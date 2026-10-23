@@ -33,10 +33,11 @@
     detail: MyPointsDetail;
     status: PublicEpochStatus | null;
     config: PointsConfig | null;
+    onRetry: () => void;
   }
   // `state` stays the public prop name; bind it as `pState` locally so the
   // `$state` rune isn't shadowed by a binding named `state`.
-  let { state: pState, rank, detail, status, config }: Props = $props();
+  let { state: pState, rank, detail, status, config, onRetry }: Props = $props();
 
   // After season end the engine credits nothing, ever — the live panel must
   // say so instead of claiming positions are still earning.
@@ -174,14 +175,14 @@
 
   <!-- ── How you've earned ───────────────────────────────────────────── -->
   <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
-    <p class="text-sm font-medium text-gray-200 mb-3">How you've earned</p>
+    <p class="text-sm font-medium text-gray-200 mb-3">Ordinary earnings</p>
     {#if detail.loading}
       <p class="text-sm text-gray-400">Loading your earning history…</p>
     {:else if detail.ledgerFailed || !history}
       <p class="text-sm text-gray-400">Couldn't load your earning history. Retry from the top of the page.</p>
     {:else if history.sources.length === 0}
       <p class="text-sm text-gray-400">
-        No points credited yet — your first credit lands when the current epoch closes.
+        No ordinary earnings are recorded yet.
       </p>
     {:else}
       <ul class="flex flex-col gap-2">
@@ -207,7 +208,7 @@
             </div>
             <div class="mt-1 flex items-center justify-between gap-2 text-xs">
               <span class="text-gray-500">
-                {s.sharePct.toFixed(1)}% of your points ·
+                {s.sharePct.toFixed(1)}% of ordinary earnings ·
                 {s.epochCount === 1 ? `epoch ${s.firstEpoch}` : `epochs ${s.firstEpoch}–${s.lastEpoch}`}
               </span>
               {#if s.status === 'stopped'}
@@ -224,10 +225,35 @@
     {/if}
   </div>
 
+  <!-- Compensation remains distinct from observed snapshot earnings. -->
+  {#if detail.outageCreditsFailed}
+    <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
+      <p class="text-sm text-gray-400">Couldn't load compensation history.</p>
+      <button class="mt-2 text-sm text-teal-400 hover:underline" onclick={onRetry}>Retry compensation history</button>
+    </div>
+  {:else if !detail.loading && detail.outageCredits === null}
+    <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
+      <p class="text-sm text-gray-400">Compensation history is unavailable on this deployment.</p>
+    </div>
+  {:else if detail.outageCredits && detail.outageCredits.length > 0}
+    <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
+      <p class="text-sm font-medium text-gray-200 mb-2">Outage compensation</p>
+      <p class="text-xs text-gray-400 mb-3">Additional points covering missed processing, included in your total above.</p>
+      <ul class="flex flex-col gap-2">
+        {#each detail.outageCredits as credit (`${Array.from(credit.allocation_digest).join(',')}:${credit.epoch_index}`)}
+          <li class="flex items-center justify-between gap-3 text-sm">
+            <span class="text-gray-300">Epoch {Number(credit.epoch_index)} · {epochDateRange(credit.scheduled_period_start_ns, credit.scheduled_period_end_ns)}</span>
+            <span class="text-gray-100 tabular-nums">+{formatPoints(credit.credited_points)}</span>
+          </li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
+
   <!-- ── Recent epochs ───────────────────────────────────────────────── -->
   {#if history && history.epochs.length > 0}
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
-      <p class="text-sm font-medium text-gray-200 mb-3">Points by epoch</p>
+      <p class="text-sm font-medium text-gray-200 mb-3">Ordinary points by epoch</p>
       <ul class="flex flex-col gap-1.5">
         {#if openEpoch}
           <li class="flex items-center justify-between gap-3 rounded-lg border border-dashed border-gray-700/40 px-3 py-2">

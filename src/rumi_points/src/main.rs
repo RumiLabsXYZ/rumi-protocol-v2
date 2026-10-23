@@ -6,14 +6,14 @@
 use candid::Principal;
 use ic_canister_log::{declare_log_buffer, log};
 
+use rumi_points::events::SourceId;
 use rumi_points::snapshot_seed::RevealedSeed;
+use rumi_points::source_types::three_pool;
 use rumi_points::types::{
     EpochStatus, EpochSummary, FiatStablePointsPolicy, FiatStableTopupProgress, IngestStatus,
     InitArgs, LeaderboardEntry, PointEntryPage, PointsConfig, PointsError, PrincipalState,
     PublicEpochStatus, RegistrationInfo, SourceStatus,
 };
-use rumi_points::events::SourceId;
-use rumi_points::source_types::three_pool;
 use rumi_points::{epoch, events, poll, state};
 
 // Canister debug-log buffer (retrievable in later phases; for now feeds the
@@ -21,6 +21,26 @@ use rumi_points::{epoch, events, poll, state};
 declare_log_buffer!(name = INFO, capacity = 2000);
 
 fn main() {}
+
+#[ic_cdk::query]
+fn get_held_epoch_recovery(index: u64) -> Option<rumi_points::types::HeldEpochRecoveryView> {
+    state::held_epoch_recovery_public(index)
+}
+
+#[ic_cdk::query]
+fn get_points_recovery_coverage() -> Option<rumi_points::recovery_v2::RecoveryCoverage> {
+    rumi_points::recovery_v2::coverage()
+}
+
+#[ic_cdk::update]
+async fn admin_resume_points_recovery_v2() -> Result<(),String> {
+    let caller=ic_cdk::caller();
+    if !state::is_admin(caller) { return Err("unauthorized".into()); }
+    epoch::admin_reschedule_held_open_epoch_v2().await?;
+    state::set_epoch_driver_enabled(caller,true).map_err(|e|format!("{e:?}"))?;
+    epoch::setup_epoch_timer();
+    Ok(())
+}
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -91,8 +111,9 @@ fn get_point_ledger_len() -> u64 {
 }
 
 /// A page of the raw audit ledger. Together with `get_principal_point_entries`
-/// this is what makes `total_points` auditable: it decomposes every principal's
-/// total into per-source, per-epoch deltas.
+/// this decomposes ordinary earnings into per-source, per-epoch deltas.
+/// Any separately applied outage compensation is exposed by the outage-credit
+/// readers; both ledgers together explain `total_points`.
 #[ic_cdk::query]
 fn get_point_entries(offset: u64, limit: u32) -> PointEntryPage {
     state::point_entries(offset, limit)
@@ -103,6 +124,29 @@ fn get_point_entries(offset: u64, limit: u32) -> PointEntryPage {
 #[ic_cdk::query]
 fn get_principal_point_entries(principal: Principal, offset: u64, limit: u32) -> PointEntryPage {
     state::principal_point_entries(principal, offset, limit)
+}
+
+/// Separate compensation audit; ordinary PointEntry rows remain unchanged.
+#[ic_cdk::query]
+fn get_outage_credit_len() -> u64 {
+    rumi_points::outage_reconciliation::credit_count()
+}
+
+#[ic_cdk::query]
+fn get_outage_credit_entries(
+    offset: u64,
+    limit: u32,
+) -> rumi_points::outage_reconciliation::OutageCreditPage {
+    rumi_points::outage_reconciliation::credit_entries(offset, limit)
+}
+
+#[ic_cdk::query]
+fn get_principal_outage_credit_entries(
+    principal: Principal,
+    offset: u64,
+    limit: u32,
+) -> rumi_points::outage_reconciliation::OutageCreditPage {
+    rumi_points::outage_reconciliation::principal_credit_entries(principal, offset, limit)
 }
 
 #[ic_cdk::query]
@@ -220,6 +264,34 @@ fn apply_fiat_stable_topups(max_rows: u32) -> Result<FiatStableTopupProgress, St
     state::apply_fiat_stable_topups(ic_cdk::caller(), max_rows, ic_cdk::api::time())
 }
 
+/// Admin-only: stage exactly the compiled allocation. An unset pin rejects
+/// before touching progress memory; this is not an arbitrary credit endpoint.
+#[ic_cdk::update]
+async fn admin_stage_outage_allocation(
+    allocation: rumi_points::outage_reconciliation::OutageAllocation,
+) -> Result<rumi_points::outage_reconciliation::OutageReconciliationStatus, String> {
+    rumi_points::outage_reconciliation::stage(ic_cdk::caller(), allocation).await?;
+    Ok(rumi_points::outage_reconciliation::status())
+}
+
+/// Admin-only: at most100 scanned ordinary rows OR one participant/epoch
+/// credit, atomically with its receipt. Unset allocation pin rejects every call.
+#[ic_cdk::update]
+fn admin_continue_outage_reconciliation(
+) -> Result<rumi_points::outage_reconciliation::OutageReconciliationStatus, String> {
+    rumi_points::outage_reconciliation::continue_reconciliation(
+        ic_cdk::caller(),
+        ic_cdk::api::time(),
+    )?;
+    Ok(rumi_points::outage_reconciliation::status())
+}
+
+#[ic_cdk::query]
+fn get_outage_reconciliation_status(
+) -> rumi_points::outage_reconciliation::OutageReconciliationStatus {
+    rumi_points::outage_reconciliation::status()
+}
+
 // ── Phase 2: ingestion control ──────────────────────────────────────────────
 
 /// Admin-set a source canister id (point the poller at the right canister per
@@ -227,7 +299,13 @@ fn apply_fiat_stable_topups(max_rows: u32) -> Result<FiatStableTopupProgress, St
 /// 3 = AMM.
 #[ic_cdk::update]
 fn set_source_canister(source_tag: u8, canister: Principal) -> Result<(), PointsError> {
-    state::set_source_canister(ic_cdk::caller(), source_tag, canister)
+    match state::set_source_canister(ic_cdk::caller(), source_tag, canister) {
+        Ok(()) => Ok(()),
+        Err(state::SourceCanisterUpdateError::Unauthorized) => Err(PointsError::Unauthorized),
+        Err(state::SourceCanisterUpdateError::Locked) => {
+            ic_cdk::trap("source configuration is locked during points replay")
+        }
+    }
 }
 
 /// Admin-only manual poll of all configured sources. Returns the number of events
@@ -238,6 +316,30 @@ async fn trigger_poll() -> Result<u64, PointsError> {
         return Err(PointsError::Unauthorized);
     }
     Ok(poll::poll_all().await as u64)
+}
+
+/// Admin recovery poll while a legacy epoch remains held. Repeat until the
+/// source cursors reach their live tails, then call `admin_resume_held_points`.
+#[ic_cdk::update]
+async fn admin_poll_held_points_backlog() -> Result<u64, String> {
+    if !state::is_admin(ic_cdk::caller()) {
+        return Err("unauthorized".to_string());
+    }
+    poll::poll_held_backlog_once().await.map(|n| n as u64)
+}
+
+/// Admin recovery finalization. The canister verifies every source cursor is at
+/// its retained log tail before it securely reschedules B and resumes the timer.
+#[ic_cdk::update]
+async fn admin_resume_held_points() -> Result<(), String> {
+    let caller = ic_cdk::caller();
+    if !state::is_admin(caller) {
+        return Err("unauthorized".to_string());
+    }
+    epoch::admin_reschedule_held_open_epoch().await?;
+    state::set_epoch_driver_enabled(caller, true).map_err(|e| format!("{:?}", e))?;
+    epoch::setup_epoch_timer();
+    Ok(())
 }
 
 /// Admin-only repair: refetch the already-ingested 3pool liquidity history (ids
@@ -273,7 +375,10 @@ async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
         let resp = match res {
             Ok((r,)) => r,
             Err((code, msg)) => {
-                return Err(format!("3pool fetch at {} failed: {:?} {}", start, code, msg))
+                return Err(format!(
+                    "3pool fetch at {} failed: {:?} {}",
+                    start, code, msg
+                ))
             }
         };
         let (page, next_start, reached_end) = three_pool::normalize_forward(resp);
@@ -284,7 +389,12 @@ async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
         start = next_start;
     }
     let applied = events::rebuild_3pool_recorded(&all) as u64;
-    log!(INFO, "admin_rebuild_3pool_recorded: replayed {} events (cursor {})", applied, cursor);
+    log!(
+        INFO,
+        "admin_rebuild_3pool_recorded: replayed {} events (cursor {})",
+        applied,
+        cursor
+    );
     Ok(applied)
 }
 

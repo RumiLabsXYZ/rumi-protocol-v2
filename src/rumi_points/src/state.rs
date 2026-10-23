@@ -53,9 +53,8 @@ use crate::snapshot_seed::{RevealedSeed, SnapshotSeedSingleton};
 use crate::types::{
     AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, FiatStablePointsPolicy,
     FiatStableTopupProgress, InitArgs, LeaderboardEntry, OpenEpoch, PointEntry, PointEntryPage,
-    PointSource, PointsConfig, PointsError, PrincipalState,
-    PublicEpochStatus,
-    PublicOpenEpoch, QualifyingAction, RegistrationInfo, RepaymentEvent, Venue,
+    PointSource, PointsConfig, PointsError, PrincipalState, PublicEpochStatus, PublicOpenEpoch,
+    QualifyingAction, RegistrationInfo, RepaymentEvent, Venue,
 };
 
 // ── Memory ids (never reuse) ────────────────────────────────────────────────
@@ -86,10 +85,12 @@ const EPOCH_CONFIG_MEM_ID: MemoryId = MemoryId::new(13);
 // frozen State blob so an upgrade neither reshapes nor risks decoding its
 // existing open-epoch state.
 const FIAT_STABLE_POLICY_MEM_ID: MemoryId = MemoryId::new(14);
+// Append-only audit for the one authorized legacy recovery. Existing State and memories are unchanged.
+const HELD_EPOCH_RECOVERY_MEM_ID: MemoryId = MemoryId::new(15);
 
 const WASM_PAGE_SIZE: u64 = 65_536; // 64 KiB
 
-type VMem = VirtualMemory<DefaultMemoryImpl>;
+pub(crate) type VMem = VirtualMemory<DefaultMemoryImpl>;
 
 // ── At-rest versioned wrappers ──────────────────────────────────────────────
 
@@ -374,6 +375,77 @@ impl_cbor_storable!(StoredRevealedSeed);
 impl_cbor_storable!(StoredSnapshotWeights);
 impl_cbor_storable!(StoredFiatStablePolicy);
 
+#[derive(Serialize, Deserialize, Clone)]
+enum StoredHeldEpochRecovery {
+    V1(crate::types::HeldEpochRecoveryRecord),
+}
+impl_cbor_storable!(StoredHeldEpochRecovery);
+thread_local! {
+    static HELD_EPOCH_RECOVERIES: RefCell<StableBTreeMap<u64, StoredHeldEpochRecovery, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(HELD_EPOCH_RECOVERY_MEM_ID))));
+}
+
+pub fn held_epoch_recovery(index: u64) -> Option<crate::types::HeldEpochRecoveryRecord> {
+    HELD_EPOCH_RECOVERIES.with(|m| {
+        m.borrow().get(&index).map(|v| match v {
+            StoredHeldEpochRecovery::V1(r) => r,
+        })
+    })
+}
+
+pub fn record_held_epoch_recovery(
+    record: crate::types::HeldEpochRecoveryRecord,
+) -> Result<(), String> {
+    HELD_EPOCH_RECOVERIES.with(|m| {
+        let mut map = m.borrow_mut();
+        if record.epoch_index != 18 || !map.is_empty() {
+            return Err("legacy recovery is single-use for epoch 18".into());
+        }
+        map.insert(record.epoch_index, StoredHeldEpochRecovery::V1(record));
+        Ok(())
+    })
+}
+
+pub fn held_epoch_recovery_matches(open: &OpenEpoch) -> bool {
+    held_epoch_recovery(open.epoch_index)
+        .map(|r| {
+            r.epoch_index == 18
+                && r.epoch_start_ns == open.epoch_start_ns
+                && r.epoch_end_ns == open.epoch_end_ns
+                && r.snapshot_a_ns == open.snapshot_a_ns
+                && r.replacement_b_ns == open.snapshot_b_ns
+        })
+        .unwrap_or(false)
+}
+
+pub fn held_epoch_recovery_public(index: u64) -> Option<crate::types::HeldEpochRecoveryView> {
+    let r = held_epoch_recovery(index)?;
+    let closed = epoch_summary_by_index(index).is_some();
+    let b_complete = closed
+        || get_open_epoch()
+            .map(|o| o.epoch_index == index && o.b_complete)
+            .unwrap_or(false);
+    Some(crate::types::HeldEpochRecoveryView {
+        epoch_index: r.epoch_index,
+        kind: "delayed_legacy_b".to_string(),
+        authorized_at_ns: r.authorized_at_ns,
+        epoch_start_ns: r.epoch_start_ns,
+        epoch_end_ns: r.epoch_end_ns,
+        snapshot_a_ns: r.snapshot_a_ns,
+        original_b_ns: if b_complete {
+            Some(r.original_b_ns)
+        } else {
+            None
+        },
+        replacement_b_ns: if b_complete {
+            Some(r.replacement_b_ns)
+        } else {
+            None
+        },
+        closed,
+    })
+}
+
 /// `StableBTreeMap` key wrapper. ic-stable-structures 0.6.5 does not provide a
 /// `Storable` impl for `Principal`, so we wrap it. A principal is at most 29
 /// bytes; bounded (not fixed) so short principals do not waste space.
@@ -554,7 +626,9 @@ pub fn init_state(args: Option<InitArgs>, caller: Principal) {
     let state = State {
         admin,
         excluded_principals,
-        season_start_ns: args.season_start_ns.unwrap_or(crate::DEFAULT_SEASON_START_NS),
+        season_start_ns: args
+            .season_start_ns
+            .unwrap_or(crate::DEFAULT_SEASON_START_NS),
         season_end_ns: args.season_end_ns.unwrap_or(crate::DEFAULT_SEASON_END_NS),
         current_epoch_index: 0,
         snapshot_seed,
@@ -708,6 +782,16 @@ pub fn leaderboard(offset: u32, limit: u32) -> Vec<LeaderboardEntry> {
         .collect()
 }
 
+/// Logical lookup; public history offsets remain physical log offsets.
+pub fn epoch_summary_by_index(index: u64) -> Option<EpochSummary> {
+    EPOCH_SUMMARIES.with(|l| {
+        let log=l.borrow(); let (mut lo,mut hi)=(0,log.len());
+        while lo<hi {let mid=lo+(hi-lo)/2;let row=log.get(mid)?.into_current();
+            if row.epoch_index<index {lo=mid+1;}else{hi=mid;}}
+        log.get(lo).map(|r|r.into_current()).filter(|r|r.epoch_index==index)
+    })
+}
+
 pub fn epoch_history(offset: u64, limit: u64) -> Vec<EpochSummary> {
     EPOCH_SUMMARIES.with(|l| {
         let log = l.borrow();
@@ -801,13 +885,19 @@ pub fn restore_from_stable_or_trap() {
 // ── Thin accessors (plumbing exercised by the behavioral tests) ─────────────
 
 pub fn get_principal_state(p: &Principal) -> Option<PrincipalState> {
-    PRINCIPALS.with(|m| m.borrow().get(&StorablePrincipal(*p)).map(|s| s.into_current()))
+    PRINCIPALS.with(|m| {
+        m.borrow()
+            .get(&StorablePrincipal(*p))
+            .map(|s| s.into_current())
+    })
 }
 
 fn put_principal_state(ps: PrincipalState) {
     PRINCIPALS.with(|m| {
-        m.borrow_mut()
-            .insert(StorablePrincipal(ps.principal), StoredPrincipalState::from_current(ps));
+        m.borrow_mut().insert(
+            StorablePrincipal(ps.principal),
+            StoredPrincipalState::from_current(ps),
+        );
     });
 }
 
@@ -837,6 +927,41 @@ pub fn append_point_entry(entry: PointEntry) {
             .append(&StoredPointEntry::V1(entry))
             .expect("failed to append point entry");
     });
+}
+
+// New region reserved exclusively for the additive outage reconciliation draft.
+// No State, OpenEpoch, or existing StableLog / map encoding changes.
+pub(crate) fn late_recovery_memory() -> VMem {
+    MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(19)))
+}
+
+pub(crate) fn outage_reconciliation_memory() -> VMem {
+    MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(16)))
+}
+
+pub(crate) fn outage_credit_memories() -> (VMem, VMem) {
+    MEMORY_MANAGER.with(|m| {
+        let manager = m.borrow();
+        (manager.get(MemoryId::new(17)), manager.get(MemoryId::new(18)))
+    })
+}
+
+pub(crate) fn preflight_outage_credit(principal: &Principal, amount: u128) -> Result<(), String> {
+    let ps = get_principal_state(principal).ok_or("outage participant disappeared")?;
+    ps.total_points
+        .checked_add(amount)
+        .ok_or("outage credit would overflow total points")?;
+    Ok(())
+}
+
+pub(crate) fn commit_outage_credit(principal: &Principal, amount: u128) {
+    let mut ps = get_principal_state(principal)
+        .unwrap_or_else(|| ic_cdk::trap("outage participant disappeared after preflight"));
+    ps.total_points = ps
+        .total_points
+        .checked_add(amount)
+        .unwrap_or_else(|| ic_cdk::trap("outage total overflow after preflight"));
+    put_principal_state(ps);
 }
 
 pub fn point_ledger_len() -> u64 {
@@ -1007,12 +1132,12 @@ fn fiat_stable_corrections(
             .ok_or_else(|| "fiat stable correction aggregation overflow".to_string())?;
     }
     for (principal, delta) in by_principal {
-        let state = get_principal_state(&principal)
-            .ok_or_else(|| format!("missing principal state for point ledger correction: {principal}"))?;
-        state
-            .total_points
-            .checked_add(delta)
-            .ok_or_else(|| format!("fiat stable correction would overflow total points for {principal}"))?;
+        let state = get_principal_state(&principal).ok_or_else(|| {
+            format!("missing principal state for point ledger correction: {principal}")
+        })?;
+        state.total_points.checked_add(delta).ok_or_else(|| {
+            format!("fiat stable correction would overflow total points for {principal}")
+        })?;
     }
     Ok(corrections)
 }
@@ -1036,12 +1161,12 @@ fn commit_fiat_stable_corrections(
     // invariant remains obvious even if this helper is reused elsewhere.
     let mut updated = Vec::with_capacity(by_principal.len());
     for (principal, delta) in by_principal {
-        let mut state = get_principal_state(&principal)
-            .ok_or_else(|| format!("missing principal state for point ledger correction: {principal}"))?;
-        state.total_points = state
-            .total_points
-            .checked_add(delta)
-            .ok_or_else(|| format!("fiat stable correction would overflow total points for {principal}"))?;
+        let mut state = get_principal_state(&principal).ok_or_else(|| {
+            format!("missing principal state for point ledger correction: {principal}")
+        })?;
+        state.total_points = state.total_points.checked_add(delta).ok_or_else(|| {
+            format!("fiat stable correction would overflow total points for {principal}")
+        })?;
         updated.push(state);
     }
     for correction in &corrections {
@@ -1076,7 +1201,9 @@ pub fn apply_fiat_stable_topups(
         .historical_ledger_cutoff
         .ok_or_else(|| "fiat stable policy is not scheduled".to_string())?;
     let start = policy.historical_next_offset.min(cutoff);
-    let end = start.saturating_add(max_rows.min(MAX_FIAT_STABLE_TOPUP_ROWS) as u64).min(cutoff);
+    let end = start
+        .saturating_add(max_rows.min(MAX_FIAT_STABLE_TOPUP_ROWS) as u64)
+        .min(cutoff);
     let corrections = fiat_stable_corrections(start, end, None)?;
     let (credited_rows, credited_points) = commit_fiat_stable_corrections(corrections, now_ns)?;
     policy.historical_next_offset = end;
@@ -1142,11 +1269,7 @@ pub fn principal_point_entries(principal: Principal, offset: u64, limit: u32) ->
     read_ledger_page(offset, limit, |e| e.principal == principal)
 }
 
-fn read_ledger_page(
-    offset: u64,
-    limit: u32,
-    keep: impl Fn(&PointEntry) -> bool,
-) -> PointEntryPage {
+fn read_ledger_page(offset: u64, limit: u32, keep: impl Fn(&PointEntry) -> bool) -> PointEntryPage {
     let limit = limit.min(MAX_LEDGER_LIMIT) as usize;
     POINT_LEDGER.with(|l| {
         let log = l.borrow();
@@ -1164,7 +1287,11 @@ fn read_ledger_page(
             i += 1;
             scanned += 1;
         }
-        PointEntryPage { entries, next_offset: i, reached_end: i >= len }
+        PointEntryPage {
+            entries,
+            next_offset: i,
+            reached_end: i >= len,
+        }
     })
 }
 
@@ -1227,7 +1354,10 @@ pub fn public_epoch_status(now_ns: u64) -> PublicEpochStatus {
         current_epoch_index: s.current_epoch_index,
         driver_enabled: epoch_driver_enabled(),
         driver_interval_secs: epoch_driver_interval_secs(),
-        open_epoch: s.open_epoch.as_ref().map(|o| PublicOpenEpoch::redacted(o, now_ns)),
+        open_epoch: s
+            .open_epoch
+            .as_ref()
+            .map(|o| PublicOpenEpoch::redacted(o, now_ns)),
         revealed_seed_count: revealed_seed_count(),
         snapshot_seed_committed: s.snapshot_seed.is_committed(),
     })
@@ -1258,7 +1388,12 @@ pub fn source_canister_seed() -> Vec<(u8, Principal)> {
         (3u8, "ijlzs-2yaaa-aaaap-quaaq-cai"), // rumi_amm
     ]
     .iter()
-    .map(|(tag, s)| (*tag, Principal::from_text(s).expect("invalid source principal literal")))
+    .map(|(tag, s)| {
+        (
+            *tag,
+            Principal::from_text(s).expect("invalid source principal literal"),
+        )
+    })
     .collect()
 }
 
@@ -1268,14 +1403,27 @@ pub fn get_source_canister(source_tag: u8) -> Option<Principal> {
 }
 
 /// Admin-set a source canister id (e.g. point at local replica ids).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceCanisterUpdateError {
+    Unauthorized,
+    Locked,
+}
+
 pub fn set_source_canister(
     caller: Principal,
     source_tag: u8,
     canister: Principal,
-) -> Result<(), PointsError> {
-    require_admin(caller)?;
+) -> Result<(), SourceCanisterUpdateError> {
+    if !is_admin(caller) {
+        return Err(SourceCanisterUpdateError::Unauthorized);
+    }
+    if legacy_transition_held() {
+        return Err(SourceCanisterUpdateError::Locked);
+    }
+    let _guard = PollGuard::new().ok_or(SourceCanisterUpdateError::Locked)?;
     SOURCE_CANISTERS.with(|m| {
-        m.borrow_mut().insert(source_tag, StorablePrincipal(canister));
+        m.borrow_mut()
+            .insert(source_tag, StorablePrincipal(canister));
     });
     Ok(())
 }
@@ -1421,7 +1569,11 @@ pub fn snapshot_buffer_put(p: Principal, w: SnapshotWeights) {
 
 /// Read a principal's buffered weights, if any.
 pub fn snapshot_buffer_get(p: &Principal) -> Option<SnapshotWeights> {
-    SNAPSHOT_BUFFER.with(|b| b.borrow().get(&StorablePrincipal(*p)).map(|s| s.into_current()))
+    SNAPSHOT_BUFFER.with(|b| {
+        b.borrow()
+            .get(&StorablePrincipal(*p))
+            .map(|s| s.into_current())
+    })
 }
 
 /// Drop a principal's buffered weights.
@@ -1504,7 +1656,12 @@ pub fn asset_ledger_seed() -> Vec<(u8, Principal)> {
         (4u8, "ryjl3-tyaaa-aaaaa-aaaba-cai"), // ICP
     ]
     .iter()
-    .map(|(t, s)| (*t, Principal::from_text(s).expect("invalid asset ledger literal")))
+    .map(|(t, s)| {
+        (
+            *t,
+            Principal::from_text(s).expect("invalid asset ledger literal"),
+        )
+    })
     .collect()
 }
 
@@ -1553,7 +1710,11 @@ pub fn epoch_driver_enabled() -> bool {
 }
 
 pub fn epoch_driver_interval_secs() -> u64 {
-    EPOCH_CONFIG.with(|c| c.borrow().get(&1).unwrap_or(DEFAULT_EPOCH_DRIVER_INTERVAL_SECS))
+    EPOCH_CONFIG.with(|c| {
+        c.borrow()
+            .get(&1)
+            .unwrap_or(DEFAULT_EPOCH_DRIVER_INTERVAL_SECS)
+    })
 }
 
 pub fn set_epoch_driver_enabled(caller: Principal, enabled: bool) -> Result<(), PointsError> {
@@ -1590,14 +1751,20 @@ pub fn credit_3pool_recorded(
         Some(p) => p,
         None => return,
     };
-    let key = DepositKey { venue: Venue::ThreePool, asset };
-    let rec = ps.active_deposits.entry(key).or_insert_with(|| DepositRecord {
-        asset,
+    let key = DepositKey {
         venue: Venue::ThreePool,
-        recorded_value_usd: 0,
-        deposited_at: now_ns,
-        last_verified_at: now_ns,
-    });
+        asset,
+    };
+    let rec = ps
+        .active_deposits
+        .entry(key)
+        .or_insert_with(|| DepositRecord {
+            asset,
+            venue: Venue::ThreePool,
+            recorded_value_usd: 0,
+            deposited_at: now_ns,
+            last_verified_at: now_ns,
+        });
     rec.recorded_value_usd = rec.recorded_value_usd.saturating_add(amount_usd_e8s);
     rec.last_verified_at = now_ns;
     put_principal_state(ps);
@@ -1659,7 +1826,8 @@ pub fn clear_all_3pool_recorded() {
             None => continue,
         };
         let before = ps.active_deposits.len();
-        ps.active_deposits.retain(|k, _| k.venue != Venue::ThreePool);
+        ps.active_deposits
+            .retain(|k, _| k.venue != Venue::ThreePool);
         if ps.active_deposits.len() != before {
             put_principal_state(ps);
         }
@@ -1679,7 +1847,9 @@ pub fn record_repayment(
         None => return,
     };
     let season_end = with_state(|s| s.season_end_ns);
-    let window_end = repaid_at.saturating_add(REPAYMENT_WINDOW_NS).min(season_end);
+    let window_end = repaid_at
+        .saturating_add(REPAYMENT_WINDOW_NS)
+        .min(season_end);
     ps.repayment_events.push(RepaymentEvent {
         asset,
         amount_usd: amount_usd_e8s,
@@ -1834,9 +2004,9 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
         }
         let mut ps = match get_principal_state(p) {
             Some(s) => s,
-            None if inline_fiat_stable_topups_required_for_epoch(epoch_index) => ic_cdk::trap(
-                "missing principal state during fiat stable inline legacy top-up",
-            ),
+            None if inline_fiat_stable_topups_required_for_epoch(epoch_index) => {
+                ic_cdk::trap("missing principal state during fiat stable inline legacy top-up")
+            }
             None => continue,
         };
         let min_weights = snapshot_buffer_get(p).unwrap_or_default();
@@ -1868,9 +2038,9 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
                     inline_topup_points = inline_topup_points
                         .checked_add(correction)
                         .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up overflow"));
-                    inline_topup_rows = inline_topup_rows
-                        .checked_add(1)
-                        .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up row count overflow"));
+                    inline_topup_rows = inline_topup_rows.checked_add(1).unwrap_or_else(|| {
+                        ic_cdk::trap("fiat stable inline top-up row count overflow")
+                    });
                     append_point_entry(PointEntry {
                         principal: *p,
                         epoch_index,
@@ -1882,13 +2052,15 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
             }
         }
         if delta > 0 {
-            let combined_delta = delta
-                .checked_add(inline_topup_points)
-                .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up combined delta overflow"));
+            let combined_delta = delta.checked_add(inline_topup_points).unwrap_or_else(|| {
+                ic_cdk::trap("fiat stable inline top-up combined delta overflow")
+            });
             ps.total_points = ps
                 .total_points
                 .checked_add(combined_delta)
-                .unwrap_or_else(|| ic_cdk::trap("fiat stable inline top-up would overflow total points"));
+                .unwrap_or_else(|| {
+                    ic_cdk::trap("fiat stable inline top-up would overflow total points")
+                });
             open.close_active = open.close_active.saturating_add(1);
         }
         record_inline_fiat_stable_topup_rows(inline_topup_rows)
@@ -1896,7 +2068,8 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
         ps.last_epoch_processed = epoch_index;
         // Drop repayment windows that can no longer overlap any future epoch, so
         // the per-principal vec stays bounded (no unbounded growth in the value).
-        ps.repayment_events.retain(|r| r.window_end > epoch_end_capped);
+        ps.repayment_events
+            .retain(|r| r.window_end > epoch_end_capped);
         put_principal_state(ps);
         open.close_points_accrued = open.close_points_accrued.saturating_add(delta);
     }
@@ -1922,9 +2095,9 @@ pub fn run_close_accrual_chunk(now_ns: u64) -> CloseStep {
     // Buffer drained and accrual complete: compute the season-wide total for the
     // summary and finalize.
     let total_points_all = PRINCIPALS.with(|m| {
-        m.borrow()
-            .iter()
-            .fold(0u128, |acc, (_, v)| acc.saturating_add(v.into_current().total_points))
+        m.borrow().iter().fold(0u128, |acc, (_, v)| {
+            acc.saturating_add(v.into_current().total_points)
+        })
     });
     let registered_principals = registered_count();
     mark_inline_fiat_stable_topups_complete(epoch_index);
@@ -2080,9 +2253,14 @@ pub fn append_revealed_seed(seed: RevealedSeed) {
     });
 }
 
-/// The revealed seed for a CLOSED epoch (the log index equals the epoch index).
+/// Logical epoch lookup, including sparse history after an audited recovery.
 pub fn get_revealed_seed(epoch_index: u64) -> Option<RevealedSeed> {
-    REVEALED_SEEDS.with(|l| l.borrow().get(epoch_index).map(|s| s.into_current()))
+    REVEALED_SEEDS.with(|l| {
+        let log=l.borrow();let(mut lo,mut hi)=(0,log.len());
+        while lo<hi{let mid=lo+(hi-lo)/2;let row=log.get(mid)?.into_current();
+            if row.epoch_index<epoch_index{lo=mid+1;}else{hi=mid;}}
+        log.get(lo).map(|s|s.into_current()).filter(|s|s.epoch_index==epoch_index)
+    })
 }
 
 /// Advance `current_epoch_index` (called at epoch close).
