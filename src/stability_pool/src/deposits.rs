@@ -846,6 +846,42 @@ async fn fetch_deposit_intent_block(
         .ok_or_else(|| "ledger did not return the exact deposit block".to_string())
 }
 
+/// Verify an ambiguous conversion ingress against a directly served ICRC-3
+/// block. This deliberately reuses the bounded exact-block fetcher used by
+/// durable deposit intents; archive contents or a balance query never prove a
+/// conversion pull.
+pub(crate) async fn verify_exact_conversion_pull_block(
+    ledger: Principal,
+    block_index: u64,
+    from: &Account,
+    to: &Account,
+    amount: u64,
+    fee_raw: Option<u64>,
+    memo: &[u8],
+    created_at_time_ns: u64,
+) -> Result<(), String> {
+    let fetched = fetch_deposit_intent_block(ledger, block_index).await?;
+    if !fetched.direct_from_ledger {
+        return Err("candidate conversion block came from an archive callback".into());
+    }
+    let decoded = rumi_protocol_backend::icrc3_proof::decode_block(&fetched.block)?;
+    if (decoded.op != "transfer" && decoded.op != "xfer")
+        || decoded.btype.as_deref().is_some_and(|kind| kind != "2xfer")
+        || decoded.from.as_ref() != Some(from)
+        || decoded.to.as_ref() != Some(to)
+        || !decoded.spender.as_ref().is_some_and(|spender| {
+            spender.owner == ic_cdk::api::id() && spender.subaccount.is_none()
+        })
+        || decoded.amount != u128::from(amount)
+        || fee_raw.is_some_and(|fee| decoded.fee != Some(fee))
+        || decoded.memo.as_deref() != Some(memo)
+        || decoded.created_at_time != Some(created_at_time_ns)
+    {
+        return Err("candidate ledger block does not match the exact conversion pull tuple".into());
+    }
+    Ok(())
+}
+
 fn deposit_intent_parent_hash(block: &ICRC3Value, index: u64) -> Result<Option<[u8; 32]>, String> {
     let map = match block {
         ICRC3Value::Map(map) => map,
@@ -2079,17 +2115,11 @@ fn finish_claim_all(
     }
     Ok(claimed)
 }
-/// Convenience conversion is temporarily fail-closed until a durable conversion
-/// saga can recover every pull, approval, 3pool, allowance-revocation, and refund
-/// outcome. The current Candid contract has no caller-funded fee budget or
-/// persistent phase journal, so even a zero-fee ledger is unsafe after an
-/// ambiguous inter-canister outcome. This is containment, not restoration of
-/// the convenience feature.
 pub async fn deposit_as_3usd(
-    _token_ledger: Principal,
-    _amount: u64,
+    token_ledger: Principal,
+    amount: u64,
 ) -> Result<u64, StabilityPoolError> {
-    Err(StabilityPoolError::SystemBusy)
+    crate::conversion::legacy_deposit_as_3usd(token_ledger, amount).await
 }
 
 /// Refund the pulled tokens to the user after a failed deposit_as_3usd.

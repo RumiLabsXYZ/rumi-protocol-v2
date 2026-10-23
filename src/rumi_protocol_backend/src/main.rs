@@ -9494,6 +9494,16 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
     })
 }
 
+/// Current point quote for the SP's public fallback. The receiving SP still
+/// verifies bindings and obtains a durable backend reservation before payment.
+#[candid_method(query)]
+#[query]
+fn get_stability_pool_liquidation_candidate(
+    vault_id: u64,
+) -> Option<rumi_protocol_backend::LiquidatableVaultInfo> {
+    read_state(|state| rumi_protocol_backend::stability_pool_liquidation_candidate(state, vault_id))
+}
+
 /// Paginated enumeration of currently-liquidatable vaults, ordered
 /// ascending by `vault_id` starting at `start_id`. `limit` is capped
 /// at `MAX_VAULTS_PAGE_LIMIT` (the same cap as `get_vaults_page`).
@@ -19958,4 +19968,48 @@ async fn reconcile_held_sp_interest_receipt(
     let caller=ic_cdk::api::caller();
     if !read_state(|s|can_inspect_held_interest_notifications(caller,s.developer_principal)) { return Err(ProtocolError::GenericError("Only developer may reconcile a held interest receipt".into())); }
     rumi_protocol_backend::treasury::reconcile_held_sp_interest_receipt(caller,notification,manifest_hash).await
+}
+
+/// Durable ordinary Stability Pool liquidation rail. The four wrappers are
+/// intentionally isolated from the compatibility endpoints above so existing
+/// clients keep their current Candid surface while the SP migrates to the
+/// request-ID protocol.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_prepare_liquidation(
+    request: rumi_protocol_backend::sp_liquidation::SpLiquidationRequest,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::validate_caller()?;
+    validate_call().await?;
+    validate_liquidation_not_frozen()?;
+    validate_price_for_liquidation()?;
+    validate_freshness_for_vault(request.vault_id).await?;
+    rumi_protocol_backend::sp_liquidation::prepare(request).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn stability_pool_execute_liquidation(
+    request_id: Vec<u8>,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::validate_caller()?;
+    validate_call().await?;
+    validate_liquidation_not_frozen()?;
+    rumi_protocol_backend::sp_liquidation::execute(request_id).await
+}
+
+#[candid_method(query)]
+#[query]
+fn stability_pool_liquidation_status(
+    request_id: Vec<u8>,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::status(request_id)
+}
+
+#[candid_method(update)]
+#[update]
+fn stability_pool_cancel_liquidation(
+    request_id: Vec<u8>,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::cancel(request_id)
 }

@@ -29,7 +29,10 @@ impl PoolGuard {
     pub fn new() -> Result<Self, ThreePoolError> {
         // Receipt attempts retain this fence across a callback trap/upgrade.
         // Ordinary unpause cannot authorize reserve movement while unresolved.
-        if crate::receipts::fenced() || crate::storage::payouts::fenced() {
+        if crate::receipts::fenced()
+            || crate::storage::payouts::fenced()
+            || crate::storage::liquidity_receipt_fence().is_some()
+        {
             return Err(ThreePoolError::PoolLocked);
         }
         Self::acquire()
@@ -38,8 +41,59 @@ impl PoolGuard {
     /// Recovery for an ordinary payout can cross its own durable payout fence,
     /// but never a receipt-backed swap fence.
     pub(crate) fn new_payout_recovery() -> Result<Self, ThreePoolError> {
+        if crate::receipts::fenced()
+            || crate::storage::liquidity_receipt_fence().is_some()
+        {
+            return Err(ThreePoolError::PoolLocked);
+        }
+        Self::acquire()
+    }
+
+    /// Acquire the pool lock for the exact durable add-liquidity receipt that
+    /// owns the persisted fence.  This is the only bypass for that fence; swap
+    /// and unrelated payout fences remain blocking.
+    pub(crate) fn new_for_liquidity_receipt(
+        receipt: &crate::liquidity_receipts::LiquidityReceiptV1,
+    ) -> Result<Self, ThreePoolError> {
         if crate::receipts::fenced() {
             return Err(ThreePoolError::PoolLocked);
+        }
+        let intent_id: [u8; 32] = receipt
+            .request
+            .intent_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ThreePoolError::PoolLocked)?;
+        if crate::storage::liquidity_receipt_fence()
+            != Some((receipt.owner, intent_id))
+        {
+            return Err(ThreePoolError::PoolLocked);
+        }
+        if crate::storage::payouts::fenced() {
+            // A receipt may cross only the payout fence belonging to one of
+            // its own prebound add-liquidity refund identities.  The payout
+            // row is checked as well so an ID collision or a stale receipt
+            // cannot bypass an unrelated swap/output fence.
+            let Some(fence_id) = crate::storage::payouts::fence_id() else {
+                return Err(ThreePoolError::PoolLocked);
+            };
+            let owns_fence = receipt
+                .input_ids
+                .iter()
+                .chain(receipt.refund_ids.iter())
+                .flatten()
+                .any(|id| *id == fence_id);
+            let Some(entitlement) = crate::payouts::get(fence_id) else {
+                return Err(ThreePoolError::PoolLocked);
+            };
+            if !owns_fence
+                || entitlement.owner != receipt.owner
+                || entitlement.kind != crate::payouts::PayoutKind::AddLiquidityRefund
+                || entitlement.input_action
+                    != Some(crate::payouts::PayoutInputAction::AddLiquidity)
+            {
+                return Err(ThreePoolError::PoolLocked);
+            }
         }
         Self::acquire()
     }

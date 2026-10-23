@@ -17,11 +17,25 @@
   import PointsCallout from '../points/PointsCallout.svelte';
   import { spMultiplier } from '$lib/utils/pointsRules';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
+  import {
+    conversionMinimumLp,
+    conversionWalletRequirement,
+    formatExactTokenAmount,
+    parseExactTokenAmount,
+    quoteStabilityPoolConversion,
+    convertStabilityPoolStableTo3Usd,
+    discoverActiveStabilityPoolConversion,
+    readPendingStabilityPoolConversion,
+    resumePendingStabilityPoolConversion,
+    type StabilityPoolConversionQuote,
+    type PendingStabilityPoolConversion,
+  } from '../../services/stabilityPoolConversion';
+  import type { StabilityPoolActionContext } from '../../services/stabilityPoolService';
 
   onMount(() => {
     seasonStore.ensureLoaded();
     const onStorage = (event: StorageEvent) => {
-      if (!event.key || event.key.startsWith('rumi:stability-pool:pending-deposit:')) {
+      if (!event.key || event.key.startsWith('rumi:stability-pool:pending-deposit:') || event.key.startsWith('rumi:stability-pool:pending-conversion:')) {
         pendingRefresh += 1;
       }
     };
@@ -53,10 +67,42 @@
   let pendingRefresh = 0;
   let pendingDeposit: PendingStabilityPoolDeposit | null = null;
   let pendingDepositStorageError = '';
+  let depositMode: 'deposit' | 'convert' = 'deposit';
+  let conversionQuote: StabilityPoolConversionQuote | null = null;
+  let conversionQuoteError = '';
+  let conversionAuthorized = false;
+  let quoteLoading = false;
+  let pendingConversion: PendingStabilityPoolConversion | null = null;
+  let pendingConversionStorageError = '';
+  let conversionStatusMessage = '';
+  let conversionDiscoveryOwner = '';
+  let conversionContext: StabilityPoolActionContext | null = null;
 
   $: isConnected = $walletStore.isConnected;
   $: activeStablecoins = poolStatus?.stablecoin_registry?.filter(s => s.is_active) ?? [];
   $: selectedToken = activeStablecoins[selectedTokenIndex] ?? null;
+  $: conversionEligible = activeTab === 'deposit' && !!selectedToken &&
+    !selectedToken.is_lp_token && selectedToken.ledger_id.toText() !== CANISTER_IDS.THREEPOOL;
+  $: conversionMinLp = conversionQuote ? conversionMinimumLp(conversionQuote.quoted_lp) : 0n;
+  $: conversionWalletRequired = conversionQuote
+    ? conversionWalletRequirement(conversionQuote.principal_raw, conversionQuote.live_transfer_fee_raw, conversionQuote.minimum_fee_budget_raw)
+    : 0n;
+  $: conversionWalletHasBalance = !conversionQuote || walletBalance >= conversionWalletRequired;
+  $: if ($walletStore.principal && selectedToken && conversionDiscoveryOwner !== $walletStore.principal.toText()) {
+    conversionDiscoveryOwner = $walletStore.principal.toText();
+    try {
+      const context = captureStabilityPoolActionContext(selectedToken.ledger_id, 'convert');
+      void discoverActiveStabilityPoolConversion(context).then(record => {
+        if (record) pendingRefresh += 1;
+      }).catch(() => {
+        // The normal recovery marker remains authoritative when the active
+        // query is unavailable during reconnect.
+      });
+    } catch {
+      // Wallet session changes are surfaced by the normal action guard.
+    }
+  }
+  $: if (!$walletStore.principal) conversionDiscoveryOwner = '';
   $: {
     pendingRefresh;
     selectedToken;
@@ -73,6 +119,13 @@
         pendingDepositStorageError = err instanceof Error
           ? err.message
           : 'A Stability Pool recovery record needs review.';
+      }
+      try {
+        pendingConversion = readPendingStabilityPoolConversion($walletStore.principal.toText());
+        pendingConversionStorageError = '';
+      } catch (err) {
+        pendingConversion = null;
+        pendingConversionStorageError = err instanceof Error ? err.message : 'A conversion recovery record needs review.';
       }
     }
   }
@@ -162,6 +215,11 @@
     error = '';
     poolTokenBalance = null;
     poolTokenBalanceKey = '';
+    depositMode = 'deposit';
+    conversionQuote = null;
+    conversionQuoteError = '';
+    conversionAuthorized = false;
+    conversionContext = null;
   }
 
   function closeDropdown() {
@@ -214,12 +272,53 @@
     }
   }
 
+  async function loadConversionQuote() {
+    const token = selectedToken;
+    if (!token || !conversionEligible) return;
+    try {
+      quoteLoading = true;
+      conversionQuoteError = '';
+      const rawAmount = parseExactTokenAmount(amount, token.decimals);
+      if (rawAmount <= 0n) throw new Error('Enter a valid amount');
+      const context = captureStabilityPoolActionContext(token.ledger_id, 'convert');
+      conversionQuote = await quoteStabilityPoolConversion(token.ledger_id, rawAmount, 0n, context);
+      conversionContext = context;
+      conversionAuthorized = false;
+    } catch (err: any) {
+      conversionQuote = null;
+      conversionContext = null;
+      conversionQuoteError = err?.message || 'Unable to quote this conversion';
+    } finally {
+      quoteLoading = false;
+    }
+  }
+
+  async function resumeConversion() {
+    if (!pendingConversion || !$walletStore.principal) return;
+    try {
+      loading = true;
+      error = '';
+      const ledger = Principal.fromText(pendingConversion.ledger);
+      const context = captureStabilityPoolActionContext(ledger, 'convert');
+      const status = await resumePendingStabilityPoolConversion(context);
+      conversionStatusMessage = 'Completed conversion recovery. The pool balance will refresh shortly.';
+      if ('Pending' in status) conversionStatusMessage = `Conversion ${pendingConversion.intentSeq} is still pending. Keep this request and resume it again later.`;
+      if ('Completed' in status && status.Completed.retained_dust_raw > 0n) conversionStatusMessage += ` A remainder of ${status.Completed.retained_dust_raw} raw units is retained for recovery.`;
+      if ('Refunded' in status && status.Refunded.retained_dust_raw > 0n) conversionStatusMessage = `Conversion refunded; ${status.Refunded.retained_dust_raw} raw units remain retained for recovery.`;
+      pendingRefresh += 1;
+    } catch (err: any) {
+      error = err?.message || 'Unable to resume this conversion';
+    } finally {
+      loading = false;
+    }
+  }
+
   async function handleSubmit() {
     if (loading) return;
     const token = selectedToken;
     const action = activeTab;
     const amountText = amount;
-    if (!pendingDeposit && (!token || !amountText || parseFloat(amountText) <= 0)) {
+    if (!pendingDeposit && (!token || !amountText)) {
       error = 'Enter a valid amount';
       return;
     }
@@ -246,12 +345,31 @@
         error = 'Select a token';
         return;
       }
-      const rawAmount = parseTokenAmount(amountText, token.decimals);
+      const rawAmount = depositMode === 'convert'
+        ? parseExactTokenAmount(amountText, token.decimals)
+        : parseTokenAmount(amountText, token.decimals);
 
       if (action === 'deposit') {
-        const oneUnit = BigInt(Math.pow(10, token.decimals));
+        const oneUnit = 10n ** BigInt(token.decimals);
         if (rawAmount < oneUnit) {
           error = `Minimum deposit is 1 ${token.symbol}`;
+          return;
+        }
+        if (depositMode === 'convert') {
+          if (!conversionQuote) throw new Error('Get a fresh conversion quote before authorizing the wallet.');
+          if (!conversionAuthorized) throw new Error('Confirm the displayed maximum fees before continuing.');
+          if (!conversionWalletHasBalance) throw new Error('Insufficient balance for the conversion amount and all displayed fees.');
+          if (!conversionContext) throw new Error('Get a fresh conversion quote before authorizing the wallet.');
+          const status = await convertStabilityPoolStableTo3Usd(conversionQuote, conversionMinLp, conversionContext);
+          conversionStatusMessage = 'Conversion request accepted. The exact request remains recoverable until the pool reports a terminal result.';
+          if ('Pending' in status) conversionStatusMessage = `Conversion is pending (${status.Pending.reason?.[0] ?? 'reconciliation continues'}).`;
+          if ('Completed' in status && status.Completed.retained_dust_raw > 0n) conversionStatusMessage += ` A remainder of ${status.Completed.retained_dust_raw} raw units is retained for recovery.`;
+          if ('Refunded' in status && status.Refunded.retained_dust_raw > 0n) conversionStatusMessage = `Conversion refunded; ${status.Refunded.retained_dust_raw} raw units remain retained for recovery.`;
+          dispatch('success', { action: 'convert', status });
+          amount = '';
+          conversionQuote = null;
+          conversionAuthorized = false;
+          conversionContext = null;
           return;
         }
         // User needs amount + 2 fees (approve + transfer_from). Read fees
@@ -302,7 +420,7 @@
     >Deposit</button>
     <button
       class="tab" class:active={activeTab === 'withdraw'}
-      on:click={() => { activeTab = 'withdraw'; error = ''; }}
+      on:click={() => { activeTab = 'withdraw'; depositMode = 'deposit'; conversionQuote = null; error = ''; }}
       disabled={!userPosition}
     >Withdraw</button>
     <div class="tab-indicator" class:right={activeTab === 'withdraw'}></div>
@@ -346,9 +464,10 @@
         min="0"
         placeholder="0.00"
         bind:value={amount}
+        on:input={() => { if (depositMode === 'convert') { conversionQuote = null; conversionContext = null; conversionAuthorized = false; } }}
         disabled={loading || (activeTab === 'deposit' && !!pendingDeposit)}
         class="amount-input"
-        class:has-value={amount && parseFloat(amount) > 0}
+        class:has-value={!!amount}
       />
       <div class="input-actions">
         {#if activeStablecoins.length > 1}
@@ -391,12 +510,59 @@
       </div>
     {/if}
 
+    {#if conversionEligible}
+      <div class="conversion-choice" role="group" aria-label="Deposit method">
+        <button class:choice-active={depositMode === 'deposit'} on:click={() => { depositMode = 'deposit'; conversionQuote = null; conversionContext = null; conversionAuthorized = false; }}>
+          Deposit {selectedToken?.symbol}
+        </button>
+        <button class:choice-active={depositMode === 'convert'} on:click={() => { depositMode = 'convert'; conversionQuote = null; conversionContext = null; conversionAuthorized = false; }}>
+          Convert to 3USD and deposit
+        </button>
+      </div>
+    {/if}
+
+    {#if pendingConversion || pendingConversionStorageError}
+      <div class="recovery-note" role="status">
+        {#if pendingConversion}
+          Conversion {pendingConversion.intentSeq} is retained for {pendingConversion.principalRaw} raw input units on {pendingConversion.ledger}.
+          <button class="quote-btn" on:click={resumeConversion} disabled={loading}>Resume conversion</button>
+        {:else}
+          {pendingConversionStorageError} New conversions stay disabled until recovery state is readable.
+        {/if}
+      </div>
+    {/if}
+
+    {#if depositMode === 'convert' && conversionEligible && !pendingConversion}
+      <div class="conversion-quote" aria-live="polite">
+        <button class="quote-btn" on:click={loadConversionQuote} disabled={quoteLoading || loading || !amount}>
+          {quoteLoading ? 'Loading quote…' : 'Get conversion quote'}
+        </button>
+        {#if conversionQuote}
+          <div class="quote-line"><span>Expected 3USD</span><strong>{formatExactTokenAmount(conversionQuote.quoted_lp, 8)} 3USD</strong></div>
+          <div class="quote-line"><span>Minimum received</span><strong>{formatExactTokenAmount(conversionMinLp, 8)} 3USD (99% minimum)</strong></div>
+          <div class="quote-line"><span>Maximum conversion fee budget</span><strong>{formatExactTokenAmount(conversionQuote.minimum_fee_budget_raw, selectedToken?.decimals ?? 8)} {selectedToken?.symbol}</strong></div>
+          <div class="quote-line"><span>Pool pull ledger fee</span><strong>{formatExactTokenAmount(conversionQuote.live_transfer_fee_raw, selectedToken?.decimals ?? 8)} {selectedToken?.symbol}</strong></div>
+          <div class="quote-line"><span>Wallet approval transaction fee</span><strong>{formatExactTokenAmount(conversionQuote.live_transfer_fee_raw, selectedToken?.decimals ?? 8)} {selectedToken?.symbol}</strong></div>
+          <div class="quote-line"><span>Wallet balance required</span><strong>{formatExactTokenAmount(conversionWalletRequired, selectedToken?.decimals ?? 8)} {selectedToken?.symbol}</strong></div>
+          <label class="fee-confirmation">
+            <input type="checkbox" bind:checked={conversionAuthorized} />
+            I authorize up to the displayed fee budget and wallet fees.
+          </label>
+          {#if !conversionWalletHasBalance}
+            <p class="conversion-warning">Your wallet balance does not cover the conversion amount and all displayed fees.</p>
+          {/if}
+        {/if}
+        {#if conversionQuoteError}<p class="conversion-warning">{conversionQuoteError}</p>{/if}
+      </div>
+    {/if}
+    {#if conversionStatusMessage}<p class="conversion-status" role="status">{conversionStatusMessage}</p>{/if}
+
     <!-- Submit -->
     <button
       class="submit-btn" class:withdraw={activeTab === 'withdraw'}
       on:click={handleSubmit}
-      disabled={loading || (activeTab === 'deposit' && !!pendingDepositStorageError) || (!!pendingDeposit && activeTab !== 'deposit') ||
-        (!pendingDeposit && (!amount || parseFloat(amount) <= 0))}
+      disabled={loading || (activeTab === 'deposit' && (!!pendingDepositStorageError || !!pendingConversionStorageError || !!pendingConversion)) || (!!pendingDeposit && activeTab !== 'deposit') ||
+        (!pendingDeposit && !amount)}
     >
       {#if loading}
         <span class="spinner"></span>
@@ -404,7 +570,7 @@
       {:else}
         {pendingDeposit
           ? (activeTab === 'deposit' ? `Resume intent ${pendingDeposit.intentSeq}` : 'Resolve deposit intent first')
-          : `${activeTab === 'deposit' ? 'Deposit' : 'Withdraw'} ${selectedToken?.symbol ?? ''}`}
+          : (activeTab === 'deposit' && depositMode === 'convert') ? 'Convert to 3USD and deposit' : `${activeTab === 'deposit' ? 'Deposit' : 'Withdraw'} ${selectedToken?.symbol ?? ''}`}
       {/if}
     </button>
 
@@ -784,4 +950,40 @@
     font-size: 0.8125rem;
     line-height: 1.45;
   }
+
+  .conversion-choice {
+    display: grid;
+    gap: 0.375rem;
+    margin: 0.75rem 0;
+  }
+  .conversion-choice button,
+  .quote-btn {
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem;
+    background: var(--rumi-bg-surface2);
+    color: var(--rumi-text-secondary);
+    text-align: left;
+    cursor: pointer;
+  }
+  .conversion-choice button.choice-active {
+    border-color: var(--rumi-teal);
+    color: var(--rumi-text-primary);
+  }
+  .conversion-quote {
+    display: grid;
+    gap: 0.4rem;
+    margin-bottom: 0.75rem;
+    padding: 0.75rem;
+    background: var(--rumi-bg-surface2);
+    border-radius: 0.375rem;
+    font-size: 0.78rem;
+  }
+  .quote-btn { text-align: center; color: var(--rumi-teal); }
+  .quote-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .quote-line { display: flex; justify-content: space-between; gap: 1rem; }
+  .quote-line strong { color: var(--rumi-text-primary); text-align: right; }
+  .fee-confirmation { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.25rem; color: var(--rumi-text-secondary); }
+  .conversion-warning { margin: 0; color: var(--rumi-danger); }
+  .conversion-status { margin: 0.75rem 0 0; color: var(--rumi-text-secondary); font-size: 0.8125rem; line-height: 1.45; }
 </style>

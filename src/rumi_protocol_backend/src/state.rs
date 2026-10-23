@@ -2161,6 +2161,180 @@ pub struct PendingMarginTransfer {
     pub min_net_collateral_raw: Option<u64>,
 }
 
+/// Payment rail selected by the stability pool for an ordinary liquidation.
+/// The rail is part of the durable request identity so an icUSD request cannot
+/// be replayed as a ckStable pull (or vice versa).
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord,
+    serde::Serialize, serde::Deserialize)]
+pub enum SpLiquidationPayment {
+    Icusd,
+    Ckusdc,
+    Ckusdt,
+}
+
+impl Default for SpLiquidationPayment {
+    fn default() -> Self { Self::Icusd }
+}
+
+/// Lifecycle of one ordinary stability-pool liquidation. A submitted phase is
+/// deliberately retained across reply loss and upgrades; retrying it reuses
+/// the exact tuple stored on the journal.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize,
+    serde::Deserialize)]
+pub enum SpLiquidationPhase {
+    Prepared,
+    PaymentSubmitted,
+    PaymentConfirmed,
+    DebtCommitted,
+    PayoutSubmitted,
+    PayoutSettled,
+    PaymentNoEffect(String),
+    PayoutNoEffect(String),
+    Cancelled,
+}
+
+impl SpLiquidationPhase {
+    pub fn blocks_vault(&self) -> bool {
+        matches!(
+            self,
+            Self::Prepared
+                | Self::PaymentSubmitted
+                | Self::PaymentConfirmed
+                | Self::DebtCommitted
+                | Self::PayoutSubmitted
+        )
+    }
+
+    pub fn terminal(&self) -> bool {
+        matches!(self, Self::PayoutSettled | Self::PaymentNoEffect(_) | Self::Cancelled)
+    }
+}
+
+/// Exact payment tuple for the incoming ICRC-2 pull. It is persisted before
+/// dispatch and remains immutable for the entire request lifetime.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize,
+    serde::Deserialize)]
+pub struct SpLiquidationPaymentTuple {
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_raw: u64,
+    pub ledger_fee_raw: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+}
+
+/// Durable ordinary SP liquidation journal. All values used after the payment
+/// await are frozen here; no continuation recomputes from a changing vault or
+/// fee cache.
+pub(crate) fn default_anonymous_principal() -> Principal {
+    Principal::anonymous()
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize,
+    serde::Deserialize)]
+pub struct SpLiquidationJournal {
+    pub request_id: [u8; 32],
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub payment: SpLiquidationPayment,
+    #[serde(default)]
+    pub max_debt_e8s: u64,
+    pub max_gross_raw: u64,
+    pub collateral_type: Principal,
+    /// Immutable ICRC ledger identity resolved from the collateral config.
+    /// This is separate from `collateral_type` because legacy ICP vaults use
+    /// the anonymous principal as a synthetic type key.
+    #[serde(default = "default_anonymous_principal")]
+    pub collateral_ledger: Principal,
+    #[serde(default)]
+    pub quote_collateral_decimals: u8,
+    pub quote_debt_e8s: u64,
+    pub quote_collateral_gross_raw: u64,
+    pub quote_collateral_net_raw: u64,
+    #[serde(default)]
+    pub quote_collateral_payout_net_raw: u64,
+    pub quote_protocol_cut_raw: u64,
+    pub quote_interest_share_e8s: u64,
+    pub quote_price_e8s: u64,
+    #[serde(default)]
+    pub quote_price_usd_bits: u64,
+    /// Exact rust_decimal representation used for the frozen quote. The f64
+    /// bits above remain only as a compatibility fallback for an interrupted
+    /// pre-rail snapshot; new rows never reconstruct economics from f64.
+    #[serde(default)]
+    pub quote_price_decimal: [u8; 16],
+    #[serde(default)]
+    pub quote_payout_fee_raw: u64,
+    /// Whether `quote_payout_fee_raw` was fetched and pinned by the durable
+    /// rail. Older rows used zero as an implicit sentinel; a real zero-fee
+    /// ledger must remain zero on every replay.
+    #[serde(default)]
+    pub quote_payout_fee_known: bool,
+    pub principal_raw: u64,
+    pub surcharge_raw: u64,
+    pub gross_payment_raw: u64,
+    pub payment_tuple: SpLiquidationPaymentTuple,
+    pub phase: SpLiquidationPhase,
+    #[serde(default)]
+    pub payment_block_index: Option<u64>,
+    #[serde(default)]
+    pub payout_operation_id: Option<u128>,
+    #[serde(default)]
+    pub payout_op_nonce: Option<u128>,
+    #[serde(default)]
+    pub payout_ledger: Option<Principal>,
+    #[serde(default)]
+    pub payout_gross_raw: Option<u64>,
+    #[serde(default)]
+    pub payout_net_raw: Option<u64>,
+    #[serde(default)]
+    pub payout_fee_raw: Option<u64>,
+    #[serde(default)]
+    pub payout_memo: [u8; 16],
+    #[serde(default)]
+    pub payout_created_at_time_ns: u64,
+    #[serde(default)]
+    pub payout_block_index: Option<u64>,
+    /// A prior payment call may have committed even when its reply was lost.
+    /// Once set, a later typed ledger error cannot prove that the original
+    /// payment had no effect; retries retain this exact tuple indefinitely.
+    #[serde(default)]
+    pub payment_ambiguous: bool,
+    /// Set synchronously before the first payment await. A later typed error
+    /// after this fence cannot prove that the earlier attempt had no effect.
+    #[serde(default)]
+    pub payment_attempted: bool,
+    /// Exact treasury-fee destination and dedup identity captured with the
+    /// quote. These fields let execute retry the fee transfer after upgrade
+    /// without consulting mutable treasury configuration.
+    #[serde(default)]
+    pub protocol_fee_treasury: Option<Principal>,
+    #[serde(default)]
+    pub protocol_fee_op_nonce: Option<u128>,
+    #[serde(default)]
+    pub protocol_fee_ledger_fee_raw: Option<u64>,
+    #[serde(default)]
+    pub protocol_fee_attempted: bool,
+    #[serde(default)]
+    pub protocol_fee_block_index: Option<u64>,
+    #[serde(default)]
+    pub interest_dispatch_started: bool,
+    #[serde(default)]
+    pub post_accounting_done: bool,
+    /// Interest actually removed with the debt commit. The prepare quote is
+    /// only a preview: a harvest can change the per-vault accrued amount while
+    /// the request is waiting, so settlement must distribute this committed
+    /// value and never the stale preview.
+    #[serde(default)]
+    pub applied_interest_share_e8s: Option<u64>,
+    #[serde(default)]
+    pub created_at_ns: u64,
+    #[serde(default)]
+    pub updated_at_ns: u64,
+}
+
 /// Wave-4 ICC-007: durable refund record for `redeem_reserves` failures.
 ///
 /// When a reserve redemption pulls icUSD from the user (effectively burning it)
@@ -3228,6 +3402,11 @@ pub struct State {
     #[serde(deserialize_with = "deserialize_pending_keyed")]
     pub pending_excess_transfers: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Caller-owned ordinary stability-pool liquidation journals. Rows are
+    /// retained until the incoming payment and collateral payout both have
+    /// definitive receipts or the request is explicitly cancelled/no-effect.
+    #[serde(default)]
+    pub sp_liquidation_journals: BTreeMap<[u8; 32], SpLiquidationJournal>,
     /// Owner-facing index over all durable payout receipts, keyed by stable ID.
     #[serde(default)]
     pub pending_payout_index: BTreeMap<u128, PendingPayoutLocator>,
@@ -4196,6 +4375,7 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
             payout_history_scan_window_ns: 0,
@@ -4393,6 +4573,7 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
             payout_history_scan_window_ns: 0,
@@ -5446,6 +5627,16 @@ impl State {
             .any(|journal| journal.vault_id == vault_id)
     }
 
+    /// Durable ordinary SP liquidation reservations are considered vault
+    /// locks by synchronous redemption scans as well as by async guards. This
+    /// state-local helper avoids consulting the transient thread-local guard
+    /// while a redemption simulation already holds an immutable State borrow.
+    pub fn has_unresolved_sp_liquidation_for_vault(&self, vault_id: u64) -> bool {
+        self.sp_liquidation_journals
+            .values()
+            .any(|journal| journal.vault_id == vault_id && journal.phase.blocks_vault())
+    }
+
     pub fn vault_operation_status(&self, owner: Principal) -> VaultOperationStatus {
         VaultOperationStatus {
             acknowledged_through: self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0),
@@ -6028,6 +6219,7 @@ impl State {
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -8302,6 +8494,7 @@ impl State {
             // this scan (see `apply_vault_redemptions`).
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -8544,6 +8737,7 @@ impl State {
             // this scan (see `apply_vault_redemptions`).
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -8735,6 +8929,7 @@ impl State {
             if vault.borrowed_icusd_amount == 0
                 || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;
@@ -8875,6 +9070,7 @@ impl State {
             }
             if vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
             {
                 continue;

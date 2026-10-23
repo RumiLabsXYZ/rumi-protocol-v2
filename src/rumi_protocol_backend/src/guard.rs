@@ -215,7 +215,7 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None, false)
+        Self::acquire(vault_id, None, false, None)
     }
 
     /// Acquire the lock only for the exact caller/vault add-margin retry whose
@@ -225,7 +225,7 @@ impl VaultLiquidationGuard {
         vault_id: u64,
         owner: Principal,
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, Some(owner), false)
+        Self::acquire(vault_id, Some(owner), false, None)
     }
 
     /// Only the already-authorized exact borrow retry may pass its own
@@ -242,13 +242,27 @@ impl VaultLiquidationGuard {
                 "Vault #{vault_id} has an unresolved bot liquidation; retry after it settles"
             )));
         }
-        Self::acquire(vault_id, None, true)
+        Self::acquire(vault_id, None, true, None)
+    }
+
+    /// Acquire a vault for the exact caller-owned ordinary SP journal. A
+    /// durable prepared/submitted journal is a reservation across upgrades;
+    /// no other caller or request may enter the vault while it is unresolved.
+    pub fn new_for_sp_liquidation_retry(
+        vault_id: u64,
+        caller: Principal,
+        request_id: [u8; 32],
+    ) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None, false, Some((caller, request_id)))
     }
 
     fn acquire(
         vault_id: u64,
         retry_owner: Option<Principal>,
         allow_pending_borrow: bool,
+        // The ordinary stability-pool journal is the only durable owner that
+        // may retry a reserved vault. `None` is used by every legacy path.
+        sp_retry: Option<(Principal, [u8; 32])>,
     ) -> Result<Self, crate::ProtocolError> {
         let pending = read_state(|s| {
             s.push_sweep_journals
@@ -266,6 +280,20 @@ impl VaultLiquidationGuard {
         {
             return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
                 "Vault #{vault_id} has an unresolved push-deposit sweep; retry that exact operation"
+            )));
+        }
+        let sp_pending = read_state(|s| {
+            s.sp_liquidation_journals
+                .values()
+                .filter(|journal| journal.vault_id == vault_id && journal.phase.blocks_vault())
+                .map(|journal| (journal.caller, journal.request_id))
+                .collect::<Vec<_>>()
+        });
+        if !sp_pending.is_empty()
+            && !(sp_pending.len() == 1 && sp_retry.is_some_and(|retry| sp_pending[0] == retry))
+        {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has an unresolved stability-pool liquidation; retry that exact request"
             )));
         }
         if !allow_pending_borrow && crate::state::has_pending_borrow_mint(vault_id) {

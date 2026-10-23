@@ -7,6 +7,7 @@ use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use num_traits::ToPrimitive;
 use rumi_protocol_backend::chains::config::ChainId;
+use serde_bytes::ByteBuf;
 use std::collections::BTreeMap;
 
 use crate::logs::INFO;
@@ -23,6 +24,12 @@ pub(crate) const FALLBACK_COLLATERAL_FEE_E8S: u64 = 10_000;
 
 pub(crate) const CHAIN_WRITEDOWN_MEMO_PREFIX: &[u8] = b"RUMI-LIQ-004:";
 const AMBIGUOUS_BURN_RECOVERY_SCAN_BLOCKS: u64 = 256;
+const ORDINARY_APPROVAL_RECOVERY_SCAN_BLOCKS: u64 = 256;
+// The pinned official ICRC ledgers retain approve deduplication identities
+// beyond the five-minute allowance expiry.  Retrying the exact persisted
+// tuple within this horizon can therefore return Duplicate for a committed
+// approval; after it, only a positive direct ICRC-3 proof is accepted.
+const ORDINARY_APPROVAL_DEDUP_WINDOW_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 #[derive(Clone, Debug)]
 pub(crate) struct IcusdBurnAttemptError {
@@ -1232,6 +1239,7 @@ pub(crate) fn apply_native_xrp_absorb_success_in_state_at(
         collateral_type: intent.collateral_type,
         success: true,
         error_message: None,
+        admitted: None,
     })
 }
 
@@ -1681,6 +1689,7 @@ fn liquidation_failure(
         collateral_type: vault_info.collateral_type,
         success: false,
         error_message: Some(format!("{:?}", error)),
+        admitted: None,
     }
 }
 
@@ -2817,10 +2826,12 @@ pub async fn notify_liquidatable_vaults(
         // Check effective pool coverage for this collateral type
         let effective_pool =
             read_state(|s| s.effective_pool_for_collateral(&vault_info.collateral_type));
-        if effective_pool < vault_info.debt_amount {
+        // Partial ordinary liquidation is bounded by the backend's durable
+        // quote; requiring the whole vault debt here prevented that rail.
+        if effective_pool == 0 {
             log!(
                 INFO,
-                "Insufficient pool coverage for vault {}: need {} e8s, have {} e8s",
+                "No eligible pool coverage for vault {}: debt {} e8s, available {} e8s",
                 vault_info.vault_id,
                 vault_info.debt_amount,
                 effective_pool
@@ -2892,21 +2903,19 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     // Fetch vault info from backend
     let protocol_id = read_state(|s| s.protocol_canister_id);
 
-    let (vaults,): (Vec<rumi_protocol_backend::vault::CandidVault>,) =
-        call(protocol_id, "get_liquidatable_vaults", ())
+    let (candidate,): (Option<rumi_protocol_backend::LiquidatableVaultInfo>,) =
+        call(protocol_id, "get_stability_pool_liquidation_candidate", (vault_id,))
             .await
             .map_err(|_e| StabilityPoolError::InterCanisterCallFailed {
                 target: "Protocol".to_string(),
-                method: "get_liquidatable_vaults".to_string(),
+                method: "get_stability_pool_liquidation_candidate".to_string(),
             })?;
-    let target_vault = vaults.into_iter().find(|v| v.vault_id == vault_id);
-
-    let vault = match target_vault {
+    let vault = match candidate {
         Some(v) => v,
         None => {
             return Err(StabilityPoolError::LiquidationFailed {
                 vault_id,
-                reason: "Vault not found in liquidatable list".to_string(),
+                reason: "Vault has no current backend liquidation quote".to_string(),
             })
         }
     };
@@ -2914,16 +2923,19 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     let vault_info = LiquidatableVaultInfo {
         vault_id: vault.vault_id,
         collateral_type: vault.collateral_type,
-        debt_amount: vault.borrowed_icusd_amount,
-        collateral_amount: vault.icp_margin_amount,
-        recommended_liquidation_amount: 0,
-        collateral_price_e8s: 0,
+        debt_amount: vault.debt_amount,
+        collateral_amount: vault.collateral_amount,
+        recommended_liquidation_amount: vault.recommended_liquidation_amount,
+        collateral_price_e8s: vault.collateral_price_e8s,
     };
 
     // Check pool coverage
     let effective_pool =
         read_state(|s| s.effective_pool_for_collateral(&vault_info.collateral_type));
-    if effective_pool < vault_info.debt_amount {
+    // The durable backend quote caps a partial liquidation to available
+    // payment. Requiring coverage of the full debt would reject a safe
+    // smaller liquidation before that authoritative sizing step.
+    if effective_pool == 0 {
         return Err(StabilityPoolError::InsufficientPoolBalance);
     }
 
@@ -3742,6 +3754,115 @@ fn three_usd_payout_block_matches(
         && block.created_at_time == Some(payout.created_at_time_ns)
 }
 
+/// Authenticate an ordinary SP liquidation's backend collateral payout
+/// against the canonical ledger's directly served block. The backend receipt
+/// is only a candidate: settlement must also prove the exact source,
+/// destination, net amount, fee, memo, timestamp, and block index here.
+/// Archive callbacks are intentionally rejected because they do not establish
+/// membership in the ledger's current canonical block log.
+pub(crate) async fn verify_ordinary_collateral_payout(
+    protocol_id: Principal,
+    receipt: &rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt,
+) -> Result<u64, String> {
+    let payout = receipt
+        .payout_tuple
+        .as_ref()
+        .ok_or_else(|| "ordinary liquidation receipt has no payout tuple".to_string())?;
+    let block_index = receipt
+        .payout_block_index
+        .ok_or_else(|| "ordinary liquidation receipt has no payout block".to_string())?;
+    let pool = ic_cdk::api::id();
+    if payout.source != (Account { owner: protocol_id, subaccount: None })
+        || payout.destination != (Account { owner: pool, subaccount: None })
+        || payout.ledger != receipt.collateral_ledger
+        || payout.amount_raw != receipt.collateral_payout_net_raw
+        || payout.gross_raw
+            != payout
+                .amount_raw
+                .checked_add(payout.ledger_fee_raw)
+                .ok_or_else(|| "ordinary payout gross amount overflow".to_string())?
+        // The backend payout tuple is the SP leg after its protocol cut.  The
+        // full seized amount is `collateral_gross_raw`; the tuple's gross is
+        // the immutable SP gross, before the collateral ledger fee.
+        || payout.gross_raw != receipt.collateral_net_raw
+        || receipt.collateral_net_raw > receipt.collateral_gross_raw
+        || receipt.payout_operation_id.is_none()
+        || receipt.payout_net_raw != Some(payout.amount_raw)
+    {
+        return Err("ordinary backend payout conflicts with the immutable receipt tuple".into());
+    }
+
+    if rumi_protocol_backend::native_icp_proof::is_native_icp_ledger(payout.ledger) {
+        let (response,): (rumi_protocol_backend::native_icp_proof::QueryBlocksResponse,) = call(
+            payout.ledger,
+            "query_blocks",
+            (rumi_protocol_backend::native_icp_proof::GetBlocksArgs {
+                start: block_index,
+                length: 1,
+            },),
+        )
+        .await
+        .map_err(|error| format!("native ICP payout proof failed: {error:?}"))?;
+        let block = native_icp_direct_candidate_block(response, block_index)?;
+        let fee = rumi_protocol_backend::native_icp_proof::verify_transfer_block(
+            &block,
+            protocol_id,
+            pool,
+            payout.amount_raw,
+            &payout.memo,
+            payout.created_at_time_ns,
+        )?;
+        if fee != payout.ledger_fee_raw {
+            return Err("native ICP payout fee differs from the pinned ordinary tuple".into());
+        }
+        return Ok(payout.amount_raw);
+    }
+
+    let (response,): (GetBlocksResult,) = call(
+        payout.ledger,
+        "icrc3_get_blocks",
+        (vec![GetBlocksRequest {
+            start: Nat::from(block_index),
+            length: Nat::from(1u64),
+        }],),
+    )
+    .await
+    .map_err(|error| format!("ordinary collateral ICRC-3 proof failed: {error:?}"))?;
+    let log_length = response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ordinary collateral ICRC-3 log length exceeds u64".to_string())?;
+    if log_length <= block_index
+        || !response.archived_blocks.is_empty()
+        || response.blocks.len() != 1
+        || response.blocks[0].id.0.to_u64() != Some(block_index)
+    {
+        return Err("ordinary collateral ledger did not directly serve its exact payout block".into());
+    }
+    let block = rumi_protocol_backend::icrc3_proof::decode_block(&response.blocks[0].block)
+        .map_err(|error| format!("malformed ordinary collateral payout block: {error}"))?;
+    if !ordinary_payout_block_matches(payout, &block) {
+        return Err("ordinary collateral block does not match the exact payout tuple".into());
+    }
+    Ok(payout.amount_raw)
+}
+
+fn ordinary_payout_block_matches(
+    payout: &rumi_protocol_backend::sp_liquidation::SpLiquidationPayoutTuple,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    block.op == "xfer"
+        && block.btype.as_deref().is_none_or(|kind| kind == "1xfer")
+        && block.from == Some(payout.source)
+        && block.to == Some(payout.destination)
+        && block.spender.is_none()
+        && block.amount == u128::from(payout.amount_raw)
+        && block.fee == Some(payout.ledger_fee_raw)
+        && block.memo.as_deref() == Some(payout.memo.as_slice())
+        && block.created_at_time == Some(payout.created_at_time_ns)
+}
+
 fn exact_three_usd_refund_receipt_matches(
     protocol_id: Principal,
     stability_pool: Principal,
@@ -4207,9 +4328,1713 @@ pub async fn recover_pending_three_usd_absorbs() {
     }
 }
 
+fn ordinary_payment_for_symbol(symbol: &str) -> Option<rumi_protocol_backend::state::SpLiquidationPayment> {
+    match symbol {
+        "icUSD" => Some(rumi_protocol_backend::state::SpLiquidationPayment::Icusd),
+        "ckUSDC" => Some(rumi_protocol_backend::state::SpLiquidationPayment::Ckusdc),
+        "ckUSDT" => Some(rumi_protocol_backend::state::SpLiquidationPayment::Ckusdt),
+        _ => None,
+    }
+}
+
+fn ordinary_selection_for_vault_excluding(
+    vault_info: &LiquidatableVaultInfo,
+    excluded_ledgers: &[Principal],
+) -> Option<(
+    crate::ordinary_liquidation::StableSelection,
+    Vec<crate::ordinary_liquidation::ParticipantBalance>,
+)> {
+    let target_debt = if vault_info.recommended_liquidation_amount > 0 {
+        vault_info
+            .recommended_liquidation_amount
+            .min(vault_info.debt_amount)
+    } else {
+        vault_info.debt_amount
+    };
+    if target_debt == 0 {
+        return None;
+    }
+    read_state(|state| {
+        if state.collateral_requires_payout_address(&vault_info.collateral_type)
+            || state.is_chain_collateral_sentinel(&vault_info.collateral_type)
+            || !state
+                .collateral_registry
+                .get(&vault_info.collateral_type)
+                .is_some_and(|config| matches!(&config.status, CollateralStatus::Active))
+        {
+            return None;
+        }
+        let candidates: Vec<_> = state
+            .stablecoin_registry
+            .values()
+            .filter(|config| {
+                config.is_active
+                    && !config.is_lp_token.unwrap_or(false)
+                    && !excluded_ledgers.contains(&config.ledger_id)
+                    && ordinary_payment_for_symbol(&config.symbol).is_some()
+            })
+            .filter_map(|config| {
+                let payment = ordinary_payment_for_symbol(&config.symbol)?;
+                let available_raw = state
+                    .deposits
+                    .values()
+                    .filter(|position| position.is_opted_in(&vault_info.collateral_type))
+                    .map(|position| {
+                        position
+                            .stablecoin_balances
+                            .get(&config.ledger_id)
+                            .copied()
+                            .unwrap_or(0)
+                    })
+                    .fold(0u64, u64::saturating_add);
+                Some(crate::ordinary_liquidation::StableCandidate {
+                    ledger: config.ledger_id,
+                    payment,
+                    decimals: config.decimals,
+                    priority: config.priority,
+                    active: config.is_active,
+                    is_lp: config.is_lp_token.unwrap_or(false),
+                    available_raw,
+                })
+            })
+            .collect();
+        let selection = crate::ordinary_liquidation::choose_single_stable(&candidates, target_debt)?;
+        let participants = state
+            .deposits
+            .iter()
+            .map(|(owner, position)| {
+                crate::ordinary_liquidation::ParticipantBalance {
+                    owner: *owner,
+                    balance_raw: position
+                        .stablecoin_balances
+                        .get(&selection.ledger)
+                        .copied()
+                        .unwrap_or(0),
+                    opted_in: position.is_opted_in(&vault_info.collateral_type),
+                }
+            })
+            .filter(|participant| participant.opted_in && participant.balance_raw > 0)
+            .collect::<Vec<_>>();
+        Some((selection, participants))
+    })
+}
+
+fn ordinary_quote_from_receipt(
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    receipt: &rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt,
+    collateral_ledger: Principal,
+) -> Result<crate::ordinary_liquidation::OrdinaryLiquidationQuote, String> {
+    let request_id = intent.request_id;
+    if receipt.request_id.as_slice() != request_id
+        || receipt.vault_id != intent.vault_id
+        || receipt.payment != intent.payment
+        || receipt.payment_tuple.ledger != intent.stable_ledger
+        || receipt.collateral_ledger != collateral_ledger
+        || receipt.debt_e8s == 0
+        || receipt.debt_e8s > intent.requested_debt_e8s
+        || receipt.gross_payment_raw > intent.max_gross_raw
+    {
+        return Err("backend ordinary quote conflicts with the admitted request".into());
+    }
+    let pull_amount = receipt
+        .principal_raw
+        .checked_add(receipt.surcharge_raw)
+        .ok_or_else(|| "ordinary principal plus surcharge overflow".to_string())?;
+    let gross = pull_amount
+        .checked_add(receipt.pull_fee_raw)
+        .ok_or_else(|| "ordinary pull gross overflow".to_string())?;
+    if receipt.payment_tuple.amount_raw != pull_amount
+        || receipt.payment_tuple.ledger_fee_raw != receipt.pull_fee_raw
+        || receipt.gross_payment_raw != gross
+        || receipt.collateral_net_raw > receipt.collateral_gross_raw
+        || receipt.collateral_payout_net_raw > receipt.collateral_net_raw
+    {
+        return Err("backend ordinary quote has inconsistent payment or collateral totals".into());
+    }
+    let payout_tuple = receipt
+        .payout_tuple
+        .as_ref()
+        .map(crate::ordinary_liquidation::OrdinaryPayoutTuple::from);
+    let collateral_fee_raw = if let Some(tuple) = payout_tuple.as_ref() {
+        let expected_fee = receipt
+            .collateral_net_raw
+            .checked_sub(receipt.collateral_payout_net_raw)
+            .ok_or_else(|| "ordinary payout net exceeds the SP collateral gross".to_string())?;
+        if tuple.ledger_fee_raw != expected_fee {
+            return Err("ordinary payout tuple fee conflicts with the SP collateral gross".into());
+        }
+        expected_fee
+    } else {
+        receipt
+            .collateral_net_raw
+            .checked_sub(receipt.collateral_payout_net_raw)
+            .ok_or_else(|| "ordinary payout net exceeds the SP collateral gross".to_string())?
+    };
+    if let Some(tuple) = payout_tuple.as_ref() {
+        if tuple.amount_raw != receipt.collateral_payout_net_raw
+            || tuple.gross_raw
+                != tuple
+                    .amount_raw
+                    .checked_add(tuple.ledger_fee_raw)
+                    .ok_or_else(|| "ordinary payout gross overflow".to_string())?
+            || tuple.gross_raw != receipt.collateral_net_raw
+        {
+            return Err("backend ordinary payout tuple conflicts with the SP collateral gross".into());
+        }
+    }
+    Ok(crate::ordinary_liquidation::OrdinaryLiquidationQuote {
+        debt_e8s: receipt.debt_e8s,
+        principal_raw: receipt.principal_raw,
+        surcharge_raw: receipt.surcharge_raw,
+        pull_fee_raw: receipt.pull_fee_raw,
+        gross_payment_raw: receipt.gross_payment_raw,
+        payment_tuple: crate::ordinary_liquidation::OrdinaryPaymentTuple::from(&receipt.payment_tuple),
+        collateral_ledger: receipt.collateral_ledger,
+        collateral_price_e8s: receipt.collateral_price_e8s,
+        collateral_gross_raw: receipt.collateral_gross_raw,
+        collateral_net_raw: receipt.collateral_net_raw,
+        collateral_fee_raw,
+        payout_operation_id: receipt.payout_operation_id,
+        payout_tuple,
+        payment_block_index: receipt.payment_block_index,
+        payout_block_index: receipt.payout_block_index,
+        payout_net_raw: receipt.payout_net_raw,
+    })
+}
+
+fn ordinary_quote_frozen_fields_match(
+    saved: &crate::ordinary_liquidation::OrdinaryLiquidationQuote,
+    next: &crate::ordinary_liquidation::OrdinaryLiquidationQuote,
+) -> bool {
+    saved.debt_e8s == next.debt_e8s
+        && saved.principal_raw == next.principal_raw
+        && saved.surcharge_raw == next.surcharge_raw
+        && saved.pull_fee_raw == next.pull_fee_raw
+        && saved.gross_payment_raw == next.gross_payment_raw
+        && saved.payment_tuple == next.payment_tuple
+        && saved.collateral_ledger == next.collateral_ledger
+        && saved.collateral_price_e8s == next.collateral_price_e8s
+        && saved.collateral_gross_raw == next.collateral_gross_raw
+        && saved.collateral_net_raw == next.collateral_net_raw
+        && saved.collateral_fee_raw == next.collateral_fee_raw
+}
+
+fn ordinary_failure(vault_info: &LiquidatableVaultInfo, reason: impl Into<String>) -> LiquidationResult {
+    crate::ordinary_liquidation::ordinary_failure_result(
+        vault_info.vault_id,
+        vault_info.collateral_type,
+        reason,
+        false,
+    )
+}
+
+fn ordinary_has_other_pending_work(except_request_id: Option<&[u8; 32]>) -> bool {
+    read_state(|state| {
+        state.has_pending_chain_absorbs()
+            || state.has_pending_native_xrp_absorbs()
+            || state.pending_three_usd_absorb_count() > 0
+            || state.pending_ordinary_liquidations.as_ref().is_some_and(|pending| {
+                pending.keys().any(|request_id| {
+                    except_request_id != Some(request_id)
+                })
+            })
+    })
+}
+
+/// The ordinary worker is normally called while its caller already owns the
+/// pool liquidation guard.  The generic token mutation helper intentionally
+/// rejects that state, so admission uses this narrower check that recognizes
+/// the caller-owned guard while still fencing every other durable absorb and
+/// any in-flight balance rollback.
+fn ordinary_admission_guard(
+    _stable_ledger: Principal,
+    except_request_id: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    if !crate::pool_guard::liquidation_in_progress() {
+        return Err("ordinary liquidation admission requires the caller-owned pool guard".into());
+    }
+    crate::ensure_no_pool_balance_async_in_flight()
+        .map_err(|error| format!("ordinary pool balance operation is still in flight: {error:?}"))?;
+    if ordinary_has_other_pending_work(except_request_id) {
+        return Err("another durable pool absorb owns the ordinary admission fence".into());
+    }
+    Ok(())
+}
+
+fn ordinary_fresh_dispatch_guard(
+    protocol_id: Principal,
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> Result<(), String> {
+    ordinary_admission_guard(intent.stable_ledger, Some(&intent.request_id))?;
+    read_state(|state| {
+        if state.configuration.emergency_pause {
+            return Err("ordinary liquidation paused before a new backend/approval dispatch".into());
+        }
+        if state.protocol_canister_id != protocol_id {
+            return Err("ordinary backend authority changed before dispatch".into());
+        }
+        let stable_matches = state.stablecoin_registry.get(&intent.stable_ledger).is_some_and(|config| {
+            config.ledger_id == intent.stable_ledger
+                && config.is_active
+                && config.decimals == intent.stable_decimals
+                && ordinary_payment_for_symbol(&config.symbol) == Some(intent.payment)
+        });
+        if !stable_matches {
+            return Err("ordinary stablecoin binding changed before dispatch".into());
+        }
+        if !state.collateral_registry.get(&intent.collateral_type).is_some_and(|config| {
+            matches!(&config.status, CollateralStatus::Active)
+        }) {
+            return Err("ordinary collateral binding changed before dispatch".into());
+        }
+        Ok(())
+    })
+}
+
+fn ordinary_recovery_dispatch_guard(
+    protocol_id: Principal,
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> Result<(), String> {
+    ordinary_admission_guard(intent.stable_ledger, Some(&intent.request_id))?;
+    read_state(|state| {
+        if state.configuration.emergency_pause {
+            return Err("ordinary liquidation paused before exact backend recovery".into());
+        }
+        if state.protocol_canister_id != protocol_id {
+            return Err("ordinary backend authority changed before exact recovery".into());
+        }
+        Ok(())
+    })
+}
+
+async fn start_ordinary_liquidation(
+    vault_info: &LiquidatableVaultInfo,
+    selection: crate::ordinary_liquidation::StableSelection,
+    participants: Vec<crate::ordinary_liquidation::ParticipantBalance>,
+    excluded_ledgers: &[Principal],
+) -> LiquidationResult {
+    let protocol_id = read_state(|state| state.protocol_canister_id);
+    let target_debt = selection.covered_debt_e8s;
+    // Reserve the live approval fee before durable admission.  The backend
+    // owns surcharge/pull-fee calculation and will shrink its debt quote to
+    // this gross ceiling; the old 2x bound could admit a request that could
+    // never be paid by the frozen participants.
+    let approval_fee_budget = match crate::deposits::current_ledger_transfer_fee(selection.ledger).await {
+        Ok(fee) => fee,
+        Err(error) => {
+            return ordinary_failure(
+                vault_info,
+                format!("ordinary approval fee preflight failed: {error:?}"),
+            )
+        }
+    };
+    if let Err(reason) = ordinary_admission_guard(selection.ledger, None) {
+        return ordinary_failure(vault_info, reason);
+    }
+    if read_state(|state| state.configuration.emergency_pause) {
+        return ordinary_failure(vault_info, "ordinary liquidation paused during admission preflight");
+    }
+    // The fee query awaited above. Re-read every immutable binding before the
+    // request ID is allocated so deposits, opt-outs, configuration changes,
+    // or a concurrent pending operation cannot leave a stale frozen snapshot.
+    let Some((rechecked_selection, rechecked_participants)) =
+        ordinary_selection_for_vault_excluding(vault_info, excluded_ledgers)
+    else {
+        return ordinary_failure(vault_info, "ordinary eligible stable liquidity disappeared during admission");
+    };
+    if rechecked_selection != selection || rechecked_participants != participants {
+        return ordinary_failure(vault_info, "ordinary eligible stable snapshot changed during admission");
+    }
+    // The gross ceiling is the complete frozen eligible balance, not merely
+    // the selected debt draw. This lets the backend choose a safe partial
+    // debt amount while still reserving the approval fee exactly once.
+    let eligible_balance_raw = participants
+        .iter()
+        .try_fold(0u64, |sum, participant| sum.checked_add(participant.balance_raw));
+    let Some(max_gross_raw) = eligible_balance_raw
+        .and_then(|available| {
+            crate::ordinary_liquidation::affordable_max_gross_raw(available, approval_fee_budget)
+        })
+    else {
+        return ordinary_failure(
+            vault_info,
+            "ordinary eligible stable balance cannot reserve the approval fee",
+        );
+    };
+    let request_id = match mutate_state(|state| state.allocate_ordinary_request_id(vault_info.vault_id)) {
+        Ok(request_id) => request_id,
+        Err(error) => return ordinary_failure(vault_info, format!("ordinary request admission failed: {error:?}")),
+    };
+    let intent = crate::ordinary_liquidation::OrdinaryLiquidationIntent {
+        request_id,
+        vault_id: vault_info.vault_id,
+        collateral_type: vault_info.collateral_type,
+        payment: selection.payment,
+        stable_ledger: selection.ledger,
+        stable_decimals: selection.decimals,
+        requested_debt_e8s: target_debt,
+        max_gross_raw,
+        participant_snapshot: participants,
+        quote: None,
+        approval: None,
+        approval_attempted: false,
+        approval_block_index: None,
+        revoke_fee_raw: 0,
+        backend_attempted: false,
+        phase: crate::ordinary_liquidation::OrdinaryLiquidationPhase::Prepared,
+        last_error: None,
+        created_at_ns: ic_cdk::api::time(),
+        updated_at_ns: ic_cdk::api::time(),
+    };
+    if let Err(error) = mutate_state(|state| state.admit_ordinary_liquidation(intent.clone())) {
+        return ordinary_failure(vault_info, format!("ordinary request admission failed: {error:?}"));
+    }
+    resume_ordinary_liquidation(intent).await
+}
+
+enum OrdinaryBackendCallError {
+    Rejected(String),
+    Unknown(String),
+}
+
+fn ordinary_prepare_request(
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> rumi_protocol_backend::sp_liquidation::SpLiquidationRequest {
+    rumi_protocol_backend::sp_liquidation::SpLiquidationRequest {
+        request_id: intent.request_id.to_vec(),
+        vault_id: intent.vault_id,
+        payment: intent.payment,
+        max_debt_e8s: intent.requested_debt_e8s,
+        max_gross_raw: intent.max_gross_raw,
+    }
+}
+
+async fn ordinary_backend_prepare(
+    protocol_id: Principal,
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, OrdinaryBackendCallError> {
+    let request = ordinary_prepare_request(intent);
+    let result: Result<
+        (Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, rumi_protocol_backend::ProtocolError>,),
+        _,
+    > = call(protocol_id, "stability_pool_prepare_liquidation", (request,)).await;
+    match result {
+        Ok((Ok(receipt),)) => Ok(receipt),
+        Ok((Err(error),)) => Err(OrdinaryBackendCallError::Rejected(format!(
+            "backend rejected ordinary preparation: {error:?}"
+        ))),
+        Err(error) => Err(OrdinaryBackendCallError::Unknown(format!(
+            "ordinary preparation outcome is unknown: {error:?}"
+        ))),
+    }
+}
+
+async fn ordinary_backend_status(
+    protocol_id: Principal,
+    request_id: [u8; 32],
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, String> {
+    let result: Result<
+        (Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, rumi_protocol_backend::ProtocolError>,),
+        _,
+    > = call(
+        protocol_id,
+        "stability_pool_liquidation_status",
+        (request_id.to_vec(),),
+    )
+    .await;
+    match result {
+        Ok((Ok(receipt),)) => Ok(receipt),
+        Ok((Err(error),)) => Err(format!("ordinary status unavailable: {error:?}")),
+        Err(error) => Err(format!("ordinary status call failed: {error:?}")),
+    }
+}
+
+async fn ordinary_backend_execute(
+    protocol_id: Principal,
+    request_id: [u8; 32],
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, String> {
+    let result: Result<
+        (Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, rumi_protocol_backend::ProtocolError>,),
+        _,
+    > = call(
+        protocol_id,
+        "stability_pool_execute_liquidation",
+        (request_id.to_vec(),),
+    )
+    .await;
+    match result {
+        Ok((Ok(receipt),)) => Ok(receipt),
+        Ok((Err(error),)) => Err(format!("ordinary execute remains unresolved: {error:?}")),
+        Err(error) => Err(format!("ordinary execute outcome is unknown: {error:?}")),
+    }
+}
+
+async fn ordinary_backend_cancel(
+    protocol_id: Principal,
+    request_id: [u8; 32],
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, String> {
+    let result: Result<
+        (Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, rumi_protocol_backend::ProtocolError>,),
+        _,
+    > = call(
+        protocol_id,
+        "stability_pool_cancel_liquidation",
+        (request_id.to_vec(),),
+    )
+    .await;
+    match result {
+        Ok((Ok(receipt),)) => Ok(receipt),
+        Ok((Err(error),)) => Err(format!("ordinary backend cancellation was rejected: {error:?}")),
+        Err(error) => Err(format!("ordinary backend cancellation outcome is unknown: {error:?}")),
+    }
+}
+
+fn ordinary_backend_receipt_identity_matches(
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    receipt: &rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt,
+) -> bool {
+    receipt.request_id.as_slice() == intent.request_id
+        && receipt.vault_id == intent.vault_id
+        && receipt.payment == intent.payment
+        && receipt.payment_tuple.ledger == intent.stable_ledger
+}
+
+/// Cancel a request whose backend journal may already exist.  The SP must
+/// never delete its durable row merely because a local budget check or an
+/// approval failed: the backend request ID is the only authority for whether
+/// a fresh attempt is safe.  This helper first observes the exact backend
+/// status, cancels only while it is still prepared, and tombstones only after
+/// the backend returns a terminal no-effect phase.
+async fn cancel_admitted_ordinary(
+    protocol_id: Principal,
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    reason: String,
+) -> Result<LiquidationResult, String> {
+    let current = read_state(|state| state.get_pending_ordinary_liquidation(&intent.request_id))
+        .ok_or_else(|| "ordinary request disappeared while backend cancellation was required".to_string())?;
+    if !matches!(
+        current.phase,
+        crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::CancellationSubmitted
+    ) {
+        return Err(format!(
+            "ordinary backend cancellation is unsafe from phase {:?}",
+            current.phase
+        ));
+    }
+    if current.phase != crate::ordinary_liquidation::OrdinaryLiquidationPhase::CancellationSubmitted {
+        let expected = current.phase.clone();
+        mutate_state(|state| {
+            state
+                .update_ordinary_liquidation(intent.request_id, Some(expected), |next| {
+                    next.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::CancellationSubmitted;
+                    next.last_error = Some(reason.clone());
+                })
+                .map(|_| ())
+        })
+        .map_err(|error| format!("ordinary cancellation CAS failed: {error:?}"))?;
+    }
+
+    let status = ordinary_backend_status(protocol_id, intent.request_id).await?;
+    if !ordinary_backend_receipt_identity_matches(intent, &status) {
+        return Err("ordinary backend cancellation status conflicts with the frozen request".into());
+    }
+    // If an approval block has been positively proven, a backend cancellation
+    // still means the approval fee physically left the pool.  Charge that fee
+    // through the PaymentNoEffect path exactly once; only a cancellation with
+    // no approval proof is a zero-outflow Cancelled terminal.
+    let approval_was_confirmed = current.approval_block_index.is_some();
+    let terminal = match status.phase {
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Cancelled => {
+            Some(if approval_was_confirmed {
+                crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
+            } else {
+                crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled
+            })
+        }
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect => {
+            Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect)
+        }
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Prepared => {
+            let cancelled = ordinary_backend_cancel(protocol_id, intent.request_id).await?;
+            if !ordinary_backend_receipt_identity_matches(intent, &cancelled) {
+                return Err("ordinary backend cancellation receipt conflicts with the frozen request".into());
+            }
+            match cancelled.phase {
+                rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Cancelled => {
+                    Some(if approval_was_confirmed {
+                        crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
+                    } else {
+                        crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled
+                    })
+                }
+                rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect => {
+                    Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let Some(terminal) = terminal else {
+        return Err("ordinary backend payment may have started; retaining the exact request".into());
+    };
+    mutate_state(|state| {
+        state
+            .complete_ordinary_liquidation_no_effect(
+                intent.request_id,
+                terminal,
+                reason,
+                ic_cdk::api::time(),
+            )
+            .map_err(|error| format!("ordinary no-effect tombstone failed: {error:?}"))
+    })
+}
+
+enum OrdinaryApprovalCallError {
+    NoEffect(String),
+    Unknown(String),
+}
+
+fn ordinary_approval_block_matches(
+    approval: &crate::ordinary_liquidation::OrdinaryApprovalTuple,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    let pool = ic_cdk::api::id();
+    let expected_spender = Account {
+        owner: approval.spender,
+        subaccount: None,
+    };
+    let default_account = |actual: &Account, expected: &Account| {
+        actual.owner == expected.owner
+            && actual
+                .subaccount
+                .is_none_or(|subaccount| subaccount == [0; 32])
+    };
+    block.op == "approve"
+        // ICRC-2 approval blocks use the 2approve discriminator.  Ledgers
+        // with the in-tree compact schema may omit btype, but a present
+        // discriminator must never be downgraded to a generic approval.
+        && block.btype.as_deref().is_none_or(|kind| kind == "2approve")
+        && block
+            .from
+            .as_ref()
+            .is_some_and(|from| default_account(from, &Account { owner: pool, subaccount: None }))
+        && block.to.is_none()
+        && block
+            .spender
+            .as_ref()
+            .is_some_and(|spender| default_account(spender, &expected_spender))
+        && block.amount == u128::from(approval.amount_raw)
+        && block.fee == Some(approval.fee_raw)
+        && block.memo.as_deref() == Some(approval.memo.as_slice())
+        && block.created_at_time == Some(approval.created_at_time_ns)
+}
+
+fn ordinary_approval_wire_expiry_matches(
+    approval: &crate::ordinary_liquidation::OrdinaryApprovalTuple,
+    value: &icrc_ledger_types::icrc::generic_value::ICRC3Value,
+) -> bool {
+    let icrc_ledger_types::icrc::generic_value::ICRC3Value::Map(block) = value else {
+        return false;
+    };
+    let Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Map(tx)) = block.get("tx") else {
+        return false;
+    };
+    match tx.get("expires_at") {
+        Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Nat(expires_at)) => {
+            expires_at.0.to_u64() == Some(approval.expires_at_time_ns)
+        }
+        _ => false,
+    }
+}
+
+/// Fetch one directly served ICRC-3 block and require that it is the exact
+/// persisted approval tuple.  Archive callbacks and a missing block are not
+/// evidence of a no-effect approval: callers must retain the pending row.
+async fn verify_ordinary_approval_block(
+    approval: &crate::ordinary_liquidation::OrdinaryApprovalTuple,
+    candidate_index: u64,
+) -> Result<(), String> {
+    let result: Result<(GetBlocksResult,), _> = call(
+        approval.ledger,
+        "icrc3_get_blocks",
+        (vec![GetBlocksRequest {
+            start: Nat::from(candidate_index),
+            length: Nat::from(1u64),
+        }],),
+    )
+    .await;
+    let (response,) = result.map_err(|error| format!("ordinary approval proof failed: {error:?}"))?;
+    let log_length = response
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ordinary approval ledger log length exceeds u64".to_string())?;
+    if log_length <= candidate_index
+        || !response.archived_blocks.is_empty()
+        || response.blocks.len() != 1
+        || response.blocks[0].id.0.to_u64() != Some(candidate_index)
+    {
+        return Err("ordinary approval candidate was not directly served at its exact ledger index".into());
+    }
+    let block_value = &response.blocks[0].block;
+    let block = rumi_protocol_backend::icrc3_proof::decode_block(block_value)
+        .map_err(|error| format!("malformed ordinary approval block: {error}"))?;
+    if !ordinary_approval_block_matches(approval, &block)
+        || !ordinary_approval_wire_expiry_matches(approval, block_value)
+    {
+        return Err("ordinary approval candidate conflicts with the persisted ledger tuple".into());
+    }
+    Ok(())
+}
+
+/// Search only a bounded, directly served suffix for a positive approval
+/// proof.  A zero match is deliberately `Ok(None)`: without a complete proof
+/// of ledger history absence it cannot authorize a refund or a fresh request.
+async fn scan_ordinary_approval_candidates(
+    approval: &crate::ordinary_liquidation::OrdinaryApprovalTuple,
+) -> Result<Option<u64>, String> {
+    let tip_request = vec![GetBlocksRequest {
+        start: Nat::from(0u64),
+        length: Nat::from(0u64),
+    }];
+    let tip_result: Result<(GetBlocksResult,), _> =
+        call(approval.ledger, "icrc3_get_blocks", (tip_request,)).await;
+    let (tip,) = tip_result.map_err(|error| format!("ordinary approval ledger tip failed: {error:?}"))?;
+    if !tip.blocks.is_empty() || !tip.archived_blocks.is_empty() {
+        return Err("ordinary approval ledger tip returned unexpected block evidence".into());
+    }
+    let log_length = tip
+        .log_length
+        .0
+        .to_u64()
+        .ok_or_else(|| "ordinary approval ledger log length exceeds u64".to_string())?;
+    if log_length == 0 {
+        return Ok(None);
+    }
+    let start = log_length.saturating_sub(ORDINARY_APPROVAL_RECOVERY_SCAN_BLOCKS);
+    let length = log_length - start;
+    let result: Result<(GetBlocksResult,), _> = call(
+        approval.ledger,
+        "icrc3_get_blocks",
+        (vec![GetBlocksRequest {
+            start: Nat::from(start),
+            length: Nat::from(length),
+        }],),
+    )
+    .await;
+    let (response,) = result.map_err(|error| format!("ordinary approval history scan failed: {error:?}"))?;
+    if !response.archived_blocks.is_empty()
+        || response.blocks.len() != usize::try_from(length).map_err(|_| "ordinary approval scan length exceeds usize".to_string())?
+    {
+        return Err("ordinary approval history scan was not a complete direct range".into());
+    }
+    let mut matches = Vec::new();
+    for (offset, block) in response.blocks.iter().enumerate() {
+        let index = start + offset as u64;
+        if block.id.0.to_u64() != Some(index) {
+            return Err("ordinary approval history scan contained a gap or wrong block index".into());
+        }
+        if let Ok(decoded) = rumi_protocol_backend::icrc3_proof::decode_block(&block.block) {
+            if ordinary_approval_block_matches(approval, &decoded)
+                && ordinary_approval_wire_expiry_matches(approval, &block.block)
+            {
+                matches.push(index);
+            }
+        }
+    }
+    match matches.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => Err("multiple exact ordinary approval blocks matched the persisted tuple".into()),
+    }
+}
+
+async fn reconcile_ordinary_approval_candidate(
+    protocol_id: Principal,
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    candidate_index: u64,
+) -> Result<LiquidationResult, String> {
+    if intent.phase != crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted {
+        return Err("ordinary approval reconciliation requires ApprovalSubmitted".into());
+    }
+    let approval = intent
+        .approval
+        .as_ref()
+        .ok_or_else(|| "ordinary approval tuple is missing".to_string())?;
+    verify_ordinary_approval_block(approval, candidate_index).await?;
+    let updated = mutate_state(|state| {
+        state.update_ordinary_liquidation(
+            intent.request_id,
+            Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted),
+            |current| {
+                if current.approval_block_index.is_some_and(|index| index != candidate_index) {
+                    return;
+                }
+                current.approval_block_index = Some(candidate_index);
+                current.last_error = None;
+            },
+        )
+    })
+    .map_err(|error| format!("ordinary approval proof CAS failed: {error:?}"))?;
+    cancel_admitted_ordinary(
+        protocol_id,
+        &updated,
+        "ordinary approval was positively reconciled from its exact ICRC-3 block; backend cancellation is required".into(),
+    )
+    .await
+}
+
+async fn approve_ordinary_tuple(
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> Result<u64, OrdinaryApprovalCallError> {
+    let approval = intent
+        .approval
+        .as_ref()
+        .ok_or_else(|| {
+            OrdinaryApprovalCallError::Unknown("ordinary approval tuple is missing".into())
+        })?;
+    let args = ApproveArgs {
+        from_subaccount: None,
+        spender: Account {
+            owner: approval.spender,
+            subaccount: None,
+        },
+        amount: Nat::from(approval.amount_raw),
+        expected_allowance: None,
+        expires_at: Some(approval.expires_at_time_ns),
+        fee: Some(Nat::from(approval.fee_raw)),
+        memo: Some(Memo(ByteBuf::from(approval.memo.clone()))),
+        created_at_time: Some(approval.created_at_time_ns),
+    };
+    let result: Result<(Result<Nat, ApproveError>,), _> =
+        call(approval.ledger, "icrc2_approve", (args,)).await;
+    match result {
+        Ok((Ok(block),)) => block
+            .0
+            .to_u64()
+            .ok_or_else(|| OrdinaryApprovalCallError::Unknown("ordinary approval block exceeds u64".into())),
+        Ok((Err(ApproveError::Duplicate { duplicate_of }),)) => duplicate_of
+            .0
+            .to_u64()
+            .map_or_else(
+                || {
+                    Err(OrdinaryApprovalCallError::Unknown(
+                        "ordinary approval duplicate block exceeds u64".into(),
+                    ))
+                },
+                Ok,
+            ),
+        Ok((Err(error),)) => {
+            let reason = format!("ordinary approval had no effect: {error:?}");
+            match error {
+                ApproveError::BadFee { .. }
+                | ApproveError::InsufficientFunds { .. }
+                | ApproveError::AllowanceChanged { .. }
+                | ApproveError::Expired { .. }
+                | ApproveError::TooOld
+                | ApproveError::CreatedInFuture { .. } => {
+                    Err(OrdinaryApprovalCallError::NoEffect(reason))
+                }
+                ApproveError::TemporarilyUnavailable
+                | ApproveError::GenericError { .. } => {
+                    Err(OrdinaryApprovalCallError::Unknown(reason))
+                }
+                // Duplicate is handled above and must remain a positive
+                // acknowledgement of this exact memo/timestamp tuple.
+                ApproveError::Duplicate { .. } => unreachable!(),
+            }
+        }
+        Err(error) => Err(OrdinaryApprovalCallError::Unknown(format!(
+            "ordinary approval outcome is unknown: {error:?}"
+        ))),
+    }
+}
+
+async fn resolve_ordinary_receipt(
+    protocol_id: Principal,
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    receipt: rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt,
+) -> Result<LiquidationResult, String> {
+    if matches!(
+        &receipt.phase,
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect
+    ) {
+        return mutate_state(|state| {
+            state
+                .complete_ordinary_liquidation_no_effect(
+                    intent.request_id,
+                    crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect,
+                    "backend proved ordinary payment had no effect".into(),
+                    ic_cdk::api::time(),
+                )
+                .map_err(|error| format!("ordinary no-effect tombstone failed: {error:?}"))
+        });
+    }
+    let collateral_ledger = read_state(|state| {
+        state
+            .collateral_registry
+            .get(&intent.collateral_type)
+            .map(|config| config.ledger_id)
+    })
+    .ok_or_else(|| "ordinary collateral ledger is no longer configured".to_string())?;
+    let quote = ordinary_quote_from_receipt(intent, &receipt, collateral_ledger)?;
+    let pool = ic_cdk::api::id();
+    if quote.payment_tuple.source != (Account { owner: pool, subaccount: None })
+        || quote.payment_tuple.destination
+            != (Account {
+                owner: protocol_id,
+                subaccount: None,
+            })
+        || quote.payment_tuple.memo.len() != 16
+        || quote.payment_tuple.op_nonce == 0
+    {
+        return Err("backend ordinary payment tuple is not bound to this SP and registered backend".into());
+    }
+    if let Some(saved) = intent.quote.as_ref() {
+        if !ordinary_quote_frozen_fields_match(saved, &quote)
+            || (saved.payout_tuple.is_some()
+                && (saved.payout_tuple != quote.payout_tuple
+                    || saved.payout_operation_id != quote.payout_operation_id
+                    || saved.payment_block_index != quote.payment_block_index
+                    || saved.payout_block_index != quote.payout_block_index
+                    || saved.payout_net_raw != quote.payout_net_raw))
+        {
+            return Err("backend ordinary receipt changed the frozen quote".into());
+        }
+    }
+    let payout_tuple = crate::ordinary_liquidation::validate_receipt_identity(
+        &receipt,
+        &intent.request_id,
+        intent.vault_id,
+        intent.payment,
+        intent.stable_ledger,
+        collateral_ledger,
+        quote.debt_e8s,
+        quote.principal_raw,
+        quote.surcharge_raw,
+        quote.pull_fee_raw,
+        quote.gross_payment_raw,
+        quote.collateral_gross_raw,
+        quote.collateral_net_raw,
+    )
+    .map_err(|error| format!("ordinary receipt held: {error}"))?;
+    let collateral_gained = verify_ordinary_collateral_payout(protocol_id, &receipt)
+        .await
+        .map_err(|error| format!("ordinary payout held: {error}"))?;
+    let _ = payout_tuple;
+    let updated = mutate_state(|state| {
+        state.update_ordinary_liquidation(intent.request_id, None, |current| {
+            current.quote = Some(quote.clone());
+            current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::PayoutHeld;
+            current.last_error = None;
+        })
+    })
+    .map_err(|error| format!("ordinary receipt CAS failed: {error:?}"))?;
+    mutate_state(|state| {
+        state
+            .settle_ordinary_liquidation(updated.request_id, collateral_gained, ic_cdk::api::time())
+    })
+    .map_err(|error| format!("ordinary settlement held: {error:?}"))
+}
+
+/// A backend prepare call is the only ordinary transition that may be replayed
+/// without first asking for status.  The SP persists `BackendSubmitted` before
+/// the await, so an upgrade or lost reply can leave that marker behind even
+/// though the backend never accepted the call.  Once either side has retained
+/// a quote or approval evidence, status is authoritative and this fast path is
+/// deliberately disabled.
+fn ordinary_prepare_replay_allowed(
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> bool {
+    intent.phase == crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted
+        && intent.quote.is_none()
+        && intent.approval.is_none()
+        && !intent.approval_attempted
+}
+
+enum OrdinaryPrepareReceiptOutcome {
+    Resume(crate::ordinary_liquidation::OrdinaryLiquidationIntent),
+    Terminal(LiquidationResult),
+}
+
+/// Adopt the receipt returned by an idempotent replay of the exact prepare
+/// request.  This shares the same immutable receipt checks as the first
+/// submission and never allocates a new request identity.
+async fn adopt_ordinary_prepare_receipt(
+    protocol_id: Principal,
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    receipt: rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt,
+) -> Result<OrdinaryPrepareReceiptOutcome, String> {
+    let collateral_ledger = read_state(|state| {
+        state
+            .collateral_registry
+            .get(&intent.collateral_type)
+            .map(|config| config.ledger_id)
+    });
+    let Some(collateral_ledger) = collateral_ledger else {
+        return Err("ordinary collateral ledger missing".into());
+    };
+    if matches!(
+        &receipt.phase,
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect
+    ) {
+        return resolve_ordinary_receipt(protocol_id, intent, receipt)
+            .await
+            .map(OrdinaryPrepareReceiptOutcome::Terminal);
+    }
+    let quote = ordinary_quote_from_receipt(intent, &receipt, collateral_ledger)?;
+    let updated = mutate_state(|state| {
+        state.update_ordinary_liquidation(
+            intent.request_id,
+            Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted),
+            |current| {
+                current.quote = Some(quote.clone());
+                current.phase =
+                    crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared;
+                current.last_error = None;
+            },
+        )
+    })
+    .map_err(|error| format!("ordinary preparation replay CAS failed: {error:?}"))?;
+    Ok(OrdinaryPrepareReceiptOutcome::Resume(updated))
+}
+
+async fn resume_ordinary_liquidation(
+    mut intent: crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> LiquidationResult {
+    let request_id = intent.request_id;
+    let protocol_id = read_state(|state| state.protocol_canister_id);
+    if let Some(done) = read_state(|state| state.get_completed_ordinary_liquidation(&request_id)) {
+        return done.result;
+    }
+    if intent.phase == crate::ordinary_liquidation::OrdinaryLiquidationPhase::CancellationSubmitted {
+        return match cancel_admitted_ordinary(
+            protocol_id,
+            &intent,
+            "ordinary cancellation remains pending for exact retry".into(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(reason) => ordinary_failure_for_intent_with_reason(&intent, reason),
+        };
+    }
+    if matches!(
+        intent.phase,
+        crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled
+    ) {
+        return ordinary_failure_for_intent(&intent);
+    }
+
+    if matches!(
+        intent.phase,
+        crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::PayoutHeld
+    ) {
+        // The initial prepare marker is persisted before the inter-canister
+        // await.  If the reply was lost before the backend could accept the
+        // request, replay the exact same request ID and immutable arguments.
+        // No quote or approval evidence means no downstream side effect has
+        // been observed; this is the one safe recovery case that does not
+        // need a status result first.  A quote, approval tuple, or attempted
+        // approval keeps the normal status/execute-only path below.
+        if ordinary_prepare_replay_allowed(&intent) {
+            match ordinary_fresh_dispatch_guard(protocol_id, &intent) {
+                Err(reason) => {
+                    let _ = mutate_state(|state| {
+                        state.update_ordinary_liquidation(request_id, None, |current| {
+                            current.last_error = Some(reason.clone());
+                        })
+                    });
+                }
+                Ok(()) => match ordinary_backend_prepare(protocol_id, &intent).await {
+                Ok(receipt) => {
+                    match adopt_ordinary_prepare_receipt(protocol_id, &intent, receipt).await {
+                        Ok(OrdinaryPrepareReceiptOutcome::Terminal(result)) => return result,
+                        Ok(OrdinaryPrepareReceiptOutcome::Resume(next)) => {
+                            return Box::pin(resume_ordinary_liquidation(next)).await;
+                        }
+                        Err(reason) => {
+                            let _ = mutate_state(|state| {
+                                state.update_ordinary_liquidation(request_id, None, |current| {
+                                    current.last_error = Some(reason.clone());
+                                })
+                            });
+                            return ordinary_failure_for_intent_with_reason(&intent, reason);
+                        }
+                    }
+                }
+                Err(OrdinaryBackendCallError::Rejected(reason)) => {
+                    // The backend typed rejection is the definitive
+                    // pre-dispatch no-effect response for this exact ID.
+                    return match mutate_state(|state| {
+                        state.complete_ordinary_liquidation_no_effect(
+                            request_id,
+                            crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect,
+                            reason.clone(),
+                            ic_cdk::api::time(),
+                        )
+                    }) {
+                        Ok(result) => result,
+                        Err(error) => ordinary_failure_for_intent_with_reason(
+                            &intent,
+                            format!("ordinary prepare replay rejection tombstone failed: {error:?}"),
+                        ),
+                    };
+                }
+                Err(OrdinaryBackendCallError::Unknown(reason)) => {
+                    let _ = mutate_state(|state| {
+                        state.update_ordinary_liquidation(request_id, None, |current| {
+                            current.last_error = Some(reason.clone());
+                        })
+                    });
+                    return ordinary_failure_for_intent_with_reason(&intent, reason);
+                }
+                },
+            }
+        }
+        match ordinary_backend_status(protocol_id, request_id).await {
+            Ok(receipt)
+                if matches!(
+                    &receipt.phase,
+                    rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Prepared
+                        | rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentSubmitted
+                ) => {
+                    let collateral_ledger = read_state(|state| {
+                        state
+                            .collateral_registry
+                            .get(&intent.collateral_type)
+                            .map(|config| config.ledger_id)
+                    });
+                    let Some(collateral_ledger) = collateral_ledger else {
+                        return ordinary_failure_for_intent_with_reason(
+                            &intent,
+                            "ordinary collateral ledger missing".into(),
+                        );
+                    };
+                    match ordinary_quote_from_receipt(&intent, &receipt, collateral_ledger) {
+                        Ok(quote) => {
+                            let updated = mutate_state(|state| {
+                                state.update_ordinary_liquidation(request_id, None, |current| {
+                                    current.quote = Some(quote.clone());
+                                    current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared;
+                                    current.last_error = None;
+                                })
+                            });
+                            match updated {
+                                Ok(next) => {
+                                    return Box::pin(resume_ordinary_liquidation(next)).await;
+                                }
+                                Err(error) => {
+                                    return ordinary_failure_for_intent_with_reason(
+                                        &intent,
+                                        format!("ordinary status CAS failed: {error:?}"),
+                                    )
+                                }
+                            }
+                        }
+                        Err(reason) => return ordinary_failure_for_intent_with_reason(&intent, reason),
+                    }
+                }
+            Ok(receipt)
+                if matches!(
+                    &receipt.phase,
+                    rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentConfirmed
+                ) => {
+                    match ordinary_backend_execute(protocol_id, request_id).await {
+                        Ok(next_receipt) => match resolve_ordinary_receipt(protocol_id, &intent, next_receipt).await {
+                            Ok(result) => return result,
+                            Err(reason) => return ordinary_failure_for_intent_with_reason(&intent, reason),
+                        },
+                        Err(reason) => return ordinary_failure_for_intent_with_reason(&intent, reason),
+                    }
+                }
+            Ok(receipt)
+                if matches!(
+                    &receipt.phase,
+                    rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::DebtCommitted
+                        | rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PayoutSubmitted
+                        | rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PayoutNoEffect
+                ) => {
+                    match ordinary_backend_execute(protocol_id, request_id).await {
+                        Ok(next_receipt) => match resolve_ordinary_receipt(protocol_id, &intent, next_receipt).await {
+                            Ok(result) => return result,
+                            Err(reason) => return ordinary_failure_for_intent_with_reason(&intent, reason),
+                        },
+                        Err(reason) => return ordinary_failure_for_intent_with_reason(&intent, reason),
+                    }
+                }
+            Ok(receipt) => match resolve_ordinary_receipt(protocol_id, &intent, receipt).await {
+                Ok(result) => return result,
+                Err(reason) => {
+                    let _ = mutate_state(|state| {
+                        state.update_ordinary_liquidation(request_id, None, |current| {
+                            current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::PayoutHeld;
+                            current.last_error = Some(reason.clone());
+                        })
+                    });
+                    return ordinary_failure_for_intent_with_reason(&intent, reason);
+                }
+            },
+            Err(reason) => {
+                let _ = mutate_state(|state| {
+                    state.update_ordinary_liquidation(request_id, None, |current| {
+                        current.last_error = Some(reason.clone());
+                    })
+                });
+                return ordinary_failure_for_intent_with_reason(&intent, reason);
+            }
+        }
+    }
+
+    if matches!(intent.phase, crate::ordinary_liquidation::OrdinaryLiquidationPhase::Prepared) {
+        if let Err(reason) = ordinary_fresh_dispatch_guard(protocol_id, &intent) {
+            // The request was admitted, but no external call has started yet;
+            // a pause or binding change can therefore be completed locally as
+            // a no-effect tombstone without guessing about backend state.
+            return match mutate_state(|state| {
+                state.complete_ordinary_liquidation_no_effect(
+                    request_id,
+                    crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect,
+                    reason.clone(),
+                    ic_cdk::api::time(),
+                )
+            }) {
+                Ok(result) => result,
+                Err(error) => ordinary_failure_for_intent_with_reason(
+                    &intent,
+                    format!("ordinary pre-dispatch tombstone failed: {error:?}"),
+                ),
+            };
+        }
+        let _ = mutate_state(|state| {
+            state.update_ordinary_liquidation(request_id, Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::Prepared), |current| {
+                current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted;
+                current.backend_attempted = true;
+            })
+        });
+        match ordinary_backend_prepare(protocol_id, &intent).await {
+            Ok(receipt) => {
+                let collateral_ledger = read_state(|state| {
+                    state.collateral_registry.get(&intent.collateral_type).map(|config| config.ledger_id)
+                });
+                let Some(collateral_ledger) = collateral_ledger else {
+                    return ordinary_failure_for_intent_with_reason(&intent, "ordinary collateral ledger missing".into());
+                };
+                if matches!(
+                    &receipt.phase,
+                    rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect
+                ) {
+                    return match resolve_ordinary_receipt(protocol_id, &intent, receipt).await {
+                        Ok(result) => result,
+                        Err(reason) => ordinary_failure_for_intent_with_reason(&intent, reason),
+                    };
+                }
+                match ordinary_quote_from_receipt(&intent, &receipt, collateral_ledger) {
+                    Ok(quote) => {
+                        let updated = mutate_state(|state| {
+                            state.update_ordinary_liquidation(request_id, Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted), |current| {
+                                current.quote = Some(quote.clone());
+                                current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared;
+                                current.last_error = None;
+                            })
+                        });
+                        if let Ok(next) = updated { intent = next; } else {
+                            return ordinary_failure_for_intent_with_reason(&intent, "ordinary preparation CAS failed".into());
+                        }
+                    }
+                    Err(reason) => return ordinary_failure_for_intent_with_reason(&intent, reason),
+                }
+            }
+            Err(OrdinaryBackendCallError::Rejected(reason)) => {
+                // A typed rejection from the first prepare submission is a
+                // definitive pre-dispatch no-effect according to the
+                // backend contract. Complete the exact request tombstone so
+                // callers can safely retry with a fresh admission; never
+                // remove the row without its tombstone.
+                return match mutate_state(|state| {
+                    state.complete_ordinary_liquidation_no_effect(
+                        request_id,
+                        crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect,
+                        reason.clone(),
+                        ic_cdk::api::time(),
+                    )
+                }) {
+                    Ok(result) => result,
+                    Err(error) => ordinary_failure_for_intent_with_reason(
+                        &intent,
+                        format!("ordinary prepare rejection tombstone failed: {error:?}"),
+                    ),
+                };
+            }
+            Err(OrdinaryBackendCallError::Unknown(reason)) => {
+                let _ = mutate_state(|state| {
+                    state.update_ordinary_liquidation(request_id, None, |current| {
+                        current.last_error = Some(reason.clone());
+                    })
+                });
+                return ordinary_failure_for_intent_with_reason(&intent, reason);
+            }
+        }
+    }
+
+    if matches!(intent.phase, crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared)
+        && intent.approval.is_none()
+    {
+        let Some(quote) = intent.quote.clone() else {
+            return ordinary_failure_for_intent_with_reason(&intent, "ordinary backend quote missing".into());
+        };
+        let approval_fee = match crate::deposits::current_ledger_transfer_fee(intent.stable_ledger).await {
+            Ok(fee) => fee,
+            Err(error) => {
+                let reason = format!("ordinary approval fee lookup failed after backend admission: {error:?}");
+                return match cancel_admitted_ordinary(protocol_id, &intent, reason.clone()).await {
+                    Ok(result) => result,
+                    Err(cancel_error) => ordinary_failure_for_intent_with_reason(
+                        &intent,
+                        format!("{reason}; backend cancellation remains unresolved: {cancel_error}"),
+                    ),
+                };
+            }
+        };
+        if let Err(reason) = ordinary_fresh_dispatch_guard(protocol_id, &intent) {
+            return match cancel_admitted_ordinary(protocol_id, &intent, reason.clone()).await {
+                Ok(result) => result,
+                Err(cancel_error) => ordinary_failure_for_intent_with_reason(
+                    &intent,
+                    format!("{reason}; backend cancellation remains unresolved: {cancel_error}"),
+                ),
+            };
+        }
+        let approval_amount = match quote
+            .principal_raw
+            .checked_add(quote.surcharge_raw)
+            .and_then(|amount| amount.checked_add(quote.pull_fee_raw))
+        {
+            Some(amount) => amount,
+            None => return ordinary_failure_for_intent_with_reason(&intent, "ordinary approval amount overflow".into()),
+        };
+        let created = ic_cdk::api::time();
+        let expires = created.saturating_add(300_000_000_000);
+        let approval = crate::ordinary_liquidation::OrdinaryApprovalTuple {
+            ledger: intent.stable_ledger,
+            spender: protocol_id,
+            amount_raw: approval_amount,
+            fee_raw: approval_fee,
+            memo: request_id.to_vec(),
+            created_at_time_ns: created,
+            expires_at_time_ns: expires,
+        };
+        let expected_debit = crate::ordinary_liquidation::exact_stable_debit(
+            quote.principal_raw,
+            quote.surcharge_raw,
+            quote.pull_fee_raw,
+            approval.fee_raw,
+            intent.revoke_fee_raw,
+        );
+        if expected_debit
+            .and_then(|debit| {
+                crate::ordinary_liquidation::allocate_exact_debit(
+                    &intent.participant_snapshot,
+                    debit,
+                )
+                .ok()
+                .map(|_| ())
+            })
+            .is_none()
+        {
+            let reason = "ordinary quote plus exact ledger fees exceed the frozen eligible budget".to_string();
+            return match cancel_admitted_ordinary(protocol_id, &intent, reason.clone()).await {
+                Ok(result) => result,
+                Err(cancel_error) => ordinary_failure_for_intent_with_reason(
+                    &intent,
+                    format!("{reason}; backend cancellation remains unresolved: {cancel_error}"),
+                ),
+            };
+        }
+        let updated = mutate_state(|state| {
+            state.update_ordinary_liquidation(request_id, Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared), |current| {
+                current.approval = Some(approval.clone());
+            })
+        });
+        if let Ok(next) = updated { intent = next; } else {
+            return ordinary_failure_for_intent_with_reason(&intent, "ordinary approval tuple CAS failed".into());
+        }
+    }
+
+    if matches!(
+        intent.phase,
+        crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted
+    ) {
+        let had_prior_approval_attempt = intent.approval_attempted;
+        let expected = if intent.phase == crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared {
+            Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared)
+        } else {
+            Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted)
+        };
+        if intent.phase == crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared {
+            let updated = mutate_state(|state| {
+                state.update_ordinary_liquidation(request_id, expected, |current| {
+                    current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted;
+                    current.approval_attempted = true;
+                })
+            });
+            if let Ok(next) = updated { intent = next; } else {
+                return ordinary_failure_for_intent_with_reason(&intent, "ordinary approval dispatch CAS failed".into());
+            }
+        }
+        // Once the persisted approval tuple has expired *and* the official
+        // ledger's deduplication horizon has passed, retrying the same call
+        // can no longer distinguish a lost committed approval from a genuine
+        // Expired/TooOld response.  Search a bounded direct suffix for
+        // positive exact ICRC-3 evidence; a miss remains held and must not be
+        // converted into an unverified refund or fresh nonce. Before that
+        // horizon, the exact retry below is retained so Duplicate can prove
+        // the original approval landed.
+        if intent.phase == crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted
+            && intent.approval.as_ref().is_some_and(|approval| {
+                ic_cdk::api::time() >= approval.expires_at_time_ns
+                    && ic_cdk::api::time()
+                        >= approval
+                            .created_at_time_ns
+                            .saturating_add(ORDINARY_APPROVAL_DEDUP_WINDOW_NS)
+            })
+        {
+            let approval = intent.approval.as_ref().expect("approval checked above");
+            match scan_ordinary_approval_candidates(approval).await {
+                Ok(Some(candidate_index)) => {
+                    return match reconcile_ordinary_approval_candidate(
+                        protocol_id,
+                        &intent,
+                        candidate_index,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(reason) => ordinary_failure_for_intent_with_reason(&intent, reason),
+                    };
+                }
+                Ok(None) => {
+                    let reason = "ordinary approval tuple expired without a positive exact ICRC-3 block; request remains held for a caller-supplied candidate".to_string();
+                    let _ = mutate_state(|state| {
+                        state.update_ordinary_liquidation(request_id, None, |current| {
+                            current.last_error = Some(reason.clone());
+                        })
+                    });
+                    return ordinary_failure_for_intent_with_reason(&intent, reason);
+                }
+                Err(reason) => {
+                    let reason = format!(
+                        "ordinary approval expiry reconciliation remains held: {reason}"
+                    );
+                    let _ = mutate_state(|state| {
+                        state.update_ordinary_liquidation(request_id, None, |current| {
+                            current.last_error = Some(reason.clone());
+                        })
+                    });
+                    return ordinary_failure_for_intent_with_reason(&intent, reason);
+                }
+            }
+        }
+        match approve_ordinary_tuple(&intent).await {
+            Ok(block_index) => {
+                let updated = mutate_state(|state| {
+                    state.update_ordinary_liquidation(request_id, Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalSubmitted), |current| {
+                        current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalConfirmed;
+                        current.approval_block_index = Some(block_index);
+                        current.last_error = None;
+                    })
+                });
+                if let Ok(next) = updated { intent = next; } else {
+                    return ordinary_failure_for_intent_with_reason(&intent, "ordinary approval receipt CAS failed".into());
+                }
+            }
+            Err(OrdinaryApprovalCallError::NoEffect(reason)) => {
+                let _ = mutate_state(|state| {
+                    state.update_ordinary_liquidation(request_id, None, |current| {
+                        current.last_error = Some(reason.clone());
+                    })
+                });
+                if had_prior_approval_attempt {
+                    return ordinary_failure_for_intent_with_reason(&intent, reason);
+                }
+                // The backend prepare journal is durable even though this
+                // approval had no effect. Confirm cancellation by this exact
+                // request ID before creating the no-effect tombstone.
+                return match cancel_admitted_ordinary(protocol_id, &intent, reason.clone()).await {
+                    Ok(result) => result,
+                    Err(cancel_error) => ordinary_failure_for_intent_with_reason(
+                        &intent,
+                        format!("{reason}; backend cancellation remains unresolved: {cancel_error}"),
+                    ),
+                };
+            }
+            Err(OrdinaryApprovalCallError::Unknown(reason)) => {
+                let _ = mutate_state(|state| {
+                    state.update_ordinary_liquidation(request_id, None, |current| {
+                        current.last_error = Some(reason.clone());
+                    })
+                });
+                return ordinary_failure_for_intent_with_reason(&intent, reason);
+            }
+        }
+    }
+
+    if intent.phase == crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalConfirmed {
+        if let Err(reason) = ordinary_recovery_dispatch_guard(protocol_id, &intent) {
+            let _ = mutate_state(|state| {
+                state.update_ordinary_liquidation(request_id, None, |current| {
+                    current.last_error = Some(reason.clone());
+                })
+            });
+            return ordinary_failure_for_intent_with_reason(&intent, reason);
+        }
+        let updated = mutate_state(|state| {
+            state.update_ordinary_liquidation(request_id, Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::ApprovalConfirmed), |current| {
+                current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted;
+                current.backend_attempted = true;
+            })
+        });
+        if let Ok(next) = updated { intent = next; } else {
+            return ordinary_failure_for_intent_with_reason(&intent, "ordinary execute dispatch CAS failed".into());
+        }
+        match ordinary_backend_execute(protocol_id, request_id).await {
+            Ok(receipt) => match resolve_ordinary_receipt(protocol_id, &intent, receipt).await {
+                Ok(result) => return result,
+                Err(reason) => {
+                    let _ = mutate_state(|state| {
+                        state.update_ordinary_liquidation(request_id, None, |current| {
+                            current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::PayoutHeld;
+                            current.last_error = Some(reason.clone());
+                        })
+                    });
+                    return ordinary_failure_for_intent_with_reason(&intent, reason);
+                }
+            },
+            Err(reason) => {
+                let _ = mutate_state(|state| {
+                    state.update_ordinary_liquidation(request_id, None, |current| {
+                        current.phase = crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted;
+                        current.last_error = Some(reason.clone());
+                    })
+                });
+                return ordinary_failure_for_intent_with_reason(&intent, reason);
+            }
+        }
+    }
+    ordinary_failure_for_intent(&intent)
+}
+
+fn ordinary_failure_for_intent(
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+) -> LiquidationResult {
+    ordinary_failure_for_intent_with_reason(
+        intent,
+        intent
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "ordinary liquidation remains pending for exact retry".into()),
+    )
+}
+
+fn ordinary_failure_for_intent_with_reason(
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    reason: String,
+) -> LiquidationResult {
+    crate::ordinary_liquidation::ordinary_failure_result(
+        intent.vault_id,
+        intent.collateral_type,
+        reason,
+        true,
+    )
+}
+
+pub async fn retry_ordinary_liquidation(request_id: Vec<u8>) -> Result<LiquidationResult, StabilityPoolError> {
+    let bytes: [u8; 32] = request_id
+        .try_into()
+        .map_err(|_| StabilityPoolError::SystemBusy)?;
+    let _guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let intent = read_state(|state| state.get_pending_ordinary_liquidation(&bytes));
+    if let Some(intent) = intent {
+        return Ok(resume_ordinary_liquidation(intent).await);
+    }
+    read_state(|state| {
+        state
+            .get_completed_ordinary_liquidation(&bytes)
+            .map(|done| done.result)
+    })
+    .ok_or(StabilityPoolError::LiquidationFailed {
+        vault_id: 0,
+        reason: "ordinary liquidation request identity is unknown".into(),
+    })
+}
+
+/// Reconcile an ambiguous ordinary approval using a caller-supplied ledger
+/// block candidate.  The candidate is only accepted after a direct ICRC-3
+/// query proves the complete persisted account, spender, amount, fee, memo,
+/// and creation timestamp tuple.  A candidate that is archived, missing, or
+/// mismatched leaves the original approval row held for the same request ID.
+pub async fn reconcile_ordinary_liquidation_approval(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    let bytes: [u8; 32] = request_id
+        .try_into()
+        .map_err(|_| StabilityPoolError::SystemBusy)?;
+    let _guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let intent = match read_state(|state| state.get_pending_ordinary_liquidation(&bytes)) {
+        Some(intent) => intent,
+        None => {
+            return read_state(|state| {
+                state
+                    .get_completed_ordinary_liquidation(&bytes)
+                    .map(|done| done.result)
+            })
+            .ok_or(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: "ordinary liquidation request identity is unknown".into(),
+            })
+        }
+    };
+    let protocol_id = read_state(|state| state.protocol_canister_id);
+    match reconcile_ordinary_approval_candidate(protocol_id, &intent, candidate_block_index).await {
+        Ok(result) => Ok(result),
+        Err(reason) => Err(StabilityPoolError::LiquidationFailed {
+            vault_id: intent.vault_id,
+            reason,
+        }),
+    }
+}
+
+pub fn ordinary_liquidation_status(
+    request_id: Vec<u8>,
+) -> Option<crate::ordinary_liquidation::OrdinaryLiquidationStatus> {
+    let bytes: [u8; 32] = request_id.try_into().ok()?;
+    read_state(|state| {
+        if let Some(intent) = state.get_pending_ordinary_liquidation(&bytes) {
+            return Some(crate::ordinary_liquidation::OrdinaryLiquidationStatus::from(&intent));
+        }
+        state.get_completed_ordinary_liquidation(&bytes).map(|done| {
+            crate::ordinary_liquidation::OrdinaryLiquidationStatus {
+                request_id: done.request_id,
+                vault_id: done.vault_id,
+                payment: done.payment,
+                stable_ledger: done.stable_ledger,
+                collateral_type: done.collateral_type,
+                phase: done.terminal_phase,
+                quote: done.quote,
+                approval: None,
+                approval_attempted: true,
+                backend_attempted: true,
+                last_error: done.result.error_message,
+            }
+        })
+    })
+}
+
+pub async fn cancel_ordinary_liquidation(
+    request_id: Vec<u8>,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    let bytes: [u8; 32] = request_id
+        .try_into()
+        .map_err(|_| StabilityPoolError::SystemBusy)?;
+    let _guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let intent = match read_state(|state| state.get_pending_ordinary_liquidation(&bytes)) {
+        Some(intent) => intent,
+        None => {
+            return read_state(|state| {
+                state
+                    .get_completed_ordinary_liquidation(&bytes)
+                    .map(|done| done.result)
+            })
+            .ok_or(StabilityPoolError::SystemBusy)
+        }
+    };
+    if intent.phase == crate::ordinary_liquidation::OrdinaryLiquidationPhase::Prepared
+        && !intent.backend_attempted
+    {
+        return mutate_state(|state| state.cancel_ordinary_liquidation(bytes, ic_cdk::api::time()));
+    }
+    if matches!(
+        intent.phase,
+        crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted
+            | crate::ordinary_liquidation::OrdinaryLiquidationPhase::CancellationSubmitted
+    ) {
+        let protocol_id = read_state(|state| state.protocol_canister_id);
+        return cancel_admitted_ordinary(
+            protocol_id,
+            &intent,
+            "ordinary liquidation cancellation requested by caller".into(),
+        )
+        .await
+        .map_err(|_| StabilityPoolError::SystemBusy);
+    }
+    Err(StabilityPoolError::SystemBusy)
+}
+
+pub async fn recover_pending_ordinary_liquidations() {
+    const MAX_PER_TICK: usize = 2;
+    let intents = mutate_state(|state| state.take_pending_ordinary_liquidation_page(MAX_PER_TICK));
+    for intent in intents {
+        let _ = retry_ordinary_liquidation(intent.request_id.to_vec()).await;
+    }
+}
+
 async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
     if read_state(|s| s.collateral_requires_payout_address(&vault_info.collateral_type)) {
         return execute_native_xrp_absorb_with_io(vault_info, &mut CdkNativeXrpAbsorbIo).await;
+    }
+
+    // Ordinary icUSD/ckStable requests own the pool while their exact backend
+    // receipt is pending. A pending 3USD request remains authoritative for
+    // its vault and is handled by the legacy branch below.
+    if let Some(intent) = read_state(|s| s.get_pending_ordinary_liquidation_for_vault(vault_info.vault_id)) {
+        return resume_ordinary_liquidation(intent).await;
+    }
+    if read_state(|s| s.has_pending_ordinary_liquidations()) {
+        return ordinary_failure(vault_info, "Another ordinary liquidation owns the pool");
+    }
+    if read_state(|s| {
+        s.get_pending_three_usd_absorb(vault_info.vault_id).is_none()
+            && s.pending_three_usd_absorb_count() > 0
+    }) {
+        return ordinary_failure(vault_info, "A 3USD liquidation owns the pool");
+    }
+    // A tiny high-priority stable can be unable to cover the backend's
+    // surcharge and pull fee even when a lower-priority stable or the LP pool
+    // can fund a safe partial liquidation. Try at most the three configured
+    // ordinary roles, excluding a ledger only for this invocation. A fresh
+    // request is permitted only after the prior request has a terminal
+    // no-effect tombstone and no ordinary row remains active.
+    let mut excluded_ordinary_ledgers = Vec::new();
+    for _ in 0..3 {
+        let Some((selection, participants)) = ordinary_selection_for_vault_excluding(
+            vault_info,
+            &excluded_ordinary_ledgers,
+        ) else {
+            break;
+        };
+        let failed_ledger = selection.ledger;
+        let result = start_ordinary_liquidation(
+            vault_info,
+            selection,
+            participants,
+            &excluded_ordinary_ledgers,
+        )
+        .await;
+        let terminal_no_effect = result.admitted == Some(false)
+            && !read_state(|state| state.has_pending_ordinary_liquidations());
+        if !terminal_no_effect {
+            return result;
+        }
+        excluded_ordinary_ledgers.push(failed_ledger);
     }
 
     let pending_intent = read_state(|s| s.get_pending_three_usd_absorb(vault_info.vault_id));
@@ -4224,9 +6049,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         .find(|(_, c)| c.symbol == "icUSD")
         .map(|(id, _)| *id);
 
-    // New work is limited to the one configured 3USD LP ledger. Ordinary
-    // icUSD/ck-stable routes remain held until their own receipt rails exist.
-    // Existing intents always take precedence and retain their saved tuple.
+    // Remaining new work uses the configured 3USD LP ledger. Ordinary
+    // stablecoins use the durable rail above. Existing LP intents retain
+    // their saved tuple and take precedence over fresh LP admission.
     let token_draw = if let Some(intent) = &pending_intent {
         BTreeMap::from([(intent.ledger, intent.amount)])
     } else {
@@ -4246,8 +6071,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 collateral_type: vault_info.collateral_type,
                 success: false,
                 error_message: Some(
-                    "No eligible configured 3USD balance; ordinary stablecoin liquidation remains held".into(),
+                    "No eligible stablecoin balance covers a safe liquidation".into(),
                 ),
+                admitted: Some(false),
             };
         };
         if vault_info.collateral_price_e8s == 0
@@ -4268,6 +6094,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                     "Fresh 3USD liquidation requires a pinned collateral price and ledger"
                         .into(),
                 ),
+                admitted: Some(false),
             };
         }
         if read_state(|state| state.configuration.emergency_pause) {
@@ -4278,6 +6105,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 collateral_type: vault_info.collateral_type,
                 success: false,
                 error_message: Some("Pool paused before new 3USD absorb admission".into()),
+                admitted: Some(false),
             };
         }
         BTreeMap::from([(ledger, amount)])
@@ -4901,6 +6729,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 collateral_type: vault_info.collateral_type,
                 success: true,
                 error_message: None,
+                admitted: None,
             },
             Err(error) => {
                 log!(INFO, "Liquidation fee accounting failed for vault {}: {:?}; pending absorb identity and pool balances were preserved", vault_info.vault_id, error);
@@ -4911,6 +6740,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                     collateral_type: vault_info.collateral_type,
                     success: false,
                     error_message: Some("Exact reserve fee accounting failed; reconciliation required".to_string()),
+                    admitted: None,
                 }
             }
         }
@@ -4926,6 +6756,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             } else {
                 "All liquidation calls failed".to_string()
             }),
+            admitted: None,
         }
     };
 
@@ -5847,7 +7678,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_liquidation_without_persisted_three_usd_intent_is_held_before_calls() {
+    fn liquidation_without_an_eligible_configured_collateral_is_held_before_calls() {
         let mut state = test_state();
         let owner = user_a();
         let ledger = icusd_ledger();
@@ -5868,12 +7699,100 @@ mod tests {
         let result = futures::executor::block_on(execute_single_liquidation(&vault));
 
         assert!(!result.success);
-        assert!(result.error_message.as_deref().unwrap().contains("ordinary stablecoin liquidation remains held"));
+        assert!(result.error_message.as_deref().unwrap().contains("No eligible stablecoin balance"));
+        assert_eq!(result.admitted, Some(false));
         read_state(|state| {
             assert!(state.get_pending_three_usd_absorb(vault.vault_id).is_none());
             assert_eq!(state.total_stablecoin_balances.get(&ledger), Some(&50_000_000));
             assert_eq!(state.deposits[&owner].stablecoin_balances.get(&ledger), Some(&50_000_000));
         });
+        replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn lost_prepare_reply_replays_same_id_and_immutable_arguments() {
+        let intent = crate::ordinary_liquidation::OrdinaryLiquidationIntent {
+            request_id: [91; 32],
+            vault_id: 4242,
+            collateral_type: principal(55),
+            payment: rumi_protocol_backend::state::SpLiquidationPayment::Ckusdc,
+            stable_ledger: principal(56),
+            stable_decimals: 8,
+            requested_debt_e8s: 12_345,
+            max_gross_raw: 67_890,
+            participant_snapshot: Vec::new(),
+            quote: None,
+            approval: None,
+            approval_attempted: false,
+            approval_block_index: None,
+            revoke_fee_raw: 0,
+            backend_attempted: true,
+            phase: crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted,
+            last_error: Some("lost prepare reply".into()),
+            created_at_ns: 1,
+            updated_at_ns: 2,
+        };
+
+        assert!(ordinary_prepare_replay_allowed(&intent));
+        let first_request = ordinary_prepare_request(&intent);
+        // A recovery after the lost reply uses the journal row unchanged. The
+        // request must therefore be byte-for-byte identical, including the
+        // original request ID and affordability ceiling.
+        let replay_request = ordinary_prepare_request(&intent);
+        assert_eq!(first_request, replay_request);
+        assert_eq!(replay_request.request_id, vec![91; 32]);
+        assert_eq!(replay_request.vault_id, 4242);
+        assert_eq!(replay_request.payment, intent.payment);
+        assert_eq!(replay_request.max_debt_e8s, 12_345);
+        assert_eq!(replay_request.max_gross_raw, 67_890);
+
+        let mut approval_attempted = intent.clone();
+        approval_attempted.approval_attempted = true;
+        assert!(!ordinary_prepare_replay_allowed(&approval_attempted));
+        let mut quoted = intent.clone();
+        quoted.quote = Some(crate::ordinary_liquidation::OrdinaryLiquidationQuote {
+            debt_e8s: 1,
+            principal_raw: 1,
+            surcharge_raw: 0,
+            pull_fee_raw: 0,
+            gross_payment_raw: 1,
+            payment_tuple: crate::ordinary_liquidation::OrdinaryPaymentTuple {
+                ledger: principal(56),
+                source: Account {
+                    owner: principal(57),
+                    subaccount: None,
+                },
+                destination: Account {
+                    owner: principal(58),
+                    subaccount: None,
+                },
+                amount_raw: 1,
+                ledger_fee_raw: 0,
+                memo: Vec::new(),
+                created_at_time_ns: 1,
+                op_nonce: 1,
+            },
+            collateral_ledger: principal(59),
+            collateral_price_e8s: 1,
+            collateral_gross_raw: 1,
+            collateral_net_raw: 1,
+            collateral_fee_raw: 0,
+            payout_operation_id: None,
+            payout_tuple: None,
+            payment_block_index: None,
+            payout_block_index: None,
+            payout_net_raw: None,
+        });
+        assert!(!ordinary_prepare_replay_allowed(&quoted));
+    }
+
+    #[test]
+    fn ordinary_admission_accepts_the_caller_owned_guard() {
+        replace_state(test_state());
+        assert!(ordinary_admission_guard(principal(56), None).is_err());
+        let guard = crate::pool_guard::SpLiquidationGuard::new().expect("caller owns guard");
+        assert!(ordinary_admission_guard(principal(56), None).is_ok());
+        drop(guard);
         replace_state(StabilityPoolState::default());
     }
 
@@ -5923,7 +7842,8 @@ mod tests {
             .error_message
             .as_deref()
             .unwrap()
-            .contains("SystemBusy"));
+            .contains("A 3USD liquidation owns the pool"));
+        assert_eq!(result.admitted, Some(false));
         read_state(|state| {
             assert_eq!(state.get_pending_three_usd_absorb(42), Some(first));
             assert!(state.get_pending_three_usd_absorb(43).is_none());

@@ -188,7 +188,7 @@ export function decimalsForLedger(ledger: Principal, registries?: { stablecoins?
 
 const STABILITY_POOL_CANISTER_ID = CANISTER_IDS.STABILITY_POOL;
 
-export type StabilityPoolAction = 'deposit' | 'withdraw';
+export type StabilityPoolAction = 'deposit' | 'withdraw' | 'convert';
 
 export interface StabilityPoolActionContext {
   readonly principalText: string;
@@ -520,7 +520,8 @@ class StabilityPoolService {
     return await actor.check_pool_capacity(tokenLedger, amount) as boolean;
   }
 
-  private async getMutationActor(): Promise<StabilityPoolNativeXrpActor> {
+  /** Authenticated Stability Pool actor shared by all financial SP flows. */
+  async getMutationActor(): Promise<StabilityPoolNativeXrpActor> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
@@ -537,6 +538,21 @@ class StabilityPoolService {
       STABILITY_POOL_CANISTER_ID,
       canisterIDLs.stability_pool
     ) as StabilityPoolNativeXrpActor;
+  }
+
+  /**
+   * Authenticated token-ledger actor using the same wallet binding as the
+   * existing deposit path. Conversion uses this only after its durable marker
+   * has been written and rechecks the action context around every await.
+   */
+  async getLedgerMutationActor(tokenLedger: Principal): Promise<any> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      return createOisyActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL, signerAgent);
+    }
+    return walletStore.getActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL) as any;
   }
 
   // ── Mutations ──
@@ -995,3 +1011,8 @@ class StabilityPoolService {
 }
 
 export const stabilityPoolService = new StabilityPoolService();
+
+/** Narrow public helpers for the durable conversion service. */
+export const getStabilityPoolMutationActor = () => stabilityPoolService.getMutationActor();
+export const getStabilityPoolLedgerMutationActor = (tokenLedger: Principal) =>
+  stabilityPoolService.getLedgerMutationActor(tokenLedger);

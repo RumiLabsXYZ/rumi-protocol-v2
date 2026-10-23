@@ -12,9 +12,11 @@ pub mod swap;
 pub mod liquidity;
 pub mod transfers;
 pub mod receipts;
+pub mod liquidity_receipts;
 pub mod payouts;
 mod payout_reconciliation;
 use receipts::{SwapReceiptErrorV1, SwapReceiptStatusV1, SwapReceiptV1, SwapRequestV1};
+use liquidity_receipts::{AddLiquidityRequestV1, LiquidityReceiptErrorV1, LiquidityReceiptStatusV1, LiquidityReceiptV1};
 pub mod admin;
 pub mod pool_guard;
 pub mod icrc21;
@@ -1729,8 +1731,58 @@ fn public_add_liquidity_error(error: AddLiquidityError) -> ThreePoolError {
     }
 }
 
+/// The legacy preparer creates default-account tuples.  Receipt requests may
+/// bind a caller-owned source subaccount, so rewrite the newly created,
+/// still-held tuple before any dispatch.  This is safe because the payout is
+/// `Prepared` and the operation has not yet exposed it to a ledger call.
+fn bind_receipt_subaccount(
+    id: u64,
+    owner: Principal,
+    source_subaccount: Option<[u8; 32]>,
+) -> Result<(), String> {
+    let Some(mut entitlement) = payouts::get(id) else {
+        return Err("receipt input reservation disappeared before dispatch".into());
+    };
+    if !matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Prepared)) {
+        return Err("receipt input reservation was dispatched before source binding".into());
+    }
+    let source = liquidity_receipts::source_account(owner, source_subaccount);
+    let Some(input) = entitlement.input_transfer.as_mut() else {
+        return Err("receipt input reservation has no input tuple".into());
+    };
+    input.from = source;
+    for attempt in entitlement.attempts.iter_mut() {
+        if !matches!(attempt.outcome, crate::payouts::PayoutOutcome::Prepared) {
+            return Err("receipt refund reservation was dispatched before source binding".into());
+        }
+        attempt.transfer.to = source;
+    }
+    payouts::save(entitlement);
+    Ok(())
+}
+
 #[update]
 pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, ThreePoolError> {
+    add_liquidity_inner(amounts, min_lp, None).await
+}
+
+/// Shared implementation for the legacy add-liquidity call and the durable
+/// receipt call.  The legacy path passes `None`, preserving its public
+/// signature and transfer tuples byte-for-byte.
+async fn add_liquidity_inner(
+    amounts: Vec<u128>,
+    min_lp: u128,
+    mut receipt: Option<&mut LiquidityReceiptV1>,
+) -> Result<u128, ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    if let Some(row) = receipt.as_deref_mut() {
+        // A receipt is immutable with respect to caller and request.  This
+        // check protects the shared helper if a future caller wires a row
+        // into it without first validating the request at reserve time.
+        if row.owner != caller || row.request.amounts != amounts || row.request.min_lp != min_lp {
+            return Err(ThreePoolError::Unauthorized);
+        }
+    }
     // 1. Check not paused
     if read_state(|s| s.is_paused) {
         return Err(ThreePoolError::PoolPaused);
@@ -1743,9 +1795,17 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     let amounts_arr: [u128; 3] = [amounts[0], amounts[1], amounts[2]];
 
     // 3. Acquire the pool lock BEFORE reading balances so a concurrent
-    //    caller cannot compute LP amounts against stale state. Released
-    //    on Drop (Ok, Err, or trap). Audit fence B-01.
-    let _pool_guard = pool_guard::PoolGuard::new()?;
+    //    caller cannot compute LP amounts against stale state. Receipt-backed
+    //    calls first persist their durable owner+intent fence; the exact
+    //    receipt is the only operation allowed to cross that fence during
+    //    recovery after an upgrade. Released on Drop (Ok, Err, or trap).
+    let _pool_guard = if let Some(row) = receipt.as_deref() {
+        liquidity_receipts::claim_active(row.owner, &row.request.intent_id)
+            .map_err(|_| ThreePoolError::PoolLocked)?;
+        pool_guard::PoolGuard::new_for_liquidity_receipt(row)?
+    } else {
+        pool_guard::PoolGuard::new()?
+    };
 
     // 4. Compute A and precision_muls
     let amp = get_current_a();
@@ -1767,6 +1827,9 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     // pull. A pull whose gross amount cannot cover that fee would create an
     // unpayable refund entitlement, so reject the whole batch first.
     let mut refund_fees = [0u128; 3];
+    let max_transfer_fee = receipt
+        .as_deref()
+        .and_then(|row| row.request.max_transfer_fee);
     for k in 0..3 {
         if amounts_arr[k] > 0 {
             refund_fees[k] = crate::transfers::try_current_ledger_fee(token_meta[k].0)
@@ -1775,6 +1838,17 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
                     token: token_meta[k].1.clone(),
                     reason: format!("cannot safely admit add-liquidity leg without its actual refund fee: {reason}"),
                 })?;
+            if let Some(cap) = max_transfer_fee {
+                if refund_fees[k] > cap {
+                    return Err(ThreePoolError::TransferFailed {
+                        token: token_meta[k].1.clone(),
+                        reason: format!(
+                            "actual ledger fee {} exceeds caller transfer-fee cap {}",
+                            refund_fees[k], cap
+                        ),
+                    });
+                }
+            }
             if amounts_arr[k] <= refund_fees[k] {
                 return Err(ThreePoolError::InsufficientOutput {
                     expected_min: refund_fees[k].saturating_add(1),
@@ -1808,7 +1882,6 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     // < k) are stranded in the pool with no accounting. Refund each already-
     // pulled amount; if a refund itself fails, record a pending claim so the
     // user can recover it via `claim_pending`. Audit 2026-06-05 (3P-03).
-    let caller = ic_cdk::api::caller();
     let mut balances_after = old_balances;
     for k in 0..3 {
         balances_after[k] = balances_after[k]
@@ -1822,6 +1895,23 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     let lp_supply_after = lp_total_supply
         .checked_add(lp_minted)
         .ok_or(ThreePoolError::MathOverflow)?;
+
+    if let Some(row) = receipt.as_deref_mut() {
+        liquidity_receipts::plan(
+            row,
+            old_balances,
+            lp_total_supply,
+            caller_lp_before,
+            balances_after,
+            lp_supply_after,
+            caller_lp_after,
+            lp_minted,
+            liq_outcome.fee_bps_used,
+            liq_outcome.imbalance_before,
+            liq_outcome.imbalance_after,
+            liq_outcome.is_rebalancing,
+        );
+    }
     // On failure of the last nonzero pull, every earlier successful pull can
     // independently fail its refund. Reserve that full bound before pulling.
     let possible_refunds = amounts_arr.iter().filter(|amount| **amount > 0).count() as u64;
@@ -1833,18 +1923,48 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
     for k in 0..3 {
         if amounts_arr[k] > 0 {
             let (ledger, symbol) = &token_meta[k];
-            refund_ids[k] = Some(crate::transfers::prepare_add_liquidity_refund(
+            let id = crate::transfers::prepare_add_liquidity_refund(
                 k as u8, *ledger, symbol, caller, amounts_arr[k], refund_fees[k],
             ).await.map_err(|failure| ThreePoolError::TransferFailed {
                 token: symbol.clone(), reason: failure.reason,
-            })?);
+            })?;
+            // Persist the exact identity before any further await or tuple
+            // mutation.  If source binding fails, recovery can still cancel
+            // this prepared reservation instead of losing its fence.
+            if let Some(row) = receipt.as_deref_mut() {
+                liquidity_receipts::set_prepared_id(row, k, id);
+            }
+            if let Some(row) = receipt.as_deref() {
+                bind_receipt_subaccount(id, row.owner, row.request.source_subaccount)
+                    .map_err(|reason| ThreePoolError::TransferFailed {
+                        token: symbol.clone(), reason,
+                    })?;
+            }
+            if let Some(row) = receipt.as_deref_mut() {
+                if let Some(entitlement) = payouts::get(id) {
+                    // Refresh after source binding so the receipt retains the
+                    // exact escrow account and fee used by the first dispatch.
+                    liquidity_receipts::sync_leg(row, k, &entitlement);
+                }
+            }
+            refund_ids[k] = Some(id);
         }
     }
     for k in 0..3 {
         if amounts_arr[k] > 0 {
             let (_, symbol) = &token_meta[k];
             let input_id = refund_ids[k].expect("positive leg has a prebound input identity");
+            if let Some(row) = receipt.as_deref_mut() {
+                liquidity_receipts::set_executing(row);
+            }
             if let Err(reason) = crate::transfers::execute_pinned_input(input_id).await {
+                if let Some(row) = receipt.as_deref_mut() {
+                    if let Some(entitlement) = payouts::get(input_id) {
+                        liquidity_receipts::sync_leg(row, k, &entitlement);
+                    }
+                    row.compensation_started = true;
+                    liquidity_receipts::recovery_pending(row, reason.clone());
+                }
                 // Select the compensation set before the first outbound call:
                 // prior successful pulls are owed refunds; this failed pull
                 // has an unknown effect and remains held; later legs were
@@ -1897,10 +2017,43 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
                     reason,
                 });
             }
+            if let Some(row) = receipt.as_deref_mut() {
+                if let Some(entitlement) = payouts::get(input_id) {
+                    liquidity_receipts::sync_leg(row, k, &entitlement);
+                }
+            }
         }
     }
 
-    // 8. Update state
+    // 8. Update state, both durable liquidity events, and the receipt in one
+    // synchronous commit.  No await is permitted between these writes.  A
+    // callback can outlive an upgrade/recovery boundary, so re-read the
+    // durable owner row immediately before minting.  Compensation or a
+    // terminal row wins over this stale local continuation.
+    let receipt_mode = receipt.is_some();
+    if let Some(row) = receipt.as_deref() {
+        let current = liquidity_receipts::get(row.owner, &row.request.intent_id)
+            .ok_or(ThreePoolError::PoolLocked)?;
+        let same_plan = current.old_balances == row.old_balances
+            && current.old_lp_supply == row.old_lp_supply
+            && current.old_caller_lp == row.old_caller_lp
+            && current.balances_after == row.balances_after
+            && current.lp_supply_after == row.lp_supply_after
+            && current.caller_lp_after == row.caller_lp_after
+            && current.lp_minted == row.lp_minted
+            && current.fee_bps == row.fee_bps
+            && current.imbalance_before == row.imbalance_before
+            && current.imbalance_after == row.imbalance_after
+            && current.is_rebalancing == row.is_rebalancing;
+        if current.compensation_started
+            || current.status != LiquidityReceiptStatusV1::Executing
+            || !same_plan
+            || !liquidity_receipts::all_inputs_confirmed(&current)
+        {
+            return Err(ThreePoolError::PoolLocked);
+        }
+    }
+    let receipt_for_commit = receipt.as_deref_mut();
     if let Err(error) = mutate_state(|s| -> Result<(), ThreePoolError> {
         if s.balances != old_balances
             || s.lp_total_supply != lp_total_supply
@@ -1918,6 +2071,36 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
             amount: lp_minted,
             to_subaccount: None,
         });
+        let event_id = storage::liq_v2::len();
+        let vp_after = virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply).unwrap_or(0);
+        storage::liq_v2::push(LiquidityEventV2 {
+            id: event_id,
+            timestamp: ic_cdk::api::time(),
+            caller,
+            action: LiquidityAction::AddLiquidity,
+            amounts: amounts_arr,
+            lp_amount: lp_minted,
+            coin_index: None,
+            fee: None,
+            fee_bps: Some(liq_outcome.fee_bps_used),
+            imbalance_before: liq_outcome.imbalance_before,
+            imbalance_after: liq_outcome.imbalance_after,
+            is_rebalancing: liq_outcome.is_rebalancing,
+            pool_balances_after: s.balances,
+            virtual_price_after: vp_after,
+            migrated: false,
+        });
+        if let Some(row) = receipt_for_commit {
+            row.status = LiquidityReceiptStatusV1::Completed;
+            row.lp_minted = Some(lp_minted);
+            row.mint_event_id = Some(event_id);
+            for k in 0..3 {
+                if refund_ids[k].is_some() {
+                    row.refund_status[k] = Some(liquidity_receipts::LiquidityLegStatusV1::Skipped);
+                }
+            }
+            liquidity_receipts::save(row);
+        }
         Ok(())
     }) {
         for (index, id) in refund_ids.into_iter().enumerate() {
@@ -1937,44 +2120,544 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
         return Err(error);
     }
 
-    // Record liquidity event v2 (dynamic-fee schema). v1 writes are stopped —
-    // v1 entries remain as frozen historical state for the migration.
-    mutate_state(|s| {
-        let lp_supply = s.lp_total_supply;
-        let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
-        let balances_after = s.balances;
-        let id = storage::liq_v2::len();
-        storage::liq_v2::push(LiquidityEventV2 {
-            id,
-            timestamp: ic_cdk::api::time(),
-            caller,
-            action: LiquidityAction::AddLiquidity,
-            amounts: amounts_arr,
-            lp_amount: lp_minted,
-            coin_index: None,
-            fee: None,
-            fee_bps: Some(liq_outcome.fee_bps_used),
-            imbalance_before: liq_outcome.imbalance_before,
-            imbalance_after: liq_outcome.imbalance_after,
-            is_rebalancing: liq_outcome.is_rebalancing,
-            pool_balances_after: balances_after,
-            virtual_price_after: vp_after,
-            migrated: false,
-        });
-    });
-
     // Only close the held refund identities after both the pool accounting and
     // liquidity event are committed.
     for id in refund_ids.into_iter().flatten() {
-        crate::transfers::cancel_prepared_payout(id, "liquidity addition committed; refund not required")
-            .map_err(|failure| ThreePoolError::TransferFailed {
-                token: "add liquidity refund reservation".into(), reason: failure.reason,
-            })?;
+        if let Err(failure) = crate::transfers::cancel_prepared_payout(
+            id,
+            "liquidity addition committed; refund not required",
+        ) {
+            if receipt_mode {
+                // The receipt/accounting/event commit is intentionally one
+                // synchronous boundary.  A held identity failing to close
+                // here is an impossible invariant violation; trapping rolls
+                // back the whole message rather than returning an error that
+                // could overwrite a durable Completed receipt.
+                ic_cdk::trap(&format!(
+                    "completed add-liquidity receipt cleanup failed for payout {id}: {}",
+                    failure.reason
+                ));
+            }
+            return Err(ThreePoolError::TransferFailed {
+                token: "add liquidity refund reservation".into(),
+                reason: failure.reason,
+            });
+        }
     }
 
     log!(INFO, "AddLiquidity: {:?} -> {} LP for {}", amounts_arr, lp_minted, caller);
 
     Ok(lp_minted)
+}
+
+/// Close every reservation that is known to have never dispatched.  A
+/// prepared identity can be left behind if an upgrade or rejection occurs
+/// between two reservation awaits; it must be canceled before the receipt is
+/// terminally rejected.  Missing identities are accepted only when the
+/// receipt already records a terminal leg outcome.
+fn close_unstarted_receipt_legs(receipt: &mut LiquidityReceiptV1) -> Result<(), String> {
+    for index in 0..3 {
+        let Some(id) = receipt.input_ids[index] else { continue };
+        let Some(entitlement) = payouts::get(id) else {
+            let known_terminal = matches!(
+                receipt.input_status[index],
+                Some(
+                    liquidity_receipts::LiquidityLegStatusV1::RejectedNoTransfer { .. }
+                        | liquidity_receipts::LiquidityLegStatusV1::Skipped
+                )
+            ) && matches!(
+                receipt.refund_status[index],
+                Some(liquidity_receipts::LiquidityLegStatusV1::Skipped)
+            );
+            if known_terminal {
+                continue;
+            }
+            return Err(format!("prepared receipt identity {id} is missing"));
+        };
+        match entitlement.input_outcome.clone() {
+            Some(crate::payouts::PayoutInputOutcome::Prepared)
+            | Some(crate::payouts::PayoutInputOutcome::RejectedNoTransfer { .. }) => {
+                crate::transfers::cancel_prepared_payout(
+                    id,
+                    "receipt input was never dispatched",
+                )
+                .map_err(|failure| failure.reason)?;
+                receipt.input_status[index] = Some(
+                    if let Some(crate::payouts::PayoutInputOutcome::RejectedNoTransfer { reason }) =
+                        entitlement.input_outcome
+                    {
+                        liquidity_receipts::LiquidityLegStatusV1::RejectedNoTransfer { reason }
+                    } else {
+                        liquidity_receipts::LiquidityLegStatusV1::Skipped
+                    },
+                );
+                receipt.refund_status[index] =
+                    Some(liquidity_receipts::LiquidityLegStatusV1::Skipped);
+                liquidity_receipts::save(receipt);
+            }
+            Some(
+                crate::payouts::PayoutInputOutcome::Submitted
+                | crate::payouts::PayoutInputOutcome::Confirmed { .. }
+                | crate::payouts::PayoutInputOutcome::Unresolved { .. },
+            ) => return Err(format!("receipt input identity {id} may have dispatched")),
+            None => return Err(format!("receipt input identity {id} has no outcome")),
+        }
+    }
+    Ok(())
+}
+
+/// Start one caller-owned add-liquidity saga.  A duplicate request only reads
+/// and returns the existing receipt; it never enters `add_liquidity_inner`.
+#[update]
+pub async fn add_liquidity_with_receipt_v1(
+    request: AddLiquidityRequestV1,
+) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
+    let owner = ic_cdk::api::caller();
+    let (mut receipt, fresh) = liquidity_receipts::reserve(owner, request.clone())?;
+    if !fresh {
+        // A terminal row may outlive the callback that cleared its transient
+        // guard.  Reconcile the exact durable fence while preserving the
+        // immutable terminal result.
+        liquidity_receipts::clear_if_terminal(&receipt);
+        return Ok(receipt);
+    }
+    let _live = liquidity_receipts::acquire_live(owner, &request.intent_id)?;
+    if let Err(error) = add_liquidity_inner(request.amounts, request.min_lp, Some(&mut receipt)).await {
+        // Completed is terminal forever.  In particular, a synchronous
+        // cleanup error after the accounting/event commit must never turn it
+        // back into a retryable receipt (the receipt path traps instead).
+        if matches!(&receipt.status, LiquidityReceiptStatusV1::Completed | LiquidityReceiptStatusV1::Refunded | LiquidityReceiptStatusV1::Rejected) {
+            liquidity_receipts::clear_if_terminal(&receipt);
+            return Ok(receipt);
+        }
+        if matches!(&receipt.status, LiquidityReceiptStatusV1::Prepared)
+            && liquidity_receipts::no_input_dispatched(&receipt)
+        {
+            if close_unstarted_receipt_legs(&mut receipt).is_ok() {
+                liquidity_receipts::reject(&mut receipt, format!("{error:?}"));
+                liquidity_receipts::clear_if_terminal(&receipt);
+            } else {
+                liquidity_receipts::recovery_pending(&mut receipt, format!("{error:?}"));
+            }
+        } else {
+            liquidity_receipts::recovery_pending(&mut receipt, format!("{error:?}"));
+        }
+    }
+    liquidity_receipts::clear_if_terminal(&receipt);
+    Ok(receipt)
+}
+
+#[query]
+pub fn get_liquidity_receipt_v1(intent_id: Vec<u8>) -> Option<LiquidityReceiptV1> {
+    liquidity_receipts::get(ic_cdk::api::caller(), &intent_id)
+}
+
+/// Confirm one aged, ambiguous receipt input from a positive ICRC-3 proof and
+/// refund that exact escrow leg.  The proof is bound to the persisted full
+/// `from` account, so a caller-owned subaccount can never be replaced with
+/// the legacy default account during recovery.  Missing or unavailable
+/// history remains held and requires a later retry with the same candidate.
+#[update]
+#[candid_method(update)]
+pub async fn reconcile_liquidity_receipt_input_v1(
+    intent_id: Vec<u8>,
+    leg_index: u8,
+    block_index: u64,
+) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
+    const MIN_AMBIGUOUS_AGE_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+
+    let owner = ic_cdk::api::caller();
+    if owner == Principal::anonymous() {
+        return Err(LiquidityReceiptErrorV1::Unauthorized);
+    }
+    let mut receipt = liquidity_receipts::get(owner, &intent_id)
+        .ok_or(LiquidityReceiptErrorV1::NotFound)?;
+    if intent_id.len() != 32 || receipt.request.intent_id != intent_id {
+        return Err(LiquidityReceiptErrorV1::InvalidIntentId);
+    }
+    if matches!(
+        &receipt.status,
+        LiquidityReceiptStatusV1::Completed
+            | LiquidityReceiptStatusV1::Refunded
+            | LiquidityReceiptStatusV1::Rejected
+    ) {
+        liquidity_receipts::clear_if_terminal(&receipt);
+        return Ok(receipt);
+    }
+    let index = usize::from(leg_index);
+    if index >= 3 || receipt.request.amounts[index] == 0 {
+        return Err(LiquidityReceiptErrorV1::InvalidRequest);
+    }
+    let _live = liquidity_receipts::acquire_live(owner, &intent_id)?;
+    liquidity_receipts::claim_active(owner, &intent_id)?;
+    let _pool_guard = pool_guard::PoolGuard::new_for_liquidity_receipt(&receipt)
+    .map_err(|_| LiquidityReceiptErrorV1::PoolLocked)?;
+
+    let id = receipt.input_ids[index].ok_or(LiquidityReceiptErrorV1::RecoveryRequired)?;
+    if receipt.refund_ids[index] != Some(id) {
+        liquidity_receipts::recovery_pending(&mut receipt, "input and refund identities diverged");
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+    let input = receipt.input_transfers[index]
+        .clone()
+        .ok_or(LiquidityReceiptErrorV1::RecoveryRequired)?;
+    let source = liquidity_receipts::source_account(owner, receipt.request.source_subaccount);
+    if input.from != source
+        || input.to
+            != (icrc_ledger_types::icrc1::account::Account {
+                owner: ic_cdk::id(),
+                subaccount: None,
+            })
+        || input.amount != receipt.request.amounts[index]
+        || input.fee.is_none()
+        || input.memo.is_none()
+        || ic_cdk::api::time().saturating_sub(input.created_at_time) < MIN_AMBIGUOUS_AGE_NS
+    {
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+    let entitlement = payouts::get(id).ok_or(LiquidityReceiptErrorV1::RecoveryRequired)?;
+    if entitlement.owner != owner
+        || entitlement.kind != payouts::PayoutKind::AddLiquidityRefund
+        || entitlement.input_action != Some(payouts::PayoutInputAction::AddLiquidity)
+        || entitlement.compensation_for.is_some()
+        || entitlement.input_transfer.as_ref() != Some(&input)
+        || !matches!(
+            &entitlement.input_outcome,
+            Some(payouts::PayoutInputOutcome::Submitted)
+                | Some(payouts::PayoutInputOutcome::Unresolved { .. })
+        )
+        || entitlement
+            .attempts
+            .last()
+            .map_or(true, |attempt| attempt.transfer.to != source)
+    {
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+
+    // Selecting compensation is durable before the proof await.  A delayed
+    // original continuation therefore cannot mint after this endpoint starts.
+    receipt.compensation_started = true;
+    receipt.status = LiquidityReceiptStatusV1::RecoveryPending;
+    liquidity_receipts::save(&receipt);
+
+    if let Err(reason) = crate::payout_reconciliation::verify_exact_input_block(
+        id,
+        input.ledger,
+        block_index,
+        &input,
+        icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        entitlement.input_action,
+        entitlement.kind,
+        entitlement.compensation_for,
+    )
+    .await
+    {
+        liquidity_receipts::recovery_pending(&mut receipt, reason);
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+
+    // Positive proof callbacks still compare the durable receipt and payout
+    // identity before any refund authorization is committed.
+    let current = liquidity_receipts::get(owner, &intent_id)
+        .ok_or(LiquidityReceiptErrorV1::RecoveryRequired)?;
+    if current.compensation_started != true
+        || matches!(
+            &current.status,
+            LiquidityReceiptStatusV1::Completed
+                | LiquidityReceiptStatusV1::Refunded
+                | LiquidityReceiptStatusV1::Rejected
+        )
+        || current.input_ids[index] != Some(id)
+        || current.input_transfers[index].as_ref() != Some(&input)
+    {
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+    let confirmed = crate::transfers::confirm_aged_input(
+        id,
+        &input,
+        candid::Nat::from(block_index),
+    )
+    .map_err(|reason| {
+        liquidity_receipts::recovery_pending(&mut receipt, reason);
+        LiquidityReceiptErrorV1::RecoveryRequired
+    })?;
+    liquidity_receipts::sync_leg(&mut receipt, index, &confirmed);
+
+    crate::transfers::activate_prepared_payout(id)
+        .map_err(|failure| {
+            liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
+            LiquidityReceiptErrorV1::RecoveryRequired
+        })?;
+    if let Err(failure) = crate::transfers::retry_payout_claim_with_fee_cap(
+        id,
+        receipt.request.max_transfer_fee,
+    )
+    .await
+    {
+        if let Some(updated) = payouts::get(id) {
+            liquidity_receipts::sync_leg(&mut receipt, index, &updated);
+        }
+        liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+    if !payouts::mark_settled(id) {
+        liquidity_receipts::recovery_pending(
+            &mut receipt,
+            "confirmed escrow refund could not be marked settled",
+        );
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+    if let Some(updated) = payouts::get(id) {
+        liquidity_receipts::sync_leg(&mut receipt, index, &updated);
+    }
+    let confirmed_block = match confirmed.input_outcome {
+        Some(payouts::PayoutInputOutcome::Confirmed { block }) => block,
+        _ => {
+            liquidity_receipts::recovery_pending(
+                &mut receipt,
+                "aged proof did not leave the input positively confirmed",
+            );
+            return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+        }
+    };
+    receipt.input_status[index] = Some(liquidity_receipts::LiquidityLegStatusV1::Confirmed {
+        block: confirmed_block,
+    });
+    receipt.refund_status[index] = Some(liquidity_receipts::LiquidityLegStatusV1::Refunded);
+    let all_legs_terminal = receipt
+        .request
+        .amounts
+        .iter()
+        .enumerate()
+        .all(|(leg, amount)| {
+            *amount == 0
+                || (receipt.input_status[leg].as_ref().is_some_and(|status| {
+                    matches!(
+                        status,
+                        liquidity_receipts::LiquidityLegStatusV1::Confirmed { .. }
+                            | liquidity_receipts::LiquidityLegStatusV1::RejectedNoTransfer { .. }
+                            | liquidity_receipts::LiquidityLegStatusV1::Skipped
+                    )
+                }) && receipt.refund_status[leg].as_ref().is_some_and(|status| {
+                    matches!(
+                        status,
+                        liquidity_receipts::LiquidityLegStatusV1::Refunded
+                            | liquidity_receipts::LiquidityLegStatusV1::Skipped
+                    )
+                }))
+        });
+    receipt.status = if all_legs_terminal {
+        LiquidityReceiptStatusV1::Refunded
+    } else {
+        LiquidityReceiptStatusV1::RecoveryPending
+    };
+    liquidity_receipts::save(&receipt);
+    liquidity_receipts::clear_if_terminal(&receipt);
+    Ok(receipt)
+}
+
+/// Resume a retained add-liquidity saga. Recovery reconciles every exact
+/// inbound tuple and compensates confirmed pulls. An interrupted operation is
+/// never minted during recovery: the original call owns the only accounting
+/// commit, and unknown outcomes remain held until exact reconciliation makes
+/// compensation safe.
+#[update]
+pub async fn recover_liquidity_receipt_v1(
+    intent_id: Vec<u8>,
+) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
+    let owner = ic_cdk::api::caller();
+    if owner == Principal::anonymous() {
+        return Err(LiquidityReceiptErrorV1::Unauthorized);
+    }
+    let mut receipt = liquidity_receipts::get(owner, &intent_id)
+        .ok_or(LiquidityReceiptErrorV1::NotFound)?;
+    if receipt.request.amounts.len() != 3 || receipt.request.intent_id.len() != 32 {
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+    if matches!(
+        &receipt.status,
+        LiquidityReceiptStatusV1::Completed
+            | LiquidityReceiptStatusV1::Refunded
+            | LiquidityReceiptStatusV1::Rejected
+    ) {
+        liquidity_receipts::clear_if_terminal(&receipt);
+        return Ok(receipt);
+    }
+    let _live = liquidity_receipts::acquire_live(owner, &intent_id)?;
+    liquidity_receipts::claim_active(owner, &intent_id)?;
+    let _pool_guard = pool_guard::PoolGuard::new_for_liquidity_receipt(&receipt)
+        .map_err(|_| LiquidityReceiptErrorV1::PoolLocked)?;
+
+    // Upgrade clears only the transient guards.  A Prepared receipt with no
+    // input identity has no possible dispatch and can be closed safely.
+    if receipt.input_ids.iter().all(Option::is_none) {
+        if matches!(&receipt.status, LiquidityReceiptStatusV1::Prepared)
+            && liquidity_receipts::no_input_dispatched(&receipt)
+        {
+            liquidity_receipts::reject(&mut receipt, "operation ended before an input identity was created");
+            liquidity_receipts::clear_if_terminal(&receipt);
+            return Ok(receipt);
+        }
+        return Err(LiquidityReceiptErrorV1::RecoveryRequired);
+    }
+
+    // Select compensation before the first reconciliation await.  A delayed
+    // callback must not turn an interrupted operation into a mint after a
+    // recovery caller has begun refunding.
+    receipt.compensation_started = true;
+    receipt.status = LiquidityReceiptStatusV1::RecoveryPending;
+    liquidity_receipts::save(&receipt);
+
+    let mut confirmed_input = false;
+    for k in 0..3 {
+        let Some(id) = receipt.input_ids[k] else { continue };
+        let Some(mut entitlement) = payouts::get(id) else {
+            let known_terminal = matches!(
+                receipt.input_status[k],
+                Some(
+                    liquidity_receipts::LiquidityLegStatusV1::RejectedNoTransfer { .. }
+                        | liquidity_receipts::LiquidityLegStatusV1::Skipped
+                )
+            ) && matches!(
+                receipt.refund_status[k],
+                Some(
+                    liquidity_receipts::LiquidityLegStatusV1::Skipped
+                        | liquidity_receipts::LiquidityLegStatusV1::Refunded
+                )
+            );
+            if known_terminal {
+                continue;
+            }
+            liquidity_receipts::recovery_pending(&mut receipt, "receipt input identity is missing");
+            return Ok(receipt);
+        };
+        match entitlement.input_outcome.clone() {
+            Some(crate::payouts::PayoutInputOutcome::Prepared)
+            | Some(crate::payouts::PayoutInputOutcome::RejectedNoTransfer { .. }) => {
+                let rejected_reason = match &entitlement.input_outcome {
+                    Some(crate::payouts::PayoutInputOutcome::RejectedNoTransfer { reason }) => Some(reason.clone()),
+                    _ => None,
+                };
+                if let Err(failure) = crate::transfers::cancel_prepared_payout(
+                    id,
+                    "receipt input was not dispatched",
+                ) {
+                    liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
+                    return Ok(receipt);
+                }
+                receipt.input_status[k] = Some(match rejected_reason {
+                    Some(reason) => liquidity_receipts::LiquidityLegStatusV1::RejectedNoTransfer { reason },
+                    None => liquidity_receipts::LiquidityLegStatusV1::Skipped,
+                });
+                receipt.refund_status[k] = Some(liquidity_receipts::LiquidityLegStatusV1::Skipped);
+                liquidity_receipts::save(&receipt);
+            }
+            Some(crate::payouts::PayoutInputOutcome::Confirmed { .. }) => {
+                confirmed_input = true;
+                if let Err(failure) = crate::transfers::activate_prepared_payout(id) {
+                    liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
+                    return Ok(receipt);
+                }
+                if let Err(failure) = crate::transfers::retry_payout_claim_with_fee_cap(
+                    id,
+                    receipt.request.max_transfer_fee,
+                )
+                .await
+                {
+                    liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
+                    return Ok(receipt);
+                }
+                if !payouts::mark_settled(id) {
+                    liquidity_receipts::recovery_pending(&mut receipt, "confirmed input refund could not be marked settled");
+                    return Ok(receipt);
+                }
+                if let Some(updated) = payouts::get(id) {
+                    // Capture the actual retry tuple, fee, and net amount
+                    // before declaring the compensation leg terminal.
+                    liquidity_receipts::sync_leg(&mut receipt, k, &updated);
+                }
+                receipt.input_status[k] = Some(liquidity_receipts::LiquidityLegStatusV1::Confirmed {
+                    block: match &entitlement.input_outcome {
+                        Some(crate::payouts::PayoutInputOutcome::Confirmed { block }) => block.clone(),
+                        _ => unreachable!("confirmed branch has confirmed input"),
+                    },
+                });
+                receipt.refund_status[k] = Some(liquidity_receipts::LiquidityLegStatusV1::Refunded);
+                liquidity_receipts::save(&receipt);
+            }
+            Some(
+                crate::payouts::PayoutInputOutcome::Submitted
+                | crate::payouts::PayoutInputOutcome::Unresolved { .. },
+            ) => {
+                if let Err(reason) = crate::transfers::reconcile_pinned_input(id).await {
+                    if let Some(updated) = payouts::get(id) {
+                        liquidity_receipts::sync_leg(&mut receipt, k, &updated);
+                    }
+                    liquidity_receipts::recovery_pending(&mut receipt, reason);
+                    return Ok(receipt);
+                }
+                entitlement = match payouts::get(id) {
+                    Some(value) => value,
+                    None => {
+                        liquidity_receipts::recovery_pending(&mut receipt, "input identity disappeared after reconciliation");
+                        return Ok(receipt);
+                    }
+                };
+                if matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Confirmed { .. })) {
+                    confirmed_input = true;
+                    if let Err(failure) = crate::transfers::activate_prepared_payout(id) {
+                        liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
+                        return Ok(receipt);
+                    }
+                    if let Err(failure) = crate::transfers::retry_payout_claim_with_fee_cap(
+                        id,
+                        receipt.request.max_transfer_fee,
+                    )
+                    .await
+                    {
+                        liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
+                        return Ok(receipt);
+                    }
+                    if !payouts::mark_settled(id) {
+                        liquidity_receipts::recovery_pending(&mut receipt, "confirmed input refund could not be marked settled");
+                        return Ok(receipt);
+                    }
+                    if let Some(updated) = payouts::get(id) {
+                        // Capture the actual retry tuple, fee, and net amount
+                        // before declaring the compensation leg terminal.
+                        liquidity_receipts::sync_leg(&mut receipt, k, &updated);
+                    }
+                    receipt.input_status[k] = Some(liquidity_receipts::LiquidityLegStatusV1::Confirmed {
+                        block: match &entitlement.input_outcome {
+                            Some(crate::payouts::PayoutInputOutcome::Confirmed { block }) => block.clone(),
+                            _ => unreachable!("reconciled branch has confirmed input"),
+                        },
+                    });
+                    receipt.refund_status[k] = Some(liquidity_receipts::LiquidityLegStatusV1::Refunded);
+                    liquidity_receipts::save(&receipt);
+                } else {
+                    liquidity_receipts::sync_leg(&mut receipt, k, &entitlement);
+                    liquidity_receipts::recovery_pending(&mut receipt, "input remains unresolved; no refund was dispatched");
+                    return Ok(receipt);
+                }
+            }
+            None => {
+                liquidity_receipts::recovery_pending(&mut receipt, "input identity has no durable outcome");
+                return Ok(receipt);
+            }
+        }
+    }
+    receipt.status = if confirmed_input {
+        LiquidityReceiptStatusV1::Refunded
+    } else {
+        LiquidityReceiptStatusV1::Rejected
+    };
+    liquidity_receipts::save(&receipt);
+    liquidity_receipts::clear_if_terminal(&receipt);
+    Ok(receipt)
 }
 
 // ─── Remove Liquidity (proportional) ───

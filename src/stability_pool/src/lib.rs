@@ -5,12 +5,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub mod deposits;
+pub mod conversion;
 pub mod withdrawals;
 pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
 pub mod receipt_store;
 pub mod interest_recovery;
+pub mod ordinary_liquidation;
 pub mod state;
 pub mod types;
 
@@ -30,6 +32,7 @@ const NATIVE_XRP_SETTLE_SWEEP_MAX_PER_TICK: usize = 2;
 const NATIVE_XRP_ABSORB_RECOVERY_POLL_SECONDS: u64 = 60;
 const NATIVE_XRP_ABSORB_RECOVERY_MAX_PER_TICK: usize = 2;
 const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
+const ORDINARY_LIQUIDATION_RECOVERY_POLL_SECONDS: u64 = 30;
 /// How often the pool reconciles its tracked aggregate against live ledger
 /// balances and logs any shortfall. Hourly: a handful of balance queries, so
 /// negligible cycle cost, while still surfacing drift long before it can trip a
@@ -89,7 +92,19 @@ pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool
                         .values()
                         .any(|intent| ledgers.contains(&intent.ledger))
                 });
-            chain_intersects || native_xrp_intersects || three_usd_intersects
+            let ordinary_intersects = state
+                .pending_ordinary_liquidations
+                .as_ref()
+                .map_or(false, |pending| {
+                    pending.values().any(|intent| {
+                        ledgers.contains(&intent.stable_ledger)
+                            || intent
+                                .approval
+                                .as_ref()
+                                .is_some_and(|approval| ledgers.contains(&approval.ledger))
+                    })
+                });
+            chain_intersects || native_xrp_intersects || three_usd_intersects || ordinary_intersects
         })
 }
 
@@ -136,6 +151,7 @@ fn init(args: StabilityPoolInitArgs) {
         setup_native_xrp_settle_sweep_timer();
         setup_native_xrp_absorb_recovery_timer();
         setup_three_usd_absorb_recovery_timer();
+        setup_ordinary_liquidation_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -153,6 +169,14 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    let conversion_reconciled = conversion::reconcile_after_upgrade();
+    if conversion_reconciled > 0 {
+        log!(
+            INFO,
+            "SP conversion migration: retained {} in-flight conversion intents for exact-tuple reconciliation",
+            conversion_reconciled
+        );
+    }
     mutate_state(|s| { if s.interest_recovery.is_none() { s.interest_recovery_bootstrap_hold=Some(true); } });
     let legacy_ambiguous_chain_absorbs = mutate_state(|s| {
         s.hold_legacy_prepared_chain_absorbs(ic_cdk::api::time())
@@ -235,6 +259,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         setup_native_xrp_settle_sweep_timer();
         setup_native_xrp_absorb_recovery_timer();
         setup_three_usd_absorb_recovery_timer();
+        setup_ordinary_liquidation_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -355,6 +380,20 @@ fn setup_three_usd_absorb_recovery_timer() {
         if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
         ic_cdk::spawn(crate::liquidation::recover_pending_three_usd_absorbs());
     });
+}
+
+/// Retry only retained ordinary request identities. A status NotFound or
+/// transport failure remains held; this timer never allocates a fresh nonce.
+fn setup_ordinary_liquidation_recovery_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(ORDINARY_LIQUIDATION_RECOVERY_POLL_SECONDS),
+        || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() {
+                return;
+            }
+            ic_cdk::spawn(crate::liquidation::recover_pending_ordinary_liquidations());
+        },
+    );
 }
 
 /// A successful backend notification only means the SP has durably received
@@ -543,6 +582,98 @@ pub async fn deposit_as_3usd(
 ) -> Result<u64, StabilityPoolError> {
     interest_recovery::ensure_unlocked();
     crate::deposits::deposit_as_3usd(token_ledger, amount).await
+}
+
+/// Start or resume a durable escrow-backed conversion. The caller owns the
+/// sequence and explicit downstream fee budget; a duplicate request returns
+/// the retained status without allocating another escrow account.
+#[update]
+pub async fn start_3usd_conversion(
+    request: conversion::ConversionRequest,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::start_conversion(request).await
+}
+
+/// Resume one retained conversion using its exact persisted identities.
+#[update]
+pub async fn resume_3usd_conversion(
+    intent_seq: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::resume_conversion(intent_seq).await
+}
+
+/// Authenticate an aged ambiguous ingress pull against an exact ledger block,
+/// then resume the same durable conversion intent.
+#[update]
+pub async fn reconcile_3usd_conversion_pull_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_pull(intent_seq, candidate_block).await
+}
+
+/// Reconcile only this caller's saved pool input using positive ledger proof.
+#[update]
+pub async fn reconcile_3usd_conversion_pool_input_v1(
+    intent_seq: u64,
+    leg_index: u8,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_pool_input(intent_seq, leg_index, candidate_block).await
+}
+
+/// Read the caller's exact conversion status. Missing rows are not interpreted
+/// as evidence that a transfer had no effect.
+#[query]
+pub fn get_3usd_conversion_status(
+    intent_seq: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    conversion::get_status(intent_seq)
+}
+
+#[query]
+pub fn get_active_3usd_conversion() -> Option<conversion::ConversionStatus> {
+    conversion::get_active_status()
+}
+
+/// Return the next caller-scoped sequence from the durable conversion
+/// watermark. Clients must use this value instead of guessing after a lost
+/// response.
+#[query]
+pub fn get_3usd_conversion_next_seq() -> Result<u64, conversion::ConversionError> {
+    conversion::next_sequence()
+}
+
+/// Return the active request metadata together with its status so a client can
+/// resume the exact durable intent across devices.
+#[query]
+pub fn get_active_3usd_conversion_v1() -> Option<conversion::ConversionView> {
+    conversion::get_active_view()
+}
+
+/// Cancel only a journal row that has not dispatched a user pull. Once a value
+/// moving tuple exists, the caller must resume/reconcile that exact row.
+#[update]
+pub fn cancel_3usd_conversion(
+    intent_seq: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::cancel_conversion(intent_seq)
+}
+
+/// Read-only quote/admission helper. It performs only ledger/3pool queries and
+/// never creates a conversion intent or pulls funds.
+#[update]
+pub async fn quote_3usd_conversion(
+    token_ledger: Principal,
+    principal_raw: u64,
+    min_lp: u128,
+) -> Result<conversion::ConversionQuote, conversion::ConversionError> {
+    conversion::quote_conversion(token_ledger, principal_raw, min_lp).await
 }
 
 /// Recover tokens the pool owes after a failed `deposit_as_3usd` refund
@@ -812,6 +943,54 @@ pub async fn notify_liquidatable_vaults(
 pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, StabilityPoolError> {
     interest_recovery::ensure_unlocked();
     crate::liquidation::execute_liquidation(vault_id).await
+}
+
+/// Read the durable ordinary request by its exact 32-byte identity. Unknown
+/// requests return `None`; a status miss never authorizes a fresh request ID.
+#[query]
+pub fn get_ordinary_liquidation_status(
+    request_id: Vec<u8>,
+) -> Option<ordinary_liquidation::OrdinaryLiquidationStatus> {
+    crate::liquidation::ordinary_liquidation_status(request_id)
+}
+
+/// Retry one ordinary request using its persisted approval/backend tuples.
+/// This endpoint never allocates a new request ID after an unknown callback.
+#[update]
+pub async fn retry_ordinary_liquidation(
+    request_id: Vec<u8>,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    crate::liquidation::retry_ordinary_liquidation(request_id).await
+}
+
+/// Cancel only a prepared ordinary request that has not dispatched approval.
+/// The completion tombstone is written before the pending row is released.
+#[update]
+pub async fn cancel_ordinary_liquidation(
+    request_id: Vec<u8>,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::liquidation::cancel_ordinary_liquidation(request_id).await
+}
+
+/// Resolve an aged approval using a block served by its configured ledger.
+/// The candidate is never accepted without the complete persisted tuple.
+#[update]
+pub async fn reconcile_ordinary_liquidation_approval(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::liquidation::reconcile_ordinary_liquidation_approval(request_id, candidate_block_index).await
 }
 
 #[update]
@@ -1212,6 +1391,35 @@ pub fn admin_get_three_usd_absorb_inventory_page(
     Ok(read_state(|state| {
         state.three_usd_absorb_inventory_page(after, limit)
     }))
+}
+
+/// Register this deployed SP as the V2 reserve client without starting a
+/// liquidation or reserving any depositor funds.
+#[update]
+pub async fn admin_acknowledge_three_usd_reserve_v2_client() -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let protocol = read_state(|state| {
+        if !inventory_admin_authorized(caller, &state.configuration.authorized_admins) {
+            return Err(StabilityPoolError::Unauthorized);
+        }
+        Ok(state.protocol_canister_id)
+    })?;
+    let response: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> =
+        ic_cdk::call(protocol, "acknowledge_three_usd_reserve_v2_client", ()).await;
+    read_state(|state| {
+        if !inventory_admin_authorized(caller, &state.configuration.authorized_admins)
+            || state.protocol_canister_id != protocol
+        {
+            return Err(StabilityPoolError::Unauthorized);
+        }
+        Ok(())
+    })?;
+    match response {
+        Ok((Ok(()),)) => Ok(()),
+        other => Err(StabilityPoolError::LedgerTransferFailed {
+            reason: format!("V2 client acknowledgment: {:?}", other),
+        }),
+    }
 }
 
 /// Durable no-recipient interest routes that still need a ledger transfer or

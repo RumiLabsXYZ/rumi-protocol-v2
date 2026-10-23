@@ -164,6 +164,13 @@ struct LedgerState {
     /// Next N ICRC-1 transfers commit but lose their reply, without consuming
     /// the fault on an earlier ICRC-2 transfer_from in the same saga.
     phantom_icrc1_failures_remaining: u32,
+    /// Next N ICRC-2 approvals commit but lose their reply. This is separate
+    /// from transfer faults so a conversion harness can target the approval
+    /// leg without changing the user's pull or pool pull.
+    phantom_approve_failures_remaining: u32,
+    /// Next N ICRC-2 transfer_from calls commit but lose their reply. This is
+    /// separate from ICRC-1 transfer faults for exact pool/backend pull tests.
+    phantom_transfer_from_failures_remaining: u32,
     /// Optional caller whose default-account ICRC-1 transfers produce `1mint`
     /// blocks. This is a fixture-only approximation of the configured minter.
     minter: Option<Principal>,
@@ -555,6 +562,13 @@ fn icrc2_approve(args: ApproveArgs) -> Result<Nat, ApproveError> {
             .allowances
             .insert((from.clone(), spender.clone()), amount);
         let landed_block = append_block(&mut state, approve_block(&from, &spender, amount));
+        if state.phantom_approve_failures_remaining > 0 {
+            state.phantom_approve_failures_remaining -= 1;
+            return Err(ApproveError::GenericError {
+                error_code: Nat::from(996u64),
+                message: "Injected phantom failure (approval committed, reply lost)".to_string(),
+            });
+        }
         Ok(Nat::from(landed_block))
     })
 }
@@ -706,6 +720,15 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             return Err(TransferFromError::GenericError {
                 error_code: Nat::from(998u64),
                 message: "Injected phantom failure (transfer_from committed, reply lost)"
+                    .to_string(),
+            });
+        }
+
+        if state.phantom_transfer_from_failures_remaining > 0 {
+            state.phantom_transfer_from_failures_remaining -= 1;
+            return Err(TransferFromError::GenericError {
+                error_code: Nat::from(995u64),
+                message: "Injected transfer_from phantom failure (commit landed, reply lost)"
                     .to_string(),
             });
         }
@@ -900,6 +923,20 @@ fn set_phantom_failures(n: u32) {
 #[update]
 fn set_phantom_icrc1_failures(n: u32) {
     STATE.with(|s| s.borrow_mut().phantom_icrc1_failures_remaining = n);
+}
+
+/// Next N approvals commit and lose their reply. This targets only the
+/// ICRC-2 approval leg of a multi-step saga.
+#[update]
+fn set_phantom_approve_failures(n: u32) {
+    STATE.with(|s| s.borrow_mut().phantom_approve_failures_remaining = n);
+}
+
+/// Next N ICRC-2 transfer_from calls commit and lose their reply. This targets
+/// only a pull leg, leaving ICRC-1 transfers and approvals untouched.
+#[update]
+fn set_phantom_transfer_from_failures(n: u32) {
+    STATE.with(|s| s.borrow_mut().phantom_transfer_from_failures_remaining = n);
 }
 
 /// Configure the caller whose default-account ICRC-1 transfers produce

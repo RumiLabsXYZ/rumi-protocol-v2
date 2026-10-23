@@ -258,6 +258,43 @@ pub async fn reconcile_pinned_input(id: u64) -> Result<(), String> {
     record_input_result(&mut entitlement, crate::payouts::PayoutInputOutcome::Submitted, result, true)
 }
 
+/// Commit positive evidence for an aged input proof without issuing a second
+/// ledger call.  The persisted tuple is part of the compare-and-set: a proof
+/// for one escrow account can never confirm a later identity on the same
+/// entitlement.
+pub fn confirm_aged_input(
+    id: u64,
+    expected_input: &crate::payouts::PayoutInputTransfer,
+    block: candid::Nat,
+) -> Result<crate::payouts::PayoutEntitlement, String> {
+    let mut current = crate::payouts::get(id)
+        .ok_or_else(|| "input identity disappeared while archive proof was in flight".to_string())?;
+    if current.input_transfer.as_ref() != Some(expected_input) {
+        return Err("input identity changed while archive proof was in flight".into());
+    }
+    match current.input_outcome.clone() {
+        Some(crate::payouts::PayoutInputOutcome::Confirmed { .. }) => Ok(current),
+        Some(crate::payouts::PayoutInputOutcome::Submitted)
+        | Some(crate::payouts::PayoutInputOutcome::Unresolved { .. }) => {
+            current.input_outcome = Some(crate::payouts::PayoutInputOutcome::Confirmed {
+                block: block.clone(),
+            });
+            crate::payouts::save(current.clone());
+            crate::payouts::append(
+                id,
+                crate::payouts::PayoutJournalEventKind::InputConfirmed { block },
+            );
+            Ok(current)
+        }
+        Some(crate::payouts::PayoutInputOutcome::Prepared) => {
+            Err("prepared input cannot be confirmed by an archive proof".into())
+        }
+        Some(crate::payouts::PayoutInputOutcome::RejectedNoTransfer { .. }) | None => {
+            Err("input identity is no longer eligible for archive confirmation".into())
+        }
+    }
+}
+
 fn record_input_result(
     entitlement: &mut PayoutEntitlement,
     expected_outcome: crate::payouts::PayoutInputOutcome,
@@ -513,6 +550,17 @@ fn prepare_payout_with_fee(
 /// transfer inside a conservative deduplication window. A proven no-effect
 /// attempt can start a new fee-bound attempt for the same entitlement.
 pub async fn retry_payout_claim(id: u64) -> Result<(), PayoutFailure> {
+    retry_payout_claim_with_fee_cap(id, None).await
+}
+
+/// Recover a payout claim while bounding every transfer fee this retry may
+/// consume.  Rearmed attempts retain the exact source and destination
+/// accounts from the rejected attempt; this is required for caller-owned
+/// escrow subaccounts.  Passing `None` preserves the legacy uncapped policy.
+pub async fn retry_payout_claim_with_fee_cap(
+    id: u64,
+    max_transfer_fee: Option<u128>,
+) -> Result<(), PayoutFailure> {
     let mut entitlement = crate::payouts::get(id).ok_or_else(|| PayoutFailure {
         id,
         reason: "claim has no bound payout identity; held for manual adjudication".into(),
@@ -526,12 +574,24 @@ pub async fn retry_payout_claim(id: u64) -> Result<(), PayoutFailure> {
         reason: "payout journal has no transfer attempt".into(),
         ambiguous: true,
     })?;
+    let fee_within_cap = |fee: u128| fee_is_within_cap(fee, max_transfer_fee);
     match latest.outcome {
         PayoutOutcome::Confirmed { .. } => return Ok(()),
         PayoutOutcome::HeldLegacyUnbound => {
             return Err(PayoutFailure { id, reason: "legacy payout identity is unbound".into(), ambiguous: true });
         }
         PayoutOutcome::Unresolved { .. } | PayoutOutcome::Submitted => {
+            if !fee_within_cap(latest.transfer.fee) {
+                return Err(PayoutFailure {
+                    id,
+                    reason: format!(
+                        "exact payout replay fee {} exceeds caller fee cap {}",
+                        latest.transfer.fee,
+                        max_transfer_fee.expect("fee cap is present when replay is rejected"),
+                    ),
+                    ambiguous: false,
+                });
+            }
             let now = ic_cdk::api::time();
             let age = now.saturating_sub(latest.transfer.created_at_time);
             // ICRC's standard retry window is 24h. Leave margin for clock skew.
@@ -544,6 +604,17 @@ pub async fn retry_payout_claim(id: u64) -> Result<(), PayoutFailure> {
             return execute_payout_attempt(&mut entitlement, latest.number, true).await;
         }
         PayoutOutcome::Prepared => {
+            if !fee_within_cap(latest.transfer.fee) {
+                return Err(PayoutFailure {
+                    id,
+                    reason: format!(
+                        "prepared payout fee {} exceeds caller fee cap {}",
+                        latest.transfer.fee,
+                        max_transfer_fee.expect("fee cap is present when dispatch is rejected"),
+                    ),
+                    ambiguous: false,
+                });
+            }
             return execute_payout_attempt(&mut entitlement, latest.number, false).await;
         }
         PayoutOutcome::RejectedNoTransfer { .. } => {}
@@ -562,7 +633,25 @@ pub async fn retry_payout_claim(id: u64) -> Result<(), PayoutFailure> {
         reason: format!("cannot rearm payout without a verified current fee: {reason}"),
         ambiguous: false,
     })?;
-    let attempt = make_attempt(id, number, entitlement.ledger, entitlement.owner, entitlement.gross, fee);
+    if !fee_within_cap(fee) {
+        return Err(PayoutFailure {
+            id,
+            reason: format!(
+                "rearmed payout fee {fee} exceeds caller fee cap {}",
+                max_transfer_fee.expect("fee cap is present when rearm is rejected"),
+            ),
+            ambiguous: false,
+        });
+    }
+    let attempt = make_attempt_with_accounts(
+        id,
+        number,
+        latest.transfer.ledger,
+        latest.transfer.from.clone(),
+        latest.transfer.to.clone(),
+        entitlement.gross,
+        fee,
+    );
     entitlement.attempts.push(attempt.clone());
     crate::payouts::save(entitlement.clone());
     execute_payout_attempt(&mut entitlement, number, false).await
@@ -576,6 +665,48 @@ fn make_attempt(
     gross: u128,
     fee: u128,
 ) -> PayoutAttempt {
+    make_attempt_with_accounts(
+        id,
+        number,
+        ledger,
+        Account { owner: ic_cdk::id(), subaccount: None },
+        Account { owner, subaccount: None },
+        gross,
+        fee,
+    )
+}
+
+fn make_attempt_with_accounts(
+    id: u64,
+    number: u32,
+    ledger: Principal,
+    from: Account,
+    to: Account,
+    gross: u128,
+    fee: u128,
+) -> PayoutAttempt {
+    make_attempt_with_accounts_at(
+        id,
+        number,
+        ledger,
+        from,
+        to,
+        gross,
+        fee,
+        ic_cdk::api::time(),
+    )
+}
+
+fn make_attempt_with_accounts_at(
+    id: u64,
+    number: u32,
+    ledger: Principal,
+    from: Account,
+    to: Account,
+    gross: u128,
+    fee: u128,
+    created_at_time: u64,
+) -> PayoutAttempt {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     digest.update(b"rumi-3pool-payout-v1");
@@ -586,16 +717,20 @@ fn make_attempt(
         replay_count: 0,
         transfer: PayoutTransfer {
             ledger,
-            from: Account { owner: ic_cdk::id(), subaccount: None },
-            to: Account { owner, subaccount: None },
+            from,
+            to,
             gross,
             net: gross.saturating_sub(fee),
             fee,
             memo: digest.finalize().to_vec(),
-            created_at_time: ic_cdk::api::time(),
+            created_at_time,
         },
         outcome: PayoutOutcome::Prepared,
     }
+}
+
+fn fee_is_within_cap(fee: u128, max_transfer_fee: Option<u128>) -> bool {
+    max_transfer_fee.map_or(true, |cap| fee <= cap)
 }
 
 async fn execute_payout_attempt(
@@ -706,9 +841,10 @@ async fn execute_payout_attempt(
 
 #[cfg(test)]
 mod outcome_merge_tests {
-    use super::{merge_input_outcome, merge_payout_outcome};
+    use super::{fee_is_within_cap, make_attempt_with_accounts_at, merge_input_outcome, merge_payout_outcome};
     use crate::payouts::{PayoutInputOutcome, PayoutOutcome};
-    use candid::Nat;
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc1::account::Account;
 
     #[test]
     fn a_late_confirmed_input_callback_upgrades_unresolved_and_is_never_downgraded() {
@@ -735,5 +871,37 @@ mod outcome_merge_tests {
 
         let late_error = PayoutOutcome::Unresolved { reason: "late error".into() };
         assert_eq!(merge_payout_outcome(&confirmed, late_error), confirmed);
+    }
+
+    #[test]
+    fn fee_cap_rejects_a_changed_fee_before_dispatch() {
+        assert!(fee_is_within_cap(10, Some(10)));
+        assert!(!fee_is_within_cap(11, Some(10)));
+        assert!(fee_is_within_cap(11, None));
+    }
+
+    #[test]
+    fn rearmed_attempt_preserves_escrow_accounts() {
+        let source = Account {
+            owner: Principal::self_authenticating(b"source owner"),
+            subaccount: Some([3; 32]),
+        };
+        let destination = Account {
+            owner: Principal::self_authenticating(b"destination owner"),
+            subaccount: Some([4; 32]),
+        };
+        let attempt = make_attempt_with_accounts_at(
+            91,
+            2,
+            Principal::self_authenticating(b"ledger"),
+            source.clone(),
+            destination.clone(),
+            1_000,
+            7,
+            123_456_789,
+        );
+        assert_eq!(attempt.transfer.from, source);
+        assert_eq!(attempt.transfer.to, destination);
+        assert_eq!(attempt.transfer.fee, 7);
     }
 }

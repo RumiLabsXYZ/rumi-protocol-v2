@@ -198,6 +198,7 @@ pub(crate) fn redemption_candidate_types(state: &crate::state::State) -> Vec<Pri
         if vault.borrowed_icusd_amount == 0
             || vault.bot_processing
             || state.has_unresolved_push_sweep_for_vault(vault.vault_id)
+            || state.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
             || crate::guard::is_vault_liquidating(vault.vault_id)
         {
             continue;
@@ -1796,7 +1797,7 @@ fn check_min_vault_debt_after_repay(
 /// icUSD uses 8 decimals and ckStable uses 6, round the base pull upward so
 /// the transferred principal always covers the debt that will be retired.
 /// The configurable surcharge is then charged on that rounded base amount.
-fn stable_repay_pull_e6s(amount: ICUSD, fee_rate: Ratio) -> Result<(u64, u64, u64), ProtocolError> {
+pub(crate) fn stable_repay_pull_e6s(amount: ICUSD, fee_rate: Ratio) -> Result<(u64, u64, u64), ProtocolError> {
     let amount_e8s = amount.0;
     let base_e6s = (amount_e8s / 100)
         .checked_add(u64::from(amount_e8s % 100 != 0))
@@ -3766,9 +3767,9 @@ fn queue_collateral_payout(
     op_nonce: u128,
     now_ns: u64,
 ) -> Option<u64> {
-    queue_collateral_payout_linked(
+    queue_collateral_payout_linked_with_receipt(
         s, vault_id, custody_owner, recipient, margin, collateral_type, op_nonce, now_ns, None,
-    )
+    ).0
 }
 
 fn queue_collateral_payout_linked(
@@ -3782,24 +3783,76 @@ fn queue_collateral_payout_linked(
     now_ns: u64,
     reserve_ingress_key: Option<crate::state::ThreeUsdReserveIngressKey>,
 ) -> Option<u64> {
+    queue_collateral_payout_linked_with_receipt(
+        s, vault_id, custody_owner, recipient, margin, collateral_type, op_nonce, now_ns,
+        reserve_ingress_key,
+    ).0
+}
+
+/// Queue a payout and return both a native-XRP claim ID and, for ICRC
+/// collateral, the stable operation ID inserted into `pending_payout_index`.
+/// The latter lets the SP journal link its debt commit to one exact payout
+/// receipt without changing the legacy payout API.
+pub(crate) fn queue_collateral_payout_linked_with_receipt(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    custody_owner: Principal,
+    recipient: Principal,
+    margin: ICP,
+    collateral_type: Principal,
+    op_nonce: u128,
+    now_ns: u64,
+    reserve_ingress_key: Option<crate::state::ThreeUsdReserveIngressKey>,
+) -> (Option<u64>, Option<u128>) {
+    queue_collateral_payout_linked_with_receipt_and_fee(
+        s,
+        vault_id,
+        custody_owner,
+        recipient,
+        margin,
+        collateral_type,
+        op_nonce,
+        now_ns,
+        reserve_ingress_key,
+        None,
+    )
+}
+
+/// Queue a payout with an optional caller-pinned ledger fee. Existing routes
+/// use the configured collateral fee; the durable SP rail supplies the fee it
+/// fetched during prepare so a later configuration/cache change cannot alter
+/// its committed payout tuple.
+pub(crate) fn queue_collateral_payout_linked_with_receipt_and_fee(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    custody_owner: Principal,
+    recipient: Principal,
+    margin: ICP,
+    collateral_type: Principal,
+    op_nonce: u128,
+    now_ns: u64,
+    reserve_ingress_key: Option<crate::state::ThreeUsdReserveIngressKey>,
+    fee_override: Option<u64>,
+) -> (Option<u64>, Option<u128>) {
     let is_xrp = s
         .get_collateral_config(&collateral_type)
         .map(|c| c.is_native_xrp())
         .unwrap_or(false);
     if is_xrp {
-        Some(record_xrp_claim(
+        (Some(record_xrp_claim(
             s,
             recipient,
             custody_owner,
             vault_id,
             margin.to_u64(),
             now_ns,
-        ))
+        )), None)
     } else {
-        let (ledger, fee) = s
+        let (ledger, configured_fee) = s
             .get_collateral_config(&collateral_type)
             .map(|config| (config.ledger_canister_id, config.ledger_fee))
             .unwrap_or((s.icp_ledger_principal, s.icp_ledger_fee.to_u64()));
+        let fee = fee_override.unwrap_or(configured_fee);
         let transfer_amount_raw = margin.to_u64().checked_sub(fee);
         let mut operation_id = op_nonce;
         while operation_id == 0
@@ -3862,7 +3915,249 @@ fn queue_collateral_payout_linked(
                 min_net_collateral_raw: None,
             },
         );
-        None
+        (None, Some(operation_id))
+    }
+}
+
+/// Build the same liquidatability/cap/dust/bonus quote used by the ordinary
+/// partial liquidation paths. The caller supplies the already fetched payment
+/// fee so this function remains pure and can be persisted before any pull.
+pub(crate) fn quote_sp_liquidation(
+    state: &crate::state::State,
+    vault_id: u64,
+    requested: ICUSD,
+) -> Result<crate::sp_liquidation::SpLiquidationQuote, String> {
+    if requested == ICUSD::new(0) {
+        return Err("Cannot liquidate zero amount".into());
+    }
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| format!("Vault #{vault_id} not found"))?;
+    if vault.bot_processing {
+        return Err(format!("Vault #{vault_id} is locked — bot liquidation in progress"));
+    }
+    let config = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| "Collateral configuration is missing".to_string())?;
+    if config.is_native_xrp() {
+        return Err("Native-XRP collateral uses the claim-based SP rail".into());
+    }
+    if !config.status.allows_liquidation() {
+        return Err("Liquidation is not allowed for this collateral type".into());
+    }
+    let price = state
+        .get_collateral_price_decimal(&vault.collateral_type)
+        .ok_or_else(|| "No price available for collateral".to_string())?;
+    let collateral_price_usd = UsdIcp::from(price);
+    let ratio = compute_collateral_ratio(vault, collateral_price_usd, state);
+    let min_ratio = state.get_min_liquidation_ratio_for(&vault.collateral_type);
+    if ratio >= min_ratio {
+        return Err(format!(
+            "Vault #{vault_id} is not liquidatable. Current ratio: {}, minimum: {}",
+            ratio.to_f64(),
+            min_ratio.to_f64()
+        ));
+    }
+    let debt = state.effective_liquidation_amount(vault, collateral_price_usd, Some(requested));
+    if debt == ICUSD::new(0) {
+        return Err("No liquidatable debt available".into());
+    }
+    let liq_bonus = state.get_liquidation_bonus_for(&vault.collateral_type);
+    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+        debt,
+        price,
+        config.decimals,
+    );
+    let collateral_gross = crate::numeric::collateral_with_bonus_capped(
+        collateral_raw,
+        liq_bonus,
+        vault.collateral_amount,
+    );
+    let bonus_portion = collateral_gross.saturating_sub(collateral_raw);
+    let protocol_cut = (Decimal::from(bonus_portion) * state.get_liquidation_protocol_share().0)
+        .to_u64()
+        .unwrap_or(0)
+        .min(collateral_gross);
+    let collateral_net = collateral_gross.saturating_sub(protocol_cut);
+    if collateral_net <= config.ledger_fee {
+        return Err("Liquidation collateral cannot cover the configured payout fee".into());
+    }
+    let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+        let share = crate::numeric::checked_proportional_amount(
+            debt.0,
+            vault.borrowed_icusd_amount.0,
+            vault.accrued_interest.0,
+        )
+        .unwrap_or(0);
+        share.min(vault.accrued_interest.0)
+    } else {
+        0
+    };
+    if debt.to_u64() < state.min_icusd_amount.to_u64()
+        && debt != vault.borrowed_icusd_amount
+    {
+        return Err(format!(
+            "Liquidation amount is below the minimum of {}",
+            state.min_icusd_amount.to_u64()
+        ));
+    }
+    Ok(crate::sp_liquidation::SpLiquidationQuote {
+        vault_id,
+        collateral_type: vault.collateral_type,
+        collateral_ledger: config.ledger_canister_id,
+        collateral_decimals: config.decimals,
+        collateral_price: price,
+        collateral_price_e8s: UsdIcp::from(price).to_e8s(),
+        collateral_price_usd,
+        collateral_ledger_fee_raw: config.ledger_fee,
+        debt_e8s: debt.to_u64(),
+        collateral_gross_raw: collateral_gross,
+        collateral_net_raw: collateral_net,
+        protocol_cut_raw: protocol_cut,
+        interest_share_e8s: interest_share,
+    })
+}
+
+/// Apply the economic state transition for a prepared SP payment. This is the
+/// shared accounting seam used by the durable rail; all external awaits happen
+/// before or after this function, while the debt result and payout operation ID
+/// are committed together.
+pub(crate) fn apply_sp_liquidation_in_state(
+    state: &mut crate::state::State,
+    quote: &crate::sp_liquidation::SpLiquidationQuote,
+    caller: Principal,
+    payment_block_index: u64,
+) -> Result<crate::sp_liquidation::SpLiquidationApplied, String> {
+    let vault_snapshot = state
+        .vault_id_to_vaults
+        .get(&quote.vault_id)
+        .cloned()
+        .ok_or_else(|| format!("Vault #{} disappeared before debt commit", quote.vault_id))?;
+    if vault_snapshot.collateral_type != quote.collateral_type
+        || vault_snapshot.borrowed_icusd_amount.to_u64() < quote.debt_e8s
+        || vault_snapshot.collateral_amount < quote.collateral_gross_raw
+    {
+        return Err("Prepared liquidation quote no longer matches the reserved vault".into());
+    }
+    let debt = ICUSD::new(quote.debt_e8s);
+    let collateral = quote.collateral_gross_raw;
+    // The prepare quote's interest preview can be stale after a harvest. Use
+    // the current vault snapshot at the synchronous debt commit and persist
+    // this applied share with the journal; post-accounting distributes only
+    // this value, so a reply loss cannot mint the frozen preview twice.
+    let interest_share_e8s = sp_current_interest_share(
+        quote.debt_e8s,
+        vault_snapshot.borrowed_icusd_amount.0,
+        vault_snapshot.accrued_interest.0,
+    );
+    let interest = ICUSD::new(interest_share_e8s);
+    if let Some(vault) = state.vault_id_to_vaults.get_mut(&quote.vault_id) {
+        vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt);
+        vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral);
+        vault.accrued_interest = vault.accrued_interest.saturating_sub(interest);
+    }
+    crate::event::record_liquidation_for_breaker(state, quote.debt_e8s);
+    let seized_usd = crate::numeric::collateral_usd_value(
+        collateral,
+        quote.collateral_price,
+        quote.collateral_decimals,
+    );
+    if seized_usd < debt {
+        let shortfall = debt - seized_usd;
+        crate::event::record_deficit_accrued(
+            state,
+            crate::event::DeficitSource::Liquidation { vault_id: quote.vault_id },
+            shortfall,
+            ic_cdk::api::time(),
+        );
+        let _ = state.check_deficit_readonly_latch();
+    }
+    crate::storage::record_event(&crate::event::Event::PartialLiquidateVault {
+        vault_id: quote.vault_id,
+        liquidator_payment: debt,
+        icp_to_liquidator: ICP::new(quote.collateral_net_raw),
+        liquidator: Some(caller),
+        icp_rate: Some(quote.collateral_price_usd),
+        protocol_fee_collateral: (quote.protocol_cut_raw > 0).then_some(quote.protocol_cut_raw),
+        ledger_fee_collateral: None,
+        timestamp: Some(ic_cdk::api::time()),
+        three_usd_reserves_e8s: None,
+    });
+    let payout_nonce = state.next_op_nonce();
+    let (xrp_claim_id, payout_operation_id) = queue_collateral_payout_linked_with_receipt_and_fee(
+        state,
+        quote.vault_id,
+        vault_snapshot.owner,
+        caller,
+        ICP::new(quote.collateral_net_raw),
+        quote.collateral_type,
+        payout_nonce,
+        ic_cdk::api::time(),
+        None,
+        Some(quote.collateral_ledger_fee_raw),
+    );
+    let drained = state.cleanup_if_drained(quote.vault_id);
+    let payout = payout_operation_id.and_then(|operation_id| {
+        state.get_pending_payout(operation_id).map(|(_, row)| {
+            (
+                operation_id,
+                row.ledger.unwrap_or(Principal::anonymous()),
+                row.margin.to_u64(),
+                row.transfer_amount_raw.unwrap_or(0),
+                row.margin.to_u64().saturating_sub(row.transfer_amount_raw.unwrap_or(0)),
+                row.op_nonce,
+            )
+        })
+    });
+    Ok(crate::sp_liquidation::SpLiquidationApplied {
+        debt_e8s: quote.debt_e8s,
+        interest_share_e8s: interest_share_e8s,
+        collateral_gross_raw: quote.collateral_gross_raw,
+        collateral_net_raw: quote.collateral_net_raw,
+        protocol_cut_raw: quote.protocol_cut_raw,
+        payout,
+        xrp_claim_id,
+        drained,
+        payment_block_index,
+    })
+}
+
+/// Compute the interest leg from the current vault snapshot at the debt
+/// commit boundary. This deliberately does not accept the prepared preview:
+/// harvests can move that preview into the pending pool while new interest
+/// accrues on the remaining live debt.
+pub(crate) fn sp_current_interest_share(
+    debt_e8s: u64,
+    borrowed_e8s: u64,
+    accrued_interest_e8s: u64,
+) -> u64 {
+    if accrued_interest_e8s == 0 || borrowed_e8s == 0 {
+        return 0;
+    }
+    crate::numeric::checked_proportional_amount(
+        debt_e8s,
+        borrowed_e8s,
+        accrued_interest_e8s,
+    )
+    .unwrap_or(0)
+    .min(accrued_interest_e8s)
+}
+
+#[cfg(test)]
+mod sp_current_interest_share_tests {
+    use super::sp_current_interest_share;
+
+    #[test]
+    fn harvest_snapshot_is_not_reminted_and_new_accrual_is_proportional() {
+        // The prepared quote saw 100 e8s, then harvest moved it to the
+        // pending pool and zeroed the vault. A commit against that snapshot
+        // must not distribute the old preview again.
+        assert_eq!(sp_current_interest_share(1_000, 1_000, 0), 0);
+        // New interest accrued after the harvest is the only amount eligible
+        // for this liquidation's treasury leg.
+        assert_eq!(sp_current_interest_share(500, 1_000, 100), 50);
+        assert_eq!(sp_current_interest_share(2_000, 1_000, 100), 100);
     }
 }
 
@@ -4049,7 +4344,9 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
             "SP writedown path is disabled by admin".to_string(),
         ));
     }
-    if crate::guard::is_vault_liquidating(vault_id) {
+    if state.has_unresolved_sp_liquidation_for_vault(vault_id)
+        || crate::guard::is_vault_liquidating(vault_id)
+    {
         return Err(ProtocolError::TemporarilyUnavailable(format!(
             "Vault #{vault_id} has another operation in flight; retry shortly"
         )));
