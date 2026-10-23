@@ -2528,6 +2528,11 @@ service : (ProtocolArg) -> {
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result_1);
   stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_39);
   stability_pool_prepare_liquidation : (SpLiquidationRequest) -> (Result_35);
+  stability_pool_reconcile_liquidation_payment : (blob, nat64) -> (Result_35);
+  stability_pool_reconcile_liquidation_payout : (blob, nat64) -> (Result_35);
+  stability_pool_reconcile_liquidation_protocol_fee : (blob, nat64) -> (
+      Result_35,
+    );
   stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_28);
   stability_pool_settle_xrp_claim : (nat64, principal, text, opt nat32) -> (
       Result_2,

@@ -433,6 +433,10 @@ def additive_projection(baseline: str, current: str, method_names: list[str],
                         preserve_intentional_inputs: bool = False) -> tuple[str, list[str], list[str], bool]:
     """Build one compatibility service with additive and intentional drift methods."""
     baseline_methods = service_methods(baseline)
+    # A published baseline may already contain an earlier additive projection.
+    # Keep its aliases stable and choose a fresh namespace for this addition.
+    while any(name.startswith(prefix) for name in type_blocks(baseline)):
+        prefix = prefix.rstrip("_") + "Next_"
     new_methods = [name for name in method_names if name not in baseline_methods]
     types, methods = graph_components(current, new_methods, prefix)
     intentional_input_drift = False
@@ -480,6 +484,19 @@ def additive_projection(baseline: str, current: str, method_names: list[str],
     pieces.append(service_body + suffix)
     return ("\n".join(piece for piece in pieces if piece) + "\n",
             new_methods, intentional_drift, intentional_input_drift)
+
+
+def repeated_projection_regression() -> None:
+    baseline = 'type Item = nat;\nservice : { old : () -> (Item) query; };\n'
+    current = ('type Item = nat;\ntype Problem = variant { Missing };\n'
+               'service : { old : () -> (Item) query; '
+               'first : (Item) -> (variant { Ok : Item; Err : Problem }); '
+               'second : (Item) -> (variant { Ok : Item; Err : Problem }); };\n')
+    first, *_ = additive_projection(baseline, current, ["first"], "Rail_", [])
+    second, *_ = additive_projection(first, current, ["first", "second"], "Rail_", [])
+    names = TYPE_START.findall(second)
+    if len(names) != len(set(names)) or set(service_methods(second)) != {"old", "first", "second"}:
+        raise InterfaceError("repeated additive projection reused a published alias")
 
 
 def replace_module_paths(source: Path, text: str) -> tuple[str, list[Path]]:
@@ -923,6 +940,7 @@ def main() -> int:
     failure = None
     try:
         rename_regressions = rename_tokens_regressions()
+        repeated_projection_regression()
         for kind in RAIL_SPECS:
             results.append(process_kind(root, evidence, didc, cargo, kind, args.capture,
                                        target_dir, baseline_backend if kind == "backend" else None))

@@ -3374,6 +3374,21 @@ export const idlFactory = ({ IDL }) => {
         [Result_35],
         [],
       ),
+    'stability_pool_reconcile_liquidation_payment' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat64],
+        [Result_35],
+        [],
+      ),
+    'stability_pool_reconcile_liquidation_payout' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat64],
+        [Result_35],
+        [],
+      ),
+    'stability_pool_reconcile_liquidation_protocol_fee' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat64],
+        [Result_35],
+        [],
+      ),
     'stability_pool_release_xrp_absorb_preflight' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result_28],

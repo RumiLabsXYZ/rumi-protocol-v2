@@ -2967,6 +2967,18 @@ export interface _SERVICE {
     [SpLiquidationRequest],
     Result_35
   >,
+  'stability_pool_reconcile_liquidation_payment' : ActorMethod<
+    [Uint8Array | number[], bigint],
+    Result_35
+  >,
+  'stability_pool_reconcile_liquidation_payout' : ActorMethod<
+    [Uint8Array | number[], bigint],
+    Result_35
+  >,
+  'stability_pool_reconcile_liquidation_protocol_fee' : ActorMethod<
+    [Uint8Array | number[], bigint],
+    Result_35
+  >,
   'stability_pool_release_xrp_absorb_preflight' : ActorMethod<
     [bigint, bigint],
     Result_28

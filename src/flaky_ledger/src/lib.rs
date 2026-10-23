@@ -459,6 +459,15 @@ fn icrc1_balance_of(account: Account) -> Nat {
 }
 
 #[query]
+fn icrc1_total_supply() -> Nat {
+    STATE.with(|s| {
+        s.borrow().balances.values().fold(Nat::from(0u64), |total, amount| {
+            total + Nat::from(*amount)
+        })
+    })
+}
+
+#[query]
 fn icrc1_fee() -> Nat {
     STATE.with(|s| {
         let state = s.borrow();

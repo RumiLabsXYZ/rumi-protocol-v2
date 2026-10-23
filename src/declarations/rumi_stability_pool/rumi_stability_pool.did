@@ -815,6 +815,69 @@ type SpRailWire_IntentionalDrift_LiquidationResult = record {
   success : bool;
   collateral_type : principal;
 };
+type SpRailWireNext_ConversionError = variant {
+  EmergencyPaused;
+  CapacityExceeded;
+  SequenceExhausted;
+  NonZeroFeeBudgetRequired : record {
+    minimum_budget_raw : nat64;
+    fee_raw : nat64;
+  };
+  TokenNotActive : record { ledger : principal };
+  IntentConflict;
+  SequenceMismatch : record { expected_seq : nat64 };
+  NotFound;
+  AmountTooLow : record { minimum_e8s : nat64 };
+  Unauthorized;
+  InvalidRequest : record { reason : text };
+  LpTokenUnavailable;
+  ActiveIntent : record { intent_seq : nat64 };
+  CannotCancel;
+  SystemBusy;
+  TokenNotAccepted : record { ledger : principal };
+};
+type SpRailWireNext_ConversionPhase = variant {
+  Refunding;
+  Revoking;
+  Reserved;
+  Refunded;
+  Pulling;
+  Rejected;
+  Approving;
+  PoolCall;
+  CreditPending;
+  Completed;
+};
+type SpRailWireNext_ConversionStatus = variant {
+  Refunded : record {
+    refunded_raw : nat64;
+    retained_dust_raw : nat64;
+    intent_seq : nat64;
+  };
+  Rejected : record { intent_seq : nat64; reason : text };
+  Completed : record {
+    uncredited_lp : opt nat;
+    retained_dust_raw : nat64;
+    lp_credited : bool;
+    lp_minted : nat;
+    intent_seq : nat64;
+  };
+  Pending : record {
+    phase : SpRailWireNext_ConversionPhase;
+    intent_seq : nat64;
+    reason : opt text;
+  };
+};
+type SpRailWireNext_Result_4 = variant { Ok : SpRailWireNext_ConversionStatus; Err : SpRailWireNext_ConversionError };
+type SpRailWireNext_IntentionalDrift_LiquidationResult = record {
+  admitted : opt bool;
+  error_message : opt text;
+  stables_consumed : vec record { principal; nat64 };
+  vault_id : nat64;
+  collateral_gained : nat64;
+  success : bool;
+  collateral_type : principal;
+};
 service : (StabilityPoolInitArgs) -> {
 
   // ── Deposit / Withdraw / Claim ──
@@ -929,5 +992,8 @@ cancel_ordinary_liquidation : (blob) -> (SpRailWire_Result_5);
 reconcile_3usd_conversion_pool_input_v1 : (nat64, nat8, nat64) -> (SpRailWire_Result_4);
 reconcile_ordinary_liquidation_approval : (blob, nat64) -> (SpRailWire_Result_5);
 admin_acknowledge_three_usd_reserve_v2_client : () -> (SpRailWire_Result);
+reconcile_3usd_conversion_approval_v1 : (nat64, nat64) -> (SpRailWireNext_Result_4);
+reconcile_3usd_conversion_revoke_v1 : (nat64, nat64) -> (SpRailWireNext_Result_4);
+reconcile_3usd_conversion_refund_v1 : (nat64, nat64) -> (SpRailWireNext_Result_4);
 notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec SpRailWire_IntentionalDrift_LiquidationResult);
 execute_liquidation : (nat64) -> (variant { Ok : SpRailWire_IntentionalDrift_LiquidationResult; Err : StabilityPoolError });};

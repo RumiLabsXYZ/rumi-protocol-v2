@@ -435,6 +435,74 @@ export interface PoolLiquidationRecord {
 }
 export type SpProofLedger = { 'IcusdBurn' : null } |
   { 'ThreePoolTransfer' : null };
+export type SpRailWireNext_ConversionError = { 'EmergencyPaused' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'SequenceExhausted' : null } |
+  {
+    'NonZeroFeeBudgetRequired' : {
+      'minimum_budget_raw' : bigint,
+      'fee_raw' : bigint,
+    }
+  } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  { 'IntentConflict' : null } |
+  { 'SequenceMismatch' : { 'expected_seq' : bigint } } |
+  { 'NotFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : { 'reason' : string } } |
+  { 'LpTokenUnavailable' : null } |
+  { 'ActiveIntent' : { 'intent_seq' : bigint } } |
+  { 'CannotCancel' : null } |
+  { 'SystemBusy' : null } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } };
+export type SpRailWireNext_ConversionPhase = { 'Refunding' : null } |
+  { 'Revoking' : null } |
+  { 'Reserved' : null } |
+  { 'Refunded' : null } |
+  { 'Pulling' : null } |
+  { 'Rejected' : null } |
+  { 'Approving' : null } |
+  { 'PoolCall' : null } |
+  { 'CreditPending' : null } |
+  { 'Completed' : null };
+export type SpRailWireNext_ConversionStatus = {
+    'Refunded' : {
+      'refunded_raw' : bigint,
+      'retained_dust_raw' : bigint,
+      'intent_seq' : bigint,
+    }
+  } |
+  { 'Rejected' : { 'intent_seq' : bigint, 'reason' : string } } |
+  {
+    'Completed' : {
+      'uncredited_lp' : [] | [bigint],
+      'retained_dust_raw' : bigint,
+      'lp_credited' : boolean,
+      'lp_minted' : bigint,
+      'intent_seq' : bigint,
+    }
+  } |
+  {
+    'Pending' : {
+      'phase' : SpRailWireNext_ConversionPhase,
+      'intent_seq' : bigint,
+      'reason' : [] | [string],
+    }
+  };
+export interface SpRailWireNext_IntentionalDrift_LiquidationResult {
+  'admitted' : [] | [boolean],
+  'error_message' : [] | [string],
+  'stables_consumed' : Array<[Principal, bigint]>,
+  'vault_id' : bigint,
+  'collateral_gained' : bigint,
+  'success' : boolean,
+  'collateral_type' : Principal,
+}
+export type SpRailWireNext_Result_4 = {
+    'Ok' : SpRailWireNext_ConversionStatus
+  } |
+  { 'Err' : SpRailWireNext_ConversionError };
 export interface SpRailWire_Account {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
@@ -1039,6 +1107,10 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'reconcile_3usd_conversion_approval_v1' : ActorMethod<
+    [bigint, bigint],
+    SpRailWireNext_Result_4
+  >,
   'reconcile_3usd_conversion_pool_input_v1' : ActorMethod<
     [bigint, number, bigint],
     SpRailWire_Result_4
@@ -1046,6 +1118,14 @@ export interface _SERVICE {
   'reconcile_3usd_conversion_pull_v1' : ActorMethod<
     [bigint, bigint],
     SpRailWire_Result_4
+  >,
+  'reconcile_3usd_conversion_refund_v1' : ActorMethod<
+    [bigint, bigint],
+    SpRailWireNext_Result_4
+  >,
+  'reconcile_3usd_conversion_revoke_v1' : ActorMethod<
+    [bigint, bigint],
+    SpRailWireNext_Result_4
   >,
   'reconcile_collateral_claim' : ActorMethod<
     [Principal, Principal, bigint],

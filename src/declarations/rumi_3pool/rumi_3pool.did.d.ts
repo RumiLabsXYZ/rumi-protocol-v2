@@ -512,6 +512,92 @@ export interface ThreePoolPendingClaim {
   'symbol' : string,
   'reason' : string,
 }
+export interface ThreepoolRailWireNext_Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
+export interface ThreepoolRailWireNext_AddLiquidityRequestV1 {
+  'source_subaccount' : [] | [Uint8Array | number[]],
+  'min_lp' : bigint,
+  'amounts' : Array<bigint>,
+  'max_transfer_fee' : [] | [bigint],
+  'intent_id' : Uint8Array | number[],
+}
+export type ThreepoolRailWireNext_LiquidityLegStatusV1 = { 'Skipped' : null } |
+  { 'Refunded' : null } |
+  { 'Confirmed' : { 'block' : bigint } } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : { 'reason' : string } } |
+  { 'RejectedNoTransfer' : { 'reason' : string } } |
+  { 'Submitted' : null };
+export type ThreepoolRailWireNext_LiquidityReceiptErrorV1 = {
+    'RecoveryRequired' : null
+  } |
+  { 'Concurrent' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'IntentConflict' : null } |
+  { 'NotFound' : null } |
+  { 'PoolLocked' : null } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : null } |
+  { 'InvalidIntentId' : null };
+export type ThreepoolRailWireNext_LiquidityReceiptStatusV1 = {
+    'Refunded' : null
+  } |
+  { 'RecoveryPending' : null } |
+  { 'Executing' : null } |
+  { 'Prepared' : null } |
+  { 'Rejected' : null } |
+  { 'Completed' : null };
+export interface ThreepoolRailWireNext_LiquidityReceiptV1 {
+  'status' : ThreepoolRailWireNext_LiquidityReceiptStatusV1,
+  'balances_after' : [] | [Array<bigint>],
+  'old_caller_lp' : [] | [bigint],
+  'imbalance_after' : [] | [bigint],
+  'input_ids' : Array<[] | [bigint]>,
+  'refund_transfers' : Array<[] | [ThreepoolRailWireNext_PayoutTransfer]>,
+  'is_rebalancing' : [] | [boolean],
+  'mint_event_id' : [] | [bigint],
+  'owner' : Principal,
+  'old_balances' : [] | [Array<bigint>],
+  'input_status' : Array<[] | [ThreepoolRailWireNext_LiquidityLegStatusV1]>,
+  'request' : ThreepoolRailWireNext_AddLiquidityRequestV1,
+  'input_transfers' : Array<[] | [ThreepoolRailWireNext_PayoutInputTransfer]>,
+  'fee_bps' : [] | [number],
+  'error' : [] | [string],
+  'imbalance_before' : [] | [bigint],
+  'refund_ids' : Array<[] | [bigint]>,
+  'version' : number,
+  'compensation_started' : boolean,
+  'lp_supply_after' : [] | [bigint],
+  'refund_status' : Array<[] | [ThreepoolRailWireNext_LiquidityLegStatusV1]>,
+  'caller_lp_after' : [] | [bigint],
+  'old_lp_supply' : [] | [bigint],
+  'lp_minted' : [] | [bigint],
+}
+export interface ThreepoolRailWireNext_PayoutInputTransfer {
+  'to' : ThreepoolRailWireNext_Account,
+  'fee' : [] | [bigint],
+  'from' : ThreepoolRailWireNext_Account,
+  'memo' : [] | [Uint8Array | number[]],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
+export interface ThreepoolRailWireNext_PayoutTransfer {
+  'to' : ThreepoolRailWireNext_Account,
+  'fee' : bigint,
+  'net' : bigint,
+  'from' : ThreepoolRailWireNext_Account,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'gross' : bigint,
+  'created_at_time' : bigint,
+}
+export type ThreepoolRailWireNext_Result_2 = {
+    'Ok' : ThreepoolRailWireNext_LiquidityReceiptV1
+  } |
+  { 'Err' : ThreepoolRailWireNext_LiquidityReceiptErrorV1 };
 export interface ThreepoolRailWire_Account {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
@@ -705,6 +791,10 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'get_active_liquidity_receipt_v1' : ActorMethod<
+    [],
+    [] | [[Principal, Uint8Array | number[]]]
+  >,
   'get_admin_event_count' : ActorMethod<[], bigint>,
   'get_admin_events' : ActorMethod<
     [bigint, bigint],
@@ -870,9 +960,21 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'reconcile_liquidity_receipt_input_for_v1' : ActorMethod<
+    [Principal, Uint8Array | number[], number, bigint],
+    ThreepoolRailWireNext_Result_2
+  >,
   'reconcile_liquidity_receipt_input_v1' : ActorMethod<
     [Uint8Array | number[], number, bigint],
     ThreepoolRailWire_Result_2
+  >,
+  'reconcile_liquidity_receipt_refund_for_v1' : ActorMethod<
+    [Principal, Uint8Array | number[], number, bigint],
+    ThreepoolRailWireNext_Result_2
+  >,
+  'recover_liquidity_receipt_for_v1' : ActorMethod<
+    [Principal, Uint8Array | number[]],
+    ThreepoolRailWireNext_Result_2
   >,
   'recover_liquidity_receipt_v1' : ActorMethod<
     [Uint8Array | number[]],
