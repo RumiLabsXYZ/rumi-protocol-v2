@@ -109,6 +109,27 @@ describe('stability pool conversion recovery boundaries', () => {
     expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledOnce();
   });
 
+  it('replays the same cached start request after authenticated NotFound recovery', async () => {
+    mocks.poolActor.start_3usd_conversion
+      .mockRejectedValueOnce(new Error('transport before acceptance'))
+      .mockResolvedValueOnce(pendingStatus(1n));
+    mocks.poolActor.get_3usd_conversion_status.mockResolvedValueOnce({ Err: { NotFound: null } });
+    const status = await convertStabilityPoolStableTo3Usd(quote(), 980100n, context());
+    expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+    expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledTimes(2);
+    expect(mocks.poolActor.start_3usd_conversion.mock.calls[1][0]).toEqual(mocks.poolActor.start_3usd_conversion.mock.calls[0][0]);
+    expect(mocks.poolActor.start_3usd_conversion.mock.calls[1][0].intent_seq).toBe(1n);
+    expect(readPendingStabilityPoolConversion(mocks.ownerText)).toMatchObject({ intentSeq: '1', stage: 'start-submitted' });
+  });
+
+  it('does not duplicate an accepted start when status proves it is still pending', async () => {
+    mocks.poolActor.start_3usd_conversion.mockRejectedValueOnce(new Error('accepted reply lost'));
+    mocks.poolActor.get_3usd_conversion_status.mockResolvedValueOnce(pendingStatus(1n));
+    const status = await convertStabilityPoolStableTo3Usd(quote(), 980100n, context());
+    expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+    expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledOnce();
+  });
+
   it('retains the exact wallet approval tuple when its reply is lost', async () => {
     mocks.ledgerActor.icrc2_approve.mockRejectedValueOnce(new Error('approval transport timeout'));
     await expect(convertStabilityPoolStableTo3Usd(quote(), 980100n, context())).rejects.toThrow(/approval transport timeout/i);
@@ -127,6 +148,24 @@ describe('stability pool conversion recovery boundaries', () => {
     expect(args.memo).toHaveLength(1);
     expect(args.memo[0]).toBeInstanceOf(Uint8Array);
     expect(args.memo[0]).toHaveLength(32);
+  });
+
+  it('acknowledges only an authenticated duplicate for the exact approval tuple', async () => {
+    mocks.ledgerActor.icrc2_approve.mockResolvedValueOnce({ Err: { Duplicate: { duplicate_of: 12_345n } } });
+    mocks.poolActor.start_3usd_conversion.mockResolvedValueOnce(pendingStatus(1n));
+    const status = await convertStabilityPoolStableTo3Usd(quote(), 980100n, context());
+    expect('Pending' in (status as StabilityPoolConversionStatus)).toBe(true);
+    expect(mocks.ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
+    expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledOnce();
+    const args = mocks.ledgerActor.icrc2_approve.mock.calls[0][0];
+    expect(args.fee).toEqual([10n]);
+    expect(args.amount).toBe(1_000_060n);
+    expect(args.memo[0]).toBeInstanceOf(Uint8Array);
+    expect(readPendingStabilityPoolConversion(mocks.ownerText)).toMatchObject({
+      stage: 'start-submitted',
+      approvalFeeRaw: '10',
+      approvalAmountRaw: '1000060',
+    });
   });
 
   it('resumes a retained request without allocating a new sequence or approving again', async () => {
@@ -148,6 +187,17 @@ describe('stability pool conversion recovery boundaries', () => {
     await expect(convertStabilityPoolStableTo3Usd(quote(), 980100n, captured)).rejects.toThrow(/wallet session changed/i);
     expect(mocks.poolActor.start_3usd_conversion).not.toHaveBeenCalled();
     expect(mocks.ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+  });
+
+  it('does not replay after the wallet changes during authenticated recovery lookup', async () => {
+    mocks.poolActor.start_3usd_conversion.mockRejectedValueOnce(new Error('transport before acceptance'));
+    mocks.poolActor.get_3usd_conversion_status.mockImplementationOnce(async () => {
+      mocks.wallet.principal = Principal.fromText(mocks.otherOwnerText);
+      return { Err: { NotFound: null } };
+    });
+    await expect(convertStabilityPoolStableTo3Usd(quote(), 980100n, context())).rejects.toThrow(/exact request/i);
+    expect(mocks.poolActor.start_3usd_conversion).toHaveBeenCalledOnce();
+    expect(mocks.ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
   });
 
   it('binds an active request discovered on another device and resumes it', async () => {

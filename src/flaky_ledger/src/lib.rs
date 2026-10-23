@@ -136,10 +136,56 @@ struct DedupKey {
     created_at_time: u64,
 }
 
+/// ICRC-2 approval deduplication keeps the full request identity.  In
+/// particular, `expected_allowance` and `expires_at` are part of the tuple;
+/// an approval with the same amount but a different CAS or expiry is a new
+/// request and must never be reported as a duplicate.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ApproveDedupKey {
+    caller: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    spender: Account,
+    amount: u128,
+    expected_allowance: Option<u128>,
+    expires_at: Option<u64>,
+    fee: Option<u128>,
+    memo: Option<Vec<u8>>,
+    created_at_time: u64,
+}
+
+#[derive(Clone, Debug)]
+struct AllowanceEntry {
+    amount: u128,
+    expires_at: Option<u64>,
+}
+
+const TRANSACTION_WINDOW_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+const PERMITTED_DRIFT_NS: u64 = 60 * 1_000_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DedupWindowReject {
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+}
+
+fn check_dedup_window(created_at_time: u64, now: u64) -> Result<(), DedupWindowReject> {
+    if created_at_time
+        .saturating_add(TRANSACTION_WINDOW_NS)
+        .saturating_add(PERMITTED_DRIFT_NS)
+        < now
+    {
+        return Err(DedupWindowReject::TooOld);
+    }
+    if created_at_time > now.saturating_add(PERMITTED_DRIFT_NS) {
+        return Err(DedupWindowReject::CreatedInFuture { ledger_time: now });
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct LedgerState {
     balances: BTreeMap<Account, u128>,
-    allowances: BTreeMap<(Account, Account), u128>,
+    allowances: BTreeMap<(Account, Account), AllowanceEntry>,
     block_index: u64,
     /// ICRC-3 history is passive test evidence. Every successful ledger
     /// operation appends exactly one block at its normal zero-based index.
@@ -189,6 +235,8 @@ struct LedgerState {
     bad_fee_after_transfer_from_pending: bool,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
     dedup: BTreeMap<DedupKey, u64>,
+    /// Recent approvals keyed by their complete ICRC-2 request tuple.
+    approve_dedup: BTreeMap<ApproveDedupKey, u64>,
     /// When set, icrc1_transfer rejects with GenericError if the caller
     /// matches. Used by audit_pocs_bot_002 to fail the bot's outbound
     /// return-collateral transfer without breaking the protocol's bot_claim
@@ -220,6 +268,35 @@ fn take_too_old_after_phantom_mint(state: &mut LedgerState, key: &DedupKey, dupl
     } else {
         false
     }
+}
+
+fn effective_allowance(entry: &AllowanceEntry, now: u64) -> u128 {
+    if entry.expires_at.is_some_and(|expires_at| expires_at < now) {
+        0
+    } else {
+        entry.amount
+    }
+}
+
+fn check_approve_dedup(
+    state: &LedgerState,
+    key: &ApproveDedupKey,
+    now: u64,
+) -> Result<(), ApproveError> {
+    if let Err(reject) = check_dedup_window(key.created_at_time, now) {
+        return Err(match reject {
+            DedupWindowReject::TooOld => ApproveError::TooOld,
+            DedupWindowReject::CreatedInFuture { ledger_time } => {
+                ApproveError::CreatedInFuture { ledger_time }
+            }
+        });
+    }
+    if let Some(prev_block) = state.approve_dedup.get(key).copied() {
+        return Err(ApproveError::Duplicate {
+            duplicate_of: Nat::from(prev_block),
+        });
+    }
+    Ok(())
 }
 
 fn account_key(owner: Principal, subaccount: Option<[u8; 32]>) -> Account {
@@ -292,12 +369,37 @@ fn transfer_block(
     ICRC3Value::Map(block)
 }
 
-fn approve_block(from: &Account, spender: &Account, amount: u128) -> ICRC3Value {
+fn approve_block(
+    from: &Account,
+    spender: &Account,
+    amount: u128,
+    fee: u128,
+    memo: Option<&[u8]>,
+    created_at_time: Option<u64>,
+    expires_at: Option<u64>,
+    expected_allowance: Option<u128>,
+) -> ICRC3Value {
     let mut tx = ICRC3Map::new();
     tx.insert("op".into(), ICRC3Value::Text("approve".into()));
     tx.insert("from".into(), account_value(from));
     tx.insert("spender".into(), account_value(spender));
     tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(amount)));
+    tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(fee)));
+    if let Some(memo) = memo {
+        tx.insert("memo".into(), ICRC3Value::Blob(memo.to_vec().into()));
+    }
+    if let Some(created_at_time) = created_at_time {
+        tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(created_at_time)));
+    }
+    if let Some(expires_at) = expires_at {
+        tx.insert("expires_at".into(), ICRC3Value::Nat(Nat::from(expires_at)));
+    }
+    if let Some(expected_allowance) = expected_allowance {
+        tx.insert(
+            "expected_allowance".into(),
+            ICRC3Value::Nat(Nat::from(expected_allowance)),
+        );
+    }
     let mut block = ICRC3Map::new();
     block.insert("btype".into(), ICRC3Value::Text("1approve".into()));
     block.insert("tx".into(), ICRC3Value::Map(tx));
@@ -387,6 +489,7 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
     let caller = ic_cdk::caller();
     STATE.with(|s| {
         let mut state = s.borrow_mut();
+        let now = ic_cdk::api::time();
 
         if state.fail_transfers {
             return Err(TransferError::GenericError {
@@ -459,6 +562,14 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
 
         // Dedup check (only when created_at_time is provided, matching ICRC-1).
         if let Some(key) = dedup_key.as_ref() {
+            if let Err(reject) = check_dedup_window(key.created_at_time, now) {
+                return Err(match reject {
+                    DedupWindowReject::TooOld => TransferError::TooOld,
+                    DedupWindowReject::CreatedInFuture { ledger_time } => {
+                        TransferError::CreatedInFuture { ledger_time }
+                    }
+                });
+            }
             if let Some(prev_block) = state.dedup.get(key).copied() {
                 if is_mint && take_too_old_after_phantom_mint(&mut state, key, prev_block) {
                     return Err(TransferError::TooOld);
@@ -555,13 +666,94 @@ fn icrc2_approve(args: ApproveArgs) -> Result<Nat, ApproveError> {
         let mut state = s.borrow_mut();
         let caller = ic_cdk::caller();
         let from = account_key(caller, args.from_subaccount);
-        let spender = args.spender;
+        let spender = args.spender.clone();
         let amount = nat_to_u128(&args.amount);
+        let fee = args.fee.as_ref().map(nat_to_u128);
+        let expected_allowance = args.expected_allowance.as_ref().map(nat_to_u128);
+        let now = ic_cdk::api::time();
 
-        state
+        // The optional fee means "use the current ledger fee".  An explicit
+        // value must match before any dedup record, balance, allowance, or
+        // block mutation is made.
+        if fee.is_some_and(|quoted| quoted != state.fee) {
+            return Err(ApproveError::BadFee {
+                expected_fee: Nat::from(state.fee),
+            });
+        }
+
+        // Check the complete ICRC-2 request identity before expires_at is
+        // validated.  A replay of the exact request therefore returns
+        // Duplicate even if its allowance expiry has since passed, while a
+        // changed expiry/CAS/memo/fee is a distinct request.
+        let dedup_key = args.created_at_time.map(|created_at_time| ApproveDedupKey {
+            caller,
+            from_subaccount: args.from_subaccount,
+            spender: spender.clone(),
+            amount,
+            expected_allowance,
+            expires_at: args.expires_at,
+            fee,
+            memo: args.memo.clone(),
+            created_at_time,
+        });
+        if let Some(key) = dedup_key.as_ref() {
+            check_approve_dedup(&state, key, now)?;
+        }
+
+        if args.expires_at.is_some_and(|expires_at| expires_at < now) {
+            return Err(ApproveError::Expired { ledger_time: now });
+        }
+
+        let current_allowance = state
             .allowances
-            .insert((from.clone(), spender.clone()), amount);
-        let landed_block = append_block(&mut state, approve_block(&from, &spender, amount));
+            .get(&(from.clone(), spender.clone()))
+            .map(|entry| effective_allowance(entry, now))
+            .unwrap_or(0);
+        if let Some(expected) = expected_allowance {
+            if current_allowance != expected {
+                return Err(ApproveError::AllowanceChanged {
+                    current_allowance: Nat::from(current_allowance),
+                });
+            }
+        }
+
+        let charged_fee = fee.unwrap_or(state.fee);
+        let balance = state.balances.get(&from).copied().unwrap_or(0);
+        if charged_fee > balance {
+            return Err(ApproveError::InsufficientFunds {
+                balance: Nat::from(balance),
+            });
+        }
+
+        // Approval fees are charged from the owner's balance and burned.  The
+        // state, fee, full approval block, and dedup tuple all commit before a
+        // configured phantom reply loss is injected.
+        if charged_fee > 0 {
+            *state.balances.entry(from.clone()).or_insert(0) -= charged_fee;
+        }
+        state.allowances.insert(
+            (from.clone(), spender.clone()),
+            AllowanceEntry {
+                amount,
+                expires_at: args.expires_at,
+            },
+        );
+        let landed_block = append_block(
+            &mut state,
+            approve_block(
+                &from,
+                &spender,
+                amount,
+                charged_fee,
+                args.memo.as_deref(),
+                args.created_at_time,
+                args.expires_at,
+                expected_allowance,
+            ),
+        );
+        if let Some(key) = dedup_key {
+            state.approve_dedup.insert(key, landed_block);
+        }
         if state.phantom_approve_failures_remaining > 0 {
             state.phantom_approve_failures_remaining -= 1;
             return Err(ApproveError::GenericError {
@@ -586,17 +778,21 @@ fn icrc2_allowance(args: AllowanceArgs) -> Allowance {
         owner: args.spender.owner,
         subaccount: args.spender.subaccount,
     };
-    let allowance = STATE.with(|s| {
-        s.borrow()
-            .allowances
-            .get(&(account, spender))
-            .copied()
-            .unwrap_or(0)
-    });
-    Allowance {
-        allowance: Nat::from(allowance),
-        expires_at: None,
-    }
+    let now = ic_cdk::api::time();
+    STATE.with(|s| {
+        let state = s.borrow();
+        let Some(entry) = state.allowances.get(&(account, spender)) else {
+            return Allowance {
+                allowance: Nat::from(0u64),
+                expires_at: None,
+            };
+        };
+        let allowance = effective_allowance(entry, now);
+        Allowance {
+            allowance: Nat::from(allowance),
+            expires_at: (allowance > 0).then_some(entry.expires_at).flatten(),
+        }
+    })
 }
 
 #[update]
@@ -623,6 +819,7 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
         let from = args.from.clone();
         let amount = nat_to_u128(&args.amount);
         let fee = args.fee.as_ref().map(nat_to_u128);
+        let now = ic_cdk::api::time();
 
         // Dedup keyed on the spender (caller of transfer_from) plus the args.
         if let Some(t) = args.created_at_time {
@@ -635,6 +832,14 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
                 memo: args.memo.clone(),
                 created_at_time: t,
             };
+            if let Err(reject) = check_dedup_window(t, now) {
+                return Err(match reject {
+                    DedupWindowReject::TooOld => TransferFromError::TooOld,
+                    DedupWindowReject::CreatedInFuture { ledger_time } => {
+                        TransferFromError::CreatedInFuture { ledger_time }
+                    }
+                });
+            }
             if let Some(prev_block) = state.dedup.get(&key).copied() {
                 return Err(TransferFromError::Duplicate {
                     duplicate_of: Nat::from(prev_block),
@@ -649,7 +854,7 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
         let allowance = state
             .allowances
             .get(&(from.clone(), spender_account.clone()))
-            .copied()
+            .map(|entry| effective_allowance(entry, now))
             .unwrap_or(0);
         if amount > allowance {
             return Err(TransferFromError::InsufficientAllowance {
@@ -668,7 +873,7 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
             .allowances
             .get_mut(&(from.clone(), spender_account.clone()))
         {
-            *a -= amount;
+            a.amount -= amount;
         }
 
         let charged_fee = state.fee;
@@ -1002,6 +1207,7 @@ fn reset_dedup() {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         state.dedup.clear();
+        state.approve_dedup.clear();
         state.phantom_mint_dedup.clear();
     });
 }
@@ -1092,5 +1298,123 @@ mod borrow_mint_retry_tests {
         assert_eq!(state.too_old_after_phantom_mint_remaining, 0);
         assert_eq!(state.balances.get(&key.to), Some(&42));
         assert!(state.blocks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod approve_semantics_tests {
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000_000_000_000;
+
+    fn sample_key() -> ApproveDedupKey {
+        ApproveDedupKey {
+            caller: Principal::self_authenticating(b"approval-owner"),
+            from_subaccount: None,
+            spender: Account {
+                owner: Principal::self_authenticating(b"approval-spender"),
+                subaccount: None,
+            },
+            amount: 42,
+            expected_allowance: Some(7),
+            expires_at: Some(NOW + 10_000),
+            fee: Some(3),
+            memo: Some(vec![1, 2, 3]),
+            created_at_time: NOW,
+        }
+    }
+
+    #[test]
+    fn expired_allowance_is_zero_and_does_not_expose_expiry() {
+        let entry = AllowanceEntry {
+            amount: 42,
+            expires_at: Some(NOW - 1),
+        };
+        assert_eq!(effective_allowance(&entry, NOW), 0);
+        let active = AllowanceEntry {
+            amount: 42,
+            expires_at: Some(NOW + 1),
+        };
+        assert_eq!(effective_allowance(&active, NOW), 42);
+    }
+
+    #[test]
+    fn transfer_dedup_window_rejects_old_and_future_timestamps() {
+        assert_eq!(
+            check_dedup_window(NOW - TRANSACTION_WINDOW_NS - PERMITTED_DRIFT_NS - 1, NOW),
+            Err(DedupWindowReject::TooOld)
+        );
+        assert_eq!(
+            check_dedup_window(NOW + PERMITTED_DRIFT_NS + 1, NOW),
+            Err(DedupWindowReject::CreatedInFuture { ledger_time: NOW })
+        );
+        assert_eq!(check_dedup_window(NOW, NOW), Ok(()));
+    }
+
+    #[test]
+    fn approval_dedup_uses_full_tuple_and_precedes_expiry_validation() {
+        let key = sample_key();
+        let mut state = LedgerState::default();
+        state.approve_dedup.insert(key.clone(), 9);
+
+        // Exact replay is a duplicate even if allowance expiry is now past;
+        // the endpoint checks this result before its expires_at validation.
+        assert!(matches!(
+            check_approve_dedup(&state, &key, NOW + 20_000),
+            Err(ApproveError::Duplicate { duplicate_of }) if duplicate_of == Nat::from(9u64)
+        ));
+
+        let mut changed_expiry = key.clone();
+        changed_expiry.expires_at = Some(NOW + 20_001);
+        assert!(check_approve_dedup(&state, &changed_expiry, NOW).is_ok());
+
+        let old = ApproveDedupKey {
+            created_at_time: NOW - TRANSACTION_WINDOW_NS - PERMITTED_DRIFT_NS - 1,
+            ..key
+        };
+        assert!(matches!(
+            check_approve_dedup(&state, &old, NOW),
+            Err(ApproveError::TooOld)
+        ));
+    }
+
+    #[test]
+    fn approval_block_keeps_the_full_icrc3_request_tuple() {
+        let from = Account {
+            owner: Principal::self_authenticating(b"approval-owner"),
+            subaccount: None,
+        };
+        let spender = Account {
+            owner: Principal::self_authenticating(b"approval-spender"),
+            subaccount: None,
+        };
+        let block = approve_block(
+            &from,
+            &spender,
+            42,
+            3,
+            Some(&[1, 2, 3]),
+            Some(NOW),
+            Some(NOW + 10_000),
+            Some(7),
+        );
+        let ICRC3Value::Map(fields) = block else {
+            panic!("approval block must be a map");
+        };
+        let Some(ICRC3Value::Map(tx)) = fields.get("tx") else {
+            panic!("approval block must contain a transaction map");
+        };
+        for field in [
+            "from",
+            "spender",
+            "amt",
+            "fee",
+            "memo",
+            "ts",
+            "expires_at",
+            "expected_allowance",
+        ] {
+            assert!(tx.contains_key(field), "missing approval field {field}");
+        }
     }
 }

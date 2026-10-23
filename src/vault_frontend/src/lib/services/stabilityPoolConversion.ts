@@ -60,6 +60,17 @@ export class PendingStabilityPoolConversionError extends Error {
   }
 }
 
+class ConversionRejectedError extends Error {
+  constructor(readonly candidError: unknown) {
+    super(`3USD conversion request rejected: ${safeJson(candidError)}`);
+    this.name = 'ConversionRejectedError';
+  }
+}
+
+function safeJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested) => typeof nested === 'bigint' ? nested.toString() : nested);
+}
+
 const pendingKey = (owner: string) => `rumi:stability-pool:pending-conversion:${owner}`;
 
 function storageOrThrow(): Storage {
@@ -251,9 +262,32 @@ export function conversionWalletRequirement(principalRaw: bigint, feeRaw: bigint
 
 function resultOrThrow<T>(result: { Ok: T } | { Err: unknown } | T): T {
   if (result && typeof result === 'object' && 'Err' in result) {
-    throw new Error(`3USD conversion request rejected: ${JSON.stringify(result.Err)}`);
+    throw new ConversionRejectedError(result.Err);
   }
   return (result && typeof result === 'object' && 'Ok' in result ? result.Ok : result) as T;
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof ConversionRejectedError &&
+    !!error.candidError && typeof error.candidError === 'object' &&
+    'NotFound' in error.candidError;
+}
+
+function isDuplicateApprovalError(error: unknown): boolean {
+  return error instanceof ConversionRejectedError &&
+    !!error.candidError && typeof error.candidError === 'object' &&
+    'Duplicate' in error.candidError;
+}
+
+function acknowledgeApprovalResult(result: unknown): void {
+  try {
+    resultOrThrow(result as { Ok: unknown } | { Err: unknown });
+  } catch (error) {
+    // A lost approval reply may be followed by the ledger's authenticated
+    // Duplicate response for the exact retained tuple. That is success for
+    // this approval only; all other errors remain failures.
+    if (!isDuplicateApprovalError(error)) throw error;
+  }
 }
 
 function terminal(status: StabilityPoolConversionStatus): boolean {
@@ -263,6 +297,16 @@ function terminal(status: StabilityPoolConversionStatus): boolean {
 function requestMatches(record: PendingStabilityPoolConversion, owner: string, ledger: Principal, principalRaw: bigint, budget: bigint, minLp: bigint): boolean {
   return record.owner === owner && record.ledger === ledger.toText() && record.principalRaw === principalRaw.toString() &&
     record.maxFeeBudgetRaw === budget.toString() && record.minLp === minLp.toString();
+}
+
+function startRequest(marker: PendingStabilityPoolConversion): { intent_seq: bigint; token_ledger: Principal; principal_raw: bigint; max_fee_budget_raw: bigint; min_lp: bigint } {
+  return {
+    intent_seq: BigInt(marker.intentSeq),
+    token_ledger: Principal.fromText(marker.ledger),
+    principal_raw: BigInt(marker.principalRaw),
+    max_fee_budget_raw: BigInt(marker.maxFeeBudgetRaw),
+    min_lp: BigInt(marker.minLp),
+  };
 }
 
 function recordsMatch(left: PendingStabilityPoolConversion, right: PendingStabilityPoolConversion): boolean {
@@ -425,20 +469,14 @@ export async function convertStabilityPoolStableTo3Usd(
       exactContext(context, ledger);
       const approval = await ledgerActor.icrc2_approve(approvalArgs(tuple!));
       exactContext(context, ledger);
-      resultOrThrow(approval);
+      acknowledgeApprovalResult(approval);
       marker = { ...marker, stage: 'approval-submitted' };
       writePending(marker, true);
     }
 
     marker = { ...marker, stage: 'start-submitted' };
     writePending(marker, true);
-    const request = {
-      intent_seq: BigInt(marker.intentSeq),
-      token_ledger: ledger,
-      principal_raw: BigInt(marker.principalRaw),
-      max_fee_budget_raw: BigInt(marker.maxFeeBudgetRaw),
-      min_lp: BigInt(marker.minLp),
-    };
+    const request = startRequest(marker);
     try {
       exactContext(context, ledger);
       const result = await actor.start_3usd_conversion(request);
@@ -453,7 +491,21 @@ export async function convertStabilityPoolStableTo3Usd(
           clearPending(marker.owner, marker.intentSeq);
           return status;
         }
-      } catch {
+        return status;
+      } catch (statusError) {
+        if (isNotFoundError(statusError)) {
+          try {
+            exactContext(context, ledger);
+            const replay = await actor.start_3usd_conversion(request);
+            exactContext(context, ledger);
+            const replayStatus = resultOrThrow<StabilityPoolConversionStatus>(replay);
+            if (terminal(replayStatus)) clearPending(marker.owner, marker.intentSeq);
+            return replayStatus;
+          } catch {
+            // A replay with the same immutable request may itself be ambiguous;
+            // retain the marker and require status-backed recovery next time.
+          }
+        }
         // Preserve the exact marker through a lost reply or unavailable status.
       }
       throw new PendingStabilityPoolConversionError(`Conversion intent ${marker.intentSeq} is unresolved. Resume this exact request; do not start a new one.`);
@@ -463,14 +515,32 @@ export async function convertStabilityPoolStableTo3Usd(
 
 async function resumeConversionWithContext(seq: bigint, marker: PendingStabilityPoolConversion, actor: any, context: StabilityPoolActionContext): Promise<StabilityPoolConversionStatus> {
   const ledger = Principal.fromText(marker.ledger);
+  const request = startRequest(marker);
   try {
     exactContext(context, ledger);
     const result = await actor.resume_3usd_conversion(seq);
     exactContext(context, ledger);
     return resultOrThrow<StabilityPoolConversionStatus>(result);
-  } catch {
-    const status = await statusFor(actor, seq, context, ledger);
-    if (terminal(status)) return status;
+  } catch (resumeError) {
+    try {
+      const status = await statusFor(actor, seq, context, ledger);
+      if (terminal(status)) return status;
+      return status;
+    } catch (statusError) {
+      if (isNotFoundError(statusError)) {
+        try {
+          exactContext(context, ledger);
+          const replay = await actor.start_3usd_conversion(request);
+          exactContext(context, ledger);
+          return resultOrThrow<StabilityPoolConversionStatus>(replay);
+        } catch {
+          // Preserve the marker when the same-request replay is ambiguous.
+        }
+      }
+      if (isNotFoundError(resumeError) && !isNotFoundError(statusError)) {
+        throw new PendingStabilityPoolConversionError(`Conversion intent ${seq} is unresolved. Resume this exact request; do not start a new one.`);
+      }
+    }
     throw new PendingStabilityPoolConversionError(`Conversion intent ${seq} is unresolved. Resume this exact request; do not start a new one.`);
   }
 }

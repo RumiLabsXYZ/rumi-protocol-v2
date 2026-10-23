@@ -20013,3 +20013,37 @@ fn stability_pool_cancel_liquidation(
 ) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
     rumi_protocol_backend::sp_liquidation::cancel(request_id)
 }
+
+/// Recovery-only wrapper: it deliberately skips the normal mode/oracle gate
+/// because a positive proof for an already-dispatched immutable tuple must
+/// remain usable after a freeze, price change, upgrade, or archive transition.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_reconcile_liquidation_payment(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::reconcile_payment(request_id, candidate_block_index).await
+}
+
+/// Recovery-only wrapper for the exact protocol-fee collateral transfer.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_reconcile_liquidation_protocol_fee(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::reconcile_protocol_fee(request_id, candidate_block_index).await
+}
+
+/// Recovery-only wrapper for the exact SP collateral payout. This can reattach
+/// a generic worker's settled operation when its pending row has already been
+/// removed, but only after the full frozen payout tuple proves the block.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_reconcile_liquidation_payout(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::reconcile_payout(request_id, candidate_block_index).await
+}

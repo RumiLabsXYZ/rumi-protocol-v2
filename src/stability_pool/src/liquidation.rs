@@ -4902,7 +4902,14 @@ fn ordinary_approval_block_matches(
     approval: &crate::ordinary_liquidation::OrdinaryApprovalTuple,
     block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
 ) -> bool {
-    let pool = ic_cdk::api::id();
+    ordinary_approval_block_matches_for_pool(approval, block, ic_cdk::api::id())
+}
+
+fn ordinary_approval_block_matches_for_pool(
+    approval: &crate::ordinary_liquidation::OrdinaryApprovalTuple,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    pool: Principal,
+) -> bool {
     let expected_spender = Account {
         owner: approval.spender,
         subaccount: None,
@@ -4951,40 +4958,24 @@ fn ordinary_approval_wire_expiry_matches(
     }
 }
 
-/// Fetch one directly served ICRC-3 block and require that it is the exact
-/// persisted approval tuple.  Archive callbacks and a missing block are not
-/// evidence of a no-effect approval: callers must retain the pending row.
+/// Fetch one exact ledger-global ICRC-3 block and require that it is the exact
+/// persisted approval tuple.  The backend helper accepts either the ledger's
+/// direct response or one bounded archive callback. Missing or malformed
+/// evidence still leaves the pending row held.
 async fn verify_ordinary_approval_block(
     approval: &crate::ordinary_liquidation::OrdinaryApprovalTuple,
     candidate_index: u64,
 ) -> Result<(), String> {
-    let result: Result<(GetBlocksResult,), _> = call(
+    let block_value = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block_value(
         approval.ledger,
-        "icrc3_get_blocks",
-        (vec![GetBlocksRequest {
-            start: Nat::from(candidate_index),
-            length: Nat::from(1u64),
-        }],),
+        candidate_index,
     )
-    .await;
-    let (response,) = result.map_err(|error| format!("ordinary approval proof failed: {error:?}"))?;
-    let log_length = response
-        .log_length
-        .0
-        .to_u64()
-        .ok_or_else(|| "ordinary approval ledger log length exceeds u64".to_string())?;
-    if log_length <= candidate_index
-        || !response.archived_blocks.is_empty()
-        || response.blocks.len() != 1
-        || response.blocks[0].id.0.to_u64() != Some(candidate_index)
-    {
-        return Err("ordinary approval candidate was not directly served at its exact ledger index".into());
-    }
-    let block_value = &response.blocks[0].block;
-    let block = rumi_protocol_backend::icrc3_proof::decode_block(block_value)
+    .await
+    .map_err(|error| format!("ordinary approval proof failed: {error}"))?;
+    let block = rumi_protocol_backend::icrc3_proof::decode_block(&block_value)
         .map_err(|error| format!("malformed ordinary approval block: {error}"))?;
     if !ordinary_approval_block_matches(approval, &block)
-        || !ordinary_approval_wire_expiry_matches(approval, block_value)
+        || !ordinary_approval_wire_expiry_matches(approval, &block_value)
     {
         return Err("ordinary approval candidate conflicts with the persisted ledger tuple".into());
     }
@@ -5876,10 +5867,11 @@ pub async fn retry_ordinary_liquidation(request_id: Vec<u8>) -> Result<Liquidati
 }
 
 /// Reconcile an ambiguous ordinary approval using a caller-supplied ledger
-/// block candidate.  The candidate is only accepted after a direct ICRC-3
-/// query proves the complete persisted account, spender, amount, fee, memo,
-/// and creation timestamp tuple.  A candidate that is archived, missing, or
-/// mismatched leaves the original approval row held for the same request ID.
+/// block candidate. The candidate is accepted only after the exact ledger
+/// block, including a single bounded archive callback when needed, proves the
+/// complete persisted account, spender, amount, fee, memo, creation timestamp,
+/// and expiry tuple. Missing or mismatched evidence leaves the original
+/// approval row held for the same request ID.
 pub async fn reconcile_ordinary_liquidation_approval(
     request_id: Vec<u8>,
     candidate_block_index: u64,
@@ -7794,6 +7786,65 @@ mod tests {
         assert!(ordinary_admission_guard(principal(56), None).is_ok());
         drop(guard);
         replace_state(StabilityPoolState::default());
+    }
+
+    #[test]
+    fn ordinary_approval_proof_requires_exact_tuple_and_expiry() {
+        let approval = crate::ordinary_liquidation::OrdinaryApprovalTuple {
+            ledger: principal(61),
+            spender: principal(62),
+            amount_raw: 500,
+            fee_raw: 10,
+            memo: vec![7, 8, 9],
+            created_at_time_ns: 99,
+            expires_at_time_ns: 100,
+        };
+        let block = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("2approve".into()),
+            op: "approve".into(),
+            from: Some(Account {
+                owner: principal(63),
+                subaccount: None,
+            }),
+            to: None,
+            spender: Some(Account {
+                owner: approval.spender,
+                subaccount: Some([0; 32]),
+            }),
+            amount: 500,
+            fee: Some(10),
+            created_at_time: Some(99),
+            memo: Some(vec![7, 8, 9]),
+        };
+        assert!(ordinary_approval_block_matches_for_pool(
+            &approval,
+            &block,
+            principal(63),
+        ));
+
+        let mut tx = ICRC3Map::new();
+        tx.insert(
+            "expires_at".into(),
+            ICRC3Value::Nat(Nat::from(100u64)),
+        );
+        let mut value = ICRC3Map::new();
+        value.insert("tx".into(), ICRC3Value::Map(tx));
+        assert!(ordinary_approval_wire_expiry_matches(
+            &approval,
+            &ICRC3Value::Map(value.clone()),
+        ));
+
+        let mut wrong_value = ICRC3Value::Map(value);
+        if let ICRC3Value::Map(block_map) = &mut wrong_value {
+            let ICRC3Value::Map(tx_map) = block_map.get_mut("tx").unwrap() else {
+                panic!("test tx map");
+            };
+            tx_map.insert(
+                "expires_at".into(),
+                ICRC3Value::Nat(Nat::from(101u64)),
+            );
+        }
+        assert!(!ordinary_approval_wire_expiry_matches(&approval, &wrong_value));
     }
 
     #[test]

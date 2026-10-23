@@ -304,6 +304,72 @@ pub fn sync_leg(receipt: &mut LiquidityReceiptV1, index: usize, entitlement: &pa
     save(receipt);
 }
 
+/// Persist a definitive no-transfer leg before its prepared payout identity
+/// is removed.  The durable status is the tombstone that lets recovery accept
+/// the intentionally missing payout row without treating an unknown identity
+/// as proof of no effect.
+pub fn mark_rejected_no_transfer(
+    receipt: &mut LiquidityReceiptV1,
+    index: usize,
+    reason: impl Into<String>,
+) {
+    receipt.input_status[index] = Some(LiquidityLegStatusV1::RejectedNoTransfer {
+        reason: reason.into().chars().take(512).collect(),
+    });
+    receipt.refund_status[index] = Some(LiquidityLegStatusV1::Skipped);
+    save(receipt);
+}
+
+/// Persist that a prepared leg was never dispatched before canceling its
+/// payout identity.  If cancellation fails, the caller must resync the live
+/// payout row and leave the receipt retryable.
+pub fn mark_skipped(receipt: &mut LiquidityReceiptV1, index: usize) {
+    receipt.input_status[index] = Some(LiquidityLegStatusV1::Skipped);
+    receipt.refund_status[index] = Some(LiquidityLegStatusV1::Skipped);
+    save(receipt);
+}
+
+pub fn mark_refunded(receipt: &mut LiquidityReceiptV1, index: usize) {
+    receipt.refund_status[index] = Some(LiquidityLegStatusV1::Refunded);
+    save(receipt);
+}
+
+/// Return the terminal receipt status only when every nonzero request leg has
+/// a durable, conservative terminal outcome.  Unknown or missing legs never
+/// become terminal by absence.
+pub fn terminal_status(receipt: &LiquidityReceiptV1) -> Option<LiquidityReceiptStatusV1> {
+    let all_terminal = receipt.request.amounts.len() == 3
+        && receipt.request.amounts.iter().enumerate().all(|(index, amount)| {
+            *amount == 0
+                || (receipt.input_ids[index].is_some()
+                    && receipt.refund_ids[index].is_some()
+                    && receipt.input_status[index].as_ref().is_some_and(|status| {
+                    matches!(
+                        status,
+                        LiquidityLegStatusV1::Confirmed { .. }
+                            | LiquidityLegStatusV1::RejectedNoTransfer { .. }
+                            | LiquidityLegStatusV1::Skipped
+                    )
+                    }) && receipt.refund_status[index].as_ref().is_some_and(|status| {
+                        matches!(
+                            status,
+                            LiquidityLegStatusV1::Refunded | LiquidityLegStatusV1::Skipped
+                        )
+                    }))
+        });
+    if !all_terminal {
+        return None;
+    }
+    let any_confirmed = receipt.input_status.iter().any(|status| {
+        matches!(status, Some(LiquidityLegStatusV1::Confirmed { .. }))
+    });
+    Some(if any_confirmed {
+        LiquidityReceiptStatusV1::Refunded
+    } else {
+        LiquidityReceiptStatusV1::Rejected
+    })
+}
+
 fn input_status(status: &payouts::PayoutInputOutcome) -> LiquidityLegStatusV1 {
     match status {
         payouts::PayoutInputOutcome::Prepared => LiquidityLegStatusV1::Prepared,
@@ -466,5 +532,63 @@ mod tests {
         assert!(!all_inputs_confirmed(&row));
         row.input_ids[0] = Some(42);
         assert!(all_inputs_confirmed(&row));
+    }
+
+    #[test]
+    fn definitive_no_transfer_leg_is_terminal_rejection() {
+        let owner = Principal::self_authenticating(b"no funds terminal");
+        let (mut row, _) = reserve(
+            owner,
+            AddLiquidityRequestV1 {
+                intent_id: vec![9; 32],
+                amounts: vec![100, 0, 0],
+                min_lp: 1,
+                source_subaccount: None,
+                max_transfer_fee: None,
+            },
+        )
+        .unwrap();
+        row.input_ids[0] = Some(101);
+        row.refund_ids[0] = Some(101);
+        mark_rejected_no_transfer(&mut row, 0, "allowance too low");
+        assert_eq!(
+            terminal_status(&row),
+            Some(LiquidityReceiptStatusV1::Rejected)
+        );
+    }
+
+    #[test]
+    fn mixed_known_and_unknown_legs_remain_recovery_pending() {
+        let owner = Principal::self_authenticating(b"mixed terminal");
+        let (mut row, _) = reserve(
+            owner,
+            AddLiquidityRequestV1 {
+                intent_id: vec![10; 32],
+                amounts: vec![100, 200, 0],
+                min_lp: 1,
+                source_subaccount: None,
+                max_transfer_fee: None,
+            },
+        )
+        .unwrap();
+        row.input_ids[0] = Some(102);
+        row.refund_ids[0] = Some(102);
+        row.input_ids[1] = Some(103);
+        row.refund_ids[1] = Some(103);
+        mark_rejected_no_transfer(&mut row, 0, "allowance too low");
+        row.input_status[1] = Some(LiquidityLegStatusV1::Unresolved {
+            reason: "ledger reply lost".into(),
+        });
+        row.refund_status[1] = Some(LiquidityLegStatusV1::Prepared);
+        assert_eq!(terminal_status(&row), None);
+
+        row.input_status[1] = Some(LiquidityLegStatusV1::Confirmed {
+            block: Nat::from(77u8),
+        });
+        mark_refunded(&mut row, 1);
+        assert_eq!(
+            terminal_status(&row),
+            Some(LiquidityReceiptStatusV1::Refunded)
+        );
     }
 }

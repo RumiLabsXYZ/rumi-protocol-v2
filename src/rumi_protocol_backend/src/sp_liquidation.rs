@@ -15,6 +15,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive as DecimalToPrimitive};
 
 use crate::management;
 use crate::numeric::{ICUSD, UsdIcp};
+use crate::icrc3_proof::DecodedBlock;
 use crate::state::{
     mutate_state, read_state, SpLiquidationJournal, SpLiquidationPayment,
     SpLiquidationPaymentTuple, SpLiquidationPhase,
@@ -246,6 +247,166 @@ fn effective_payment_fee(payment: SpLiquidationPayment, ledger_fee_raw: u64) -> 
         SpLiquidationPayment::Icusd => 0,
         SpLiquidationPayment::Ckusdc | SpLiquidationPayment::Ckusdt => ledger_fee_raw,
     }
+}
+
+/// A candidate block is only a pointer into the configured ledger's history.
+/// Once a durable block index has been adopted, a different candidate is a
+/// conflict and may never replace the original proof. The equal-index path is
+/// the idempotent retry used after an upgrade or a lost reconciliation reply.
+fn reconcile_existing_block(
+    existing: Option<u64>,
+    candidate: u64,
+    leg: &str,
+) -> Result<bool, ProtocolError> {
+    match existing {
+        None => Ok(false),
+        Some(index) if index == candidate => Ok(true),
+        Some(index) => Err(ProtocolError::GenericError(format!(
+            "SP liquidation {leg} receipt is already bound to block {index}"
+        ))),
+    }
+}
+
+fn payment_reconciliation_phase_allowed(
+    phase: &SpLiquidationPhase,
+    attempted: bool,
+    block_index: Option<u64>,
+) -> bool {
+    attempted
+        && block_index.is_none()
+        && matches!(phase, SpLiquidationPhase::PaymentSubmitted | SpLiquidationPhase::PaymentNoEffect(_))
+}
+
+fn post_accounting_reconciliation_phase_allowed(
+    phase: &SpLiquidationPhase,
+    attempted: bool,
+    block_index: Option<u64>,
+) -> bool {
+    attempted
+        && block_index.is_none()
+        && matches!(
+            phase,
+            SpLiquidationPhase::DebtCommitted
+                | SpLiquidationPhase::PayoutSubmitted
+                | SpLiquidationPhase::PayoutNoEffect(_)
+        )
+}
+
+fn payout_reconciliation_phase_allowed(
+    phase: &SpLiquidationPhase,
+    block_index: Option<u64>,
+) -> bool {
+    block_index.is_none()
+        && matches!(phase, SpLiquidationPhase::PayoutSubmitted | SpLiquidationPhase::PayoutNoEffect(_))
+}
+
+fn payout_first_dispatch_required(phase: &SpLiquidationPhase) -> bool {
+    matches!(phase, SpLiquidationPhase::DebtCommitted)
+}
+
+fn validate_exact_payment_block(
+    block: &DecodedBlock,
+    payment: SpLiquidationPayment,
+    tuple: &SpLiquidationPaymentTuple,
+) -> Result<(), String> {
+    match payment {
+        SpLiquidationPayment::Icusd => {
+            // The configured icUSD minting account is the ledger's burn
+            // destination. Its canonical ICRC-3 record is a transfer-from
+            // burn: 2burn/burn, source=SP, spender=backend, no `to`, and a
+            // fee that is either omitted or explicitly zero.
+            if block.btype.as_deref() != Some("2burn") || block.op != "burn" {
+                return Err("SP icUSD proof is not the canonical ICRC-2 burn block".into());
+            }
+            if block.to.is_some() {
+                return Err("SP icUSD burn proof unexpectedly contains a destination".into());
+            }
+            if block.fee.is_some_and(|fee| fee != 0) {
+                return Err("SP icUSD burn proof records a nonzero fee".into());
+            }
+        }
+        SpLiquidationPayment::Ckusdc | SpLiquidationPayment::Ckusdt => {
+            if block.btype.as_deref() != Some("2xfer") || block.op != "xfer" {
+                return Err("SP stable payment proof is not an ICRC-2 transfer-from block".into());
+            }
+            if block.to != Some(tuple.destination.clone()) {
+                return Err("SP payment proof recipient does not match the frozen destination".into());
+            }
+            if block.fee != Some(effective_payment_fee(payment, tuple.ledger_fee_raw)) {
+                return Err("SP payment proof fee does not match the frozen fee".into());
+            }
+        }
+    }
+    if block.from != Some(tuple.source.clone()) {
+        return Err("SP payment proof sender does not match the frozen source".into());
+    }
+    if block.spender != Some(tuple.destination.clone()) {
+        return Err("SP payment proof spender does not match the backend".into());
+    }
+    if block.amount != u128::from(tuple.amount_raw) {
+        return Err("SP payment proof amount does not match the frozen pull".into());
+    }
+    if block.memo.as_deref() != Some(tuple.memo.as_slice()) {
+        return Err("SP payment proof memo does not match the frozen nonce".into());
+    }
+    if block.created_at_time != Some(tuple.created_at_time_ns) {
+        return Err("SP payment proof timestamp does not match the frozen nonce".into());
+    }
+    Ok(())
+}
+
+fn validate_exact_ledger_transfer_block(
+    block: &DecodedBlock,
+    from: Account,
+    to: Account,
+    amount_raw: u64,
+    fee_raw: u64,
+    memo: &[u8],
+    created_at_time_ns: u64,
+) -> Result<(), String> {
+    if block.btype.as_deref() != Some("1xfer") {
+        return Err("SP collateral proof is not an ICRC-1 transfer block".into());
+    }
+    crate::icrc3_proof::validate_icrc3_transfer_block(
+        block,
+        Some(from),
+        to,
+        amount_raw,
+        Some(memo),
+        Some(created_at_time_ns),
+    )?;
+    if block.fee != Some(fee_raw) {
+        return Err("SP transfer proof fee does not match the frozen fee".into());
+    }
+    Ok(())
+}
+
+fn reconciliation_caller_allowed(caller: Principal) -> bool {
+    caller != Principal::anonymous()
+        && read_state(|state| {
+            state_reconciliation_caller_allowed(state, caller)
+        })
+}
+
+fn state_reconciliation_caller_allowed(
+    state: &crate::state::State,
+    caller: Principal,
+) -> bool {
+    caller != Principal::anonymous()
+        && (state.stability_pool_canister == Some(caller)
+            || state.developer_principal == caller)
+}
+
+fn require_reconciliation_caller(caller: Principal) -> Result<(), ProtocolError> {
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if !reconciliation_caller_allowed(caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the registered stability pool or developer may reconcile this exact liquidation journal".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn payment_gross_for_debt(
@@ -586,15 +747,11 @@ pub async fn prepare(request: SpLiquidationRequest) -> Result<SpLiquidationRecei
             "Liquidations were frozen while preparing the SP liquidation".into(),
         ));
     }
-    let (op_nonce, protocol_fee_op_nonce) = mutate_state(|state| {
-        let payment_nonce = state.next_op_nonce();
-        let protocol_nonce = if quote.protocol_cut_raw > 0 {
-            Some(state.next_op_nonce())
-        } else {
-            None
-        };
-        (payment_nonce, protocol_nonce)
-    });
+    // Only the incoming payment is dispatched from the prepared quote. The
+    // protocol-fee leg is created later, immediately before its first ledger
+    // await, so a long-held payment/recovery journal cannot age that later
+    // tuple into TooOld before it is ever attempted.
+    let op_nonce = mutate_state(|state| state.next_op_nonce());
     let tuple = SpLiquidationPaymentTuple {
         ledger,
         source: Account { owner: caller, subaccount: None },
@@ -645,7 +802,7 @@ pub async fn prepare(request: SpLiquidationRequest) -> Result<SpLiquidationRecei
         payment_ambiguous: false,
         payment_attempted: false,
         protocol_fee_treasury,
-        protocol_fee_op_nonce,
+        protocol_fee_op_nonce: None,
         protocol_fee_ledger_fee_raw: (quote.protocol_cut_raw > 0)
             .then_some(actual_payout_fee_raw),
         protocol_fee_attempted: false,
@@ -890,66 +1047,91 @@ async fn settle_post_accounting(
             }
         }
     }
-    if journal.quote_protocol_cut_raw > 0
-        && journal.protocol_fee_block_index.is_none()
-    {
-        let (treasury, fee, op_nonce, attempted) = read_state(|state| {
-            let current = state.sp_liquidation_journals.get(&key);
-            current.map(|current| (
-                current.protocol_fee_treasury,
-                current.protocol_fee_ledger_fee_raw,
-                current.protocol_fee_op_nonce,
-                current.protocol_fee_attempted,
-            )).unwrap_or((None, None, None, false))
-        });
-        let treasury = treasury.ok_or_else(|| {
-            ProtocolError::TemporarilyUnavailable("SP liquidation treasury destination is missing".into())
+    if journal.quote_protocol_cut_raw > 0 {
+        // The protocol-fee tuple is created immediately before its first
+        // ledger await, after any interest-distribution await. Once the
+        // attempted fence is set, every retry reuses that exact nonce and
+        // timestamp; a pre-dispatch quote can never age into a TooOld tuple.
+        let tuple = mutate_state(|state| {
+            let snapshot = state.sp_liquidation_journals.get(&key).cloned().ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable("SP liquidation journal disappeared".into())
+            })?;
+            if snapshot.protocol_fee_block_index.is_some() {
+                return Ok(None);
+            }
+            let treasury = snapshot.protocol_fee_treasury.ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable(
+                    "SP liquidation treasury destination is missing".into(),
+                )
+            })?;
+            let fee = snapshot.protocol_fee_ledger_fee_raw.ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable(
+                    "SP liquidation treasury fee tuple is missing".into(),
+                )
+            })?;
+            let op_nonce = if snapshot.protocol_fee_attempted {
+                snapshot.protocol_fee_op_nonce.ok_or_else(|| {
+                    ProtocolError::TemporarilyUnavailable(
+                        "SP liquidation treasury nonce is missing after dispatch".into(),
+                    )
+                })?
+            } else {
+                let nonce = state.next_op_nonce();
+                let current = state.sp_liquidation_journals.get_mut(&key).ok_or_else(|| {
+                    ProtocolError::TemporarilyUnavailable("SP liquidation journal disappeared".into())
+                })?;
+                current.protocol_fee_op_nonce = Some(nonce);
+                current.protocol_fee_attempted = true;
+                current.updated_at_ns = ic_cdk::api::time();
+                nonce
+            };
+            Ok(Some((treasury, fee, op_nonce)))
         })?;
-        let fee = fee.ok_or_else(|| {
-            ProtocolError::TemporarilyUnavailable("SP liquidation treasury fee tuple is missing".into())
-        })?;
-        let op_nonce = op_nonce.ok_or_else(|| {
-            ProtocolError::TemporarilyUnavailable("SP liquidation treasury nonce is missing".into())
-        })?;
-        let protocol_fee_net_raw = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
-        if !attempted {
-            mutate_state(|state| {
-                if let Some(current) = state.sp_liquidation_journals.get_mut(&key) {
-                    current.protocol_fee_attempted = true;
-                    current.updated_at_ns = ic_cdk::api::time();
-                }
-            });
-        }
-        match crate::management::transfer_collateral_with_nonce_and_fee_status(
-            protocol_fee_net_raw,
-            Some(fee),
-            treasury,
-            journal.collateral_ledger,
-            op_nonce,
-        ).await {
+        if let Some((treasury, fee, op_nonce)) = tuple {
+            let protocol_fee_net_raw = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
+            match crate::management::transfer_collateral_with_nonce_and_fee_status(
+                protocol_fee_net_raw,
+                Some(fee),
+                treasury,
+                journal.collateral_ledger,
+                op_nonce,
+            ).await {
             Ok(block_index) => {
-                mutate_state(|state| {
+                let should_notify = mutate_state(|state| {
                     if let Some(current) = state.sp_liquidation_journals.get_mut(&key) {
-                        current.protocol_fee_block_index = Some(block_index);
+                        // A concurrent positive-proof reconciliation may have
+                        // committed this same tuple while the transfer reply
+                        // was in flight. Never overwrite a different durable
+                        // proof and never clear a proof on a retry.
+                        let should_notify = current.protocol_fee_block_index.is_none();
+                        if should_notify {
+                            current.protocol_fee_block_index = Some(block_index);
+                        }
                         current.updated_at_ns = ic_cdk::api::time();
+                        should_notify
+                    } else {
+                        false
                     }
                 });
                 // Preserve the existing treasury bookkeeping callback. Its
                 // failure is non-critical; the exact ledger receipt above is
                 // the durable proof of the fee transfer.
-                let _ = crate::treasury::notify_treasury_deposit(
-                    treasury,
-                    crate::treasury::DepositType::LiquidationFee,
-                    crate::treasury::collateral_to_asset_type(&journal.collateral_type),
-                    protocol_fee_net_raw,
-                    block_index,
-                ).await;
+                if should_notify {
+                    let _ = crate::treasury::notify_treasury_deposit(
+                        treasury,
+                        crate::treasury::DepositType::LiquidationFee,
+                        crate::treasury::collateral_to_asset_type(&journal.collateral_type),
+                        protocol_fee_net_raw,
+                        block_index,
+                    ).await;
+                }
             }
             Err(error) => {
                 return Err(ProtocolError::TemporarilyUnavailable(format!(
                     "SP treasury fee remains unresolved; retry the same request: {error:?}"
                 )));
             }
+        }
         }
     }
     mutate_state(|state| {
@@ -973,17 +1155,16 @@ async fn settle_payout(
     if journal.caller != caller {
         return Err(ProtocolError::GenericError("SP liquidation request owner mismatch".into()));
     }
+    if journal.phase == SpLiquidationPhase::PayoutSettled {
+        return Ok(receipt(&journal));
+    }
     let Some(operation_id) = journal.payout_operation_id else {
         return Err(ProtocolError::TemporarilyUnavailable("SP payout operation is not linked yet".into()));
     };
-    let Some((_, transfer)) = read_state(|state| state.get_pending_payout(operation_id)) else {
-        if journal.phase == SpLiquidationPhase::PayoutSettled {
-            return Ok(receipt(&journal));
-        }
-        return Err(ProtocolError::TemporarilyUnavailable("SP payout receipt is missing".into()));
-    };
-    mutate_state(|state| {
-        let Some(current) = state.sp_liquidation_journals.get_mut(&key) else { return false };
+    let (journal, transfer) = mutate_state(|state| {
+        let current = state.sp_liquidation_journals.get(&key).cloned().ok_or_else(|| {
+            ProtocolError::GenericError("Unknown SP liquidation request_id".into())
+        })?;
         if current.caller != caller
             || current.payout_operation_id != Some(operation_id)
             || !matches!(
@@ -993,19 +1174,60 @@ async fn settle_payout(
                     | SpLiquidationPhase::PayoutNoEffect(_)
             )
         {
-            return false;
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP payout is not dispatchable in the current journal phase".into(),
+            ));
         }
-        current.phase = SpLiquidationPhase::PayoutSubmitted;
-        current.updated_at_ns = ic_cdk::api::time();
-        state.mutate_pending_payout(operation_id, |row| row.in_flight = true);
-        true
-    });
+        if state.get_pending_payout(operation_id).is_none() {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP payout receipt is missing".into(),
+            ));
+        }
+
+        let mut next = current;
+        if payout_first_dispatch_required(&next.phase) {
+            // Debt commit reserves the payout operation and keeps its pending
+            // row in-flight, but the actual ledger tuple is frozen only here,
+            // immediately before the first payout await. This avoids a stale
+            // created_at_time after a long interest/proof recovery delay.
+            let op_nonce = state.next_op_nonce();
+            next.payout_op_nonce = Some(op_nonce);
+            next.payout_memo = management::nonce_to_memo(op_nonce)
+                .0
+                .as_slice()
+                .try_into()
+                .unwrap_or([0; 16]);
+            next.payout_created_at_time_ns = management::nonce_to_created_at_time(op_nonce);
+        }
+        next.phase = SpLiquidationPhase::PayoutSubmitted;
+        next.updated_at_ns = ic_cdk::api::time();
+        state.sp_liquidation_journals.insert(key, next.clone());
+        state.mutate_pending_payout(operation_id, |row| {
+            row.op_nonce = next.payout_op_nonce.unwrap_or(row.op_nonce);
+            row.in_flight = true;
+        });
+        let transfer = state
+            .get_pending_payout(operation_id)
+            .map(|(_, transfer)| transfer)
+            .ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable("SP payout receipt disappeared".into())
+            })?;
+        Ok((next, transfer))
+    })?;
     let amount = transfer.transfer_amount_raw.ok_or_else(|| {
         ProtocolError::TemporarilyUnavailable("SP payout net amount is missing".into())
     })?;
     let ledger = transfer.ledger.ok_or_else(|| {
         ProtocolError::TemporarilyUnavailable("SP payout ledger is missing".into())
     })?;
+    if journal.payout_ledger != Some(ledger)
+        || journal.payout_net_raw != Some(amount)
+        || journal.payout_op_nonce != Some(transfer.op_nonce)
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP payout row does not match its frozen journal tuple".into(),
+        ));
+    }
     let payout = crate::management::transfer_collateral_with_nonce_and_fee_status(
         amount,
         journal.payout_fee_raw,
@@ -1059,6 +1281,409 @@ async fn settle_payout(
             "SP collateral payout is unresolved; retry the exact request: {error:?}"
         ))),
     }
+}
+
+/// Adopt a positive ICRC-3 proof for the exact incoming SP pull after its
+/// original transfer-from reply was lost or became TooOld. The candidate is
+/// checked against the immutable request tuple and the journal CAS is repeated
+/// after the ledger await. No absence, balance, or new-nonce claim can resolve
+/// this rail.
+pub async fn reconcile_payment(
+    request_id_arg: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<SpLiquidationReceipt, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    require_reconciliation_caller(caller)?;
+    let key = request_id(&request_id_arg)?;
+    let journal = read_state(|state| state.sp_liquidation_journals.get(&key).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("Unknown SP liquidation request_id".into()))?;
+    if reconcile_existing_block(journal.payment_block_index, candidate_block_index, "payment")? {
+        return Ok(receipt(&journal));
+    }
+    if !payment_reconciliation_phase_allowed(
+        &journal.phase,
+        journal.payment_attempted,
+        journal.payment_block_index,
+    ) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP payment proof is not admissible for the current journal phase".into(),
+        ));
+    }
+    let block = crate::icrc3_proof::fetch_icrc3_block(
+        journal.payment_tuple.ledger,
+        candidate_block_index,
+    )
+    .await
+    .map_err(|error| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "SP payment proof could not be fetched: {error}"
+        ))
+    })?;
+    validate_exact_payment_block(&block, journal.payment, &journal.payment_tuple).map_err(
+        |error| {
+            ProtocolError::TemporarilyUnavailable(format!(
+                "SP payment proof does not match the frozen tuple: {error}"
+            ))
+        },
+    )?;
+
+    let committed = mutate_state(|state| {
+        if !state_reconciliation_caller_allowed(state, caller) {
+            return Err(ProtocolError::GenericError(
+                "SP payment reconciliation caller is no longer authorized".into(),
+            ));
+        }
+        let current = state.sp_liquidation_journals.get_mut(&key).ok_or_else(|| {
+            ProtocolError::GenericError("Unknown SP liquidation request_id".into())
+        })?;
+        if let Some(existing) = current.payment_block_index {
+            if existing == candidate_block_index {
+                return Ok(current.clone());
+            }
+            return Err(ProtocolError::GenericError(
+                "SP payment receipt is already bound to a different block".into(),
+            ));
+        }
+        if current.request_id != journal.request_id
+            || current.caller != journal.caller
+            || current.payment != journal.payment
+            || current.payment_tuple != journal.payment_tuple
+            || !payment_reconciliation_phase_allowed(
+                &current.phase,
+                current.payment_attempted,
+                current.payment_block_index,
+            )
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP payment journal changed while its proof was being fetched".into(),
+            ));
+        }
+        current.payment_block_index = Some(candidate_block_index);
+        current.phase = SpLiquidationPhase::PaymentConfirmed;
+        current.updated_at_ns = ic_cdk::api::time();
+        Ok(current.clone())
+    })?;
+    Ok(receipt(&committed))
+}
+
+/// Adopt a positive ICRC-3 proof for the frozen protocol-fee transfer. The
+/// exact treasury, gross/net amount, fee, memo, timestamp, and ledger are all
+/// read from the durable journal; mutable treasury configuration is not used.
+pub async fn reconcile_protocol_fee(
+    request_id_arg: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<SpLiquidationReceipt, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    require_reconciliation_caller(caller)?;
+    let key = request_id(&request_id_arg)?;
+    let journal = read_state(|state| state.sp_liquidation_journals.get(&key).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("Unknown SP liquidation request_id".into()))?;
+    if reconcile_existing_block(
+        journal.protocol_fee_block_index,
+        candidate_block_index,
+        "protocol fee",
+    )? {
+        return Ok(receipt(&journal));
+    }
+    if journal.quote_protocol_cut_raw == 0
+        || !post_accounting_reconciliation_phase_allowed(
+            &journal.phase,
+            journal.protocol_fee_attempted,
+            journal.protocol_fee_block_index,
+        )
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP protocol-fee proof is not admissible for the current journal phase".into(),
+        ));
+    }
+    let treasury = journal.protocol_fee_treasury.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable(
+            "SP protocol-fee proof has no frozen treasury destination".into(),
+        )
+    })?;
+    let fee = journal.protocol_fee_ledger_fee_raw.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable(
+            "SP protocol-fee proof has no frozen ledger fee".into(),
+        )
+    })?;
+    let op_nonce = journal.protocol_fee_op_nonce.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable(
+            "SP protocol-fee proof has no frozen operation nonce".into(),
+        )
+    })?;
+    let amount = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
+    let memo = management::nonce_to_memo(op_nonce).0.to_vec();
+    let created_at_time_ns = management::nonce_to_created_at_time(op_nonce);
+    let block = crate::icrc3_proof::fetch_icrc3_block(
+        journal.collateral_ledger,
+        candidate_block_index,
+    )
+    .await
+    .map_err(|error| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "SP protocol-fee proof could not be fetched: {error}"
+        ))
+    })?;
+    validate_exact_ledger_transfer_block(
+        &block,
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        Account {
+            owner: treasury,
+            subaccount: None,
+        },
+        amount,
+        fee,
+        &memo,
+        created_at_time_ns,
+    )
+    .map_err(|error| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "SP protocol-fee proof does not match the frozen tuple: {error}"
+        ))
+    })?;
+
+    let committed = mutate_state(|state| {
+        if !state_reconciliation_caller_allowed(state, caller) {
+            return Err(ProtocolError::GenericError(
+                "SP protocol-fee reconciliation caller is no longer authorized".into(),
+            ));
+        }
+        let current = state.sp_liquidation_journals.get_mut(&key).ok_or_else(|| {
+            ProtocolError::GenericError("Unknown SP liquidation request_id".into())
+        })?;
+        if let Some(existing) = current.protocol_fee_block_index {
+            if existing == candidate_block_index {
+                return Ok(current.clone());
+            }
+            return Err(ProtocolError::GenericError(
+                "SP protocol-fee receipt is already bound to a different block".into(),
+            ));
+        }
+        if current.request_id != journal.request_id
+            || current.caller != journal.caller
+            || current.protocol_fee_treasury != journal.protocol_fee_treasury
+            || current.protocol_fee_op_nonce != journal.protocol_fee_op_nonce
+            || current.protocol_fee_ledger_fee_raw != journal.protocol_fee_ledger_fee_raw
+            || current.quote_protocol_cut_raw != journal.quote_protocol_cut_raw
+            || current.collateral_ledger != journal.collateral_ledger
+            || !post_accounting_reconciliation_phase_allowed(
+                &current.phase,
+                current.protocol_fee_attempted,
+                current.protocol_fee_block_index,
+            )
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP protocol-fee journal changed while its proof was being fetched".into(),
+            ));
+        }
+        current.protocol_fee_block_index = Some(candidate_block_index);
+        current.updated_at_ns = ic_cdk::api::time();
+        Ok(current.clone())
+    })?;
+    Ok(receipt(&committed))
+}
+
+#[derive(Clone)]
+struct FrozenPayoutTuple {
+    operation_id: u128,
+    ledger: Principal,
+    gross_raw: u64,
+    net_raw: u64,
+    fee_raw: u64,
+    memo: [u8; 16],
+    created_at_time_ns: u64,
+    op_nonce: u128,
+}
+
+fn frozen_payout_tuple(journal: &SpLiquidationJournal) -> Result<FrozenPayoutTuple, ProtocolError> {
+    let operation_id = journal.payout_operation_id.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable("SP payout operation is not linked yet".into())
+    })?;
+    let ledger = journal.payout_ledger.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable("SP payout ledger is missing".into())
+    })?;
+    let gross_raw = journal.payout_gross_raw.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable("SP payout gross amount is missing".into())
+    })?;
+    let net_raw = journal.payout_net_raw.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable("SP payout net amount is missing".into())
+    })?;
+    let fee_raw = journal.payout_fee_raw.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable("SP payout ledger fee is missing".into())
+    })?;
+    let op_nonce = journal.payout_op_nonce.ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable("SP payout operation nonce is missing".into())
+    })?;
+    if operation_id == 0 || op_nonce == 0 || journal.payout_memo == [0; 16]
+        || journal.payout_created_at_time_ns == 0
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP payout exact tuple is incomplete".into(),
+        ));
+    }
+    if gross_raw.checked_sub(fee_raw) != Some(net_raw) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP payout gross, net, and fee tuple is inconsistent".into(),
+        ));
+    }
+    Ok(FrozenPayoutTuple {
+        operation_id,
+        ledger,
+        gross_raw,
+        net_raw,
+        fee_raw,
+        memo: journal.payout_memo,
+        created_at_time_ns: journal.payout_created_at_time_ns,
+        op_nonce,
+    })
+}
+
+fn pending_payout_matches_frozen_tuple(
+    transfer: &crate::state::PendingMarginTransfer,
+    journal: &SpLiquidationJournal,
+    frozen: &FrozenPayoutTuple,
+) -> bool {
+    transfer.operation_id == frozen.operation_id
+        && transfer.vault_id == journal.vault_id
+        && transfer.payout_kind == crate::state::PendingPayoutKind::Margin
+        && transfer.owner == journal.caller
+        && transfer.ledger == Some(frozen.ledger)
+        && transfer.transfer_amount_raw == Some(frozen.net_raw)
+        && transfer.op_nonce == frozen.op_nonce
+}
+
+/// Adopt a positive ICRC-3 proof for the outgoing SP collateral transfer. If
+/// the generic payout worker already removed the pending row, the journal's
+/// immutable operation tuple is sufficient to reattach the settled receipt;
+/// if the row remains, journal, event, and pending-row removal commit together.
+pub async fn reconcile_payout(
+    request_id_arg: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<SpLiquidationReceipt, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    require_reconciliation_caller(caller)?;
+    let key = request_id(&request_id_arg)?;
+    let journal = read_state(|state| state.sp_liquidation_journals.get(&key).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("Unknown SP liquidation request_id".into()))?;
+    if reconcile_existing_block(journal.payout_block_index, candidate_block_index, "payout")? {
+        return Ok(receipt(&journal));
+    }
+    if !journal.post_accounting_done
+        || !payout_reconciliation_phase_allowed(&journal.phase, journal.payout_block_index)
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP payout proof is not admissible before post-accounting is committed".into(),
+        ));
+    }
+    let frozen = frozen_payout_tuple(&journal)?;
+    let pending = read_state(|state| state.get_pending_payout(frozen.operation_id));
+    if let Some((_, transfer)) = &pending {
+        if !pending_payout_matches_frozen_tuple(transfer, &journal, &frozen) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP payout pending row does not match the frozen tuple".into(),
+            ));
+        }
+    }
+    let block = crate::icrc3_proof::fetch_icrc3_block(frozen.ledger, candidate_block_index)
+        .await
+        .map_err(|error| {
+            ProtocolError::TemporarilyUnavailable(format!(
+                "SP payout proof could not be fetched: {error}"
+            ))
+        })?;
+    validate_exact_ledger_transfer_block(
+        &block,
+        Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },
+        Account {
+            owner: journal.caller,
+            subaccount: None,
+        },
+        frozen.net_raw,
+        frozen.fee_raw,
+        &frozen.memo,
+        frozen.created_at_time_ns,
+    )
+    .map_err(|error| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "SP payout proof does not match the frozen tuple: {error}"
+        ))
+    })?;
+
+    let committed = mutate_state(|state| {
+        if !state_reconciliation_caller_allowed(state, caller) {
+            return Err(ProtocolError::GenericError(
+                "SP payout reconciliation caller is no longer authorized".into(),
+            ));
+        }
+        let current_snapshot = state.sp_liquidation_journals.get(&key).cloned().ok_or_else(|| {
+            ProtocolError::GenericError("Unknown SP liquidation request_id".into())
+        })?;
+        if let Some(existing) = current_snapshot.payout_block_index {
+            if existing == candidate_block_index {
+                return Ok(current_snapshot);
+            }
+            return Err(ProtocolError::GenericError(
+                "SP payout receipt is already bound to a different block".into(),
+            ));
+        }
+        if current_snapshot.request_id != journal.request_id
+            || current_snapshot.caller != journal.caller
+            || current_snapshot.post_accounting_done != journal.post_accounting_done
+            || current_snapshot.payout_operation_id != Some(frozen.operation_id)
+            || current_snapshot.payout_ledger != Some(frozen.ledger)
+            || current_snapshot.payout_gross_raw != Some(frozen.gross_raw)
+            || current_snapshot.payout_net_raw != Some(frozen.net_raw)
+            || current_snapshot.payout_fee_raw != Some(frozen.fee_raw)
+            || current_snapshot.payout_memo != frozen.memo
+            || current_snapshot.payout_created_at_time_ns != frozen.created_at_time_ns
+            || current_snapshot.payout_op_nonce != Some(frozen.op_nonce)
+            || !payout_reconciliation_phase_allowed(
+                &current_snapshot.phase,
+                current_snapshot.payout_block_index,
+            )
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP payout journal changed while its proof was being fetched".into(),
+            ));
+        }
+        let pending = state.get_pending_payout(frozen.operation_id);
+        let pending = pending.map(|(kind, transfer)| (kind, transfer));
+        if let Some((_, transfer)) = &pending {
+            if !pending_payout_matches_frozen_tuple(transfer, &current_snapshot, &frozen) {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "SP payout pending row changed while its proof was being fetched".into(),
+                ));
+            }
+        }
+        let committed = {
+            let current = state.sp_liquidation_journals.get_mut(&key).ok_or_else(|| {
+                ProtocolError::GenericError("Unknown SP liquidation request_id".into())
+            })?;
+            current.phase = SpLiquidationPhase::PayoutSettled;
+            current.payout_block_index = Some(candidate_block_index);
+            current.payout_net_raw = Some(frozen.net_raw);
+            current.updated_at_ns = ic_cdk::api::time();
+            current.clone()
+        };
+        if let Some((kind, transfer)) = pending {
+            crate::event::record_margin_transfer(
+                state,
+                transfer.vault_id,
+                transfer.owner,
+                frozen.operation_id,
+                kind,
+                candidate_block_index,
+            );
+        }
+        Ok(committed)
+    })?;
+    Ok(receipt(&committed))
 }
 
 /// Execute or resume one exact prepared request. No fresh nonce is allocated
@@ -1184,27 +1809,18 @@ pub async fn execute(request_id_arg: Vec<u8>) -> Result<SpLiquidationReceipt, Pr
             next.payment_block_index = Some(payment_block);
             next.applied_interest_share_e8s = Some(applied.interest_share_e8s);
             next.payout_operation_id = applied.payout.as_ref().map(|row| row.0);
-            next.payout_op_nonce = applied.payout.as_ref().map(|row| row.5);
             next.payout_ledger = applied.payout.as_ref().map(|row| row.1);
             next.payout_gross_raw = applied.payout.as_ref().map(|row| row.2);
             next.payout_net_raw = applied.payout.as_ref().map(|row| row.3);
             next.payout_fee_raw = applied.payout.as_ref().map(|row| row.4);
-            next.payout_memo = applied
-                .payout
-                .as_ref()
-                .map(|row| {
-                    management::nonce_to_memo(row.5)
-                        .0
-                        .as_slice()
-                        .try_into()
-                        .unwrap_or([0; 16])
-                })
-                .unwrap_or([0; 16]);
-            next.payout_created_at_time_ns = applied
-                .payout
-                .as_ref()
-                .map(|row| management::nonce_to_created_at_time(row.5))
-                .unwrap_or_default();
+            // The generic pending row is created with an operation nonce for
+            // worker compatibility, but the SP rail must not expose or use
+            // that tuple before its own first payout dispatch. The exact
+            // nonce, memo, and timestamp are frozen by `settle_payout`
+            // immediately before its first ledger await.
+            next.payout_op_nonce = None;
+            next.payout_memo = [0; 16];
+            next.payout_created_at_time_ns = 0;
             next.updated_at_ns = ic_cdk::api::time();
             next.clone()
         };
@@ -1424,6 +2040,237 @@ mod tests {
         assert!(!should_dispatch_interest(123, true));
         assert!(!should_dispatch_interest(0, false));
         assert!(!should_dispatch_interest(0, true));
+    }
+
+    fn proof_payment_tuple() -> SpLiquidationPaymentTuple {
+        SpLiquidationPaymentTuple {
+            ledger: Principal::from_slice(&[9]),
+            source: Account {
+                owner: Principal::from_slice(&[1]),
+                subaccount: None,
+            },
+            destination: Account {
+                owner: Principal::from_slice(&[2]),
+                subaccount: None,
+            },
+            amount_raw: 123,
+            ledger_fee_raw: 17,
+            memo: [8; 16],
+            created_at_time_ns: 55,
+            op_nonce: 7,
+        }
+    }
+
+    #[test]
+    fn positive_payment_proof_requires_every_icrc2_tuple_field() {
+        let tuple = proof_payment_tuple();
+        let block = DecodedBlock {
+            btype: Some("2xfer".into()),
+            op: "xfer".into(),
+            from: Some(tuple.source.clone()),
+            to: Some(tuple.destination.clone()),
+            spender: Some(tuple.destination.clone()),
+            amount: tuple.amount_raw.into(),
+            fee: Some(tuple.ledger_fee_raw),
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        };
+        assert!(validate_exact_payment_block(
+            &block,
+            SpLiquidationPayment::Ckusdc,
+            &tuple
+        )
+        .is_ok());
+
+        let mut wrong = block.clone();
+        wrong.spender = Some(tuple.source.clone());
+        assert!(validate_exact_payment_block(
+            &wrong,
+            SpLiquidationPayment::Ckusdc,
+            &tuple
+        )
+        .is_err());
+        let mut wrong_fee = block.clone();
+        wrong_fee.fee = Some(18);
+        assert!(validate_exact_payment_block(
+            &wrong_fee,
+            SpLiquidationPayment::Ckusdc,
+            &tuple
+        )
+        .is_err());
+        let mut wrong_memo = block;
+        wrong_memo.memo = Some(vec![7; 16]);
+        assert!(validate_exact_payment_block(
+            &wrong_memo,
+            SpLiquidationPayment::Ckusdc,
+            &tuple
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn icusd_payment_proof_uses_canonical_transfer_from_burn_shape() {
+        let mut tuple = proof_payment_tuple();
+        tuple.ledger_fee_raw = 100_000;
+        let backend = tuple.destination.clone();
+        let block = DecodedBlock {
+            btype: Some("2burn".into()),
+            op: "burn".into(),
+            from: Some(tuple.source.clone()),
+            to: None,
+            spender: Some(backend.clone()),
+            amount: tuple.amount_raw.into(),
+            fee: None,
+            created_at_time: Some(tuple.created_at_time_ns),
+            memo: Some(tuple.memo.to_vec()),
+        };
+        assert!(validate_exact_payment_block(
+            &block,
+            SpLiquidationPayment::Icusd,
+            &tuple,
+        )
+        .is_ok());
+
+        let mut explicit_zero = block.clone();
+        explicit_zero.fee = Some(0);
+        assert!(validate_exact_payment_block(
+            &explicit_zero,
+            SpLiquidationPayment::Icusd,
+            &tuple,
+        )
+        .is_ok());
+
+        let mut unexpected_destination = block.clone();
+        unexpected_destination.to = Some(backend.clone());
+        assert!(validate_exact_payment_block(
+            &unexpected_destination,
+            SpLiquidationPayment::Icusd,
+            &tuple,
+        )
+        .is_err());
+
+        let mut wrong_spender = block.clone();
+        wrong_spender.spender = Some(tuple.source.clone());
+        assert!(validate_exact_payment_block(
+            &wrong_spender,
+            SpLiquidationPayment::Icusd,
+            &tuple,
+        )
+        .is_err());
+
+        let mut plain_unbound_burn = block;
+        plain_unbound_burn.btype = Some("1burn".into());
+        plain_unbound_burn.spender = None;
+        assert!(validate_exact_payment_block(
+            &plain_unbound_burn,
+            SpLiquidationPayment::Icusd,
+            &tuple,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn positive_collateral_proof_requires_exact_fee_and_accounts() {
+        let from = Account {
+            owner: Principal::from_slice(&[3]),
+            subaccount: None,
+        };
+        let to = Account {
+            owner: Principal::from_slice(&[4]),
+            subaccount: None,
+        };
+        let block = DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "xfer".into(),
+            from: Some(from.clone()),
+            to: Some(to.clone()),
+            spender: None,
+            amount: 90,
+            fee: Some(10),
+            created_at_time: Some(77),
+            memo: Some(vec![6; 16]),
+        };
+        assert!(validate_exact_ledger_transfer_block(
+            &block,
+            from.clone(),
+            to.clone(),
+            90,
+            10,
+            &[6; 16],
+            77,
+        )
+        .is_ok());
+        let mut wrong_fee = block.clone();
+        wrong_fee.fee = Some(9);
+        assert!(validate_exact_ledger_transfer_block(
+            &wrong_fee,
+            from.clone(),
+            to.clone(),
+            90,
+            10,
+            &[6; 16],
+            77,
+        )
+        .is_err());
+        let mut wrong_to = block;
+        wrong_to.to = Some(Account {
+            owner: Principal::from_slice(&[5]),
+            subaccount: None,
+        });
+        assert!(validate_exact_ledger_transfer_block(
+            &wrong_to,
+            from,
+            to,
+            90,
+            10,
+            &[6; 16],
+            77,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn positive_proof_wrong_candidate_does_not_pin_and_equal_retry_is_idempotent() {
+        assert!(!reconcile_existing_block(None, 12, "payment").unwrap());
+        assert!(reconcile_existing_block(Some(12), 12, "payment").unwrap());
+        assert!(reconcile_existing_block(Some(12), 13, "payment").is_err());
+
+        assert!(payment_reconciliation_phase_allowed(
+            &SpLiquidationPhase::PaymentNoEffect("TooOld".into()),
+            true,
+            None,
+        ));
+        assert!(!payment_reconciliation_phase_allowed(
+            &SpLiquidationPhase::Prepared,
+            false,
+            None,
+        ));
+        assert!(!payment_reconciliation_phase_allowed(
+            &SpLiquidationPhase::PaymentSubmitted,
+            true,
+            Some(12),
+        ));
+        assert!(payout_first_dispatch_required(&SpLiquidationPhase::DebtCommitted));
+        assert!(!payout_first_dispatch_required(&SpLiquidationPhase::PayoutSubmitted));
+        assert!(!payout_first_dispatch_required(&SpLiquidationPhase::PayoutNoEffect(
+            "typed".into(),
+        )));
+        assert!(!payout_reconciliation_phase_allowed(
+            &SpLiquidationPhase::DebtCommitted,
+            None,
+        ));
+        assert!(payout_reconciliation_phase_allowed(
+            &SpLiquidationPhase::PayoutSubmitted,
+            None,
+        ));
+        assert!(payout_reconciliation_phase_allowed(
+            &SpLiquidationPhase::PayoutNoEffect("TooOld".into()),
+            None,
+        ));
+        assert!(!payout_reconciliation_phase_allowed(
+            &SpLiquidationPhase::PayoutSubmitted,
+            Some(19),
+        ));
     }
 }
 

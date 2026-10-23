@@ -626,6 +626,39 @@ pub async fn reconcile_3usd_conversion_pool_input_v1(
     conversion::reconcile_pool_input(intent_seq, leg_index, candidate_block).await
 }
 
+/// Reconcile an aged escrow approval only from its exact directly served
+/// ICRC-3 approval block. The caller selects only its own durable intent.
+#[update]
+pub async fn reconcile_3usd_conversion_approval_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_approval(intent_seq, candidate_block).await
+}
+
+/// Reconcile an aged allowance revoke only from its exact directly served
+/// ICRC-3 approval block.
+#[update]
+pub async fn reconcile_3usd_conversion_revoke_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_revoke(intent_seq, candidate_block).await
+}
+
+/// Reconcile an aged escrow refund only from its exact directly served ICRC-3
+/// transfer block.
+#[update]
+pub async fn reconcile_3usd_conversion_refund_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_refund(intent_seq, candidate_block).await
+}
+
 /// Read the caller's exact conversion status. Missing rows are not interpreted
 /// as evidence that a transfer had no effect.
 #[query]

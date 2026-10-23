@@ -9,10 +9,12 @@
 
 use candid::{CandidType, Nat, Principal};
 use ic_cdk::call;
+use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -129,6 +131,11 @@ const ESCROW_DOMAIN: &[u8] = b"RUMI-SP-CONVERSION-ESCROW-V1";
 const INTENT_DOMAIN: &[u8] = b"RUMI-SP-3POOL-INTENT-V1";
 const MEMO_DOMAIN: &[u8] = b"RUMI-SP-CONVERSION-MEMO-V1";
 const APPROVAL_EXPIRY_NS: u64 = 300_000_000_000;
+/// ICRC-2 ledgers reject a created_at_time older than their 24-hour
+/// deduplication window.  A journal row can survive longer while paused or
+/// waiting for an aged proof, so every still-undispatched tuple gets a fresh
+/// timestamp before its first value-moving await.
+const CREATED_AT_MAX_AGE_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 /// Admission reserves enough caller budget for approval, the 3pool pull,
 /// compensation, allowance revocation, and the SP escrow refund.  The 3pool
 /// receipt is still the authority for whether a leg actually consumed value.
@@ -408,6 +415,28 @@ fn fee_cap(request: &ConversionRequest) -> u64 {
 
 fn next_attempt_time(previous: u64) -> u64 {
     ic_cdk::api::time().max(previous.saturating_add(1))
+}
+
+fn created_at_needs_refresh(created_at_ns: u64, now_ns: u64) -> bool {
+    now_ns >= created_at_ns.saturating_add(CREATED_AT_MAX_AGE_NS)
+}
+
+/// Refresh only a tuple that has never been dispatched and has no ambiguous
+/// reply.  Once a call was dispatched, its timestamp, memo, and generation
+/// are immutable evidence and must never be rebound by a resume or upgrade.
+fn refresh_first_dispatch_tuple_if_stale(
+    created_at_ns: &mut u64,
+    generation: &mut u64,
+    dispatched: bool,
+    ambiguous: bool,
+    now_ns: u64,
+) -> bool {
+    if dispatched || ambiguous || !created_at_needs_refresh(*created_at_ns, now_ns) {
+        return false;
+    }
+    *generation = (*generation).saturating_add(1);
+    *created_at_ns = now_ns.max((*created_at_ns).saturating_add(1));
+    true
 }
 
 fn block_index(value: Nat) -> Result<u64, ConversionError> {
@@ -1025,6 +1054,10 @@ fn revoke_args(intent: &ConversionIntent) -> ApproveArgs {
         spender: intent.revoke_spender,
         amount: Nat::from(intent.revoke_amount_raw),
         expected_allowance: Some(Nat::from(intent.revoke_expected_allowance_raw)),
+        // No expiry is the ICRC-2 wire representation of the revoke's expiry
+        // zero sentinel.  `Some(0)` is rejected as already expired by
+        // standard ledgers, so the exact tuple records absence rather than a
+        // short-lived timestamp.
         expires_at: None,
         fee: Some(Nat::from(intent.revoke_fee_raw)),
         memo: Some(intent.revoke_memo.clone().into()),
@@ -1128,6 +1161,22 @@ async fn pull(mut intent: ConversionIntent) -> ConversionIntent {
     if let Err(reason) = crate::ensure_pool_token_balance_mutation_allowed(&[intent.request.token_ledger]) {
         return set_pending(intent, format!("conversion waits for pool mutation guard: {reason:?}"));
     }
+    let now = ic_cdk::api::time();
+    if refresh_first_dispatch_tuple_if_stale(
+        &mut intent.pull_created_at_ns,
+        &mut intent.pull_generation,
+        intent.pull_dispatched,
+        intent.pull_ambiguous,
+        now,
+    ) {
+        intent.pull_memo = retry_memo(
+            b"pull-retry",
+            intent.owner,
+            intent.request.token_ledger,
+            intent.request.intent_seq,
+            intent.pull_generation,
+        );
+    }
     intent.pull_dispatched = true;
     update_phase(&mut intent, ConversionPhase::Pulling);
     if !save_intent(intent.clone()) {
@@ -1201,18 +1250,82 @@ async fn pull(mut intent: ConversionIntent) -> ConversionIntent {
     }
 }
 
+fn approval_funded_no_effect(
+    mut intent: ConversionIntent,
+    reason: impl Into<String>,
+) -> ConversionIntent {
+    let reason = error_text(reason.into());
+    // A definite ledger no-effect response can enter the refund path only
+    // when no earlier approval call was ambiguous.  After an unknown reply,
+    // the same tuple may already have committed and must remain held for a
+    // positive approval proof before any refund or revoke decision.
+    if intent.approve_ambiguous {
+        return set_pending(intent, reason);
+    }
+    intent.last_error = Some(reason);
+    save_phase(intent, ConversionPhase::Refunding)
+}
+
+fn approval_unknown(
+    intent: ConversionIntent,
+    reason: impl Into<String>,
+) -> ConversionIntent {
+    let mut intent = intent;
+    intent.approve_ambiguous = true;
+    set_pending(intent, reason)
+}
+
+fn approval_error_is_authenticated_no_effect(error: &ApproveError) -> bool {
+    matches!(
+        error,
+        ApproveError::InsufficientFunds { .. }
+            | ApproveError::AllowanceChanged { .. }
+            | ApproveError::Expired { .. }
+            | ApproveError::TooOld
+            | ApproveError::CreatedInFuture { .. }
+            | ApproveError::BadFee { .. }
+    )
+}
+
+fn approval_no_effect_can_refund(ambiguous: bool, error: &ApproveError) -> bool {
+    !ambiguous && approval_error_is_authenticated_no_effect(error)
+}
+
+fn approval_bad_fee_can_retry(ambiguous: bool, expected_fee: u64, cap: u64) -> bool {
+    !ambiguous && expected_fee <= cap
+}
+
 async fn approve(mut intent: ConversionIntent) -> ConversionIntent {
     if intent.approve_confirmed {
         return save_phase(intent, ConversionPhase::PoolCall);
     }
     if intent.approve_fee_raw > fee_cap(&intent.request) {
-        return set_rejected(intent, "approval fee exceeds caller fee budget cap");
+        return approval_funded_no_effect(intent, "approval fee exceeds caller fee budget cap");
     }
     if read_state(|state| state.configuration.emergency_pause) {
         return set_pending(intent, "conversion paused before approval");
     }
     if let Err(reason) = crate::ensure_pool_token_balance_mutation_allowed(&[intent.request.token_ledger]) {
         return set_pending(intent, format!("approval waits for pool mutation guard: {reason:?}"));
+    }
+    let now = ic_cdk::api::time();
+    if refresh_first_dispatch_tuple_if_stale(
+        &mut intent.approve_created_at_ns,
+        &mut intent.approve_generation,
+        intent.approve_dispatched,
+        intent.approve_ambiguous,
+        now,
+    ) {
+        intent.approve_memo = retry_memo(
+            b"approve-retry",
+            intent.owner,
+            intent.request.token_ledger,
+            intent.request.intent_seq,
+            intent.approve_generation,
+        );
+        intent.approve_expires_at_ns = intent
+            .approve_created_at_ns
+            .saturating_add(APPROVAL_EXPIRY_NS);
     }
     intent.approve_dispatched = true;
     update_phase(&mut intent, ConversionPhase::Approving);
@@ -1246,14 +1359,21 @@ async fn approve(mut intent: ConversionIntent) -> ConversionIntent {
             let Ok(expected_fee) = block_index(expected_fee) else {
                 return set_pending(intent, "approval fee does not fit u64");
             };
-            if intent.approve_ambiguous {
-                return set_pending(
+            if !approval_bad_fee_can_retry(
+                intent.approve_ambiguous,
+                expected_fee,
+                fee_cap(&intent.request),
+            ) {
+                if intent.approve_ambiguous {
+                    return set_pending(
+                        intent,
+                        "approval returned BadFee after an ambiguous attempt; exact original tuple is retained",
+                    );
+                }
+                return approval_funded_no_effect(
                     intent,
-                    "approval returned BadFee after an ambiguous attempt; exact original tuple is retained",
+                    format!("approval fee {expected_fee} exceeds caller fee budget"),
                 );
-            }
-            if expected_fee > fee_cap(&intent.request) {
-                return set_rejected(intent, "approval fee exceeds caller fee budget");
             }
             intent.approve_fee_raw = expected_fee;
             intent.approve_amount_raw = match intent
@@ -1262,7 +1382,12 @@ async fn approve(mut intent: ConversionIntent) -> ConversionIntent {
                 .checked_add(expected_fee)
             {
                 Some(amount) => amount,
-                None => return set_rejected(intent, "approval amount overflow after BadFee"),
+                None => {
+                    return approval_funded_no_effect(
+                        intent,
+                        "approval amount overflow after BadFee",
+                    )
+                }
             };
             intent.revoke_expected_allowance_raw = intent.approve_amount_raw;
             intent.approve_generation = intent.approve_generation.saturating_add(1);
@@ -1274,22 +1399,27 @@ async fn approve(mut intent: ConversionIntent) -> ConversionIntent {
                 intent.approve_generation,
             );
             intent.approve_created_at_ns = next_attempt_time(intent.approve_created_at_ns);
+            intent.approve_expires_at_ns = intent
+                .approve_created_at_ns
+                .saturating_add(APPROVAL_EXPIRY_NS);
             intent.approve_dispatched = false;
             let reason = format!("ledger requires approval fee {expected_fee}");
             intent.last_error = Some(reason.clone());
             set_pending(intent, reason)
         }
-        Ok((Err(error),)) => match error {
-            ApproveError::GenericError { .. } | ApproveError::TemporarilyUnavailable => {
-                intent.approve_ambiguous = true;
-                set_pending(intent, format!("approval remains unresolved: {error:?}"))
+        Ok((Err(error),)) => {
+            if approval_no_effect_can_refund(intent.approve_ambiguous, &error) {
+                approval_funded_no_effect(
+                    intent,
+                    format!("approval had an authenticated no-effect response: {error:?}"),
+                )
+            } else {
+                // Duplicate is handled above and is positive evidence for
+                // the exact persisted approval tuple.  Every other result
+                // after an unknown attempt remains held for exact proof.
+                approval_unknown(intent, format!("approval remains unresolved: {error:?}"))
             }
-            _ => {
-                // No authenticated approval means no 3pool spend is allowed;
-                // refund the exact escrow after this transition.
-                save_phase(intent, ConversionPhase::Refunding)
-            }
-        },
+        }
         Err((code, message)) => {
             intent.approve_ambiguous = true;
             set_pending(intent, format!("approval call unresolved: {code:?} {message}"))
@@ -1390,6 +1520,105 @@ fn exact_refund_tuple_matches(
         && refund.net.checked_add(refund.fee) == Some(refund.gross)
 }
 
+/// A terminal rejection can retain the prepared input/refund tuples even
+/// though no value-moving ledger call was dispatched.  The explicit
+/// `RejectedNoTransfer`/`Skipped` markers are the proof of no effect; any
+/// retained tuples still have to bind to this conversion's escrow and pool
+/// accounts before they are accepted.
+fn rejected_no_effect_with_exact_tuples(
+    intent: &ConversionIntent,
+    receipt: &LiquidityReceiptV1,
+) -> Result<bool, String> {
+    if !matches!(&receipt.status, LiquidityReceiptStatusV1::Rejected) {
+        return Ok(false);
+    }
+    let pool_default = Account {
+        owner: intent.pool_canister,
+        subaccount: None,
+    };
+    let fee_cap_raw = u128::from(fee_cap(&intent.request));
+    let mut saw_marked_leg = false;
+    for index in 0..3 {
+        let amount = intent.pool_amounts[index];
+        if amount == 0 {
+            if receipt.input_ids[index].is_some()
+                || receipt.refund_ids[index].is_some()
+                || receipt.input_status[index].is_some()
+                || receipt.refund_status[index].is_some()
+                || receipt.input_transfers[index].is_some()
+                || receipt.refund_transfers[index].is_some()
+            {
+                return Err("rejected pool receipt has an identity for a zero amount leg".into());
+            }
+            continue;
+        }
+        let marked_no_effect = matches!(
+            receipt.input_status[index].as_ref(),
+            Some(LiquidityLegStatusV1::RejectedNoTransfer { .. }
+                | LiquidityLegStatusV1::Skipped)
+        );
+        if marked_no_effect {
+            saw_marked_leg = true;
+            let input = receipt.input_transfers[index].as_ref().ok_or_else(|| {
+                "rejected no-transfer leg omitted its exact prepared input tuple".to_string()
+            })?;
+            if !exact_input_tuple_matches(
+                intent.request.token_ledger,
+                intent.escrow_account.clone(),
+                pool_default.clone(),
+                amount,
+                fee_cap_raw,
+                input,
+            ) {
+                return Err("rejected no-transfer input tuple is not bound to the conversion escrow".into());
+            }
+            if !matches!(
+                receipt.refund_status[index].as_ref(),
+                None | Some(LiquidityLegStatusV1::Skipped)
+            ) {
+                return Err("rejected no-transfer leg has a value-moving refund status".into());
+            }
+            if let Some(refund) = receipt.refund_transfers[index].as_ref() {
+                if !matches!(
+                    receipt.refund_status[index].as_ref(),
+                    Some(LiquidityLegStatusV1::Skipped)
+                ) {
+                    return Err(
+                        "rejected no-transfer refund tuple lacks an explicit skipped marker"
+                            .into(),
+                    );
+                }
+                if !exact_refund_tuple_matches(
+                    intent.request.token_ledger,
+                    intent.escrow_account.clone(),
+                    pool_default.clone(),
+                    amount,
+                    fee_cap_raw,
+                    refund,
+                ) {
+                    return Err("rejected no-transfer refund tuple is not bound to escrow".into());
+                }
+            }
+            continue;
+        }
+
+        // A completely absent identity is handled by the older explicit
+        // no-dispatch rejection path.  Once a positive leg has a retained
+        // identity, however, an unmarked leg is not safe to infer as unused.
+        if receipt.input_ids[index].is_none()
+            && receipt.refund_ids[index].is_none()
+            && receipt.input_status[index].is_none()
+            && receipt.refund_status[index].is_none()
+            && receipt.input_transfers[index].is_none()
+            && receipt.refund_transfers[index].is_none()
+        {
+            continue;
+        }
+        return Ok(false);
+    }
+    Ok(saw_marked_leg)
+}
+
 fn validate_receipt_tuples(
     intent: &ConversionIntent,
     receipt: &LiquidityReceiptV1,
@@ -1399,6 +1628,11 @@ fn validate_receipt_tuples(
         || receipt.request.min_lp != intent.request.min_lp
     {
         return Err("3pool receipt fee cap or amount plan does not match conversion journal".into());
+    }
+    match rejected_no_effect_with_exact_tuples(intent, receipt) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(reason) => return Err(reason),
     }
     if explicit_no_dispatch_rejection(
         &receipt.status,
@@ -1430,8 +1664,8 @@ fn validate_receipt_tuples(
             .ok_or_else(|| "3pool receipt omitted its exact input tuple".to_string())?;
         if !exact_input_tuple_matches(
             intent.request.token_ledger,
-            intent.escrow_account,
-            pool_default,
+            intent.escrow_account.clone(),
+            pool_default.clone(),
             amount,
             u128::from(fee_cap(&intent.request)),
             input,
@@ -1474,6 +1708,169 @@ fn receipt_terminal_action(status: &LiquidityReceiptStatusV1) -> Option<bool> {
     }
 }
 
+fn pool_receipt_is_terminal(status: &LiquidityReceiptStatusV1) -> bool {
+    matches!(
+        status,
+        LiquidityReceiptStatusV1::Completed
+            | LiquidityReceiptStatusV1::Refunded
+            | LiquidityReceiptStatusV1::Rejected
+    )
+}
+
+fn revoke_allowance_is_frozen(intent: &ConversionIntent) -> bool {
+    let terminal = matches!(
+        intent.pool_last_status.as_deref(),
+        Some("Completed") | Some("Refunded") | Some("Rejected")
+    );
+    terminal
+        && (intent.pool_input_confirmed == Some(true)
+            // `RejectedNoTransfer` is a terminal no-effect proof even when
+            // the receipt retains the prepared input tuple for auditability.
+            || intent.pool_last_status.as_deref() == Some("Rejected"))
+}
+
+fn effective_approval_allowance(
+    approved: u64,
+    expires_at_ns: u64,
+    now_ns: u64,
+) -> u64 {
+    if now_ns >= expires_at_ns {
+        0
+    } else {
+        approved
+    }
+}
+
+fn terminal_leg_is_known_no_effect(
+    receipt_status: &LiquidityReceiptStatusV1,
+    input_status: &Option<LiquidityLegStatusV1>,
+) -> bool {
+    matches!(receipt_status, LiquidityReceiptStatusV1::Rejected)
+        && matches!(
+            input_status,
+            Some(
+                LiquidityLegStatusV1::RejectedNoTransfer { .. }
+                    | LiquidityLegStatusV1::Skipped
+            )
+        )
+}
+
+/// Freeze the allowance CAS value from the exact terminal pool receipt.  The
+/// original approval covers principal plus the pool input fee; once the pool
+/// has positively recorded that input, only the unused allowance remains to
+/// be revoked.  This is called before the first revoke dispatch and is never
+/// recomputed from a nonterminal or ambiguous response.
+fn terminal_revoke_expected_allowance(
+    intent: &ConversionIntent,
+    receipt: &LiquidityReceiptV1,
+) -> Result<u64, String> {
+    if !pool_receipt_is_terminal(&receipt.status) {
+        return Err("allowance CAS cannot be frozen from a nonterminal pool receipt".into());
+    }
+    let pool_default = Account {
+        owner: intent.pool_canister,
+        subaccount: None,
+    };
+    let fee_cap_raw = u128::from(fee_cap(&intent.request));
+    // Once the fixed approval expiry has elapsed, the official ledger's
+    // effective allowance is zero even if the pool receipt was a no-effect
+    // rejection.  Freeze that value before the first revoke dispatch.  The
+    // equality boundary is intentional and covered by a pure regression test.
+    let mut remaining = effective_approval_allowance(
+        intent.approve_amount_raw,
+        intent.approve_expires_at_ns,
+        ic_cdk::api::time(),
+    );
+    for index in 0..3 {
+        let amount = intent.pool_amounts[index];
+        if amount == 0 {
+            continue;
+        }
+        let explicit_absent_no_effect = matches!(&receipt.status, LiquidityReceiptStatusV1::Rejected)
+            && receipt.input_status[index].is_none()
+            && receipt.input_transfers[index].is_none();
+        if terminal_leg_is_known_no_effect(&receipt.status, &receipt.input_status[index])
+            || explicit_absent_no_effect
+        {
+            // A known no-effect leg did not consume the approval.  If a
+            // tuple is retained, validate it again here so this accounting
+            // helper cannot be called with a differently bound receipt.
+            if let Some(input) = receipt.input_transfers[index].as_ref() {
+                if !exact_input_tuple_matches(
+                    intent.request.token_ledger,
+                    intent.escrow_account.clone(),
+                    pool_default.clone(),
+                    amount,
+                    fee_cap_raw,
+                    input,
+                ) {
+                    return Err("rejected no-transfer input tuple does not match the conversion escrow".into());
+                }
+            }
+            if let Some(refund) = receipt.refund_transfers[index].as_ref() {
+                if !exact_refund_tuple_matches(
+                    intent.request.token_ledger,
+                    intent.escrow_account.clone(),
+                    pool_default.clone(),
+                    amount,
+                    fee_cap_raw,
+                    refund,
+                ) {
+                    return Err("rejected no-transfer refund tuple does not match the conversion escrow".into());
+                }
+            }
+            continue;
+        }
+        let input_confirmed = matches!(
+            receipt.input_status[index].as_ref(),
+            Some(LiquidityLegStatusV1::Confirmed { .. })
+        );
+        if !input_confirmed {
+            if matches!(&receipt.status, LiquidityReceiptStatusV1::Rejected)
+                && receipt.input_transfers[index].is_none()
+            {
+                continue;
+            }
+            return Err("terminal pool receipt lacks a confirmed input for allowance accounting".into());
+        }
+        let input = receipt.input_transfers[index]
+            .as_ref()
+            .ok_or_else(|| "confirmed pool input is missing its exact tuple".to_string())?;
+        if !exact_input_tuple_matches(
+            intent.request.token_ledger,
+            intent.escrow_account.clone(),
+            pool_default.clone(),
+            amount,
+            fee_cap_raw,
+            input,
+        ) {
+            return Err("confirmed pool input does not match the allowance accounting tuple".into());
+        }
+        let input_fee = input
+            .fee
+            .ok_or_else(|| "confirmed pool input is missing its actual fee".to_string())?;
+        let input_fee = u64::try_from(input_fee)
+            .map_err(|_| "confirmed pool input fee exceeds u64".to_string())?;
+        remaining = allowance_after_pool_input(remaining, amount, u128::from(input_fee))?;
+    }
+    Ok(remaining)
+}
+
+fn allowance_after_pool_input(
+    approved: u64,
+    input_amount: u128,
+    input_fee: u128,
+) -> Result<u64, String> {
+    let consumed = input_amount
+        .checked_add(input_fee)
+        .ok_or_else(|| "pool input allowance consumption overflows u128".to_string())?;
+    let consumed = u64::try_from(consumed)
+        .map_err(|_| "pool input allowance consumption exceeds u64".to_string())?;
+    approved
+        .checked_sub(consumed)
+        .ok_or_else(|| "pool input consumed more allowance than approved".to_string())
+}
+
 fn apply_pool_receipt(mut intent: ConversionIntent, receipt: LiquidityReceiptV1) -> ConversionIntent {
     if receipt.owner != ic_cdk::api::id()
         || receipt.request.intent_id != intent.pool_intent_id.to_vec()
@@ -1483,6 +1880,12 @@ fn apply_pool_receipt(mut intent: ConversionIntent, receipt: LiquidityReceiptV1)
     }
     if let Err(reason) = validate_receipt_tuples(&intent, &receipt) {
         return set_pending(intent, reason);
+    }
+    if pool_receipt_is_terminal(&receipt.status) {
+        match terminal_revoke_expected_allowance(&intent, &receipt) {
+            Ok(expected) => intent.revoke_expected_allowance_raw = expected,
+            Err(reason) => return set_pending(intent, reason),
+        }
     }
     intent.pool_input_transfers = receipt.input_transfers.clone();
     intent.pool_refund_transfers = receipt.refund_transfers.clone();
@@ -1623,7 +2026,10 @@ async fn pool_call(mut intent: ConversionIntent) -> ConversionIntent {
         return set_pending(intent, "conversion paused before 3pool request");
     }
     if intent.request.max_fee_budget_raw < fee_cap(&intent.request) * MAX_FEE_LEGS {
-        return set_rejected(intent, "caller fee budget is below the per-leg cap product");
+        return set_pending(
+            intent,
+            "caller fee budget is below the per-leg cap product; funded escrow remains recoverable",
+        );
     }
     submit_same_pool_request(intent).await
 }
@@ -1643,11 +2049,39 @@ async fn revoke(mut intent: ConversionIntent) -> ConversionIntent {
             save_phase(intent, ConversionPhase::Refunding)
         };
     }
+    if !intent.revoke_dispatched && !revoke_allowance_is_frozen(&intent) {
+        return set_pending(
+            intent,
+            "allowance revoke waits for an exact terminal pool input or rejection proof",
+        );
+    }
     if intent.revoke_fee_raw > fee_cap(&intent.request) {
         return set_pending(intent, "allowance revoke fee exceeds caller fee budget cap");
     }
     if let Err(reason) = crate::ensure_pool_token_balance_mutation_allowed(&[intent.request.token_ledger]) {
         return set_pending(intent, format!("allowance revoke waits for pool mutation guard: {reason:?}"));
+    }
+    let now = ic_cdk::api::time();
+    if !intent.revoke_dispatched && now >= intent.approve_expires_at_ns {
+        // The approval's effective allowance is now zero.  Freeze that CAS
+        // value immediately before the first revoke dispatch; once dispatched
+        // (or ambiguous) this tuple is immutable and cannot be rebound.
+        intent.revoke_expected_allowance_raw = 0;
+    }
+    if refresh_first_dispatch_tuple_if_stale(
+        &mut intent.revoke_created_at_ns,
+        &mut intent.revoke_generation,
+        intent.revoke_dispatched,
+        intent.revoke_ambiguous,
+        now,
+    ) {
+        intent.revoke_memo = retry_memo(
+            b"revoke-retry",
+            intent.owner,
+            intent.request.token_ledger,
+            intent.request.intent_seq,
+            intent.revoke_generation,
+        );
     }
     intent.revoke_dispatched = true;
     update_phase(&mut intent, ConversionPhase::Revoking);
@@ -1864,6 +2298,22 @@ async fn refund(mut intent: ConversionIntent) -> ConversionIntent {
         return intent;
     };
     intent.refund_amount_raw = Some(transfer_amount);
+    let now = ic_cdk::api::time();
+    if refresh_first_dispatch_tuple_if_stale(
+        &mut intent.refund_created_at_ns,
+        &mut intent.refund_generation,
+        intent.refund_dispatched,
+        intent.refund_ambiguous,
+        now,
+    ) {
+        intent.refund_memo = retry_memo(
+            b"refund-retry",
+            intent.owner,
+            intent.request.token_ledger,
+            intent.request.intent_seq,
+            intent.refund_generation,
+        );
+    }
     intent.refund_dispatched = true;
     update_phase(&mut intent, ConversionPhase::Refunding);
     if !save_intent(intent.clone()) {
@@ -2295,6 +2745,429 @@ pub async fn reconcile_pool_input(
     }
 }
 
+async fn fetch_exact_conversion_block(
+    ledger: Principal,
+    candidate_block: u64,
+) -> Result<ICRC3Value, String> {
+    // The backend helper proves the exact global block whether the ledger
+    // serves it directly or through one validated archive callback.  Keep
+    // this wrapper local so every conversion proof still feeds the same field
+    // matchers below, without duplicating archive/range handling here.
+    rumi_protocol_backend::icrc3_proof::fetch_icrc3_block_value(ledger, candidate_block).await
+}
+
+fn conversion_wire_expiry(value: &ICRC3Value) -> Result<Option<u64>, String> {
+    let ICRC3Value::Map(block) = value else {
+        return Err("conversion proof block is not a map".into());
+    };
+    let Some(ICRC3Value::Map(tx)) = block.get("tx") else {
+        return Err("conversion proof block has no transaction map".into());
+    };
+    match tx.get("expires_at") {
+        Some(ICRC3Value::Nat(expiry)) => expiry
+            .0
+            .to_u64()
+            .map(Some)
+            .ok_or_else(|| "conversion proof expiry exceeds u64".to_string()),
+        Some(_) => Err("conversion proof expiry is not a Nat".into()),
+        None => Ok(None),
+    }
+}
+
+fn conversion_wire_expected_allowance(value: &ICRC3Value) -> Result<Option<u64>, String> {
+    let ICRC3Value::Map(block) = value else {
+        return Err("conversion proof block is not a map".into());
+    };
+    let Some(ICRC3Value::Map(tx)) = block.get("tx") else {
+        return Err("conversion proof block has no transaction map".into());
+    };
+    match tx.get("expected_allowance") {
+        Some(ICRC3Value::Nat(expected)) => expected
+            .0
+            .to_u64()
+            .map(Some)
+            .ok_or_else(|| "conversion proof expected allowance exceeds u64".to_string()),
+        Some(_) => Err("conversion proof expected allowance is not a Nat".into()),
+        None => Ok(None),
+    }
+}
+
+fn conversion_approval_fields_match(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    from: &Account,
+    spender: &Account,
+    amount: u64,
+    fee: u64,
+    memo: &[u8],
+    created_at_ns: u64,
+) -> bool {
+    block.op == "approve"
+        && block.btype.as_deref().is_none_or(|kind| kind == "2approve")
+        && block.from.as_ref() == Some(from)
+        && block.to.is_none()
+        && block.spender.as_ref() == Some(spender)
+        && block.amount == u128::from(amount)
+        && block.fee == Some(fee)
+        && block.memo.as_deref() == Some(memo)
+        && block.created_at_time == Some(created_at_ns)
+}
+
+fn verify_conversion_approval_value(
+    intent: &ConversionIntent,
+    value: &ICRC3Value,
+    from: Account,
+    spender: Account,
+    amount: u64,
+    expected_allowance: u64,
+    fee: u64,
+    memo: &[u8],
+    created_at_ns: u64,
+    expiry: Option<u64>,
+) -> Result<(), String> {
+    let block = rumi_protocol_backend::icrc3_proof::decode_block(value)
+        .map_err(|error| format!("malformed conversion approval proof: {error}"))?;
+    if !conversion_approval_fields_match(
+        &block,
+        &from,
+        &spender,
+        amount,
+        fee,
+        memo,
+        created_at_ns,
+    )
+        || conversion_wire_expected_allowance(value)? != Some(expected_allowance)
+        || conversion_wire_expiry(value)? != expiry
+    {
+        return Err(format!(
+            "candidate approval proof does not match the exact persisted tuple for conversion {}",
+            intent.request.intent_seq
+        ));
+    }
+    Ok(())
+}
+
+fn conversion_refund_fields_match(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    from: &Account,
+    to: &Account,
+    amount: u64,
+    fee: u64,
+    memo: &[u8],
+    created_at_ns: u64,
+) -> bool {
+    (block.op == "xfer" || block.op == "transfer")
+        && block.btype.as_deref().is_none_or(|kind| kind == "1xfer")
+        && block.from.as_ref() == Some(from)
+        && block.to.as_ref() == Some(to)
+        && block.spender.is_none()
+        && block.amount == u128::from(amount)
+        && block.fee == Some(fee)
+        && block.memo.as_deref() == Some(memo)
+        && block.created_at_time == Some(created_at_ns)
+}
+
+fn verify_conversion_refund_value(
+    intent: &ConversionIntent,
+    value: &ICRC3Value,
+    amount: u64,
+) -> Result<(), String> {
+    let block = rumi_protocol_backend::icrc3_proof::decode_block(value)
+        .map_err(|error| format!("malformed conversion refund proof: {error}"))?;
+    if !conversion_refund_fields_match(
+        &block,
+        &intent.refund_from,
+        &intent.refund_to,
+        amount,
+        intent.refund_fee_raw,
+        &intent.refund_memo,
+        intent.refund_created_at_ns,
+    ) {
+        return Err(format!(
+            "candidate refund proof does not match the exact persisted tuple for conversion {}",
+            intent.request.intent_seq
+        ));
+    }
+    Ok(())
+}
+
+fn proof_pending(
+    owner: Principal,
+    intent_seq: u64,
+    reason: impl Into<String>,
+) -> Result<ConversionStatus, ConversionError> {
+    let current = get_intent(owner, intent_seq).ok_or(ConversionError::NotFound)?;
+    if is_terminal(&current.status) {
+        return Ok(current.status);
+    }
+    Ok(set_pending(current, reason).status)
+}
+
+/// Reconcile an aged approval only from an exact ICRC-3 approval block. A
+/// candidate block never changes the journal unless the complete persisted
+/// tuple and phase still match after verification.
+pub async fn reconcile_approval(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<ConversionStatus, ConversionError> {
+    let owner = ic_cdk::api::caller();
+    if owner == Principal::anonymous() {
+        return Err(ConversionError::Unauthorized);
+    }
+    let intent = get_intent(owner, intent_seq).ok_or(ConversionError::NotFound)?;
+    if is_terminal(&intent.status) {
+        return Ok(intent.status);
+    }
+    if intent.approve_confirmed {
+        return resume_conversion(intent_seq).await;
+    }
+    if !matches!(&intent.phase, ConversionPhase::Approving)
+        || !intent.approve_dispatched
+        || intent.approve_block.is_some()
+    {
+        return Err(ConversionError::InvalidRequest {
+            reason: "approval reconciliation requires a dispatched unconfirmed approval".into(),
+        });
+    }
+    let _live = acquire_live(owner, intent_seq)?;
+    let value = match fetch_exact_conversion_block(intent.request.token_ledger, candidate_block).await {
+        Ok(value) => value,
+        Err(reason) => return proof_pending(owner, intent_seq, format!("exact approval proof remains pending: {reason}")),
+    };
+    if let Err(reason) = verify_conversion_approval_value(
+        &intent,
+        &value,
+        intent.approve_from.clone(),
+        intent.approve_spender.clone(),
+        intent.approve_amount_raw,
+        intent.approve_expected_allowance_raw,
+        intent.approve_fee_raw,
+        &intent.approve_memo,
+        intent.approve_created_at_ns,
+        Some(intent.approve_expires_at_ns),
+    ) {
+        return proof_pending(owner, intent_seq, format!("exact approval proof remains pending: {reason}"));
+    }
+    let committed = mutate_state(|state| {
+        let Some(rows) = state.conversion_intents.as_mut() else {
+            return false;
+        };
+        let Some(stored) = rows.get_mut(&(owner, intent_seq)) else {
+            return false;
+        };
+        if stored.request != intent.request
+            || !matches!(&stored.phase, ConversionPhase::Approving)
+            || !stored.approve_dispatched
+            || stored.approve_confirmed
+            || stored.approve_block.is_some()
+            || stored.approve_generation != intent.approve_generation
+            || stored.approve_amount_raw != intent.approve_amount_raw
+            || stored.approve_expected_allowance_raw != intent.approve_expected_allowance_raw
+            || stored.approve_fee_raw != intent.approve_fee_raw
+            || stored.approve_memo != intent.approve_memo
+            || stored.approve_created_at_ns != intent.approve_created_at_ns
+        {
+            return false;
+        }
+        stored.approve_confirmed = true;
+        stored.approve_ambiguous = false;
+        stored.approve_block = Some(candidate_block);
+        stored.last_error = None;
+        stored.phase = ConversionPhase::PoolCall;
+        stored.status = ConversionStatus::Pending {
+            intent_seq,
+            phase: ConversionPhase::PoolCall,
+            reason: None,
+        };
+        true
+    });
+    if !committed {
+        return Err(ConversionError::SystemBusy);
+    }
+    let durable = get_intent(owner, intent_seq).ok_or(ConversionError::NotFound)?;
+    Ok(run(durable).await)
+}
+
+/// Reconcile an aged allowance revoke from its exact ICRC-3 approval block.
+pub async fn reconcile_revoke(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<ConversionStatus, ConversionError> {
+    let owner = ic_cdk::api::caller();
+    if owner == Principal::anonymous() {
+        return Err(ConversionError::Unauthorized);
+    }
+    let intent = get_intent(owner, intent_seq).ok_or(ConversionError::NotFound)?;
+    if is_terminal(&intent.status) {
+        return Ok(intent.status);
+    }
+    if intent.revoke_confirmed {
+        return resume_conversion(intent_seq).await;
+    }
+    if !matches!(&intent.phase, ConversionPhase::Revoking)
+        || !intent.revoke_dispatched
+        || intent.revoke_block.is_some()
+    {
+        return Err(ConversionError::InvalidRequest {
+            reason: "revoke reconciliation requires a dispatched unconfirmed revoke".into(),
+        });
+    }
+    let _live = acquire_live(owner, intent_seq)?;
+    let value = match fetch_exact_conversion_block(intent.request.token_ledger, candidate_block).await {
+        Ok(value) => value,
+        Err(reason) => return proof_pending(owner, intent_seq, format!("exact revoke proof remains pending: {reason}")),
+    };
+    if let Err(reason) = verify_conversion_approval_value(
+        &intent,
+        &value,
+        intent.revoke_from.clone(),
+        intent.revoke_spender.clone(),
+        intent.revoke_amount_raw,
+        intent.revoke_expected_allowance_raw,
+        intent.revoke_fee_raw,
+        &intent.revoke_memo,
+        intent.revoke_created_at_ns,
+        None,
+    ) {
+        return proof_pending(owner, intent_seq, format!("exact revoke proof remains pending: {reason}"));
+    }
+    let committed = mutate_state(|state| {
+        let Some(rows) = state.conversion_intents.as_mut() else {
+            return false;
+        };
+        let Some(stored) = rows.get_mut(&(owner, intent_seq)) else {
+            return false;
+        };
+        if stored.request != intent.request
+            || !matches!(&stored.phase, ConversionPhase::Revoking)
+            || !stored.revoke_dispatched
+            || stored.revoke_confirmed
+            || stored.revoke_block.is_some()
+            || stored.revoke_generation != intent.revoke_generation
+            || stored.revoke_expected_allowance_raw != intent.revoke_expected_allowance_raw
+            || stored.revoke_amount_raw != intent.revoke_amount_raw
+            || stored.revoke_fee_raw != intent.revoke_fee_raw
+            || stored.revoke_memo != intent.revoke_memo
+            || stored.revoke_created_at_ns != intent.revoke_created_at_ns
+        {
+            return false;
+        }
+        stored.revoke_confirmed = true;
+        stored.revoke_ambiguous = false;
+        stored.revoke_block = Some(candidate_block);
+        stored.last_error = None;
+        let next_phase = if stored.pool_lp_minted.is_some() {
+            ConversionPhase::CreditPending
+        } else {
+            ConversionPhase::Refunding
+        };
+        stored.phase = next_phase.clone();
+        stored.status = ConversionStatus::Pending {
+            intent_seq,
+            phase: next_phase,
+            reason: None,
+        };
+        true
+    });
+    if !committed {
+        return Err(ConversionError::SystemBusy);
+    }
+    let durable = get_intent(owner, intent_seq).ok_or(ConversionError::NotFound)?;
+    Ok(run(durable).await)
+}
+
+/// Reconcile an aged escrow refund from its exact ICRC-3 transfer block.
+pub async fn reconcile_refund(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<ConversionStatus, ConversionError> {
+    let owner = ic_cdk::api::caller();
+    if owner == Principal::anonymous() {
+        return Err(ConversionError::Unauthorized);
+    }
+    let intent = get_intent(owner, intent_seq).ok_or(ConversionError::NotFound)?;
+    if is_terminal(&intent.status) {
+        return Ok(intent.status);
+    }
+    if intent.refund_block.is_some() {
+        return resume_conversion(intent_seq).await;
+    }
+    let Some(refund_amount) = intent.refund_amount_raw else {
+        return Err(ConversionError::InvalidRequest {
+            reason: "refund reconciliation requires a persisted refund amount".into(),
+        });
+    };
+    if !matches!(&intent.phase, ConversionPhase::Refunding)
+        || !intent.refund_dispatched
+        || intent.pool_lp_minted.is_some() && !intent.lp_credited
+    {
+        return Err(ConversionError::InvalidRequest {
+            reason: "refund reconciliation requires a dispatched recoverable refund".into(),
+        });
+    }
+    let _live = acquire_live(owner, intent_seq)?;
+    let value = match fetch_exact_conversion_block(intent.request.token_ledger, candidate_block).await {
+        Ok(value) => value,
+        Err(reason) => return proof_pending(owner, intent_seq, format!("exact refund proof remains pending: {reason}")),
+    };
+    if let Err(reason) = verify_conversion_refund_value(&intent, &value, refund_amount) {
+        return proof_pending(owner, intent_seq, format!("exact refund proof remains pending: {reason}"));
+    }
+    let committed = mutate_state(|state| {
+        let Some(rows) = state.conversion_intents.as_mut() else {
+            return false;
+        };
+        let Some(stored) = rows.get_mut(&(owner, intent_seq)) else {
+            return false;
+        };
+        if stored.request != intent.request
+            || !matches!(&stored.phase, ConversionPhase::Refunding)
+            || !stored.refund_dispatched
+            || stored.refund_block.is_some()
+            || stored.refund_generation != intent.refund_generation
+            || stored.refund_amount_raw != Some(refund_amount)
+            || stored.refund_fee_raw != intent.refund_fee_raw
+            || stored.refund_memo != intent.refund_memo
+            || stored.refund_created_at_ns != intent.refund_created_at_ns
+            || (stored.pool_lp_minted.is_some() && !stored.lp_credited)
+        {
+            return false;
+        }
+        stored.refund_block = Some(candidate_block);
+        stored.refund_ambiguous = false;
+        stored.refunded_raw = refund_amount;
+        stored.retained_dust_raw = 0;
+        stored.escrow_remaining_raw = Some(0);
+        stored.phase = if stored.lp_credited {
+            ConversionPhase::Completed
+        } else {
+            ConversionPhase::Refunded
+        };
+        stored.status = if stored.lp_credited {
+            ConversionStatus::Completed {
+                intent_seq,
+                lp_minted: stored.pool_lp_minted.unwrap_or(0),
+                lp_credited: true,
+                uncredited_lp: None,
+                retained_dust_raw: 0,
+            }
+        } else {
+            ConversionStatus::Refunded {
+                intent_seq,
+                refunded_raw: refund_amount,
+                retained_dust_raw: 0,
+            }
+        };
+        stored.last_error = None;
+        true
+    });
+    if !committed {
+        return Err(ConversionError::SystemBusy);
+    }
+    get_intent(owner, intent_seq)
+        .map(|intent| intent.status)
+        .ok_or(ConversionError::NotFound)
+}
+
 /// Reconcile an aged ambiguous user pull with a caller-supplied exact ICRC-3
 /// block. The persisted tuple is the only authority; a failed proof leaves the
 /// same intent pending and never allocates a replacement sequence or escrow.
@@ -2410,6 +3283,18 @@ pub fn reconcile_after_upgrade() -> usize {
                 continue;
             }
             count += 1;
+            if intent.pull_dispatched && intent.pull_block.is_none() {
+                intent.pull_ambiguous = true;
+            }
+            if intent.approve_dispatched && !intent.approve_confirmed {
+                intent.approve_ambiguous = true;
+            }
+            if intent.revoke_dispatched && !intent.revoke_confirmed {
+                intent.revoke_ambiguous = true;
+            }
+            if intent.refund_dispatched && intent.refund_block.is_none() {
+                intent.refund_ambiguous = true;
+            }
             let reason = "upgrade interrupted conversion; resume the exact durable tuple".to_string();
             intent.last_error = Some(reason.clone());
             intent.status = ConversionStatus::Pending {
@@ -2502,6 +3387,244 @@ mod tests {
         assert_eq!(fee_cap(&request), 3);
         assert!(fee_cap(&request) * MAX_FEE_LEGS <= request.max_fee_budget_raw);
         assert!(request.max_fee_budget_raw < (fee_cap(&request) + 1) * MAX_FEE_LEGS);
+    }
+
+    #[test]
+    fn funded_approval_no_effect_is_not_refundable_after_unknown() {
+        let error = ApproveError::TooOld;
+        assert!(approval_no_effect_can_refund(false, &error));
+        assert!(!approval_no_effect_can_refund(true, &error));
+        assert!(approval_bad_fee_can_retry(false, 3, 3));
+        assert!(!approval_bad_fee_can_retry(false, 4, 3));
+        assert!(!approval_bad_fee_can_retry(true, 3, 3));
+        assert!(!approval_no_effect_can_refund(
+            false,
+            &ApproveError::GenericError {
+                error_code: Nat::from(9u64),
+                message: "unknown".into(),
+            }
+        ));
+    }
+
+    #[test]
+    fn revoke_expected_allowance_uses_exact_pool_input_consumption() {
+        assert_eq!(allowance_after_pool_input(105, 100, 2).unwrap(), 3);
+        assert!(allowance_after_pool_input(101, 100, 2).is_err());
+        assert!(allowance_after_pool_input(u64::MAX, u128::from(u64::MAX), 1).is_err());
+    }
+
+    #[test]
+    fn approval_expiry_boundary_freezes_effective_allowance_to_zero() {
+        assert_eq!(effective_approval_allowance(105, 500, 499), 105);
+        assert_eq!(effective_approval_allowance(105, 500, 500), 0);
+        assert_eq!(effective_approval_allowance(105, 500, 501), 0);
+    }
+
+    #[test]
+    fn stale_undispatched_legs_refresh_once_before_first_dispatch() {
+        let old = 100;
+        let now = old + CREATED_AT_MAX_AGE_NS + 1;
+        let mut prior_phase_legs = [(old, 0u64), (old, 4u64), (old, 8u64), (old, 12u64)];
+        for (created_at, generation) in &mut prior_phase_legs {
+            assert!(refresh_first_dispatch_tuple_if_stale(
+                created_at,
+                generation,
+                false,
+                false,
+                now,
+            ));
+            assert_eq!(*created_at, now);
+            assert!(*generation > 0);
+        }
+
+        let mut dispatched_created = old;
+        let mut dispatched_generation = 2;
+        assert!(!refresh_first_dispatch_tuple_if_stale(
+            &mut dispatched_created,
+            &mut dispatched_generation,
+            true,
+            false,
+            now,
+        ));
+        assert_eq!(dispatched_created, old);
+        assert_eq!(dispatched_generation, 2);
+
+        let mut ambiguous_created = old;
+        let mut ambiguous_generation = 3;
+        assert!(!refresh_first_dispatch_tuple_if_stale(
+            &mut ambiguous_created,
+            &mut ambiguous_generation,
+            false,
+            true,
+            now,
+        ));
+        assert_eq!(ambiguous_created, old);
+        assert_eq!(ambiguous_generation, 3);
+
+        let mut boundary_created = old;
+        let mut boundary_generation = 0;
+        assert!(refresh_first_dispatch_tuple_if_stale(
+            &mut boundary_created,
+            &mut boundary_generation,
+            false,
+            false,
+            old + CREATED_AT_MAX_AGE_NS,
+        ));
+        assert_eq!(boundary_created, old + CREATED_AT_MAX_AGE_NS);
+        assert_eq!(boundary_generation, 1);
+    }
+
+    #[test]
+    fn rejected_no_transfer_exact_input_is_known_no_effect() {
+        let ledger = Principal::self_authenticating(b"rejected-ledger");
+        let escrow = Account {
+            owner: Principal::self_authenticating(b"rejected-sp"),
+            subaccount: Some([7; 32]),
+        };
+        let pool_default = Account {
+            owner: Principal::self_authenticating(b"rejected-pool"),
+            subaccount: None,
+        };
+        let input = LiquidityInputTransferV1 {
+            ledger,
+            from: escrow.clone(),
+            to: pool_default.clone(),
+            amount: 100,
+            fee: Some(2),
+            memo: Some(vec![1, 2, 3]),
+            created_at_time: 44,
+        };
+        assert!(exact_input_tuple_matches(
+            ledger,
+            escrow,
+            pool_default,
+            100,
+            2,
+            &input,
+        ));
+        assert!(terminal_leg_is_known_no_effect(
+            &LiquidityReceiptStatusV1::Rejected,
+            &Some(LiquidityLegStatusV1::RejectedNoTransfer {
+                reason: "paused before dispatch".into(),
+            }),
+        ));
+        assert!(!terminal_leg_is_known_no_effect(
+            &LiquidityReceiptStatusV1::Completed,
+            &Some(LiquidityLegStatusV1::RejectedNoTransfer {
+                reason: "wrong terminal status".into(),
+            }),
+        ));
+        // The no-effect marker makes the terminal allowance branch retain
+        // the approved value; only a Confirmed input calls
+        // `allowance_after_pool_input`.
+        assert_eq!(effective_approval_allowance(102, 500, 499), 102);
+    }
+
+    #[test]
+    fn aged_approval_and_refund_proofs_reject_wrong_tuple_fields() {
+        let from = Account {
+            owner: Principal::self_authenticating(b"proof-sp"),
+            subaccount: Some([4; 32]),
+        };
+        let spender = Account {
+            owner: Principal::self_authenticating(b"proof-pool"),
+            subaccount: None,
+        };
+        let to = Account {
+            owner: Principal::self_authenticating(b"proof-user"),
+            subaccount: None,
+        };
+        let memo = b"proof-memo".to_vec();
+        let approval = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("2approve".into()),
+            op: "approve".into(),
+            from: Some(from.clone()),
+            to: None,
+            spender: Some(spender.clone()),
+            amount: 102,
+            fee: Some(2),
+            created_at_time: Some(8),
+            memo: Some(memo.clone()),
+        };
+        assert!(conversion_approval_fields_match(
+            &approval,
+            &from,
+            &spender,
+            102,
+            2,
+            &memo,
+            8,
+        ));
+        assert!(!conversion_approval_fields_match(
+            &approval,
+            &from,
+            &Account {
+                owner: Principal::self_authenticating(b"wrong-spender"),
+                subaccount: None,
+            },
+            102,
+            2,
+            &memo,
+            8,
+        ));
+        assert!(!conversion_approval_fields_match(
+            &approval,
+            &from,
+            &spender,
+            103,
+            2,
+            &memo,
+            8,
+        ));
+
+        let refund = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "xfer".into(),
+            from: Some(from.clone()),
+            to: Some(to.clone()),
+            spender: None,
+            amount: 100,
+            fee: Some(2),
+            created_at_time: Some(9),
+            memo: Some(memo.clone()),
+        };
+        assert!(conversion_refund_fields_match(
+            &refund, &from, &to, 100, 2, &memo, 9
+        ));
+        assert!(!conversion_refund_fields_match(
+            &refund, &from, &to, 99, 2, &memo, 9
+        ));
+    }
+
+    #[test]
+    fn approval_proof_expected_allowance_is_required_and_exact() {
+        let mut tx = std::collections::BTreeMap::new();
+        tx.insert(
+            "expected_allowance".into(),
+            ICRC3Value::Nat(Nat::from(7u64)),
+        );
+        let mut block = std::collections::BTreeMap::new();
+        block.insert("tx".into(), ICRC3Value::Map(tx.clone()));
+        let value = ICRC3Value::Map(block);
+        assert_eq!(conversion_wire_expected_allowance(&value).unwrap(), Some(7));
+        assert_ne!(conversion_wire_expected_allowance(&value).unwrap(), Some(8));
+
+        tx.remove("expected_allowance");
+        let mut missing_block = std::collections::BTreeMap::new();
+        missing_block.insert("tx".into(), ICRC3Value::Map(tx));
+        assert_eq!(
+            conversion_wire_expected_allowance(&ICRC3Value::Map(missing_block)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn allowance_freeze_is_terminal_only_and_nonterminal_stays_held() {
+        assert!(pool_receipt_is_terminal(&LiquidityReceiptStatusV1::Completed));
+        assert!(pool_receipt_is_terminal(&LiquidityReceiptStatusV1::Refunded));
+        assert!(pool_receipt_is_terminal(&LiquidityReceiptStatusV1::Rejected));
+        assert!(!pool_receipt_is_terminal(&LiquidityReceiptStatusV1::Executing));
+        assert!(!pool_receipt_is_terminal(&LiquidityReceiptStatusV1::RecoveryPending));
     }
 
     #[test]
