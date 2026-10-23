@@ -65,6 +65,7 @@ Installed gzip hashes/public Candid, Running state, management settings and cont
 | Control | Current state and reason |
 | --- | --- |
 | Old V1 reserve ingress | Retired after historical reconciliation; normal3USD liquidation uses enabledV2. This is not an outstanding reopening blocker. |
+| Separate legacy receipt-swap / authorized redeem-and-burn endpoints | Remain disabled in production. Their old implementations lack bounded ambiguous-leg recovery / persisted burn identity (`src/rumi_3pool/src/lib.rs:1271`, `:1288`, `:5070`). The restored convenience conversion and V2 liquidation paths use their reviewed replacement protocols; these old endpoints are not a reopening dependency. |
 | Foreign/native-chain SP automation | Disabled, with no configured chain pools in the captured SP inventory. Enabling additional chain rails requires their own configured pools and settlement evidence; it is outside restoration of the existing rails. |
 | Bot collateral allowlist | Existing ICP-only policy retained. This limits that bot's collateral selection; it does not re-pause the restored ordinary SP receipt path. No accepted finding requires expanding the allowlist to reopen these rails. |
 | Reserve redemptions | Existing disabled setting retained. This separate reserve-redemption feature is not the restored conversion/liquidation ingress. |
