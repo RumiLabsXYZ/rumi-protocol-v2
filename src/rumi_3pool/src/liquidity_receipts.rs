@@ -13,6 +13,22 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 pub const MAX_RECEIPTS: u64 = 10_000;
+/// Keep a bounded portion of the permanent receipt map available for the
+/// configured protocol conversion client. Public callers never receive these
+/// slots, while the client may use the full map cap after authentication.
+pub const RESERVED_CLIENT_RECEIPTS: u64 = 1_024;
+
+pub fn trusted_client_matches(configured: Option<Principal>, caller: Principal) -> bool {
+    caller != Principal::anonymous() && configured == Some(caller)
+}
+
+pub fn capacity_limit_for_client(trusted_client: bool) -> u64 {
+    if trusted_client {
+        MAX_RECEIPTS
+    } else {
+        MAX_RECEIPTS.saturating_sub(RESERVED_CLIENT_RECEIPTS)
+    }
+}
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AddLiquidityRequestV1 {
@@ -116,7 +132,12 @@ pub fn get(owner: Principal, intent_id: &[u8]) -> Option<LiquidityReceiptV1> {
 /// this while holding the global admission guard, so an invalid or unfunded
 /// request cannot consume one of the bounded receipt slots.
 pub fn capacity_available() -> bool {
-    storage::LIQUIDITY_RECEIPTS_V1.with(|map| map.borrow().len() < MAX_RECEIPTS)
+    capacity_available_for_client(false)
+}
+
+pub fn capacity_available_for_client(trusted_client: bool) -> bool {
+    let limit = capacity_limit_for_client(trusted_client);
+    storage::LIQUIDITY_RECEIPTS_V1.with(|map| map.borrow().len() < limit)
 }
 
 /// Pure funding gate used before a fresh receipt is reserved.  The source
@@ -536,10 +557,53 @@ mod tests {
     #[test]
     fn capacity_is_bounded_and_never_evicts_existing_rows() {
         assert_eq!(MAX_RECEIPTS, 10_000);
+        assert_eq!(RESERVED_CLIENT_RECEIPTS, 1_024);
+        assert!(MAX_RECEIPTS > RESERVED_CLIENT_RECEIPTS);
         let owner = Principal::self_authenticating(b"capacity owner");
         let (row, _) = reserve(owner, request()).unwrap();
         assert_eq!(reserve(owner, request()).unwrap().0, row);
         assert!(get(owner, &request().intent_id).is_some());
+    }
+
+    #[test]
+    fn generic_capacity_preserves_protected_client_slots() {
+        assert_eq!(capacity_limit_for_client(false), 8_976);
+        assert_eq!(capacity_limit_for_client(true), MAX_RECEIPTS);
+        // The pure admission rule is intentionally independent of the map
+        // contents; the runtime map check applies this limit while holding the
+        // global admission guard.
+        assert!(capacity_available_for_client(false));
+        assert!(capacity_available_for_client(true));
+    }
+
+    #[test]
+    fn trusted_client_authentication_is_exact_and_fail_closed() {
+        let configured = Principal::self_authenticating(b"configured client");
+        let other = Principal::self_authenticating(b"other client");
+        assert!(trusted_client_matches(Some(configured), configured));
+        assert!(!trusted_client_matches(Some(configured), other));
+        assert!(!trusted_client_matches(None, configured));
+        assert!(!trusted_client_matches(Some(Principal::anonymous()), configured));
+    }
+
+    #[test]
+    fn rejected_preflight_tombstone_replays_without_new_admission() {
+        let owner = Principal::self_authenticating(b"rejected preflight owner");
+        let request = AddLiquidityRequestV1 {
+            intent_id: vec![91; 32],
+            amounts: vec![100, 0, 0],
+            min_lp: 1,
+            source_subaccount: Some([3; 32]),
+            max_transfer_fee: Some(10),
+        };
+        let (mut row, fresh) = reserve(owner, request.clone()).unwrap();
+        assert!(fresh);
+        reject(&mut row, "preflight funding changed");
+        let (replay, fresh) = reserve(owner, request).unwrap();
+        assert!(!fresh);
+        assert_eq!(replay.status, LiquidityReceiptStatusV1::Rejected);
+        assert_eq!(replay.input_ids, [None; 3]);
+        assert_eq!(replay.refund_ids, [None; 3]);
     }
 
     #[test]

@@ -131,6 +131,12 @@ pub const MAX_CONVERSION_INTENTS: usize = 10_000;
 const ESCROW_DOMAIN: &[u8] = b"RUMI-SP-CONVERSION-ESCROW-V1";
 const INTENT_DOMAIN: &[u8] = b"RUMI-SP-3POOL-INTENT-V1";
 const MEMO_DOMAIN: &[u8] = b"RUMI-SP-CONVERSION-MEMO-V1";
+/// The configured 3pool conversion client is the only route that reserves
+/// the durable receipt/fence before its preflight awaits. Calling the public
+/// endpoint here would reintroduce the reply-loss window where a permanent
+/// preflight rejection can be reported as `NotFound` and retried forever.
+const THREE_POOL_CONVERSION_CLIENT_METHOD: &str =
+    "add_liquidity_with_receipt_client_v1";
 const APPROVAL_EXPIRY_NS: u64 = 300_000_000_000;
 /// ICRC-2 ledgers reject a created_at_time older than their 24-hour
 /// deduplication window.  A journal row can survive longer while paused or
@@ -2223,7 +2229,7 @@ async fn submit_same_pool_request(mut intent: ConversionIntent) -> ConversionInt
     }
     let request = pool_request(&intent);
     let result: Result<(Result<LiquidityReceiptV1, LiquidityReceiptErrorV1>,), _> =
-        call(intent.pool_canister, "add_liquidity_with_receipt_v1", (request,)).await;
+        call(intent.pool_canister, THREE_POOL_CONVERSION_CLIENT_METHOD, (request,)).await;
     match result {
         Ok((Ok(receipt),)) => apply_pool_receipt(intent, receipt),
         Ok((Err(error),)) => set_pending(intent, format!("same-intent 3pool request unresolved: {error:?}")),
@@ -4316,6 +4322,14 @@ mod tests {
     }
 
     #[test]
+    fn pool_submission_is_pinned_to_the_durable_conversion_client_route() {
+        assert_eq!(
+            THREE_POOL_CONVERSION_CLIENT_METHOD,
+            "add_liquidity_with_receipt_client_v1"
+        );
+    }
+
+    #[test]
     fn pool_input_proxy_rejects_wrong_leg_and_wrong_escrow_tuple() {
         let ledger = Principal::self_authenticating(b"conversion-ledger");
         let owner = Principal::self_authenticating(b"conversion-owner");
@@ -4443,6 +4457,19 @@ mod tests {
             &input_transfers,
             &refund_transfers,
         ));
+    }
+
+    #[test]
+    fn trusted_preflight_rejection_without_input_identity_passes_full_validator() {
+        let (intent, mut receipt) =
+            terminal_revoke_test_case(LiquidityReceiptStatusV1::Rejected, 102);
+        receipt.input_ids = [None; 3];
+        receipt.refund_ids = [None; 3];
+        receipt.input_status = [None, None, None];
+        receipt.refund_status = [None, None, None];
+        receipt.input_transfers = std::array::from_fn(|_| None);
+        receipt.refund_transfers = std::array::from_fn(|_| None);
+        assert!(validate_receipt_tuples(&intent, &receipt).is_ok());
     }
 }
 

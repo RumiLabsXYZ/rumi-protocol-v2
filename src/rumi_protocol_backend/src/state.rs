@@ -253,6 +253,95 @@ mod three_usd_reserve_ingress_state_tests {
         (journal, request, tuple)
     }
 
+    fn retirement_state() -> (super::State, super::ThreeUsdReserveIngressKey, ThreeUsdReserveIngressRequest) {
+        let mut state = super::State::default();
+        let pool = Principal::from_slice(&[1]);
+        state.stability_pool_canister = Some(pool);
+        (state, super::ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 7, absorb_id: 11 }, submitted_journal().1)
+    }
+
+    fn encoded_state(state: &super::State) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(state, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn three_usd_retirement_absent_request_is_bound_durable_and_idempotent() {
+        let (mut state, key, request) = retirement_state();
+        let phase = super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap();
+        assert!(matches!(phase, ThreeUsdReserveIngressPhase::PreTransferRejected { .. }));
+        let before = encoded_state(&state);
+        assert_eq!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap(), phase);
+        assert_eq!(encoded_state(&state), before);
+        let mut restored: super::State = ciborium::de::from_reader(before.as_slice()).unwrap();
+        assert_eq!(restored.three_usd_reserve_ingress_journals[&key].request, request);
+        assert_eq!(super::retire_three_usd_reserve_ingress_in_state(&mut restored, &key, &request).unwrap(), phase);
+        for conflict in [ThreeUsdReserveIngressRequest { icusd_debt_covered_e8s: 91, ..request.clone() },
+            ThreeUsdReserveIngressRequest { three_usd_amount_e8s: 101, ..request.clone() },
+            ThreeUsdReserveIngressRequest { ledger: Principal::from_slice(&[9]), ..request.clone() }] {
+            let before = encoded_state(&restored);
+            assert!(super::retire_three_usd_reserve_ingress_in_state(&mut restored, &key, &conflict).is_err());
+            assert_eq!(encoded_state(&restored), before);
+        }
+    }
+
+    #[test]
+    fn three_usd_retirement_admission_pending_releases_only_protocol_reservation() {
+        let (mut state, key, request) = retirement_state();
+        let mut row = submitted_journal().0;
+        row.phase = ThreeUsdReserveIngressPhase::AdmissionPending;
+        row.protocol_refund_fee_reserve_e8s = 123;
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), row);
+        let mut expected: super::State = ciborium::de::from_reader(encoded_state(&state).as_slice()).unwrap();
+        let phase = super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap();
+        expected.three_usd_reserve_ingress_journals.get_mut(&key).unwrap().phase = phase;
+        expected.three_usd_reserve_ingress_journals.get_mut(&key).unwrap().protocol_refund_fee_reserve_e8s = 0;
+        assert_eq!(encoded_state(&state), encoded_state(&expected));
+    }
+
+    #[test]
+    fn three_usd_retirement_preserves_submitted_confirmed_and_wide_receipts() {
+        let (base, key, request) = retirement_state();
+        let (journal, _, tuple) = submitted_journal();
+        for phase in [journal.phase.clone(), ThreeUsdReserveIngressPhase::TransferConfirmed { tuple, block_index: 44 }] {
+            let mut state: super::State = ciborium::de::from_reader(encoded_state(&base).as_slice()).unwrap();
+            let mut row = journal.clone(); row.phase = phase.clone();
+            state.three_usd_reserve_ingress_journals.insert(key.clone(), row);
+            let before = encoded_state(&state);
+            assert_eq!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap(), phase);
+            assert_eq!(encoded_state(&state), before);
+        }
+        let mut state = base;
+        let mut row = journal; row.phase = ThreeUsdReserveIngressPhase::AdmissionPending;
+        row.confirmed_unindexable_block = Some(Nat::from(u128::MAX));
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), row);
+        let before = encoded_state(&state);
+        assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).is_err());
+        assert_eq!(encoded_state(&state), before);
+    }
+
+    #[test]
+    fn three_usd_retirement_auth_zero_and_capacity_fail_closed() {
+        let (mut state, key, request) = retirement_state();
+        for owner in [Principal::anonymous(), Principal::from_slice(&[9])] {
+            let before = encoded_state(&state);
+            let bad = super::ThreeUsdReserveIngressKey { stability_pool: owner, ..key.clone() };
+            assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &bad, &request).is_err());
+            assert_eq!(encoded_state(&state), before);
+        }
+        let zero = super::ThreeUsdReserveIngressKey { absorb_id: 0, ..key.clone() };
+        assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &zero, &request).is_err());
+        assert!(state.three_usd_reserve_ingress_journals.is_empty());
+        for id in 1..=super::MAX_THREE_USD_RESERVE_PAYOUT_JOURNALS {
+            let k = super::ThreeUsdReserveIngressKey { absorb_id: id as u64 + 100, ..key.clone() };
+            state.three_usd_reserve_ingress_journals.insert(k, submitted_journal().0);
+        }
+        let before = encoded_state(&state);
+        assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).is_err());
+        assert_eq!(encoded_state(&state), before);
+    }
+
     #[test]
     fn older_than_dedup_candidate_receipt_promotes_only_exact_persisted_tuple() {
         let (mut journal, request, tuple) = submitted_journal();
@@ -3026,6 +3115,55 @@ pub struct ThreeUsdReserveIngressJournal {
     /// clients, but refuse dispatch, candidate promotion, and absence scans.
     #[serde(default)]
     pub confirmed_unindexable_block: Option<candid::Nat>,
+}
+
+/// Permanently fence an exact SP request that never reached ledger dispatch.
+/// Callers hold both V2 admission guards. Never infer no transfer from an
+/// absent query alone: the inserted tombstone rejects any delayed original.
+pub fn retire_three_usd_reserve_ingress_in_state(
+    state: &mut State,
+    key: &ThreeUsdReserveIngressKey,
+    request: &ThreeUsdReserveIngressRequest,
+) -> Result<ThreeUsdReserveIngressPhase, ProtocolError> {
+    if key.stability_pool == Principal::anonymous()
+        || state.stability_pool_canister != Some(key.stability_pool)
+    {
+        return Err(ProtocolError::GenericError("Caller is not the registered Stability Pool".into()));
+    }
+    if key.absorb_id == 0 || request.icusd_debt_covered_e8s == 0 || request.three_usd_amount_e8s == 0 {
+        return Err(ProtocolError::GenericError("Retirement requires a nonzero exact 3USD absorb request".into()));
+    }
+    if let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) {
+        if &row.request != request {
+            return Err(ProtocolError::GenericError("SP absorb ID was reused with different arguments".into()));
+        }
+        if matches!(row.phase, ThreeUsdReserveIngressPhase::AdmissionPending) {
+            if row.ingress_proof_verified || row.refund.is_some()
+                || row.non_inclusion_scan.is_some() || row.confirmed_unindexable_block.is_some()
+            {
+                return Err(ProtocolError::TemporarilyUnavailable("Admission journal contains transfer evidence; retirement remains held".into()));
+            }
+            row.phase = ThreeUsdReserveIngressPhase::PreTransferRejected {
+                reason: "Exact request retired before any 3USD ledger dispatch".into(),
+            };
+            row.protocol_refund_fee_reserve_e8s = 0;
+        }
+        // Submitted, confirmed and settled money phases are authoritative.
+        // Returning their current status never releases the SP reservation.
+        return Ok(row.phase.clone());
+    }
+    if state.three_usd_reserve_ingress_journals.len() >= MAX_THREE_USD_RESERVE_PAYOUT_JOURNALS {
+        return Err(ProtocolError::TemporarilyUnavailable("3USD retirement journal capacity exhausted; no retirement fence committed".into()));
+    }
+    let phase = ThreeUsdReserveIngressPhase::PreTransferRejected {
+        reason: "Exact request retired before any 3USD ledger dispatch".into(),
+    };
+    state.three_usd_reserve_ingress_journals.insert(key.clone(), ThreeUsdReserveIngressJournal {
+        request: request.clone(), phase: phase.clone(), ingress_proof_verified: false,
+        refund: None, protocol_refund_fee_reserve_e8s: 0, non_inclusion_scan: None,
+        confirmed_unindexable_block: None,
+    });
+    Ok(phase)
 }
 
 /// Immutable ICRC-1 tuple for the single collateral leg queued by a 3USD

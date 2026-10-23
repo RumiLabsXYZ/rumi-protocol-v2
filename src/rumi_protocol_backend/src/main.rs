@@ -8484,6 +8484,34 @@ async fn stability_pool_liquidate_with_reserves_v2(
     }
 }
 
+/// Request-bound no-dispatch fence. Never replace this with a bare Unseen
+/// query: delayed original calls must find the same durable terminal row.
+#[update]
+#[candid_method(update)]
+fn retire_stability_pool_liquidate_with_reserves_v2(
+    vault_id: u64,
+    absorb_id: u64,
+    icusd_debt_covered_e8s: u64,
+    three_usd_amount_e8s: u64,
+    three_usd_ledger: Principal,
+) -> Result<rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView, ProtocolError> {
+    use rumi_protocol_backend::state::{ThreeUsdReserveIngressKey, ThreeUsdReserveIngressRequest};
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || read_state(|s| s.stability_pool_canister) != Some(caller) {
+        return Err(ProtocolError::GenericError("Caller is not the registered Stability Pool".into()));
+    }
+    let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
+    let request = ThreeUsdReserveIngressRequest { icusd_debt_covered_e8s, three_usd_amount_e8s, ledger: three_usd_ledger };
+    let Some(_admission_guard) = rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire() else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    let Some(_guard) = rumi_protocol_backend::management::ThreeUsdReserveIngressGuard::try_acquire(&key) else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|state| rumi_protocol_backend::state::retire_three_usd_reserve_ingress_in_state(state, &key, &request))?;
+    Ok(get_stability_pool_liquidate_with_reserves_v2_status(vault_id, absorb_id))
+}
+
 #[query]
 #[candid_method(query)]
 fn get_stability_pool_liquidate_with_reserves_v2_status(
@@ -20018,6 +20046,17 @@ fn stability_pool_cancel_liquidation(
     request_id: Vec<u8>,
 ) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
     rumi_protocol_backend::sp_liquidation::cancel(request_id)
+}
+
+/// Bind an absent prepare retirement to every immutable request field and
+/// its frozen payment ledger; no mutable admission gates run during recovery.
+#[candid_method(update)]
+#[update]
+fn stability_pool_cancel_liquidation_bound(
+    request: rumi_protocol_backend::sp_liquidation::SpLiquidationRequest,
+    payment_ledger: Principal,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::cancel_bound(request, payment_ledger)
 }
 
 /// Recovery-only wrapper: it deliberately skips the normal mode/oracle gate

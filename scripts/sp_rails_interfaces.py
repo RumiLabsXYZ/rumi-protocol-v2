@@ -62,6 +62,8 @@ RAIL_SPECS = {
         "package": "rumi_3pool",
         "methods": [
             "add_liquidity_with_receipt_v1", "get_liquidity_receipt_v1",
+            "add_liquidity_with_receipt_client_v1",
+            "set_liquidity_receipt_client", "get_liquidity_receipt_client",
             "recover_liquidity_receipt_v1",
             "reconcile_liquidity_receipt_input_v1",
             "get_active_liquidity_receipt_v1",
@@ -85,6 +87,8 @@ RAIL_SPECS = {
             "stability_pool_execute_liquidation",
             "stability_pool_liquidation_status",
             "stability_pool_cancel_liquidation",
+            "stability_pool_cancel_liquidation_bound",
+            "retire_stability_pool_liquidate_with_reserves_v2",
             "get_stability_pool_liquidation_candidate",
             "stability_pool_reconcile_liquidation_payment",
             "stability_pool_reconcile_liquidation_protocol_fee",

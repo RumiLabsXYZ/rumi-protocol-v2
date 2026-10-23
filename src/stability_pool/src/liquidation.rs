@@ -3491,8 +3491,10 @@ fn lp_liquidation_equivalent_e8s(
 ///
 /// No circuit breaker / suspension mechanism — if a token fails, we skip it and try the
 /// next one. If they all fail, the liquidation simply doesn't happen this round.
+#[derive(Debug)]
 enum ThreeUsdReserveAbsorbStatusResolution {
     Unseen,
+    AdmissionPending,
     TransferSubmittedOrUnknown,
     TransferConfirmed,
     Absorbed {
@@ -3506,6 +3508,16 @@ enum ThreeUsdReserveAbsorbStatusResolution {
         refund_fee_e8s: u64,
     },
     Pending(String),
+}
+
+fn three_usd_absorb_retire_allowed(
+    resolution: &ThreeUsdReserveAbsorbStatusResolution,
+) -> bool {
+    matches!(
+        resolution,
+        ThreeUsdReserveAbsorbStatusResolution::Unseen
+            | ThreeUsdReserveAbsorbStatusResolution::AdmissionPending
+    )
 }
 
 /// Opaque evidence that the backend payout for one immutable 3USD request was
@@ -3991,6 +4003,7 @@ async fn resolve_three_usd_absorb_status(
 
     match view.status {
         Status::Unseen => ThreeUsdReserveAbsorbStatusResolution::Unseen,
+        Status::AdmissionPending => ThreeUsdReserveAbsorbStatusResolution::AdmissionPending,
         Status::TransferSubmittedOrUnknown => ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown,
         Status::TransferConfirmed { .. } => ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed,
         Status::PreTransferRejected { .. } => {
@@ -4063,6 +4076,49 @@ async fn resolve_three_usd_absorb_status(
         status => ThreeUsdReserveAbsorbStatusResolution::Pending(format!(
             "backend reserve absorb remains unresolved: {status:?}"
         )),
+    }
+}
+
+/// Retire an exact 3USD identity only before a transfer could have been
+/// submitted. The backend binds this operation to every immutable request
+/// field and returns its status view; callers still re-read the status through
+/// `resolve_three_usd_absorb_status` before releasing any local reservation.
+async fn retire_three_usd_absorb(
+    protocol_id: Principal,
+    intent: &ThreeUsdReserveAbsorbIntent,
+) -> Result<rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView, String> {
+    let result: Result<
+        (
+            Result<
+                rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView,
+                rumi_protocol_backend::ProtocolError,
+            >,
+        ),
+        _,
+    > = call(
+        protocol_id,
+        "retire_stability_pool_liquidate_with_reserves_v2",
+        (
+            intent.vault_id,
+            intent.absorb_id,
+            intent.debt_e8s,
+            intent.amount,
+            intent.ledger,
+        ),
+    )
+    .await;
+    match result {
+        Ok((Ok(view),)) => {
+            if view.stability_pool != ic_cdk::api::id()
+                || view.vault_id != intent.vault_id
+                || view.absorb_id != intent.absorb_id
+            {
+                return Err("3USD retire response conflicts with the persisted request identity".into());
+            }
+            Ok(view)
+        }
+        Ok((Err(error),)) => Err(format!("3USD exact identity retire was rejected: {error:?}")),
+        Err(error) => Err(format!("3USD exact identity retire outcome is unknown: {error:?}")),
     }
 }
 
@@ -4232,6 +4288,22 @@ pub async fn recover_pending_three_usd_absorbs() {
         mutate_state(|state| state.take_pending_three_usd_absorb_page(MAX_PER_TICK));
     for intent in pending {
         let mut resolution = resolve_three_usd_absorb_status(protocol_id, &intent).await;
+        if three_usd_absorb_retire_allowed(&resolution) {
+            // An exact identity that has not reached the transfer boundary may
+            // be retired after an upgrade or a lost pre-admission reply. The
+            // backend returns its post-CAS status; re-read through the normal
+            // authenticated resolver before any local release. A rejected or
+            // unknown retire never authorizes clearing the SP intent.
+            if let Err(error) = retire_three_usd_absorb(protocol_id, &intent).await {
+                log!(
+                    INFO,
+                    "3USD absorb {} pre-transfer retire remains unresolved: {}",
+                    intent.absorb_id,
+                    error
+                );
+            }
+            resolution = resolve_three_usd_absorb_status(protocol_id, &intent).await;
+        }
         if matches!(resolution, ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown) {
             // Resume the same durable identity directly. This call never
             // performs another approval; the backend replays the exact tuple
@@ -4302,6 +4374,7 @@ pub async fn recover_pending_three_usd_absorbs() {
                 log!(INFO, "3USD absorb {} remains held for reconciliation: {}", intent.absorb_id, reason);
             }
             ThreeUsdReserveAbsorbStatusResolution::Unseen
+            | ThreeUsdReserveAbsorbStatusResolution::AdmissionPending
             | ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed
             | ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown => {}
         }
@@ -4751,15 +4824,22 @@ async fn ordinary_backend_execute(
 
 async fn ordinary_backend_cancel(
     protocol_id: Principal,
-    request_id: [u8; 32],
+    intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
 ) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, String> {
+    // Cancellation is deliberately bound to the complete immutable request.
+    // When prepare's reply was lost before the backend journal was written,
+    // the backend uses this exact tuple to create a permanent no-effect
+    // tombstone. A request-id-only cancel cannot safely distinguish that case
+    // from an unrelated or changed request, and the explicit ledger keeps an
+    // absent-request tombstone compatible with SP receipt identity checks.
+    let request = ordinary_prepare_request(intent);
     let result: Result<
         (Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, rumi_protocol_backend::ProtocolError>,),
         _,
     > = call(
         protocol_id,
-        "stability_pool_cancel_liquidation",
-        (request_id.to_vec(),),
+        "stability_pool_cancel_liquidation_bound",
+        (request, intent.stable_ledger),
     )
     .await;
     match result {
@@ -4779,12 +4859,36 @@ fn ordinary_backend_receipt_identity_matches(
         && receipt.payment_tuple.ledger == intent.stable_ledger
 }
 
+fn ordinary_cancel_terminal_phase(
+    phase: &rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView,
+    approval_was_confirmed: bool,
+) -> Option<crate::ordinary_liquidation::OrdinaryLiquidationPhase> {
+    match phase {
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Cancelled => {
+            Some(if approval_was_confirmed {
+                // The backend cancellation tombstone proves that the pull did not
+                // happen, but a separately proven approval still charged its
+                // exact ledger fee.  Preserve that fee through PaymentNoEffect.
+                crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
+            } else {
+                crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled
+            })
+        }
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect => {
+            Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect)
+        }
+        _ => None,
+    }
+}
+
 /// Cancel a request whose backend journal may already exist.  The SP must
 /// never delete its durable row merely because a local budget check or an
 /// approval failed: the backend request ID is the only authority for whether
-/// a fresh attempt is safe.  This helper first observes the exact backend
-/// status, cancels only while it is still prepared, and tombstones only after
-/// the backend returns a terminal no-effect phase.
+/// a fresh attempt is safe. This helper observes the exact backend status when
+/// available, then uses the complete immutable request to cancel. If status
+/// is unavailable, the bound cancellation rail can create the backend's
+/// permanent absent-request tombstone; SP tombstones only after it returns a
+/// terminal no-effect phase.
 async fn cancel_admitted_ordinary(
     protocol_id: Principal,
     intent: &crate::ordinary_liquidation::OrdinaryLiquidationIntent,
@@ -4817,7 +4921,49 @@ async fn cancel_admitted_ordinary(
         .map_err(|error| format!("ordinary cancellation CAS failed: {error:?}"))?;
     }
 
-    let status = ordinary_backend_status(protocol_id, intent.request_id).await?;
+    let status = match ordinary_backend_status(protocol_id, intent.request_id).await {
+        Ok(status) => status,
+        Err(status_error) => {
+            // A lost prepare reply can leave no backend row at all.  Calling
+            // the exact-bound cancellation rail is safe in both cases: it
+            // returns the current receipt for an existing request, or creates
+            // a durable Cancelled tombstone for an absent request.  Only that
+            // identity-checked terminal receipt may release the SP hold.
+            let cancelled = ordinary_backend_cancel(protocol_id, intent)
+                .await
+                .map_err(|cancel_error| {
+                    format!(
+                        "ordinary backend status unavailable ({status_error}); exact-bound cancellation remains unresolved: {cancel_error}"
+                    )
+                })?;
+            if !ordinary_backend_receipt_identity_matches(intent, &cancelled) {
+                return Err(
+                    "ordinary backend cancellation receipt conflicts with the frozen request"
+                        .into(),
+                );
+            }
+            let Some(terminal) = ordinary_cancel_terminal_phase(
+                &cancelled.phase,
+                current.approval_block_index.is_some(),
+            ) else {
+                return Err(format!(
+                    "ordinary backend status unavailable ({status_error}); exact-bound cancellation returned nonterminal phase {:?}",
+                    cancelled.phase
+                ));
+            };
+            let completion_reason = format!("{reason}; status unavailable: {status_error}");
+            return mutate_state(|state| {
+                state
+                    .complete_ordinary_liquidation_no_effect(
+                        intent.request_id,
+                        terminal,
+                        completion_reason,
+                        ic_cdk::api::time(),
+                    )
+                    .map_err(|error| format!("ordinary no-effect tombstone failed: {error:?}"))
+            });
+        }
+    };
     if !ordinary_backend_receipt_identity_matches(intent, &status) {
         return Err("ordinary backend cancellation status conflicts with the frozen request".into());
     }
@@ -4826,35 +4972,17 @@ async fn cancel_admitted_ordinary(
     // through the PaymentNoEffect path exactly once; only a cancellation with
     // no approval proof is a zero-outflow Cancelled terminal.
     let approval_was_confirmed = current.approval_block_index.is_some();
-    let terminal = match status.phase {
-        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Cancelled => {
-            Some(if approval_was_confirmed {
-                crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
-            } else {
-                crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled
-            })
-        }
-        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect => {
-            Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect)
+    let terminal = match &status.phase {
+        rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Cancelled
+        | rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect => {
+            ordinary_cancel_terminal_phase(&status.phase, approval_was_confirmed)
         }
         rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Prepared => {
-            let cancelled = ordinary_backend_cancel(protocol_id, intent.request_id).await?;
+            let cancelled = ordinary_backend_cancel(protocol_id, intent).await?;
             if !ordinary_backend_receipt_identity_matches(intent, &cancelled) {
                 return Err("ordinary backend cancellation receipt conflicts with the frozen request".into());
             }
-            match cancelled.phase {
-                rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::Cancelled => {
-                    Some(if approval_was_confirmed {
-                        crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
-                    } else {
-                        crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled
-                    })
-                }
-                rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView::PaymentNoEffect => {
-                    Some(crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect)
-                }
-                _ => None,
-            }
+            ordinary_cancel_terminal_phase(&cancelled.phase, approval_was_confirmed)
         }
         _ => None,
     };
@@ -6438,7 +6566,36 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         let should_approve = if had_existing_intent {
             let existing_status = resolve_three_usd_absorb_status(protocol_id, &intent).await;
             match existing_status {
-                ThreeUsdReserveAbsorbStatusResolution::Unseen => true,
+                ThreeUsdReserveAbsorbStatusResolution::Unseen
+                | ThreeUsdReserveAbsorbStatusResolution::AdmissionPending => {
+                    // A saved pre-dispatch identity is retired by its exact
+                    // bound request before any approval can be charged again.
+                    // Re-read the authenticated status because a concurrent
+                    // backend transition may have crossed the transfer fence.
+                    if let Err(error) = retire_three_usd_absorb(protocol_id, &intent).await {
+                        log!(
+                            INFO,
+                            "Holding saved 3USD absorb {}: pre-transfer retire unresolved: {}",
+                            intent.absorb_id,
+                            error
+                        );
+                        continue;
+                    }
+                    match resolve_three_usd_absorb_status(protocol_id, &intent).await {
+                        ThreeUsdReserveAbsorbStatusResolution::PreTransferRejected => {
+                            mutate_state(|s| s.clear_pending_three_usd_absorb(intent.vault_id));
+                        }
+                        other => {
+                            log!(
+                                INFO,
+                                "Holding saved 3USD absorb {} after exact retire: transfer disposition remains {:?}",
+                                intent.absorb_id,
+                                other
+                            );
+                        }
+                    }
+                    continue;
+                }
                 ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown => {
                     log!(INFO, "Holding ambiguous 3USD absorb {} without re-approval; recovery timer will resume the exact tuple", intent.absorb_id);
                     continue;
@@ -6618,6 +6775,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         match resolution {
             ThreeUsdReserveAbsorbStatusResolution::Unseen => {
                 log!(INFO, "3USD reserve absorb {} remains unseen after dispatch; preserving identity", intent.absorb_id);
+            }
+            ThreeUsdReserveAbsorbStatusResolution::AdmissionPending => {
+                log!(INFO, "3USD reserve absorb {} remains admission-pending after dispatch; preserving identity for exact pre-transfer retirement", intent.absorb_id);
             }
             ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown => {
                 log!(INFO, "3USD reserve absorb {} remains ambiguous after one exact-tuple recovery attempt; preserving identity", intent.absorb_id);
@@ -7799,6 +7959,55 @@ mod tests {
             payout_net_raw: None,
         });
         assert!(!ordinary_prepare_replay_allowed(&quoted));
+    }
+
+    #[test]
+    fn unknown_backend_status_accepts_only_terminal_bound_cancel_phases() {
+        use rumi_protocol_backend::sp_liquidation::SpLiquidationPhaseView;
+        use crate::ordinary_liquidation::OrdinaryLiquidationPhase;
+
+        assert_eq!(
+            ordinary_cancel_terminal_phase(&SpLiquidationPhaseView::Cancelled, false),
+            Some(OrdinaryLiquidationPhase::Cancelled)
+        );
+        assert_eq!(
+            ordinary_cancel_terminal_phase(&SpLiquidationPhaseView::Cancelled, true),
+            Some(OrdinaryLiquidationPhase::PaymentNoEffect)
+        );
+        assert_eq!(
+            ordinary_cancel_terminal_phase(&SpLiquidationPhaseView::PaymentNoEffect, false),
+            Some(OrdinaryLiquidationPhase::PaymentNoEffect)
+        );
+        // A request-bound cancel response that still reports a live payment
+        // phase cannot release the SP reservation. Recovery must retain the
+        // same request ID and retry the exact cancellation.
+        assert_eq!(
+            ordinary_cancel_terminal_phase(&SpLiquidationPhaseView::Prepared, false),
+            None
+        );
+        assert_eq!(
+            ordinary_cancel_terminal_phase(&SpLiquidationPhaseView::PaymentSubmitted, true),
+            None
+        );
+    }
+
+    #[test]
+    fn three_usd_retire_is_limited_to_unseen_or_admission_pending() {
+        assert!(three_usd_absorb_retire_allowed(
+            &ThreeUsdReserveAbsorbStatusResolution::Unseen
+        ));
+        assert!(three_usd_absorb_retire_allowed(
+            &ThreeUsdReserveAbsorbStatusResolution::AdmissionPending
+        ));
+        assert!(!three_usd_absorb_retire_allowed(
+            &ThreeUsdReserveAbsorbStatusResolution::TransferSubmittedOrUnknown
+        ));
+        assert!(!three_usd_absorb_retire_allowed(
+            &ThreeUsdReserveAbsorbStatusResolution::TransferConfirmed
+        ));
+        assert!(!three_usd_absorb_retire_allowed(
+            &ThreeUsdReserveAbsorbStatusResolution::PreTransferRejected
+        ));
     }
 
     #[test]

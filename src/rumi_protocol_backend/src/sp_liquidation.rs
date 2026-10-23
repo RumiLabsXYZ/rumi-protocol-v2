@@ -167,6 +167,132 @@ fn request_binding_matches(
         && journal_max_gross_raw == request.max_gross_raw
 }
 
+/// A cancellation submitted after a lost prepare reply needs a durable row of
+/// its own. The row is deliberately represented by the existing permanent
+/// journal map: it carries the complete immutable request binding, but has no
+/// executable payment or payout tuple and is terminally `Cancelled`. A late
+/// original prepare therefore authenticates to this tombstone and can never
+/// create a new reservation after the vault has moved on.
+fn cancellation_tombstone(
+    key: [u8; REQUEST_ID_LEN],
+    caller: Principal,
+    request: &SpLiquidationRequest,
+    payment_ledger: Principal,
+    now: u64,
+) -> SpLiquidationJournal {
+    SpLiquidationJournal {
+        request_id: key,
+        caller,
+        vault_id: request.vault_id,
+        payment: request.payment,
+        max_debt_e8s: request.max_debt_e8s,
+        max_gross_raw: request.max_gross_raw,
+        collateral_type: Principal::anonymous(),
+        collateral_ledger: Principal::anonymous(),
+        quote_collateral_decimals: 0,
+        quote_debt_e8s: 0,
+        quote_collateral_gross_raw: 0,
+        quote_collateral_net_raw: 0,
+        quote_collateral_payout_net_raw: 0,
+        quote_protocol_cut_raw: 0,
+        quote_interest_share_e8s: 0,
+        quote_price_e8s: 0,
+        quote_price_usd_bits: 0,
+        quote_price_decimal: [0; 16],
+        quote_payout_fee_raw: 0,
+        quote_payout_fee_known: false,
+        principal_raw: 0,
+        surcharge_raw: 0,
+        gross_payment_raw: 0,
+        payment_tuple: SpLiquidationPaymentTuple {
+            // The SP owns this immutable value.  Keeping it in the tombstone
+            // makes an absent-prepare cancellation authenticate to the same
+            // payment identity as a normal request; an anonymous sentinel
+            // would be rejected by the SP receipt matcher.
+            ledger: payment_ledger,
+            source: Account { owner: caller, subaccount: None },
+            destination: Account { owner: Principal::anonymous(), subaccount: None },
+            amount_raw: 0,
+            ledger_fee_raw: 0,
+            memo: [0; 16],
+            created_at_time_ns: 0,
+            op_nonce: 0,
+        },
+        phase: SpLiquidationPhase::Cancelled,
+        payment_block_index: None,
+        payout_operation_id: None,
+        payout_op_nonce: None,
+        payout_ledger: None,
+        payout_gross_raw: None,
+        payout_net_raw: None,
+        payout_fee_raw: None,
+        payout_memo: [0; 16],
+        payout_created_at_time_ns: 0,
+        payout_block_index: None,
+        payment_ambiguous: false,
+        payment_attempted: false,
+        protocol_fee_treasury: None,
+        protocol_fee_op_nonce: None,
+        protocol_fee_ledger_fee_raw: None,
+        protocol_fee_attempted: false,
+        protocol_fee_block_index: None,
+        interest_dispatch_started: false,
+        post_accounting_done: false,
+        applied_interest_share_e8s: None,
+        created_at_ns: now,
+        updated_at_ns: now,
+    }
+}
+
+fn cancel_bound_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    request: &SpLiquidationRequest,
+    payment_ledger: Principal,
+    key: [u8; REQUEST_ID_LEN],
+    now: u64,
+) -> Result<SpLiquidationJournal, ProtocolError> {
+    if let Some(current) = state.sp_liquidation_journals.get(&key).cloned() {
+        if current.request_id != key
+            || !request_binding_matches(
+                current.caller,
+                current.vault_id,
+                current.payment,
+                current.max_debt_e8s,
+                current.max_gross_raw,
+                caller,
+                request,
+            )
+            || current.payment_tuple.ledger != payment_ledger
+        {
+            return Err(ProtocolError::GenericError(
+                "SP liquidation request_id is already bound to different parameters".into(),
+            ));
+        }
+        if current.phase == SpLiquidationPhase::Cancelled {
+            return Ok(current);
+        }
+        if !can_cancel_phase(&current.phase) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "Only an unsubmitted SP liquidation can be cancelled".into(),
+            ));
+        }
+        let mut next = current;
+        next.phase = SpLiquidationPhase::Cancelled;
+        next.updated_at_ns = now;
+        state.sp_liquidation_journals.insert(key, next.clone());
+        return Ok(next);
+    }
+    if state.sp_liquidation_journals.len() >= MAX_SP_LIQUIDATION_JOURNALS {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP liquidation receipt journal capacity is exhausted".into(),
+        ));
+    }
+    let tombstone = cancellation_tombstone(key, caller, request, payment_ledger, now);
+    state.sp_liquidation_journals.insert(key, tombstone.clone());
+    Ok(tombstone)
+}
+
 /// Look up only an already durable prepare row. This helper performs no
 /// admission, quote, fee, oracle, or guard work, so callers can safely use it
 /// before those gates to replay an accepted request after a lost reply. A
@@ -1936,6 +2062,32 @@ pub fn status(request_id_arg: Vec<u8>) -> Result<SpLiquidationReceipt, ProtocolE
     Ok(receipt(&journal))
 }
 
+/// Cancel an ordinary request using its complete immutable binding. If the
+/// prepare row is absent (for example, its reply was lost before the backend
+/// persisted it), this creates a permanent cancellation tombstone. The
+/// tombstone consumes the same bounded journal capacity as a normal request,
+/// so an absent-ID cancellation cannot grow unbounded state or be replayed as
+/// a fresh admission later.
+pub fn cancel_bound(
+    request: SpLiquidationRequest,
+    payment_ledger: Principal,
+) -> Result<SpLiquidationReceipt, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    require_sp(caller)?;
+    let key = request_id(&request.request_id)?;
+    let journal = mutate_state(|state| {
+        cancel_bound_in_state(
+            state,
+            caller,
+            &request,
+            payment_ledger,
+            key,
+            ic_cdk::api::time(),
+        )
+    })?;
+    Ok(receipt(&journal))
+}
+
 pub fn cancel(request_id_arg: Vec<u8>) -> Result<SpLiquidationReceipt, ProtocolError> {
     let caller = ic_cdk::api::caller();
     require_sp(caller)?;
@@ -1946,6 +2098,9 @@ pub fn cancel(request_id_arg: Vec<u8>) -> Result<SpLiquidationReceipt, ProtocolE
         })?;
         if current.caller != caller {
             return Err(ProtocolError::GenericError("SP liquidation request owner mismatch".into()));
+        }
+        if current.phase == SpLiquidationPhase::Cancelled {
+            return Ok(current);
         }
         if !can_cancel_phase(&current.phase) {
             return Err(ProtocolError::TemporarilyUnavailable(
@@ -2055,6 +2210,125 @@ mod tests {
                 &changed,
             ));
         }
+    }
+
+    #[test]
+    fn absent_bound_cancel_is_a_terminal_request_bound_tombstone() {
+        let caller = Principal::from_slice(&[12, 13, 14]);
+        let original = request(SpLiquidationPayment::Ckusdc);
+        let key = request_id(&original.request_id).unwrap();
+        let mut state = crate::state::State::default();
+
+        let payment_ledger = Principal::from_slice(&[75]);
+        let tombstone = cancel_bound_in_state(
+            &mut state,
+            caller,
+            &original,
+            payment_ledger,
+            key,
+            77,
+        )
+            .expect("an absent request can be durably cancelled by the registered SP");
+        assert_eq!(tombstone.request_id, key);
+        assert_eq!(tombstone.caller, caller);
+        assert_eq!(tombstone.vault_id, original.vault_id);
+        assert_eq!(tombstone.payment, original.payment);
+        assert_eq!(tombstone.max_debt_e8s, original.max_debt_e8s);
+        assert_eq!(tombstone.max_gross_raw, original.max_gross_raw);
+        assert_eq!(tombstone.payment_tuple.ledger, payment_ledger);
+        assert_eq!(tombstone.phase, SpLiquidationPhase::Cancelled);
+        assert_eq!(state.sp_liquidation_journals.len(), 1);
+
+        let mut conflicting = original.clone();
+        conflicting.max_gross_raw += 1;
+        let conflict = cancel_bound_in_state(
+            &mut state,
+            caller,
+            &conflicting,
+            payment_ledger,
+            key,
+            78,
+        );
+        assert!(conflict.is_err(), "a changed immutable tuple must conflict");
+        let ledger_conflict = cancel_bound_in_state(
+            &mut state,
+            caller,
+            &original,
+            Principal::from_slice(&[77]),
+            key,
+            79,
+        );
+        assert!(ledger_conflict.is_err(), "a changed frozen payment ledger must conflict");
+
+        // A delayed original prepare sees the durable cancellation before any
+        // quote, guard, oracle, or mutable admission work and cannot create a
+        // replacement row.
+        crate::state::replace_state(state);
+        let replay = lookup_existing_prepare(caller, &original, key)
+            .unwrap()
+            .expect("the exact delayed prepare must replay the tombstone");
+        assert_eq!(replay.phase, SpLiquidationPhaseView::Cancelled);
+    }
+
+    #[test]
+    fn absent_bound_cancel_is_idempotent_and_capacity_bounded() {
+        let caller = Principal::from_slice(&[15]);
+        let original = request(SpLiquidationPayment::Icusd);
+        let key = request_id(&original.request_id).unwrap();
+        let mut state = crate::state::State::default();
+        let payment_ledger = Principal::from_slice(&[76]);
+        let first = cancel_bound_in_state(
+            &mut state,
+            caller,
+            &original,
+            payment_ledger,
+            key,
+            100,
+        )
+        .unwrap();
+        let second = cancel_bound_in_state(
+            &mut state,
+            caller,
+            &original,
+            payment_ledger,
+            key,
+            101,
+        )
+        .unwrap();
+        assert_eq!(first, second, "repeated cancellation must not mutate the tombstone");
+
+        for index in 1..MAX_SP_LIQUIDATION_JOURNALS {
+            let mut request = original.clone();
+            let mut request_key = [0; REQUEST_ID_LEN];
+            request_key[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            request.request_id = request_key.to_vec();
+            let key = request_id(&request.request_id).unwrap();
+            cancel_bound_in_state(
+                &mut state,
+                caller,
+                &request,
+                payment_ledger,
+                key,
+                102,
+            )
+            .unwrap();
+        }
+        assert_eq!(state.sp_liquidation_journals.len(), MAX_SP_LIQUIDATION_JOURNALS);
+
+        let mut exhausted = original;
+        exhausted.request_id = vec![0xaa; REQUEST_ID_LEN];
+        let exhausted_key = request_id(&exhausted.request_id).unwrap();
+        let error = cancel_bound_in_state(
+            &mut state,
+            caller,
+            &exhausted,
+            payment_ledger,
+            exhausted_key,
+            103,
+        )
+            .expect_err("bounded cancellation tombstones must fail closed at capacity");
+        assert!(matches!(error, ProtocolError::TemporarilyUnavailable(_)));
+        assert_eq!(state.sp_liquidation_journals.len(), MAX_SP_LIQUIDATION_JOURNALS);
     }
 
     #[test]

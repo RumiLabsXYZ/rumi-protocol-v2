@@ -2285,6 +2285,30 @@ fn close_unstarted_receipt_legs(receipt: &mut LiquidityReceiptV1) -> Result<(), 
 pub async fn add_liquidity_with_receipt_v1(
     request: AddLiquidityRequestV1,
 ) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
+    add_liquidity_with_receipt_inner(request, false).await
+}
+
+/// Start a receipt-backed add-liquidity saga for the one admin-configured
+/// protocol conversion client. This endpoint reserves the exact durable row
+/// and pool fence before its read-only preflight. A preflight failure is then
+/// a durable rejected tombstone, so a lost original cannot later allocate a
+/// second saga or leave the client retrying a permanent `NotFound` forever.
+#[update]
+#[candid_method(update)]
+pub async fn add_liquidity_with_receipt_client_v1(
+    request: AddLiquidityRequestV1,
+) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
+    let owner = ic_cdk::api::caller();
+    if !liquidity_receipts::trusted_client_matches(storage::liquidity_receipt_client(), owner) {
+        return Err(LiquidityReceiptErrorV1::Unauthorized);
+    }
+    add_liquidity_with_receipt_inner(request, true).await
+}
+
+async fn add_liquidity_with_receipt_inner(
+    request: AddLiquidityRequestV1,
+    trusted_client: bool,
+) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
     let owner = ic_cdk::api::caller();
     if owner == Principal::anonymous() {
         return Err(LiquidityReceiptErrorV1::Unauthorized);
@@ -2306,41 +2330,107 @@ pub async fn add_liquidity_with_receipt_v1(
         }
     }
 
-    // Hold one global guard over all fresh-request awaits.  Invalid, unfunded,
-    // or allowance-free requests therefore leave no durable row and cannot
-    // consume the bounded receipt map.  The guard is handed directly to the
-    // receipt saga below, with no unlock/relock gap after reserve().
+    // Hold one global guard over all fresh-request awaits. Generic callers
+    // retain the no-row preflight policy. The configured protocol client
+    // reserves first, while this same guard remains held, so every subsequent
+    // preflight failure has an immutable tombstone and cannot race a late
+    // original call.
     let admission = pool_guard::PoolGuard::new_liquidity_receipt_admission()
         .map_err(|_| LiquidityReceiptErrorV1::PoolLocked)?;
-    if !liquidity_receipts::capacity_available() {
+    if !liquidity_receipts::capacity_available_for_client(trusted_client) {
         return Err(LiquidityReceiptErrorV1::CapacityExceeded);
     }
-    preflight_new_liquidity_receipt(owner, &request).await?;
 
-    // The only awaits were in the read-only preflight.  Recheck the mutable
-    // admission conditions synchronously before creating the durable identity.
-    if read_state(|s| s.is_paused) {
-        return Err(LiquidityReceiptErrorV1::PoolLocked);
-    }
-    if receipts::fenced()
-        || storage::payouts::fenced()
-        || storage::liquidity_receipt_fence().is_some()
-    {
-        return Err(LiquidityReceiptErrorV1::PoolLocked);
-    }
-    if !liquidity_receipts::capacity_available() {
-        return Err(LiquidityReceiptErrorV1::CapacityExceeded);
-    }
-    let (mut receipt, fresh) = liquidity_receipts::reserve(owner, request.clone())?;
+    let (mut receipt, fresh) = if trusted_client {
+        let (receipt, fresh) = liquidity_receipts::reserve(owner, request.clone())?;
+        if fresh {
+            let mut receipt = receipt;
+            if liquidity_receipts::claim_active(owner, &request.intent_id).is_err() {
+                liquidity_receipts::reject(&mut receipt, "receipt fence could not be claimed before preflight");
+                liquidity_receipts::clear_if_terminal(&receipt);
+                return Ok(receipt);
+            }
+            return add_liquidity_with_receipt_after_reserve(
+                owner,
+                request,
+                receipt,
+                admission,
+                trusted_client,
+            )
+            .await;
+        }
+        (receipt, fresh)
+    } else {
+        preflight_new_liquidity_receipt(owner, &request).await?;
+        liquidity_receipts::reserve(owner, request.clone())?
+    };
     if !fresh {
         liquidity_receipts::clear_if_terminal(&receipt);
         return Ok(receipt);
     }
-    let _live = liquidity_receipts::acquire_live(owner, &request.intent_id)?;
-    liquidity_receipts::claim_active(owner, &request.intent_id)?;
-    let admission = admission
-        .handoff_to_liquidity_receipt(&receipt)
+
+    liquidity_receipts::claim_active(owner, &request.intent_id)
         .map_err(|_| LiquidityReceiptErrorV1::PoolLocked)?;
+
+    add_liquidity_with_receipt_after_reserve(
+        owner,
+        request,
+        receipt,
+        admission,
+        trusted_client,
+    )
+    .await
+}
+
+async fn add_liquidity_with_receipt_after_reserve(
+    owner: Principal,
+    request: AddLiquidityRequestV1,
+    mut receipt: LiquidityReceiptV1,
+    admission: pool_guard::PoolGuard,
+    trusted_client: bool,
+) -> Result<LiquidityReceiptV1, LiquidityReceiptErrorV1> {
+
+    if trusted_client {
+        if let Err(error) = preflight_new_liquidity_receipt(owner, &request).await {
+            liquidity_receipts::reject(&mut receipt, format!("trusted-client preflight rejected: {error:?}"));
+            liquidity_receipts::clear_if_terminal(&receipt);
+            return Ok(receipt);
+        }
+    }
+
+    // Recheck mutable admission conditions synchronously before dispatch. A
+    // trusted client already owns a durable rejected row if this check fails;
+    // generic callers still fail before reserving any row.
+    if read_state(|s| s.is_paused) {
+        liquidity_receipts::reject(&mut receipt, "pool paused before receipt dispatch");
+        liquidity_receipts::clear_if_terminal(&receipt);
+        return Ok(receipt);
+    }
+    let intent_key: [u8; 32] = request
+        .intent_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| LiquidityReceiptErrorV1::InvalidIntentId)?;
+    if receipts::fenced()
+        || storage::payouts::fenced()
+        || storage::liquidity_receipt_fence() != Some((owner, intent_key))
+    {
+        liquidity_receipts::reject(&mut receipt, "pool fence changed before receipt dispatch");
+        liquidity_receipts::clear_if_terminal(&receipt);
+        return Ok(receipt);
+    }
+    let _live = liquidity_receipts::acquire_live(owner, &request.intent_id)?;
+    let admission = admission
+        .handoff_to_liquidity_receipt(&receipt);
+    let admission = match admission {
+        Ok(admission) => admission,
+        Err(_) if trusted_client => {
+            liquidity_receipts::reject(&mut receipt, "pool receipt fence handoff failed before dispatch");
+            liquidity_receipts::clear_if_terminal(&receipt);
+            return Ok(receipt);
+        }
+        Err(_) => return Err(LiquidityReceiptErrorV1::PoolLocked),
+    };
     if let Err(error) = add_liquidity_inner_with_guard(
         request.amounts,
         request.min_lp,
@@ -4930,6 +5020,28 @@ pub fn remove_authorized_burn_caller(canister: Principal) -> Result<(), ThreePoo
 #[query]
 pub fn get_authorized_burn_callers() -> Vec<Principal> {
     admin::get_authorized_burn_callers()
+}
+
+/// Configure the one trusted protocol client allowed to reserve a
+/// receipt-backed add-liquidity row before its read-only preflight.  The
+/// unset value is fail-closed; changing it is an admin action and does not
+/// alter existing receipt ownership or fences.
+#[update]
+pub fn set_liquidity_receipt_client(client: Option<Principal>) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || caller != read_state(|s| s.config.admin) {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    if client == Some(Principal::anonymous()) {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    storage::set_liquidity_receipt_client(client);
+    Ok(())
+}
+
+#[query]
+pub fn get_liquidity_receipt_client() -> Option<Principal> {
+    storage::liquidity_receipt_client()
 }
 
 // ─── Authorized Redeem-and-Burn ───

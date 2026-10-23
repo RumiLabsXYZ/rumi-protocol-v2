@@ -52,6 +52,7 @@
 //   43      payout_exit_index_complete       — backfill completion marker
 //   44      liquidity_receipts_v1            — caller+intent keyed add-liquidity sagas
 //   45      liquidity_receipt_fence           — durable active caller+intent fence
+//   46      liquidity_receipt_client          — optional trusted conversion client
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -125,6 +126,7 @@ const MEM_PAYOUT_EXIT_INDEX_CURSOR: MemoryId = MemoryId::new(42);
 const MEM_PAYOUT_EXIT_INDEX_COMPLETE: MemoryId = MemoryId::new(43);
 const MEM_LIQUIDITY_RECEIPTS_V1: MemoryId = MemoryId::new(44);
 const MEM_LIQUIDITY_RECEIPT_FENCE: MemoryId = MemoryId::new(45);
+const MEM_LIQUIDITY_RECEIPT_CLIENT: MemoryId = MemoryId::new(46);
 const MAX_PAYOUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 const MAX_INPUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 
@@ -645,6 +647,15 @@ thread_local! {
         )
         .expect("init liquidity receipt fence"),
     );
+    /// Optional admin-configured canister allowed to reserve a receipt before
+    /// its read-only preflight.  Anonymous is the durable unset marker.
+    pub(crate) static LIQUIDITY_RECEIPT_CLIENT: RefCell<StableCell<StorablePrincipal, Memory>> = RefCell::new(
+        StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_LIQUIDITY_RECEIPT_CLIENT)),
+            StorablePrincipal(Principal::anonymous()),
+        )
+        .expect("init liquidity receipt client"),
+    );
     pub(crate) static ICRC_DEDUP_BY_HASH: RefCell<StableBTreeMap<StorableHash, DedupEntry, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ICRC_DEDUP_BY_HASH))));
     pub(crate) static ICRC_DEDUP_BY_EXPIRY: RefCell<StableBTreeMap<DedupExpiryKey, Unit, Memory>> =
@@ -866,6 +877,22 @@ pub(crate) fn clear_liquidity_receipt_fence(owner: Principal, intent_id: [u8; 32
             .expect("clear liquidity receipt fence");
         true
     })
+}
+
+/// Read the optional trusted conversion client.  Anonymous is the stable
+/// unset marker so upgrades preserve the distinction without changing the
+/// legacy heap state.
+pub(crate) fn liquidity_receipt_client() -> Option<Principal> {
+    LIQUIDITY_RECEIPT_CLIENT.with(|cell| {
+        let principal = cell.borrow().get().0;
+        (principal != Principal::anonymous()).then_some(principal)
+    })
+}
+
+pub(crate) fn set_liquidity_receipt_client(client: Option<Principal>) {
+    LIQUIDITY_RECEIPT_CLIENT
+        .with(|cell| cell.borrow_mut().set(StorablePrincipal(client.unwrap_or_else(Principal::anonymous))))
+        .expect("set liquidity receipt client");
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────

@@ -2142,6 +2142,10 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : RepayAndCloseSuccess,
     'Err' : ProtocolError,
   });
+  const Result_34 = IDL.Variant({
+    'Ok' : ThreeUsdReserveIngressV2StatusView,
+    'Err' : ProtocolError,
+  });
   const UpdateChainConfigArg = IDL.Record({
     'rpc_endpoints' : IDL.Opt(IDL.Vec(IDL.Text)),
     'gas_strategy' : IDL.Opt(GasStrategy),
@@ -2161,7 +2165,7 @@ export const idlFactory = ({ IDL }) => {
     'reserve_tx_hash' : IDL.Text,
     'reserve_transfer_log_index' : IDL.Nat64,
   });
-  const Result_34 = IDL.Variant({
+  const Result_35 = IDL.Variant({
     'Ok' : IDL.Vec(IDL.Nat8),
     'Err' : ProtocolError,
   });
@@ -2225,11 +2229,18 @@ export const idlFactory = ({ IDL }) => {
     'collateral_payout_net_raw' : IDL.Nat64,
     'debt_e8s' : IDL.Nat64,
   });
-  const Result_35 = IDL.Variant({
+  const Result_36 = IDL.Variant({
     'Ok' : SpLiquidationReceipt,
     'Err' : ProtocolError,
   });
-  const Result_36 = IDL.Variant({
+  const SpLiquidationRequest = IDL.Record({
+    'request_id' : IDL.Vec(IDL.Nat8),
+    'max_gross_raw' : IDL.Nat64,
+    'max_debt_e8s' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'payment' : SpLiquidationPayment,
+  });
+  const Result_37 = IDL.Variant({
     'Ok' : StabilityPoolLiquidationResult,
     'Err' : ProtocolError,
   });
@@ -2244,7 +2255,7 @@ export const idlFactory = ({ IDL }) => {
     'chain_id' : IDL.Nat32,
     'success' : IDL.Bool,
   });
-  const Result_37 = IDL.Variant({
+  const Result_38 = IDL.Variant({
     'Ok' : ChainStabilityPoolLiquidationResult,
     'Err' : ProtocolError,
   });
@@ -2276,7 +2287,7 @@ export const idlFactory = ({ IDL }) => {
     'collateral_received_drops' : IDL.Nat64,
     'success' : IDL.Bool,
   });
-  const Result_38 = IDL.Variant({
+  const Result_39 = IDL.Variant({
     'Ok' : XrpSpAbsorbResult,
     'Err' : ProtocolError,
   });
@@ -2287,16 +2298,9 @@ export const idlFactory = ({ IDL }) => {
     'collateral_received_drops' : IDL.Nat64,
     'expires_at_ns' : IDL.Nat64,
   });
-  const Result_39 = IDL.Variant({
+  const Result_40 = IDL.Variant({
     'Ok' : XrpSpAbsorbPreflight,
     'Err' : ProtocolError,
-  });
-  const SpLiquidationRequest = IDL.Record({
-    'request_id' : IDL.Vec(IDL.Nat8),
-    'max_gross_raw' : IDL.Nat64,
-    'max_debt_e8s' : IDL.Nat64,
-    'vault_id' : IDL.Nat64,
-    'payment' : SpLiquidationPayment,
   });
   const XrpSpAbsorbStatus = IDL.Variant({
     'ConsumedWithoutResult' : IDL.Null,
@@ -2304,12 +2308,12 @@ export const idlFactory = ({ IDL }) => {
     'Accepted' : XrpSpAbsorbResult,
     'RefundJournaled' : IDL.Null,
   });
-  const Result_40 = IDL.Variant({
+  const Result_41 = IDL.Variant({
     'Ok' : XrpSpAbsorbStatus,
     'Err' : ProtocolError,
   });
-  const Result_41 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
-  const Result_42 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
+  const Result_42 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
+  const Result_43 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
   return IDL.Service({
     'ack_vault_operation' : IDL.Func([VaultOperationIdArg], [Result], []),
     'acknowledge_three_usd_reserve_v2_client' : IDL.Func([], [Result_1], []),
@@ -3032,6 +3036,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'retire_stability_pool_liquidate_with_reserves_v2' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Principal],
+        [Result_34],
+        [],
+      ),
     'retry_pending_borrow_fee_mint' : IDL.Func([IDL.Nat], [Result_1], []),
     'set_amm1_canister' : IDL.Func([IDL.Principal], [Result_1], []),
     'set_amm1_pool_id' : IDL.Func([IDL.Text], [Result_1], []),
@@ -3311,52 +3320,57 @@ export const idlFactory = ({ IDL }) => {
     'solana_settlement_address' : IDL.Func([], [Result_2], []),
     'solana_sign_test_transfer' : IDL.Func(
         [IDL.Text, IDL.Nat64],
-        [Result_34],
+        [Result_35],
         [],
       ),
     'stability_pool_cancel_liquidation' : IDL.Func(
         [IDL.Vec(IDL.Nat8)],
-        [Result_35],
+        [Result_36],
+        [],
+      ),
+    'stability_pool_cancel_liquidation_bound' : IDL.Func(
+        [SpLiquidationRequest, IDL.Principal],
+        [Result_36],
         [],
       ),
     'stability_pool_execute_liquidation' : IDL.Func(
         [IDL.Vec(IDL.Nat8)],
-        [Result_35],
+        [Result_36],
         [],
       ),
     'stability_pool_liquidate' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [Result_36],
+        [Result_37],
         [],
       ),
     'stability_pool_liquidate_chain_vault' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, SpWritedownProof],
-        [Result_37],
+        [Result_38],
         [],
       ),
     'stability_pool_liquidate_debt_burned' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, SpWritedownProof],
-        [Result_36],
+        [Result_37],
         [],
       ),
     'stability_pool_liquidate_with_reserves' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Principal],
-        [Result_36],
+        [Result_37],
         [],
       ),
     'stability_pool_liquidate_with_reserves_v2' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Principal],
-        [Result_36],
+        [Result_37],
         [],
       ),
     'stability_pool_liquidate_xrp_vault' : IDL.Func(
         [XrpSpAbsorbRequest],
-        [Result_38],
+        [Result_39],
         [],
       ),
     'stability_pool_liquidation_status' : IDL.Func(
         [IDL.Vec(IDL.Nat8)],
-        [Result_35],
+        [Result_36],
         ['query'],
       ),
     'stability_pool_preflight_chain_absorb' : IDL.Func(
@@ -3366,27 +3380,27 @@ export const idlFactory = ({ IDL }) => {
       ),
     'stability_pool_preflight_xrp_absorb' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [Result_39],
+        [Result_40],
         [],
       ),
     'stability_pool_prepare_liquidation' : IDL.Func(
         [SpLiquidationRequest],
-        [Result_35],
+        [Result_36],
         [],
       ),
     'stability_pool_reconcile_liquidation_payment' : IDL.Func(
         [IDL.Vec(IDL.Nat8), IDL.Nat64],
-        [Result_35],
+        [Result_36],
         [],
       ),
     'stability_pool_reconcile_liquidation_payout' : IDL.Func(
         [IDL.Vec(IDL.Nat8), IDL.Nat64],
-        [Result_35],
+        [Result_36],
         [],
       ),
     'stability_pool_reconcile_liquidation_protocol_fee' : IDL.Func(
         [IDL.Vec(IDL.Nat8), IDL.Nat64],
-        [Result_35],
+        [Result_36],
         [],
       ),
     'stability_pool_release_xrp_absorb_preflight' : IDL.Func(
@@ -3401,7 +3415,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'stability_pool_xrp_absorb_status' : IDL.Func(
         [XrpSpAbsorbRequest],
-        [Result_40],
+        [Result_41],
         [],
       ),
     'stability_pool_xrp_claim_outstanding' : IDL.Func(
@@ -3409,8 +3423,8 @@ export const idlFactory = ({ IDL }) => {
         [Result_28],
         [],
       ),
-    'start_cksol_deposit' : IDL.Func([], [Result_41], []),
-    'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_42], []),
+    'start_cksol_deposit' : IDL.Func([], [Result_42], []),
+    'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_43], []),
     'sweep_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result_1], []),
     'unfreeze_protocol' : IDL.Func([], [Result_1], []),
     'update_collateral_config' : IDL.Func(
