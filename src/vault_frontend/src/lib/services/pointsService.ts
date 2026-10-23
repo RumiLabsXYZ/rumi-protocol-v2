@@ -11,6 +11,7 @@
 import type { Principal } from '@dfinity/principal';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { CANISTER_IDS, CONFIG } from '$lib/config';
+import { LOCAL_IC_HOST } from '$lib/localNetwork';
 import { idlFactory } from '$declarations/rumi_points/rumi_points.did.js';
 import type {
   _SERVICE as PointsService,
@@ -92,7 +93,7 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseDelayMs = 30
 let _actor: PointsService | null = null;
 function getActor(): PointsService {
   if (_actor) return _actor;
-  const host = CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io';
+  const host = CONFIG.isLocal ? LOCAL_IC_HOST : 'https://icp0.io';
   const agent = new HttpAgent({ host });
   if (CONFIG.isLocal) {
     agent.fetchRootKey().catch((e) => console.warn('[pointsService] fetchRootKey failed', e));

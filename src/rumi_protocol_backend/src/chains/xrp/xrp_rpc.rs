@@ -36,16 +36,8 @@ use ic_cdk::api::management_canister::http_request::{
 };
 use serde_json::{json, Value};
 
-use super::config::{is_xrp_production_key_name, xrp_schnorr_key_name};
-
-const MAINNET_URL: &str = "https://xrplcluster.com/";
-const TESTNET_URL: &str = "https://s.altnet.rippletest.net:51234/";
-const MAINNET_READ_URLS: &[&str] = &[
-    MAINNET_URL,
-    "https://xrpl.link/",
-    "https://s1.ripple.com:51234/",
-];
-const TESTNET_READ_URLS: &[&str] = &[TESTNET_URL, "https://testnet.xrpl-labs.com/"];
+use super::config::xrp_schnorr_key_name;
+use super::network::{collateral_network_for_key, provider_urls_unchecked};
 
 pub const MAX_READ_BYTES: u64 = 8_192;
 pub const MAX_TX_BYTES: u64 = 65_536;
@@ -56,7 +48,7 @@ pub const SUBMIT_CYCLES: u128 = 4_000_000_000;
 /// How many times a consensus-relative READ is re-issued on the transient
 /// consensus-miss class before giving up. Reads are idempotent, so retrying is
 /// safe; a validated ledger usually stabilises within a couple of rounds.
-const READ_RETRIES: u8 = 3;
+pub(super) const READ_RETRIES: u8 = 3;
 
 /// Parsed `account_info` result. `exists=false` for `actNotFound` (an unfunded
 /// account); `ledger_index` is still returned so a withdrawal can set
@@ -86,21 +78,19 @@ pub enum XrpTxStatus {
     Failed,
 }
 
-/// Select the rippled cluster by key name: mainnet for the production key,
-/// the public altnet testnet otherwise (matches the `test_key_1` default).
+/// Select the rippled cluster for the COLLATERAL rail by key name: mainnet for the
+/// production key, the public altnet testnet otherwise (matches the `test_key_1`
+/// default). The mapping lives in `network::collateral_network_for_key`; in the
+/// default-off `xrpl-testnet-fixture` build it is pinned to testnet.
 pub fn rpc_url(chain_key_name: &str) -> &'static str {
     read_provider_urls(chain_key_name)[0]
 }
 
 fn read_provider_urls(chain_key_name: &str) -> &'static [&'static str] {
-    if is_xrp_production_key_name(chain_key_name) {
-        MAINNET_READ_URLS
-    } else {
-        TESTNET_READ_URLS
-    }
+    provider_urls_unchecked(collateral_network_for_key(chain_key_name))
 }
 
-fn rpc_body(method: &str, params: Value) -> Vec<u8> {
+pub(super) fn rpc_body(method: &str, params: Value) -> Vec<u8> {
     json!({ "method": method, "params": [params] })
         .to_string()
         .into_bytes()
@@ -122,7 +112,7 @@ fn build_request(
     )
 }
 
-fn build_request_to_url(
+pub(super) fn build_request_to_url(
     url: &str,
     method: &str,
     params: Value,
@@ -211,7 +201,7 @@ fn tx_request_to_url(url: &str, tx_hash: &str) -> CanisterHttpRequestArgument {
 /// ("a transform that lets a volatile field through → consensus failures"). All
 /// error/edge signal is carried in the body (`parse_error`/`error`), and the
 /// parsers key entirely off the body, so pinning the status to 200 is loss-free.
-fn reduced_response(body: Vec<u8>) -> HttpResponse {
+pub(super) fn reduced_response(body: Vec<u8>) -> HttpResponse {
     HttpResponse {
         status: candid::Nat::from(200u16),
         headers: vec![],
@@ -436,13 +426,13 @@ fn parse_tx_status_for_hash(body: &[u8], expected_hash: &str) -> Result<XrpTxSta
 // ---- async outcalls (consensus-retry + provider-quorum wrapped) ----
 
 /// True for the transient consensus-miss class that is safe to re-issue on a READ.
-fn is_transient(code: RejectionCode, msg: &str) -> bool {
+pub(super) fn is_transient(code: RejectionCode, msg: &str) -> bool {
     matches!(code, RejectionCode::SysTransient)
         || msg.contains("No consensus could be reached")
         || msg.contains("Timeout expired")
 }
 
-const READ_QUORUM: usize = 2;
+pub(super) const READ_QUORUM: usize = 2;
 const RESERVE_READ_MIN_RESPONSES: usize = 1;
 
 fn require_minimum_provider_set(
@@ -1010,6 +1000,7 @@ mod tests {
         assert_eq!(v.get("tx_hash"), Some(&json!("TXHASH")));
     }
 
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     #[test]
     fn read_provider_urls_are_quorum_sets_by_key_network() {
         let mainnet = read_provider_urls(XRP_PRODUCTION_SCHNORR_KEY_NAME);
@@ -1128,12 +1119,14 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     #[test]
     fn rpc_url_selects_network_by_key() {
-        assert_eq!(rpc_url("key_1"), MAINNET_URL);
-        assert_eq!(rpc_url("test_key_1"), TESTNET_URL);
+        assert_eq!(rpc_url("key_1"), "https://xrplcluster.com/");
+        assert_eq!(rpc_url("test_key_1"), "https://s.altnet.rippletest.net:51234/");
     }
 
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     #[test]
     fn production_reads_can_tolerate_one_provider_outage() {
         let providers = read_provider_urls("key_1");

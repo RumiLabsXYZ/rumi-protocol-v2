@@ -1111,10 +1111,17 @@ fn post_upgrade(arg: ProtocolArg) {
             );
         }
         // Remove empty vaults (fully liquidated shells with zero debt and zero collateral)
+        // XRPL icUSD lane: never remove a vault that carries an XRPL exclusion, an
+        // accrual freeze, or an unresolved borrow/repayment operation (its settlement
+        // needs the vault, and the shell is its only record).
         let empty_vault_ids: Vec<u64> = s
             .vault_id_to_vaults
             .iter()
-            .filter(|(_, v)| v.borrowed_icusd_amount.0 == 0 && v.collateral_amount == 0)
+            .filter(|(id, v)| {
+                v.borrowed_icusd_amount.0 == 0
+                    && v.collateral_amount == 0
+                    && !s.xrpl_icusd.vault_has_open_operation(**id)
+            })
             .map(|(id, _)| *id)
             .collect();
         for vault_id in &empty_vault_ids {
@@ -1207,6 +1214,10 @@ fn post_upgrade(arg: ProtocolArg) {
         chains,
         chain_vaults
     );
+
+    // XRPL icUSD lane: normalise calls that were in flight across the upgrade and
+    // re-arm the one-shot tick only if durable work remains (idle-free otherwise).
+    rumi_protocol_backend::xrpl_icusd::on_post_upgrade();
 
     setup_timers();
     // Async futures are cancelled by an upgrade. Resume durable payout and
@@ -9641,6 +9652,324 @@ fn xrp_transform_tx(
     rumi_protocol_backend::chains::xrp::xrp_rpc::transform_tx(args)
 }
 
+// Issued-token (icUSD) lane transforms: strict reducers (status pinned, only the
+// consumed fields kept) for trust lines, validated receipts, issuer history and
+// server_info coverage. Read-only; no money-moving endpoint is added here.
+
+#[query]
+fn xrp_transform_lines(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_lines(args)
+}
+
+#[query]
+fn xrp_transform_issued_tx(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_issued_tx(args)
+}
+
+#[query]
+fn xrp_transform_account_tx(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_account_tx(args)
+}
+
+#[query]
+fn xrp_transform_server_info(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issued_rpc::transform_server_info(args)
+}
+
+// XRPL build-environment marker. The final Wasm carries a PUBLIC custom section
+// `rumi:xrpl-environment` whose value is `production` for every normal build and
+// `testnet-fixture` for the default-off `xrpl-testnet-fixture` artifact (the latter
+// also exports the `xrpl_fixture_environment_marker` query below). It is a
+// `link_section` static (not an `ic-wasm metadata` post-step) so it travels with the
+// code and survives `ic-wasm shrink`. `scripts/verify-xrpl-icusd-artifact.sh
+// --require-mainnet`, run by the normal backend build, rejects a fixture marker or
+// query; the fixture runner requires them.
+#[cfg(all(target_arch = "wasm32", not(feature = "xrpl-testnet-fixture")))]
+#[used]
+#[link_section = "icp:public rumi:xrpl-environment"]
+static XRPL_ENVIRONMENT_MARKER: [u8; 10] = *b"production";
+
+#[cfg(all(target_arch = "wasm32", feature = "xrpl-testnet-fixture"))]
+#[used]
+#[link_section = "icp:public rumi:xrpl-environment"]
+static XRPL_ENVIRONMENT_MARKER: [u8; 15] = *b"testnet-fixture";
+
+/// Feature-only (fixture artifact) marker query; absent from every normal build and
+/// deliberately not in the Candid file.
+#[cfg(feature = "xrpl-testnet-fixture")]
+#[query]
+fn xrpl_fixture_environment_marker() -> String {
+    rumi_protocol_backend::chains::xrp::network::build_environment().to_string()
+}
+
+// Issuer-side token-lane transforms (account state, base fee, owner-directory probe).
+
+#[query]
+fn xrp_transform_issuer_account(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issuer_rpc::transform_issuer_account(args)
+}
+
+#[query]
+fn xrp_transform_fee(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issuer_rpc::transform_fee(args)
+}
+
+#[query]
+fn xrp_transform_issuer_objects(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::issuer_rpc::transform_objects(args)
+}
+
+// ─── XRPL icUSD lane (Task 3 foundation; DISABLED until configured) ───────────
+// User methods reject anonymous callers and are caller-scoped (another principal's
+// operation is "not found"). Admin methods are controller-only. Nothing here signs
+// arbitrary bytes: the issuer sequencer only signs transactions it built from a
+// persisted, owner-authorized operation or the explicit-policy setup steps.
+
+use rumi_protocol_backend::xrpl_icusd::{
+    self as xrpl, BorrowToXrplArg, ConfigureXrplIcusdArg, CoverageReport, IssueFromCanonicalArg, IssuerSetupStatus,
+    ObserveRepaymentArg, OperationPage, OperationView, PrepareRepaymentArg, PublicXrplIcusdConfig,
+    QuarantinedReceiptView, RepaymentIntentView, ResolveClaimArg, SetPausesArg, XrplIcusdError,
+};
+
+fn xrpl_require_controller() -> Result<(), XrplIcusdError> {
+    if ic_cdk::api::is_controller(&ic_cdk::caller()) {
+        Ok(())
+    } else {
+        Err(XrplIcusdError::Unauthorized)
+    }
+}
+
+/// Public, key-free configuration of the XRPL icUSD lane.
+#[candid_method(query)]
+#[query]
+fn get_xrpl_icusd_config() -> PublicXrplIcusdConfig {
+    xrpl::get_public_config()
+}
+
+/// Move canonical icUSD (explicit ICRC-2 allowance, stable-nonce pull) into escrow and
+/// issue the same amount on the XRPL to `recipient`. Creates NO debt and NO fee.
+#[candid_method(update)]
+#[update]
+async fn issue_xrpl_from_canonical(
+    arg: IssueFromCanonicalArg,
+) -> Result<OperationView, XrplIcusdError> {
+    xrpl::issue_from_canonical(ic_cdk::caller(), arg).await
+}
+
+/// Borrow icUSD against the caller's own native-XRP vault and deliver it as XRPL
+/// icUSD to `recipient` (a funded classic account with the exact trust line). Debt
+/// is recorded through the normal borrow event only after the canonical escrow mint
+/// is proven; delivery then follows as a backed, owner-held claim.
+#[candid_method(update)]
+#[update]
+async fn borrow_to_xrpl(arg: BorrowToXrplArg) -> Result<OperationView, XrplIcusdError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(XrplIcusdError::AnonymousCaller);
+    }
+    validate_authenticated_not_frozen().map_err(xrpl::borrow::map_protocol_error)?;
+    // An exact retry of an accepted request resolves the existing operation and
+    // must not depend on a fresh price or an unchanged mode.
+    let already_accepted = <[u8; 32]>::try_from(arg.request_nonce.as_slice())
+        .map(|n| {
+            read_state(|s| s.xrpl_icusd.request_nonce_index.contains_key(&(caller, n)))
+        })
+        .unwrap_or(false);
+    if !already_accepted {
+        validate_call().await.map_err(xrpl::borrow::map_protocol_error)?;
+        validate_mode().map_err(xrpl::borrow::map_protocol_error)?;
+        // ORACLE-001: refresh this vault's collateral price before debt increases.
+        validate_freshness_for_vault(arg.vault_id)
+            .await
+            .map_err(xrpl::borrow::map_protocol_error)?;
+    }
+    xrpl::borrow::borrow_to_xrpl(caller, arg).await
+}
+
+/// Owner-scoped: drive one of the caller's operations forward (reconciliation stays
+/// available while issuance or settlement is paused).
+#[candid_method(update)]
+#[update]
+async fn resume_xrpl_operation(operation_id: u64) -> Result<OperationView, XrplIcusdError> {
+    xrpl::resume_operation(ic_cdk::caller(), operation_id).await
+}
+
+/// Owner-scoped claim resolution: take the canonical backing back, or reissue on the
+/// XRPL. Refused while a signed issuance for the claim is unresolved.
+#[candid_method(update)]
+#[update]
+async fn resolve_xrpl_claim(arg: ResolveClaimArg) -> Result<OperationView, XrplIcusdError> {
+    xrpl::resolve_claim(ic_cdk::caller(), arg).await
+}
+
+/// Prepare a repayment of the caller's own XRP-vault debt with XRPL icUSD. Returns the
+/// exact `Payment` (to the issuer, with a unique never-reused destination tag) the
+/// wallet must sign. Nothing is credited until the backend itself verifies the
+/// validated return; `top_up_operation` binds a follow-up payment to a HELD repayment.
+#[candid_method(update)]
+#[update]
+fn prepare_xrpl_repayment(arg: PrepareRepaymentArg) -> Result<RepaymentIntentView, XrplIcusdError> {
+    validate_authenticated_not_frozen().map_err(xrpl::borrow::map_protocol_error)?;
+    xrpl::repay::prepare_xrpl_repayment(ic_cdk::caller(), arg)
+}
+
+/// A wallet-reported transaction hash is a HINT only: the backend re-reads and
+/// verifies the transaction itself (the same private consumer as the issuer-history
+/// scan, so a return found by both applies once). Owner-only and throttled.
+#[candid_method(update)]
+#[update]
+async fn observe_xrpl_repayment(arg: ObserveRepaymentArg) -> Result<OperationView, XrplIcusdError> {
+    xrpl::observer::observe_xrpl_repayment(ic_cdk::caller(), arg).await
+}
+
+/// Caller-scoped, paged (at most 50 rows).
+#[candid_method(query)]
+#[query]
+fn get_my_xrpl_operations(cursor: Option<u64>, limit: u32) -> OperationPage {
+    xrpl::get_operations(ic_cdk::caller(), cursor, limit)
+}
+
+#[candid_method(update)]
+#[update]
+async fn configure_xrpl_icusd(
+    arg: ConfigureXrplIcusdArg,
+) -> Result<PublicXrplIcusdConfig, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::configure(arg).await
+}
+
+#[candid_method(update)]
+#[update]
+fn set_xrpl_icusd_pauses(arg: SetPausesArg) -> Result<PublicXrplIcusdConfig, XrplIcusdError> {
+    xrpl_require_controller()?;
+    Ok(xrpl::set_pauses(arg))
+}
+
+#[candid_method(update)]
+#[update]
+async fn verify_xrpl_icusd_minting_account(
+) -> Result<icrc_ledger_types::icrc1::account::Account, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::verify_minting_account().await
+}
+
+#[candid_method(update)]
+#[update]
+async fn run_xrpl_issuer_setup_step() -> Result<IssuerSetupStatus, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::run_issuer_setup_step().await
+}
+
+/// Refreshes and returns the coverage report (escrow balance vs liabilities vs the
+/// fixed-ledger issuer obligation snapshot).
+#[candid_method(update)]
+#[update]
+async fn get_xrpl_icusd_coverage() -> Result<CoverageReport, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::coverage_report().await
+}
+
+/// Controller-only: the value-bearing receipts held in quarantine (their value left
+/// `O` and is part of `H`; none is credited as debt repayment).
+#[candid_method(query)]
+#[query]
+fn get_xrpl_quarantined_receipts() -> Result<Vec<QuarantinedReceiptView>, XrplIcusdError> {
+    xrpl_require_controller()?;
+    Ok(read_state(|s| {
+        s.xrpl_icusd
+            .quarantined_receipts
+            .values()
+            .map(QuarantinedReceiptView::from)
+            .collect()
+    }))
+}
+
+/// Controller-only: re-read a quarantined transaction through the provider quorum and
+/// book its value into the verified sender's refundable aggregate. There is no
+/// assertion-only path: the amount comes from the re-verified receipt and must match
+/// the quarantine record and the receipt's own issuer-line metadata.
+#[candid_method(update)]
+#[update]
+async fn reconcile_xrpl_quarantined_receipt(
+    tx_hash: String,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::observer::reconcile_quarantined_receipt(tx_hash).await
+}
+
+/// Controller-only: per-transaction evidence for value held in an overflow bucket
+/// (contributions at or above the auto-refund threshold; bounded).
+#[candid_method(query)]
+#[query]
+fn get_xrpl_overflow_evidence() -> Result<Vec<QuarantinedReceiptView>, XrplIcusdError> {
+    xrpl_require_controller()?;
+    Ok(read_state(|s| {
+        s.xrpl_icusd
+            .overflow_evidence
+            .values()
+            .map(xrpl::observer::overflow_view)
+            .collect()
+    }))
+}
+
+/// Controller-only: re-read ONE overflow receipt through the provider quorum and move
+/// exactly its amount from the overflow bucket to the verified sender's attributed
+/// aggregate (refundable at the threshold). Works once per receipt; there is no
+/// assertion-only path.
+#[candid_method(update)]
+#[update]
+async fn reconcile_xrpl_overflow_receipt(
+    tx_hash: String,
+) -> Result<QuarantinedReceiptView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::observer::reconcile_overflow_receipt(tx_hash).await
+}
+
+/// Controller-only: retry a HELD borrow fee-remainder mint (no treasury at the debt
+/// commit, or the automatic fresh-nonce budget is exhausted). Refused unless every
+/// earlier fee-mint job is proven unexecuted.
+#[candid_method(update)]
+#[update]
+async fn retry_xrpl_fee_mint(operation_id: u64) -> Result<OperationView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    mutate_state(|s| {
+        xrpl::borrow::operator_retry_fee_mint(s, operation_id, ic_cdk::api::time())
+    })?;
+    xrpl::ensure_xrpl_tick_scheduled();
+    let _ = xrpl::run_op_step(operation_id).await;
+    read_state(|s| s.xrpl_icusd.op(operation_id).map(xrpl::operation_view))
+        .ok_or(XrplIcusdError::NotFound)
+}
+
+/// Controller-only: resolve a replay-rebuilt borrow (`NextAction::ReconcileMint`) by
+/// supplying the ledger block of its escrow mint. The block is fetched and verified
+/// against the reservation terms; without a block the borrow stays surfaced.
+#[candid_method(update)]
+#[update]
+async fn reconcile_xrpl_borrow_mint(
+    operation_id: u64,
+    block_index: u64,
+) -> Result<OperationView, XrplIcusdError> {
+    xrpl_require_controller()?;
+    xrpl::borrow::reconcile_borrow_mint(operation_id, block_index).await?;
+    read_state(|s| s.xrpl_icusd.op(operation_id).map(xrpl::operation_view))
+        .ok_or(XrplIcusdError::NotFound)
+}
+
 /// Developer-only guard for the experimental XRP observability endpoints below.
 fn xrp_require_developer() -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
@@ -9655,12 +9984,19 @@ fn xrp_require_developer() -> Result<(), ProtocolError> {
 
 fn xrp_require_production_schnorr_key() -> Result<(), ProtocolError> {
     let configured_key = rumi_protocol_backend::chains::xrp::config::xrp_schnorr_key_name();
-    if rumi_protocol_backend::chains::xrp::config::is_xrp_production_key_name(&configured_key) {
+    // Same key gate as the collateral guardrails: production `key_1` in every normal
+    // build; only the default-off `xrpl-testnet-fixture` artifact accepts `test_key_1`.
+    if rumi_protocol_backend::state::xrp_collateral_key_ok(&configured_key) {
         return Ok(());
     }
-    let required = rumi_protocol_backend::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME;
+    let required = rumi_protocol_backend::chains::xrp::network::expected_collateral_key_name();
+    let kind = if rumi_protocol_backend::chains::xrp::network::FIXTURE_BUILD {
+        "fixture"
+    } else {
+        "production"
+    };
     Err(ProtocolError::GenericError(format!(
-        "XRP collateral registration requires production Schnorr key {required} (configured: {configured_key})"
+        "XRP collateral registration requires {kind} Schnorr key {required} (configured: {configured_key})"
     )))
 }
 
@@ -11872,6 +12208,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         if vault.bot_processing
             || s.has_unresolved_push_sweep_for_vault(vault_id)
             || s.bot_claims.contains_key(&vault_id)
+            || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
         {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is already being processed",
@@ -11912,7 +12249,10 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+            if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -12070,6 +12410,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         if vault.bot_processing
             || s.has_unresolved_push_sweep_for_vault(vault_id)
             || s.bot_claims.contains_key(&vault_id)
+            || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
         {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} already has active liquidation work", vault_id
@@ -12873,7 +13214,10 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+            if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -13038,7 +13382,10 @@ async fn dev_force_partial_bot_liquidate(
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+            if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
                 return Err(ProtocolError::GenericError(format!(
                     "Vault #{} is already being processed",
                     vault_id
@@ -13193,7 +13540,10 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
             .get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 
-        if vault.bot_processing || s.has_unresolved_push_sweep_for_vault(vault_id) {
+        if vault.bot_processing
+                || s.has_unresolved_push_sweep_for_vault(vault_id)
+                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+            {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is locked by bot_processing",
                 vault_id
@@ -18233,6 +18583,16 @@ fn admin_correct_vault_debts(
 
     mutate_state(|s| {
         for c in &corrections {
+            // XRPL icUSD lane: a vault with an exclusion, accrual freeze or open XRPL
+            // operation holds a saved debt/interest snapshot; rewriting its debt here
+            // would desynchronise the pending settlement. Refuse.
+            if s.xrpl_icusd.vault_has_open_operation(c.vault_id) {
+                results.push(format!(
+                    "vault#{}: REFUSED (unresolved XRPL icUSD operation)",
+                    c.vault_id
+                ));
+                continue;
+            }
             if let Some(vault) = s.vault_id_to_vaults.get_mut(&c.vault_id) {
                 let old_borrowed = vault.borrowed_icusd_amount.0;
                 let old_accrued = vault.accrued_interest.0;

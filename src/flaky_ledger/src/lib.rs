@@ -164,6 +164,12 @@ struct LedgerState {
     /// Next N ICRC-1 transfers commit but lose their reply, without consuming
     /// the fault on an earlier ICRC-2 transfer_from in the same saga.
     phantom_icrc1_failures_remaining: u32,
+    /// Next N ICRC-1 transfers commit, then the call TRAPS after an inter-canister await,
+    /// so the caller sees a canister reject (the faithful IC reply-loss shape) while the
+    /// committed state and block persist.
+    trap_after_commit_remaining: u32,
+    /// Set by the transfer body when the wrapper must trap after committing.
+    trap_pending: bool,
     /// Optional caller whose default-account ICRC-1 transfers produce `1mint`
     /// blocks. This is a fixture-only approximation of the configured minter.
     minter: Option<Principal>,
@@ -308,6 +314,28 @@ fn mint_block(to: &Account, amount: u128) -> ICRC3Value {
     ICRC3Value::Map(block)
 }
 
+fn burn_block(
+    from: &Account,
+    amount: u128,
+    memo: Option<&[u8]>,
+    created_at_time: Option<u64>,
+) -> ICRC3Value {
+    let mut tx = ICRC3Map::new();
+    tx.insert("op".into(), ICRC3Value::Text("burn".into()));
+    tx.insert("from".into(), account_value(from));
+    tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(amount)));
+    if let Some(memo) = memo {
+        tx.insert("memo".into(), ICRC3Value::Blob(memo.to_vec().into()));
+    }
+    if let Some(created_at_time) = created_at_time {
+        tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(created_at_time)));
+    }
+    let mut block = ICRC3Map::new();
+    block.insert("btype".into(), ICRC3Value::Text("1burn".into()));
+    block.insert("tx".into(), ICRC3Value::Map(tx));
+    ICRC3Value::Map(block)
+}
+
 fn borrow_mint_block(
     to: &Account,
     amount: u128,
@@ -349,6 +377,17 @@ fn icrc1_balance_of(account: Account) -> Nat {
     })
 }
 
+/// The configured minting account (`set_minter`); `None` until one is set.
+#[query]
+fn icrc1_minting_account() -> Option<Account> {
+    STATE.with(|s| {
+        s.borrow().minter.map(|owner| Account {
+            owner,
+            subaccount: None,
+        })
+    })
+}
+
 #[query]
 fn icrc1_fee() -> Nat {
     STATE.with(|s| {
@@ -376,8 +415,19 @@ fn get_pool_status() -> TestPoolStatus {
 }
 
 #[update]
-fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
-    let caller = ic_cdk::caller();
+async fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
+    let result = icrc1_transfer_inner(args, ic_cdk::caller());
+    let trap = STATE.with(|s| std::mem::take(&mut s.borrow_mut().trap_pending));
+    if trap {
+        // The await below commits everything the transfer did; the trap afterwards only
+        // discards the reply, exactly like a lost response.
+        let _ = ic_cdk::api::management_canister::main::raw_rand().await;
+        ic_cdk::trap("injected: trap after commit (reply lost)");
+    }
+    result
+}
+
+fn icrc1_transfer_inner(args: TransferArg, caller: Principal) -> Result<Nat, TransferError> {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
 
@@ -462,14 +512,21 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             }
         }
 
-        let expected_fee = if is_mint { 0 } else { state.fee };
+        // A plain transfer INTO the configured minting account is a burn: fee-free, the
+        // minter is never credited, and the ledger logs a `burn` block (as the real
+        // ICRC-1 ledger does). Only active once a minter is configured.
+        let is_burn = !is_mint
+            && state
+                .minter
+                .is_some_and(|m| args.to.owner == m && args.to.subaccount.is_none());
+        let expected_fee = if is_mint || is_burn { 0 } else { state.fee };
         if fee.is_some_and(|quoted| quoted != expected_fee) {
             return Err(TransferError::BadFee { expected_fee: Nat::from(expected_fee) });
         }
 
         // Balance check (against the caller's debit, not the to-account).
         let balance = state.balances.get(&from).copied().unwrap_or(0);
-        if !is_mint && amount + state.fee > balance {
+        if !is_mint && amount + expected_fee > balance {
             return Err(TransferError::InsufficientFunds {
                 balance: Nat::from(balance),
             });
@@ -481,8 +538,12 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
         if !is_mint {
             *state.balances.entry(from.clone()).or_insert(0) -= amount + charged_fee;
         }
-        *state.balances.entry(args.to.clone()).or_insert(0) += amount;
-        let block = if is_mint {
+        if !is_burn {
+            *state.balances.entry(args.to.clone()).or_insert(0) += amount;
+        }
+        let block = if is_burn {
+            burn_block(&from, amount, args.memo.as_deref(), args.created_at_time)
+        } else if is_mint {
             borrow_mint_block(
                 &args.to,
                 amount,
@@ -521,6 +582,16 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
                 error_code: Nat::from(998u64),
                 message: "Injected phantom failure (transfer committed, reply lost)".to_string(),
             });
+        }
+        if state.trap_after_commit_remaining > 0 {
+            state.trap_after_commit_remaining -= 1;
+            if is_mint {
+                if let Some(key) = dedup_key.as_ref() {
+                    state.phantom_mint_dedup.insert(key.clone(), landed_block);
+                }
+            }
+            state.trap_pending = true;
+            return Ok(Nat::from(landed_block));
         }
         if state.phantom_icrc1_failures_remaining > 0 {
             state.phantom_icrc1_failures_remaining -= 1;
@@ -893,6 +964,13 @@ fn set_fail_fee_query(fail: bool) {
 #[update]
 fn set_phantom_failures(n: u32) {
     STATE.with(|s| s.borrow_mut().phantom_failures_remaining = n);
+}
+
+/// Next N ICRC-1 transfers commit and then trap after an await: the caller gets a canister
+/// reject (not a typed ledger error), the faithful lost-reply shape.
+#[update]
+fn set_trap_icrc1_after_commit(n: u32) {
+    STATE.with(|s| s.borrow_mut().trap_after_commit_remaining = n);
 }
 
 /// Next N ICRC-1 transfers commit and lose their reply. ICRC-2 transfer_from

@@ -590,6 +590,9 @@ canisters:
   #      candid interface without a sidecar file
   #   4. `ic-wasm <out> -o <out> shrink --keep-name-section`
   #   5. `gzip -9 -n -f <out>` (best compression, no filename/timestamp header)
+  #   6. `scripts/verify-xrpl-icusd-artifact.sh --require-mainnet <out>` inspects the
+  #      FINAL gzip: it must carry the `rumi:xrpl-environment` = production marker and
+  #      must NOT carry the xrpl-testnet-fixture marker or its marker query.
   #
   # The init_args block below pins the Upgrade variant with `mode = null` so
   # `icp canister install --mode upgrade` cannot accidentally change the
@@ -612,6 +615,7 @@ canisters:
             - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section
             - gzip -9 -n -f "$ICP_WASM_OUTPUT_PATH"
             - mv "${ICP_WASM_OUTPUT_PATH}.gz" "$ICP_WASM_OUTPUT_PATH"
+            - scripts/verify-xrpl-icusd-artifact.sh --require-mainnet "$ICP_WASM_OUTPUT_PATH"
     init_args: |
       (variant {
         Upgrade = record {
