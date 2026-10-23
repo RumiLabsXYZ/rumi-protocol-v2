@@ -1844,6 +1844,16 @@ pub fn icrc21_canister_call_consent_message(
                 Err(_) => "Deposit stablecoins into the Stability Pool via the 3pool as 3USD LP tokens.".to_string(),
             }
         }
+        // The conversion actor is deliberately created through Oisy.  Keep
+        // these calls in the consent surface even though quote is economically
+        // read-only: Oisy asks for ICRC-21 consent for update methods, and the
+        // recovery calls must describe the retained journal row rather than
+        // presenting an opaque, generic approval.
+        method if conversion_consent_method(method) => conversion_consent_message(
+            method,
+            &request.arg,
+            ic_cdk::api::caller(),
+        ),
         _ => {
             return Icrc21ConsentMessageResponse::Err(Icrc21Error::UnsupportedCanisterCall(
                 Icrc21ErrorInfo {
@@ -1863,6 +1873,228 @@ pub fn icrc21_canister_call_consent_message(
             utc_offset_minutes: request.user_preferences.metadata.utc_offset_minutes,
         },
     })
+}
+
+/// Methods in the durable 3USD conversion flow that may be invoked through
+/// the user's Oisy actor.  This list is intentionally explicit so a new
+/// update method cannot silently acquire a generic wallet approval message.
+fn conversion_consent_method(method: &str) -> bool {
+    matches!(
+        method,
+        "quote_3usd_conversion"
+            | "start_3usd_conversion"
+            | "resume_3usd_conversion"
+            | "cancel_3usd_conversion"
+            | "reconcile_3usd_conversion_pull_v1"
+            | "reconcile_3usd_conversion_pool_input_v1"
+            | "reconcile_3usd_conversion_approval_v1"
+            | "reconcile_3usd_conversion_revoke_v1"
+            | "reconcile_3usd_conversion_refund_v1"
+    )
+}
+
+/// Render consent for the actual conversion wire arguments.  Each malformed
+/// argument path remains bounded to the named method and makes no claim about
+/// an amount, ledger, or transfer.  That is safer than showing a generic
+/// approval when an Oisy caller supplied bytes that did not decode.
+fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> String {
+    let malformed = || match method {
+        "quote_3usd_conversion" => {
+            "## Quote 3USD Conversion\n\n\
+             You are requesting a read-only 3USD conversion quote. Verify the\
+             exact token ledger, amount, and minimum LP output shown by the\
+             wallet. This call does not create an intent or move funds."
+                .to_string()
+        }
+        "start_3usd_conversion" => {
+            "## Start 3USD Conversion\n\n\
+             You are authorizing a durable 3USD conversion intent. Verify the\
+             exact caller, token ledger, amount, downstream fee budget, and\
+             minimum LP output shown by the wallet. Retries remain bound to the\
+             same stored intent; this message does not authorize an arbitrary\
+             transfer."
+                .to_string()
+        }
+        "resume_3usd_conversion" => {
+            "## Resume 3USD Conversion\n\n\
+             You are authorizing recovery of one stored 3USD conversion intent.\
+             Verify the exact intent shown by the wallet. This resumes the same\
+             persisted request and does not create a new sequence or fresh spend."
+                .to_string()
+        }
+        "cancel_3usd_conversion" => {
+            "## Cancel 3USD Conversion\n\n\
+             You are requesting cancellation of one stored 3USD conversion\
+             intent. Cancellation is limited to that journaled request and does\
+             not authorize a new transfer or arbitrary refund."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_pull_v1" => {
+            "## Reconcile 3USD Conversion Pull\n\n\
+             You are reconciling one stored conversion intent against a candidate\
+             token-ledger block. This verifies the same ingress pull and does not\
+             create a new intent or fresh spend."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_pool_input_v1" => {
+            "## Reconcile 3USD Pool Input\n\n\
+             You are reconciling one stored conversion intent and pool leg against\
+             a candidate block. This verifies the same pool input and does not\
+             create a new intent or fresh spend."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_approval_v1" => {
+            "## Reconcile 3USD Conversion Approval\n\n\
+             You are reconciling the approval proof for one stored conversion\
+             intent against a candidate ledger block. This verifies the same\
+             approval and does not authorize a new transfer."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_revoke_v1" => {
+            "## Reconcile 3USD Conversion Revoke\n\n\
+             You are reconciling the allowance revoke for one stored conversion\
+             intent against a candidate ledger block. This verifies the same\
+             revoke and does not authorize a new transfer."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_refund_v1" => {
+            "## Reconcile 3USD Conversion Refund\n\n\
+             You are reconciling the refund proof for one stored conversion\
+             intent against a candidate ledger block. This verifies the same\
+             refund and does not authorize a new transfer or arbitrary refund."
+                .to_string()
+        }
+        _ => "This conversion method is not supported for wallet consent.".to_string(),
+    };
+
+    let token_details = |token_ledger: Principal| {
+        read_state(|s| {
+            s.stablecoin_registry
+                .get(&token_ledger)
+                .map(|config| (config.symbol.clone(), config.decimals))
+                .unwrap_or_else(|| (format!("token {}", token_ledger), 8))
+        })
+    };
+
+    match method {
+        "quote_3usd_conversion" => {
+            match candid::decode_args::<(Principal, u64, u128)>(arg) {
+                Ok((token_ledger, principal_raw, min_lp)) => {
+                    let (symbol, decimals) = token_details(token_ledger);
+                    format!(
+                        "## Quote 3USD Conversion\n\n\
+                         You are requesting a read-only 3USD conversion quote for **{} {}**\
+                         from token ledger `{}` with a minimum output of **{} LP base units**.\
+                         This call only queries the configured route; it does not create a\
+                         durable intent or move funds. Any wallet ingress ledger fee is\
+                         reported separately from a downstream fee budget.",
+                        format_token_amount(principal_raw, decimals),
+                        symbol,
+                        token_ledger,
+                        min_lp
+                    )
+                }
+                Err(_) => malformed(),
+            }
+        }
+        "start_3usd_conversion" => {
+            match candid::decode_args::<(conversion::ConversionRequest,)>(arg) {
+                Ok((request,)) => {
+                    let (symbol, decimals) = token_details(request.token_ledger);
+                    format!(
+                        "## Start 3USD Conversion\n\n\
+                         Caller principal `{}` is authorizing durable conversion intent **#{}**\
+                         for **{} {}** from token ledger `{}`. The explicit downstream fee\
+                         budget is **{} {}** and the minimum LP output is **{} LP base units**.\
+                         The wallet ingress transfer fee is charged separately by the token\
+                         ledger and is not included in this downstream escrow fee budget.\
+                         Retries remain bound to this same intent and request.",
+                        caller,
+                        request.intent_seq,
+                        format_token_amount(request.principal_raw, decimals),
+                        symbol,
+                        request.token_ledger,
+                        format_token_amount(request.max_fee_budget_raw, decimals),
+                        symbol,
+                        request.min_lp
+                    )
+                }
+                Err(_) => malformed(),
+            }
+        }
+        "resume_3usd_conversion" => match candid::decode_args::<(u64,)>(arg) {
+            Ok((intent_seq,)) => format!(
+                "## Resume 3USD Conversion\n\n\
+                 Caller principal `{}` is authorizing recovery of stored conversion intent\
+                 **#{}**. This resumes the exact persisted token, amount, fee budget, and\
+                 minimum LP request; it does not create a new sequence or authorize a fresh\
+                 spend.",
+                caller, intent_seq
+            ),
+            Err(_) => malformed(),
+        },
+        "cancel_3usd_conversion" => match candid::decode_args::<(u64,)>(arg) {
+            Ok((intent_seq,)) => format!(
+                "## Cancel 3USD Conversion\n\n\
+                 Caller principal `{}` is requesting cancellation of stored conversion intent\
+                 **#{}**. Cancellation is limited to the exact journaled request and is only\
+                 effective before value movement; otherwise that same intent remains for\
+                 status or reconciliation. This call does not authorize a new transfer or\
+                 arbitrary refund.",
+                caller, intent_seq
+            ),
+            Err(_) => malformed(),
+        },
+        "reconcile_3usd_conversion_pull_v1" => {
+            match candid::decode_args::<(u64, u64)>(arg) {
+                Ok((intent_seq, candidate_block)) => format!(
+                    "## Reconcile 3USD Conversion Pull\n\n\
+                     Caller principal `{}` is reconciling the exact stored conversion intent\
+                     **#{}** using candidate token-ledger block **#{}**. This verifies or\
+                     resumes recovery of the same ingress pull; it does not create a new\
+                     intent or fresh spend.",
+                    caller, intent_seq, candidate_block
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "reconcile_3usd_conversion_pool_input_v1" => {
+            match candid::decode_args::<(u64, u8, u64)>(arg) {
+                Ok((intent_seq, leg_index, candidate_block)) => format!(
+                    "## Reconcile 3USD Pool Input\n\n\
+                     Caller principal `{}` is reconciling the exact stored conversion intent\
+                     **#{}**, pool leg **#{}**, using candidate block **#{}**. This verifies\
+                     the same pool input; it does not create a new intent or fresh spend.",
+                    caller, intent_seq, leg_index, candidate_block
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "reconcile_3usd_conversion_approval_v1"
+        | "reconcile_3usd_conversion_revoke_v1"
+        | "reconcile_3usd_conversion_refund_v1" => {
+            let title = match method {
+                "reconcile_3usd_conversion_approval_v1" => "Approval",
+                "reconcile_3usd_conversion_revoke_v1" => "Allowance Revoke",
+                _ => "Refund",
+            };
+            match candid::decode_args::<(u64, u64)>(arg) {
+                Ok((intent_seq, candidate_block)) => format!(
+                    "## Reconcile 3USD Conversion {}\n\n\
+                     Caller principal `{}` is reconciling the exact stored conversion intent\
+                     **#{}** against candidate ledger block **#{}**. This verifies the same\
+                     {} operation and does not authorize a new transfer.",
+                    title.to_string(),
+                    caller,
+                    intent_seq,
+                    candidate_block,
+                    title.to_lowercase()
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        _ => malformed(),
+    }
 }
 
 // ─── ICRC-10: Supported Standards ───
@@ -2159,6 +2391,89 @@ mod tests {
         );
         drop(guard);
         assert!(ensure_no_pool_balance_async_in_flight().is_ok());
+    }
+
+    #[test]
+    fn conversion_consent_dispatch_is_bounded_and_quote_is_read_only() {
+        let token = principal(41);
+        let args = candid::encode_args((token, 1_250u64, 99u128)).unwrap();
+        let message = conversion_consent_message("quote_3usd_conversion", &args, principal(7));
+
+        assert!(conversion_consent_method("quote_3usd_conversion"));
+        assert!(!conversion_consent_method("some_future_update"));
+        assert!(message.contains("1.25"));
+        assert!(message.contains(token.to_text().as_str()));
+        assert!(message.contains("99 LP base units"));
+        assert!(message.contains("read-only"));
+        assert!(message.contains("does not create a durable intent or move funds"));
+    }
+
+    #[test]
+    fn conversion_start_consent_decodes_wire_request_and_discloses_budget() {
+        let request = conversion::ConversionRequest {
+            intent_seq: 7,
+            token_ledger: principal(42),
+            principal_raw: 12_500,
+            max_fee_budget_raw: 275,
+            min_lp: 888,
+        };
+        let args = candid::encode_args((request.clone(),)).unwrap();
+        let caller = principal(9);
+        let message = conversion_consent_message("start_3usd_conversion", &args, caller);
+
+        assert!(message.contains(caller.to_text().as_str()));
+        assert!(message.contains("intent **#7**"));
+        assert!(message.contains("0.000125"));
+        assert!(message.contains("0.00000275"));
+        assert!(message.contains(request.token_ledger.to_text().as_str()));
+        assert!(message.contains("888 LP base units"));
+        assert!(message.contains("ingress transfer fee is charged separately"));
+        assert!(message.contains("same intent and request"));
+    }
+
+    #[test]
+    fn conversion_recovery_consent_binds_same_intent_and_candidate_proof() {
+        let caller = principal(10);
+        let pull_args = candid::encode_args((7u64, 123u64)).unwrap();
+        let pull_message = conversion_consent_message(
+            "reconcile_3usd_conversion_pull_v1",
+            &pull_args,
+            caller,
+        );
+        assert!(pull_message.contains("intent **#7**"));
+        assert!(pull_message.contains("block **#123**"));
+        assert!(pull_message.contains("same ingress pull"));
+        assert!(pull_message.contains("does not create a new intent or fresh spend"));
+
+        let pool_args = candid::encode_args((7u64, 2u8, 456u64)).unwrap();
+        let pool_message = conversion_consent_message(
+            "reconcile_3usd_conversion_pool_input_v1",
+            &pool_args,
+            caller,
+        );
+        assert!(pool_message.contains("pool leg **#2**"));
+        assert!(pool_message.contains("candidate block **#456**"));
+
+        let resume_args = candid::encode_args((7u64,)).unwrap();
+        let resume_message =
+            conversion_consent_message("resume_3usd_conversion", &resume_args, caller);
+        assert!(resume_message.contains("same persisted token, amount, fee budget"));
+        assert!(resume_message.contains("does not create a new sequence or authorize a fresh spend"));
+
+        let cancel_args = candid::encode_args((7u64,)).unwrap();
+        let cancel_message =
+            conversion_consent_message("cancel_3usd_conversion", &cancel_args, caller);
+        assert!(cancel_message.contains("stored conversion intent"));
+        assert!(cancel_message.contains("not authorize a new transfer or arbitrary refund"));
+    }
+
+    #[test]
+    fn conversion_consent_malformed_args_do_not_claim_amount_or_opaque_approval() {
+        let message = conversion_consent_message("start_3usd_conversion", &[], principal(11));
+        assert!(message.contains("exact caller, token ledger, amount"));
+        assert!(message.contains("does not authorize an arbitrary transfer"));
+        assert!(!message.contains("0 LP base units"));
+        assert!(!message.contains("0.0"));
     }
 }
 

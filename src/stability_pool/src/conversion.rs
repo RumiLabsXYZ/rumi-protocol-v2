@@ -1947,6 +1947,14 @@ fn terminal_revoke_expected_allowance(
     intent: &ConversionIntent,
     receipt: &LiquidityReceiptV1,
 ) -> Result<u64, String> {
+    terminal_revoke_expected_allowance_at(intent, receipt, ic_cdk::api::time())
+}
+
+fn terminal_revoke_expected_allowance_at(
+    intent: &ConversionIntent,
+    receipt: &LiquidityReceiptV1,
+    now_ns: u64,
+) -> Result<u64, String> {
     if !pool_receipt_is_terminal(&receipt.status) {
         return Err("allowance CAS cannot be frozen from a nonterminal pool receipt".into());
     }
@@ -1955,15 +1963,11 @@ fn terminal_revoke_expected_allowance(
         subaccount: None,
     };
     let fee_cap_raw = u128::from(fee_cap(&intent.request));
-    // Once the fixed approval expiry has elapsed, the official ledger's
-    // effective allowance is zero even if the pool receipt was a no-effect
-    // rejection.  Freeze that value before the first revoke dispatch.  The
-    // equality boundary is intentional and covered by a pure regression test.
-    let mut remaining = effective_approval_allowance(
-        intent.approve_amount_raw,
-        intent.approve_expires_at_ns,
-        ic_cdk::api::time(),
-    );
+    // Subtract confirmed pool consumption from the original approval first.
+    // Applying expiry to the original amount before this subtraction would
+    // make an aged, positively confirmed receipt underflow and strand the
+    // saga before it can freeze the revoke CAS value.
+    let mut remaining = intent.approve_amount_raw;
     for index in 0..3 {
         let amount = intent.pool_amounts[index];
         if amount == 0 {
@@ -2036,7 +2040,16 @@ fn terminal_revoke_expected_allowance(
             .map_err(|_| "confirmed pool input fee exceeds u64".to_string())?;
         remaining = allowance_after_pool_input(remaining, amount, u128::from(input_fee))?;
     }
-    Ok(remaining)
+    // Once the fixed approval expiry has elapsed, the official ledger's
+    // effective allowance is zero even if the pool receipt was a no-effect
+    // rejection.  Apply that rule only after exact terminal consumption has
+    // been accounted for.  The equality boundary is intentional and covered
+    // by pure regression tests.
+    Ok(effective_approval_allowance(
+        remaining,
+        intent.approve_expires_at_ns,
+        now_ns,
+    ))
 }
 
 fn allowance_after_pool_input(
@@ -3620,6 +3633,219 @@ mod tests {
         assert_eq!(allowance_after_pool_input(105, 100, 2).unwrap(), 3);
         assert!(allowance_after_pool_input(101, 100, 2).is_err());
         assert!(allowance_after_pool_input(u64::MAX, u128::from(u64::MAX), 1).is_err());
+    }
+
+    fn terminal_revoke_test_case(
+        status: LiquidityReceiptStatusV1,
+        approve_amount_raw: u64,
+    ) -> (ConversionIntent, LiquidityReceiptV1) {
+        let owner = Principal::self_authenticating(b"conversion-owner");
+        let token_ledger = Principal::self_authenticating(b"conversion-ledger");
+        let pool_canister = Principal::self_authenticating(b"conversion-pool");
+        let lp_ledger = Principal::self_authenticating(b"conversion-lp");
+        let escrow_subaccount = [7; 32];
+        let escrow_account = Account {
+            owner: Principal::self_authenticating(b"stability-pool"),
+            subaccount: Some(escrow_subaccount),
+        };
+        let pool_default = Account {
+            owner: pool_canister,
+            subaccount: None,
+        };
+        let request = ConversionRequest {
+            intent_seq: 1,
+            token_ledger,
+            principal_raw: 100,
+            max_fee_budget_raw: 10,
+            min_lp: 1,
+        };
+        let pool_intent_id = [9; 32];
+        let input = LiquidityInputTransferV1 {
+            ledger: token_ledger,
+            from: escrow_account.clone(),
+            to: pool_default.clone(),
+            amount: 100,
+            fee: Some(2),
+            memo: Some(vec![1, 2, 3]),
+            created_at_time: 44,
+        };
+        let refund = LiquidityRefundTransferV1 {
+            ledger: token_ledger,
+            from: pool_default.clone(),
+            to: escrow_account.clone(),
+            gross: 100,
+            net: 98,
+            fee: 2,
+            memo: vec![4, 5, 6],
+            created_at_time: 45,
+        };
+        let compensation_started = matches!(&status, LiquidityReceiptStatusV1::Refunded);
+        let refund_status = if compensation_started {
+            Some(LiquidityLegStatusV1::Refunded)
+        } else {
+            Some(LiquidityLegStatusV1::Confirmed {
+                block: Nat::from(12u64),
+            })
+        };
+        let receipt = LiquidityReceiptV1 {
+            version: 1,
+            owner: pool_canister,
+            request: AddLiquidityRequestV1 {
+                intent_id: pool_intent_id.to_vec(),
+                amounts: vec![100, 0, 0],
+                min_lp: 1,
+                source_subaccount: Some(escrow_subaccount),
+                max_transfer_fee: Some(2),
+            },
+            status,
+            input_ids: [Some(1), None, None],
+            refund_ids: [Some(2), None, None],
+            input_status: [
+                Some(LiquidityLegStatusV1::Confirmed {
+                    block: Nat::from(11u64),
+                }),
+                None,
+                None,
+            ],
+            refund_status: [refund_status, None, None],
+            input_transfers: [Some(input), None, None],
+            refund_transfers: [Some(refund), None, None],
+            old_balances: None,
+            old_lp_supply: None,
+            old_caller_lp: None,
+            balances_after: None,
+            lp_supply_after: None,
+            caller_lp_after: None,
+            lp_minted: if compensation_started { None } else { Some(1) },
+            fee_bps: None,
+            imbalance_before: None,
+            imbalance_after: None,
+            is_rebalancing: None,
+            mint_event_id: None,
+            compensation_started,
+            error: None,
+        };
+        let intent = ConversionIntent {
+            owner,
+            request,
+            phase: ConversionPhase::PoolCall,
+            status: ConversionStatus::Pending {
+                intent_seq: 1,
+                phase: ConversionPhase::PoolCall,
+                reason: None,
+            },
+            lp_ledger,
+            pool_canister,
+            pool_coin_index: Some(0),
+            quoted_lp: Some(1),
+            pool_amounts: vec![100, 0, 0],
+            pool_intent_id,
+            escrow_subaccount,
+            escrow_account: escrow_account.clone(),
+            pull_from: Account {
+                owner,
+                subaccount: None,
+            },
+            pull_to: escrow_account.clone(),
+            pull_amount_raw: 110,
+            pull_call_fee_raw: None,
+            pull_fee_raw: Some(0),
+            pull_memo: vec![7],
+            pull_created_at_ns: 1,
+            pull_dispatched: true,
+            pull_block: Some(1),
+            pull_ambiguous: false,
+            pull_generation: 0,
+            escrow_funded_raw: Some(110),
+            escrow_remaining_raw: Some(110),
+            approve_from: escrow_account.clone(),
+            approve_spender: pool_default.clone(),
+            approve_amount_raw,
+            approve_expected_allowance_raw: 0,
+            approve_expires_at_ns: 500,
+            approve_fee_raw: 2,
+            approve_memo: vec![8],
+            approve_created_at_ns: 2,
+            approve_dispatched: true,
+            approve_confirmed: true,
+            approve_block: Some(2),
+            approve_ambiguous: false,
+            approve_generation: 0,
+            pool_dispatched: true,
+            pool_input_confirmed: Some(true),
+            pool_refund_confirmed: Some(true),
+            pool_lp_minted: if compensation_started { None } else { Some(1) },
+            pool_last_status: None,
+            pool_input_transfers: std::array::from_fn(|_| None),
+            pool_refund_transfers: std::array::from_fn(|_| None),
+            revoke_from: escrow_account.clone(),
+            revoke_spender: pool_default,
+            revoke_amount_raw: 0,
+            revoke_expected_allowance_raw: 0,
+            revoke_fee_raw: 2,
+            revoke_memo: vec![9],
+            revoke_created_at_ns: 3,
+            revoke_dispatched: false,
+            revoke_confirmed: false,
+            revoke_block: None,
+            revoke_ambiguous: false,
+            revoke_generation: 0,
+            refund_from: escrow_account,
+            refund_to: Account {
+                owner,
+                subaccount: None,
+            },
+            refund_amount_raw: None,
+            refund_fee_raw: 2,
+            refund_memo: vec![10],
+            refund_created_at_ns: 4,
+            refund_dispatched: false,
+            refund_block: None,
+            refunded_raw: 0,
+            retained_dust_raw: 0,
+            refund_ambiguous: false,
+            refund_generation: 0,
+            lp_credited: false,
+            uncredited_lp: None,
+            last_error: None,
+        };
+        (intent, receipt)
+    }
+
+    #[test]
+    fn expired_approval_completed_receipt_freezes_after_confirmed_consumption() {
+        let (intent, receipt) =
+            terminal_revoke_test_case(LiquidityReceiptStatusV1::Completed, 102);
+        assert!(validate_receipt_tuples(&intent, &receipt).is_ok());
+        assert_eq!(
+            terminal_revoke_expected_allowance_at(&intent, &receipt, 500).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn expired_approval_compensated_receipt_freezes_after_confirmed_consumption() {
+        let (intent, receipt) =
+            terminal_revoke_test_case(LiquidityReceiptStatusV1::Refunded, 102);
+        assert!(validate_receipt_tuples(&intent, &receipt).is_ok());
+        assert_eq!(
+            terminal_revoke_expected_allowance_at(&intent, &receipt, 501).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn live_approval_freezes_the_exact_unconsumed_remainder() {
+        // Keep three raw units outside the confirmed input so this test
+        // proves the production helper subtracts first and applies expiry
+        // second, rather than merely returning zero for both cases.
+        let (intent, receipt) =
+            terminal_revoke_test_case(LiquidityReceiptStatusV1::Completed, 105);
+        assert!(validate_receipt_tuples(&intent, &receipt).is_ok());
+        assert_eq!(
+            terminal_revoke_expected_allowance_at(&intent, &receipt, 499).unwrap(),
+            3
+        );
     }
 
     #[test]

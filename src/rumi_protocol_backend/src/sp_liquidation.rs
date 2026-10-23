@@ -426,6 +426,74 @@ fn validate_exact_ledger_transfer_block(
     Ok(())
 }
 
+fn validate_native_icp_transfer_block(
+    block: &crate::native_icp_proof::Block,
+    from: Account,
+    to: Account,
+    amount_raw: u64,
+    fee_raw: u64,
+    memo: &[u8],
+    created_at_time_ns: u64,
+) -> Result<(), String> {
+    if from.subaccount.is_some() || to.subaccount.is_some() {
+        return Err("native ICP exact collateral proof requires default accounts".into());
+    }
+    let observed_fee = crate::native_icp_proof::verify_transfer_block(
+        block,
+        from.owner,
+        to.owner,
+        amount_raw,
+        memo,
+        created_at_time_ns,
+    )?;
+    if observed_fee != fee_raw {
+        return Err("native ICP transfer proof fee does not match the frozen fee".into());
+    }
+    Ok(())
+}
+
+/// Verify an exact outbound collateral transfer receipt using the proof
+/// protocol exposed by the configured ledger. The canonical ICP ledger does
+/// not expose ICRC-3, so it must be read through its query_blocks path and
+/// checked with the native transfer verifier. All other collateral ledgers
+/// retain the bounded ICRC-3 proof path.
+async fn validate_exact_collateral_transfer(
+    ledger: Principal,
+    block_index: u64,
+    from: Account,
+    to: Account,
+    amount_raw: u64,
+    fee_raw: u64,
+    memo: &[u8],
+    created_at_time_ns: u64,
+) -> Result<(), String> {
+    if crate::native_icp_proof::is_native_icp_ledger(ledger) {
+        let block = crate::native_icp_proof::query_block(ledger, block_index).await?;
+        return validate_native_icp_transfer_block(
+            &block,
+            from,
+            to,
+            amount_raw,
+            fee_raw,
+            memo,
+            created_at_time_ns,
+        );
+    }
+
+    let block_value = crate::icrc3_proof::fetch_icrc3_block_value(ledger, block_index).await?;
+    let block = crate::icrc3_proof::decode_block(&block_value)
+        .map_err(|error| format!("malformed collateral ICRC-3 transfer block: {error}"))?;
+    validate_exact_ledger_transfer_block(
+        &block,
+        from,
+        to,
+        amount_raw,
+        fee_raw,
+        memo,
+        created_at_time_ns,
+    )
+}
+
 fn reconciliation_caller_allowed(caller: Principal) -> bool {
     caller != Principal::anonymous()
         && read_state(|state| {
@@ -1398,7 +1466,7 @@ pub async fn reconcile_payment(
     Ok(receipt(&committed))
 }
 
-/// Adopt a positive ICRC-3 proof for the frozen protocol-fee transfer. The
+/// Adopt a positive ledger proof for the frozen protocol-fee transfer. The
 /// exact treasury, gross/net amount, fee, memo, timestamp, and ledger are all
 /// read from the durable journal; mutable treasury configuration is not used.
 pub async fn reconcile_protocol_fee(
@@ -1446,18 +1514,9 @@ pub async fn reconcile_protocol_fee(
     let amount = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
     let memo = management::nonce_to_memo(op_nonce).0.to_vec();
     let created_at_time_ns = management::nonce_to_created_at_time(op_nonce);
-    let block = crate::icrc3_proof::fetch_icrc3_block(
+    validate_exact_collateral_transfer(
         journal.collateral_ledger,
         candidate_block_index,
-    )
-    .await
-    .map_err(|error| {
-        ProtocolError::TemporarilyUnavailable(format!(
-            "SP protocol-fee proof could not be fetched: {error}"
-        ))
-    })?;
-    validate_exact_ledger_transfer_block(
-        &block,
         Account {
             owner: ic_cdk::id(),
             subaccount: None,
@@ -1587,7 +1646,7 @@ fn pending_payout_matches_frozen_tuple(
         && transfer.op_nonce == frozen.op_nonce
 }
 
-/// Adopt a positive ICRC-3 proof for the outgoing SP collateral transfer. If
+/// Adopt a positive ledger proof for the outgoing SP collateral transfer. If
 /// the generic payout worker already removed the pending row, the journal's
 /// immutable operation tuple is sufficient to reattach the settled receipt;
 /// if the row remains, journal, event, and pending-row removal commit together.
@@ -1619,15 +1678,9 @@ pub async fn reconcile_payout(
             ));
         }
     }
-    let block = crate::icrc3_proof::fetch_icrc3_block(frozen.ledger, candidate_block_index)
-        .await
-        .map_err(|error| {
-            ProtocolError::TemporarilyUnavailable(format!(
-                "SP payout proof could not be fetched: {error}"
-            ))
-        })?;
-    validate_exact_ledger_transfer_block(
-        &block,
+    validate_exact_collateral_transfer(
+        frozen.ledger,
+        candidate_block_index,
         Account {
             owner: ic_cdk::id(),
             subaccount: None,
@@ -2051,6 +2104,159 @@ mod tests {
     fn icusd_burn_tuple_uses_zero_fee_even_when_normal_ledger_fee_is_nonzero() {
         assert_eq!(effective_payment_fee(SpLiquidationPayment::Icusd, 100_000), 0);
         assert_eq!(effective_payment_fee(SpLiquidationPayment::Ckusdc, 10), 10);
+    }
+
+    fn native_transfer_block(
+        from: Principal,
+        to: Principal,
+        amount_raw: u64,
+        fee_raw: u64,
+        memo: &[u8],
+        created_at_time_ns: u64,
+    ) -> crate::native_icp_proof::Block {
+        crate::native_icp_proof::Block {
+            parent_hash: None,
+            transaction: crate::native_icp_proof::Transaction {
+                memo: 0,
+                icrc1_memo: Some(memo.to_vec()),
+                operation: Some(crate::native_icp_proof::Operation::Transfer {
+                    from: crate::native_icp_proof::account_identifier(from).to_vec(),
+                    to: crate::native_icp_proof::account_identifier(to).to_vec(),
+                    spender: None,
+                    amount: crate::native_icp_proof::Tokens { e8s: amount_raw },
+                    fee: crate::native_icp_proof::Tokens { e8s: fee_raw },
+                }),
+                created_at_time: crate::native_icp_proof::Timestamp {
+                    timestamp_nanos: created_at_time_ns,
+                },
+            },
+            timestamp: crate::native_icp_proof::Timestamp {
+                timestamp_nanos: created_at_time_ns,
+            },
+        }
+    }
+
+    #[test]
+    fn native_collateral_proof_accepts_backend_treasury_and_sp_exact_tuples() {
+        let backend = Principal::from_slice(&[31]);
+        let treasury = Principal::from_slice(&[32]);
+        let stability_pool = Principal::from_slice(&[33]);
+        let memo = [0x71; 16];
+
+        let treasury_block = native_transfer_block(backend, treasury, 900, 10, &memo, 701);
+        assert!(validate_native_icp_transfer_block(
+            &treasury_block,
+            Account {
+                owner: backend,
+                subaccount: None,
+            },
+            Account {
+                owner: treasury,
+                subaccount: None,
+            },
+            900,
+            10,
+            &memo,
+            701,
+        )
+        .is_ok());
+
+        let stability_pool_block =
+            native_transfer_block(backend, stability_pool, 1_900, 10, &memo, 702);
+        assert!(validate_native_icp_transfer_block(
+            &stability_pool_block,
+            Account {
+                owner: backend,
+                subaccount: None,
+            },
+            Account {
+                owner: stability_pool,
+                subaccount: None,
+            },
+            1_900,
+            10,
+            &memo,
+            702,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn native_collateral_proof_rejects_wrong_frozen_tuple_fields() {
+        let backend = Principal::from_slice(&[41]);
+        let treasury = Principal::from_slice(&[42]);
+        let other = Principal::from_slice(&[43]);
+        let memo = [0x72; 16];
+        let block = native_transfer_block(backend, treasury, 900, 10, &memo, 701);
+        let from = Account {
+            owner: backend,
+            subaccount: None,
+        };
+        let to = Account {
+            owner: treasury,
+            subaccount: None,
+        };
+
+        assert!(validate_native_icp_transfer_block(
+            &block,
+            from.clone(),
+            to.clone(),
+            899,
+            10,
+            &memo,
+            701,
+        )
+        .is_err());
+        assert!(validate_native_icp_transfer_block(
+            &block,
+            from.clone(),
+            Account {
+                owner: other,
+                subaccount: None,
+            },
+            900,
+            10,
+            &memo,
+            701,
+        )
+        .is_err());
+        assert!(validate_native_icp_transfer_block(
+            &block,
+            Account {
+                owner: other,
+                subaccount: None,
+            },
+            to.clone(),
+            900,
+            10,
+            &memo,
+            701,
+        )
+        .is_err());
+        assert!(validate_native_icp_transfer_block(
+            &block,
+            from.clone(),
+            to.clone(),
+            900,
+            11,
+            &memo,
+            701,
+        )
+        .is_err());
+        assert!(validate_native_icp_transfer_block(
+            &block,
+            from.clone(),
+            to.clone(),
+            900,
+            10,
+            &[0x73; 16],
+            701,
+        )
+        .is_err());
+        assert!(validate_native_icp_transfer_block(
+            &block, from, to, 900, 10, &memo, 702
+        )
+        .is_err());
     }
 
     #[test]
