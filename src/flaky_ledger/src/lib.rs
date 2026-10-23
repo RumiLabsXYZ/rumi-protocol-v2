@@ -408,7 +408,9 @@ fn approve_block(
         );
     }
     let mut block = ICRC3Map::new();
-    block.insert("btype".into(), ICRC3Value::Text("1approve".into()));
+    // ICRC-3 uses the canonical ledger block type for approvals. Production
+    // receipt validators reject the historical fixture-only `1approve` tag.
+    block.insert("btype".into(), ICRC3Value::Text("2approve".into()));
     block.insert("tx".into(), ICRC3Value::Map(tx));
     ICRC3Value::Map(block)
 }
@@ -1427,6 +1429,11 @@ mod approve_semantics_tests {
         let ICRC3Value::Map(fields) = block else {
             panic!("approval block must be a map");
         };
+        assert_eq!(
+            fields.get("btype"),
+            Some(&ICRC3Value::Text("2approve".into())),
+            "the emitted approval block must use the canonical ICRC-3 type",
+        );
         let Some(ICRC3Value::Map(tx)) = fields.get("tx") else {
             panic!("approval block must contain a transaction map");
         };

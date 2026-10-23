@@ -3314,27 +3314,175 @@ thread_local! {
 // CL14: queues are keyed by (VaultId, recipient, operation_id). The visitor also
 // accepts V7/V8's integer and (VaultId, recipient) keys without collapsing rows.
 //
-// We can't use `#[serde(untagged)]` here because ciborium's untagged-enum
-// dispatch doesn't reliably distinguish a CBOR map with integer keys from one
-// with array keys when both variants are themselves maps. Instead, we drive a
-// Visitor over MapAccess and decide per-entry: each key is deserialized as
-// `EitherKey`, which ciborium handles cleanly via deserialize_any (integer vs. array).
+// Do not use `#[serde(untagged)]` here. Ciborium's buffered untagged decoding
+// asks the integer arm to deserialize a CBOR u128 as u64 before it considers
+// the tuple arm. Operation IDs are intentionally full u128 values, so an
+// ordinary liquidation payout can trap during an upgrade when it exceeds
+// u64. The explicit visitors below inspect the CBOR shape and decode integers
+// directly as u128.
+#[derive(Debug)]
+enum PendingKey {
+    Current(VaultId, Principal, u128),
+    Previous(VaultId, Principal),
+    Legacy(VaultId),
+}
+
+struct PendingKeyVisitor;
+
+struct PendingOperationIdVisitor;
+
+struct PendingOperationId(u128);
+
+fn pending_key_vault_id<E>(value: u128) -> Result<VaultId, E>
+where
+    E: serde::de::Error,
+{
+    if value > u64::MAX as u128 {
+        return Err(E::custom("pending payout vault id does not fit u64"));
+    }
+    Ok(value as VaultId)
+}
+
+fn pending_key_from_signed<E>(value: i128) -> Result<PendingKey, E>
+where
+    E: serde::de::Error,
+{
+    if value < 0 {
+        return Err(E::custom("pending payout key cannot be negative"));
+    }
+    Ok(PendingKey::Legacy(pending_key_vault_id(value as u128)?))
+}
+
+fn pending_operation_id_from_signed<E>(value: i128) -> Result<PendingOperationId, E>
+where
+    E: serde::de::Error,
+{
+    if value < 0 {
+        return Err(E::custom("pending payout operation id cannot be negative"));
+    }
+    Ok(PendingOperationId(value as u128))
+}
+
+impl<'de> serde::de::Visitor<'de> for PendingOperationIdVisitor {
+    type Value = PendingOperationId;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a non-negative pending payout operation id")
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingOperationId(value as u128))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingOperationId(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_operation_id_from_signed(value as i128)
+    }
+
+    fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_operation_id_from_signed(value)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PendingOperationId {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        d.deserialize_any(PendingOperationIdVisitor)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for PendingKeyVisitor {
+    type Value = PendingKey;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a pending payout key (legacy u64, V7/V8 pair, or CL14 triple)")
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingKey::Legacy(value))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingKey::Legacy(pending_key_vault_id(value)?))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_key_from_signed(value as i128)
+    }
+
+    fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_key_from_signed(value)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let vault_id = seq
+            .next_element::<VaultId>()?
+            .ok_or_else(|| serde::de::Error::custom("pending payout key is missing vault id"))?;
+        let owner = seq
+            .next_element::<Principal>()?
+            .ok_or_else(|| serde::de::Error::custom("pending payout key is missing owner"))?;
+        let operation_id = seq.next_element::<PendingOperationId>()?;
+        match operation_id {
+            Some(PendingOperationId(operation_id)) => {
+                if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "pending payout key has more than three elements",
+                    ));
+                }
+                Ok(PendingKey::Current(vault_id, owner, operation_id))
+            }
+            None => Ok(PendingKey::Previous(vault_id, owner)),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PendingKey {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        d.deserialize_any(PendingKeyVisitor)
+    }
+}
+
 fn deserialize_pending_keyed<'de, D>(
     d: D,
 ) -> Result<BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use std::fmt;
-
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum EitherKey {
-        Current((VaultId, Principal, u128)),
-        Previous((VaultId, Principal)),
-        Legacy(VaultId),
-    }
-
     struct V;
     impl<'de> serde::de::Visitor<'de> for V {
         type Value = BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>;
@@ -3348,10 +3496,10 @@ where
             A: serde::de::MapAccess<'de>,
         {
             let mut out = BTreeMap::new();
-            while let Some(key) = map.next_key::<EitherKey>()? {
+            while let Some(key) = map.next_key::<PendingKey>()? {
                 let value: PendingMarginTransfer = map.next_value()?;
                 let final_key = match key {
-                    EitherKey::Current((vault_id, owner, operation_id)) => (
+                    PendingKey::Current(vault_id, owner, operation_id) => (
                         vault_id,
                         owner,
                         if operation_id == 0 {
@@ -3360,10 +3508,14 @@ where
                             operation_id
                         },
                     ),
-                    EitherKey::Previous((vault_id, owner)) => (vault_id, owner, value.operation_id),
-                    EitherKey::Legacy(vault_id) => (vault_id, value.owner, value.operation_id),
+                    PendingKey::Previous(vault_id, owner) => (vault_id, owner, value.operation_id),
+                    PendingKey::Legacy(vault_id) => (vault_id, value.owner, value.operation_id),
                 };
-                out.insert(final_key, value);
+                if out.insert(final_key, value).is_some() {
+                    return Err(serde::de::Error::custom(
+                        "duplicate pending payout key after legacy normalization",
+                    ));
+                }
             }
             Ok(out)
         }
@@ -13761,6 +13913,207 @@ mod tests {
         assert_eq!(key, (12, owner, 0));
         assert_eq!(value.op_nonce, 9001);
         assert_eq!(value.retry_count, 60);
+    }
+
+    fn pending_payout_test_row(owner: Principal, operation_id: u128) -> PendingMarginTransfer {
+        PendingMarginTransfer {
+            owner,
+            margin: ICP::new(500),
+            collateral_type: Principal::anonymous(),
+            retry_count: 2,
+            op_nonce: operation_id,
+            vault_id: 12,
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            ledger: None,
+            transfer_amount_raw: None,
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 0,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        }
+    }
+
+    fn pending_sp_journal_test_row(
+        request_id: [u8; 32],
+        phase: SpLiquidationPhase,
+    ) -> SpLiquidationJournal {
+        use icrc_ledger_types::icrc1::account::Account;
+
+        let caller = Principal::from_slice(&[33]);
+        let ledger = Principal::from_slice(&[34]);
+        let account = |owner| Account { owner, subaccount: None };
+        let operation_id = (1_u128 << 100) + 91;
+        SpLiquidationJournal {
+            request_id,
+            caller,
+            vault_id: 12,
+            payment: SpLiquidationPayment::Icusd,
+            max_debt_e8s: 900,
+            max_gross_raw: 1_000,
+            collateral_type: Principal::anonymous(),
+            collateral_ledger: ledger,
+            quote_collateral_decimals: 8,
+            quote_debt_e8s: 800,
+            quote_collateral_gross_raw: 700,
+            quote_collateral_net_raw: 690,
+            quote_collateral_payout_net_raw: 680,
+            quote_protocol_cut_raw: 20,
+            quote_interest_share_e8s: 10,
+            quote_price_e8s: 5_000_000,
+            quote_price_usd_bits: 5.0_f64.to_bits(),
+            quote_price_decimal: [7; 16],
+            quote_payout_fee_raw: 10,
+            quote_payout_fee_known: true,
+            principal_raw: 800,
+            surcharge_raw: 8,
+            gross_payment_raw: 808,
+            payment_tuple: SpLiquidationPaymentTuple {
+                ledger,
+                source: account(caller),
+                destination: account(Principal::from_slice(&[35])),
+                amount_raw: 808,
+                ledger_fee_raw: 10,
+                memo: [8; 16],
+                created_at_time_ns: 9,
+                op_nonce: operation_id,
+            },
+            phase,
+            payment_block_index: Some(41),
+            payout_operation_id: Some(operation_id),
+            payout_op_nonce: Some(operation_id + 1),
+            payout_ledger: Some(ledger),
+            payout_gross_raw: Some(700),
+            payout_net_raw: Some(680),
+            payout_fee_raw: Some(10),
+            payout_memo: [9; 16],
+            payout_created_at_time_ns: 10,
+            payout_block_index: Some(42),
+            payment_ambiguous: false,
+            payment_attempted: true,
+            protocol_fee_treasury: Some(Principal::from_slice(&[36])),
+            protocol_fee_op_nonce: Some(operation_id + 2),
+            protocol_fee_ledger_fee_raw: Some(10),
+            protocol_fee_attempted: true,
+            protocol_fee_block_index: Some(43),
+            interest_dispatch_started: true,
+            post_accounting_done: false,
+            applied_interest_share_e8s: Some(10),
+            created_at_ns: 11,
+            updated_at_ns: 12,
+        }
+    }
+
+    #[test]
+    fn full_state_roundtrip_preserves_large_pending_key_and_sp_journal_phases() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[37]);
+        let operation_id = 29_892_980_702_760_322_383_038_576_878_241_710_092_u128;
+        state.pending_margin_transfers.insert(
+            (12, owner, operation_id),
+            pending_payout_test_row(owner, operation_id),
+        );
+        state
+            .sp_liquidation_journals
+            .insert(
+                [55; 32],
+                pending_sp_journal_test_row([55; 32], SpLiquidationPhase::DebtCommitted),
+            );
+        state
+            .sp_liquidation_journals
+            .insert(
+                [56; 32],
+                pending_sp_journal_test_row([56; 32], SpLiquidationPhase::PayoutSubmitted),
+            );
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let restored: State = ciborium::de::from_reader(encoded.as_slice())
+            .expect("full state with a high-bit payout operation id must decode");
+
+        assert_eq!(
+            restored
+                .pending_margin_transfers
+                .get(&(12, owner, operation_id))
+                .unwrap()
+                .operation_id,
+            operation_id
+        );
+        assert_eq!(
+            restored.sp_liquidation_journals[&[55; 32]].phase,
+            SpLiquidationPhase::DebtCommitted
+        );
+        assert_eq!(
+            restored.sp_liquidation_journals[&[56; 32]].phase,
+            SpLiquidationPhase::PayoutSubmitted
+        );
+    }
+
+    #[test]
+    fn pending_payout_legacy_integer_keys_decode_without_u128_buffering() {
+        #[derive(serde::Serialize)]
+        struct LegacyState {
+            pending: BTreeMap<VaultId, PendingMarginTransfer>,
+        }
+        #[derive(serde::Deserialize)]
+        struct CurrentState {
+            #[serde(deserialize_with = "deserialize_pending_keyed")]
+            pending: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
+        }
+
+        let owner = Principal::from_slice(&[38]);
+        let legacy = LegacyState {
+            pending: BTreeMap::from([(12, pending_payout_test_row(owner, 901))]),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        let restored: CurrentState = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.pending.len(), 1);
+        assert_eq!(
+            restored.pending.keys().next().copied(),
+            Some((12, owner, 901))
+        );
+    }
+
+    #[test]
+    fn pending_payout_key_conflicts_fail_closed_instead_of_collapsing_rows() {
+        #[derive(serde::Deserialize)]
+        struct CurrentState {
+            #[serde(deserialize_with = "deserialize_pending_keyed")]
+            pending: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
+        }
+
+        fn value<T: serde::Serialize>(item: &T) -> ciborium::Value {
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(item, &mut bytes).unwrap();
+            ciborium::de::from_reader(bytes.as_slice()).unwrap()
+        }
+
+        let owner = Principal::from_slice(&[39]);
+        let row = pending_payout_test_row(owner, 902);
+        let pending = ciborium::Value::Map(vec![
+            (value(&(12_u64, owner)), value(&row)),
+            (value(&(12_u64, owner, 902_u128)), value(&row)),
+        ]);
+        let state = ciborium::Value::Map(vec![(
+            ciborium::Value::Text("pending".to_string()),
+            pending,
+        )]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let decoded: Result<CurrentState, _> = ciborium::de::from_reader(bytes.as_slice());
+        assert!(
+            decoded.is_err(),
+            "legacy/current aliases for one payout key must not silently replace a row"
+        );
     }
 
     #[test]
