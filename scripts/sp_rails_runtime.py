@@ -704,20 +704,21 @@ class RailsDriver(Driver):
         self.call(ckusdc, "set_phantom_icrc1_failures", "(1 : nat32)", did=self.args.flaky_did)
         refund_wallet = self.qbalance(ckusdc, self.user, flaky=True)
         refund_lp_before=self.pool_book(self.pool_id)
-        seqr, _ = self.start_conversion(ckusdc, 1000000, 5000, 0)
-        # Pausing retains the same pool identity. Unpause before resuming so
-        # it can mint LP and reach the actual change-refund callback loss.
-        self.result_ok(self.call(self.pool_id, "set_paused", "(false)", did=self.args.threepool_did))
-        refund_pending=self.result_ok(self.resume_conversion(seqr))
+        seqr, refund_started = self.start_conversion(ckusdc, 1000000, 5000, 0)
+        # The configured client persists its exact Rejected receipt even when
+        # the paused pool fails preflight. Compensation has therefore already
+        # reached the actual refund callback loss before this start returns.
+        refund_pending=self.result_ok(refund_started)
         self.check("lost_refund_reply_staged_before_upgrade","Pending" in refund_pending and "Refunding" in refund_pending["Pending"]["phase"])
         if self.args.upgrade_pending:
             self.upgrade(self.sp, self.args.sp_wasm, self.encode(f'(record {{protocol_canister_id=principal "{self.backend_id}";authorized_admins=vec {{principal "{self.admin}"}}}})', self.args.sp_did, types="(StabilityPoolInitArgs)"))
             retained=self.conversion_status(seqr)
             self.check("upgrade_pending_conversion_phase","Pending" in retained and "Refunding" in retained["Pending"]["phase"])
+        self.result_ok(self.call(self.pool_id, "set_paused", "(false)", did=self.args.threepool_did))
         finalr = self.settle_conversion(seqr)
-        self.check("lost_refund_reply_completion_retry_same_identity", "Completed" in finalr)
-        self.check("refund_exact_once_including_actual_five_fees", refund_wallet - self.qbalance(ckusdc, self.user, flaky=True) == 1000000 + 5*1000)
-        self.check("refund_completion_lp_credited_once",self.pool_book(self.pool_id)-refund_lp_before==nat(finalr["Completed"]["lp_minted"]))
+        self.check("lost_refund_reply_compensation_retry_same_identity", "Refunded" in finalr)
+        self.check("refund_exact_once_including_actual_four_fees", refund_wallet - self.qbalance(ckusdc, self.user, flaky=True) == 4*1000)
+        self.check("refund_compensation_no_lp_credit",self.pool_book(self.pool_id)==refund_lp_before)
         refund_after = self.qbalance(ckusdc, self.user, flaky=True)
         refund_lp_after=self.pool_book(self.pool_id)
         replay_refund = self.start_conversion(ckusdc, 1000000, 5000, 0, seq=seqr)[1]

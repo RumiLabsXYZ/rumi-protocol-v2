@@ -132,9 +132,13 @@ def _check_pool_rejection(driver: Any, ids: dict[str, str]) -> dict[str, Any]:
     driver.check("no_admission_pool_all_escrow_returned", _balance(driver, token, driver.sp, escrow) == 0)
     allowance = driver.call(token, "icrc2_allowance",
         f'(record {{account={_account(driver.sp, escrow)};spender={account(driver.pool_id)}}})',
-        did=driver.args.flaky_did, query=True)[0]
+        did=driver.args.ledger_did)[0]
     driver.check("no_admission_pool_allowance_revoked", nat(allowance["allowance"]) == 0)
-    _fee_curve(driver, old_curve)
+    _fee_curve(driver, {"min_fee_bps": 0, "max_fee_bps": 0, "imb_saturation": 1_000_000_000})
+    replay_quote = driver.result_ok(driver.call(driver.sp, "quote_3usd_conversion",
+        f'(principal "{token}",{amount} : nat64,0 : nat)'))
+    driver.check("no_admission_pool_delayed_original_min_lp_now_admissible",
+                 nat(replay_quote["quoted_lp"]) >= minimum)
 
     # Make a delayed original financially executable in the absence of its
     # tombstone. This funding and approval are explicit LOCAL fixture actions,
@@ -146,13 +150,19 @@ def _check_pool_rejection(driver: Any, ids: dict[str, str]) -> dict[str, Any]:
         f'(record {{from_subaccount=opt {blob(escrow)};spender={account(driver.pool_id)};'
         f'amount={amount + fee} : nat;expected_allowance=opt 0 : opt nat;expires_at=null;'
         'fee=opt 1000 : opt nat;memo=null;created_at_time=null})', sender=driver.sp, did=driver.args.flaky_did))
+    late_allowance = driver.call(token, "icrc2_allowance",
+        f'(record {{account={_account(driver.sp, escrow)};spender={account(driver.pool_id)}}})',
+        did=driver.args.ledger_did)[0]
     late_before = _snapshot(driver, ids)
     escrow_before = _balance(driver, token, driver.sp, escrow)
+    driver.check("no_admission_pool_delayed_original_has_sufficient_balance_and_allowance",
+                 escrow_before >= amount + fee and nat(late_allowance["allowance"]) >= amount + fee)
     late = driver.result_ok(driver.call(driver.pool_id, "add_liquidity_with_receipt_client_v1",
                                         _pool_request(receipt), sender=driver.sp, did=driver.args.threepool_did))
     driver.check("no_admission_pool_delayed_original_replays_rejection", late == receipt)
     driver.check("no_admission_pool_delayed_original_cannot_spend_or_mint",
                  _snapshot(driver, ids) == late_before and _balance(driver, token, driver.sp, escrow) == escrow_before)
+    _fee_curve(driver, old_curve)
     return {"intent_seq": seq, "pool_intent_id": intent_id.hex(), "receipt": receipt,
             "final": final, "before": before, "after": after, "late_probe_funded_escrow_raw": escrow_before,
             "local_only": True}
