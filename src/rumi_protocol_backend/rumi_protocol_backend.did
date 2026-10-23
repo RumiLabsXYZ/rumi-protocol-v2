@@ -1847,7 +1847,13 @@ type TreasuryInterestMintRecoveryRow = record {
   phase : TreasuryInterestMintPhase;
   absence_scan : opt BorrowMintAbsenceScan;
   history_floor : opt nat64;
+  route : TreasuryInterestMintRoute;
   treasury : principal;
+};
+type TreasuryInterestMintRoute = variant {
+  ThreePool;
+  StabilityPool : record { collateral_type : principal };
+  Treasury;
 };
 type TreasuryStableTransferJournal = record {
   asset_type : AssetType;

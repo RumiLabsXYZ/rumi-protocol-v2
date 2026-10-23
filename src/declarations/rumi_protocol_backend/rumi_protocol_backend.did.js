@@ -1331,12 +1331,18 @@ export const idlFactory = ({ IDL }) => {
     'candidate_block_index' : IDL.Opt(IDL.Nat64),
     'next_block_index' : IDL.Nat64,
   });
+  const TreasuryInterestMintRoute = IDL.Variant({
+    'ThreePool' : IDL.Null,
+    'StabilityPool' : IDL.Record({ 'collateral_type' : IDL.Principal }),
+    'Treasury' : IDL.Null,
+  });
   const TreasuryInterestMintRecoveryRow = IDL.Record({
     'tuple' : BorrowMintTuple,
     'expiry_proven' : IDL.Bool,
     'phase' : TreasuryInterestMintPhase,
     'absence_scan' : IDL.Opt(BorrowMintAbsenceScan),
     'history_floor' : IDL.Opt(IDL.Nat64),
+    'route' : TreasuryInterestMintRoute,
     'treasury' : IDL.Principal,
   });
   const TreasuryInterestMintRecoveryPage = IDL.Record({
