@@ -258,3 +258,14 @@ Worktree: `/private/tmp/rumi-cksol-20261018`; branch: `codex/cksol-collateral-mi
 - Browser: signed-out desktop and 390px mobile layout and direction-tab interaction checked in the in-app browser; mainnet ckSOL actions disabled on localhost. Existing global live-data queries fail against the local replica. A preview server required restart after rebuilt asset hashes replaced its original manifest.
 - Limits: no PocketIC minter/relay lifecycle, optimized Wasm artifact/install, connected-wallet action, deployment, collateral activation, sponsorship allocation, or SOL settlement proof. These remain distinct from this source acceptance.
 - Safe worktree inventory under disk pressure: zero eligible removals; dirty/locked/unmerged/active trees preserved.
+
+
+# ckSOL user-funded processing
+
+| ID | State | Owner | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- |
+| SOLPAY-1 | Implemented | Root | Backend payment/refund state, Candid, consent | 29 focused tests pass; durable caller-funded effects/refunds; stable global replay fence; legacy sponsorship disabled; rejection pruning and post-funding capacity recheck |
+| SOLPAY-2 | Implemented | Nora | Frontend paid deposit service/page/tests | Global quote sequence, exact expiring approval with expected allowance, generated Candid signature parity, durable receipt recovery without local journal, pre-approval legacy relay gate and rejected-attempt acknowledgment, settled next-payment and deposit-status UI, owner/session-safe recovery, Plug/II/OISY and PNP whitelist coverage; old sponsored start removed. Focused frontend suites: 72 tests pass. No live wallet/funds actions. |
+| SOLPAY-3 | Passed | Yara and Zane | Final integrated patch | 101 focused tests; production builds; interface/state compatibility; both fresh round-5 reviewers PASS after capacity/recovery fixes. No live funds or deployment proof. |
+
+Worktree: `/private/tmp/rumi-cksol-user-funded-20261020`; branch `codex/cksol-user-funded`, base `ed99a4d7`. Existing dirty primary preserved. Shared generated backend declarations owned by Root only. Backend/source integration owned by Root. Native frontend worker uses available GPT-6 Luna; external provider route previously rejected for private-source envelope and is not retried. No live funds test or deployment is part of this implementation pass.

@@ -418,8 +418,20 @@ fn generate_consent_message_for_caller(
             "## Vault Operation Status\n\nThis authenticated query shows your operation watermark and the safe status of your active operation. It does not expose the ledger transfer tuple or move funds.".into()
         ),
 
+        "start_cksol_deposit_paid" => {
+            let (sequence, max_payment) = candid::decode_args::<(u64, u64)>(arg)
+                .map_err(|_| "Invalid ckSOL payment arguments".to_string())?;
+            let q = crate::cksol_paid::quote();
+            if max_payment != q.funding_cycles { return Err("Refresh ckSOL payment terms".into()); }
+            Ok(format!("## Pay for SOL deposit processing\n\nPayment #{}: authorize at most {} cycles from your connected account on Cycles Ledger {}. The ledger withdrawal fee is {} cycles, in addition to the payment; approval has its own ledger fee. This includes {} processing cycles (including a {} refund-fee reserve) and a 1T minter attachment. Unused attached cycles return to the same account. An uncertain operation is retained, never automatically charged again. This consent does not move SOL or withdraw ckSOL.", sequence, max_payment, q.cycles_ledger, q.ledger_fee, q.processing_fee, q.refund_fee_reserve))
+        }
+        "claim_cksol_cycle_refund" => {
+            let (sequence,) = candid::decode_args::<(u64,)>(arg)
+                .map_err(|_| "Invalid ckSOL refund arguments".to_string())?;
+            Ok(format!("## Return unused ckSOL processing cycles\n\nReturn available credit from payment #{} to your same connected Cycles Ledger account. No new deposit is submitted. Unknown refund outcomes remain held for reconciliation rather than risking a duplicate refund.", sequence))
+        }
         "start_cksol_deposit" => Ok(
-            "## Start ckSOL Deposit\n\nRumi will ask the fixed ckSOL minter to queue a SOL deposit for your wallet principal. This action does not pull tokens or spend wallet funds; it uses Rumi's bounded relay cycle budget and returns a deposit id. Send SOL only to the separately displayed ckSOL deposit address, then wait for the minter status to reach Minted or Dropped.".into()
+            "## Sponsored ckSOL Deposit Disabled\n\nPublic sponsorship is disabled. This legacy method rejects without submitting a deposit. Use the caller-funded ckSOL payment flow.".into()
         ),
 
         "clear_cksol_deposit" => Ok(
@@ -1135,6 +1147,30 @@ mod tests {
         assert!(unauthorized.contains("payout amount for claim #44 is unavailable"));
         assert!(!unauthorized.contains("rPriorDestination"));
         assert!(!unauthorized.contains("tag 77"));
+    }
+
+    #[test]
+    fn cksol_paid_consent_binds_positional_cap_and_discloses_refund() {
+        crate::state::replace_state(crate::state::State::default());
+        let funding = crate::cksol_paid::quote().funding_cycles;
+        let message = generate_consent_message(
+            "start_cksol_deposit_paid", &Encode!(&37u64, &funding).unwrap()
+        ).unwrap();
+        assert!(message.contains("Payment #37"));
+        assert!(message.contains(&funding.to_string()));
+        assert!(message.contains(crate::cksol_paid::CYCLES_LEDGER));
+        assert!(message.contains("same account"));
+        assert!(generate_consent_message(
+            "start_cksol_deposit_paid", &Encode!(&37u64, &(funding + 1)).unwrap()
+        ).is_err());
+        assert!(generate_consent_message("start_cksol_deposit_paid", &Encode!(&37u64).unwrap()).is_err());
+        let refund = generate_consent_message(
+            "claim_cksol_cycle_refund", &Encode!(&37u64).unwrap()
+        ).unwrap();
+        assert!(refund.contains("payment #37"));
+        assert!(refund.contains("No new deposit"));
+        let legacy = generate_consent_message("start_cksol_deposit", &[]).unwrap();
+        assert!(legacy.contains("Public sponsorship is disabled"));
     }
 
     // The generic (empty-arg) fallbacks are what Oisy renders while the user is
