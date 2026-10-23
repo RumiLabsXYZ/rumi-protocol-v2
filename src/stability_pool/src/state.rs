@@ -2448,6 +2448,19 @@ impl StabilityPoolState {
     where
         F: FnOnce(&mut crate::ordinary_liquidation::OrdinaryLiquidationIntent),
     {
+        self.update_ordinary_liquidation_at(request_id, expected_phase, ic_cdk::api::time(), update)
+    }
+
+    pub fn update_ordinary_liquidation_at<F>(
+        &mut self,
+        request_id: [u8; 32],
+        expected_phase: Option<crate::ordinary_liquidation::OrdinaryLiquidationPhase>,
+        now_ns: u64,
+        update: F,
+    ) -> Result<crate::ordinary_liquidation::OrdinaryLiquidationIntent, StabilityPoolError>
+    where
+        F: FnOnce(&mut crate::ordinary_liquidation::OrdinaryLiquidationIntent),
+    {
         let current = self
             .get_pending_ordinary_liquidation(&request_id)
             .ok_or(StabilityPoolError::SystemBusy)?;
@@ -2456,7 +2469,7 @@ impl StabilityPoolState {
         }
         let mut next = current;
         update(&mut next);
-        next.updated_at_ns = ic_cdk::api::time();
+        next.updated_at_ns = now_ns;
         self.pending_ordinary_liquidations
             .get_or_insert_with(BTreeMap::new)
             .insert(request_id, next.clone());

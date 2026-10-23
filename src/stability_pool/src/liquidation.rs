@@ -5230,10 +5230,11 @@ fn ordinary_prepare_replay_allowed(
 fn retain_ordinary_prepare_replay_rejection(
     request_id: [u8; 32],
     reason: String,
+    now_ns: u64,
 ) -> Result<(), String> {
     mutate_state(|state| {
         state
-            .update_ordinary_liquidation(request_id, None, |current| {
+            .update_ordinary_liquidation_at(request_id, None, now_ns, |current| {
                 current.last_error = Some(reason.clone());
             })
             .map(|_| ())
@@ -5364,7 +5365,7 @@ async fn resume_ordinary_liquidation(
                     let reason = format!(
                         "ordinary prepare replay was rejected; exact backend disposition required: {reason}"
                     );
-                    let _ = retain_ordinary_prepare_replay_rejection(request_id, reason.clone());
+                    let _ = retain_ordinary_prepare_replay_rejection(request_id, reason.clone(), ic_cdk::api::time());
                     return match cancel_admitted_ordinary(protocol_id, &intent, reason.clone()).await {
                         Ok(result) => result,
                         Err(cancel_error) => ordinary_failure_for_intent_with_reason(
@@ -7729,6 +7730,7 @@ mod tests {
         retain_ordinary_prepare_replay_rejection(
             intent.request_id,
             "backend replay rejected after the original reply was lost".into(),
+            3,
         )
         .expect("retain ambiguous replay rejection");
         read_state(|state| {
@@ -7740,6 +7742,7 @@ mod tests {
                 crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendSubmitted
             );
             assert!(pending.last_error.is_some());
+            assert_eq!(pending.updated_at_ns, 3);
             assert!(state
                 .get_completed_ordinary_liquidation(&intent.request_id)
                 .is_none());
