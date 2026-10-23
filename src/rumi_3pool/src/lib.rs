@@ -2965,6 +2965,17 @@ async fn recover_liquidity_receipt_inner(
     let _pool_guard = pool_guard::PoolGuard::new_for_liquidity_receipt(&receipt)
         .map_err(|_| LiquidityReceiptErrorV1::PoolLocked)?;
 
+    // Every payout await can leave a newer durable entitlement than the
+    // receipt snapshot held by this continuation.  Resync the exact leg
+    // before recording RecoveryPending so an input confirmed by reconciliation
+    // and a refund whose reply was lost cannot be stranded as
+    // Unresolved/Prepared in the receipt.
+    let sync_latest_leg = |receipt: &mut LiquidityReceiptV1, index: usize, id: u64| {
+        if let Some(updated) = payouts::get(id) {
+            liquidity_receipts::sync_leg(receipt, index, &updated);
+        }
+    };
+
     // Upgrade clears only the transient guards.  A Prepared receipt with no
     // input identity has no possible dispatch and can be closed safely.
     if receipt.input_ids.iter().all(Option::is_none) {
@@ -3032,6 +3043,7 @@ async fn recover_liquidity_receipt_inner(
             }
             Some(crate::payouts::PayoutInputOutcome::Confirmed { .. }) => {
                 if let Err(failure) = crate::transfers::activate_prepared_payout(id) {
+                    sync_latest_leg(&mut receipt, k, id);
                     liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
                     return Ok(receipt);
                 }
@@ -3041,10 +3053,12 @@ async fn recover_liquidity_receipt_inner(
                 )
                 .await
                 {
+                    sync_latest_leg(&mut receipt, k, id);
                     liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
                     return Ok(receipt);
                 }
                 if !payouts::mark_settled(id) {
+                    sync_latest_leg(&mut receipt, k, id);
                     liquidity_receipts::recovery_pending(&mut receipt, "confirmed input refund could not be marked settled");
                     return Ok(receipt);
                 }
@@ -3076,12 +3090,14 @@ async fn recover_liquidity_receipt_inner(
                 entitlement = match payouts::get(id) {
                     Some(value) => value,
                     None => {
+                        sync_latest_leg(&mut receipt, k, id);
                         liquidity_receipts::recovery_pending(&mut receipt, "input identity disappeared after reconciliation");
                         return Ok(receipt);
                     }
                 };
                 if matches!(entitlement.input_outcome, Some(crate::payouts::PayoutInputOutcome::Confirmed { .. })) {
                     if let Err(failure) = crate::transfers::activate_prepared_payout(id) {
+                        sync_latest_leg(&mut receipt, k, id);
                         liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
                         return Ok(receipt);
                     }
@@ -3091,10 +3107,12 @@ async fn recover_liquidity_receipt_inner(
                     )
                     .await
                     {
+                        sync_latest_leg(&mut receipt, k, id);
                         liquidity_receipts::recovery_pending(&mut receipt, failure.reason);
                         return Ok(receipt);
                     }
                     if !payouts::mark_settled(id) {
+                        sync_latest_leg(&mut receipt, k, id);
                         liquidity_receipts::recovery_pending(&mut receipt, "confirmed input refund could not be marked settled");
                         return Ok(receipt);
                     }

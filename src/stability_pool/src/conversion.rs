@@ -1478,6 +1478,28 @@ fn approval_bad_fee_can_retry(ambiguous: bool, expected_fee: u64, cap: u64) -> b
     !ambiguous && expected_fee <= cap
 }
 
+/// Whether an `AllowanceChanged(current_allowance=0)` reply proves that the
+/// first revoke tuple had no effect because the approval expired before the
+/// ledger applied it. The dispatched and non-ambiguous guards are essential:
+/// an earlier transport-unknown revoke may already have committed and must
+/// retain its exact tuple for positive reconciliation.
+fn revoke_expired_zero_allowance_no_effect(
+    revoke_dispatched: bool,
+    revoke_ambiguous: bool,
+    approval_expires_at_ns: u64,
+    now_ns: u64,
+    error: &ApproveError,
+) -> bool {
+    revoke_dispatched
+        && !revoke_ambiguous
+        && now_ns >= approval_expires_at_ns
+        && matches!(
+            error,
+            ApproveError::AllowanceChanged { current_allowance }
+                if current_allowance == &Nat::from(0u64)
+        )
+}
+
 async fn approve(mut intent: ConversionIntent) -> ConversionIntent {
     if intent.approve_confirmed {
         return save_phase(intent, ConversionPhase::PoolCall);
@@ -2342,6 +2364,50 @@ async fn revoke(mut intent: ConversionIntent) -> ConversionIntent {
             set_pending(intent, format!("ledger requires revoke fee {expected_fee}"))
         }
         Ok((Err(error),)) => {
+            // A revoke that was first frozen just before the approval expiry
+            // can reach the ledger after that expiry. The ledger then returns
+            // the authenticated current allowance (zero), even though the
+            // revoke tuple itself never committed. That is a definite
+            // no-effect result only for this first, non-ambiguous attempt. A
+            // fresh generation/CAS-0 tuple is persisted before the next
+            // await; an earlier unknown attempt remains held forever for
+            // positive proof instead of being rebound.
+            if revoke_expired_zero_allowance_no_effect(
+                intent.revoke_dispatched,
+                intent.revoke_ambiguous,
+                intent.approve_expires_at_ns,
+                ic_cdk::api::time(),
+                &error,
+            ) {
+                let previous_error = intent.last_error.clone();
+                let Some(next_generation) = intent.revoke_generation.checked_add(1) else {
+                    return set_pending(
+                        intent,
+                        format!(
+                            "revoke expiry race was authenticated as no-effect but retry generation exhausted; previous_error={previous_error:?}; ledger_error={error:?}"
+                        ),
+                    );
+                };
+                let previous_generation = intent.revoke_generation;
+                intent.revoke_generation = next_generation;
+                intent.revoke_expected_allowance_raw = 0;
+                intent.revoke_dispatched = false;
+                intent.revoke_ambiguous = false;
+                intent.revoke_memo = retry_memo(
+                    b"revoke-retry",
+                    intent.owner,
+                    intent.request.token_ledger,
+                    intent.request.intent_seq,
+                    next_generation,
+                );
+                intent.revoke_created_at_ns = next_attempt_time(intent.revoke_created_at_ns);
+                return set_pending(
+                    intent,
+                    format!(
+                        "revoke returned authenticated AllowanceChanged(current_allowance=0) after approval expiry with no committed revoke; persisted CAS-0 retry generation {previous_generation}->{next_generation}; previous_error={previous_error:?}; ledger_error={error:?}"
+                    ),
+                );
+            }
             intent.revoke_ambiguous = true;
             set_pending(intent, format!("allowance revoke unresolved: {error:?}"))
         }
@@ -3625,6 +3691,41 @@ mod tests {
                 error_code: Nat::from(9u64),
                 message: "unknown".into(),
             }
+        ));
+    }
+
+    #[test]
+    fn expired_zero_revoke_allowance_changed_is_retryable_only_first_time() {
+        let error = ApproveError::AllowanceChanged {
+            current_allowance: Nat::from(0u64),
+        };
+        assert!(revoke_expired_zero_allowance_no_effect(
+            true, false, 300, 301, &error
+        ));
+        assert!(!revoke_expired_zero_allowance_no_effect(
+            true, true, 300, 301, &error
+        ));
+        assert!(!revoke_expired_zero_allowance_no_effect(
+            false, false, 300, 301, &error
+        ));
+    }
+
+    #[test]
+    fn revoke_allowance_changed_nonzero_or_before_expiry_remains_held() {
+        let nonzero = ApproveError::AllowanceChanged {
+            current_allowance: Nat::from(1u64),
+        };
+        let zero = ApproveError::AllowanceChanged {
+            current_allowance: Nat::from(0u64),
+        };
+        assert!(!revoke_expired_zero_allowance_no_effect(
+            true, false, 300, 301, &nonzero
+        ));
+        assert!(!revoke_expired_zero_allowance_no_effect(
+            true, false, 300, 299, &zero
+        ));
+        assert!(!revoke_expired_zero_allowance_no_effect(
+            true, false, u64::MAX, 0, &zero
         ));
     }
 

@@ -1882,6 +1882,10 @@ fn conversion_consent_method(method: &str) -> bool {
     matches!(
         method,
         "quote_3usd_conversion"
+            | "get_active_3usd_conversion_v1"
+            | "get_active_3usd_conversion"
+            | "get_3usd_conversion_next_seq"
+            | "get_3usd_conversion_status"
             | "start_3usd_conversion"
             | "resume_3usd_conversion"
             | "cancel_3usd_conversion"
@@ -1904,6 +1908,29 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
              You are requesting a read-only 3USD conversion quote. Verify the \
              exact token ledger, amount, and minimum LP output shown by the \
              wallet. This call does not create an intent or move funds."
+                .to_string()
+        }
+        "get_active_3usd_conversion_v1" | "get_active_3usd_conversion" => {
+            "## Read Active 3USD Conversion\n\n\
+             The wallet supplied malformed arguments for this caller-scoped \
+             active-conversion query. Retry with empty arguments. This read-only \
+             query does not create an intent, reserve a sequence, move funds, or \
+             authorize a transfer."
+                .to_string()
+        }
+        "get_3usd_conversion_next_seq" => {
+            "## Read Next 3USD Conversion Sequence\n\n\
+             The wallet supplied malformed arguments for this caller-scoped next \
+             sequence query. Retry with empty arguments. This read-only query does \
+             not reserve a sequence, create an intent, move funds, or authorize a \
+             transfer."
+                .to_string()
+        }
+        "get_3usd_conversion_status" => {
+            "## Read 3USD Conversion Status\n\n\
+             The wallet supplied malformed arguments for this caller-scoped status \
+             query. Retry with exactly one intent sequence. This read-only query \
+             does not resume an intent, move funds, or authorize a transfer."
                 .to_string()
         }
         "start_3usd_conversion" => {
@@ -1994,6 +2021,43 @@ fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> St
                         min_lp
                     )
                 }
+                Err(_) => malformed(),
+            }
+        }
+        "get_active_3usd_conversion_v1" | "get_active_3usd_conversion" => {
+            match candid::decode_args::<()>(arg) {
+                Ok(()) => format!(
+                    "## Read Active 3USD Conversion\n\n\
+                     Caller principal `{}` is checking the caller-scoped active \
+                     conversion request and status. This read-only query does not \
+                     create an intent, reserve a sequence, move funds, or authorize \
+                     a transfer.",
+                    caller
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "get_3usd_conversion_next_seq" => {
+            match candid::decode_args::<()>(arg) {
+                Ok(()) => format!(
+                    "## Read Next 3USD Conversion Sequence\n\n\
+                     Caller principal `{}` is checking the next durable caller-scoped \
+                     conversion sequence. This read-only query does not reserve a \
+                     sequence, create an intent, move funds, or authorize a transfer.",
+                    caller
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "get_3usd_conversion_status" => {
+            match candid::decode_args::<(u64,)>(arg) {
+                Ok((intent_seq,)) => format!(
+                    "## Read 3USD Conversion Status\n\n\
+                     Caller principal `{}` is checking the status of stored conversion \
+                     intent **#{}**. This read-only query does not resume the intent, \
+                     move funds, or authorize a transfer.",
+                    caller, intent_seq
+                ),
                 Err(_) => malformed(),
             }
         }
@@ -2406,6 +2470,66 @@ mod tests {
         assert!(message.contains("99 LP base units"));
         assert!(message.contains("read-only"));
         assert!(message.contains("does not create a durable intent or move funds"));
+    }
+
+    #[test]
+    fn conversion_getter_consent_decodes_empty_and_sequence_arguments() {
+        let caller = principal(43);
+        let empty = candid::encode_args(()).unwrap();
+        for method in [
+            "get_active_3usd_conversion_v1",
+            "get_active_3usd_conversion",
+            "get_3usd_conversion_next_seq",
+        ] {
+            let message = conversion_consent_message(method, &empty, caller);
+            assert!(conversion_consent_method(method));
+            assert!(message.contains(caller.to_text().as_str()));
+            assert!(message.contains("read-only query"));
+            assert!(message.contains("does not"));
+            assert!(!message.contains("authorizing"));
+        }
+
+        let status_args = candid::encode_args((19u64,)).unwrap();
+        let status_message = conversion_consent_message(
+            "get_3usd_conversion_status",
+            &status_args,
+            caller,
+        );
+        assert!(conversion_consent_method("get_3usd_conversion_status"));
+        assert!(status_message.contains(caller.to_text().as_str()));
+        assert!(status_message.contains("intent **#19**"));
+        assert!(status_message.contains("read-only query"));
+        assert!(status_message.contains("does not resume the intent"));
+        assert!(!status_message.contains("authorizing"));
+    }
+
+    #[test]
+    fn conversion_getter_consent_malformed_args_stay_bounded_and_read_only() {
+        let caller = principal(44);
+        let wrong_empty_args = candid::encode_args((1u64,)).unwrap();
+        for method in [
+            "get_active_3usd_conversion_v1",
+            "get_active_3usd_conversion",
+            "get_3usd_conversion_next_seq",
+        ] {
+            let message = conversion_consent_message(method, &wrong_empty_args, caller);
+            assert!(message.contains("malformed arguments"));
+            assert!(message.contains("empty arguments"));
+            assert!(message.contains("does not"));
+            assert!(!message.contains("intent **#1**"));
+            assert!(!message.contains("authorizing"));
+        }
+
+        let malformed_status = conversion_consent_message(
+            "get_3usd_conversion_status",
+            &[],
+            caller,
+        );
+        assert!(malformed_status.contains("malformed arguments"));
+        assert!(malformed_status.contains("exactly one intent sequence"));
+        assert!(malformed_status.contains("does not resume an intent"));
+        assert!(!malformed_status.contains("intent **#0**"));
+        assert!(!malformed_status.contains("authorizing"));
     }
 
     #[test]
