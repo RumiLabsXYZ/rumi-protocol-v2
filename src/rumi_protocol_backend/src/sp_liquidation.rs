@@ -1530,6 +1530,7 @@ pub async fn reconcile_protocol_fee(
         &memo,
         created_at_time_ns,
     )
+    .await
     .map_err(|error| {
         ProtocolError::TemporarilyUnavailable(format!(
             "SP protocol-fee proof does not match the frozen tuple: {error}"
@@ -1694,6 +1695,7 @@ pub async fn reconcile_payout(
         &frozen.memo,
         frozen.created_at_time_ns,
     )
+    .await
     .map_err(|error| {
         ProtocolError::TemporarilyUnavailable(format!(
             "SP payout proof does not match the frozen tuple: {error}"
