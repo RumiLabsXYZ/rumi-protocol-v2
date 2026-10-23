@@ -102,3 +102,16 @@ Re-checked on the merged tree:
 | Release code section after shrink | 11,712,624 bytes (limit 12,582,912) |
 
 The PocketIC suites were not rerun after the merge. The merge touched only Candid and declaration files on this branch's side.
+
+## After merging main `32358d23` (ckSOL user-funded deposits)
+
+The Candid conflict was resolved the same way: regenerate the `.did` from the merged Rust source, then regenerate the declarations. Every main method is present.
+
+| Check | Result |
+| --- | --- |
+| Backend library | 1465 passed |
+| Bin, including Candid compatibility | 85 passed |
+| Frontend | 1277 passed |
+| Release code section | 11,826,498 bytes (94% of the 12 MiB limit) |
+
+Size headroom is shrinking as main grows. Budget future backend features against it.
