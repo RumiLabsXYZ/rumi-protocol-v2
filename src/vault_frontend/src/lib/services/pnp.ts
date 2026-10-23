@@ -69,6 +69,7 @@ export const getAllDelegationTargets = (): string[] => {
     CANISTER_IDS.ICPSWAP_CKUSDT_CKUSDC_POOL,  // ICPswap ckUSDT/ckUSDC pool
     CANISTER_IDS.CKSOL_MINTER,
     CANISTER_IDS.CKSOL_LEDGER,
+    CANISTER_IDS.CYCLES_LEDGER,
     CANISTER_IDS.CKDOGE_MINTER,             // ckDOGE minter
     CANISTER_IDS.CKDOGE_LEDGER,             // ckDOGE Ledger
     CANISTER_IDS.CKBTC_MINTER,              // DFINITY ckBTC minter

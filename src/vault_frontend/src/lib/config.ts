@@ -48,6 +48,7 @@ export const CANISTER_IDS = {
   // Official ckSOL mainnet deployment: dfinity/cksol (9 decimal lamports).
   CKSOL_MINTER: "lh22c-kyaaa-aaaar-qb5nq-cai",
   CKSOL_LEDGER: "ls5lp-lqaaa-aaaar-qb5oa-cai",
+  CYCLES_LEDGER: "um5iw-rqaaa-aaaaq-qaaba-cai",
   // ckDOGE minter and ledger on ICP mainnet
   CKDOGE_MINTER: "eqltq-xqaaa-aaaar-qb3vq-cai",
   CKDOGE_LEDGER: "efmc5-wyaaa-aaaar-qb3wa-cai",

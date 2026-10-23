@@ -17609,6 +17609,27 @@ fn get_cksol_relay_budget() -> u64 {
     rumi_protocol_backend::cksol::budget()
 }
 
+#[candid_method(query)]
+#[query]
+fn get_cksol_payment_quote() -> rumi_protocol_backend::cksol_paid::CkSolPaymentQuote {
+    rumi_protocol_backend::cksol_paid::quote()
+}
+#[candid_method(query)]
+#[query]
+fn get_cksol_payment(owner: Principal) -> Option<rumi_protocol_backend::cksol_paid::CkSolPayment> {
+    rumi_protocol_backend::cksol_paid::payment(owner)
+}
+#[candid_method(update)]
+#[update]
+async fn start_cksol_deposit_paid(sequence: u64, max_payment: u64) -> Result<rumi_protocol_backend::cksol_paid::CkSolPayment, String> {
+    rumi_protocol_backend::cksol_paid::start_with(ic_cdk::caller(), sequence, max_payment, &rumi_protocol_backend::cksol_paid::IcTransport).await
+}
+#[candid_method(update)]
+#[update]
+async fn claim_cksol_cycle_refund(sequence: u64) -> Result<rumi_protocol_backend::cksol_paid::CkSolPayment, String> {
+    rumi_protocol_backend::cksol_paid::claim_with(ic_cdk::caller(), sequence, &rumi_protocol_backend::cksol_paid::IcTransport).await
+}
+
 #[candid_method(update)]
 #[update]
 async fn start_cksol_deposit() -> Result<u64, String> {

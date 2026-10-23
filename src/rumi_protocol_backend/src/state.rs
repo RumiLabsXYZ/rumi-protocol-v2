@@ -3569,6 +3569,11 @@ pub struct State {
     /// zero-budget default.
     #[serde(default)]
     pub cksol_relay_budget: u64,
+    /// Caller-funded receipts and refundable liabilities, independent of sponsorship.
+    #[serde(default)]
+    pub cksol_paid_sequence: u64,
+    #[serde(default)]
+    pub cksol_paid_payments: BTreeMap<Principal, crate::cksol_paid::CkSolPayment>,
     /// One bounded attempt per owner. Rows are retained until the upstream
     /// minter reports Minted or Dropped, or until explicit operator recovery.
     #[serde(default)]
@@ -4311,6 +4316,8 @@ impl Default for State {
             collateral_configs: BTreeMap::new(),
             collateral_to_vault_ids: BTreeMap::new(),
             cksol_relay_budget: 0,
+            cksol_paid_sequence: 0,
+            cksol_paid_payments: BTreeMap::new(),
             cksol_relay_attempts: BTreeMap::new(),
             cksol_relay_in_flight: BTreeSet::new(),
             global_rate_curve: RateCurve::default(),
@@ -4559,6 +4566,8 @@ impl From<InitArg> for State {
             collateral_to_vault_ids: BTreeMap::new(),
 
             cksol_relay_budget: 0,
+            cksol_paid_sequence: 0,
+            cksol_paid_payments: BTreeMap::new(),
             cksol_relay_attempts: BTreeMap::new(),
             cksol_relay_in_flight: BTreeSet::new(),
 

@@ -18,6 +18,7 @@ describe('getAllDelegationTargets', () => {
     expect(targets).toContain(CANISTER_IDS.STABILITY_POOL);
     expect(targets).toContain(CANISTER_IDS.THREEPOOL);
     expect(targets).toContain(CANISTER_IDS.RUMI_AMM);
+    expect(targets).toContain(CANISTER_IDS.CYCLES_LEDGER);
   });
 
   it('includes all five ICPswap pool canisters used as swap venues', () => {

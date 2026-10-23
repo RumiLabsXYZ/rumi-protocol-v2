@@ -32,7 +32,6 @@ async function verifyCksolActorOwner(actor: any, owner: Principal): Promise<void
   }
 }
 
-export const CKSOL_RELAY_CYCLES = 1_000_000_000_000n;
 let minter: ActorSubclass<CksolMinter>;
 let ledger: any;
 let backend: any;
@@ -52,20 +51,6 @@ export function getCksolRelay(): any {
 export async function getSolDepositAddress(owner: Principal): Promise<string> {
   if (!owner || owner.isAnonymous()) throw new Error('Connect an ICP wallet first.');
   return getCksolMinter().get_deposit_address({ owner: [owner], subaccount: [] });
-}
-export async function startSolDeposit(isLive: () => boolean): Promise<bigint> {
-  if (CONFIG.isLocal) throw new Error('ckSOL is available on ICP mainnet only.');
-  const owner = get(walletStore).principal;
-  if (!owner) throw new Error('Connect an ICP wallet first.');
-  const current = pinCksolSession(owner, isLive);
-  if (!current()) throw new Error('Wallet session changed before deposit dispatch.');
-  const actor: any = await walletStore.getActor(CONFIG.currentCanisterId, backendIdl);
-  if (!current()) throw new Error('Wallet session changed before deposit dispatch.');
-  await verifyCksolActorOwner(actor, owner);
-  if (!current()) throw new Error('Wallet session changed before deposit dispatch.');
-  const result = await actor.start_cksol_deposit();
-  if ('Err' in result) throw new Error(result.Err);
-  return BigInt(result.Ok);
 }
 export async function clearSolDeposit(isLive: () => boolean): Promise<void> {
   if (CONFIG.isLocal) throw new Error('ckSOL is available on ICP mainnet only.');

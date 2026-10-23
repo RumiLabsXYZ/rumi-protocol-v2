@@ -3,19 +3,24 @@ import { mount, unmount, flushSync } from 'svelte';
 import { Principal } from '@dfinity/principal';
 const fx = vi.hoisted(() => {
   function store<T>(v: T) { const listeners = new Set<(v:T)=>void>(); return { subscribe(fn:(v:T)=>void) { listeners.add(fn); fn(v); return () => { listeners.delete(fn); }; }, set(n:T) { v=n; listeners.forEach(fn=>fn(v)); } }; }
-  return { wallet: store<any>({ isConnected: false, principal: null }), generation: store(0), collaterals: store<any>({ collaterals: [] }),
-    info: vi.fn(), budget: vi.fn(), attempt: vi.fn(), address: vi.fn(), start: vi.fn(), quote: vi.fn(), submit: vi.fn(), depositStatus: vi.fn(), withdrawalStatus: vi.fn(), balance: vi.fn(), acknowledge: vi.fn(), oisy: false, saved: null as any };
+  return { wallet: store<any>({ isConnected: false, principal: null }), generation: store(0), auth: store<any>({walletType:'plug'}), collaterals: store<any>({ collaterals: [] }),
+    info: vi.fn(), attempt: vi.fn(), address: vi.fn(), quote: vi.fn(), submit: vi.fn(), depositStatus: vi.fn(), withdrawalStatus: vi.fn(), balance: vi.fn(), acknowledge: vi.fn(), oisy: false, saved: null as any,
+    paidQuote: vi.fn(), submitPaid: vi.fn(), loadPaid: vi.fn(), recoverPaid: vi.fn(), claimRefund: vi.fn(), resumePaid: vi.fn(), continuePaid: vi.fn() };
 });
 vi.mock('$lib/stores/wallet', () => ({ walletStore: fx.wallet }));
-vi.mock('$lib/services/auth', () => ({ walletSessionGeneration: fx.generation }));
+vi.mock('$lib/services/auth', () => ({ walletSessionGeneration: fx.generation, auth: fx.auth }));
 vi.mock('$lib/services/protocol/walletOperations', () => ({ isOisyWallet: () => fx.oisy }));
 vi.mock('$lib/stores/collateralStore', () => ({ collateralStore: { subscribe: fx.collaterals.subscribe, fetchSupportedCollateral: vi.fn(async () => []) } }));
 vi.mock('$lib/services/cksolMinter', () => ({
   isCksolOisyWallet: () => fx.oisy, getCksolMinter: () => ({ get_minter_info: fx.info, deposit_sol_status: fx.depositStatus, withdraw_sol_status: fx.withdrawalStatus }),
   getCksolLedger: () => ({ icrc1_balance_of: fx.balance }),
-  getCksolRelay: () => ({ get_cksol_relay_budget: fx.budget, get_cksol_deposit: fx.attempt }),
-  clearSolDeposit: vi.fn(async () => {}), getSolDepositAddress: fx.address, startSolDeposit: fx.start, quoteSolWithdrawal: fx.quote, submitSolWithdrawal: fx.submit,
-  loadSolWithdrawal: () => fx.saved, acknowledgeSolWithdrawal: fx.acknowledge, solWithdrawalKey: (s:string) => `withdrawal:${s}`, CKSOL_RELAY_CYCLES: 1_000_000_000_000n,
+  getCksolRelay: () => ({ get_cksol_deposit: fx.attempt }),
+  clearSolDeposit: vi.fn(async () => {}), getSolDepositAddress: fx.address, quoteSolWithdrawal: fx.quote, submitSolWithdrawal: fx.submit,
+  loadSolWithdrawal: () => fx.saved, acknowledgeSolWithdrawal: fx.acknowledge, solWithdrawalKey: (s:string) => `withdrawal:${s}`,
+}));
+vi.mock('$lib/services/cksolPayment', () => ({
+  quoteCksolPayment: fx.paidQuote, submitCksolPayment: fx.submitPaid, loadCksolPayment: fx.loadPaid, saveCksolPayment: vi.fn(),
+  recoverCksolPayment: fx.recoverPaid, claimCksolRefund: fx.claimRefund, resumeFundedCksolPayment: fx.resumePaid, continueApprovedCksolPayment: fx.continuePaid, cksolPaymentKey: (s:string)=>`paid:${s}`,
 }));
 import Page from '../../routes/solana/+page.svelte';
 const ownerA = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai'), ownerB = Principal.fromText('ryjl3-tyaaa-aaaaa-aaaba-cai');
@@ -27,8 +32,10 @@ beforeEach(() => {
   vi.clearAllMocks(); fx.acknowledge.mockReset(); fx.oisy=false; fx.saved=null;
   fx.wallet.set({isConnected:false,principal:null}); fx.generation.set(0);
   fx.info.mockResolvedValue({ minimum_deposit_amount:20_000_000n, minimum_withdrawal_amount:2_000_000n, withdrawal_fee:1_000_000n, deposit_sol_required_cycles:1_000_000_000_000n });
-  fx.budget.mockResolvedValue(3_000_000_000_000n); fx.attempt.mockResolvedValue([]); fx.balance.mockResolvedValue(1_000_000_000n);
-  fx.address.mockResolvedValue('GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax'); fx.start.mockResolvedValue(42n); fx.depositStatus.mockResolvedValue({Queued:{sweepable_amount:100n}});
+  fx.attempt.mockResolvedValue([]); fx.balance.mockResolvedValue(1_000_000_000n);
+  fx.paidQuote.mockResolvedValue({next_sequence:1n,funding_cycles:1_001_000_000_000n,processing_fee:1_000_000_000n,ledger_fee:100_000_000n,approval_amount:1_001_100_000_000n,refund_fee_reserve:100_000_000n,balance:5_000_000_000_000n});
+  fx.loadPaid.mockReturnValue(null); fx.recoverPaid.mockResolvedValue(null); fx.auth.set({walletType:'plug'});
+  fx.address.mockResolvedValue('GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax'); fx.depositStatus.mockResolvedValue({Queued:{sweepable_amount:100n}});
   host=document.createElement('div'); document.body.appendChild(host);
 });
 afterEach(() => { if(instance) unmount(instance); host.remove(); vi.useRealTimers(); });
@@ -36,13 +43,65 @@ describe('ckSOL real page', () => {
   it('shows a wallet connection prompt and never allocates a deposit address signed out', async () => {
     render(); await settle(); expect(host.textContent).toContain('Connect your ICP wallet'); expect(button('Get my SOL').disabled).toBe(true); expect(fx.address).not.toHaveBeenCalled();
   });
-  it('fails closed when relay is unavailable without preventing public minter terms', async () => {
-    fx.wallet.set({isConnected:true,principal:ownerA}); fx.budget.mockRejectedValue(new Error('method not found'));
-    render(); await settle(); expect(button('Get my SOL').disabled).toBe(true); expect(host.textContent).toContain('0.02 SOL'); expect(host.textContent).toContain('Do not send new SOL');
+  it('fails closed when paid quote endpoint is unavailable without preventing public minter terms', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA}); fx.paidQuote.mockRejectedValue(new Error('method not found'));
+    render(); await settle(); expect(button('Get my SOL').disabled).toBe(true); expect(host.textContent).toContain('0.02 SOL'); expect(host.textContent).toContain('Do not send SOL');
   });
   it('binds a personal address to the connected principal', async () => {
     fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle(); button('Get my SOL').click(); await settle();
     expect(fx.address).toHaveBeenCalledWith(ownerA); expect(host.textContent).toContain(ownerA.toText());
+  });
+  it.each(['plug','internet-identity','oisy'])('routes paid processing for %s through its connected owner session', async walletType => {
+    fx.oisy=walletType==='oisy'; fx.auth.set({walletType}); fx.wallet.set({isConnected:true,principal:ownerA});
+    Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>fn({})}});
+    fx.submitPaid.mockResolvedValue({owner:ownerA.toText(),sequence:'1',phase:'Receipt',createdAt:1,receipt:{phase:'FundingPending'}});
+    render(); await settle(); expect(fx.paidQuote).toHaveBeenCalledWith(ownerA,walletType);
+    button('Get my SOL').click(); await settle(); button('Approve and process').click(); await settle();
+    expect(fx.submitPaid).toHaveBeenCalledOnce(); expect(fx.submitPaid.mock.calls[0][0]).toEqual(expect.objectContaining({approval_amount:1_001_100_000_000n}));
+    expect(fx.submitPaid.mock.calls[0][1]).toBe(ownerA); expect(host.textContent).toContain('FundingPending');
+  });
+  it('adopts a successful payment receipt deposit id and checks its minter status', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>fn({})}});
+    fx.submitPaid.mockResolvedValue({owner:ownerA.toText(),sequence:'1',phase:'Receipt',createdAt:1,receipt:{phase:'DepositPending',deposit_id:[77n]}});
+    render(); await settle(); button('Get my SOL').click(); await settle(); button('Approve and process').click(); await settle();
+    expect(fx.depositStatus).toHaveBeenCalledWith(77n); expect(host.textContent).toContain('Deposit ID: 77');
+  });
+  it('allows a new paid request after the saved receipt settles', async () => {
+    const settled={owner:ownerA.toText(),sequence:'1',phase:'Receipt',createdAt:1,receipt:{phase:'Complete'}};
+    fx.loadPaid.mockReturnValue(settled); fx.recoverPaid.mockResolvedValue(settled);
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>fn({})}});
+    fx.submitPaid.mockResolvedValue({owner:ownerA.toText(),sequence:'2',phase:'Receipt',createdAt:2,receipt:{phase:'FundingPending'}});
+    render(); await settle(); button('Get my SOL').click(); await settle(); button('Start next paid deposit').click(); await settle();
+    expect(fx.submitPaid).toHaveBeenCalledOnce();
+  });
+  it('does not let a stale paid receipt overwrite the next wallet owner', async () => {
+    const saved={owner:ownerA.toText(),sequence:'1',phase:'Receipt',createdAt:1,receipt:{phase:'FundingPending'}};
+    fx.loadPaid.mockReturnValue(saved); fx.recoverPaid.mockResolvedValue(saved);
+    fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle();
+    let resolve!: (value:any)=>void; fx.recoverPaid.mockImplementationOnce(()=>new Promise(r=>resolve=r));
+    button('Refresh payment receipt').click(); await settle();
+    fx.generation.set(1); fx.wallet.set({isConnected:true,principal:ownerB}); await settle();
+    resolve({...saved,sequence:'99'}); await settle();
+    expect(host.textContent).not.toContain('Paid payment sequence: 99');
+  });
+  it('shows a backend Funded receipt and recovery actions without a local journal', async () => {
+    const funded={owner:ownerA.toText(),sequence:'12',phase:'Receipt',createdAt:12,receipt:{phase:'Funded',refundable_cycles:55n}};
+    fx.wallet.set({isConnected:true,principal:ownerA}); fx.loadPaid.mockReturnValue(null); fx.recoverPaid.mockResolvedValue(funded);
+    render(); await settle();
+    expect(fx.recoverPaid).toHaveBeenCalled();expect(host.textContent).toContain('Paid payment sequence: 12');
+    expect(host.textContent).toContain('Refundable cycles: 55');expect(button('Resume minter dispatch')).toBeTruthy();expect(button('Claim unused cycles refund')).toBeTruthy();
+  });
+  it('allows the owner to acknowledge a rejected legacy attempt before paid processing', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.attempt.mockResolvedValueOnce([{status:{Rejected:'minter rejected'},started_at_ns:1n}]).mockResolvedValueOnce([]);
+    Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>fn({})}});
+    fx.submitPaid.mockResolvedValue({owner:ownerA.toText(),sequence:'1',phase:'Receipt',createdAt:1,receipt:{phase:'FundingPending'}});
+    render(); await settle();
+    expect(button('Get my SOL').disabled).toBe(true);expect(button('Acknowledge rejected legacy attempt')).toBeTruthy();expect(fx.submitPaid).not.toHaveBeenCalled();
+    button('Acknowledge rejected legacy attempt').click();await settle();button('Get my SOL').click();await settle();button('Approve and process').click();await settle();
+    expect(fx.submitPaid).toHaveBeenCalledOnce();
   });
   it('discards an old wallet address response after A to B to A transitions', async () => {
     let resolve!: (s:string)=>void; fx.address.mockImplementation(()=>new Promise<string>(r=>resolve=r));
@@ -59,7 +118,7 @@ describe('ckSOL real page', () => {
     expect(host.textContent).toContain('consent interface required by OISY'); expect(button('Get withdrawal quote').disabled).toBe(true); expect(fx.submit).not.toHaveBeenCalled();
   });
   it('cancels deposit polling on component teardown', async () => {
-    vi.useFakeTimers(); fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle(); button('Get my SOL').click(); await settle(); button('Process my deposit').click(); await settle();
+    vi.useFakeTimers(); fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle(); button('Get my SOL').click(); await settle();
     const calls=fx.depositStatus.mock.calls.length; unmount(instance); instance=null; await vi.advanceTimersByTimeAsync(60_000);
     expect(fx.depositStatus.mock.calls.length).toBe(calls);
   });
