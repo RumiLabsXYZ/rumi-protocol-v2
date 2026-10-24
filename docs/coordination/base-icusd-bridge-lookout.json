@@ -173,7 +173,7 @@
       "state": "done",
       "owner": "coordinator",
       "scope": "Branch and draft PR",
-      "evidenceText": "proof=source; Branch pushed at fb005f1b; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged; description updated with round-3 results",
+      "evidenceText": "proof=source; Branch pushed; code reviewed at 8f2abbfc, docs-only commits after it; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged, not deployed; supervisor accepted the local delivery milestone at 5fdf2145",
       "evidenceLinks": [
         {
           "title": "Draft PR #591",

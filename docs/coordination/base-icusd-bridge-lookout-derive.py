@@ -7,8 +7,9 @@ Reads docs/coordination/base-icusd-bridge-kanban.md and writes
 docs/coordination/base-icusd-bridge-lookout.json. The output carries board metadata
 only: card id, state, owner role, scope and a short evidence text with its proof
 level. Paths, hashes longer than a short commit id, addresses and URLs are removed.
-Publishing is HELD (see base-icusd-bridge-operating-rules.md); this script never
-uploads anything.
+This script never uploads anything. Publishing is done separately by the scoped Lookout
+publisher under the event rule and limits in base-icusd-bridge-operating-rules.md
+(sanitized board metadata only, after the setup owner's cutover confirmation).
 """
 
 import json

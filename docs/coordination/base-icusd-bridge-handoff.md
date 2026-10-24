@@ -199,7 +199,21 @@ time on the same Wasm from a clean tree.
 - Lane throughput is one unincluded tx at a time per lane (acceptable for v1, documented).
 - `rumi_analytics` still reports ICP ledger supply as circulating; subtracting escrow is a follow-up.
 
+## Milestone 7 (2026-10-24): local delivery accepted; Lookout approval
+
+- Miles (supervisor) verified a clean worktree, PR #591 draft and unmerged at `5fdf2145`, the
+  bounded `eab65670` to `8f2abbfc` closure diff and the test and docs-only follow-ups, an unchanged
+  backend and `IcUSD.sol`, a clean `git diff --check`, and independently hashed the release Wasm
+  (`c03ce4f1...4d6ff`, matching this handoff). He accepted the local implementation and reviewable
+  draft PR milestone, relying on the recorded local evidence without rerunning suites. This is
+  not production safety, live readiness, or merge, deploy, signing, funding or role approval.
+- Rob approved uploading this board's sanitized snapshot and future sanitized updates to his
+  private Lookout backend (verified by Miles). The first-upload hold is resolved; routine event
+  publishing starts after the setup owner confirms the initial cutover. Rules and limits:
+  `base-icusd-bridge-operating-rules.md`.
+
 ## Held live actions
 
 Base Sepolia or Base deployment, canister creation or install on any network, contract role
-assignment, gas funding, enabling deposits, any mainnet change, and the first Lookout upload.
+assignment, gas funding, enabling deposits, and any mainnet change. (Lookout publication of
+sanitized board metadata is approved; see milestone 7.)

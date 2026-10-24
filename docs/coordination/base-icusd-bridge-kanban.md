@@ -7,7 +7,8 @@ This is the single canonical board for the ICP icUSD <-> Base bridge work.
 - Baseline: `origin/main` at `32358d23d98b6430cab0236a3245519c9322fe90` (fetched 2026-10-24)
 - Coordinator: Claude (Opus 5.5, main thread). Supervisor: Miles (Codex), for Rob.
 - Boundaries: no merge, no deploy, no live signing or broadcast, no funds movement, no controller/role changes.
-- Lookout: **FIRST OPERATIONAL UPLOAD HELD** (see `base-icusd-bridge-operating-rules.md`). The projection is maintained locally only; nothing is published.
+- Delivery: local implementation complete; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged, not deployed. Miles (supervisor) accepted the local implementation and reviewable draft PR milestone at `5fdf2145`, relying on the recorded local test and review evidence. That acceptance is not production safety, live readiness, or approval to merge, deploy, sign, fund or change roles.
+- Lookout: Rob approved uploading this board's sanitized metadata to his private Lookout backend, and future sanitized updates (2026-10-24, verified by Miles; see `base-icusd-bridge-operating-rules.md`). Routine event publishing starts after the Lookout setup owner confirms the initial cutover; nothing has been published from this worktree yet.
 
 ## Proof levels
 
@@ -52,7 +53,7 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 | BB-13 Adversarial review B (IC semantics, cycles, upgrade, wallet flow) | done | worker (Sonnet / Sonnet) | read-only | all | R1 FAIL, fixed in 6208c117; R2 FAIL at e4213be1, fixed in 779bd37f; R3 FAIL at eab65670 (runbook reads refused, no ingress size bound), fixed in 8f2abbfc; fresh re-check of 8f2abbfc PASS | local-integration |
 | BB-05b Observer/RPC review fixes | done | worker (Sonnet / Sonnet) | `observer.rs`, `evm/rpc.rs` | BB-12, BB-13 | Committed in `6208c117`; adaptive log span (halving) and cap escalation, contiguity completeness with rewind, backoff, chain-id quorum, count-based C3, receipt cap; 98 observer/rpc tests | local-test |
 | BB-15 Cumulative mint guard | done | worker (Sonnet / Sonnet) | contract `totalMinted`, `evm/abi.rs`, `observer.rs`, fault test | BB-05b | Committed `e4213be1`; forge 111; lib 390; mint-then-burn regression passing (attacker burn not paid, bridge halts) | local-integration |
-| BB-14 Branch and draft PR | done | coordinator (Opus 5.5 / Opus 5.5) | none | all | Branch pushed at fb005f1b; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged; description updated with round-3 results | source |
+| BB-14 Branch and draft PR | done | coordinator (Opus 5.5 / Opus 5.5) | none | all | Branch pushed; code reviewed at 8f2abbfc, docs-only commits after it; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged, not deployed; supervisor accepted the local delivery milestone at 5fdf2145 | source |
 | BB-16 Round-2 follow-up fixes | done | coordinator (Opus 5.5 / Opus 5.5) + workers W2, W3, W4 (Sonnet / Sonnet) | gas, lane, rpc, deposit, admin, keccak (coordinator); ledger_ops, observer, timer, state, views, types, lib, .did, declarations (W2); PocketIC tests and harness (W3); ids.rs and bridge page (W4) | BB-12, BB-13 | Frozen candidate eab65670. Wasm de4ad399 (sha256 prefix), reproduced by a forced recompile from the clean tree; on that Wasm: round2 suite 11 passed (7 new, all failing on the pre-round-2 Wasm), e2e 24, faults 16, smoke 12; lib 428; clippy lib clean; vitest 1506 passed, 1 skipped; npm run check at baseline; build ok | local-integration |
 | BB-17 Round-3 fixes | done | coordinator (Opus 5.5 / Opus 5.5) | lib.rs, state.rs, timer.rs, lane.rs, deposit.rs, icrc21.rs, runbook, design, bridge page, PocketIC tests | BB-12, BB-13 | Commit 8f2abbfc (Wasm c03ce4f1, reproduced from the clean tree) plus fb005f1b (tests and docs, Wasm byte-identical): lib 432; round2 12, e2e 24, faults 16, smoke 12 (10 of them on a serial rerun after infrastructure failures); forge 111; vitest 1507 passed, 1 skipped; check at baseline; build ok; fresh re-check PASS | local-integration |
 
@@ -67,8 +68,9 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 
 - Public-testnet (Base Sepolia) contract deployment and canister install.
 - Any mainnet deploy, controller change, contract role assignment, live signing/broadcast, or funding.
-- Lookout first operational upload (held by the setup owner's approval review).
 - Worktree removal pass (`scripts/cleanup_worktrees.sh --remove-eligible`): denied by the permission classifier on 2026-10-24; dry run showed 0 eligible anyway.
+
+Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-review rejection) was cleared by Rob's approval of sanitized board metadata uploads; publishing from this worktree waits only for the setup owner's cutover confirmation.
 
 ## Change log
 
@@ -79,3 +81,4 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 - 2026-10-24: round 1 fixed (`6208c117`), C4 (`e4213be1`), draft PR #591; round 2 A and B both FAIL, reviewer B's blockers fixed (`779bd37f`); reviewer A's gas blocker and notes in BB-16 (uncommitted); review record added.
 - 2026-10-24: round-2 follow-ups committed as frozen candidate `eab65670` (Wasm sha256 `de4ad399550504d7ab06b5d7299cce4f20d9ea81e34ea75a69d743a3fb2eacf6`); all four PocketIC suites ran on that exact Wasm; round 3 (fresh A and B) started on it.
 - 2026-10-24: round 3 on `eab65670` (A PASS, B FAIL); fixes in `8f2abbfc`; fresh re-check PASS; test and doc follow-ups in `fb005f1b` (Wasm unchanged); PR description updated.
+- 2026-10-24: supervisor accepted the local implementation and draft PR milestone at `5fdf2145`; Rob approved sanitized Lookout uploads, so the first-upload hold is resolved; event publishing waits for the setup owner's cutover confirmation.
