@@ -5,10 +5,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub mod deposits;
+pub mod conversion;
+pub mod withdrawals;
 pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
 pub mod receipt_store;
+pub mod interest_recovery;
+pub mod ordinary_liquidation;
 pub mod state;
 pub mod types;
 
@@ -28,6 +32,7 @@ const NATIVE_XRP_SETTLE_SWEEP_MAX_PER_TICK: usize = 2;
 const NATIVE_XRP_ABSORB_RECOVERY_POLL_SECONDS: u64 = 60;
 const NATIVE_XRP_ABSORB_RECOVERY_MAX_PER_TICK: usize = 2;
 const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
+const ORDINARY_LIQUIDATION_RECOVERY_POLL_SECONDS: u64 = 30;
 /// How often the pool reconciles its tracked aggregate against live ledger
 /// balances and logs any shortfall. Hourly: a handful of balance queries, so
 /// negligible cycle cost, while still surfacing drift long before it can trip a
@@ -87,7 +92,19 @@ pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool
                         .values()
                         .any(|intent| ledgers.contains(&intent.ledger))
                 });
-            chain_intersects || native_xrp_intersects || three_usd_intersects
+            let ordinary_intersects = state
+                .pending_ordinary_liquidations
+                .as_ref()
+                .map_or(false, |pending| {
+                    pending.values().any(|intent| {
+                        ledgers.contains(&intent.stable_ledger)
+                            || intent
+                                .approval
+                                .as_ref()
+                                .is_some_and(|approval| ledgers.contains(&approval.ledger))
+                    })
+                });
+            chain_intersects || native_xrp_intersects || three_usd_intersects || ordinary_intersects
         })
 }
 
@@ -119,7 +136,12 @@ fn init(args: StabilityPoolInitArgs) {
         ic_cdk::api::stable::stable64_size() == 0,
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
-    mutate_state(|s| s.initialize(args));
+    mutate_state(|s| {
+        s.initialize(args);
+        // A pool created by this code has no pre-recovery interest backlog,
+        // so it is never subject to the one-time recovery bootstrap hold.
+        s.interest_recovery_bootstrap_hold = Some(false);
+    });
     receipt_store::init_layout();
     state::save_to_stable_memory();
     receipt_store::set_layout_version(receipt_store::LAYOUT_VERSION);
@@ -134,6 +156,7 @@ fn init(args: StabilityPoolInitArgs) {
         setup_native_xrp_settle_sweep_timer();
         setup_native_xrp_absorb_recovery_timer();
         setup_three_usd_absorb_recovery_timer();
+        setup_ordinary_liquidation_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -151,6 +174,25 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    let conversion_reconciled = conversion::reconcile_after_upgrade();
+    if conversion_reconciled > 0 {
+        log!(
+            INFO,
+            "SP conversion migration: retained {} in-flight conversion intents for exact-tuple reconciliation",
+            conversion_reconciled
+        );
+    }
+    // Hold all unrelated updates only for state written by pre-recovery code
+    // (hold flag never set) that also has no recovery record. Pools created by
+    // `init` start with Some(false); a pool already held stays held.
+    mutate_state(|s| {
+        if interest_recovery::bootstrap_hold_engages_on_upgrade(
+            s.interest_recovery.is_some(),
+            s.interest_recovery_bootstrap_hold,
+        ) {
+            s.interest_recovery_bootstrap_hold = Some(true);
+        }
+    });
     let legacy_ambiguous_chain_absorbs = mutate_state(|s| {
         s.hold_legacy_prepared_chain_absorbs(ic_cdk::api::time())
     });
@@ -161,6 +203,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
             legacy_ambiguous_chain_absorbs
         );
     }
+    mutate_state(|s| s.reconcile_pending_withdrawals_after_upgrade());
     let recovered_payouts = mutate_state(|s| {
         s.initialize_pending_outbound_payouts();
         let pending = s.pending_outbound_payouts.as_ref().map_or(0, |p| p.len());
@@ -231,6 +274,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         setup_native_xrp_settle_sweep_timer();
         setup_native_xrp_absorb_recovery_timer();
         setup_three_usd_absorb_recovery_timer();
+        setup_ordinary_liquidation_recovery_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -259,6 +303,7 @@ fn setup_native_xrp_settle_sweep_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(NATIVE_XRP_SETTLE_SWEEP_POLL_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 let cursor = SWEEP_CURSOR.with(|c| c.get());
                 let summary = crate::liquidation::run_native_xrp_settle_sweep_with_io(
@@ -296,6 +341,7 @@ fn setup_native_xrp_absorb_recovery_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(NATIVE_XRP_ABSORB_RECOVERY_POLL_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 let cursor = RECOVERY_CURSOR.with(|c| c.get());
                 let vault_ids = crate::liquidation::pending_native_xrp_recovery_vault_ids(
@@ -331,6 +377,7 @@ fn setup_chain_absorb_auto_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 if let Err(error) = crate::liquidation::run_chain_absorb_auto_tick().await {
                     log!(INFO, "chain absorb auto tick skipped: {:?}", error);
@@ -345,8 +392,23 @@ fn setup_chain_absorb_auto_timer() {
 /// absorb or deletion.
 fn setup_three_usd_absorb_recovery_timer() {
     ic_cdk_timers::set_timer_interval(Duration::from_secs(30), || {
+        if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
         ic_cdk::spawn(crate::liquidation::recover_pending_three_usd_absorbs());
     });
+}
+
+/// Retry only retained ordinary request identities. A status NotFound or
+/// transport failure remains held; this timer never allocates a fresh nonce.
+fn setup_ordinary_liquidation_recovery_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(ORDINARY_LIQUIDATION_RECOVERY_POLL_SECONDS),
+        || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() {
+                return;
+            }
+            ic_cdk::spawn(crate::liquidation::recover_pending_ordinary_liquidations());
+        },
+    );
 }
 
 /// A successful backend notification only means the SP has durably received
@@ -356,6 +418,7 @@ fn setup_unallocated_interest_forward_retry_timer() {
     ic_cdk_timers::set_timer_interval(
         Duration::from_secs(UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS),
         || {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return; }
             ic_cdk::spawn(async {
                 let next = read_state(|s| {
                     s.pending_unallocated_interest_forwards()
@@ -420,6 +483,7 @@ async fn fetch_virtual_prices() {
 
 #[update]
 pub async fn deposit(_token_ledger: Principal, _amount: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // The legacy call has no operation identity. A client retry after an
     // ambiguous ledger reply can pull and credit a second time, so keep its
     // Candid signature for old clients but reject before any ledger call.
@@ -434,6 +498,7 @@ pub async fn deposit_with_intent(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<DepositIntentResult, DepositIntentError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::deposit_with_intent(intent_seq, token_ledger, amount).await
 }
 
@@ -445,16 +510,36 @@ pub fn get_deposit_intent(intent_seq: u64) -> DepositIntentStatus {
 
 #[update]
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::withdraw(token_ledger, amount).await
+}
+
+/// Exact unresolved stablecoin withdrawal transfers for the caller.
+#[query]
+pub fn get_my_pending_withdrawals() -> Vec<PendingOutboundPayoutStatus> {
+    read_state(|s| s.pending_withdrawals_for(&ic_cdk::api::caller()))
+}
+
+/// Settle an aged/ambiguous withdrawal from its exact ledger receipt.
+#[update]
+pub async fn reconcile_withdrawal(
+    token_ledger: Principal,
+    withdrawal_owner: Principal,
+    block_index: u64,
+) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    crate::withdrawals::reconcile(token_ledger, withdrawal_owner, block_index).await
 }
 
 #[update]
 pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::claim_collateral(collateral_ledger).await
 }
 
 #[update]
 pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::claim_all_collateral().await
 }
 
@@ -466,6 +551,7 @@ pub async fn reconcile_collateral_claim(
     claim_owner: Principal,
     block_index: u64,
 ) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::reconcile_collateral_claim(collateral_ledger, claim_owner, block_index).await
 }
 
@@ -509,7 +595,133 @@ pub async fn deposit_as_3usd(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::deposit_as_3usd(token_ledger, amount).await
+}
+
+/// Start or resume a durable escrow-backed conversion. The caller owns the
+/// sequence and explicit downstream fee budget; a duplicate request returns
+/// the retained status without allocating another escrow account.
+#[update]
+pub async fn start_3usd_conversion(
+    request: conversion::ConversionRequest,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::start_conversion(request).await
+}
+
+/// Resume one retained conversion using its exact persisted identities.
+#[update]
+pub async fn resume_3usd_conversion(
+    intent_seq: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::resume_conversion(intent_seq).await
+}
+
+/// Authenticate an aged ambiguous ingress pull against an exact ledger block,
+/// then resume the same durable conversion intent.
+#[update]
+pub async fn reconcile_3usd_conversion_pull_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_pull(intent_seq, candidate_block).await
+}
+
+/// Reconcile only this caller's saved pool input using positive ledger proof.
+#[update]
+pub async fn reconcile_3usd_conversion_pool_input_v1(
+    intent_seq: u64,
+    leg_index: u8,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_pool_input(intent_seq, leg_index, candidate_block).await
+}
+
+/// Reconcile an aged escrow approval only from its exact directly served
+/// ICRC-3 approval block. The caller selects only its own durable intent.
+#[update]
+pub async fn reconcile_3usd_conversion_approval_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_approval(intent_seq, candidate_block).await
+}
+
+/// Reconcile an aged allowance revoke only from its exact directly served
+/// ICRC-3 approval block.
+#[update]
+pub async fn reconcile_3usd_conversion_revoke_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_revoke(intent_seq, candidate_block).await
+}
+
+/// Reconcile an aged escrow refund only from its exact directly served ICRC-3
+/// transfer block.
+#[update]
+pub async fn reconcile_3usd_conversion_refund_v1(
+    intent_seq: u64,
+    candidate_block: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::reconcile_refund(intent_seq, candidate_block).await
+}
+
+/// Read the caller's exact conversion status. Missing rows are not interpreted
+/// as evidence that a transfer had no effect.
+#[query]
+pub fn get_3usd_conversion_status(
+    intent_seq: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    conversion::get_status(intent_seq)
+}
+
+#[query]
+pub fn get_active_3usd_conversion() -> Option<conversion::ConversionStatus> {
+    conversion::get_active_status()
+}
+
+/// Return the next caller-scoped sequence from the durable conversion
+/// watermark. Clients must use this value instead of guessing after a lost
+/// response.
+#[query]
+pub fn get_3usd_conversion_next_seq() -> Result<u64, conversion::ConversionError> {
+    conversion::next_sequence()
+}
+
+/// Return the active request metadata together with its status so a client can
+/// resume the exact durable intent across devices.
+#[query]
+pub fn get_active_3usd_conversion_v1() -> Option<conversion::ConversionView> {
+    conversion::get_active_view()
+}
+
+/// Cancel only a journal row that has not dispatched a user pull. Once a value
+/// moving tuple exists, the caller must resume/reconcile that exact row.
+#[update]
+pub fn cancel_3usd_conversion(
+    intent_seq: u64,
+) -> Result<conversion::ConversionStatus, conversion::ConversionError> {
+    interest_recovery::ensure_unlocked();
+    conversion::cancel_conversion(intent_seq)
+}
+
+/// Read-only quote/admission helper. It performs only ledger/3pool queries and
+/// never creates a conversion intent or pulls funds.
+#[update]
+pub async fn quote_3usd_conversion(
+    token_ledger: Principal,
+    principal_raw: u64,
+    min_lp: u128,
+) -> Result<conversion::ConversionQuote, conversion::ConversionError> {
+    conversion::quote_conversion(token_ledger, principal_raw, min_lp).await
 }
 
 /// Recover tokens the pool owes after a failed `deposit_as_3usd` refund
@@ -517,6 +729,7 @@ pub async fn deposit_as_3usd(
 /// the net amount sent (gross minus the ledger transfer fee).
 #[update]
 pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::deposits::claim_pending_refund(refund_id).await
 }
 
@@ -525,6 +738,7 @@ pub async fn claim_cfx(
     chain_sentinel: Principal,
     dest_evm: String,
 ) -> Result<u128, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::claim_cfx(chain_sentinel, dest_evm).await
 }
 
@@ -532,6 +746,7 @@ pub async fn claim_cfx(
 pub fn recredit_failed_cfx_claim_payout(
     recovery: CfxClaimPayoutRecovery,
 ) -> Result<bool, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
@@ -547,6 +762,7 @@ pub fn recredit_failed_cfx_claim_payout(
 
 #[update]
 pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: opt-in/out changes the apportionment denominator, so
     // it must not land between a liquidation's snapshot and its apportionment
     // (escape-the-burn + aggregate drift above the ledger balance).
@@ -564,6 +780,7 @@ pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoo
 
 #[update]
 pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     // `pool_balance_mutation_blocked` includes `liquidation_in_progress`.
     if pool_balance_mutation_blocked() {
@@ -579,6 +796,7 @@ pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPool
 
 #[update]
 pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
@@ -600,6 +818,7 @@ pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
 
 #[update]
 pub fn opt_out_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
@@ -624,6 +843,7 @@ pub fn opt_in_native_collateral(
     collateral_type: Principal,
     payout_address: String,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     opt_in_native_collateral_with_tag(collateral_type, payout_address, None)
 }
 
@@ -633,6 +853,7 @@ pub fn opt_in_native_collateral_with_tag(
     payout_address: String,
     destination_tag: Option<u32>,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     // SP-102 / AR-S-002: see opt_out_collateral.
     if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
@@ -696,6 +917,7 @@ pub fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
 
 #[update]
 pub async fn ack_native_xrp_payout_settled(claim_id: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let protocol_canister_id = read_state(|s| {
         s.native_xrp_pending_payout_for(&caller, claim_id)
@@ -742,6 +964,7 @@ async fn ensure_backend_xrp_claim_absent(
 pub async fn notify_liquidatable_vaults(
     vaults: Vec<LiquidatableVaultInfo>,
 ) -> Vec<LiquidationResult> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
@@ -766,13 +989,63 @@ pub async fn notify_liquidatable_vaults(
 /// Public fallback: trigger liquidation for a specific vault.
 #[update]
 pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::execute_liquidation(vault_id).await
+}
+
+/// Read the durable ordinary request by its exact 32-byte identity. Unknown
+/// requests return `None`; a status miss never authorizes a fresh request ID.
+#[query]
+pub fn get_ordinary_liquidation_status(
+    request_id: Vec<u8>,
+) -> Option<ordinary_liquidation::OrdinaryLiquidationStatus> {
+    crate::liquidation::ordinary_liquidation_status(request_id)
+}
+
+/// Retry one ordinary request using its persisted approval/backend tuples.
+/// This endpoint never allocates a new request ID after an unknown callback.
+#[update]
+pub async fn retry_ordinary_liquidation(
+    request_id: Vec<u8>,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    crate::liquidation::retry_ordinary_liquidation(request_id).await
+}
+
+/// Cancel only a prepared ordinary request that has not dispatched approval.
+/// The completion tombstone is written before the pending row is released.
+#[update]
+pub async fn cancel_ordinary_liquidation(
+    request_id: Vec<u8>,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::liquidation::cancel_ordinary_liquidation(request_id).await
+}
+
+/// Resolve an aged approval using a block served by its configured ledger.
+/// The candidate is never accepted without the complete persisted tuple.
+#[update]
+pub async fn reconcile_ordinary_liquidation_approval(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::liquidation::reconcile_ordinary_liquidation_approval(request_id, candidate_block_index).await
 }
 
 #[update]
 pub async fn sp_absorb_chain_vault(
     vault_id: u64,
 ) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::sp_absorb_chain_vault(vault_id).await
 }
 
@@ -787,6 +1060,7 @@ pub async fn admin_recover_ambiguous_native_xrp_burn(
     vault_id: u64,
     candidate_block_index: Option<u64>,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -805,6 +1079,7 @@ pub async fn admin_recover_ambiguous_chain_burn(
     vault_id: u64,
     candidate_block_index: Option<u64>,
 ) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -817,6 +1092,7 @@ pub async fn admin_recover_ambiguous_chain_burn(
 pub async fn scan_chain_absorb_candidates(
     max_per_chain: Option<u64>,
 ) -> Result<Vec<ChainSpAbsorbCandidate>, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     crate::liquidation::scan_chain_absorb_candidates(max_per_chain).await
 }
 
@@ -824,6 +1100,7 @@ pub async fn scan_chain_absorb_candidates(
 pub fn set_chain_absorb_auto_config(
     config: ChainAbsorbAutoConfig,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if caller == Principal::anonymous() {
         return Err(StabilityPoolError::Unauthorized);
@@ -859,6 +1136,7 @@ pub fn receive_interest_revenue(
     _amount: u64,
     _collateral_type: Option<Principal>,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
@@ -884,16 +1162,6 @@ pub async fn receive_interest_revenue_v2(
     if caller != expected {
         return Err(StabilityPoolError::Unauthorized);
     }
-    ensure_pool_balance_mutation_allowed()?;
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
-    }
-    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) {
-        return Err(StabilityPoolError::TokenNotAccepted {
-            ledger: token_ledger,
-        });
-    }
-
     let payload = state::InterestMintReceiptPayload {
         token_ledger,
         amount,
@@ -901,6 +1169,7 @@ pub async fn receive_interest_revenue_v2(
     };
     match read_state(|s| receipt_store::interest_mint_receipt_status(s, source_mint_block, &payload)) {
         state::InterestMintReceiptStatus::PendingForward(batch_id) => {
+            if read_state(|s| s.configuration.emergency_pause) || interest_recovery::locked() { return Err(StabilityPoolError::SystemBusy); }
             return process_unallocated_interest_forward(batch_id).await;
         }
         state::InterestMintReceiptStatus::Duplicate => return Ok(()),
@@ -915,6 +1184,14 @@ pub async fn receive_interest_revenue_v2(
         state::InterestMintReceiptStatus::New => {}
     }
 
+    interest_recovery::ensure_unlocked();
+    ensure_pool_balance_mutation_allowed()?;
+    let paused=read_state(|s| s.configuration.emergency_pause);
+    if paused && !interest_recovery::live() { return Err(StabilityPoolError::EmergencyPaused); }
+    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) { return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger }); }
+    if paused && !read_state(|s| s.stablecoin_registry.get(&token_ledger).is_some_and(|c|c.symbol=="icUSD" && c.decimals==8)
+        && collateral_type.is_some_and(|c|s.collateral_registry.contains_key(&c))
+        && s.has_eligible_interest_recipient(collateral_type.as_ref())) { return Err(StabilityPoolError::SystemBusy); }
     if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
         return match mutate_state(
             |s| match receipt_store::record_interest_mint_receipt(s, source_mint_block, state::InterestMintReceipt {
@@ -1164,6 +1441,35 @@ pub fn admin_get_three_usd_absorb_inventory_page(
     }))
 }
 
+/// Register this deployed SP as the V2 reserve client without starting a
+/// liquidation or reserving any depositor funds.
+#[update]
+pub async fn admin_acknowledge_three_usd_reserve_v2_client() -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let protocol = read_state(|state| {
+        if !inventory_admin_authorized(caller, &state.configuration.authorized_admins) {
+            return Err(StabilityPoolError::Unauthorized);
+        }
+        Ok(state.protocol_canister_id)
+    })?;
+    let response: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> =
+        ic_cdk::call(protocol, "acknowledge_three_usd_reserve_v2_client", ()).await;
+    read_state(|state| {
+        if !inventory_admin_authorized(caller, &state.configuration.authorized_admins)
+            || state.protocol_canister_id != protocol
+        {
+            return Err(StabilityPoolError::Unauthorized);
+        }
+        Ok(())
+    })?;
+    match response {
+        Ok((Ok(()),)) => Ok(()),
+        other => Err(StabilityPoolError::LedgerTransferFailed {
+            reason: format!("V2 client acknowledgment: {:?}", other),
+        }),
+    }
+}
+
 /// Durable no-recipient interest routes that still need a ledger transfer or
 /// treasury bookkeeping acknowledgement. Public for transparent operations.
 #[query]
@@ -1251,6 +1557,7 @@ async fn compute_ledger_reconciliation() -> Vec<LedgerReconciliationEntry> {
 #[update]
 pub async fn get_ledger_reconciliation(
 ) -> Result<Vec<LedgerReconciliationEntry>, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1290,6 +1597,7 @@ fn setup_ledger_reconciliation_timer() {
 
 #[update]
 pub fn register_stablecoin(config: StablecoinConfig) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1308,6 +1616,7 @@ pub fn register_stablecoin(config: StablecoinConfig) -> Result<(), StabilityPool
 
 #[update]
 pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1326,6 +1635,7 @@ pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolErro
 
 #[update]
 pub fn register_cfx_collateral(chain_id: u32) -> Result<Principal, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1347,6 +1657,7 @@ pub fn register_cfx_collateral(chain_id: u32) -> Result<Principal, StabilityPool
 
 #[update]
 pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1364,6 +1675,7 @@ pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), St
 pub fn icrc21_canister_call_consent_message(
     request: Icrc21ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResponse {
+    interest_recovery::ensure_unlocked();
     let message_text = match request.method.as_str() {
         "deposit" => {
             "## Legacy Stability Pool Deposit Unavailable\n\n\
@@ -1547,6 +1859,16 @@ pub fn icrc21_canister_call_consent_message(
                 Err(_) => "Deposit stablecoins into the Stability Pool via the 3pool as 3USD LP tokens.".to_string(),
             }
         }
+        // The conversion actor is deliberately created through Oisy.  Keep
+        // these calls in the consent surface even though quote is economically
+        // read-only: Oisy asks for ICRC-21 consent for update methods, and the
+        // recovery calls must describe the retained journal row rather than
+        // presenting an opaque, generic approval.
+        method if conversion_consent_method(method) => conversion_consent_message(
+            method,
+            &request.arg,
+            ic_cdk::api::caller(),
+        ),
         _ => {
             return Icrc21ConsentMessageResponse::Err(Icrc21Error::UnsupportedCanisterCall(
                 Icrc21ErrorInfo {
@@ -1566,6 +1888,292 @@ pub fn icrc21_canister_call_consent_message(
             utc_offset_minutes: request.user_preferences.metadata.utc_offset_minutes,
         },
     })
+}
+
+/// Methods in the durable 3USD conversion flow that may be invoked through
+/// the user's Oisy actor.  This list is intentionally explicit so a new
+/// update method cannot silently acquire a generic wallet approval message.
+fn conversion_consent_method(method: &str) -> bool {
+    matches!(
+        method,
+        "quote_3usd_conversion"
+            | "get_active_3usd_conversion_v1"
+            | "get_active_3usd_conversion"
+            | "get_3usd_conversion_next_seq"
+            | "get_3usd_conversion_status"
+            | "start_3usd_conversion"
+            | "resume_3usd_conversion"
+            | "cancel_3usd_conversion"
+            | "reconcile_3usd_conversion_pull_v1"
+            | "reconcile_3usd_conversion_pool_input_v1"
+            | "reconcile_3usd_conversion_approval_v1"
+            | "reconcile_3usd_conversion_revoke_v1"
+            | "reconcile_3usd_conversion_refund_v1"
+    )
+}
+
+/// Render consent for the actual conversion wire arguments.  Each malformed
+/// argument path remains bounded to the named method and makes no claim about
+/// an amount, ledger, or transfer.  That is safer than showing a generic
+/// approval when an Oisy caller supplied bytes that did not decode.
+fn conversion_consent_message(method: &str, arg: &[u8], caller: Principal) -> String {
+    let malformed = || match method {
+        "quote_3usd_conversion" => {
+            "## Quote 3USD Conversion\n\n\
+             You are requesting a read-only 3USD conversion quote. Verify the \
+             exact token ledger, amount, and minimum LP output shown by the \
+             wallet. This call does not create an intent or move funds."
+                .to_string()
+        }
+        "get_active_3usd_conversion_v1" | "get_active_3usd_conversion" => {
+            "## Read Active 3USD Conversion\n\n\
+             The wallet supplied malformed arguments for this caller-scoped \
+             active-conversion query. Retry with empty arguments. This read-only \
+             query does not create an intent, reserve a sequence, move funds, or \
+             authorize a transfer."
+                .to_string()
+        }
+        "get_3usd_conversion_next_seq" => {
+            "## Read Next 3USD Conversion Sequence\n\n\
+             The wallet supplied malformed arguments for this caller-scoped next \
+             sequence query. Retry with empty arguments. This read-only query does \
+             not reserve a sequence, create an intent, move funds, or authorize a \
+             transfer."
+                .to_string()
+        }
+        "get_3usd_conversion_status" => {
+            "## Read 3USD Conversion Status\n\n\
+             The wallet supplied malformed arguments for this caller-scoped status \
+             query. Retry with exactly one intent sequence. This read-only query \
+             does not resume an intent, move funds, or authorize a transfer."
+                .to_string()
+        }
+        "start_3usd_conversion" => {
+            "## Start 3USD Conversion\n\n\
+             You are authorizing a durable 3USD conversion intent. Verify the \
+             exact caller, token ledger, amount, downstream fee budget, and \
+             minimum LP output shown by the wallet. Retries remain bound to the \
+             same stored intent; this message does not authorize an arbitrary \
+             transfer."
+                .to_string()
+        }
+        "resume_3usd_conversion" => {
+            "## Resume 3USD Conversion\n\n\
+             You are authorizing recovery of one stored 3USD conversion intent. \
+             Verify the exact intent shown by the wallet. This resumes the same \
+             persisted request and does not create a new sequence or fresh spend."
+                .to_string()
+        }
+        "cancel_3usd_conversion" => {
+            "## Cancel 3USD Conversion\n\n\
+             You are requesting cancellation of one stored 3USD conversion \
+             intent. Cancellation is limited to that journaled request and does \
+             not authorize a new transfer or arbitrary refund."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_pull_v1" => {
+            "## Reconcile 3USD Conversion Pull\n\n\
+             You are reconciling one stored conversion intent against a candidate \
+             token-ledger block. This verifies the same ingress pull and does not \
+             create a new intent or fresh spend."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_pool_input_v1" => {
+            "## Reconcile 3USD Pool Input\n\n\
+             You are reconciling one stored conversion intent and pool leg against \
+             a candidate block. This verifies the same pool input and does not \
+             create a new intent or fresh spend."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_approval_v1" => {
+            "## Reconcile 3USD Conversion Approval\n\n\
+             You are reconciling the approval proof for one stored conversion \
+             intent against a candidate ledger block. This verifies the same \
+             approval and does not authorize a new transfer."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_revoke_v1" => {
+            "## Reconcile 3USD Conversion Revoke\n\n\
+             You are reconciling the allowance revoke for one stored conversion \
+             intent against a candidate ledger block. This verifies the same \
+             revoke and does not authorize a new transfer."
+                .to_string()
+        }
+        "reconcile_3usd_conversion_refund_v1" => {
+            "## Reconcile 3USD Conversion Refund\n\n\
+             You are reconciling the refund proof for one stored conversion \
+             intent against a candidate ledger block. This verifies the same \
+             refund and does not authorize a new transfer or arbitrary refund."
+                .to_string()
+        }
+        _ => "This conversion method is not supported for wallet consent.".to_string(),
+    };
+
+    let token_details = |token_ledger: Principal| {
+        read_state(|s| {
+            s.stablecoin_registry
+                .get(&token_ledger)
+                .map(|config| (config.symbol.clone(), config.decimals))
+                .unwrap_or_else(|| (format!("token {}", token_ledger), 8))
+        })
+    };
+
+    match method {
+        "quote_3usd_conversion" => {
+            match candid::decode_args::<(Principal, u64, u128)>(arg) {
+                Ok((token_ledger, principal_raw, min_lp)) => {
+                    let (symbol, decimals) = token_details(token_ledger);
+                    format!(
+                        "## Quote 3USD Conversion\n\n\
+                         You are requesting a read-only 3USD conversion quote for **{} {}** \
+                         from token ledger `{}` with a minimum output of **{} LP base units**. \
+                         This call only queries the configured route; it does not create a \
+                         durable intent or move funds. Any wallet ingress ledger fee is \
+                         reported separately from a downstream fee budget.",
+                        format_token_amount(principal_raw, decimals),
+                        symbol,
+                        token_ledger,
+                        min_lp
+                    )
+                }
+                Err(_) => malformed(),
+            }
+        }
+        "get_active_3usd_conversion_v1" | "get_active_3usd_conversion" => {
+            match candid::decode_args::<()>(arg) {
+                Ok(()) => format!(
+                    "## Read Active 3USD Conversion\n\n\
+                     Caller principal `{}` is checking the caller-scoped active \
+                     conversion request and status. This read-only query does not \
+                     create an intent, reserve a sequence, move funds, or authorize \
+                     a transfer.",
+                    caller
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "get_3usd_conversion_next_seq" => {
+            match candid::decode_args::<()>(arg) {
+                Ok(()) => format!(
+                    "## Read Next 3USD Conversion Sequence\n\n\
+                     Caller principal `{}` is checking the next durable caller-scoped \
+                     conversion sequence. This read-only query does not reserve a \
+                     sequence, create an intent, move funds, or authorize a transfer.",
+                    caller
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "get_3usd_conversion_status" => {
+            match candid::decode_args::<(u64,)>(arg) {
+                Ok((intent_seq,)) => format!(
+                    "## Read 3USD Conversion Status\n\n\
+                     Caller principal `{}` is checking the status of stored conversion \
+                     intent **#{}**. This read-only query does not resume the intent, \
+                     move funds, or authorize a transfer.",
+                    caller, intent_seq
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "start_3usd_conversion" => {
+            match candid::decode_args::<(conversion::ConversionRequest,)>(arg) {
+                Ok((request,)) => {
+                    let (symbol, decimals) = token_details(request.token_ledger);
+                    format!(
+                        "## Start 3USD Conversion\n\n\
+                         Caller principal `{}` is authorizing durable conversion intent **#{}** \
+                         for **{} {}** from token ledger `{}`. The explicit downstream fee \
+                         budget is **{} {}** and the minimum LP output is **{} LP base units**. \
+                         The wallet ingress transfer fee is charged separately by the token \
+                         ledger and is not included in this downstream escrow fee budget. \
+                         Retries remain bound to this same intent and request.",
+                        caller,
+                        request.intent_seq,
+                        format_token_amount(request.principal_raw, decimals),
+                        symbol,
+                        request.token_ledger,
+                        format_token_amount(request.max_fee_budget_raw, decimals),
+                        symbol,
+                        request.min_lp
+                    )
+                }
+                Err(_) => malformed(),
+            }
+        }
+        "resume_3usd_conversion" => match candid::decode_args::<(u64,)>(arg) {
+            Ok((intent_seq,)) => format!(
+                "## Resume 3USD Conversion\n\n\
+                 Caller principal `{}` is authorizing recovery of stored conversion intent \
+                 **#{}**. This resumes the exact persisted token, amount, fee budget, and \
+                 minimum LP request; it does not create a new sequence or authorize a fresh \
+                 spend.",
+                caller, intent_seq
+            ),
+            Err(_) => malformed(),
+        },
+        "cancel_3usd_conversion" => match candid::decode_args::<(u64,)>(arg) {
+            Ok((intent_seq,)) => format!(
+                "## Cancel 3USD Conversion\n\n\
+                 Caller principal `{}` is requesting cancellation of stored conversion intent \
+                 **#{}**. Cancellation is limited to the exact journaled request and is only \
+                 effective before value movement; otherwise that same intent remains for \
+                 status or reconciliation. This call does not authorize a new transfer or \
+                 arbitrary refund.",
+                caller, intent_seq
+            ),
+            Err(_) => malformed(),
+        },
+        "reconcile_3usd_conversion_pull_v1" => {
+            match candid::decode_args::<(u64, u64)>(arg) {
+                Ok((intent_seq, candidate_block)) => format!(
+                    "## Reconcile 3USD Conversion Pull\n\n\
+                     Caller principal `{}` is reconciling the exact stored conversion intent \
+                     **#{}** using candidate token-ledger block **#{}**. This verifies or \
+                     resumes recovery of the same ingress pull; it does not create a new \
+                     intent or fresh spend.",
+                    caller, intent_seq, candidate_block
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "reconcile_3usd_conversion_pool_input_v1" => {
+            match candid::decode_args::<(u64, u8, u64)>(arg) {
+                Ok((intent_seq, leg_index, candidate_block)) => format!(
+                    "## Reconcile 3USD Pool Input\n\n\
+                     Caller principal `{}` is reconciling the exact stored conversion intent \
+                     **#{}**, pool leg **#{}**, using candidate block **#{}**. This verifies \
+                     the same pool input; it does not create a new intent or fresh spend.",
+                    caller, intent_seq, leg_index, candidate_block
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        "reconcile_3usd_conversion_approval_v1"
+        | "reconcile_3usd_conversion_revoke_v1"
+        | "reconcile_3usd_conversion_refund_v1" => {
+            let title = match method {
+                "reconcile_3usd_conversion_approval_v1" => "Approval",
+                "reconcile_3usd_conversion_revoke_v1" => "Allowance Revoke",
+                _ => "Refund",
+            };
+            match candid::decode_args::<(u64, u64)>(arg) {
+                Ok((intent_seq, candidate_block)) => format!(
+                    "## Reconcile 3USD Conversion {}\n\n\
+                     Caller principal `{}` is reconciling the exact stored conversion intent \
+                     **#{}** against candidate ledger block **#{}**. This verifies the same \
+                     {} operation and does not authorize a new transfer.",
+                    title.to_string(),
+                    caller,
+                    intent_seq,
+                    candidate_block,
+                    title.to_lowercase()
+                ),
+                Err(_) => malformed(),
+            }
+        }
+        _ => malformed(),
+    }
 }
 
 // ─── ICRC-10: Supported Standards ───
@@ -1616,6 +2224,7 @@ pub fn emergency_pause() -> Result<(), StabilityPoolError> {
 
 #[update]
 pub fn resume_operations() -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1633,6 +2242,7 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
 /// route is unsettled, so a persisted receipt can never be retargeted.
 #[update]
 pub fn set_interest_treasury(treasury: Option<Principal>) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1648,6 +2258,7 @@ pub fn set_interest_treasury(treasury: Option<Principal>) -> Result<(), Stabilit
 /// timestamp/memo is reused, so a retry after an ambiguous response is safe.
 #[update]
 pub async fn retry_unallocated_interest_forward(batch_id: u64) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1663,6 +2274,7 @@ pub async fn confirm_unallocated_interest_forward_transfer(
     batch_id: u64,
     transfer_block_index: u64,
 ) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1681,6 +2293,7 @@ pub fn admin_correct_balance(
     token_ledger: Principal,
     correct_amount: u64,
 ) -> Result<String, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1708,6 +2321,7 @@ pub fn admin_correct_collateral_gain(
     collateral_ledger: Principal,
     correct_amount: u64,
 ) -> Result<String, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
@@ -1857,4 +2471,162 @@ mod tests {
         drop(guard);
         assert!(ensure_no_pool_balance_async_in_flight().is_ok());
     }
+
+    #[test]
+    fn conversion_consent_dispatch_is_bounded_and_quote_is_read_only() {
+        let token = principal(41);
+        let args = candid::encode_args((token, 125_000_000u64, 99u128)).unwrap();
+        let message = conversion_consent_message("quote_3usd_conversion", &args, principal(7));
+
+        assert!(conversion_consent_method("quote_3usd_conversion"));
+        assert!(!conversion_consent_method("some_future_update"));
+        assert!(message.contains("1.25"));
+        assert!(message.contains(token.to_text().as_str()));
+        assert!(message.contains("99 LP base units"));
+        assert!(message.contains("read-only"));
+        assert!(message.contains("does not create a durable intent or move funds"));
+    }
+
+    #[test]
+    fn conversion_getter_consent_decodes_empty_and_sequence_arguments() {
+        let caller = principal(43);
+        let empty = candid::encode_args(()).unwrap();
+        for method in [
+            "get_active_3usd_conversion_v1",
+            "get_active_3usd_conversion",
+            "get_3usd_conversion_next_seq",
+        ] {
+            let message = conversion_consent_message(method, &empty, caller);
+            assert!(conversion_consent_method(method));
+            assert!(message.contains(caller.to_text().as_str()));
+            assert!(message.contains("read-only query"));
+            assert!(message.contains("does not"));
+            assert!(!message.contains("authorizing"));
+        }
+
+        let status_args = candid::encode_args((19u64,)).unwrap();
+        let status_message = conversion_consent_message(
+            "get_3usd_conversion_status",
+            &status_args,
+            caller,
+        );
+        assert!(conversion_consent_method("get_3usd_conversion_status"));
+        assert!(status_message.contains(caller.to_text().as_str()));
+        assert!(status_message.contains("intent **#19**"));
+        assert!(status_message.contains("read-only query"));
+        assert!(status_message.contains("does not resume the intent"));
+        assert!(!status_message.contains("authorizing"));
+    }
+
+    #[test]
+    fn conversion_getter_consent_malformed_args_stay_bounded_and_read_only() {
+        let caller = principal(44);
+        // Candid permits trailing arguments for a zero-argument method.
+        // Exercise malformed bytes rather than valid, extra arguments.
+        let wrong_empty_args = Vec::<u8>::new();
+        for method in [
+            "get_active_3usd_conversion_v1",
+            "get_active_3usd_conversion",
+            "get_3usd_conversion_next_seq",
+        ] {
+            let message = conversion_consent_message(method, &wrong_empty_args, caller);
+            assert!(message.contains("malformed arguments"));
+            assert!(message.contains("empty arguments"));
+            assert!(message.contains("does not"));
+            assert!(!message.contains("intent **#1**"));
+            assert!(!message.contains("authorizing"));
+        }
+
+        let malformed_status = conversion_consent_message(
+            "get_3usd_conversion_status",
+            &[],
+            caller,
+        );
+        assert!(malformed_status.contains("malformed arguments"));
+        assert!(malformed_status.contains("exactly one intent sequence"));
+        assert!(malformed_status.contains("does not resume an intent"));
+        assert!(!malformed_status.contains("intent **#0**"));
+        assert!(!malformed_status.contains("authorizing"));
+    }
+
+    #[test]
+    fn conversion_start_consent_decodes_wire_request_and_discloses_budget() {
+        let request = conversion::ConversionRequest {
+            intent_seq: 7,
+            token_ledger: principal(42),
+            principal_raw: 12_500,
+            max_fee_budget_raw: 275,
+            min_lp: 888,
+        };
+        let args = candid::encode_args((request.clone(),)).unwrap();
+        let caller = principal(9);
+        let message = conversion_consent_message("start_3usd_conversion", &args, caller);
+
+        assert!(message.contains(caller.to_text().as_str()));
+        assert!(message.contains("intent **#7**"));
+        assert!(message.contains("0.000125"));
+        assert!(message.contains("0.00000275"));
+        assert!(message.contains(request.token_ledger.to_text().as_str()));
+        assert!(message.contains("888 LP base units"));
+        assert!(message.contains("ingress transfer fee is charged separately"));
+        assert!(message.contains("same intent and request"));
+    }
+
+    #[test]
+    fn conversion_recovery_consent_binds_same_intent_and_candidate_proof() {
+        let caller = principal(10);
+        let pull_args = candid::encode_args((7u64, 123u64)).unwrap();
+        let pull_message = conversion_consent_message(
+            "reconcile_3usd_conversion_pull_v1",
+            &pull_args,
+            caller,
+        );
+        assert!(pull_message.contains("intent **#7**"));
+        assert!(pull_message.contains("block **#123**"));
+        assert!(pull_message.contains("same ingress pull"));
+        assert!(pull_message.contains("does not create a new intent or fresh spend"));
+
+        let pool_args = candid::encode_args((7u64, 2u8, 456u64)).unwrap();
+        let pool_message = conversion_consent_message(
+            "reconcile_3usd_conversion_pool_input_v1",
+            &pool_args,
+            caller,
+        );
+        assert!(pool_message.contains("pool leg **#2**"));
+        assert!(pool_message.contains("candidate block **#456**"));
+
+        let resume_args = candid::encode_args((7u64,)).unwrap();
+        let resume_message =
+            conversion_consent_message("resume_3usd_conversion", &resume_args, caller);
+        assert!(resume_message.contains("exact persisted token, amount, fee budget"));
+        assert!(resume_message.contains("does not create a new sequence or authorize a fresh spend"));
+
+        let cancel_args = candid::encode_args((7u64,)).unwrap();
+        let cancel_message =
+            conversion_consent_message("cancel_3usd_conversion", &cancel_args, caller);
+        assert!(cancel_message.contains("stored conversion intent"));
+        assert!(cancel_message.contains("not authorize a new transfer or arbitrary refund"));
+    }
+
+    #[test]
+    fn conversion_consent_malformed_args_do_not_claim_amount_or_opaque_approval() {
+        let message = conversion_consent_message("start_3usd_conversion", &[], principal(11));
+        assert!(message.contains("exact caller, token ledger, amount"));
+        assert!(message.contains("does not authorize an arbitrary transfer"));
+        assert!(!message.contains("0 LP base units"));
+        assert!(!message.contains("0.0"));
+    }
 }
+
+// Scoped recovery endpoints bind the exact reviewed allocation seal; execution needs separate authority.
+#[update]
+pub fn stage_interest_recovery(manifest: interest_recovery::RecoveryManifest) -> Result<interest_recovery::RecoveryStatus, String> { interest_recovery::stage(manifest) }
+#[update]
+pub fn continue_interest_recovery(manifest_hash: Vec<u8>, expected_next: u16, limit: u8) -> Result<interest_recovery::RecoveryStatus, String> { interest_recovery::continue_batch(manifest_hash,expected_next,limit) }
+#[update]
+pub fn finish_interest_recovery(manifest_hash: Vec<u8>) -> Result<interest_recovery::RecoveryStatus, String> { interest_recovery::finish(manifest_hash) }
+#[query]
+pub fn get_interest_recovery_status() -> Result<Option<interest_recovery::RecoveryStatus>, String> { interest_recovery::get_status() }
+/// Replicated read for the configured backend to prove an already-applied source credit.
+#[update]
+pub fn get_interest_recovery_packet_receipt(source_mint_block: u64) -> Result<Option<interest_recovery::RecoveryPacketReceipt>, String> { interest_recovery::get_receipt(source_mint_block) }

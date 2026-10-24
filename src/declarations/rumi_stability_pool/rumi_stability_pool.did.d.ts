@@ -268,6 +268,48 @@ export interface InterestMintReceiptCapacity {
   'capacity' : bigint,
   'admission_blocked_reason' : [] | [string],
 }
+export interface InterestRecoveryWire_InterestMintReceiptPayload {
+  'collateral_type' : [] | [Principal],
+  'amount' : bigint,
+  'token_ledger' : Principal,
+}
+export interface InterestRecoveryWire_RecoveryManifest {
+  'packets' : Array<InterestRecoveryWire_RecoveryPacket>,
+  'baseline_digest' : Uint8Array | number[],
+}
+export interface InterestRecoveryWire_RecoveryPacket {
+  'source_mint_block' : bigint,
+  'allocations' : Array<[Principal, bigint]>,
+  'collateral_type' : Principal,
+  'amount' : bigint,
+  'token_ledger' : Principal,
+}
+export interface InterestRecoveryWire_RecoveryPacketReceipt {
+  'source_mint_block' : bigint,
+  'allocation_digest' : Uint8Array | number[],
+  'manifest_hash' : Uint8Array | number[],
+  'credited' : boolean,
+  'payload' : InterestRecoveryWire_InterestMintReceiptPayload,
+}
+export interface InterestRecoveryWire_RecoveryStatus {
+  'next_packet' : number,
+  'manifest_hash' : Uint8Array | number[],
+  'credited_raw' : bigint,
+  'packet_count' : number,
+  'live_interest_only' : boolean,
+}
+export type InterestRecoveryWire_Result_10 = {
+    'Ok' : [] | [InterestRecoveryWire_RecoveryPacketReceipt]
+  } |
+  { 'Err' : string };
+export type InterestRecoveryWire_Result_11 = {
+    'Ok' : [] | [InterestRecoveryWire_RecoveryStatus]
+  } |
+  { 'Err' : string };
+export type InterestRecoveryWire_Result_7 = {
+    'Ok' : InterestRecoveryWire_RecoveryStatus
+  } |
+  { 'Err' : string };
 export interface LedgerReconciliationEntry {
   'healthy' : boolean,
   'ledger' : Principal,
@@ -393,6 +435,286 @@ export interface PoolLiquidationRecord {
 }
 export type SpProofLedger = { 'IcusdBurn' : null } |
   { 'ThreePoolTransfer' : null };
+export type SpRailWireNext_ConversionError = { 'EmergencyPaused' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'SequenceExhausted' : null } |
+  {
+    'NonZeroFeeBudgetRequired' : {
+      'minimum_budget_raw' : bigint,
+      'fee_raw' : bigint,
+    }
+  } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  { 'IntentConflict' : null } |
+  { 'SequenceMismatch' : { 'expected_seq' : bigint } } |
+  { 'NotFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : { 'reason' : string } } |
+  { 'LpTokenUnavailable' : null } |
+  { 'ActiveIntent' : { 'intent_seq' : bigint } } |
+  { 'CannotCancel' : null } |
+  { 'SystemBusy' : null } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } };
+export type SpRailWireNext_ConversionPhase = { 'Refunding' : null } |
+  { 'Revoking' : null } |
+  { 'Reserved' : null } |
+  { 'Refunded' : null } |
+  { 'Pulling' : null } |
+  { 'Rejected' : null } |
+  { 'Approving' : null } |
+  { 'PoolCall' : null } |
+  { 'CreditPending' : null } |
+  { 'Completed' : null };
+export type SpRailWireNext_ConversionStatus = {
+    'Refunded' : {
+      'refunded_raw' : bigint,
+      'retained_dust_raw' : bigint,
+      'intent_seq' : bigint,
+    }
+  } |
+  { 'Rejected' : { 'intent_seq' : bigint, 'reason' : string } } |
+  {
+    'Completed' : {
+      'uncredited_lp' : [] | [bigint],
+      'retained_dust_raw' : bigint,
+      'lp_credited' : boolean,
+      'lp_minted' : bigint,
+      'intent_seq' : bigint,
+    }
+  } |
+  {
+    'Pending' : {
+      'phase' : SpRailWireNext_ConversionPhase,
+      'intent_seq' : bigint,
+      'reason' : [] | [string],
+    }
+  };
+export interface SpRailWireNext_IntentionalDrift_LiquidationResult {
+  'admitted' : [] | [boolean],
+  'error_message' : [] | [string],
+  'stables_consumed' : Array<[Principal, bigint]>,
+  'vault_id' : bigint,
+  'collateral_gained' : bigint,
+  'success' : boolean,
+  'collateral_type' : Principal,
+}
+export type SpRailWireNext_Result_4 = {
+    'Ok' : SpRailWireNext_ConversionStatus
+  } |
+  { 'Err' : SpRailWireNext_ConversionError };
+export interface SpRailWire_Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
+export type SpRailWire_ConversionError = { 'EmergencyPaused' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'SequenceExhausted' : null } |
+  {
+    'NonZeroFeeBudgetRequired' : {
+      'minimum_budget_raw' : bigint,
+      'fee_raw' : bigint,
+    }
+  } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  { 'IntentConflict' : null } |
+  { 'SequenceMismatch' : { 'expected_seq' : bigint } } |
+  { 'NotFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : { 'reason' : string } } |
+  { 'LpTokenUnavailable' : null } |
+  { 'ActiveIntent' : { 'intent_seq' : bigint } } |
+  { 'CannotCancel' : null } |
+  { 'SystemBusy' : null } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } };
+export type SpRailWire_ConversionPhase = { 'Refunding' : null } |
+  { 'Revoking' : null } |
+  { 'Reserved' : null } |
+  { 'Refunded' : null } |
+  { 'Pulling' : null } |
+  { 'Rejected' : null } |
+  { 'Approving' : null } |
+  { 'PoolCall' : null } |
+  { 'CreditPending' : null } |
+  { 'Completed' : null };
+export interface SpRailWire_ConversionQuote {
+  'lp_ledger' : Principal,
+  'quoted_lp' : bigint,
+  'pool_coin_index' : number,
+  'minimum_fee_budget_raw' : bigint,
+  'principal_raw' : bigint,
+  'live_transfer_fee_raw' : bigint,
+  'token_ledger' : Principal,
+  'pool_canister' : Principal,
+}
+export interface SpRailWire_ConversionRequest {
+  'min_lp' : bigint,
+  'max_fee_budget_raw' : bigint,
+  'principal_raw' : bigint,
+  'intent_seq' : bigint,
+  'token_ledger' : Principal,
+}
+export type SpRailWire_ConversionStatus = {
+    'Refunded' : {
+      'refunded_raw' : bigint,
+      'retained_dust_raw' : bigint,
+      'intent_seq' : bigint,
+    }
+  } |
+  { 'Rejected' : { 'intent_seq' : bigint, 'reason' : string } } |
+  {
+    'Completed' : {
+      'uncredited_lp' : [] | [bigint],
+      'retained_dust_raw' : bigint,
+      'lp_credited' : boolean,
+      'lp_minted' : bigint,
+      'intent_seq' : bigint,
+    }
+  } |
+  {
+    'Pending' : {
+      'phase' : SpRailWire_ConversionPhase,
+      'intent_seq' : bigint,
+      'reason' : [] | [string],
+    }
+  };
+export interface SpRailWire_ConversionView {
+  'status' : SpRailWire_ConversionStatus,
+  'request' : SpRailWire_ConversionRequest,
+}
+export interface SpRailWire_IntentionalDrift_LiquidationResult {
+  'admitted' : [] | [boolean],
+  'error_message' : [] | [string],
+  'stables_consumed' : Array<[Principal, bigint]>,
+  'vault_id' : bigint,
+  'collateral_gained' : bigint,
+  'success' : boolean,
+  'collateral_type' : Principal,
+}
+export interface SpRailWire_LiquidationResult {
+  'admitted' : [] | [boolean],
+  'error_message' : [] | [string],
+  'stables_consumed' : Array<[Principal, bigint]>,
+  'vault_id' : bigint,
+  'collateral_gained' : bigint,
+  'success' : boolean,
+  'collateral_type' : Principal,
+}
+export interface SpRailWire_OrdinaryApprovalTuple {
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'fee_raw' : bigint,
+  'amount_raw' : bigint,
+  'ledger' : Principal,
+  'spender' : Principal,
+  'expires_at_time_ns' : bigint,
+}
+export type SpRailWire_OrdinaryLiquidationPhase = { 'BackendPrepared' : null } |
+  { 'ApprovalConfirmed' : null } |
+  { 'CancellationSubmitted' : null } |
+  { 'PaymentConfirmed' : null } |
+  { 'PaymentNoEffect' : null } |
+  { 'BackendSubmitted' : null } |
+  { 'Prepared' : null } |
+  { 'ApprovalSubmitted' : null } |
+  { 'PayoutNoEffect' : null } |
+  { 'Cancelled' : null } |
+  { 'PayoutHeld' : null } |
+  { 'Completed' : null };
+export interface SpRailWire_OrdinaryLiquidationQuote {
+  'payout_tuple' : [] | [SpRailWire_OrdinaryPayoutTuple],
+  'payout_operation_id' : [] | [bigint],
+  'collateral_price_e8s' : bigint,
+  'collateral_gross_raw' : bigint,
+  'pull_fee_raw' : bigint,
+  'payment_block_index' : [] | [bigint],
+  'payout_block_index' : [] | [bigint],
+  'payout_net_raw' : [] | [bigint],
+  'surcharge_raw' : bigint,
+  'principal_raw' : bigint,
+  'collateral_ledger' : Principal,
+  'collateral_net_raw' : bigint,
+  'gross_payment_raw' : bigint,
+  'collateral_fee_raw' : bigint,
+  'payment_tuple' : SpRailWire_OrdinaryPaymentTuple,
+  'debt_e8s' : bigint,
+}
+export interface SpRailWire_OrdinaryLiquidationStatus {
+  'request_id' : Uint8Array | number[],
+  'last_error' : [] | [string],
+  'approval_attempted' : boolean,
+  'stable_ledger' : Principal,
+  'backend_attempted' : boolean,
+  'quote' : [] | [SpRailWire_OrdinaryLiquidationQuote],
+  'vault_id' : bigint,
+  'approval' : [] | [SpRailWire_OrdinaryApprovalTuple],
+  'phase' : SpRailWire_OrdinaryLiquidationPhase,
+  'collateral_type' : Principal,
+  'payment' : SpRailWire_SpLiquidationPayment,
+}
+export interface SpRailWire_OrdinaryPaymentTuple {
+  'destination' : SpRailWire_Account,
+  'source' : SpRailWire_Account,
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'amount_raw' : bigint,
+  'ledger_fee_raw' : bigint,
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+}
+export interface SpRailWire_OrdinaryPayoutTuple {
+  'destination' : SpRailWire_Account,
+  'source' : SpRailWire_Account,
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'amount_raw' : bigint,
+  'ledger_fee_raw' : bigint,
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+  'gross_raw' : bigint,
+}
+export type SpRailWire_Result = { 'Ok' : null } |
+  { 'Err' : SpRailWire_StabilityPoolError };
+export type SpRailWire_Result_11 = { 'Ok' : bigint } |
+  { 'Err' : SpRailWire_ConversionError };
+export type SpRailWire_Result_15 = { 'Ok' : SpRailWire_ConversionQuote } |
+  { 'Err' : SpRailWire_ConversionError };
+export type SpRailWire_Result_4 = { 'Ok' : SpRailWire_ConversionStatus } |
+  { 'Err' : SpRailWire_ConversionError };
+export type SpRailWire_Result_5 = { 'Ok' : SpRailWire_LiquidationResult } |
+  { 'Err' : SpRailWire_StabilityPoolError };
+export type SpRailWire_SpLiquidationPayment = { 'Icusd' : null } |
+  { 'Ckusdc' : null } |
+  { 'Ckusdt' : null };
+export type SpRailWire_StabilityPoolError = {
+    'LedgerTransferFailed' : { 'reason' : string }
+  } |
+  { 'RefundClaimNotFound' : null } |
+  { 'EmergencyPaused' : null } |
+  { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  {
+    'InsufficientBalance' : {
+      'token' : Principal,
+      'available' : bigint,
+      'required' : bigint,
+    }
+  } |
+  { 'InvalidPayoutAddress' : { 'reason' : string } } |
+  { 'CollateralNotFound' : { 'ledger' : Principal } } |
+  { 'NoPositionFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
+  { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
+  { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
+  { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
+  { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
+  { 'SystemBusy' : null } |
+  { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } } |
+  { 'InsufficientPoolBalance' : null };
 export interface SpWritedownProof {
   'block_index' : bigint,
   'ledger_kind' : SpProofLedger,
@@ -503,11 +825,66 @@ export interface UserStabilityPosition {
   'total_usd_value_e8s' : bigint,
   'opted_out_collateral' : Array<Principal>,
 }
+export interface WithdrawalWire_Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
+export interface WithdrawalWire_PendingOutboundPayoutStatus {
+  'last_error' : [] | [string],
+  'ambiguous_seen' : boolean,
+  'transfer_fee' : bigint,
+  'reconciliation_attempts' : bigint,
+  'last_reconciliation_at_ns' : [] | [bigint],
+  'recipient' : WithdrawalWire_Account,
+  'transfer_amount' : bigint,
+  'from_subaccount' : [] | [Uint8Array | number[]],
+  'transfer_created_at_time_ns' : bigint,
+  'ledger' : Principal,
+  'candidate_block_index' : [] | [bigint],
+  'dispatch_in_flight' : boolean,
+  'candidate_block_index_raw' : [] | [string],
+  'transfer_memo' : Uint8Array | number[],
+  'gross_amount' : bigint,
+}
+export type WithdrawalWire_Result_6 = { 'Ok' : bigint } |
+  { 'Err' : WithdrawalWire_StabilityPoolError };
+export type WithdrawalWire_StabilityPoolError = {
+    'LedgerTransferFailed' : { 'reason' : string }
+  } |
+  { 'RefundClaimNotFound' : null } |
+  { 'EmergencyPaused' : null } |
+  { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
+  { 'TokenNotActive' : { 'ledger' : Principal } } |
+  {
+    'InsufficientBalance' : {
+      'token' : Principal,
+      'available' : bigint,
+      'required' : bigint,
+    }
+  } |
+  { 'InvalidPayoutAddress' : { 'reason' : string } } |
+  { 'CollateralNotFound' : { 'ledger' : Principal } } |
+  { 'NoPositionFound' : null } |
+  { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
+  { 'Unauthorized' : null } |
+  { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
+  { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
+  { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
+  { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
+  { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
+  { 'SystemBusy' : null } |
+  { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
+  { 'TokenNotAccepted' : { 'ledger' : Principal } } |
+  { 'InsufficientPoolBalance' : null };
 export interface _SERVICE {
   'ack_native_xrp_payout_settled' : ActorMethod<
     [bigint],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
+  >,
+  'admin_acknowledge_three_usd_reserve_v2_client' : ActorMethod<
+    [],
+    SpRailWire_Result
   >,
   'admin_correct_balance' : ActorMethod<
     [Principal, Principal, bigint],
@@ -533,6 +910,11 @@ export interface _SERVICE {
     [bigint, [] | [bigint]],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
+  >,
+  'cancel_3usd_conversion' : ActorMethod<[bigint], SpRailWire_Result_4>,
+  'cancel_ordinary_liquidation' : ActorMethod<
+    [Uint8Array | number[]],
+    SpRailWire_Result_5
   >,
   'check_chain_absorb_capacity' : ActorMethod<[Principal, bigint], boolean>,
   'check_pool_capacity' : ActorMethod<[Principal, bigint], boolean>,
@@ -561,6 +943,10 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'continue_interest_recovery' : ActorMethod<
+    [Uint8Array | number[], number, number],
+    InterestRecoveryWire_Result_7
+  >,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'deposit' : ActorMethod<
@@ -585,8 +971,22 @@ export interface _SERVICE {
   >,
   'execute_liquidation' : ActorMethod<
     [bigint],
-    { 'Ok' : LiquidationResult } |
+    { 'Ok' : SpRailWire_IntentionalDrift_LiquidationResult } |
       { 'Err' : StabilityPoolError }
+  >,
+  'finish_interest_recovery' : ActorMethod<
+    [Uint8Array | number[]],
+    InterestRecoveryWire_Result_7
+  >,
+  'get_3usd_conversion_next_seq' : ActorMethod<[], SpRailWire_Result_11>,
+  'get_3usd_conversion_status' : ActorMethod<[bigint], SpRailWire_Result_4>,
+  'get_active_3usd_conversion' : ActorMethod<
+    [],
+    [] | [SpRailWire_ConversionStatus]
+  >,
+  'get_active_3usd_conversion_v1' : ActorMethod<
+    [],
+    [] | [SpRailWire_ConversionView]
   >,
   'get_chain_absorb_auto_status' : ActorMethod<[], ChainAbsorbAutoStatus>,
   'get_chain_collateral_sentinel' : ActorMethod<[number], Principal>,
@@ -598,6 +998,14 @@ export interface _SERVICE {
   'get_interest_mint_receipt_capacity' : ActorMethod<
     [],
     InterestMintReceiptCapacity
+  >,
+  'get_interest_recovery_packet_receipt' : ActorMethod<
+    [bigint],
+    InterestRecoveryWire_Result_10
+  >,
+  'get_interest_recovery_status' : ActorMethod<
+    [],
+    InterestRecoveryWire_Result_11
   >,
   'get_ledger_reconciliation' : ActorMethod<
     [],
@@ -620,6 +1028,14 @@ export interface _SERVICE {
   'get_my_pending_collateral_claims' : ActorMethod<
     [],
     Array<PendingOutboundPayoutStatus>
+  >,
+  'get_my_pending_withdrawals' : ActorMethod<
+    [],
+    Array<WithdrawalWire_PendingOutboundPayoutStatus>
+  >,
+  'get_ordinary_liquidation_status' : ActorMethod<
+    [Uint8Array | number[]],
+    [] | [SpRailWire_OrdinaryLiquidationStatus]
   >,
   'get_pending_chain_absorbs' : ActorMethod<[], Array<ChainSpAbsorbIntent>>,
   'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,
@@ -645,7 +1061,7 @@ export interface _SERVICE {
   'list_depositor_principals' : ActorMethod<[], Array<Principal>>,
   'notify_liquidatable_vaults' : ActorMethod<
     [Array<LiquidatableVaultInfo>],
-    Array<LiquidationResult>
+    Array<SpRailWire_IntentionalDrift_LiquidationResult>
   >,
   'opt_in_cfx' : ActorMethod<
     [Principal],
@@ -677,6 +1093,10 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'quote_3usd_conversion' : ActorMethod<
+    [Principal, bigint, bigint],
+    SpRailWire_Result_15
+  >,
   'receive_interest_revenue' : ActorMethod<
     [Principal, bigint, [] | [Principal]],
     { 'Ok' : null } |
@@ -687,10 +1107,38 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'reconcile_3usd_conversion_approval_v1' : ActorMethod<
+    [bigint, bigint],
+    SpRailWireNext_Result_4
+  >,
+  'reconcile_3usd_conversion_pool_input_v1' : ActorMethod<
+    [bigint, number, bigint],
+    SpRailWire_Result_4
+  >,
+  'reconcile_3usd_conversion_pull_v1' : ActorMethod<
+    [bigint, bigint],
+    SpRailWire_Result_4
+  >,
+  'reconcile_3usd_conversion_refund_v1' : ActorMethod<
+    [bigint, bigint],
+    SpRailWireNext_Result_4
+  >,
+  'reconcile_3usd_conversion_revoke_v1' : ActorMethod<
+    [bigint, bigint],
+    SpRailWireNext_Result_4
+  >,
   'reconcile_collateral_claim' : ActorMethod<
     [Principal, Principal, bigint],
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
+  >,
+  'reconcile_ordinary_liquidation_approval' : ActorMethod<
+    [Uint8Array | number[], bigint],
+    SpRailWire_Result_5
+  >,
+  'reconcile_withdrawal' : ActorMethod<
+    [Principal, Principal, bigint],
+    WithdrawalWire_Result_6
   >,
   'recredit_failed_cfx_claim_payout' : ActorMethod<
     [CfxClaimPayoutRecovery],
@@ -712,10 +1160,15 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'resume_3usd_conversion' : ActorMethod<[bigint], SpRailWire_Result_4>,
   'resume_operations' : ActorMethod<
     [],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
+  >,
+  'retry_ordinary_liquidation' : ActorMethod<
+    [Uint8Array | number[]],
+    SpRailWire_Result_5
   >,
   'retry_unallocated_interest_forward' : ActorMethod<
     [bigint],
@@ -741,6 +1194,14 @@ export interface _SERVICE {
     [bigint],
     { 'Ok' : ChainSpAbsorbResult } |
       { 'Err' : StabilityPoolError }
+  >,
+  'stage_interest_recovery' : ActorMethod<
+    [InterestRecoveryWire_RecoveryManifest],
+    InterestRecoveryWire_Result_7
+  >,
+  'start_3usd_conversion' : ActorMethod<
+    [SpRailWire_ConversionRequest],
+    SpRailWire_Result_4
   >,
   'update_pool_configuration' : ActorMethod<
     [PoolConfiguration],
