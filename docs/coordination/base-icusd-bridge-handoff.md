@@ -239,6 +239,14 @@ Rob's answer pending), which steps F and I.2 need. Pre-merge follow-ups: a Pocke
 
 ## Held live actions
 
-Base Sepolia or Base deployment, canister creation or install on any network, contract role
-assignment, gas funding, enabling deposits, and any mainnet change. (Lookout publication of
-sanitized board metadata is approved; see milestone 7.)
+Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
+meaning steps A to E (a new synthetic test ledger and a dedicated bridge canister on ICP, their
+installation and configuration, deriving the bridge's public Base addresses) and, once the
+deployer signer is authorized, steps F to J on Base Sepolia (chain 84532).
+
+Still held: provisioning the test-only Base Sepolia deployer signer (an approval review refused
+it; waiting on Rob's explicit answer), so contract deployment, test-ETH funding, binding and the
+Base-side round trip wait for it; anything touching the production icUSD ledger or any existing
+Rumi canister, frontend or configuration; Base mainnet (8453); production controller, role or
+governance changes; real funds; and merging PR #591. (Lookout publication of sanitized board
+metadata is approved; see milestone 7.)

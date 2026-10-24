@@ -78,7 +78,7 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 
 - Base Sepolia test: now authorized in scope (synthetic test ledger, dedicated bridge canister, chain 84532 only), executed only by Miles after he validates the deployment packet (BB-23, BB-24 ICP side, BB-25 Base side). The production icUSD ledger, existing Rumi canisters, Base mainnet and merge stay held.
 - Base Sepolia deployer signer provisioning: HELD. An approval review refused creating a test-only deployer key (2026-10-24); no key exists. Do not create, import or relay one by any route until Rob's explicit answer arrives.
-- Any mainnet deploy, controller change, contract role assignment, live signing/broadcast, or funding.
+- Anything outside that test: production deploys (existing Rumi canisters, the production icUSD ledger, Base mainnet), production controller, role or governance changes, live signing or broadcast beyond the packet's Base Sepolia steps, real funds, and merging PR #591.
 - Worktree removal pass (`scripts/cleanup_worktrees.sh --remove-eligible`): denied by the permission classifier on 2026-10-24; dry run showed 0 eligible anyway.
 
 Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-review rejection) was cleared by Rob's approval of sanitized board metadata uploads, and the first snapshot has been published and verified.
