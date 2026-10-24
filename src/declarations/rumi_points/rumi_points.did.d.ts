@@ -2,6 +2,13 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface AllocationRow {
+  'principal' : Principal,
+  'epoch_index' : bigint,
+  'coverage_end_ns' : [] | [bigint],
+  'target_epoch_points' : bigint,
+  'coverage_start_ns' : [] | [bigint],
+}
 export type AssetType = { 'Icp' : null } |
   { 'IcUsd' : null } |
   { 'CkUsdc' : null } |
@@ -68,6 +75,17 @@ export interface FiatStableTopupProgress {
   'complete' : boolean,
   'next_offset' : bigint,
 }
+export interface HeldEpochRecoveryView {
+  'closed' : boolean,
+  'epoch_index' : bigint,
+  'replacement_b_ns' : [] | [bigint],
+  'kind' : string,
+  'epoch_start_ns' : bigint,
+  'authorized_at_ns' : bigint,
+  'original_b_ns' : [] | [bigint],
+  'snapshot_a_ns' : bigint,
+  'epoch_end_ns' : bigint,
+}
 export interface IngestStatus {
   'registered_count' : bigint,
   'poll_interval_secs' : bigint,
@@ -101,6 +119,53 @@ export interface OpenEpoch {
   'snapshot_b_ns' : bigint,
   'close_points_accrued' : bigint,
   'epoch_end_ns' : bigint,
+}
+export interface OutageAllocation {
+  'rows' : Array<AllocationRow>,
+  'original_ledger_prefix_digest' : Uint8Array | number[],
+  'evidence_digest' : Uint8Array | number[],
+  'season_start_ns' : bigint,
+  'original_ledger_prefix_len' : bigint,
+  'season_end_ns' : bigint,
+}
+export interface OutageCredit {
+  'principal' : Principal,
+  'normal_ledger_cutoff' : bigint,
+  'scheduled_period_end_ns' : bigint,
+  'applied_at_ns' : bigint,
+  'epoch_index' : bigint,
+  'coverage_end_ns' : [] | [bigint],
+  'allocation_digest' : Uint8Array | number[],
+  'kind' : OutageCreditKind,
+  'normal_points_earned' : bigint,
+  'credited_points' : bigint,
+  'target_epoch_points' : bigint,
+  'evidence_digest' : Uint8Array | number[],
+  'coverage_start_ns' : [] | [bigint],
+  'scheduled_period_start_ns' : bigint,
+}
+export type OutageCreditKind = { 'OutageMakeWhole' : null };
+export interface OutageCreditPage {
+  'reached_end' : boolean,
+  'entries' : Array<OutageCredit>,
+  'next_offset' : bigint,
+}
+export interface OutageProgressView {
+  'scanned_through' : bigint,
+  'allocation_digest' : Uint8Array | number[],
+  'rows_total' : number,
+  'ledger_cutoff' : bigint,
+  'credited_points' : bigint,
+  'complete' : boolean,
+  'evidence_digest' : Uint8Array | number[],
+  'original_ledger_prefix_len' : bigint,
+  'rows_applied' : number,
+}
+export interface OutageReconciliationStatus {
+  'progress' : [] | [OutageProgressView],
+  'audit_count_matches_receipts' : boolean,
+  'configured_allocation_digest' : [] | [Uint8Array | number[]],
+  'credit_log_len' : bigint,
 }
 export interface PointEntry {
   'principal' : Principal,
@@ -165,6 +230,21 @@ export type QualifyingAction = { 'ProvideAmmLiquidity' : null } |
   { 'Deposit3Pool' : null } |
   { 'DepositStabilityPool' : null } |
   { 'RepayVault' : null };
+export interface RecoveryCoverage {
+  'participants' : Array<Principal>,
+  'normal_end_ns' : [] | [bigint],
+  'normal_epoch' : [] | [bigint],
+  'authorized_at_ns' : bigint,
+  'predecessor_next_commit' : [] | [Uint8Array | number[]],
+  'predecessor_epoch' : bigint,
+  'bridge_digest' : [] | [Uint8Array | number[]],
+  'missed_start_ns' : bigint,
+  'season_start_ns' : bigint,
+  'predecessor_summary_digest' : [] | [Uint8Array | number[]],
+  'season_end_ns' : bigint,
+  'normal_seed_commit' : [] | [Uint8Array | number[]],
+  'normal_start_ns' : [] | [bigint],
+}
 export interface RegistrationInfo {
   'principal' : Principal,
   'registered_at_ns' : bigint,
@@ -180,13 +260,15 @@ export type Result = { 'Ok' : FiatStablePointsPolicy } |
   { 'Err' : string };
 export type Result_1 = { 'Ok' : null } |
   { 'Err' : PointsError };
-export type Result_2 = { 'Ok' : bigint } |
+export type Result_2 = { 'Ok' : OutageReconciliationStatus } |
   { 'Err' : string };
-export type Result_3 = { 'Ok' : FiatStableTopupProgress } |
+export type Result_3 = { 'Ok' : bigint } |
   { 'Err' : string };
 export type Result_4 = { 'Ok' : null } |
   { 'Err' : string };
-export type Result_5 = { 'Ok' : bigint } |
+export type Result_5 = { 'Ok' : FiatStableTopupProgress } |
+  { 'Err' : string };
+export type Result_6 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
@@ -208,8 +290,13 @@ export type Venue = { 'Amm' : null } |
 export interface _SERVICE {
   'activate_fiat_stable_4x' : ActorMethod<[], Result>,
   'add_excluded_principal' : ActorMethod<[Principal], Result_1>,
-  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_2>,
-  'apply_fiat_stable_topups' : ActorMethod<[number], Result_3>,
+  'admin_continue_outage_reconciliation' : ActorMethod<[], Result_2>,
+  'admin_poll_held_points_backlog' : ActorMethod<[], Result_3>,
+  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_3>,
+  'admin_resume_held_points' : ActorMethod<[], Result_4>,
+  'admin_resume_points_recovery_v2' : ActorMethod<[], Result_4>,
+  'admin_stage_outage_allocation' : ActorMethod<[OutageAllocation], Result_2>,
+  'apply_fiat_stable_topups' : ActorMethod<[number], Result_5>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result_1>,
@@ -219,12 +306,27 @@ export interface _SERVICE {
   'get_epoch_status_admin' : ActorMethod<[], EpochStatus>,
   'get_excluded_principals' : ActorMethod<[], Array<Principal>>,
   'get_fiat_stable_points_policy' : ActorMethod<[], FiatStablePointsPolicy>,
+  'get_held_epoch_recovery' : ActorMethod<
+    [bigint],
+    [] | [HeldEpochRecoveryView]
+  >,
   'get_ingest_status' : ActorMethod<[], IngestStatus>,
   'get_leaderboard' : ActorMethod<[number, number], Array<LeaderboardEntry>>,
+  'get_outage_credit_entries' : ActorMethod<[bigint, number], OutageCreditPage>,
+  'get_outage_credit_len' : ActorMethod<[], bigint>,
+  'get_outage_reconciliation_status' : ActorMethod<
+    [],
+    OutageReconciliationStatus
+  >,
   'get_pending_commit' : ActorMethod<[], Uint8Array | number[]>,
   'get_point_entries' : ActorMethod<[bigint, number], PointEntryPage>,
   'get_point_ledger_len' : ActorMethod<[], bigint>,
   'get_points_config' : ActorMethod<[], PointsConfig>,
+  'get_points_recovery_coverage' : ActorMethod<[], [] | [RecoveryCoverage]>,
+  'get_principal_outage_credit_entries' : ActorMethod<
+    [Principal, bigint, number],
+    OutageCreditPage
+  >,
   'get_principal_point_entries' : ActorMethod<
     [Principal, bigint, number],
     PointEntryPage
@@ -245,7 +347,7 @@ export interface _SERVICE {
   'set_season_end_ns' : ActorMethod<[bigint], Result_4>,
   'set_source_canister' : ActorMethod<[number, Principal], Result_1>,
   'start_season' : ActorMethod<[Uint8Array | number[]], Result_4>,
-  'trigger_poll' : ActorMethod<[], Result_5>,
+  'trigger_poll' : ActorMethod<[], Result_6>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

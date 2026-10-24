@@ -1150,6 +1150,14 @@ type LegacyPendingThreeUsdRefund = record {
 };
 type LegacySpProofLedger = variant { IcusdBurn; ThreePoolTransfer };
 type LineDisplayPage = record { lines : vec text };
+type LiquidatableVaultInfo = record {
+  collateral_amount : nat64;
+  recommended_liquidation_amount : nat64;
+  collateral_price_e8s : nat64;
+  debt_amount : nat64;
+  vault_id : nat64;
+  collateral_type : principal;
+};
 type LiquidationTier = variant { Bot; StabilityPool };
 type LiquidityStatus = record {
   liquidity_provided : nat64;
@@ -1688,8 +1696,8 @@ type Result_33 = variant {
   Ok : ChainSupplyReconciliation;
   Err : ProtocolError;
 };
-type Result_34 = variant { Ok : QuarantinedReceiptView; Err : XrplIcusdError };
-type Result_35 = variant { Ok : bool; Err : ProtocolError };
+type Result_34 = variant { Ok : bool; Err : ProtocolError };
+type Result_35 = variant { Ok : QuarantinedReceiptView; Err : XrplIcusdError };
 type Result_36 = variant { Ok : RedemptionResult; Err : RedemptionError };
 type Result_37 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
 type Result_38 = variant {
@@ -1702,23 +1710,28 @@ type Result_4 = variant {
   Err : ProtocolError;
 };
 type Result_40 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
-type Result_41 = variant { Ok : IssuerSetupStatus; Err : XrplIcusdError };
-type Result_42 = variant { Ok : blob; Err : ProtocolError };
-type Result_43 = variant {
+type Result_41 = variant {
+  Ok : ThreeUsdReserveIngressV2StatusView;
+  Err : ProtocolError;
+};
+type Result_42 = variant { Ok : IssuerSetupStatus; Err : XrplIcusdError };
+type Result_43 = variant { Ok : blob; Err : ProtocolError };
+type Result_44 = variant { Ok : SpLiquidationReceipt; Err : ProtocolError };
+type Result_45 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_44 = variant {
+type Result_46 = variant {
   Ok : ChainStabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_45 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
-type Result_46 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
-type Result_47 = variant { Ok : XrpSpAbsorbStatus; Err : ProtocolError };
-type Result_48 = variant { Ok : nat64; Err : text };
-type Result_49 = variant { Ok : nat32; Err : ProtocolError };
+type Result_47 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
+type Result_48 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
+type Result_49 = variant { Ok : XrpSpAbsorbStatus; Err : ProtocolError };
 type Result_5 = variant { Ok : SuccessWithFee; Err : ProtocolError };
-type Result_50 = variant { Ok : Account; Err : XrplIcusdError };
+type Result_50 = variant { Ok : nat64; Err : text };
+type Result_51 = variant { Ok : nat32; Err : ProtocolError };
+type Result_52 = variant { Ok : Account; Err : XrplIcusdError };
 type Result_6 = variant { Ok : OperationView; Err : XrplIcusdError };
 type Result_7 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
 type Result_8 = variant { Ok : CkSolPayment; Err : text };
@@ -1737,6 +1750,69 @@ type SpBurnRefundReceipt = record {
   ledger : principal;
   refund_block_index : nat64;
   refund_created_at_time : nat64;
+};
+type SpLiquidationPayment = variant { Icusd; Ckusdc; Ckusdt };
+type SpLiquidationPaymentTuple = record {
+  destination : Account;
+  source : Account;
+  created_at_time_ns : nat64;
+  memo : blob;
+  amount_raw : nat64;
+  ledger_fee_raw : nat64;
+  ledger : principal;
+  op_nonce : nat;
+};
+type SpLiquidationPayoutTuple = record {
+  destination : Account;
+  source : Account;
+  created_at_time_ns : nat64;
+  memo : blob;
+  amount_raw : nat64;
+  ledger_fee_raw : nat64;
+  ledger : principal;
+  op_nonce : nat;
+  gross_raw : nat64;
+};
+type SpLiquidationPhaseView = variant {
+  PaymentConfirmed;
+  PayoutSettled;
+  PaymentNoEffect;
+  Prepared;
+  PayoutSubmitted;
+  PaymentSubmitted;
+  PayoutNoEffect;
+  Cancelled;
+  DebtCommitted;
+};
+type SpLiquidationReceipt = record {
+  request_id : blob;
+  payout_tuple : opt SpLiquidationPayoutTuple;
+  payout_operation_id : opt nat;
+  collateral_price_e8s : nat64;
+  collateral_gross_raw : nat64;
+  pull_fee_raw : nat64;
+  vault_id : nat64;
+  payment_block_index : opt nat64;
+  payout_block_index : opt nat64;
+  payout_net_raw : opt nat64;
+  collateral_price_decimal : blob;
+  surcharge_raw : nat64;
+  principal_raw : nat64;
+  phase : SpLiquidationPhaseView;
+  collateral_ledger : principal;
+  collateral_net_raw : nat64;
+  gross_payment_raw : nat64;
+  payment : SpLiquidationPayment;
+  payment_tuple : SpLiquidationPaymentTuple;
+  collateral_payout_net_raw : nat64;
+  debt_e8s : nat64;
+};
+type SpLiquidationRequest = record {
+  request_id : blob;
+  max_gross_raw : nat64;
+  max_debt_e8s : nat64;
+  vault_id : nat64;
+  payment : SpLiquidationPayment;
 };
 type SpProofLedger = variant {
   IcusdBurn;
@@ -2048,7 +2124,13 @@ type TreasuryInterestMintRecoveryRow = record {
   phase : TreasuryInterestMintPhase;
   absence_scan : opt BorrowMintAbsenceScan;
   history_floor : opt nat64;
+  route : TreasuryInterestMintRoute;
   treasury : principal;
+};
+type TreasuryInterestMintRoute = variant {
+  ThreePool;
+  StabilityPool : record { collateral_type : principal };
+  Treasury;
 };
 type TreasuryStableTransferJournal = record {
   asset_type : AssetType;
@@ -2519,6 +2601,9 @@ service : (ProtocolArg) -> {
   get_stability_pool_liquidate_with_reserves_v2_status : (nat64, nat64) -> (
       ThreeUsdReserveIngressV2StatusView,
     ) query;
+  get_stability_pool_liquidation_candidate : (nat64) -> (
+      opt LiquidatableVaultInfo,
+    ) query;
   get_stability_pool_principal : () -> (opt principal) query;
   get_stable_token_enabled : (StableTokenType) -> (bool) query;
   get_supply_audit : () -> (SupplyAudit) query;
@@ -2583,6 +2668,10 @@ service : (ProtocolArg) -> {
   rearm_unsent_v2_default_account_refund : (nat) -> (Result_1);
   reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_33);
+  reconcile_held_sp_interest_receipt : (
+      PendingStabilityPoolInterestNotification,
+      blob,
+    ) -> (Result_34);
   reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (
       Result_1,
     );
@@ -2607,11 +2696,11 @@ service : (ProtocolArg) -> {
       Result_1,
     );
   reconcile_xrpl_borrow_mint : (nat64, nat64) -> (Result_6);
-  reconcile_xrpl_overflow_receipt : (text) -> (Result_34);
-  reconcile_xrpl_quarantined_receipt : (text) -> (Result_34);
+  reconcile_xrpl_overflow_receipt : (text) -> (Result_35);
+  reconcile_xrpl_quarantined_receipt : (text) -> (Result_35);
   recover_cksol_deposit_id : (principal, nat64) -> (Result_9);
-  recover_pending_payout : (nat) -> (Result_35);
-  recover_pending_transfer : (nat64) -> (Result_35);
+  recover_pending_payout : (nat) -> (Result_34);
+  recover_pending_transfer : (nat64) -> (Result_34);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result_1);
   redeem_collateral : (principal, nat64) -> (Result_5);
   redeem_icp : (nat64) -> (Result_5);
@@ -2631,9 +2720,16 @@ service : (ProtocolArg) -> {
   resolve_stuck_settlement_op : (nat32, nat64) -> (Result_1);
   resolve_xrpl_claim : (ResolveClaimArg) -> (Result_6);
   resume_xrpl_operation : (nat64) -> (Result_6);
+  retire_stability_pool_liquidate_with_reserves_v2 : (
+      nat64,
+      nat64,
+      nat64,
+      nat64,
+      principal,
+    ) -> (Result_41);
   retry_pending_borrow_fee_mint : (nat) -> (Result_1);
   retry_xrpl_fee_mint : (nat64) -> (Result_6);
-  run_xrpl_issuer_setup_step : () -> (Result_41);
+  run_xrpl_issuer_setup_step : () -> (Result_42);
   set_amm1_canister : (principal) -> (Result_1);
   set_amm1_pool_id : (text) -> (Result_1);
   set_borrowing_fee : (float64) -> (Result_1);
@@ -2741,16 +2837,22 @@ service : (ProtocolArg) -> {
   solana_get_balance : (text) -> (Result);
   solana_get_mint_supply : () -> (Result);
   solana_settlement_address : () -> (Result_2);
-  solana_sign_test_transfer : (text, nat64) -> (Result_42);
-  stability_pool_liquidate : (nat64, nat64) -> (Result_43);
+  solana_sign_test_transfer : (text, nat64) -> (Result_43);
+  stability_pool_cancel_liquidation : (blob) -> (Result_44);
+  stability_pool_cancel_liquidation_bound : (
+      SpLiquidationRequest,
+      principal,
+    ) -> (Result_44);
+  stability_pool_execute_liquidation : (blob) -> (Result_44);
+  stability_pool_liquidate : (nat64, nat64) -> (Result_45);
   stability_pool_liquidate_chain_vault : (nat64, nat64, SpWritedownProof) -> (
-      Result_44,
+      Result_46,
     );
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
-      Result_43,
+      Result_45,
     );
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
-      Result_43,
+      Result_45,
     );
   stability_pool_liquidate_with_reserves_v2 : (
       nat64,
@@ -2758,23 +2860,30 @@ service : (ProtocolArg) -> {
       nat64,
       nat64,
       principal,
-    ) -> (Result_43);
-  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_45);
+    ) -> (Result_45);
+  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_47);
+  stability_pool_liquidation_status : (blob) -> (Result_44) query;
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result_1);
-  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_46);
-  stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_35);
+  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_48);
+  stability_pool_prepare_liquidation : (SpLiquidationRequest) -> (Result_44);
+  stability_pool_reconcile_liquidation_payment : (blob, nat64) -> (Result_44);
+  stability_pool_reconcile_liquidation_payout : (blob, nat64) -> (Result_44);
+  stability_pool_reconcile_liquidation_protocol_fee : (blob, nat64) -> (
+      Result_44,
+    );
+  stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_34);
   stability_pool_settle_xrp_claim : (nat64, principal, text, opt nat32) -> (
       Result_2,
     );
-  stability_pool_xrp_absorb_status : (XrpSpAbsorbRequest) -> (Result_47);
-  stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_35);
-  start_cksol_deposit : () -> (Result_48);
+  stability_pool_xrp_absorb_status : (XrpSpAbsorbRequest) -> (Result_49);
+  stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_34);
+  start_cksol_deposit : () -> (Result_50);
   start_cksol_deposit_paid : (nat64, nat64) -> (Result_8);
-  submit_burn_proof : (nat32, text) -> (Result_49);
+  submit_burn_proof : (nat32, text) -> (Result_51);
   sweep_xrp_pending_open : (nat64) -> (Result_1);
   unfreeze_protocol : () -> (Result_1);
   update_collateral_config : (principal, CollateralConfig) -> (Result_1);
-  verify_xrpl_icusd_minting_account : () -> (Result_50);
+  verify_xrpl_icusd_minting_account : () -> (Result_52);
   withdraw_and_close_vault : (nat64) -> (Result_10);
   withdraw_chain_collateral : (nat64, nat, text) -> (Result_1);
   withdraw_chain_collateral_evm : (VaultIntent, blob) -> (Result_1);

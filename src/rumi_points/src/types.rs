@@ -19,6 +19,31 @@ use candid::{CandidType, Principal};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Separate stable audit record; the frozen State/OpenEpoch encodings stay intact.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HeldEpochRecoveryRecord {
+    pub epoch_index: u64,
+    pub authorized_at_ns: u64,
+    pub epoch_start_ns: u64,
+    pub epoch_end_ns: u64,
+    pub snapshot_a_ns: u64,
+    pub original_b_ns: u64,
+    pub replacement_b_ns: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HeldEpochRecoveryView {
+    pub epoch_index: u64,
+    pub kind: String,
+    pub authorized_at_ns: u64,
+    pub epoch_start_ns: u64,
+    pub epoch_end_ns: u64,
+    pub snapshot_a_ns: u64,
+    pub original_b_ns: Option<u64>,
+    pub replacement_b_ns: Option<u64>,
+    pub closed: bool,
+}
+
 // ── Enums ───────────────────────────────────────────────────────────────────
 
 /// Asset a position / deposit / repayment is denominated in. USD-pegged stables

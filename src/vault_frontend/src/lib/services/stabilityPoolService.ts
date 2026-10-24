@@ -6,7 +6,7 @@ import { walletSessionGeneration } from './auth';
 import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
-import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import { getOisySignerAgent, createOisyActor, openOisySignerChannel } from './oisySigner';
 import {
   ackNativeXrpPayoutSettledWithActor,
   getMyNativeXrpPayoutsWithActor,
@@ -188,7 +188,7 @@ export function decimalsForLedger(ledger: Principal, registries?: { stablecoins?
 
 const STABILITY_POOL_CANISTER_ID = CANISTER_IDS.STABILITY_POOL;
 
-export type StabilityPoolAction = 'deposit' | 'withdraw';
+export type StabilityPoolAction = 'deposit' | 'withdraw' | 'convert';
 
 export interface StabilityPoolActionContext {
   readonly principalText: string;
@@ -386,6 +386,18 @@ export function captureStabilityPoolActionContext(
   });
 }
 
+/**
+ * Enter Oisy's signer channel while the caller is still inside the wallet
+ * button's user-gesture handler. The returned promise may be awaited only
+ * after this function has been invoked; putting the call behind a Web Locks
+ * callback or an async actor lookup is too late for PostMessageTransport's
+ * click guard. Non-signer wallets do not need a channel entry.
+ */
+export function prepareStabilityPoolOisySignerChannel(principal: Principal): Promise<void> {
+  if (!isOisyWallet()) return Promise.resolve();
+  return openOisySignerChannel(principal);
+}
+
 /** Pure validation for the click-time identity and operation parameters. */
 export function assertStabilityPoolActionContext(
   context: StabilityPoolActionContext,
@@ -520,7 +532,8 @@ class StabilityPoolService {
     return await actor.check_pool_capacity(tokenLedger, amount) as boolean;
   }
 
-  private async getMutationActor(): Promise<StabilityPoolNativeXrpActor> {
+  /** Authenticated Stability Pool actor shared by all financial SP flows. */
+  async getMutationActor(): Promise<StabilityPoolNativeXrpActor> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
 
@@ -537,6 +550,21 @@ class StabilityPoolService {
       STABILITY_POOL_CANISTER_ID,
       canisterIDLs.stability_pool
     ) as StabilityPoolNativeXrpActor;
+  }
+
+  /**
+   * Authenticated token-ledger actor using the same wallet binding as the
+   * existing deposit path. Conversion uses this only after its durable marker
+   * has been written and rechecks the action context around every await.
+   */
+  async getLedgerMutationActor(tokenLedger: Principal): Promise<any> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      return createOisyActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL, signerAgent);
+    }
+    return walletStore.getActor(tokenLedger.toText(), CONFIG.icusd_ledgerIDL) as any;
   }
 
   // ── Mutations ──
@@ -995,3 +1023,8 @@ class StabilityPoolService {
 }
 
 export const stabilityPoolService = new StabilityPoolService();
+
+/** Narrow public helpers for the durable conversion service. */
+export const getStabilityPoolMutationActor = () => stabilityPoolService.getMutationActor();
+export const getStabilityPoolLedgerMutationActor = (tokenLedger: Principal) =>
+  stabilityPoolService.getLedgerMutationActor(tokenLedger);
