@@ -210,7 +210,7 @@
       "state": "in_progress",
       "owner": "worker-sonnet",
       "scope": "Follow-up: refund and sweep re-arm",
-      "evidenceText": "proof=none; Claimed: re-arm reconciliation after an unknown ledger outcome, same tuple, no new transfer",
+      "evidenceText": "proof=local-test; Implemented: an unresolved inline refund or sweep attempt re-arms the timer; same tuple, no new transfer; 9 unit tests, mutation-checked; lib 445",
       "evidenceLinks": []
     },
     {
@@ -218,15 +218,15 @@
       "state": "in_progress",
       "owner": "worker-sonnet",
       "scope": "Follow-up: RPC provider-count limit",
-      "evidenceText": "proof=none; Claimed: at most 5 providers, enforced at init, replacement and upgrade before any provider call",
+      "evidenceText": "proof=local-test; Implemented: at most 5 providers, checked at install, on replacement before any provider call, and at upgrade (refuses and keeps the old module); 4 unit tests, mutation-checked",
       "evidenceLinks": []
     },
     {
       "id": "BB-21",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Base Sepolia read-only preflight",
-      "evidenceText": "proof=none; Claimed: CLI, identity and cycles, ECDSA test key, EVM RPC costs, Base Sepolia provider finality, deploy script dry run",
+      "evidenceText": "proof=source; Read-only: CLI ready via a separate test project; cycles fit a reduced budget; test key and providers checked; EVM RPC request costs measured; deploy script simulated; deployer signer held",
       "evidenceLinks": []
     },
     {
