@@ -115,3 +115,23 @@ The Candid conflict was resolved the same way: regenerate the `.did` from the me
 | Release code section | 11,826,498 bytes (94% of the 12 MiB limit) |
 
 Size headroom is shrinking as main grows. Budget future backend features against it.
+
+## After merging main `a8709fc1` (SP rails restore #590, points outage work #583)
+
+Main independently set the backend to `opt-level = "z"`. This branch now uses main's setting instead of its own `"s"`.
+
+`VaultLiquidationGuard::acquire` gained parameters on both sides, and both were kept:
+- every caller respects the XRPL exclusion, except claim settlement (unchanged);
+- main's new SP-liquidation retry respects the exclusion too.
+
+| Check | Result |
+| --- | --- |
+| Backend library | 1495 passed |
+| Bin, including Candid compatibility | 85 passed |
+| Fixture XRP | 302 passed |
+| Frontend | 1298 passed |
+| Release code section after shrink | 10,123,330 bytes (80% of the 12 MiB limit) |
+| `xrpl_icusd_e2e_pic` | 17 of 17 passed (437 s) |
+| `xrp_native_e2e_pic` | 4 of 4 passed, 0 `[gated]` |
+
+Both PocketIC suites ran against the shrunk production artifact itself, which now fits PocketIC 7's 10 MiB cap. They no longer need a separate size-optimised test build.
