@@ -1,6 +1,6 @@
 # Base icUSD bridge: public-testnet runbook (Base Sepolia)
 
-**Read first.** Every step marked **HELD** needs its own explicit authorization from the protocol owner before anyone runs it. Nothing in this document has been executed. The run uses a separate test icUSD ledger, so no real funds are involved.
+**Read first.** For the 2026-10-24 Base Sepolia run, the authoritative plan is `docs/coordination/base-icusd-bridge-sepolia-packet.md`: Rob authorized that scoped testnet run (synthetic test ledger, dedicated bridge canister, chain 84532 only), Miles is its one executor, and the packet's targets, budget, providers and commands replace the matching parts below (it also corrects the tester identity, the cost figures and the provider list). Outside that run, every step marked **HELD** still needs its own explicit authorization. Nothing in this document has been executed. The run uses a separate test icUSD ledger, so no real funds are involved.
 
 Status: draft, 2026-10-24. Checked against the deploy script, `rumi_icusd_bridge.did`, `types.rs` and the bridge source.
 
@@ -16,12 +16,12 @@ It does not prove mainnet readiness. Local tests already cover the accounting, l
    ```bash
    export PATH="$HOME/.foundry/bin:$PATH"
    ```
-2. icp-cli pinned to 1.3.0. Every `$ICP` below means this:
+2. icp-cli 1.3.0, already installed. Every `$ICP` below means the installed binary (`npx -y` can download a package and stall at an approval prompt):
    ```bash
-   ICP="npx -y @icp-sdk/icp-cli@1.3.0"
+   ICP=icp
    ```
 3. `ic-wasm`, `didc`, `cast` and `shasum` on PATH. `rumi_identity` must control both new canisters. The tester uses a separate identity (`<tester identity>`), because the ICP pull comes from the caller's own account.
-4. Cycles (estimates, re-measure before the run): about 26.15 billion per `sign_with_ecdsa` on `key_1` (the backend design notes record `26,153,846,153` for ic-cdk 0.12.2; the `test_key_1` cost is not measured). About 2 billion per EVM RPC provider call (the bridge default `cycles_per_rpc_call`). Plan for at least 5 trillion on the bridge canister for a test run, as a planning figure.
+4. Cycles (official cost table): 10 billion per `sign_with_ecdsa` on `test_key_1` (26.15 billion on `key_1`); canister creation 500 billion on a 13-node subnet, paid out of `--cycles`; EVM RPC calls about 0.74 billion (8 KiB cap) to 2.3 billion (64 KiB) per provider call on its 34-node subnet, plus collateral. See the packet for the measured budget (600 billion ledger, 1.9 trillion bridge).
 5. Deployer key: a fresh Base Sepolia account used only for the deploy, held in a foundry keystore, never in an environment variable or a file. The script refuses a deployer that is the admin, minter or guardian.
    ```bash
    cast wallet import base-sepolia-deployer --interactive
