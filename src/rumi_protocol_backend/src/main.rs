@@ -19192,8 +19192,8 @@ service : {
         }
     }
 
-    candid::export_service!();
-
+    // The export is generated at the end of this file so it sees every
+    // #[candid_method], including ones declared after this test.
     let new_interface = __export_service();
     service_compatible(
         CandidSource::Text(&new_interface),
@@ -20113,3 +20113,7 @@ async fn stability_pool_reconcile_liquidation_payout(
 ) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
     rumi_protocol_backend::sp_liquidation::reconcile_payout(request_id, candidate_block_index).await
 }
+
+// Keep last: export_service! only collects #[candid_method]s declared above it.
+#[cfg(test)]
+candid::export_service!();
