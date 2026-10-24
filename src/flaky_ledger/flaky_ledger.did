@@ -107,6 +107,7 @@ service : () -> {
   // ICRC-1
   icrc1_balance_of : (Account) -> (nat) query;
   icrc1_fee : () -> (nat) query;
+  icrc1_total_supply : () -> (nat) query;
   icrc1_transfer : (TransferArg) -> (variant { Ok : nat; Err : TransferError });
 
   // ICRC-3 exact block history used by payout-recovery integration tests.
@@ -124,6 +125,9 @@ service : () -> {
   set_fee : (nat) -> ();
   set_fail_fee_query : (bool) -> ();
   set_phantom_failures : (nat32) -> ();
+  set_phantom_icrc1_failures : (nat32) -> ();
+  set_phantom_approve_failures : (nat32) -> ();
+  set_phantom_transfer_from_failures : (nat32) -> ();
   set_bad_fee_failures : (nat32) -> ();
   set_bad_fee_after_transfer_from : (bool) -> ();
   reset_dedup : () -> ();

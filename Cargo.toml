@@ -18,3 +18,10 @@ members = [
     "src/flaky_ledger",
 ]
 resolver = "2"
+
+# Keep the backend below the IC executable-code limit with the existing
+# 256 KiB project reserve. Only this package's production code uses size
+# optimization; ledger dependencies and the other canisters retain their
+# current release settings.
+[profile.release.package.rumi_protocol_backend]
+opt-level = "z"

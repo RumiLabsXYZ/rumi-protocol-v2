@@ -8484,6 +8484,34 @@ async fn stability_pool_liquidate_with_reserves_v2(
     }
 }
 
+/// Request-bound no-dispatch fence. Never replace this with a bare Unseen
+/// query: delayed original calls must find the same durable terminal row.
+#[update]
+#[candid_method(update)]
+fn retire_stability_pool_liquidate_with_reserves_v2(
+    vault_id: u64,
+    absorb_id: u64,
+    icusd_debt_covered_e8s: u64,
+    three_usd_amount_e8s: u64,
+    three_usd_ledger: Principal,
+) -> Result<rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView, ProtocolError> {
+    use rumi_protocol_backend::state::{ThreeUsdReserveIngressKey, ThreeUsdReserveIngressRequest};
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || read_state(|s| s.stability_pool_canister) != Some(caller) {
+        return Err(ProtocolError::GenericError("Caller is not the registered Stability Pool".into()));
+    }
+    let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
+    let request = ThreeUsdReserveIngressRequest { icusd_debt_covered_e8s, three_usd_amount_e8s, ledger: three_usd_ledger };
+    let Some(_admission_guard) = rumi_protocol_backend::management::ThreeUsdReserveIngressAdmissionGuard::try_acquire() else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    let Some(_guard) = rumi_protocol_backend::management::ThreeUsdReserveIngressGuard::try_acquire(&key) else {
+        return Err(ProtocolError::AlreadyProcessing);
+    };
+    mutate_state(|state| rumi_protocol_backend::state::retire_three_usd_reserve_ingress_in_state(state, &key, &request))?;
+    Ok(get_stability_pool_liquidate_with_reserves_v2_status(vault_id, absorb_id))
+}
+
 #[query]
 #[candid_method(query)]
 fn get_stability_pool_liquidate_with_reserves_v2_status(
@@ -9492,6 +9520,16 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
             .map(CandidVault::from)
             .collect::<Vec<CandidVault>>()
     })
+}
+
+/// Current point quote for the SP's public fallback. The receiving SP still
+/// verifies bindings and obtains a durable backend reservation before payment.
+#[candid_method(query)]
+#[query]
+fn get_stability_pool_liquidation_candidate(
+    vault_id: u64,
+) -> Option<rumi_protocol_backend::LiquidatableVaultInfo> {
+    read_state(|state| rumi_protocol_backend::stability_pool_liquidation_candidate(state, vault_id))
 }
 
 /// Paginated enumeration of currently-liquidatable vaults, ordered
@@ -19154,8 +19192,8 @@ service : {
         }
     }
 
-    candid::export_service!();
-
+    // The export is generated at the end of this file so it sees every
+    // #[candid_method], including ones declared after this test.
     let new_interface = __export_service();
     service_compatible(
         CandidSource::Text(&new_interface),
@@ -19968,3 +20006,114 @@ mod reserve_redemption_status_tests {
         }
     }
 }
+
+/// Reconcile only a held legacy tuple after a positive sealed receiver credit.
+#[candid_method(update)]
+#[update]
+async fn reconcile_held_sp_interest_receipt(
+    notification: rumi_protocol_backend::state::PendingStabilityPoolInterestNotification,
+    manifest_hash: Vec<u8>,
+) -> Result<bool, ProtocolError> {
+    let caller=ic_cdk::api::caller();
+    if !read_state(|s|can_inspect_held_interest_notifications(caller,s.developer_principal)) { return Err(ProtocolError::GenericError("Only developer may reconcile a held interest receipt".into())); }
+    rumi_protocol_backend::treasury::reconcile_held_sp_interest_receipt(caller,notification,manifest_hash).await
+}
+
+/// Durable ordinary Stability Pool liquidation rail. The four wrappers are
+/// intentionally isolated from the compatibility endpoints above so existing
+/// clients keep their current Candid surface while the SP migrates to the
+/// request-ID protocol.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_prepare_liquidation(
+    request: rumi_protocol_backend::sp_liquidation::SpLiquidationRequest,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::validate_caller()?;
+    // Replay an already accepted request before freeze/oracle/freshness gates.
+    // A lost prepare reply must not strand the durable reservation when the
+    // protocol changes state before the SP retries the same immutable tuple.
+    if let Some(receipt) = rumi_protocol_backend::sp_liquidation::replay_existing_prepare(&request)? {
+        return Ok(receipt);
+    }
+    validate_call().await?;
+    validate_liquidation_not_frozen()?;
+    validate_price_for_liquidation()?;
+    validate_freshness_for_vault(request.vault_id).await?;
+    rumi_protocol_backend::sp_liquidation::prepare(request).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn stability_pool_execute_liquidation(
+    request_id: Vec<u8>,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::validate_caller()?;
+    validate_call().await?;
+    validate_liquidation_not_frozen()?;
+    rumi_protocol_backend::sp_liquidation::execute(request_id).await
+}
+
+#[candid_method(query)]
+#[query]
+fn stability_pool_liquidation_status(
+    request_id: Vec<u8>,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::status(request_id)
+}
+
+#[candid_method(update)]
+#[update]
+fn stability_pool_cancel_liquidation(
+    request_id: Vec<u8>,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::cancel(request_id)
+}
+
+/// Bind an absent prepare retirement to every immutable request field and
+/// its frozen payment ledger; no mutable admission gates run during recovery.
+#[candid_method(update)]
+#[update]
+fn stability_pool_cancel_liquidation_bound(
+    request: rumi_protocol_backend::sp_liquidation::SpLiquidationRequest,
+    payment_ledger: Principal,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::cancel_bound(request, payment_ledger)
+}
+
+/// Recovery-only wrapper: it deliberately skips the normal mode/oracle gate
+/// because a positive proof for an already-dispatched immutable tuple must
+/// remain usable after a freeze, price change, upgrade, or archive transition.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_reconcile_liquidation_payment(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::reconcile_payment(request_id, candidate_block_index).await
+}
+
+/// Recovery-only wrapper for the exact protocol-fee collateral transfer.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_reconcile_liquidation_protocol_fee(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::reconcile_protocol_fee(request_id, candidate_block_index).await
+}
+
+/// Recovery-only wrapper for the exact SP collateral payout. This can reattach
+/// a generic worker's settled operation when its pending row has already been
+/// removed, but only after the full frozen payout tuple proves the block.
+#[candid_method(update)]
+#[update]
+async fn stability_pool_reconcile_liquidation_payout(
+    request_id: Vec<u8>,
+    candidate_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_liquidation::reconcile_payout(request_id, candidate_block_index).await
+}
+
+// Keep last: export_service! only collects #[candid_method]s declared above it.
+#[cfg(test)]
+candid::export_service!();

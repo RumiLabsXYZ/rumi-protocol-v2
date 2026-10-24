@@ -134,6 +134,9 @@ pub async fn query_block(ledger: Principal, block_index: u64) -> Result<Block, S
             .map_err(|(code, message)| {
                 format!("native ICP query_blocks failed: {code:?} {message}")
             })?;
+    if !native_block_in_log(block_index, response.chain_length) {
+        return Err("native ICP block index is outside the ledger chain length".into());
+    }
 
     if response.first_block_index == block_index
         && response.blocks.len() == 1
@@ -163,6 +166,9 @@ pub async fn query_block(ledger: Principal, block_index: u64) -> Result<Block, S
     if matching_archives.next().is_some() {
         return Err("native ICP query_blocks returned overlapping archive evidence".into());
     }
+    if !native_archive_callback_valid(archive.callback.0.principal, &archive.callback.0.method) {
+        return Err("native ICP archive callback is invalid".into());
+    }
 
     let (result,): (QueryArchiveResult,) = ic_cdk::call(
         archive.callback.0.principal,
@@ -180,6 +186,16 @@ pub async fn query_block(ledger: Principal, block_index: u64) -> Result<Block, S
         Ok(_) => Err("native ICP archive callback returned an ambiguous block range".into()),
         Err(_) => Err("native ICP archive callback rejected the requested block".into()),
     }
+}
+
+fn native_block_in_log(block_index: u64, chain_length: u64) -> bool {
+    block_index < chain_length
+}
+
+fn native_archive_callback_valid(canister: Principal, method: &str) -> bool {
+    canister != Principal::anonymous()
+        && canister != Principal::management_canister()
+        && !method.trim().is_empty()
 }
 
 /// Fetch only a block held directly by the native ICP ledger. Receipt recovery
@@ -328,10 +344,22 @@ fn crc32_ieee(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        account_identifier, is_exact_direct_block_range, verify_transfer_block,
+        account_identifier, is_exact_direct_block_range, native_archive_callback_valid,
+        native_block_in_log, verify_transfer_block,
         verify_transfer_from_block, Block, Operation, Timestamp, Tokens, Transaction,
     };
     use candid::Principal;
+
+    #[test]
+    fn native_archive_reader_checks_global_bounds_and_callback() {
+        assert!(native_block_in_log(999, 1_000));
+        assert!(!native_block_in_log(1_000, 1_000));
+        assert!(!native_block_in_log(0, 0));
+        assert!(native_archive_callback_valid(Principal::from_slice(&[9, 1]), "get_blocks"));
+        assert!(!native_archive_callback_valid(Principal::anonymous(), "get_blocks"));
+        assert!(!native_archive_callback_valid(Principal::management_canister(), "get_blocks"));
+        assert!(!native_archive_callback_valid(Principal::from_slice(&[9, 1]), "  "));
+    }
 
     fn transfer_block(from: Principal, to: Principal, amount: u64, fee: u64) -> Block {
         Block {

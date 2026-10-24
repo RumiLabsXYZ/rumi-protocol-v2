@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   sessionGeneration: 0,
   getActor: vi.fn(),
   isOisyWallet: vi.fn(() => false),
+  openOisySignerChannel: vi.fn(() => Promise.resolve()),
   lockBusy: false,
 }));
 
@@ -35,11 +36,13 @@ vi.mock('./auth', () => ({
 vi.mock('./oisySigner', () => ({
   getOisySignerAgent: vi.fn(),
   createOisyActor: vi.fn(),
+  openOisySignerChannel: mocks.openOisySignerChannel,
 }));
 
 import {
   assertStabilityPoolActionContext,
   captureStabilityPoolActionContext,
+  prepareStabilityPoolOisySignerChannel,
   readPendingStabilityPoolDeposit,
   stabilityPoolService,
 } from './stabilityPoolService';
@@ -81,6 +84,15 @@ function setupActors(poolActor: any, ledgerActor: any = { icrc2_approve: vi.fn()
 }
 
 describe('Stability Pool wallet-bound deposit intents', () => {
+  it('enters the Oisy channel synchronously before the caller awaits a signed action', () => {
+    connectedAs(ownerA);
+    mocks.isOisyWallet.mockReturnValue(true);
+    const pending = prepareStabilityPoolOisySignerChannel(ownerA);
+    expect(mocks.openOisySignerChannel).toHaveBeenCalledOnce();
+    expect(mocks.openOisySignerChannel).toHaveBeenCalledWith(ownerA);
+    return pending;
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
