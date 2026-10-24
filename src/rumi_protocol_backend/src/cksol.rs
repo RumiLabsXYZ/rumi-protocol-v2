@@ -2,14 +2,11 @@
 //!
 //! The ckSOL minter requires an inter-canister call with cycles.  Ingress
 //! callers cannot attach those cycles to a call made by the backend, so this
-//! module provides a deliberately fixed, developer-budgeted relay.  The
+//! module provides the fixed minter transport for caller-funded processing. The
 //! accepted deposit id is retained until the minter reports a terminal status;
 //! transport uncertainty is fail-closed and never retried automatically.
 
 use candid::{CandidType, Deserialize, Nat, Principal};
-use ic_canister_log::log;
-
-use crate::logs::INFO;
 use crate::state::{mutate_state, read_state, CkSolRelayAttempt, CkSolRelayStatus};
 
 pub const CKSOL_LEDGER_CANISTER: &str = "ls5lp-lqaaa-aaaar-qb5oa-cai";
@@ -170,19 +167,14 @@ pub fn set_budget(caller: Principal, budget: u64) -> Result<(), String> {
     if !developer_authorized(caller, developer) {
         return Err("Only the developer can set the ckSOL relay budget".into());
     }
-    if budget > CKSOL_RELAY_BUDGET_CAP {
-        return Err(format!(
-            "ckSOL relay budget exceeds cap {} cycles",
-            CKSOL_RELAY_BUDGET_CAP
-        ));
+    if budget != 0 {
+        return Err("Public ckSOL sponsorship is disabled; only a zero allowance is permitted".into());
     }
     mutate_state(|state| state.cksol_relay_budget = budget);
     Ok(())
 }
 
-pub fn budget() -> u64 {
-    read_state(|state| state.cksol_relay_budget)
-}
+pub fn budget() -> u64 { 0 }
 
 pub fn attempt(owner: Principal) -> Option<CkSolRelayAttempt> {
     read_state(|state| state.cksol_relay_attempts.get(&owner).cloned())
@@ -227,26 +219,8 @@ fn reserve_attempt(
     if state.cksol_relay_budget < CKSOL_RELAY_CALL_CYCLES as u64 {
         return Err("ckSOL relay budget is exhausted".into());
     }
-    if state.cksol_relay_attempts.len() >= CKSOL_RELAY_OWNER_CAP
-        && !state.cksol_relay_attempts.contains_key(&owner)
-    {
-        // A typed rejection proves that no upstream deposit was accepted. Once
-        // its cooldown has elapsed, evict at most the oldest such row to keep
-        // the bounded owner map live for new users. Unknown and accepted rows
-        // are never evicted here.
-        let evict = state
-            .cksol_relay_attempts
-            .iter()
-            .filter_map(|(candidate, row)| {
-                (matches!(&row.status, CkSolRelayStatus::Rejected(_))
-                    && now_is_after_cooldown(row.started_at_ns, started_at_ns))
-                .then_some((*candidate, row.started_at_ns))
-            })
-            .min_by_key(|(_, started_at_ns)| *started_at_ns)
-            .map(|(candidate, _)| candidate);
-        if let Some(candidate) = evict {
-            state.cksol_relay_attempts.remove(&candidate);
-        }
+    if !state.cksol_relay_attempts.contains_key(&owner) {
+        reclaim_expired_rejection(state, started_at_ns);
     }
     if state.cksol_relay_attempts.len() >= CKSOL_RELAY_OWNER_CAP
         && !state.cksol_relay_attempts.contains_key(&owner)
@@ -264,6 +238,31 @@ fn reserve_attempt(
         },
     );
     Ok(())
+}
+
+/// Reuse a bounded slot only when a typed minter rejection and elapsed
+/// cooldown prove there is no accepted upstream deposit. Paid credits are
+/// stored separately and are never removed by this pruning policy.
+pub(crate) fn reclaim_expired_rejection(state: &mut crate::state::State, now_ns: u64) {
+    if state.cksol_relay_attempts.len() >= CKSOL_RELAY_OWNER_CAP {
+        // A typed rejection proves that no upstream deposit was accepted. Once
+        // its cooldown has elapsed, evict at most the oldest such row to keep
+        // the bounded owner map live for new users. Unknown and accepted rows
+        // are never evicted here.
+        let evict = state
+            .cksol_relay_attempts
+            .iter()
+            .filter_map(|(candidate, row)| {
+                (matches!(&row.status, CkSolRelayStatus::Rejected(_))
+                    && now_is_after_cooldown(row.started_at_ns, now_ns))
+                .then_some((*candidate, row.started_at_ns))
+            })
+            .min_by_key(|(_, started_at_ns)| *started_at_ns)
+            .map(|(candidate, _)| candidate);
+        if let Some(candidate) = evict {
+            state.cksol_relay_attempts.remove(&candidate);
+        }
+    }
 }
 
 fn now_is_after_cooldown(started_at_ns: u64, now_ns: u64) -> bool {
@@ -311,125 +310,28 @@ pub fn bind_observed_id(
 }
 
 /// Start one fixed ckSOL minter deposit for the ingress caller.
-pub async fn start(owner: Principal) -> Result<u64, String> {
-    if owner == Principal::anonymous() {
-        return Err("Anonymous callers cannot start a ckSOL deposit".into());
-    }
+pub async fn start(_owner: Principal) -> Result<u64, String> {
+    Err("Rumi sponsorship is disabled. Use caller-funded ckSOL processing.".into())
+}
 
-    // A queued attempt is reconciled before admitting a new one.  Any status
-    // that is not terminal remains a durable owner lock; NotFound and
-    // Quarantined are deliberately treated as unknown, never as a retry cue.
-    if let Some(existing) = attempt(owner) {
-        match existing.status {
-            CkSolRelayStatus::SubmittedOrUnknown => {
-                return Err("ckSOL deposit outcome is unknown; recovery is required".into())
-            }
-            CkSolRelayStatus::Rejected(reason) => {
-                let age = ic_cdk::api::time().saturating_sub(existing.started_at_ns);
-                if age < CKSOL_REJECTED_RETRY_COOLDOWN_NS {
-                    return Err(format!("ckSOL retry cooldown active: {reason}"));
-                }
-            }
-            CkSolRelayStatus::Queued(id) => {
-                begin_in_flight(owner)?;
-                let status_result: Result<(DepositSolStatus,), _> =
-                    ic_cdk::call(minter_principal(), "deposit_sol_status", (id,)).await;
-                end_in_flight(owner);
-                match status_result {
-                    Ok((status,)) if is_terminal(&status) => {
-                        mutate_state(|state| {
-                            state.cksol_relay_attempts.remove(&owner);
-                        });
-                    }
-                    Ok((status,)) if status_is_unknown(&status) => {
-                        mutate_state(|state| {
-                            if let Some(row) = state.cksol_relay_attempts.get_mut(&owner) {
-                                row.status = CkSolRelayStatus::SubmittedOrUnknown;
-                            }
-                        });
-                        return Err(format!(
-                            "ckSOL deposit {id} is {} and requires recovery",
-                            status_description(&status)
-                        ));
-                    }
-                    Ok((status,)) => {
-                        return Err(format!(
-                            "ckSOL deposit {id} remains {}",
-                            status_description(&status)
-                        ));
-                    }
-                    Err((code, message)) => {
-                        // A read-only status probe cannot change the upstream
-                        // record. Keep the accepted id for a safe later probe.
-                        return Err(format!(
-                            "ckSOL deposit {id} status probe failed: {code:?} {message}"
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    let now = ic_cdk::api::time();
-    let enough_budget =
-        read_state(|state| state.cksol_relay_budget >= CKSOL_RELAY_CALL_CYCLES as u64);
-    if !enough_budget {
-        return Err("ckSOL relay budget is exhausted".into());
-    }
-    if ic_cdk::api::canister_balance128()
-        < CKSOL_RELAY_CALL_CYCLES.saturating_add(CKSOL_RELAY_CANISTER_RESERVE)
-    {
-        return Err("ckSOL relay is below its protected canister cycle reserve".into());
-    }
-    begin_in_flight(owner)?;
-    if let Err(reason) = mutate_state(|state| reserve_attempt(state, owner, now)) {
-        end_in_flight(owner);
-        return Err(reason);
-    }
-
+pub(crate) async fn call_paid_minter(owner: Principal) -> (crate::cksol_paid::DepositOutcome, u128) {
+    use crate::cksol_paid::DepositOutcome;
     let result: Result<(Result<u64, DepositSolError>,), _> =
-        ic_cdk::api::call::call_with_payment128(
-            minter_principal(),
-            "deposit_sol",
-            (DepositSolArgs {
-                owner: Some(owner),
-                subaccount: None,
-            },),
-            CKSOL_RELAY_CALL_CYCLES,
-        )
-        .await;
-    end_in_flight(owner);
-
-    match result {
-        Ok((Ok(id),)) => {
-            mutate_state(|state| {
-                if let Some(row) = state.cksol_relay_attempts.get_mut(&owner) {
-                    row.status = CkSolRelayStatus::Queued(id);
-                }
-            });
-            log!(INFO, "[cksol] queued deposit {} for {}", id, owner);
-            Ok(id)
-        }
+        ic_cdk::api::call::call_with_payment128(minter_principal(), "deposit_sol", (DepositSolArgs {
+            owner: Some(owner), subaccount: None,
+        },), CKSOL_RELAY_CALL_CYCLES).await;
+    let refunded = ic_cdk::api::call::msg_cycles_refunded128();
+    let outcome = match result {
+        Ok((Ok(id),)) => DepositOutcome::Queued(id),
         Ok((Err(error),)) => {
-            let reason = minter_error_message(&error);
-            mutate_state(|state| {
-                if let Some(row) = state.cksol_relay_attempts.get_mut(&owner) {
-                    row.status = if matches!(error, DepositSolError::Quarantined { .. }) {
-                        CkSolRelayStatus::SubmittedOrUnknown
-                    } else {
-                        CkSolRelayStatus::Rejected(reason.clone())
-                    };
-                }
-            });
-            Err(reason)
+            let message = minter_error_message(&error);
+            if matches!(error, DepositSolError::Quarantined { .. }) {
+                DepositOutcome::Unknown(message)
+            } else { DepositOutcome::Rejected(message) }
         }
-        Err((code, message)) => {
-            retain_unknown(owner, now);
-            Err(format!(
-                "ckSOL minter call outcome is unknown: {code:?} {message}"
-            ))
-        }
-    }
+        Err((code, message)) => DepositOutcome::Unknown(format!("Minter outcome unknown: {code:?} {message}")),
+    };
+    (outcome, refunded)
 }
 
 /// Reclaim a completed owner slot after independently reading the upstream

@@ -3,13 +3,14 @@
   import { get } from 'svelte/store';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
-  import { walletSessionGeneration } from '$lib/services/auth';
+  import { auth, walletSessionGeneration } from '$lib/services/auth';
   import { collateralStore } from '$lib/stores/collateralStore';
   import { CANISTER_IDS } from '$lib/config';
-  import { getCksolMinter, getCksolLedger, getCksolRelay, getSolDepositAddress, startSolDeposit, clearSolDeposit,
+  import { getCksolMinter, getCksolLedger, getCksolRelay, getSolDepositAddress, clearSolDeposit,
     quoteSolWithdrawal, submitSolWithdrawal, loadSolWithdrawal, acknowledgeSolWithdrawal, solWithdrawalKey, isCksolOisyWallet,
-    CKSOL_RELAY_CYCLES, type MinterInfo, type SolWithdrawalQuote, type SolWithdrawalIntent } from '$lib/services/cksolMinter';
+    type MinterInfo, type SolWithdrawalQuote, type SolWithdrawalIntent } from '$lib/services/cksolMinter';
   import { parseSol, formatSol, depositView, withdrawalView, type StatusView } from '$lib/utils/cksolMinterFlow';
+  import { quoteCksolPayment, submitCksolPayment, loadCksolPayment, saveCksolPayment, recoverCksolPayment, claimCksolRefund, resumeFundedCksolPayment, continueApprovedCksolPayment, cksolPaymentKey, type CksolPaymentQuote, type CksolPaymentIntent } from '$lib/services/cksolPayment';
 
   let owner: Principal | null = null;
   let ownerText = '';
@@ -19,12 +20,16 @@
   let error = '';
   let notice = '';
   let info: MinterInfo | null = null;
-  let relayBudget: bigint | null = null;
+  let paymentQuote: CksolPaymentQuote | null = null;
+  let paymentIntent: CksolPaymentIntent | null = null;
+  let cyclesBalance: bigint | null = null;
   let balance: bigint | null = null;
   let depositAddress = '';
   let depositId: bigint | null = null;
   let depositStatus: StatusView | null = null;
   let depositBlocked = false;
+  let legacyAttempt: any = null;
+  let legacyBlocked = false;
   let withdrawalStatus: StatusView | null = null;
   let withdrawalStatusFor: { intentId: string; burnBlock: string } | null = null;
   let intent: SolWithdrawalIntent | null = null;
@@ -47,6 +52,14 @@
       && !current.loading && (current.isConnected ? current.principal?.toText() ?? '' : '') === capturedOwner;
   }
   function stopPoll() { if (timer) clearTimeout(timer); timer = null; }
+  function paidIntentSettled(value: CksolPaymentIntent | null) {
+    return value?.phase === 'NotStarted' || (value?.phase === 'Receipt' && ['Complete', 'FundingRejected'].includes(value.receipt?.phase));
+  }
+  function adoptPaidIntent(value: CksolPaymentIntent) {
+    paymentIntent = value;
+    const id = value.receipt?.deposit_id?.[0];
+    if (id !== undefined) { depositId = BigInt(id); depositStatus = null; pollCount = 0; void checkStatus(true); }
+  }
   function loadSaved() {
     if (!owner) return;
     try {
@@ -64,50 +77,94 @@
       const data = await getCksolMinter().get_minter_info();
       if (!live(e, text)) return;
       info = data;
-      // Fail closed for new deposits if the installed Rumi backend lacks the relay.
-      try { const budget = await getCksolRelay().get_cksol_relay_budget(); if (live(e, text)) relayBudget = BigInt(budget); }
-      catch { if (live(e, text)) { relayBudget = null; notice = 'SOL deposit processing is not enabled on this Rumi backend yet. Do not send new SOL through this page.'; } }
+      // New address display is gated by the paid quote endpoint. Never use the legacy sponsorship budget as readiness.
+      if (account) {
+        try {
+          const q=await quoteCksolPayment(account,isCksolOisyWallet()?'oisy':(get(auth).walletType ?? 'unknown'));
+          if(live(e,text)) {
+            const recovered=await recoverCksolPayment(account,localStorage);
+            if(live(e,text)) { paymentQuote=q; cyclesBalance=q.balance; paymentIntent=recovered; if(paymentIntent) adoptPaidIntent(paymentIntent); }
+          }
+        } catch { if(live(e,text)) { paymentQuote=null; cyclesBalance=null; notice='Paid SOL deposit processing is unavailable on this backend. Do not send SOL to a new deposit address.'; } }
+      }
       if (!account || !live(e, text)) return;
       const [funds, attempt] = await Promise.all([
         getCksolLedger().icrc1_balance_of({ owner: account, subaccount: [] }),
-        getCksolRelay().get_cksol_deposit(account).catch(() => []),
+        getCksolRelay().get_cksol_deposit(account),
       ]);
       if (!live(e, text)) return;
       balance = BigInt(funds); loadSaved();
       if (attempt[0]) {
+        legacyAttempt=attempt[0]; legacyBlocked=true;
         if ('Queued' in attempt[0].status) depositId = BigInt(attempt[0].status.Queued);
-        else if ('SubmittedOrUnknown' in attempt[0].status) { depositBlocked = true; notice = 'A previous deposit notification has an unknown outcome. Keep your deposit address; contact Rumi support before submitting again.'; }
+        else if ('SubmittedOrUnknown' in attempt[0].status) notice = 'A previous deposit notification has an unknown outcome. Keep its record for reconciliation; paid processing is blocked.';
         else if ('Rejected' in attempt[0].status) notice = attempt[0].status.Rejected;
+        else notice='A previous deposit attempt has an unrecognized status. Paid processing is blocked.';
+      } else {
+        legacyAttempt=null; legacyBlocked=false;
       }
       await checkStatus(false);
-    } catch (err) { if (live(e, text)) error = String(err); }
+    } catch (err) { if (live(e, text)) { error = String(err); legacyBlocked=true; } }
     finally { if (live(e, text)) busy = false; }
   }
   async function showAddress() {
-    if (!owner || depositBlocked || !info || info.deposit_sol_required_cycles > CKSOL_RELAY_CYCLES || relayBudget === null || relayBudget < CKSOL_RELAY_CYCLES) return;
+    if (!owner || depositBlocked || legacyBlocked || !info || !paymentQuote) return;
     const e = epoch, text = ownerText; busy = true; error = '';
     try { const address = await getSolDepositAddress(owner); if (live(e, text)) depositAddress = address; }
     catch (err) { if (live(e, text)) error = String(err); }
     finally { if (live(e, text)) busy = false; }
   }
-  async function notifyDeposit() {
-    if (!owner || depositBlocked) return;
-    const e = epoch, text = ownerText; busy = true; error = ''; notice = '';
-    try {
-      const id = await startSolDeposit(() => live(e, text));
-      if (!live(e, text)) return;
-      depositId = id; pollCount = 0; await checkStatus(true);
-    } catch (err) { if (live(e, text)) error = `${String(err)} Your deposit address remains bound to your ICP account. Refresh to recover any queued deposit ID.`; }
-    finally { if (live(e, text)) busy = false; }
+  async function processPaidDeposit() {
+    if(!owner||!paymentQuote||busy||legacyBlocked||depositBlocked||(paymentIntent&&!paidIntentSettled(paymentIntent))) return;
+    const e=epoch,text=ownerText,account=owner,quote=paymentQuote;
+    if(!navigator.locks) { error='This browser cannot safely coordinate paid deposits across tabs. Use a browser with Web Locks support.'; return; }
+    busy=true;error='';notice='';
+    try { await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{
+      if(!lock) throw new Error('A paid ckSOL payment is active in another tab.');
+      if(!live(e,text)) return;
+      const result=await submitCksolPayment(quote,account,localStorage,()=>live(e,text));
+      if(live(e,text)) { adoptPaidIntent(result); paymentQuote=null; notice=result.message??'Payment request saved. Refresh the receipt before taking another action.'; }
+    }); } catch(err) { if(live(e,text)) { error=String(err); try { paymentIntent=loadCksolPayment(localStorage,text); } catch {} } }
+    finally { if(live(e,text)) busy=false; }
+  }
+  async function refreshPaidReceipt() {
+    if(!owner||busy) return; const e=epoch,text=ownerText,account=owner; busy=true;error='';
+    try { const recovered=await recoverCksolPayment(account,localStorage); if(!live(e,text))return; if(recovered) adoptPaidIntent(recovered); const q=await quoteCksolPayment(account,get(auth).walletType ?? 'unknown'); if(live(e,text)){paymentQuote=q;cyclesBalance=q.balance;} }
+    catch(err) { if(live(e,text)) error=String(err); } finally { if(live(e,text)) busy=false; }
+  }
+  async function refundPaidCycles() {
+    if(!owner||!paymentIntent||!paymentIntent.receipt||busy) return;
+    const e=epoch,text=ownerText,account=owner,payment=paymentIntent.receipt; busy=true;error='';
+    try { if(!navigator.locks) throw new Error('Web Locks support is required to claim a refund safely.');
+      await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{if(!lock) throw new Error('A paid ckSOL payment is active in another tab.'); if(!live(e,text)) return; const result=await claimCksolRefund(account,payment,()=>live(e,text)); if('Err' in result) throw new Error(String(result.Err)); const recovered=await recoverCksolPayment(account,localStorage); if(live(e,text)&&recovered) adoptPaidIntent(recovered);});
+    } catch(err) { if(live(e,text)) error=String(err); } finally { if(live(e,text)) busy=false; }
+  }
+  async function resumePaidDispatch() {
+    if(!owner||!paymentIntent||busy) return; const e=epoch,text=ownerText,account=owner,displayed=paymentIntent; busy=true;error='';
+    try { if(!navigator.locks) throw new Error('Web Locks support is required to resume safely.');
+      await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{if(!lock) throw new Error('A paid ckSOL payment is active in another tab.'); if(!live(e,text)) return; const resumed=await resumeFundedCksolPayment(account,displayed,localStorage,()=>live(e,text)); if(!live(e,text))return; adoptPaidIntent(resumed);});
+    } catch(err) { if(live(e,text)) error=String(err); } finally { if(live(e,text)) busy=false; }
+  }
+  async function continuePaidApproval() {
+    if(!owner||!paymentIntent||busy) return;const e=epoch,text=ownerText,account=owner,displayed=paymentIntent;busy=true;error='';
+    try { if(!navigator.locks) throw new Error('Web Locks support is required to continue safely.');
+      await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{if(!lock) throw new Error('A paid ckSOL payment is active in another tab.');if(!live(e,text))return;const latest=loadCksolPayment(localStorage,text);if(!latest||latest.sequence!==displayed.sequence)throw new Error('Saved payment changed in another tab. Refresh it before continuing.');const continued=await continueApprovedCksolPayment(account,latest,localStorage,()=>live(e,text));if(live(e,text))adoptPaidIntent(continued);});
+    } catch(err) { if(live(e,text)) error=String(err); } finally { if(live(e,text))busy=false; }
   }
   async function acknowledgeDeposit() {
+    if(!owner) return;
     const e = epoch, text = ownerText;
+    const account=owner;
     busy = true; error = '';
     try {
       await clearSolDeposit(() => live(e, text));
       if (!live(e, text)) return;
+      const remaining=await getCksolRelay().get_cksol_deposit(account);
+      if(!live(e,text)) return;
+      if(remaining?.[0]) { legacyAttempt=remaining[0];legacyBlocked=true;throw new Error('The legacy deposit attempt is still retained; keep it for reconciliation.'); }
+      legacyAttempt=null;legacyBlocked=false;
       statusGeneration++; depositId = null; depositStatus = null; depositBlocked = false; depositAddress = '';
-      notice = 'Completed deposit acknowledged. Your ckSOL remains in your wallet.';
+      notice = 'Previous deposit attempt acknowledged. The paid deposit flow is available after refreshing its quote.';
     } catch (err) { if (live(e, text)) error = String(err); }
     finally { if (live(e, text)) busy = false; }
   }
@@ -179,8 +236,9 @@
     const wallet = get(walletStore);
     owner = wallet.isConnected && !wallet.loading ? wallet.principal : null; ownerText = owner?.toText() ?? '';
     busy = false; error = ''; notice = ''; depositAddress = ''; depositId = null;
-    depositStatus = null; depositBlocked = false; withdrawalStatus = null; withdrawalStatusFor = null; intent = null; invalidSavedIntent = false;
-    balance = null; quote = null; amount = ''; destination = ''; oisy = isCksolOisyWallet();
+    depositStatus = null; depositBlocked = false; legacyAttempt=null;legacyBlocked=false;withdrawalStatus = null; withdrawalStatusFor = null; intent = null; invalidSavedIntent = false;
+    balance = null; quote = null; amount = ''; destination = ''; oisy = isCksolOisyWallet(); paymentQuote=null;cyclesBalance=null;paymentIntent=null;
+    if(owner) { try { paymentIntent=loadCksolPayment(localStorage,ownerText); } catch { error='Saved paid ckSOL request is invalid. Preserve it for support.'; } }
     if (owner) loadSaved();
     void refresh();
   }
@@ -208,11 +266,14 @@
   <section class="rounded-xl border border-gray-700 bg-gray-900 p-6">
     {#if selectedTab === 'mint'}
       <h2 class="text-xl font-medium">SOL → ckSOL</h2>
-      <ol class="mt-4 list-decimal space-y-3 pl-5 text-gray-300"><li>Get the deposit address for your connected ICP account.</li><li>Send SOL from a Solana mainnet wallet or exchange.</li><li>Select “Process my deposit” to queue the minter’s sweep, then follow its status.</li></ol>
-      {#if info}<div class="mt-5 space-y-1 text-sm text-gray-400"><p>Minimum deposit balance: {formatSol(info.minimum_deposit_amount)} SOL.</p><p>The sweep’s transaction fee is deducted before minting. The first sweep also leaves SOL on the deposit address for rent exemption.</p><p>Rumi sponsors the minter’s cycle verification cost while its finite relay budget is available.</p></div>{/if}
-      {#if relayBudget === null || relayBudget < CKSOL_RELAY_CYCLES}<p class="mt-5 text-amber-300">New deposit processing is unavailable. Do not send new SOL until Rumi’s deposit relay is funded and enabled.</p>{/if}
-      <button class="mt-5 rounded-lg bg-emerald-600 px-4 py-2 font-medium text-white disabled:opacity-40" disabled={!owner || busy || depositBlocked || !info || info.deposit_sol_required_cycles > CKSOL_RELAY_CYCLES || relayBudget === null || relayBudget < CKSOL_RELAY_CYCLES} onclick={showAddress}>Get my SOL deposit address</button>
-      {#if depositAddress}<div class="mt-5 rounded-lg bg-gray-800 p-4"><p class="text-sm text-gray-400">SOL mainnet deposit address · credits ICP account {ownerText}</p><code class="mt-2 block break-all select-all">{depositAddress}</code><p class="mt-3 text-xs text-amber-300">Relay capacity can change after the address is shown. Keep this address and your ICP account details for recovery.</p><button class="mt-4 rounded-lg bg-emerald-600 px-4 py-2 disabled:opacity-40" disabled={busy || depositBlocked} onclick={notifyDeposit}>Process my deposit</button></div>{/if}
+      <ol class="mt-4 list-decimal space-y-3 pl-5 text-gray-300"><li>Review the paid processing quote and cycles ledger balance.</li><li>Get your account-bound SOL mainnet deposit address and send SOL.</li><li>Approve the capped cycles payment, then track the minter receipt and any refund.</li></ol>
+      {#if info}<div class="mt-5 space-y-1 text-sm text-gray-400"><p>Minimum deposit balance: {formatSol(info.minimum_deposit_amount)} SOL.</p><p>The sweep’s transaction fee is deducted before minting. The first sweep also leaves SOL on the deposit address for rent exemption.</p></div>{/if}
+      {#if paymentQuote}<div class="mt-5 space-y-2 rounded-lg bg-gray-800 p-4 text-sm"><p>Cycles ledger balance: {cyclesBalance?.toString() ?? 'Loading'} cycles.</p><p>Funding: {paymentQuote.funding_cycles.toString()} cycles, including {paymentQuote.processing_fee.toString()} processing fee (which covers the refund reserve).</p><p>Approval cap: {paymentQuote.approval_amount.toString()} cycles, including the {paymentQuote.ledger_fee.toString()} withdrawal fee. The approval transaction also costs {paymentQuote.ledger_fee.toString()} cycles.</p><p>Maximum balance needed: {(paymentQuote.approval_amount+paymentQuote.ledger_fee).toString()} cycles. Quote expires after 60 seconds; approval is exact and expires after 10 minutes.</p><a class="text-emerald-400 underline" href="https://internetcomputer.org/docs/current/developer-docs/smart-contracts/maintain/cycles-management/" target="_blank" rel="noreferrer">How to add cycles to your cycles ledger</a><button class="ml-3 underline" disabled={busy} onclick={refreshPaidReceipt}>Refresh quote and receipt</button></div>{/if}
+      {#if legacyAttempt && 'Rejected' in legacyAttempt.status}<div class="mt-5 space-y-2 rounded-lg border border-amber-700 bg-gray-800 p-4"><p>Previous legacy deposit attempt was rejected: {legacyAttempt.status.Rejected}</p><p>Acknowledge this rejected attempt before starting a paid deposit.</p><button class="underline" disabled={busy} onclick={acknowledgeDeposit}>Acknowledge rejected legacy attempt</button></div>{:else if legacyBlocked}<p class="mt-5 text-amber-300">A previous legacy deposit attempt is still retained or could not be checked. Paid processing stays blocked until its outcome is resolved.</p>{/if}
+      {#if !paymentQuote}<p class="mt-5 text-amber-300">Paid deposit processing is unavailable until this backend provides its payment quote. Do not send SOL to a new address.</p>{/if}
+      <button class="mt-5 rounded-lg bg-emerald-600 px-4 py-2 font-medium text-white disabled:opacity-40" disabled={!owner || busy || depositBlocked || legacyBlocked || !info || !paymentQuote || !!paymentIntent && !paidIntentSettled(paymentIntent)} onclick={showAddress}>Get my SOL deposit address</button>
+      {#if depositAddress}<div class="mt-5 rounded-lg bg-gray-800 p-4"><p class="text-sm text-gray-400">SOL mainnet deposit address · credits ICP account {ownerText}</p><code class="mt-2 block break-all select-all">{depositAddress}</code><p class="mt-3 text-xs text-gray-300">After SOL arrives, approve the displayed cycles cap to queue its sweep. Rumi does not sponsor this processing.</p><button class="mt-4 rounded-lg bg-emerald-600 px-4 py-2 disabled:opacity-40" disabled={busy || depositBlocked || legacyBlocked || !paymentQuote || !!paymentIntent && !paidIntentSettled(paymentIntent)} onclick={processPaidDeposit}>{paymentIntent?.phase==='NotStarted'?'Refresh and retry payment':paidIntentSettled(paymentIntent)?'Start next paid deposit':'Approve and process my deposit'}</button></div>{/if}
+      {#if paymentIntent}<div class="mt-5 space-y-2 rounded-lg border border-gray-700 bg-gray-800 p-4"><p>Paid payment sequence: {paymentIntent.sequence}; state: {paymentIntent.receipt?.phase ?? paymentIntent.phase}.</p>{#if paymentIntent.receipt?.funding_block?.[0] !== undefined}<p>Funding ledger block: <code>{paymentIntent.receipt.funding_block[0].toString()}</code></p>{/if}{#if paymentIntent.receipt?.deposit_id?.[0] !== undefined}<p>Deposit ID: <code>{paymentIntent.receipt.deposit_id[0].toString()}</code></p>{/if}<p>{paymentIntent.receipt?.message?.[0] ?? paymentIntent.message ?? 'Keep this sequence and refresh its receipt before starting another payment.'}</p>{#if paymentIntent.phase === 'NotStarted'}<p>No funding was started for this sequence. Refresh the quote, then retry to select the current backend sequence.</p>{/if}{#if paymentIntent.phase === 'Approved' && !paymentIntent.receipt}<button class="underline" disabled={busy} onclick={continuePaidApproval}>Continue saved approval for this sequence</button>{/if}{#if paymentIntent.receipt?.phase === 'Funded'}<button class="underline" disabled={busy} onclick={resumePaidDispatch}>Resume minter dispatch for this funded sequence</button>{/if}{#if ['RefundReady','Funded'].includes(paymentIntent.receipt?.phase)}<p>Refundable cycles: {paymentIntent.receipt.refundable_cycles?.toString()}.</p><button class="underline" disabled={busy} onclick={refundPaidCycles}>Claim unused cycles refund</button>{/if}{#if paymentIntent.receipt?.refund_block?.[0] !== undefined}<p>Refund ledger block: <code>{paymentIntent.receipt.refund_block[0].toString()}</code></p>{/if}<button class="ml-3 underline" disabled={busy} onclick={refreshPaidReceipt}>Refresh payment receipt</button></div>{/if}
       {#if depositId !== null}<div class="mt-5 rounded-lg bg-gray-800 p-4"><p>Deposit ID: <code>{depositId.toString()}</code></p><p class="mt-2">{depositStatus?.label ?? 'Check the deposit status.'}</p>{#if depositStatus?.signature}<a class="mt-2 block break-all text-emerald-400 underline" href="https://solscan.io/tx/{depositStatus.signature}" target="_blank" rel="noreferrer">View sweep on Solana</a>{/if}<button class="mt-3 underline" disabled={busy} onclick={() => { pollCount = 0; void checkStatus(true); }}>Check deposit status</button>{#if depositStatus?.success || depositStatus?.kind === 'Dropped'}<button class="ml-3 underline" disabled={busy} onclick={acknowledgeDeposit}>Acknowledge completed deposit</button>{/if}</div>{/if}
     {:else}
       <h2 class="text-xl font-medium">ckSOL → SOL</h2>
@@ -228,5 +289,5 @@
       {#if quote}<div class="mt-5 space-y-2 rounded-lg bg-gray-800 p-4 text-sm"><p>Minter fee deducted from amount: {formatSol(quote.minterFee)} SOL.</p><p>Approval fee: {formatSol(quote.ledgerFee)} ckSOL. Additional ledger fee reserve: {formatSol(quote.ledgerFee)} ckSOL.</p><p>Estimated SOL received: {formatSol(quote.amount - quote.minterFee)} SOL.</p><p>Approve {formatSol(quote.amount + quote.ledgerFee)} ckSOL for the official minter, then request withdrawal. Quote expires after 60 seconds.</p><button class="mt-3 rounded-lg bg-emerald-600 px-4 py-2 font-medium disabled:opacity-40" disabled={busy || !!intent || oisy} onclick={redeem}>Approve and request SOL</button></div>{/if}
     {/if}
   </section>
-  <div class="mt-6 flex flex-wrap items-center gap-4 text-sm"><button class="text-gray-300 underline" disabled={busy} onclick={refresh}>Refresh balance and minter terms</button>{#if activeCollateral?.status === 'Active'}<a class="text-emerald-400 underline" href="/?collateral={CANISTER_IDS.CKSOL_LEDGER}">Borrow icUSD with ckSOL</a>{:else}<span class="text-gray-500">Borrowing appears when ckSOL collateral is active on Rumi.</span>{/if}<a class="text-gray-400 underline" href="https://github.com/dfinity/cksol" target="_blank" rel="noreferrer">Official ckSOL documentation</a></div>
+  <div class="mt-6 flex flex-wrap items-center gap-4 text-sm"><button class="text-gray-300 underline" disabled={busy} onclick={refresh}>Refresh balance and minter terms</button>{#if activeCollateral?.status === 'Active'}<a class="text-emerald-400 underline" href="/?collateral={CANISTER_IDS.CKSOL_LEDGER}">Borrow icUSD with ckSOL</a>{:else}<span class="text-gray-500">Borrowing appears when ckSOL collateral is active on Rumi.</span>{/if}<a class="text-gray-400 underline" href="https://internetcomputer.org/docs/current/developer-docs/smart-contracts/maintain/cycles-management/" target="_blank" rel="noreferrer">Cycles ledger documentation</a><a class="text-gray-400 underline" href="https://github.com/dfinity/cksol" target="_blank" rel="noreferrer">Official ckSOL documentation</a></div>
 </main>
