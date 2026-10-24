@@ -402,6 +402,8 @@ pub struct SupplyAudit {
     pub base_total_supply_e8s: Option<Nat>,
     pub base_supply_block: Option<u64>,
     pub inflight_mint_e8s: Nat,
+    /// C2 and C4 together: Base `totalSupply` within outstanding plus in-flight mints, and the
+    /// contract's cumulative `totalMinted` within the bridge's cumulative mints plus in flight.
     pub base_supply_within_bound: Option<bool>,
     pub base_supply_exact_match: Option<bool>,
     /// How to combine these figures with the ICP ledger and debt-backed chain supply

@@ -154,18 +154,18 @@
     },
     {
       "id": "BB-05b",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Observer/RPC review fixes",
-      "evidenceText": "proof=none; Adaptive log span and cap, contiguity completeness with rewind, backoff, chain-id check, count-based C3, receipt cap",
+      "evidenceText": "proof=local-test; Committed in 6208c117; adaptive log span (halving) and cap escalation, contiguity completeness with rewind, backoff, chain-id quorum, count-based C3, receipt cap; 98 observer/rpc tests",
       "evidenceLinks": []
     },
     {
       "id": "BB-15",
-      "state": "todo",
+      "state": "done (commit pending)",
       "owner": "worker-sonnet",
       "scope": "Cumulative mint guard",
-      "evidenceText": "proof=none; Burn recording refuses if on-chain cumulative mints exceed the canister's",
+      "evidenceText": "proof=local-integration; forge 111 passed; lib 390 passed; mint-then-burn regression test un-ignored and passing (attacker burn not paid, bridge halts); faults 16/16",
       "evidenceLinks": []
     },
     {

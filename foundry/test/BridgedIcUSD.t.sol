@@ -107,6 +107,7 @@ contract BridgedIcUSDTest is Test {
         assertEq(token.mintWindowSeconds(), WINDOW_SECONDS);
         assertEq(token.mintWindowStart(), uint64(block.timestamp));
         assertEq(token.mintedInWindow(), 0);
+        assertEq(token.totalMinted(), 0);
         assertEq(token.minBridgeOut(), MIN_BRIDGE_OUT);
         assertFalse(token.mintPaused());
         assertFalse(token.bridgeOutPaused());
@@ -221,6 +222,84 @@ contract BridgedIcUSDTest is Test {
         assertEq(token.totalSupply(), amount);
         assertTrue(token.mintConsumed(id));
         assertEq(token.mintedInWindow(), amount);
+        assertEq(token.totalMinted(), amount);
+    }
+
+    function test_total_minted_increments_per_mint_and_not_on_bridge_out() public {
+        assertEq(token.totalMinted(), 0);
+        _mint(alice, 1_000_000_000, bytes32(uint256(1)));
+        assertEq(token.totalMinted(), 1_000_000_000);
+        _mint(bob, 250_000_000, bytes32(uint256(2)));
+        assertEq(token.totalMinted(), 1_250_000_000);
+
+        // A burn lowers the supply but never the cumulative counter.
+        _bridgeOut(alice, 400_000_000, NONCE);
+        assertEq(token.totalSupply(), 850_000_000);
+        assertEq(token.totalMinted(), 1_250_000_000);
+
+        // Plain transfers change neither.
+        vm.prank(bob);
+        assertTrue(token.transfer(alice, 1));
+        assertEq(token.totalMinted(), 1_250_000_000);
+
+        // A mint after a burn adds to the cumulative total, not to the net supply figure.
+        _mint(alice, 100, bytes32(uint256(3)));
+        assertEq(token.totalMinted(), 1_250_000_100);
+        assertEq(token.totalSupply(), 850_000_100);
+        assertEq(token.totalSupply(), token.totalMinted() - 400_000_000);
+    }
+
+    function test_total_minted_is_unchanged_by_a_reverted_mint() public {
+        bytes32 id = keccak256("total-minted-revert");
+        _mint(alice, 500, id);
+        assertEq(token.totalMinted(), 500);
+
+        // Duplicate id.
+        vm.prank(minter);
+        vm.expectRevert(abi.encodeWithSelector(BridgedIcUSD.MintAlreadyConsumed.selector, id));
+        token.mint(alice, 500, id);
+        // Zero amount, zero recipient, too large, unauthorized caller.
+        vm.prank(minter);
+        vm.expectRevert(BridgedIcUSD.ZeroAmount.selector);
+        token.mint(alice, 0, bytes32(uint256(7)));
+        vm.prank(minter);
+        vm.expectRevert(abi.encodeWithSelector(BridgedIcUSD.InvalidRecipient.selector, address(0)));
+        token.mint(address(0), 1, bytes32(uint256(8)));
+        vm.prank(minter);
+        vm.expectRevert(abi.encodeWithSelector(BridgedIcUSD.AmountTooLarge.selector, uint256(type(uint64).max) + 1));
+        token.mint(alice, uint256(type(uint64).max) + 1, bytes32(uint256(9)));
+        vm.prank(alice);
+        vm.expectRevert(_unauthorized(alice, MINTER));
+        token.mint(alice, 1, bytes32(uint256(10)));
+        // Supply cap and rate limit.
+        vm.prank(minter);
+        vm.expectRevert(abi.encodeWithSelector(BridgedIcUSD.SupplyCapExceeded.selector, SUPPLY_CAP + 500, SUPPLY_CAP));
+        token.mint(alice, SUPPLY_CAP, bytes32(uint256(11)));
+        vm.prank(minter);
+        vm.expectRevert(
+            abi.encodeWithSelector(BridgedIcUSD.MintRateLimitExceeded.selector, WINDOW_LIMIT, WINDOW_LIMIT - 500)
+        );
+        token.mint(alice, WINDOW_LIMIT, bytes32(uint256(12)));
+        // Paused.
+        vm.prank(admin);
+        token.pauseMint();
+        vm.prank(minter);
+        vm.expectRevert(BridgedIcUSD.MintIsPaused.selector);
+        token.mint(alice, 1, bytes32(uint256(13)));
+
+        assertEq(token.totalMinted(), 500);
+        assertEq(token.totalSupply(), 500);
+    }
+
+    function test_total_minted_is_not_a_function_of_supply_or_window() public {
+        // The window counter resets and the supply falls, the cumulative counter does neither.
+        _mint(alice, WINDOW_LIMIT, bytes32(uint256(1)));
+        _bridgeOut(alice, WINDOW_LIMIT, NONCE);
+        vm.warp(block.timestamp + WINDOW_SECONDS + 1);
+        _mint(alice, 10, bytes32(uint256(2)));
+        assertEq(token.mintedInWindow(), 10);
+        assertEq(token.totalSupply(), 10);
+        assertEq(token.totalMinted(), uint256(WINDOW_LIMIT) + 10);
     }
 
     function test_non_minter_cannot_mint() public {
@@ -1163,6 +1242,9 @@ contract BridgedIcUSDTest is Test {
         assertEq(bytes4(keccak256("totalSupply()")), bytes4(0x18160ddd));
         assertEq(token.totalSupply.selector, bytes4(0x18160ddd));
 
+        assertEq(bytes4(keccak256("totalMinted()")), bytes4(0xa2309ff8));
+        assertEq(token.totalMinted.selector, bytes4(0xa2309ff8));
+
         assertEq(bytes4(keccak256("supplyCap()")), bytes4(0x8f770ad0));
         assertEq(token.supplyCap.selector, bytes4(0x8f770ad0));
 
@@ -1210,9 +1292,28 @@ contract BridgedIcUSDTest is Test {
         if (amount != 0 && amount <= type(uint64).max) {
             assertEq(t.balanceOf(alice), amount);
             assertEq(t.totalSupply(), amount);
+            assertEq(t.totalMinted(), amount);
         } else {
             assertEq(t.totalSupply(), 0);
+            assertEq(t.totalMinted(), 0);
         }
+    }
+
+    function testFuzz_total_minted_counts_mints_and_ignores_burns(uint64 a, uint64 burnPart, uint64 b) public {
+        vm.assume(a >= MIN_BRIDGE_OUT && b != 0);
+        BridgedIcUSD t = new BridgedIcUSD(
+            admin, ADMIN_DELAY, minter, guardian, type(uint256).max, type(uint256).max, 1 days, MIN_BRIDGE_OUT
+        );
+        vm.prank(minter);
+        t.mint(alice, a, bytes32(uint256(1)));
+        uint256 burned = bound(burnPart, MIN_BRIDGE_OUT, a);
+        vm.prank(alice);
+        t.bridgeOut(burned, PRINCIPAL, SUBACCOUNT, NONCE);
+        assertEq(t.totalMinted(), a);
+        vm.prank(minter);
+        t.mint(bob, b, bytes32(uint256(2)));
+        assertEq(t.totalMinted(), uint256(a) + uint256(b));
+        assertEq(t.totalSupply(), uint256(a) + uint256(b) - burned);
     }
 
     function testFuzz_supply_cap_boundary(uint64 cap, uint64 amount) public {
@@ -1476,6 +1577,17 @@ contract BridgedIcUSDInvariantTest is StdInvariant, Test {
 
     function invariant_supply_equals_ghost_minted_minus_burned() public view {
         assertEq(token.totalSupply(), handler.ghostMinted() - handler.ghostBurned());
+    }
+
+    /// The cumulative counter equals the sum of every successful mint and never drops.
+    function invariant_total_minted_equals_ghost_minted() public view {
+        assertEq(token.totalMinted(), handler.ghostMinted());
+    }
+
+    /// supply == cumulative mints minus cumulative burns, the identity the bridge canister
+    /// relies on to detect a mint it did not make.
+    function invariant_supply_equals_total_minted_minus_burned() public view {
+        assertEq(token.totalSupply(), token.totalMinted() - handler.ghostBurned());
     }
 
     function invariant_bridge_out_count_matches_successes() public view {

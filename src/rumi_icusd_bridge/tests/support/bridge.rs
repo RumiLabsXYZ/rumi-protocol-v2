@@ -811,6 +811,9 @@ impl BridgeWorld {
         // 7. limits (inside the contract's), bind, then open the bridge.
         w.set_limits(opts.limits.clone()).expect("admin_set_limits");
         if opts.bind_contract {
+            // Binding compares the contract's minBridgeOut with the release cost, which needs
+            // the ledger fee; the first tick learns it.
+            w.tick();
             let address = w.token.address.clone();
             let bound: BridgeResult<ContractBindingView> = w.admin_call("admin_bind_contract", (address,));
             let bound = bound.expect("admin_bind_contract");

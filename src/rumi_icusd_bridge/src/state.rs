@@ -486,6 +486,11 @@ pub struct BridgeCore {
     pub ledger_tip_lower_bound: u64,
     #[serde(default)]
     pub sweeps: Vec<SweepRecord>,
+    /// Sum of every amount this canister has minted on Base and seen finalized (deposit
+    /// deliveries and re-mints). Compared with the contract's cumulative `totalMinted` to
+    /// detect a mint this canister did not make, even if it was burned again right away.
+    #[serde(default)]
+    pub cumulative_minted_e8s: u128,
 }
 
 impl Default for BridgeCore {
@@ -511,6 +516,7 @@ impl Default for BridgeCore {
             ledger_minting_account: None,
             ledger_tip_lower_bound: 0,
             sweeps: vec![],
+            cumulative_minted_e8s: 0,
         }
     }
 }

@@ -387,7 +387,10 @@ pub fn on_mint_finalized(deposit_id: u64, tx_id: u64, outcome: MintTxOutcome) ->
                 state::halt(format!("deposit {deposit_id}: delivery accounting failed: {e}"));
                 return Err(e.to_string());
             }
-            state::mutate_core(|c| c.observer.max_settled_block = c.observer.max_settled_block.max(receipt.block_number));
+            state::mutate_core(|c| {
+                c.observer.max_settled_block = c.observer.max_settled_block.max(receipt.block_number);
+                c.cumulative_minted_e8s = c.cumulative_minted_e8s.saturating_add(d.mint_amount_e8s as u128);
+            });
             d.state = DepositState::Delivered;
             d.active_tx = None;
             d.delivered = Some(Inclusion { tx_hash: receipt.tx_hash, block_number: receipt.block_number, block_hash: receipt.block_hash });
@@ -842,7 +845,9 @@ pub(crate) mod tests {
         let b = state::read_core(|c| c.buckets);
         assert_eq!(b.outstanding_base, (100 * E8) as u128);
         assert_eq!(b.pending_mint, 0);
+        assert_eq!(state::read_core(|c| c.cumulative_minted_e8s), (100 * E8) as u128);
         assert!(on_mint_finalized(d.id, 7, MintTxOutcome::Executed(receipt)).is_err());
+        assert_eq!(state::read_core(|c| c.cumulative_minted_e8s), (100 * E8) as u128, "counted once");
         assert_eq!(state::read_core(|c| c.buckets), b);
     }
 

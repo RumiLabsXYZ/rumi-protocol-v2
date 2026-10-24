@@ -57,6 +57,9 @@ pub enum ViewCall {
     Version,
     Decimals,
     TotalSupply,
+    /// `totalMinted()`: the contract's cumulative count of every minted unit; it never
+    /// decreases, unlike `totalSupply()`.
+    TotalMinted,
     SupplyCap,
     MintWindowLimit,
     MintWindowSeconds,
@@ -120,6 +123,7 @@ pub const SEL_MINT_CONSUMED: [u8; 4] = 0x26c5_b40e_u32.to_be_bytes();
 pub const SEL_BRIDGE_OUT_USED: [u8; 4] = 0x3e94_2d93_u32.to_be_bytes();
 pub const SEL_BRIDGE_OUT_COUNT: [u8; 4] = 0x53eb_d818_u32.to_be_bytes();
 pub const SEL_TOTAL_SUPPLY: [u8; 4] = 0x1816_0ddd_u32.to_be_bytes();
+pub const SEL_TOTAL_MINTED: [u8; 4] = 0xa230_9ff8_u32.to_be_bytes();
 pub const SEL_SUPPLY_CAP: [u8; 4] = 0x8f77_0ad0_u32.to_be_bytes();
 pub const SEL_VERSION: [u8; 4] = 0xffa1_ad74_u32.to_be_bytes();
 pub const SEL_HAS_ROLE: [u8; 4] = 0x91d1_4854_u32.to_be_bytes();
@@ -180,6 +184,7 @@ pub fn encode_view(v: &ViewCall) -> Vec<u8> {
         ViewCall::Version => call(&SEL_VERSION, &[]),
         ViewCall::Decimals => call(&SEL_DECIMALS, &[]),
         ViewCall::TotalSupply => call(&SEL_TOTAL_SUPPLY, &[]),
+        ViewCall::TotalMinted => call(&SEL_TOTAL_MINTED, &[]),
         ViewCall::SupplyCap => call(&SEL_SUPPLY_CAP, &[]),
         ViewCall::MintWindowLimit => call(&SEL_MINT_WINDOW_LIMIT, &[]),
         ViewCall::MintWindowSeconds => call(&SEL_MINT_WINDOW_SECONDS, &[]),
@@ -418,6 +423,7 @@ mod tests {
             ("bridgeOutUsed(bytes32)", SEL_BRIDGE_OUT_USED, 0x3e942d93),
             ("bridgeOutCount()", SEL_BRIDGE_OUT_COUNT, 0x53ebd818),
             ("totalSupply()", SEL_TOTAL_SUPPLY, 0x18160ddd),
+            ("totalMinted()", SEL_TOTAL_MINTED, 0xa2309ff8),
             ("supplyCap()", SEL_SUPPLY_CAP, 0x8f770ad0),
             ("VERSION()", SEL_VERSION, 0xffa1ad74),
             ("hasRole(bytes32,address)", SEL_HAS_ROLE, 0x91d14854),
@@ -498,6 +504,8 @@ mod tests {
             (ViewCall::Version, "0xffa1ad74"),
             (ViewCall::Decimals, "0x313ce567"),
             (ViewCall::TotalSupply, "0x18160ddd"),
+            // cast sig 'totalMinted()'
+            (ViewCall::TotalMinted, "0xa2309ff8"),
             (ViewCall::SupplyCap, "0x8f770ad0"),
             (ViewCall::MintWindowLimit, "0xfeafa875"),
             (ViewCall::MintWindowSeconds, "0x24704279"),

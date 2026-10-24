@@ -21,6 +21,12 @@
 //!   the events of a range are recorded, and recording is idempotent on the transfer id,
 //!   so a retry after a partial failure cannot double count. A recording error stops the
 //!   range at that event; the events before it stay counted.
+//! - A burn cannot hide a mint from the contract's cumulative `totalMinted()` counter
+//!   (unlike `totalSupply()`, which a mint followed by a burn leaves looking normal). So
+//!   before a pass records ANY burn it reads `totalMinted()` at the same finalized head and
+//!   refuses to go on when the contract has minted more than this canister did itself
+//!   (`cumulative_minted_e8s`) plus what it may have in flight. That halts the bridge before
+//!   a release can be paid out of honest users' escrow for tokens nobody backed.
 //! - `eth_getLogs` adapts to the provider: a failing range is halved, a single block that
 //!   still fails raises the response cap, and both recover after successes. A dense stretch
 //!   of burns can therefore slow the scan down but never wedge it.
@@ -116,6 +122,22 @@ async fn view_address(contract: &[u8; 20], call: ViewCall, at: u64) -> Result<[u
 async fn bridge_out_count(contract: &[u8; 20], at: u64) -> Result<u64, String> {
     let v = view_u128(contract, ViewCall::BridgeOutCount, at).await?;
     u64::try_from(v).map_err(|_| format!("bridgeOutCount {v} at block {at} does not fit u64"))
+}
+
+/// The cumulative-mint guard. The contract's `totalMinted()` counts every unit ever minted
+/// and never decreases; this canister counts every mint it made and saw finalized
+/// (`cumulative_minted_e8s`). Mints it has signed but not seen finalized may already be on
+/// Base, so they are allowed on top. Anything above that is a mint this canister did not
+/// make (a bug, or a compromised mint authority), even if it was burned again right away.
+///
+/// Returns the halt reason on a violation. Reads local state with no await in between, so
+/// a mint that finalizes meanwhile only moves from "in flight" to "minted".
+fn cumulative_mint_violation(total_minted: u128) -> Option<String> {
+    let minted = state::read_core(|c| c.cumulative_minted_e8s);
+    let inflight = state::inflight_mint_e8s();
+    (total_minted > minted.saturating_add(inflight)).then(|| {
+        format!("Base cumulative mints {total_minted} exceed the bridge's minted {minted} plus in flight {inflight}")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +239,10 @@ pub async fn bind_contract(address: String) -> BridgeResult<ContractBindingView>
     require(total_supply == 0, || format!("totalSupply() is {total_supply}, expected 0"))?;
     let out_count = view_u128(&contract, ViewCall::BridgeOutCount, at).await.map_err(read)?;
     require(out_count == 0, || format!("bridgeOutCount() is {out_count}, expected 0"))?;
+    // The cumulative-mint guard starts from zero on both sides; a contract that cannot
+    // answer this (an older build) would leave the guard unable to ever run.
+    let total_minted = view_u128(&contract, ViewCall::TotalMinted, at).await.map_err(read)?;
+    require(total_minted == 0, || format!("totalMinted() is {total_minted}, expected 0"))?;
 
     let minter_has = view_bool(&contract, ViewCall::HasRole { role: abi::MINTER_ROLE, account: minter }, at).await.map_err(read)?;
     require(minter_has, || "the canister's minter address does not hold MINTER_ROLE".to_string())?;
@@ -552,6 +578,18 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
         return Ok(ObserverOutcome::default());
     }
 
+    // Burns are about to be recorded (the counter is ahead of what is processed). Before
+    // ANY of them is, make sure no mint happened that this canister did not make: a burn
+    // of such tokens would be released out of escrow that backs honest users. Same head
+    // as the count above. A failed read records nothing and does not advance.
+    let total_minted = view_u128(&contract, ViewCall::TotalMinted, head.number)
+        .await
+        .map_err(|e| format!("cumulative mint guard: {e}; no burn is recorded until it can be read"))?;
+    if let Some(reason) = cumulative_mint_violation(total_minted) {
+        state::halt(reason.clone());
+        return Err(reason);
+    }
+
     let mut span = saved_span.unwrap_or(cfg.chunk_blocks).clamp(1, cfg.chunk_blocks);
     let mut cap = saved_cap.unwrap_or(cfg.default_cap).max(cfg.default_cap).min(rpc::MAX_RESPONSE_BYTES);
     let mut recorded = 0u32;
@@ -796,6 +834,17 @@ pub async fn check_base_supply() -> Result<state::BaseSupplySnapshot, String> {
     let head = rpc::finalized_head().await.map_err(|e| format!("finalized head: {e}"))?;
     let total = view_u128(&contract, ViewCall::TotalSupply, head.number).await?;
     let count_head = bridge_out_count(&contract, head.number).await?;
+    let total_minted = view_u128(&contract, ViewCall::TotalMinted, head.number).await?;
+    // The cumulative guard needs neither quiescence nor the burn bookkeeping below: it holds
+    // whatever is in flight and whatever the observer has processed. A violation halts at
+    // once, and the snapshot reports the supply as NOT within bound whatever `totalSupply`
+    // says (a mint burned again leaves it looking normal). The timer stores that snapshot and
+    // `admin_clear_halt` needs a fresh within-bound one, so the halt cannot be cleared while
+    // the excess exists; a cumulative count never comes back down.
+    let violation = cumulative_mint_violation(total_minted);
+    if let Some(reason) = &violation {
+        state::halt(reason.clone());
+    }
     // No await between reading local state and building the snapshot.
     let (skip, quiescent) = state::read_core(|c| {
         (
@@ -807,7 +856,11 @@ pub async fn check_base_supply() -> Result<state::BaseSupplySnapshot, String> {
         return Err("recorded burns are above the finalized head; supply check skipped".into());
     }
     let quiescent = quiescent && state::inflight_mint_e8s() == 0;
-    Ok(crate::timer::base_supply_snapshot(total, head.number, quiescent))
+    let mut snapshot = crate::timer::base_supply_snapshot(total, head.number, quiescent);
+    if violation.is_some() {
+        snapshot.within_bound = false;
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -858,6 +911,13 @@ mod tests {
         version: String,
         decimals: u128,
         total_supply: u128,
+        /// The contract's cumulative `totalMinted()` (what the canister minted, plus any
+        /// mint it did not make).
+        total_minted: u128,
+        /// `totalMinted()` fails on every provider.
+        fail_total_minted: bool,
+        /// How many `totalMinted()` calls the providers served (per provider call).
+        total_minted_reads: u32,
         supply_cap: u128,
         window_limit: u128,
         window_seconds: u128,
@@ -898,6 +958,9 @@ mod tests {
                 version: ids::CONTRACT_VERSION.to_string(),
                 decimals: 8,
                 total_supply: 0,
+                total_minted: 0,
+                fail_total_minted: false,
+                total_minted_reads: 0,
                 supply_cap: 100_000 * E8 as u128,
                 window_limit: 10_000 * E8 as u128,
                 window_seconds: 86_400,
@@ -983,6 +1046,11 @@ mod tests {
                         abi::SEL_VERSION => abi_string(&self.version),
                         abi::SEL_DECIMALS => word(self.decimals),
                         abi::SEL_TOTAL_SUPPLY => word(prov.supply.unwrap_or(self.total_supply)),
+                        abi::SEL_TOTAL_MINTED if self.fail_total_minted => return Err("totalMinted() is not served".into()),
+                        abi::SEL_TOTAL_MINTED => {
+                            self.total_minted_reads += 1;
+                            word(self.total_minted)
+                        }
                         abi::SEL_BRIDGE_OUT_COUNT => word(self.count_at(at)),
                         abi::SEL_SUPPLY_CAP => word(self.supply_cap),
                         abi::SEL_MINT_WINDOW_LIMIT => word(self.window_limit),
@@ -1195,10 +1263,10 @@ mod tests {
         assert_eq!(b.outstanding_base, (850 * E8) as u128);
         assert_eq!(b.pending_release, (150 * E8) as u128);
         assert_eq!(state::releases_in_state(|_| true, 10).len(), 2);
-        // One head round, one count round, one logs round; the head count is reused for
-        // the chunk that ends at the head.
+        // One head round, one count round, one cumulative-mint round, one logs round; the
+        // head count is reused for the chunk that ends at the head.
         assert_eq!(count_of(&sim, "eth_getLogs"), 3);
-        assert_eq!(count_of(&sim, "eth_call"), 3);
+        assert_eq!(count_of(&sim, "eth_call"), 6);
         assert_eq!(sim.borrow().calls.iter().find(|(_, m, _)| m == "eth_getLogs").unwrap().2, Some((101, 150)));
 
         // Replay the same range from the start: no second effect.
@@ -1230,9 +1298,10 @@ mod tests {
             per_provider.collect()
         };
         assert_eq!(ranges, vec![(101, 110), (111, 120), (121, 130)]);
-        // Counts read at 130 (head), 110 and 120; 130 is reused for the last chunk.
+        // Reads at 130 (head count, then totalMinted), then counts at 110 and 120; the head
+        // count is reused for the last chunk.
         let at: Vec<u64> = sim.borrow().calls.iter().filter(|(p, m, _)| *p == 0 && m == "eth_call").map(|(_, _, r)| r.unwrap().0).collect();
-        assert_eq!(at, vec![130, 110, 120]);
+        assert_eq!(at, vec![130, 130, 110, 120]);
     }
 
     #[test]
@@ -1572,6 +1641,8 @@ mod tests {
             ("wrong decimals", "decimals()", Box::new(|s: &mut Sim| s.decimals = 18)),
             ("existing supply", "totalSupply()", Box::new(|s: &mut Sim| s.total_supply = 1)),
             ("existing bridge-outs", "bridgeOutCount()", Box::new(|s: &mut Sim| s.count_blocks = vec![10])),
+            ("existing cumulative mints", "totalMinted()", Box::new(|s: &mut Sim| s.total_minted = 1)),
+            ("no totalMinted() getter", "TotalMinted", Box::new(|s: &mut Sim| s.fail_total_minted = true)),
             ("minter lacks the role", "MINTER_ROLE", Box::new(|s: &mut Sim| s.roles.clear())),
             ("admin holds the minter role", "admin address holds MINTER_ROLE", Box::new(|s: &mut Sim| s.roles.push((abi::MINTER_ROLE, ADMIN)))),
             ("someone else is default admin", "defaultAdmin()", Box::new(|s: &mut Sim| s.default_admin = [0x99; 20])),
@@ -1789,6 +1860,194 @@ mod tests {
         assert!(block_on(check_base_supply()).unwrap_err().contains("finalized head"));
         unbound(3, 2);
         assert!(block_on(check_base_supply()).unwrap_err().contains("no Base contract"));
+    }
+
+    // ----- cumulative mint guard ---------------------------------------------------------
+
+    /// A canister that has minted `minted` itself and sees `minted + extra` minted on Base.
+    fn guarded(minted: u64, extra: u64) -> Sim {
+        state::mutate_core(|c| c.cumulative_minted_e8s = minted as u128);
+        let mut s = Sim::new(3, 150);
+        s.total_minted = (minted + extra) as u128;
+        s
+    }
+
+    #[test]
+    fn an_extra_mint_followed_by_a_burn_in_the_same_pass_halts_before_any_release_is_recorded() {
+        bound(3, 2, 100);
+        // The canister minted 100; Base shows 140 minted (40 nobody here made). The
+        // attacker burned those 40 at once, so totalSupply looks normal (100 - 0 here).
+        let mut s = guarded(100 * E8, 40 * E8);
+        s.total_supply = 100 * E8 as u128;
+        s.add_event(1, 120, 40 * E8);
+        let sim = install(s);
+        let buckets = state::read_core(|c| c.buckets);
+
+        let err = run().unwrap_err();
+        assert!(err.contains("Base cumulative mints") && err.contains("exceed"), "{err}");
+        assert!(err.contains(&(140 * E8).to_string()) && err.contains(&(100 * E8).to_string()), "{err}");
+        let halted = state::read_core(|c| c.halted.clone()).expect("the bridge halts");
+        assert_eq!(halted.reason, err);
+        assert_eq!(release_count(), 0, "no release is recorded");
+        assert_eq!(state::read_core(|c| c.buckets), buckets, "no bucket moved");
+        assert_eq!(pos(), (100, 0), "the cursor does not advance");
+        assert_eq!(count_of(&sim, "eth_getLogs"), 0, "the burn was not even fetched");
+        assert_stuck("Base cumulative mints");
+
+        // The excess never goes away: every later pass refuses again, still recording nothing.
+        state::mutate_core(|c| c.observer.next_attempt_ns = None);
+        assert!(run().unwrap_err().contains("Base cumulative mints"));
+        assert_eq!(release_count(), 0);
+        assert_eq!(pos(), (100, 0));
+    }
+
+    #[test]
+    fn a_legitimate_in_flight_mint_does_not_halt() {
+        bound(3, 2, 100);
+        // 100 minted and seen final; a further 40 signed and already on Base but not yet
+        // seen final by the canister: allowed, and the burn is recorded.
+        put_inflight_mint(1, (40 * E8) as u64);
+        let mut s = guarded(100 * E8, 40 * E8);
+        s.add_event(1, 120, 10 * E8);
+        install(s);
+        let out = run().unwrap();
+        assert_eq!(out.recorded, 1);
+        assert!(!state::is_halted());
+        assert_eq!(release_count(), 1);
+        assert_eq!(pos(), (150, 1));
+    }
+
+    #[test]
+    fn the_guard_allows_exactly_minted_plus_in_flight_and_nothing_more() {
+        // Exactly equal is fine (nothing in flight).
+        bound(3, 2, 100);
+        let mut s = guarded(100 * E8, 0);
+        s.add_event(1, 120, 10 * E8);
+        install(s);
+        assert!(run().is_ok());
+        assert!(!state::is_halted());
+
+        // One unit more than minted plus in flight halts.
+        state::reset_for_tests();
+        bound(3, 2, 100);
+        put_inflight_mint(1, 7);
+        let mut s = guarded(100 * E8, 7);
+        s.total_minted += 1;
+        s.add_event(1, 120, 10 * E8);
+        install(s);
+        assert!(run().unwrap_err().contains("plus in flight 7"));
+        assert!(state::is_halted());
+        assert_eq!(release_count(), 0);
+    }
+
+    #[test]
+    fn a_failed_total_minted_read_records_nothing_and_does_not_advance() {
+        bound(3, 2, 100);
+        let mut s = guarded(100 * E8, 0);
+        s.add_event(1, 120, 10 * E8);
+        s.fail_total_minted = true;
+        let sim = install(s);
+        let err = run().unwrap_err();
+        assert!(err.contains("cumulative mint guard"), "{err}");
+        assert_eq!(release_count(), 0);
+        assert_eq!(pos(), (100, 0));
+        assert_eq!(count_of(&sim, "eth_getLogs"), 0, "no burn is fetched while the guard cannot be read");
+        assert!(!state::is_halted(), "an unreadable guard is a retryable error, not a halt");
+        assert_stuck("cumulative mint guard");
+
+        // Once the read works again the burn is recorded.
+        sim.borrow_mut().fail_total_minted = false;
+        let out = run().unwrap();
+        assert_eq!(out.recorded, 1);
+        assert_eq!(pos(), (150, 1));
+    }
+
+    #[test]
+    fn the_guard_is_read_at_the_same_finalized_head_as_the_count() {
+        bound(3, 2, 100);
+        let mut s = guarded(100 * E8, 0);
+        s.add_event(1, 120, 10 * E8);
+        let sim = install(s);
+        run().unwrap();
+        let reads: Vec<u64> = sim.borrow().calls.iter().filter(|(p, m, _)| *p == 0 && m == "eth_call").map(|(_, _, r)| r.unwrap().0).collect();
+        assert_eq!(reads, vec![150, 150], "bridgeOutCount and totalMinted, both at the head");
+    }
+
+    #[test]
+    fn an_idle_pass_records_no_burn_and_so_does_not_read_the_guard() {
+        bound(3, 2, 100);
+        // Base shows an excess, but nothing was burned: the cheap path records nothing and
+        // the reconcile timer is what reports the excess.
+        let sim = install(guarded(100 * E8, 40 * E8));
+        assert_eq!(run().unwrap(), ObserverOutcome::default());
+        assert!(!state::is_halted());
+        assert_eq!(pos(), (150, 0));
+        assert_eq!(sim.borrow().total_minted_reads, 0, "totalMinted() was read on the idle path");
+        assert_eq!(count_of(&sim, "eth_call"), 3);
+    }
+
+    #[test]
+    fn check_base_supply_halts_on_a_cumulative_excess_even_when_the_supply_looks_normal() {
+        bound(3, 2, 150);
+        // totalSupply equals outstanding (1000), so the C2 bound holds, but Base minted 40
+        // more than this canister did: they were burned again before this reading.
+        let mut s = guarded(1_000 * E8, 40 * E8);
+        s.total_supply = 1_000 * E8 as u128;
+        install(s);
+        let snap = block_on(check_base_supply()).unwrap();
+        assert!(!snap.within_bound, "a cumulative excess is never within bound, whatever totalSupply says");
+        assert_eq!(snap.total_supply, 1_000 * E8 as u128);
+        let reason = state::read_core(|c| c.halted.clone()).expect("the bridge halts").reason;
+        assert!(reason.contains("Base cumulative mints") && reason.contains("exceed"), "{reason}");
+        assert!(reason.contains(&(1_040 * E8).to_string()) && reason.contains(&(1_000 * E8).to_string()), "{reason}");
+    }
+
+    #[test]
+    fn check_base_supply_allows_in_flight_mints_and_an_exact_match() {
+        bound(3, 2, 150);
+        put_inflight_mint(1, (40 * E8) as u64);
+        let mut s = guarded(1_000 * E8, 40 * E8);
+        s.total_supply = 1_000 * E8 as u128;
+        install(s);
+        let snap = block_on(check_base_supply()).unwrap();
+        assert!(snap.within_bound);
+        assert!(!state::is_halted());
+
+        // Exactly the canister's own total, nothing in flight.
+        state::reset_for_tests();
+        bound(3, 2, 150);
+        let mut s = guarded(1_000 * E8, 0);
+        s.total_supply = 1_000 * E8 as u128;
+        install(s);
+        assert!(block_on(check_base_supply()).is_ok());
+        assert!(!state::is_halted());
+    }
+
+    #[test]
+    fn check_base_supply_cannot_read_the_guard_so_it_reports_an_error_without_a_snapshot() {
+        bound(3, 2, 150);
+        let mut s = guarded(1_000 * E8, 0);
+        s.total_supply = 1_000 * E8 as u128;
+        s.fail_total_minted = true;
+        install(s);
+        let err = block_on(check_base_supply()).unwrap_err();
+        assert!(err.contains("TotalMinted"), "{err}");
+        assert!(!state::is_halted());
+    }
+
+    #[test]
+    fn the_cumulative_halt_cannot_be_cleared_because_every_fresh_snapshot_is_out_of_bound() {
+        bound(3, 2, 150);
+        let mut s = guarded(1_000 * E8, 40 * E8);
+        s.total_supply = 1_000 * E8 as u128;
+        install(s);
+        assert!(!block_on(check_base_supply()).unwrap().within_bound);
+        assert!(state::is_halted());
+        // A second check (what admin_clear_halt runs) is out of bound again, and the halt
+        // keeps its first reason.
+        let first = state::read_core(|c| c.halted.clone()).unwrap().reason;
+        assert!(!block_on(check_base_supply()).unwrap().within_bound);
+        assert_eq!(state::read_core(|c| c.halted.clone()).unwrap().reason, first);
     }
 
     // ----- adaptive log ranges ---------------------------------------------------------
@@ -2056,7 +2315,7 @@ mod tests {
         assert_eq!(release_count(), 2);
         // The count reads were attempted (and failed) at the chunk ends before the head.
         let at: Vec<u64> = sim.borrow().calls.iter().filter(|(p, m, _)| *p == 0 && m == "eth_call").map(|(_, _, r)| r.unwrap().0).collect();
-        assert_eq!(at, vec![130, 110, 120]);
+        assert_eq!(at, vec![130, 130, 110, 120]);
         // Each unverified range is in the audit log.
         let notes = state::audit_page(0, 1_000).into_iter().filter(|r| r.note.contains("continuity alone")).count();
         assert_eq!(notes, 2);

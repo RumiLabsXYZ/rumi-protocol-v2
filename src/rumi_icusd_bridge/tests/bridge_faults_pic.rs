@@ -831,13 +831,15 @@ fn unauthorized_base_supply_halts_bridge_blocks_deposits_and_releases() {
     assert_eq!(audit.outstanding(), a as u128);
     let info = w.bridge_info();
     let reason = info.halted.clone().expect("bridge halted");
-    assert!(reason.contains("exceeds"), "halt reason: {reason}");
+    // Both the cumulative-mint guard ("exceed the bridge's minted") and the supply bound
+    // ("exceeds outstanding") fire on this excess; the cumulative one reports first.
+    assert!(reason.contains("exceed"), "halt reason: {reason}");
 
     // New deposits are refused.
     w.approve_bridge(user2, e8(5));
     let args = w.deposit_args(e8(5), &recipient);
     match w.bridge_to_base(user2, args) {
-        Err(BridgeError::Halted(r)) => assert!(r.contains("exceeds"), "{r}"),
+        Err(BridgeError::Halted(r)) => assert!(r.contains("exceed"), "{r}"),
         other => panic!("expected Halted, got {other:?}"),
     }
 
@@ -867,27 +869,24 @@ fn unauthorized_base_supply_halts_bridge_blocks_deposits_and_releases() {
     assert_eq!(w.user_balance(user2), user2_before);
 }
 
-/// DESIGN GAP, not a spec violation: the supply bound is only checked by `reconcile_supply`
-/// (every 30 minutes, or on `admin_reconcile`). Releases are paid by the same tick that
-/// records the burn, without re-checking the bound. So unbacked Base tokens that are minted
-/// by a compromised mint authority and immediately burned toward an ICP account are PAID OUT of
-/// escrow before the next reconcile can halt the bridge; the halt then fires too late (the
-/// accounting shows Base supply above `outstanding` because the burn consumed `outstanding`).
-/// The test states the desired property (nothing is paid out while Base supply exceeds the
-/// accounted bound) and is `#[ignore]` because the current design pays out. Run with
-/// `--ignored` to reproduce.
+/// A mint this canister did not make, burned again at once, must not be paid out of escrow.
+/// The periodic supply bound cannot see it (the burn leaves Base `totalSupply` looking
+/// normal), so the contract counts every mint cumulatively (`totalMinted()`) and the observer
+/// reads that counter at the finalized head BEFORE it records any burn. It finds Base has
+/// minted 40 more than the canister did (plus nothing in flight), halts the bridge and
+/// records nothing: the attacker's burn is never released and escrow stays untouched.
 ///
 /// Real: everything executes on anvil and the real ledger. Mocked: nothing.
 /// Simulated: anvil impersonates the bridge's admin address to `grantRole(MINTER_ROLE,
 /// attacker)` (a compromised admin key); the attacker is an anvil unlocked account.
 #[test]
-#[ignore = "DESIGN GAP: a release is paid in the tick that records the burn, before the next supply reconcile can halt (see doc comment)"]
 fn unauthorized_mint_then_burn_before_reconcile_must_not_pay_out_of_escrow() {
     let mut w = world();
     let (user, user2, recipient, attacker) = (w.user, w.user2, w.holder(0), w.holder(3));
     w.deposit_and_deliver(user, e8(100), &recipient);
     let clean = w.reconcile(); // the last reconcile before the attack
     assert_eq!(clean.base_supply_within_bound, Some(true));
+    assert!(w.bridge_info().halted.is_none());
     let user2_before = w.user_balance(user2);
     let escrow_before = w.escrow_balance();
 
@@ -898,17 +897,24 @@ fn unauthorized_mint_then_burn_before_reconcile_must_not_pay_out_of_escrow() {
     let nonce = w.fresh_nonce();
     let out = w.bridge_out_from(&attacker, e8(40) as u128, user2.as_slice(), [0u8; 32], nonce);
     assert!(out.success);
+    // The burn hides the mint from totalSupply: only the cumulative counter shows it.
+    assert_eq!(w.base_total_supply(), e8(100) as u128, "supply looks normal again");
     w.mine_finalize();
     w.ticks(6); // well inside the 30 minute reconcile cadence
     let paid = w.user_balance(user2) - user2_before;
+    let reason = w.bridge_info().halted.clone().expect("the observer halted the bridge before any reconcile");
+    assert!(reason.contains("Base cumulative mints") && reason.contains("exceed"), "halt reason: {reason}");
+    assert_eq!((paid, w.escrow_balance()), (0, escrow_before), "nothing may be paid out of escrow; halt: {reason}");
+    if let Some(r) = w.get_release(&out.transfer_id) {
+        assert_ne!(r.status, ReleaseStatus::Released, "the unbacked burn must not be released: {r:?}");
+        assert!(r.release_block_index.is_none());
+    }
+
+    // The late reconcile does not undo the halt, and nothing is ever paid.
     let audit = w.reconcile();
-    assert_eq!(
-        (paid, w.escrow_balance()),
-        (0, escrow_before),
-        "40 unbacked icUSD were released from escrow before any reconcile could halt the bridge; \
-         after the late reconcile: halted={:?} audit={audit:?}",
-        w.bridge_info().halted
-    );
+    assert!(w.bridge_info().halted.is_some(), "still halted after reconcile: {audit:?}");
+    w.ticks(4);
+    assert_eq!((w.user_balance(user2) - user2_before, w.escrow_balance()), (0, escrow_before));
 }
 
 // ===========================================================================

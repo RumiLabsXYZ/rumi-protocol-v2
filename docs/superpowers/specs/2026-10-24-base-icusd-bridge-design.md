@@ -150,7 +150,8 @@ event BridgeOut(bytes32 indexed transferId, address indexed from, uint256 amount
 - Validation: amount in `[max(1, minBridgeOut), u64::MAX]`; principal 1..29 bytes and not the
   anonymous principal `0x04`.
 - `mint` checks: not paused; recipient not zero or the contract; amount in `1..=u64::MAX`; `mintId`
-  unused; `totalSupply + amount <= supplyCap`; fixed-window rate limit.
+  unused; `totalSupply + amount <= supplyCap`; fixed-window rate limit. Every mint adds to the
+  cumulative `totalMinted` counter (never decreases).
 
 ## 7. Canister design
 
@@ -192,6 +193,14 @@ Any violation sets `halted` and stops mints, releases, refunds and sweeps.
 **Invariant C2 (Base supply bound):** at a finalized Base block, `totalSupply <= O + M_inflight`, where
 `M_inflight` sums mint amounts of operations with any signed attempt not yet finalized. A violation
 means unauthorized Base supply; it halts the bridge.
+
+**Invariant C4 (cumulative mints):** the contract's cumulative `totalMinted` at the finalized head
+never exceeds the canister's own cumulative finalized mints plus mints in flight. It is checked
+before any burn is recorded and at every reconciliation. Unlike C2 it cannot be hidden by burning
+the excess again, so a mint this canister did not make (a canister bug, or a compromised
+`MINTER_ROLE` grant) halts the bridge before its burn can be paid from escrow. Residual exposure:
+a foreign mint no larger than the mints in flight at that moment passes once; it is caught when
+those mints finalize.
 
 **Invariant C3 (exact quiescent match):** when no mint attempt is outstanding and the observer has
 consumed every bridge-out through finalized block `F` (`processed_count == bridgeOutCount(F)`),
@@ -478,6 +487,7 @@ local-EVM execution (anvil).
     start of a fresh window; replacing RPC providers is controller-only.
   - `SupplyAudit` now carries the ICP ledger total supply and the derived
     `circulating_on_icp = total - escrow` and `circulating_on_base` figures.
+  - Contract `totalMinted` and invariant C4 (above); bind requires `totalMinted() == 0`.
   - Oisy uses two clicks when an approval is needed (each signer call is the first signer call of
     its own click); Internet Identity and Plug keep one click.
 - **No `icp.yaml` entry.** The bridge is deliberately absent from `icp.yaml` so a broad deploy can

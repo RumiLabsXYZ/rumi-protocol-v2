@@ -80,6 +80,12 @@ contract BridgedIcUSD is ERC20, AccessControlDefaultAdminRules {
     /// @notice Amount minted so far in the current window.
     uint256 public mintedInWindow;
 
+    /// @notice Cumulative amount ever minted by `mint`. It never decreases (burns do not
+    /// reduce it), so `totalSupply() == totalMinted - total burned`. The bridge canister
+    /// compares it with the total it minted itself to detect a mint it did not make, even
+    /// one that was burned again before the next supply check could see it.
+    uint256 public totalMinted;
+
     /// @notice Minimum `bridgeOut` amount (a zero amount is rejected separately).
     uint256 public minBridgeOut;
 
@@ -218,6 +224,7 @@ contract BridgedIcUSD is ERC20, AccessControlDefaultAdminRules {
 
         mintConsumed[mintId] = true;
         mintedInWindow = used + amount;
+        totalMinted += amount;
         _mint(to, amount);
         emit BridgeMint(mintId, to, amount);
     }

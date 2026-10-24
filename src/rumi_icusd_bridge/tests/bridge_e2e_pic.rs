@@ -983,61 +983,69 @@ fn observer_finds_every_burn_across_chunks_and_inside_one_block() {
 
 #[test]
 fn exact_fee_boundaries_dust_is_held_and_one_e8_over_is_released() {
-    let (dep_fee, rel_fee) = (E8 - 1, E8); // deposit fee just under the 1 icUSD minimum deposit
+    // The contract minimum bridge-out (and the minimum deposit) is set to exactly
+    // release fee + ledger fee + 1, the smallest value the canister accepts: every burn the
+    // contract allows must leave at least 1 e8s for the user. Dust that only becomes
+    // unreleasable after a later ledger-fee rise is covered by the canister unit tests
+    // (flows::release::tests::dust_*), not here.
+    let rel_fee = E8;
+    let min_out = rel_fee + LEDGER_FEE + 1;
+    let dep_fee = min_out - 1; // deposit fee just under the minimum deposit
     let mut opts = SetupOptions::default();
+    opts.contract_min_bridge_out_e8s = min_out as u128;
+    opts.limits.min_deposit_e8s = min_out;
     opts.fees = BridgeFees { deposit_fee_e8s: dep_fee, release_fee_e8s: rel_fee };
     let mut w = BridgeWorld::setup(opts);
     let (user, h0) = (w.user, w.holder(0));
 
     // A = exactly the minimum deposit: only 1 e8s is minted.
-    let d1 = w.deposit_and_deliver(user, E8, &h0);
-    assert_eq!((d1.amount_e8s, d1.deposit_fee_e8s, d1.mint_amount_e8s), (E8, dep_fee, 1));
+    let d1 = w.deposit_and_deliver(user, min_out, &h0);
+    assert_eq!((d1.amount_e8s, d1.deposit_fee_e8s, d1.mint_amount_e8s), (min_out, dep_fee, 1));
     assert_eq!(w.base_balance(&h0), 1);
-    // A fee equal to the deposit would leave nothing to mint and is refused up front.
-    w.set_fees(BridgeFees { deposit_fee_e8s: dep_fee, release_fee_e8s: rel_fee }).expect("fees");
+    // Fee settings that would mint nothing, or leave the contract minimum unreleasable,
+    // are refused up front.
     assert!(matches!(
-        w.set_fees(BridgeFees { deposit_fee_e8s: E8, release_fee_e8s: rel_fee }),
+        w.set_fees(BridgeFees { deposit_fee_e8s: min_out, release_fee_e8s: rel_fee }),
         Err(BridgeError::InvalidArgument(_))
     ));
+    assert!(matches!(
+        w.set_fees(BridgeFees { deposit_fee_e8s: dep_fee, release_fee_e8s: rel_fee + 1 }),
+        Err(BridgeError::InvalidArgument(_))
+    ));
+    w.set_fees(BridgeFees { deposit_fee_e8s: dep_fee, release_fee_e8s: rel_fee }).expect("fees");
     // Second deposit to have something to burn.
     let d2 = w.deposit_and_deliver(user, e8(10), &h0);
     assert_eq!(d2.mint_amount_e8s, e8(10) - dep_fee);
     let held_total = 1 + (e8(10) - dep_fee) as u128;
     assert_eq!(w.base_balance(&h0), held_total);
 
-    // B = release fee + ledger fee exactly: nothing would be left for the user, so the claim
-    // is held and re-minted to the Base sender (no ICP transfer).
+    // One e8s below the contract minimum: the burn itself reverts on Base, so there is
+    // nothing to release and no dust claim.
     let user_before = w.user_balance(user);
     let escrow_before = w.escrow_balance();
-    let b_dust = rel_fee + LEDGER_FEE;
     let nonce = w.fresh_nonce();
-    let dust = w.bridge_out_from(&h0, b_dust as u128, user.as_slice(), [0u8; 32], nonce);
-    assert!(dust.success);
+    let below = w.bridge_out_from(&h0, (min_out - 1) as u128, user.as_slice(), [0u8; 32], nonce);
+    assert!(!below.success, "the contract rejects a burn below minBridgeOut");
     w.mine_finalize();
-    let r = w.wait_release(&dust.transfer_id, "Reminted", |r| matches!(r.status, ReleaseStatus::Reminting { .. } | ReleaseStatus::Reminted { .. }));
-    let (ReleaseStatus::Reminting { deposit_id } | ReleaseStatus::Reminted { deposit_id }) = r.status else { unreachable!() };
-    w.wait_mint_included(deposit_id);
-    w.mine_finalize();
-    w.wait_delivered(deposit_id);
-    w.wait_release(&dust.transfer_id, "Reminted", |r| matches!(r.status, ReleaseStatus::Reminted { .. }));
-    assert_eq!(w.base_balance(&h0), held_total, "the sender is made whole");
-    assert_eq!((w.user_balance(user), w.escrow_balance()), (user_before, escrow_before), "no ICP moved");
+    w.ticks(3);
+    assert_eq!(w.base_balance(&h0), held_total);
+    assert_eq!((w.user_balance(user), w.escrow_balance()), (user_before, escrow_before), "nothing moved");
 
-    // B = release fee + ledger fee + 1: exactly 1 e8s reaches the user.
-    let b_ok = rel_fee + LEDGER_FEE + 1;
+    // B = the contract minimum: exactly 1 e8s reaches the user.
     let nonce = w.fresh_nonce();
-    let ok = w.bridge_out_from(&h0, b_ok as u128, user.as_slice(), [0u8; 32], nonce);
+    let ok = w.bridge_out_from(&h0, min_out as u128, user.as_slice(), [0u8; 32], nonce);
+    assert!(ok.success);
     w.mine_finalize();
     let rel = w.wait_released(&ok.transfer_id);
     assert_eq!((rel.amount_to_receive_e8s, rel.release_fee_e8s), (Some(1), rel_fee));
     assert_eq!(w.user_balance(user) - user_before, 1, "exactly one e8s");
-    assert_eq!(escrow_before - w.escrow_balance(), (b_ok - rel_fee) as u128, "escrow pays B - release fee");
+    assert_eq!(escrow_before - w.escrow_balance(), (min_out - rel_fee) as u128, "escrow pays B - release fee");
     let audit = w.reconcile();
     let fees = (2 * dep_fee + rel_fee) as u128;
     assert_eq!(audit.fees(), fees, "{audit:?}");
-    assert_eq!(audit.outstanding(), held_total - b_ok as u128);
+    assert_eq!(audit.outstanding(), held_total - min_out as u128);
     assert_eq!(audit.coverage_ok, Some(true));
-    assert_eq!(w.base_total_supply(), held_total - b_ok as u128);
+    assert_eq!(w.base_total_supply(), held_total - min_out as u128);
     assert!(w.bridge_info().halted.is_none());
 }
 
@@ -1067,7 +1075,9 @@ fn unbacked_base_supply_halts_the_bridge_and_nothing_leaves_escrow() {
     let audit = w.reconcile();
     assert_eq!(audit.base_supply_within_bound, Some(false), "{audit:?}");
     let halted = w.bridge_info().halted.expect("bridge halted");
-    assert!(halted.contains("exceeds outstanding"), "{halted}");
+    // Either guard may report first: the cumulative-mint guard ("exceed the bridge's
+    // minted") or the supply bound ("exceeds outstanding").
+    assert!(halted.contains("exceed"), "{halted}");
     let escrow = w.escrow_balance();
     assert_eq!(escrow, e8(40) as u128);
 
@@ -1277,7 +1287,6 @@ fn hints_are_bounded_and_active_operation_limits_hold() {
 /// pass (hourly), so as soon as the finalized head moves on after the last burn,
 /// `base_supply_exact_match` becomes `None` although every burn up to F is recorded.
 #[test]
-#[ignore = "BUG (reported to coordinator): check_base_supply requires observer.cursor_block >= finalized head, which an idle observer never advances, so C3 exact_match is None whenever the finalized head moved after the last full pass. Remove this ignore once the cursor condition is dropped."]
 fn exact_match_is_reported_when_quiescent_even_if_the_observer_idled() {
     let mut w = BridgeWorld::setup(SetupOptions::default());
     let (user, h0) = (w.user, w.holder(0));
