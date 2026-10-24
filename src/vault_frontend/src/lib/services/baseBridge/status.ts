@@ -163,7 +163,7 @@ export function describeDeposit(view: DepositView, ctx: DepositContext = {}): De
         ...base,
         stage: 'held',
         label: 'Held',
-        detail: `The Base mint is on hold: ${reason || 'no reason given'}. Your escrowed icUSD is safe. The bridge may retry automatically${canRefund ? ', or you can request a refund' : ''}.`,
+        detail: `The Base mint is on hold: ${reason || 'no reason given'}. Your escrowed icUSD is safe. A hold caused by a pause or limit is retried automatically; a reverted mint waits for an operator retry${canRefund ? ' or your refund' : ''}.`,
         tone: 'warning',
         holdReason: reason,
         canRefund,

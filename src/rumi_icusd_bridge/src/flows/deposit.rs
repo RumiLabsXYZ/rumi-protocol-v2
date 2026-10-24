@@ -129,7 +129,9 @@ fn admit_inner(caller: candid::Principal, args: &BridgeToBaseArgs, dry_run: bool
     }
 
     // Active operation limits.
-    if state::active_deposit_count() >= limits.max_active_global as u64 {
+    // Re-mints of held claims are not user admissions and must not crowd them out.
+    let active_user = state::deposits_in_state(|d| matches!(d.kind, DepositKind::UserDeposit), usize::MAX).len();
+    if active_user >= limits.max_active_global as usize {
         return Err(BridgeError::TooManyActiveOperations);
     }
     let mine = state::active_deposits_owned_by(&caller);

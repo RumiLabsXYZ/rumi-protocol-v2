@@ -254,8 +254,11 @@ async fn admin_clear_halt() -> BridgeResult<SupplyAudit> {
 async fn admin_run_tick() -> BridgeResult<()> {
     admin::require_admin()?;
     timer::ensure_scheduled();
-    timer::run_tick().await;
-    Ok(())
+    if timer::run_tick().await {
+        Ok(())
+    } else {
+        Err(BridgeError::InvalidState("a tick is already running".into()))
+    }
 }
 
 #[ic_cdk::update]

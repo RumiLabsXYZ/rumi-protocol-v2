@@ -12,7 +12,7 @@ use crate::flows;
 use crate::ids::LaneKind;
 use crate::ledger;
 use crate::observer;
-use crate::state::{self, AuditCtx, BalanceSnapshot};
+use crate::state::{self, AuditCtx, BalanceSnapshot, DepositState, ReleaseState};
 use crate::types::*;
 use crate::views;
 use std::cell::Cell;
@@ -31,17 +31,26 @@ thread_local! {
     static NEXT_TIMER: std::cell::RefCell<Option<ic_cdk_timers::TimerId>> = const { std::cell::RefCell::new(None) };
 }
 
+/// A pending tick whose due time passed this long ago is treated as lost (for example a
+/// timer task dropped while the canister was frozen), so it can be re-armed.
+pub const LOST_TIMER_GRACE_NS: u64 = 60 * 1_000_000_000;
+
 /// Decide whether a request to tick at `wanted_due` should replace the pending tick.
 /// A pending tick that is already due no later than requested is kept, so repeated
-/// requests (for example many user calls) can never push the next tick later.
-pub fn should_reschedule(pending_due: Option<u64>, wanted_due: u64) -> bool {
+/// requests (for example many user calls) can never push the next tick later. A pending
+/// tick that is long overdue is presumed lost and is replaced.
+pub fn should_reschedule(pending_due: Option<u64>, wanted_due: u64, now_ns: u64) -> bool {
     match pending_due {
+        Some(due) if due.saturating_add(LOST_TIMER_GRACE_NS) < now_ns => true,
         Some(due) => wanted_due < due,
         None => true,
     }
 }
 
-struct TickGuard;
+/// Holder token for the tick guard: the start time of the tick that owns it.
+struct TickGuard {
+    token: u64,
+}
 
 impl TickGuard {
     fn acquire() -> Option<TickGuard> {
@@ -50,7 +59,7 @@ impl TickGuard {
             Some(t) if now.saturating_sub(t) < STALE_GUARD_NS => None,
             _ => {
                 r.set(Some(now));
-                Some(TickGuard)
+                Some(TickGuard { token: now })
             }
         })
     }
@@ -58,7 +67,12 @@ impl TickGuard {
 
 impl Drop for TickGuard {
     fn drop(&mut self) {
-        RUNNING_SINCE.with(|r| r.set(None));
+        // Clear only our own claim: a stale guard may have been reclaimed by a newer tick.
+        RUNNING_SINCE.with(|r| {
+            if r.get() == Some(self.token) {
+                r.set(None);
+            }
+        });
     }
 }
 
@@ -66,11 +80,33 @@ impl Drop for TickGuard {
 /// deliberately excluded: anyone signed in can submit one, and they must not be able
 /// to force fast, paid RPC polling.
 pub fn has_pending_work() -> bool {
-    state::active_deposit_count() > 0 || state::active_release_count() > 0 || state::read_core(|c| {
+    // Only states the timer can move forward count. Held deposits (finalized revert,
+    // waiting for the owner or an admin) and held or re-minting releases (their re-mint is
+    // a deposit counted on its own) do not keep the timer fast.
+    let deposits = state::deposits_in_state(
+        |d| {
+            matches!(
+                d.state,
+                DepositState::PullPending
+                    | DepositState::PullUnknown
+                    | DepositState::Escrowed
+                    | DepositState::MintInFlight
+                    | DepositState::Refunding
+            )
+        },
+        1,
+    );
+    if !deposits.is_empty() {
+        return true;
+    }
+    if !state::releases_in_state(|r| matches!(r.state, ReleaseState::Pending), 1).is_empty() {
+        return true;
+    }
+    state::read_core(|c| {
         // A halted lane (nonce anomaly) is parked for manual investigation; it must not
         // keep the timer at the fast interval forever.
         (c.minter_lane.halted.is_none()
-                && (c.minter_lane.unincluded_tx.is_some() || !c.minter_lane.unfinalized_txs.is_empty()))
+            && (c.minter_lane.unincluded_tx.is_some() || !c.minter_lane.unfinalized_txs.is_empty()))
             || (c.admin_lane.halted.is_none()
                 && (c.admin_lane.unincluded_tx.is_some()
                     || !c.admin_lane.unfinalized_txs.is_empty()
@@ -81,8 +117,9 @@ pub fn has_pending_work() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn schedule_in(secs: u64) {
-    let wanted = env::now_ns().saturating_add(secs.saturating_mul(1_000_000_000));
-    if !should_reschedule(NEXT_DUE_NS.with(|d| d.get()), wanted) {
+    let now = env::now_ns();
+    let wanted = now.saturating_add(secs.saturating_mul(1_000_000_000));
+    if !should_reschedule(NEXT_DUE_NS.with(|d| d.get()), wanted, now) {
         return;
     }
     NEXT_TIMER.with(|t| {
@@ -97,7 +134,7 @@ fn schedule_in(secs: u64) {
             let idle = state::read_core(|c| c.config.observer.idle_interval_secs);
             schedule_in(idle);
             ic_cdk::spawn(async {
-                run_tick().await;
+                let _ = run_tick().await;
                 schedule_next();
             })
         });
@@ -108,8 +145,9 @@ fn schedule_in(secs: u64) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn schedule_in(secs: u64) {
-    let wanted = env::now_ns().saturating_add(secs.saturating_mul(1_000_000_000));
-    if should_reschedule(NEXT_DUE_NS.with(|d| d.get()), wanted) {
+    let now = env::now_ns();
+    let wanted = now.saturating_add(secs.saturating_mul(1_000_000_000));
+    if should_reschedule(NEXT_DUE_NS.with(|d| d.get()), wanted, now) {
         NEXT_DUE_NS.with(|d| d.set(Some(wanted)));
     }
 }
@@ -163,11 +201,12 @@ async fn refresh_ledger_basics() {
     }
 }
 
-/// All background work, in dependency order.
-pub async fn run_tick() {
-    let Some(_guard) = TickGuard::acquire() else { return };
+/// All background work, in dependency order. Returns false if another tick holds the
+/// guard (nothing was run).
+pub async fn run_tick() -> bool {
+    let Some(_guard) = TickGuard::acquire() else { return false };
     if !state::read_core(|c| c.initialized) {
-        return;
+        return true;
     }
     refresh_ledger_basics().await;
     flows::deposit::reconcile_pulls().await;
@@ -190,6 +229,7 @@ pub async fn run_tick() {
     if due {
         let _ = reconcile_supply().await;
     }
+    true
 }
 
 /// Check invariant C1 against the live escrow balance and C2/C3 against the finalized
@@ -289,10 +329,52 @@ mod tests {
 
     #[test]
     fn requests_never_push_a_pending_tick_later() {
-        assert!(should_reschedule(None, 100));
-        assert!(should_reschedule(Some(100), 50), "an earlier request wins");
-        assert!(!should_reschedule(Some(100), 100));
-        assert!(!should_reschedule(Some(100), 150), "a later request never delays the pending tick");
+        assert!(should_reschedule(None, 100, 0));
+        assert!(should_reschedule(Some(100), 50, 0), "an earlier request wins");
+        assert!(!should_reschedule(Some(100), 100, 0));
+        assert!(!should_reschedule(Some(100), 150, 0), "a later request never delays the pending tick");
+    }
+
+    #[test]
+    fn a_long_overdue_pending_tick_is_presumed_lost_and_can_be_rearmed() {
+        let due = 1_000_000_000_000u64;
+        // Within the grace period the pending tick is kept.
+        assert!(!should_reschedule(Some(due), due + 5_000_000_000, due + LOST_TIMER_GRACE_NS));
+        // Long overdue: replaced even by a later request.
+        assert!(should_reschedule(Some(due), due + 3_600_000_000_000, due + LOST_TIMER_GRACE_NS + 1));
+        // Host scheduling follows the same rule.
+        crate::state::reset_for_tests();
+        crate::env::test_env::set_now_ns(due);
+        schedule_soon();
+        let armed = pending_due_for_tests().unwrap();
+        crate::env::test_env::set_now_ns(armed + 3_600_000_000_000);
+        ensure_scheduled();
+        assert!(pending_due_for_tests().unwrap() > armed, "an admin call revives a lost timer");
+    }
+
+    #[test]
+    fn a_reclaimed_guard_is_not_released_by_the_older_holder() {
+        crate::env::test_env::set_now_ns(10);
+        let old = TickGuard::acquire().expect("free");
+        // The old tick runs past the stale threshold; a new tick reclaims the guard.
+        crate::env::test_env::set_now_ns(10 + STALE_GUARD_NS + 1);
+        let new = TickGuard::acquire().expect("stale guard reclaimed");
+        drop(old);
+        assert!(TickGuard::acquire().is_none(), "the newer holder still owns the guard");
+        drop(new);
+        assert!(TickGuard::acquire().is_some());
+    }
+
+    #[test]
+    fn held_states_do_not_keep_the_timer_fast() {
+        crate::flows::deposit::tests::setup_bound();
+        let mut d = crate::state::tests::sample_deposit(1, candid::Principal::from_slice(&[1; 10]));
+        d.state = DepositState::MintHeld { reason: "reverted".into() };
+        crate::state::put_deposit(&d);
+        assert!(!has_pending_work(), "a held deposit waits for the owner or an admin");
+        d.state = DepositState::Escrowed;
+        crate::state::put_deposit(&d);
+        assert!(has_pending_work());
     }
 
     #[test]

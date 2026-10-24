@@ -103,8 +103,8 @@ primitives crate is a follow-up, not a prerequisite.
 | --- | --- | --- | --- |
 | Escrow account `(bridge, ESCROW_SUBACCOUNT)` | Bridge canister code only | Release to the account named in a finalized `BridgeOut`; refund a deposit to its own source account after non-delivery is proven; sweep accrued fees (bounded by the fee bucket) to the configured fee recipient. There is no general withdraw endpoint. | Canister code, i.e. controllers via upgrade. |
 | ICRC-2 pull | The depositor | Pull exactly `A` from `Account{caller, from_subaccount}` once, under the user's own `icrc2_approve` to the bridge canister. The canister never pulls from any account except the authenticated caller's. | User. |
-| Canister admins | Principals in config (init arg; changed only by controllers) | Pause/unpause; set limits and fees within hard bounds; set RPC providers; bind the Base contract once (only with zero liabilities); sweep fees; submit Base contract admin actions; retry or recover held operations. Admins cannot move escrow except via the paths above. | Controllers (`set_admins`, controller-only). |
-| Controllers | Same trust root as other Rumi canisters | Upgrade code (which could do anything with escrow and keys). | NNS/controller set. |
+| Canister admins | Principals in config (init arg; changed only by controllers) | Pause/unpause; set limits, fees, gas and observer settings within hard bounds; bind the Base contract once (only with zero liabilities); sweep fees; submit Base contract admin actions; retry or recover held operations. Admins cannot move escrow except via the paths above. | Controllers (`set_admins`, controller-only). |
+| Controllers | Same trust root as other Rumi canisters | Upgrade code (which could do anything with escrow and keys); replace RPC providers (chain-id verified); set admins. | NNS/controller set. |
 
 The bridge canister is **not** the icUSD minting account, so it cannot create ICP icUSD.
 
@@ -361,7 +361,7 @@ exceed contract limits.
 
 `ic-stable-structures` with a fixed `MemoryId` layout and a uniqueness test: a CBOR `StableCell` for
 config and counters, `StableBTreeMap`s for deposits, releases, txs, the per-owner index, the
-`(owner, client_request_id)` index, and a bounded audit log. Records are CBOR with
+`(owner, client_request_id)` index, and an append-only audit log (`StableLog`; it grows with operations, not with time). Records are CBOR with
 `#[serde(default)]` on added fields (CBOR is self-describing, unlike Candid `Decode!`). There is no
 `pre_upgrade` hook; `post_upgrade` restarts the timer. Operation ids, attempts and buckets survive
 upgrades; tests upgrade the canister mid-flight. Upgrades should follow stop -> upgrade -> start so

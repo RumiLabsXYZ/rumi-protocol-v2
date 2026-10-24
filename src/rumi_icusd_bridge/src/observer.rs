@@ -682,8 +682,13 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
         let mut newly = 0u32;
         let mut last_block = last_event_block;
         let mut failure = None;
+        let mut deferred = None;
         for (ev, log) in &events {
             match record_finalized_bridge_out(ev, log) {
+                Ok(RecordOutcome::Deferred(reason)) => {
+                    deferred = Some(format!("BridgeOut {} deferred: {reason}", ev.sequence));
+                    break;
+                }
                 Ok(outcome) => {
                     if outcome == RecordOutcome::Recorded {
                         newly += 1;
@@ -698,6 +703,15 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
             }
         }
         recorded += newly;
+        if let Some(note) = deferred {
+            // Not a failure: an in-flight mint explains the burn. Keep the recorded prefix
+            // and retry next pass, without counting toward backoff.
+            if done > 0 {
+                let kept = Progress { cursor, processed: processed + done, last_event_block: last_block };
+                commit_progress(head, (cursor, processed), kept, None)?;
+            }
+            return Ok(ObserverOutcome { recorded, pending_work: true, note: Some(note) });
+        }
         if let Some(msg) = failure {
             // Stop at the failing event. The ones before it are stored, so they stay
             // counted; the cursor does not pass the range, and the next pass starts here
@@ -2534,9 +2548,11 @@ mod tests {
         let mut s = Sim::new(3, 150);
         s.add_event(1, 120, 10 * E8);
         install(s);
-        let err = run().unwrap_err();
-        assert!(err.contains("recording BridgeOut 1"), "{err}");
-        assert!(!state::is_halted(), "a retryable error is not a halt");
+        let out = run().unwrap();
+        assert!(out.note.as_deref().unwrap_or("").contains("deferred"), "{out:?}");
+        assert!(out.pending_work);
+        assert!(!state::is_halted(), "a deferred burn is not a halt");
+        assert_eq!(state::read_core(|c| c.observer.consecutive_failures), 0, "a deferral is not a failure (no backoff)");
         let o = observer_state();
         assert_eq!((o.cursor_block, o.processed_count, o.last_event_block), (100, 0, 0));
         assert_eq!(release_count(), 0);

@@ -26,6 +26,10 @@ pub const MAX_HINTS_PER_CALLER: usize = 5;
 pub enum RecordOutcome {
     Recorded,
     AlreadyRecorded,
+    /// Not recorded yet, and not an error: the burn exceeds settled outstanding supply but
+    /// in-flight mints explain it. The observer stops here and retries next pass without
+    /// counting a failure (so no backoff delays the release).
+    Deferred(String),
 }
 
 /// Parse the destination named in a bridge-out. `Err` gives the hold reason.
@@ -96,11 +100,11 @@ pub fn record_finalized_bridge_out(ev: &BridgeOutEvent, log: &RawLog) -> Result<
     if (ev.amount_e8s as u128) > outstanding {
         let inflight = state::inflight_mint_e8s();
         if (ev.amount_e8s as u128) <= outstanding.saturating_add(inflight) {
-            return Err(format!(
+            return Ok(RecordOutcome::Deferred(format!(
                 "bridge-out {} of {} e8s waits for in-flight mint settlement (settled outstanding {outstanding}, in flight {inflight})",
                 ids::hex0x(&ev.transfer_id),
                 ev.amount_e8s
-            ));
+            )));
         }
     }
     let (t, st) = match &releasable {
@@ -164,9 +168,16 @@ pub async fn process_releases() {
     if paused {
         return;
     }
-    let pending = state::releases_in_state(|r| matches!(r.state, ReleaseState::Pending), MAX_RELEASES_PER_TICK);
-    for r in pending {
-        let tid = r.transfer_id;
+    let pending: Vec<[u8; 32]> = state::releases_in_state(|r| matches!(r.state, ReleaseState::Pending), MAX_RELEASES_PER_TICK)
+        .into_iter()
+        .map(|r| r.transfer_id)
+        .collect();
+    for tid in pending {
+        // Re-read: an earlier iteration's await may have let another tick change it.
+        let Some(r) = state::get_release(&tid) else { continue };
+        if !matches!(r.state, ReleaseState::Pending) {
+            continue;
+        }
         if r.transfer.is_none() && !prepare_release_op(&tid) {
             continue;
         }
@@ -186,6 +197,14 @@ pub async fn process_releases() {
 /// Returns false if the release must wait.
 fn prepare_release_op(tid: &[u8; 32]) -> bool {
     let Some(mut r) = state::get_release(tid) else { return false };
+    if !matches!(r.state, ReleaseState::Pending) {
+        return false;
+    }
+    // Never replace a tuple that may already have been sent: a second distinct tuple
+    // with the same memo would be a second, independent transfer.
+    if r.transfer.is_some() {
+        return true;
+    }
     let Some(dest) = r.destination else { return false };
     let now = env::now_ns();
     let canister = env::canister_id();
@@ -436,13 +455,34 @@ mod tests {
             note: None,
         });
         let (e, l) = ev(1, 100 * E8, user().as_slice().to_vec());
-        assert!(record_finalized_bridge_out(&e, &l).is_err());
+        assert!(matches!(record_finalized_bridge_out(&e, &l), Ok(RecordOutcome::Deferred(_))));
         assert!(!state::is_halted(), "an in-flight mint explains the burn");
         assert!(state::get_release(&e.transfer_id).is_none());
         // More than the in-flight mint can explain still halts.
         let (e2, l2) = ev(2, 101 * E8, user().as_slice().to_vec());
         assert!(record_finalized_bridge_out(&e2, &l2).is_err());
         assert!(state::is_halted());
+    }
+
+    #[test]
+    fn preparing_twice_never_replaces_a_tuple_that_may_have_been_sent() {
+        setup();
+        let (e, l) = ev(1, 10 * E8, user().as_slice().to_vec());
+        record_finalized_bridge_out(&e, &l).unwrap();
+        assert!(prepare_release_op(&e.transfer_id));
+        let first = state::get_release(&e.transfer_id).unwrap().transfer.unwrap();
+        // Simulate the first send (as attempt() would persist it).
+        let op_ref = OpRef::Release(e.transfer_id);
+        let mut sent = first.clone();
+        sent.attempts = 1;
+        sent.outflow_reserved = true;
+        ledger_ops::store_op(&op_ref, sent.clone());
+        // A second, overlapping tick prepares the same release later.
+        crate::env::test_env::advance_secs(7);
+        assert!(prepare_release_op(&e.transfer_id));
+        let after = state::get_release(&e.transfer_id).unwrap().transfer.unwrap();
+        assert_eq!(after, sent, "the persisted tuple must be untouched");
+        assert_eq!(state::read_core(|c| c.windows.released_in_window), (10 * E8) as u128, "window charged once");
     }
 
     #[test]
