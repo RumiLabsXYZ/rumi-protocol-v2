@@ -122,10 +122,10 @@
     },
     {
       "id": "BB-10",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Frontend Bridge page",
-      "evidenceText": "proof=none; vitest specs for both flows, wallet/network changes, recovery; npm run check adds no errors; build passes",
+      "evidenceText": "proof=local-test; Committed ac7a517a; 314 bridge specs and 1428 total vitest pass; svelte-check at baseline; build passes; no new deps or CSP change",
       "evidenceLinks": []
     },
     {
@@ -138,18 +138,18 @@
     },
     {
       "id": "BB-12",
-      "state": "todo",
+      "state": "in_progress",
       "owner": "worker-sonnet",
       "scope": "Adversarial review A (accounting, authority, replay)",
-      "evidenceText": "proof=none; Findings with dispositions",
+      "evidenceText": "proof=none; Round 1 running; same rubric as B, isolated",
       "evidenceLinks": []
     },
     {
       "id": "BB-13",
-      "state": "todo",
+      "state": "in_progress",
       "owner": "worker-sonnet",
-      "scope": "Adversarial review B (state, Candid, upgrade, wallet flow)",
-      "evidenceText": "proof=none; Findings with dispositions",
+      "scope": "Adversarial review B (IC semantics, cycles, upgrade, wallet flow)",
+      "evidenceText": "proof=none; Round 1 running; same rubric as A, isolated",
       "evidenceLinks": []
     },
     {
