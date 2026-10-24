@@ -1,0 +1,52 @@
+{
+  "cards": [
+    {
+      "id": "BB-00",
+      "state": "done",
+      "owner": "coordinator",
+      "scope": "Baseline, worktree inventory, isolated branch",
+      "evidenceText": "proof=source; inventory run, 0 eligible worktrees; baseline main 32358d23",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-R1",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Recon: existing icUSD Solidity contract, tests, deploy script",
+      "evidenceText": "proof=none",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-R2",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Recon: backend EVM signing, transaction, observer and supply code",
+      "evidenceText": "proof=none",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-R3",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Recon: backend ledger calls, persistence, Candid tooling, CI",
+      "evidenceText": "proof=none",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-R4",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Recon: vault frontend routes, auth and wallet code",
+      "evidenceText": "proof=none",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-01",
+      "state": "todo",
+      "owner": "coordinator",
+      "scope": "Design spec and implementation plan",
+      "evidenceText": "proof=none",
+      "evidenceLinks": []
+    }
+  ]
+}
