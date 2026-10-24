@@ -20,8 +20,18 @@ definitions; update it with every material board change.
 | `source` | Source read or written; no test executed. |
 | `local-test` | Deterministic local tests (cargo unit, forge, vitest) passed. |
 | `local-integration` | Local PocketIC and/or local anvil execution passed. |
+| `public-created` | Authorized Base Sepolia run only: new test canisters created and funded, controllers verified; no code installed. |
+| `public-installed` | Authorized run: code installed and its module hash read back equal to the packet's install artifact. |
+| `public-signed` | Authorized run: a transaction signed by the bridge's threshold key. |
+| `public-broadcast` | Authorized run: a transaction accepted by Base Sepolia providers (hash known). |
+| `public-receipt` | Authorized run: a receipt with status 1 on two providers. |
+| `public-finalized` | Authorized run: the receipt block is at or behind the finalized head with a matching canonical hash. |
+| `public-settled` | Authorized run: the bridge records the operation complete and ledger, Base and supply-audit readbacks agree. |
 
-No card may claim a live, testnet, or mainnet proof level. Live work is listed under Held.
+The `public-*` levels apply only to the isolated Base Sepolia run in the deployment packet (synthetic
+test assets, chain 84532), each at the exact step it names. No card may claim a production or
+mainnet-funds proof level. Exact targets, transactions and funding stay in the executor's private
+run record, never on this board.
 
 ## Shared build coordination
 
@@ -64,7 +74,7 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 | BB-21 Base Sepolia read-only preflight | done | worker W7 (Sonnet / Sonnet) + coordinator | read-only | none | Read-only: CLI ready via a separate test project; cycles fit a reduced budget; test key and providers checked; EVM RPC request costs measured; deploy script simulated; deployer signer held | source |
 | BB-22 Focused reviews of the follow-up candidate | done | worker (Sonnet / Sonnet) x2 | read-only | BB-18, BB-19, BB-20 | Review A PASS and review B PASS on 4169feb8, no blockers; raw Wasm a0049b9a passes all five PocketIC suites run one after another (71 tests) | local-integration |
 | BB-23 Base Sepolia deployment packet | done (ready for executor validation) | coordinator (Opus 5.5 / Opus 5.5) | deployment packet and runbook | BB-21, BB-22 | Packet with raw and install-artifact hashes kept apart; install artifact 0b324387 passes three PocketIC round-trip and upgrade tests; budget 2.5T cycles with 0.55T reserve; deployer steps held | local-integration |
-| BB-24 Base Sepolia phase 1: ICP side (packet steps A to E) | todo (ready for the executor) | supervisor (Miles) | none (public executor) | BB-23 | New synthetic ledger and dedicated bridge on fuqsr, 600B and 1.9T cycles (reserve at least 0.5T), install, observer config, derive public Base addresses; stops before step F | none |
+| BB-24 Base Sepolia phase 1: ICP side (packet steps A to E) | in progress (step B done; ledger install pending at the executor) | supervisor (Miles) | none (public executor) | BB-23 | Step B done: two test canisters created on the packet's subnet, budget and reserve as planned, single controller verified. Step C ledger install pending at the executor boundary, not retried; no code installed; bridge install not begun | public-created |
 | BB-25 Base Sepolia phase 2: Base side (packet steps F to J) | blocked (deployer signer held) | supervisor (Miles) | none (public executor) | BB-24 | Contract deploy, funding, bind, round trip and close. HELD: creating a test-only Base Sepolia deployer signer was refused by an approval review; waiting on Rob's explicit test-key answer | none |
 
 ## Regression evidence (backend untouched)
@@ -100,3 +110,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-24: preflight done (read-only); reduced cycles budget fits; W5 fixes implemented; W7 recovered from a download stuck at approval.
 - 2026-10-24: follow-ups closed in 4169feb8; focused reviews A and B PASS; raw Wasm passes all five suites; install artifact passes three round-trip and upgrade tests; packet ready for Miles; deployer signer still held.
 - 2026-10-24: Miles validated the packet; BB-24 split into phase 1 (ICP side, steps A to E, ready) and BB-25 phase 2 (Base side, held on the deployer signer).
+- 2026-10-24: BB-24 step B done by Miles (two test canisters created, controller verified); step C ledger install pending at the executor boundary; Base side still held.

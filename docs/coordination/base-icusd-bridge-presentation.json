@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge is built and has passed independent reviews. The three remaining follow-ups are fixed and re-reviewed, and a deployment plan for an isolated test on Base's public test network, using synthetic test tokens, is ready for the supervisor to check. Nothing is deployed yet; real icUSD, Base mainnet and merging stay off limits, and the test still waits on a decision about its test signing key.",
+  "summary": "The Rumi-to-Base bridge is built, its last follow-ups are fixed and re-reviewed, and its test plan is approved. The test has started on the ICP side: two new test canisters exist, but no code is installed in them yet. Real icUSD, Base mainnet and merging stay off limits, and the Base side waits on a decision about its test signing key.",
   "glossary": [
     {
       "term": "proof=source",
@@ -403,6 +403,14 @@
     {
       "term": "install artifact",
       "definition": "The exact compiled file that will be installed on ICP, after adding interface metadata and shrinking. Its fingerprint must match after install."
+    },
+    {
+      "term": "public-created",
+      "definition": "Proof level for the approved test run: new test canisters exist and are funded with the right controller, but no code is installed in them yet."
+    },
+    {
+      "term": "executor boundary",
+      "definition": "The point where the one person or agent running public steps waits for a tool or approval to respond. A pending request there is not retried another way."
     }
   ]
 }

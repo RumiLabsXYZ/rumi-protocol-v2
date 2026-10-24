@@ -247,10 +247,10 @@
     },
     {
       "id": "BB-24",
-      "state": "todo",
+      "state": "in_progress",
       "owner": "supervisor",
       "scope": "Base Sepolia phase 1: ICP side (packet steps A to E)",
-      "evidenceText": "proof=none; New synthetic ledger and dedicated bridge on fuqsr, 600B and 1.9T cycles (reserve at least 0.5T), install, observer config, derive public Base addresses; stops before step F",
+      "evidenceText": "proof=public-created; Step B done: two test canisters created on the packet's subnet, budget and reserve as planned, single controller verified. Step C ledger install pending at the executor boundary, not retried; no code installed; bridge install not begun",
       "evidenceLinks": []
     },
     {
