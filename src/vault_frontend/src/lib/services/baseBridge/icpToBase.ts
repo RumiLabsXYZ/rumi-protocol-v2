@@ -653,9 +653,9 @@ async function submitToBridge(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit
     return;
   }
   const err: BridgeError = result.Err;
-  if (bridgeErrorKind(err) === 'FeeChanged') {
+  if ('FeeChanged' in err) {
     markFailed(deps, intent, 'fee changed');
-    emit({ type: 'submit_fee_changed', currentFeeE8s: (err as { FeeChanged: { current_fee_e8s: bigint } }).FeeChanged.current_fee_e8s });
+    emit({ type: 'submit_fee_changed', currentFeeE8s: err.FeeChanged.current_fee_e8s });
     return;
   }
   if (classifyBridgeError(err) === 'no_effect') {
@@ -664,7 +664,7 @@ async function submitToBridge(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit
       type: 'submit_rejected',
       message: formatBridgeError(err),
       // The allowance is short or expired: nothing was created, review again to approve anew.
-      reapprove: bridgeErrorKind(err) === 'InsufficientAllowance',
+      reapprove: 'InsufficientAllowance' in err,
     });
     return;
   }

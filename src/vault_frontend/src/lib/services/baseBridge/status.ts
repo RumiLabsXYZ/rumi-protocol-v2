@@ -388,57 +388,43 @@ function nsToLocalTime(ns: bigint): string {
   return new Date(ms).toLocaleString();
 }
 
+/** Plain-language text for a bridge error. Narrows on the generated `BridgeError` union, so a new variant is a compile error here. */
 export function formatBridgeError(err: BridgeError): string {
-  const e = err as Record<string, any>;
-  switch (bridgeErrorKind(err)) {
-    case 'Rpc':
-      return `The bridge could not reach Base: ${e.Rpc}`;
-    case 'Internal':
-      return `The bridge hit an internal error: ${e.Internal}`;
-    case 'Anonymous':
-      return 'Sign in with your ICP wallet to use the bridge.';
-    case 'Paused':
-      return `The bridge is paused: ${e.Paused}`;
-    case 'AmountBelowMinimum':
-      return `The minimum amount is ${formatE8s(e.AmountBelowMinimum.min_e8s)} icUSD.`;
-    case 'AmountAboveMaximum':
-      return `The maximum amount per transfer is ${formatE8s(e.AmountAboveMaximum.max_e8s)} icUSD.`;
-    case 'CapacityExceeded':
-      return `The bridge can take only ${formatE8s(e.CapacityExceeded.available_e8s)} icUSD more right now.`;
-    case 'NotFound':
-      return 'The bridge has no record of that request.';
-    case 'TooManyActiveOperations':
-      return 'Too many bridge transfers are in progress. Wait for one to finish, then try again.';
-    case 'Unauthorized':
-      return 'You are not allowed to do that.';
-    case 'NotOwner':
-      return 'Only the account that made this deposit can do that.';
-    case 'InvalidRecipient':
-      return `That Base recipient is not valid: ${e.InvalidRecipient}`;
-    case 'RateLimited':
-      return `The bridge's rolling limit is reached (${formatE8s(e.RateLimited.available_e8s)} icUSD available now). It resets around ${nsToLocalTime(BigInt(e.RateLimited.window_resets_at_ns))}.`;
-    case 'NotConfigured':
-      return `The bridge is not fully configured yet: ${e.NotConfigured}`;
-    case 'InvalidArgument':
-      return `The bridge rejected the request: ${e.InvalidArgument}`;
-    case 'Ledger':
-      return `The icUSD ledger reported a problem: ${e.Ledger}`;
-    case 'Halted':
-      return `The bridge is halted for safety: ${e.Halted}`;
-    case 'RequestIdConflict':
-      return 'A different bridge request already uses this request id. Start a new transfer.';
-    case 'InvalidState':
-      return `That action is not available in the current state: ${e.InvalidState}`;
-    case 'FeeChanged':
-      return `The bridge fee changed to ${formatE8s(e.FeeChanged.current_fee_e8s)} icUSD. Review and confirm again.`;
-    // Returned by bridge_to_base before any deposit exists, so nothing was created.
-    case 'InsufficientAllowance':
-      return `Your allowance for the bridge is ${formatE8s(BigInt(e.InsufficientAllowance.allowance_e8s))} icUSD, but ${formatE8s(BigInt(e.InsufficientAllowance.required_e8s))} icUSD is needed. Approve again, then bridge.`;
-    case 'InsufficientFunds':
-      return `Your icUSD balance is ${formatE8s(BigInt(e.InsufficientFunds.balance_e8s))} icUSD, but ${formatE8s(BigInt(e.InsufficientFunds.required_e8s))} icUSD is needed (the amount plus the ledger fee).`;
-    default:
-      return 'The bridge returned an error this page does not recognise.';
+  if ('Rpc' in err) return `The bridge could not reach Base: ${err.Rpc}`;
+  if ('Internal' in err) return `The bridge hit an internal error: ${err.Internal}`;
+  if ('Anonymous' in err) return 'Sign in with your ICP wallet to use the bridge.';
+  if ('Paused' in err) return `The bridge is paused: ${err.Paused}`;
+  if ('AmountBelowMinimum' in err) return `The minimum amount is ${formatE8s(err.AmountBelowMinimum.min_e8s)} icUSD.`;
+  if ('AmountAboveMaximum' in err) return `The maximum amount per transfer is ${formatE8s(err.AmountAboveMaximum.max_e8s)} icUSD.`;
+  if ('CapacityExceeded' in err) return `The bridge can take only ${formatE8s(err.CapacityExceeded.available_e8s)} icUSD more right now.`;
+  if ('NotFound' in err) return 'The bridge has no record of that request.';
+  if ('TooManyActiveOperations' in err) return 'Too many bridge transfers are in progress. Wait for one to finish, then try again.';
+  if ('Unauthorized' in err) return 'You are not allowed to do that.';
+  if ('NotOwner' in err) return 'Only the account that made this deposit can do that.';
+  if ('InvalidRecipient' in err) return `That Base recipient is not valid: ${err.InvalidRecipient}`;
+  if ('RateLimited' in err) {
+    return `The bridge's rolling limit is reached (${formatE8s(err.RateLimited.available_e8s)} icUSD available now). It resets around ${nsToLocalTime(err.RateLimited.window_resets_at_ns)}.`;
   }
+  if ('NotConfigured' in err) return `The bridge is not fully configured yet: ${err.NotConfigured}`;
+  if ('InvalidArgument' in err) return `The bridge rejected the request: ${err.InvalidArgument}`;
+  if ('Ledger' in err) return `The icUSD ledger reported a problem: ${err.Ledger}`;
+  if ('Halted' in err) return `The bridge is halted for safety: ${err.Halted}`;
+  if ('RequestIdConflict' in err) return 'A different bridge request already uses this request id. Start a new transfer.';
+  if ('InvalidState' in err) return `That action is not available in the current state: ${err.InvalidState}`;
+  if ('FeeChanged' in err) return `The bridge fee changed to ${formatE8s(err.FeeChanged.current_fee_e8s)} icUSD. Review and confirm again.`;
+  // Returned by bridge_to_base before any deposit exists, so nothing was created.
+  if ('InsufficientAllowance' in err) {
+    return `Your allowance for the bridge is ${formatE8s(err.InsufficientAllowance.allowance_e8s)} icUSD, but ${formatE8s(err.InsufficientAllowance.required_e8s)} icUSD is needed. Approve again, then bridge.`;
+  }
+  if ('InsufficientFunds' in err) {
+    return `Your icUSD balance is ${formatE8s(err.InsufficientFunds.balance_e8s)} icUSD, but ${formatE8s(err.InsufficientFunds.required_e8s)} icUSD is needed (the amount plus the ledger fee).`;
+  }
+  return exhaustiveBridgeError(err);
+}
+
+/** Compile-time check that every `BridgeError` variant is handled above; at runtime a variant from a newer canister gets a generic message. */
+function exhaustiveBridgeError(_unhandled: never): string {
+  return 'The bridge returned an error this page does not recognise.';
 }
 
 // ---------------------------------------------------------------------------

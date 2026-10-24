@@ -731,9 +731,9 @@ describe('two clicks for popup-signer wallets (Oisy)', () => {
 });
 
 describe('InsufficientAllowance and InsufficientFunds from bridge_to_base', () => {
-  // The Candid bindings gain these variants when the canister adds them; they are typed by shape here.
-  const allowanceErr = { InsufficientAllowance: { allowance_e8s: 1_000_000n, required_e8s: 2_500_100_000n } } as unknown as BridgeError;
-  const fundsErr = { InsufficientFunds: { balance_e8s: 5_000_000n, required_e8s: 2_500_100_000n } } as unknown as BridgeError;
+  // Typed directly against the generated BridgeError union.
+  const allowanceErr: BridgeError = { InsufficientAllowance: { allowance_e8s: 1_000_000n, required_e8s: 2_500_100_000n } };
+  const fundsErr: BridgeError = { InsufficientFunds: { balance_e8s: 5_000_000n, required_e8s: 2_500_100_000n } };
 
   it('InsufficientAllowance is a clean rejection that asks the user to approve again', async () => {
     const h = harness({ separateApproval: true });
