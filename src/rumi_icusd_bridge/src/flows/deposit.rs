@@ -49,6 +49,15 @@ fn same_request(d: &DepositRecord, args: &BridgeToBaseArgs) -> BridgeResult<bool
 /// Validate and persist a new deposit in `PullPending`. Pure state, no awaits, so it is
 /// atomic. Returns the stored record.
 pub fn admit(caller: candid::Principal, args: &BridgeToBaseArgs) -> BridgeResult<DepositRecord> {
+    admit_inner(caller, args, false).map(|d| d.expect("admit persists a record"))
+}
+
+/// Run every admission check without persisting anything.
+pub fn validate_admission(caller: candid::Principal, args: &BridgeToBaseArgs) -> BridgeResult<()> {
+    admit_inner(caller, args, true).map(|_| ())
+}
+
+fn admit_inner(caller: candid::Principal, args: &BridgeToBaseArgs, dry_run: bool) -> BridgeResult<Option<DepositRecord>> {
     let rkey = state::request_key(&caller, &args.client_request_id).map_err(BridgeError::InvalidArgument)?;
     if state::lookup_request(&rkey).is_some() {
         return Err(BridgeError::RequestIdConflict);
@@ -93,12 +102,15 @@ pub fn admit(caller: candid::Principal, args: &BridgeToBaseArgs) -> BridgeResult
         BridgeError::InvalidArgument("amount does not exceed the deposit fee".into())
     })?;
 
-    // Capacity: everything that is, or may become, Base supply.
+    // Capacity: everything that is, or may become, Base supply, including held claims
+    // that will be re-minted without admission.
     let exposure = core
         .buckets
         .base_exposure()
-        .and_then(|e| e.checked_add(core.buckets.reserved_pulls).ok_or(crate::accounting::AccountingError::Overflow { bucket: "exposure".into() }))
-        .map_err(|e| BridgeError::Internal(e.to_string()))?;
+        .ok()
+        .and_then(|e| e.checked_add(core.buckets.held))
+        .and_then(|e| e.checked_add(core.buckets.reserved_pulls))
+        .ok_or_else(|| BridgeError::Internal("capacity overflow".into()))?;
     let cap = limits.max_outstanding_e8s as u128;
     if exposure.saturating_add(a as u128) > cap {
         return Err(BridgeError::CapacityExceeded { available_e8s: cap.saturating_sub(exposure).min(u64::MAX as u128) as u64 });
@@ -117,17 +129,16 @@ pub fn admit(caller: candid::Principal, args: &BridgeToBaseArgs) -> BridgeResult
     }
 
     // Active operation limits.
-    if core.active_deposits.len() >= limits.max_active_global as usize {
+    if state::active_deposit_count() >= limits.max_active_global as u64 {
         return Err(BridgeError::TooManyActiveOperations);
     }
-    let mine = core
-        .active_deposits
-        .iter()
-        .filter_map(|id| state::get_deposit(*id))
-        .filter(|d| d.owner == caller)
-        .count();
+    let mine = state::active_deposits_owned_by(&caller);
     if mine >= limits.max_active_per_caller as usize {
         return Err(BridgeError::TooManyActiveOperations);
+    }
+
+    if dry_run {
+        return Ok(None);
     }
 
     // Persist.
@@ -183,7 +194,39 @@ pub fn admit(caller: candid::Principal, args: &BridgeToBaseArgs) -> BridgeResult
     state::put_deposit(&d);
     state::index_owner_deposit(&caller, id);
     state::insert_request(rkey, id);
-    Ok(d)
+    Ok(Some(d))
+}
+
+/// Check the caller's allowance and balance before anything is persisted, so a caller
+/// without funds cannot create records or cause paid background work. This is a hint
+/// only: the ICRC-2 pull remains the authority.
+async fn precheck_funds(caller: candid::Principal, args: &BridgeToBaseArgs) -> BridgeResult<()> {
+    let subaccount = parse_subaccount(&args.from_subaccount)?;
+    let canister = env::canister_id();
+    let (ledger_id, cached_fee) = state::read_core(|c| (c.config.icusd_ledger, c.ledger_fee_e8s));
+    let fee = match cached_fee {
+        Some(f) => f,
+        None => {
+            let f = ledger::fee(ledger_id).await.map_err(BridgeError::Ledger)?;
+            state::mutate_core(|c| c.ledger_fee_e8s = Some(f));
+            f
+        }
+    };
+    let required = args.amount_e8s.checked_add(fee).ok_or_else(|| BridgeError::InvalidArgument("amount overflow".into()))?;
+    let from = Account { owner: caller, subaccount };
+    let spender = Account { owner: canister, subaccount: None };
+    let (allowance, expires_at) = ledger::allowance(ledger_id, from, spender).await.map_err(BridgeError::Ledger)?;
+    // An allowance that expires within a minute is treated as missing.
+    let live = expires_at.map(|e| e > env::now_ns().saturating_add(60 * 1_000_000_000)).unwrap_or(true);
+    let usable = if live { allowance } else { 0 };
+    if usable < required as u128 {
+        return Err(BridgeError::InsufficientAllowance { allowance_e8s: usable.min(u64::MAX as u128) as u64, required_e8s: required });
+    }
+    let balance = ledger::balance_of(ledger_id, from).await.map_err(BridgeError::Ledger)?;
+    if balance < required as u128 {
+        return Err(BridgeError::InsufficientFunds { balance_e8s: balance.min(u64::MAX as u128) as u64, required_e8s: required });
+    }
+    Ok(())
 }
 
 pub async fn bridge_to_base(args: BridgeToBaseArgs) -> BridgeResult<DepositView> {
@@ -193,10 +236,18 @@ pub async fn bridge_to_base(args: BridgeToBaseArgs) -> BridgeResult<DepositView>
         let d = state::get_deposit(existing).ok_or_else(|| BridgeError::Internal("request index points to a missing deposit".into()))?;
         return if same_request(&d, &args)? { Ok(views::deposit_view(&d)) } else { Err(BridgeError::RequestIdConflict) };
     }
+    // Cheap checks first, then the funds pre-check, then re-check idempotency (a
+    // concurrent identical call may have been admitted during the awaits) and admit.
+    validate_admission(caller, &args)?;
+    precheck_funds(caller, &args).await?;
+    if let Some(existing) = state::lookup_request(&rkey) {
+        let d = state::get_deposit(existing).ok_or_else(|| BridgeError::Internal("request index points to a missing deposit".into()))?;
+        return if same_request(&d, &args)? { Ok(views::deposit_view(&d)) } else { Err(BridgeError::RequestIdConflict) };
+    }
     let d = admit(caller, &args)?;
     let r = OpRef::Pull(d.id);
-    if let Some(res) = ledger_ops::attempt(&r).await {
-        ledger_ops::apply_resolution(&r, res);
+    if let Some(sent) = ledger_ops::attempt(&r).await {
+        ledger_ops::apply_outcome(&r, sent);
     }
     let d = state::get_deposit(d.id).ok_or_else(|| BridgeError::Internal("deposit vanished".into()))?;
     if matches!(d.state, DepositState::PullPending) {
@@ -206,7 +257,10 @@ pub async fn bridge_to_base(args: BridgeToBaseArgs) -> BridgeResult<DepositView>
         state::put_deposit(&d2);
     }
     let d = state::get_deposit(d.id).unwrap_or(d);
-    crate::timer::schedule_soon();
+    // Only work that is still in progress needs the background tick.
+    if !d.state.is_terminal() {
+        crate::timer::schedule_soon();
+    }
     Ok(views::deposit_view(&d))
 }
 
@@ -479,8 +533,8 @@ pub async fn request_refund(id: u64) -> BridgeResult<DepositView> {
     state::put_deposit(&d);
 
     let r = OpRef::Refund(id);
-    if let Some(res) = ledger_ops::attempt(&r).await {
-        ledger_ops::apply_resolution(&r, res);
+    if let Some(sent) = ledger_ops::attempt(&r).await {
+        ledger_ops::apply_outcome(&r, sent);
     }
     let d = state::get_deposit(id).ok_or(BridgeError::NotFound)?;
     Ok(views::deposit_view(&d))
@@ -549,8 +603,8 @@ pub async fn sweep_fees(amount_e8s: u64) -> BridgeResult<u64> {
     })?;
     state::append_audit(None, AuditCtx::note(format!("fee sweep {id} of {amount_e8s} e8s started")));
     let r = OpRef::Sweep(id);
-    if let Some(res) = ledger_ops::attempt(&r).await {
-        ledger_ops::apply_resolution(&r, res);
+    if let Some(sent) = ledger_ops::attempt(&r).await {
+        ledger_ops::apply_outcome(&r, sent);
     }
     Ok(id)
 }
@@ -686,6 +740,15 @@ pub(crate) mod tests {
             Err(BridgeError::CapacityExceeded { available_e8s }) => assert_eq!(available_e8s, 5 * E8),
             other => panic!("{other:?}"),
         }
+        // Held claims count toward capacity (they re-mint without admission).
+        setup_bound();
+        state::mutate_core(|c| {
+            c.config.limits.max_outstanding_e8s = 25 * E8;
+            c.buckets.held = (20 * E8) as u128;
+        });
+        assert!(matches!(admit(user(), &args(10 * E8, 1)), Err(BridgeError::CapacityExceeded { available_e8s }) if available_e8s == 5 * E8));
+        assert!(validate_admission(user(), &args(5 * E8, 1)).is_ok());
+        assert!(state::lookup_request(&state::request_key(&user(), &[1; 16]).unwrap()).is_none(), "dry run persists nothing");
         setup_bound();
         state::mutate_core(|c| c.config.limits.mint_window_limit_e8s = 15 * E8);
         admit(user(), &args(10 * E8, 1)).unwrap();
@@ -725,7 +788,7 @@ pub(crate) mod tests {
         assert!(matches!(d.state, DepositState::PullFailed { .. }));
         assert_eq!(state::read_core(|c| c.buckets), crate::accounting::Buckets::default());
         assert_eq!(state::read_core(|c| c.windows.admitted_in_window), 0);
-        assert!(!state::read_core(|c| c.active_deposits.contains(&d.id)));
+        assert!(!state::is_deposit_active(d.id));
     }
 
     #[test]

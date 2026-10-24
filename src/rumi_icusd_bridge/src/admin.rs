@@ -109,7 +109,7 @@ pub fn on_contract_action_finalized(action: &ContractAdminAction, executed: bool
         return;
     }
     let violation = state::mutate_core(|c| {
-        let Some(b) = c.config.contract.as_mut() else { return None };
+        let b = c.config.contract.as_mut()?;
         match action {
             ContractAdminAction::SetSupplyCap { cap_e8s } => b.supply_cap = *cap_e8s as u128,
             ContractAdminAction::SetMintRateLimit { limit_e8s, window_seconds } => {
@@ -136,8 +136,20 @@ pub fn on_contract_action_finalized(action: &ContractAdminAction, executed: bool
 
 pub fn set_fees(f: BridgeFees) -> BridgeResult<()> {
     let caller = require_admin()?;
-    let limits = state::read_core(|c| c.config.limits.clone());
+    let (limits, binding, ledger_fee) =
+        state::read_core(|c| (c.config.limits.clone(), c.config.contract.clone(), c.ledger_fee_e8s));
     validate_fees(&f, &limits).map_err(BridgeError::InvalidArgument)?;
+    // Every bridge-out the contract accepts must be releasable, otherwise it becomes a
+    // dust claim re-minted at operator gas cost.
+    if let Some(b) = binding {
+        let floor = (f.release_fee_e8s as u128).saturating_add(ledger_fee.unwrap_or(0) as u128);
+        if b.min_bridge_out <= floor {
+            return Err(BridgeError::InvalidArgument(format!(
+                "release fee plus ledger fee ({floor} e8s) must stay below the contract minBridgeOut ({})",
+                b.min_bridge_out
+            )));
+        }
+    }
     state::mutate_core(|c| c.config.fees = f.clone());
     state::append_audit(None, AuditCtx::note(format!("fees set by {caller}: {f:?}")));
     Ok(())
@@ -214,8 +226,19 @@ pub fn validate_observer(s: &ObserverSettings) -> Result<(), String> {
     Ok(())
 }
 
-pub fn set_rpc_services(services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
-    let caller = require_admin()?;
+/// Controller-only: the provider set decides what the canister believes about Base, so
+/// replacing it is as powerful as an upgrade and stays with the controllers. The proposed
+/// set must answer `eth_chainId` with the configured chain by quorum before it is stored.
+pub async fn set_rpc_services(services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
+    require_controller()?;
+    let chain = state::read_core(|c| c.config.chain_id);
+    validate_rpc_services(chain, &services, min_quorum).map_err(BridgeError::InvalidArgument)?;
+    crate::evm::rpc::verify_chain_id_with(&services, min_quorum, chain).await.map_err(|e| BridgeError::Rpc(e.to_string()))?;
+    store_rpc_services(services, min_quorum)
+}
+
+fn store_rpc_services(services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
+    let caller = require_controller()?;
     let chain = state::read_core(|c| c.config.chain_id);
     validate_rpc_services(chain, &services, min_quorum).map_err(BridgeError::InvalidArgument)?;
     state::mutate_core(|c| {
@@ -366,6 +389,45 @@ mod tests {
         on_contract_action_finalized(&ContractAdminAction::SetSupplyCap { cap_e8s: 999 }, true);
         assert_eq!(state::read_core(|c| c.config.contract.as_ref().unwrap().supply_cap), 999);
         assert!(state::read_core(|c| c.config.pauses.deposits));
+    }
+
+    #[test]
+    fn rpc_services_are_controller_only() {
+        setup();
+        test_env::set_caller(admin());
+        let svc = vec![RpcServiceConfig::Custom { url: "https://a.example".into() }];
+        let block_on = crate::evm::rpc::testutil::block_on;
+        assert_eq!(block_on(set_rpc_services(svc.clone(), 1)), Err(BridgeError::Unauthorized));
+        let ctl = Principal::from_slice(&[7; 10]);
+        test_env::set_controllers(vec![ctl]);
+        test_env::set_caller(ctl);
+        // A provider set that does not prove the configured chain id is refused.
+        crate::evm::rpc::set_mock_transport(|_, _| Ok(crate::evm::rpc::testutil::ok_body(serde_json::json!("0x1"))));
+        assert!(matches!(block_on(set_rpc_services(svc.clone(), 1)), Err(BridgeError::Rpc(_))));
+        // The right chain (Base Sepolia 84532 = 0x14a34) is accepted.
+        crate::evm::rpc::set_mock_transport(|_, _| Ok(crate::evm::rpc::testutil::ok_body(serde_json::json!("0x14a34"))));
+        assert!(block_on(set_rpc_services(svc.clone(), 1)).is_ok());
+        assert_eq!(state::read_core(|c| c.config.rpc_services.clone()), svc);
+    }
+
+    #[test]
+    fn fees_must_keep_min_bridge_out_releasable() {
+        setup();
+        test_env::set_caller(admin());
+        state::mutate_core(|c| {
+            c.ledger_fee_e8s = Some(10_000);
+            c.config.contract = Some(state::ContractBinding {
+                address: [1; 20],
+                bound_at_ns: 0,
+                start_block: 0,
+                supply_cap: u128::MAX,
+                mint_window_limit: u128::MAX,
+                mint_window_seconds: 1,
+                min_bridge_out: 100_000_000,
+            });
+        });
+        assert!(set_fees(BridgeFees { deposit_fee_e8s: 0, release_fee_e8s: 99_990_000 }).is_err());
+        assert!(set_fees(BridgeFees { deposit_fee_e8s: 0, release_fee_e8s: 99_989_999 }).is_ok());
     }
 
     #[test]

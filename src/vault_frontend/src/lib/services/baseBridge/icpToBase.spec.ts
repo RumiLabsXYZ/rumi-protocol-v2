@@ -8,6 +8,7 @@ import {
   INITIAL_ICP_TO_BASE_STATE,
   QUOTE_MAX_AGE_MS,
   allowanceNeedsApproval,
+  bridgeAfterApproval,
   buildQuote,
   checkQuote,
   chooseLedgerFee,
@@ -22,6 +23,7 @@ import {
   retryIcpToBase,
   startIcpToBase,
   trackDeposit,
+  unresolvedIntents,
   validateRecipient,
   type IcpToBaseDeps,
   type IcpToBaseEvent,
@@ -288,6 +290,35 @@ describe('reduceIcpToBase', () => {
     expect(reduceIcpToBase(inflight, { type: 'track_existing', intent: intent(), deposit })).toBe(inflight);
   });
 
+  it('moves approving -> approved -> submitting for the two-click path, and ignores out-of-order events', () => {
+    const approving = drive([{ type: 'confirmed', quote: q, intent: intent(), needsApproval: true }]);
+    const approved = reduceIcpToBase(approving, { type: 'approval_confirmed' });
+    expect(approved).toMatchObject({ kind: 'approved', quote: q });
+    expect(reduceIcpToBase(approved, { type: 'bridge_started' })).toMatchObject({ kind: 'submitting', quote: q });
+    expect(reduceIcpToBase(INITIAL_ICP_TO_BASE_STATE, { type: 'approval_confirmed' })).toBe(INITIAL_ICP_TO_BASE_STATE);
+    expect(reduceIcpToBase(INITIAL_ICP_TO_BASE_STATE, { type: 'bridge_started' })).toBe(INITIAL_ICP_TO_BASE_STATE);
+    expect(reduceIcpToBase(approved, { type: 'confirmed', quote: q, intent: intent(), needsApproval: true })).toBe(approved);
+    expect(reduceIcpToBase(approved, { type: 'track_existing', intent: intent(), deposit: makeDeposit() })).toBe(approved);
+  });
+
+  it('a reload recovery looks the request up, then lands in tracking, approved or uncertain', () => {
+    const looking = reduceIcpToBase(INITIAL_ICP_TO_BASE_STATE, { type: 'resume_started', intent: intent({ status: 'approved' }) });
+    expect(looking).toMatchObject({ kind: 'uncertain', lookup: 'looking' });
+    expect(reduceIcpToBase(looking, { type: 'resume_approved', intent: intent({ status: 'approved' }) })).toMatchObject({ kind: 'approved', quote: null });
+    expect(reduceIcpToBase(looking, { type: 'lookup_found', deposit: makeDeposit() }).kind).toBe('tracking');
+    expect(reduceIcpToBase(looking, { type: 'lookup_not_found' })).toMatchObject({ lookup: 'not_found' });
+    // Not available while something is in flight.
+    const inflight = drive([{ type: 'confirmed', quote: q, intent: intent(), needsApproval: true }]);
+    expect(reduceIcpToBase(inflight, { type: 'resume_started', intent: intent() })).toBe(inflight);
+    expect(reduceIcpToBase(INITIAL_ICP_TO_BASE_STATE, { type: 'resume_approved', intent: intent() })).toBe(INITIAL_ICP_TO_BASE_STATE);
+  });
+
+  it('carries the re-approval hint on a rejection', () => {
+    const submitting = drive([{ type: 'confirmed', quote: q, intent: intent(), needsApproval: false }]);
+    expect(reduceIcpToBase(submitting, { type: 'submit_rejected', message: 'm', reapprove: true })).toMatchObject({ kind: 'rejected', reapprove: true });
+    expect(reduceIcpToBase(submitting, { type: 'submit_rejected', message: 'm' })).toMatchObject({ kind: 'rejected', reapprove: false });
+  });
+
   it('aborts on a session change from any state', () => {
     for (const state of [
       INITIAL_ICP_TO_BASE_STATE,
@@ -332,8 +363,8 @@ interface Harness {
   current: { value: boolean };
 }
 
-function harness(overrides: { deposit?: DepositView } = {}): Harness {
-  const storage = createMemoryStorage();
+function harness(overrides: { deposit?: DepositView; separateApproval?: boolean; storage?: ReturnType<typeof createMemoryStorage> } = {}): Harness {
+  const storage = overrides.storage ?? createMemoryStorage();
   const store = new IntentStore(storage, ME);
   const current = { value: true };
   const deposit = overrides.deposit ?? makeDeposit({ status: { Escrowed: null }, client_request_id: new Uint8Array(16).fill(0xcd) });
@@ -349,6 +380,7 @@ function harness(overrides: { deposit?: DepositView } = {}): Harness {
     ledger: { approve: approve as any },
     bridge: { bridgeToBase: bridgeToBase as any, requestDepositRefund: requestDepositRefund as any },
     reads: { getDeposit: getDeposit as any, getDepositByRequest: getDepositByRequest as any },
+    separateApproval: overrides.separateApproval ?? false,
     isCurrent: () => current.value,
     random: (length) => new Uint8Array(length).fill(0xcd),
     now: () => NOW,
@@ -504,8 +536,8 @@ describe('startIcpToBase: approval outcomes', () => {
     await startIcpToBase(h.deps, quote(), h.emit);
     expect(h.bridgeToBase).not.toHaveBeenCalled();
     expect(h.state().kind).toBe('session_changed');
-    // The unsent intent is kept so it can be resolved after signing in again.
-    expect(h.store.get(REQUEST_ID)).toMatchObject({ status: 'prepared' });
+    // The unsent intent is kept (as approved) so it can be resolved after signing in again.
+    expect(h.store.get(REQUEST_ID)).toMatchObject({ status: 'approved' });
   });
 });
 
@@ -538,6 +570,210 @@ describe('startIcpToBase: bridge outcomes', () => {
     expect((h.state() as { message: string }).message).toMatch(/paused/);
     expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
     expect(h.getDepositByRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe('single click for delegation wallets (Internet Identity, Plug)', () => {
+  it('approves and then sends the transfer inside the same click flow', async () => {
+    const h = harness({ separateApproval: false });
+    const promise = startIcpToBase(h.deps, quote(), h.emit);
+    expect(h.approve).toHaveBeenCalledTimes(1);
+    await promise;
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
+    expect(h.events.map((e) => e.type)).toEqual(['confirmed', 'approval_ok', 'submit_ok']);
+    expect(h.state().kind).toBe('tracking');
+  });
+});
+
+describe('two clicks for popup-signer wallets (Oisy)', () => {
+  const needsApproval = () => quote();
+
+  it('click 1 performs ONLY the approval and stops in the approved state', async () => {
+    const h = harness({ separateApproval: true });
+    const promise = startIcpToBase(h.deps, needsApproval(), h.emit);
+    expect(h.approve).toHaveBeenCalledTimes(1); // the first signer call of the click, issued synchronously
+    await promise;
+    expect(h.bridgeToBase).not.toHaveBeenCalled();
+    expect(h.events.map((e) => e.type)).toEqual(['confirmed', 'approval_confirmed']);
+    expect(h.state()).toMatchObject({ kind: 'approved' });
+    expect(h.store.get(REQUEST_ID)).toMatchObject({ status: 'approved', clientRequestId: REQUEST_ID });
+  });
+
+  it('click 2 sends bridge_to_base as its first signer call, with the SAME client request id', async () => {
+    const h = harness({ separateApproval: true });
+    await startIcpToBase(h.deps, needsApproval(), h.emit);
+    const approved = h.state() as { kind: 'approved'; intent: IcpToBaseIntent };
+    expect(h.approve).toHaveBeenCalledTimes(1);
+
+    const promise = bridgeAfterApproval(h.deps, approved.intent, h.emit);
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1); // synchronously, before any await
+    expect(h.approve).toHaveBeenCalledTimes(1); // never a second approval in the same flow
+    await promise;
+
+    expect(bytesToHex(h.bridgeToBase.mock.calls[0][0].client_request_id)).toBe(REQUEST_ID);
+    expect(h.bridgeToBase.mock.calls[0][0]).toMatchObject({ amount_e8s: AMOUNT, base_recipient: RECIPIENT, expected_deposit_fee_e8s: DEPOSIT_FEE });
+    expect(h.events.map((e) => e.type)).toEqual(['confirmed', 'approval_confirmed', 'bridge_started', 'submit_ok']);
+    expect(h.state().kind).toBe('tracking');
+    expect(h.store.get(REQUEST_ID)).toMatchObject({ status: 'submitted', depositId: 1n });
+  });
+
+  it('never chains a second signer call after an await inside one click', async () => {
+    const h = harness({ separateApproval: true });
+    let approveCallsAtBridgeTime = -1;
+    h.bridgeToBase.mockImplementation(async () => {
+      approveCallsAtBridgeTime = h.approve.mock.calls.length;
+      return { Ok: makeDeposit({ client_request_id: new Uint8Array(16).fill(0xcd) }) };
+    });
+    // Click 1: only approve. Nothing at all happens to the bridge afterwards.
+    await startIcpToBase(h.deps, needsApproval(), h.emit);
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(h.bridgeToBase).not.toHaveBeenCalled();
+    // Click 2: only the bridge call.
+    await bridgeAfterApproval(h.deps, (h.state() as { intent: IcpToBaseIntent }).intent, h.emit);
+    expect(approveCallsAtBridgeTime).toBe(1);
+    expect(h.approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the intent across a reload between the clicks and resumes with the same request id', async () => {
+    const storage = createMemoryStorage();
+    const first = harness({ separateApproval: true, storage });
+    await startIcpToBase(first.deps, needsApproval(), first.emit);
+    expect(first.state().kind).toBe('approved');
+
+    // Reload: a fresh store, fresh deps, and the bridge has never seen the request.
+    const second = harness({ separateApproval: true, storage });
+    const saved = second.store.get(REQUEST_ID) as IcpToBaseIntent;
+    expect(saved).toMatchObject({ status: 'approved', amountE8s: AMOUNT, recipient: RECIPIENT, expectedDepositFee: DEPOSIT_FEE });
+    expect(unresolvedIntents(second.store)).toHaveLength(1);
+
+    await resumeIcpToBase(second.deps, saved, second.emit);
+    expect(second.getDepositByRequest).toHaveBeenCalledTimes(1);
+    expect(second.state()).toMatchObject({ kind: 'approved', quote: null });
+    expect(second.approve).not.toHaveBeenCalled();
+    expect(second.bridgeToBase).not.toHaveBeenCalled();
+
+    const promise = bridgeAfterApproval(second.deps, (second.state() as { intent: IcpToBaseIntent }).intent, second.emit);
+    expect(second.bridgeToBase).toHaveBeenCalledTimes(1);
+    await promise;
+    expect(bytesToHex(second.bridgeToBase.mock.calls[0][0].client_request_id)).toBe(REQUEST_ID);
+    expect(second.store.list()).toHaveLength(1);
+    expect(second.state().kind).toBe('tracking');
+  });
+
+  it('after a reload, goes straight to tracking if the bridge already has the deposit', async () => {
+    const storage = createMemoryStorage();
+    const first = harness({ separateApproval: true, storage });
+    await startIcpToBase(first.deps, needsApproval(), first.emit);
+    const second = harness({ separateApproval: true, storage });
+    second.getDepositByRequest.mockResolvedValue(makeDeposit({ id: 21n, client_request_id: new Uint8Array(16).fill(0xcd) }));
+    await resumeIcpToBase(second.deps, second.store.get(REQUEST_ID) as IcpToBaseIntent, second.emit);
+    expect(second.state()).toMatchObject({ kind: 'tracking' });
+    expect(second.store.get(REQUEST_ID)).toMatchObject({ status: 'submitted', depositId: 21n });
+    expect(second.bridgeToBase).not.toHaveBeenCalled();
+  });
+
+  it('cannot be edited or re-quoted while waiting for the second click, and blocks a new transfer', async () => {
+    const h = harness({ separateApproval: true });
+    await startIcpToBase(h.deps, needsApproval(), h.emit);
+    const approved = h.state();
+    expect(reduceIcpToBase(approved, { type: 'edit' })).toBe(approved);
+    expect(reduceIcpToBase(approved, { type: 'reset' })).toBe(approved);
+    expect(reduceIcpToBase(approved, { type: 'quote_started' })).toBe(approved);
+    expect(hasUnresolvedIntent(h.store)).toBe(true);
+    const again = harness({ separateApproval: true, storage: h.storage });
+    await startIcpToBase(again.deps, needsApproval(), again.emit);
+    expect(again.approve).not.toHaveBeenCalled();
+    expect(again.state().kind).toBe('error');
+  });
+
+  it('does not send the transfer if the session changed between the clicks', async () => {
+    const h = harness({ separateApproval: true });
+    await startIcpToBase(h.deps, needsApproval(), h.emit);
+    const intent = (h.state() as { intent: IcpToBaseIntent }).intent;
+    h.current.value = false;
+    await bridgeAfterApproval(h.deps, intent, h.emit);
+    expect(h.bridgeToBase).not.toHaveBeenCalled();
+    expect(h.state().kind).toBe('session_changed');
+    expect(h.store.get(REQUEST_ID)).toMatchObject({ status: 'approved' });
+  });
+
+  it('skips the approval click entirely when the allowance already covers the transfer', async () => {
+    const h = harness({ separateApproval: true });
+    const promise = startIcpToBase(h.deps, quote({ allowanceE8s: 10n ** 12n }), h.emit);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
+    await promise;
+    expect(h.state().kind).toBe('tracking');
+  });
+
+  it('a declined approval leaves no intent and never reaches the second step', async () => {
+    const h = harness({ separateApproval: true });
+    h.approve.mockRejectedValue(new Error('User rejected the request'));
+    await startIcpToBase(h.deps, needsApproval(), h.emit);
+    expect(h.state()).toMatchObject({ kind: 'approval_failed', declined: true });
+    expect(h.store.list()).toEqual([]);
+    expect(h.bridgeToBase).not.toHaveBeenCalled();
+  });
+
+  it('a fee change on the second click shows the new fee even after a reload (no stored quote)', async () => {
+    const storage = createMemoryStorage();
+    const first = harness({ separateApproval: true, storage });
+    await startIcpToBase(first.deps, needsApproval(), first.emit);
+    const second = harness({ separateApproval: true, storage });
+    await resumeIcpToBase(second.deps, second.store.get(REQUEST_ID) as IcpToBaseIntent, second.emit);
+    second.bridgeToBase.mockResolvedValue({ Err: { FeeChanged: { current_fee_e8s: 20_000n } } });
+    await bridgeAfterApproval(second.deps, (second.state() as { intent: IcpToBaseIntent }).intent, second.emit);
+    expect(second.state()).toMatchObject({ kind: 'error' });
+    expect((second.state() as { message: string }).message).toContain('0.0002 icUSD');
+    expect(second.store.get(REQUEST_ID)).toMatchObject({ status: 'failed' });
+  });
+});
+
+describe('InsufficientAllowance and InsufficientFunds from bridge_to_base', () => {
+  // The Candid bindings gain these variants when the canister adds them; they are typed by shape here.
+  const allowanceErr = { InsufficientAllowance: { allowance_e8s: 1_000_000n, required_e8s: 2_500_100_000n } } as unknown as BridgeError;
+  const fundsErr = { InsufficientFunds: { balance_e8s: 5_000_000n, required_e8s: 2_500_100_000n } } as unknown as BridgeError;
+
+  it('InsufficientAllowance is a clean rejection that asks the user to approve again', async () => {
+    const h = harness({ separateApproval: true });
+    await startIcpToBase(h.deps, quote(), h.emit);
+    h.bridgeToBase.mockResolvedValue({ Err: allowanceErr });
+    await bridgeAfterApproval(h.deps, (h.state() as { intent: IcpToBaseIntent }).intent, h.emit);
+    expect(h.state()).toMatchObject({ kind: 'rejected', reapprove: true });
+    const message = (h.state() as { message: string }).message;
+    expect(message).toContain('0.01 icUSD');
+    expect(message).toContain('25.001 icUSD');
+    expect(message).toMatch(/Approve again/);
+    expect(h.store.get(REQUEST_ID)).toMatchObject({ status: 'failed' });
+    expect(h.getDepositByRequest).not.toHaveBeenCalled();
+    expect(hasUnresolvedIntent(h.store)).toBe(false);
+  });
+
+  it('InsufficientFunds is a clean rejection about the balance, with no re-approval', async () => {
+    const h = harness();
+    h.bridgeToBase.mockResolvedValue({ Err: fundsErr });
+    await startIcpToBase(h.deps, quote({ allowanceE8s: 10n ** 12n }), h.emit);
+    expect(h.state()).toMatchObject({ kind: 'rejected', reapprove: false });
+    const message = (h.state() as { message: string }).message;
+    expect(message).toContain('0.05 icUSD');
+    expect(message).toContain('25.001 icUSD');
+    expect(h.store.get(REQUEST_ID)).toMatchObject({ status: 'failed' });
+    expect(h.getDepositByRequest).not.toHaveBeenCalled();
+  });
+
+  it('after a re-approval review the next transfer gets a fresh request id', async () => {
+    let n = 0;
+    const h = harness({ separateApproval: true });
+    h.deps.random = (length) => new Uint8Array(length).fill(0xc0 + n++);
+    await startIcpToBase(h.deps, quote(), h.emit);
+    h.bridgeToBase.mockResolvedValueOnce({ Err: allowanceErr });
+    await bridgeAfterApproval(h.deps, (h.state() as { intent: IcpToBaseIntent }).intent, h.emit);
+    const again = harness({ separateApproval: true, storage: h.storage });
+    again.deps.random = () => new Uint8Array(16).fill(0xee);
+    await startIcpToBase(again.deps, quote(), again.emit);
+    expect(again.state().kind).toBe('approved');
+    expect(again.store.list()).toHaveLength(2);
   });
 });
 

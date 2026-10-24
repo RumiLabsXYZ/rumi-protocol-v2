@@ -114,10 +114,10 @@
     },
     {
       "id": "BB-09b",
-      "state": "in_progress",
+      "state": "in progress (rerun pending)",
       "owner": "worker-sonnet",
       "scope": "Bridge scenarios on PocketIC + anvil",
-      "evidenceText": "proof=none; Round trip, fees, duplicates, caps/pauses, held re-mint, preflight hold + refund, upgrade mid-flight; part 2: lost replies, replacement, reorg, inconsistent providers, revert + refund, unauthorized Base supply",
+      "evidenceText": "proof=local-integration; Pre-fix wasm: e2e 19 scenarios pass (no mocked responses), faults 11 pass (mocked/simulated parts labeled); found C3 reporting bug and the unauthorized mint-then-burn payout gap (ignored regression test); rerun after round 1 fixes and BB-15",
       "evidenceLinks": []
     },
     {
@@ -138,18 +138,34 @@
     },
     {
       "id": "BB-12",
-      "state": "in_progress",
+      "state": "done (round 1: FAIL)",
       "owner": "worker-sonnet",
       "scope": "Adversarial review A (accounting, authority, replay)",
-      "evidenceText": "proof=none; Round 1 running; same rubric as B, isolated",
+      "evidenceText": "proof=source; 4 blockers: tick-order false halt (reproduced), observer wedge on dense logs (reproduced), Oisy approve+bridge in one click, circulating supply not computed; all accepted and being fixed; round 2 pending",
       "evidenceLinks": []
     },
     {
       "id": "BB-13",
-      "state": "in_progress",
+      "state": "done (round 1: FAIL)",
       "owner": "worker-sonnet",
       "scope": "Adversarial review B (IC semantics, cycles, upgrade, wallet flow)",
-      "evidenceText": "proof=none; Round 1 running; same rubric as A, isolated",
+      "evidenceText": "proof=source; 4 blockers: spam starves the timer, observer wedge / historical state, tick-order false halt, timer chain dies after a trap; all accepted and being fixed; round 2 pending",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-05b",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Observer/RPC review fixes",
+      "evidenceText": "proof=none; Adaptive log span and cap, contiguity completeness with rewind, backoff, chain-id check, count-based C3, receipt cap",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-15",
+      "state": "todo",
+      "owner": "worker-sonnet",
+      "scope": "Cumulative mint guard",
+      "evidenceText": "proof=none; Burn recording refuses if on-chain cumulative mints exceed the canister's",
       "evidenceLinks": []
     },
     {

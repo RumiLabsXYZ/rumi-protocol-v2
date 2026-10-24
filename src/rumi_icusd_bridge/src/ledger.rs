@@ -334,6 +334,19 @@ pub async fn log_length(ledger: Principal) -> Result<u64, String> {
     nat_to_u64(&response.log_length).ok_or_else(|| format!("ledger log length {} does not fit in u64", response.log_length))
 }
 
+/// `icrc2_allowance(account, spender)`: (allowance, expires_at).
+pub async fn allowance(ledger: Principal, account: Account, spender: Account) -> Result<(u128, Option<u64>), String> {
+    let args = icrc_ledger_types::icrc2::allowance::AllowanceArgs { account, spender };
+    let (a,): (icrc_ledger_types::icrc2::allowance::Allowance,) = call_candid(ledger, "icrc2_allowance", (args,)).await?;
+    let amount = nat_to_u128(&a.allowance).ok_or_else(|| format!("allowance {} does not fit in u128", a.allowance))?;
+    Ok((amount, a.expires_at))
+}
+
+pub async fn total_supply(ledger: Principal) -> Result<u128, String> {
+    let (supply,): (Nat,) = call_candid(ledger, "icrc1_total_supply", ()).await?;
+    nat_to_u128(&supply).ok_or_else(|| format!("total supply {supply} does not fit in u128"))
+}
+
 // ---------------------------------------------------------------------------
 // ICRC-3 block decoding and matching (pure)
 // ---------------------------------------------------------------------------

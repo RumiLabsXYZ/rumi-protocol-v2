@@ -241,6 +241,19 @@ describe('bridge errors', () => {
     [{ RequestIdConflict: null }, 'RequestIdConflict', 'no_effect', /different bridge request/],
     [{ InvalidState: 'not held' }, 'InvalidState', 'uncertain', /not available in the current state/],
     [{ FeeChanged: { current_fee_e8s: 20_000n } }, 'FeeChanged', 'no_effect', /fee changed to 0\.0002 icUSD/],
+    // Added by the canister after these bindings were generated; typed by shape until they are regenerated.
+    [
+      { InsufficientAllowance: { allowance_e8s: 1_000_000n, required_e8s: 2_500_100_000n } } as unknown as BridgeError,
+      'InsufficientAllowance',
+      'no_effect',
+      /allowance for the bridge is 0\.01 icUSD, but 25\.001 icUSD is needed\. Approve again/,
+    ],
+    [
+      { InsufficientFunds: { balance_e8s: 5_000_000n, required_e8s: 2_500_100_000n } } as unknown as BridgeError,
+      'InsufficientFunds',
+      'no_effect',
+      /balance is 0\.05 icUSD, but 25\.001 icUSD is needed/,
+    ],
   ];
 
   it.each(cases)('formats and classifies variant #%#', (error, kind, classification, pattern) => {
@@ -252,7 +265,7 @@ describe('bridge errors', () => {
   it('covers every BridgeError variant in the Candid interface', () => {
     // Guards against a new variant silently falling through to the generic message.
     const covered = new Set(cases.map(([, kind]) => kind));
-    expect(covered.size).toBe(20);
+    expect(covered.size).toBe(22);
   });
 
   it('formats ICRC-2 approve errors', () => {

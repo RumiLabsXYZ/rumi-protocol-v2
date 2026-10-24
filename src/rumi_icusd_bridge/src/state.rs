@@ -35,6 +35,8 @@ pub const MEM_RELEASE_BY_SEQ: u8 = 7;
 pub const MEM_AUDIT_INDEX: u8 = 8;
 pub const MEM_AUDIT_DATA: u8 = 9;
 pub const MEM_SENDER_RELEASES: u8 = 10;
+pub const MEM_ACTIVE_DEPOSITS: u8 = 11;
+pub const MEM_ACTIVE_RELEASES: u8 = 12;
 
 /// Append-only. Never reuse or reorder an id.
 pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
@@ -49,6 +51,8 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_AUDIT_INDEX, "audit_index"),
     (MEM_AUDIT_DATA, "audit_data"),
     (MEM_SENDER_RELEASES, "base_sender_release_index"),
+    (MEM_ACTIVE_DEPOSITS, "active_deposits"),
+    (MEM_ACTIVE_RELEASES, "active_releases_by_sequence"),
 ];
 
 pub const CORE_SCHEMA_VERSION: u32 = 1;
@@ -377,6 +381,21 @@ pub struct ObserverState {
     /// observer only probes `bridgeOutCount()` at the finalized tag.
     #[serde(default)]
     pub last_full_pass_ns: Option<u64>,
+    /// Block span currently used for `eth_getLogs` (shrinks on oversized or failed
+    /// responses, grows back after successes). `None` means the configured default.
+    #[serde(default)]
+    pub adaptive_chunk_blocks: Option<u64>,
+    /// Response cap currently used for `eth_getLogs` (grows when even a one-block range
+    /// does not fit). `None` means the configured default.
+    #[serde(default)]
+    pub adaptive_logs_cap: Option<u64>,
+    /// Earliest time of the next observer attempt after consecutive failures (backoff).
+    #[serde(default)]
+    pub next_attempt_ns: Option<u64>,
+    /// Block of the last processed `BridgeOut` event. A completeness mismatch rewinds the
+    /// cursor here so the missing range is scanned again.
+    #[serde(default)]
+    pub last_event_block: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -398,6 +417,12 @@ pub struct BalanceSnapshot {
     pub at_ns: u64,
     /// Coverage result at that time.
     pub coverage_ok: bool,
+    /// icUSD ledger total supply read in the same reconciliation, if available.
+    #[serde(default)]
+    pub ledger_total_supply: Option<u128>,
+    /// Required escrow (`liabilities - unknown_outflow`) used for the verdict.
+    #[serde(default)]
+    pub required: u128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -441,12 +466,6 @@ pub struct BridgeCore {
     pub admin_lane: LaneState,
     #[serde(default)]
     pub observer: ObserverState,
-    /// Deposits not in a terminal state (`Delivered`, `PullFailed`, `Refunded`).
-    #[serde(default)]
-    pub active_deposits: BTreeSet<u64>,
-    /// Releases not in a terminal state (`Released`, `Reminted`).
-    #[serde(default)]
-    pub active_releases: BTreeSet<[u8; 32]>,
     #[serde(default)]
     pub hints: Vec<Hint>,
     #[serde(default)]
@@ -484,8 +503,6 @@ impl Default for BridgeCore {
             minter_lane: LaneState::default(),
             admin_lane: LaneState::default(),
             observer: ObserverState::default(),
-            active_deposits: BTreeSet::new(),
-            active_releases: BTreeSet::new(),
             hints: vec![],
             halted: None,
             escrow_snapshot: None,
@@ -938,6 +955,14 @@ thread_local! {
 
     static SENDER_RELEASES: RefCell<StableBTreeMap<SenderKey, [u8; 32], Mem>> =
         RefCell::new(StableBTreeMap::init(mem(MEM_SENDER_RELEASES)));
+
+    /// Non-terminal deposits, by id (oldest first).
+    static ACTIVE_DEPOSITS: RefCell<StableBTreeMap<u64, (), Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_ACTIVE_DEPOSITS)));
+
+    /// Non-terminal releases, by bridge-out sequence (oldest first).
+    static ACTIVE_RELEASES: RefCell<StableBTreeMap<u64, [u8; 32], Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_ACTIVE_RELEASES)));
 }
 
 fn mem(id: u8) -> Mem {
@@ -1047,15 +1072,28 @@ pub fn get_deposit(id: u64) -> Option<DepositRecord> {
 
 /// Insert or update a deposit and keep the active set in sync.
 pub fn put_deposit(d: &DepositRecord) {
-    let terminal = d.state.is_terminal();
     DEPOSITS.with(|m| m.borrow_mut().insert(d.id, d.clone()));
-    mutate_core(|c| {
-        if terminal {
-            c.active_deposits.remove(&d.id);
+    ACTIVE_DEPOSITS.with(|m| {
+        if d.state.is_terminal() {
+            m.borrow_mut().remove(&d.id);
         } else {
-            c.active_deposits.insert(d.id);
+            m.borrow_mut().insert(d.id, ());
         }
     });
+}
+
+pub fn active_deposit_count() -> u64 {
+    ACTIVE_DEPOSITS.with(|m| m.borrow().len())
+}
+
+pub fn is_deposit_active(id: u64) -> bool {
+    ACTIVE_DEPOSITS.with(|m| m.borrow().contains_key(&id))
+}
+
+/// Count active deposits owned by `owner` (bounded by `max_active_global`).
+pub fn active_deposits_owned_by(owner: &Principal) -> usize {
+    let ids: Vec<u64> = ACTIVE_DEPOSITS.with(|m| m.borrow().iter().map(|(k, _)| k).collect());
+    ids.into_iter().filter_map(get_deposit).filter(|d| d.owner == *owner).count()
 }
 
 pub fn index_owner_deposit(owner: &Principal, id: u64) {
@@ -1090,8 +1128,9 @@ pub fn insert_request(key: RequestKey, deposit_id: u64) {
     REQUEST_IDS.with(|m| m.borrow_mut().insert(key, deposit_id));
 }
 
+/// Active deposits matching `pred`, oldest first.
 pub fn deposits_in_state(pred: impl Fn(&DepositRecord) -> bool, limit: usize) -> Vec<DepositRecord> {
-    let ids: Vec<u64> = read_core(|c| c.active_deposits.iter().copied().collect());
+    let ids: Vec<u64> = ACTIVE_DEPOSITS.with(|m| m.borrow().iter().map(|(k, _)| k).collect());
     ids.into_iter().filter_map(get_deposit).filter(|d| pred(d)).take(limit).collect()
 }
 
@@ -1102,15 +1141,18 @@ pub fn get_release(tid: &[u8; 32]) -> Option<ReleaseRecord> {
 }
 
 pub fn put_release(r: &ReleaseRecord) {
-    let terminal = r.state.is_terminal();
     RELEASES.with(|m| m.borrow_mut().insert(r.transfer_id, r.clone()));
-    mutate_core(|c| {
-        if terminal {
-            c.active_releases.remove(&r.transfer_id);
+    ACTIVE_RELEASES.with(|m| {
+        if r.state.is_terminal() {
+            m.borrow_mut().remove(&r.sequence);
         } else {
-            c.active_releases.insert(r.transfer_id);
+            m.borrow_mut().insert(r.sequence, r.transfer_id);
         }
     });
+}
+
+pub fn active_release_count() -> u64 {
+    ACTIVE_RELEASES.with(|m| m.borrow().len())
 }
 
 pub fn release_by_sequence(seq: u64) -> Option<[u8; 32]> {
@@ -1153,8 +1195,9 @@ pub fn list_sender_releases(sender: &[u8; 20], start_after_sequence: Option<u64>
     tids.iter().filter_map(get_release).collect()
 }
 
+/// Active releases matching `pred`, oldest bridge-out first.
 pub fn releases_in_state(pred: impl Fn(&ReleaseRecord) -> bool, limit: usize) -> Vec<ReleaseRecord> {
-    let tids: Vec<[u8; 32]> = read_core(|c| c.active_releases.iter().copied().collect());
+    let tids: Vec<[u8; 32]> = ACTIVE_RELEASES.with(|m| m.borrow().iter().map(|(_, v)| v).collect());
     tids.iter().filter_map(get_release).filter(|r| pred(r)).take(limit).collect()
 }
 
@@ -1245,10 +1288,33 @@ pub fn reset_for_tests() {
             m.borrow_mut().remove(&k);
         }
     });
+    ACTIVE_DEPOSITS.with(|m| {
+        let keys: Vec<u64> = m.borrow().iter().map(|(k, _)| k).collect();
+        for k in keys {
+            m.borrow_mut().remove(&k);
+        }
+    });
+    ACTIVE_RELEASES.with(|m| {
+        let keys: Vec<u64> = m.borrow().iter().map(|(k, _)| k).collect();
+        for k in keys {
+            m.borrow_mut().remove(&k);
+        }
+    });
+}
+
+/// Test-only: mark ids active without full records.
+#[cfg(test)]
+pub fn test_mark_active(deposit: Option<u64>, release: Option<(u64, [u8; 32])>) {
+    if let Some(id) = deposit {
+        ACTIVE_DEPOSITS.with(|m| m.borrow_mut().insert(id, ()));
+    }
+    if let Some((seq, tid)) = release {
+        ACTIVE_RELEASES.with(|m| m.borrow_mut().insert(seq, tid));
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::types::L2MainnetService;
 
@@ -1281,8 +1347,8 @@ mod tests {
             assert!(ids.insert(*id), "duplicate memory id {id}");
             assert!(names.insert(*name), "duplicate memory name {name}");
         }
-        assert_eq!(ids.len(), 11);
-        assert_eq!(*ids.iter().next_back().unwrap(), MEM_SENDER_RELEASES);
+        assert_eq!(ids.len(), 13);
+        assert_eq!(*ids.iter().next_back().unwrap(), MEM_ACTIVE_RELEASES);
     }
 
     #[test]
@@ -1348,7 +1414,6 @@ mod tests {
         let mut core = BridgeCore::default();
         core.initialized = true;
         core.buckets.outstanding_base = u128::from(u64::MAX) * 3;
-        core.active_releases.insert([7u8; 32]);
         core.minter_lane.next_nonce = Some(42);
         let bytes = cbor_encode(&core);
         let back: BridgeCore = cbor_decode(&bytes);
@@ -1413,10 +1478,10 @@ mod tests {
         reset_for_tests();
         let mut d = sample_deposit(1, p(1));
         put_deposit(&d);
-        assert!(read_core(|c| c.active_deposits.contains(&1)));
+        assert!(is_deposit_active(1));
         d.state = DepositState::Delivered;
         put_deposit(&d);
-        assert!(!read_core(|c| c.active_deposits.contains(&1)));
+        assert!(!is_deposit_active(1));
     }
 
     #[test]

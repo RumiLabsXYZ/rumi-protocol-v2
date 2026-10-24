@@ -76,9 +76,17 @@ pub fn is_terminal(op: &LedgerOp) -> bool {
     matches!(op.status, LedgerOpStatus::Succeeded { .. } | LedgerOpStatus::Failed { .. })
 }
 
-/// Send one attempt of the persisted tuple. Returns the classified resolution, or
-/// `None` when there is nothing to send.
-pub async fn attempt(r: &OpRef) -> Option<Resolution> {
+/// The raw result of one send, tagged with the attempt number it belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentAttempt {
+    pub attempt: u32,
+    pub outcome: CallOutcome,
+}
+
+/// Send one attempt of the persisted tuple. Returns the raw outcome tagged with its
+/// attempt number, or `None` when there is nothing to send. Classify it with
+/// `apply_outcome`, which uses the op as stored AFTER the await.
+pub async fn attempt(r: &OpRef) -> Option<SentAttempt> {
     let mut op = load_op(r)?;
     if is_terminal(&op) {
         return None;
@@ -102,9 +110,31 @@ pub async fn attempt(r: &OpRef) -> Option<Resolution> {
     op.last_attempt_ns = Some(now);
     store_op(r, op.clone());
 
+    let attempt_no = op.attempts;
     let ledger_id = state::read_core(|c| c.config.icusd_ledger);
     let outcome = ledger::execute(ledger_id, &op).await;
-    Some(ledger::classify(&op, &outcome))
+    Some(SentAttempt { attempt: attempt_no, outcome })
+}
+
+/// Apply the outcome of a send. The classification uses the op as stored now, not the
+/// copy taken before the await, so a slow reply cannot use stale `ambiguous_seen`. A
+/// non-success reply from an older attempt (a newer send of the same tuple has started
+/// since) proves nothing about the newer send, so it only marks the op unknown.
+pub fn apply_outcome(r: &OpRef, sent: SentAttempt) {
+    let Some(mut op) = load_op(r) else { return };
+    if is_terminal(&op) {
+        return;
+    }
+    let res = ledger::classify(&op, &sent.outcome);
+    if sent.attempt != op.attempts && !matches!(res, Resolution::Succeeded { .. }) {
+        op.ambiguous_seen = true;
+        op.status = LedgerOpStatus::Unknown {
+            last_error: format!("late reply from attempt {} while attempt {} is outstanding", sent.attempt, op.attempts),
+        };
+        store_op(r, op);
+        return;
+    }
+    apply_resolution(r, res);
 }
 
 /// Completion bucket changes for a proven success, by kind. `None` means the parent
@@ -324,8 +354,8 @@ pub async fn reconcile(r: &OpRef) {
         return;
     }
     if unsent || now < op.created_at_time.saturating_add(DEDUP_SAFE_WINDOW_NS) {
-        if let Some(res) = attempt(r).await {
-            apply_resolution(r, res);
+        if let Some(sent) = attempt(r).await {
+            apply_outcome(r, sent);
         }
         return;
     }
@@ -361,4 +391,82 @@ pub async fn reconcile(r: &OpRef) {
 /// Outcome for a freshly sent call, used by tests to drive `apply_resolution`.
 pub fn resolution_for(op: &LedgerOp, outcome: &CallOutcome) -> Resolution {
     ledger::classify(op, outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flows::deposit::tests::setup_bound;
+    use crate::ledger::LedgerRejection;
+    use crate::state::DepositState;
+    use crate::types::BridgeToBaseArgs;
+    use candid::Principal;
+
+    fn admitted() -> u64 {
+        setup_bound();
+        let args = BridgeToBaseArgs {
+            amount_e8s: 100_000_000,
+            base_recipient: "0x00000000000000000000000000000000000000aa".into(),
+            from_subaccount: None,
+            client_request_id: serde_bytes::ByteBuf::from(vec![1; 16]),
+            expected_deposit_fee_e8s: 0,
+        };
+        crate::flows::deposit::admit(Principal::from_slice(&[0x11; 29]), &args).unwrap().id
+    }
+
+    fn mark_sent(id: u64) -> u32 {
+        let r = OpRef::Pull(id);
+        let mut op = load_op(&r).unwrap();
+        if op.attempts > 0 && matches!(op.status, LedgerOpStatus::Pending) {
+            op.ambiguous_seen = true;
+            op.status = LedgerOpStatus::Unknown { last_error: "stale".into() };
+        }
+        op.attempts += 1;
+        let n = op.attempts;
+        store_op(&r, op);
+        n
+    }
+
+    #[test]
+    fn late_no_effect_reply_from_an_older_attempt_cannot_fail_the_op() {
+        let id = admitted();
+        let first = mark_sent(id);
+        // The reply to attempt 1 is slow; meanwhile the timer resends the same tuple.
+        let second = mark_sent(id);
+        assert_eq!((first, second), (1, 2));
+        // Attempt 1's typed no-effect reply arrives late.
+        apply_outcome(
+            &OpRef::Pull(id),
+            SentAttempt { attempt: first, outcome: CallOutcome::Rejected(LedgerRejection::InsufficientAllowance { allowance: 0 }) },
+        );
+        let d = state::get_deposit(id).unwrap();
+        assert!(matches!(d.state, DepositState::PullPending | DepositState::PullUnknown), "{:?}", d.state);
+        assert!(matches!(d.pull.as_ref().unwrap().status, LedgerOpStatus::Unknown { .. }));
+        // Attempt 2 proves the transfer happened (Duplicate of attempt 1's block).
+        apply_outcome(&OpRef::Pull(id), SentAttempt { attempt: second, outcome: CallOutcome::Accepted { block_index: 4 } });
+        assert_eq!(state::get_deposit(id).unwrap().state, DepositState::Escrowed);
+    }
+
+    #[test]
+    fn success_from_an_older_attempt_still_counts() {
+        let id = admitted();
+        let first = mark_sent(id);
+        let _second = mark_sent(id);
+        apply_outcome(&OpRef::Pull(id), SentAttempt { attempt: first, outcome: CallOutcome::Accepted { block_index: 9 } });
+        assert_eq!(state::get_deposit(id).unwrap().state, DepositState::Escrowed);
+    }
+
+    #[test]
+    fn classification_uses_the_op_as_stored_after_the_await() {
+        let id = admitted();
+        let n = mark_sent(id);
+        // While the call was in flight something else marked the op ambiguous.
+        let r = OpRef::Pull(id);
+        let mut op = load_op(&r).unwrap();
+        op.ambiguous_seen = true;
+        store_op(&r, op);
+        apply_outcome(&r, SentAttempt { attempt: n, outcome: CallOutcome::Rejected(LedgerRejection::InsufficientFunds { balance: 0 }) });
+        let d = state::get_deposit(id).unwrap();
+        assert!(!matches!(d.state, DepositState::PullFailed { .. }), "a no-effect reply after ambiguity is not proof");
+    }
 }

@@ -22,7 +22,7 @@ export const INTENT_STORAGE_PREFIX = 'rumi:base-bridge:v1:';
 export const MAX_RESOLVED_INTENTS = 40;
 export const MAX_INTENTS = 120;
 
-export type IcpToBaseStatus = 'prepared' | 'submitted' | 'done' | 'failed';
+export type IcpToBaseStatus = 'prepared' | 'approved' | 'submitted' | 'done' | 'failed';
 export type BaseToIcpStatus = 'prepared' | 'sent' | 'done';
 
 export interface IcpToBaseIntent {
@@ -122,7 +122,7 @@ function parseIntent(value: unknown): BridgeIntent | null {
     if (!str(r.clientRequestId) || !isHex(r.clientRequestId, 16)) return null;
     if (!str(r.recipient) || !isAddress(r.recipient)) return null;
     if (!str(r.expectedDepositFee) || !DECIMAL.test(r.expectedDepositFee)) return null;
-    if (!['prepared', 'submitted', 'done', 'failed'].includes(r.status as string)) return null;
+    if (!['prepared', 'approved', 'submitted', 'done', 'failed'].includes(r.status as string)) return null;
     if (r.depositId !== undefined && (!str(r.depositId) || !DECIMAL.test(r.depositId))) return null;
     return {
       v: 1,

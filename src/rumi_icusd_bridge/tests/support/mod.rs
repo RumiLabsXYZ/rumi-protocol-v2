@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 pub mod anvil;
+pub mod bridge;
 pub mod contract;
 pub mod ledger;
 pub mod outcalls;

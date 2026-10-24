@@ -13,10 +13,12 @@
     captureSessionGuard,
     createSigners,
     getAnonymousBridge,
+    needsSeparateApprovalClick,
     type Signers,
   } from '$lib/services/baseBridge/bridgeActor';
   import {
     INITIAL_ICP_TO_BASE_STATE,
+    bridgeAfterApproval,
     discardIntent,
     isQuoteStale,
     prepareIcpToBase,
@@ -55,19 +57,25 @@
   let refundBusy = $state(false);
   let refundMessage = $state('');
   let storeVersion = $state(0);
+  /** True for popup-signer wallets: the approval and the transfer are two separate clicks. */
+  let twoStep = $state(needsSeparateApprovalClick());
   let sessionGuard: (() => boolean) | null = null;
 
   const signedIn = $derived(!!principal && !principal.isAnonymous());
   const principalText = $derived(principal ? principal.toText() : '');
   const bridgeBlocked = $derived(config.depositsPaused || !!config.halted);
   const busy = $derived(flow.kind === 'quoting' || flow.kind === 'approving' || flow.kind === 'submitting');
-  const inputsLocked = $derived(busy || flow.kind === 'uncertain');
+  const inputsLocked = $derived(busy || flow.kind === 'uncertain' || flow.kind === 'approved');
   const trackedDisplay = $derived(flow.kind === 'tracking' ? describeDeposit(flow.deposit, { principal: principalText }) : null);
 
-  /** Earlier requests on this device that never recorded an outcome. */
+  /** Earlier requests on this device that never recorded an outcome (not the one on screen right now). */
   const unresolved = $derived.by(() => {
     storeVersion;
-    return store ? unresolvedIntents(store) : [];
+    const onScreen =
+      flow.kind === 'approving' || flow.kind === 'approved' || flow.kind === 'submitting' || flow.kind === 'uncertain' || flow.kind === 'tracking'
+        ? flow.intent.clientRequestId
+        : null;
+    return store ? unresolvedIntents(store).filter((intent) => intent.clientRequestId !== onScreen) : [];
   });
   /** Deposits started on this device that are still in progress. */
   const inProgress = $derived.by(() => {
@@ -184,6 +192,7 @@
       formError = recipient.message;
       return;
     }
+    twoStep = needsSeparateApprovalClick();
     dispatch({ type: 'quote_started' });
     const guard = captureSessionGuard();
     try {
@@ -202,7 +211,10 @@
     }
   }
 
-  /** Click handler. The first signer call is issued synchronously inside startIcpToBase. */
+  /**
+   * Click handler. The first signer call is issued synchronously inside startIcpToBase.
+   * For popup-signer wallets with an approval needed, this click only approves.
+   */
   function confirm() {
     if (flow.kind !== 'review' || flow.problem) return;
     const quote = flow.quote;
@@ -216,6 +228,27 @@
       return;
     }
     void startIcpToBase(deps, quote, dispatch).then(touched);
+  }
+
+  /**
+   * Second click of the two-click path. The approval is already confirmed, so the
+   * transfer request is this click's first (and only) signer call.
+   */
+  function bridgeNow() {
+    if (flow.kind !== 'approved') return;
+    const deps = buildDeps();
+    if (!deps) {
+      dispatch({ type: 'blocked', message: 'Your wallet is not ready. Wait a moment and try again.' });
+      return;
+    }
+    void bridgeAfterApproval(deps, flow.intent, dispatch).then(touched);
+  }
+
+  function discardApproved() {
+    if (flow.kind !== 'approved' || !store) return;
+    discardIntent({ store }, flow.intent);
+    flow = INITIAL_ICP_TO_BASE_STATE;
+    touched();
   }
 
   function retry() {
@@ -234,6 +267,11 @@
 
   async function resume(intent: IcpToBaseIntent) {
     if (busy || !principal || !store) return;
+    // Show what the earlier request was for, so the user can review it again if it needs re-approving.
+    amountText = formatE8s(intent.amountE8s);
+    recipientText = intent.recipient;
+    recipientTouched = true;
+    twoStep = needsSeparateApprovalClick();
     try {
       if (!(await ensureReady())) return;
       const deps = buildDeps();
@@ -404,7 +442,9 @@
         </dl>
         <p class="small-note">
           Expected delivery: about 20 minutes after the deposit is escrowed (Base L1 batch finality).
-          {#if quote.needsApproval}
+          {#if quote.needsApproval && twoStep}
+            Your wallet needs two separate confirmations. First click approves exactly {fmt(quote.requiredAllowanceE8s)} icUSD for the bridge, valid for {approvalMinutes} minutes. Then click Bridge to Base to confirm the transfer.
+          {:else if quote.needsApproval}
             Your wallet will first ask you to approve exactly {fmt(quote.requiredAllowanceE8s)} icUSD for the bridge, valid for {approvalMinutes} minutes, and then to confirm the transfer.
           {:else}
             Your existing allowance already covers this transfer, so only the transfer itself needs your approval.
@@ -418,12 +458,12 @@
 
     {#if flow.kind === 'review'}
       <button type="button" class="btn-primary wide" onclick={confirm} disabled={!!flow.problem || bridgeBlocked}>
-        {flow.quote.needsApproval ? 'Approve and bridge' : 'Bridge to Base'}
+        {flow.quote.needsApproval ? (twoStep ? 'Approve (step 1 of 2)' : 'Approve and bridge') : 'Bridge to Base'}
       </button>
       <button type="button" class="btn-secondary wide" onclick={startOver}>Edit</button>
     {/if}
     {#if flow.kind === 'approving'}
-      <p class="banner" role="status">Approve exactly {fmt(flow.quote.requiredAllowanceE8s)} icUSD in your wallet. Nothing moves until the transfer step.</p>
+      <p class="banner" role="status">Approve exactly {fmt(flow.quote.requiredAllowanceE8s)} icUSD in your wallet. Nothing moves until the transfer step{twoStep ? ', which is the next click' : ''}.</p>
     {/if}
     {#if flow.kind === 'submitting'}
       <p class="banner" role="status">Sending the transfer request to the bridge. Please wait; do not close this page.</p>
@@ -440,8 +480,27 @@
     {/if}
     {#if flow.kind === 'rejected'}
       <p class="banner bad" role="alert">{flow.message} No icUSD moved.</p>
+      {#if flow.reapprove}
+        <button type="button" class="btn-primary wide" onclick={review}>Review and approve again</button>
+      {/if}
       <button type="button" class="btn-secondary wide" onclick={startOver}>Edit transfer</button>
     {/if}
+  {/if}
+
+  {#if flow.kind === 'approved'}
+    <div class="review" aria-label="Approved transfer">
+      <h3>Approval confirmed</h3>
+      <p class="banner" role="status">Approval confirmed. Click Bridge to Base to continue. Nothing has been sent to the bridge yet.</p>
+      <dl>
+        <div><dt>Amount to bridge</dt><dd>{fmt(flow.intent.amountE8s)} icUSD</dd></div>
+        <div><dt>Bridge deposit fee, deducted from the mint</dt><dd>{fmt(flow.intent.expectedDepositFee)} icUSD</dd></div>
+        <div class="total"><dt>You receive on {config.chain.name}</dt><dd>{fmt(flow.intent.amountE8s > flow.intent.expectedDepositFee ? flow.intent.amountE8s - flow.intent.expectedDepositFee : 0n)} icUSD</dd></div>
+        <div><dt>Recipient</dt><dd><code>{flow.intent.recipient}</code></dd></div>
+      </dl>
+      <p class="small-note">The icUSD ledger fee is charged on top. The approval expires about {approvalMinutes} minutes after it was granted; if it has expired the bridge will ask you to approve again.</p>
+    </div>
+    <button type="button" class="btn-primary wide" onclick={bridgeNow} disabled={bridgeBlocked}>Bridge to Base</button>
+    <button type="button" class="btn-secondary wide" onclick={discardApproved}>Discard this request</button>
   {/if}
 
   {#if flow.kind === 'uncertain'}

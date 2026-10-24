@@ -109,9 +109,14 @@ pub fn consent_text(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
                 }));
             }
             let receive = a.amount_e8s.checked_sub(fee).ok_or_else(|| bad_arg("amount below fee"))?;
+            let source = match &a.from_subaccount {
+                None => "your default icUSD account".to_string(),
+                Some(sub) if sub.len() == 32 => format!("your icUSD subaccount `{}`", hex::encode(sub)),
+                Some(_) => return Err(bad_arg("from_subaccount must be 32 bytes")),
+            };
             Ok(format!(
                 "## Bridge icUSD to Base\n\n\
-                 * Moves **{}** from your icUSD account into the Rumi bridge escrow. The icUSD ledger fee is charged to you separately.\n\
+                 * Moves **{}** from {source} into the Rumi bridge escrow. The icUSD ledger fee is charged to you separately.\n\
                  * Mints **{}** icUSD on Base (chain {chain}) to `{}`.\n\
                  * Bridge fee: {}.\n\
                  * Delivery is expected after Base L1 batch finality, about 20 minutes. Your escrowed icUSD stays locked while it circulates on Base.\n\
@@ -132,6 +137,7 @@ pub fn consent_text(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         }
         "notify_base_bridge_out" => {
             let tx = Decode!(arg, String).map_err(bad_arg)?;
+            let tx = ids::hex0x(&ids::parse_bytes32(&tx).map_err(bad_arg)?);
             Ok(format!(
                 "## Report a Base bridge transaction\n\n\
                  * Tells the bridge to check Base transaction `{tx}` sooner.\n\
@@ -251,6 +257,22 @@ mod tests {
             expected_deposit_fee_e8s: 5,
         };
         assert!(consent_text("bridge_to_base", &Encode!(&args).unwrap()).is_err());
+    }
+
+    #[test]
+    fn notify_consent_requires_a_valid_hash_and_deposit_names_the_subaccount() {
+        crate::state::reset_for_tests();
+        assert!(consent_text("notify_base_bridge_out", &Encode!(&"not a hash".to_string()).unwrap()).is_err());
+        assert!(consent_text("notify_base_bridge_out", &Encode!(&format!("0x{}", "ab".repeat(32))).unwrap()).is_ok());
+        let args = BridgeToBaseArgs {
+            amount_e8s: 100_000_000,
+            base_recipient: "0x00000000000000000000000000000000000000aa".into(),
+            from_subaccount: Some(serde_bytes::ByteBuf::from(vec![7u8; 32])),
+            client_request_id: serde_bytes::ByteBuf::from(vec![1u8; 16]),
+            expected_deposit_fee_e8s: 0,
+        };
+        let text = consent_text("bridge_to_base", &Encode!(&args).unwrap()).unwrap();
+        assert!(text.contains(&hex::encode([7u8; 32])));
     }
 
     #[test]

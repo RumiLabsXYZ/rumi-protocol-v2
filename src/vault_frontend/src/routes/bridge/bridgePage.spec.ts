@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => {
     };
   }
   return {
-    flags: { enabled: false },
+    flags: { enabled: false, separate: false },
     principal: writable<any>(null),
     generation: writable(0),
     loadBridgeConfig: vi.fn(),
@@ -53,6 +53,7 @@ vi.mock('$lib/services/auth', () => ({ walletSessionGeneration: mocks.generation
 
 vi.mock('$lib/services/baseBridge/bridgeActor', () => ({
   getBridgeCanisterId: () => 'tfesu-vyaaa-aaaap-qrd7a-cai',
+  needsSeparateApprovalClick: () => mocks.flags.separate,
   loadBridgeConfig: mocks.loadBridgeConfig,
   getAnonymousBridge: mocks.getAnonymousBridge,
   createSigners: mocks.createSigners,
@@ -78,6 +79,7 @@ vi.mock('$lib/services/baseBridge/bridgeActor', () => ({
       getDeposit: async (id: bigint) => (await o.anonymous.get_deposit(id))[0] ?? null,
       getDepositByRequest: async (owner: unknown, requestId: unknown) => (await o.anonymous.get_deposit_by_request(owner, requestId))[0] ?? null,
     },
+    separateApproval: mocks.flags.separate,
     isCurrent: o.isCurrent,
   }),
   buildBaseToIcpDeps: (o: any) => ({
@@ -165,6 +167,7 @@ beforeEach(() => {
   host = document.createElement('div');
   document.body.appendChild(host);
   mocks.flags.enabled = false;
+  mocks.flags.separate = false;
   mocks.principal.set(null);
   mocks.generation.set(0);
   mocks.loadBridgeConfig.mockReset().mockImplementation(async () => resolveBridgeConfig(makeBridgeInfo()));
@@ -418,6 +421,131 @@ describe('ICP to Base through the page', () => {
     expect(host.textContent).toContain('DEPOSIT #1');
     const after = JSON.parse(localStorage.getItem(`rumi:base-bridge:v1:${TEST_OWNER.toText()}`)!);
     expect(after.intents[0]).toMatchObject({ status: 'submitted', depositId: '1' });
+  });
+
+  it('Internet Identity and Plug keep one click: approval then transfer without a second click', async () => {
+    mocks.flags.separate = false;
+    await reviewTransfer();
+    expect(button(/Approve and bridge/)).toBeTruthy();
+    expect(host.textContent).not.toContain('two separate confirmations');
+    click(/Approve and bridge/);
+    await settle(24);
+    expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(signers.bridge.bridge_to_base).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain('DEPOSIT #1');
+    expect(host.textContent).not.toContain('Approval confirmed');
+  });
+
+  describe('Oisy (popup signer): two separate clicks', () => {
+    beforeEach(() => {
+      mocks.flags.separate = true;
+    });
+
+    it('explains the two steps before anything is signed', async () => {
+      await reviewTransfer();
+      expect(host.textContent).toContain('two separate confirmations');
+      expect(host.textContent).toContain('Then click Bridge to Base to confirm the transfer');
+      expect(button(/Approve \(step 1 of 2\)/)).toBeTruthy();
+      expect(button(/Approve and bridge/)).toBeUndefined();
+    });
+
+    it('click 1 only approves; click 2 sends the transfer as its first signer call, with the same request id', async () => {
+      await reviewTransfer();
+      button(/Approve \(step 1 of 2\)/)!.click();
+      expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1); // synchronous in click 1
+      flushSync();
+      await settle(24);
+      // Stopped after the approval. No transfer yet.
+      expect(signers.bridge.bridge_to_base).not.toHaveBeenCalled();
+      expect(host.textContent).toContain('Approval confirmed. Click Bridge to Base to continue.');
+      expect(button(/Approve/)).toBeUndefined();
+      const stored = JSON.parse(localStorage.getItem(`rumi:base-bridge:v1:${TEST_OWNER.toText()}`)!);
+      expect(stored.intents).toHaveLength(1);
+      expect(stored.intents[0]).toMatchObject({ status: 'approved' });
+      const requestId = stored.intents[0].clientRequestId;
+
+      button(/^Bridge to Base$/)!.click();
+      expect(signers.bridge.bridge_to_base).toHaveBeenCalledTimes(1); // synchronous in click 2
+      expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1);
+      flushSync();
+      await settle(24);
+      const sentId = '0x' + Array.from(signers.bridge.bridge_to_base.mock.calls[0][0].client_request_id as Uint8Array).map((b) => b.toString(16).padStart(2, '0')).join('');
+      expect(sentId).toBe(requestId);
+      expect(host.textContent).toContain('DEPOSIT #1');
+    });
+
+    it('cannot be edited while waiting for the second click; the request can be discarded', async () => {
+      await reviewTransfer();
+      click(/Approve \(step 1 of 2\)/);
+      await settle(24);
+      expect(host.querySelector<HTMLInputElement>('#icp-amount')!.disabled).toBe(true);
+      expect(button(/^Review transfer$/)).toBeUndefined();
+      click(/Discard this request/);
+      await settle(24);
+      expect(host.textContent).not.toContain('Approval confirmed');
+      expect(host.querySelector<HTMLInputElement>('#icp-amount')!.disabled).toBe(false);
+      const record = JSON.parse(localStorage.getItem(`rumi:base-bridge:v1:${TEST_OWNER.toText()}`)!);
+      expect(record.intents).toEqual([]);
+    });
+
+    it('survives a reload between the clicks and sends with the same request id', async () => {
+      const store = new IntentStore(localStorage, TEST_OWNER.toText());
+      store.put({
+        v: 1,
+        kind: 'icp_to_base',
+        clientRequestId: `0x${'cd'.repeat(16)}`,
+        amountE8s: 2_500_000_000n,
+        recipient: '0x1111111111111111111111111111111111111111',
+        expectedDepositFee: 10_000n,
+        createdAt: 1,
+        status: 'approved',
+      });
+      render();
+      await settle(24);
+      expect(host.textContent).toContain('Earlier request without a recorded outcome');
+      click(/Check status/);
+      await settle(24);
+      expect(anonymous.get_deposit_by_request).toHaveBeenCalledTimes(1);
+      expect(host.textContent).toContain('Approval confirmed. Click Bridge to Base to continue.');
+      expect(host.textContent).not.toContain('Earlier request without a recorded outcome');
+      // The form shows what was approved.
+      expect(host.querySelector<HTMLInputElement>('#icp-amount')!.value).toBe('25');
+      expect(signers.ledger.icrc2_approve).not.toHaveBeenCalled();
+      expect(signers.bridge.bridge_to_base).not.toHaveBeenCalled();
+
+      button(/^Bridge to Base$/)!.click();
+      expect(signers.bridge.bridge_to_base).toHaveBeenCalledTimes(1);
+      const id = Array.from(signers.bridge.bridge_to_base.mock.calls[0][0].client_request_id as Uint8Array);
+      expect(id).toEqual(Array.from({ length: 16 }, () => 0xcd));
+      await settle(24);
+      expect(host.textContent).toContain('DEPOSIT #1');
+      expect(signers.ledger.icrc2_approve).not.toHaveBeenCalled();
+    });
+
+    it('asks to approve again when the bridge reports an insufficient allowance', async () => {
+      signers.bridge.bridge_to_base.mockResolvedValue({ Err: { InsufficientAllowance: { allowance_e8s: 0n, required_e8s: 2_500_100_000n } } });
+      await reviewTransfer();
+      click(/Approve \(step 1 of 2\)/);
+      await settle(24);
+      click(/^Bridge to Base$/);
+      await settle(24);
+      expect(host.textContent).toContain('Approve again, then bridge');
+      expect(host.textContent).toContain('No icUSD moved');
+      expect(button(/Review and approve again/)).toBeTruthy();
+      // Reviewing again re-reads the allowance and offers the approval step again.
+      click(/Review and approve again/);
+      await settle(24);
+      expect(button(/Approve \(step 1 of 2\)/)).toBeTruthy();
+    });
+  });
+
+  it('explains an insufficient balance reported by the bridge', async () => {
+    signers.bridge.bridge_to_base.mockResolvedValue({ Err: { InsufficientFunds: { balance_e8s: 5_000_000n, required_e8s: 2_500_100_000n } } });
+    await reviewTransfer();
+    click(/Approve and bridge/);
+    await settle(24);
+    expect(host.textContent).toContain('Your icUSD balance is 0.05 icUSD, but 25.001 icUSD is needed');
+    expect(button(/Review and approve again/)).toBeUndefined();
   });
 
   it('skips the approval when the allowance already covers the transfer', async () => {

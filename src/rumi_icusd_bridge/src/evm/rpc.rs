@@ -222,10 +222,15 @@ pub fn to_rpc_service(cfg: &RpcServiceConfig) -> RpcService {
 // Configuration snapshot
 // ---------------------------------------------------------------------------
 
+/// Largest response cap the EVM RPC canister accepts for one `request`.
+pub const MAX_RESPONSE_BYTES: u64 = 2_000_000;
 /// Largest multiple of `cycles_per_rpc_call` attached to one call. The EVM RPC canister
 /// charges in proportion to the response cap and refunds the unused part of the
-/// attached cycles.
-const MAX_CYCLE_FACTOR: u64 = 32;
+/// attached cycles. The multiple grows with the cap (see [`Settings::cycles_for`]) and
+/// stops here; at the largest cap (2 MB) the HTTPS outcall alone costs roughly 55 billion
+/// cycles on a 34-node subnet (about 27 200 cycles per cap byte), which 48 x the default
+/// 2 billion covers with margin. Raising a cap therefore never starves the call.
+const MAX_CYCLE_FACTOR: u64 = 48;
 /// Maximum characters of any provider-supplied text kept in an error message.
 const MAX_ERR_CHARS: usize = 120;
 
@@ -254,28 +259,37 @@ impl Settings {
         let factor = max_bytes.div_ceil(unit).clamp(1, MAX_CYCLE_FACTOR);
         self.cycles.saturating_mul(factor as u128)
     }
+
+    /// The providers and quorum must describe a usable set.
+    fn validated(self) -> Result<Settings, RpcError> {
+        if self.services.is_empty() {
+            return Err(RpcError::NotConfigured("no RPC services configured".into()));
+        }
+        if self.quorum == 0 || self.quorum > self.services.len() {
+            return Err(RpcError::NotConfigured(format!(
+                "min_quorum {} is not in 1..={}",
+                self.quorum,
+                self.services.len()
+            )));
+        }
+        Ok(self)
+    }
 }
 
-fn settings() -> Result<Settings, RpcError> {
-    let s = state::read_core(|c| Settings {
+/// The configured settings, unchecked.
+fn base_settings() -> Settings {
+    state::read_core(|c| Settings {
         evm_rpc: c.config.evm_rpc,
         services: c.config.rpc_services.clone(),
         quorum: c.config.min_quorum as usize,
         cycles: c.config.observer.cycles_per_rpc_call,
         default_max: c.config.observer.default_max_response_bytes,
         logs_max: c.config.observer.logs_max_response_bytes,
-    });
-    if s.services.is_empty() {
-        return Err(RpcError::NotConfigured("no RPC services configured".into()));
-    }
-    if s.quorum == 0 || s.quorum > s.services.len() {
-        return Err(RpcError::NotConfigured(format!(
-            "min_quorum {} is not in 1..={}",
-            s.quorum,
-            s.services.len()
-        )));
-    }
-    Ok(s)
+    })
+}
+
+fn settings() -> Result<Settings, RpcError> {
+    base_settings().validated()
 }
 
 // ---------------------------------------------------------------------------
@@ -797,30 +811,82 @@ pub async fn simulate_call(from: &[u8; 20], to: &[u8; 20], data: &[u8], block: B
 }
 
 /// `eth_getLogs` for one address and topic0 over `[from, to]`, by quorum on the whole
-/// sorted vector. A provider whose answer breaks the filter or has duplicate positions
-/// does not vote.
+/// sorted vector, with the configured logs response cap. A provider whose answer breaks
+/// the filter or has duplicate positions does not vote.
 pub async fn get_logs(address: &[u8; 20], topic0: &[u8; 32], from: u64, to: u64) -> Result<Vec<RawLog>, RpcError> {
+    let cap = settings()?.logs_max;
+    get_logs_with_cap(address, topic0, from, to, cap).await
+}
+
+/// [`get_logs`] with an explicit response cap. The cap is bounded to what the EVM RPC
+/// canister accepts, and the attached cycles scale with it.
+pub async fn get_logs_with_cap(
+    address: &[u8; 20],
+    topic0: &[u8; 32],
+    from: u64,
+    to: u64,
+    max_response_bytes: u64,
+) -> Result<Vec<RawLog>, RpcError> {
     if from > to {
         return Err(RpcError::Decode(format!("invalid log range [{from}, {to}]")));
     }
     let s = settings()?;
+    let cap = max_response_bytes.clamp(1, MAX_RESPONSE_BYTES);
     let params = json!([{
         "address": hex0x(address),
         "topics": [hex0x(topic0)],
         "fromBlock": quantity_param(from),
         "toBlock": quantity_param(to),
     }]);
-    let replies = call_all(&s, "eth_getLogs", &params, s.logs_max).await;
+    let replies = call_all(&s, "eth_getLogs", &params, cap).await;
     vote(&replies, s.quorum, &format!("eth_getLogs [{from}, {to}]"), |r| {
         ok_value(r).and_then(|v| parse_logs(v, address, topic0, from, to))
     })
 }
 
+async fn receipt_round(s: &Settings, tx_hash: &[u8; 32], cap: u64) -> Result<Option<Receipt>, RpcError> {
+    let replies = call_all(s, "eth_getTransactionReceipt", &json!([hex0x(tx_hash)]), cap).await;
+    vote(&replies, s.quorum, "receipt", |r| ok_value(r).and_then(|v| parse_receipt(v, tx_hash)))
+}
+
 /// The receipt of `tx_hash`, by quorum. `None` (no receipt) is a value like any other.
+///
+/// The bridge's own transactions (a mint, a few admin calls) have small receipts, so the
+/// small default cap is used. Only when every provider fails (an oversized response is
+/// reported as a failure by the EVM RPC canister) is the call repeated once with the
+/// larger logs cap.
 pub async fn get_receipt(tx_hash: &[u8; 32]) -> Result<Option<Receipt>, RpcError> {
     let s = settings()?;
-    let replies = call_all(&s, "eth_getTransactionReceipt", &json!([hex0x(tx_hash)]), s.logs_max).await;
-    vote(&replies, s.quorum, "receipt", |r| ok_value(r).and_then(|v| parse_receipt(v, tx_hash)))
+    match receipt_round(&s, tx_hash, s.default_max).await {
+        Err(RpcError::AllFailed(_)) if s.logs_max > s.default_max => receipt_round(&s, tx_hash, s.logs_max).await,
+        other => other,
+    }
+}
+
+async fn chain_id_with(s: &Settings) -> Result<u64, RpcError> {
+    let replies = call_all(s, "eth_chainId", &json!([]), s.default_max).await;
+    vote(&replies, s.quorum, "chain id", |r| ok_value(r).and_then(|v| parse_quantity_u64(v, "chain id")))
+}
+
+/// `eth_chainId`, by quorum.
+pub async fn chain_id() -> Result<u64, RpcError> {
+    let s = settings()?;
+    chain_id_with(&s).await
+}
+
+/// Check that a quorum of an explicit provider set reports chain `expected`. Used on a
+/// proposed provider list BEFORE it is stored, so a list that points at the wrong
+/// network is never adopted. The quorum rules are those of every other read.
+pub async fn verify_chain_id_with(services: &[RpcServiceConfig], min_quorum: u8, expected: u64) -> Result<(), RpcError> {
+    let mut s = base_settings();
+    s.services = services.to_vec();
+    s.quorum = min_quorum as usize;
+    let s = s.validated()?;
+    let got = chain_id_with(&s).await?;
+    if got != expected {
+        return Err(RpcError::NotConfigured(format!("the RPC providers serve chain id {got}, expected {expected}")));
+    }
+    Ok(())
 }
 
 /// `eth_getTransactionCount`, by quorum.
@@ -1562,7 +1628,7 @@ mod tests {
         assert!(r.success);
         assert_eq!((r.block_number, r.block_hash, r.from, r.to), (100, h32(100, 0), [0x11; 20], Some(ADDR)));
         assert_eq!(r.logs, vec![l]);
-        assert_eq!(mock_calls()[0].max_response_bytes, 65_536);
+        assert_eq!(mock_calls()[0].max_response_bytes, 8_192, "our own receipts are small: the default cap");
         // Reverted.
         let rv = receipt_json(tx, "0x0", vec![]);
         script(move |_, _, _| Ok(ok_body(rv.clone())));
@@ -1630,6 +1696,137 @@ mod tests {
             script(move |_, _, _| Ok(ok_body(bad.clone())));
             assert!(matches!(block_on(get_receipt(&tx)), Err(RpcError::AllFailed(_))), "{name}");
         }
+    }
+
+    // ----- explicit log caps, receipt fallback, chain id -----------------------------------
+
+    #[test]
+    fn get_logs_with_cap_uses_the_given_cap_bounded_to_the_canister_maximum() {
+        configure(1, 1);
+        script(|_, _, _| Ok(ok_body(json!([]))));
+        let base = state::read_core(|c| c.config.observer.cycles_per_rpc_call);
+        let mut last_cycles = 0u128;
+        for cap in [1_024u64, 8_192, 65_536, 131_072, 524_288, MAX_RESPONSE_BYTES] {
+            clear_mock_calls();
+            block_on(get_logs_with_cap(&ADDR, &TOPIC, 1, 2, cap)).unwrap();
+            let c = &mock_calls()[0];
+            assert_eq!(c.max_response_bytes, cap);
+            assert!(c.cycles >= last_cycles, "the attached cycles never shrink as the cap grows");
+            assert!(c.cycles >= base, "at least the base amount");
+            last_cycles = c.cycles;
+        }
+        // The largest cap attaches the largest multiple, and that covers the outcall cost
+        // of a 2 MB response (about 27 200 cycles per cap byte on a 34-node subnet).
+        assert_eq!(last_cycles, base * MAX_CYCLE_FACTOR as u128);
+        let outcall_estimate = 27_200 * MAX_RESPONSE_BYTES as u128;
+        assert!(last_cycles >= outcall_estimate * 3 / 2, "{last_cycles} must cover {outcall_estimate} with margin");
+        // Above the maximum the cap is clamped, never sent as is.
+        clear_mock_calls();
+        block_on(get_logs_with_cap(&ADDR, &TOPIC, 1, 2, 50_000_000)).unwrap();
+        assert_eq!(mock_calls()[0].max_response_bytes, MAX_RESPONSE_BYTES);
+        // `get_logs` is the configured-cap wrapper.
+        clear_mock_calls();
+        block_on(get_logs(&ADDR, &TOPIC, 1, 2)).unwrap();
+        assert_eq!(mock_calls()[0].max_response_bytes, 65_536);
+        // An inverted range is refused before any call, whatever the cap.
+        clear_mock_calls();
+        assert!(matches!(block_on(get_logs_with_cap(&ADDR, &TOPIC, 6, 5, 8_192)), Err(RpcError::Decode(_))));
+        assert!(mock_calls().is_empty());
+    }
+
+    #[test]
+    fn a_receipt_is_retried_once_with_the_logs_cap_only_when_every_provider_fails() {
+        configure(3, 2);
+        let tx = [0x77; 32];
+        let big = receipt_json(tx, "0x1", vec![]);
+        // Providers fail any response above the cap they were given (simulating an
+        // oversized receipt on the small cap).
+        set_mock_transport({
+            let b = big.clone();
+            move |_, _| {
+                let cap = mock_calls().last().unwrap().max_response_bytes;
+                if cap < 10_000 {
+                    Err("Http body exceeds size limit".into())
+                } else {
+                    Ok(ok_body(b.clone()))
+                }
+            }
+        });
+        let r = block_on(get_receipt(&tx)).unwrap().unwrap();
+        assert!(r.success);
+        let caps: Vec<u64> = mock_calls().iter().map(|c| c.max_response_bytes).collect();
+        assert_eq!(caps, vec![8_192, 8_192, 8_192, 65_536, 65_536, 65_536], "small cap first, then one retry with the logs cap");
+
+        // A split vote is NOT retried: only a total failure is.
+        let f = big.clone();
+        script(move |p, _, _| match p {
+            0 => Ok(ok_body(f.clone())),
+            1 => Ok(ok_body(Value::Null)),
+            _ => Err("down".into()),
+        });
+        assert!(matches!(block_on(get_receipt(&tx)), Err(RpcError::NoQuorum(_))));
+        assert_eq!(mock_calls().len(), 3);
+
+        // With a logs cap that is not larger there is nothing to retry with.
+        state::mutate_core(|c| c.config.observer.logs_max_response_bytes = 8_192);
+        script(|_, _, _| Err("down".into()));
+        assert!(matches!(block_on(get_receipt(&tx)), Err(RpcError::AllFailed(_))));
+        assert_eq!(mock_calls().len(), 3);
+    }
+
+    #[test]
+    fn chain_id_is_a_strict_quorum_quantity() {
+        configure(3, 2);
+        script(|p, m, params| {
+            assert_eq!(m, "eth_chainId");
+            assert_eq!(*params, json!([]));
+            Ok(ok_body(json!(if p == 2 { "0x1" } else { "0x14a34" })))
+        });
+        assert_eq!(block_on(chain_id()), Ok(84_532));
+        assert!(mock_calls().iter().all(|c| c.max_response_bytes == 8_192));
+        script(|p, _, _| Ok(ok_body(json!(["0x14a34", "0x2105", "0x1"][p]))));
+        assert!(matches!(block_on(chain_id()), Err(RpcError::NoQuorum(_))));
+        for bad in [json!("0x014a34"), json!(84532), json!("84532"), json!("0x")] {
+            script(move |_, _, _| Ok(ok_body(bad.clone())));
+            assert!(matches!(block_on(chain_id()), Err(RpcError::AllFailed(_))));
+        }
+    }
+
+    #[test]
+    fn verify_chain_id_with_checks_a_proposed_provider_set_not_the_stored_one() {
+        configure(3, 2);
+        // The stored set is on Base Sepolia; the proposed one (p4, p5, p6) is not.
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<usize>::new()));
+        let s2 = seen.clone();
+        set_mock_transport(move |svc, body| {
+            let (m, _) = request_of(body);
+            assert_eq!(m, "eth_chainId");
+            let i = provider_index(svc);
+            s2.borrow_mut().push(i);
+            Ok(ok_body(json!(if i >= 3 { "0x2105" } else { "0x14a34" })))
+        });
+        let proposed: Vec<RpcServiceConfig> = (3..6).map(|i| RpcServiceConfig::Custom { url: url(i) }).collect();
+        match block_on(verify_chain_id_with(&proposed, 2, 84_532)) {
+            Err(RpcError::NotConfigured(m)) => assert!(m.contains("8453") && m.contains("84532"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(*seen.borrow(), vec![3, 4, 5], "only the proposed providers are asked");
+        assert_eq!(block_on(verify_chain_id_with(&proposed, 2, 8_453)), Ok(()));
+        // Quorum rules: one wrong provider is outvoted, two are not.
+        let s3 = seen.clone();
+        set_mock_transport(move |svc, _| {
+            s3.borrow_mut().push(provider_index(svc));
+            Ok(ok_body(json!(if provider_index(svc) == 5 { "0x1" } else { "0x14a34" })))
+        });
+        assert_eq!(block_on(verify_chain_id_with(&proposed, 2, 84_532)), Ok(()));
+        assert!(block_on(verify_chain_id_with(&proposed, 3, 84_532)).is_err(), "quorum 3 needs all three");
+        // A malformed set is refused like the stored one.
+        assert!(matches!(block_on(verify_chain_id_with(&[], 1, 84_532)), Err(RpcError::NotConfigured(_))));
+        assert!(matches!(block_on(verify_chain_id_with(&proposed, 4, 84_532)), Err(RpcError::NotConfigured(_))));
+        assert!(matches!(block_on(verify_chain_id_with(&proposed, 0, 84_532)), Err(RpcError::NotConfigured(_))));
+        // Unreachable providers are an error, not a pass.
+        script(|_, _, _| Err("down".into()));
+        assert!(matches!(block_on(verify_chain_id_with(&proposed, 2, 84_532)), Err(RpcError::AllFailed(_))));
     }
 
     // ----- counts, balances, fees, broadcast ------------------------------------------
@@ -1740,7 +1937,7 @@ mod tests {
         // the attached cycles scale with it (the unused part is refunded).
         assert_eq!((by_method("eth_getBlockByNumber").max_response_bytes, by_method("eth_getBlockByNumber").cycles), (65_536, base * 8));
         assert_eq!((by_method("eth_getLogs").max_response_bytes, by_method("eth_getLogs").cycles), (65_536, base * 8));
-        assert_eq!(by_method("eth_getTransactionReceipt").max_response_bytes, 65_536);
+        assert_eq!(by_method("eth_getTransactionReceipt").max_response_bytes, 8_192);
         // The scaling is bounded.
         state::mutate_core(|c| c.config.observer.logs_max_response_bytes = 2_000_000);
         clear_mock_calls();

@@ -1,6 +1,6 @@
 //! Projections from stable records to public Candid views.
 
-use crate::accounting::{check_coverage, Buckets};
+use crate::accounting::Buckets;
 use crate::env;
 use crate::ids::{self, LaneKind};
 use crate::state::{
@@ -179,8 +179,8 @@ pub fn bridge_info() -> BridgeInfo {
         },
         lanes: vec![lane_status(LaneKind::Minter, &c.minter_lane), lane_status(LaneKind::Admin, &c.admin_lane)],
         ledger_fee_e8s: c.ledger_fee_e8s,
-        active_deposits: c.active_deposits.len() as u32,
-        active_releases: c.active_releases.len() as u32,
+        active_deposits: state::active_deposit_count() as u32,
+        active_releases: state::active_release_count() as u32,
         mint_window_used_e8s: c.windows.admitted_in_window.min(u64::MAX as u128) as u64,
         release_window_used_e8s: c.windows.released_in_window.min(u64::MAX as u128) as u64,
         window_resets_at_ns: c.window_resets_at_ns(),
@@ -199,9 +199,21 @@ pub fn supply_audit() -> SupplyAudit {
         let b: &Buckets = &c.buckets;
         let liabilities = b.liabilities().unwrap_or(u128::MAX);
         let required = liabilities.saturating_sub(b.unknown_outflow);
-        let coverage = c.escrow_snapshot.as_ref().and_then(|s| check_coverage(b, s.balance).ok());
+        // Report the verdict and figures of the last reconciliation, not a recomputation
+        // against buckets that may have moved since the balance was read.
+        let snap = c.escrow_snapshot.as_ref();
+        let surplus = snap.and_then(|s| s.balance.checked_sub(s.required));
+        let deficit = snap.and_then(|s| s.required.checked_sub(s.balance).filter(|d| *d > 0));
+        let ledger_total = c.escrow_snapshot.as_ref().and_then(|s| s.ledger_total_supply);
+        let escrow = c.escrow_snapshot.as_ref().map(|s| s.balance);
         SupplyAudit {
             escrow_account: c.escrow_account(canister),
+            icp_ledger_total_supply_e8s: ledger_total.map(Nat::from),
+            circulating_on_icp_e8s: match (ledger_total, escrow) {
+                (Some(t), Some(e)) => Some(Nat::from(t.saturating_sub(e))),
+                _ => None,
+            },
+            circulating_on_base_e8s: c.base_supply_snapshot.as_ref().map(|s| Nat::from(s.total_supply)),
             escrow_balance_e8s: c.escrow_snapshot.as_ref().map(|s| Nat::from(s.balance)),
             escrow_balance_checked_at_ns: c.escrow_snapshot.as_ref().map(|s| s.at_ns),
             outstanding_base_e8s: Nat::from(b.outstanding_base),
@@ -214,9 +226,9 @@ pub fn supply_audit() -> SupplyAudit {
             unknown_outflow_e8s: Nat::from(b.unknown_outflow),
             liabilities_e8s: Nat::from(liabilities),
             required_escrow_e8s: Nat::from(required),
-            surplus_e8s: coverage.as_ref().and_then(|r| r.surplus).map(Nat::from),
-            deficit_e8s: coverage.as_ref().and_then(|r| r.deficit).map(Nat::from),
-            coverage_ok: coverage.as_ref().map(|r| r.ok),
+            surplus_e8s: surplus.map(Nat::from),
+            deficit_e8s: deficit.map(Nat::from),
+            coverage_ok: snap.map(|s| s.coverage_ok),
             base_total_supply_e8s: c.base_supply_snapshot.as_ref().map(|s| Nat::from(s.total_supply)),
             base_supply_block: c.base_supply_snapshot.as_ref().map(|s| s.block_number),
             inflight_mint_e8s: Nat::from(inflight),

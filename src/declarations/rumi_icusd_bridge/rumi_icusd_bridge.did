@@ -26,6 +26,10 @@ type BridgeError = variant {
   Internal : text;
   Anonymous;
   Paused : text;
+  InsufficientAllowance : record {
+    allowance_e8s : nat64;
+    required_e8s : nat64;
+  };
   AmountBelowMinimum : record { min_e8s : nat64 };
   CapacityExceeded : record { available_e8s : nat64 };
   NotFound;
@@ -41,6 +45,7 @@ type BridgeError = variant {
   RequestIdConflict;
   InvalidState : text;
   FeeChanged : record { current_fee_e8s : nat64 };
+  InsufficientFunds : record { required_e8s : nat64; balance_e8s : nat64 };
   AmountAboveMaximum : record { max_e8s : nat64 };
 };
 type BridgeFees = record { release_fee_e8s : nat64; deposit_fee_e8s : nat64 };
@@ -285,12 +290,14 @@ type RpcServiceConfig = variant {
 type StandardRecord = record { url : text; name : text };
 type SupplyAudit = record {
   fees_e8s : nat;
+  icp_ledger_total_supply_e8s : opt nat;
   inflight_mint_e8s : nat;
   pending_refund_e8s : nat;
   base_total_supply_e8s : opt nat;
   reserved_pulls_e8s : nat;
   pending_mint_e8s : nat;
   escrow_account : Account;
+  circulating_on_base_e8s : opt nat;
   base_supply_exact_match : opt bool;
   escrow_balance_e8s : opt nat;
   outstanding_base_e8s : nat;
@@ -300,6 +307,7 @@ type SupplyAudit = record {
   required_escrow_e8s : nat;
   liabilities_e8s : nat;
   held_e8s : nat;
+  circulating_on_icp_e8s : opt nat;
   pending_release_e8s : nat;
   escrow_balance_checked_at_ns : opt nat64;
   deficit_e8s : opt nat;

@@ -42,6 +42,10 @@ export const idlFactory = ({ IDL }) => {
     'Internal' : IDL.Text,
     'Anonymous' : IDL.Null,
     'Paused' : IDL.Text,
+    'InsufficientAllowance' : IDL.Record({
+      'allowance_e8s' : IDL.Nat64,
+      'required_e8s' : IDL.Nat64,
+    }),
     'AmountBelowMinimum' : IDL.Record({ 'min_e8s' : IDL.Nat64 }),
     'CapacityExceeded' : IDL.Record({ 'available_e8s' : IDL.Nat64 }),
     'NotFound' : IDL.Null,
@@ -60,6 +64,10 @@ export const idlFactory = ({ IDL }) => {
     'RequestIdConflict' : IDL.Null,
     'InvalidState' : IDL.Text,
     'FeeChanged' : IDL.Record({ 'current_fee_e8s' : IDL.Nat64 }),
+    'InsufficientFunds' : IDL.Record({
+      'required_e8s' : IDL.Nat64,
+      'balance_e8s' : IDL.Nat64,
+    }),
     'AmountAboveMaximum' : IDL.Record({ 'max_e8s' : IDL.Nat64 }),
   });
   const Result = IDL.Variant({
@@ -69,12 +77,14 @@ export const idlFactory = ({ IDL }) => {
   const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : BridgeError });
   const SupplyAudit = IDL.Record({
     'fees_e8s' : IDL.Nat,
+    'icp_ledger_total_supply_e8s' : IDL.Opt(IDL.Nat),
     'inflight_mint_e8s' : IDL.Nat,
     'pending_refund_e8s' : IDL.Nat,
     'base_total_supply_e8s' : IDL.Opt(IDL.Nat),
     'reserved_pulls_e8s' : IDL.Nat,
     'pending_mint_e8s' : IDL.Nat,
     'escrow_account' : Account,
+    'circulating_on_base_e8s' : IDL.Opt(IDL.Nat),
     'base_supply_exact_match' : IDL.Opt(IDL.Bool),
     'escrow_balance_e8s' : IDL.Opt(IDL.Nat),
     'outstanding_base_e8s' : IDL.Nat,
@@ -84,6 +94,7 @@ export const idlFactory = ({ IDL }) => {
     'required_escrow_e8s' : IDL.Nat,
     'liabilities_e8s' : IDL.Nat,
     'held_e8s' : IDL.Nat,
+    'circulating_on_icp_e8s' : IDL.Opt(IDL.Nat),
     'pending_release_e8s' : IDL.Nat,
     'escrow_balance_checked_at_ns' : IDL.Opt(IDL.Nat64),
     'deficit_e8s' : IDL.Opt(IDL.Nat),

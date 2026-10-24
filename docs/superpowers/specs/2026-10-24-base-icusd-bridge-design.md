@@ -166,8 +166,8 @@ event BridgeOut(bytes32 indexed transferId, address indexed from, uint256 amount
 | Ledger memo (release) | the 32-byte transfer id |
 | Ledger memo (refund) | `b"RBRG-RFD" ++ deposit_id BE`; fee sweep `b"RBRG-FEE" ++ sweep_id BE` |
 
-`instance_salt` comes from `raw_rand` at init and never changes, so a hypothetical reinstall cannot
-reuse mint ids already consumed on the contract.
+`instance_salt` is `sha256("rumi-icusd-base-bridge:instance-salt:v1" || canister id || install time)`,
+fixed at init, so a hypothetical reinstall cannot reuse mint ids already consumed on the contract.
 
 ### 7.2 Accounting buckets
 
@@ -281,8 +281,8 @@ States: `Observed -> {ReleasePending | Held}`, `ReleasePending -> {Released | Re
 1. The user's Base transaction is the authorization: it binds amount, destination principal and
    subaccount, sender, and transfer id. Wallet callbacks and tx hashes are hints only.
 2. **Single settlement path:** only the finalized-log observer creates release records.
-   `notify_base_bridge_out(tx_hash)` (non-anonymous, bounded) records a hint used for UI status
-   and to schedule an earlier observer pass. It never settles.
+   `notify_base_bridge_out(tx_hash)` (non-anonymous, bounded) records a hint shown in
+   `get_bridge_info`. It never settles and never changes polling cadence (section 11a).
 3. Observer pass: quorum `finalized` head `(F, hash_F)`; quorum `bridgeOutCount()` at `F`; if it
    exceeds `processed_count`, quorum `eth_getLogs(address = contract, topics = [BridgeOut],
    from = cursor + 1, to = F)` in bounded chunks. Each log must carry `removed = false`, the bound
@@ -382,7 +382,8 @@ needed. The canister is the settlement authority; the browser only shows hints.
   disclosed fees (approve fee if an approval is needed, transfer fee, deposit fee), and expected
   delivery (~20 min after the pull). An approval is requested only when the anonymous allowance read
   is below `A + transfer_fee`. Approve and `bridge_to_base` run sequentially inside one click (Oisy
-  rule). A `client_request_id` is persisted before the first signer call.
+  rule: for Oisy and other popup signers, approve and bridge are separate clicks). A
+  `client_request_id` is persisted before the first signer call.
 - **Base -> ICP:** connect Base wallet; switch or add the Base network; show the ICP destination
   (the logged-in principal, explicit and visible in the confirmation step); amount and fees. A random
   `clientNonce` and the contract-computed `transferId` are persisted before the wallet prompt. Before
@@ -455,6 +456,30 @@ local-EVM execution (anvil).
   backing stays in `pending_mint`. This indicates a key or record anomaly, so recovery is a
   controller decision: investigate, then ship an explicit fix by upgrade. `admin_clear_lane_halt`
   only clears halts with no outstanding transaction whose chain nonce matches local records.
+- **Review round 1 changes.**
+  - `bridge_to_base` validates the request, then pre-checks the caller's allowance and balance
+    before persisting anything, so a caller without funds creates no records and no paid work
+    (`InsufficientAllowance` / `InsufficientFunds`). The background tick is scheduled only for work
+    still in progress, and a request can never push a pending tick later.
+  - Each tick arms its fallback successor before its first await, so a trap after an await cannot
+    end the timer chain; admin endpoints also re-arm it.
+  - Lanes settle mints before the observer records burns. A burn that exceeds settled outstanding
+    supply but is covered by in-flight mints waits and is retried; only an unexplained excess halts.
+  - The observer adapts its `eth_getLogs` span and response cap, proves completeness by sequence
+    contiguity plus the head counter (rewinding on a mismatch) without requiring historical state
+    at every chunk end, backs off after repeated failures, and checks `eth_chainId` at bind.
+  - Ledger replies are classified against the op as stored after the await, and a non-success reply
+    from an older attempt never resolves an op whose newer attempt is outstanding.
+  - Coverage (C1) compares the balance with the buckets before and after the balance read, so a
+    concurrent transition cannot fake a deficit; the audit reports the stored verdict.
+  - The Base supply check is skipped when recorded burns are above the finalized head, and C3
+    quiescence is count-based.
+  - Capacity counts held claims; a release larger than the release window goes out alone at the
+    start of a fresh window; replacing RPC providers is controller-only.
+  - `SupplyAudit` now carries the ICP ledger total supply and the derived
+    `circulating_on_icp = total - escrow` and `circulating_on_base` figures.
+  - Oisy uses two clicks when an approval is needed (each signer call is the first signer call of
+    its own click); Internet Identity and Plug keep one click.
 - **No `icp.yaml` entry.** The bridge is deliberately absent from `icp.yaml` so a broad deploy can
   never create or install it by accident. `foundry/DEPLOY-BASE.md` uses explicit commands.
 

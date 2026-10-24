@@ -31,6 +31,12 @@ export type BridgeError = { 'Rpc' : string } |
   { 'Internal' : string } |
   { 'Anonymous' : null } |
   { 'Paused' : string } |
+  {
+    'InsufficientAllowance' : {
+      'allowance_e8s' : bigint,
+      'required_e8s' : bigint,
+    }
+  } |
   { 'AmountBelowMinimum' : { 'min_e8s' : bigint } } |
   { 'CapacityExceeded' : { 'available_e8s' : bigint } } |
   { 'NotFound' : null } |
@@ -48,6 +54,9 @@ export type BridgeError = { 'Rpc' : string } |
   { 'RequestIdConflict' : null } |
   { 'InvalidState' : string } |
   { 'FeeChanged' : { 'current_fee_e8s' : bigint } } |
+  {
+    'InsufficientFunds' : { 'required_e8s' : bigint, 'balance_e8s' : bigint }
+  } |
   { 'AmountAboveMaximum' : { 'max_e8s' : bigint } };
 export interface BridgeFees {
   'release_fee_e8s' : bigint,
@@ -304,12 +313,14 @@ export type RpcServiceConfig = { 'BaseMainnet' : L2MainnetService } |
 export interface StandardRecord { 'url' : string, 'name' : string }
 export interface SupplyAudit {
   'fees_e8s' : bigint,
+  'icp_ledger_total_supply_e8s' : [] | [bigint],
   'inflight_mint_e8s' : bigint,
   'pending_refund_e8s' : bigint,
   'base_total_supply_e8s' : [] | [bigint],
   'reserved_pulls_e8s' : bigint,
   'pending_mint_e8s' : bigint,
   'escrow_account' : Account,
+  'circulating_on_base_e8s' : [] | [bigint],
   'base_supply_exact_match' : [] | [boolean],
   'escrow_balance_e8s' : [] | [bigint],
   'outstanding_base_e8s' : bigint,
@@ -319,6 +330,7 @@ export interface SupplyAudit {
   'required_escrow_e8s' : bigint,
   'liabilities_e8s' : bigint,
   'held_e8s' : bigint,
+  'circulating_on_icp_e8s' : [] | [bigint],
   'pending_release_e8s' : bigint,
   'escrow_balance_checked_at_ns' : [] | [bigint],
   'deficit_e8s' : [] | [bigint],

@@ -168,7 +168,9 @@ fn get_audit_log(start: u64, limit: u32) -> Vec<AuditEntry> {
 
 #[ic_cdk::update]
 fn admin_set_pauses(p: Pauses) -> BridgeResult<()> {
-    admin::set_pauses(p)
+    admin::set_pauses(p)?;
+    timer::ensure_scheduled();
+    Ok(())
 }
 
 #[ic_cdk::update]
@@ -192,8 +194,8 @@ fn admin_set_observer_config(o: ObserverConfig) -> BridgeResult<()> {
 }
 
 #[ic_cdk::update]
-fn admin_set_rpc_services(services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
-    admin::set_rpc_services(services, min_quorum)
+async fn admin_set_rpc_services(services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
+    admin::set_rpc_services(services, min_quorum).await
 }
 
 #[ic_cdk::update]
@@ -223,6 +225,7 @@ fn admin_cancel_stuck_tx(tx_id: u64) -> BridgeResult<()> {
 #[ic_cdk::update]
 async fn admin_clear_lane_halt(lane: LaneKind) -> BridgeResult<()> {
     admin::require_admin()?;
+    timer::ensure_scheduled();
     evm::lane::clear_lane_halt(lane).await
 }
 
@@ -235,6 +238,7 @@ fn admin_retry_deposit(id: u64) -> BridgeResult<DepositView> {
 #[ic_cdk::update]
 async fn admin_reconcile() -> BridgeResult<SupplyAudit> {
     admin::require_admin()?;
+    timer::ensure_scheduled();
     timer::reconcile_supply().await?;
     Ok(views::supply_audit())
 }
@@ -242,12 +246,14 @@ async fn admin_reconcile() -> BridgeResult<SupplyAudit> {
 #[ic_cdk::update]
 async fn admin_clear_halt() -> BridgeResult<SupplyAudit> {
     admin::require_admin()?;
+    timer::ensure_scheduled();
     timer::clear_halt_after_checks().await
 }
 
 #[ic_cdk::update]
 async fn admin_run_tick() -> BridgeResult<()> {
     admin::require_admin()?;
+    timer::ensure_scheduled();
     timer::run_tick().await;
     Ok(())
 }

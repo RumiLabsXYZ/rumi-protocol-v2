@@ -87,6 +87,15 @@ describe('persist and load', () => {
     });
   });
 
+  it('persists the approved status (approval confirmed, transfer not yet sent) across a reload', () => {
+    const storage = createMemoryStorage();
+    new IntentStore(storage, ALICE).put(icpIntent({ status: 'approved' }));
+    const reopened = new IntentStore(storage, ALICE);
+    expect(reopened.loadStatus).toBe('ok');
+    expect(reopened.get(icpIntent().clientRequestId)).toMatchObject({ status: 'approved' });
+    expect(isResolved(reopened.list()[0])).toBe(false);
+  });
+
   it('replaces an intent with the same id instead of duplicating it', () => {
     const store = new IntentStore(createMemoryStorage(), ALICE);
     store.put(icpIntent());

@@ -25,8 +25,20 @@ const RECONCILE_EVERY_NS: u64 = 30 * 60 * 1_000_000_000;
 thread_local! {
     static RUNNING_SINCE: Cell<Option<u64>> = const { Cell::new(None) };
     static LAST_RECONCILE_NS: Cell<u64> = const { Cell::new(0) };
+    /// Due time of the pending tick, if one is armed.
+    static NEXT_DUE_NS: Cell<Option<u64>> = const { Cell::new(None) };
     #[cfg(target_arch = "wasm32")]
     static NEXT_TIMER: std::cell::RefCell<Option<ic_cdk_timers::TimerId>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Decide whether a request to tick at `wanted_due` should replace the pending tick.
+/// A pending tick that is already due no later than requested is kept, so repeated
+/// requests (for example many user calls) can never push the next tick later.
+pub fn should_reschedule(pending_due: Option<u64>, wanted_due: u64) -> bool {
+    match pending_due {
+        Some(due) => wanted_due < due,
+        None => true,
+    }
 }
 
 struct TickGuard;
@@ -54,12 +66,10 @@ impl Drop for TickGuard {
 /// deliberately excluded: anyone signed in can submit one, and they must not be able
 /// to force fast, paid RPC polling.
 pub fn has_pending_work() -> bool {
-    state::read_core(|c| {
-        !c.active_deposits.is_empty()
-            || !c.active_releases.is_empty()
-            // A halted lane (nonce anomaly) is parked for manual investigation; it must
-            // not keep the timer at the fast interval forever.
-            || (c.minter_lane.halted.is_none()
+    state::active_deposit_count() > 0 || state::active_release_count() > 0 || state::read_core(|c| {
+        // A halted lane (nonce anomaly) is parked for manual investigation; it must not
+        // keep the timer at the fast interval forever.
+        (c.minter_lane.halted.is_none()
                 && (c.minter_lane.unincluded_tx.is_some() || !c.minter_lane.unfinalized_txs.is_empty()))
             || (c.admin_lane.halted.is_none()
                 && (c.admin_lane.unincluded_tx.is_some()
@@ -71,11 +81,21 @@ pub fn has_pending_work() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn schedule_in(secs: u64) {
+    let wanted = env::now_ns().saturating_add(secs.saturating_mul(1_000_000_000));
+    if !should_reschedule(NEXT_DUE_NS.with(|d| d.get()), wanted) {
+        return;
+    }
     NEXT_TIMER.with(|t| {
         if let Some(id) = t.borrow_mut().take() {
             ic_cdk_timers::clear_timer(id);
         }
         let id = ic_cdk_timers::set_timer(std::time::Duration::from_secs(secs), || {
+            // This timer has fired. Arm a fallback tick first, in this message, so the
+            // chain survives even if the spawned tick traps after one of its awaits.
+            NEXT_TIMER.with(|t| *t.borrow_mut() = None);
+            NEXT_DUE_NS.with(|d| d.set(None));
+            let idle = state::read_core(|c| c.config.observer.idle_interval_secs);
+            schedule_in(idle);
             ic_cdk::spawn(async {
                 run_tick().await;
                 schedule_next();
@@ -83,10 +103,27 @@ fn schedule_in(secs: u64) {
         });
         *t.borrow_mut() = Some(id);
     });
+    NEXT_DUE_NS.with(|d| d.set(Some(wanted)));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn schedule_in(_secs: u64) {}
+fn schedule_in(secs: u64) {
+    let wanted = env::now_ns().saturating_add(secs.saturating_mul(1_000_000_000));
+    if should_reschedule(NEXT_DUE_NS.with(|d| d.get()), wanted) {
+        NEXT_DUE_NS.with(|d| d.set(Some(wanted)));
+    }
+}
+
+/// Make sure a tick is armed (used by admin endpoints, so an operator can always revive
+/// the timer without an upgrade).
+pub fn ensure_scheduled() {
+    schedule_soon();
+}
+
+#[cfg(test)]
+pub fn pending_due_for_tests() -> Option<u64> {
+    NEXT_DUE_NS.with(|d| d.get())
+}
 
 /// Run a tick within about a second (used after user actions and on install).
 pub fn schedule_soon() {
@@ -135,6 +172,10 @@ pub async fn run_tick() {
     refresh_ledger_basics().await;
     flows::deposit::reconcile_pulls().await;
     flows::deposit::retry_due_holds();
+    // Lanes first: a mint and the burn of its tokens can finalize in the same head step,
+    // and the burn must not be recorded before the mint has credited outstanding supply.
+    evm::lane::run_lane(LaneKind::Minter).await;
+    evm::lane::run_lane(LaneKind::Admin).await;
     if !state::read_core(|c| c.config.pauses.observer) {
         if let Err(e) = observer::run_pass().await {
             state::mutate_core(|c| c.observer.last_error = Some(e));
@@ -142,8 +183,6 @@ pub async fn run_tick() {
     }
     flows::release::start_remints();
     flows::release::process_releases().await;
-    evm::lane::run_lane(LaneKind::Minter).await;
-    evm::lane::run_lane(LaneKind::Admin).await;
     flows::deposit::process_refunds().await;
     flows::deposit::process_sweeps().await;
     let now = env::now_ns();
@@ -159,15 +198,27 @@ pub async fn reconcile_supply() -> BridgeResult<()> {
     LAST_RECONCILE_NS.with(|l| l.set(env::now_ns()));
     let canister = env::canister_id();
     let (ledger_id, escrow) = state::read_core(|c| (c.config.icusd_ledger, c.escrow_account(canister)));
+    let ledger_total = ledger::total_supply(ledger_id).await.ok();
+    // The balance read is an await, and other messages may change the buckets while it
+    // is in flight. Inflows only add surplus, and every escrow outflow is reserved in
+    // `unknown_outflow` before it is sent, so comparing the balance with the buckets as
+    // they were before AND after the read can only fail both ways for a real deficit.
+    let before = state::read_core(|c| c.buckets);
     let balance = ledger::balance_of(ledger_id, escrow).await.map_err(BridgeError::Ledger)?;
-    let buckets = state::read_core(|c| c.buckets);
-    let report = check_coverage(&buckets, balance).map_err(|e| BridgeError::Internal(e.to_string()))?;
+    let after = state::read_core(|c| c.buckets);
+    let r_before = check_coverage(&before, balance).map_err(|e| BridgeError::Internal(e.to_string()))?;
+    let r_after = check_coverage(&after, balance).map_err(|e| BridgeError::Internal(e.to_string()))?;
+    let ok = r_before.ok || r_after.ok;
+    let required = r_before.required.min(r_after.required);
     let now = env::now_ns();
-    state::mutate_core(|c| c.escrow_snapshot = Some(BalanceSnapshot { balance, at_ns: now, coverage_ok: report.ok }));
-    if !report.ok {
+    state::mutate_core(|c| {
+        c.escrow_snapshot =
+            Some(BalanceSnapshot { balance, at_ns: now, coverage_ok: ok, ledger_total_supply: ledger_total, required })
+    });
+    if !ok {
         state::halt(format!(
-            "escrow coverage violated: balance {balance} < required {} (deficit {:?})",
-            report.required, report.deficit
+            "escrow coverage violated: balance {balance} < required {} (before) and {} (after)",
+            r_before.required, r_after.required
         ));
     }
     if state::read_core(|c| c.config.contract.is_some()) {
@@ -232,6 +283,33 @@ pub async fn clear_halt_after_checks() -> BridgeResult<SupplyAudit> {
 }
 
 /// Evaluate C2/C3 for a finalized Base `totalSupply`. Shared with the observer.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_never_push_a_pending_tick_later() {
+        assert!(should_reschedule(None, 100));
+        assert!(should_reschedule(Some(100), 50), "an earlier request wins");
+        assert!(!should_reschedule(Some(100), 100));
+        assert!(!should_reschedule(Some(100), 150), "a later request never delays the pending tick");
+    }
+
+    #[test]
+    fn many_schedule_soon_calls_keep_the_first_due_time() {
+        crate::state::reset_for_tests();
+        crate::env::test_env::set_now_ns(1_000_000_000_000);
+        schedule_soon();
+        let first = pending_due_for_tests().unwrap();
+        for _ in 0..100 {
+            crate::env::test_env::advance_secs(0);
+            crate::env::test_env::set_now_ns(1_000_000_000_000 + 500_000_000);
+            schedule_soon();
+        }
+        assert_eq!(pending_due_for_tests(), Some(first));
+    }
+}
+
 pub fn base_supply_snapshot(total_supply: u128, block_number: u64, quiescent: bool) -> state::BaseSupplySnapshot {
     let buckets = state::read_core(|c| c.buckets);
     let inflight = state::inflight_mint_e8s();

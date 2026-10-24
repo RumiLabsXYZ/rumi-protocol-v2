@@ -22,12 +22,23 @@ import type { _SERVICE as BridgeService } from '$declarations/rumi_icusd_bridge/
 import type { _SERVICE as LedgerService } from '$declarations/icusd_ledger/icusd_ledger.did';
 import { walletSessionGeneration } from '$lib/services/auth';
 import { principal as principalStore, walletStore } from '$lib/stores/wallet';
+import { isOisyWallet } from '$lib/services/protocol/walletOperations';
 import { fetchLedgerFeeStrict } from '$lib/services/ledgerFeeService';
 import { resolveBridgeConfig, type BridgeConfig, type BridgeConfigResult } from './chains';
 import type { BaseToIcpDeps } from './baseToIcp';
 import type { IcpToBaseConfig, IcpToBaseDeps, PrepareDeps } from './icpToBase';
 import type { IntentStore } from './intents';
 import type { Eip1193Provider } from './evmWallet';
+
+/**
+ * Popup-signer wallets (Oisy) open their popup only for the first signer call of
+ * a click, so approve and bridge_to_base need two clicks. Delegation wallets
+ * (Internet Identity, Plug) sign without a popup and keep the single click path.
+ * Oisy is the only popup-signer wallet in this app's configuration.
+ */
+export function needsSeparateApprovalClick(): boolean {
+  return isOisyWallet();
+}
 
 export function getBridgeCanisterId(): string {
   return CANISTER_IDS.ICUSD_BRIDGE as string;
@@ -157,6 +168,7 @@ export function buildIcpToBaseDeps(opts: {
         return (await anonymous.get_deposit_by_request(owner, clientRequestId))[0] ?? null;
       },
     },
+    separateApproval: needsSeparateApprovalClick(),
     isCurrent: opts.isCurrent,
   };
 }

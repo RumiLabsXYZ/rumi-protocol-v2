@@ -431,6 +431,11 @@ export function formatBridgeError(err: BridgeError): string {
       return `That action is not available in the current state: ${e.InvalidState}`;
     case 'FeeChanged':
       return `The bridge fee changed to ${formatE8s(e.FeeChanged.current_fee_e8s)} icUSD. Review and confirm again.`;
+    // Returned by bridge_to_base before any deposit exists, so nothing was created.
+    case 'InsufficientAllowance':
+      return `Your allowance for the bridge is ${formatE8s(BigInt(e.InsufficientAllowance.allowance_e8s))} icUSD, but ${formatE8s(BigInt(e.InsufficientAllowance.required_e8s))} icUSD is needed. Approve again, then bridge.`;
+    case 'InsufficientFunds':
+      return `Your icUSD balance is ${formatE8s(BigInt(e.InsufficientFunds.balance_e8s))} icUSD, but ${formatE8s(BigInt(e.InsufficientFunds.required_e8s))} icUSD is needed (the amount plus the ledger fee).`;
     default:
       return 'The bridge returned an error this page does not recognise.';
   }

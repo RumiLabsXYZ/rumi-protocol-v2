@@ -89,6 +89,20 @@ pub fn record_finalized_bridge_out(ev: &BridgeOutEvent, log: &RawLog) -> Result<
         )),
         Err(e) => Err(e.clone()),
     };
+    // A burn can be finalized in the same head step as the mint that funded it, before
+    // the lane has settled that mint. If in-flight mints explain the shortfall, wait and
+    // retry (the observer does not advance); only a burn no mint can explain halts.
+    let outstanding = state::read_core(|c| c.buckets.outstanding_base);
+    if (ev.amount_e8s as u128) > outstanding {
+        let inflight = state::inflight_mint_e8s();
+        if (ev.amount_e8s as u128) <= outstanding.saturating_add(inflight) {
+            return Err(format!(
+                "bridge-out {} of {} e8s waits for in-flight mint settlement (settled outstanding {outstanding}, in flight {inflight})",
+                ids::hex0x(&ev.transfer_id),
+                ev.amount_e8s
+            ));
+        }
+    }
     let (t, st) = match &releasable {
         Ok(()) => (Transition::BridgeOutAccepted { amount: ev.amount_e8s }, ReleaseState::Pending),
         Err(reason) => (Transition::BridgeOutHeld { amount: ev.amount_e8s }, ReleaseState::Held { reason: reason.clone() }),
@@ -159,8 +173,8 @@ pub async fn process_releases() {
         let op_ref = OpRef::Release(tid);
         let Some(op) = ledger_ops::load_op(&op_ref) else { continue };
         if matches!(op.status, LedgerOpStatus::Pending) && op.attempts == 0 {
-            if let Some(res) = ledger_ops::attempt(&op_ref).await {
-                ledger_ops::apply_resolution(&op_ref, res);
+            if let Some(sent) = ledger_ops::attempt(&op_ref).await {
+                ledger_ops::apply_outcome(&op_ref, sent);
             }
         } else {
             ledger_ops::reconcile(&op_ref).await;
@@ -175,18 +189,7 @@ fn prepare_release_op(tid: &[u8; 32]) -> bool {
     let Some(dest) = r.destination else { return false };
     let now = env::now_ns();
     let canister = env::canister_id();
-    let (fee, escrow, window_ok, tip) = state::mutate_core(|c| {
-        c.roll_window(now);
-        let ok = c.windows.released_in_window.saturating_add(r.amount_e8s as u128)
-            <= c.config.limits.release_window_limit_e8s as u128;
-        if ok {
-            c.windows.released_in_window += r.amount_e8s as u128;
-        }
-        (c.ledger_fee_e8s, c.escrow_account(canister), ok, c.ledger_tip_lower_bound)
-    });
-    if !window_ok {
-        return false;
-    }
+    let (fee, escrow, tip) = state::read_core(|c| (c.ledger_fee_e8s, c.escrow_account(canister), c.ledger_tip_lower_bound));
     let Some(fee) = fee else { return false };
     let outflow = r.amount_e8s - r.release_fee_e8s;
     if outflow <= fee {
@@ -196,6 +199,21 @@ fn prepare_release_op(tid: &[u8; 32]) -> bool {
             r.updated_at_ns = now;
             state::put_release(&r);
         }
+        return false;
+    }
+    // Window: a release that alone exceeds the limit may go out at the start of a fresh
+    // window, so no valid release waits forever.
+    let window_ok = state::mutate_core(|c| {
+        c.roll_window(now);
+        let used = c.windows.released_in_window;
+        let ok = used == 0
+            || used.saturating_add(r.amount_e8s as u128) <= c.config.limits.release_window_limit_e8s as u128;
+        if ok {
+            c.windows.released_in_window = used.saturating_add(r.amount_e8s as u128);
+        }
+        ok
+    });
+    if !window_ok {
         return false;
     }
     r.transfer = Some(LedgerOp {
@@ -371,6 +389,90 @@ mod tests {
         let (e, l) = ev(1, 10_000, user().as_slice().to_vec());
         record_finalized_bridge_out(&e, &l).unwrap();
         assert!(matches!(state::get_release(&e.transfer_id).unwrap().state, ReleaseState::Held { .. }));
+    }
+
+    #[test]
+    fn burn_explained_by_an_in_flight_mint_waits_instead_of_halting() {
+        setup();
+        state::mutate_core(|c| c.buckets.outstanding_base = 0);
+        // A user deposit of 100 icUSD whose mint was signed (and possibly included) but not
+        // yet settled by the lane.
+        let mut d = state::tests::sample_deposit(50, user());
+        d.amount_e8s = 100 * E8;
+        d.mint_amount_e8s = 100 * E8;
+        d.state = DepositState::MintInFlight;
+        d.active_tx = Some(9);
+        state::put_deposit(&d);
+        state::put_tx(&state::EvmTxRecord {
+            id: 9,
+            lane: crate::ids::LaneKind::Minter,
+            nonce: 0,
+            purpose: state::TxPurpose::Mint { deposit_id: 50 },
+            to: [0xcc; 20],
+            value_wei: 0,
+            data: vec![],
+            gas_limit: 150_000,
+            attempts: vec![state::TxAttempt {
+                kind: state::AttemptKind::Original,
+                to: [0xcc; 20],
+                value_wei: 0,
+                data: vec![],
+                max_fee_per_gas: 1,
+                max_priority_fee_per_gas: 1,
+                gas_limit: 150_000,
+                raw: vec![2],
+                tx_hash: [3; 32],
+                created_at_ns: 0,
+                broadcast_count: 1,
+                last_broadcast_ns: Some(0),
+                last_broadcast_note: None,
+            }],
+            status: state::TxStatus::Included { attempt: 0, block_number: 10, block_hash: [4; 32], success: true },
+            cancel_requested: false,
+            outcome_applied: false,
+            created_at_ns: 0,
+            updated_at_ns: 0,
+            last_checked_ns: None,
+            note: None,
+        });
+        let (e, l) = ev(1, 100 * E8, user().as_slice().to_vec());
+        assert!(record_finalized_bridge_out(&e, &l).is_err());
+        assert!(!state::is_halted(), "an in-flight mint explains the burn");
+        assert!(state::get_release(&e.transfer_id).is_none());
+        // More than the in-flight mint can explain still halts.
+        let (e2, l2) = ev(2, 101 * E8, user().as_slice().to_vec());
+        assert!(record_finalized_bridge_out(&e2, &l2).is_err());
+        assert!(state::is_halted());
+    }
+
+    #[test]
+    fn a_release_larger_than_the_window_goes_out_alone_in_a_fresh_window() {
+        setup();
+        state::mutate_core(|c| c.config.limits.release_window_limit_e8s = 50 * E8);
+        let (e, l) = ev(1, 100 * E8, user().as_slice().to_vec());
+        record_finalized_bridge_out(&e, &l).unwrap();
+        assert!(prepare_release_op(&e.transfer_id), "fresh window admits one oversized release");
+        let (e2, l2) = ev(2, 10 * E8, user().as_slice().to_vec());
+        record_finalized_bridge_out(&e2, &l2).unwrap();
+        assert!(!prepare_release_op(&e2.transfer_id), "window now used");
+        crate::env::test_env::advance_secs(86_401);
+        assert!(prepare_release_op(&e2.transfer_id));
+    }
+
+    #[test]
+    fn dust_does_not_consume_the_release_window() {
+        setup();
+        state::mutate_core(|c| {
+            c.config.limits.release_window_limit_e8s = 50 * E8;
+            c.config.fees.release_fee_e8s = 0;
+        });
+        let (e, l) = ev(1, 100 * E8, user().as_slice().to_vec());
+        record_finalized_bridge_out(&e, &l).unwrap();
+        // Ledger fee rises above the release before the transfer is prepared.
+        state::mutate_core(|c| c.ledger_fee_e8s = Some(200 * E8));
+        assert!(!prepare_release_op(&e.transfer_id));
+        assert!(matches!(state::get_release(&e.transfer_id).unwrap().state, ReleaseState::Held { .. }));
+        assert_eq!(state::read_core(|c| c.windows.released_in_window), 0);
     }
 
     #[test]

@@ -5,18 +5,28 @@
  *  - a pure state machine (`reduceIcpToBase`, `buildQuote`, `validateRecipient`,
  *    `checkQuote`) that the specs exercise exhaustively, and
  *  - a thin effect runner (`prepareIcpToBase`, `startIcpToBase`,
- *    `retryIcpToBase`, `resumeIcpToBase`, `trackDeposit`, `requestDepositRefund`)
- *    that talks to the ledger and the bridge canister through injected deps.
+ *    `bridgeAfterApproval`, `retryIcpToBase`, `resumeIcpToBase`, `trackDeposit`,
+ *    `requestDepositRefund`) that talks to the ledger and the bridge canister
+ *    through injected deps.
  *
  * Safety properties:
  *  - The intent (with its client request id) is persisted BEFORE the first
- *    signer call, and that first call is made synchronously inside the click
- *    handler, with no await in front of it (Oisy opens its popup only from a
- *    direct user gesture; later awaits are fine).
+ *    signer call, and every signer call is issued synchronously inside its click
+ *    handler, with no await in front of it.
+ *  - Popup-signer wallets (Oisy) only open their popup from a direct user
+ *    gesture, and only for the FIRST signer call of that gesture: a second
+ *    signer call after an await fails with "Signer window should not be opened
+ *    outside of click handler". So when an approval is needed and
+ *    `deps.separateApproval` is set, one click performs only `icrc2_approve`, the
+ *    flow stops in the `approved` state, and a second click performs
+ *    `bridge_to_base` as the first signer call of that click. The intent and its
+ *    client request id are persisted (status `approved`) across both clicks and
+ *    across a reload. Delegation wallets (Internet Identity, Plug) have no popup
+ *    and keep the single click path: approve, then `bridge_to_base`.
  *  - An approval is requested only when the current allowance is short, for
  *    exactly `amount + ledger fee`, with a short expiry.
  *  - An uncertain outcome (thrown error, lost reply, `Internal`/`Rpc` errors)
- *    is resolved by looking the request up by `client_request_id`. A manual
+ *    is resolved by looking the request up with `get_deposit_by_request`. A manual
  *    retry reuses the SAME id, so the canister returns the existing deposit
  *    instead of creating a second one. Nothing is ever re-sent automatically.
  *  - The canister is the settlement authority; this module only displays it.
@@ -31,7 +41,7 @@ import type {
 } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
 import type { ApproveArgs, ApproveResult } from '$declarations/icusd_ledger/icusd_ledger.did';
 import { bytesToHex, hexToBytes, isAddress, isZeroAddress } from './abi';
-import { tryParseE8s } from './amounts';
+import { formatE8s, tryParseE8s } from './amounts';
 import type { BridgeConfig } from './chains';
 import {
   IntentStoreError,
@@ -228,11 +238,17 @@ export type IcpToBaseState =
   /** The canister reported a different deposit fee. The user must review and confirm the new one. */
   | { kind: 'fee_changed'; quote: IcpToBaseQuote; currentFeeE8s: bigint }
   | { kind: 'approving'; quote: IcpToBaseQuote; intent: IcpToBaseIntent }
+  /**
+   * The approval is confirmed and the transfer has NOT been sent. Waiting for a
+   * second click (popup-signer wallets). `quote` is null after a reload.
+   */
+  | { kind: 'approved'; quote: IcpToBaseQuote | null; intent: IcpToBaseIntent }
   /** Approval declined or failed. No funds moved. */
   | { kind: 'approval_failed'; quote: IcpToBaseQuote; message: string; declined: boolean }
   | { kind: 'submitting'; quote: IcpToBaseQuote | null; intent: IcpToBaseIntent }
   /** The canister rejected the request before creating anything. */
-  | { kind: 'rejected'; quote: IcpToBaseQuote | null; message: string }
+  /** `reapprove` is set when the allowance is the problem: review again to approve anew. */
+  | { kind: 'rejected'; quote: IcpToBaseQuote | null; message: string; reapprove: boolean }
   /** Outcome unknown. `lookup` says whether the request could be found by its id. */
   | {
       kind: 'uncertain';
@@ -251,11 +267,20 @@ export type IcpToBaseEvent =
   | { type: 'quote_ready'; quote: IcpToBaseQuote; problem: QuoteProblem | null }
   | { type: 'quote_failed'; message: string }
   | { type: 'confirmed'; quote: IcpToBaseQuote | null; intent: IcpToBaseIntent; needsApproval: boolean }
+  /** Approval confirmed and the transfer is sent in the same click (delegation wallets). */
   | { type: 'approval_ok' }
+  /** Approval confirmed; the transfer waits for a second click (popup-signer wallets). */
+  | { type: 'approval_confirmed' }
+  /** The second click: the transfer request is being sent. */
+  | { type: 'bridge_started' }
+  /** Reload recovery: an earlier request is being looked up. */
+  | { type: 'resume_started'; intent: IcpToBaseIntent }
+  /** Reload recovery: the approval was granted earlier and the bridge has no deposit yet. */
+  | { type: 'resume_approved'; intent: IcpToBaseIntent }
   | { type: 'approval_failed'; message: string; declined: boolean }
   | { type: 'submit_ok'; deposit: DepositView }
   | { type: 'submit_fee_changed'; currentFeeE8s: number | bigint }
-  | { type: 'submit_rejected'; message: string }
+  | { type: 'submit_rejected'; message: string; reapprove?: boolean }
   | { type: 'submit_uncertain'; message: string }
   | { type: 'lookup_found'; deposit: DepositView }
   | { type: 'lookup_not_found' }
@@ -274,14 +299,14 @@ export function reduceIcpToBase(state: IcpToBaseState, event: IcpToBaseEvent): I
   switch (event.type) {
     case 'reset':
     case 'edit':
-      // Editing is only possible while nothing is in flight.
-      if (state.kind === 'approving' || state.kind === 'submitting') return state;
+      // Editing is only possible while nothing is in flight. An approved request must be bridged or discarded.
+      if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'approved') return state;
       if (state.kind === 'uncertain' && event.type === 'edit') return state;
       return { kind: 'draft' };
     case 'session_changed':
       return { kind: 'session_changed' };
     case 'quote_started':
-      if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'uncertain') return state;
+      if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'uncertain' || state.kind === 'approved') return state;
       return { kind: 'quoting' };
     case 'quote_ready':
       if (state.kind !== 'quoting') return state;
@@ -290,13 +315,25 @@ export function reduceIcpToBase(state: IcpToBaseState, event: IcpToBaseEvent): I
       if (state.kind !== 'quoting') return state;
       return { kind: 'error', message: event.message };
     case 'confirmed':
-      if (state.kind === 'approving' || state.kind === 'submitting') return state;
+      if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'approved') return state;
       return event.needsApproval && event.quote
         ? { kind: 'approving', quote: event.quote, intent: event.intent }
         : { kind: 'submitting', quote: event.quote, intent: event.intent };
     case 'approval_ok':
       if (state.kind !== 'approving') return state;
       return { kind: 'submitting', quote: state.quote, intent: state.intent };
+    case 'approval_confirmed':
+      if (state.kind !== 'approving') return state;
+      return { kind: 'approved', quote: state.quote, intent: state.intent };
+    case 'bridge_started':
+      if (state.kind !== 'approved') return state;
+      return { kind: 'submitting', quote: state.quote, intent: state.intent };
+    case 'resume_started':
+      if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'approved') return state;
+      return { kind: 'uncertain', intent: event.intent, message: 'This request was started on this device earlier and has no recorded outcome.', lookup: 'looking' };
+    case 'resume_approved':
+      if (state.kind !== 'uncertain') return state;
+      return { kind: 'approved', quote: null, intent: event.intent };
     case 'approval_failed':
       if (state.kind !== 'approving') return state;
       return { kind: 'approval_failed', quote: state.quote, message: event.message, declined: event.declined };
@@ -305,7 +342,12 @@ export function reduceIcpToBase(state: IcpToBaseState, event: IcpToBaseEvent): I
       return { kind: 'tracking', intent: state.intent, deposit: event.deposit };
     case 'submit_fee_changed':
       if (state.kind !== 'submitting') return state;
-      if (!state.quote) return { kind: 'error', message: 'The bridge fee changed. Start the transfer again to see the new fee.' };
+      if (!state.quote) {
+        return {
+          kind: 'error',
+          message: `The bridge deposit fee changed to ${formatE8s(BigInt(event.currentFeeE8s))} icUSD. No icUSD moved. Review the transfer again to see the new amounts.`,
+        };
+      }
       return {
         kind: 'fee_changed',
         quote: state.quote,
@@ -313,7 +355,7 @@ export function reduceIcpToBase(state: IcpToBaseState, event: IcpToBaseEvent): I
       };
     case 'submit_rejected':
       if (state.kind !== 'submitting') return state;
-      return { kind: 'rejected', quote: state.quote, message: event.message };
+      return { kind: 'rejected', quote: state.quote, message: event.message, reapprove: event.reapprove === true };
     case 'submit_uncertain':
       if (state.kind !== 'submitting') return state;
       return { kind: 'uncertain', intent: state.intent, message: event.message, lookup: 'looking' };
@@ -334,7 +376,7 @@ export function reduceIcpToBase(state: IcpToBaseState, event: IcpToBaseEvent): I
       if (state.kind !== 'tracking') return state;
       return { ...state, deposit: event.deposit };
     case 'track_existing':
-      if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'uncertain') return state;
+      if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'uncertain' || state.kind === 'approved') return state;
       return { kind: 'tracking', intent: event.intent, deposit: event.deposit };
     case 'blocked':
       return { kind: 'error', message: event.message };
@@ -409,6 +451,12 @@ export interface IcpToBaseDeps {
     /** `get_deposit_by_request(owner, client_request_id)`. */
     getDepositByRequest(owner: Principal, clientRequestId: Uint8Array): Promise<DepositView | null>;
   };
+  /**
+   * True for popup-signer wallets (Oisy): every signer call must be the first
+   * signer call of its own click, so the approval and the transfer are two clicks.
+   * False for delegation wallets (Internet Identity, Plug): one click does both.
+   */
+  separateApproval: boolean;
   /** Synchronous liveness check: same wallet session and same principal as when the action began. */
   isCurrent(): boolean;
   random?: RandomBytes;
@@ -440,13 +488,17 @@ export function bridgeToBaseArgs(intent: IcpToBaseIntent): BridgeToBaseArgs {
 
 /** True while an earlier ICP -> Base request has no recorded outcome. */
 export function hasUnresolvedIntent(store: IntentStore): boolean {
-  return store.list().some((intent) => intent.kind === 'icp_to_base' && intent.status === 'prepared');
+  return unresolvedIntents(store).length > 0;
 }
 
+/** Requests with no recorded outcome: not yet sent (`prepared`) or approved but not yet bridged (`approved`). */
 export function unresolvedIntents(store: IntentStore): IcpToBaseIntent[] {
   return store
     .list()
-    .filter((intent): intent is IcpToBaseIntent => intent.kind === 'icp_to_base' && intent.status === 'prepared');
+    .filter(
+      (intent): intent is IcpToBaseIntent =>
+        intent.kind === 'icp_to_base' && (intent.status === 'prepared' || intent.status === 'approved'),
+    );
 }
 
 /**
@@ -454,7 +506,9 @@ export function unresolvedIntents(store: IntentStore): IcpToBaseIntent[] {
  *
  * Everything before the first signer call is synchronous: the intent is saved
  * (localStorage is synchronous) and the first ledger or bridge call is issued
- * without an await in front of it.
+ * without an await in front of it. With `deps.separateApproval` and an approval
+ * needed, this click ends after `icrc2_approve`; `bridgeAfterApproval` is the
+ * second click.
  */
 export function startIcpToBase(deps: IcpToBaseDeps, quote: IcpToBaseQuote, emit: Emit): Promise<void> {
   if (!deps.isCurrent()) {
@@ -529,14 +583,36 @@ async function continueAfterConfirm(
       emit({ type: 'approval_failed', declined: false, message: formatApproveError(approval.Err) });
       return;
     }
+    // The approval is a fact worth keeping: it survives a reload and gates the "ready to bridge" state.
+    markApproved(deps, intent);
     if (!deps.isCurrent()) {
       // The approval is harmless and expires; the unsent intent stays so it can be resolved later.
       emit({ type: 'session_changed' });
       return;
     }
+    if (deps.separateApproval) {
+      // Popup wallets cannot sign a second request in this click. Stop here; the next click sends the transfer.
+      emit({ type: 'approval_confirmed' });
+      return;
+    }
     emit({ type: 'approval_ok' });
   }
   await submitToBridge(deps, intent, emit);
+}
+
+/**
+ * Second click of the two-click path (popup-signer wallets): the approval is
+ * already confirmed, so this click sends `bridge_to_base` as its FIRST signer
+ * call, with the SAME client request id as the approval click. Also used after a
+ * reload, for an intent that was approved earlier.
+ */
+export function bridgeAfterApproval(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit: Emit): Promise<void> {
+  if (!deps.isCurrent()) {
+    emit({ type: 'session_changed' });
+    return Promise.resolve();
+  }
+  emit({ type: 'bridge_started' });
+  return submitToBridge(deps, intent, emit);
 }
 
 /**
@@ -584,7 +660,12 @@ async function submitToBridge(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit
   }
   if (classifyBridgeError(err) === 'no_effect') {
     markFailed(deps, intent, bridgeErrorKind(err));
-    emit({ type: 'submit_rejected', message: formatBridgeError(err) });
+    emit({
+      type: 'submit_rejected',
+      message: formatBridgeError(err),
+      // The allowance is short or expired: nothing was created, review again to approve anew.
+      reapprove: bridgeErrorKind(err) === 'InsufficientAllowance',
+    });
     return;
   }
   await resolveUncertain(deps, intent, emit, formatBridgeError(err), 'submit_uncertain');
@@ -596,6 +677,7 @@ async function resolveUncertain(
   emit: Emit,
   message: string,
   first: 'submit_uncertain' | null,
+  fromReload = false,
 ): Promise<void> {
   if (first) emit({ type: first, message });
   const outcome = await findDepositByRequestId(deps, intent.clientRequestId);
@@ -604,7 +686,8 @@ async function resolveUncertain(
     return;
   }
   if (outcome === null) {
-    emit({ type: 'lookup_not_found' });
+    // After a reload, an approved request the bridge has never seen is simply ready to bridge.
+    emit(fromReload && intent.status === 'approved' ? { type: 'resume_approved', intent } : { type: 'lookup_not_found' });
     return;
   }
   acceptDeposit(deps, intent, outcome);
@@ -637,9 +720,8 @@ export async function findDepositByRequestId(
  * Looks it up by client request id and reports through the same events.
  */
 export async function resumeIcpToBase(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit: Emit): Promise<void> {
-  emit({ type: 'confirmed', quote: null, intent, needsApproval: false });
-  emit({ type: 'submit_uncertain', message: 'This request was started on this device earlier and has no recorded outcome.' });
-  await resolveUncertain(deps, intent, emit, '', null);
+  emit({ type: 'resume_started', intent });
+  await resolveUncertain(deps, intent, emit, '', null, true);
 }
 
 /** Forget an unsent intent. Only safe once a lookup showed the request never reached the bridge. */
@@ -652,6 +734,14 @@ function abandonIntent(deps: IcpToBaseDeps, intent: IcpToBaseIntent): void {
     deps.store.remove(intentId(intent));
   } catch {
     // A stale unsent record is resolved on the next visit.
+  }
+}
+
+function markApproved(deps: IcpToBaseDeps, intent: IcpToBaseIntent): void {
+  try {
+    deps.store.patch<IcpToBaseIntent>(intentId(intent), { status: 'approved' });
+  } catch {
+    // The approval stands on the ledger either way; the intent stays 'prepared' and resolves the same way.
   }
 }
 

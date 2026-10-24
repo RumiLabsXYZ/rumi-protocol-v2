@@ -195,6 +195,10 @@ pub enum BridgeError {
     CapacityExceeded { available_e8s: u64 },
     RateLimited { available_e8s: u64, window_resets_at_ns: u64 },
     FeeChanged { current_fee_e8s: u64 },
+    /// The caller's ICRC-2 allowance to the bridge does not cover amount plus ledger fee.
+    InsufficientAllowance { allowance_e8s: u64, required_e8s: u64 },
+    /// The caller's icUSD balance does not cover amount plus ledger fee.
+    InsufficientFunds { balance_e8s: u64, required_e8s: u64 },
     TooManyActiveOperations,
     RequestIdConflict,
     NotFound,
@@ -374,6 +378,12 @@ pub struct BridgeInfo {
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SupplyAudit {
     pub escrow_account: Account,
+    /// icUSD ledger `icrc1_total_supply` at the last reconciliation (includes escrow).
+    pub icp_ledger_total_supply_e8s: Option<Nat>,
+    /// `icp_ledger_total_supply - escrow_balance`: ICP icUSD not locked as Base backing.
+    pub circulating_on_icp_e8s: Option<Nat>,
+    /// Base `totalSupply` at the last reconciliation (finalized head).
+    pub circulating_on_base_e8s: Option<Nat>,
     pub escrow_balance_e8s: Option<Nat>,
     pub escrow_balance_checked_at_ns: Option<u64>,
     pub outstanding_base_e8s: Nat,
