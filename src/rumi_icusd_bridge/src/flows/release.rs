@@ -316,6 +316,8 @@ mod tests {
         let r = state::get_release(&e.transfer_id).unwrap();
         assert_eq!(r.destination, Some(Account { owner: user(), subaccount: None }));
         assert_eq!(state::list_owner_releases(&user(), None, 10).len(), 1);
+        assert_eq!(state::list_sender_releases(&[0x55; 20], None, 10).len(), 1);
+        assert!(state::list_sender_releases(&[0x56; 20], None, 10).is_empty());
     }
 
     #[test]

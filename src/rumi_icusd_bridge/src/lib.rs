@@ -98,6 +98,29 @@ fn list_my_deposits(args: ListDepositsArgs) -> Vec<DepositView> {
     state::list_owner_deposits(&caller, args.start_after, args.limit).iter().map(views::deposit_view).collect()
 }
 
+/// Public: deposits are on-chain facts. Lets wallets whose signer upgrades queries to
+/// signed calls (Oisy) read history without a consent prompt.
+#[ic_cdk::query]
+fn list_deposits_for_owner(args: ListDepositsForOwnerArgs) -> Vec<DepositView> {
+    state::list_owner_deposits(&args.owner, args.start_after, args.limit).iter().map(views::deposit_view).collect()
+}
+
+/// Public lookup of a deposit by its owner and client request id (recovery after a
+/// lost `bridge_to_base` reply).
+#[ic_cdk::query]
+fn get_deposit_by_request(owner: Principal, client_request_id: serde_bytes::ByteBuf) -> Option<DepositView> {
+    let key = state::request_key(&owner, &client_request_id).ok()?;
+    state::lookup_request(&key).and_then(state::get_deposit).map(|d| views::deposit_view(&d))
+}
+
+/// Public: releases created by a given Base sender, including held claims whose ICP
+/// destination was invalid.
+#[ic_cdk::query]
+fn list_releases_for_base_sender(args: ListReleasesForSenderArgs) -> Vec<ReleaseView> {
+    let Ok(sender) = ids::parse_address(&args.base_sender) else { return vec![] };
+    state::list_sender_releases(&sender, args.start_after_sequence, args.limit).iter().map(views::release_view).collect()
+}
+
 #[ic_cdk::query]
 fn get_release(transfer_id: String) -> Option<ReleaseView> {
     let tid = ids::parse_bytes32(&transfer_id).ok()?;

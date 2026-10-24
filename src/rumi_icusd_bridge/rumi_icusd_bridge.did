@@ -207,9 +207,19 @@ type LaneStatus = record {
 };
 type LineDisplayPage = record { lines : vec text };
 type ListDepositsArgs = record { start_after : opt nat64; limit : nat32 };
+type ListDepositsForOwnerArgs = record {
+  owner : principal;
+  start_after : opt nat64;
+  limit : nat32;
+};
 type ListReleasesArgs = record {
   start_after_sequence : opt nat64;
   owner : principal;
+  limit : nat32;
+};
+type ListReleasesForSenderArgs = record {
+  start_after_sequence : opt nat64;
+  base_sender : text;
   limit : nat32;
 };
 type ObserverConfig = record {
@@ -337,12 +347,19 @@ service : (BridgeArg) -> {
   get_base_addresses : () -> (Result_5);
   get_bridge_info : () -> (BridgeInfo) query;
   get_deposit : (nat64) -> (opt DepositView) query;
+  get_deposit_by_request : (principal, blob) -> (opt DepositView) query;
   get_release : (text) -> (opt ReleaseView) query;
   get_supply_audit : () -> (SupplyAudit) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_6);
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  list_deposits_for_owner : (ListDepositsForOwnerArgs) -> (
+      vec DepositView,
+    ) query;
   list_my_deposits : (ListDepositsArgs) -> (vec DepositView) query;
+  list_releases_for_base_sender : (ListReleasesForSenderArgs) -> (
+      vec ReleaseView,
+    ) query;
   list_releases_for_owner : (ListReleasesArgs) -> (vec ReleaseView) query;
   notify_base_bridge_out : (text) -> (Result_1);
   request_deposit_refund : (nat64) -> (Result_3);

@@ -888,6 +888,7 @@ fn apply_purpose(tx: &EvmTxRecord, kind: Option<AttemptKind>, success: bool, rec
                 "reverted"
             };
             state::append_audit(None, AuditCtx::tx(tx.id, format!("admin action {action:?} {how}")));
+            crate::admin::on_contract_action_finalized(action, success && kind != Some(AttemptKind::Cancel));
             Ok(())
         }
     }

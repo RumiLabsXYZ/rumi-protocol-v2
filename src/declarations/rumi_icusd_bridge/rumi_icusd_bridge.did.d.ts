@@ -223,9 +223,19 @@ export interface ListDepositsArgs {
   'start_after' : [] | [bigint],
   'limit' : number,
 }
+export interface ListDepositsForOwnerArgs {
+  'owner' : Principal,
+  'start_after' : [] | [bigint],
+  'limit' : number,
+}
 export interface ListReleasesArgs {
   'start_after_sequence' : [] | [bigint],
   'owner' : Principal,
+  'limit' : number,
+}
+export interface ListReleasesForSenderArgs {
+  'start_after_sequence' : [] | [bigint],
+  'base_sender' : string,
   'limit' : number,
 }
 export interface ObserverConfig {
@@ -357,6 +367,10 @@ export interface _SERVICE {
   'get_base_addresses' : ActorMethod<[], Result_5>,
   'get_bridge_info' : ActorMethod<[], BridgeInfo>,
   'get_deposit' : ActorMethod<[bigint], [] | [DepositView]>,
+  'get_deposit_by_request' : ActorMethod<
+    [Principal, Uint8Array | number[]],
+    [] | [DepositView]
+  >,
   'get_release' : ActorMethod<[string], [] | [ReleaseView]>,
   'get_supply_audit' : ActorMethod<[], SupplyAudit>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
@@ -365,7 +379,15 @@ export interface _SERVICE {
     Result_6
   >,
   'icrc28_trusted_origins' : ActorMethod<[], Icrc28TrustedOriginsResponse>,
+  'list_deposits_for_owner' : ActorMethod<
+    [ListDepositsForOwnerArgs],
+    Array<DepositView>
+  >,
   'list_my_deposits' : ActorMethod<[ListDepositsArgs], Array<DepositView>>,
+  'list_releases_for_base_sender' : ActorMethod<
+    [ListReleasesForSenderArgs],
+    Array<ReleaseView>
+  >,
   'list_releases_for_owner' : ActorMethod<
     [ListReleasesArgs],
     Array<ReleaseView>

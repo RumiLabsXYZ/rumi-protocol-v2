@@ -347,8 +347,18 @@ export const idlFactory = ({ IDL }) => {
   const Icrc28TrustedOriginsResponse = IDL.Record({
     'trusted_origins' : IDL.Vec(IDL.Text),
   });
+  const ListDepositsForOwnerArgs = IDL.Record({
+    'owner' : IDL.Principal,
+    'start_after' : IDL.Opt(IDL.Nat64),
+    'limit' : IDL.Nat32,
+  });
   const ListDepositsArgs = IDL.Record({
     'start_after' : IDL.Opt(IDL.Nat64),
+    'limit' : IDL.Nat32,
+  });
+  const ListReleasesForSenderArgs = IDL.Record({
+    'start_after_sequence' : IDL.Opt(IDL.Nat64),
+    'base_sender' : IDL.Text,
     'limit' : IDL.Nat32,
   });
   const ListReleasesArgs = IDL.Record({
@@ -390,6 +400,11 @@ export const idlFactory = ({ IDL }) => {
     'get_base_addresses' : IDL.Func([], [Result_5], []),
     'get_bridge_info' : IDL.Func([], [BridgeInfo], ['query']),
     'get_deposit' : IDL.Func([IDL.Nat64], [IDL.Opt(DepositView)], ['query']),
+    'get_deposit_by_request' : IDL.Func(
+        [IDL.Principal, IDL.Vec(IDL.Nat8)],
+        [IDL.Opt(DepositView)],
+        ['query'],
+      ),
     'get_release' : IDL.Func([IDL.Text], [IDL.Opt(ReleaseView)], ['query']),
     'get_supply_audit' : IDL.Func([], [SupplyAudit], ['query']),
     'icrc10_supported_standards' : IDL.Func(
@@ -407,9 +422,19 @@ export const idlFactory = ({ IDL }) => {
         [Icrc28TrustedOriginsResponse],
         ['query'],
       ),
+    'list_deposits_for_owner' : IDL.Func(
+        [ListDepositsForOwnerArgs],
+        [IDL.Vec(DepositView)],
+        ['query'],
+      ),
     'list_my_deposits' : IDL.Func(
         [ListDepositsArgs],
         [IDL.Vec(DepositView)],
+        ['query'],
+      ),
+    'list_releases_for_base_sender' : IDL.Func(
+        [ListReleasesForSenderArgs],
+        [IDL.Vec(ReleaseView)],
         ['query'],
       ),
     'list_releases_for_owner' : IDL.Func(

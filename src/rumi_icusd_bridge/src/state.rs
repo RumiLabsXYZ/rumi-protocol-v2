@@ -34,6 +34,7 @@ pub const MEM_OWNER_RELEASES: u8 = 6;
 pub const MEM_RELEASE_BY_SEQ: u8 = 7;
 pub const MEM_AUDIT_INDEX: u8 = 8;
 pub const MEM_AUDIT_DATA: u8 = 9;
+pub const MEM_SENDER_RELEASES: u8 = 10;
 
 /// Append-only. Never reuse or reorder an id.
 pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
@@ -47,6 +48,7 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_RELEASE_BY_SEQ, "release_by_sequence"),
     (MEM_AUDIT_INDEX, "audit_index"),
     (MEM_AUDIT_DATA, "audit_data"),
+    (MEM_SENDER_RELEASES, "base_sender_release_index"),
 ];
 
 pub const CORE_SCHEMA_VERSION: u32 = 1;
@@ -863,6 +865,15 @@ impl AuditCtx {
 pub type OwnerKey = [u8; 38];
 /// `[principal len, principal padded to 29, request id len, request id padded to 32]`.
 pub type RequestKey = [u8; 63];
+/// `[Base sender address, sequence BE]`.
+pub type SenderKey = [u8; 28];
+
+pub fn sender_key(sender: &[u8; 20], seq: u64) -> SenderKey {
+    let mut k = [0u8; 28];
+    k[..20].copy_from_slice(sender);
+    k[20..].copy_from_slice(&seq.to_be_bytes());
+    k
+}
 
 fn principal_prefix(p: &Principal) -> [u8; 30] {
     let bytes = p.as_slice();
@@ -924,6 +935,9 @@ thread_local! {
 
     static AUDIT: RefCell<StableLog<AuditRecord, Mem, Mem>> = RefCell::new(
         StableLog::init(mem(MEM_AUDIT_INDEX), mem(MEM_AUDIT_DATA)).expect("init audit log"));
+
+    static SENDER_RELEASES: RefCell<StableBTreeMap<SenderKey, [u8; 32], Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_SENDER_RELEASES)));
 }
 
 fn mem(id: u8) -> Mem {
@@ -1105,6 +1119,7 @@ pub fn release_by_sequence(seq: u64) -> Option<[u8; 32]> {
 
 pub fn index_release(r: &ReleaseRecord) {
     RELEASE_BY_SEQ.with(|m| m.borrow_mut().insert(r.sequence, r.transfer_id));
+    SENDER_RELEASES.with(|m| m.borrow_mut().insert(sender_key(&r.base_sender, r.sequence), r.transfer_id));
     if let Some(dest) = &r.destination {
         OWNER_RELEASES.with(|m| m.borrow_mut().insert(owner_key(&dest.owner, r.sequence), r.transfer_id));
     }
@@ -1120,6 +1135,21 @@ pub fn list_owner_releases(owner: &Principal, start_after_sequence: Option<u64>,
     let lower = owner_key(owner, 0);
     let tids: Vec<[u8; 32]> =
         OWNER_RELEASES.with(|m| m.borrow().range(lower..=upper).rev().take(limit).map(|(_, v)| v).collect());
+    tids.iter().filter_map(get_release).collect()
+}
+
+/// Releases created by bridge-outs from `sender`, newest first. Lets a sender find held
+/// claims (for example an invalid destination) without local storage.
+pub fn list_sender_releases(sender: &[u8; 20], start_after_sequence: Option<u64>, limit: u32) -> Vec<ReleaseRecord> {
+    let limit = limit.clamp(1, MAX_PAGE) as usize;
+    let upper = match start_after_sequence {
+        Some(0) => return vec![],
+        Some(s) => sender_key(sender, s - 1),
+        None => sender_key(sender, u64::MAX),
+    };
+    let lower = sender_key(sender, 0);
+    let tids: Vec<[u8; 32]> =
+        SENDER_RELEASES.with(|m| m.borrow().range(lower..=upper).rev().take(limit).map(|(_, v)| v).collect());
     tids.iter().filter_map(get_release).collect()
 }
 
@@ -1209,6 +1239,12 @@ pub fn reset_for_tests() {
             m.borrow_mut().remove(&k);
         }
     });
+    SENDER_RELEASES.with(|m| {
+        let keys: Vec<SenderKey> = m.borrow().iter().map(|(k, _)| k).collect();
+        for k in keys {
+            m.borrow_mut().remove(&k);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1245,8 +1281,8 @@ mod tests {
             assert!(ids.insert(*id), "duplicate memory id {id}");
             assert!(names.insert(*name), "duplicate memory name {name}");
         }
-        assert_eq!(ids.len(), 10);
-        assert_eq!(*ids.iter().next_back().unwrap(), MEM_AUDIT_DATA);
+        assert_eq!(ids.len(), 11);
+        assert_eq!(*ids.iter().next_back().unwrap(), MEM_SENDER_RELEASES);
     }
 
     #[test]

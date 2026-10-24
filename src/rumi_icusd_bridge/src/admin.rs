@@ -101,6 +101,39 @@ pub fn check_limits_within_contract(l: &BridgeLimits, b: &state::ContractBinding
     Ok(())
 }
 
+/// A canister-signed contract admin action reached finality. When it executed, keep the
+/// stored binding equal to the contract's settings, and pause deposits if the canister's
+/// limits now exceed the contract's (so the contract never becomes the first check).
+pub fn on_contract_action_finalized(action: &ContractAdminAction, executed: bool) {
+    if !executed {
+        return;
+    }
+    let violation = state::mutate_core(|c| {
+        let Some(b) = c.config.contract.as_mut() else { return None };
+        match action {
+            ContractAdminAction::SetSupplyCap { cap_e8s } => b.supply_cap = *cap_e8s as u128,
+            ContractAdminAction::SetMintRateLimit { limit_e8s, window_seconds } => {
+                b.mint_window_limit = *limit_e8s as u128;
+                b.mint_window_seconds = *window_seconds;
+            }
+            ContractAdminAction::SetMinBridgeOut { minimum_e8s } => b.min_bridge_out = *minimum_e8s as u128,
+            _ => return None,
+        }
+        let b = b.clone();
+        match check_limits_within_contract(&c.config.limits, &b) {
+            Ok(()) => None,
+            Err(e) => {
+                c.config.pauses.deposits = true;
+                Some(e)
+            }
+        }
+    });
+    state::append_audit(None, AuditCtx::note(format!("contract binding updated after {action:?}")));
+    if let Some(e) = violation {
+        state::append_audit(None, AuditCtx::note(format!("deposits paused: canister limits exceed the contract ({e})")));
+    }
+}
+
 pub fn set_fees(f: BridgeFees) -> BridgeResult<()> {
     let caller = require_admin()?;
     let limits = state::read_core(|c| c.config.limits.clone());
@@ -300,6 +333,39 @@ mod tests {
         let mut o = ObserverSettings::default();
         o.active_interval_secs = 1;
         assert!(validate_observer(&o).is_err());
+    }
+
+    #[test]
+    fn finalized_contract_actions_update_the_binding_and_pause_on_violation() {
+        setup();
+        state::mutate_core(|c| {
+            c.config.pauses.deposits = false;
+            c.config.limits.max_outstanding_e8s = 1_000;
+            c.config.limits.max_deposit_e8s = 100;
+            c.config.limits.min_deposit_e8s = 10;
+            c.config.limits.mint_window_limit_e8s = 500;
+            c.config.limits.window_seconds = 3_600;
+            c.config.contract = Some(state::ContractBinding {
+                address: [1; 20],
+                bound_at_ns: 0,
+                start_block: 0,
+                supply_cap: 1_000,
+                mint_window_limit: 500,
+                mint_window_seconds: 3_600,
+                min_bridge_out: 10,
+            });
+        });
+        // A reverted action changes nothing.
+        on_contract_action_finalized(&ContractAdminAction::SetSupplyCap { cap_e8s: 1 }, false);
+        assert_eq!(state::read_core(|c| c.config.contract.as_ref().unwrap().supply_cap), 1_000);
+        // Raising the minimum keeps limits valid.
+        on_contract_action_finalized(&ContractAdminAction::SetMinBridgeOut { minimum_e8s: 5 }, true);
+        assert_eq!(state::read_core(|c| c.config.contract.as_ref().unwrap().min_bridge_out), 5);
+        assert!(!state::read_core(|c| c.config.pauses.deposits));
+        // Lowering the cap below max_outstanding pauses deposits.
+        on_contract_action_finalized(&ContractAdminAction::SetSupplyCap { cap_e8s: 999 }, true);
+        assert_eq!(state::read_core(|c| c.config.contract.as_ref().unwrap().supply_cap), 999);
+        assert!(state::read_core(|c| c.config.pauses.deposits));
     }
 
     #[test]

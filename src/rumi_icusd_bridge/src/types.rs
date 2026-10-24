@@ -149,6 +149,21 @@ pub struct ListDepositsArgs {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListDepositsForOwnerArgs {
+    pub owner: Principal,
+    pub start_after: Option<u64>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListReleasesForSenderArgs {
+    /// `0x`-prefixed 20-byte Base address that called `bridgeOut`.
+    pub base_sender: String,
+    pub start_after_sequence: Option<u64>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct ListReleasesArgs {
     pub owner: Principal,
     pub start_after_sequence: Option<u64>,
