@@ -141,7 +141,7 @@
       "state": "in_progress",
       "owner": "worker-sonnet",
       "scope": "Adversarial review A (accounting, authority, replay)",
-      "evidenceText": "proof=source; Round 1 FAIL, 4 blockers fixed; round 2 fresh reviewer running on e4213be1",
+      "evidenceText": "proof=local-integration; R1 FAIL at 2fee9970 plus follow-ups, 4 blockers fixed in 6208c117; R2 FAIL at e4213be1 and re-run on clean 779bd37f, 1 blocker (mint gas limit) accepted, fix in BB-16; see review record",
       "evidenceLinks": []
     },
     {
@@ -149,7 +149,7 @@
       "state": "in_progress",
       "owner": "worker-sonnet",
       "scope": "Adversarial review B (IC semantics, cycles, upgrade, wallet flow)",
-      "evidenceText": "proof=source; Round 1 FAIL, 4 blockers fixed; round 2 fresh reviewer running on e4213be1",
+      "evidenceText": "proof=local-test; R1 FAIL, 4 blockers fixed in 6208c117; R2 FAIL at e4213be1, 2 blockers (double release, lost timer) accepted, fixed in 779bd37f and re-checked by reviewer A; see review record",
       "evidenceLinks": []
     },
     {
@@ -173,13 +173,21 @@
       "state": "in_progress",
       "owner": "coordinator",
       "scope": "Branch and draft PR",
-      "evidenceText": "proof=source; Branch pushed; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open (not merged); description to be updated after review round 2",
+      "evidenceText": "proof=source; Branch pushed; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open (not merged); description to be updated on the frozen round-3 candidate",
       "evidenceLinks": [
         {
           "title": "Draft PR #591",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/591"
         }
       ]
+    },
+    {
+      "id": "BB-16",
+      "state": "in_progress",
+      "owner": "coordinator",
+      "scope": "Round-2 follow-up fixes",
+      "evidenceText": "proof=local-test; Uncommitted. Interim on the dirty tree: lib 428 passed; vitest 1506 passed, 1 skipped; npm run check at baseline; build ok; PocketIC runs pending on a frozen candidate",
+      "evidenceLinks": []
     }
   ]
 }

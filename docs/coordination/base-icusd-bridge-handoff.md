@@ -7,7 +7,8 @@ has been deployed, signed live, broadcast to a public network, or funded.
 ## Where
 
 - Worktree: `.worktrees/base-icusd-bridge-20261024` in the rumi-protocol-v2 checkout.
-- Branch: `codex/base-icusd-bridge` (local; not pushed yet).
+- Branch: `codex/base-icusd-bridge`, pushed; draft PR RumiLabsXYZ/rumi-protocol-v2#591 (not merged).
+- Review findings and resolutions: `base-icusd-bridge-review-record.md`.
 - Baseline: `origin/main` `32358d23d98b6430cab0236a3245519c9322fe90`.
 
 ## Milestone 1 (2026-10-24, about 02:00 PT): interfaces fixed, workers running
@@ -95,10 +96,34 @@ Review round 1: both reviewers FAIL with 8 distinct blockers (2 shared); all acc
 "Review round 1 changes"). The scenario suites also found the C3 reporting bug and the unauthorized mint-then-burn
 payout gap; both fixed with regression tests. Round 2 (fresh reviewers) running.
 
+## Milestone 4 checkpoint (2026-10-24, about 06:00 PT): round 2 adjudicated, follow-ups uncommitted
+
+| Commit | Content |
+| --- | --- |
+| `92a6941d`, `b50297a1` | Milestone 3 handoff and board, draft PR recorded |
+| `779bd37f` | Round-2 fixes for reviewer B's blockers (double release, lost timer) |
+
+Round 2: reviewer A FAIL (1 blocker, mint gas limit) at `e4213be1` and re-run at `779bd37f`;
+reviewer B FAIL (2 blockers) at `e4213be1`. All three accepted. Details, original-failure evidence
+and dispositions: `base-icusd-bridge-review-record.md`.
+
+Evidence for `779bd37f`: reviewer A's clean-tree runs (lib 394, faults 16, e2e 24, forge 111,
+vitest 1455). The e4213be1 results (24 / 16) do not validate `779bd37f` or later writes.
+
+Owned, uncommitted round-2 follow-ups (BB-16): mint gas sizing and gas-exact preflight
+simulation, ingress filter, re-mint ordering, EIP-55 (canister and page), gas-wait notice, owner
+token on lane guards, ICRC-3 absence-proof freshness, deferral visibility, timer cadence,
+controller capture in `admin_set_rpc_services`, docs and runbook checks. Interim local results
+on the dirty tree (not a frozen candidate): lib 428 passed; vitest 1506 passed (1 skipped);
+`npm run check` at baseline; build ok. PocketIC test work for these changes is in progress.
+
 ## Next action
 
-1. Round 2 adversarial reviews (running); fix confirmed findings; draft PR open.
-2. Final handoff with PR link, risks and runbook pointers.
+1. Finish the BB-16 writes, freeze one candidate commit, rebuild the Wasm and record its hash.
+2. Run lib, forge, the four PocketIC suites and the frontend checks on that candidate; record which
+   suites used which Wasm.
+3. Round 3: fresh independent re-check of the material fixes on the frozen candidate.
+4. Update PR #591 and this handoff. Merge, deploy and live actions stay held.
 
 ## Unresolved risks (as of this milestone)
 
