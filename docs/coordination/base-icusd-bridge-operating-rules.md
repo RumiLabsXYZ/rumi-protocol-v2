@@ -52,13 +52,13 @@ summary and any affected glossary entries in the presentation sidecar, re-derive
 the local publisher record outside this public repository, not here. No hourly monitor or
 additional timer.
 
-Presentation cutover (2026-10-24): the root Lookout owner controls the first presentation
-upload while building the board's status and definitions feature. Once the publisher manifest
-carries presentation metadata, `--publish` uploads cards and presentation together, so until the
-root owner confirms that feature and cutover are active this worktree does not run `--publish`
-(read-only `--dry-run` is fine). After confirmation, each material checkpoint publishes cards and
-presentation with the existing command and verifies the no-op readback. No new wrapper, timer or
-monitor.
+Presentation cutover (2026-10-24, complete): the root Lookout owner built the board's status and
+definitions feature and made the first presentation upload; the publisher manifest now reads
+cards and presentation from this worktree's projection and sidecar. A read-only `--dry-run`
+afterwards reported both unchanged. Routine ownership is active: each material checkpoint
+publishes cards, summary and glossary together with the same scoped publisher under Rob's
+standing approval (no setup or root approval), then verifies the no-op readback. Identical data
+is never republished. No new wrapper, timer or monitor.
 
 First publication (2026-10-24): the Lookout setup owner completed the initial cutover and
 published this projection; the immediate readback was an exact no-op, and this worktree's own
