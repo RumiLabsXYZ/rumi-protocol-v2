@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "scope": "Ledgerinventoryandsevenconfirmedrepairs;historicalprooflimitsremainexplicit",
+  "reviewed_artifacts": [
+    {
+      "path": "docs/operations/3usd-donation-reconciliation-20261024.md",
+      "sha256": "f680b656d68150c84ad13a02a0f56a260960462bf88f393a081c29b141e7f67a"
+    },
+    {
+      "path": "docs/operations/evidence/every-donation-reconciliation-v4.csv",
+      "sha256": "9cf8a7ef1632719bfea84ee5946d346be5c7f4054650f01246284549b72bf7f8"
+    },
+    {
+      "path": "docs/operations/evidence/3usd-donation-final-review-c-20261024.md",
+      "sha256": "12fbf39fa632c971cbdfe44faa416c5d054bfb86c84a27cfe92043c83a342612"
+    },
+    {
+      "path": "docs/operations/evidence/3usd-donation-final-review-d-20261024.md",
+      "sha256": "1ff23d273af10a46d427162bd9804e5b34edfcc0625f54402cd442a83e288b27"
+    }
+  ],
+  "all_historical_individual_credits_proven": false,
+  "earliest92_original_credit_history_open": true,
+  "confirmed_repair_icusd": "0.36063541",
+  "confirmed_repair_completed_utc": "2026-10-24T00:31:42.617325Z",
+  "closing_live_utc": "2026-10-24T00:55:35.061205Z",
+  "no_additional_proven_missing_credit": true,
+  "remaining_icUSD_surplus_unswept": "0.19616202",
+  "private_raw_evidence": ".recovery-artifacts/rumi-3usd-donation-reconciliation-20261023"
+}
