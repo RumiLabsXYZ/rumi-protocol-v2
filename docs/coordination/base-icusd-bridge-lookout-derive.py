@@ -19,6 +19,11 @@ ROOT = pathlib.Path(__file__).resolve().parent
 BOARD = ROOT / "base-icusd-bridge-kanban.md"
 OUT = ROOT / "base-icusd-bridge-lookout.json"
 
+# Public board links only (no local paths, no payloads).
+LINKS = {
+    "BB-14": [{"title": "Draft PR #591", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/591"}],
+}
+
 STATE = {"done": "done", "in progress": "in_progress", "todo": "todo", "blocked": "blocked", "held": "held"}
 
 
@@ -55,6 +60,7 @@ def main() -> None:
             continue
         title, state, owner, _files, _deps, evidence, proof = cols[:7]
         card_id, _, scope = title.partition(" ")
+        state = state.split(" (")[0]
         cards.append(
             {
                 "id": card_id,
@@ -62,7 +68,7 @@ def main() -> None:
                 "owner": owner_role(owner),
                 "scope": sanitize(scope),
                 "evidenceText": f"proof={proof}; {sanitize(evidence)}".strip("; "),
-                "evidenceLinks": [],
+                "evidenceLinks": LINKS.get(card_id, []),
             }
         )
     OUT.write_text(json.dumps({"cards": cards}, indent=2) + "\n")

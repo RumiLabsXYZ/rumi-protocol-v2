@@ -52,7 +52,7 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 | BB-13 Adversarial review B (IC semantics, cycles, upgrade, wallet flow) | in progress (round 2) | worker (Sonnet / Sonnet) | read-only | all | Round 1 FAIL, 4 blockers fixed; round 2 fresh reviewer running on `e4213be1` | source |
 | BB-05b Observer/RPC review fixes | done | worker (Sonnet / Sonnet) | `observer.rs`, `evm/rpc.rs` | BB-12, BB-13 | Committed in `6208c117`; adaptive log span (halving) and cap escalation, contiguity completeness with rewind, backoff, chain-id quorum, count-based C3, receipt cap; 98 observer/rpc tests | local-test |
 | BB-15 Cumulative mint guard | done | worker (Sonnet / Sonnet) | contract `totalMinted`, `evm/abi.rs`, `observer.rs`, fault test | BB-05b | Committed `e4213be1`; forge 111; lib 390; mint-then-burn regression passing (attacker burn not paid, bridge halts) | local-integration |
-| BB-14 Branch and draft PR | todo | coordinator (Opus 5.5) | none | all | Branch pushed, draft PR open, handoff updated | none |
+| BB-14 Branch and draft PR | in progress | coordinator (Opus 5.5 / Opus 5.5) | none | all | Branch pushed; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open (not merged); description to be updated after review round 2 | source |
 
 ## Regression evidence (backend untouched)
 
