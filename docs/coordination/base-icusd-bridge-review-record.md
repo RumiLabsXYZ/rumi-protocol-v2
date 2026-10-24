@@ -101,7 +101,66 @@ All 7 new round-2 PocketIC tests fail on the pre-round-2 Wasm.
 
 ## Round 3
 
-Running on the frozen candidate `eab65670` (Wasm `de4ad399`) with two fresh reviewers. Scope is
-bounded: does each round-2 fix close its original failure case, and did the round-2 changes
-introduce regressions. Reviewer A: canister-side fixes. Reviewer B: caller paths, interfaces,
-wallet flow, artifacts and test honesty.
+Bounded scope: does each round-2 fix close its original failure case, and did the round-2
+changes introduce regressions.
+
+| Reviewer | Pin | Verdict |
+| --- | --- | --- |
+| A (canister-side fixes) | `eab65670`, Wasm `de4ad399` | PASS; one minor regression (A3-R1) |
+| B (caller paths, interfaces, wallet flow, artifacts) | `eab65670`, Wasm `de4ad399` | FAIL, 2 blockers (B3-B1, B3-B2) |
+
+Reviewer A re-ran the worst-case mint (gasUsed 152,342 of 300,000) and reproduced the bindings with
+`didc`; all eight round-2 fixes FIXED. Reviewer B checked `keccak.ts` against `cast keccak` on 477
+inputs and the checksum code against `cast to-check-sum-address` on 150 addresses (0 mismatches).
+
+### B3-B1: the runbook's read calls were refused at ingress (accepted, fixed in `8f2abbfc`)
+
+- Original failure: `icp canister call` sends an update unless `--query` is given (reviewer B
+  confirmed with a local logging server), and the new filter refuses query names sent as updates.
+  `get_bridge_info`, `get_deposit`, `get_supply_audit` and `get_release` in the runbook had no
+  `--query`.
+- Fix: `--query` on every bridge read; the rule in design 7.10 and the runbook; unit test
+  `the_runbook_calls_queries_as_queries_and_updates_as_updates` (mutation-checked: removing one
+  `--query` fails it). Reads stay unlisted so replicated reads never cost cycles.
+
+### B3-B2: no ingress size bound (accepted, fixed in `8f2abbfc`)
+
+- Original failure: an accepted caller (anonymous for ICRC-21) could send about 2 MiB per message
+  and the bridge pays the ingress fee. Precedent: the sentinel caps consent ingress at 4 KiB.
+- Fix: arguments over 4 KiB (open methods) or 16 KiB (admin and controller) are refused before
+  execution. Unit tests at the exact boundary for every method; PocketIC
+  `oversized_ingress_is_refused_before_execution_at_the_exact_boundary` (exactly 4,096 bytes
+  accepted, 4,097 and 1 MiB refused at `submit_call`).
+
+### A3-R1: timer re-arm order after clearing a halt (accepted, fixed in `8f2abbfc`)
+
+- Original failure: `admin_clear_halt` re-armed before its checks; a tick during the checks saw
+  the halt and armed the idle interval, so escrowed mints could wait up to `idle_interval_secs`
+  after the clear. `admin_retry_deposit` did not re-arm.
+- Fix: clearing a halt or lane halt, retrying a held deposit, queueing an admin action and
+  requesting a cancel re-arm after the change; four of the five sites have unit tests.
+
+### Round-3 notes taken
+
+- Admission counted active user deposits by decoding every active record (both reviewers):
+  replaced by a constant-time count from a new active re-mint index (MemoryId 13), with a test
+  that re-mints never count against the global limit.
+- Consent messages show the recipient in EIP-55 form; the gas notice shows only on the ICP to
+  Base tab; the e2e refusal helper requires a real update method and an ingress refusal.
+
+### Re-check of `8f2abbfc` (fresh reviewer): PASS
+
+All five items CLOSED, no blockers. The verdict was conditional on the serial rerun of 10 PocketIC
+tests that failed for infrastructure reasons in the concurrent run (see the handoff); that rerun
+passed on the same Wasm. Test and doc follow-ups from the re-check landed in `fb005f1b` (release
+Wasm byte-identical): exact stable-layout pin, a format-robust runbook scan, a multi-line-safe
+refusal helper, and runbook notes on query reads.
+
+Open follow-ups (not fixed; each would change the Wasm and need its own review):
+
+- The `admin_clear_halt` success path has no automated test (host tests cannot reach a successful
+  ledger read). Impact if regressed: at most `idle_interval_secs` of delay after a clear.
+- `request_deposit_refund` and `admin_sweep_fees` do not re-arm the timer when their ledger
+  attempt ends in an unknown state (pre-existing, same class as A3-R1, bounded delay).
+- The 16 KiB admin cap is an implicit limit of about 60 RPC providers; there is no explicit
+  provider-count limit.

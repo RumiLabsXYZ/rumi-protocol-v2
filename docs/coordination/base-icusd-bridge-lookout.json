@@ -138,18 +138,18 @@
     },
     {
       "id": "BB-12",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Adversarial review A (accounting, authority, replay)",
-      "evidenceText": "proof=local-integration; R1 FAIL at 2fee9970 plus follow-ups, 4 blockers fixed in 6208c117; R2 FAIL at e4213be1 and re-run on clean 779bd37f, 1 blocker (mint gas limit) accepted and fixed in eab65670; see review record",
+      "evidenceText": "proof=local-integration; R1 FAIL at 2fee9970, fixed in 6208c117; R2 FAIL at e4213be1, gas blocker fixed in eab65670; R3 PASS at eab65670 (one minor regression, fixed in 8f2abbfc); see review record",
       "evidenceLinks": []
     },
     {
       "id": "BB-13",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Adversarial review B (IC semantics, cycles, upgrade, wallet flow)",
-      "evidenceText": "proof=local-test; R1 FAIL, 4 blockers fixed in 6208c117; R2 FAIL at e4213be1, 2 blockers (double release, lost timer) accepted, fixed in 779bd37f and re-checked by reviewer A; see review record",
+      "evidenceText": "proof=local-integration; R1 FAIL, fixed in 6208c117; R2 FAIL at e4213be1, fixed in 779bd37f; R3 FAIL at eab65670 (runbook reads refused, no ingress size bound), fixed in 8f2abbfc; fresh re-check of 8f2abbfc PASS",
       "evidenceLinks": []
     },
     {
@@ -170,10 +170,10 @@
     },
     {
       "id": "BB-14",
-      "state": "in_progress",
+      "state": "done",
       "owner": "coordinator",
       "scope": "Branch and draft PR",
-      "evidenceText": "proof=source; Branch pushed; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open (not merged); description to be updated on the frozen round-3 candidate",
+      "evidenceText": "proof=source; Branch pushed at fb005f1b; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged; description updated with round-3 results",
       "evidenceLinks": [
         {
           "title": "Draft PR #591",
@@ -187,6 +187,14 @@
       "owner": "coordinator",
       "scope": "Round-2 follow-up fixes",
       "evidenceText": "proof=local-integration; Frozen candidate eab65670. Wasm de4ad399 (sha256 prefix), reproduced by a forced recompile from the clean tree; on that Wasm: round2 suite 11 passed (7 new, all failing on the pre-round-2 Wasm), e2e 24, faults 16, smoke 12; lib 428; clippy",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-17",
+      "state": "done",
+      "owner": "coordinator",
+      "scope": "Round-3 fixes",
+      "evidenceText": "proof=local-integration; Commit 8f2abbfc (Wasm c03ce4f1, reproduced from the clean tree) plus fb005f1b (tests and docs, Wasm byte-identical): lib 432; round2 12, e2e 24, faults 16, smoke 12 (10 of them on a serial rerun after infrastructure failures); forge 111; vi",
       "evidenceLinks": []
     }
   ]

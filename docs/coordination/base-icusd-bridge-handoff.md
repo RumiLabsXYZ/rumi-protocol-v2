@@ -150,11 +150,47 @@ Measured on local anvil through the canister: the worst-case first mint used 152
 `cargo clippy --tests` still reports style lints in pre-existing integration-test harness files;
 not a gate and not new in this round.
 
+## Milestone 6 (2026-10-24, about 08:00 PT): round 3 resolved, re-check PASS
+
+| Commit | Content |
+| --- | --- |
+| `2fb60b03` | Frozen round-3 candidate evidence (docs) |
+| `8f2abbfc` | Round-3 fixes: runbook `--query`, ingress size caps, timer re-arm order, constant-time admission count, checksummed consent text, gas notice tab |
+| `fb005f1b` | Re-check follow-ups, tests and docs only (release Wasm byte-identical to `8f2abbfc`) |
+
+Round 3 on `eab65670`: reviewer A PASS (one minor regression), reviewer B FAIL (2 blockers); all
+three accepted and fixed in `8f2abbfc`. A fresh re-check of `8f2abbfc`: PASS, no blockers. Details:
+`base-icusd-bridge-review-record.md`.
+
+Release Wasm built from `8f2abbfc` (and unchanged at `fb005f1b`): sha256
+`c03ce4f11205438769493ccea1322b0ba21b442963f703acc6b5a2c60ee4d6ff`, 3,852,177 B, reproduced by a
+forced recompile from the clean tree; every PocketIC result below used exactly that file.
+
+| Check | Result | Commit |
+| --- | --- | --- |
+| `cargo test --offline -p rumi_icusd_bridge --lib` | 432 passed | `8f2abbfc` and `fb005f1b` |
+| `cargo clippy --offline -p rumi_icusd_bridge --lib -- -D warnings` | clean | both |
+| `bridge_round2_pic` | 12 passed | `8f2abbfc` |
+| `bridge_e2e_pic` | 24 passed: 20 in the concurrent run, the other 4 on a serial rerun | `8f2abbfc` |
+| `bridge_faults_pic` | 16 passed: 11 concurrent, 5 on the serial rerun | `8f2abbfc` |
+| `harness_smoke_pic` | 12 passed: 11 concurrent, 1 on the serial rerun | `8f2abbfc` |
+| `bridge_e2e_pic` tests using the stricter refusal helper | 2 passed | `fb005f1b` |
+| `forge test --offline` | 111 passed | `8f2abbfc` |
+| vitest (vault_frontend) | 1507 passed, 1 skipped | `8f2abbfc` |
+| `npm run check` | 30 errors / 66 warnings, identical to baseline, none in bridge files | `8f2abbfc` |
+| `npm run build` | passes | `8f2abbfc` |
+| Backend suites | not rerun: backend and other canisters unchanged | n/a |
+
+Serial rerun: with all four PocketIC suites running at once, 10 tests failed inside pocket-ic
+before any bridge call (the PocketIC server's HTTP adapter could not load macOS root certificates,
+"I/O error -36", and `POST /instances` failed). The same 10 tests passed when rerun one suite at a
+time on the same Wasm from a clean tree.
+
 ## Next action
 
-1. Round 3 (fresh A and B, running on `eab65670`): fix or disprove every finding; re-check any
-   material fix.
-2. Update PR #591 and this handoff. Merge, deploy and live actions stay held.
+1. Rob or Miles: review draft PR #591. Merge, deploy and every live action stay held.
+2. Before any public-testnet run: the open follow-ups in the review record, a fee and minimum that
+   cover per-deposit cost, and the held runbook steps in `foundry/DEPLOY-BASE.md`.
 
 ## Unresolved risks (as of this milestone)
 
