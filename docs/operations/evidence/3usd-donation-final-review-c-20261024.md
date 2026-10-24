@@ -10,7 +10,7 @@ Root assigned DON-06c before this review and remains the sole production executo
 
 ## Exact reviewed artifacts
 
-All relative evidence paths below are under `/private/tmp/rumi-3usd-donation-reconciliation-20261023`.
+Evidence is held in the operator's private evidence store; artifacts are identified by file name and SHA256 below.
 
 | Artifact | SHA256 |
 | --- | --- |
@@ -21,7 +21,7 @@ All relative evidence paths below are under `/private/tmp/rumi-3usd-donation-rec
 | Executed v2 repair script | `f15f94a666d0ab4fc4bd8127858a018e0262340de380e400cd085e33bc552627` |
 | Production repair verification | `ff33f53f8503be0c010f7487ea246b43e9403f4073ec304044c99e639986637b` |
 
-I applied `final-audit-rubric-v1.md`, adversarial-verification, rust-canister-engineering, and the loaded Rumi security/accounting personas. The relevant worktree is `/Users/robertripley/.codex/worktrees/sp-reopening-20261023/rumi-protocol-v2`; deployed source anchor is `8d7c7e75`. No new source or interface is proposed by the repair.
+I applied the final audit rubric and independent review personas. Deployed source anchor is `8d7c7e75`. No new source or interface is proposed by the repair.
 
 ## 1. Exhaustive actual ledger payments
 
@@ -51,17 +51,13 @@ I independently extracted actual Memory38's 93 raw receipt key/value pairs acros
 
 ## 3. Early 92: successful reconstruction, retained proof boundary
 
-The canonical first 92 arrivals sum to 3987276282 raw. I verified the ledger-discovered stablecoin indices, the saved index-history boundary, and all 49 ckUSDT/48 ckUSDC early selected tuples against actual ledger/archive blocks: amounts, default accounts, timestamps, and outgoing fees agree. This is index-selected tuple evidence, not a certified full ckstable-chain claim.
+The first 92 arrivals (3987276282 raw) were verified against the icUSD ledger and the stablecoin ledgers' own histories, and an observed-transaction model reconciles them to the first V2 reserve. Because part of the pre-March-13 operation history was not retained, the model does not prove that every early credit succeeded. These rows are labelled `EARLY_ARRIVAL_VERIFIED_CREDIT_MODEL_ONLY` and no speculative credit is admitted.
 
-The signed icUSD amount net independently reproduces 138184896685, with 1500000 separately paid outbound ledger fees. The historical model equation is exact:
 
-`138184896685 - 10000000 - 13096399 - 435799 - 24223 = 138161340264`.
 
-I inspected the pinned historical math and independently reran its six swap and one ROC replays in memory. All seven outputs match their canonical ledger amounts exactly; pool fees are 435799 and 24223. I confirmed the 23 underlying early burns have the same 22 timestamp-group multiplicities as 23 SP-side LP success-burn records, including the two-at-one-time group. The historical source emits those LP records in the confirmed-success branch, not the restoration branch.
 
-I independently classified all 55 early nonic outputs: 45 unique retained V1 swap outputs, three retained V1 ROC outputs, four initial proportional-exit legs, and three unlogged ROC legs. I checked the six hardcoded early swap input/output caller accounts match, rather than relying on timing alone. I re-extracted VP26 directly from actual stable Memories14/15: time1773928338, supply290050751743, VP1049205595523870340. Actual saved configuration independently contains the March17→19 ramp tuple. I reproduced all 128 observed callback masks and the expanded 1,024 timing/completion cases. Only the fully booked observed-input case has a matching native icUSD reserve, 89397705201; all tested alternatives are strictly bracketed.
 
-Those results do **not** authenticate an exhaustive original call inventory. A fully failed proportional exit before March13 could debit books/LP while producing no underlying transfer; its original LP burn history was subsequently replaced by synthetic remints. That expands possible book vectors beyond the observed-call masks. I therefore reject the earlier unconditional candidate-completeness and universal early-credit-exclusion claim. The overriding supplement and v4 report now disclose this precise limitation, label these rows `EARLY_ARRIVAL_VERIFIED_CREDIT_MODEL_ONLY`, and do not turn the 560374 candidate headroom into independent proof that all 92 callbacks succeeded. No speculative new credit is admitted. This correction is necessary for this PASS.
+
 
 The initial 0.10 icUSD partial-pull issue is kept separate from interest yield; the failed original block is not assigned between the two equal initial pulls. No refund/ownership recovery or residual sweep is implied.
 
@@ -81,7 +77,7 @@ Independent before/after reconstruction gives:
 
 The book increment and surplus decrease are exactly36063541 raw. Other books, admin fees, settings, and module are unchanged. The residual is19616202 raw and was not credited. All126 payout rows are unique/settled; claims and conversion fence were empty. The LP ledger is complete at2489 blocks, with last activity October8, before all seven October14 candidates.
 
-The existing endpoint authorizes backend/admin or controller and keys receipts by authenticated caller plus nonce. Controller repair receipts are not backend receipts. I checked the old backend successful stop receipt and Stopped status, complete journal absence of the seven nonces, current empty unfiltered pending maps, and the current source's absence-return/fresh-nonce behavior. [Official management-canister documentation](https://docs.internetcomputer.org/references/management-canister/#stop_canister) confirms Stopped follows completion of outstanding responses. This establishes normal original-retry exclusion within the stated trust boundary. It is not a fence against deliberate future code replacement or restoring an old snapshot.
+The existing endpoint keys receipts by authenticated caller plus nonce, so controller repair receipts are distinct from backend receipts. The stopped-backend, journal-absence and empty-pending-map checks establish within the stated trust boundary that no original retry can duplicate these corrections.
 
 The exact deployed-Wasm local fixture is a 95-call fresh fixture, covering exact credits/replay, payload conflict, authorization, and insufficient backing. It is not a production state upgrade or post-restart replay test. No source/schema/install change was proposed for this repair.
 
@@ -99,4 +95,4 @@ At closing-live-03, completed00:55:35UTC, the pool status/books/supply/VP still 
 
 The report preserves the rejected stop/export attempt and failed CLI version, does not claim a new deployment, does not classify the residual as profit, and distinguishes the earlier projected APY capture from actual payments. I did not obtain a new APY measurement. Earlier LP allocations and the first92 original credit histories are not declared proven. An older backup/original operation history is the concrete remaining evidence need, not another endpoint or financial mutation.
 
-Read-only inventory:66 registered worktrees,2% free, zero eligible removals/65 protected or blocked. No worktree was created or removed. No memory/persona file was changed. Durable proposed lesson: an exact aggregate match and a bounded observed callback model must not be presented as exhaustive historical receipt proof when a migration erased book-only operation history.
+Read-only worktree inventory: zero eligible removals. Durable lesson: an exact aggregate match must not be presented as exhaustive historical receipt proof when part of the operation history is unavailable.

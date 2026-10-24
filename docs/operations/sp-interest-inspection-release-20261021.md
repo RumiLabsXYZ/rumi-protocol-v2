@@ -4,20 +4,20 @@
 
 This is a proposed single backend upgrade to expose already-retained interest-delivery routes through the existing developer-only recovery query. The source patch is `c98db171c7d7722e50ee8ed8f41313a1f4350800`, based on the deployed backend source `cc224b3edf0f098779cb87d1c09bb245affd8c55`.
 
-Exact source collateral is needed to reproduce the delayed pool packets' recipient allocations. The current query omits that retained field. This additive query is one concrete inspection path; equivalent authenticated retained-state evidence would also work. A query-only source change still requires a real canister upgrade to become available: the unchanged backend lifecycle runs during that upgrade, rearms its normal timers, and schedules immediate durable payout/refund processing via `process_pending_transfer` (`src/rumi_protocol_backend/src/main.rs:1211`). This is a real lifecycle action, not a passive query invocation; fresh pending-journal checks and post-upgrade reconciliation must cover that ordinary processing.
+Exact source collateral is needed to reproduce the delayed pool packets' recipient allocations. The current query omits that retained field. This additive query is one concrete inspection path; equivalent authenticated retained-state evidence would also work. A query-only source change still requires a real canister upgrade to become available: the unchanged backend lifecycle runs during that upgrade, rearms its normal timers, and schedules ordinary durable payout/refund processing. This is a real lifecycle action, not a passive query invocation; fresh pending-journal checks and post-upgrade reconciliation must cover that ordinary processing.
 
 This proposal does not authorize a pool upgrade, global pool resume, legacy receipt promotion, new mint, manual notification replay, allocation application, journal deletion, timer setter, cap change or fund transfer. The pool's existing emergency pause and earlier ambiguous notification holds stay in place. The completed points recovery and Treasury upgrade/backfill are outside this operation and must not be repeated.
 
 ## Earlier-request risk and authority
 
-The earlier backend release record preserves a terminally rejected known upgrade wrapper and a claimed other request whose internal identity and terminal disposition were never established. A later normal-reviewed reconsideration succeeded on the current backend, but that success is not a cancellation receipt for the unidentified earlier request. This risk remains separate from the completed Treasury operation and the pool's own earlier installation hold.
+An earlier backend upgrade request has no authoritative disposition on record. A later reviewed reconsideration succeeded on the current backend, but that success is not a cancellation receipt for the earlier request. This risk remains separate from the completed Treasury operation and the pool's own installation hold.
 
-Before this proposed single backend upgrade, obtain either authoritative earlier-request disposition or Rob's explicit authorization for this exact new attempt accepting that unresolved backend-request risk. Existing recovery intent and the consumed Treasury-only grant must not be presented as that risk acceptance. Normal approval review still applies. There is no alternate executor or indirect installation path in this proposal.
+Before this proposed single backend upgrade, obtain either authoritative earlier-request disposition or the owner's explicit authorization for this exact new attempt accepting that unresolved risk. Existing recovery intent and the consumed Treasury-only grant must not be presented as that risk acceptance. Normal approval review still applies. There is no alternate executor or indirect installation path in this proposal.
 
 ## Exact target
 
 - Canister: `tfesu-vyaaa-aaaap-qrd7a-cai` (existing production backend).
-- Network: `ic`; operator identity alias: `rumi_identity`; install mode: `upgrade`.
+- Network: `ic`; install mode: `upgrade`.
 - Expected current uploaded-module SHA256: `3b51aca404bb8da8994b55273114571a33486b99c3275547c809746254128566`.
 - Candidate uploaded-module SHA256 after one authorized upgrade: `aad0b7e133a27938ed25ebebbd5d4de5d7bb1793cf0d5ccbad5210c4644da259`.
 - This is not a Stability Pool or Treasury install. Fresh identity/controller validation is still required at execution.

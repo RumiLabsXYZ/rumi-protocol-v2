@@ -15,6 +15,6 @@ The four early plain ICRC-1 transfers (blocks 10, 11, 12, 13) exactly explain th
 
 ## Machine binding
 
-Canonical attestation SHA256: `735beb8ca505532c75b1c322188435bd170358aed7dd1672adf286b0981650a2`. The JSON binds full source data hashes, exact balances, matches and preservation disposition. Local source evidence: `/private/tmp/rumi-sp-rails-restoration-20261023/legacy-v1-capture/`. Copy the attestation to the durable task evidence before activation and re-read live balances/inventory and new blocks since the pinned tip. Any unexplained change stops activation for reconciliation.
+Canonical attestation SHA256: `735beb8ca505532c75b1c322188435bd170358aed7dd1672adf286b0981650a2`. The JSON binds full source data hashes, exact balances, matches and preservation disposition. Source evidence is retained in the operator's private evidence store. Copy the attestation to the durable task evidence before activation and re-read live balances/inventory and new blocks since the pinned tip. Any unexplained change stops activation for reconciliation.
 
 Activation uses the existing developer-only `reconcile_three_usd_reserve_v1_cutover` with these exact 32 digest bytes, the actual SP caller acknowledgment, then existing ingress enable. V1 must become Retired. Neither book balances nor existing excess change in these calls. New journaled V2 work retains exact tuple and zero-fee requirements.

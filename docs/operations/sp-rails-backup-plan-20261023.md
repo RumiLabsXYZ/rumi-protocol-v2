@@ -2,7 +2,7 @@
 
 The user explicitly authorized repairing, deploying and restoring conversion/liquidation rails without another approval. This is this task's concrete backup operation plan, not an extension of an earlier inspection operator's authority.
 
-Backend `tfesu-vyaaa-aaaap-qrd7a-cai` has ten snapshots, its capacity limit. Before any backend replacement: its oldest exact snapshot `00000000000000040000000001f088fe0101` (timestamp `1787733991429007038`, total size `88413621`) has been fully downloaded in native upload-restorable format. Payload and metadata sizes/SHA256 are verified in `/private/tmp/rumi-sp-rails-restoration-20261023/backend-oldest-preservation/verified.json`. No snapshot has yet been replaced/deleted for this task.
+Backend `tfesu-vyaaa-aaaap-qrd7a-cai` has ten snapshots, its capacity limit. Before any backend replacement, its oldest snapshot (timestamp `1787733991429007038`, total size `88413621`) has been fully downloaded in native upload-restorable format. Payload and metadata sizes/SHA256 are verified and retained in the operator's private evidence store. No snapshot has yet been replaced/deleted for this task.
 
 After independent review of that preservation proof, root may stop the backend, create ONE current snapshot with `--replace` naming ONLY that oldest ID, download and verify the current snapshot, then restart the unchanged backend. Re-list and compare exact settings, original module, all other snapshot IDs and Running status. Keep both full local payload sets; never prune them in this task. Old snapshot identity is replaced on-network; its entire prior state remains in the saved native restore payload. No application-state correction or fund movement is part of backup creation.
 

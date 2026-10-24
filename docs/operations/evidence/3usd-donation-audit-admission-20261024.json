@@ -26,5 +26,5 @@
   "closing_live_utc": "2026-10-24T00:55:35.061205Z",
   "no_additional_proven_missing_credit": true,
   "remaining_icUSD_surplus_unswept": "0.19616202",
-  "private_raw_evidence": ".recovery-artifacts/rumi-3usd-donation-reconciliation-20261023"
+  "private_raw_evidence": "operator private evidence store (not published)"
 }

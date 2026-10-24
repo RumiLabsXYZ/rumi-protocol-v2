@@ -37,9 +37,9 @@ This cleanup is separate from crediting or acknowledging the original 42 modern 
 
 ## Existing interface drift is preserved and disclosed
 
-The full native Rust export reveals pre-existing differences from the published pool metadata: unrelated liquidation notification hints and a native proof variant. This repair changes neither those existing Rust handler signatures nor their proof checks. Broad pool operations remain paused.
+The pool's published interface metadata differs from its native Rust export in some unrelated liquidation-related methods. This repair does not change them. Broad pool operations remain paused.
 
-The scoped interface generator retains every existing published legacy method/type and adds only the five new Rust-derived recovery endpoints. Existing published contracts are equivalent in both directions after removing the new methods; the five new endpoint types separately match the full Rust export in both directions. JavaScript and TypeScript declarations are generated automatically. The failed whole-service comparison is preserved. No claim is made that the full pre-existing Rust service and legacy published metadata have been reconciled. Broader liquidation-interface repair is deferred under the repository's scope discipline.
+The scoped interface adds only the five new recovery endpoints and keeps every existing published method. No claim is made that the full Rust service and the published metadata have been reconciled; broader interface repair is deferred.
 
 ## Evidence and remaining execution boundary
 
@@ -47,6 +47,6 @@ A current backup preserves the exact deployed module, heap, globals and stable m
 
 Exact deployed source provenance remains unproved: two clean baseline source builds produce the same result, differing from the deployed module by 135 executable-code bytes. The source/State checks do not erase that limitation. Actual candidate-Wasm migration, source and artifact reviews, exact release hashes and fresh live preflight remain outstanding before an execution proposal is ready.
 
-The separate earlier pool-install request risk remains unresolved. No new pool install, credits, broad resume or held-row promotion is authorized by this preparation. No Support messages or rejected cross-chat material are resent.
+No new pool install, credits, broad resume or held-row promotion is authorized by this preparation.
 
 Completion requires positive matching pool receipts and every participant's reconciled credits, continued normal interest processing, and an empty applicable live backlog across a later normal cycle. Queue absence alone and a successful ledger mint are insufficient. Any separately retained legacy holds remain explicitly reported.

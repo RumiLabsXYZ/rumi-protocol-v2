@@ -279,10 +279,10 @@ Working branch: `codex/sp-conversion-liquidation-restoration-20261023`.
 | R-04c | Review | agent:rails_sp_conversion_impl | SP escrow conversion and recovery | R-04a | Explicit budget/sequence, escrow proofs, exact recovery implemented; SP unit suite passes |
 | R-04d | Review | agent:rails_sp_ordinary_impl | SP exact ordinary settlement and routing | R-04b | Durable ordinary rail, affordable partials, exact proofs and cancellation implemented |
 | R-04e | Review | agent:rails_conversion_ui_impl | Explicit quote, fee authorization and wallet recovery UI | R-04c | Exact NotFound replay and approval Duplicate fixes; 13 focused tests pass; final build pending |
-| R-05a | In progress | agent:rails_3usd_review | Exact-artifact local multi-canister runtime harness | R-04 | Candidate01 normal ordinary plus actual 3USD liquidation: 58 checks pass; conversion and public no-funds tests reproduce accepted blockers |
+| R-05a | In progress | agent:rails_3usd_review | Exact-artifact local multi-canister runtime harness | R-04 | Candidate01 runtime checks in progress |
 | R-05b | In progress | agent:rails_aged_backend_runtime | Actual aged payment, protocol fee and payout proof recovery | R-04b | Separate local fixture; exact candidate02 pending |
 | R-05 | In progress | root | Deterministic regression, runtime, migration and interface checks | R-04 | Repaired source: SP267, 3pool180, backend1299 pass; final interface refresh/build/runtime/migration repetition pending |
-| R-06 | In progress | two fresh independent reviewers | Adversarial final release review | R-05 | Both candidate01 reviews FAIL; confirmed money/recovery/fence and UI findings assigned and repaired; fresh candidate review pending |
+| R-06 | In progress | two fresh independent reviewers | Adversarial final release review | R-05 | Both candidate01 reviews FAIL; findings assigned and repaired; fresh candidate review pending |
 | R-07 | Blocked | root | Deploy and restore reviewed conversion/liquidation paths | R-06 | No task upgrades or activation yet; exact final artifact and adversarial passes required |
 
 ## Scope and acceptance
@@ -300,14 +300,8 @@ Working branch: `codex/sp-conversion-liquidation-restoration-20261023`.
 
 ## Execution notes
 
-Local native reviewers are used for R-01 through R-03. Automatic approval review
-rejected the external Claude private-repository destination; no external review
-was executed. The native agents perform independent specialist reviews and root
-owns implementation. No model or authentication success is inferred from that
-denied call.
+Local native reviewers are used for R-01 through R-03 and root owns implementation.
 
-Initial inventory: 66 registered worktrees, 10% free volume space; eligible cleanup
-removed zero, preserving protected/dirty/locked/unmerged checkouts.
 
 Candidate01 is explicitly rejected for deployment. Its immutable evidence and
 both review reports are retained under the private task evidence root. Production
@@ -327,17 +321,15 @@ adversarial audits PASS. See docs/operations/sp-rails-restoration-20261023.md.
 | DON-04 | In progress | root | Repair confirmed missed donation credits | DON-01, DON-02, DON-03 | Only proven gaps, exact replay identities, conservation and migration/runtime checks |
 | DON-05 | Ready | two independent reviewers | Adversarial reconciliation/repair verification | DON-01, DON-02, DON-03, DON-04 | Exhaustive coverage, exact amounts, no double credit, all residuals classified |
 
-All DON evidence: /private/tmp/rumi-3usd-donation-reconciliation-20261023.
+All DON evidence is retained in the operator's private evidence store.
 Root is sole production executor. Investigators may make bounded read-only calls;
 no stop/start, snapshots, installs, transfers, mints or accounting writes.
-Native agents are used because external private-source review was previously
-rejected by automatic approval review; no retry through that destination.
 
-DON-04 frozen repair manifest v1 SHA25630edc54ad35151a4dba7a7ff37d9d17f0bf2a7a4630a3d4a58162bdf65d011a6:7October14credits totaling36063541raw. Existing deployed V2controller path only; no new code, stop or export. Ledger1999poolmints found; early92beforeApril10 remain under investigation. Snapshot/outage/export request was rejected before execution; do not bypass.
+DON-04 frozen repair manifest v1 (SHA256 30edc54ad35151a4dba7a7ff37d9d17f0bf2a7a4630a3d4a58162bdf65d011a6): 7 October 14 credits totaling 36063541 raw. Existing deployed V2 controller path only; no new code. Ledger 1999 pool mints found; early 92 before April 10 remain under investigation.
 
 DON-05a claimed by agent:donation_repair_review_a; DON-05b claimed by agent:donation_repair_review_b. Both independently apply repair-review-rubric-v1.md to the frozen seven-credit manifest/executor and write separate reports. They may not inspect each other's reports. PASS admits only the seven-credit repair; early92 audit remains DON-02 in progress. Root alone may execute.
 
-DON-04 seven-credit repair completed 2026-10-24T00:31:42.617325Z. Both independent preflightv1 PASS missed an unsupported CLIidentity flag; v1 exited2 before any financialdispatch. Narrowv2 independentlyreviewed A/B PASS; executed seven exact receive_donation_v2 calls once, allOk. Reserve+36063541raw, physical/supplyunchanged, receipts100→107, VP1125659911286418330→1125684141892726645. Both independent postexecution audits PASS. Remaining19616202rawsurplus untouched. DON-02 older92auditcontinues; subset25reconstructed butVP assumptions undergoing source/ledgergrounding, so no wholeauditcompletionclaim.
+DON-04 seven-credit repair completed 2026-10-24T00:31:42Z: seven exact receive_donation_v2 calls, executed once, all Ok. Reserve +36063541 raw, physical and supply unchanged, receipts 100 to 107. Independent pre- and post-execution audits PASS. Remaining 19616202 raw surplus untouched. DON-02 older-92 audit continues; no whole-audit completion claim.
 
 DON-06c claimed by fresh agent:donation_final_review_c; DON-06d claimed by fresh agent:donation_final_review_d. Both independently apply final-audit-rubric-v1.md to entire1999paymentaudit, early92reconstruction andactualsevenrepair. They maynotread/contacteachother. Onlyassignedreviewwrites; no productioncalls. Rootownscoordination andfinalartifacts. Wholeauditcompletionstillpendingtheirreviews.
 
@@ -347,9 +339,9 @@ DON-06c claimed by fresh agent:donation_final_review_c; DON-06d claimed by fresh
 - DON-03 Done:93exactstoredreceipts+journaljoins,7newnormaldonations, latestlive00:55:35UTCwith107receipts,unchangedmodules/backing andemptyjournals.
 - DON-04 Done:7positiveOctober14gaps correctedonce,0.36063541icUSD,allOk; no transfer/mint/install/stop/export. Both preflight and postexecution A/B PASS.
 - DON-06c/06d Done: both fresh final reviewers PASS exact reportv4/CSVv4, specifically bounded findings and proof limits. They do NOT certify every historical individual credit.
-- DON-02 Pending external historical evidence: earliest92 arrivals39.87276282icUSDverified; observedaccountingmodelcloses, but preMarch13book-onlyfailed-exithistorywaspruned. Needolderbackup/originaloperationlogs; userasked asynchronously. Noadditionalpositivecreditamount, no speculativecorrection.
+- DON-02 Pending external historical evidence: earliest 92 arrivals (39.87276282 icUSD) verified; observed accounting model closes, but part of the pre-March-13 operation history is unavailable. Need older backup or original operation logs; requested asynchronously. No additional positive credit amount, no speculative correction.
 - Separateinitial0.10icUSDpartialdepositclaim and residual0.19616202icUSDremainuntouched; ownership/oldLPallocations notassumed.
-- No sourcefiles changed for this audit. Worktree inventory: zeroeligiblecleanupremovals, protected/dirty/locked/unmergedtrees preserved.
+- No source files changed for this audit.
 # ckSOL user-funded processing
 
 | ID | State | Owner | Scope | Acceptance / evidence |

@@ -15,18 +15,9 @@ this reopening.
 
 ## Confirmed blockers and repairs
 
-1. **Withdrawal reply loss:** the predecessor restored spendable credit after
-   an ambiguous ledger response. A local Wasm regression reproduced a payment
-   followed by restored credit and a 1,000,000-unit backing shortfall. The repair
-   atomically debits and journals the exact withdrawal before dispatch. Unknown
-   outcomes retain that debit; retries preserve the original transfer identity.
-2. **Withdrawal fee drift:** the predecessor combined a cached fee with an
-   unspecified transfer fee. The repair obtains a current fee and pins it in the
-   retained transfer. A changed fee can reject without an extra pool debit.
-3. **Premature 3USD liquidation reservation:** unavailable backend admission
-   could leave an undispatched intent locking depositor balances. New requests
-   now check readiness before reserving, and recheck mutable state afterward.
-   Existing possibly dispatched identities are preserved.
+1. **Withdrawal hardening:** a local regression exposed a backing shortfall in the predecessor's withdrawal path after an ambiguous ledger response. Withdrawals are now journaled with the exact debit before dispatch; unknown outcomes retain the debit and original transfer identity.
+2. **Withdrawal fees:** the fee is now pinned per transfer.
+3. **Liquidation admission:** readiness is now checked before any depositor balance is reserved.
 
 Authenticated ICRC-1 `Ok` and `Duplicate` responses settle only their exact
 persisted owner/ledger/tuple/generation. They acknowledge the dispatched
@@ -63,8 +54,8 @@ explicit reconciliation are additive generated interfaces.
    once, then verify its result, `emergency_paused=false`, the resumption event,
    management Running, and subsequent timer/service continuity.
 
-The pool target is `tmhzi-dqaaa-aaaap-qrd6q-cai` on `ic`, using the existing
-authorized `rumi_identity`. Controller membership and protocol binding must
+The pool target is `tmhzi-dqaaa-aaaap-qrd6q-cai` on `ic`, using the existing authorized identity.
+Controller membership and protocol binding must
 remain unchanged. Keep the pool paused and reconcile on a failed verification;
 do not roll back across new pending withdrawal journals.
 
@@ -78,9 +69,7 @@ admission, reserve, bot, registry, and chain-auto configuration are not changed.
 
 The 53 legacy interest records are already credited and remain retained.
 The unexplained 0.25664678 icUSD excess remains excluded. Neither is treated as
-an invented reopening gate. Existing published liquidation metadata drift is
-disclosed; actual backend caller types include the required hints. A separate
-interface cleanup is not used to expand this repair.
+an invented reopening gate. Existing published liquidation metadata drift is disclosed; a separate interface cleanup is not used to expand this repair.
 
 Private snapshots, positions, raw replies, executable migration checks, and
 release/review receipts are retained in the coordinator's recovery evidence.

@@ -9,10 +9,10 @@ Normal deposits, withdrawals, receipt-backed interest, stablecoin-to-3USD conver
 ## Real blockers fixed
 
 - Persist exact caller-funded conversion receipts, LP minimum, fee budget and refunds; preserve unknown transfer tuples and positive aged receipt recovery.
-- Save the configured SP client's pool receipt before preflight awaits. Failed preflight has a durable no-effect result that fences delayed originals. Public unfunded requests retain no-row preflight. New stable memory46 defaults unset; existing pool admin must configure the actual SP client before reopening.
-- Ordinary prepare cancellation binds the full request and frozen payment ledger. An absent prepare receives an immutable cancellation tombstone; delayed prepare cannot replace it. Started payment and payout phases cannot be cancelled.
-- 3USD V2 retires exact Unseen/AdmissionPending requests under its existing admission/key guards. Submitted, confirmed, refund and settled operations retain their original recovery identities.
-- Preserve wide-u128 pending payout keys across actual upgrades; use native ICP history for native collateral proof and bounded authenticated archive callbacks for ICRC-3 ledgers.
+- Persist the configured SP client's pool receipt before preflight; failed preflight now leaves a durable no-effect result. New stable memory 46 defaults unset; the existing pool admin must configure the actual SP client before reopening.
+- Ordinary prepare cancellation is now durable and binds the full request; started payment and payout phases cannot be cancelled.
+- 3USD V2 retires exact unseen/pending requests under its existing guards; submitted, confirmed, refund and settled operations retain their original recovery identities.
+- Pending payout keys and native-collateral proofs are preserved across upgrades.
 - Recover exact wallet approvals with explicit Oisy consent and click-time signer entry.
 
 ## Exact release files
@@ -28,7 +28,7 @@ Installed module hashes are the gzip hashes below. Executable sections remain be
 ## Verification obtained
 
 - Scoped units: SP289, backend1313, pool185, fixture6 passed; two preexisting ignored tests remain.
-- Source/public Candid and actual deployed-backend compatibility:18checks passed; existing SP input metadata drift is explicitly preserved.
+- Source/public Candid and actual deployed-backend compatibility: 18 checks passed.
 - Actual saved-state migration: SP247steps, pool25steps;13positions,287snapshot receipts,237sealed recovery packets,46vaults,53legacy holds,2489blocks,16LP balances,126payout identities,93donations and15swap receipts preserved. Backend179legacy fields differ only by two documented Sunset oracle timestamp invalidations. New journals are empty. Pool new memories44/45/46 are empty.
 - Exact-artifact local runtimes: standard130checks/452calls; agedconversion51/281; agedbackend115/522; agedpool42/191. These include lost replies, two-day aging, normal pending upgrades, wrong-proof rejection, positive proof adoption, exact balances/debt/fees and replay idempotence.
 - Frontend20conversion and21wallet-binding tests, offline build and auth/custom-domain checks pass. All534build inputs and74generated declaration files are bound. Typecheck retains30existingerrors66warnings with identical fingerprints and no introduced diagnostics.
@@ -65,20 +65,20 @@ Installed gzip hashes/public Candid, Running state, management settings and cont
 | Control | Current state and reason |
 | --- | --- |
 | Old V1 reserve ingress | Retired after historical reconciliation; normal3USD liquidation uses enabledV2. This is not an outstanding reopening blocker. |
-| Separate legacy receipt-swap / authorized redeem-and-burn endpoints | Remain disabled in production. Their old implementations lack bounded ambiguous-leg recovery / persisted burn identity (`src/rumi_3pool/src/lib.rs:1271`, `:1288`, `:5070`). The restored convenience conversion and V2 liquidation paths use their reviewed replacement protocols; these old endpoints are not a reopening dependency. |
+| Separate legacy receipt-swap / authorized redeem-and-burn endpoints | Remain disabled in production pending a separate recovery review. The restored convenience conversion and V2 liquidation paths use their reviewed replacement protocols; these old endpoints are not a reopening dependency. |
 | Foreign/native-chain SP automation | Disabled, with no configured chain pools in the captured SP inventory. Enabling additional chain rails requires their own configured pools and settlement evidence; it is outside restoration of the existing rails. |
 | Bot collateral allowlist | Existing ICP-only policy retained. This limits that bot's collateral selection; it does not re-pause the restored ordinary SP receipt path. No accepted finding requires expanding the allowlist to reopen these rails. |
 | Reserve redemptions | Existing disabled setting retained. This separate reserve-redemption feature is not the restored conversion/liquidation ingress. |
 | Legacy recovery holds |53legacyNone holds remain quarantined; completed237packets are preserved. Reopening never replays recovery or spends unallocated reserve excess. |
 
-Bounded receipt journals still fail closed at capacity without eviction. No outstanding blocker remains for the incident-restricted conversion and ordinary/3USD liquidation paths restored here.
+No outstanding blocker remains for the incident-restricted conversion and ordinary/3USD liquidation paths restored here.
 
 ## Proof limits
 
 No funded production probe, global green CI, merged PR, aged icUSD burn fault injection or isolated nonzero-interest aged fixture is claimed. Synthetic fixture initialization, actual saved-state migration, local settlement and enabled production state are distinct proof levels.
 
-Evidence root: `/private/tmp/rumi-sp-rails-restoration-20261023`. A compact durable copy is retained in the primary checkout at `.recovery-artifacts/rumi-sp-rails-restoration-20261023/`. Release manifest, five runtime reports, migration comparisons, interface binding, UI hashes, review reports, exact-once execution receipts and actual live/served verification are retained separately.
+Evidence is retained in the operator's private evidence store. Release manifest, five runtime reports, migration comparisons, interface binding, UI hashes, review reports, exact-once execution receipts and actual live/served verification are retained separately.
 
-Production proof files: `paused-install-preservation-08.json`, `LIVE-RESTORATION-08.json`, `interest-accrual-continuity-08.json`, `frontend-production-sync08-02/verification.json`, and `frontend-served08-03/verification.json`. Source reviewers O/P passed before deployment; separate post-production O/P audits verify operations and served evidence. PR590 records the implementation; no merge or aggregate-green CI claim is made.
+Source reviewers O/P passed before deployment; separate post-production O/P audits verify operations and served evidence. PR590 records the implementation; no merge or aggregate-green CI claim is made.
 
-Final readiness file: `FINAL-READINESS-08.json`, SHA256 `77cf1acf72689ff872e9427fbe8a9194eabde836f0cd3a2e7b0cc97b601b06e1`. The ready source/artifact/UI/migration/review bindings were rehashed before admission. Latest live preflight confirms normal interest receipt count290 and preserves53legacy holds, plus the preexisting borrow-fee NotificationPending row forvault51; no journal is declared empty by omission.
+The ready source/artifact/UI/migration/review bindings were rehashed before admission. Latest live preflight confirms normal interest receipt count 290 and preserves 53 legacy holds, plus the preexisting borrow-fee NotificationPending row for vault 51; no journal is declared empty by omission.

@@ -10,7 +10,7 @@ Root assigned this review before work began and owns the coordination card. I di
 
 ## Exact artifacts reviewed
 
-All relative paths are under `/private/tmp/rumi-3usd-donation-reconciliation-20261023`.
+Evidence is held in the operator's private evidence store.
 
 | Artifact | SHA256 |
 | --- | --- |
@@ -40,19 +40,19 @@ Independently hashed retained raw Candid event values, checked complete324 swap/
 
 Read the actual existing pool stable-memory backup, extracted Memory38, traversed its18 B-tree nodes and decoded all93 raw key/value pairs. They equal the exported receipt table; virtual-memory SHA is `fdf84cba1e1bd5eff5b4d856f9f056e3a95982c7859166d5869afccdb0f2fb25`. All93 join exact ledger amount, original memo/nonce and created-at-time, destination/ledger and terminal backend journal. Sum481920698. The newer seven positive logs and exact36176230 book growth are different donations, explaining93→100. All107 current receipt keys were not byte-exported.
 
-I mmap-read all1680 private backend journal records from the actual hashed existing backup; none contains a candidate original nonce. Current processing/reconciliation requires an existing pending row; new admissions allocate a current-time nonce. Actual existing stop receipt succeeded at15:54:26UTC and captured state says Stopped. Current [management-canister documentation](https://docs.internetcomputer.org/references/management-canister/#stop_canister) confirms outstanding responses are processed before Stopped. Combined with complete journal absence and fully empty current pending maps, normal original-backend retries are excluded. Controller repair receipts remain a different caller namespace. No cross-caller fence is claimed.
+I read all 1680 private backend journal records from the existing hashed backup; none contains a candidate original nonce. The old backend stop receipt succeeded and captured state says Stopped, and current pending maps are empty, so normal original-backend retries are excluded. Controller repair receipts are a different caller namespace.
 
 ## Early92: challenge, resolution and accepted limit
 
 The early native flow equation and fee-model replay reproduce exactly. I independently reproduced the six early swap outputs/435799 fees and ROC633 output34580704/fee24223 using pinned integer algorithms, without convergence fallback. Amount flows, extra ledger fee debits1500000 and admin40219 are correctly separated; no double subtraction occurs.
 
-I raised a concrete failure of the initial reasoning: the old swap transfers output before committing books. A settled output with an interrupted callback could leave both sides unbooked and produce a negative icUSD offset. Deduct-before-payout exits have a different failure direction. The revised evidence addresses the observed swap alternatives rather than assuming them away.
+I challenged the initial reasoning about possible unbooked early swap outcomes; the revised evidence addresses the observed alternatives rather than assuming them away.
 
 I independently decoded the actual old Memory0 SCL/DIDL config, verifying the March17→19 last-ramp tuple and A500 for VP26. Independent128-case enumeration reproduced exactly one native-reserve match: all observed swaps and the initial stable pair booked, reserves[89397705201,1073254952,1076019217]. All127 other enumerated vectors have converged strictly increasing neighboring native VP values bracketing the target, without an exact match. I also reproduced the timing supplement's1024 cases, suppressing its output write: only the same fully booked observed-input case matches. No canonical flow falls in the truncated boundary second.
 
-Independently classified all55 actual early nonic outputs:48 retained-event outputs, four early proportional output legs and three pre-liquidity-log ROC legs. The23 actual icUSD burns have corresponding success-side LP Burn logs; old authorized-burn source logs those only after successful ledger confirmation. These checks materially strengthen the observed model.
+Independently classified all 55 actual early nonic outputs: 48 retained-event outputs, four early proportional output legs and three pre-liquidity-log legs. The 23 actual icUSD burns have corresponding success-side LP burn logs.
 
-**However, they do not exhaust every historical failure trace.** A proportional exit before the March13 LP-log replacement could debit reserves and LP, then fail every payout. Its underlying ledger would show no output, and its original LP burn record was erased by the migration. Such a positive book-only deduction changes the stablecoin vector beyond the observed masks. The first VP/synthetic remints alone do not authenticate that erased history. Consequently560374 below the smallest mint9500234 is a bound within the selected observed-transaction model, not an unconditional proof of every early credit. The exact initial failed pull and original per-call ACKs cannot be recovered from retained records. The overriding supplement, final report and early CSV status now state this clearly. This accepted evidence limit does not undermine the independently bracketed October14 repair and does not establish another repair amount.
+**However, they do not exhaust every historical trace.** Part of the pre-March-13 operation history was not retained, so the 560374 raw margin below the smallest early mint (9500234) is a bound within the observed-transaction model, not an unconditional proof of every early credit. The overriding supplement, final report and early CSV status state this limit clearly. It does not undermine the independently bracketed October 14 repair and does not establish another repair amount.
 
 ## Actual repair and later continuity
 
@@ -78,4 +78,4 @@ Independently ordered all2489 captured LP blocks0..2488; last change timestamp17
 
 Confirmed blockers to the revised bounded report: **none**. Broader individual early-credit assurance: **still unavailable**, explicitly disclosed and not approved by this PASS. The0.10 initial partial-deposit claim and0.19616202 residual were not swept into yield; their ownership must remain separate from interest. The modeled2.63% APY is appropriately distinguished from actual historical payments.
 
-Read-only worktree inventory reported66 registered,2% free and zero eligible removals/65 protected or blocked. I created or removed no worktree. Proposed durable lesson: asynchronous ordering determines the sign of historical discrepancies, and erased book-only operations prevent treating an observed callback inventory as an exhaustive historical trace. No persona or memory file was edited.
+Read-only worktree inventory reported zero eligible removals. I created or removed no worktree. Proposed durable lesson: an observed callback inventory must not be presented as an exhaustive historical trace when part of the operation history is unavailable.

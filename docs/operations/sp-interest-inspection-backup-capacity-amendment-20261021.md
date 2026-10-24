@@ -6,9 +6,9 @@ The approved retained-route inspection proposal at `d34b00e2b39267f2dd6035662109
 
 ## Exact additional action proposed
 
-Authorize replacement of **one** managed snapshot on the already-authorized production backend `tfesu-vyaaa-aaaap-qrd7a-cai`, network `ic`, identity alias `rumi_identity`:
+Authorize replacement of **one** managed snapshot on the already-authorized production backend `tfesu-vyaaa-aaaap-qrd7a-cai`, network `ic`, using the operator's authorized identity:
 
-- Selected snapshot: `00000000000000030000000001f088fe0101`, the oldest entry in the verified inventory.
+- Selected snapshot: the oldest entry in the verified inventory.
 - Preserve its complete downloaded module, Wasm memory, stable memory and metadata in the protected recovery store. Verify every named payload's length against its metadata, its snapshot timestamp against the managed inventory, and every retained SHA256 before replacement. The declared chunk store is empty.
 - Only after that preservation passes, use the normal snapshot `create --replace` operation for this exact ID during the bounded stopped-backend backup. The old network identity and direct network restore path will disappear; the complete verified local backup payloads remain protected. No restore roundtrip has been performed or is claimed.
 - Do not delete or replace any other snapshot, discard any downloaded backup, clear a marker, restore stale financial state, or repeat a failed/unknown snapshot creation. Compare the entire live snapshot inventory with the fresh preflight inventory before replacement, and verify the other nine entries remain identical afterward. If the inventory or selected snapshot differs, halt and reassess.
