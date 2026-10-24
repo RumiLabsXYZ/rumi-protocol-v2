@@ -69,15 +69,40 @@ releases to the ledger minting account are held; idle observer probes `bridgeOut
 finalized tag between hourly full passes; supply reconciliation every 30 minutes; no `icp.yaml`
 entry; lane halts on unexplained nonce use stay halted until a controller decision.
 
+## Milestone 3 (2026-10-24): review round 1 fixed, cumulative mint guard, all local suites green
+
+| Commit | Content |
+| --- | --- |
+| `19fbb0b5` | Public history queries, Base-sender index, contract binding refresh |
+| `ac7a517a` | Frontend Bridge page |
+| `6208c117` | Review round 1 fixes, Oisy two-click, PocketIC + anvil e2e and fault suites |
+| `19d589c3` | Frontend types against generated bindings |
+| `e4213be1` | Cumulative mint guard (invariant C4) |
+
+| Check (on `e4213be1`) | Result |
+| --- | --- |
+| `forge test --offline` | 111 passed |
+| `cargo test --offline -p rumi_icusd_bridge --lib` | 390 passed |
+| `cargo test --offline -p rumi_icusd_bridge --test bridge_e2e_pic` (PocketIC + anvil) | 24 passed |
+| `cargo test --offline -p rumi_icusd_bridge --test bridge_faults_pic` | 16 passed |
+| `cargo test --offline -p rumi_icusd_bridge --test harness_smoke_pic` | 12 passed |
+| vitest (vault_frontend) | 1455 passed (341 bridge) |
+| `npm run check` | 30 errors / 66 warnings, identical to baseline, none in bridge files |
+| `npm run build` | passes |
+| Wasm | 3,822,456 B raw, 3,185,887 B shrunk |
+
+Review round 1: both reviewers FAIL with 8 distinct blockers (2 shared); all accepted and fixed (see the design's
+"Review round 1 changes"). The scenario suites also found the C3 reporting bug and the unauthorized mint-then-burn
+payout gap; both fixed with regression tests. Round 2 (fresh reviewers) running.
+
 ## Next action
 
-1. BB-09b part 1 (running) then part 2 (fault scenarios) on PocketIC + anvil.
-2. Integrate BB-10 frontend (running).
-3. Two adversarial reviews (BB-12, BB-13), fixes, push, draft PR.
+1. Round 2 adversarial reviews (running); fix confirmed findings; draft PR open.
+2. Final handoff with PR link, risks and runbook pointers.
 
 ## Unresolved risks (as of this milestone)
 
-- No end-to-end evidence yet: the bridge has not executed a canister-signed transaction on anvil.
+- Local evidence only: canister-signed transactions executed on a local anvil; nothing on Base Sepolia or Base.
 - pocket-ic 6.0.0 `await_call` panics after 100 rounds; the harness works around it.
 - Lane throughput is one unincluded tx at a time per lane (acceptable for v1, documented).
 - `rumi_analytics` still reports ICP ledger supply as circulating; subtracting escrow is a follow-up.
