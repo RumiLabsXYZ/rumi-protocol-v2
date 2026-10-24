@@ -237,6 +237,23 @@ leaving about 0.55T. HELD: the test-only Base Sepolia deployer signer (approval-
 Rob's answer pending), which steps F and I.2 need. Pre-merge follow-ups: a PocketIC test of the
 `post_upgrade` refusal, and a zero-provider-call test of the provider cap on replacement.
 
+## Milestone 9 (2026-10-24): partial public setup, installation held
+
+Executed by Miles (the one public executor), packet steps A and B only:
+
+- Proven (`public-created`): two new test canisters exist on the packet's test subnet, both running,
+  with the single intended controller verified, funded as budgeted with the reserve kept.
+- Not proven: no code is installed (both module hashes read back none), so no synthetic test
+  tokens were minted, no bridge configuration exists and no Base addresses were derived.
+- Ledger install (step C): the executor's install request never returned a session or a result.
+  Miles ended only his local wait, which is not a network cancellation. Installation is HELD:
+  reconcile the request against the canister's authoritative status before any fresh install, and
+  never retry it through another executor.
+- Bridge install (step D) was never attempted. The Base side (steps F to J) stays held on the
+  test deployer signer, pending Rob's explicit answer.
+- Exact canister ids, cycles figures and the reconciliation rule are in the executor's private run
+  record, not in this repository.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

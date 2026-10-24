@@ -247,10 +247,10 @@
     },
     {
       "id": "BB-24",
-      "state": "in_progress",
+      "state": "held",
       "owner": "supervisor",
       "scope": "Base Sepolia phase 1: ICP side (packet steps A to E)",
-      "evidenceText": "proof=public-created; Step B done: two test canisters created on the packet's subnet, budget and reserve as planned, single controller verified. Step C ledger install pending at the executor boundary, not retried; no code installed; bridge install not begun",
+      "evidenceText": "proof=public-created; Created: two test canisters running, single controller verified. Ledger install request stalled at the executor with no result; both module hashes read back none, so no code. Held: reconcile before retry; bridge install not attempted",
       "evidenceLinks": []
     },
     {
