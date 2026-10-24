@@ -270,9 +270,24 @@ pub fn validate_init(args: &InitArgs) -> Result<BridgeConfig, String> {
     })
 }
 
+/// The most RPC providers the bridge accepts.
+///
+/// 5 covers all five built-in Base mainnet providers of the EVM RPC canister (the
+/// `L2MainnetService` enum: Alchemy, Ankr, BlockPi, PublicNode, Llama); the Base Sepolia
+/// runbook uses 3. Every provider is called for every request, so the cap also bounds the
+/// per-call cycle cost.
+///
+/// Enforced by [`validate_rpc_services`], which runs at install (`validate_init`) and in
+/// `admin_set_rpc_services` before any provider call, and by
+/// [`validate_stored_rpc_config`] on the stored set at upgrade.
+pub const MAX_RPC_SERVICES: usize = 5;
+
 pub fn validate_rpc_services(chain_id: u64, services: &[RpcServiceConfig], min_quorum: u8) -> Result<(), String> {
     if services.is_empty() {
         return Err("at least one RPC service is required".into());
+    }
+    if services.len() > MAX_RPC_SERVICES {
+        return Err(format!("at most {MAX_RPC_SERVICES} RPC services are allowed, got {}", services.len()));
     }
     let mut seen = BTreeSet::new();
     for s in services {
@@ -304,6 +319,20 @@ pub fn validate_rpc_services(chain_id: u64, services: &[RpcServiceConfig], min_q
         return Err("Base mainnet requires min_quorum >= 2".into());
     }
     Ok(())
+}
+
+/// Check the RPC configuration that survived an upgrade, by the same rules as a set given
+/// at install or to `admin_set_rpc_services`. Upgrade arguments carry no providers, so the
+/// stored set is what the new module will call. Pure, so it can be unit tested; `post_upgrade`
+/// traps on an error (which rolls the upgrade back to the old module).
+pub fn validate_stored_rpc_config(config: &BridgeConfig) -> Result<(), String> {
+    validate_rpc_services(config.chain_id, &config.rpc_services, config.min_quorum).map_err(|e| {
+        format!(
+            "stored RPC configuration is invalid ({} services, min_quorum {}): {e}",
+            config.rpc_services.len(),
+            config.min_quorum
+        )
+    })
 }
 
 pub fn validate_limits(l: &BridgeLimits) -> Result<(), String> {
@@ -1485,6 +1514,114 @@ pub(crate) mod tests {
         let mut a = init_args(CHAIN_BASE_MAINNET, "key_1");
         a.min_quorum = 1;
         assert!(validate_init(&a).is_err(), "mainnet needs quorum >= 2");
+    }
+
+    fn custom_services(n: usize) -> Vec<RpcServiceConfig> {
+        (0..n).map(|i| RpcServiceConfig::Custom { url: format!("https://p{i}.example") }).collect()
+    }
+
+    fn all_built_in_base_providers() -> Vec<RpcServiceConfig> {
+        use crate::types::L2MainnetService::*;
+        [Alchemy, Ankr, BlockPi, PublicNode, Llama].into_iter().map(RpcServiceConfig::BaseMainnet).collect()
+    }
+
+    #[test]
+    fn the_provider_count_cap_has_exact_boundaries() {
+        assert_eq!(MAX_RPC_SERVICES, 5);
+        let check = |n: usize, q: u8| validate_rpc_services(CHAIN_BASE_SEPOLIA, &custom_services(n), q);
+        // Count boundaries: 0 refused, 1 accepted, 5 accepted, 6 refused.
+        assert!(check(0, 1).is_err(), "no providers");
+        assert!(check(1, 1).is_ok());
+        assert!(check(5, 2).is_ok());
+        let over = check(6, 2).unwrap_err();
+        assert!(over.contains("at most 5"), "{over}");
+        // The cap is its own rule: a quorum that would otherwise be fine does not help.
+        for q in [1u8, 3, 6] {
+            let e = check(6, q).unwrap_err();
+            assert!(e.contains("at most 5"), "quorum {q}: {e}");
+        }
+        // Quorum boundaries at the largest accepted count.
+        assert!(check(5, 0).is_err(), "quorum 0");
+        assert!(check(5, 1).is_ok(), "quorum 1 is allowed off mainnet");
+        assert!(check(5, 5).is_ok(), "quorum = count");
+        assert!(check(5, 6).is_err(), "quorum = count + 1");
+    }
+
+    #[test]
+    fn base_mainnet_accepts_all_five_built_in_providers_and_still_needs_quorum_two() {
+        let all = all_built_in_base_providers();
+        assert_eq!(all.len(), MAX_RPC_SERVICES);
+        assert!(validate_rpc_services(CHAIN_BASE_MAINNET, &all, 1).is_err(), "Base mainnet quorum 1");
+        for q in 2..=5u8 {
+            assert!(validate_rpc_services(CHAIN_BASE_MAINNET, &all, q).is_ok(), "quorum {q}");
+        }
+        assert!(validate_rpc_services(CHAIN_BASE_MAINNET, &all, 6).is_err());
+        // A sixth provider of any kind is over the cap.
+        let mut six = all.clone();
+        six.push(RpcServiceConfig::Custom { url: "https://extra.example".into() });
+        let e = validate_rpc_services(CHAIN_BASE_MAINNET, &six, 3).unwrap_err();
+        assert!(e.contains("at most 5"), "{e}");
+        // The same set through install validation.
+        let mut a = init_args(CHAIN_BASE_MAINNET, "key_1");
+        a.rpc_services = all;
+        a.min_quorum = 3;
+        assert!(validate_init(&a).is_ok());
+        a.rpc_services = six;
+        assert!(validate_init(&a).is_err());
+    }
+
+    #[test]
+    fn install_validation_enforces_the_provider_cap() {
+        let mut a = init_args(CHAIN_BASE_SEPOLIA, "test_key_1");
+        a.rpc_services = custom_services(5);
+        assert!(validate_init(&a).is_ok());
+        a.rpc_services = custom_services(6);
+        let e = validate_init(&a).unwrap_err();
+        assert!(e.contains("at most 5"), "{e}");
+    }
+
+    #[test]
+    fn the_stored_rpc_config_is_revalidated_at_upgrade() {
+        // A valid stored set passes, at the cap too.
+        let mut config = validate_init(&init_args(CHAIN_BASE_SEPOLIA, "test_key_1")).unwrap();
+        assert!(validate_stored_rpc_config(&config).is_ok());
+        config.rpc_services = custom_services(MAX_RPC_SERVICES);
+        config.min_quorum = 3;
+        assert!(validate_stored_rpc_config(&config).is_ok());
+
+        // Read from the stored core, as `post_upgrade` does.
+        reset_for_tests();
+        mutate_core(|c| c.config = config.clone());
+        assert!(read_core(|c| validate_stored_rpc_config(&c.config)).is_ok());
+
+        // Six stored providers are refused, with a message that names the problem.
+        mutate_core(|c| c.config.rpc_services = custom_services(MAX_RPC_SERVICES + 1));
+        let e = read_core(|c| validate_stored_rpc_config(&c.config)).unwrap_err();
+        assert!(e.contains("stored RPC configuration is invalid"), "{e}");
+        assert!(e.contains("6 services"), "{e}");
+        assert!(e.contains("at most 5"), "{e}");
+
+        // The other install-time rules apply to the stored set as well.
+        let bad: Vec<(&str, BridgeConfig)> = vec![
+            ("no providers", BridgeConfig { rpc_services: vec![], ..config.clone() }),
+            ("quorum 0", BridgeConfig { min_quorum: 0, ..config.clone() }),
+            ("quorum above count", BridgeConfig { min_quorum: 6, ..config.clone() }),
+            ("duplicate provider", BridgeConfig { rpc_services: vec![custom_services(1)[0].clone(); 2], ..config.clone() }),
+            (
+                "plain http off local anvil",
+                BridgeConfig { rpc_services: vec![RpcServiceConfig::Custom { url: "http://a.example".into() }], min_quorum: 1, ..config.clone() },
+            ),
+            ("never configured", BridgeConfig::default()),
+            (
+                "Base mainnet with quorum 1",
+                BridgeConfig { chain_id: CHAIN_BASE_MAINNET, rpc_services: all_built_in_base_providers(), min_quorum: 1, ..config.clone() },
+            ),
+        ];
+        for (label, c) in bad {
+            assert!(validate_stored_rpc_config(&c).is_err(), "{label}");
+        }
+        let mainnet = BridgeConfig { chain_id: CHAIN_BASE_MAINNET, rpc_services: all_built_in_base_providers(), min_quorum: 2, ..config };
+        assert!(validate_stored_rpc_config(&mainnet).is_ok());
     }
 
     #[test]

@@ -347,7 +347,11 @@ Two lanes (minter, admin), each with a persisted `next_nonce`, initialized once 
 
 - Transport: EVM RPC canister `request` per configured service (`BaseMainnet(provider)` or
   `Custom{url}`), `min_quorum` identical results required (default 2 of 3), sequential calls,
-  configurable response cap (logs default 64 KiB).
+  configurable response cap (logs default 64 KiB). At most 5 services (`MAX_RPC_SERVICES`, the
+  five built-in Base mainnet providers; every request goes to every service, so the cap also
+  bounds per-call cycle cost). The limit and the quorum rules are checked at install, on
+  `admin_set_rpc_services` before any provider is called, and again in `post_upgrade`, which
+  refuses (traps, keeping the old module) if the stored set violates them.
 - Settlement finality: `finalized` tag, taken as the lowest agreeing quorum value, then the block
   hash at that height by quorum. `latest` and `safe` are shown to users as progress only.
 - Inconsistent providers never advance state; the condition is visible in `get_bridge_info`.

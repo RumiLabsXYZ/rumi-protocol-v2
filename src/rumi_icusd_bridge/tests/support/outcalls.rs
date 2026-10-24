@@ -301,6 +301,40 @@ pub fn serve_pending(pic: &PocketIc, router: &mut dyn OutcallRouter) -> (usize, 
     (total, answered)
 }
 
+/// Like [`serve_pending`], but every parked request for which `hold` returns true is left
+/// parked: it is offered again (and held again) on the next round, and it is never shown to
+/// the router, so nothing about it is logged or faulted. Lets a test pace ONE request of a
+/// running call (for example to move IC time while a canister call is mid-flight) while
+/// everything else, including other requests of the same call, is answered normally. The
+/// answer, once the hold is lifted, is whatever the router gives, so a held request stays
+/// REAL evidence under [`FaultAction::Pass`]. Returns `(pending_total, held, answered)`.
+pub fn serve_pending_except(
+    pic: &PocketIc,
+    router: &mut dyn OutcallRouter,
+    hold: &dyn Fn(&CanisterHttpRequest) -> bool,
+) -> (usize, usize, usize) {
+    let pending = pic.get_canister_http();
+    let total = pending.len();
+    let mut held = 0;
+    let mut answered = 0;
+    for req in pending {
+        if hold(&req) {
+            held += 1;
+            continue;
+        }
+        if let Some(response) = router.route(&req) {
+            pic.mock_canister_http_response(MockCanisterHttpResponse {
+                subnet_id: req.subnet_id,
+                request_id: req.request_id,
+                response,
+                additional_responses: vec![],
+            });
+            answered += 1;
+        }
+    }
+    (total, held, answered)
+}
+
 /// Submit an update call without executing it.
 pub fn submit(
     pic: &PocketIc,

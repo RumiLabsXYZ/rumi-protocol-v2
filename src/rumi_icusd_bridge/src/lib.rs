@@ -74,6 +74,13 @@ fn post_upgrade(arg: Option<BridgeArg>) {
     if !state::read_core(|c| c.initialized) {
         ic_cdk::trap("upgrade of an uninitialized bridge");
     }
+    // Upgrade arguments carry no providers, so the stored RPC set is what this module will
+    // call. Re-check it by the install-time rules before anything can arm a timer or reach
+    // a provider. A trap in `post_upgrade` rolls the upgrade back: the old module and its
+    // state stay in place.
+    if let Err(e) = state::read_core(|c| state::validate_stored_rpc_config(&c.config)) {
+        ic_cdk::trap(&format!("upgrade refused, the previous module stays installed: {e}"));
+    }
     state::append_audit(None, AuditCtx::note("upgraded"));
     timer::schedule_soon();
 }

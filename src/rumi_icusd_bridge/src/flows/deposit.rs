@@ -476,6 +476,40 @@ pub fn retry_held(id: u64) -> BridgeResult<DepositView> {
 }
 
 // ---------------------------------------------------------------------------
+// Inline attempt shared by refunds and fee sweeps
+// ---------------------------------------------------------------------------
+
+/// Send the one inline attempt of a refund or fee sweep that was just persisted, apply its
+/// outcome, then hand any unresolved operation to the background tick.
+///
+/// The durable transfer tuple, the outflow reservation and the ambiguity bookkeeping all
+/// stay in `ledger_ops::attempt` and `ledger_ops::apply_outcome`; this only adds the
+/// follow-up decision of [`rearm_if_unresolved`].
+async fn send_inline_attempt(r: &OpRef) {
+    if let Some(sent) = ledger_ops::attempt(r).await {
+        ledger_ops::apply_outcome(r, sent);
+    }
+    // Runs whether or not an attempt could be made: `attempt` returns `None` when it could
+    // not reserve the outflow (the bridge halts), and the persisted operation still needs
+    // its follow-up once the halt is cleared.
+    rearm_if_unresolved(r);
+}
+
+/// Post-attempt decision. When the operation is not terminal (reply lost, ambiguous
+/// outcome, `Unknown` status, a retryable no-effect reply, or no attempt could be made),
+/// arm a tick within about a second instead of waiting out the idle interval, which an
+/// admin may set as high as a day. This is the same rule `bridge_to_base` applies.
+///
+/// Synchronous, and it only arms the timer: it never allocates an operation, rebuilds or
+/// resends a tuple, retries, or touches the buckets. What happens to the operation next is
+/// decided by the tick (`process_refunds`, `process_sweeps` and `ledger_ops::reconcile`).
+fn rearm_if_unresolved(r: &OpRef) {
+    if ledger_ops::load_op(r).is_some_and(|op| !ledger_ops::is_terminal(&op)) {
+        crate::timer::schedule_soon();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Refunds
 // ---------------------------------------------------------------------------
 
@@ -560,10 +594,7 @@ pub async fn request_refund(id: u64) -> BridgeResult<DepositView> {
     d.updated_at_ns = now;
     state::put_deposit(&d);
 
-    let r = OpRef::Refund(id);
-    if let Some(sent) = ledger_ops::attempt(&r).await {
-        ledger_ops::apply_outcome(&r, sent);
-    }
+    send_inline_attempt(&OpRef::Refund(id)).await;
     let d = state::get_deposit(id).ok_or(BridgeError::NotFound)?;
     Ok(views::deposit_view(&d))
 }
@@ -630,10 +661,7 @@ pub async fn sweep_fees(amount_e8s: u64) -> BridgeResult<u64> {
         Ok(id)
     })?;
     state::append_audit(None, AuditCtx::note(format!("fee sweep {id} of {amount_e8s} e8s started")));
-    let r = OpRef::Sweep(id);
-    if let Some(sent) = ledger_ops::attempt(&r).await {
-        ledger_ops::apply_outcome(&r, sent);
-    }
+    send_inline_attempt(&OpRef::Sweep(id)).await;
     Ok(id)
 }
 
@@ -1021,5 +1049,351 @@ pub(crate) mod tests {
             note: None,
         });
         assert!(matches!(refund_preconditions(&rec2, user()), Err(BridgeError::InvalidState(_))));
+    }
+
+    // -----------------------------------------------------------------------
+    // Refund and sweep: an unresolved inline attempt re-arms the tick
+    // -----------------------------------------------------------------------
+    //
+    // On the host every ledger call is an `Ambiguous` outcome (see `ledger::call_candid`),
+    // which is exactly a lost reply, so `ledger_ops::attempt` runs for real here.
+    // `request_refund` runs end to end. `sweep_fees` cannot: it always awaits the ledger
+    // fee first, and that read is an error off-chain. The sweep tests therefore start from
+    // the state `sweep_fees` persists and run the shared `send_inline_attempt`, which is all
+    // `sweep_fees` does after persisting the operation and writing its audit note.
+
+    use crate::evm::rpc::testutil;
+    use crate::flows::ledger_ops::SentAttempt;
+
+    const IDLE_NS: u64 = 300 * 1_000_000_000;
+    const SOON_NS: u64 = 1_000_000_000;
+
+    /// Pretend the idle tick is armed, as it is when nothing was pending. Returns `now`.
+    fn arm_idle_tick() -> u64 {
+        let now = env::now_ns();
+        crate::timer::set_pending_due_for_tests(Some(now + IDLE_NS));
+        now
+    }
+
+    /// A held user deposit that may be refunded, with every provider answering "the mint
+    /// id is not consumed". The caller is its owner.
+    fn held_refundable_deposit() -> u64 {
+        setup_bound();
+        state::mutate_core(|c| {
+            c.config.rpc_services = testutil::services(3);
+            c.config.min_quorum = 2;
+            c.config.evm_rpc = Principal::from_slice(&[7; 10]);
+        });
+        let not_consumed = format!("0x{}", "00".repeat(32));
+        crate::evm::rpc::set_mock_transport(move |_, _| Ok(testutil::ok_body(serde_json::json!(not_consumed))));
+        let d = admit(user(), &args(100 * E8, 1)).unwrap();
+        mark_sent(d.id);
+        resolve_pull(d.id, CallOutcome::Accepted { block_index: 1 });
+        on_mint_preflight_hold(d.id, "paused".into());
+        test_env::set_caller(user());
+        d.id
+    }
+
+    /// Builds an operation whose inline attempt got no reply; returns it and the time.
+    type Fixture = fn() -> (OpRef, u64);
+
+    /// A refund requested while the ledger reply is lost: `Refunding`, op `Unknown`.
+    fn refund_with_lost_reply() -> (OpRef, u64) {
+        let id = held_refundable_deposit();
+        let now = arm_idle_tick();
+        testutil::block_on(request_refund(id)).unwrap();
+        (OpRef::Refund(id), now)
+    }
+
+    /// A just-persisted fee sweep, in the shape `sweep_fees` stores it (10_000 e8s ledger
+    /// fee, 5 icUSD of accrued fees).
+    fn persisted_sweep(amount: u64) -> OpRef {
+        setup_bound();
+        let recipient = Account { owner: Principal::from_slice(&[0x44; 29]), subaccount: None };
+        let fee = 10_000;
+        let now = env::now_ns();
+        let canister = env::canister_id();
+        let id = state::mutate_core(|c| {
+            c.config.fee_recipient = Some(recipient);
+            c.buckets.fees = (5 * E8) as u128;
+            let id = c.next_sweep_id;
+            c.next_sweep_id += 1;
+            let op = LedgerOp {
+                kind: LedgerOpKind::Sweep,
+                from: c.escrow_account(canister),
+                to: recipient,
+                spender: None,
+                amount_e8s: amount - fee,
+                fee_e8s: Some(fee),
+                memo: ids::sweep_memo(id),
+                created_at_time: now,
+                attempts: 0,
+                ambiguous_seen: false,
+                status: LedgerOpStatus::Pending,
+                search_from_block: c.ledger_tip_lower_bound,
+                search_next_block: None,
+                last_attempt_ns: None,
+                outflow_reserved: false,
+            };
+            c.sweeps.push(SweepRecord { id, amount_e8s: amount, op, created_at_ns: now });
+            id
+        });
+        OpRef::Sweep(id)
+    }
+
+    /// A sweep whose inline attempt got no reply: `Unknown`.
+    fn sweep_with_lost_reply() -> (OpRef, u64) {
+        let r = persisted_sweep(E8);
+        let now = arm_idle_tick();
+        testutil::block_on(send_inline_attempt(&r));
+        (r, now)
+    }
+
+    /// The op with its send history blanked: what is left is the durable transfer tuple
+    /// (accounts, amount, fee, memo, `created_at_time`) the ledger deduplicates on.
+    fn tuple_of(op: &LedgerOp) -> LedgerOp {
+        LedgerOp {
+            attempts: 0,
+            ambiguous_seen: false,
+            status: LedgerOpStatus::Pending,
+            search_next_block: None,
+            last_attempt_ns: None,
+            outflow_reserved: false,
+            ..op.clone()
+        }
+    }
+
+    /// Everything a re-arm must leave alone: the core (buckets, sweeps, halt, counters),
+    /// the deposit if any, and the audit log.
+    fn snapshot(deposit: Option<u64>) -> (state::BridgeCore, Option<DepositRecord>, u64) {
+        (state::read_core(|c| c.clone()), deposit.and_then(state::get_deposit), state::audit_len())
+    }
+
+    fn deposit_id_of(r: &OpRef) -> Option<u64> {
+        match r {
+            OpRef::Refund(id) | OpRef::Pull(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn refund_with_a_lost_reply_rearms_the_tick_and_keeps_the_original_tuple() {
+        let id = held_refundable_deposit();
+        let pending_mint_before = state::read_core(|c| c.buckets.pending_mint);
+        assert_eq!(pending_mint_before, (100 * E8) as u128);
+        let now = arm_idle_tick();
+
+        testutil::block_on(request_refund(id)).unwrap();
+
+        let d = state::get_deposit(id).unwrap();
+        assert_eq!(d.state, DepositState::Refunding, "an unresolved refund stays Refunding");
+        let op = d.refund.clone().unwrap();
+        assert!(matches!(op.status, LedgerOpStatus::Unknown { .. }), "{:?}", op.status);
+        assert!(op.ambiguous_seen);
+        assert!(!ledger_ops::is_terminal(&op));
+        // The persisted tuple, sent exactly once.
+        assert_eq!(op.attempts, 1, "the re-arm sent nothing");
+        assert_eq!(op.created_at_time, now);
+        assert_eq!(op.memo, ids::refund_memo(id));
+        assert_eq!((op.amount_e8s, op.fee_e8s), (100 * E8 - 10_000, Some(10_000)));
+        assert_eq!(op.to, d.from.unwrap());
+        assert!(op.outflow_reserved, "the outflow stays reserved while the outcome is unknown");
+        // One refund, no other operation.
+        assert!(d.pull.as_ref().map(ledger_ops::is_terminal).unwrap_or(false), "the pull is untouched");
+        assert!(state::read_core(|c| c.sweeps.is_empty()));
+        // Buckets are exactly what RefundStarted and the outflow reservation produce.
+        let b = state::read_core(|c| c.buckets);
+        assert_eq!(
+            (b.pending_mint, b.pending_refund, b.unknown_outflow, b.reserved_pulls, b.outstanding_base, b.fees),
+            (0, (100 * E8) as u128, (100 * E8) as u128, 0, 0, 0)
+        );
+        // The tick is due within a second, not at the idle interval.
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + SOON_NS));
+    }
+
+    #[test]
+    fn sweep_with_a_lost_reply_rearms_the_tick_and_keeps_the_original_tuple() {
+        let r = persisted_sweep(E8);
+        let before = ledger_ops::load_op(&r).unwrap();
+        let now = arm_idle_tick();
+
+        testutil::block_on(send_inline_attempt(&r));
+
+        let op = ledger_ops::load_op(&r).unwrap();
+        assert!(matches!(op.status, LedgerOpStatus::Unknown { .. }), "{:?}", op.status);
+        assert!(op.ambiguous_seen);
+        assert!(!ledger_ops::is_terminal(&op));
+        assert_eq!(tuple_of(&op), tuple_of(&before), "the durable tuple is unchanged");
+        assert_eq!(op.attempts, 1, "the re-arm sent nothing");
+        assert!(op.outflow_reserved);
+        // One sweep, no other operation.
+        assert_eq!(state::read_core(|c| (c.sweeps.len(), c.next_sweep_id)), (1, 1));
+        let b = state::read_core(|c| c.buckets);
+        assert_eq!((b.fees, b.unknown_outflow), ((5 * E8) as u128, E8 as u128), "fees are only reserved, not spent");
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + SOON_NS));
+    }
+
+    #[test]
+    fn the_rearm_changes_nothing_but_the_timer() {
+        // Every non-terminal shape an inline attempt can leave behind, for both kinds.
+        let kinds: [(&str, Fixture); 2] = [("refund", refund_with_lost_reply), ("sweep", sweep_with_lost_reply)];
+        for (label, make) in kinds {
+            for shape in ["unknown after a lost reply", "sent, outcome never recorded", "definite no-effect reply"] {
+                let (r, _) = make();
+                let mut op = ledger_ops::load_op(&r).unwrap();
+                match shape {
+                    "unknown after a lost reply" => {}
+                    "sent, outcome never recorded" => op.status = LedgerOpStatus::Pending,
+                    _ => {
+                        op.status = LedgerOpStatus::Pending;
+                        op.attempts = 0;
+                        op.ambiguous_seen = false;
+                        op.last_attempt_ns = None;
+                    }
+                }
+                ledger_ops::store_op(&r, op);
+                let now = arm_idle_tick();
+                let before = snapshot(deposit_id_of(&r));
+
+                rearm_if_unresolved(&r);
+
+                assert_eq!(snapshot(deposit_id_of(&r)), before, "{label} / {shape}: no record, bucket or audit change");
+                assert_eq!(crate::timer::pending_due_for_tests(), Some(now + SOON_NS), "{label} / {shape}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_retryable_no_effect_reply_is_rearmed_without_a_new_tuple() {
+        // A typed `TemporarilyUnavailable` before any ambiguous attempt leaves the op
+        // Pending and unsent: the tick must resend the same tuple soon.
+        for kind in ["refund", "sweep"] {
+            let (r, tuple_before) = if kind == "refund" {
+                let id = held_refundable_deposit();
+                testutil::block_on(request_refund(id)).unwrap();
+                let r = OpRef::Refund(id);
+                // Rewind to the state just before the send: nothing ambiguous happened.
+                let mut op = ledger_ops::load_op(&r).unwrap();
+                op.status = LedgerOpStatus::Pending;
+                op.ambiguous_seen = false;
+                op.attempts = 1;
+                ledger_ops::store_op(&r, op.clone());
+                (r, tuple_of(&op))
+            } else {
+                let r = persisted_sweep(E8);
+                // The attempt is recorded as sent; its raw outcome is discarded and replaced
+                // by the typed reply below.
+                let sent = testutil::block_on(ledger_ops::attempt(&r)).unwrap();
+                assert_eq!(sent.attempt, 1);
+                let op = ledger_ops::load_op(&r).unwrap();
+                assert_eq!((op.status.clone(), op.ambiguous_seen), (LedgerOpStatus::Pending, false));
+                (r, tuple_of(&op))
+            };
+            let now = arm_idle_tick();
+            ledger_ops::apply_outcome(
+                &r,
+                SentAttempt { attempt: 1, outcome: CallOutcome::Rejected(LedgerRejection::TemporarilyUnavailable) },
+            );
+            let op = ledger_ops::load_op(&r).unwrap();
+            assert_eq!((op.status.clone(), op.attempts), (LedgerOpStatus::Pending, 0), "{kind}: unsent, same tuple");
+            let before = snapshot(deposit_id_of(&r));
+            rearm_if_unresolved(&r);
+            assert_eq!(snapshot(deposit_id_of(&r)), before, "{kind}");
+            assert_eq!(tuple_of(&ledger_ops::load_op(&r).unwrap()), tuple_before, "{kind}: same tuple");
+            assert_eq!(crate::timer::pending_due_for_tests(), Some(now + SOON_NS), "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_succeeded_operation_needs_no_fast_rearm() {
+        // Refund: the ledger answers `Accepted` for the one attempt.
+        let (r, now) = refund_with_lost_reply();
+        ledger_ops::apply_outcome(&r, SentAttempt { attempt: 1, outcome: CallOutcome::Accepted { block_index: 9 } });
+        assert_eq!(state::get_deposit(deposit_id_of(&r).unwrap()).unwrap().state, DepositState::Refunded);
+        assert!(ledger_ops::is_terminal(&ledger_ops::load_op(&r).unwrap()));
+        crate::timer::set_pending_due_for_tests(Some(now + IDLE_NS));
+        rearm_if_unresolved(&r);
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + IDLE_NS), "a finished refund leaves the idle tick alone");
+        assert_eq!(state::read_core(|c| (c.buckets.pending_refund, c.buckets.unknown_outflow)), (0, 0));
+
+        // Sweep: same.
+        let (r, now) = sweep_with_lost_reply();
+        ledger_ops::apply_outcome(&r, SentAttempt { attempt: 1, outcome: CallOutcome::Accepted { block_index: 10 } });
+        assert!(ledger_ops::is_terminal(&ledger_ops::load_op(&r).unwrap()));
+        crate::timer::set_pending_due_for_tests(Some(now + IDLE_NS));
+        rearm_if_unresolved(&r);
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + IDLE_NS), "a finished sweep leaves the idle tick alone");
+        assert_eq!(state::read_core(|c| (c.buckets.fees, c.buckets.unknown_outflow)), (((5 * E8) - E8) as u128, 0));
+        // The rule is only "arm the timer", so re-arming a finished operation would also
+        // be harmless; it is skipped to keep an idle bridge idle.
+    }
+
+    #[test]
+    fn a_missing_operation_is_not_rearmed() {
+        setup_bound();
+        let now = arm_idle_tick();
+        rearm_if_unresolved(&OpRef::Sweep(42));
+        rearm_if_unresolved(&OpRef::Refund(42));
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + IDLE_NS));
+    }
+
+    #[test]
+    fn a_sweep_that_could_not_be_attempted_is_still_rearmed() {
+        // The outflow reservation overflows, so `attempt` halts the bridge and returns
+        // `None` without sending or storing anything.
+        let r = persisted_sweep(E8);
+        state::mutate_core(|c| c.buckets.unknown_outflow = u128::MAX);
+        let before_op = ledger_ops::load_op(&r).unwrap();
+        let now = arm_idle_tick();
+
+        testutil::block_on(send_inline_attempt(&r));
+
+        assert!(state::is_halted());
+        assert_eq!(ledger_ops::load_op(&r).unwrap(), before_op, "no attempt was recorded, the op is as persisted");
+        assert_eq!(before_op.attempts, 0);
+        assert_eq!(state::read_core(|c| c.buckets.unknown_outflow), u128::MAX, "no partial reservation");
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + SOON_NS));
+    }
+
+    #[test]
+    fn a_refund_that_could_not_be_attempted_is_still_rearmed() {
+        let id = held_refundable_deposit();
+        state::mutate_core(|c| c.buckets.unknown_outflow = u128::MAX);
+        let now = arm_idle_tick();
+
+        testutil::block_on(request_refund(id)).unwrap();
+
+        assert!(state::is_halted());
+        let d = state::get_deposit(id).unwrap();
+        assert_eq!(d.state, DepositState::Refunding);
+        let op = d.refund.unwrap();
+        assert_eq!((op.attempts, op.status.clone(), op.outflow_reserved, op.last_attempt_ns), (0, LedgerOpStatus::Pending, false, None));
+        assert_eq!(op.created_at_time, now);
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + SOON_NS));
+    }
+
+    #[test]
+    fn the_tick_resends_the_identical_tuple_after_the_rearm() {
+        // The re-arm only schedules; the existing reconciliation path decides. It resends
+        // the same tuple (same created_at_time and memo), so the ledger can deduplicate.
+        let (r, now) = refund_with_lost_reply();
+        let first = ledger_ops::load_op(&r).unwrap();
+        test_env::advance_secs(1);
+        testutil::block_on(process_refunds());
+        let second = ledger_ops::load_op(&r).unwrap();
+        assert_eq!(second.attempts, 2);
+        assert_eq!(tuple_of(&second), tuple_of(&first));
+        assert_eq!(second.created_at_time, now);
+        assert_eq!(state::read_core(|c| c.buckets.unknown_outflow), (100 * E8) as u128, "reserved once, not twice");
+
+        let (r, now) = sweep_with_lost_reply();
+        let first = ledger_ops::load_op(&r).unwrap();
+        test_env::advance_secs(1);
+        testutil::block_on(process_sweeps());
+        let second = ledger_ops::load_op(&r).unwrap();
+        assert_eq!(second.attempts, 2);
+        assert_eq!(tuple_of(&second), tuple_of(&first));
+        assert_eq!(second.created_at_time, now);
+        assert_eq!(state::read_core(|c| (c.sweeps.len(), c.buckets.unknown_outflow)), (1, E8 as u128));
     }
 }
