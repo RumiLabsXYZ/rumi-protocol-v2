@@ -77,6 +77,16 @@ pub fn accounting_digest(s: &StabilityPoolState) -> Vec<u8> {
         .expect("encode recovery accounting baseline"),
     )
 }
+/// Whether `post_upgrade` must engage the one-time recovery bootstrap hold.
+///
+/// Engages only for state written by pre-recovery code (hold flag never set)
+/// that has no recovery record. `init` sets the flag to `Some(false)`, so
+/// pools created by this code are never held. A pool already held stays held
+/// until its recovery finishes; a pool with a recovery record is unaffected.
+pub fn bootstrap_hold_engages_on_upgrade(has_recovery_record: bool, hold: Option<bool>) -> bool {
+    !has_recovery_record && hold.is_none()
+}
+
 pub fn locked() -> bool {
     read_state(|s| {
         s.interest_recovery_bootstrap_hold.unwrap_or(false)
@@ -387,4 +397,33 @@ pub fn get_receipt(block: u64) -> Result<Option<RecoveryPacketReceipt>, String> 
                 })
         })
     }))
+}
+
+#[cfg(test)]
+mod bootstrap_hold_tests {
+    use super::bootstrap_hold_engages_on_upgrade as engages;
+
+    #[test]
+    fn pre_recovery_state_without_record_is_held() {
+        // The October 21 production upgrade case.
+        assert!(engages(false, None));
+    }
+
+    #[test]
+    fn pool_created_by_init_is_never_held() {
+        assert!(!engages(false, Some(false)));
+    }
+
+    #[test]
+    fn already_held_pool_is_not_reset_and_stays_held() {
+        // The flag is left as Some(true); `locked()` keeps reading it.
+        assert!(!engages(false, Some(true)));
+    }
+
+    #[test]
+    fn pool_with_recovery_record_is_unaffected() {
+        assert!(!engages(true, None));
+        assert!(!engages(true, Some(false)));
+        assert!(!engages(true, Some(true)));
+    }
 }

@@ -136,7 +136,12 @@ fn init(args: StabilityPoolInitArgs) {
         ic_cdk::api::stable::stable64_size() == 0,
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
-    mutate_state(|s| s.initialize(args));
+    mutate_state(|s| {
+        s.initialize(args);
+        // A pool created by this code has no pre-recovery interest backlog,
+        // so it is never subject to the one-time recovery bootstrap hold.
+        s.interest_recovery_bootstrap_hold = Some(false);
+    });
     receipt_store::init_layout();
     state::save_to_stable_memory();
     receipt_store::set_layout_version(receipt_store::LAYOUT_VERSION);
@@ -177,7 +182,17 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
             conversion_reconciled
         );
     }
-    mutate_state(|s| { if s.interest_recovery.is_none() { s.interest_recovery_bootstrap_hold=Some(true); } });
+    // Hold all unrelated updates only for state written by pre-recovery code
+    // (hold flag never set) that also has no recovery record. Pools created by
+    // `init` start with Some(false); a pool already held stays held.
+    mutate_state(|s| {
+        if interest_recovery::bootstrap_hold_engages_on_upgrade(
+            s.interest_recovery.is_some(),
+            s.interest_recovery_bootstrap_hold,
+        ) {
+            s.interest_recovery_bootstrap_hold = Some(true);
+        }
+    });
     let legacy_ambiguous_chain_absorbs = mutate_state(|s| {
         s.hold_legacy_prepared_chain_absorbs(ic_cdk::api::time())
     });
