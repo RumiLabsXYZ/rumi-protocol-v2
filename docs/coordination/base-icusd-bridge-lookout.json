@@ -85,7 +85,7 @@
       "state": "done",
       "owner": "worker-sonnet",
       "scope": "Transaction lanes",
-      "evidenceText": "proof=local-test; 83 tests; pure decisions; attempts persisted before broadcast; receipts checked for every attempt; replacement only at an unconsumed nonce after the wall-clock delay; reorg back to pending; atomic nonce assignment; lane halt on unexplained",
+      "evidenceText": "proof=local-test; 83 tests; attempts persisted before broadcast; receipts checked for every attempt; replacement only at an unconsumed nonce after the wall-clock delay; reorg back to pending; atomic nonce assignment; lane halt on unexplained nonce use",
       "evidenceLinks": []
     },
     {
@@ -186,7 +186,7 @@
       "state": "done",
       "owner": "coordinator",
       "scope": "Round-2 follow-up fixes",
-      "evidenceText": "proof=local-integration; Frozen candidate eab65670. Wasm de4ad399 (sha256 prefix), reproduced by a forced recompile from the clean tree; on that Wasm: round2 suite 11 passed (7 new, all failing on the pre-round-2 Wasm), e2e 24, faults 16, smoke 12; lib 428; clippy",
+      "evidenceText": "proof=local-integration; Frozen candidate eab65670, Wasm de4ad399 (sha256 prefix; clean rebuild matches); on it: round2 11 (7 new, all failing on the old Wasm), e2e 24, faults 16, smoke 12; lib 428; clippy clean; vitest 1506 (1 skipped); check at baseline; build ok",
       "evidenceLinks": []
     },
     {
@@ -194,7 +194,7 @@
       "state": "done",
       "owner": "coordinator",
       "scope": "Round-3 fixes",
-      "evidenceText": "proof=local-integration; Commit 8f2abbfc (Wasm c03ce4f1, reproduced from the clean tree) plus fb005f1b (tests and docs, Wasm byte-identical): lib 432; round2 12, e2e 24, faults 16, smoke 12 (10 of them on a serial rerun after infrastructure failures); forge 111; vi",
+      "evidenceText": "proof=local-integration; 8f2abbfc, Wasm c03ce4f1 (clean rebuild matches); fb005f1b tests and docs, Wasm byte-identical: lib 432; round2 12, e2e 24, faults 16, smoke 12 (10 on a serial rerun); forge 111; vitest 1507; check at baseline; build ok; re-check PASS",
       "evidenceLinks": []
     }
   ]

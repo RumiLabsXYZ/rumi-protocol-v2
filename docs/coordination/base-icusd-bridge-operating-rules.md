@@ -10,6 +10,11 @@ These rules apply to every agent working in this worktree on the Base bridge.
   It holds board metadata only. Never include credentials, keys, wallet addresses,
   balances, transaction or provider payloads, private logs, or local filesystem paths.
   Evidence text uses the proof levels `none`, `source`, `local-test`, `local-integration`.
+- Presentation sidecar: `docs/coordination/base-icusd-bridge-presentation.json`, shape
+  `{summary, glossary:[{term, definition, cardId?}]}` and nothing else: a short plain-English
+  status (at most 600 characters) and up to 200 term definitions (`cardId` scopes a term to one
+  card, for example R1 on a review card). It is board visibility only, held to the same
+  sanitization limits, and never adds fields to the cards. The derive script validates it.
 - Milestone handoff: `docs/coordination/base-icusd-bridge-handoff.md`.
 
 ## Lookout publication rule
@@ -39,12 +44,21 @@ Scope and limits (unchanged by the approval):
    changes, live signing or broadcast, and funding all stay held.
 
 Event rule (owned by this worktree's coordinator under Rob's standing approval; no setup-owner or
-root approval needed): after each material change to the canonical board, re-derive the
-projection and run the scoped publisher with `--dry-run`. If it reports a change, publish with
+root approval needed): after each material change to the canonical board, update the short
+summary and any affected glossary entries in the presentation sidecar, re-derive the projection
+(which also validates the sidecar), and run the same scoped publisher with `--dry-run`. If it reports a change, publish with
 `--publish`, then confirm an immediate `--dry-run` reports the exact source as already published
 (no-op). Never republish identical data. Record each published revision and source revision in
 the local publisher record outside this public repository, not here. No hourly monitor or
 additional timer.
+
+Presentation cutover (2026-10-24): the root Lookout owner controls the first presentation
+upload while building the board's status and definitions feature. Once the publisher manifest
+carries presentation metadata, `--publish` uploads cards and presentation together, so until the
+root owner confirms that feature and cutover are active this worktree does not run `--publish`
+(read-only `--dry-run` is fine). After confirmation, each material checkpoint publishes cards and
+presentation with the existing command and verifies the no-op readback. No new wrapper, timer or
+monitor.
 
 First publication (2026-10-24): the Lookout setup owner completed the initial cutover and
 published this projection; the immediate readback was an exact no-op, and this worktree's own
