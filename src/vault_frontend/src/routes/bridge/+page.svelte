@@ -117,7 +117,7 @@
       {/if}
     </section>
   {:else}
-    {#if config.minterAwaitingGas}
+    {#if config.minterAwaitingGas && direction === 'icp_to_base'}
       <p class="banner warn" role="status" data-testid="gas-notice">{GAS_NOTICE_MESSAGE}</p>
     {/if}
     <div class="layout">

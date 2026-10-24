@@ -24,7 +24,7 @@ import {
 } from './evmWallet';
 import { EIP55_VECTORS, ORACLE_OR_ZERO, createFakeProvider, createMemoryStorage, flipCase, walletError } from './testSupport';
 
-/** The Keccak-256 the wallet module sees. null mirrors the shipped state (nothing configured). */
+/** The Keccak-256 the wallet module sees. null simulates a build without a hash (the app ships one, see keccak.ts). */
 const keccakMock = vi.hoisted(() => ({ fn: null as null | ((data: Uint8Array) => Uint8Array) }));
 vi.mock('./keccak', () => ({
   get keccak256() {

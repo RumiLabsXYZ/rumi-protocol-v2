@@ -37,6 +37,7 @@ pub const MEM_AUDIT_DATA: u8 = 9;
 pub const MEM_SENDER_RELEASES: u8 = 10;
 pub const MEM_ACTIVE_DEPOSITS: u8 = 11;
 pub const MEM_ACTIVE_RELEASES: u8 = 12;
+pub const MEM_ACTIVE_REMINTS: u8 = 13;
 
 /// Append-only. Never reuse or reorder an id.
 pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
@@ -53,6 +54,7 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_SENDER_RELEASES, "base_sender_release_index"),
     (MEM_ACTIVE_DEPOSITS, "active_deposits"),
     (MEM_ACTIVE_RELEASES, "active_releases_by_sequence"),
+    (MEM_ACTIVE_REMINTS, "active_remint_deposits"),
 ];
 
 pub const CORE_SCHEMA_VERSION: u32 = 1;
@@ -995,6 +997,11 @@ thread_local! {
     /// Non-terminal releases, by bridge-out sequence (oldest first).
     static ACTIVE_RELEASES: RefCell<StableBTreeMap<u64, [u8; 32], Mem>> =
         RefCell::new(StableBTreeMap::init(mem(MEM_ACTIVE_RELEASES)));
+
+    /// The subset of `ACTIVE_DEPOSITS` that are re-mints, so admission can count active
+    /// user deposits in constant time. Maintained only by `put_deposit`.
+    static ACTIVE_REMINTS: RefCell<StableBTreeMap<u64, (), Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_ACTIVE_REMINTS)));
 }
 
 fn mem(id: u8) -> Mem {
@@ -1105,17 +1112,36 @@ pub fn get_deposit(id: u64) -> Option<DepositRecord> {
 /// Insert or update a deposit and keep the active set in sync.
 pub fn put_deposit(d: &DepositRecord) {
     DEPOSITS.with(|m| m.borrow_mut().insert(d.id, d.clone()));
+    let active = !d.state.is_terminal();
     ACTIVE_DEPOSITS.with(|m| {
-        if d.state.is_terminal() {
-            m.borrow_mut().remove(&d.id);
-        } else {
+        if active {
             m.borrow_mut().insert(d.id, ());
+        } else {
+            m.borrow_mut().remove(&d.id);
+        }
+    });
+    // A record's kind never changes, but keep the index exact whatever is written.
+    ACTIVE_REMINTS.with(|m| {
+        if active && matches!(d.kind, DepositKind::Remint { .. }) {
+            m.borrow_mut().insert(d.id, ());
+        } else {
+            m.borrow_mut().remove(&d.id);
         }
     });
 }
 
 pub fn active_deposit_count() -> u64 {
     ACTIVE_DEPOSITS.with(|m| m.borrow().len())
+}
+
+/// Active re-mint deposits (a subset of the active deposits).
+pub fn active_remint_count() -> u64 {
+    ACTIVE_REMINTS.with(|m| m.borrow().len())
+}
+
+/// Active user deposits, in constant time (admission's global limit counts only these).
+pub fn active_user_deposit_count() -> u64 {
+    active_deposit_count().saturating_sub(active_remint_count())
 }
 
 pub fn is_deposit_active(id: u64) -> bool {
@@ -1343,6 +1369,12 @@ pub fn reset_for_tests() {
             m.borrow_mut().remove(&k);
         }
     });
+    ACTIVE_REMINTS.with(|m| {
+        let keys: Vec<u64> = m.borrow().iter().map(|(k, _)| k).collect();
+        for k in keys {
+            m.borrow_mut().remove(&k);
+        }
+    });
     ACTIVE_RELEASES.with(|m| {
         let keys: Vec<u64> = m.borrow().iter().map(|(k, _)| k).collect();
         for k in keys {
@@ -1396,8 +1428,8 @@ pub(crate) mod tests {
             assert!(ids.insert(*id), "duplicate memory id {id}");
             assert!(names.insert(*name), "duplicate memory name {name}");
         }
-        assert_eq!(ids.len(), 13);
-        assert_eq!(*ids.iter().next_back().unwrap(), MEM_ACTIVE_RELEASES);
+        assert_eq!(ids.len(), 14);
+        assert_eq!(*ids.iter().next_back().unwrap(), MEM_ACTIVE_REMINTS);
     }
 
     #[test]

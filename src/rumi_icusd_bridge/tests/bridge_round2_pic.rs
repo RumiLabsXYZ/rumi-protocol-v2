@@ -359,7 +359,8 @@ fn inspect_message_refuses_anonymous_and_unauthorized_callers_before_execution()
     let consent = consent_for(&mut w, anon, &args).expect("anonymous consent call is accepted at ingress");
     match consent {
         Ok(ConsentInfo { consent_message: ConsentMessage::GenericDisplayMessage(text), .. }) => {
-            assert!(text.contains("Bridge icUSD to Base") && text.contains(&w.holder(0)), "{text}")
+            let shown = eip55(&w.holder(0)[2..].to_ascii_lowercase());
+            assert!(text.contains("Bridge icUSD to Base") && text.contains(&shown), "{text}")
         }
         other => panic!("expected a consent message, got {other:?}"),
     }
@@ -580,7 +581,7 @@ fn eip55_mixed_case_recipients_must_match_their_checksum() {
     let good_args = w.deposit_args(amount, vector);
     match consent_for(&mut w, Principal::anonymous(), &good_args).expect("accepted at ingress") {
         Ok(ConsentInfo { consent_message: ConsentMessage::GenericDisplayMessage(t), .. }) => {
-            assert!(t.contains(&lower), "the consent shows the canonical lowercase address: {t}")
+            assert!(t.contains(vector), "the consent shows the EIP-55 form of the address: {t}")
         }
         other => panic!("expected a consent message for the correct checksum, got {other:?}"),
     }
@@ -604,4 +605,85 @@ fn eip55_mixed_case_recipients_must_match_their_checksum() {
     }
     assert_eq!(w.base_balance(&lower), 3 * amount as u128, "all three forms credit the same account (anvil)");
     assert_eq!(w.base_total_supply(), 3 * amount as u128);
+}
+
+// ---------------------------------------------------------------------------
+// E. Ingress size caps (round 3)
+// ---------------------------------------------------------------------------
+
+/// The canister's caps (`lib.rs` MAX_OPEN_INGRESS_BYTES / MAX_ADMIN_INGRESS_BYTES).
+const MAX_OPEN: usize = 4 * 1024;
+const MAX_ADMIN: usize = 16 * 1024;
+
+/// A consent request for `bridge_to_base` whose Candid encoding is exactly `size` bytes.
+fn consent_bytes_of_size(size: usize) -> Vec<u8> {
+    let encode = |pad: usize| {
+        let mut req = consent_request(&BridgeToBaseArgs {
+            amount_e8s: 100_000_000,
+            base_recipient: "0x00000000000000000000000000000000000000aa".to_string(),
+            from_subaccount: None,
+            client_request_id: serde_bytes::ByteBuf::from(vec![1u8; 16]),
+            expected_deposit_fee_e8s: 0,
+        });
+        req.arg.resize(req.arg.len() + pad, 0);
+        candid::encode_one(&req).expect("encode consent request")
+    };
+    let base = encode(0).len();
+    assert!(base < size, "a minimal consent request is {base} bytes");
+    let mut pad = size - base;
+    // The arg length prefix is LEB128, so a longer arg can need one more prefix byte.
+    loop {
+        let bytes = encode(pad);
+        match bytes.len().cmp(&size) {
+            std::cmp::Ordering::Equal => return bytes,
+            std::cmp::Ordering::Greater => pad -= bytes.len() - size,
+            std::cmp::Ordering::Less => pad += size - bytes.len(),
+        }
+    }
+}
+
+/// REAL: PocketIC ingress through the canister's own `inspect_message`. Shows the caps are
+/// enforced at the exact boundary before execution (so an oversized message costs the bridge
+/// no ingress fee), for anonymous wallet-standard calls, user methods and admin methods, and
+/// that ordinary arguments are far below them.
+#[test]
+fn oversized_ingress_is_refused_before_execution_at_the_exact_boundary() {
+    let mut w = quick_world();
+    let (user, controller, anon) = (w.user, w.controller, Principal::anonymous());
+    let audit_before = w.audit_log_all();
+
+    // Anonymous ICRC-21 consent: exactly at the cap is accepted (and answered), one byte more is refused.
+    let at_cap = consent_bytes_of_size(MAX_OPEN);
+    assert_eq!(at_cap.len(), MAX_OPEN);
+    match w.try_update_raw(anon, "icrc21_canister_call_consent_message", at_cap) {
+        Ok(_) => {}
+        Err(e) => panic!("a {MAX_OPEN}-byte consent request must be accepted at ingress: {e:?}"),
+    }
+    let over = consent_bytes_of_size(MAX_OPEN + 1);
+    assert!(matches!(w.try_update_raw(anon, "icrc21_canister_call_consent_message", over), Err(CallFailure::Refused(_))));
+    let huge = consent_bytes_of_size(1024 * 1024);
+    assert!(matches!(w.try_update_raw(anon, "icrc21_canister_call_consent_message", huge), Err(CallFailure::Refused(_))));
+
+    // A signed-in user: a padded bridge_to_base is refused before execution; an ordinary one is
+    // accepted at ingress (it then fails in execution because deposits are paused, which is fine).
+    let mut big = w.deposit_args(e8(2), &w.holder(0));
+    big.client_request_id = serde_bytes::ByteBuf::from(vec![7u8; MAX_OPEN]);
+    w.expect_refused(user, "bridge_to_base", (big,));
+    let normal = w.deposit_args(e8(2), &w.holder(0));
+    let normal_len = candid::encode_one(&normal).unwrap().len();
+    assert!(normal_len * 8 < MAX_OPEN, "an ordinary bridge_to_base argument is {normal_len} bytes");
+    let accepted: Result<BridgeResult<DepositView>, CallFailure> = w.try_update(user, "bridge_to_base", (normal,));
+    assert!(!matches!(accepted, Err(CallFailure::Refused(_))), "an ordinary request passes ingress: {accepted:?}");
+
+    // A controller: an oversized provider list is refused before execution; a large but
+    // in-cap one is accepted at ingress and then judged by the method itself.
+    let long = |n: usize| vec![RpcServiceConfig::Custom { url: format!("https://{}.test/", "a".repeat(n)) }];
+    w.expect_refused(controller, "admin_set_rpc_services", (long(MAX_ADMIN), 1u8));
+    let in_cap: Result<BridgeResult<()>, CallFailure> = w.try_update(controller, "admin_set_rpc_services", (long(MAX_ADMIN / 2), 1u8));
+    // The method itself refuses the 8 KiB URL (over its 256-byte URL limit) without any outcall.
+    assert!(matches!(in_cap, Ok(Err(BridgeError::InvalidArgument(_)))), "an in-cap admin argument passes ingress: {in_cap:?}");
+
+    // Nothing that was refused ran, and nothing accepted changed state.
+    assert_eq!(w.audit_log_all(), audit_before, "no audit entries");
+    assert!(w.list_my_deposits(user, None, 50).is_empty(), "no deposit records");
 }

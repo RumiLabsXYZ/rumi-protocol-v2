@@ -116,6 +116,8 @@ pub fn enqueue_admin_action(action: ContractAdminAction) -> BridgeResult<u64> {
     state::put_tx(&rec);
     state::mutate_core(|c| c.admin_lane.queued_txs.push(id));
     state::append_audit(None, AuditCtx::tx(id, note));
+    // New lane work: run a tick soon rather than at the idle cadence.
+    crate::timer::schedule_soon();
     Ok(id)
 }
 
@@ -139,6 +141,7 @@ pub fn request_cancel(tx_id: u64) -> BridgeResult<()> {
     tx.updated_at_ns = env::now_ns();
     state::put_tx(&tx);
     state::append_audit(None, AuditCtx::tx(tx_id, "cancel requested"));
+    crate::timer::schedule_soon();
     Ok(())
 }
 
@@ -1585,6 +1588,9 @@ pub(crate) async fn clear_lane_halt_with<I: LaneIo>(io: &I, lane: LaneKind) -> B
             halted.unwrap_or_default()
         )),
     );
+    // The lane can start work again: re-arm after the clear, not only before the checks
+    // (a tick that ran during the checks may have armed the idle interval).
+    crate::timer::schedule_soon();
     Ok(())
 }
 
@@ -2460,6 +2466,10 @@ mod tests {
 
     // ----- state helpers --------------------------------------------------------------------
 
+    fn test_env_now() -> u64 {
+        env::now_ns()
+    }
+
     fn setup() {
         state::reset_for_tests();
         test_env::set_now_ns(NOW);
@@ -2977,8 +2987,10 @@ mod tests {
         let io = MockIo::new();
         assert_eq!(request_cancel(99), Err(BridgeError::NotFound));
         let (d, id) = start_one_mint(&io);
-        // Idempotent.
+        // Idempotent, and a new cancel re-arms the timer.
+        crate::timer::set_pending_due_for_tests(Some(test_env_now() + 300 * NS_PER_SEC));
         request_cancel(id).unwrap();
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(test_env_now() + NS_PER_SEC));
         request_cancel(id).unwrap();
         // Included transactions can no longer be cancelled.
         let hash = tx(id).attempts[0].tx_hash;
@@ -3394,7 +3406,9 @@ mod tests {
         state::mutate_core(|c| c.config.contract = None);
         assert!(matches!(enqueue_admin_action(ContractAdminAction::PauseMint), Err(BridgeError::NotConfigured(_))));
         setup();
+        crate::timer::set_pending_due_for_tests(Some(NOW + 300 * NS_PER_SEC));
         let a = enqueue_admin_action(ContractAdminAction::PauseMint).unwrap();
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(NOW + NS_PER_SEC), "new admin work re-arms the timer");
         let b = enqueue_admin_action(ContractAdminAction::SetSupplyCap { cap_e8s: 5 }).unwrap();
         assert!(b > a);
         let t = tx(a);
@@ -3521,9 +3535,11 @@ mod tests {
         halted_clean_lane(3);
         let io = MockIo::new();
         io.chain().counts.insert(MINTER, Counts { latest: 3, pending: 3, finalized: 3 });
+        crate::timer::set_pending_due_for_tests(Some(NOW + 300 * NS_PER_SEC));
         assert_eq!(block_on(clear_lane_halt_with(&io, LaneKind::Minter)), Ok(()));
         assert!(minter().halted.is_none());
         assert!(state::audit_page(0, 50).iter().any(|r| r.note.contains("halt cleared")));
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(NOW + NS_PER_SEC), "re-armed after the clear");
         // Not halted any more.
         assert!(matches!(block_on(clear_lane_halt_with(&io, LaneKind::Minter)), Err(BridgeError::InvalidState(_))));
     }

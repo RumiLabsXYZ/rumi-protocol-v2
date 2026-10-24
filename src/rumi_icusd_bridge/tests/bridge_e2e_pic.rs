@@ -57,13 +57,20 @@ fn assert_rejected_at_ingress<A: ArgumentEncoder>(w: &BridgeWorld, sender: Princ
     assert_rejected_raw(w, sender, method, arg);
 }
 
+/// The call must be refused by `inspect_message` before execution, and `method` must be a
+/// real update method of the bridge (so a mistyped name cannot pass as "refused").
 fn assert_rejected_raw(w: &BridgeWorld, sender: Principal, method: &str, arg: Vec<u8>) {
+    const DID: &str = include_str!("../rumi_icusd_bridge.did");
+    let service = DID.split("service :").nth(1).expect("service block in the .did");
+    let line = service
+        .lines()
+        .find(|l| l.trim_start().starts_with(&format!("{method} : ")))
+        .unwrap_or_else(|| panic!("{method} is not a method of the bridge"));
+    assert!(!line.contains(" query"), "{method} is a query, not an update: {line}");
     match w.pic.submit_call(w.bridge, sender, method, arg) {
-        Err(_) => {}
-        Ok(id) => match w.pic.await_call(id) {
-            Err(_) | Ok(pocket_ic::WasmResult::Reject(_)) => {}
-            Ok(pocket_ic::WasmResult::Reply(_)) => panic!("{method} as {sender} ran; ingress should have been refused"),
-        },
+        Err(e) if e.code == pocket_ic::ErrorCode::CanisterRejectedMessage => {}
+        Err(e) => panic!("{method} as {sender}: expected an ingress refusal, got {:?}: {}", e.code, e.description),
+        Ok(_) => panic!("{method} as {sender} was accepted at ingress; it should have been refused before execution"),
     }
 }
 

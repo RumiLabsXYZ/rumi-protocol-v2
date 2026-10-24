@@ -428,6 +428,19 @@ describe('/bridge when the bridge cannot pay Base gas', () => {
     expect(notice!.closest('[role="tabpanel"]')).toBeNull();
   });
 
+  it('shows the gas notice only on the ICP to Base tab (releases need no Base gas)', async () => {
+    withLanes(true, false);
+    render();
+    await settle();
+    expect(host.querySelector('[data-testid="gas-notice"]')).toBeTruthy();
+    host.querySelector<HTMLButtonElement>('#tab-base-to-icp')!.click();
+    await settle();
+    expect(host.querySelector('[data-testid="gas-notice"]')).toBeNull();
+    host.querySelector<HTMLButtonElement>('#tab-icp-to-base')!.click();
+    await settle();
+    expect(host.querySelector('[data-testid="gas-notice"]')).toBeTruthy();
+  });
+
   it('shows nothing user-facing when only the Admin lane is awaiting gas', async () => {
     withLanes(false, true);
     render();

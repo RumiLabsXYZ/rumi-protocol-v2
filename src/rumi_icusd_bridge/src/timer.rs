@@ -166,6 +166,12 @@ pub fn pending_due_for_tests() -> Option<u64> {
     NEXT_DUE_NS.with(|d| d.get())
 }
 
+/// Tests: pretend a tick is already armed at `due` (for example the idle interval).
+#[cfg(test)]
+pub fn set_pending_due_for_tests(due: Option<u64>) {
+    NEXT_DUE_NS.with(|d| d.set(due));
+}
+
 /// Run a tick within about a second (used after user actions and on install).
 pub fn schedule_soon() {
     schedule_in(1);
@@ -322,6 +328,10 @@ pub async fn clear_halt_after_checks() -> BridgeResult<SupplyAudit> {
         return Err(BridgeError::Halted("a new halt was raised during the checks".into()));
     }
     state::append_audit(None, AuditCtx::note(format!("halt cleared after fresh checks: {}", halt.reason)));
+    // Work held back by the halt (escrowed mints, releases, refunds) can move again. A
+    // tick that ran during the checks saw the halt and may have armed the idle interval,
+    // so re-arm now.
+    schedule_soon();
     Ok(views::supply_audit())
 }
 

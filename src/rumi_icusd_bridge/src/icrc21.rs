@@ -123,7 +123,8 @@ pub fn consent_text(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
                  * This does not borrow or create debt.",
                 format_icusd(a.amount_e8s),
                 format_icusd(receive).trim_end_matches(" icUSD"),
-                ids::hex0x(&recipient),
+                // EIP-55 form, as the bridge page and Base wallets show it (same bytes).
+                ids::to_checksum(&recipient),
                 format_icusd(fee),
             ))
         }
@@ -242,8 +243,13 @@ mod tests {
         };
         let text = consent_text("bridge_to_base", &Encode!(&args).unwrap()).unwrap();
         assert!(text.contains("**1 icUSD**"));
-        assert!(text.contains("0x00000000000000000000000000000000000000aa"));
+        assert!(text.contains(&ids::to_checksum(&ids::parse_address("0x00000000000000000000000000000000000000aa").unwrap())));
         assert!(text.contains("does not borrow"));
+        // A checksummed recipient is shown exactly in its EIP-55 form.
+        let vector = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+        let args = BridgeToBaseArgs { base_recipient: vector.to_ascii_lowercase(), ..args };
+        let text = consent_text("bridge_to_base", &Encode!(&args).unwrap()).unwrap();
+        assert!(text.contains(vector), "{text}");
     }
 
     #[test]

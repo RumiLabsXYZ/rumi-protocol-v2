@@ -120,11 +120,11 @@ Record the `BridgedIcUSD deployed at:` address and deploy tx hash from `foundry/
 
 ## 10. HELD: configure and bind
 
-0. Read-only checks first. The ledger must report 8 decimals and the expected symbol (the bridge does not verify ledger metadata itself), and `get_bridge_info` must show `mint_gas_limit` of at least 250,000 (default 300,000) and `admin_gas_limit` of at least 80,000 (default 100,000). The most expensive mint measured on anvil uses 152,390 gas.
+0. Read-only checks first. Bridge read methods are queries: call them with `--query`. The bridge refuses a query name sent as an update call (its ingress filter only admits update methods), and `icp canister call` sends an update unless `--query` is given. The ledger must report 8 decimals and the expected symbol (the bridge does not verify ledger metadata itself), and `get_bridge_info` must show `mint_gas_limit` of at least 250,000 (default 300,000) and `admin_gas_limit` of at least 80,000 (default 100,000). The most expensive mint measured on anvil uses 152,390 gas.
    ```bash
-   $ICP canister call <ledger id> icrc1_decimals '()' --environment <ic-env>
-   $ICP canister call <ledger id> icrc1_symbol '()' --environment <ic-env>
-   $ICP canister call rumi-icusd-bridge-test get_bridge_info '()' --environment <ic-env>
+   $ICP canister call <ledger id> icrc1_decimals '()' --query --environment <ic-env>
+   $ICP canister call <ledger id> icrc1_symbol '()' --query --environment <ic-env>
+   $ICP canister call rumi-icusd-bridge-test get_bridge_info '()' --query --environment <ic-env>
    ```
 1. Set limits inside the contract limits: `max_outstanding_e8s` at most the supply cap, `mint_window_limit_e8s` at most the contract window limit, `window_seconds` at least the contract window, and `min_deposit_e8s` at least the contract minimum bridge-out.
    ```bash
@@ -155,7 +155,7 @@ Run each sub-step only after its own approval.
    ```
 3. Poll with the `id` from step 2 until the status is `Delivered`:
    ```bash
-   $ICP canister call rumi-icusd-bridge-test get_deposit '(<deposit id>)' --environment <ic-env> --identity <tester identity>
+   $ICP canister call rumi-icusd-bridge-test get_deposit '(<deposit id>)' --query --environment <ic-env> --identity <tester identity>
    ```
 4. Check Base. The balance should be 500,000,000 minus the deposit fee:
    ```bash
@@ -166,7 +166,7 @@ Run each sub-step only after its own approval.
    ```
 5. Check coverage: in `get_supply_audit`, `coverage_ok` and `base_supply_within_bound` must both be `opt true`.
    ```bash
-   $ICP canister call rumi-icusd-bridge-test get_supply_audit '()' --environment <ic-env> --identity rumi_identity
+   $ICP canister call rumi-icusd-bridge-test get_supply_audit '()' --query --environment <ic-env> --identity rumi_identity
    ```
 6. Duplicate check: repeat step 2 with identical arguments. The same deposit ID comes back and the ledger balance does not change. A different amount under the same ID must return `RequestIdConflict`.
 
@@ -189,7 +189,7 @@ Run each sub-step only after its own approval.
    ```
 4. Wait about 20 minutes for finality, then poll until the status is `Released`:
    ```bash
-   $ICP canister call rumi-icusd-bridge-test get_release '("<transfer id>")' --environment <ic-env> --identity rumi_identity
+   $ICP canister call rumi-icusd-bridge-test get_release '("<transfer id>")' --query --environment <ic-env> --identity rumi_identity
    ```
 5. The tester's ICP balance should rise by 199,990,000 (200,000,000 minus the 10,000 ledger fee, with release fee 0):
    ```bash

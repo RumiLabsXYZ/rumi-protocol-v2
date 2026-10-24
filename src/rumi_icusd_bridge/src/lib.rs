@@ -315,9 +315,10 @@ enum IngressAccess {
 /// endpoint must be added here; `every_update_endpoint_has_an_ingress_decision` fails
 /// until it is.
 ///
-/// The two `Anyone` entries that are queries here (ICRC-28, ICRC-10) never run as
-/// updates, they are listed so the standards stay open to anonymous callers if they are
-/// ever served as updates.
+/// The two `Anyone` entries that are queries here (ICRC-28, ICRC-10) are listed so the
+/// standards stay open to anonymous callers when a client sends them as update calls.
+/// Every other query (`get_*`, `list_*`, `bridge_version`) must be called as a query:
+/// a query name sent as an update call is refused, so replicated reads cost nothing.
 const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
     // Wallet standards.
     ("icrc21_canister_call_consent_message", IngressAccess::Anyone),
@@ -348,6 +349,13 @@ const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
     ("set_admins", IngressAccess::Controller),
 ];
 
+/// Largest accepted argument for open methods (wallet standards and user methods). The
+/// biggest legitimate one, a `bridge_to_base` consent request, is well under 1 KiB.
+/// Without a cap any caller could make the canister pay the ingress fee for about 2 MiB.
+pub const MAX_OPEN_INGRESS_BYTES: usize = 4 * 1024;
+/// Largest accepted argument for admin and controller methods (provider lists, admin lists).
+pub const MAX_ADMIN_INGRESS_BYTES: usize = 16 * 1024;
+
 fn ingress_access(method: &str) -> Option<IngressAccess> {
     INGRESS_METHODS.iter().find(|(name, _)| *name == method).map(|(_, access)| *access)
 }
@@ -355,15 +363,24 @@ fn ingress_access(method: &str) -> Option<IngressAccess> {
 /// Whether an ingress update call is worth executing. Pure, so the table above is unit
 /// tested. NOT a security boundary: it runs on one replica without consensus. Every
 /// method keeps its own caller checks, which are what protect state and funds.
-fn decide(method: &str, caller_is_anonymous: bool, is_admin: bool, is_controller: bool) -> bool {
-    match ingress_access(method) {
+fn decide(method: &str, arg_bytes: usize, caller_is_anonymous: bool, is_admin: bool, is_controller: bool) -> bool {
+    let Some(access) = ingress_access(method) else {
         // Not a known update method (a query name, a typo, a probe): nothing to run.
-        None => false,
-        Some(IngressAccess::Anyone) => true,
-        Some(_) if caller_is_anonymous => false,
-        Some(IngressAccess::Authenticated) => true,
-        Some(IngressAccess::Admin) => is_admin || is_controller,
-        Some(IngressAccess::Controller) => is_controller,
+        return false;
+    };
+    let max_bytes = match access {
+        IngressAccess::Anyone | IngressAccess::Authenticated => MAX_OPEN_INGRESS_BYTES,
+        IngressAccess::Admin | IngressAccess::Controller => MAX_ADMIN_INGRESS_BYTES,
+    };
+    if arg_bytes > max_bytes {
+        return false;
+    }
+    match access {
+        IngressAccess::Anyone => true,
+        _ if caller_is_anonymous => false,
+        IngressAccess::Authenticated => true,
+        IngressAccess::Admin => is_admin || is_controller,
+        IngressAccess::Controller => is_controller,
     }
 }
 
@@ -373,6 +390,7 @@ fn decide(method: &str, caller_is_anonymous: bool, is_admin: bool, is_controller
 #[ic_cdk::inspect_message]
 fn inspect_message() {
     let method = ic_cdk::api::call::method_name();
+    let arg_bytes = ic_cdk::api::call::arg_data_raw_size();
     let caller = ic_cdk::api::caller();
     let anonymous = caller == Principal::anonymous();
     // Only the role checks the method's table entry might need; skipped for anonymous.
@@ -381,7 +399,7 @@ fn inspect_message() {
     } else {
         (state::read_core(|c| c.is_admin(&caller)), ic_cdk::api::is_controller(&caller))
     };
-    if decide(&method, anonymous, is_admin, is_controller) {
+    if decide(&method, arg_bytes, anonymous, is_admin, is_controller) {
         ic_cdk::api::call::accept_message();
     }
 }
@@ -558,8 +576,11 @@ mod ingress_tests {
     const CONTROLLER: (bool, bool, bool) = (false, false, true);
     const BOTH: (bool, bool, bool) = (false, true, true);
 
+    /// A typical small argument (a `bridge_to_base` call is a few hundred bytes).
+    const SMALL: usize = 300;
+
     fn d(method: &str, who: (bool, bool, bool)) -> bool {
-        decide(method, who.0, who.1, who.2)
+        decide(method, SMALL, who.0, who.1, who.2)
     }
 
     #[test]
@@ -612,7 +633,7 @@ mod ingress_tests {
         // way). Anonymous ingress is still refused for every role-bound method.
         for (m, access) in INGRESS_METHODS {
             if *access != IngressAccess::Anyone {
-                assert!(!decide(m, true, true, true), "{m}");
+                assert!(!decide(m, SMALL, true, true, true), "{m}");
             }
         }
     }
@@ -631,5 +652,74 @@ mod ingress_tests {
             }
             assert!(!d(&m, BOTH), "query {m} must not be accepted as an update");
         }
+    }
+
+    #[test]
+    fn oversized_arguments_are_refused_before_execution_for_every_caller() {
+        for (m, access) in INGRESS_METHODS {
+            let max = match access {
+                IngressAccess::Anyone | IngressAccess::Authenticated => MAX_OPEN_INGRESS_BYTES,
+                IngressAccess::Admin | IngressAccess::Controller => MAX_ADMIN_INGRESS_BYTES,
+            };
+            // BOTH passes every role check, so only the size decides.
+            assert!(decide(m, max, false, true, true), "{m} at exactly {max} bytes");
+            assert!(!decide(m, max + 1, false, true, true), "{m} at {} bytes", max + 1);
+            assert!(!decide(m, 2 * 1024 * 1024, false, true, true), "{m} near the 2 MiB ingress limit");
+        }
+        // Anonymous consent requests are open, but only small ones.
+        assert!(decide("icrc21_canister_call_consent_message", MAX_OPEN_INGRESS_BYTES, true, false, false));
+        assert!(!decide("icrc21_canister_call_consent_message", MAX_OPEN_INGRESS_BYTES + 1, true, false, false));
+    }
+
+    #[test]
+    fn real_arguments_fit_under_their_caps() {
+        use candid::Encode;
+        let consent = icrc21::ConsentMessageRequest {
+            method: "bridge_to_base".into(),
+            arg: Encode!(&types::BridgeToBaseArgs {
+                amount_e8s: u64::MAX,
+                base_recipient: format!("0x{}", "ab".repeat(20)),
+                from_subaccount: Some(serde_bytes::ByteBuf::from(vec![0xff; 32])),
+                client_request_id: serde_bytes::ByteBuf::from(vec![0xff; 32]),
+                expected_deposit_fee_e8s: u64::MAX,
+            })
+            .unwrap(),
+            user_preferences: icrc21::ConsentMessageSpec {
+                metadata: icrc21::ConsentMessageMetadata { language: "en-US".into(), utc_offset_minutes: Some(-420) },
+                device_spec: Some(icrc21::DeviceSpec::LineDisplay { characters_per_line: 40, lines_per_page: 10 }),
+            },
+        };
+        let consent_len = Encode!(&consent).unwrap().len();
+        assert!(consent_len * 4 < MAX_OPEN_INGRESS_BYTES, "consent request {consent_len} B");
+        let services: Vec<types::RpcServiceConfig> =
+            (0..8).map(|i| types::RpcServiceConfig::Custom { url: format!("https://provider-{i}.example.org/{}", "x".repeat(200)) }).collect();
+        let rpc_len = Encode!(&services, &2u8).unwrap().len();
+        assert!(rpc_len * 4 < MAX_ADMIN_INGRESS_BYTES, "rpc services {rpc_len} B");
+        let admins: Vec<Principal> = (0..50u8).map(|i| Principal::from_slice(&[i; 29])).collect();
+        let admins_len = Encode!(&admins).unwrap().len();
+        assert!(admins_len * 4 < MAX_ADMIN_INGRESS_BYTES, "admins {admins_len} B");
+    }
+
+    /// `icp canister call` sends an update unless `--query` is given, and query names sent
+    /// as updates are refused. Every runbook call to a bridge query must pass `--query`,
+    /// and no update call may.
+    #[test]
+    fn the_runbook_calls_queries_as_queries_and_updates_as_updates() {
+        const RUNBOOK: &str = include_str!("../../../foundry/DEPLOY-BASE.md");
+        let queries: BTreeSet<String> = endpoints("#[ic_cdk::query]").into_iter().map(|(n, _)| n).collect();
+        let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().map(|(n, _)| n).collect();
+        let mut seen = 0;
+        for line in RUNBOOK.lines() {
+            let Some(rest) = line.split("canister call rumi-icusd-bridge-test ").nth(1) else { continue };
+            let method = rest.split_whitespace().next().unwrap_or_default();
+            seen += 1;
+            if queries.contains(method) {
+                assert!(line.contains(" --query"), "runbook calls query {method} without --query: {line}");
+            } else {
+                assert!(updates.contains(method), "runbook calls unknown method {method}: {line}");
+                assert!(!line.contains(" --query"), "runbook calls update {method} with --query: {line}");
+            }
+        }
+        assert!(seen >= 15, "the scan found only {seen} runbook calls");
     }
 }

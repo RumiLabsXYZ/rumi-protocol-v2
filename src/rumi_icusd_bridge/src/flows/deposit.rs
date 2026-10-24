@@ -130,8 +130,8 @@ fn admit_inner(caller: candid::Principal, args: &BridgeToBaseArgs, dry_run: bool
 
     // Active operation limits.
     // Re-mints of held claims are not user admissions and must not crowd them out.
-    let active_user = state::deposits_in_state(|d| matches!(d.kind, DepositKind::UserDeposit), usize::MAX).len();
-    if active_user >= limits.max_active_global as usize {
+    let active_user = state::active_user_deposit_count();
+    if active_user >= limits.max_active_global as u64 {
         return Err(BridgeError::TooManyActiveOperations);
     }
     let mine = state::active_deposits_owned_by(&caller);
@@ -471,6 +471,7 @@ pub fn retry_held(id: u64) -> BridgeResult<DepositView> {
     d.updated_at_ns = env::now_ns();
     state::put_deposit(&d);
     state::append_audit(None, AuditCtx::deposit(id, "admin retry of held mint"));
+    crate::timer::schedule_soon();
     Ok(views::deposit_view(&d))
 }
 
@@ -790,6 +791,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn remints_never_count_against_the_global_active_limit() {
+        setup_bound();
+        state::mutate_core(|c| c.config.limits.max_active_global = 2);
+        // A backlog of active re-mints far above the global limit.
+        for id in 1_000..1_050u64 {
+            let mut r = state::tests::sample_deposit(id, env::canister_id());
+            r.kind = DepositKind::Remint { transfer_id: [(id % 251) as u8; 32] };
+            r.mint_id = [(id % 253) as u8; 32];
+            state::put_deposit(&r);
+        }
+        assert_eq!(state::active_remint_count(), 50);
+        assert_eq!(state::active_user_deposit_count(), 0);
+        let other = Principal::from_slice(&[8; 10]);
+        admit(user(), &args(E8, 1)).unwrap();
+        admit(other, &args(E8, 2)).unwrap();
+        assert_eq!(state::active_user_deposit_count(), 2);
+        // The third user deposit hits the limit: only user deposits count.
+        assert!(matches!(admit(Principal::from_slice(&[9; 10]), &args(E8, 3)), Err(BridgeError::TooManyActiveOperations)));
+        // A re-mint finishing frees nothing for users; a user deposit finishing does.
+        let mut r = state::get_deposit(1_000).unwrap();
+        r.state = DepositState::Delivered;
+        state::put_deposit(&r);
+        assert_eq!((state::active_remint_count(), state::active_user_deposit_count()), (49, 2));
+    }
+
+    #[test]
     fn pull_success_moves_reservation_to_pending_mint() {
         setup_bound();
         let d = admit(user(), &args(100 * E8, 1)).unwrap();
@@ -939,8 +966,11 @@ pub(crate) mod tests {
         assert_eq!(state::read_core(|c| c.buckets.pending_mint), (100 * E8) as u128, "backing stays reserved");
         retry_due_holds();
         assert!(matches!(state::get_deposit(d.id).unwrap().state, DepositState::MintHeld { .. }));
+        let now = env::now_ns();
+        crate::timer::set_pending_due_for_tests(Some(now + 300 * 1_000_000_000));
         retry_held(d.id).unwrap();
         assert_eq!(state::get_deposit(d.id).unwrap().state, DepositState::Escrowed);
+        assert_eq!(crate::timer::pending_due_for_tests(), Some(now + 1_000_000_000), "an admin retry re-arms the timer");
     }
 
     #[test]

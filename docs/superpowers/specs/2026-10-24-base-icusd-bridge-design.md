@@ -394,7 +394,10 @@ Admin methods: `admin_set_pauses`, `admin_set_limits`, `admin_set_fees`, `admin_
 `icrc21_canister_call_consent_message`, `icrc28_trusted_origins` and `icrc10_supported_standards`
 for Oisy. An `inspect_message` filter rejects anonymous ingress to update methods (except the ICRC
 standard methods) and non-admin or non-controller ingress to admin and controller methods before
-execution; it is a cost filter only, and every method keeps its own checks. Frontend bindings
+execution, and refuses arguments over 4 KiB (open methods) or 16 KiB (admin and controller
+methods); it is a cost filter only, and every method keeps its own checks. Read methods are
+queries and must be called as queries: a query name sent as an update call is refused, so
+replicated reads never cost the bridge cycles (the runbook passes `--query`, checked by a test). Frontend bindings
 come from `scripts/regenerate-declarations.sh`.
 
 ## 8. Frontend
@@ -422,7 +425,8 @@ needed. The canister is the settlement authority; the browser only shows hints.
   (`rumi:base-bridge:v1:<principal>`) stores only intents and hints. Uncertain outcomes are shown as
   uncertain; a second transfer is never started automatically. Wrong network, rejected approval,
   account changes (Base or ICP session), allowance shortfall, insufficient ETH for gas, and reloads
-  each have an explicit state.
+  each have an explicit state. When the minter lane reports `awaiting_gas`, the ICP -> Base tab
+  shows that deliveries wait for bridge gas and waiting deposits read "Waiting for bridge gas".
 
 ## 9. Fees and gas
 
