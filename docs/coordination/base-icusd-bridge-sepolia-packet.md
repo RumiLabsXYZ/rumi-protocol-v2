@@ -3,6 +3,10 @@
 The single readable plan for one isolated Base Sepolia test of the bridge. It supersedes the
 per-step HELD wording of `foundry/DEPLOY-BASE.md` for this run only.
 
+Status: READY for the executor's validation (code candidate `4169feb8`, two focused reviews PASS,
+raw-Wasm suites and install-artifact checks passed). Steps A to E and G need no deployer signer;
+F and I.2 wait for it.
+
 ## 0. Authority, scope, executor
 
 - **Authority:** Rob, 2026-10-24 (relayed and verified by Miles): fix the three PR #591
@@ -16,7 +20,7 @@ per-step HELD wording of `foundry/DEPLOY-BASE.md` for this run only.
 - **Executor:** Miles is the ONE public executor, after validating this packet. Nobody else
   creates, installs, signs, broadcasts or funds anything for this run.
 - **HELD inside the run:** provisioning a test-only Base Sepolia deployer signer (an approval
-  review refused creating one; Rob's explicit answer is pending). Steps F, I.4 and J.2 need it.
+  review refused creating one; Rob's explicit answer is pending). Steps F and I.2 need it.
   Everything before F can run without it.
 
 ## 1. Candidate and artifacts
@@ -24,11 +28,24 @@ per-step HELD wording of `foundry/DEPLOY-BASE.md` for this run only.
 | Item | Value |
 | --- | --- |
 | Code candidate | `4169feb8` (branch `codex/base-icusd-bridge`; later commits are docs only) |
-| Bridge Wasm (cargo release, clean tree) | sha256 `a0049b9ae79a81084121fdad43249dadc413e87404d1e7462db4cd41607ae157`, 3,853,783 B |
-| Bridge install artifact (candid metadata, then shrink) | sha256 `0b324387251dbb8842d3671ab00a70a5b6ccf5fffd2a47727639e11edc6f929a`, 3,225,447 B |
+| Bridge Wasm, raw (cargo release, clean tree) | sha256 `a0049b9ae79a81084121fdad43249dadc413e87404d1e7462db4cd41607ae157`, 3,853,783 B. Not installed; the input to the install artifact |
+| Bridge install artifact (raw + `candid:service` metadata, then `shrink --keep-name-section`) | sha256 `0b324387251dbb8842d3671ab00a70a5b6ccf5fffd2a47727639e11edc6f929a`, 3,225,447 B. This exact file is installed, and the module hash read back after install must equal it |
 | Test ledger Wasm `src/ledger/ic-icrc1-ledger.wasm` | sha256 `cb0c3233ebb137f606d7928e90bfd907fe932a941f11b41c23cf0d6cf9c64802` |
 | `BridgedIcUSD` creation bytecode (forge build) | sha256 `b780d317624e9a82defd5ca4bddc3ed8993e024bf931ad146ff095ba728267a4`, 10,016 B |
 | `BridgedIcUSD` runtime bytecode | sha256 `0dd0612c45e19fa72ca2dd6b2a4e8234b9964b39f81dcdc5b4a7b865cceb4ec8`, 8,266 B; contract source unchanged since `e4213be1` |
+
+Evidence per file (kept separate on purpose):
+
+- Raw `a0049b9a`: lib 445; all five PocketIC suites run one after another (follow-ups 7, round 2
+  12, smoke 12, faults 16, e2e 24; 71 passed, no infrastructure failure), hash identical before
+  and after; two focused reviews PASS on `4169feb8`.
+- Install artifact `0b324387`: three e2e PocketIC tests run with `BRIDGE_WASM` pointing at this
+  exact file (hash identical before and after; the harness installs and upgrades with these
+  bytes): `duplicate_requests_do_not_double_pull_or_double_release` (deposit and release round trip,
+  idempotency), `subaccount_deposit_pulls_from_and_refunds_to_the_same_subaccount` (the tester
+  subaccount flow used below) and `upgrade_mid_flight_preserves_state_and_completes_exactly_once`
+  (an upgrade through the stored-provider check). 3 passed. `ic-wasm info` shows
+  `canister_inspect_message` exported and public `candid:service` metadata.
 
 Reproduce from a clean checkout of the candidate (repo root), then compare every hash:
 
@@ -113,9 +130,11 @@ Observer configuration applied right after install (validated bounds in source):
 Bridge limits (inside the contract limits): min deposit 1, max deposit 10, max outstanding 100,
 mint and release windows 100 per 86,400 s (all icUSD); 5 active per caller, 500 global.
 
-Base Sepolia ETH (faucet or existing test ETH only): deployer about 0.01 (deploy estimate 2,795,263
-gas), minter at least 0.0011 and admin at least 0.0007 (`gas_limit x max_fee + min_gas_reserve`
-at the bridge defaults); send minter 0.003 and admin 0.002 for headroom.
+Base Sepolia ETH (faucet or existing test ETH only; total faucet budget at most 0.02 test ETH):
+the deployer forwards 0.005 to the bridge (0.003 to the minter, 0.002 to the admin; their minimums
+are 0.0011 and 0.0007, `gas_limit x max_fee + min_gas_reserve` at the bridge defaults), and keeps
+up to 0.015 for its own gas on top of that (contract deploy, estimated 2,795,263 gas plus the L1
+data fee, the two funding transfers, and one `bridgeOut`).
 
 ## 6. Run directory
 
@@ -185,7 +204,9 @@ icp canister status rumi-icusd-bridge-test -e base-sepolia-test --identity rumi_
 
 Expected: `(variant { Ok })` for the observer call; `get_bridge_info` shows chain 84532, three
 providers, quorum 2, `deposits = true`, no contract, no halt; the module hash in `status` equals
-`0b324387...929a`.
+`0b324387251dbb8842d3671ab00a70a5b6ccf5fffd2a47727639e11edc6f929a` (the install artifact, not the
+raw Wasm hash). The test ledger's module hash equals
+`cb0c3233ebb137f606d7928e90bfd907fe932a941f11b41c23cf0d6cf9c64802`.
 
 **E. Derive the Base addresses** (no signing, no Base transaction):
 
@@ -211,7 +232,24 @@ forge script script/DeployBridgedIcUSD.s.sol:DeployBridgedIcUSD --rpc-url https:
 ```
 
 Expected: the dry run passes its post-deploy checks; the broadcast prints
-`BridgedIcUSD deployed at: <CONTRACT_ADDR>`. Wait about 20 minutes for Base finality before G.
+`BridgedIcUSD deployed at: <CONTRACT_ADDR>`. A printed address is not proof. Before G, verify on at
+least two of the three providers:
+
+```bash
+cast code <CONTRACT_ADDR> --rpc-url https://base-sepolia-rpc.publicnode.com | xxd -r -p | shasum -a 256
+cast receipt <DEPLOY_TX> --rpc-url https://base-sepolia-rpc.publicnode.com
+cast receipt <DEPLOY_TX> --rpc-url https://base-sepolia.gateway.tenderly.co
+cast block finalized --field number --rpc-url https://base-sepolia-rpc.publicnode.com
+cast block <RECEIPT_BLOCK> --field hash --rpc-url https://base-sepolia.gateway.tenderly.co
+```
+
+Required: the runtime code sha256 equals `0dd0612c45e19fa72ca2dd6b2a4e8234b9964b39f81dcdc5b4a7b865cceb4ec8`
+(the contract has no immutables, so the on-chain code equals the forge runtime bytecode byte for
+byte); the deploy receipt has `status 1` with the same block number and block hash on both
+providers; after about 20 minutes the finalized block number is at or past the receipt block and
+the canonical hash at the receipt block equals the receipt's block hash. Check the two funding
+transfers' receipts the same way (`status 1`). Only then bind; the bind itself re-reads the
+contract at the finalized head.
 
 **G. Configure, bind, unpause:**
 
@@ -245,7 +283,25 @@ Expected: the deposit moves PullPending, Escrowed, MintInFlight, Delivered (abou
 3. After about 20 minutes: `icp canister call rumi-icusd-bridge-test get_release '("<TRANSFER_ID>")' --query -e base-sepolia-test --identity rumi_identity` reaches `Released` (the next idle probe can add up to 30 minutes).
 4. The tester subaccount balance rises by 199,990,000 (2 TICUSD minus the 10,000 ledger fee).
 
-**J. Close the window:**
+**J. Close the window.** First capture the final state, because it is not zero:
+
+```bash
+icp canister call rumi-icusd-bridge-test get_supply_audit '()' --query -e base-sepolia-test --identity rumi_identity
+icp canister call test-icusd-ledger icrc1_balance_of '(record { owner = principal "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"; subaccount = opt blob "<SUB>" })' --query -e base-sepolia-test --identity rumi_identity
+cast call <CONTRACT_ADDR> "totalSupply()(uint256)" --rpc-url https://base-sepolia-rpc.publicnode.com
+cast call <CONTRACT_ADDR> "balanceOf(address)(uint256)" <DEPLOYER> --rpc-url https://base-sepolia-rpc.publicnode.com
+icp canister status rumi-icusd-bridge-test -e base-sepolia-test --identity rumi_identity
+icp canister status test-icusd-ledger -e base-sepolia-test --identity rumi_identity
+```
+
+Expected after H and I (fee 0): Base `totalSupply` and the deployer balance 300,000,000 (3 TICUSD
+still on Base); escrow 300,000,000 and outstanding Base 300,000,000 in the audit, with
+`coverage_ok` and `base_supply_within_bound` true; the tester subaccount at 99,699,970,000
+(100,000,000,000, minus the 10,000 approve fee, minus the 500,010,000 pull including its fee, plus
+the 199,990,000 release); controllers unchanged; module hashes as in section 1. The 3 TICUSD on
+Base remain a live obligation backed by 3 TICUSD in escrow. Stopping the bridge preserves that
+liability; it does not settle it, and redeeming the remaining tokens later needs the bridge
+running again. Then:
 
 ```bash
 icp canister call rumi-icusd-bridge-test admin_set_pauses '(record { deposits = true; mints = true; releases = true; observer = true })' -e base-sepolia-test --identity rumi_identity
@@ -280,6 +336,10 @@ Stop, record and report (do not retry around the condition) when:
 - `lanes[].awaiting_gas` is true: top up the minter or admin from the deployer, or stop;
 - the bridge's cycles fall below 800B, or `rumi_identity` would fall below 0.5T: pause and stop.
 
+Upgrade note: `post_upgrade` refuses (traps, keeping the old module) if the stored provider set
+breaks the install rules, including more than 5 providers. Reduce the set with
+`admin_set_rpc_services` first if that ever applies. The three-provider set here passes.
+
 ## 10. Evidence (keep proof levels apart)
 
 Source and local tests (PR #591) | installation (module hashes) | signing (derived addresses, signed
@@ -291,12 +351,19 @@ private run record; only sanitized board metadata goes to Lookout.
 
 ## 11. Optional local UI check (isolated copy, never committed)
 
-The command-line round trip does not need it. In a throwaway copy of `src/vault_frontend`, set
-`CANISTER_IDS.ICUSD_LEDGER` to `<TEST_LEDGER_ID>` and `CANISTER_IDS.ICUSD_BRIDGE` to
-`<TEST_BRIDGE_ID>` in `src/lib/config.ts` (both, because the bridge page refuses a ledger that does
-not match `get_bridge_info`), keep the host `https://icp0.io` (network `ic`), and run the dev server
-locally. The production `config.ts` keeps `ICUSD_BRIDGE` empty and is not changed, built or
-deployed.
+The command-line round trip does not need it. In a throwaway copy of `src/vault_frontend`, edit
+`src/lib/config.ts`:
+
+1. set `CANISTER_IDS.ICUSD_LEDGER` to `<TEST_LEDGER_ID>` and `CANISTER_IDS.ICUSD_BRIDGE` to
+   `<TEST_BRIDGE_ID>` (both, because the bridge page refuses a ledger that does not match
+   `get_bridge_info`);
+2. make the `CONFIG.isLocal` getter return `false`. On `localhost` it otherwise returns `true`,
+   which switches `currentIcusdLedgerId` to `LOCAL_CANISTER_IDS.ICUSD_LEDGER` and `host` to
+   `http://localhost:4943`.
+
+Run the dev server in that copy and confirm in the browser console that `CONFIG.host` is
+`https://icp0.io` and `CONFIG.currentIcusdLedgerId` is `<TEST_LEDGER_ID>` before any wallet action.
+The production `config.ts` keeps `ICUSD_BRIDGE` empty and is not changed, built or deployed.
 
 ## 12. Watch items
 

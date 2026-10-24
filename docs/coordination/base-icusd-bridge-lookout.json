@@ -199,26 +199,26 @@
     },
     {
       "id": "BB-18",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Follow-up: clear-halt success coverage",
-      "evidenceText": "proof=none; Claimed: PocketIC test of a real halt cleared on fresh checks, with the post-clear timer re-arm moving an escrowed mint; mutation check",
+      "evidenceText": "proof=local-integration; 4169feb8: a real halt cleared on fresh checks while the canister's own timer fires mid-check; the escrowed mint goes out within seconds; a mutant without the post-clear re-arm fails",
       "evidenceLinks": []
     },
     {
       "id": "BB-19",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Follow-up: refund and sweep re-arm",
-      "evidenceText": "proof=local-test; Implemented: an unresolved inline refund or sweep attempt re-arms the timer; same tuple, no new transfer; 9 unit tests, mutation-checked; lib 445",
+      "evidenceText": "proof=local-integration; 4169feb8: an unresolved refund or sweep re-arms the timer, same tuple, no new transfer; 9 unit tests plus flaky-ledger PocketIC tests counting exactly one transfer; mutants fail",
       "evidenceLinks": []
     },
     {
       "id": "BB-20",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Follow-up: RPC provider-count limit",
-      "evidenceText": "proof=local-test; Implemented: at most 5 providers, checked at install, on replacement before any provider call, and at upgrade (refuses and keeps the old module); 4 unit tests, mutation-checked",
+      "evidenceText": "proof=local-integration; 4169feb8: at most 5 providers, checked at install, on replacement before any provider call, and at upgrade; exact-boundary unit tests; upgrade wiring covered by existing upgrade tests only (pre-merge follow-up)",
       "evidenceLinks": []
     },
     {
@@ -231,26 +231,34 @@
     },
     {
       "id": "BB-22",
-      "state": "todo",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Focused reviews of the follow-up candidate",
-      "evidenceText": "proof=none; Two isolated reviews of one frozen candidate",
+      "evidenceText": "proof=local-integration; Review A PASS and review B PASS on 4169feb8, no blockers; raw Wasm a0049b9a passes all five PocketIC suites run one after another (71 tests)",
       "evidenceLinks": []
     },
     {
       "id": "BB-23",
-      "state": "todo",
+      "state": "done",
       "owner": "coordinator",
       "scope": "Base Sepolia deployment packet",
-      "evidenceText": "proof=none; Synthetic test ledger, dedicated bridge, chain 84532 only; targets, budget, commands, stop conditions",
+      "evidenceText": "proof=local-integration; Packet with raw and install-artifact hashes kept apart; install artifact 0b324387 passes three PocketIC round-trip and upgrade tests; budget 2.5T cycles with 0.55T reserve; deployer steps held",
       "evidenceLinks": []
     },
     {
       "id": "BB-24",
+      "state": "todo",
+      "owner": "supervisor",
+      "scope": "Base Sepolia phase 1: ICP side (packet steps A to E)",
+      "evidenceText": "proof=none; New synthetic ledger and dedicated bridge on fuqsr, 600B and 1.9T cycles (reserve at least 0.5T), install, observer config, derive public Base addresses; stops before step F",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-25",
       "state": "blocked",
       "owner": "supervisor",
-      "scope": "Base Sepolia execution",
-      "evidenceText": "proof=none; The one public executor, after validating the packet. HELD: creating a test-only Base Sepolia deployer signer was refused by an approval review; waiting on Rob's explicit test-key answer",
+      "scope": "Base Sepolia phase 2: Base side (packet steps F to J)",
+      "evidenceText": "proof=none; Contract deploy, funding, bind, round trip and close. HELD: creating a test-only Base Sepolia deployer signer was refused by an approval review; waiting on Rob's explicit test-key answer",
       "evidenceLinks": []
     }
   ]

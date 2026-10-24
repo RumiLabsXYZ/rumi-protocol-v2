@@ -156,7 +156,7 @@ passed on the same Wasm. Test and doc follow-ups from the re-check landed in `fb
 Wasm byte-identical): exact stable-layout pin, a format-robust runbook scan, a multi-line-safe
 refusal helper, and runbook notes on query reads.
 
-Open follow-ups (not fixed; each would change the Wasm and need its own review):
+Open follow-ups at that point (all three closed later in `4169feb8`; see "Follow-up round"):
 
 - The `admin_clear_halt` success path has no automated test (host tests cannot reach a successful
   ledger read). Impact if regressed: at most `idle_interval_secs` of delay after a clear.
@@ -164,3 +164,34 @@ Open follow-ups (not fixed; each would change the Wasm and need its own review):
   attempt ends in an unknown state (pre-existing, same class as A3-R1, bounded delay).
 - The 16 KiB admin cap is an implicit limit of about 60 RPC providers; there is no explicit
   provider-count limit.
+
+## Follow-up round (Rob's request, 2026-10-24)
+
+Candidate `4169feb8` closes the three open follow-ups (BB-18, BB-19, BB-20); release Wasm sha256
+`a0049b9ae79a81084121fdad43249dadc413e87404d1e7462db4cd41607ae157` from a clean-tree build.
+
+| Reviewer | Pin | Verdict |
+| --- | --- | --- |
+| Follow-up A (source correctness, invariants) | `4169feb8` | PASS, no blockers |
+| Follow-up B (tests, evidence, operational fit) | `4169feb8` | PASS, no blockers |
+
+Both confirmed each fix is closed on every reachable path: the re-arm only reads the op and arms
+the timer (same tuple, no new op, no resend, reservation unchanged); the provider cap is checked
+at install, on replacement before the chain-id provider call, and at upgrade, and the upgrade
+check cannot refuse any set the install or replacement rules accept; the clear-halt test is
+discriminating (it holds the clear's last read while the canister's own timer fires mid-check);
+the reply-loss tests count exactly one transfer block in the ledger's own ICRC-3 record. No
+stable-layout, Candid or declaration change.
+
+Accepted non-blocking notes:
+
+- Both reviewers: the `post_upgrade` wiring of the stored-provider check is tested only through
+  its pure function; deleting the call would fail no test. No stored set above 5 can arise from
+  this code, so it does not block the Base Sepolia run. Pre-merge follow-up: a PocketIC test that
+  installs a pre-cap build with six providers and shows the upgrade refused with module and state
+  unchanged.
+- B: no test passes six providers to `admin_set_rpc_services` and asserts zero provider calls
+  (correct by code order). Pre-merge follow-up.
+- B: the runbook's install step still listed the superseded providers: corrected.
+- A: operator note that an upgrade from a build holding more than 5 providers is refused: added
+  to the deployment packet.

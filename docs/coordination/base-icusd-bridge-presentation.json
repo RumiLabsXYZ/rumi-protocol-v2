@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge is built and passed three rounds of local review. Work now closes three small follow-ups and prepares an isolated test on Base's public test network with synthetic test tokens. Nothing is deployed yet; real icUSD, Base mainnet and merging stay off limits. The test deployment also waits on a decision about its test signing key.",
+  "summary": "The Rumi-to-Base bridge is built and has passed independent reviews. The three remaining follow-ups are fixed and re-reviewed, and a deployment plan for an isolated test on Base's public test network, using synthetic test tokens, is ready for the supervisor to check. Nothing is deployed yet; real icUSD, Base mainnet and merging stay off limits, and the test still waits on a decision about its test signing key.",
   "glossary": [
     {
       "term": "proof=source",
@@ -399,6 +399,10 @@
     {
       "term": "deployer signer",
       "definition": "The test-only Base Sepolia account key that would deploy the token contract. Creating it is on hold until it is explicitly authorized."
+    },
+    {
+      "term": "install artifact",
+      "definition": "The exact compiled file that will be installed on ICP, after adding interface metadata and shrinking. Its fingerprint must match after install."
     }
   ]
 }

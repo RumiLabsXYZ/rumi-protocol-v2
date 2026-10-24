@@ -213,6 +213,30 @@ time on the same Wasm from a clean tree.
   worktree's coordinator owns syncing each changed sanitized checkpoint from here on. Rules and
   limits: `base-icusd-bridge-operating-rules.md`.
 
+## Milestone 8 (2026-10-24, about 11:30 PT): follow-ups closed, Base Sepolia packet ready
+
+Rob asked (relayed by Miles) to fix the three PR follow-ups and get ready for Base Sepolia
+testing; Miles is the one public executor.
+
+| Commit | Content |
+| --- | --- |
+| `4169feb8` | The three follow-ups: clear-halt success coverage, refund and sweep re-arm, at most 5 RPC providers |
+| `2f0e25fa` and later | Deployment packet `base-icusd-bridge-sepolia-packet.md`, runbook pointer, board, review record |
+
+| Check | Result | File |
+| --- | --- | --- |
+| `cargo test --offline -p rumi_icusd_bridge --lib` | 445 passed | n/a |
+| clippy `--lib -D warnings`, `git diff --check` | clean | n/a |
+| Five PocketIC suites, one after another | follow-ups 7, round 2 12, smoke 12, faults 16, e2e 24 (71 passed, no infrastructure failure) | raw `a0049b9a` |
+| Three e2e round-trip and upgrade tests via `BRIDGE_WASM` | 3 passed | install artifact `0b324387` |
+| Focused review A (source, invariants) and B (tests, evidence, fit) | PASS, PASS | `4169feb8` |
+| Read-only preflight | CLI, subnet, test key, EVM RPC costs, providers, deploy dry run checked | public read-only |
+
+Budget: 600B ledger plus 1.9T bridge plus fees, 2,500,200,000,000 of the 3,050,950,044,313 available,
+leaving about 0.55T. HELD: the test-only Base Sepolia deployer signer (approval-review refusal,
+Rob's answer pending), which steps F and I.2 need. Pre-merge follow-ups: a PocketIC test of the
+`post_upgrade` refusal, and a zero-provider-call test of the provider cap on replacement.
+
 ## Held live actions
 
 Base Sepolia or Base deployment, canister creation or install on any network, contract role

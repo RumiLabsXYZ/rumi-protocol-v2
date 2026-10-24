@@ -82,8 +82,10 @@ Install once. The operator is the minting account. The tester gets 1,000 test ic
 Install once, never reinstall (section 12). Init pauses deposits only. Mints, releases and the observer start unpaused, but no mint is possible until a contract is bound. `fee_recipient = null` means fee sweeps are refused. Check `pauses` in `get_bridge_info`.
 
 ```bash
-$ICP canister install rumi-icusd-bridge-test --environment <ic-env> --identity rumi_identity --mode install --wasm "$HOME/base-bridge-run/rumi_icusd_bridge.wasm" --args '(variant { Init = record { icusd_ledger = principal "<test ledger id>"; evm_rpc = principal "7hfb6-caaaa-aaaar-qadga-cai"; ecdsa_key_name = "test_key_1"; base_chain_id = 84532 : nat64; admins = vec { principal "<operator>" }; fee_recipient = null; rpc_services = vec { variant { Custom = record { url = "https://sepolia.base.org" } }; variant { Custom = record { url = "https://base-sepolia-rpc.publicnode.com" } }; variant { Custom = record { url = "https://base-sepolia.drpc.org" } } }; min_quorum = 2 : nat8 } })'
+$ICP canister install rumi-icusd-bridge-test --environment <ic-env> --identity rumi_identity --mode install --wasm "$HOME/base-bridge-run/rumi_icusd_bridge.wasm" --args '(variant { Init = record { icusd_ledger = principal "<test ledger id>"; evm_rpc = principal "7hfb6-caaaa-aaaar-qadga-cai"; ecdsa_key_name = "test_key_1"; base_chain_id = 84532 : nat64; admins = vec { principal "<operator>" }; fee_recipient = null; rpc_services = vec { variant { Custom = record { url = "https://base-sepolia-rpc.publicnode.com" } }; variant { Custom = record { url = "https://base-sepolia.gateway.tenderly.co" } }; variant { Custom = record { url = "https://84532.rpc.thirdweb.com" } } }; min_quorum = 2 : nat8 } })'
 ```
+
+Providers: publicnode, Tenderly and thirdweb serve `eth_getLogs` spans of at least 1,000 blocks; `sepolia.base.org` (200) and `base-sepolia.drpc.org` (100) are too narrow for 200 ms blocks. At most 5 providers are accepted. Apply the packet's observer configuration right after install.
 
 ## 7. HELD: derive the Base addresses
 
