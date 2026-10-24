@@ -117,13 +117,44 @@ controller capture in `admin_set_rpc_services`, docs and runbook checks. Interim
 on the dirty tree (not a frozen candidate): lib 428 passed; vitest 1506 passed (1 skipped);
 `npm run check` at baseline; build ok. PocketIC test work for these changes is in progress.
 
+## Milestone 5 (2026-10-24, about 07:00 PT): frozen round-3 candidate
+
+| Commit | Content |
+| --- | --- |
+| `e2a1cd7d` | Round-2 review record and milestone 4 checkpoint (docs) |
+| `eab65670` | Round-2 follow-ups (BB-16): the frozen candidate under round-3 review |
+
+Release Wasm built from `eab65670`: sha256
+`de4ad399550504d7ab06b5d7299cce4f20d9ea81e34ea75a69d743a3fb2eacf6`, 3,849,016 B raw,
+3,210,909 B shrunk, exports `canister_inspect_message`. A forced recompile of the bridge crate from
+the clean tree at `eab65670` reproduced the same hash, so the suites below ran this candidate.
+
+| Check (on `eab65670`) | Result | Wasm |
+| --- | --- | --- |
+| `cargo test --offline -p rumi_icusd_bridge --lib` | 428 passed | n/a |
+| `cargo clippy --offline -p rumi_icusd_bridge --lib -- -D warnings` | clean | n/a |
+| `bridge_round2_pic` (new) | 11 passed (7 new, plus 4 shared support tests) | `de4ad399` |
+| `bridge_e2e_pic` | 24 passed | `de4ad399` |
+| `bridge_faults_pic` | 16 passed | `de4ad399` |
+| `harness_smoke_pic` | 12 passed | `de4ad399` |
+| Negative control: the 7 new tests on the pre-round-2 Wasm | all 7 fail | pre-round-2 build |
+| vitest (vault_frontend) | 1506 passed, 1 skipped | n/a |
+| `npm run check` | 30 errors / 66 warnings, identical to baseline, none in bridge files | n/a |
+| `npm run build` | passes | n/a |
+| `forge test --offline` | not rerun: contracts and tests unchanged since `e4213be1` (111 passed at `779bd37f`, reviewer A) | n/a |
+| Backend suites | not rerun: backend and other canisters unchanged (`git diff` empty) | n/a |
+
+Measured on local anvil through the canister: the worst-case first mint used 152,342 gas of the
+300,000 limit, with every preflight `eth_call` carrying that limit.
+
+`cargo clippy --tests` still reports style lints in pre-existing integration-test harness files;
+not a gate and not new in this round.
+
 ## Next action
 
-1. Finish the BB-16 writes, freeze one candidate commit, rebuild the Wasm and record its hash.
-2. Run lib, forge, the four PocketIC suites and the frontend checks on that candidate; record which
-   suites used which Wasm.
-3. Round 3: fresh independent re-check of the material fixes on the frozen candidate.
-4. Update PR #591 and this handoff. Merge, deploy and live actions stay held.
+1. Round 3 (fresh A and B, running on `eab65670`): fix or disprove every finding; re-check any
+   material fix.
+2. Update PR #591 and this handoff. Merge, deploy and live actions stay held.
 
 ## Unresolved risks (as of this milestone)
 

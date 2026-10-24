@@ -92,7 +92,16 @@ anything later.
 | B: held states keep the fast timer; `admin_run_tick` silently no-ops; doc drift (5.1 RPC authority, 7.9 audit log, hold copy) | Fixed in `779bd37f` and its docs commits. |
 | B: spam economics, admission shared with re-mints, release backoff, head-of-line, soft release cap, ECDSA fee, supply reporting | Production configuration or documented risks; the backoff case was addressed by the typed deferral in `779bd37f`. |
 
+A-B1 resolution evidence (frozen candidate `eab65670`, Wasm sha256 prefix `de4ad399`): the
+PocketIC test `first_mint_after_the_contract_window_elapsed_to_a_dense_recipient_succeeds_within_gas_margin`
+mints the first token ever after the contract window to a 20-non-zero-byte recipient: status 1,
+gasUsed 152,342 of 300,000, every preflight `eth_call` carries the limit. The out-of-gas hold path
+is covered with a mocked provider reply (`out_of_gas_mint_simulation_holds_the_deposit_without_a_transaction_then_retries`).
+All 7 new round-2 PocketIC tests fail on the pre-round-2 Wasm.
+
 ## Round 3
 
-Not started. It runs on one frozen candidate after the round-2 follow-ups are committed, with
-fresh reviewers and the rebuilt-Wasm identity recorded on the board.
+Running on the frozen candidate `eab65670` (Wasm `de4ad399`) with two fresh reviewers. Scope is
+bounded: does each round-2 fix close its original failure case, and did the round-2 changes
+introduce regressions. Reviewer A: canister-side fixes. Reviewer B: caller paths, interfaces,
+wallet flow, artifacts and test honesty.

@@ -141,7 +141,7 @@
       "state": "in_progress",
       "owner": "worker-sonnet",
       "scope": "Adversarial review A (accounting, authority, replay)",
-      "evidenceText": "proof=local-integration; R1 FAIL at 2fee9970 plus follow-ups, 4 blockers fixed in 6208c117; R2 FAIL at e4213be1 and re-run on clean 779bd37f, 1 blocker (mint gas limit) accepted, fix in BB-16; see review record",
+      "evidenceText": "proof=local-integration; R1 FAIL at 2fee9970 plus follow-ups, 4 blockers fixed in 6208c117; R2 FAIL at e4213be1 and re-run on clean 779bd37f, 1 blocker (mint gas limit) accepted and fixed in eab65670; see review record",
       "evidenceLinks": []
     },
     {
@@ -183,10 +183,10 @@
     },
     {
       "id": "BB-16",
-      "state": "in_progress",
+      "state": "done",
       "owner": "coordinator",
       "scope": "Round-2 follow-up fixes",
-      "evidenceText": "proof=local-test; Uncommitted. Interim on the dirty tree: lib 428 passed; vitest 1506 passed, 1 skipped; npm run check at baseline; build ok; PocketIC runs pending on a frozen candidate",
+      "evidenceText": "proof=local-integration; Frozen candidate eab65670. Wasm de4ad399 (sha256 prefix), reproduced by a forced recompile from the clean tree; on that Wasm: round2 suite 11 passed (7 new, all failing on the pre-round-2 Wasm), e2e 24, faults 16, smoke 12; lib 428; clippy",
       "evidenceLinks": []
     }
   ]
