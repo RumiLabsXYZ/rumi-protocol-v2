@@ -4,6 +4,8 @@ members = [
     "src/rumi_cycle_sentinel",
     "src/rumi_cycle_sentinel/tests/mock_canister",
     "src/rumi_protocol_backend",
+    "src/rumi_icusd_bridge",
+    "src/rumi_icusd_bridge/tests/evm_rpc_relay",
     "src/rumi_treasury",
     "src/stability_pool",
     "src/rumi_3pool",

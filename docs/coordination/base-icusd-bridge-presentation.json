@@ -1,0 +1,420 @@
+{
+  "summary": "The Rumi-to-Base bridge is built, its last follow-ups are fixed and re-reviewed, and its test plan is approved. On the ICP side two new test canisters exist, but no code is installed in them: the first install request stalled without a result, so installing is on hold until that request is reconciled. Real icUSD, Base mainnet and merging stay off limits, and the Base side waits on a decision about its test signing key.",
+  "glossary": [
+    {
+      "term": "proof=source",
+      "definition": "Code or documents exist and were inspected. This alone does not show the bridge running."
+    },
+    {
+      "term": "proof=local-test",
+      "definition": "Automated checks passed on a developer’s computer. This does not show a live transfer."
+    },
+    {
+      "term": "proof=local-integration",
+      "definition": "Connected components were exercised in a local test environment, with simulated parts identified. This is not public-network proof."
+    },
+    {
+      "term": "R1",
+      "cardId": "BB-12",
+      "definition": "First round of independent review. The reviewer found problems, which were fixed in a later code version."
+    },
+    {
+      "term": "R2",
+      "cardId": "BB-12",
+      "definition": "Second round of independent review. It found a mint transaction gas allowance that was too small."
+    },
+    {
+      "term": "R3",
+      "cardId": "BB-12",
+      "definition": "Third round of independent review. This reviewer passed the candidate and noted a minor scheduling issue that was then fixed."
+    },
+    {
+      "term": "R1",
+      "cardId": "BB-13",
+      "definition": "First round of independent review, not release version one. This reviewer found problems that were subsequently fixed."
+    },
+    {
+      "term": "R2",
+      "cardId": "BB-13",
+      "definition": "Second review round. It found a possible double payment and a background timer that could fail to restart."
+    },
+    {
+      "term": "R3",
+      "cardId": "BB-13",
+      "definition": "Third review round. It found incorrect runbook read commands and missing limits on incoming request sizes; both were fixed."
+    },
+    {
+      "term": "BB-R1",
+      "definition": "The work item that inspected the existing token contracts. Here R1 is part of a reconnaissance task ID, not a review verdict."
+    },
+    {
+      "term": "Recon",
+      "definition": "An initial investigation of existing code before choosing what to reuse or change."
+    },
+    {
+      "term": "Foundry",
+      "definition": "The toolkit used to build and test the Base token contract."
+    },
+    {
+      "term": "forge",
+      "definition": "Foundry’s command-line program; forge test runs the contract’s automated tests."
+    },
+    {
+      "term": "CI",
+      "definition": "Automated checks run by the code-hosting service. The listed local tests are separate evidence."
+    },
+    {
+      "term": "EVM",
+      "definition": "The smart-contract execution system used by Base and Ethereum."
+    },
+    {
+      "term": "mint",
+      "definition": "Create tokens. This bridge creates Base tokens only after canonical Rumi tokens are reserved as backing."
+    },
+    {
+      "term": "burn",
+      "definition": "Permanently remove tokens. A Base bridge burn creates a claim to release the matching backing on ICP."
+    },
+    {
+      "term": "burn(amount,vault_id)",
+      "cardId": "BB-R1",
+      "definition": "The older token’s loan-repayment operation. It is not the new bridge’s return-transfer operation."
+    },
+    {
+      "term": "RPC",
+      "definition": "Requests to blockchain data services for chain information or transaction submission."
+    },
+    {
+      "term": "RBF",
+      "definition": "Replace-by-fee: replace a pending transaction with a higher-fee transaction using the same transaction number."
+    },
+    {
+      "term": "nonce",
+      "definition": "An account’s transaction sequence number. Reusing the correct number helps prevent duplicate execution during replacements."
+    },
+    {
+      "term": "invariant",
+      "definition": "An accounting rule that must remain true, such as token claims having enough backing."
+    },
+    {
+      "term": "debt-backed",
+      "definition": "Tokens accounted for against borrowing debt. The new escrow-backed bridge keeps separate books."
+    },
+    {
+      "term": "escrow",
+      "definition": "Canonical icUSD held aside to cover bridge tokens and pending claims."
+    },
+    {
+      "term": "ICRC-3",
+      "definition": "The ICP ledger standard used to retrieve transaction records and verify what a transfer actually did."
+    },
+    {
+      "term": "Candid",
+      "definition": "The description of a canister’s callable methods and data formats, used to generate matching app bindings."
+    },
+    {
+      "term": "declarations",
+      "definition": "Generated app files that describe how to call the canister’s published interface."
+    },
+    {
+      "term": "EIP-1193",
+      "definition": "The wallet-provider interface used by the web app to request Ethereum-compatible wallet actions."
+    },
+    {
+      "term": "CSP",
+      "definition": "Content Security Policy: browser rules controlling which outside connections the app is allowed to make."
+    },
+    {
+      "term": "Oisy",
+      "definition": "An ICP wallet whose approval flow must be respected when the app requests signed calls."
+    },
+    {
+      "term": "delegation targets",
+      "definition": "Canisters that a wallet session has been authorized to call. Adding the bridge may require reconnecting an existing session."
+    },
+    {
+      "term": "EIP-1559",
+      "definition": "The Ethereum-compatible transaction format used here, including its gas and fee fields."
+    },
+    {
+      "term": "RLP",
+      "definition": "The byte-encoding format used to assemble Ethereum-compatible signed transactions."
+    },
+    {
+      "term": "golden",
+      "definition": "A fixed reference example with a known expected result, used to detect encoding changes."
+    },
+    {
+      "term": "cast",
+      "definition": "A Foundry command-line tool used to independently check transaction encoding and calculated values."
+    },
+    {
+      "term": "anvil",
+      "definition": "The local Ethereum-compatible test blockchain used to execute bridge transactions without public-network funds."
+    },
+    {
+      "term": "low-s",
+      "definition": "A standardized form of an ECDSA signature, used here so signed transactions have the expected encoding."
+    },
+    {
+      "term": "quorum",
+      "definition": "The required agreement between blockchain data providers before the bridge accepts a result."
+    },
+    {
+      "term": "finalized head",
+      "definition": "The latest block accepted as finalized by the configured provider checks, rather than a newly announced sequencer block."
+    },
+    {
+      "term": "chunked log scan",
+      "definition": "Reading blockchain events in bounded batches so a large response does not stall the bridge."
+    },
+    {
+      "term": "receipt",
+      "definition": "A blockchain record showing whether a transaction executed and which events it produced."
+    },
+    {
+      "term": "reorg",
+      "definition": "A change to the chain’s previously observed block history; unsettled work must be checked again."
+    },
+    {
+      "term": "atomic",
+      "definition": "Related state changes are recorded together, so only part of the update cannot be left applied."
+    },
+    {
+      "term": "dedup window",
+      "definition": "The ledger’s time window for recognizing a repeated transfer request as the same request."
+    },
+    {
+      "term": "archive",
+      "definition": "A ledger storage canister containing older transaction records."
+    },
+    {
+      "term": "Wasm",
+      "definition": "The compiled executable installed in an ICP canister."
+    },
+    {
+      "term": "shrunk",
+      "definition": "The compiled executable after size-reduction processing; this is different from proving it was installed."
+    },
+    {
+      "term": "PocketIC",
+      "definition": "A local ICP test environment used to run canisters and exercise their interactions."
+    },
+    {
+      "term": "tECDSA",
+      "definition": "Threshold ECDSA: ICP network nodes collectively sign the bridge’s Base transactions."
+    },
+    {
+      "term": "mocked",
+      "definition": "A test supplies a controlled answer instead of obtaining it from a real outside service."
+    },
+    {
+      "term": "e2e",
+      "definition": "End-to-end tests that exercise a complete local bridge flow across connected components."
+    },
+    {
+      "term": "C3",
+      "cardId": "BB-09b",
+      "definition": "The check that observed Base token supply exactly matches the bridge’s accounting when no transfers are in flight."
+    },
+    {
+      "term": "C3",
+      "cardId": "BB-05b",
+      "definition": "The exact-supply reporting check for a quiet bridge; the fixes avoid false mismatch reports."
+    },
+    {
+      "term": "mint-then-burn",
+      "definition": "A tested attack scenario: extra tokens are created outside the bridge’s records, then burned to try to withdraw backing."
+    },
+    {
+      "term": "un-ignored",
+      "definition": "A previously skipped test now runs normally and must pass."
+    },
+    {
+      "term": "vitest",
+      "definition": "The automated test runner used for the bridge web app."
+    },
+    {
+      "term": "svelte-check",
+      "definition": "The app’s Svelte and TypeScript checker. At baseline means the bridge added no new reported issues."
+    },
+    {
+      "term": "Base Sepolia",
+      "definition": "Base’s public test network. No bridge deployment or transfer there has been authorized or proved."
+    },
+    {
+      "term": "HELD",
+      "definition": "An action is waiting for separate authorization; a completed code task does not authorize deployment or funds movement."
+    },
+    {
+      "term": "adversarial review",
+      "definition": "An independent reviewer actively looks for ways the implementation could fail or violate its requirements."
+    },
+    {
+      "term": "PASS",
+      "definition": "The reviewer found no blocking issue within the stated scope and exact version reviewed. It is not a deployment approval."
+    },
+    {
+      "term": "FAIL",
+      "definition": "The reviewer found a blocking issue in that reviewed version. Later cards explain the fixes and re-checks."
+    },
+    {
+      "term": "ingress",
+      "definition": "A request entering an ICP canister from a client. Size and caller filters reduce unnecessary work and cost."
+    },
+    {
+      "term": "Cumulative mint guard",
+      "definition": "A check comparing all tokens ever created by the Base contract with the bridge’s recorded mint activity before paying a return."
+    },
+    {
+      "term": "draft PR",
+      "definition": "A proposed code change on GitHub, available for review but not yet merged into the main product."
+    },
+    {
+      "term": "frozen candidate",
+      "definition": "An exact code version held unchanged while tests and reviewers assess it."
+    },
+    {
+      "term": "sha256 prefix",
+      "definition": "The opening characters of a file fingerprint. Here it identifies a compiled Wasm file, not a review round."
+    },
+    {
+      "term": "byte-identical",
+      "definition": "Two compiled files contain exactly the same bytes."
+    },
+    {
+      "term": "lib",
+      "definition": "The canister library’s Rust unit-test suite, not the local end-to-end tests."
+    },
+    {
+      "term": "clippy",
+      "definition": "Rust’s automated checker for common code mistakes and quality issues."
+    },
+    {
+      "term": "serial rerun",
+      "definition": "Retrying test suites one at a time after simultaneous runs hit local test-infrastructure failures."
+    },
+    {
+      "term": "7ceb605e",
+      "definition": "Short Git version identifier for the committed bridge design, plan and coordination documents."
+    },
+    {
+      "term": "225fece7",
+      "definition": "Short Git version identifier for the new Base bridge token contract and its tests."
+    },
+    {
+      "term": "a02b4292",
+      "definition": "Short Git version identifier for the initial ICP bridge canister and local test harness."
+    },
+    {
+      "term": "ac7a517a",
+      "definition": "Short Git version identifier for the Rumi Bridge web page."
+    },
+    {
+      "term": "2fee9970",
+      "definition": "Short Git version identifier for an early milestone that the first review examined."
+    },
+    {
+      "term": "6208c117",
+      "definition": "Short Git version identifier for the first review round’s fixes."
+    },
+    {
+      "term": "e4213be1",
+      "definition": "Short Git version identifier for the cumulative-mint guard and the candidate used by the second review round."
+    },
+    {
+      "term": "779bd37f",
+      "definition": "Short Git version identifier for fixes to overlapping-tick double payments and lost-timer recovery."
+    },
+    {
+      "term": "eab65670",
+      "definition": "Short Git version identifier for the second-round follow-up fixes assessed in the third review round."
+    },
+    {
+      "term": "8f2abbfc",
+      "definition": "Short Git version identifier for the final reviewed executable changes, including ingress bounds and timer fixes."
+    },
+    {
+      "term": "fb005f1b",
+      "definition": "Short Git version identifier for later test and documentation improvements; the release executable stayed unchanged."
+    },
+    {
+      "term": "5fdf2145",
+      "definition": "Short Git version identifier for the final local-delivery handoff accepted by Miles. It does not identify a live deployment."
+    },
+    {
+      "term": "de4ad399",
+      "cardId": "BB-16",
+      "definition": "Prefix of the compiled executable’s SHA-256 fingerprint for the earlier third-round review candidate."
+    },
+    {
+      "term": "c03ce4f1",
+      "cardId": "BB-17",
+      "definition": "Prefix of the final reviewed compiled executable’s SHA-256 fingerprint; tests were tied to that exact file."
+    },
+    {
+      "term": "mutation checks",
+      "definition": "Deliberately breaking small parts of code or evidence to verify that the tests detect the change."
+    },
+    {
+      "term": "bind",
+      "definition": "Connect the bridge configuration to the exact expected Base token contract after validating its identity."
+    },
+    {
+      "term": "cap",
+      "definition": "A configured upper limit, such as the amount of tokens that may exist or be issued."
+    },
+    {
+      "term": "pause",
+      "definition": "Temporarily stop a supported operation without deleting existing claims."
+    },
+    {
+      "term": "follow-up",
+      "definition": "A small, already-identified improvement left open after review. The three follow-ups here are being fixed before testnet testing."
+    },
+    {
+      "term": "re-arm",
+      "definition": "Schedule the bridge's background check to run again soon, instead of waiting for its slower idle interval."
+    },
+    {
+      "term": "preflight",
+      "definition": "Read-only checks before a deployment: tools, identities, available cycles and test funds, signing keys and blockchain data services. Nothing is changed."
+    },
+    {
+      "term": "deployment packet",
+      "definition": "A written plan for one test deployment: exact targets, test assets, budget, commands, expected results and stop conditions, checked before anything public is changed."
+    },
+    {
+      "term": "84532",
+      "definition": "The chain ID of Base Sepolia, Base's public test network. The bridge is limited to it for this test."
+    },
+    {
+      "term": "synthetic test ledger",
+      "definition": "A separate ICP ledger issuing test icUSD with no value, used instead of the real icUSD ledger."
+    },
+    {
+      "term": "public executor",
+      "definition": "The one person or agent allowed to perform the public deployment steps, so no two attempts race."
+    },
+    {
+      "term": "deployer signer",
+      "definition": "The test-only Base Sepolia account key that would deploy the token contract. Creating it is on hold until it is explicitly authorized."
+    },
+    {
+      "term": "install artifact",
+      "definition": "The exact compiled file that will be installed on ICP, after adding interface metadata and shrinking. Its fingerprint must match after install."
+    },
+    {
+      "term": "public-created",
+      "definition": "Proof level for the approved test run: new test canisters exist and are funded with the right controller, but no code is installed in them yet."
+    },
+    {
+      "term": "executor boundary",
+      "definition": "The point where the one person or agent running public steps waits for a tool or approval to respond. A pending request there is not retried another way."
+    },
+    {
+      "term": "reconcile before retry",
+      "definition": "After a request whose outcome is unknown, first read the authoritative state to learn what actually happened, and only then decide whether a new request is safe."
+    }
+  ]
+}
