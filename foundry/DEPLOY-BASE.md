@@ -244,7 +244,10 @@ Note: design section 7.10 names `admin_retry_operation` and `list_releases_for_a
 - Commit, clean-tree result, `shasum -a 256` output, canister IDs, environment, controllers and admins.
 - Base contract address, deploy tx hash, minter and admin addresses, funding tx hashes, and every `bridgeOut` tx hash.
 - `get_bridge_info` and `get_supply_audit` output before and after each stage, saved to files, plus deposit and release views.
-- The full audit log, paged with `get_audit_log(start, limit)` until a page comes back empty.
+- The full audit log, paged until a page comes back empty (bridge reads are queries: always pass `--query`):
+  ```bash
+  $ICP canister call rumi-icusd-bridge-test get_audit_log '(0 : nat64, 100 : nat32)' --query --environment <ic-env>
+  ```
 
 ## 14. Differences for a future mainnet run (each needs separate approval)
 
@@ -254,5 +257,6 @@ Note: design section 7.10 names `admin_retry_operation` and `list_releases_for_a
 - The real icUSD ledger `t6bor-paaaa-aaaap-qrd5q-cai` instead of a test ledger, with conservative caps.
 - Controller and admin authority: who holds controller status, and whether admin is a governed principal rather than `rumi_identity`.
 - The pre-deploy test hook (`.claude/hooks/pre-deploy-test.sh`) applies to mainnet deploys.
+- Bridge reads (`get_*`, `list_*`) are query calls and return uncertified answers from one replica. For a replicated, certified supply check use `admin_reconcile` (an update that returns `SupplyAudit`); `admin_clear_halt` likewise returns it after fresh checks.
 - Repeat the "first mint after the contract mint window has elapsed" check on Base Sepolia (wait one contract mint window after deploying, then bridge to a recipient whose address has no zero bytes) and confirm the receipt's `gasUsed` stays below 80% of `mint_gas_limit`.
 - Watch `lanes[].awaiting_gas` and the observer's deferral fields in `get_bridge_info`; a funded minter is a precondition for every delivery, and the page tells users when deliveries wait for gas.

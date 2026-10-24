@@ -1430,6 +1430,25 @@ pub(crate) mod tests {
         }
         assert_eq!(ids.len(), 14);
         assert_eq!(*ids.iter().next_back().unwrap(), MEM_ACTIVE_REMINTS);
+        // The exact (id, name) pairs. Changing any existing pair after the first install
+        // would make a region be read as a different structure: append only.
+        let expected: &[(u8, &str)] = &[
+            (0, "core"),
+            (1, "deposits"),
+            (2, "releases"),
+            (3, "evm_txs"),
+            (4, "owner_deposit_index"),
+            (5, "client_request_index"),
+            (6, "owner_release_index"),
+            (7, "release_by_sequence"),
+            (8, "audit_index"),
+            (9, "audit_data"),
+            (10, "base_sender_release_index"),
+            (11, "active_deposits"),
+            (12, "active_releases_by_sequence"),
+            (13, "active_remint_deposits"),
+        ];
+        assert_eq!(MEMORY_LAYOUT, expected);
     }
 
     #[test]

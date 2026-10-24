@@ -708,18 +708,40 @@ mod ingress_tests {
         const RUNBOOK: &str = include_str!("../../../foundry/DEPLOY-BASE.md");
         let queries: BTreeSet<String> = endpoints("#[ic_cdk::query]").into_iter().map(|(n, _)| n).collect();
         let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().map(|(n, _)| n).collect();
+        // Join backslash-continued lines so a wrapped command is checked as one.
+        let joined = RUNBOOK.replace("\\\n", " ");
         let mut seen = 0;
-        for line in RUNBOOK.lines() {
-            let Some(rest) = line.split("canister call rumi-icusd-bridge-test ").nth(1) else { continue };
-            let method = rest.split_whitespace().next().unwrap_or_default();
-            seen += 1;
-            if queries.contains(method) {
-                assert!(line.contains(" --query"), "runbook calls query {method} without --query: {line}");
-            } else {
-                assert!(updates.contains(method), "runbook calls unknown method {method}: {line}");
-                assert!(!line.contains(" --query"), "runbook calls update {method} with --query: {line}");
+        for line in joined.lines() {
+            // Whitespace tokens, with a `<placeholder with spaces>` kept as one token.
+            let mut tokens: Vec<String> = vec![];
+            for t in line.split_whitespace() {
+                match tokens.last_mut() {
+                    Some(last) if last.starts_with('<') && !last.ends_with('>') => {
+                        last.push(' ');
+                        last.push_str(t);
+                    }
+                    _ => tokens.push(t.to_string()),
+                }
             }
+            let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            let Some(call) = tokens.windows(2).position(|w| w == ["canister", "call"]) else { continue };
+            // Positional arguments after `call`, whatever the flags and their order: the
+            // canister (name or id), then the method.
+            let positional: Vec<&str> = tokens[call + 2..]
+                .iter()
+                .filter(|t| !t.starts_with('-') && !t.starts_with('\'') && !t.starts_with('('))
+                .map(|t| t.trim_matches('"'))
+                .collect();
+            let Some(method) = positional.get(1).copied() else { continue };
+            let is_query = queries.contains(method);
+            if !is_query && !updates.contains(method) {
+                // A ledger or other canister method (`icrc2_approve`, `icrc1_balance_of`, ...).
+                continue;
+            }
+            seen += 1;
+            let has_query_flag = tokens.contains(&"--query");
+            assert_eq!(has_query_flag, is_query, "runbook call to {method} must{} pass --query: {line}", if is_query { "" } else { " not" });
         }
-        assert!(seen >= 15, "the scan found only {seen} runbook calls");
+        assert!(seen >= 16, "the scan found only {seen} runbook calls to bridge methods");
     }
 }

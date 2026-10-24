@@ -62,11 +62,12 @@ fn assert_rejected_at_ingress<A: ArgumentEncoder>(w: &BridgeWorld, sender: Princ
 fn assert_rejected_raw(w: &BridgeWorld, sender: Principal, method: &str, arg: Vec<u8>) {
     const DID: &str = include_str!("../rumi_icusd_bridge.did");
     let service = DID.split("service :").nth(1).expect("service block in the .did");
-    let line = service
-        .lines()
-        .find(|l| l.trim_start().starts_with(&format!("{method} : ")))
+    // The whole declaration, which may wrap over several lines, up to its `;`.
+    let start = service
+        .find(&format!("\n  {method} : "))
         .unwrap_or_else(|| panic!("{method} is not a method of the bridge"));
-    assert!(!line.contains(" query"), "{method} is a query, not an update: {line}");
+    let decl = &service[start..start + service[start..].find(';').expect("declaration ends with ;")];
+    assert!(!decl.split_whitespace().any(|t| t == "query"), "{method} is a query, not an update: {decl}");
     match w.pic.submit_call(w.bridge, sender, method, arg) {
         Err(e) if e.code == pocket_ic::ErrorCode::CanisterRejectedMessage => {}
         Err(e) => panic!("{method} as {sender}: expected an ingress refusal, got {:?}: {}", e.code, e.description),
