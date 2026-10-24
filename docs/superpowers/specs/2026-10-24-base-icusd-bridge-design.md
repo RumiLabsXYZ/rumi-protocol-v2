@@ -362,11 +362,12 @@ no call is in flight.
 
 New `rumi_icusd_bridge.did`, generated from Rust with `export_candid!` and checked by a test that the
 checked-in file is equal to the generated service. User methods: `bridge_to_base`, `get_deposit`,
-`list_my_deposits`, `get_release`, `list_releases_for_account`, `notify_base_bridge_out`,
-`request_deposit_refund`, `get_bridge_info`, `get_supply_audit`, `get_base_addresses`. Admin methods:
-`admin_set_pauses`, `admin_set_limits`, `admin_set_fees`, `admin_set_rpc_services`,
-`admin_bind_contract`, `admin_sweep_fees`, `admin_submit_contract_action`, `admin_cancel_stuck_tx`,
-`admin_retry_operation`, `admin_clear_halt`, `set_admins` (controllers). Also
+`list_my_deposits`, `get_release`, `list_releases_for_owner`, `notify_base_bridge_out`,
+`request_deposit_refund`, `get_bridge_info`, `get_supply_audit`, `get_base_addresses`, `get_audit_log`.
+Admin methods: `admin_set_pauses`, `admin_set_limits`, `admin_set_fees`, `admin_set_gas`,
+`admin_set_observer_config`, `admin_set_rpc_services`, `admin_bind_contract`, `admin_sweep_fees`,
+`admin_submit_contract_action`, `admin_cancel_stuck_tx`, `admin_retry_deposit`, `admin_reconcile`,
+`admin_clear_halt`, `admin_clear_lane_halt`, `admin_run_tick`, and `set_admins` (controllers). Also
 `icrc21_canister_call_consent_message` and `icrc10_supported_standards` for Oisy. Frontend bindings
 come from `scripts/regenerate-declarations.sh`.
 
@@ -433,6 +434,29 @@ changes.
 
 Evidence must distinguish mocked external-chain behavior (injected provider faults) from actual
 local-EVM execution (anvil).
+
+## 11a. Implementation notes (decisions made while building)
+
+- **Hints never speed up polling.** Any signed-in caller can submit a hint, so hints are bounded
+  (256 total, 5 per caller, 2 h TTL) and are excluded from the "work pending" test that selects the
+  fast timer interval. Otherwise a caller could force paid RPC polling.
+- **Releases to the ledger minting account are held.** An `icrc1_transfer` to the minting account is
+  a burn; such a bridge-out is held and re-minted to its Base sender. Releases are not classified
+  until the ledger fee and minting account are known.
+- **Cheap idle observer.** Block responses on Base exceed 8 KiB, so the finalized-head read needs a
+  64 KiB response cap. Between full passes (at least hourly) an idle observer only probes
+  `bridgeOutCount()` at the `finalized` tag; any change, disagreement or error triggers a full pass.
+  Automatic supply reconciliation runs every 30 minutes and on `admin_reconcile`.
+- **Escrow outflow is reserved before the first send.** `unknown_outflow` includes every escrow
+  transfer that has been sent at least once and is not yet proven, so a trap after send can never
+  produce a false coverage deficit.
+- **Lane-halt escape policy.** If a lane's nonce is consumed and none of its recorded attempts has
+  a receipt, the lane halts and its transaction is parked. Nothing is re-signed and the deposit's
+  backing stays in `pending_mint`. This indicates a key or record anomaly, so recovery is a
+  controller decision: investigate, then ship an explicit fix by upgrade. `admin_clear_lane_halt`
+  only clears halts with no outstanding transaction whose chain nonce matches local records.
+- **No `icp.yaml` entry.** The bridge is deliberately absent from `icp.yaml` so a broad deploy can
+  never create or install it by accident. `foundry/DEPLOY-BASE.md` uses explicit commands.
 
 ## 12. Assumptions
 

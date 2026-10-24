@@ -1713,6 +1713,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca81e6b4777c89fd810c25a4be2b1bd93ea034fbe58e6a75216a34c6b82c539b"
 
 [[package]]
+name = "evm_rpc_relay"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk 0.12.2",
+ "serde",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7298,6 +7307,29 @@ dependencies = [
  "serde",
  "serde_bytes",
  "sha2",
+]
+
+[[package]]
+name = "rumi_icusd_bridge"
+version = "0.1.0"
+dependencies = [
+ "alloy-rlp",
+ "candid",
+ "candid_parser",
+ "ciborium",
+ "hex",
+ "ic-cdk 0.12.2",
+ "ic-cdk-timers 0.10.0",
+ "ic-stable-structures",
+ "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "k256",
+ "num-traits",
+ "pocket-ic",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "sha3",
 ]
 
 [[package]]

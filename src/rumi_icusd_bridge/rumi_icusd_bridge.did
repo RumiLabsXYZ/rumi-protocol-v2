@@ -1,0 +1,350 @@
+type Account = record { owner : principal; subaccount : opt blob };
+type AuditEntry = record {
+  seq : nat64;
+  tx_id : opt nat64;
+  deposit_id : opt nat64;
+  at_ns : nat64;
+  note : text;
+  transition : opt Transition;
+  transfer_id : opt text;
+};
+type BaseAddresses = record { admin : text; minter : text };
+type BaseInclusion = record {
+  block_hash : text;
+  block_number : nat64;
+  tx_hash : text;
+};
+type BaseTxStage = variant {
+  Queued;
+  Finalized : record { block_number : nat64; success : bool };
+  Included : record { block_number : nat64 };
+  Submitted;
+};
+type BridgeArg = variant { Upgrade : UpgradeArgs; Init : InitArgs };
+type BridgeError = variant {
+  Rpc : text;
+  Internal : text;
+  Anonymous;
+  Paused : text;
+  AmountBelowMinimum : record { min_e8s : nat64 };
+  CapacityExceeded : record { available_e8s : nat64 };
+  NotFound;
+  TooManyActiveOperations;
+  Unauthorized;
+  NotOwner;
+  InvalidRecipient : text;
+  RateLimited : record { window_resets_at_ns : nat64; available_e8s : nat64 };
+  NotConfigured : text;
+  InvalidArgument : text;
+  Ledger : text;
+  Halted : text;
+  RequestIdConflict;
+  InvalidState : text;
+  FeeChanged : record { current_fee_e8s : nat64 };
+  AmountAboveMaximum : record { max_e8s : nat64 };
+};
+type BridgeFees = record { release_fee_e8s : nat64; deposit_fee_e8s : nat64 };
+type BridgeInfo = record {
+  gas : GasConfig;
+  observer : ObserverStatus;
+  mint_window_used_e8s : nat64;
+  contract : opt ContractBindingView;
+  min_quorum : nat8;
+  escrow_account : Account;
+  fees : BridgeFees;
+  active_releases : nat32;
+  observer_config : ObserverConfig;
+  finality_policy : text;
+  window_resets_at_ns : nat64;
+  lanes : vec LaneStatus;
+  release_window_used_e8s : nat64;
+  version : text;
+  chain_id : nat64;
+  ledger_fee_e8s : opt nat64;
+  active_deposits : nat32;
+  halted : opt text;
+  icusd_ledger : principal;
+  limits : BridgeLimits;
+  rpc_service_count : nat32;
+  pauses : Pauses;
+};
+type BridgeLimits = record {
+  max_active_per_caller : nat32;
+  release_window_limit_e8s : nat64;
+  max_deposit_e8s : nat64;
+  max_active_global : nat32;
+  min_deposit_e8s : nat64;
+  window_seconds : nat64;
+  mint_window_limit_e8s : nat64;
+  max_outstanding_e8s : nat64;
+};
+type BridgeToBaseArgs = record {
+  base_recipient : text;
+  client_request_id : blob;
+  from_subaccount : opt blob;
+  amount_e8s : nat64;
+  expected_deposit_fee_e8s : nat64;
+};
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+type ConsentMessage = variant {
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+  GenericDisplayMessage : text;
+};
+type ConsentMessageMetadata = record {
+  utc_offset_minutes : opt int16;
+  language : text;
+};
+type ConsentMessageRequest = record {
+  arg : blob;
+  method : text;
+  user_preferences : ConsentMessageSpec;
+};
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+type ContractAdminAction = variant {
+  UnpauseBridgeOut;
+  SetSupplyCap : record { cap_e8s : nat64 };
+  SetMinBridgeOut : record { minimum_e8s : nat64 };
+  SetMintRateLimit : record { limit_e8s : nat64; window_seconds : nat64 };
+  PauseBridgeOut;
+  UnpauseMint;
+  PauseMint;
+};
+type ContractBindingView = record {
+  bound_at_ns : nat64;
+  supply_cap_e8s : nat;
+  mint_window_seconds : nat64;
+  address : text;
+  mint_window_limit_e8s : nat;
+  start_block : nat64;
+  min_bridge_out_e8s : nat;
+};
+type DepositKindView = variant {
+  UserDeposit;
+  Remint : record { transfer_id : text };
+};
+type DepositStatus = variant {
+  Refunding;
+  Refunded;
+  MintHeld : record { reason : text };
+  PullPending;
+  PullFailed : record { reason : text };
+  Delivered;
+  MintInFlight;
+  Escrowed;
+  PullUnknown;
+};
+type DepositView = record {
+  id : nat64;
+  base_recipient : text;
+  status : DepositStatus;
+  mint_tx_hashes : vec text;
+  client_request_id : blob;
+  refund_amount_e8s : opt nat64;
+  owner : principal;
+  from : opt Account;
+  kind : DepositKindView;
+  mint_stage : opt BaseTxStage;
+  mint_id : text;
+  pull_block_index : opt nat64;
+  mint_amount_e8s : nat64;
+  updated_at_ns : nat64;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  delivered : opt BaseInclusion;
+  refund_block_index : opt nat64;
+  deposit_fee_e8s : nat64;
+};
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type ErrorInfo = record { description : text };
+type GasConfig = record {
+  replace_after_secs : nat64;
+  mint_gas_limit : nat64;
+  max_priority_fee_per_gas_wei : nat;
+  admin_gas_limit : nat64;
+  max_fee_per_gas_wei : nat;
+  min_gas_reserve_wei : nat;
+};
+type HintView = record {
+  submitted_at_ns : nat64;
+  tx_hash : text;
+  submitted_by : principal;
+};
+type Icrc21Error = variant {
+  GenericError : record { description : text; error_code : nat64 };
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
+type Icrc28TrustedOriginsResponse = record { trusted_origins : vec text };
+type InitArgs = record {
+  ecdsa_key_name : text;
+  base_chain_id : nat64;
+  rpc_services : vec RpcServiceConfig;
+  min_quorum : nat8;
+  fee_recipient : opt Account;
+  evm_rpc : principal;
+  admins : vec principal;
+  icusd_ledger : principal;
+};
+type L2MainnetService = variant { Alchemy; Llama; BlockPi; PublicNode; Ankr };
+type LaneKind = variant { Minter; Admin };
+type LaneStatus = record {
+  next_nonce : opt nat64;
+  unfinalized_txs : nat32;
+  lane : LaneKind;
+  address : opt text;
+  awaiting_gas : bool;
+  halted : opt text;
+  unincluded_tx : opt nat64;
+};
+type LineDisplayPage = record { lines : vec text };
+type ListDepositsArgs = record { start_after : opt nat64; limit : nat32 };
+type ListReleasesArgs = record {
+  start_after_sequence : opt nat64;
+  owner : principal;
+  limit : nat32;
+};
+type ObserverConfig = record {
+  idle_interval_secs : nat64;
+  cycles_per_rpc_call : nat;
+  logs_chunk_blocks : nat64;
+  logs_max_response_bytes : nat64;
+  default_max_response_bytes : nat64;
+  active_interval_secs : nat64;
+};
+type ObserverStatus = record {
+  last_error : opt text;
+  last_run_ns : opt nat64;
+  processed_count : nat64;
+  cursor_block : nat64;
+  pending_hints : vec HintView;
+  last_finalized_block : opt nat64;
+};
+type Pauses = record {
+  mints : bool;
+  observer : bool;
+  releases : bool;
+  deposits : bool;
+};
+type ReleaseStatus = variant {
+  Reminted : record { deposit_id : nat64 };
+  TransferUnknown;
+  Held : record { reason : text };
+  Released;
+  Reminting : record { deposit_id : nat64 };
+  Pending;
+};
+type ReleaseView = record {
+  status : ReleaseStatus;
+  destination : opt Account;
+  raw_icp_principal : blob;
+  log_index : nat64;
+  release_block_index : opt nat64;
+  base_sender : text;
+  updated_at_ns : nat64;
+  transfer_id : text;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  release_fee_e8s : nat64;
+  ledger_fee_e8s : opt nat64;
+  base_tx_hash : text;
+  base_block_number : nat64;
+  amount_to_receive_e8s : opt nat64;
+  icp_subaccount : blob;
+  sequence : nat64;
+};
+type Result = variant { Ok : ContractBindingView; Err : BridgeError };
+type Result_1 = variant { Ok; Err : BridgeError };
+type Result_2 = variant { Ok : SupplyAudit; Err : BridgeError };
+type Result_3 = variant { Ok : DepositView; Err : BridgeError };
+type Result_4 = variant { Ok : nat64; Err : BridgeError };
+type Result_5 = variant { Ok : BaseAddresses; Err : BridgeError };
+type Result_6 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type RpcServiceConfig = variant {
+  BaseMainnet : L2MainnetService;
+  Custom : record { url : text };
+};
+type StandardRecord = record { url : text; name : text };
+type SupplyAudit = record {
+  fees_e8s : nat;
+  inflight_mint_e8s : nat;
+  pending_refund_e8s : nat;
+  base_total_supply_e8s : opt nat;
+  reserved_pulls_e8s : nat;
+  pending_mint_e8s : nat;
+  escrow_account : Account;
+  base_supply_exact_match : opt bool;
+  escrow_balance_e8s : opt nat;
+  outstanding_base_e8s : nat;
+  surplus_e8s : opt nat;
+  base_supply_block : opt nat64;
+  reporting_note : text;
+  required_escrow_e8s : nat;
+  liabilities_e8s : nat;
+  held_e8s : nat;
+  pending_release_e8s : nat;
+  escrow_balance_checked_at_ns : opt nat64;
+  deficit_e8s : opt nat;
+  unknown_outflow_e8s : nat;
+  coverage_ok : opt bool;
+  base_supply_within_bound : opt bool;
+};
+type Transition = variant {
+  RemintDelivered : record { amount : nat64 };
+  BridgeOutHeld : record { amount : nat64 };
+  PullFailed : record { amount : nat64 };
+  SweepCompleted : record { amount : nat64 };
+  OutflowResolved : record { amount : nat64 };
+  BridgeOutAccepted : record { amount : nat64 };
+  RefundStarted : record { amount : nat64 };
+  AdmitDeposit : record { amount : nat64 };
+  RemintStarted : record { amount : nat64 };
+  ReleaseHeld : record { amount : nat64 };
+  MintDelivered : record { fee : nat64; amount : nat64 };
+  RefundCompleted : record { amount : nat64 };
+  ReleaseCompleted : record { amount : nat64; release_fee : nat64 };
+  PullSucceeded : record { amount : nat64 };
+  OutflowUnknown : record { amount : nat64 };
+};
+type UpgradeArgs = record { admins : opt vec principal };
+service : (BridgeArg) -> {
+  admin_bind_contract : (text) -> (Result);
+  admin_cancel_stuck_tx : (nat64) -> (Result_1);
+  admin_clear_halt : () -> (Result_2);
+  admin_clear_lane_halt : (LaneKind) -> (Result_1);
+  admin_reconcile : () -> (Result_2);
+  admin_retry_deposit : (nat64) -> (Result_3);
+  admin_run_tick : () -> (Result_1);
+  admin_set_fees : (BridgeFees) -> (Result_1);
+  admin_set_gas : (GasConfig) -> (Result_1);
+  admin_set_limits : (BridgeLimits) -> (Result_1);
+  admin_set_observer_config : (ObserverConfig) -> (Result_1);
+  admin_set_pauses : (Pauses) -> (Result_1);
+  admin_set_rpc_services : (vec RpcServiceConfig, nat8) -> (Result_1);
+  admin_submit_contract_action : (ContractAdminAction) -> (Result_4);
+  admin_sweep_fees : (nat64) -> (Result_4);
+  bridge_to_base : (BridgeToBaseArgs) -> (Result_3);
+  bridge_version : () -> (text) query;
+  get_audit_log : (nat64, nat32) -> (vec AuditEntry) query;
+  get_base_addresses : () -> (Result_5);
+  get_bridge_info : () -> (BridgeInfo) query;
+  get_deposit : (nat64) -> (opt DepositView) query;
+  get_release : (text) -> (opt ReleaseView) query;
+  get_supply_audit : () -> (SupplyAudit) query;
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_6);
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  list_my_deposits : (ListDepositsArgs) -> (vec DepositView) query;
+  list_releases_for_owner : (ListReleasesArgs) -> (vec ReleaseView) query;
+  notify_base_bridge_out : (text) -> (Result_1);
+  request_deposit_refund : (nat64) -> (Result_3);
+  set_admins : (vec principal) -> (Result_1);
+}

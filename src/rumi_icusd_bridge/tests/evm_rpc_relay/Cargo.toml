@@ -1,0 +1,14 @@
+[package]
+name = "evm_rpc_relay"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Test-only canister: forwards the EVM RPC canister `request` escape-hatch to a Custom provider over HTTPS outcalls (PocketIC harness for the Base icUSD bridge)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = "0.10.6"
+ic-cdk = "0.12.0"
+serde = { version = "1", features = ["derive"] }

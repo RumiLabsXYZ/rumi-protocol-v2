@@ -66,18 +66,18 @@
     },
     {
       "id": "BB-04",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "EVM primitives",
-      "evidenceText": "proof=none; Pins vs Foundry, golden EIP-1559 vector via cast decode-transaction, strict decoders",
+      "evidenceText": "proof=local-test; 56 tests; pins recomputed from signatures; golden EIP-1559 vectors decoded by cast and accepted by local anvil with matching hashes; low-s normalization; chain-id guard in signing",
       "evidenceLinks": []
     },
     {
       "id": "BB-05",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "RPC transport and observer",
-      "evidenceText": "proof=none; Quorum on parsed values, finalized head + hash quorum, count-proven log scan, bind checks",
+      "evidenceText": "proof=local-test; 67 tests; quorum on parsed values (two values both reaching quorum decide nothing); finalized head = quorum-th highest height plus hash quorum; count-proven chunked log scan; bind refusals; coordinator added the cheap idle probe",
       "evidenceLinks": []
     },
     {
@@ -90,10 +90,10 @@
     },
     {
       "id": "BB-07",
-      "state": "in_progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Ledger client",
-      "evidenceText": "proof=none; Classification table, exact ICRC-3 matching, archive callbacks limited to listed archives, proven absence",
+      "evidenceText": "proof=local-test; 67 tests; classification table; exact tuple matching; archive callbacks only to listed archives with id-exact replies; absence proven only at tip after the dedup window",
       "evidenceLinks": []
     },
     {
@@ -130,10 +130,10 @@
     },
     {
       "id": "BB-11",
-      "state": "todo",
+      "state": "done",
       "owner": "worker-haiku",
       "scope": "Docs and testnet runbook",
-      "evidenceText": "proof=none; Runbook with every live step marked held",
+      "evidenceText": "proof=source; 250-line Base Sepolia runbook; every create/install/fund/broadcast/verify step labeled HELD; dry run shown before broadcast; coordinator reviewed",
       "evidenceLinks": []
     },
     {
