@@ -12,7 +12,7 @@
   import "../app.css";
   import { protocolService } from "../lib/services/protocol";
   import { isDevelopment } from "../lib/config";
-  import { POINTS_ENABLED } from '$lib/config';
+  import { POINTS_ENABLED, BRIDGE_ENABLED } from '$lib/config';
   import { developerAccess } from "../lib/stores/developer";
   import ToastContainer from "../lib/components/common/ToastContainer.svelte";
   import SeasonBar from "$lib/components/points/SeasonBar.svelte";
@@ -79,6 +79,7 @@
     <a href="/" class="nav-link" class:active={currentPath === '/'}><span>Borrow</span></a>
     <a href="/earn" class="nav-link" class:active={earnActive}><span>Earn</span></a>
     <a href="/swap" class="nav-link" class:active={currentPath === '/swap'}><span>Swap</span></a>
+    {#if BRIDGE_ENABLED}<a href="/bridge" class="nav-link" class:active={currentPath.startsWith('/bridge')}><span>Bridge</span></a>{/if}
     {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}
     {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
     <a href="/explorer" class="nav-link" class:active={currentPath.startsWith('/explorer')}><span>Explorer</span></a>
@@ -116,6 +117,7 @@
         <a href="/bitcoin/borrow" class="footer-link">Borrow with Bitcoin</a>
       {:else}
       <a href="/redeem" class="footer-link">Redeem</a>
+      {#if BRIDGE_ENABLED}<a href="/bridge" class="footer-link">Base Bridge</a>{/if}
       <a href="/solana" class="footer-link">ckSOL Minter</a>
       <a href="/doge" class="footer-link">ckDOGE Minter</a>
       <a href="/bitcoin" class="footer-link">Bitcoin Minter</a>

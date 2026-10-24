@@ -57,11 +57,20 @@ export const CANISTER_IDS = {
   // DFINITY ckETH minter also operates the ckERC20 rails (including ckUSDC).
   CKERC20_MINTER: "sv3dd-oaaaa-aaaar-qacoa-cai",
   CKETH_LEDGER: "ss2fx-dyaaa-aaaar-qacoq-cai",
+  // Rumi icUSD <-> Base bridge canister (rumi_icusd_bridge). Empty until the
+  // canister is deployed; filling it in flips BRIDGE_ENABLED true so /bridge
+  // and its nav links appear.
+  ICUSD_BRIDGE: "",
 } as const;
 
 /** The /points airdrop section is shown only once the rumi_points canister id
  *  is configured above. Flip on by filling RUMI_POINTS at deploy time. */
 export const POINTS_ENABLED: boolean = CANISTER_IDS.RUMI_POINTS !== "";
+
+/** The /bridge page (icUSD between the Internet Computer and Base) is shown only
+ *  once the rumi_icusd_bridge canister id is configured above. The string cast
+ *  keeps the comparison valid whether the id is empty or filled in. */
+export const BRIDGE_ENABLED: boolean = (CANISTER_IDS.ICUSD_BRIDGE as string) !== "";
 
 /**
  * AMM1 (3USD/ICP) liquidity deposits are paused (2026-07-23): the pool card is
@@ -101,6 +110,7 @@ export const LOCAL_CANISTER_IDS = {
   STABILITY_POOL: "tmhzi-dqaaa-aaaap-qrd6q-cai",
   INTERNET_IDENTITY: "rdmx6-jaaaa-aaaaa-aaadq-cai", // Local II canister
   CYCLE_SENTINEL: "",
+  ICUSD_BRIDGE: "",
 } as const;
 
 export const isCycleSentinelConfigured = CANISTER_IDS.CYCLE_SENTINEL.trim().length > 0;
