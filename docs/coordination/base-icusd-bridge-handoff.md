@@ -47,11 +47,33 @@ Workers (requested / actual model): BB-04, BB-05, BB-06, BB-07, BB-10 Sonnet / S
 All recon (BB-R1..R4), BB-02 and BB-09a were Sonnet / Sonnet. No Haiku task has run yet; BB-11
 (runbook mechanics) is queued for Haiku.
 
+## Milestone 2 (2026-10-24): canister committed
+
+| Commit | Content |
+| --- | --- |
+| `88a403ed` | Milestone 1 board, projection, handoff |
+| `a02b4292` | `rumi_icusd_bridge` canister, PocketIC + anvil harness, generated declarations, runbook |
+
+| Check | Result |
+| --- | --- |
+| `cargo test --offline -p rumi_icusd_bridge --lib` | 339 passed |
+| `cargo clippy --offline -p rumi_icusd_bridge --lib` | no warnings in bridge sources |
+| `cargo build --offline --release --target wasm32-unknown-unknown -p rumi_icusd_bridge` | ok; 3,699,998 B raw, 3,078,884 B after `ic-wasm shrink` |
+| `cargo test --offline -p rumi_protocol_backend --lib chains::` (private target) | 659 passed; backend source unchanged |
+| `cargo test --offline -p rumi_protocol_backend --test multi_chain_supply_invariant` | 2 passed |
+
+Worker models so far (requested / actual): BB-04, BB-05, BB-06, BB-07, BB-09a Sonnet / Sonnet; BB-11 Haiku / Haiku.
+
+Decisions since milestone 1: hints never select the fast timer interval and are capped per caller;
+releases to the ledger minting account are held; idle observer probes `bridgeOutCount()` at the
+finalized tag between hourly full passes; supply reconciliation every 30 minutes; no `icp.yaml`
+entry; lane halts on unexplained nonce use stay halted until a controller decision.
+
 ## Next action
 
-1. Integrate BB-04/05/06/07 deliveries, run the full crate suite and the wasm release build, commit.
-2. Dispatch BB-09b (bridge scenarios on PocketIC + anvil with real ledger and tECDSA).
-3. Integrate BB-10 frontend, then two adversarial reviews (BB-12, BB-13), fixes, push, draft PR.
+1. BB-09b part 1 (running) then part 2 (fault scenarios) on PocketIC + anvil.
+2. Integrate BB-10 frontend (running).
+3. Two adversarial reviews (BB-12, BB-13), fixes, push, draft PR.
 
 ## Unresolved risks (as of this milestone)
 
