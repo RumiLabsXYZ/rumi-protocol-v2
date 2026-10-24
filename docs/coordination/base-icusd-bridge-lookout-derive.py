@@ -74,6 +74,8 @@ def owner_role(cell: str) -> str:
     cell = cell.lower()
     if cell.startswith("coordinator"):
         return "coordinator"
+    if cell.startswith("supervisor"):
+        return "supervisor"
     if "haiku" in cell:
         return "worker-haiku"
     if "sonnet" in cell:

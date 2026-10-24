@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge is built, and local transfer tests, recovery tests, and review fixes are complete. It is awaiting review before release; it has not been deployed or used with customer funds. Next is reviewing the remaining follow-ups and separately approving testing on Base’s public test network.",
+  "summary": "The Rumi-to-Base bridge is built and passed three rounds of local review. Work now closes three small follow-ups and prepares an isolated test on Base's public test network with synthetic test tokens. Nothing is deployed yet; real icUSD, Base mainnet and merging stay off limits. The test deployment also waits on a decision about its test signing key.",
   "glossary": [
     {
       "term": "proof=source",
@@ -367,6 +367,38 @@
     {
       "term": "pause",
       "definition": "Temporarily stop a supported operation without deleting existing claims."
+    },
+    {
+      "term": "follow-up",
+      "definition": "A small, already-identified improvement left open after review. The three follow-ups here are being fixed before testnet testing."
+    },
+    {
+      "term": "re-arm",
+      "definition": "Schedule the bridge's background check to run again soon, instead of waiting for its slower idle interval."
+    },
+    {
+      "term": "preflight",
+      "definition": "Read-only checks before a deployment: tools, identities, available cycles and test funds, signing keys and blockchain data services. Nothing is changed."
+    },
+    {
+      "term": "deployment packet",
+      "definition": "A written plan for one test deployment: exact targets, test assets, budget, commands, expected results and stop conditions, checked before anything public is changed."
+    },
+    {
+      "term": "84532",
+      "definition": "The chain ID of Base Sepolia, Base's public test network. The bridge is limited to it for this test."
+    },
+    {
+      "term": "synthetic test ledger",
+      "definition": "A separate ICP ledger issuing test icUSD with no value, used instead of the real icUSD ledger."
+    },
+    {
+      "term": "public executor",
+      "definition": "The one person or agent allowed to perform the public deployment steps, so no two attempts race."
+    },
+    {
+      "term": "deployer signer",
+      "definition": "The test-only Base Sepolia account key that would deploy the token contract. Creating it is on hold until it is explicitly authorized."
     }
   ]
 }

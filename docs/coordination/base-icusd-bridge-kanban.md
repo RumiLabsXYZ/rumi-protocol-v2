@@ -58,6 +58,13 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 | BB-14 Branch and draft PR | done | coordinator (Opus 5.5 / Opus 5.5) | none | all | Branch pushed; code reviewed at 8f2abbfc, docs-only commits after it; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged, not deployed; supervisor accepted the local delivery milestone at 5fdf2145 | source |
 | BB-16 Round-2 follow-up fixes | done | coordinator (Opus 5.5 / Opus 5.5) + workers W2, W3, W4 (Sonnet / Sonnet) | gas, lane, rpc, deposit, admin, keccak (coordinator); ledger_ops, observer, timer, state, views, types, lib, .did, declarations (W2); PocketIC tests and harness (W3); ids.rs and bridge page (W4) | BB-12, BB-13 | Frozen candidate eab65670, Wasm de4ad399 (sha256 prefix; clean rebuild matches); on it: round2 11 (7 new, all failing on the old Wasm), e2e 24, faults 16, smoke 12; lib 428; clippy clean; vitest 1506 (1 skipped); check at baseline; build ok | local-integration |
 | BB-17 Round-3 fixes | done | coordinator (Opus 5.5 / Opus 5.5) | lib.rs, state.rs, timer.rs, lane.rs, deposit.rs, icrc21.rs, runbook, design, bridge page, PocketIC tests | BB-12, BB-13 | 8f2abbfc, Wasm c03ce4f1 (clean rebuild matches); fb005f1b tests and docs, Wasm byte-identical: lib 432; round2 12, e2e 24, faults 16, smoke 12 (10 on a serial rerun); forge 111; vitest 1507; check at baseline; build ok; re-check PASS | local-integration |
+| BB-18 Follow-up: clear-halt success coverage | in progress | worker W6 (Sonnet / Sonnet) | new PocketIC test file, additive test helpers | BB-17 | Claimed: PocketIC test of a real halt cleared on fresh checks, with the post-clear timer re-arm moving an escrowed mint; mutation check | none |
+| BB-19 Follow-up: refund and sweep re-arm | in progress | worker W5 (Sonnet / Sonnet) | deposit flows | BB-17 | Claimed: re-arm reconciliation after an unknown ledger outcome, same tuple, no new transfer | none |
+| BB-20 Follow-up: RPC provider-count limit | in progress | worker W5 (Sonnet / Sonnet) | state validation, init and upgrade | BB-17 | Claimed: at most 5 providers, enforced at init, replacement and upgrade before any provider call | none |
+| BB-21 Base Sepolia read-only preflight | in progress | worker W7 (Sonnet / Sonnet) | read-only | none | Claimed: CLI, identity and cycles, ECDSA test key, EVM RPC costs, Base Sepolia provider finality, deploy script dry run | none |
+| BB-22 Focused reviews of the follow-up candidate | todo | worker (Sonnet / Sonnet) x2 | read-only | BB-18, BB-19, BB-20 | Two isolated reviews of one frozen candidate | none |
+| BB-23 Base Sepolia deployment packet | todo | coordinator (Opus 5.5 / Opus 5.5) | deployment packet and runbook | BB-21, BB-22 | Synthetic test ledger, dedicated bridge, chain 84532 only; targets, budget, commands, stop conditions | none |
+| BB-24 Base Sepolia execution | blocked (deployer signer held) | supervisor (Miles) | none (public executor) | BB-23 | The one public executor, after validating the packet. HELD: creating a test-only Base Sepolia deployer signer was refused by an approval review; waiting on Rob's explicit test-key answer | none |
 
 ## Regression evidence (backend untouched)
 
@@ -68,7 +75,8 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 
 ## Held (needs separate authorization; not started)
 
-- Public-testnet (Base Sepolia) contract deployment and canister install.
+- Base Sepolia test: now authorized in scope (synthetic test ledger, dedicated bridge canister, chain 84532 only), executed only by Miles after he validates the deployment packet (BB-23, BB-24). The production icUSD ledger, existing Rumi canisters, Base mainnet and merge stay held.
+- Base Sepolia deployer signer provisioning: HELD. An approval review refused creating a test-only deployer key (2026-10-24); no key exists. Do not create, import or relay one by any route until Rob's explicit answer arrives.
 - Any mainnet deploy, controller change, contract role assignment, live signing/broadcast, or funding.
 - Worktree removal pass (`scripts/cleanup_worktrees.sh --remove-eligible`): denied by the permission classifier on 2026-10-24; dry run showed 0 eligible anyway.
 
@@ -86,3 +94,5 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-24: supervisor accepted the local implementation and draft PR milestone at `5fdf2145`; Rob approved sanitized Lookout uploads, so the first-upload hold is resolved; event publishing waits for the setup owner's cutover confirmation.
 - 2026-10-24: Lookout cutover confirmed by the setup owner; first snapshot published and verified as a no-op readback; this worktree's `--dry-run` confirms no change; routine sync of changed checkpoints is owned here.
 - 2026-10-24: presentation sidecar added (short status plus 89 definitions, Rob's request); projection evidence now ends at a clause or word boundary (BB-06, BB-16, BB-17 shortened to complete text); publishing held for the root owner's presentation cutover.
+- 2026-10-24: Rob asked to fix the three follow-ups and prepare Base Sepolia testing; BB-18..BB-24 claimed; Miles is the one public executor.
+- 2026-10-24: deployer signer provisioning held after an approval-review refusal; BB-24 blocked on it; fixes, reviews and the packet continue.

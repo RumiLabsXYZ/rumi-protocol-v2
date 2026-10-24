@@ -196,6 +196,62 @@
       "scope": "Round-3 fixes",
       "evidenceText": "proof=local-integration; 8f2abbfc, Wasm c03ce4f1 (clean rebuild matches); fb005f1b tests and docs, Wasm byte-identical: lib 432; round2 12, e2e 24, faults 16, smoke 12 (10 on a serial rerun); forge 111; vitest 1507; check at baseline; build ok; re-check PASS",
       "evidenceLinks": []
+    },
+    {
+      "id": "BB-18",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Follow-up: clear-halt success coverage",
+      "evidenceText": "proof=none; Claimed: PocketIC test of a real halt cleared on fresh checks, with the post-clear timer re-arm moving an escrowed mint; mutation check",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-19",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Follow-up: refund and sweep re-arm",
+      "evidenceText": "proof=none; Claimed: re-arm reconciliation after an unknown ledger outcome, same tuple, no new transfer",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-20",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Follow-up: RPC provider-count limit",
+      "evidenceText": "proof=none; Claimed: at most 5 providers, enforced at init, replacement and upgrade before any provider call",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-21",
+      "state": "in_progress",
+      "owner": "worker-sonnet",
+      "scope": "Base Sepolia read-only preflight",
+      "evidenceText": "proof=none; Claimed: CLI, identity and cycles, ECDSA test key, EVM RPC costs, Base Sepolia provider finality, deploy script dry run",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-22",
+      "state": "todo",
+      "owner": "worker-sonnet",
+      "scope": "Focused reviews of the follow-up candidate",
+      "evidenceText": "proof=none; Two isolated reviews of one frozen candidate",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-23",
+      "state": "todo",
+      "owner": "coordinator",
+      "scope": "Base Sepolia deployment packet",
+      "evidenceText": "proof=none; Synthetic test ledger, dedicated bridge, chain 84532 only; targets, budget, commands, stop conditions",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-24",
+      "state": "blocked",
+      "owner": "supervisor",
+      "scope": "Base Sepolia execution",
+      "evidenceText": "proof=none; The one public executor, after validating the packet. HELD: creating a test-only Base Sepolia deployer signer was refused by an approval review; waiting on Rob's explicit test-key answer",
+      "evidenceLinks": []
     }
   ]
 }
