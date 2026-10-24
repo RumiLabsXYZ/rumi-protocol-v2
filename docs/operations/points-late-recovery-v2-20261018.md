@@ -3,9 +3,7 @@
 ## Status
 
 This revises the original recovery source. It is not a live restoration receipt.
-The original upgrade request still lacks authoritative disposition; no retry,
-alternate executor, indirect execution, replay or resume is authorized until it
-is resolved. Changing source or method names does not clear that hold.
+The original upgrade request still lacks authoritative disposition; no retry, alternate executor, replay or resume is authorized until it is resolved.
 
 No numerical outage allocation is approved or applied. The allocation digest
 remains unset. Reconstructed records cannot supply the random snapshots which
@@ -34,19 +32,13 @@ after a V1 schedule; an existing V1 record is not V2 coverage metadata:
    conservative selection rule, not a guarantee of external source uptime.
 5. At the actual synchronous opening, freeze the exact gap end, target and
    actual opening bounds, refreshed bounded registration census and seed bridge.
-   The bridge digest is SHA256(domain || predecessor18 || real summary hash ||
-   predecessor successor commitment || missing-start || target-index || actual
-   opening || epoch-end). Integers are little-endian u64. The target seed is
-   SHA256(domain || private preloaded successor seed || bridge digest). The
-   private successor used the fresh close18 entropy. Reveal that entropy only
-   when the target closes. No retry redraws B or a normal target seed.
+5. At the actual synchronous opening, freeze the gap bounds, a refreshed bounded registration census and a seed bridge commitment. Private entropy is revealed only when the target epoch closes. No retry redraws B or a normal target seed.
 6. No ordinary summary or seed reveal is fabricated for a skipped epoch.
    Logical seed/summary lookups use binary search by epoch ID. Public history
    offsets and counts still paginate real records, so offsets may differ from
    scheduled IDs after this explicit gap.
 
-The domain is `rumi-points-late-recovery-bridge-v2` followed by a null byte.
-The public coverage query reveals commitments, actual bounds and the census,
+The public coverage query reveals commitments, actual bounds and the census, never private entropy or future capture timestamps.
 never private entropy or future capture timestamps. A changed season bound or
 an exceeded100-person total registered census fails closed for explicit review
 (including registrants added after reopening).

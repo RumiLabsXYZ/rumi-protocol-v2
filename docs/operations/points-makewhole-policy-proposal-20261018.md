@@ -5,8 +5,7 @@ make-whole rule because some scheduled random snapshots were never captured.
 An exact counterfactual award cannot be uniquely recovered from those missing
 observations. Credits must identify compensation honestly; history is retained.
 
-This policy decision does not authorize a repeated upgrade, clear the original
-execution-request hold, or delay an otherwise reviewed normal resume.
+This policy decision does not authorize a repeated upgrade or delay an otherwise reviewed normal resume.
 
 ## Proposed rule
 
@@ -26,8 +25,7 @@ execution-request hold, or delay an otherwise reviewed normal resume.
 4. For epoch19, reconstruct source maxima over the entire affected epoch using
    the retained source records, actual balances and recorded composition. Use
    1x debt, the existing SP/AMM rates, and flat 4x fiat-stable 3pool policy.
-   Include proved debt losses and a bounded allowance for unlogged dust
-   forgiveness. Use the resulting conservative maximum snapshot weight for the
+Include proved debt losses and a bounded allowance for small unlogged debt forgiveness.
    full scheduled epoch, subject to registration/exclusion rules.
 5. Historical verification/valuation gaps require explicit entries in the final
    input manifest. A recorded-composition cap may be used conservatively where
@@ -75,7 +73,6 @@ An affirmative decision accepts the conservative compensation policy and its
 possible overcredit, rather than asserting exact replay of missing randomness.
 It does not approve a particular future allocation with unclosed exceptions.
 The final numerical manifest, compatible implementation and actual production
-receipts still require review. Original upgrade-request disposition and normal
 release preconditions remain in force; no retry or alternate executor is granted.
 
 Declining this proposal leaves the economic choice unresolved. Merely resuming

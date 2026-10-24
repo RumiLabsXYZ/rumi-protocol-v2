@@ -53,14 +53,7 @@ Upgrade-risk acceptance alone does not approve this economic choice.
   for the original cohort. Refresh through the cutoff; handle additions and
   newly discovered participants explicitly.
 
-The reverse debt argument uses nonnegative accrual and complete loss visibility
-in inspected source. Original recovered lifecycle outputs support a stopped
-backend across the start of19, a stopped upgrade preserving140 State fields,
-then one start. This is bounded operational evidence under the sole-executor
-premise; old171's Git identity and continuous status against unknown controllers
-are not certified. Saved/current proof sets match; known source does not prune
-them. Historical SP provenance remains a disclosed limitation. Retain these
-conditions in the evidence manifest; do not call this exact counterfactual proof.
+The debt-side bound relies on nonnegative accrual, visibility of debt reductions in inspected source, and retained lifecycle evidence. It is bounded operational evidence, not an exact counterfactual proof; historical SP provenance remains a disclosed limitation.
 
 ## Application and verification
 

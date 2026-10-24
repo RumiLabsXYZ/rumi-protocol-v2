@@ -4,20 +4,14 @@ Status: investigation checkpoint, not a completed recovery or approved credit al
 
 ## Updated user requirement
 
-Rob explicitly requires restoring processing and covering the missed period as
+The owner explicitly requires restoring processing and covering the missed period as
 if the program had continued. Preserving existing totals and restarting the
 driver alone does not meet that requirement. Existing earned rows must remain
 unchanged; catch-up must not double-count them.
 
 ## Why the existing release is insufficient on its own
 
-The held epoch 18 repair in source `0eefe9fa` preserves its original reward
-period and saved A, with one newly scheduled B. Its next epoch opens at actual
-restart time. See `src/rumi_points/src/epoch.rs`:
-`safe_due_epoch_start`, `resume_legacy_reseed`, and the driver's `Start`
-branch. See `src/rumi_points/src/state.rs::run_close_accrual_chunk` and
-`src/rumi_points/src/accrual.rs::accrue_principal_for_policy`: accrual uses
-`epoch_end_capped - epoch_start`.
+The held epoch 18 repair preserves its original reward period and saved A, with one newly scheduled B, but its next epoch opens at the actual restart time and accrual is capped at the epoch end, so the earlier part of epoch 19 is not covered.
 
 Epoch 19's scheduled interval is October 12–19 UTC. Rebasing its opening to
 restart omits the preceding part of that interval from ordinary epoch accrual.
@@ -48,21 +42,14 @@ strictly contiguous. All query calls succeeded. These observations establish
 retention at the saved cursors and preserve the bounded backlog; they do not
 establish replay, applied credits, full historical balances or ongoing tails.
 
-Local evidence is protected under
-`.recovery-artifacts/rumi-points-recovery-20261017/no-gap-assessment-20261018`:
-`coverage-assessment.json`, `query-receipt.json`,
-`retained-backlog-query-receipt.json` and the hashed raw query files.
-Raw financial/user records are not included in this document.
+Local evidence is protected in the operator's private evidence store. Raw financial/user records are not included in this document.
 
 ## Exact replay and compensation are different proof obligations
 
-The scoring rule selects the smaller **whole** A/B weighted snapshot and scales
-it by the epoch period; repayment windows are added separately. See
-`accrual.rs::min_by_total` and `accrue_principal_for_policy`.
+The scoring rule selects the smaller whole A/B weighted snapshot and scales it by the epoch period; repayment windows are added separately.
 An event replay alone does not recover every historical snapshot input: wallet
 token balances, pool verification and valuations also contribute to capture.
 Epoch 19 never opened; its secure entropy and snapshots were not captured.
-See `snapshot_seed.rs` and `epoch.rs::close_current_epoch`.
 
 Consequently this evidence does not determine a unique counterfactual award
 for the missed interval. Do not silently backdate a newly observed balance,
@@ -72,7 +59,6 @@ allocation as an exact replay of unobserved snapshots.
 ## Required remaining work
 
 1. Resolve the original execution request disposition. Preserve root sole
-   ownership; no duplicate install or alternative execution path.
 2. Inventory the missed interval per principal and source, including actual
    balance/valuation evidence and missing inputs. Refresh source counts and
    retention before execution.

@@ -109,13 +109,7 @@ an investigation artifact. No financial/user records are included here.
    zero in this worksheet. The result is **594,211.14277139 points** for that
    illustrative interval. This is not an exact historical balance, sealed
    allocation, strict historical ceiling, or approved reward-policy change.
-   In exact deployed PR527 `vault.rs::withdraw_and_close_vault_internal`
-   (lines 10122–10138) and partial withdrawal (around line 9915), up to
-   `DUST_DEBT_THRESHOLD = 50,000` raw debt can be forgiven without a separate
-   repayment event. The current-debt-plus-repayments reference does not account
-   for that unlogged amount. A final no-underpayment calculation must account
-   for it; this worksheet is not that proof. The source reads are about 07:11,
-   backend history freezes about 07:17, and the illustrative endpoint is 07:20.
+A final no-underpayment calculation must also account for small unlogged debt forgiveness on vault closes; this worksheet does not. The source reads are about 07:11, backend history freezes about 07:17, and the illustrative endpoint is 07:20.
    That final interval is extrapolation, not observed coverage; the calls were
    not an atomic capture. Nonzero LP holders receive a
    full-composition ceiling; historical verification between price samples is
@@ -131,12 +125,7 @@ crediting an interval twice.
 
 ## Execution and remaining work
 
-The authorized points update was sent once in existing Support case 17015292
-after Rob confirmed the login account. A fresh case reload still shows that
-sent update without an authoritative original-request disposition. No new
-packet was sent. The current tool inventory exposes no applicable approval
-queue cancellation/status control. The separate rejected cross-chat handoff
-remains unsent and was not relayed indirectly.
+The original request disposition remains unresolved and no new request was sent. The current tool inventory exposes no applicable approval-queue status control.
 
 The concrete remaining work is to choose and implement the auditable
 missed-period allocation, independently review its actual retained-state and

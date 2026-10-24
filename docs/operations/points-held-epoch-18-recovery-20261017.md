@@ -18,14 +18,9 @@ Existing memories 0–14 and frozen State/OpenEpoch layouts are unchanged. The
 replacement schedule is hidden publicly until B completes or the epoch closes;
 the audit record survives close. Repeating resume cannot resample B.
 
-Replay propagates source errors, verifies retained rotating-log coverage and
-requires all source cursors at their observed tails before resume. A final
-post-await comparison rejects concurrent configuration or state changes.
+Replay verifies retained source coverage and observed tails before resume.
 
-Capture rejects zero, future or older-than-600-second cached ICP timestamps,
-including after source awaits and before each principal's snapshot write. AMM
-transport/decode errors retry capture instead of being treated as zero balances.
-The existing scoring formulas and audit rows are unchanged.
+Capture rejects stale cached prices and retries on source errors. The existing scoring formulas and audit rows are unchanged.
 
 ## Release boundary
 

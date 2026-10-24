@@ -42,7 +42,7 @@ The full private evidence and participant rows are retained in the protected rec
 
 ## Exact candidate release
 
-The only production-source delta from the running recovery source is the immutable allocation digest `None→Some(26face…61cd)` and corresponding comments in `src/rumi_points/src/outage_reconciliation.rs`. Types, stable regions, handlers, interfaces, source guards, seed chain and driver schedules are unchanged. Production is still on the prior unpinned release.
+The only production-source delta from the running recovery source is the immutable allocation digest `None->Some(26face...61cd)` and corresponding comments. Types, stable regions, handlers, interfaces, source guards, seed chain and driver schedules are unchanged. Production is still on the prior unpinned release.
 
 - Candidate raw Wasm SHA256: `279f335ab92518d3e0c6250e4f826bb765c18687c2aa5a0bfb0b119f7b208641` (2,798,952bytes).
 - Candidate gzip SHA256: `1942255ef30dc04bf0090e8013983f57a224189fa35b46d52298a57ac1fa2486` (691,320bytes).
@@ -52,7 +52,7 @@ The only production-source delta from the running recovery source is the immutab
 
 ## Requested one-time execution scope
 
-The first limited upgrade authorization has been used. The alleged older internal request remains unidentified; the successful upgrade does not establish cancellation. A second upgrade therefore requires a **new explicit authorization accepting that same unresolved earlier-request risk**, through the normal approval system.
+The first limited upgrade authorization has been used. A second upgrade requires a **new explicit authorization** through the normal approval system.
 
 If approved: freshly revalidate the exact release, identity/admin/controllers, root sole writer, actual state/census/source bindings and a new downloaded verified snapshot; perform one upgrade of points canister `bfnu3-6aaaa-aaaab-qhanq-cai` to the exact gzip above. Preserve normal20 opening/seed/coverage and all456 ordinary rows/current totals. Stop on unknown outcomes or unexpected drift. Do not switch executor or bypass review.
 
