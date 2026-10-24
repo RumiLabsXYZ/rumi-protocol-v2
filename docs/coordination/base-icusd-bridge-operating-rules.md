@@ -38,15 +38,18 @@ Scope and limits (unchanged by the approval):
 4. The approval does not touch any other hold: merge, deploy, governance, controller or role
    changes, live signing or broadcast, and funding all stay held.
 
-Event rule: after each material change to the canonical board, re-derive the projection, run the
-scoped publisher with `--dry-run`, publish the changed snapshot, then verify the readback and a
-no-op republish, and record the published revision and source hash on the board. No hourly
-monitor or additional timer.
+Event rule (owned by this worktree's coordinator under Rob's standing approval; no setup-owner or
+root approval needed): after each material change to the canonical board, re-derive the
+projection and run the scoped publisher with `--dry-run`. If it reports a change, publish with
+`--publish`, then confirm an immediate `--dry-run` reports the exact source as already published
+(no-op). Never republish identical data. Record each published revision and source revision in
+the local publisher record outside this public repository, not here. No hourly monitor or
+additional timer.
 
-Cutover gate: the Lookout setup owner is performing the initial seed and current-source cutover.
-Routine event publishing from this worktree starts only after that owner confirms the cutover is
-complete, so this worktree never races or overwrites the initial snapshot. Until then the board
-and projection are kept current locally.
+First publication (2026-10-24): the Lookout setup owner completed the initial cutover and
+published this projection; the immediate readback was an exact no-op, and this worktree's own
+`--dry-run` afterwards confirmed no change. The publisher's manifest reads the projection file
+directly, so the board and its single derived projection remain the only source.
 
 History (resolved): on 2026-10-24 the setup owner's automatic approval review rejected the first
 Rumi operational snapshot upload, because approval of the exact payload and private destination

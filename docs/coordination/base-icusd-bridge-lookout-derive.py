@@ -9,7 +9,7 @@ only: card id, state, owner role, scope and a short evidence text with its proof
 level. Paths, hashes longer than a short commit id, addresses and URLs are removed.
 This script never uploads anything. Publishing is done separately by the scoped Lookout
 publisher under the event rule and limits in base-icusd-bridge-operating-rules.md
-(sanitized board metadata only, after the setup owner's cutover confirmation).
+(sanitized board metadata only; only changed snapshots are published).
 """
 
 import json

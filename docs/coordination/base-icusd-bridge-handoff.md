@@ -208,9 +208,10 @@ time on the same Wasm from a clean tree.
   draft PR milestone, relying on the recorded local evidence without rerunning suites. This is
   not production safety, live readiness, or merge, deploy, signing, funding or role approval.
 - Rob approved uploading this board's sanitized snapshot and future sanitized updates to his
-  private Lookout backend (verified by Miles). The first-upload hold is resolved; routine event
-  publishing starts after the setup owner confirms the initial cutover. Rules and limits:
-  `base-icusd-bridge-operating-rules.md`.
+  private Lookout backend (verified by Miles). The first-upload hold is resolved. After the setup
+  owner's cutover the snapshot was published and its readback verified as a no-op; this
+  worktree's coordinator owns syncing each changed sanitized checkpoint from here on. Rules and
+  limits: `base-icusd-bridge-operating-rules.md`.
 
 ## Held live actions
 

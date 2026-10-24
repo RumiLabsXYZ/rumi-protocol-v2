@@ -8,7 +8,7 @@ This is the single canonical board for the ICP icUSD <-> Base bridge work.
 - Coordinator: Claude (Opus 5.5, main thread). Supervisor: Miles (Codex), for Rob.
 - Boundaries: no merge, no deploy, no live signing or broadcast, no funds movement, no controller/role changes.
 - Delivery: local implementation complete; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged, not deployed. Miles (supervisor) accepted the local implementation and reviewable draft PR milestone at `5fdf2145`, relying on the recorded local test and review evidence. That acceptance is not production safety, live readiness, or approval to merge, deploy, sign, fund or change roles.
-- Lookout: Rob approved uploading this board's sanitized metadata to his private Lookout backend, and future sanitized updates (2026-10-24, verified by Miles; see `base-icusd-bridge-operating-rules.md`). Routine event publishing starts after the Lookout setup owner confirms the initial cutover; nothing has been published from this worktree yet.
+- Lookout: Rob approved uploading this board's sanitized metadata to his private Lookout backend, and future sanitized updates (2026-10-24, verified by Miles; see `base-icusd-bridge-operating-rules.md`). The first snapshot was published after the setup owner's cutover and verified as a no-op readback; this worktree's coordinator now publishes each changed sanitized checkpoint (see the event rule there).
 
 ## Proof levels
 
@@ -70,7 +70,7 @@ No card may claim a live, testnet, or mainnet proof level. Live work is listed u
 - Any mainnet deploy, controller change, contract role assignment, live signing/broadcast, or funding.
 - Worktree removal pass (`scripts/cleanup_worktrees.sh --remove-eligible`): denied by the permission classifier on 2026-10-24; dry run showed 0 eligible anyway.
 
-Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-review rejection) was cleared by Rob's approval of sanitized board metadata uploads; publishing from this worktree waits only for the setup owner's cutover confirmation.
+Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-review rejection) was cleared by Rob's approval of sanitized board metadata uploads, and the first snapshot has been published and verified.
 
 ## Change log
 
@@ -82,3 +82,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-24: round-2 follow-ups committed as frozen candidate `eab65670` (Wasm sha256 `de4ad399550504d7ab06b5d7299cce4f20d9ea81e34ea75a69d743a3fb2eacf6`); all four PocketIC suites ran on that exact Wasm; round 3 (fresh A and B) started on it.
 - 2026-10-24: round 3 on `eab65670` (A PASS, B FAIL); fixes in `8f2abbfc`; fresh re-check PASS; test and doc follow-ups in `fb005f1b` (Wasm unchanged); PR description updated.
 - 2026-10-24: supervisor accepted the local implementation and draft PR milestone at `5fdf2145`; Rob approved sanitized Lookout uploads, so the first-upload hold is resolved; event publishing waits for the setup owner's cutover confirmation.
+- 2026-10-24: Lookout cutover confirmed by the setup owner; first snapshot published and verified as a no-op readback; this worktree's `--dry-run` confirms no change; routine sync of changed checkpoints is owned here.
