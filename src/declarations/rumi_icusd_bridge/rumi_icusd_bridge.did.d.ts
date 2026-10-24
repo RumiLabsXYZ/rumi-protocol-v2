@@ -257,9 +257,11 @@ export interface ObserverConfig {
 }
 export interface ObserverStatus {
   'last_error' : [] | [string],
+  'deferred_since_ns' : [] | [bigint],
   'last_run_ns' : [] | [bigint],
   'processed_count' : bigint,
   'cursor_block' : bigint,
+  'deferred_reason' : [] | [string],
   'pending_hints' : Array<HintView>,
   'last_finalized_block' : [] | [bigint],
 }

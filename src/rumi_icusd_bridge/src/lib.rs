@@ -292,6 +292,100 @@ fn bridge_version() -> String {
     ids::CONTRACT_VERSION.to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Ingress pre-filter (cycle-drain protection)
+// ---------------------------------------------------------------------------
+
+/// Who an ingress call to a method is worth executing for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IngressAccess {
+    /// Wallet standards: anyone, anonymous included (a wallet asks before the user signs).
+    Anyone,
+    /// Any authenticated principal. The method decides the rest.
+    Authenticated,
+    /// A configured admin. Controllers also pass this filter (the method itself still
+    /// requires an admin).
+    Admin,
+    /// A canister controller.
+    Controller,
+}
+
+/// Every method that may legitimately arrive as an ingress UPDATE call, with the callers
+/// it is worth running for. Anything not listed is refused before execution. A new update
+/// endpoint must be added here; `every_update_endpoint_has_an_ingress_decision` fails
+/// until it is.
+///
+/// The two `Anyone` entries that are queries here (ICRC-28, ICRC-10) never run as
+/// updates, they are listed so the standards stay open to anonymous callers if they are
+/// ever served as updates.
+const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
+    // Wallet standards.
+    ("icrc21_canister_call_consent_message", IngressAccess::Anyone),
+    ("icrc28_trusted_origins", IngressAccess::Anyone),
+    ("icrc10_supported_standards", IngressAccess::Anyone),
+    // User methods.
+    ("bridge_to_base", IngressAccess::Authenticated),
+    ("notify_base_bridge_out", IngressAccess::Authenticated),
+    ("request_deposit_refund", IngressAccess::Authenticated),
+    ("get_base_addresses", IngressAccess::Authenticated),
+    // Admin methods.
+    ("admin_set_pauses", IngressAccess::Admin),
+    ("admin_set_limits", IngressAccess::Admin),
+    ("admin_set_fees", IngressAccess::Admin),
+    ("admin_set_gas", IngressAccess::Admin),
+    ("admin_set_observer_config", IngressAccess::Admin),
+    ("admin_bind_contract", IngressAccess::Admin),
+    ("admin_sweep_fees", IngressAccess::Admin),
+    ("admin_submit_contract_action", IngressAccess::Admin),
+    ("admin_cancel_stuck_tx", IngressAccess::Admin),
+    ("admin_clear_lane_halt", IngressAccess::Admin),
+    ("admin_retry_deposit", IngressAccess::Admin),
+    ("admin_reconcile", IngressAccess::Admin),
+    ("admin_clear_halt", IngressAccess::Admin),
+    ("admin_run_tick", IngressAccess::Admin),
+    // Controller methods.
+    ("admin_set_rpc_services", IngressAccess::Controller),
+    ("set_admins", IngressAccess::Controller),
+];
+
+fn ingress_access(method: &str) -> Option<IngressAccess> {
+    INGRESS_METHODS.iter().find(|(name, _)| *name == method).map(|(_, access)| *access)
+}
+
+/// Whether an ingress update call is worth executing. Pure, so the table above is unit
+/// tested. NOT a security boundary: it runs on one replica without consensus. Every
+/// method keeps its own caller checks, which are what protect state and funds.
+fn decide(method: &str, caller_is_anonymous: bool, is_admin: bool, is_controller: bool) -> bool {
+    match ingress_access(method) {
+        // Not a known update method (a query name, a typo, a probe): nothing to run.
+        None => false,
+        Some(IngressAccess::Anyone) => true,
+        Some(_) if caller_is_anonymous => false,
+        Some(IngressAccess::Authenticated) => true,
+        Some(IngressAccess::Admin) => is_admin || is_controller,
+        Some(IngressAccess::Controller) => is_controller,
+    }
+}
+
+/// Runs on a single replica before consensus and costs nothing if it refuses, so
+/// anonymous callers and callers that cannot pass the method's own check do not make the
+/// canister pay for Candid decoding and execution.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::call::method_name();
+    let caller = ic_cdk::api::caller();
+    let anonymous = caller == Principal::anonymous();
+    // Only the role checks the method's table entry might need; skipped for anonymous.
+    let (is_admin, is_controller) = if anonymous {
+        (false, false)
+    } else {
+        (state::read_core(|c| c.is_admin(&caller)), ic_cdk::api::is_controller(&caller))
+    };
+    if decide(&method, anonymous, is_admin, is_controller) {
+        ic_cdk::api::call::accept_message();
+    }
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -310,5 +404,232 @@ mod candid_tests {
         let checked_in = std::fs::read_to_string(&path).expect("read rumi_icusd_bridge.did");
         service_equal(CandidSource::Text(&generated), CandidSource::Text(&checked_in))
             .expect("rumi_icusd_bridge.did is out of date; regenerate it");
+    }
+}
+
+#[cfg(test)]
+mod ingress_tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const SRC_LIB: &str = include_str!("lib.rs");
+    const SRC_ADMIN: &str = include_str!("admin.rs");
+
+    /// `(attribute, fn name, body)` of every endpoint in `lib.rs` carrying `attr`.
+    fn endpoints(attr: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = SRC_LIB.lines().collect();
+        let mut out = vec![];
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].trim() == attr {
+                let mut j = i + 1;
+                while lines[j].trim().starts_with("#[") {
+                    j += 1;
+                }
+                let sig = lines[j].trim();
+                let rest = sig.strip_prefix("pub ").unwrap_or(sig);
+                let rest = rest.strip_prefix("async ").unwrap_or(rest);
+                let rest = rest.strip_prefix("fn ").unwrap_or_else(|| panic!("fn expected after {attr}: {sig}"));
+                let name = rest.split(['(', '<']).next().unwrap().to_string();
+                let mut body = String::new();
+                let mut k = j;
+                loop {
+                    body.push_str(lines[k]);
+                    body.push('\n');
+                    if lines[k] == "}" {
+                        break;
+                    }
+                    k += 1;
+                }
+                out.push((name, body));
+                i = k;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Top-level function bodies of `admin.rs`, without the test module.
+    fn admin_fn_bodies() -> BTreeMap<String, String> {
+        let src = SRC_ADMIN.split("#[cfg(test)]").next().unwrap();
+        let mut out: BTreeMap<String, String> = BTreeMap::new();
+        let mut current: Option<String> = None;
+        for line in src.lines() {
+            let head = ["pub async fn ", "pub fn ", "async fn ", "fn "].iter().find_map(|p| line.strip_prefix(p));
+            if let Some(rest) = head {
+                let name = rest.split(['(', '<']).next().unwrap().to_string();
+                out.insert(name.clone(), String::new());
+                current = Some(name);
+            }
+            if let Some(name) = &current {
+                let body = out.get_mut(name).unwrap();
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        out
+    }
+
+    /// What the method itself demands, read from the source: the strongest of
+    /// `require_controller` and `require_admin` reached directly or through `admin::f(..)`.
+    fn demanded_role(body: &str, admin_fns: &BTreeMap<String, String>) -> Option<IngressAccess> {
+        let mut texts = vec![body.to_string()];
+        for (name, text) in admin_fns {
+            if body.contains(&format!("admin::{name}(")) {
+                texts.push(text.clone());
+            }
+        }
+        if texts.iter().any(|t| t.contains("require_controller()")) {
+            Some(IngressAccess::Controller)
+        } else if texts.iter().any(|t| t.contains("require_admin()")) {
+            Some(IngressAccess::Admin)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn every_update_endpoint_has_an_ingress_decision() {
+        let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().map(|(n, _)| n).collect();
+        assert!(updates.len() >= 20, "the scan found {} update endpoints", updates.len());
+        let listed: BTreeSet<String> = INGRESS_METHODS.iter().map(|(n, _)| n.to_string()).collect();
+        let missing: Vec<_> = updates.difference(&listed).collect();
+        assert!(missing.is_empty(), "update endpoints without an ingress decision (add them to INGRESS_METHODS): {missing:?}");
+        // Anything listed that is not an update must be one of the two standards queries.
+        let queries: BTreeSet<String> = endpoints("#[ic_cdk::query]").into_iter().map(|(n, _)| n).collect();
+        let extra: Vec<_> = listed.difference(&updates).cloned().collect();
+        assert_eq!(extra, vec!["icrc10_supported_standards".to_string(), "icrc28_trusted_origins".to_string()]);
+        assert!(extra.iter().all(|n| queries.contains(n)), "{extra:?}");
+        // No duplicates.
+        assert_eq!(listed.len(), INGRESS_METHODS.len());
+        // The explicit list of update endpoints this decision table was written for.
+        let expected: BTreeSet<String> = [
+            "bridge_to_base",
+            "notify_base_bridge_out",
+            "request_deposit_refund",
+            "get_base_addresses",
+            "admin_set_pauses",
+            "admin_set_limits",
+            "admin_set_fees",
+            "admin_set_gas",
+            "admin_set_observer_config",
+            "admin_set_rpc_services",
+            "admin_bind_contract",
+            "admin_sweep_fees",
+            "admin_submit_contract_action",
+            "admin_cancel_stuck_tx",
+            "admin_clear_lane_halt",
+            "admin_retry_deposit",
+            "admin_reconcile",
+            "admin_clear_halt",
+            "admin_run_tick",
+            "set_admins",
+            "icrc21_canister_call_consent_message",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(updates, expected);
+    }
+
+    #[test]
+    fn the_filter_matches_what_each_method_demands_of_its_caller() {
+        let admin_fns = admin_fn_bodies();
+        for (name, body) in endpoints("#[ic_cdk::update]") {
+            let access = ingress_access(&name).unwrap_or_else(|| panic!("{name} has no decision"));
+            let demanded = demanded_role(&body, &admin_fns);
+            match demanded {
+                Some(IngressAccess::Controller) => assert_eq!(access, IngressAccess::Controller, "{name} requires a controller"),
+                Some(IngressAccess::Admin) => assert_eq!(access, IngressAccess::Admin, "{name} requires an admin"),
+                _ => assert!(
+                    matches!(access, IngressAccess::Anyone | IngressAccess::Authenticated),
+                    "{name} demands no role, so the filter must not demand one either"
+                ),
+            }
+            if name.starts_with("admin_") {
+                assert!(demanded.is_some(), "{name} is named admin_ but its body checks no role");
+            }
+        }
+    }
+
+    const ANON: (bool, bool, bool) = (true, false, false);
+    const USER: (bool, bool, bool) = (false, false, false);
+    const ADMIN: (bool, bool, bool) = (false, true, false);
+    const CONTROLLER: (bool, bool, bool) = (false, false, true);
+    const BOTH: (bool, bool, bool) = (false, true, true);
+
+    fn d(method: &str, who: (bool, bool, bool)) -> bool {
+        decide(method, who.0, who.1, who.2)
+    }
+
+    #[test]
+    fn standards_are_open_to_everyone_including_anonymous() {
+        for m in ["icrc21_canister_call_consent_message", "icrc28_trusted_origins", "icrc10_supported_standards"] {
+            for who in [ANON, USER, ADMIN, CONTROLLER, BOTH] {
+                assert!(d(m, who), "{m} {who:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn user_methods_need_an_authenticated_caller() {
+        for m in ["bridge_to_base", "notify_base_bridge_out", "request_deposit_refund", "get_base_addresses"] {
+            assert!(!d(m, ANON), "{m} anonymous");
+            for who in [USER, ADMIN, CONTROLLER, BOTH] {
+                assert!(d(m, who), "{m} {who:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn admin_methods_need_an_admin_or_a_controller() {
+        for (m, access) in INGRESS_METHODS {
+            if !m.starts_with("admin_") || *access != IngressAccess::Admin {
+                continue;
+            }
+            assert!(!d(m, ANON), "{m} anonymous");
+            assert!(!d(m, USER), "{m} plain user");
+            for who in [ADMIN, CONTROLLER, BOTH] {
+                assert!(d(m, who), "{m} {who:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn controller_methods_need_a_controller() {
+        for m in ["admin_set_rpc_services", "set_admins"] {
+            assert!(!d(m, ANON), "{m} anonymous");
+            assert!(!d(m, USER), "{m} plain user");
+            assert!(!d(m, ADMIN), "{m} an admin that is not a controller");
+            assert!(d(m, CONTROLLER), "{m} controller");
+            assert!(d(m, BOTH), "{m} controller and admin");
+        }
+    }
+
+    #[test]
+    fn a_controller_flag_never_lets_an_anonymous_caller_through() {
+        // The anonymous principal can be a controller (PocketIC creates canisters that
+        // way). Anonymous ingress is still refused for every role-bound method.
+        for (m, access) in INGRESS_METHODS {
+            if *access != IngressAccess::Anyone {
+                assert!(!decide(m, true, true, true), "{m}");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_methods_are_refused_for_everyone() {
+        for m in ["get_bridge_info", "get_deposit", "list_my_deposits", "bridge_version", "no_such_method", "", "Admin_set_pauses", "admin_set_pauses "] {
+            for who in [ANON, USER, ADMIN, CONTROLLER, BOTH] {
+                assert!(!d(m, who), "{m:?} {who:?}");
+            }
+        }
+        // Query endpoints are refused as updates: they have no update entry point.
+        for (m, _) in endpoints("#[ic_cdk::query]") {
+            if m == "icrc28_trusted_origins" || m == "icrc10_supported_standards" {
+                continue;
+            }
+            assert!(!d(&m, BOTH), "query {m} must not be accepted as an update");
+        }
     }
 }

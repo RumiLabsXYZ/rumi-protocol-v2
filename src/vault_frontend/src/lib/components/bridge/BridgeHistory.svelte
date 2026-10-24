@@ -2,6 +2,7 @@
   import type { Principal } from '@dfinity/principal';
   import { formatE8s } from '$lib/services/baseBridge/amounts';
   import type { BridgeConfig } from '$lib/services/baseBridge/chains';
+  import { displayAddress } from '$lib/services/baseBridge/eip55';
   import { captureSessionGuard, getAnonymousBridge } from '$lib/services/baseBridge/bridgeActor';
   import {
     describeDeposit,
@@ -79,7 +80,7 @@
     {#if history && history.deposits.length > 0}
       <ul>
         {#each history.deposits as deposit (deposit.id)}
-          {@const display = describeDeposit(deposit, { principal: principalText })}
+          {@const display = describeDeposit(deposit, { principal: principalText, awaitingGas: config.minterAwaitingGas })}
           <li>
             <div class="line">
               <span>#{deposit.id} · {formatE8s(deposit.amount_e8s)} icUSD</span>
@@ -87,7 +88,7 @@
             </div>
             <div class="sub">
               <span>{formatTimestampNs(deposit.created_at_ns)}</span>
-              <span>to <code title={deposit.base_recipient}>{shortAddress(deposit.base_recipient)}</code></span>
+              <span>to <code title={displayAddress(deposit.base_recipient)}>{shortAddress(displayAddress(deposit.base_recipient))}</code></span>
               {#if deposit.delivered[0]}<TxLink hash={deposit.delivered[0].tx_hash} chain={config.chain} label="Delivered in" />{/if}
             </div>
           </li>

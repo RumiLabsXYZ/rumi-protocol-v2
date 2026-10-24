@@ -14,6 +14,7 @@ import {
   parseChainId,
   resolveBridgeConfig,
 } from './chains';
+import { makeLane } from './testSupport';
 
 const LEDGER = Principal.fromText('t6bor-paaaa-aaaap-qrd5q-cai');
 const CONTRACT = '0xAbCdEf0123456789aBcDeF0123456789AbCdEf01';
@@ -111,6 +112,31 @@ describe('chain table', () => {
       blockExplorerUrls: ['https://basescan.org'],
     });
     expect(addChainParams(BASE_LOCAL)).not.toHaveProperty('blockExplorerUrls');
+  });
+});
+
+describe('resolveBridgeConfig: Minter lane gas', () => {
+  function awaiting(lanes: Array<['Minter' | 'Admin', boolean]>) {
+    const result = resolveBridgeConfig(info({ lanes: lanes.map(([kind, gas]) => makeLane(kind, { awaiting_gas: gas })) }));
+    if (!result.ok) throw new Error('unreachable');
+    return result.config.minterAwaitingGas;
+  }
+
+  it('is true only when the Minter lane is awaiting gas', () => {
+    expect(awaiting([['Minter', true], ['Admin', false]])).toBe(true);
+    expect(awaiting([['Admin', false], ['Minter', true]])).toBe(true);
+    expect(awaiting([['Minter', false], ['Admin', false]])).toBe(false);
+  });
+
+  it('ignores the Admin lane, which never affects users', () => {
+    expect(awaiting([['Minter', false], ['Admin', true]])).toBe(false);
+    expect(awaiting([['Admin', true]])).toBe(false);
+  });
+
+  it('treats an absent or empty lane list as not waiting', () => {
+    expect(awaiting([])).toBe(false);
+    const missing = resolveBridgeConfig({ ...info(), lanes: undefined } as unknown as BridgeInfo);
+    expect(missing.ok && missing.config.minterAwaitingGas).toBe(false);
   });
 });
 

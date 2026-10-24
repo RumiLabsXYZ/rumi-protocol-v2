@@ -249,9 +249,11 @@ export const idlFactory = ({ IDL }) => {
   });
   const ObserverStatus = IDL.Record({
     'last_error' : IDL.Opt(IDL.Text),
+    'deferred_since_ns' : IDL.Opt(IDL.Nat64),
     'last_run_ns' : IDL.Opt(IDL.Nat64),
     'processed_count' : IDL.Nat64,
     'cursor_block' : IDL.Nat64,
+    'deferred_reason' : IDL.Opt(IDL.Text),
     'pending_hints' : IDL.Vec(HintView),
     'last_finalized_block' : IDL.Opt(IDL.Nat64),
   });

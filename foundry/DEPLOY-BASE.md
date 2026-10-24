@@ -120,6 +120,12 @@ Record the `BridgedIcUSD deployed at:` address and deploy tx hash from `foundry/
 
 ## 10. HELD: configure and bind
 
+0. Read-only checks first. The ledger must report 8 decimals and the expected symbol (the bridge does not verify ledger metadata itself), and `get_bridge_info` must show `mint_gas_limit` of at least 250,000 (default 300,000) and `admin_gas_limit` of at least 80,000 (default 100,000). The most expensive mint measured on anvil uses 152,390 gas.
+   ```bash
+   $ICP canister call <ledger id> icrc1_decimals '()' --environment <ic-env>
+   $ICP canister call <ledger id> icrc1_symbol '()' --environment <ic-env>
+   $ICP canister call rumi-icusd-bridge-test get_bridge_info '()' --environment <ic-env>
+   ```
 1. Set limits inside the contract limits: `max_outstanding_e8s` at most the supply cap, `mint_window_limit_e8s` at most the contract window limit, `window_seconds` at least the contract window, and `min_deposit_e8s` at least the contract minimum bridge-out.
    ```bash
    $ICP canister call rumi-icusd-bridge-test admin_set_limits '(record { min_deposit_e8s = 100_000_000 : nat64; max_deposit_e8s = 1_000_000_000 : nat64; max_outstanding_e8s = 10_000_000_000 : nat64; mint_window_limit_e8s = 10_000_000_000 : nat64; release_window_limit_e8s = 10_000_000_000 : nat64; window_seconds = 86_400 : nat64; max_active_per_caller = 5 : nat32; max_active_global = 500 : nat32 })' --environment <ic-env> --identity rumi_identity
@@ -248,3 +254,5 @@ Note: design section 7.10 names `admin_retry_operation` and `list_releases_for_a
 - The real icUSD ledger `t6bor-paaaa-aaaap-qrd5q-cai` instead of a test ledger, with conservative caps.
 - Controller and admin authority: who holds controller status, and whether admin is a governed principal rather than `rumi_identity`.
 - The pre-deploy test hook (`.claude/hooks/pre-deploy-test.sh`) applies to mainnet deploys.
+- Repeat the "first mint after the contract mint window has elapsed" check on Base Sepolia (wait one contract mint window after deploying, then bridge to a recipient whose address has no zero bytes) and confirm the receipt's `gasUsed` stays below 80% of `mint_gas_limit`.
+- Watch `lanes[].awaiting_gas` and the observer's deferral fields in `get_bridge_info`; a funded minter is a precondition for every delivery, and the page tells users when deliveries wait for gas.

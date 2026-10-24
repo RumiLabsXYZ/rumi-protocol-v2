@@ -15,12 +15,23 @@ import type {
   _SERVICE as BridgeService,
 } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
 import { formatE8s } from './amounts';
+import { displayAddress } from './eip55';
 import type { EvmReceipt } from './evmWallet';
 
 export type Tone = 'pending' | 'success' | 'warning' | 'error';
 
-/** Wording for the expected settlement delay, shared by every surface. */
+/** Wording for the Base finality delay on the Base to ICP side. */
 export const FINALITY_NOTE = 'about 20 minutes';
+
+/**
+ * Wording for how long an ICP to Base delivery takes. Finality alone is about 20
+ * minutes; a busy bridge (a mint queue, a low gas balance) adds to that.
+ */
+export const DEPOSIT_DELIVERY_NOTE = 'usually about 20 minutes, longer when the bridge is busy';
+
+/** Shown on the bridge page and in deposit status while the Minter lane has no Base gas. */
+export const GAS_NOTICE_MESSAGE =
+  "Base deliveries are waiting: the bridge's Base gas balance is low. Your icUSD stays in escrow and will be delivered once gas is restored.";
 
 // ---------------------------------------------------------------------------
 // ICP -> Base: deposit status
@@ -31,6 +42,7 @@ export type DepositStage =
   | 'pull_unknown'
   | 'pull_failed'
   | 'escrowed'
+  | 'awaiting_gas'
   | 'minting'
   | 'included'
   | 'delivered'
@@ -57,6 +69,24 @@ export interface DepositDisplay {
 export interface DepositContext {
   /** Text form of the signed-in ICP principal. */
   principal?: string | null;
+  /**
+   * True while the bridge's Minter lane reports it has no Base gas
+   * (`BridgeConfig.minterAwaitingGas`). Deposits whose mint has not been sent yet
+   * are then described as waiting for gas instead of being sent.
+   */
+  awaitingGas?: boolean;
+}
+
+/** A deposit whose mint is not on Base yet, described while the Minter lane lacks gas. */
+function awaitingGasDisplay(base: { canRefund: false; finalized: false; terminal: false }): DepositDisplay {
+  return {
+    ...base,
+    stage: 'awaiting_gas',
+    label: 'Waiting for bridge gas',
+    detail:
+      "Your icUSD is locked in escrow, but the bridge's Base gas balance is low, so the mint has not been sent to Base yet. It will be sent and delivered once gas is restored. Nothing is lost while it waits.",
+    tone: 'warning',
+  };
 }
 
 function variantKey(value: object): string {
@@ -102,6 +132,7 @@ export function describeDeposit(view: DepositView, ctx: DepositContext = {}): De
       };
     }
     case 'Escrowed':
+      if (ctx.awaitingGas) return awaitingGasDisplay(base);
       return {
         ...base,
         stage: 'escrowed',
@@ -116,7 +147,7 @@ export function describeDeposit(view: DepositView, ctx: DepositContext = {}): De
           ...base,
           stage: 'included',
           label: `Included on Base (block ${blockNumber})`,
-          detail: `The mint is on Base but not final yet. The bridge counts it as delivered after Base L1 batch finality, ${FINALITY_NOTE}.`,
+          detail: `The mint is on Base but not final yet. The bridge counts it as delivered after Base L1 batch finality, ${DEPOSIT_DELIVERY_NOTE}.`,
           tone: 'pending',
           blockNumber,
         };
@@ -133,6 +164,8 @@ export function describeDeposit(view: DepositView, ctx: DepositContext = {}): De
         };
       }
       const reverted = stageKey === 'Finalized';
+      // No attempt was ever signed, so nothing has been sent to Base: with no gas, it is waiting rather than being sent.
+      if (ctx.awaitingGas && !reverted && (view.mint_tx_hashes ?? []).length === 0) return awaitingGasDisplay(base);
       return {
         ...base,
         stage: 'minting',
@@ -149,7 +182,7 @@ export function describeDeposit(view: DepositView, ctx: DepositContext = {}): De
         ...base,
         stage: 'delivered',
         label: 'Delivered (finalized)',
-        detail: `${formatE8s(view.mint_amount_e8s)} icUSD was minted on Base to ${view.base_recipient}.`,
+        detail: `${formatE8s(view.mint_amount_e8s)} icUSD was minted on Base to ${displayAddress(view.base_recipient)}.`,
         tone: 'success',
         terminal: true,
         finalized: true,

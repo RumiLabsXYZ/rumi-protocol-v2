@@ -13,6 +13,7 @@
 import { writable, type Readable } from 'svelte/store';
 import { addChainParams, parseChainId, type BaseChainConfig } from './chains';
 import { isAddress, isBytes32 } from './abi';
+import { checksumStatus } from './eip55';
 
 export interface Eip1193Provider {
   request(args: { method: string; params?: unknown[] | Record<string, unknown> }): Promise<unknown>;
@@ -156,9 +157,16 @@ export async function requestAccounts(provider: Eip1193Provider): Promise<string
   return normalizeAccounts(await rpc(provider, 'eth_requestAccounts'));
 }
 
+/**
+ * Wallet-reported accounts, lower-cased. An entry is dropped when it is malformed or when its mixed-case
+ * EIP-55 checksum is verifiably wrong. A mixed-case entry that cannot be verified (no Keccak-256
+ * configured) is kept: it came from the user's own wallet, not from a typed or pasted address.
+ */
 function normalizeAccounts(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => isAddress(entry)).map((entry) => entry.toLowerCase());
+  return value
+    .filter((entry): entry is string => isAddress(entry) && checksumStatus(entry) !== 'invalid')
+    .map((entry) => entry.toLowerCase());
 }
 
 export async function ethCall(provider: Eip1193Provider, to: string, data: string, from?: string): Promise<string> {

@@ -5,6 +5,7 @@
   import { walletSessionGeneration } from '$lib/services/auth';
   import { formatE8s, tryParseE8s } from '$lib/services/baseBridge/amounts';
   import type { BridgeConfig } from '$lib/services/baseBridge/chains';
+  import { displayAddress } from '$lib/services/baseBridge/eip55';
   import type { EvmWalletState } from '$lib/services/baseBridge/evmWallet';
   import type { IcpToBaseIntent, IntentStore } from '$lib/services/baseBridge/intents';
   import {
@@ -34,7 +35,7 @@
     type IcpToBaseEvent,
     type IcpToBaseState,
   } from '$lib/services/baseBridge/icpToBase';
-  import { describeDeposit } from '$lib/services/baseBridge/status';
+  import { DEPOSIT_DELIVERY_NOTE, describeDeposit } from '$lib/services/baseBridge/status';
   import DepositStatusCard from './DepositStatusCard.svelte';
 
   interface Props {
@@ -66,7 +67,18 @@
   const bridgeBlocked = $derived(config.depositsPaused || !!config.halted);
   const busy = $derived(flow.kind === 'quoting' || flow.kind === 'approving' || flow.kind === 'submitting');
   const inputsLocked = $derived(busy || flow.kind === 'uncertain' || flow.kind === 'approved');
-  const trackedDisplay = $derived(flow.kind === 'tracking' ? describeDeposit(flow.deposit, { principal: principalText }) : null);
+  const trackedDisplay = $derived(
+    flow.kind === 'tracking' ? describeDeposit(flow.deposit, { principal: principalText, awaitingGas: config.minterAwaitingGas }) : null,
+  );
+  /**
+   * A recipient that mixes upper and lower case must carry a valid EIP-55 checksum. This is checked while
+   * typing and blocks the review step, so a typo cannot reach the bridge. (Other problems are reported on submit.)
+   */
+  const recipientChecksumProblem = $derived.by(() => {
+    if (recipientText.trim() === '') return null;
+    const check = validateRecipient(recipientText, config.contract);
+    return !check.ok && (check.code === 'checksum' || check.code === 'checksum_unverifiable') ? check : null;
+  });
 
   /** Earlier requests on this device that never recorded an outcome (not the one on screen right now). */
   const unresolved = $derived.by(() => {
@@ -98,7 +110,7 @@
 
   // Default the recipient to the connected Base account until the user edits the field.
   $effect(() => {
-    if (!recipientTouched && wallet.account) recipientText = wallet.account;
+    if (!recipientTouched && wallet.account) recipientText = displayAddress(wallet.account);
   });
 
   // An ICP wallet session change abandons in-flight work. Intents stay on disk, keyed by principal.
@@ -269,7 +281,7 @@
     if (busy || !principal || !store) return;
     // Show what the earlier request was for, so the user can review it again if it needs re-approving.
     amountText = formatE8s(intent.amountE8s);
-    recipientText = intent.recipient;
+    recipientText = displayAddress(intent.recipient);
     recipientTouched = true;
     twoStep = needsSeparateApprovalClick();
     try {
@@ -324,7 +336,7 @@
   function useConnectedAccount() {
     if (!wallet.account) return;
     recipientTouched = false;
-    recipientText = wallet.account;
+    recipientText = displayAddress(wallet.account);
   }
 
   const fmt = (value: bigint) => formatE8s(value);
@@ -348,7 +360,7 @@
       <strong>Earlier request without a recorded outcome</strong>
       {#each unresolved as intent (intent.clientRequestId)}
         <div class="row">
-          <span>{fmt(intent.amountE8s)} icUSD to <code>{intent.recipient}</code></span>
+          <span>{fmt(intent.amountE8s)} icUSD to <code>{displayAddress(intent.recipient)}</code></span>
           <button type="button" class="btn-secondary small" onclick={() => resume(intent)} disabled={busy}>Check status</button>
         </div>
       {/each}
@@ -399,11 +411,16 @@
       placeholder="0x..."
       bind:value={recipientText}
       disabled={inputsLocked}
+      aria-invalid={recipientChecksumProblem ? 'true' : undefined}
+      aria-describedby={recipientChecksumProblem ? 'icp-recipient-error' : undefined}
       oninput={() => {
         recipientTouched = true;
         if (flow.kind === 'review' || flow.kind === 'fee_changed') flow = INITIAL_ICP_TO_BASE_STATE;
       }}
     />
+    {#if recipientChecksumProblem}
+      <p id="icp-recipient-error" class="banner bad" role="alert">{recipientChecksumProblem.message}</p>
+    {/if}
     <p class="small-note">The icUSD is minted to this address on {config.chain.name}. Double check it: a mistake cannot be undone.</p>
   </div>
 
@@ -412,7 +429,7 @@
   {/if}
 
   {#if flow.kind === 'draft' || flow.kind === 'error' || flow.kind === 'session_changed'}
-    <button type="button" class="btn-primary wide" onclick={review} disabled={!signedIn || bridgeBlocked || inputsLocked}>Review transfer</button>
+    <button type="button" class="btn-primary wide" onclick={review} disabled={!signedIn || bridgeBlocked || inputsLocked || !!recipientChecksumProblem}>Review transfer</button>
   {/if}
   {#if flow.kind === 'quoting'}
     <button type="button" class="btn-primary wide" disabled>Reading fees and allowance...</button>
@@ -438,10 +455,10 @@
           <div class="total"><dt>Total leaving your account</dt><dd>{fmt(quote.totalDebitE8s)} icUSD</dd></div>
           <div><dt>Bridge deposit fee, deducted from the mint</dt><dd>{fmt(quote.depositFeeE8s)} icUSD</dd></div>
           <div class="total"><dt>You receive on {config.chain.name}</dt><dd>{fmt(quote.mintAmountE8s)} icUSD</dd></div>
-          <div><dt>Recipient</dt><dd><code>{quote.recipient}</code></dd></div>
+          <div><dt>Recipient</dt><dd><code>{displayAddress(quote.recipient)}</code></dd></div>
         </dl>
         <p class="small-note">
-          Expected delivery: about 20 minutes after the deposit is escrowed (Base L1 batch finality).
+          Expected delivery after the deposit is escrowed: {DEPOSIT_DELIVERY_NOTE} (Base L1 batch finality).
           {#if quote.needsApproval && twoStep}
             Your wallet needs two separate confirmations. First click approves exactly {fmt(quote.requiredAllowanceE8s)} icUSD for the bridge, valid for {approvalMinutes} minutes. Then click Bridge to Base to confirm the transfer.
           {:else if quote.needsApproval}
@@ -495,7 +512,7 @@
         <div><dt>Amount to bridge</dt><dd>{fmt(flow.intent.amountE8s)} icUSD</dd></div>
         <div><dt>Bridge deposit fee, deducted from the mint</dt><dd>{fmt(flow.intent.expectedDepositFee)} icUSD</dd></div>
         <div class="total"><dt>You receive on {config.chain.name}</dt><dd>{fmt(flow.intent.amountE8s > flow.intent.expectedDepositFee ? flow.intent.amountE8s - flow.intent.expectedDepositFee : 0n)} icUSD</dd></div>
-        <div><dt>Recipient</dt><dd><code>{flow.intent.recipient}</code></dd></div>
+        <div><dt>Recipient</dt><dd><code>{displayAddress(flow.intent.recipient)}</code></dd></div>
       </dl>
       <p class="small-note">The icUSD ledger fee is charged on top. The approval expires about {approvalMinutes} minutes after it was granted; if it has expired the bridge will ask you to approve again.</p>
     </div>
@@ -528,6 +545,7 @@
       deposit={flow.deposit}
       principal={principalText}
       chain={config.chain}
+      awaitingGas={config.minterAwaitingGas}
       onRefund={refund}
       refundBusy={refundBusy || !signers}
       {refundMessage}

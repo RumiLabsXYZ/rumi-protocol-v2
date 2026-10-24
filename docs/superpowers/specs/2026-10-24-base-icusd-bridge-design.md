@@ -331,8 +331,17 @@ Two lanes (minter, admin), each with a persisted `next_nonce`, initialized once 
   Whichever attempt finalizes decides the outcome; a deposit can be refunded only when the finalized
   winner is not its mint and `mintConsumed(mintId)` is `false` at the finalized head.
 - The minter's ETH balance must cover `gas_limit * max_fee + min_gas_reserve_wei` before signing
-  (Base also charges an L1 data fee). Otherwise the lane waits in `AwaitingGas`. Gas is operator
-  funding, never paid from escrow.
+  (Base also charges an L1 data fee). Otherwise the lane waits in `AwaitingGas`, which the bridge
+  page shows. Gas is operator funding, never paid from escrow.
+- Gas limits: mint 300,000 by default (floor 250,000), admin 100,000 (floor 80,000), both at most
+  1,000,000. Measured on anvil, the most expensive mint (first mint ever, after the first mint window
+  ended, to a recipient with 20 non-zero bytes) uses 152,390 gas and the most expensive admin call (a
+  first pause) 46,905. The mint preflight `eth_call` carries the exact gas limit of the transaction,
+  so a limit that is too low becomes a preflight hold (retried automatically, no nonce used, nothing
+  signed) rather than a paid on-chain revert; the transaction is created only if the configured
+  limit still equals the simulated one.
+- Mint order: user deposits first; a re-mint starts only when no user deposit is waiting and fewer
+  than two re-mints are in flight, so recycled held burns cannot delay user deposits.
 
 ### 7.7 RPC and finality policy
 
@@ -347,9 +356,12 @@ Two lanes (minter, admin), each with a persisted `next_nonce`, initialized once 
 
 Canister: per-operation min/max, `max_outstanding`, daily mint window, daily release window, per-caller
 active operations (5), global active operations (500), fee hard caps, gas caps. Pauses:
-`deposits_paused`, `mints_paused`, `releases_paused`, `observer_paused`. `halted` is set automatically
-on C1/C2 violation, lane anomaly or unexpected ledger `InsufficientFunds`; only an admin can clear
-it, and only after the checks pass again. Pauses never erase liabilities or forget signed attempts;
+`deposits_paused`, `mints_paused`, `releases_paused`, `observer_paused`. The global `halted` flag is set
+automatically on a C1, C2 or C4 violation, an unexplained burn excess, an already-consumed mint id, or
+an unexpected ledger `InsufficientFunds`; only an admin can clear it, and only after the checks pass
+again (a C4 violation can never be cleared this way). A lane anomaly (nonce consumed with no matching
+receipt) halts only that lane and parks its transaction (see 11a, lane-halt escape policy); the rest
+of the bridge keeps running. Pauses never erase liabilities or forget signed attempts;
 reconciliation keeps running.
 
 Contract (defense in depth): `supplyCap`, per-window mint limit, `mintPaused`, `bridgeOutPaused`.
@@ -371,13 +383,18 @@ no call is in flight.
 
 New `rumi_icusd_bridge.did`, generated from Rust with `export_candid!` and checked by a test that the
 checked-in file is equal to the generated service. User methods: `bridge_to_base`, `get_deposit`,
-`list_my_deposits`, `get_release`, `list_releases_for_owner`, `notify_base_bridge_out`,
-`request_deposit_refund`, `get_bridge_info`, `get_supply_audit`, `get_base_addresses`, `get_audit_log`.
+`get_deposit_by_request`, `list_my_deposits`, `list_deposits_for_owner`, `get_release`,
+`list_releases_for_owner`, `list_releases_for_base_sender`, `notify_base_bridge_out`,
+`request_deposit_refund`, `get_bridge_info`, `get_supply_audit`, `get_base_addresses`,
+`get_audit_log`, `bridge_version`.
 Admin methods: `admin_set_pauses`, `admin_set_limits`, `admin_set_fees`, `admin_set_gas`,
 `admin_set_observer_config`, `admin_set_rpc_services`, `admin_bind_contract`, `admin_sweep_fees`,
 `admin_submit_contract_action`, `admin_cancel_stuck_tx`, `admin_retry_deposit`, `admin_reconcile`,
 `admin_clear_halt`, `admin_clear_lane_halt`, `admin_run_tick`, and `set_admins` (controllers). Also
-`icrc21_canister_call_consent_message` and `icrc10_supported_standards` for Oisy. Frontend bindings
+`icrc21_canister_call_consent_message`, `icrc28_trusted_origins` and `icrc10_supported_standards`
+for Oisy. An `inspect_message` filter rejects anonymous ingress to update methods (except the ICRC
+standard methods) and non-admin or non-controller ingress to admin and controller methods before
+execution; it is a cost filter only, and every method keeps its own checks. Frontend bindings
 come from `scripts/regenerate-declarations.sh`.
 
 ## 8. Frontend
@@ -400,7 +417,8 @@ needed. The canister is the settlement authority; the browser only shows hints.
 - **States shown:** pull pending, escrowed, mint pending, included on Base, finalized/delivered,
   held (with reason and refund action), refunding/refunded; wallet pending, rejected, submitted,
   included, awaiting finality, release pending, released, held/re-minted.
-- **Recovery:** history comes from `list_my_deposits` / `list_releases_for_account`; localStorage
+- **Recovery:** history comes from `list_my_deposits` / `list_releases_for_owner` (and
+`list_releases_for_base_sender` for a Base wallet); localStorage
   (`rumi:base-bridge:v1:<principal>`) stores only intents and hints. Uncertain outcomes are shown as
   uncertain; a second transfer is never started automatically. Wrong network, rejected approval,
   account changes (Base or ICP session), allowance shortfall, insufficient ETH for gas, and reloads
@@ -490,6 +508,17 @@ local-EVM execution (anvil).
   - Contract `totalMinted` and invariant C4 (above); bind requires `totalMinted() == 0`.
   - Oisy uses two clicks when an approval is needed (each signer call is the first signer call of
     its own click); Internet Identity and Plug keep one click.
+- **Review round 2 changes.**
+  - Releases are re-read per iteration and a prepared release never replaces an existing ledger
+    tuple, so overlapping ticks cannot pay one burn twice; the tick guard and both lane guards carry
+    an owner token so a slow run never clears a newer run's claim.
+  - A tick more than 60 s overdue is treated as lost and re-armed; held states no longer keep the
+    timer at the fast cadence; a burn waiting on in-flight mints is a typed deferral (no backoff),
+    and a long deferral is recorded and audited.
+  - Mint gas sizing, preflight simulation at the exact limit, and mint ordering (7.6).
+  - An ICRC-3 absence proof is applied only if the op is unchanged since the search started.
+  - Recipient addresses with mixed case must match their EIP-55 checksum (canister and page).
+  - `admin_set_rpc_services` checks the controller before its await and passes it through.
 - **No `icp.yaml` entry.** The bridge is deliberately absent from `icp.yaml` so a broad deploy can
   never create or install it by accident. `foundry/DEPLOY-BASE.md` uses explicit commands.
 

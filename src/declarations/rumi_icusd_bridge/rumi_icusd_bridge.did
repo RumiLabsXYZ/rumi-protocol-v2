@@ -237,9 +237,11 @@ type ObserverConfig = record {
 };
 type ObserverStatus = record {
   last_error : opt text;
+  deferred_since_ns : opt nat64;
   last_run_ns : opt nat64;
   processed_count : nat64;
   cursor_block : nat64;
+  deferred_reason : opt text;
   pending_hints : vec HintView;
   last_finalized_block : opt nat64;
 };

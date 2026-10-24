@@ -44,6 +44,12 @@ import { bytesToHex, hexToBytes, isAddress, isZeroAddress } from './abi';
 import { formatE8s, tryParseE8s } from './amounts';
 import type { BridgeConfig } from './chains';
 import {
+  CHECKSUM_ERROR_MESSAGE,
+  CHECKSUM_UNVERIFIABLE_MESSAGE,
+  checksumStatus,
+  type Keccak256,
+} from './eip55';
+import {
   IntentStoreError,
   intentId,
   isResolved,
@@ -75,14 +81,25 @@ export const QUOTE_MAX_AGE_MS = 2 * 60 * 1000;
 
 export type RecipientCheck =
   | { ok: true; address: string }
-  | { ok: false; code: 'empty' | 'format' | 'zero' | 'contract'; message: string };
+  | { ok: false; code: 'empty' | 'format' | 'checksum' | 'checksum_unverifiable' | 'zero' | 'contract'; message: string };
 
-/** Validate a Base recipient: 0x + 40 hex, not the zero address, not the bridge token contract. */
-export function validateRecipient(input: string, contract: string | null): RecipientCheck {
+/**
+ * Validate a Base recipient: 0x + 40 hex, a valid EIP-55 checksum when the hex
+ * mixes cases (all-lowercase and all-uppercase are accepted as unchecksummed),
+ * not the zero address, not the bridge token contract. The accepted address is
+ * returned lowercase, which is what is stored and sent to the canister.
+ * `hash` overrides the app's Keccak-256 (specs only).
+ */
+export function validateRecipient(input: string, contract: string | null, hash?: Keccak256 | null): RecipientCheck {
   const text = (input ?? '').trim();
   if (text === '') return { ok: false, code: 'empty', message: 'Enter the Base address that should receive the icUSD.' };
   if (!isAddress(text)) {
     return { ok: false, code: 'format', message: 'A Base address is 0x followed by 40 hexadecimal characters.' };
+  }
+  const checksum = checksumStatus(text, hash);
+  if (checksum === 'invalid') return { ok: false, code: 'checksum', message: CHECKSUM_ERROR_MESSAGE };
+  if (checksum === 'unverifiable') {
+    return { ok: false, code: 'checksum_unverifiable', message: CHECKSUM_UNVERIFIABLE_MESSAGE };
   }
   if (isZeroAddress(text)) {
     return { ok: false, code: 'zero', message: 'The zero address cannot receive icUSD.' };

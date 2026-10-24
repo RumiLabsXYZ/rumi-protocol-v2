@@ -183,9 +183,12 @@ pub fn validate_gas(s: &GasSettings) -> Result<(), String> {
     if s.max_fee_per_gas_wei > 1_000_000_000_000 {
         return Err("max_fee_per_gas above hard ceiling".into());
     }
-    for (name, v) in [("mint_gas_limit", s.mint_gas_limit), ("admin_gas_limit", s.admin_gas_limit)] {
-        if !(21_000..=1_000_000).contains(&v) {
-            return Err(format!("{name} must be in 21000..=1000000"));
+    for (name, v, min) in [
+        ("mint_gas_limit", s.mint_gas_limit, state::MIN_MINT_GAS_LIMIT),
+        ("admin_gas_limit", s.admin_gas_limit, state::MIN_ADMIN_GAS_LIMIT),
+    ] {
+        if !(min..=state::MAX_GAS_LIMIT).contains(&v) {
+            return Err(format!("{name} must be in {min}..={}", state::MAX_GAS_LIMIT));
         }
     }
     if s.replace_after_secs < 10 {
@@ -230,15 +233,17 @@ pub fn validate_observer(s: &ObserverSettings) -> Result<(), String> {
 /// replacing it is as powerful as an upgrade and stays with the controllers. The proposed
 /// set must answer `eth_chainId` with the configured chain by quorum before it is stored.
 pub async fn set_rpc_services(services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
-    require_controller()?;
+    // The caller is checked and captured before the await and passed through, so the
+    // store step never depends on reading the caller inside a response callback.
+    let caller = require_controller()?;
     let chain = state::read_core(|c| c.config.chain_id);
     validate_rpc_services(chain, &services, min_quorum).map_err(BridgeError::InvalidArgument)?;
     crate::evm::rpc::verify_chain_id_with(&services, min_quorum, chain).await.map_err(|e| BridgeError::Rpc(e.to_string()))?;
-    store_rpc_services(services, min_quorum)
+    store_rpc_services(caller, services, min_quorum)
 }
 
-fn store_rpc_services(services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
-    let caller = require_controller()?;
+fn store_rpc_services(caller: Principal, services: Vec<RpcServiceConfig>, min_quorum: u8) -> BridgeResult<()> {
+    // Re-validate after the await: the chain id cannot change, but keep the check local.
     let chain = state::read_core(|c| c.config.chain_id);
     validate_rpc_services(chain, &services, min_quorum).map_err(BridgeError::InvalidArgument)?;
     state::mutate_core(|c| {
@@ -345,16 +350,27 @@ mod tests {
 
     #[test]
     fn gas_and_observer_bounds() {
-        assert!(validate_gas(&GasSettings::default()).is_ok());
-        let mut g = GasSettings::default();
-        g.max_priority_fee_per_gas_wei = g.max_fee_per_gas_wei + 1;
-        assert!(validate_gas(&g).is_err());
-        let mut g = GasSettings::default();
-        g.mint_gas_limit = 20_000;
-        assert!(validate_gas(&g).is_err());
+        let d = GasSettings::default();
+        assert!(validate_gas(&d).is_ok());
+        let with = |f: fn(&mut GasSettings)| {
+            let mut g = d.clone();
+            f(&mut g);
+            validate_gas(&g)
+        };
+        assert!(with(|g| g.max_priority_fee_per_gas_wei = g.max_fee_per_gas_wei + 1).is_err());
+        assert!(with(|g| g.mint_gas_limit = 20_000).is_err());
+        // The old default (150k) is below the most expensive measured mint (152,390).
+        assert!(with(|g| g.mint_gas_limit = 150_000).is_err());
+        assert!(with(|g| g.mint_gas_limit = state::MIN_MINT_GAS_LIMIT - 1).is_err());
+        assert!(with(|g| g.mint_gas_limit = state::MIN_MINT_GAS_LIMIT).is_ok());
+        assert!(with(|g| g.mint_gas_limit = state::MAX_GAS_LIMIT + 1).is_err());
+        assert!(with(|g| g.admin_gas_limit = state::MIN_ADMIN_GAS_LIMIT - 1).is_err());
+        assert!(with(|g| g.admin_gas_limit = state::MIN_ADMIN_GAS_LIMIT).is_ok());
+        // The defaults keep a real margin over the measured worst cases.
+        assert!(d.mint_gas_limit as f64 >= 152_390.0 / 0.8);
+        assert!(d.admin_gas_limit as f64 >= 46_905.0 / 0.8);
         assert!(validate_observer(&ObserverSettings::default()).is_ok());
-        let mut o = ObserverSettings::default();
-        o.active_interval_secs = 1;
+        let o = ObserverSettings { active_interval_secs: 1, ..ObserverSettings::default() };
         assert!(validate_observer(&o).is_err());
     }
 

@@ -85,6 +85,9 @@ pub struct FeeEstimate {
 pub enum SimulationResult {
     Ok(Vec<u8>),
     Reverted(Vec<u8>),
+    /// The call ran out of gas at the gas limit it was simulated with (or the limit is
+    /// below the intrinsic cost). A transaction sent with that limit would fail on chain.
+    OutOfGas,
 }
 
 // ---------------------------------------------------------------------------
@@ -791,15 +794,34 @@ fn is_revert(code: i64, message: &str) -> bool {
     code == 3 || message.to_ascii_lowercase().contains("revert")
 }
 
-/// Simulate a call from `from`. An execution revert is an answer
-/// ([`SimulationResult::Reverted`], with the revert bytes when the provider supplies
-/// them), voted on like any other value.
-pub async fn simulate_call(from: &[u8; 20], to: &[u8; 20], data: &[u8], block: BlockTag) -> Result<SimulationResult, RpcError> {
+/// Out-of-gas wording across clients: geth "out of gas" and "gas required exceeds
+/// allowance", anvil "EVM error OutOfGas", and "intrinsic gas too low/high" when the
+/// limit is below the intrinsic cost.
+fn is_out_of_gas(message: &str) -> bool {
+    let m: String = message.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    m.contains("outofgas") || m.contains("gasrequiredexceeds") || m.contains("intrinsicgas")
+}
+
+/// Simulate a call from `from` with exactly `gas` gas, the limit the real transaction
+/// will carry. An execution revert is an answer ([`SimulationResult::Reverted`], with the
+/// revert bytes when the provider supplies them) and so is running out of gas
+/// ([`SimulationResult::OutOfGas`]); both are voted on like any other value.
+pub async fn simulate_call(
+    from: &[u8; 20],
+    to: &[u8; 20],
+    data: &[u8],
+    gas: u64,
+    block: BlockTag,
+) -> Result<SimulationResult, RpcError> {
     let s = settings()?;
-    let params = json!([{"from": hex0x(from), "to": hex0x(to), "data": hex0x(data)}, tag_param(&block)]);
+    let params = json!([
+        {"from": hex0x(from), "to": hex0x(to), "data": hex0x(data), "gas": quantity_param(gas)},
+        tag_param(&block)
+    ]);
     let replies = call_all(&s, "eth_call", &params, s.default_max).await;
     vote(&replies, s.quorum, "simulate_call", |r| match r {
         Reply::Ok(v) => parse_data(v, "eth_call result").map(SimulationResult::Ok),
+        Reply::JsonRpc { message, .. } if is_out_of_gas(message) => Ok(SimulationResult::OutOfGas),
         Reply::JsonRpc { code, message, data } if is_revert(*code, message) => {
             let bytes = data.as_ref().and_then(|d| parse_data(d, "revert data").ok()).unwrap_or_default();
             Ok(SimulationResult::Reverted(bytes))
@@ -1465,7 +1487,7 @@ mod tests {
         script(move |_, _, _| Ok(err_body(3, "execution reverted: nope", Some(json!(revert_data)))));
         assert!(matches!(block_on(eth_call(&ADDR, &[1], BlockTag::Latest)), Err(RpcError::AllFailed(_))));
         assert_eq!(
-            block_on(simulate_call(&[1; 20], &ADDR, &[1], BlockTag::Latest)),
+            block_on(simulate_call(&[1; 20], &ADDR, &[1], 300_000, BlockTag::Latest)),
             Ok(SimulationResult::Reverted(vec![0x08, 0xc3, 0x79, 0xa0, 0x00]))
         );
     }
@@ -1475,29 +1497,62 @@ mod tests {
         configure(3, 2);
         // Code 3 without data.
         script(|_, _, _| Ok(err_body(3, "x", None)));
-        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], BlockTag::Latest)), Ok(SimulationResult::Reverted(vec![])));
+        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Ok(SimulationResult::Reverted(vec![])));
         // Message-only revert, different code, empty data.
         script(|_, _, _| Ok(err_body(-32000, "Execution Reverted", Some(json!("0x")))));
-        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], BlockTag::Latest)), Ok(SimulationResult::Reverted(vec![])));
+        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Ok(SimulationResult::Reverted(vec![])));
         // Success.
         script(|_, _, params| {
             assert_eq!(params[0]["from"], json!(hex0x(&[1; 20])));
             Ok(ok_body(json!("0x0102")))
         });
-        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], BlockTag::Latest)), Ok(SimulationResult::Ok(vec![1, 2])));
+        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Ok(SimulationResult::Ok(vec![1, 2])));
         // Two providers say revert, one says success: revert wins by quorum.
         script(|p, _, _| if p == 0 { Ok(ok_body(json!("0x01"))) } else { Ok(err_body(3, "reverted", Some(json!("0xaa")))) });
-        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], BlockTag::Latest)), Ok(SimulationResult::Reverted(vec![0xaa])));
+        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Ok(SimulationResult::Reverted(vec![0xaa])));
         // Revert and success split 1/1/1 with different revert payloads: no quorum.
         script(|p, _, _| match p {
             0 => Ok(ok_body(json!("0x01"))),
             1 => Ok(err_body(3, "reverted", Some(json!("0xaa")))),
             _ => Ok(err_body(3, "reverted", Some(json!("0xbb")))),
         });
-        assert!(matches!(block_on(simulate_call(&[1; 20], &ADDR, &[], BlockTag::Latest)), Err(RpcError::NoQuorum(_))));
+        assert!(matches!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Err(RpcError::NoQuorum(_))));
         // A non-revert JSON-RPC error is a failed provider, not an answer.
         script(|_, _, _| Ok(err_body(-32005, "rate limit exceeded", None)));
-        assert!(matches!(block_on(simulate_call(&[1; 20], &ADDR, &[], BlockTag::Latest)), Err(RpcError::AllFailed(_))));
+        assert!(matches!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Err(RpcError::AllFailed(_))));
+    }
+
+    #[test]
+    fn simulation_sends_the_gas_limit_and_maps_out_of_gas_wording() {
+        configure(3, 2);
+        // The exact limit the transaction will carry is sent as a QUANTITY.
+        script(|_, m, params| {
+            assert_eq!(m, "eth_call");
+            assert_eq!(params[0]["gas"], json!("0x493e0"));
+            Ok(ok_body(json!("0x")))
+        });
+        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Ok(SimulationResult::Ok(vec![])));
+        // Wording observed or documented per client (anvil reply captured locally).
+        for (code, msg) in [
+            (-32603, "EVM error OutOfGas"),
+            (-32000, "out of gas"),
+            (-32000, "gas required exceeds allowance (150000)"),
+            (-32000, "intrinsic gas too low"),
+            (-32000, "intrinsic gas too high -- CallGasCostMoreThanGasLimit"),
+        ] {
+            script(move |_, _, _| Ok(err_body(code, msg, None)));
+            assert_eq!(
+                block_on(simulate_call(&[1; 20], &ADDR, &[], 150_000, BlockTag::Latest)),
+                Ok(SimulationResult::OutOfGas),
+                "{msg}"
+            );
+        }
+        // Out of gas from a quorum beats a single success.
+        script(|p, _, _| if p == 0 { Ok(ok_body(json!("0x"))) } else { Ok(err_body(-32000, "out of gas", None)) });
+        assert_eq!(block_on(simulate_call(&[1; 20], &ADDR, &[], 150_000, BlockTag::Latest)), Ok(SimulationResult::OutOfGas));
+        // An unrelated JSON-RPC error is still a failed provider, not an answer.
+        script(|_, _, _| Ok(err_body(-32005, "rate limited", None)));
+        assert!(matches!(block_on(simulate_call(&[1; 20], &ADDR, &[], 300_000, BlockTag::Latest)), Err(RpcError::AllFailed(_))));
     }
 
     // ----- logs -------------------------------------------------------------------

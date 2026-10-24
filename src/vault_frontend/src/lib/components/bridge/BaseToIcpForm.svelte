@@ -5,6 +5,7 @@
   import { walletSessionGeneration } from '$lib/services/auth';
   import { formatE8s, formatWeiAsEth, tryParseE8s } from '$lib/services/baseBridge/amounts';
   import type { BridgeConfig } from '$lib/services/baseBridge/chains';
+  import { displayAddress } from '$lib/services/baseBridge/eip55';
   import type { Eip1193Provider, EvmWalletState } from '$lib/services/baseBridge/evmWallet';
   import type { BaseToIcpIntent, IntentStore } from '$lib/services/baseBridge/intents';
   import {
@@ -495,7 +496,7 @@
         </p>
         <dl>
           <div><dt>You burn on {config.chain.name}</dt><dd>{fmt(flow.amountE8s)} icUSD</dd></div>
-          <div><dt>From Base account</dt><dd><code>{wallet.account}</code></dd></div>
+          <div><dt>From Base account</dt><dd><code>{wallet.account ? displayAddress(wallet.account) : ''}</code></dd></div>
           <div><dt>Bridge release fee (deducted)</dt><dd>{fmt(config.releaseFeeE8s)} icUSD</dd></div>
           <div><dt>icUSD ledger fee (deducted)</dt><dd>{config.ledgerFeeE8s !== null ? `${fmt(config.ledgerFeeE8s)} icUSD` : 'charged by the ledger'}</dd></div>
           {#if estimatedReceive !== null}

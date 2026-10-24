@@ -33,7 +33,8 @@ import {
   type QuoteLimits,
 } from './icpToBase';
 import { IntentStore, type IcpToBaseIntent } from './intents';
-import { TEST_OWNER, createMemoryStorage, makeDeposit } from './testSupport';
+import { EIP55_VECTORS, MIXED_CASE_NO_CHECKSUM, ORACLE, TEST_OWNER, createMemoryStorage, flipCase, makeDeposit } from './testSupport';
+import { CHECKSUM_ERROR_MESSAGE, CHECKSUM_UNVERIFIABLE_MESSAGE } from './eip55';
 import { bytesToHex, hexToBytes } from './abi';
 
 const ME = TEST_OWNER.toText();
@@ -66,11 +67,45 @@ function quote(overrides: Partial<Parameters<typeof buildQuote>[0]> = {}): IcpTo
 // ---------------------------------------------------------------------------
 
 describe('validateRecipient', () => {
-  it('accepts a 20 byte address and lower-cases it', () => {
-    expect(validateRecipient('  0xAbCdEf0123456789aBcDeF0123456789AbCdEf01 ', CONTRACT)).toEqual({
+  it('accepts a 20 byte address with a valid EIP-55 checksum and lower-cases it', () => {
+    expect(validateRecipient(`  ${EIP55_VECTORS[0]} `, CONTRACT, ORACLE)).toEqual({
       ok: true,
-      address: '0xabcdef0123456789abcdef0123456789abcdef01',
+      address: EIP55_VECTORS[0].toLowerCase(),
     });
+  });
+
+  it('accepts all-lowercase and all-uppercase hex as unchecksummed, with or without a hash', () => {
+    for (const vector of EIP55_VECTORS) {
+      const upper = `0x${vector.slice(2).toUpperCase()}`;
+      for (const hash of [ORACLE, null]) {
+        expect(validateRecipient(vector.toLowerCase(), CONTRACT, hash)).toEqual({ ok: true, address: vector.toLowerCase() });
+        expect(validateRecipient(upper, CONTRACT, hash)).toEqual({ ok: true, address: vector.toLowerCase() });
+      }
+    }
+  });
+
+  it('rejects mixed case with a wrong checksum, showing the checksum message', () => {
+    for (const vector of EIP55_VECTORS) {
+      const typo = flipCase(vector, vector.slice(2).search(/[a-fA-F]/));
+      const result = validateRecipient(typo, CONTRACT, ORACLE);
+      expect(result).toEqual({ ok: false, code: 'checksum', message: CHECKSUM_ERROR_MESSAGE });
+    }
+    expect(validateRecipient(MIXED_CASE_NO_CHECKSUM, CONTRACT, ORACLE)).toMatchObject({ ok: false, code: 'checksum' });
+  });
+
+  it('refuses mixed case it cannot verify (no hash) instead of accepting it', () => {
+    expect(validateRecipient(EIP55_VECTORS[2], CONTRACT, null)).toEqual({
+      ok: false,
+      code: 'checksum_unverifiable',
+      message: CHECKSUM_UNVERIFIABLE_MESSAGE,
+    });
+  });
+
+  it('checks the checksum before the contract and zero rules and after the format', () => {
+    expect(validateRecipient('0xAbC', CONTRACT, ORACLE)).toMatchObject({ code: 'format' });
+    // A mistyped copy of the token contract is a checksum problem first.
+    expect(validateRecipient(flipCase(EIP55_VECTORS[0], 1), EIP55_VECTORS[0], ORACLE)).toMatchObject({ code: 'checksum' });
+    expect(validateRecipient(EIP55_VECTORS[0], EIP55_VECTORS[0].toLowerCase(), ORACLE)).toMatchObject({ code: 'contract' });
   });
 
   it('rejects empty, malformed, zero and the token contract', () => {

@@ -176,6 +176,8 @@ pub fn bridge_info() -> BridgeInfo {
                     submitted_at_ns: h.submitted_at_ns,
                 })
                 .collect(),
+            deferred_since_ns: c.observer.deferred_since_ns,
+            deferred_reason: c.observer.deferred_reason.clone(),
         },
         lanes: vec![lane_status(LaneKind::Minter, &c.minter_lane), lane_status(LaneKind::Admin, &c.admin_lane)],
         ledger_fee_e8s: c.ledger_fee_e8s,

@@ -132,7 +132,19 @@ export interface BridgeConfig {
   mintsPaused: boolean;
   /** Reason text when the whole bridge is halted. */
   halted: string | null;
+  /**
+   * True while the Minter lane (the signer that mints on Base) reports it has no
+   * Base ETH to pay gas. Deliveries to Base wait, escrowed icUSD is safe. The
+   * Admin lane's gas never affects users, so it is not surfaced.
+   */
+  minterAwaitingGas: boolean;
   version: string;
+}
+
+/** Whether `get_bridge_info().lanes` says the Minter lane is waiting for gas. Tolerates a missing list. */
+export function minterAwaitingGas(info: Pick<BridgeInfo, 'lanes'>): boolean {
+  const lanes = Array.isArray(info.lanes) ? info.lanes : [];
+  return lanes.some((lane) => !!lane && typeof lane === 'object' && 'Minter' in lane.lane && lane.awaiting_gas === true);
 }
 
 export type BridgeConfigFailure = 'unsupported_chain' | 'contract_not_bound' | 'invalid_contract';
@@ -174,6 +186,7 @@ export function resolveBridgeConfig(info: BridgeInfo): BridgeConfigResult {
       releasesPaused: info.pauses.releases,
       mintsPaused: info.pauses.mints,
       halted: info.halted[0] ?? null,
+      minterAwaitingGas: minterAwaitingGas(info),
       version: info.version,
     },
   };

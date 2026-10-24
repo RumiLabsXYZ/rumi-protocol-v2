@@ -49,6 +49,24 @@ fn call_err<A: ArgumentEncoder, T: CandidType + for<'de> Deserialize<'de>>(
     }
 }
 
+/// Assert that `inspect_message` refuses an ingress update before the method runs. The
+/// filter is a cost saver, not the security boundary (every method keeps its own check),
+/// so the refusal shows up as a rejected submission rather than a `BridgeError` reply.
+fn assert_rejected_at_ingress<A: ArgumentEncoder>(w: &BridgeWorld, sender: Principal, method: &str, args: A) {
+    let arg = candid::encode_args(args).expect("encode args");
+    assert_rejected_raw(w, sender, method, arg);
+}
+
+fn assert_rejected_raw(w: &BridgeWorld, sender: Principal, method: &str, arg: Vec<u8>) {
+    match w.pic.submit_call(w.bridge, sender, method, arg) {
+        Err(_) => {}
+        Ok(id) => match w.pic.await_call(id) {
+            Err(_) | Ok(pocket_ic::WasmResult::Reject(_)) => {}
+            Ok(pocket_ic::WasmResult::Reply(_)) => panic!("{method} as {sender} ran; ingress should have been refused"),
+        },
+    }
+}
+
 /// The text of anvil's JSON-RPC error when `bridgeOut(..)` is simulated from `from`
 /// (a revert carries the custom-error selector in its data).
 fn simulate_bridge_out_error(
@@ -372,42 +390,27 @@ fn rejected_requests_move_no_funds_and_release_capacity() {
     let (user, recipient, admin) = (w.user, w.holder(0), w.admin);
     let initial_info = w.bridge_info();
 
-    // (a) No approval at all: nothing moves and no capacity stays reserved. Older canisters
-    // create the deposit and report `PullFailed` (ledger refused the pull); newer ones
-    // pre-check the allowance and reject with `InsufficientAllowance` before creating any
-    // deposit record. Both are accepted here.
+    // (a) No approval at all: the canister always pre-checks the allowance and rejects with
+    // `InsufficientAllowance` BEFORE creating any deposit record, so nothing moves, no
+    // capacity is reserved and no record exists. Strict on purpose: a `PullFailed` record
+    // (what a canister without the pre-check would create) must fail this test.
     let user_before = w.user_balance(user);
     let args = w.deposit_args(e8(10), &recipient);
     let n_records = w.list_my_deposits(user, None, 100).len();
-    let mut failed_id = None;
-    match w.bridge_to_base(user, args.clone()) {
-        Ok(failed) => {
-            assert!(
-                matches!(&failed.status, DepositStatus::PullFailed { reason } if reason.to_lowercase().contains("allowance")),
-                "{failed:?}"
-            );
-            assert!(failed.pull_block_index.is_none() && failed.mint_tx_hashes.is_empty());
-            // The same request id returns the recorded failure; it is not retried.
-            let again = w.bridge_to_base(user, args).expect("same request");
-            assert_eq!((again.id, again.status), (failed.id, failed.status.clone()));
-            failed_id = Some(failed.id);
-        }
-        Err(BridgeError::InsufficientAllowance { allowance_e8s, required_e8s }) => {
-            assert_eq!((allowance_e8s, required_e8s), (0, e8(10) + LEDGER_FEE));
-            assert_eq!(w.list_my_deposits(user, None, 100).len(), n_records, "no deposit record is created");
-        }
-        other => panic!("unexpected result for a request without approval: {other:?}"),
-    }
+    assert_eq!(
+        w.bridge_to_base(user, args),
+        Err(BridgeError::InsufficientAllowance { allowance_e8s: 0, required_e8s: e8(10) + LEDGER_FEE })
+    );
+    assert_eq!(w.list_my_deposits(user, None, 100).len(), n_records, "no deposit record is created");
+    assert!(w.get_deposit(0).is_none(), "the rejected request consumed no deposit id");
+    // There is no record to refund either.
+    assert!(matches!(w.request_refund(user, 0), Err(BridgeError::NotFound)), "nothing exists to refund");
     assert_eq!(w.user_balance(user), user_before, "no funds moved");
     assert_eq!(w.escrow_balance(), 0);
     let info = w.bridge_info();
     assert_eq!((info.active_deposits, info.mint_window_used_e8s), (0, 0), "capacity and window usage released");
     let audit = w.supply_audit();
     assert_eq!(audit.buckets(), [0; 7], "{audit:?}");
-    // A failed deposit cannot be refunded (nothing was escrowed).
-    if let Some(id) = failed_id {
-        assert!(matches!(w.request_refund(user, id), Err(BridgeError::InvalidState(_))));
-    }
     // Capacity is truly free again: a funded, approved 10 icUSD deposit is admitted.
     w.approve_bridge(user, e8(10));
     let args = w.deposit_args(e8(10), &recipient);
@@ -457,13 +460,43 @@ fn rejected_requests_move_no_funds_and_release_capacity() {
     assert!(matches!(w.bridge_to_base(user, args), Err(BridgeError::InvalidRecipient(_))));
     assert_eq!(w.list_my_deposits(user, None, 100).len(), n_before);
 
-    // (d) Anonymous callers.
+    // (d) Anonymous callers never reach the methods: `inspect_message` refuses their ingress.
+    // (The in-method `BridgeError::Anonymous` checks stay and are covered by unit tests.)
     let args = w.deposit_args(e8(2), &recipient);
-    assert_eq!(w.bridge_to_base(Principal::anonymous(), args), Err(BridgeError::Anonymous));
-    assert_eq!(w.request_refund(Principal::anonymous(), 0), Err(BridgeError::Anonymous));
-    assert_eq!(w.notify_hint(Principal::anonymous(), &hex0x(&[1u8; 32])), Err(BridgeError::Anonymous));
+    assert_rejected_at_ingress(&w, Principal::anonymous(), "bridge_to_base", (args,));
+    assert_rejected_at_ingress(&w, Principal::anonymous(), "request_deposit_refund", (0u64,));
+    assert_rejected_at_ingress(&w, Principal::anonymous(), "notify_base_bridge_out", (hex0x(&[1u8; 32]),));
 
-    // (e) Every admin method refuses a non-admin (and the anonymous principal).
+    // (e) Every admin method refuses a caller that is not an admin.
+    //  - Anonymous callers and plain users (neither admin nor controller) never reach the
+    //    method: `inspect_message` refuses their ingress.
+    //  - A controller that is not an admin passes that filter, so the method's own check is
+    //    what refuses it. That check is the real boundary and is exercised here.
+    let ingress_calls = |who: Principal| -> Vec<(&'static str, Vec<u8>)> {
+        let enc = |r: Result<Vec<u8>, candid::Error>| r.expect("encode args");
+        vec![
+            ("admin_set_pauses", enc(candid::encode_args((Pauses::default(),)))),
+            ("admin_set_limits", enc(candid::encode_args((default_limits(),)))),
+            ("admin_set_fees", enc(candid::encode_args((BridgeFees { deposit_fee_e8s: 1, release_fee_e8s: 1 },)))),
+            ("admin_bind_contract", enc(candid::encode_args((contract.clone(),)))),
+            ("admin_sweep_fees", enc(candid::encode_args((1u64,)))),
+            ("admin_submit_contract_action", enc(candid::encode_args((ContractAdminAction::PauseMint,)))),
+            ("admin_cancel_stuck_tx", enc(candid::encode_args((0u64,)))),
+            ("admin_clear_lane_halt", enc(candid::encode_args((LaneKind::Minter,)))),
+            ("admin_retry_deposit", enc(candid::encode_args((0u64,)))),
+            ("admin_reconcile", enc(candid::encode_args(()))),
+            ("admin_clear_halt", enc(candid::encode_args(()))),
+            ("admin_run_tick", enc(candid::encode_args(()))),
+            ("set_admins", enc(candid::encode_args((vec![who],)))),
+        ]
+    };
+    for who in [user, Principal::anonymous()] {
+        for (method, arg) in ingress_calls(who) {
+            assert_rejected_raw(&w, who, method, arg);
+        }
+    }
+    let controller = test_principal(0xD1);
+    w.pic.set_controllers(w.bridge, None, vec![controller]).expect("make a non-admin the controller");
     let probe = |w: &mut BridgeWorld, who: Principal, want: BridgeError| {
         let got = vec![
             call_err::<_, ()>(w, who, "admin_set_pauses", (Pauses::default(),)),
@@ -478,14 +511,15 @@ fn rejected_requests_move_no_funds_and_release_capacity() {
             call_err::<_, SupplyAudit>(w, who, "admin_reconcile", ()),
             call_err::<_, SupplyAudit>(w, who, "admin_clear_halt", ()),
             call_err::<_, ()>(w, who, "admin_run_tick", ()),
-            call_err::<_, ()>(w, who, "set_admins", (vec![who],)),
         ];
         for (i, e) in got.iter().enumerate() {
             assert_eq!(*e, want, "admin method #{i} for {who}");
         }
     };
-    probe(&mut w, user, BridgeError::Unauthorized);
-    probe(&mut w, Principal::anonymous(), BridgeError::Anonymous);
+    probe(&mut w, controller, BridgeError::Unauthorized);
+    // `set_admins` is left out of that probe on purpose (it would succeed for a controller);
+    // it was checked above for the callers that must not reach it.
+    w.pic.set_controllers(w.bridge, Some(controller), vec![Principal::anonymous()]).expect("restore the controller");
     // Nothing a non-admin tried changed the configuration.
     let info = w.bridge_info();
     assert_eq!((info.pauses.clone(), info.limits.clone(), info.fees.clone()), (Pauses::default(), default_limits(), initial_info.fees));
@@ -1245,7 +1279,7 @@ fn hints_are_bounded_and_active_operation_limits_hold() {
     w.notify_hint(user2, &hex0x(&[9u8; 32])).expect("other callers have their own budget");
     assert!(matches!(w.notify_hint(user, "0x1234"), Err(BridgeError::InvalidArgument(_))));
     assert!(matches!(w.notify_hint(user, "not hex"), Err(BridgeError::InvalidArgument(_))));
-    assert_eq!(w.notify_hint(Principal::anonymous(), &hex0x(&[7u8; 32])), Err(BridgeError::Anonymous));
+    assert_rejected_at_ingress(&w, Principal::anonymous(), "notify_base_bridge_out", (hex0x(&[7u8; 32]),));
     let info = w.bridge_info();
     assert_eq!(info.observer.pending_hints.len(), 6);
     w.ticks(3);

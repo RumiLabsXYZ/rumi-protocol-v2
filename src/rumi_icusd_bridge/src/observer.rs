@@ -92,6 +92,62 @@ pub struct ObserverOutcome {
     pub recorded: u32,
     pub pending_work: bool,
     pub note: Option<String>,
+    /// Set when the pass ended because a burn waits for in-flight mint settlement.
+    pub deferred: Option<Deferral>,
+}
+
+/// A burn the scan is waiting on: in-flight mints explain it, so it is neither recorded
+/// nor an error. The scan retries it on the next pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deferral {
+    /// Bridge-out sequence number of the waiting burn.
+    pub sequence: u64,
+    pub reason: String,
+}
+
+/// A deferral that keeps going is written to the audit log at most this often.
+pub const DEFERRAL_AUDIT_EVERY_NS: u64 = 30 * 60 * NS_PER_SEC;
+
+/// Update the persisted deferral fields after a pass and return the audit note that is
+/// due, if any. Pure over the observer state, so the rules are unit tested directly.
+///
+/// - A pass that ended deferred sets the fields. While the SAME burn (same sequence) keeps
+///   waiting, the first `deferred_since_ns` is kept and only the reason is refreshed. A
+///   different burn is a new deferral with a new start time.
+/// - Any other pass clears the fields once the waiting burn has been recorded
+///   (`processed_count` has reached its sequence). A pass that neither defers nor gets
+///   past the burn (a lagging provider quorum, a failed pass) leaves them untouched, so a
+///   long wait never disappears from the public view without having ended.
+/// - The audit log gets an entry when a deferral starts and then at most one per
+///   [`DEFERRAL_AUDIT_EVERY_NS`] while it lasts.
+pub fn track_deferral(o: &mut state::ObserverState, now_ns: u64, deferral: Option<&Deferral>) -> Option<String> {
+    let Some(d) = deferral else {
+        if o.deferred_sequence.is_none_or(|n| o.processed_count >= n) {
+            o.deferred_sequence = None;
+            o.deferred_since_ns = None;
+            o.deferred_reason = None;
+            o.deferred_last_audit_ns = None;
+        }
+        return None;
+    };
+    let continuing = o.deferred_sequence == Some(d.sequence) && o.deferred_since_ns.is_some();
+    if !continuing {
+        o.deferred_sequence = Some(d.sequence);
+        o.deferred_since_ns = Some(now_ns);
+        o.deferred_last_audit_ns = None;
+    }
+    o.deferred_reason = Some(d.reason.clone());
+    let due = o.deferred_last_audit_ns.is_none_or(|t| now_ns.saturating_sub(t) >= DEFERRAL_AUDIT_EVERY_NS);
+    if !due {
+        return None;
+    }
+    o.deferred_last_audit_ns = Some(now_ns);
+    let since = o.deferred_since_ns.unwrap_or(now_ns);
+    Some(if continuing {
+        format!("observer still waiting after {} s: {}", now_ns.saturating_sub(since) / NS_PER_SEC, d.reason)
+    } else {
+        format!("observer waiting: {}", d.reason)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -520,7 +576,7 @@ fn with_rewind(msg: String, at: Progress, start_block: u64) -> String {
 /// when it did not, it is an error, so a stuck observer is counted and backs off.
 fn stop_early(chunks_done: usize, recorded: u32, reason: String) -> Result<ObserverOutcome, String> {
     if chunks_done > 0 {
-        Ok(ObserverOutcome { recorded, pending_work: true, note: Some(reason) })
+        Ok(ObserverOutcome { recorded, pending_work: true, note: Some(reason), deferred: None })
     } else {
         Err(reason)
     }
@@ -557,7 +613,7 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
         state::mutate_core(|c| note_head_in(c, head));
         let note = (head.number < cursor.max(last_event_block))
             .then(|| format!("finalized head {} is behind the cursor {}", head.number, cursor.max(last_event_block)));
-        return Ok(ObserverOutcome { recorded: 0, pending_work: false, note });
+        return Ok(ObserverOutcome { recorded: 0, pending_work: false, note, deferred: None });
     }
 
     // One read tells whether anything at all happened in (cursor, head].
@@ -686,7 +742,7 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
         for (ev, log) in &events {
             match record_finalized_bridge_out(ev, log) {
                 Ok(RecordOutcome::Deferred(reason)) => {
-                    deferred = Some(format!("BridgeOut {} deferred: {reason}", ev.sequence));
+                    deferred = Some(Deferral { sequence: ev.sequence, reason: format!("BridgeOut {} deferred: {reason}", ev.sequence) });
                     break;
                 }
                 Ok(outcome) => {
@@ -703,14 +759,15 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
             }
         }
         recorded += newly;
-        if let Some(note) = deferred {
+        if let Some(wait) = deferred {
             // Not a failure: an in-flight mint explains the burn. Keep the recorded prefix
-            // and retry next pass, without counting toward backoff.
+            // and retry next pass, without counting toward backoff. `run_pass` keeps the
+            // wait visible (`deferred_since_ns`, `deferred_reason`) until the scan moves on.
             if done > 0 {
                 let kept = Progress { cursor, processed: processed + done, last_event_block: last_block };
                 commit_progress(head, (cursor, processed), kept, None)?;
             }
-            return Ok(ObserverOutcome { recorded, pending_work: true, note: Some(note) });
+            return Ok(ObserverOutcome { recorded, pending_work: true, note: Some(wait.reason.clone()), deferred: Some(wait) });
         }
         if let Some(msg) = failure {
             // Stop at the failing event. The ones before it are stored, so they stay
@@ -757,7 +814,7 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
     }
     let note = (unverified > 0)
         .then(|| format!("{unverified} range(s) accepted without a count check at their end block (historical state unavailable)"));
-    Ok(ObserverOutcome { recorded, pending_work: cursor < head.number, note })
+    Ok(ObserverOutcome { recorded, pending_work: cursor < head.number, note, deferred: None })
 }
 
 /// A full pass (finalized head read, which needs a large response cap) runs at least
@@ -804,28 +861,37 @@ pub async fn run_pass() -> Result<ObserverOutcome, String> {
                 c.observer.last_error = None;
                 c.observer.consecutive_failures = 0;
                 c.observer.next_attempt_ns = None;
+                // Nothing new is burned, so no burn can still be waiting.
+                track_deferral(&mut c.observer, env::now_ns(), None);
             }
         });
         return Ok(ObserverOutcome::default());
     }
     let result = scan(cfg).await;
     let now = env::now_ns();
-    state::mutate_core(|c| {
+    let audit = state::mutate_core(|c| {
         c.observer.last_run_ns = Some(now);
         match &result {
-            Ok(_) => {
+            Ok(out) => {
                 c.observer.last_error = None;
                 c.observer.consecutive_failures = 0;
                 c.observer.next_attempt_ns = None;
                 c.observer.last_full_pass_ns = Some(now);
+                track_deferral(&mut c.observer, now, out.deferred.as_ref())
             }
             Err(e) => {
                 c.observer.last_error = Some(e.clone());
                 c.observer.consecutive_failures = c.observer.consecutive_failures.saturating_add(1);
                 c.observer.next_attempt_ns = backoff_ns(c.observer.consecutive_failures).map(|d| now.saturating_add(d));
+                // A failed pass cannot start a deferral, but it may have recorded the
+                // burn that was waiting before it failed on a later one.
+                track_deferral(&mut c.observer, now, None)
             }
         }
     });
+    if let Some(note) = audit {
+        state::append_audit(None, AuditCtx::note(note));
+    }
     result
 }
 
@@ -1271,7 +1337,7 @@ mod tests {
         s.add_event(2, 130, 50 * E8);
         let sim = install(s);
         let out = run().unwrap();
-        assert_eq!(out, ObserverOutcome { recorded: 2, pending_work: false, note: None });
+        assert_eq!(out, ObserverOutcome { recorded: 2, pending_work: false, note: None, deferred: None });
         assert_eq!(pos(), (150, 2));
         let b = state::read_core(|c| c.buckets);
         assert_eq!(b.outstanding_base, (850 * E8) as u128);
@@ -1304,7 +1370,7 @@ mod tests {
         s.add_event(2, 125, 10 * E8);
         let sim = install(s);
         let out = run().unwrap();
-        assert_eq!(out, ObserverOutcome { recorded: 2, pending_work: false, note: None });
+        assert_eq!(out, ObserverOutcome { recorded: 2, pending_work: false, note: None, deferred: None });
         assert_eq!(pos(), (130, 2));
         let ranges: Vec<(u64, u64)> = {
             let s = sim.borrow();
@@ -1326,7 +1392,7 @@ mod tests {
         s.add_event(1, 290, 10 * E8);
         let sim = install(s);
         let out = run().unwrap();
-        assert_eq!(out, ObserverOutcome { recorded: 0, pending_work: true, note: None });
+        assert_eq!(out, ObserverOutcome { recorded: 0, pending_work: true, note: None, deferred: None });
         assert_eq!(pos(), (150, 0));
         assert_eq!(count_of(&sim, "eth_getLogs"), 5 * 3);
         assert!(run().unwrap().pending_work);
@@ -1336,7 +1402,7 @@ mod tests {
         // The fourth pass reaches the event; every event up to the head is then known, so
         // the cursor jumps to the head instead of scanning [291, 300] separately.
         let out = run().unwrap();
-        assert_eq!(out, ObserverOutcome { recorded: 1, pending_work: false, note: None });
+        assert_eq!(out, ObserverOutcome { recorded: 1, pending_work: false, note: None, deferred: None });
         assert_eq!(pos(), (300, 1));
     }
 
@@ -1920,7 +1986,7 @@ mod tests {
         bound(3, 2, 100);
         // 100 minted and seen final; a further 40 signed and already on Base but not yet
         // seen final by the canister: allowed, and the burn is recorded.
-        put_inflight_mint(1, (40 * E8) as u64);
+        put_inflight_mint(1, 40 * E8);
         let mut s = guarded(100 * E8, 40 * E8);
         s.add_event(1, 120, 10 * E8);
         install(s);
@@ -2019,7 +2085,7 @@ mod tests {
     #[test]
     fn check_base_supply_allows_in_flight_mints_and_an_exact_match() {
         bound(3, 2, 150);
-        put_inflight_mint(1, (40 * E8) as u64);
+        put_inflight_mint(1, 40 * E8);
         let mut s = guarded(1_000 * E8, 40 * E8);
         s.total_supply = 1_000 * E8 as u128;
         install(s);
@@ -2563,6 +2629,143 @@ mod tests {
         assert_eq!((o.cursor_block, o.processed_count, o.last_event_block), (150, 1, 120));
         assert_eq!(release_count(), 1);
         assert_eq!(state::read_core(|c| (c.buckets.pending_release, c.buckets.outstanding_base)), ((10 * E8) as u128, 0));
+    }
+
+    // ----- visible deferral --------------------------------------------------------------
+
+    fn deferral(seq: u64, why: &str) -> Deferral {
+        Deferral { sequence: seq, reason: format!("BridgeOut {seq} deferred: {why}") }
+    }
+
+    const MIN30: u64 = 30 * 60 * NS_PER_SEC;
+
+    #[test]
+    fn a_deferral_sets_the_fields_and_audits_once_at_the_start() {
+        let mut o = state::ObserverState::default();
+        let note = track_deferral(&mut o, 1_000, Some(&deferral(4, "waits for in-flight mint settlement")));
+        assert_eq!(o.deferred_sequence, Some(4));
+        assert_eq!(o.deferred_since_ns, Some(1_000));
+        assert_eq!(o.deferred_reason.as_deref(), Some("BridgeOut 4 deferred: waits for in-flight mint settlement"));
+        assert_eq!(o.deferred_last_audit_ns, Some(1_000));
+        assert!(note.unwrap().contains("observer waiting: BridgeOut 4 deferred"));
+    }
+
+    #[test]
+    fn the_same_deferral_keeps_its_first_start_time_and_refreshes_the_reason() {
+        let mut o = state::ObserverState::default();
+        track_deferral(&mut o, 1_000, Some(&deferral(4, "outstanding 0")));
+        let note = track_deferral(&mut o, 61_000_000_000, Some(&deferral(4, "outstanding 5")));
+        assert_eq!(o.deferred_since_ns, Some(1_000), "the wait began at the first pass");
+        assert_eq!(o.deferred_reason.as_deref(), Some("BridgeOut 4 deferred: outstanding 5"), "latest reason");
+        assert_eq!(note, None, "not audited again within half an hour");
+        assert_eq!(o.deferred_last_audit_ns, Some(1_000));
+    }
+
+    #[test]
+    fn a_different_burn_waiting_is_a_new_deferral() {
+        let mut o = state::ObserverState::default();
+        track_deferral(&mut o, 1_000, Some(&deferral(4, "a")));
+        // The scan recorded burn 4 and now waits on burn 5, all inside one pass.
+        o.processed_count = 4;
+        let note = track_deferral(&mut o, 9_000, Some(&deferral(5, "b")));
+        assert_eq!((o.deferred_sequence, o.deferred_since_ns), (Some(5), Some(9_000)));
+        assert!(note.is_some(), "a new deferral is audited at once");
+    }
+
+    #[test]
+    fn a_deferral_clears_once_the_scan_has_moved_past_the_burn() {
+        let mut o = state::ObserverState::default();
+        track_deferral(&mut o, 1_000, Some(&deferral(4, "a")));
+        // The burn is still unrecorded (processed 3): a pass that does not defer again
+        // (lagging quorum, failure) must not erase the wait.
+        o.processed_count = 3;
+        assert_eq!(track_deferral(&mut o, 2_000, None), None);
+        assert_eq!((o.deferred_sequence, o.deferred_since_ns), (Some(4), Some(1_000)));
+        assert!(o.deferred_reason.is_some());
+        // Recorded: cleared, including the audit throttle.
+        o.processed_count = 4;
+        assert_eq!(track_deferral(&mut o, 3_000, None), None);
+        assert_eq!(
+            (o.deferred_sequence, o.deferred_since_ns, o.deferred_reason.clone(), o.deferred_last_audit_ns),
+            (None, None, None, None)
+        );
+        // Clearing an empty state is a no-op.
+        assert_eq!(track_deferral(&mut o, 4_000, None), None);
+        // The next deferral starts fresh and is audited at once.
+        o.processed_count = 4;
+        assert!(track_deferral(&mut o, 5_000, Some(&deferral(5, "c"))).is_some());
+        assert_eq!(o.deferred_since_ns, Some(5_000));
+    }
+
+    #[test]
+    fn a_long_deferral_is_audited_at_most_once_per_half_hour() {
+        let mut o = state::ObserverState::default();
+        let t0 = 10 * NS_PER_SEC;
+        let mut notes = vec![];
+        // A pass every 30 seconds for two hours.
+        let mut t = t0;
+        while t <= t0 + 4 * MIN30 {
+            if let Some(n) = track_deferral(&mut o, t, Some(&deferral(9, "waiting"))) {
+                notes.push((t, n));
+            }
+            t += 30 * NS_PER_SEC;
+        }
+        let times: Vec<u64> = notes.iter().map(|(t, _)| *t).collect();
+        assert_eq!(times, vec![t0, t0 + MIN30, t0 + 2 * MIN30, t0 + 3 * MIN30, t0 + 4 * MIN30]);
+        assert!(notes[0].1.starts_with("observer waiting:"));
+        assert!(notes[2].1.starts_with("observer still waiting after 3600 s:"), "{}", notes[2].1);
+        // One tick short of the interval: nothing.
+        let mut o = state::ObserverState::default();
+        track_deferral(&mut o, t0, Some(&deferral(9, "x")));
+        assert_eq!(track_deferral(&mut o, t0 + MIN30 - 1, Some(&deferral(9, "x"))), None);
+        assert!(track_deferral(&mut o, t0 + MIN30, Some(&deferral(9, "x"))).is_some());
+    }
+
+    #[test]
+    fn a_waiting_burn_is_visible_from_the_first_pass_and_clears_when_it_is_recorded() {
+        bound(3, 2, 100);
+        state::mutate_core(|c| c.buckets.outstanding_base = 0);
+        put_inflight_mint(1, 10 * E8);
+        let mut s = Sim::new(3, 150);
+        s.add_event(1, 120, 10 * E8);
+        install(s);
+        let waiting_notes = || {
+            state::audit_page(0, 100).into_iter().filter(|r| r.note.contains("observer waiting") || r.note.contains("still waiting")).count()
+        };
+
+        let t1 = crate::env::now_ns();
+        assert!(run().unwrap().deferred.is_some());
+        let o = observer_state();
+        assert_eq!(o.last_error, None, "a deferral is not an error");
+        assert_eq!(o.deferred_since_ns, Some(t1));
+        assert!(o.deferred_reason.as_deref().unwrap().contains("BridgeOut 1 deferred"));
+        let info = crate::views::bridge_info().observer;
+        assert_eq!(info.deferred_since_ns, Some(t1));
+        assert_eq!(info.deferred_reason, o.deferred_reason);
+        assert_eq!(waiting_notes(), 1);
+
+        // Another pass a minute later: still waiting, same start, no second audit entry.
+        crate::env::test_env::advance_secs(60);
+        assert!(run().unwrap().deferred.is_some());
+        let o = observer_state();
+        assert_eq!(o.deferred_since_ns, Some(t1), "the first start time is kept");
+        assert_eq!(waiting_notes(), 1);
+
+        // Past the half hour the continuing wait is audited again.
+        crate::env::test_env::advance_secs(30 * 60);
+        assert!(run().unwrap().deferred.is_some());
+        assert_eq!(observer_state().deferred_since_ns, Some(t1));
+        assert_eq!(waiting_notes(), 2);
+
+        // The mint settles: the burn is recorded and the wait disappears from the view.
+        state::mutate_core(|c| c.buckets.outstanding_base = (10 * E8) as u128);
+        crate::env::test_env::advance_secs(30);
+        let out = run().unwrap();
+        assert_eq!((out.recorded, out.deferred), (1, None));
+        let o = observer_state();
+        assert_eq!((o.deferred_since_ns, o.deferred_reason.clone(), o.deferred_sequence), (None, None, None));
+        let info = crate::views::bridge_info().observer;
+        assert_eq!((info.deferred_since_ns, info.deferred_reason), (None, None));
     }
 
     #[test]

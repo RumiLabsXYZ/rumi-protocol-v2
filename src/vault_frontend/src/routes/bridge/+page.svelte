@@ -6,6 +6,7 @@
   import type { BridgeConfigResult } from '$lib/services/baseBridge/chains';
   import { createEvmWalletStore } from '$lib/services/baseBridge/evmWallet';
   import { IntentStore, browserLocalStorage } from '$lib/services/baseBridge/intents';
+  import { DEPOSIT_DELIVERY_NOTE, GAS_NOTICE_MESSAGE } from '$lib/services/baseBridge/status';
   import BaseWalletBar from '$lib/components/bridge/BaseWalletBar.svelte';
   import BaseToIcpForm from '$lib/components/bridge/BaseToIcpForm.svelte';
   import BridgeHistory from '$lib/components/bridge/BridgeHistory.svelte';
@@ -116,6 +117,9 @@
       {/if}
     </section>
   {:else}
+    {#if config.minterAwaitingGas}
+      <p class="banner warn" role="status" data-testid="gas-notice">{GAS_NOTICE_MESSAGE}</p>
+    {/if}
     <div class="layout">
       <section class="glass-card main-card">
         <div class="tabs" role="tablist" aria-label="Bridge direction" tabindex="-1" onkeydown={onTabKeydown}>
@@ -175,7 +179,7 @@
           <ul>
             <li>Network: <strong>{config.chain.name}</strong> (chain {config.chain.chainId}).</li>
             <li>icUSD contract on Base: <code>{config.contract}</code></li>
-            <li>Deposits are delivered after Base L1 batch finality, about 20 minutes. Releases back to the Internet Computer wait for the same finality.</li>
+            <li>Deposits to Base are delivered after Base L1 batch finality, {DEPOSIT_DELIVERY_NOTE}. Releases back to the Internet Computer wait for the same finality.</li>
             <li>The bridge canister is the only authority. Wallet confirmations and transaction hashes on this page are hints.</li>
           </ul>
         </section>
@@ -199,6 +203,8 @@
   .tabs button { padding:0.55rem 0.5rem; border:1px solid transparent; border-radius:0.35rem; background:transparent; color:var(--rumi-text-secondary); font:inherit; font-size:0.85rem; font-weight:600; cursor:pointer; }
   .tabs button.active { background:var(--rumi-bg-surface2); border-color:var(--rumi-border-hover); color:var(--rumi-text-primary); }
   .tabs button:focus-visible { outline:2px solid var(--rumi-action); outline-offset:2px; }
+  .banner { margin:0 0 1.25rem; padding:0.7rem 0.9rem; border:1px solid var(--rumi-border); border-radius:0.5rem; background:var(--rumi-bg-surface2); font-size:0.82rem; line-height:1.5; color:var(--rumi-text-secondary); }
+  .banner.warn { border-color:rgba(229,168,90,0.4); color:#ffd9a8; }
   .notice { margin:0; padding:0.6rem 0.8rem; border:1px solid rgba(229,168,90,0.4); border-radius:0.5rem; font-size:0.78rem; color:#ffd9a8; }
   .facts h2 { margin:0 0 0.5rem; font-size:1rem; }
   .facts ul { margin:0; padding-left:1.1rem; display:flex; flex-direction:column; gap:0.4rem; font-size:0.78rem; line-height:1.5; color:var(--rumi-text-secondary); }

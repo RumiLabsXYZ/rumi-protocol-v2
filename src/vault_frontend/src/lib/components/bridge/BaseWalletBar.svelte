@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { EvmWalletState } from '$lib/services/baseBridge/evmWallet';
   import { getChainConfig, type BaseChainConfig } from '$lib/services/baseBridge/chains';
+  import { displayAddress } from '$lib/services/baseBridge/eip55';
   import { shortAddress } from '$lib/services/baseBridge/status';
 
   interface Props {
@@ -23,7 +24,7 @@
   <div class="identity">
     <span class="dot" class:online={connected} aria-hidden="true"></span>
     {#if connected}
-      <span class="account" title={wallet.account ?? ''}>{shortAddress(wallet.account ?? '')}</span>
+      <span class="account" title={displayAddress(wallet.account ?? '')}>{shortAddress(displayAddress(wallet.account ?? ''))}</span>
       <span class="network" class:mismatch={onWrongNetwork}>{currentNetworkName}</span>
     {:else if wallet.status === 'unavailable'}
       <span class="account muted">No Base wallet found</span>

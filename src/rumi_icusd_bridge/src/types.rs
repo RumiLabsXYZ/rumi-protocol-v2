@@ -324,6 +324,12 @@ pub struct ObserverStatus {
     pub last_error: Option<String>,
     pub last_run_ns: Option<u64>,
     pub pending_hints: Vec<HintView>,
+    /// Set while the scan is waiting on a burn that in-flight mints explain (not a
+    /// failure, so `last_error` stays empty): when the wait began. Cleared once the scan
+    /// has moved past that burn.
+    pub deferred_since_ns: Option<u64>,
+    /// Why the scan is waiting, as of the latest pass.
+    pub deferred_reason: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]

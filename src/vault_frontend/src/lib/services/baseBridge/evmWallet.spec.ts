@@ -22,7 +22,15 @@ import {
   switchToChain,
   watchProvider,
 } from './evmWallet';
-import { createFakeProvider, createMemoryStorage, walletError } from './testSupport';
+import { EIP55_VECTORS, ORACLE_OR_ZERO, createFakeProvider, createMemoryStorage, flipCase, walletError } from './testSupport';
+
+/** The Keccak-256 the wallet module sees. null mirrors the shipped state (nothing configured). */
+const keccakMock = vi.hoisted(() => ({ fn: null as null | ((data: Uint8Array) => Uint8Array) }));
+vi.mock('./keccak', () => ({
+  get keccak256() {
+    return keccakMock.fn;
+  },
+}));
 
 const ACCOUNT = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const OTHER = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -78,6 +86,29 @@ describe('typed requests', () => {
       handlers: { eth_accounts: () => ['0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'nope', 12] },
     });
     expect(await getAccounts(provider)).toEqual([ACCOUNT]);
+  });
+
+  it('drops a wallet account whose mixed-case checksum is verifiably wrong, and keeps valid and unchecksummed ones', async () => {
+    keccakMock.fn = ORACLE_OR_ZERO;
+    try {
+      const bad = flipCase(EIP55_VECTORS[1], 1);
+      const provider = createFakeProvider({
+        handlers: { eth_accounts: () => [EIP55_VECTORS[0], bad, EIP55_VECTORS[2].toLowerCase(), `0x${EIP55_VECTORS[3].slice(2).toUpperCase()}`] },
+      });
+      expect(await getAccounts(provider)).toEqual([
+        EIP55_VECTORS[0].toLowerCase(),
+        EIP55_VECTORS[2].toLowerCase(),
+        EIP55_VECTORS[3].toLowerCase(),
+      ]);
+    } finally {
+      keccakMock.fn = null;
+    }
+  });
+
+  it('keeps a mixed-case wallet account it cannot verify (no Keccak-256 configured)', async () => {
+    keccakMock.fn = null;
+    const provider = createFakeProvider({ handlers: { eth_accounts: () => [EIP55_VECTORS[0]] } });
+    expect(await getAccounts(provider)).toEqual([EIP55_VECTORS[0].toLowerCase()]);
   });
 
   it('rejects garbage answers instead of guessing', async () => {

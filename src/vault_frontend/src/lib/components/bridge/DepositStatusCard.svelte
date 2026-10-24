@@ -2,6 +2,7 @@
   import type { DepositView } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
   import type { BaseChainConfig } from '$lib/services/baseBridge/chains';
   import { formatE8s } from '$lib/services/baseBridge/amounts';
+  import { displayAddress } from '$lib/services/baseBridge/eip55';
   import { describeDeposit, type DepositStage } from '$lib/services/baseBridge/status';
   import StatusSteps from './StatusSteps.svelte';
   import TxLink from './TxLink.svelte';
@@ -11,19 +12,22 @@
     /** Text form of the signed-in ICP principal. */
     principal: string;
     chain: BaseChainConfig;
+    /** True while the bridge's Minter lane has no Base gas (`BridgeConfig.minterAwaitingGas`). */
+    awaitingGas?: boolean;
     onRefund?: () => void;
     refundBusy?: boolean;
     refundMessage?: string;
   }
 
-  let { deposit, principal, chain, onRefund, refundBusy = false, refundMessage = '' }: Props = $props();
+  let { deposit, principal, chain, awaitingGas = false, onRefund, refundBusy = false, refundMessage = '' }: Props = $props();
 
-  const display = $derived(describeDeposit(deposit, { principal }));
+  const display = $derived(describeDeposit(deposit, { principal, awaitingGas }));
   const STEPS = ['Escrowed', 'Minting', 'Included on Base', 'Delivered'];
   const ACTIVE_STEP: Partial<Record<DepositStage, number>> = {
     pulling: 0,
     pull_unknown: 0,
     escrowed: 0,
+    awaiting_gas: 1,
     minting: 1,
     included: 2,
     delivered: 4,
@@ -40,12 +44,12 @@
   </header>
   <p class="detail">{display.detail}</p>
   {#if activeStep !== undefined}
-    <StatusSteps steps={STEPS} active={activeStep} attention={display.stage === 'held'} label="Deposit progress" />
+    <StatusSteps steps={STEPS} active={activeStep} attention={display.stage === 'held' || display.stage === 'awaiting_gas'} label="Deposit progress" />
   {/if}
   <dl class="facts">
     <div><dt>Sent</dt><dd>{formatE8s(deposit.amount_e8s)} icUSD</dd></div>
     <div><dt>Minted on Base</dt><dd>{formatE8s(deposit.mint_amount_e8s)} icUSD</dd></div>
-    <div><dt>Recipient</dt><dd><code>{deposit.base_recipient}</code></dd></div>
+    <div><dt>Recipient</dt><dd><code>{displayAddress(deposit.base_recipient)}</code></dd></div>
   </dl>
   {#if display.finalized}
     <p class="final">Finalized: the bridge confirmed delivery after Base L1 batch finality.</p>

@@ -303,12 +303,34 @@ pub async fn reconcile_pulls() {
 // ---------------------------------------------------------------------------
 
 /// Oldest deposit waiting for a Base mint, if minting is allowed now.
+/// Re-mints that may be on the mint lane at once. Re-mints bypass admission (they return
+/// a held Base burn to its sender), so without this cap a holder recycling a small amount
+/// through invalid ICP destinations could queue enough of them to delay every user deposit.
+pub const MAX_INFLIGHT_REMINTS: usize = 2;
+
+/// The next deposit to mint. User deposits always go first (oldest first). A re-mint is
+/// picked only when no user deposit is waiting and fewer than [`MAX_INFLIGHT_REMINTS`]
+/// re-mints are already in flight. User deposits are bounded by admission (amounts,
+/// windows, capacity), so re-mints are delayed by at most that bounded flow.
 pub fn next_mintable_deposit() -> Option<DepositRecord> {
     let ok = state::read_core(|c| c.halted.is_none() && !c.config.pauses.mints && c.config.contract.is_some());
     if !ok {
         return None;
     }
-    state::deposits_in_state(|d| matches!(d.state, DepositState::Escrowed) && d.active_tx.is_none(), 1).into_iter().next()
+    let waiting = |d: &DepositRecord| matches!(d.state, DepositState::Escrowed) && d.active_tx.is_none();
+    let user = state::deposits_in_state(|d| waiting(d) && matches!(d.kind, DepositKind::UserDeposit), 1);
+    if let Some(d) = user.into_iter().next() {
+        return Some(d);
+    }
+    let remints_in_flight = state::deposits_in_state(
+        |d| matches!(d.kind, DepositKind::Remint { .. }) && matches!(d.state, DepositState::MintInFlight),
+        MAX_INFLIGHT_REMINTS,
+    )
+    .len();
+    if remints_in_flight >= MAX_INFLIGHT_REMINTS {
+        return None;
+    }
+    state::deposits_in_state(|d| waiting(d) && matches!(d.kind, DepositKind::Remint { .. }), 1).into_iter().next()
 }
 
 pub fn on_mint_tx_created(deposit_id: u64, tx_id: u64) -> Result<(), String> {
@@ -813,6 +835,41 @@ pub(crate) mod tests {
         // Duplicate later proves the first attempt executed.
         resolve_pull(d.id, CallOutcome::Accepted { block_index: 9 });
         assert_eq!(state::get_deposit(d.id).unwrap().state, DepositState::Escrowed);
+    }
+
+    #[test]
+    fn user_deposits_mint_before_remints_and_remints_in_flight_are_capped() {
+        setup_bound();
+        let owner = user();
+        let remint = |id: u64, state: DepositState| {
+            let mut d = state::tests::sample_deposit(id, owner);
+            d.kind = DepositKind::Remint { transfer_id: [id as u8; 32] };
+            d.mint_id = [id as u8 + 100; 32];
+            d.state = state;
+            state::put_deposit(&d);
+        };
+        // Older re-mints are waiting, then a newer user deposit arrives: the user goes first.
+        remint(10, DepositState::Escrowed);
+        remint(11, DepositState::Escrowed);
+        let mut user_dep = state::tests::sample_deposit(12, owner);
+        user_dep.mint_id = [99; 32];
+        state::put_deposit(&user_dep);
+        assert_eq!(next_mintable_deposit().map(|x| x.id), Some(12));
+        // With no user deposit waiting, the oldest re-mint is next.
+        user_dep.state = DepositState::MintInFlight;
+        user_dep.active_tx = Some(1);
+        state::put_deposit(&user_dep);
+        assert_eq!(next_mintable_deposit().map(|x| x.id), Some(10));
+        // Once MAX_INFLIGHT_REMINTS re-mints are in flight, no further re-mint starts...
+        for id in 20..20 + MAX_INFLIGHT_REMINTS as u64 {
+            remint(id, DepositState::MintInFlight);
+        }
+        assert!(next_mintable_deposit().is_none());
+        // ...but a user deposit still does.
+        let mut late_user = state::tests::sample_deposit(30, owner);
+        late_user.mint_id = [98; 32];
+        state::put_deposit(&late_user);
+        assert_eq!(next_mintable_deposit().map(|x| x.id), Some(30));
     }
 
     #[test]

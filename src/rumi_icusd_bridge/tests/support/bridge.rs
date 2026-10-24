@@ -54,7 +54,10 @@
 //! `SetupOptions::default()`; free fns `bridge_wasm_bytes`, `relay_wasm_bytes`,
 //! `flaky_ledger_wasm`, `default_limits`, `escrow_subaccount`, `hex0x`, `parse_hex32`.
 //!
-//! Raw calls: `update`, `query` (generic over Candid args/results), `admin_call`.
+//! Raw calls: `update`, `query` (generic over Candid args/results), `admin_call`,
+//! `try_update` / `try_update_raw` / `expect_refused` (non-panicking; they tell a message
+//! refused at ingress by `inspect_message` apart from one rejected in execution).
+//! `controller` is a signed-in controller of the bridge canister that is not an admin.
 //!
 //! Time: `tick`, `ticks(n)`, `tick_until(what, max, pred)`, `pump_idle()`, `advance_secs(s)`,
 //! `dump()`.
@@ -92,7 +95,7 @@ use candid::{decode_one, encode_args, CandidType, Deserialize, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use num_traits::ToPrimitive;
-use pocket_ic::PocketIc;
+use pocket_ic::{ErrorCode, PocketIc};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use sha3::Keccak256;
@@ -105,6 +108,10 @@ pub const LEDGER_FEE: u64 = TRANSFER_FEE_E8S;
 pub const TICK_ADVANCE_SECS: u64 = 5;
 /// Default bound for the `wait_*` helpers.
 pub const DEFAULT_MAX_TICKS: u32 = 60;
+/// How many times [`BridgeWorld::tick`] retries `admin_run_tick` when the canister answers
+/// that a tick is already running (its own timer is mid-run), advancing a few seconds
+/// between attempts.
+pub const TICK_BUSY_RETRIES: u32 = 10;
 pub const ONE_ETH_WEI: u128 = 1_000_000_000_000_000_000;
 
 // ===========================================================================
@@ -234,6 +241,62 @@ pub struct BridgeToBaseArgs {
     pub from_subaccount: Option<serde_bytes::ByteBuf>,
     pub client_request_id: serde_bytes::ByteBuf,
     pub expected_deposit_fee_e8s: u64,
+}
+
+// ICRC-21 consent message mirrors (kept local like every other type in this file).
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ConsentMessageMetadata {
+    pub language: String,
+    pub utc_offset_minutes: Option<i16>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum DeviceSpec {
+    GenericDisplay,
+    LineDisplay { characters_per_line: u16, lines_per_page: u16 },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ConsentMessageSpec {
+    pub metadata: ConsentMessageMetadata,
+    pub device_spec: Option<DeviceSpec>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ConsentMessageRequest {
+    pub method: String,
+    pub arg: Vec<u8>,
+    pub user_preferences: ConsentMessageSpec,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct LineDisplayPage {
+    pub lines: Vec<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum ConsentMessage {
+    GenericDisplayMessage(String),
+    LineDisplayMessage { pages: Vec<LineDisplayPage> },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ConsentInfo {
+    pub metadata: ConsentMessageMetadata,
+    pub consent_message: ConsentMessage,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ErrorInfo {
+    pub description: String,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum Icrc21Error {
+    GenericError { error_code: u64, description: String },
+    UnsupportedCanisterCall(ErrorInfo),
+    ConsentMessageUnavailable(ErrorInfo),
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -515,6 +578,29 @@ pub struct AuditEntry {
     pub note: String,
 }
 
+/// Why an update call produced no reply (see [`BridgeWorld::try_update`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallFailure {
+    /// The ingress message was refused BEFORE execution (the canister's `inspect_message`
+    /// rejected it, PocketIC error code `CanisterRejectedMessage`). The update method never
+    /// ran, so it cannot have changed any state.
+    Refused(String),
+    /// The message was accepted and then rejected or trapped during execution.
+    Executed(String),
+}
+
+impl CallFailure {
+    pub fn is_refused(&self) -> bool {
+        matches!(self, CallFailure::Refused(_))
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            CallFailure::Refused(m) | CallFailure::Executed(m) => m,
+        }
+    }
+}
+
 // ===========================================================================
 // Small helpers
 // ===========================================================================
@@ -664,6 +750,10 @@ pub struct BridgeWorld {
     pub bridge: Principal,
     /// Bridge admin principal (also the sender of every `tick`).
     pub admin: Principal,
+    /// A non-anonymous controller of the bridge canister that is NOT an admin. The anonymous
+    /// principal (which created the canister) stays a controller too, so the harness'
+    /// upgrade, stop and start helpers keep working.
+    pub controller: Principal,
     /// Funded ICP-side users (`user_balance_e8s` each).
     pub user: Principal,
     pub user2: Principal,
@@ -715,6 +805,7 @@ impl BridgeWorld {
         let pic = build_pic();
 
         let admin = test_principal(0xA1);
+        let controller = test_principal(0xC2);
         let user = test_principal(0xB1);
         let user2 = test_principal(0xB2);
         let minting = test_principal(0xC1);
@@ -760,6 +851,11 @@ impl BridgeWorld {
             encode_args((BridgeArg::Init(init),)).expect("encode init"),
             None,
         );
+        // Add a signed-in controller next to the creating (anonymous) one.
+        let mut controllers = pic.get_controllers(bridge);
+        let current = *controllers.first().expect("the bridge has a controller");
+        controllers.push(controller);
+        pic.set_controllers(bridge, Some(current), controllers).expect("add the controller principal");
 
         let deployer = anvil.accounts[0].clone();
         let placeholder = BaseAddresses { minter: String::new(), admin: String::new() };
@@ -772,6 +868,7 @@ impl BridgeWorld {
             ledger,
             bridge,
             admin,
+            controller,
             user,
             user2,
             minting,
@@ -787,7 +884,8 @@ impl BridgeWorld {
         };
 
         // 5. the bridge's real tECDSA addresses; fund both with test ETH.
-        let addrs: BridgeResult<BaseAddresses> = w.update(Principal::anonymous(), "get_base_addresses", ());
+        // Signed in: anonymous ingress to update methods is refused by `inspect_message`.
+        let addrs: BridgeResult<BaseAddresses> = w.admin_call("get_base_addresses", ());
         w.base_addrs = addrs.expect("get_base_addresses");
         for a in [&w.base_addrs.minter, &w.base_addrs.admin] {
             w.anvil.set_balance(a, 10 * ONE_ETH_WEI);
@@ -848,6 +946,47 @@ impl BridgeWorld {
         decode_one(&bytes).unwrap_or_else(|e| panic!("decode {method} reply: {e}"))
     }
 
+    /// Like [`BridgeWorld::update`] but a refused or rejected call is a value, not a panic,
+    /// and the reply is returned undecoded. Distinguishes a message refused at ingress by
+    /// `inspect_message` ([`CallFailure::Refused`], the method never ran) from one that was
+    /// accepted and then rejected or trapped ([`CallFailure::Executed`]).
+    pub fn try_update_raw(&mut self, sender: Principal, method: &str, arg: Vec<u8>) -> Result<Vec<u8>, CallFailure> {
+        let id = match self.pic.submit_call(self.bridge, sender, method, arg) {
+            Ok(id) => id,
+            Err(e) if e.code == ErrorCode::CanisterRejectedMessage => {
+                return Err(CallFailure::Refused(format!("{:?}: {}", e.code, e.description)));
+            }
+            Err(e) => panic!("submit_call {method} failed unexpectedly: {e}"),
+        };
+        await_with_outcalls(&self.pic, id, &mut self.router).map_err(CallFailure::Executed)
+    }
+
+    /// Typed [`BridgeWorld::try_update_raw`].
+    pub fn try_update<A: ArgumentEncoder, R: CandidType + for<'de> Deserialize<'de>>(
+        &mut self,
+        sender: Principal,
+        method: &str,
+        args: A,
+    ) -> Result<R, CallFailure> {
+        let arg = encode_args(args).expect("encode args");
+        let bytes = self.try_update_raw(sender, method, arg)?;
+        Ok(decode_one(&bytes).unwrap_or_else(|e| panic!("decode {method} reply: {e}")))
+    }
+
+    /// Call `method` as `sender` and require that ingress refuses it (`inspect_message`).
+    /// Returns the refusal text. Panics if the message was accepted, whatever the method
+    /// then answered.
+    pub fn expect_refused<A: ArgumentEncoder>(&mut self, sender: Principal, method: &str, args: A) -> String {
+        let arg = encode_args(args).expect("encode args");
+        match self.try_update_raw(sender, method, arg) {
+            Err(CallFailure::Refused(m)) => m,
+            Err(CallFailure::Executed(m)) => {
+                panic!("{method} as {sender} was accepted at ingress and failed in execution instead: {m}")
+            }
+            Ok(bytes) => panic!("{method} as {sender} was accepted at ingress and replied ({} bytes)", bytes.len()),
+        }
+    }
+
     /// Query call as `sender`.
     pub fn query<A: ArgumentEncoder, R: CandidType + for<'de> Deserialize<'de>>(
         &self,
@@ -885,11 +1024,25 @@ impl BridgeWorld {
     }
 
     /// Advance 5 s of IC time, then run `admin_run_tick` (outcalls are pumped to anvil).
-    /// The canister's tick guard may make this a no-op when its own timer is mid-run.
+    /// The canister's tick guard answers `InvalidState("a tick is already running")` when its
+    /// own timer is mid-run; that is tolerated: a few more seconds pass and the call is
+    /// retried, at most [`TICK_BUSY_RETRIES`] times. Any other error, or a tick that is
+    /// still busy after the bound, panics.
     pub fn tick(&mut self) {
         self.advance_secs(TICK_ADVANCE_SECS);
-        let r: BridgeResult<()> = self.admin_call("admin_run_tick", ());
-        r.expect("admin_run_tick");
+        for attempt in 0..=TICK_BUSY_RETRIES {
+            let r: BridgeResult<()> = self.admin_call("admin_run_tick", ());
+            match r {
+                Ok(()) => return,
+                Err(BridgeError::InvalidState(m)) if m.contains("already running") => {
+                    if attempt < TICK_BUSY_RETRIES {
+                        self.advance_secs(TICK_ADVANCE_SECS);
+                    }
+                }
+                Err(e) => panic!("admin_run_tick failed: {e:?}"),
+            }
+        }
+        panic!("admin_run_tick still reported a running tick after {TICK_BUSY_RETRIES} retries\n{}", self.dump());
     }
 
     pub fn ticks(&mut self, n: u32) {

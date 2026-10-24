@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { Principal } from '@dfinity/principal';
 import type { BridgeError } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
 import {
+  DEPOSIT_DELIVERY_NOTE,
   FINALITY_NOTE,
+  GAS_NOTICE_MESSAGE,
   abortableSleep,
   bridgeErrorKind,
   classifyBridgeError,
@@ -18,7 +20,8 @@ import {
   shortAddress,
   shortHash,
 } from './status';
-import { TEST_OWNER, makeDeposit, makeRelease } from './testSupport';
+import { displayAddress } from './eip55';
+import { EIP55_VECTORS, TEST_OWNER, makeDeposit, makeRelease } from './testSupport';
 
 const ME = TEST_OWNER.toText();
 const HASH = `0x${'12'.repeat(32)}`;
@@ -66,7 +69,8 @@ describe('describeDeposit: every status maps to one user state', () => {
     const d = describeDeposit(makeDeposit({ status: { MintInFlight: null }, mint_stage: [{ Included: { block_number: 123n } }] }));
     expect(d).toMatchObject({ stage: 'included', blockNumber: 123n, finalized: false, terminal: false });
     expect(d.label).toBe('Included on Base (block 123)');
-    expect(d.detail).toContain(FINALITY_NOTE);
+    expect(d.detail).toContain(DEPOSIT_DELIVERY_NOTE);
+    expect(DEPOSIT_DELIVERY_NOTE).toBe('usually about 20 minutes, longer when the bridge is busy');
   });
 
   it('a finalized mint that the canister has not yet marked Delivered is still not "Delivered"', () => {
@@ -106,6 +110,59 @@ describe('describeDeposit: every status maps to one user state', () => {
     const done = describeDeposit(makeDeposit({ status: { Refunded: null }, refund_amount_e8s: [2_499_900_000n] }));
     expect(done).toMatchObject({ stage: 'refunded', terminal: true });
     expect(done.detail).toContain('24.999 icUSD');
+  });
+});
+
+describe('describeDeposit while the bridge Minter lane is waiting for gas', () => {
+  const waiting = { awaitingGas: true };
+
+  it('an escrowed deposit says it is waiting for bridge gas and that the icUSD is safe', () => {
+    const d = describeDeposit(makeDeposit({ status: { Escrowed: null } }), waiting);
+    expect(d).toMatchObject({ stage: 'awaiting_gas', label: 'Waiting for bridge gas', tone: 'warning', terminal: false, canRefund: false, finalized: false });
+    expect(d.detail).toMatch(/gas balance is low/);
+    expect(d.detail).toMatch(/escrow/);
+    expect(d.detail).not.toMatch(/being sent/);
+  });
+
+  it('a mint that was never signed reads as waiting, not as being sent', () => {
+    for (const mint_stage of [[], [{ Queued: null }]] as const) {
+      const d = describeDeposit(makeDeposit({ status: { MintInFlight: null }, mint_stage: mint_stage as any, mint_tx_hashes: [] }), waiting);
+      expect(d.stage).toBe('awaiting_gas');
+      expect(d.label).toBe('Waiting for bridge gas');
+    }
+  });
+
+  it('a mint that already has a signed attempt keeps its normal wording', () => {
+    const d = describeDeposit(makeDeposit({ status: { MintInFlight: null }, mint_tx_hashes: [HASH] }), waiting);
+    expect(d).toMatchObject({ stage: 'minting', label: 'Minting on Base' });
+  });
+
+  it('is unchanged for every other state, and when gas is fine', () => {
+    for (const status of [{ PullPending: null }, { PullUnknown: null }, { MintHeld: { reason: 'paused' } }, { Refunding: null }] as const) {
+      expect(describeDeposit(makeDeposit({ status: status as any }), waiting)).toEqual(describeDeposit(makeDeposit({ status: status as any })));
+    }
+    expect(describeDeposit(makeDeposit({ status: { Escrowed: null } }), { awaitingGas: false }).stage).toBe('escrowed');
+    expect(describeDeposit(makeDeposit({ status: { MintInFlight: null } }), { awaitingGas: false }).stage).toBe('minting');
+    const included = makeDeposit({ status: { MintInFlight: null }, mint_stage: [{ Included: { block_number: 5n } }] });
+    expect(describeDeposit(included, waiting).stage).toBe('included');
+    const delivered = makeDeposit({ status: { Delivered: null }, delivered: [{ block_number: 77n, block_hash: '0x1', tx_hash: HASH }] });
+    expect(describeDeposit(delivered, waiting).stage).toBe('delivered');
+  });
+
+  it('uses the page-level wording, which names the escrow and the gas balance', () => {
+    expect(GAS_NOTICE_MESSAGE).toBe(
+      "Base deliveries are waiting: the bridge's Base gas balance is low. Your icUSD stays in escrow and will be delivered once gas is restored.",
+    );
+  });
+});
+
+describe('describeDeposit recipient display', () => {
+  it('names the recipient, in EIP-55 form when a Keccak-256 is configured and lowercase otherwise', () => {
+    const d = describeDeposit(
+      makeDeposit({ status: { Delivered: null }, base_recipient: EIP55_VECTORS[0].toLowerCase(), delivered: [{ block_number: 1n, block_hash: '0x1', tx_hash: HASH }] }),
+    );
+    expect(d.detail.toLowerCase()).toContain(EIP55_VECTORS[0].toLowerCase());
+    expect(d.detail).toContain(displayAddress(EIP55_VECTORS[0].toLowerCase()));
   });
 });
 

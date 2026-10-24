@@ -105,6 +105,13 @@ pub struct GasSettings {
     pub replace_after_secs: u64,
 }
 
+/// Lowest accepted mint gas limit: about 1.6x the most expensive measured mint.
+pub const MIN_MINT_GAS_LIMIT: u64 = 250_000;
+/// Lowest accepted admin gas limit: about 1.7x the most expensive measured admin call.
+pub const MIN_ADMIN_GAS_LIMIT: u64 = 80_000;
+/// Highest accepted gas limit for either lane.
+pub const MAX_GAS_LIMIT: u64 = 1_000_000;
+
 impl Default for GasSettings {
     fn default() -> Self {
         GasSettings {
@@ -112,7 +119,10 @@ impl Default for GasSettings {
             max_fee_per_gas_wei: 2_000_000_000,
             // 0.1 gwei priority cap.
             max_priority_fee_per_gas_wei: 100_000_000,
-            mint_gas_limit: 150_000,
+            // Measured on anvil: the most expensive mint (first mint ever, after the
+            // first mint window ended, recipient with 20 non-zero bytes) uses 152,390.
+            mint_gas_limit: 300_000,
+            // Measured: the most expensive admin call (a first pause) uses 46,905.
             admin_gas_limit: 100_000,
             // 0.0005 ETH kept above gas_limit * max_fee for the L1 data fee.
             min_gas_reserve_wei: 500_000_000_000_000,
@@ -396,6 +406,22 @@ pub struct ObserverState {
     /// cursor here so the missing range is scanned again.
     #[serde(default)]
     pub last_event_block: u64,
+    /// Bridge-out sequence the scan is waiting on because in-flight mints explain the
+    /// burn (`RecordOutcome::Deferred`). `None` while the scan is not deferred. This is
+    /// what tells "the same deferral continues" from "the scan moved on and a different
+    /// burn now waits".
+    #[serde(default)]
+    pub deferred_sequence: Option<u64>,
+    /// When the current deferral first began. Kept while the same burn keeps waiting.
+    #[serde(default)]
+    pub deferred_since_ns: Option<u64>,
+    /// Why the scan is waiting, as of the latest pass.
+    #[serde(default)]
+    pub deferred_reason: Option<String>,
+    /// When a deferral was last written to the audit log (throttles the log to one entry
+    /// per half hour while a deferral lasts).
+    #[serde(default)]
+    pub deferred_last_audit_ns: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1096,10 +1122,27 @@ pub fn is_deposit_active(id: u64) -> bool {
     ACTIVE_DEPOSITS.with(|m| m.borrow().contains_key(&id))
 }
 
-/// Count active deposits owned by `owner` (bounded by `max_active_global`).
+/// Count active deposits owned by `owner`.
+///
+/// Walks only this owner's slice of the owner index and checks each id against the active
+/// set, so it decodes no deposit record and its cost does not grow with other owners'
+/// deposits. The index holds every deposit admitted for a caller principal
+/// (`bridge_to_base` indexes the deposit in the same message that stores it). Re-mint
+/// deposits are owned by the canister itself and are deliberately not indexed, which makes
+/// no difference here: the canister is never the caller of an admission.
 pub fn active_deposits_owned_by(owner: &Principal) -> usize {
-    let ids: Vec<u64> = ACTIVE_DEPOSITS.with(|m| m.borrow().iter().map(|(k, _)| k).collect());
-    ids.into_iter().filter_map(get_deposit).filter(|d| d.owner == *owner).count()
+    let lower = owner_key(owner, 0);
+    let upper = owner_key(owner, u64::MAX);
+    ACTIVE_DEPOSITS.with(|active| {
+        let active = active.borrow();
+        OWNER_DEPOSITS.with(|index| {
+            index
+                .borrow()
+                .range(lower..=upper)
+                .filter(|(k, _)| active.contains_key(&u64::from_be_bytes(k[30..].try_into().unwrap())))
+                .count()
+        })
+    })
 }
 
 pub fn index_owner_deposit(owner: &Principal, id: u64) {
@@ -1417,8 +1460,7 @@ pub(crate) mod tests {
 
     #[test]
     fn core_round_trips_and_tolerates_missing_fields() {
-        let mut core = BridgeCore::default();
-        core.initialized = true;
+        let mut core = BridgeCore { initialized: true, ..Default::default() };
         core.buckets.outstanding_base = u128::from(u64::MAX) * 3;
         core.minter_lane.next_nonce = Some(42);
         let bytes = cbor_encode(&core);
@@ -1444,6 +1486,53 @@ pub(crate) mod tests {
         assert_eq!(decoded.instance_salt, [5u8; 32]);
         assert_eq!(decoded.buckets, Buckets::default());
         assert!(decoded.hints.is_empty());
+    }
+
+    #[test]
+    fn an_observer_snapshot_without_the_deferral_fields_still_decodes() {
+        // The shape stored before the deferral fields existed.
+        #[derive(Serialize)]
+        struct OldObserver {
+            cursor_block: u64,
+            processed_count: u64,
+            last_finalized: Option<(u64, [u8; 32])>,
+            last_error: Option<String>,
+            last_run_ns: Option<u64>,
+            consecutive_failures: u32,
+            max_settled_block: u64,
+            last_full_pass_ns: Option<u64>,
+            adaptive_chunk_blocks: Option<u64>,
+            adaptive_logs_cap: Option<u64>,
+            next_attempt_ns: Option<u64>,
+            last_event_block: u64,
+        }
+        let old = OldObserver {
+            cursor_block: 11,
+            processed_count: 4,
+            last_finalized: Some((9, [1; 32])),
+            last_error: Some("e".into()),
+            last_run_ns: Some(5),
+            consecutive_failures: 2,
+            max_settled_block: 8,
+            last_full_pass_ns: Some(6),
+            adaptive_chunk_blocks: Some(100),
+            adaptive_logs_cap: None,
+            next_attempt_ns: None,
+            last_event_block: 10,
+        };
+        let decoded: ObserverState = cbor_decode(&cbor_encode(&old));
+        assert_eq!((decoded.cursor_block, decoded.processed_count, decoded.last_event_block), (11, 4, 10));
+        assert_eq!(
+            (decoded.deferred_sequence, decoded.deferred_since_ns, decoded.deferred_reason, decoded.deferred_last_audit_ns),
+            (None, None, None, None)
+        );
+        // And inside a whole core written by an older build.
+        let core = BridgeCore {
+            observer: ObserverState { deferred_sequence: Some(3), deferred_since_ns: Some(7), ..Default::default() },
+            ..Default::default()
+        };
+        let back: BridgeCore = cbor_decode(&cbor_encode(&core));
+        assert_eq!(back, core);
     }
 
     #[test]
@@ -1477,6 +1566,75 @@ pub(crate) mod tests {
         assert_eq!(page.iter().map(|d| d.id).collect::<Vec<_>>(), vec![2, 1, 0]);
         assert!(list_owner_deposits(&owner, Some(0), 10).is_empty());
         assert_eq!(list_owner_deposits(&other, None, 10).len(), 1);
+    }
+
+    /// The previous implementation: decode every active deposit and compare owners.
+    fn active_deposits_owned_by_by_full_scan(owner: &Principal) -> usize {
+        let ids: Vec<u64> = ACTIVE_DEPOSITS.with(|m| m.borrow().iter().map(|(k, _)| k).collect());
+        ids.into_iter().filter_map(get_deposit).filter(|d| d.owner == *owner).count()
+    }
+
+    #[test]
+    fn active_deposits_owned_by_matches_the_full_scan_on_a_mixed_set() {
+        reset_for_tests();
+        let (a, b, c) = (p(9), p(8), p(7));
+        let canister = p(0xbb);
+        let states = [
+            DepositState::PullPending,
+            DepositState::PullUnknown,
+            DepositState::PullFailed { reason: "x".into() },
+            DepositState::Escrowed,
+            DepositState::MintInFlight,
+            DepositState::Delivered,
+            DepositState::MintHeld { reason: "x".into() },
+            DepositState::Refunding,
+            DepositState::Refunded,
+        ];
+        let mut id = 0u64;
+        // Owner `a` has every state, twice; owner `b` has a few; owner `c` has none.
+        for _ in 0..2 {
+            for st in &states {
+                let mut d = sample_deposit(id, a);
+                d.state = st.clone();
+                put_deposit(&d);
+                index_owner_deposit(&a, id);
+                id += 1;
+            }
+        }
+        for st in [DepositState::Escrowed, DepositState::Delivered, DepositState::PullPending] {
+            let mut d = sample_deposit(id, b);
+            d.state = st;
+            put_deposit(&d);
+            index_owner_deposit(&b, id);
+            id += 1;
+        }
+        // Re-mints belong to the canister and are not owner-indexed.
+        let mut remint = sample_deposit(id, canister);
+        remint.kind = DepositKind::Remint { transfer_id: [3; 32] };
+        remint.state = DepositState::Escrowed;
+        put_deposit(&remint);
+        // A neighbour principal whose key prefix is close to `a` must not leak in.
+        let mut near = sample_deposit(id + 1, Principal::from_slice(&[9; 11]));
+        near.state = DepositState::Escrowed;
+        put_deposit(&near);
+        index_owner_deposit(&near.owner, near.id);
+
+        for owner in [a, b, c, near.owner] {
+            assert_eq!(active_deposits_owned_by(&owner), active_deposits_owned_by_by_full_scan(&owner), "owner {owner}");
+        }
+        // Six of the nine states are non-terminal, and `a` has each state twice.
+        let expected_a = states.iter().filter(|s| !s.is_terminal()).count() * 2;
+        assert_eq!(active_deposits_owned_by(&a), expected_a);
+        assert_eq!(active_deposits_owned_by(&b), 2);
+        assert_eq!(active_deposits_owned_by(&c), 0);
+        assert_eq!(active_deposits_owned_by(&near.owner), 1);
+
+        // A deposit leaving the active set drops out of the count.
+        let mut done = get_deposit(3).unwrap();
+        done.state = DepositState::Delivered;
+        put_deposit(&done);
+        assert_eq!(active_deposits_owned_by(&a), expected_a - 1);
+        assert_eq!(active_deposits_owned_by(&a), active_deposits_owned_by_by_full_scan(&a));
     }
 
     #[test]

@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => {
   }
   return {
     flags: { enabled: false, separate: false },
+    /** The Keccak-256 the page sees. null mirrors the shipped state (no hash implementation configured). */
+    keccak: { fn: null as null | ((data: Uint8Array) => Uint8Array) },
     principal: writable<any>(null),
     generation: writable(0),
     loadBridgeConfig: vi.fn(),
@@ -41,6 +43,12 @@ vi.mock('$lib/config', () => ({
   },
   CANISTER_IDS: { ICUSD_BRIDGE: 'tfesu-vyaaa-aaaap-qrd7a-cai' },
   CONFIG: { isLocal: false, host: 'https://icp0.io', currentIcusdLedgerId: 't6bor-paaaa-aaaap-qrd5q-cai' },
+}));
+
+vi.mock('$lib/services/baseBridge/keccak', () => ({
+  get keccak256() {
+    return mocks.keccak.fn;
+  },
 }));
 
 vi.mock('$lib/stores/wallet', () => ({
@@ -98,7 +106,20 @@ vi.mock('$lib/services/baseBridge/bridgeActor', () => ({
 import Page from './+page.svelte';
 import { resolveBridgeConfig } from '$lib/services/baseBridge/chains';
 import { SELECTORS, encodeUint256 } from '$lib/services/baseBridge/abi';
-import { createFakeProvider, makeBridgeInfo, makeDeposit, makeRelease, walletError, TEST_OWNER } from '$lib/services/baseBridge/testSupport';
+import {
+  EIP55_VECTORS,
+  ORACLE_OR_ZERO,
+  createFakeProvider,
+  flipCase,
+  makeBridgeInfo,
+  makeDeposit,
+  makeLane,
+  makeRelease,
+  walletError,
+  TEST_OWNER,
+} from '$lib/services/baseBridge/testSupport';
+import { CHECKSUM_ERROR_MESSAGE, CHECKSUM_UNVERIFIABLE_MESSAGE } from '$lib/services/baseBridge/eip55';
+import { DEPOSIT_DELIVERY_NOTE, GAS_NOTICE_MESSAGE } from '$lib/services/baseBridge/status';
 import { IntentStore } from '$lib/services/baseBridge/intents';
 
 async function settle(rounds = 14) {
@@ -168,6 +189,7 @@ beforeEach(() => {
   document.body.appendChild(host);
   mocks.flags.enabled = false;
   mocks.flags.separate = false;
+  mocks.keccak.fn = null;
   mocks.principal.set(null);
   mocks.generation.set(0);
   mocks.loadBridgeConfig.mockReset().mockImplementation(async () => resolveBridgeConfig(makeBridgeInfo()));
@@ -372,6 +394,192 @@ describe('/bridge history and keyboard support', () => {
   });
 });
 
+describe('/bridge when the bridge cannot pay Base gas', () => {
+  beforeEach(() => {
+    mocks.flags.enabled = true;
+  });
+
+  function withLanes(minterGas: boolean, adminGas: boolean) {
+    mocks.loadBridgeConfig.mockResolvedValue(
+      resolveBridgeConfig(makeBridgeInfo({ lanes: [makeLane('Minter', { awaiting_gas: minterGas }), makeLane('Admin', { awaiting_gas: adminGas })] })),
+    );
+  }
+
+  it('shows no notice while both lanes have gas', async () => {
+    withLanes(false, false);
+    render();
+    await settle();
+    expect(host.querySelector('[data-testid="gas-notice"]')).toBeNull();
+    expect(host.textContent).not.toContain('Base deliveries are waiting');
+  });
+
+  it('shows a page-level notice when the Minter lane is awaiting gas', async () => {
+    withLanes(true, false);
+    render();
+    await settle();
+    const notice = host.querySelector<HTMLElement>('[data-testid="gas-notice"]');
+    expect(notice).toBeTruthy();
+    expect(notice!.getAttribute('role')).toBe('status');
+    expect(notice!.textContent).toBe(GAS_NOTICE_MESSAGE);
+    expect(notice!.textContent).toBe(
+      "Base deliveries are waiting: the bridge's Base gas balance is low. Your icUSD stays in escrow and will be delivered once gas is restored.",
+    );
+    // Page-level: the notice is outside both direction panels.
+    expect(notice!.closest('[role="tabpanel"]')).toBeNull();
+  });
+
+  it('shows nothing user-facing when only the Admin lane is awaiting gas', async () => {
+    withLanes(false, true);
+    render();
+    await settle();
+    expect(host.querySelector('[data-testid="gas-notice"]')).toBeNull();
+    expect(host.textContent).not.toContain('Waiting for bridge gas');
+  });
+
+  it('describes in-flight deposits as waiting for gas rather than being sent', async () => {
+    withLanes(true, false);
+    mocks.principal.set(TEST_OWNER);
+    anonymous.list_deposits_for_owner.mockResolvedValue([
+      makeDeposit({ id: 7n, status: { Escrowed: null } }),
+      makeDeposit({ id: 6n, status: { MintInFlight: null }, mint_tx_hashes: [] }),
+      makeDeposit({ id: 5n, status: { MintInFlight: null }, mint_tx_hashes: [`0x${'12'.repeat(32)}`] }),
+      makeDeposit({ id: 4n, status: { Delivered: null } }),
+    ]);
+    render();
+    await settle(24);
+    const history = host.querySelector<HTMLElement>('[aria-label="Bridge history"]')!;
+    const items = Array.from(history.querySelectorAll('li'));
+    const byId = (id: number) => items.find((li) => li.textContent?.includes(`#${id} `))!;
+    expect(byId(7).textContent).toContain('Waiting for bridge gas');
+    expect(byId(6).textContent).toContain('Waiting for bridge gas');
+    expect(byId(5).textContent).toContain('Minting on Base');
+    expect(byId(4).textContent).toContain('Delivered (finalized)');
+  });
+
+  it('keeps the normal wording for the same deposits while gas is fine', async () => {
+    withLanes(false, false);
+    mocks.principal.set(TEST_OWNER);
+    anonymous.list_deposits_for_owner.mockResolvedValue([
+      makeDeposit({ id: 7n, status: { Escrowed: null } }),
+      makeDeposit({ id: 6n, status: { MintInFlight: null }, mint_tx_hashes: [] }),
+    ]);
+    render();
+    await settle(24);
+    const history = host.querySelector<HTMLElement>('[aria-label="Bridge history"]')!;
+    expect(history.textContent).not.toContain('Waiting for bridge gas');
+    expect(history.textContent).toContain('Minting on Base');
+  });
+
+  it('tells a user tracking a fresh deposit that it is waiting for gas, not being sent', async () => {
+    withLanes(true, false);
+    mocks.principal.set(TEST_OWNER);
+    render();
+    await settle();
+    type('#icp-amount', '25');
+    type('#icp-recipient', '0x1111111111111111111111111111111111111111');
+    click(/^Review transfer$/);
+    await settle();
+    click(/Approve and bridge/);
+    await settle(24);
+    const card = host.querySelector<HTMLElement>('[aria-label="Deposit status"]')!;
+    expect(card.textContent).toContain('Waiting for bridge gas');
+    expect(card.textContent).toContain('gas balance is low');
+    expect(card.textContent).not.toContain('being sent to Base');
+  });
+});
+
+describe('Base recipient checksums on the ICP to Base form', () => {
+  beforeEach(() => {
+    mocks.flags.enabled = true;
+    mocks.principal.set(TEST_OWNER);
+  });
+
+  const reviewButton = () => button(/^Review transfer$/)!;
+  const recipientInput = () => host.querySelector<HTMLInputElement>('#icp-recipient')!;
+  const inlineError = () => host.querySelector<HTMLElement>('#icp-recipient-error');
+
+  it('blocks a mixed-case recipient with a wrong checksum, inline, and does not review', async () => {
+    mocks.keccak.fn = ORACLE_OR_ZERO;
+    render();
+    await settle();
+    type('#icp-amount', '5');
+    type('#icp-recipient', flipCase(EIP55_VECTORS[0], 1));
+    expect(inlineError()?.textContent).toBe('This address has a checksum error. Check for a typo, or paste it in all lowercase.');
+    expect(inlineError()?.textContent).toBe(CHECKSUM_ERROR_MESSAGE);
+    expect(inlineError()?.getAttribute('role')).toBe('alert');
+    expect(recipientInput().getAttribute('aria-invalid')).toBe('true');
+    expect(recipientInput().getAttribute('aria-describedby')).toBe('icp-recipient-error');
+    expect(reviewButton().disabled).toBe(true);
+    reviewButton().click();
+    flushSync();
+    await settle();
+    expect(mocks.buildPrepareDeps).not.toHaveBeenCalled();
+  });
+
+  it('clears the error and allows review once the checksum is right, showing the recipient checksummed', async () => {
+    mocks.keccak.fn = ORACLE_OR_ZERO;
+    render();
+    await settle();
+    type('#icp-amount', '25');
+    type('#icp-recipient', flipCase(EIP55_VECTORS[2], 1));
+    expect(reviewButton().disabled).toBe(true);
+    type('#icp-recipient', EIP55_VECTORS[2]);
+    expect(inlineError()).toBeNull();
+    expect(recipientInput().getAttribute('aria-invalid')).toBeNull();
+    expect(reviewButton().disabled).toBe(false);
+    click(/^Review transfer$/);
+    await settle();
+    expect(mocks.buildPrepareDeps).toHaveBeenCalledTimes(1);
+    const summary = host.querySelector<HTMLElement>('[aria-label="Transfer summary"]')!;
+    expect(summary.textContent).toContain(`Recipient${EIP55_VECTORS[2]}`);
+  });
+
+  it('accepts all-lowercase and all-uppercase hex without a checksum and sends it lowercase', async () => {
+    mocks.keccak.fn = ORACLE_OR_ZERO;
+    for (const typed of [EIP55_VECTORS[1].toLowerCase(), `0x${EIP55_VECTORS[1].slice(2).toUpperCase()}`]) {
+      render();
+      await settle();
+      type('#icp-amount', '25');
+      type('#icp-recipient', typed);
+      expect(inlineError()).toBeNull();
+      expect(reviewButton().disabled).toBe(false);
+      click(/^Review transfer$/);
+      await settle();
+      click(/Approve and bridge/);
+      await settle(24);
+      expect(signers.bridge.bridge_to_base).toHaveBeenLastCalledWith(
+        expect.objectContaining({ base_recipient: EIP55_VECTORS[1].toLowerCase() }),
+      );
+      unmount(instance as any);
+      instance = undefined;
+      host.innerHTML = '';
+      localStorage.clear();
+    }
+  });
+
+  it('refuses mixed case it cannot verify while no Keccak-256 is configured, and says to paste lowercase', async () => {
+    mocks.keccak.fn = null;
+    render();
+    await settle();
+    type('#icp-amount', '5');
+    type('#icp-recipient', EIP55_VECTORS[3]);
+    expect(inlineError()?.textContent).toBe(CHECKSUM_UNVERIFIABLE_MESSAGE);
+    expect(reviewButton().disabled).toBe(true);
+    type('#icp-recipient', EIP55_VECTORS[3].toLowerCase());
+    expect(inlineError()).toBeNull();
+    expect(reviewButton().disabled).toBe(false);
+  });
+
+  it('shows no checksum error for an empty or malformed field (those are reported on review)', async () => {
+    mocks.keccak.fn = ORACLE_OR_ZERO;
+    render();
+    await settle();
+    expect(inlineError()).toBeNull();
+    type('#icp-recipient', '0x12AbC');
+    expect(inlineError()).toBeNull();
+  });
+});
+
 describe('ICP to Base through the page', () => {
   beforeEach(() => {
     mocks.flags.enabled = true;
@@ -398,7 +606,9 @@ describe('ICP to Base through the page', () => {
     expect(text).toContain('Bridge deposit fee');
     expect(text).toContain('0.0001 icUSD');
     expect(text).toContain('24.9999 icUSD');
-    expect(text).toContain('about 20 minutes after the deposit is escrowed');
+    expect(text).toContain(`after the deposit is escrowed: ${DEPOSIT_DELIVERY_NOTE}`);
+    expect(text).toContain('usually about 20 minutes, longer when the bridge is busy');
+    expect(text).not.toContain('Expected delivery: about 20 minutes');
     expect(text).toContain('does not borrow');
     expect(text).toContain('approve exactly 25.001 icUSD');
     expect(signers.ledger.icrc2_approve).not.toHaveBeenCalled();

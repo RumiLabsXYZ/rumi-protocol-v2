@@ -82,17 +82,20 @@ impl Drop for TickGuard {
 pub fn has_pending_work() -> bool {
     // Only states the timer can move forward count. Held deposits (finalized revert,
     // waiting for the owner or an admin) and held or re-minting releases (their re-mint is
-    // a deposit counted on its own) do not keep the timer fast.
+    // a deposit counted on its own) do not keep the timer fast. An escrowed deposit
+    // counts only while a mint could actually be signed for it (the same conditions as
+    // `flows::deposit::next_mintable_deposit`): with mints paused, no bound contract or a
+    // halted bridge it waits for an admin, and the admin endpoints that lift those
+    // conditions re-arm the timer themselves.
+    let mints_open = state::read_core(|c| c.halted.is_none() && !c.config.pauses.mints && c.config.contract.is_some());
     let deposits = state::deposits_in_state(
-        |d| {
-            matches!(
-                d.state,
-                DepositState::PullPending
-                    | DepositState::PullUnknown
-                    | DepositState::Escrowed
-                    | DepositState::MintInFlight
-                    | DepositState::Refunding
-            )
+        |d| match d.state {
+            DepositState::PullPending
+            | DepositState::PullUnknown
+            | DepositState::MintInFlight
+            | DepositState::Refunding => true,
+            DepositState::Escrowed => mints_open && d.active_tx.is_none(),
+            _ => false,
         },
         1,
     );
@@ -323,6 +326,21 @@ pub async fn clear_halt_after_checks() -> BridgeResult<SupplyAudit> {
 }
 
 /// Evaluate C2/C3 for a finalized Base `totalSupply`. Shared with the observer.
+pub fn base_supply_snapshot(total_supply: u128, block_number: u64, quiescent: bool) -> state::BaseSupplySnapshot {
+    let buckets = state::read_core(|c| c.buckets);
+    let inflight = state::inflight_mint_e8s();
+    let r = check_base_supply(&buckets, total_supply, inflight, quiescent);
+    state::BaseSupplySnapshot {
+        total_supply,
+        block_number,
+        inflight_mint: inflight,
+        quiescent,
+        within_bound: r.within_bound,
+        exact_match: r.exact_match,
+        at_ns: env::now_ns(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +396,64 @@ mod tests {
     }
 
     #[test]
+    fn an_escrowed_deposit_counts_as_work_only_when_a_mint_can_be_signed() {
+        use crate::flows::deposit::next_mintable_deposit;
+        let escrowed = || {
+            crate::flows::deposit::tests::setup_bound();
+            let mut d = crate::state::tests::sample_deposit(1, candid::Principal::from_slice(&[1; 10]));
+            d.state = DepositState::Escrowed;
+            crate::state::put_deposit(&d);
+        };
+        // Baseline: bound, mints open, not halted.
+        escrowed();
+        assert!(has_pending_work());
+        assert!(next_mintable_deposit().is_some());
+
+        // Mints paused.
+        escrowed();
+        crate::state::mutate_core(|c| c.config.pauses.mints = true);
+        assert!(!has_pending_work(), "paused mints: the timer cannot advance it");
+        crate::state::mutate_core(|c| c.config.pauses.mints = false);
+        assert!(has_pending_work(), "unpausing makes it work again");
+
+        // Halted bridge.
+        escrowed();
+        crate::state::halt("test halt");
+        assert!(!has_pending_work(), "a halted bridge mints nothing");
+
+        // No contract bound.
+        escrowed();
+        crate::state::mutate_core(|c| c.config.contract = None);
+        assert!(!has_pending_work(), "nothing can be minted before a contract is bound");
+
+        // The two predicates agree for every combination.
+        for bits in 0..8u8 {
+            escrowed();
+            crate::state::mutate_core(|c| {
+                c.config.pauses.mints = bits & 1 != 0;
+                if bits & 2 != 0 {
+                    c.halted = Some(crate::state::HaltRecord { reason: "t".into(), at_ns: 0 });
+                }
+                if bits & 4 != 0 {
+                    c.config.contract = None;
+                }
+            });
+            assert_eq!(has_pending_work(), next_mintable_deposit().is_some(), "combination {bits:03b}");
+        }
+
+        // Other in-flight states are unaffected by the mint conditions.
+        escrowed();
+        crate::state::mutate_core(|c| c.config.pauses.mints = true);
+        let mut d = crate::state::get_deposit(1).unwrap();
+        d.state = DepositState::MintInFlight;
+        crate::state::put_deposit(&d);
+        assert!(has_pending_work());
+        d.state = DepositState::Refunding;
+        crate::state::put_deposit(&d);
+        assert!(has_pending_work());
+    }
+
+    #[test]
     fn many_schedule_soon_calls_keep_the_first_due_time() {
         crate::state::reset_for_tests();
         crate::env::test_env::set_now_ns(1_000_000_000_000);
@@ -389,20 +465,5 @@ mod tests {
             schedule_soon();
         }
         assert_eq!(pending_due_for_tests(), Some(first));
-    }
-}
-
-pub fn base_supply_snapshot(total_supply: u128, block_number: u64, quiescent: bool) -> state::BaseSupplySnapshot {
-    let buckets = state::read_core(|c| c.buckets);
-    let inflight = state::inflight_mint_e8s();
-    let r = check_base_supply(&buckets, total_supply, inflight, quiescent);
-    state::BaseSupplySnapshot {
-        total_supply,
-        block_number,
-        inflight_mint: inflight,
-        quiescent,
-        within_bound: r.within_bound,
-        exact_match: r.exact_match,
-        at_ns: env::now_ns(),
     }
 }

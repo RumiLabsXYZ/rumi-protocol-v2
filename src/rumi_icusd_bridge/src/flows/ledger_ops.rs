@@ -4,6 +4,7 @@ use crate::accounting::Transition;
 use crate::env;
 use crate::ledger::{self, CallOutcome, LedgerRejection, Resolution, SearchOutcome};
 use crate::state::{self, AuditCtx, DepositState, LedgerOp, LedgerOpKind, LedgerOpStatus, ReleaseState};
+use icrc_ledger_types::icrc1::account::Account;
 
 /// Retry the identical tuple only while comfortably inside the ledger's 24 h dedup
 /// window; after that, resolve by ICRC-3 search.
@@ -359,20 +360,97 @@ pub async fn reconcile(r: &OpRef) {
         }
         return;
     }
-    // Outside the safe dedup window: search for the exact block.
+    // Outside the safe dedup window: search for the exact block. The search awaits, so
+    // note exactly which tuple and send history it is about; the result is applied only
+    // to an op that is still that tuple (see `apply_search_outcome`).
+    let basis = SearchBasis::of(&op);
     let ledger_id = state::read_core(|c| c.config.icusd_ledger);
     let from = op.search_next_block.unwrap_or(op.search_from_block);
-    match ledger::search(ledger_id, &op, from, SEARCH_BLOCKS_PER_TICK, now).await {
+    let outcome = ledger::search(ledger_id, &op, from, SEARCH_BLOCKS_PER_TICK, now).await;
+    apply_search_outcome(r, &basis, outcome, env::now_ns());
+}
+
+/// Identity of what an ICRC-3 search looked at: the tuple that defines the ledger
+/// transaction and the send history at the moment the search started.
+///
+/// A proof that the tuple never executed is only a statement about THAT tuple, up to the
+/// ledger tip the search reached. If the op changed while the search awaited (a new send
+/// of the same tuple, a rebuilt tuple with a new `created_at_time`, a reset), the proof no
+/// longer covers the op as it stands and must be discarded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchBasis {
+    kind: LedgerOpKind,
+    from: Account,
+    to: Account,
+    spender: Option<Account>,
+    amount_e8s: u64,
+    fee_e8s: Option<u64>,
+    memo: Vec<u8>,
+    created_at_time: u64,
+    /// Send history: a send after the search started may execute after the tip it read.
+    attempts: u32,
+    last_attempt_ns: Option<u64>,
+    /// Where the search window of this tuple starts (reset by a rebuild).
+    search_from_block: u64,
+}
+
+impl SearchBasis {
+    pub fn of(op: &LedgerOp) -> SearchBasis {
+        SearchBasis {
+            kind: op.kind,
+            from: op.from,
+            to: op.to,
+            spender: op.spender,
+            amount_e8s: op.amount_e8s,
+            fee_e8s: op.fee_e8s,
+            memo: op.memo.clone(),
+            created_at_time: op.created_at_time,
+            attempts: op.attempts,
+            last_attempt_ns: op.last_attempt_ns,
+            search_from_block: op.search_from_block,
+        }
+    }
+
+    /// True when `cur` is still the searched tuple with the same send history, and still
+    /// in a state that allows a search (not terminal; unknown, or sent without a recorded
+    /// outcome).
+    pub fn still_describes(&self, cur: &LedgerOp) -> bool {
+        !is_terminal(cur) && searchable(cur) && *self == SearchBasis::of(cur)
+    }
+}
+
+/// The states `reconcile` searches from: an unknown outcome, or a sent attempt whose
+/// outcome was never recorded. An op that was never sent has nothing to search for.
+fn searchable(op: &LedgerOp) -> bool {
+    matches!(op.status, LedgerOpStatus::Unknown { .. }) || (matches!(op.status, LedgerOpStatus::Pending) && op.attempts > 0)
+}
+
+/// Apply the result of an ICRC-3 search to the op as stored now. Synchronous. A "never
+/// executed" proof, and the progress of an unfinished search, are applied only when the
+/// op is still what the search looked at (`basis`); otherwise they are dropped and the
+/// next pass decides afresh. A found block is applied regardless: the ledger executed
+/// that transfer, which is a fact, not an inference about the op's current shape.
+pub fn apply_search_outcome(r: &OpRef, basis: &SearchBasis, outcome: SearchOutcome, now: u64) {
+    match outcome {
         SearchOutcome::Found { block_index } => apply_resolution(r, Resolution::Succeeded { block_index }),
         SearchOutcome::NotFoundYet { next_block, .. } => {
             if let Some(mut cur) = load_op(r) {
-                cur.search_next_block = Some(next_block);
-                store_op(r, cur);
+                if basis.still_describes(&cur) {
+                    cur.search_next_block = Some(next_block);
+                    store_op(r, cur);
+                }
             }
         }
         SearchOutcome::ProvenAbsent => {
             let Some(mut cur) = load_op(r) else { return };
             if is_terminal(&cur) {
+                return;
+            }
+            if !basis.still_describes(&cur) {
+                state::append_audit(
+                    None,
+                    r.ctx("ICRC-3 absence proof discarded: the operation changed while the search was running"),
+                );
                 return;
             }
             state::append_audit(None, r.ctx("ICRC-3 search proved the tuple never executed"));
@@ -453,6 +531,192 @@ mod tests {
         let first = mark_sent(id);
         let _second = mark_sent(id);
         apply_outcome(&OpRef::Pull(id), SentAttempt { attempt: first, outcome: CallOutcome::Accepted { block_index: 9 } });
+        assert_eq!(state::get_deposit(id).unwrap().state, DepositState::Escrowed);
+    }
+
+    // -----------------------------------------------------------------------
+    // ICRC-3 search results are applied only to the op the search looked at
+    // -----------------------------------------------------------------------
+
+    const T0: u64 = 1_700_000_000_000_000_000;
+    const DAY: u64 = 24 * 3_600 * 1_000_000_000;
+
+    /// A refund whose first send had an unknown outcome and is old enough to be searched.
+    fn refunding_with_unknown_outcome() -> (OpRef, u64) {
+        crate::flows::deposit::tests::setup_bound();
+        let owner = Principal::from_slice(&[0x11; 29]);
+        let escrow = crate::state::read_core(|c| c.escrow_account(crate::env::canister_id()));
+        let mut d = crate::state::tests::sample_deposit(5, owner);
+        d.state = DepositState::Refunding;
+        d.refund = Some(LedgerOp {
+            kind: LedgerOpKind::Refund,
+            from: escrow,
+            to: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
+            spender: None,
+            amount_e8s: 90,
+            fee_e8s: Some(10),
+            memo: vec![7; 8],
+            created_at_time: T0,
+            attempts: 2,
+            ambiguous_seen: true,
+            status: LedgerOpStatus::Unknown { last_error: "timeout".into() },
+            search_from_block: 5,
+            search_next_block: Some(40),
+            last_attempt_ns: Some(T0 + 1_000),
+            outflow_reserved: false,
+        });
+        state::put_deposit(&d);
+        (OpRef::Refund(5), T0 + DAY + 3_600 * 1_000_000_000)
+    }
+
+    #[test]
+    fn proven_absent_rebuilds_an_unchanged_escrow_op() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        let op = load_op(&r).unwrap();
+        assert_eq!(op.created_at_time, now, "a fresh tuple");
+        assert_eq!((op.attempts, op.ambiguous_seen, op.search_next_block), (0, false, None));
+        assert_eq!(op.status, LedgerOpStatus::Pending);
+        assert_eq!(op.search_from_block, 77, "the search window restarts at the known tip");
+        assert_eq!((op.amount_e8s, op.fee_e8s), (90, Some(10)), "same amounts");
+    }
+
+    #[test]
+    fn proven_absent_is_dropped_when_an_attempt_was_sent_during_the_search() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        // While the search awaited, the same tuple was sent again.
+        let mut op = load_op(&r).unwrap();
+        op.attempts += 1;
+        op.last_attempt_ns = Some(now - 1);
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op, "the proof does not cover the newer send");
+        // A newer send with an identical attempt count (a reset then a resend) is also
+        // told apart by its send time.
+        let mut op2 = load_op(&r).unwrap();
+        op2.attempts -= 1;
+        op2.last_attempt_ns = Some(now - 2);
+        store_op(&r, op2.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op2);
+    }
+
+    #[test]
+    fn proven_absent_is_dropped_when_the_tuple_was_rebuilt_during_the_search() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let mut op = load_op(&r).unwrap();
+        op.created_at_time = now - 5;
+        op.attempts = 2;
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op, "a proof about the old tuple says nothing about the new one");
+        // Same for any other field of the tuple.
+        for tweak in [
+            |o: &mut LedgerOp| o.amount_e8s += 1,
+            |o: &mut LedgerOp| o.fee_e8s = Some(11),
+            |o: &mut LedgerOp| o.memo = vec![8; 8],
+            |o: &mut LedgerOp| o.search_from_block += 1,
+        ] {
+            let (r, now) = refunding_with_unknown_outcome();
+            let basis = SearchBasis::of(&load_op(&r).unwrap());
+            let mut op = load_op(&r).unwrap();
+            tweak(&mut op);
+            store_op(&r, op.clone());
+            apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+            assert_eq!(load_op(&r).unwrap(), op);
+        }
+    }
+
+    #[test]
+    fn proven_absent_is_dropped_when_the_op_left_the_state_that_allowed_the_search() {
+        // Reset to unsent (a definite no-effect reply arrived meanwhile).
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Pending;
+        op.attempts = 0;
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op);
+
+        // Same attempt count and tuple, but the op is no longer searchable (never sent).
+        let (r, now) = refunding_with_unknown_outcome();
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Pending;
+        op.attempts = 0;
+        op.last_attempt_ns = None;
+        store_op(&r, op.clone());
+        let basis = SearchBasis::of(&op);
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op, "an unsent op has nothing to prove absent");
+
+        // Already terminal.
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Succeeded { block_index: 9 };
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op);
+
+        // Stale-pending (sent, no outcome recorded) is searchable and rebuilds.
+        let (r, now) = refunding_with_unknown_outcome();
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Pending;
+        store_op(&r, op.clone());
+        let basis = SearchBasis::of(&op);
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap().created_at_time, now);
+    }
+
+    #[test]
+    fn proven_absent_fails_an_unchanged_pull_and_leaves_a_changed_one_alone() {
+        let id = admitted();
+        let _ = mark_sent(id);
+        let _ = mark_sent(id);
+        let r = OpRef::Pull(id);
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        // A third send races in: the pull must not be failed on the old proof.
+        let _ = mark_sent(id);
+        let now = T0 + 2 * DAY;
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        let d = state::get_deposit(id).unwrap();
+        assert!(matches!(d.state, DepositState::PullPending | DepositState::PullUnknown), "{:?}", d.state);
+        assert!(!is_terminal(d.pull.as_ref().unwrap()));
+        // With nothing changed, the same proof fails the pull and releases the reservation.
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        let d = state::get_deposit(id).unwrap();
+        assert!(matches!(d.state, DepositState::PullFailed { .. }), "{:?}", d.state);
+        assert_eq!(state::read_core(|c| c.buckets.reserved_pulls), 0);
+    }
+
+    #[test]
+    fn search_progress_is_recorded_only_for_the_searched_tuple() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        apply_search_outcome(&r, &basis, SearchOutcome::NotFoundYet { next_block: 60, tip: 100 }, now);
+        assert_eq!(load_op(&r).unwrap().search_next_block, Some(60));
+        // The tuple is rebuilt meanwhile: the old search position must not leak into it.
+        let mut op = load_op(&r).unwrap();
+        op.created_at_time = now - 1;
+        op.search_next_block = None;
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::NotFoundYet { next_block: 90, tip: 100 }, now);
+        assert_eq!(load_op(&r).unwrap(), op);
+    }
+
+    #[test]
+    fn a_found_block_is_applied_whatever_the_op_looks_like_now() {
+        let id = admitted();
+        let _ = mark_sent(id);
+        let r = OpRef::Pull(id);
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let _ = mark_sent(id);
+        apply_search_outcome(&r, &basis, SearchOutcome::Found { block_index: 12 }, T0);
         assert_eq!(state::get_deposit(id).unwrap().state, DepositState::Escrowed);
     }
 

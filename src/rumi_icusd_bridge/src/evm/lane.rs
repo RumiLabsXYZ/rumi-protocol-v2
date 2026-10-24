@@ -552,6 +552,7 @@ pub(crate) trait LaneIo {
         from: &[u8; 20],
         to: &[u8; 20],
         data: &[u8],
+        gas: u64,
         tag: BlockTag,
     ) -> Result<SimulationResult, RpcError>;
     async fn sign(&self, lane: LaneKind, tx: &Eip1559Tx) -> Result<(Vec<u8>, [u8; 32]), String>;
@@ -592,9 +593,10 @@ impl LaneIo for ChainIo {
         from: &[u8; 20],
         to: &[u8; 20],
         data: &[u8],
+        gas: u64,
         tag: BlockTag,
     ) -> Result<SimulationResult, RpcError> {
-        rpc::simulate_call(from, to, data, tag).await
+        rpc::simulate_call(from, to, data, gas, tag).await
     }
     async fn sign(&self, lane: LaneKind, tx: &Eip1559Tx) -> Result<(Vec<u8>, [u8; 32]), String> {
         signer::sign_tx(lane, tx).await
@@ -617,8 +619,12 @@ fn lane_slot(lane: LaneKind) -> usize {
 }
 
 /// At most one run per lane at a time. A guard left behind by a trap after an await is
-/// reclaimed after ten minutes.
-struct RunGuard(LaneKind);
+/// reclaimed after ten minutes. Each guard carries the claim time it set as an owner
+/// token, so a slow run whose guard was reclaimed never clears the newer run's claim.
+struct RunGuard {
+    lane: LaneKind,
+    token: u64,
+}
 
 impl RunGuard {
     fn acquire(lane: LaneKind) -> Option<RunGuard> {
@@ -630,7 +636,7 @@ impl RunGuard {
                 Some(t) if now.saturating_sub(t) < STALE_RUN_NS => None,
                 _ => {
                     *slot = Some(now);
-                    Some(RunGuard(lane))
+                    Some(RunGuard { lane, token: now })
                 }
             }
         })
@@ -639,7 +645,13 @@ impl RunGuard {
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        RUNNING.with(|r| r.borrow_mut()[lane_slot(self.0)] = None);
+        RUNNING.with(|r| {
+            let mut r = r.borrow_mut();
+            let slot = &mut r[lane_slot(self.lane)];
+            if *slot == Some(self.token) {
+                *slot = None;
+            }
+        });
     }
 }
 
@@ -1303,13 +1315,13 @@ async fn start_mint<I: LaneIo>(io: &I, st: &mut RunState) {
     if ensure_nonce(io, st).await.is_none() {
         return;
     }
-    if !preflight_mint(io, &dep, st).await {
+    let Some(simulated_gas) = preflight_mint(io, &dep, st).await else {
         return;
-    }
+    };
     // No await from here on. The state may have changed during the preflight calls, so
-    // `create_mint_tx` re-validates the deposit, the pauses and the lane in the same
-    // synchronous block that assigns the nonce.
-    match create_mint_tx(dep.id) {
+    // `create_mint_tx` re-validates the deposit, the pauses, the lane and the gas limit
+    // the simulation used in the same synchronous block that assigns the nonce.
+    match create_mint_tx_with(dep.id, Some(simulated_gas), deposit::on_mint_tx_created) {
         Ok(tx_id) => {
             st.note(format!("tx {tx_id}: created for deposit {}", dep.id));
             drive_pending_tx(io, tx_id, st).await;
@@ -1318,24 +1330,26 @@ async fn start_mint<I: LaneIo>(io: &I, st: &mut RunState) {
     }
 }
 
-/// Local and on-chain checks before a mint gets a nonce. `true` means go ahead.
-async fn preflight_mint<I: LaneIo>(io: &I, dep: &DepositRecord, st: &mut RunState) -> bool {
+/// Local and on-chain checks before a mint gets a nonce. `Some(gas)` means go ahead with
+/// a transaction carrying exactly that gas limit (the one the simulation used).
+async fn preflight_mint<I: LaneIo>(io: &I, dep: &DepositRecord, st: &mut RunState) -> Option<u64> {
     let lane = LaneKind::Minter;
-    let (contract, paused, halted) =
-        state::read_core(|c| (c.config.contract.as_ref().map(|b| b.address), c.config.pauses.mints, c.halted.is_some()));
+    let (contract, paused, halted, gas_limit) = state::read_core(|c| {
+        (c.config.contract.as_ref().map(|b| b.address), c.config.pauses.mints, c.halted.is_some(), c.config.gas.mint_gas_limit)
+    });
     let Some(contract) = contract else {
         st.note("preflight: contract is not bound");
-        return false;
+        return None;
     };
     if paused || halted {
         st.note("preflight: mints are paused or the bridge is halted");
-        return false;
+        return None;
     }
     let from = match io.lane_address(lane).await {
         Ok(a) => a,
         Err(e) => {
             st.note(format!("preflight: minter address unavailable: {e}"));
-            return false;
+            return None;
         }
     };
     let consumed_call = abi::encode_view(&ViewCall::MintConsumed(dep.mint_id));
@@ -1344,12 +1358,12 @@ async fn preflight_mint<I: LaneIo>(io: &I, dep: &DepositRecord, st: &mut RunStat
             Ok(b) => b,
             Err(e) => {
                 st.note(format!("preflight: undecodable mintConsumed reply: {e:?}"));
-                return false;
+                return None;
             }
         },
         Err(e) => {
             st.note(format!("preflight: mintConsumed lookup failed: {e}"));
-            return false;
+            return None;
         }
     };
     if consumed {
@@ -1360,20 +1374,29 @@ async fn preflight_mint<I: LaneIo>(io: &I, dep: &DepositRecord, st: &mut RunStat
             hex0x(&dep.mint_id)
         ));
         st.note(format!("preflight: mint id of deposit {} is already consumed on Base; bridge halted", dep.id));
-        return false;
+        return None;
     }
     let calldata = abi::encode_mint(&dep.base_recipient, dep.mint_amount_e8s, &dep.mint_id);
-    match io.simulate_call(&from, &contract, &calldata, BlockTag::Latest).await {
-        Ok(SimulationResult::Ok(_)) => true,
+    // Simulated with the exact gas limit the transaction will carry, so a limit that is
+    // too low is caught here (a hold that retries) instead of on chain (a paid revert).
+    match io.simulate_call(&from, &contract, &calldata, gas_limit, BlockTag::Latest).await {
+        Ok(SimulationResult::Ok(_)) => Some(gas_limit),
         Ok(SimulationResult::Reverted(data)) => {
             let reason = format!("mint simulation reverted (selector {})", revert_selector_hex(&data));
             deposit::on_mint_preflight_hold(dep.id, reason.clone());
             st.note(format!("deposit {}: {reason}", dep.id));
-            false
+            None
+        }
+        Ok(SimulationResult::OutOfGas) => {
+            let reason = format!("mint simulation ran out of gas at the configured limit of {gas_limit}");
+            deposit::on_mint_preflight_hold(dep.id, reason.clone());
+            state::append_audit(None, AuditCtx::deposit(dep.id, format!("{reason}; raise mint_gas_limit with admin_set_gas")));
+            st.note(format!("deposit {}: {reason}", dep.id));
+            None
         }
         Err(e) => {
             st.note(format!("preflight: mint simulation failed: {e}"));
-            false
+            None
         }
     }
 }
@@ -1381,13 +1404,15 @@ async fn preflight_mint<I: LaneIo>(io: &I, dep: &DepositRecord, st: &mut RunStat
 /// Create the unsigned mint transaction. Synchronous on purpose: the re-check of the
 /// deposit, the pauses and the lane, the nonce assignment and the link to the deposit all
 /// happen in one block, so a nonce is never consumed by a mint that cannot proceed.
+#[cfg(test)]
 fn create_mint_tx(deposit_id: u64) -> Result<u64, String> {
-    create_mint_tx_with(deposit_id, deposit::on_mint_tx_created)
+    create_mint_tx_with(deposit_id, None, deposit::on_mint_tx_created)
 }
 
 /// [`create_mint_tx`] with the deposit link injectable (tests exercise the rollback).
 fn create_mint_tx_with(
     deposit_id: u64,
+    simulated_gas_limit: Option<u64>,
     link: impl FnOnce(u64, u64) -> Result<(), String>,
 ) -> Result<u64, String> {
     // (1) Re-validate. Nothing is touched when any check fails (not even the tx id counter).
@@ -1401,6 +1426,11 @@ fn create_mint_tx_with(
     let contract = contract.ok_or("the contract is not bound")?;
     if blocked {
         return Err("mints are paused or the bridge is halted".into());
+    }
+    if let Some(simulated) = simulated_gas_limit {
+        if simulated != gas_limit {
+            return Err(format!("the mint gas limit changed from {simulated} to {gas_limit} after the simulation"));
+        }
     }
     start_gate(&start_gate_for(LaneKind::Minter)).map_err(|why| format!("the lane is not free: {why}"))?;
     if !state::read_core(|c| can_allocate(&c.minter_lane)) {
@@ -2152,6 +2182,9 @@ mod tests {
         signed: Vec<Eip1559Tx>,
         rpc_down: bool,
         simulation: SimulationResult,
+        /// Gas the mock mint needs; a simulation with less answers OutOfGas.
+        mint_gas_needed: Option<u64>,
+        simulated_gas: Vec<u64>,
         consumed: bool,
         receipt_calls: u32,
     }
@@ -2177,6 +2210,8 @@ mod tests {
                 signed: vec![],
                 rpc_down: false,
                 simulation: SimulationResult::Ok(vec![]),
+                mint_gas_needed: None,
+                simulated_gas: vec![],
                 consumed: false,
                 receipt_calls: 0,
             }))
@@ -2296,11 +2331,16 @@ mod tests {
             _from: &[u8; 20],
             _to: &[u8; 20],
             _data: &[u8],
+            gas: u64,
             _tag: BlockTag,
         ) -> Result<SimulationResult, RpcError> {
-            let c = self.0.borrow();
+            let mut c = self.0.borrow_mut();
             if c.rpc_down {
                 return Err(RpcError::AllFailed("down".into()));
+            }
+            c.simulated_gas.push(gas);
+            if c.mint_gas_needed.is_some_and(|need| gas < need) {
+                return Ok(SimulationResult::OutOfGas);
             }
             Ok(c.simulation.clone())
         }
@@ -2396,11 +2436,18 @@ mod tests {
         async fn eth_call(&self, t: &[u8; 20], d: &[u8], b: BlockTag) -> Result<Vec<u8>, RpcError> {
             self.inner.eth_call(t, d, b).await
         }
-        async fn simulate_call(&self, f: &[u8; 20], t: &[u8; 20], d: &[u8], b: BlockTag) -> Result<SimulationResult, RpcError> {
+        async fn simulate_call(
+            &self,
+            f: &[u8; 20],
+            t: &[u8; 20],
+            d: &[u8],
+            g: u64,
+            b: BlockTag,
+        ) -> Result<SimulationResult, RpcError> {
             if self.fail_simulation {
                 return Err(RpcError::NoQuorum("providers disagree".into()));
             }
-            let r = self.inner.simulate_call(f, t, d, b).await;
+            let r = self.inner.simulate_call(f, t, d, g, b).await;
             if let Some(h) = &self.after_simulate {
                 h();
             }
@@ -3271,7 +3318,7 @@ mod tests {
         state::mutate_core(|c| c.minter_lane.next_nonce = Some(12));
         add_deposit(0);
         let next_id = state::read_core(|c| c.next_tx_id);
-        let err = create_mint_tx_with(0, |_, _| Err("link refused".to_string())).unwrap_err();
+        let err = create_mint_tx_with(0, None, |_, _| Err("link refused".to_string())).unwrap_err();
         assert!(err.contains("link refused") && err.contains("nonce 12 released"), "{err}");
         let l = minter();
         assert_eq!(l.next_nonce, Some(12), "nonce handed back");
@@ -3534,10 +3581,63 @@ mod tests {
         let io = MockIo::new();
         let out = run(&io, LaneKind::Minter);
         assert!(out.notes.iter().any(|n| n.contains("already in progress")));
-        // A guard left by a trapped run is reclaimed after ten minutes.
+        // A guard left by a trapped (or very slow) run is reclaimed after ten minutes.
         test_env::advance_secs(601);
-        assert!(RunGuard::acquire(LaneKind::Minter).is_some());
+        let newer = RunGuard::acquire(LaneKind::Minter).expect("stale guard reclaimed");
+        // The slow run finishing late must not clear the newer run's claim.
         drop(g);
+        assert!(RunGuard::acquire(LaneKind::Minter).is_none(), "newer run still owns the lane");
+        drop(newer);
+        assert!(RunGuard::acquire(LaneKind::Minter).is_some());
+    }
+
+    #[test]
+    fn preflight_simulates_with_the_configured_gas_limit() {
+        setup();
+        let io = MockIo::new();
+        add_deposit(0);
+        run(&io, LaneKind::Minter);
+        let configured = state::read_core(|c| c.config.gas.mint_gas_limit);
+        assert_eq!(io.chain().simulated_gas, vec![configured]);
+        let id = minter().unincluded_tx.expect("mint created");
+        assert_eq!(tx(id).gas_limit, configured, "the tx carries the simulated limit");
+    }
+
+    #[test]
+    fn preflight_out_of_gas_holds_the_deposit_spends_no_nonce_and_retries_after_a_raise() {
+        setup();
+        let io = MockIo::new();
+        let configured = state::read_core(|c| c.config.gas.mint_gas_limit);
+        io.chain().mint_gas_needed = Some(configured + 1);
+        add_deposit(0);
+        run(&io, LaneKind::Minter);
+        assert_eq!(minter().next_nonce, Some(0), "synced, nothing allocated");
+        assert!(minter().unincluded_tx.is_none());
+        assert_eq!(io.chain().sign_counter, 0, "nothing signed or broadcast");
+        let d = state::get_deposit(0).unwrap();
+        match &d.state {
+            DepositState::MintHeld { reason } => assert!(reason.contains("ran out of gas"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(d.hold_retry_at_ns.is_some(), "a preflight hold retries automatically");
+        // The operator raises the limit; the automatic retry then mints with the new limit.
+        state::mutate_core(|c| c.config.gas.mint_gas_limit = configured + 1);
+        test_env::advance_secs(24 * 3600);
+        deposit::retry_due_holds();
+        run(&io, LaneKind::Minter);
+        let id = minter().unincluded_tx.expect("mint created after the raise");
+        assert_eq!(tx(id).gas_limit, configured + 1);
+    }
+
+    #[test]
+    fn a_gas_limit_change_between_simulation_and_creation_abandons_without_a_nonce() {
+        setup();
+        add_deposit(0);
+        let configured = state::read_core(|c| c.config.gas.mint_gas_limit);
+        let err = create_mint_tx_with(0, Some(configured - 1), deposit::on_mint_tx_created).unwrap_err();
+        assert!(err.contains("gas limit changed"), "{err}");
+        assert!(minter().unincluded_tx.is_none());
+        assert_eq!(state::get_deposit(0).unwrap().state, DepositState::Escrowed);
     }
 
     #[test]

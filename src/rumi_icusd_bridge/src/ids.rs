@@ -166,7 +166,33 @@ pub fn hex0x(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-/// Parse a `0x`-prefixed 20-byte address (case-insensitive, no checksum enforcement).
+/// EIP-55 mixed-case checksum rendering of a 20-byte address (`0x` + 40 hex chars).
+///
+/// Purely presentational: every RPC parameter, stored value and hashed input in this
+/// crate uses lowercase `hex0x`, never this form.
+pub fn to_checksum(address: &[u8; 20]) -> String {
+    let lower = hex::encode(address);
+    let digest = keccak256(lower.as_bytes());
+    let mut out = String::with_capacity(42);
+    out.push_str("0x");
+    for (i, c) in lower.chars().enumerate() {
+        let byte = digest[i / 2];
+        let nibble = if i % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+        if c.is_ascii_alphabetic() && nibble >= 8 {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Parse a `0x`-prefixed 20-byte address.
+///
+/// EIP-55 rule: hex that is entirely lowercase or entirely uppercase (digits carry no
+/// case) is accepted as unchecksummed. Hex that mixes cases is a claim of checksum
+/// correctness and must match the EIP-55 checksum exactly, so a typo in a pasted
+/// address is rejected instead of silently naming a different account.
 pub fn parse_address(s: &str) -> Result<[u8; 20], String> {
     let raw = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).ok_or("address must start with 0x")?;
     if raw.len() != 40 {
@@ -175,6 +201,11 @@ pub fn parse_address(s: &str) -> Result<[u8; 20], String> {
     let bytes = hex::decode(raw).map_err(|e| format!("invalid address hex: {e}"))?;
     let mut out = [0u8; 20];
     out.copy_from_slice(&bytes);
+    let has_lower = raw.bytes().any(|b| (b'a'..=b'f').contains(&b));
+    let has_upper = raw.bytes().any(|b| (b'A'..=b'F').contains(&b));
+    if has_lower && has_upper && to_checksum(&out)[2..] != *raw {
+        return Err("address checksum does not match (EIP-55): check for a typo, or use all lowercase".to_string());
+    }
     Ok(out)
 }
 
@@ -274,5 +305,75 @@ mod tests {
         assert!(parse_address("0000000000000000000000000000000000000001").is_err());
         assert!(parse_address("0x00000000000000000000000000000000000001").is_err());
         assert!(parse_address("0xzz00000000000000000000000000000000000001").is_err());
+    }
+
+    /// The official test vectors from EIP-55.
+    const EIP55_VECTORS: [&str; 4] = [
+        "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+        "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+        "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+        "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+    ];
+
+    #[test]
+    fn eip55_vectors_render_and_parse() {
+        for v in EIP55_VECTORS {
+            let parsed = parse_address(v).unwrap_or_else(|e| panic!("{v} must parse: {e}"));
+            assert_eq!(to_checksum(&parsed), v, "to_checksum must reproduce the EIP-55 vector");
+            assert_eq!(hex0x(&parsed), v.to_ascii_lowercase(), "hex0x stays lowercase");
+        }
+    }
+
+    #[test]
+    fn unchecksummed_all_lower_and_all_upper_are_accepted() {
+        for v in EIP55_VECTORS {
+            let lower = v.to_ascii_lowercase();
+            let upper = format!("0x{}", v[2..].to_ascii_uppercase());
+            let checksummed = parse_address(v).unwrap();
+            assert_eq!(parse_address(&lower).unwrap(), checksummed);
+            assert_eq!(parse_address(&upper).unwrap(), checksummed);
+            // The `0X` prefix form is still accepted.
+            assert_eq!(parse_address(&format!("0X{}", &lower[2..])).unwrap(), checksummed);
+        }
+        // Digits-only addresses carry no case at all.
+        assert!(parse_address("0x1111111111111111111111111111111111111111").is_ok());
+    }
+
+    #[test]
+    fn mixed_case_with_a_wrong_checksum_is_rejected() {
+        for v in EIP55_VECTORS {
+            let body: Vec<char> = v[2..].chars().collect();
+            // Flip the case of every letter, one at a time: each single flip must be caught.
+            let mut flipped_any = false;
+            for (i, c) in body.iter().enumerate() {
+                if !c.is_ascii_alphabetic() {
+                    continue;
+                }
+                flipped_any = true;
+                let mut mutated = body.clone();
+                mutated[i] = if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() };
+                let text = format!("0x{}", mutated.into_iter().collect::<String>());
+                let err = parse_address(&text).expect_err(&format!("{text} has a one-character case flip"));
+                assert!(err.contains("checksum does not match"), "unexpected error: {err}");
+            }
+            assert!(flipped_any);
+        }
+    }
+
+    #[test]
+    fn checksum_error_does_not_leak_into_other_malformations() {
+        // Length and prefix errors keep their own messages.
+        assert!(parse_address("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAe").unwrap_err().contains("20 bytes"));
+        assert!(parse_address("5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed").unwrap_err().contains("start with 0x"));
+        assert!(parse_address("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeg").unwrap_err().contains("invalid address hex"));
+    }
+
+    #[test]
+    fn checksum_helper_is_deterministic_and_idempotent_through_parse() {
+        let addr = [0xabu8; 20];
+        let c = to_checksum(&addr);
+        assert!(c.starts_with("0x") && c.len() == 42);
+        assert_eq!(parse_address(&c).unwrap(), addr);
+        assert_eq!(c.to_ascii_lowercase(), hex0x(&addr));
     }
 }
