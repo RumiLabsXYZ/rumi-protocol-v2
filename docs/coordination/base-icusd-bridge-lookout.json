@@ -263,10 +263,10 @@
     },
     {
       "id": "BB-26",
-      "state": "in_progress",
+      "state": "done",
       "owner": "coordinator",
       "scope": "Isolated test UI: staging recon and recipe",
-      "evidenceText": "proof=none; Claimed: read-only inspection of frontend config, auth and wallet setup, bridge route and services, build config; a bridge-only staging recipe with placeholders; no production config edit, no dev server",
+      "evidenceText": "proof=source; Recipe written from read-only source checks: ids alone do not isolate the app, so a throwaway copy gets a bridge-only shell, test-only ids, no polling, no production II origin and a request guard. Not compiled or run",
       "evidenceLinks": []
     },
     {

@@ -311,6 +311,25 @@ What it does not prove: browser-wallet acceptance (Internet Identity, Plug, Oisy
 production activation, Base mainnet, or anything about the production icUSD ledger. PR #591 stays
 draft and unmerged.
 
+## Milestone 13 (2026-10-25): isolated test UI recipe (BB-26)
+
+Rob authorized testing the Bridge page through an isolated test UI (relayed by Miles). Recipe:
+`base-icusd-bridge-staging-recipe.md`, written from read-only source inspection (W8 Sonnet, W9
+Haiku, checked by the coordinator). Nothing was compiled, run or deployed.
+
+- Verdict: editing only ids in a copy is not enough, because the root layout and the wallet store
+  query production canisters on every route and connect, the wallet panel can send real ledger
+  transfers, and Internet Identity would use the production derivation origin. A small isolation
+  patch confined to a throwaway copy is enough: bridge-only shell, test-only ids, no balance
+  polling, no production II origin, and a request guard. No tracked file changes; the production
+  bridge id stays empty.
+- Hazard to avoid: never serve the copy on port 4943 (the production alternative-origins file
+  lists it, which would give the production II principal).
+- Open unknowns: Oisy's handling of the bridge's production-only trusted origins on a localhost
+  origin, Plug's per-call prompts, II session length.
+- Next: Miles reviews the recipe, then creates the copy, starts the single dev server and runs
+  the section 5 acceptance checks before any wallet action (BB-27).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
