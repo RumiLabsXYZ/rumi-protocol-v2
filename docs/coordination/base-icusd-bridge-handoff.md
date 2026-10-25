@@ -271,6 +271,22 @@ Executed by Miles (the one public executor), packet steps A and B only:
   choice; Rob's instruction authorizes completing the test.
 - Miles owns funding, installs and testing. Source stays frozen at `4169feb8`.
 
+## Milestone 11 (2026-10-25): ICP side installed, Base deposit receipt
+
+Reported by Miles (the one public executor) as sanitized phase and proof facts; runtime frozen at
+`4169feb8`; packet Amendment 2 at `dc79764a`.
+
+| Proof | Status |
+| --- | --- |
+| `public-installed` (BB-24) | Both isolated test modules installed; module hashes match the packet; controller checks passed; test RPC chain-id quorum verified |
+| Contract deployment (BB-25) | The reviewed `BridgedIcUSD` deployed on Base Sepolia; runtime and configuration verified; deployment finality verified |
+| Bind (BB-25) | The original bind call was reconciled as successful; it was not repeated |
+| `public-receipt` (BB-25, deposit) | The first deposit's mint transaction has a successful receipt |
+| Not yet proven | Mint finality and deposit settlement (`Delivered`); the return burn has not started, so no release exists |
+
+Not claimed: settlement of any operation, a completed round trip, or production readiness.
+Operational balances, reserves, addresses and logs stay in the executor's private record.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

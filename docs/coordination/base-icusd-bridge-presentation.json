@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge is built, its last follow-ups are fixed and re-reviewed, and its test plan is approved. On the ICP side two new test canisters exist, but no code is installed yet: the install needs more cycles up front than planned, so the plan was amended to top up the test ledger first. The test signing key is now created. Real icUSD, Base mainnet and merging stay off limits.",
+  "summary": "The Rumi-to-Base bridge is built and reviewed, and its isolated test on Base's public test network is under way with synthetic test tokens. The ICP-side test canisters are installed and verified, the test token contract is deployed, and the first deposit's mint has been accepted on Base but is not yet final. The return trip has not started. Real icUSD, Base mainnet and merging stay off limits.",
   "glossary": [
     {
       "term": "proof=source",
@@ -419,6 +419,14 @@
     {
       "term": "no-effect rejection",
       "definition": "An answer that proves a request did nothing, so it is safe to fix the cause and try again. Unlike a stalled request, it leaves no unknown outcome."
+    },
+    {
+      "term": "public-installed",
+      "definition": "Proof level for the approved test run: code is installed and its fingerprint read back matches the planned file."
+    },
+    {
+      "term": "public-receipt",
+      "definition": "Proof level for the approved test run: a Base transaction has a successful receipt, but it is not yet final and the operation is not yet settled."
     }
   ]
 }

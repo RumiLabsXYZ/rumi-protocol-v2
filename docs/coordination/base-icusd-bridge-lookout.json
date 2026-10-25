@@ -247,18 +247,18 @@
     },
     {
       "id": "BB-24",
-      "state": "in_progress",
+      "state": "done",
       "owner": "supervisor",
       "scope": "Base Sepolia phase 1: ICP side (packet steps A to E)",
-      "evidenceText": "proof=public-created; Created: two test canisters, single controller. Stalled ledger install reconciled (no module); retry got a definite no-effect rejection for too few cycles. Budget amended: top up the ledger from the run reserve, then retry",
+      "evidenceText": "proof=public-installed; Installed: both isolated test modules match the packet hashes; controller checks passed; test RPC chain-id quorum verified. Runtime frozen at 4169feb8",
       "evidenceLinks": []
     },
     {
       "id": "BB-25",
-      "state": "todo",
+      "state": "in_progress",
       "owner": "supervisor",
       "scope": "Base Sepolia phase 2: Base side (packet steps F to J)",
-      "evidenceText": "proof=none; Deployer signer created as an encrypted test-only keystore on Rob's direct instruction; only Miles uses it. Contract deploy, funding, bind, round trip and close wait on phase 1",
+      "evidenceText": "proof=public-receipt; Contract deployed; runtime, configuration and deploy finality verified; the original bind reconciled as successful, not repeated. Deposit mint receipt successful; mint finality pending; return burn not started",
       "evidenceLinks": []
     }
   ]
