@@ -330,6 +330,26 @@ Haiku, checked by the coordinator). Nothing was compiled, run or deployed.
 - Next: Miles reviews the recipe, then creates the copy, starts the single dev server and runs
   the section 5 acceptance checks before any wallet action (BB-27).
 
+## Milestone 14 (2026-10-25): staging UI rendered; fixture wallet checks (BB-27 in progress)
+
+Reported by Miles (sanitized). He reviewed the recipe and ran the single isolated copy, outside
+the worktree, reusing installed dependencies, with explicit dependency and declaration paths, no
+environment plugin, loopback-only serving and the two-target request guard. The bridge route,
+components and services are byte-identical to the working branch; production source is
+unchanged; runtime candidate unchanged at `4169feb8`.
+
+| Check | Result | Proof level |
+| --- | --- | --- |
+| Rendering at desktop and mobile sizes | correct test network and pause state, both direction tabs, keyboard navigation, no horizontal overflow, no framework overlay, no runtime errors | `staging-fixture` |
+| Request guard negative control | a non-test request was blocked before it left the browser | `staging-fixture` |
+| Wallet adapter (read-only EIP-6963 fixture) | connect rejection, switch rejection, successful test-network switch, account-change rendering | `staging-fixture` |
+| Real-wallet approvals, transaction rejection, browser transfer, reload recovery | not done | none |
+
+The short paused rendering window is closed and the test bridge is verified stopped again.
+
+Next: Rob performs the real browser-wallet gestures; then the synthetic browser round trip and
+the recovery checks (recipe section 7), with Miles as the executor.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge passed its isolated command-line test on Base's public test network with synthetic test tokens. The next step is testing the real Bridge page in a browser through an isolated staging copy that can only reach the test canisters; the plan for that copy is written and awaits review before it runs. Production use, real icUSD, Base mainnet and merging are not done.",
+  "summary": "The Rumi-to-Base bridge passed its isolated command-line test on Base's public test network with synthetic test tokens. The isolated staging copy of the Bridge page now renders correctly against the test canisters, and wallet screens were checked with a simulated wallet. Next is real wallet approvals in a browser, then a browser round trip and recovery checks. Production use, real icUSD, Base mainnet and merging are not done.",
   "glossary": [
     {
       "term": "proof=source",
@@ -443,6 +443,14 @@
     {
       "term": "request guard",
       "definition": "A small script in the staging copy that blocks any network request to an ICP canister other than the two test canisters, and records what it saw."
+    },
+    {
+      "term": "staging-fixture",
+      "definition": "Proof level for the staging copy: the page rendered against the test canisters and wallet screens were checked with a simulated, read-only wallet. It proves no real approval or transfer."
+    },
+    {
+      "term": "fixture",
+      "definition": "A simulated stand-in used in a test, here a read-only fake wallet that lets the page's wallet screens be checked without a real wallet."
     }
   ]
 }
