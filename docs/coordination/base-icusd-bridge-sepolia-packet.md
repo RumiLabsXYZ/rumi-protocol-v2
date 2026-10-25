@@ -3,9 +3,12 @@
 The single readable plan for one isolated Base Sepolia test of the bridge. It supersedes the
 per-step HELD wording of `foundry/DEPLOY-BASE.md` for this run only.
 
-Status: in execution by Miles (code candidate `4169feb8`, two focused reviews PASS, raw-Wasm suites
-and install-artifact checks passed). Steps A and B are done; step C is amended (Amendment 1 in
-section 5). The deployer signer exists (section 0), so steps F and I.2 are no longer held.
+Status: the isolated public CLI test completed on 2026-10-25 by Miles (code candidate `4169feb8`,
+two focused reviews PASS, raw-Wasm suites and install-artifact checks passed). Steps A through J
+are complete, including both finalized transfer directions and fresh accounting checks. The test
+bridge is paused and stopped, with remaining Base tokens still fully escrow-backed. See
+`base-icusd-bridge-sepolia-execution.md`. Do not repeat completed commands: reconcile the existing
+targets and durable receipts first. This is not production activation or permission to merge.
 
 ## 0. Authority, scope, executor
 
@@ -91,7 +94,7 @@ three, so a release scan of up to an hour of 200 ms blocks is about 18 chunks in
 | Tester on ICP | `rumi_identity` subaccount `0x00...01` (31 zero bytes, then `01`); no new ICP identity or key |
 | Bridge minter and admin on Base | threshold-ECDSA addresses derived by the new bridge canister (`get_base_addresses`); derivation path `[b"rumi-icusd-base-bridge", b"v1", purpose, chain_id]`, so they are bound to the new canister's principal and never equal any live address |
 | Contract roles | `DEFAULT_ADMIN_ROLE` = bridge admin address (one-day admin delay), `MINTER_ROLE` = bridge minter address, `PAUSER_ROLE` = admin and minter, no guardian; the deployer keeps no role (the deploy script asserts it) |
-| Deployer and tester on Base | one test-only Base Sepolia account: deploys the contract, funds the minter and admin, receives the test mint and calls `bridgeOut`. **HELD** (see 0) |
+| Deployer and tester on Base | one test-only Base Sepolia account: deploys the contract, funds the minter and admin, receives the test mint and calls `bridgeOut`. Approved and provisioned for this isolated run (see 0) |
 
 Domains pinned in source: mint ids `rumi.icusd.base.mint.v1`, re-mints `rumi.icusd.base.remint.v1`,
 bridge-out transfer ids `rumi.icusd.base.bridge-out.v1` (contract-computed with chain id,
@@ -123,7 +126,8 @@ Bridge burn estimate (from measured EVM RPC `requestCost` on the 34-node subnet,
 documented 340M collateral per provider call; not measured spend): about 0.74T per day while bound
 and idle, about 0.4T for one round trip, 50B for signatures, so a bounded window of about six hours
 is about 0.7T. The 30-minute supply reconciliation is the largest fixed cost and is not tunable;
-stopping the bridge canister after the test ends all burn.
+stopping the bridge canister after the test ends RPC activity. Retained storage continues to
+incur [storage charges](https://docs.internetcomputer.org/concepts/cycles/#storage).
 
 Observer configuration applied right after install (validated bounds in source):
 `logs_chunk_blocks` 1,000; `logs_max_response_bytes` 16,384 (finalized blocks measured at
@@ -290,19 +294,21 @@ icp canister call rumi-icusd-bridge-test get_base_addresses '()' -e base-sepolia
 
 Record `<MINTER_ADDR>` and `<ADMIN_ADDR>`.
 
-**F. HELD (deployer signer): fund the bridge addresses and deploy the contract.** With the
-test-only deployer account `<DEPLOYER>` (keystore name `<DEPLOYER_KEYSTORE>`, never a raw key):
+**F. Fund the bridge addresses and deploy the contract (Amendment 2).** With the
+test-only deployer account `<DEPLOYER>` (encrypted keystore `<DEPLOYER_KEYSTORE>` and protected
+`<DEPLOYER_PASSWORD_FILE>`, never a raw key). Reconcile the durable run record before executing;
+never repeat a completed or uncertain funding/deployment step:
 
 ```bash
 export PATH="$HOME/.foundry/bin:$PATH"
-cast send <MINTER_ADDR> --value 0.003ether --rpc-url https://base-sepolia-rpc.publicnode.com --account <DEPLOYER_KEYSTORE>
-cast send <ADMIN_ADDR> --value 0.002ether --rpc-url https://base-sepolia-rpc.publicnode.com --account <DEPLOYER_KEYSTORE>
+cast send <MINTER_ADDR> --value 0.000010ether --chain 84532 --gas-price 20000000 --priority-gas-price 1000000 --rpc-url https://base-sepolia-rpc.publicnode.com --keystore <DEPLOYER_KEYSTORE> --password-file <DEPLOYER_PASSWORD_FILE>
+cast send <ADMIN_ADDR> --value 0.000005ether --chain 84532 --gas-price 20000000 --priority-gas-price 1000000 --rpc-url https://base-sepolia-rpc.publicnode.com --keystore <DEPLOYER_KEYSTORE> --password-file <DEPLOYER_PASSWORD_FILE>
 cd <REPO>/foundry
 export EXPECTED_CHAIN_ID=84532 BRIDGE_ADMIN_DELAY_SECONDS=86400 BRIDGE_SUPPLY_CAP_E8S=100000000000 BRIDGE_MINT_WINDOW_LIMIT_E8S=50000000000 BRIDGE_MINT_WINDOW_SECONDS=86400 BRIDGE_MIN_BRIDGE_OUT_E8S=100000000
 export BRIDGE_ADMIN_ADDR=<ADMIN_ADDR> BRIDGE_MINTER_ADDR=<MINTER_ADDR>
 unset BRIDGE_GUARDIAN_ADDR ALLOW_BASE_MAINNET
-forge script script/DeployBridgedIcUSD.s.sol:DeployBridgedIcUSD --rpc-url https://base-sepolia-rpc.publicnode.com --account <DEPLOYER_KEYSTORE>
-forge script script/DeployBridgedIcUSD.s.sol:DeployBridgedIcUSD --rpc-url https://base-sepolia-rpc.publicnode.com --account <DEPLOYER_KEYSTORE> --broadcast
+forge script script/DeployBridgedIcUSD.s.sol:DeployBridgedIcUSD --rpc-url https://base-sepolia-rpc.publicnode.com --chain 84532 --sender <DEPLOYER> --with-gas-price 20000000 --priority-gas-price 1000000
+forge script script/DeployBridgedIcUSD.s.sol:DeployBridgedIcUSD --rpc-url https://base-sepolia-rpc.publicnode.com --chain 84532 --sender <DEPLOYER> --with-gas-price 20000000 --priority-gas-price 1000000 --keystore <DEPLOYER_KEYSTORE> --password-file <DEPLOYER_PASSWORD_FILE> --broadcast
 ```
 
 Expected: the dry run passes its post-deploy checks; the broadcast prints
@@ -350,12 +356,22 @@ Expected: the deposit moves PullPending, Escrowed, MintInFlight, Delivered (abou
 `balanceOf` is 500,000,000; the audit shows escrow 500,000,000, `coverage_ok` and
 `base_supply_within_bound` true. Resubmitting the same request returns the same deposit.
 
-**I. Base to ICP (2 TICUSD), HELD signer for I.2:**
+**I. Base to ICP (2 TICUSD), only after H is `Delivered`:**
 
 1. `cast call <CONTRACT_ADDR> "computeTransferId(address,bytes32)(bytes32)" <DEPLOYER> 0x<NONCE> --rpc-url https://base-sepolia-rpc.publicnode.com` with a fresh random 32-byte `<NONCE>`; record both.
-2. `cast send <CONTRACT_ADDR> "bridgeOut(uint256,bytes,bytes32,bytes32)" 200000000 0xcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402 0x0000000000000000000000000000000000000000000000000000000000000001 0x<NONCE> --rpc-url https://base-sepolia-rpc.publicnode.com --account <DEPLOYER_KEYSTORE>`
+2. `cast send <CONTRACT_ADDR> "bridgeOut(uint256,bytes,bytes32,bytes32)" 200000000 0xcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402 0x0000000000000000000000000000000000000000000000000000000000000001 0x<NONCE> --chain 84532 --gas-limit 200000 --gas-price 20000000 --priority-gas-price 1000000 --rpc-url https://base-sepolia-rpc.publicnode.com --keystore <DEPLOYER_KEYSTORE> --password-file <DEPLOYER_PASSWORD_FILE>`
 3. After about 20 minutes: `icp canister call rumi-icusd-bridge-test get_release '("<TRANSFER_ID>")' --query -e base-sepolia-test --identity rumi_identity` reaches `Released` (the next idle probe can add up to 30 minutes).
 4. The tester subaccount balance rises by 199,990,000 (2 TICUSD minus the 10,000 ledger fee).
+
+Test-window observer pacing: this run uses a long idle interval to conserve cycles, and each
+observer pass scans at most five chunks. A historical backlog can therefore need several
+completed passes before it reaches the burn. After independently verifying the burn's finality,
+the operator may call `admin_run_tick '()'` on the test bridge. Wait for that pass to finish,
+then inspect `get_bridge_info` (cursor, errors, halts and budget) and `get_release`. Another
+bounded pass is appropriate only if the previous one finished and made progress; do not launch
+competing passes or create another burn. `Ok` from a tick is not proof of release. Allow a
+multi-minute CLI wait for sequential provider reads, and reconcile live state if a local wait
+expires. The public run demonstrated this progression without changing the runtime.
 
 **J. Close the window.** First capture the final state, because it is not zero:
 
@@ -388,7 +404,7 @@ start).
 
 ## 8. Expected changes
 
-Two new canisters on fuqsr (about 2.5T cycles moved from `rumi_identity` into them), one new
+Two new canisters on fuqsr (within section 5's amended cycles allocation), one new
 contract on Base Sepolia, faucet ETH spent by the test deployer, synthetic TICUSD moved between the
 tester subaccount, the bridge escrow and Base. Nothing else changes: no existing canister, no
 production ledger, no production frontend, no repository configuration.
@@ -442,7 +458,9 @@ The production `config.ts` keeps `ICUSD_BRIDGE` empty and is not changed, built 
 
 ## 12. Watch items
 
-- IC outcall reachability of the three provider hosts is unverified until the first live request.
+- Live ICP chain quorum, historical contract binding, minting and burn release were verified in
+  this run. This does not prove every provider for every method; availability and historical
+  state support must still be checked on subsequent runs.
 - The EVM RPC canister marks the `request` method the bridge uses as deprecated; it is present today.
 - Whether `requestCost` already includes the 340M collateral is unresolved; the budget assumes not.
 - Base Sepolia blocks are 200 ms, so finality is about 19 minutes and log scans are block-heavy.
