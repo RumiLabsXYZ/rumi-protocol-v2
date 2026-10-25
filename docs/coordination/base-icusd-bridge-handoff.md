@@ -254,16 +254,31 @@ Executed by Miles (the one public executor), packet steps A and B only:
 - Exact canister ids, cycles figures and the reconciliation rule are in the executor's private run
   record, not in this repository.
 
+## Milestone 10 (2026-10-25): signer resolved, budget amended
+
+- Rob's direct instruction (relayed and verified by Miles): "Yes, create the encrypted Base Sepolia
+  test key and protected local password file. Reconcile the stalled install, then finish
+  deploying and testing." This resolves the 2026-10-24 signer refusal. Miles created the encrypted
+  test-only keystore with a protected password file and is its only user; nobody else reads,
+  prints, copies or exports either. Its public address is in the executor's private run record.
+- Reconciled: fresh reads after the stalled request showed both canisters running, the same
+  single controller, and no module installed.
+- Retried (same command line): a definite no-effect rejection, `IC0207`, the ledger needs
+  229,352,977,276 more cycles to execute the install. Nothing installed.
+- Packet Amendment 1: top up the test ledger by 250B from the run's reserve (30-day freezing
+  threshold kept), then retry after a fresh no-module read. Run total 2,750,300,000,000 (was
+  2,500,200,000,000); reserve about 300.65B (was about 550.75B). The 0.5T reserve was a planning
+  choice; Rob's instruction authorizes completing the test.
+- Miles owns funding, installs and testing. Source stays frozen at `4169feb8`.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
 meaning steps A to E (a new synthetic test ledger and a dedicated bridge canister on ICP, their
-installation and configuration, deriving the bridge's public Base addresses) and, once the
-deployer signer is authorized, steps F to J on Base Sepolia (chain 84532).
+installation and configuration, deriving the bridge's public Base addresses) and steps F to J on
+Base Sepolia (chain 84532) with the test deployer signer created on Rob's 2026-10-25 instruction.
 
-Still held: provisioning the test-only Base Sepolia deployer signer (an approval review refused
-it; waiting on Rob's explicit answer), so contract deployment, test-ETH funding, binding and the
-Base-side round trip wait for it; anything touching the production icUSD ledger or any existing
+Still held: anything touching the production icUSD ledger or any existing
 Rumi canister, frontend or configuration; Base mainnet (8453); production controller, role or
 governance changes; real funds; and merging PR #591. (Lookout publication of sanitized board
 metadata is approved; see milestone 7.)

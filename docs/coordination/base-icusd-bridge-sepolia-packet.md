@@ -3,9 +3,9 @@
 The single readable plan for one isolated Base Sepolia test of the bridge. It supersedes the
 per-step HELD wording of `foundry/DEPLOY-BASE.md` for this run only.
 
-Status: READY for the executor's validation (code candidate `4169feb8`, two focused reviews PASS,
-raw-Wasm suites and install-artifact checks passed). Steps A to E and G need no deployer signer;
-F and I.2 wait for it.
+Status: in execution by Miles (code candidate `4169feb8`, two focused reviews PASS, raw-Wasm suites
+and install-artifact checks passed). Steps A and B are done; step C is amended (Amendment 1 in
+section 5). The deployer signer exists (section 0), so steps F and I.2 are no longer held.
 
 ## 0. Authority, scope, executor
 
@@ -19,9 +19,13 @@ F and I.2 wait for it.
   production controllers, roles or governance, merging PR #591, buying ICP, cycles or tokens.
 - **Executor:** Miles is the ONE public executor, after validating this packet. Nobody else
   creates, installs, signs, broadcasts or funds anything for this run.
-- **HELD inside the run:** provisioning a test-only Base Sepolia deployer signer (an approval
-  review refused creating one; Rob's explicit answer is pending). Steps F and I.2 need it.
-  Everything before F can run without it.
+- **Deployer signer (resolved 2026-10-25):** an approval review first refused creating a
+  test-only Base Sepolia deployer signer (2026-10-24). Rob then directly instructed, relayed and
+  verified by Miles: "Yes, create the encrypted Base Sepolia test key and protected local password
+  file. Reconcile the stalled install, then finish deploying and testing." Miles created it as an
+  encrypted keystore with a protected local password file (owner-only permissions). Only Miles
+  uses it; no one else reads, prints, copies or exports the key or the password. Its public
+  address is recorded in the executor's private run record, not here. Steps F and I.2 use it.
 
 ## 1. Candidate and artifacts
 
@@ -135,6 +139,44 @@ the deployer forwards 0.005 to the bridge (0.003 to the minter, 0.002 to the adm
 are 0.0011 and 0.0007, `gas_limit x max_fee + min_gas_reserve` at the bridge defaults), and keeps
 up to 0.015 for its own gas on top of that (contract deploy, estimated 2,795,263 gas plus the L1
 data fee, the two funding transfers, and one `bridgeOut`).
+
+### Amendment 1 (2026-10-25): test ledger install precharge
+
+The table above is the original plan and stays as written. What happened, and the change:
+
+- The first ledger install request (step C, 2026-10-24) stalled at the executor without a result;
+  only the local wait was ended. Before any retry, fresh reads showed both canisters running with
+  the same single controller and no module installed.
+- The retry, through the same command line, returned a definite no-effect rejection: `IC0207`, the
+  test ledger needs 229,352,977,276 additional cycles to execute the install. Nothing was
+  installed and no cycles were taken for the install. The likely reason (an inference, not a
+  measurement): installing code prepays the install message's full instruction limit, which on a
+  13-node subnet is far more than the 100B operating allowance; the unused part is refunded after
+  the install. The bridge's 1.4T operating allowance covers the same prepayment.
+- Change: top up the test ledger by 250,000,000,000 cycles from this run's reserve, keeping its
+  30-day freezing threshold, then retry the install only after a fresh read shows no module. The
+  top-up leaves about 20.6B above the reported requirement.
+- The 0.5T reserve was a planning choice for this run, not an external limit; Rob's instruction
+  authorizes completing the test deployment and routine trade-offs like this one.
+
+| Line | Original (2026-10-24) | Amended (2026-10-25) |
+| --- | --- | --- |
+| Test ledger | 600,000,000,000 | 850,000,000,000 (600B, plus a 250B top-up) |
+| Test bridge | 1,900,000,000,000 | 1,900,000,000,000 (unchanged) |
+| Cycles-ledger fees | 2 x 100,000,000 | 3 x 100,000,000 (the top-up adds one) |
+| Total | 2,500,200,000,000 | 2,750,300,000,000 |
+| Remaining reserve | 550,750,044,313 | 300,650,044,313 |
+
+Top-up command (step C.1, from `<RUN_DIR>`, Miles only):
+
+```bash
+icp canister top-up test-icusd-ledger --amount 250000000000 -e base-sepolia-test --identity rumi_identity
+icp canister status test-icusd-ledger -e base-sepolia-test --identity rumi_identity
+```
+
+Expected: the ledger's balance rises by 250B, controllers and freezing threshold unchanged, module
+still none. Then step C as written. If the install again returns a definite insufficient-cycles
+rejection, stop and record it; never repeat top-ups in a loop.
 
 ## 6. Run directory
 
@@ -334,7 +376,8 @@ Stop, record and report (do not retry around the condition) when:
   endpoint the IC cannot reach): replace providers with `admin_set_rpc_services` (controller only;
   it verifies the chain id by quorum before storing; at most 5) or stop;
 - `lanes[].awaiting_gas` is true: top up the minter or admin from the deployer, or stop;
-- the bridge's cycles fall below 800B, or `rumi_identity` would fall below 0.5T: pause and stop.
+- the bridge's cycles fall below 800B, or `rumi_identity` would fall below its amended reserve
+  (about 300B after Amendment 1): pause and stop. Any further spend needs another dated amendment.
 
 Upgrade note: `post_upgrade` refuses (traps, keeping the old module) if the stored provider set
 breaks the install rules, including more than 5 providers. Reduce the set with

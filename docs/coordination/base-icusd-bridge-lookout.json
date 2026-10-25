@@ -247,18 +247,18 @@
     },
     {
       "id": "BB-24",
-      "state": "held",
+      "state": "in_progress",
       "owner": "supervisor",
       "scope": "Base Sepolia phase 1: ICP side (packet steps A to E)",
-      "evidenceText": "proof=public-created; Created: two test canisters running, single controller verified. Ledger install request stalled at the executor with no result; both module hashes read back none, so no code. Held: reconcile before retry; bridge install not attempted",
+      "evidenceText": "proof=public-created; Created: two test canisters, single controller. Stalled ledger install reconciled (no module); retry got a definite no-effect rejection for too few cycles. Budget amended: top up the ledger from the run reserve, then retry",
       "evidenceLinks": []
     },
     {
       "id": "BB-25",
-      "state": "blocked",
+      "state": "todo",
       "owner": "supervisor",
       "scope": "Base Sepolia phase 2: Base side (packet steps F to J)",
-      "evidenceText": "proof=none; Contract deploy, funding, bind, round trip and close. HELD: creating a test-only Base Sepolia deployer signer was refused by an approval review; waiting on Rob's explicit test-key answer",
+      "evidenceText": "proof=none; Deployer signer created as an encrypted test-only keystore on Rob's direct instruction; only Miles uses it. Contract deploy, funding, bind, round trip and close wait on phase 1",
       "evidenceLinks": []
     }
   ]

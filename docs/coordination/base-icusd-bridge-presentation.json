@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge is built, its last follow-ups are fixed and re-reviewed, and its test plan is approved. On the ICP side two new test canisters exist, but no code is installed in them: the first install request stalled without a result, so installing is on hold until that request is reconciled. Real icUSD, Base mainnet and merging stay off limits, and the Base side waits on a decision about its test signing key.",
+  "summary": "The Rumi-to-Base bridge is built, its last follow-ups are fixed and re-reviewed, and its test plan is approved. On the ICP side two new test canisters exist, but no code is installed yet: the install needs more cycles up front than planned, so the plan was amended to top up the test ledger first. The test signing key is now created. Real icUSD, Base mainnet and merging stay off limits.",
   "glossary": [
     {
       "term": "proof=source",
@@ -415,6 +415,10 @@
     {
       "term": "reconcile before retry",
       "definition": "After a request whose outcome is unknown, first read the authoritative state to learn what actually happened, and only then decide whether a new request is safe."
+    },
+    {
+      "term": "no-effect rejection",
+      "definition": "An answer that proves a request did nothing, so it is safe to fix the cause and try again. Unlike a stalled request, it leaves no unknown outcome."
     }
   ]
 }
