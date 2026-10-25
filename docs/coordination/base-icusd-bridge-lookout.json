@@ -260,6 +260,22 @@
       "scope": "Base Sepolia phase 2: Base side (packet steps F to J)",
       "evidenceText": "proof=public-settled; CLI synthetic test: deposit Delivered; return burn finalized; release Released; readbacks match packet vectors; fresh audit coverage, supply bound, exact match true; zero pending; remaining Base tokens fully backed; bridge stopped",
       "evidenceLinks": []
+    },
+    {
+      "id": "BB-26",
+      "state": "in_progress",
+      "owner": "coordinator",
+      "scope": "Isolated test UI: staging recon and recipe",
+      "evidenceText": "proof=none; Claimed: read-only inspection of frontend config, auth and wallet setup, bridge route and services, build config; a bridge-only staging recipe with placeholders; no production config edit, no dev server",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-27",
+      "state": "todo",
+      "owner": "supervisor",
+      "scope": "Isolated test UI: browser acceptance",
+      "evidenceText": "proof=none; Wallet approvals, both directions, reload recovery, rejected transactions, wrong network and account changes, through the staging shell only",
+      "evidenceLinks": []
     }
   ]
 }
