@@ -255,10 +255,10 @@
     },
     {
       "id": "BB-25",
-      "state": "in_progress",
+      "state": "done",
       "owner": "supervisor",
       "scope": "Base Sepolia phase 2: Base side (packet steps F to J)",
-      "evidenceText": "proof=public-receipt; Contract deployed; runtime, configuration and deploy finality verified; the original bind reconciled as successful, not repeated. Deposit mint receipt successful; mint finality pending; return burn not started",
+      "evidenceText": "proof=public-settled; CLI synthetic test: deposit Delivered; return burn finalized; release Released; readbacks match packet vectors; fresh audit coverage, supply bound, exact match true; zero pending; remaining Base tokens fully backed; bridge stopped",
       "evidenceLinks": []
     }
   ]

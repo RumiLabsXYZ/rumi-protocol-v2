@@ -287,6 +287,30 @@ Reported by Miles (the one public executor) as sanitized phase and proof facts; 
 Not claimed: settlement of any operation, a completed round trip, or production readiness.
 Operational balances, reserves, addresses and logs stay in the executor's private record.
 
+## Milestone 12 (2026-10-25): Base Sepolia CLI round trip settled
+
+Reported by Miles (the one public executor) as sanitized phase and proof facts. Runtime frozen at
+`4169feb8`. Execution evidence: `docs/coordination/base-icusd-bridge-sepolia-execution.md` and the
+corrected `docs/coordination/base-icusd-bridge-sepolia-packet.md` (both by Miles, commit
+`88872433`).
+
+| Proof | Status |
+| --- | --- |
+| `public-settled`, ICP to Base | The original deposit reached `Delivered` |
+| `public-settled`, Base to ICP | Its return burn finalized and the release reached `Released` |
+| Independent readbacks | Ledger and Base readbacks match the packet's predefined vectors |
+| Fresh audit | Coverage, supply bound and exact match all true |
+| Open operations | Zero pending or held operations |
+| Remaining liability | The Base tokens still outstanding remain fully backed by matched escrow; this is a live, backed obligation, not a cleared one |
+| Window closed | All four pauses verified, then the test bridge stopped; reviewed module and sole controller unchanged |
+
+What this proves: the bridge works end to end on Base Sepolia through the command line with
+synthetic test assets (CLI and public-testnet proof).
+
+What it does not prove: browser-wallet acceptance (Internet Identity, Plug, Oisy, Base wallets),
+production activation, Base mainnet, or anything about the production icUSD ledger. PR #591 stays
+draft and unmerged.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
