@@ -149,13 +149,13 @@ The table above is the original plan and stays as written. What happened, and th
   the same single controller and no module installed.
 - The retry, through the same command line, returned a definite no-effect rejection: `IC0207`, the
   test ledger needs 229,352,977,276 additional cycles to execute the install. Nothing was
-  installed and no cycles were taken for the install. The likely reason (an inference, not a
+  installed and no token state was initialized; the rejection still consumed cycles. The likely reason (an inference, not a
   measurement): installing code prepays the install message's full instruction limit, which on a
   13-node subnet is far more than the 100B operating allowance; the unused part is refunded after
   the install. The bridge's 1.4T operating allowance covers the same prepayment.
 - Change: top up the test ledger by 250,000,000,000 cycles from this run's reserve, keeping its
   30-day freezing threshold, then retry the install only after a fresh read shows no module. The
-  top-up leaves about 20.6B above the reported requirement.
+  actual headroom must be read after the top-up because the rejected attempt incurred charges.
 - The 0.5T reserve was a planning choice for this run, not an external limit; Rob's instruction
   authorizes completing the test deployment and routine trade-offs like this one.
 
@@ -177,6 +177,38 @@ icp canister status test-icusd-ledger -e base-sepolia-test --identity rumi_ident
 Expected: the ledger's balance rises by 250B, controllers and freezing threshold unchanged, module
 still none. Then step C as written. If the install again returns a definite insufficient-cycles
 rejection, stop and record it; never repeat top-ups in a loop.
+
+### Amendment 2 (2026-10-25): bounded faucet gas allocation
+
+The faucet's fixed grant is smaller than the original allowance. A fresh deployment dry run
+at a 20,000,000 wei maximum fee and 1,000,000 wei priority fee passes all script assertions,
+uses the exact reviewed creation/runtime bytecode, and estimates 2,795,263 gas (at most
+0.00005590526 test ETH at that cap, before the separately checked L1 data fee).
+
+For this test only, replace the original step F funding allocation with 0.000010 test ETH
+to the minter and 0.000005 to the admin. Set the new test bridge's `admin_set_gas` to:
+
+```candid
+(record {
+  max_fee_per_gas_wei = 20_000_000 : nat;
+  max_priority_fee_per_gas_wei = 1_000_000 : nat;
+  mint_gas_limit = 300_000 : nat64;
+  admin_gas_limit = 100_000 : nat64;
+  min_gas_reserve_wei = 1_000_000_000_000 : nat;
+  replace_after_secs = 90 : nat64;
+})
+```
+
+The minter needs at most 0.000006 test ETH for its 300,000 gas envelope plus a 0.000001
+reserve; the admin needs at most 0.000002 plus the same reserve. Keep the remaining grant
+with the deployer for deployment and `bridgeOut`. Use the same fee caps for deployer
+transactions. Before signing, recheck the chain, balance, nonce, current fee quote and the
+specific transaction's gas/data-fee estimate. The overall spending ceiling stays 0.02 test ETH;
+this amendment reduces the allocation and does not authorize buying ETH or using mainnet.
+Insufficient actual gas funding means hold, not a blind retry or weakening receipt/finality checks.
+
+The executor persists each signed funding transaction and hash before broadcast. Only Miles
+executes. Source, roles, contract limits, accounting and mint gas limits remain unchanged.
 
 ## 6. Run directory
 
