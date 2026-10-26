@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge passed its isolated command-line test on Base's public test network with synthetic test tokens. The isolated staging copy of the Bridge page now renders correctly against the test canisters, and wallet screens were checked with a simulated wallet. Next is real wallet approvals in a browser, then a browser round trip and recovery checks. Production use, real icUSD, Base mainnet and merging are not done.",
+  "summary": "The Rumi-to-Base bridge passed its isolated command-line test on Base's public test network with synthetic test tokens. In the isolated staging copy of the Bridge page, a real Internet Identity sign-in now works, on top of the earlier display and simulated-wallet checks. Next are a real Base wallet, approving and rejecting transactions, a browser round trip and recovery checks. Production use, real icUSD, Base mainnet and merging are not done.",
   "glossary": [
     {
       "term": "proof=source",
@@ -451,6 +451,10 @@
     {
       "term": "fixture",
       "definition": "A simulated stand-in used in a test, here a read-only fake wallet that lets the page's wallet screens be checked without a real wallet."
+    },
+    {
+      "term": "staging-auth",
+      "definition": "Proof level for the staging copy: a real wallet sign-in worked and the page shows the signed-in account. It proves no transaction approval or transfer."
     }
   ]
 }

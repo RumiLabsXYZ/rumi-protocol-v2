@@ -274,7 +274,7 @@
       "state": "in_progress",
       "owner": "supervisor",
       "scope": "Isolated test UI: browser acceptance",
-      "evidenceText": "proof=staging-fixture; Isolated copy rendered on the test network: pause state, both tabs, keyboard, desktop and mobile, no runtime errors; guard blocked a non-test request. Wallet checks via a read-only fixture only; no real wallet, transfer or recovery yet",
+      "evidenceText": "proof=staging-auth; Real II sign-in (existing session reused) returned a non-anonymous principal to the staging page; guard blocked nothing. Earlier: rendering and fixture wallet checks. Pending: Base wallet, consent and rejection, round trip, recovery",
       "evidenceLinks": []
     }
   ]

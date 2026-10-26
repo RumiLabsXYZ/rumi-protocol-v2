@@ -249,6 +249,12 @@ compiled yet):
 After each wallet connect, repeat checks 3 and 4 and read the console lines `Delegation targets:`
 and `Requesting comprehensive Plug permissions:` (`pnp.ts:141`, `:215`).
 
+Reachability rule: at every handoff, and before every wallet step, confirm the dev server is
+still serving (reload `/bridge`, or fetch any module it serves) and that a dynamically loaded
+wallet module downloads without error. A previously rendered tab is not proof that the server is
+still running; a stopped server shows up only as a failed module download at the next dynamic
+import, typically when a wallet is first connected.
+
 ## 6. Wallets, principals and real user gestures
 
 - **Internet Identity.** With E6 the principal is derived from `<STAGING_ORIGIN>`: new, empty and

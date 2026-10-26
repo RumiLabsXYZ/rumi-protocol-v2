@@ -350,6 +350,25 @@ The short paused rendering window is closed and the test bridge is verified stop
 Next: Rob performs the real browser-wallet gestures; then the synthetic browser round trip and
 the recovery checks (recipe section 7), with Miles as the executor.
 
+## Milestone 15 (2026-10-25): real Internet Identity sign-in on the staging page (BB-27)
+
+Reported by Miles (sanitized). A failed dynamic wallet-module download showed the earlier server
+had stopped; he restored the single isolated loopback server and verified the wallet module now
+serves. Current official Internet Identity docs support local development.
+
+| Check | Result | Proof level |
+| --- | --- | --- |
+| Internet Identity sign-in (real Brave browser) | the official II popup opened and returned to the staging page, which shows a non-anonymous ICP principal and the disconnect control; the request guard stayed at zero blocked requests | `staging-auth` |
+| Scope of that sign-in | an existing II browser session was reused; no credential was entered and no new passkey ceremony was exercised | n/a |
+| Earlier rendering and fixture wallet checks (milestone 14) | unchanged | `staging-fixture` |
+| Real Base-wallet connection, transaction consent and rejection, browser round trip, reload recovery | not done | none |
+
+No test transaction, canister restart, module, controller or role change, or funding happened in
+this pass. Runtime and source unchanged (`4169feb8`).
+
+Rule recorded (recipe section 5): verify the local server is reachable at every handoff and
+before every wallet step. A previously rendered tab is not proof it is still running.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

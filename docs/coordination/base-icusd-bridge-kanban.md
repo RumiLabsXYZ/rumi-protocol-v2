@@ -28,6 +28,7 @@ definitions; update it with every material board change.
 | `public-finalized` | Authorized run: the receipt block is at or behind the finalized head with a matching canonical hash. |
 | `public-settled` | Authorized run: the bridge records the operation complete and ledger, Base and supply-audit readbacks agree. |
 | `staging-fixture` | Isolated staging UI only: the page rendered against the test canisters and wallet adapters were exercised with a read-only fixture. Not a real-wallet approval, transaction rejection, browser transfer or reload-recovery proof. |
+| `staging-auth` | Isolated staging UI: a real wallet sign-in completed and the page shows the signed-in principal. Sign-in only: no transaction consent or rejection, browser transfer or reload-recovery proof. |
 
 The `public-*` levels apply only to the isolated Base Sepolia run in the deployment packet (synthetic
 test assets, chain 84532), each at the exact step it names. No card may claim a production or
@@ -78,7 +79,7 @@ run record, never on this board.
 | BB-24 Base Sepolia phase 1: ICP side (packet steps A to E) | done | supervisor (Miles) | none (public executor) | BB-23 | Installed: both isolated test modules match the packet hashes; controller checks passed; test RPC chain-id quorum verified. Runtime frozen at 4169feb8 | public-installed |
 | BB-25 Base Sepolia phase 2: Base side (packet steps F to J) | done | supervisor (Miles) | none (public executor) | BB-24 | CLI synthetic test: deposit Delivered; return burn finalized; release Released; readbacks match packet vectors; fresh audit coverage, supply bound, exact match true; zero pending; remaining Base tokens fully backed; bridge stopped | public-settled |
 | BB-26 Isolated test UI: staging recon and recipe | done | coordinator (Opus 5.5 / Opus 5.5) + worker W8 (Sonnet / Sonnet) + worker W9 (Haiku / Haiku) | read-only source; tracked recipe doc | BB-25 | Recipe written from read-only source checks: ids alone do not isolate the app, so a throwaway copy gets a bridge-only shell, test-only ids, no polling, no production II origin and a request guard. Not compiled or run | source |
-| BB-27 Isolated test UI: browser acceptance | in progress (real-wallet gestures next) | supervisor (Miles), with Rob for real-wallet gestures | none (live and browser execution) | BB-26 | Isolated copy rendered on the test network: pause state, both tabs, keyboard, desktop and mobile, no runtime errors; guard blocked a non-test request. Wallet checks via a read-only fixture only; no real wallet, transfer or recovery yet | staging-fixture |
+| BB-27 Isolated test UI: browser acceptance | in progress (Base wallet, consent and recovery next) | supervisor (Miles), with Rob for real-wallet gestures | none (live and browser execution) | BB-26 | Real II sign-in (existing session reused) returned a non-anonymous principal to the staging page; guard blocked nothing. Earlier: rendering and fixture wallet checks. Pending: Base wallet, consent and rejection, round trip, recovery | staging-auth |
 
 ## Regression evidence (backend untouched)
 
@@ -121,3 +122,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-25: Rob authorized testing the Bridge page through an isolated test UI; BB-26 (staging recon and recipe) and BB-27 (browser acceptance, Miles) claimed.
 - 2026-10-25: BB-26 done: staging recipe `docs/coordination/base-icusd-bridge-staging-recipe.md` (bridge-only throwaway copy; no tracked file changes); BB-27 waits for Miles' review before the single dev server.
 - 2026-10-25: BB-27 in progress at staging-fixture: Miles rendered the isolated copy and ran fixture wallet checks; the paused rendering window is closed and the test bridge stopped again; real-wallet gestures (Rob) come next, then the browser round trip and recovery checks.
+- 2026-10-25: BB-27 at staging-auth: a real Internet Identity sign-in (existing browser session reused, no new credential or passkey ceremony) returned a non-anonymous principal to the staging page with the guard at zero blocks; no transaction, restart, module, role or funding change.
