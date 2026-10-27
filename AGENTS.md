@@ -1,5 +1,12 @@
 # AI Agent Instructions
 
+## Shared Solana ↔ ICP knowledge
+
+For Solana/ICP work, read `docs/solana-icp-knowledge.md` first. It indexes the
+retired native-SOL collateral implementation, the preserved Solana-native
+icUSD foundation, and integration lessons. Update it with dated, evidenced
+findings useful to agents in this or other repositories.
+
 Tested implementation patterns for ICP development are available as agent skills.
 Before writing any ICP code, fetch the skills index and remember each skill's
 name and description:
