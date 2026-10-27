@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Source-only review approved generic fail-closed custody guards, but no Cargo tests/build were rerun after commit 011c0b72 or the final 10B cycle-budget edit. Remaining XRP-only withdrawal, close, and manual-liquidation branches would fall through to ICRC if XLM became Active, so WP3/WP4 remain blocked; Frozen config keeps them unreachable now. No live deposit/claim lifecycle exists.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. The source-only reserve binding and 6da8cd46 fail-closed payout guards have not been Cargo-tested. No supported deposit/claim/payout lifecycle exists, so WP3/WP4 remain blocked. Horizon still asserts one provider; Latest-Ledger transform consensus availability is a concern. SDF/Tatum/Blockdaemon and Ankr are research candidates only; no 2-of-3 quorum is configured. XRC supports XLM/USD in source, but live quote/quorum is unknown; no paid sample was called.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},

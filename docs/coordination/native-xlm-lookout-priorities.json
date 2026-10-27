@@ -5,7 +5,8 @@
       "title": "XLM parity and threat model",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Verify connected-wallet CreateAccount support and establish XRC XLM/USD live source quorum; retain separate XRP-only parity evidence and keep XLM registration/deployment unclaimed.",
+      "blockedReason": "XRC source supports XLM/USD and defaults to a received-rate floor of 3 and freshness up to 120 seconds, but live XLM quote/quorum is unknown. The read-only connector refused the backend for lack of a service-discoverability manifest; the direct XRC sample is a paid update and was not called.",
+      "nextAction": "Verify connected-wallet CreateAccount support and establish an authorized read-only path for the XRC XLM/USD live quote/quorum; assess SDF, Tatum, Blockdaemon, and Ankr research candidates for provider selection and the 2-of-3 result target.",
       "cardIds": ["WP0"]
     },
     {
@@ -13,7 +14,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run Cargo tests/build after the final 10B cycle-budget and 011c0b72 route changes when the shared slot is available; then resolve snapshot consistency and single-provider trust before actual outcalls or lifecycle work.",
+      "nextAction": "Run Cargo tests/build after commit 6da8cd46 when the shared slot is available; review the Latest-Ledger transform concern, validate and select research candidates, and test the 2-of-3 target before actual outcalls or lifecycle work.",
       "cardIds": ["WP1"]
     },
     {
@@ -21,23 +22,23 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run targeted Cargo verification after the final cycle-budget and route edits; keep pending-deposit and receipt state dormant until a complete live deposit flow is implemented.",
+      "nextAction": "Cargo-verify the account-to-exact-ledger reserve binding when the shared slot is available; keep pending-deposit and receipt state dormant until a complete live deposit flow is implemented.",
       "cardIds": ["WP2"]
     },
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "Independent read-only review identified a latent NativeXlm-to-ICRC routing hazard in src/rumi_protocol_backend/src/vault.rs; the implementation plan requires excluding NativeXlm from ICRC add/deposit endpoints before ledger calls (docs/plans/native-xlm-collateral-2026-10-27.md:86).",
-      "nextAction": "Resolve the NativeXlm-to-ICRC routing hazard, then implement unique payment verification with reserve-aware checked accounting and replay protection.",
+      "blockedReason": "No XLM deposit or borrow endpoint/lifecycle exists. The generic routes now fail closed at source level, but Cargo tests/build have not rerun after the latest guard changes.",
+      "nextAction": "After Cargo verifies the source guards, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
       "cardIds": ["WP3"]
     },
     {
       "id": "claims-exits-liquidation",
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
-      "blockedReason": "Remaining XRP-only withdrawal, close, and manual-liquidation payout branches fall through to ICRC if XLM becomes Active; the plan requires custody-aware withdrawal/close guards and guarded manual-liquidation claim handling (native-xlm-collateral-2026-10-27.md:86,89). Frozen config and generic update denial currently keep these paths unreachable.",
-      "nextAction": "Add and review fail-closed guards or XLM-specific payout routes for the remaining withdrawal, close, and manual-liquidation branches before clearing WP4.",
+      "blockedReason": "No supported XLM claim, withdrawal, close, or manual-liquidation payout lifecycle exists. Unsupported XLM routes now fail closed in source, but the latest guards have not been Cargo-tested; Frozen config and generic update denial keep XLM unreachable meanwhile.",
+      "nextAction": "Cargo-verify the new fail-closed route guards, then implement and validate the supported XLM-specific payout/claim lifecycle before clearing WP4.",
       "cardIds": ["WP4"]
     },
     {
@@ -53,7 +54,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run focused tests/build after the 10B cycle-budget and route changes when the shared slot is available; then cover the remaining fall-through paths, backend integration, and actual Horizon outcalls before testnet work.",
+      "nextAction": "Re-run focused tests/build after commit 6da8cd46 when the shared slot is available; test Latest-Ledger transform consensus and independent provider results before backend integration, real outcalls, or testnet work.",
       "cardIds": ["WP6"]
     },
     {
