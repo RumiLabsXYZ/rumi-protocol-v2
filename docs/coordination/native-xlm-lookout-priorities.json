@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo tests/build after ba0dccbf when the shared slot is available; validate transform consistency, test the pure quorum helper, and wire providers only after endpoint selection and verification.",
+      "nextAction": "Run focused Cargo tests/build after 445ebec4 when the shared slot is available; test the account, transaction-ledger, and exact deposit-receipt quorum helpers, then resolve independent provider configuration before wiring.",
       "cardIds": ["WP1"]
     },
     {
@@ -21,7 +21,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Cargo-verify the account-to-exact-ledger reserve binding and deterministic historical-ledger transform; keep pending claim/intent and receipt state dormant until a complete live deposit/credit flow is implemented.",
+      "nextAction": "Cargo-verify the account-to-exact-ledger reserve binding and new transaction/deposit-receipt matching helpers; keep pending claim/intent and receipt state dormant until a complete live deposit/credit flow is implemented.",
       "cardIds": ["WP2"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run focused tests/build after ba0dccbf when the shared slot is available; test the pure quorum helper and validate deterministic historical-ledger handling, then review provider wiring before backend integration, real outcalls, or testnet work.",
+      "nextAction": "Re-run focused tests/build after 445ebec4 when the shared slot is available; test all pure quorum/matching helpers and validate deterministic historical-ledger handling, then review provider wiring before backend integration, real outcalls, or testnet work.",
       "cardIds": ["WP6"]
     },
     {
