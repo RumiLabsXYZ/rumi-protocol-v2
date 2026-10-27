@@ -1,0 +1,11 @@
+{
+  "summary": "Native XLM collateral remains in planning and early implementation; no XLM deployment or live config is proved. The read-only mainnet XRP config observed 2026-10-27 was Active with a $30,000 ceiling and Linear curve; decoded live values are 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% fee, 1.5% base APR, and about 132.2667% recovery target. These differ from constructor values. The bounded amount helper passed 5/5 standalone tests, not integration or release evidence.",
+  "glossary": [
+    {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
+    {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
+    {"term": "Stroops", "definition": "The smallest native XLM unit; one XLM is ten million stroops.", "cardId": "WP3"},
+    {"term": "Frozen", "definition": "A registration state that prevents collateral admission until the configured checks and release process permit activation.", "cardId": "WP2"},
+    {"term": "Claim", "definition": "A durable record for a payout that remains owed until its external Stellar transfer is reconciled.", "cardId": "WP4"},
+    {"term": "Testnet", "definition": "Stellar's separate testing network; testnet success does not establish mainnet readiness or activity.", "cardId": "WP6"}
+  ]
+}

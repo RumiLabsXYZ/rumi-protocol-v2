@@ -1,0 +1,68 @@
+{
+  "items": [
+    {
+      "id": "stellar-threat-model",
+      "title": "XLM parity and threat model",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Use the decoded live XRP risk and rate settings as the parity baseline, then confirm Stellar-specific network, custody, reserve, sequence, provider, and liquidation assumptions. Keep XRP evidence distinct from XLM registration and deployment.",
+      "cardIds": ["WP0"]
+    },
+    {
+      "id": "stellar-rail-vectors",
+      "title": "Stellar rail and independent vectors",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Complete the bounded StrKey address subset and produce independent Stellar SDK transaction vectors.",
+      "cardIds": ["WP1"]
+    },
+    {
+      "id": "stable-state-launch-guard",
+      "title": "Stable state and XLM launch guard",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Implement upgrade-safe XLM state and a default-frozen registration guard.",
+      "cardIds": ["WP2"]
+    },
+    {
+      "id": "verified-deposit-borrow",
+      "title": "Verified deposits and borrowing",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Implement unique payment verification with reserve-aware checked accounting and replay protection.",
+      "cardIds": ["WP3"]
+    },
+    {
+      "id": "claims-exits-liquidation",
+      "title": "Claims, exits, and liquidation handling",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Implement durable XLM payout claims and preserve activation holds for incomplete liquidation paths.",
+      "cardIds": ["WP4"]
+    },
+    {
+      "id": "frontend-candid-monitoring",
+      "title": "User flows, Candid, and monitoring",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Add supported XLM collateral and claim flows with explicit pending and unresolved states.",
+      "cardIds": ["WP5"]
+    },
+    {
+      "id": "test-review-testnet",
+      "title": "Tests, independent review, and testnet",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Continue integration and edge-case coverage; the amount helper's 5/5 standalone result is isolated evidence, not testnet or release proof.",
+      "cardIds": ["WP6"]
+    },
+    {
+      "id": "release-activation-evidence",
+      "title": "Release, configuration, and activation evidence",
+      "status": "blocked",
+      "blockedReason": "The implementation and required review, CI, artifact, audit, operational, and current network evidence are not complete.",
+      "nextAction": "Keep registration frozen while implementation and the pre-deploy evidence packet are completed.",
+      "cardIds": ["WP7"]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "projectId": "rumi-native-xlm",
+  "title": "Rumi · Native XLM collateral",
+  "lead": "Mara / XLM implementation team",
+  "canister": "uhpzm-qaaaa-aaaah-qvcfa-cai",
+  "network": "ic",
+  "identity": "lookout-rumi-xlm-publisher",
+  "source": {
+    "kind": "curated-json",
+    "path": "/Users/robertripley/coding/rumi-protocol-v2/.worktrees/native-xlm-collateral/docs/coordination/native-xlm-lookout.json"
+  },
+  "presentationPath": "/Users/robertripley/coding/rumi-protocol-v2/.worktrees/native-xlm-collateral/docs/coordination/native-xlm-lookout-presentation.json",
+  "priorityPath": "/Users/robertripley/coding/rumi-protocol-v2/.worktrees/native-xlm-collateral/docs/coordination/native-xlm-lookout-priorities.json"
+}
