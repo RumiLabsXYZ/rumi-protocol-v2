@@ -31,7 +31,10 @@ macro_rules! ensure_eq {
 
 #[cfg(test)]
 mod xlm_deposit_state_compat_tests {
-    use super::{State, XlmDepositKind, XlmDepositReceipt, XlmPendingDeposit};
+    use super::{
+        State, XlmCustodyAttribution, XlmDepositKind, XlmDepositReceipt, XlmPendingDeposit,
+        XlmPendingDepositStatus,
+    };
     use candid::Principal;
 
     #[test]
@@ -46,6 +49,15 @@ mod xlm_deposit_state_compat_tests {
                 network_id: [0x42; 32],
                 opened_at_ns: 100,
                 expires_at_ns: 200,
+                status: XlmPendingDepositStatus::Open,
+            },
+        );
+        state.xlm_custody_attributions.insert(
+            "G-custody".to_string(),
+            XlmCustodyAttribution {
+                owner: Principal::from_slice(&[1]),
+                derivation_nonce: 17,
+                network_id: [0x42; 32],
             },
         );
         state.xlm_deposit_receipts.insert(
@@ -66,6 +78,10 @@ mod xlm_deposit_state_compat_tests {
         ciborium::ser::into_writer(&state, &mut bytes).unwrap();
         let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(restored.xlm_pending_deposits, state.xlm_pending_deposits);
+        assert_eq!(
+            restored.xlm_custody_attributions,
+            state.xlm_custody_attributions
+        );
         assert_eq!(restored.xlm_deposit_receipts, state.xlm_deposit_receipts);
 
         let mut old_map =
@@ -77,6 +93,7 @@ mod xlm_deposit_state_compat_tests {
             !matches!(key, ciborium::value::Value::Text(name)
                 if name == "xlm_pending_deposits"
                     || name == "xlm_deposit_receipts"
+                    || name == "xlm_custody_attributions"
                     || name == "xlm_stellar_key_name")
         });
         let mut old_bytes = Vec::new();
@@ -84,6 +101,7 @@ mod xlm_deposit_state_compat_tests {
         let old: State = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
         assert!(old.xlm_pending_deposits.is_empty());
         assert!(old.xlm_deposit_receipts.is_empty());
+        assert!(old.xlm_custody_attributions.is_empty());
         assert_eq!(old.xlm_stellar_key_name, "test_key_1");
 
         // Map keys remain exact pairs, so the same operation token in another
@@ -95,6 +113,49 @@ mod xlm_deposit_state_compat_tests {
             same_operation_in_another_transaction,
         );
         assert_eq!(state.xlm_deposit_receipts.len(), 2);
+
+        // A pending row written before status was introduced remains readable.
+        let mut old_row_state = State::default();
+        old_row_state.xlm_pending_deposits.insert(
+            18,
+            XlmPendingDeposit {
+                owner: Principal::from_slice(&[2]),
+                custody_address: "G-legacy".to_string(),
+                derivation_nonce: 18,
+                network_id: [0x24; 32],
+                opened_at_ns: 300,
+                expires_at_ns: 400,
+                status: XlmPendingDepositStatus::Pending,
+            },
+        );
+        let mut row_bytes = Vec::new();
+        ciborium::ser::into_writer(&old_row_state, &mut row_bytes).unwrap();
+        let mut snapshot =
+            ciborium::de::from_reader::<ciborium::value::Value, _>(row_bytes.as_slice()).unwrap();
+        if let ciborium::value::Value::Map(fields) = &mut snapshot {
+            for (key, value) in fields {
+                if matches!(key, ciborium::value::Value::Text(name) if name == "xlm_pending_deposits")
+                {
+                    if let ciborium::value::Value::Map(rows) = value {
+                        for (_, row) in rows {
+                            if let ciborium::value::Value::Map(attributes) = row {
+                                attributes.retain(|(key, _)| {
+                                    !matches!(key, ciborium::value::Value::Text(name) if name == "status")
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut legacy_row_bytes = Vec::new();
+        ciborium::ser::into_writer(&snapshot, &mut legacy_row_bytes).unwrap();
+        let legacy_row_state: State =
+            ciborium::de::from_reader(legacy_row_bytes.as_slice()).unwrap();
+        assert_eq!(
+            legacy_row_state.xlm_pending_deposits[&18].status,
+            XlmPendingDepositStatus::Pending
+        );
     }
 
     #[test]
@@ -126,10 +187,24 @@ mod xlm_deposit_state_compat_tests {
                 network_id: [0x42; 32],
                 opened_at_ns: 100,
                 expires_at_ns: 200,
+                status: XlmPendingDepositStatus::Pending,
             },
         );
         assert!(super::xlm_stellar_key_is_immutable(&state));
         assert!(super::validate_xlm_stellar_key_change(&state, "test_key_1").is_err());
+
+        // Even after a staging row is removed, its permanent attribution keeps
+        // the key binding immutable.
+        let mut attributed = State::default();
+        attributed.xlm_custody_attributions.insert(
+            "G-custody".to_string(),
+            XlmCustodyAttribution {
+                owner: Principal::from_slice(&[1]),
+                derivation_nonce: 5,
+                network_id: [0x42; 32],
+            },
+        );
+        assert!(super::xlm_stellar_key_is_immutable(&attributed));
     }
 }
 
@@ -1942,6 +2017,32 @@ pub struct XlmPendingDeposit {
     pub network_id: [u8; 32],
     pub opened_at_ns: u64,
     pub expires_at_ns: u64,
+    /// Lifecycle of this staging row. Expiry or cancellation must not remove
+    /// the separate durable address attribution.
+    #[serde(default)]
+    pub status: XlmPendingDepositStatus,
+}
+
+/// Lifecycle of an XLM deposit staging row. Terminal states retain their
+/// corresponding `XlmCustodyAttribution` so funds sent to an old address still
+/// have a permanent owner/nonce/network binding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum XlmPendingDepositStatus {
+    /// Legacy rows without an explicit status decode conservatively as pending.
+    #[default]
+    Pending,
+    Open,
+    Expired,
+    Cancelled,
+}
+
+/// Permanent per-address ownership binding for a derived Stellar custody
+/// address. This record outlives pending-row expiry and cancellation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XlmCustodyAttribution {
+    pub owner: Principal,
+    pub derivation_nonce: u64,
+    pub network_id: [u8; 32],
 }
 
 /// The native XLM operation type that justified a durable deposit receipt.
@@ -2042,6 +2143,7 @@ pub fn xlm_stellar_key_is_immutable(state: &State) -> bool {
             .values()
             .any(|config| config.custody() == CustodyKind::NativeXlm)
         || !state.xlm_pending_deposits.is_empty()
+        || !state.xlm_custody_attributions.is_empty()
         || !state.xlm_deposit_receipts.is_empty()
         || !state.xlm_claims.is_empty()
         || state.next_xlm_claim_id > 0
@@ -4811,6 +4913,10 @@ pub struct State {
     /// intentionally dormant until the Stellar deposit endpoints are added.
     #[serde(default)]
     pub xlm_pending_deposits: BTreeMap<u64, XlmPendingDeposit>,
+    /// Permanent owner/nonce/network bindings keyed by derived Stellar address.
+    /// Entries are retained after their pending deposit expires or is cancelled.
+    #[serde(default)]
+    pub xlm_custody_attributions: BTreeMap<String, XlmCustodyAttribution>,
     /// Permanent native-XLM finalized-operation tombstones keyed by exact
     /// `(transaction hash, opaque operation identity)`; never pruned or reused.
     #[serde(default)]
@@ -5183,6 +5289,7 @@ impl Default for State {
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
             xlm_pending_deposits: BTreeMap::new(),
+            xlm_custody_attributions: BTreeMap::new(),
             xlm_deposit_receipts: BTreeMap::new(),
             xlm_claims: BTreeMap::new(),
             next_xlm_claim_id: 0,
@@ -5509,6 +5616,7 @@ impl From<InitArg> for State {
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
             xlm_pending_deposits: BTreeMap::new(),
+            xlm_custody_attributions: BTreeMap::new(),
             xlm_deposit_receipts: BTreeMap::new(),
             xlm_claims: BTreeMap::new(),
             next_xlm_claim_id: 0,

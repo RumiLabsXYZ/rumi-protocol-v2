@@ -249,9 +249,9 @@ pub fn parse_transaction(body: &[u8], expected_hash: &str) -> Result<u32, Horizo
     Ok(ledger)
 }
 
-/// Parse transaction operations collection, requiring exactly one matching
-/// successful XLM deposit. The caller supplies the requested page limit; a
-/// full page is rejected because it may have been truncated.
+/// Legacy strict single-match scaffold. Requires exactly one matching
+/// successful XLM deposit and treats valid unrelated operations/destinations
+/// as mismatches. New consumers should use [`parse_custody_deposits`].
 pub fn parse_deposit_operations(
     body: &[u8],
     expected_hash: &str,
@@ -353,6 +353,115 @@ pub fn parse_deposit_operations(
     found.ok_or(HorizonParseError::Missing("matching deposit operation"))
 }
 
+/// Parse one complete Horizon transaction-operations page and return every
+/// native XLM CreateAccount or Payment directed to `expected_destination`.
+/// Each receipt carries the amount and identity of its own operation; a valid
+/// operation to another destination is ignored. The caller supplies the page
+/// limit and expected transaction identity because Horizon's collection
+/// records repeat those transaction-level fields on every operation.
+pub fn parse_custody_deposits(
+    body: &[u8],
+    expected_hash: &str,
+    expected_ledger: u32,
+    expected_destination: &str,
+    requested_page_limit: usize,
+) -> Result<Vec<FinalizedDeposit>, HorizonParseError> {
+    let v: Value = serde_json::from_slice(body).map_err(|_| HorizonParseError::Json)?;
+    let records = required(required(&v, "_embedded")?, "records")?
+        .as_array()
+        .ok_or(HorizonParseError::Invalid("records"))?;
+    if requested_page_limit == 0 {
+        return Err(HorizonParseError::Invalid("requested_page_limit"));
+    }
+    if records.len() >= requested_page_limit {
+        return Err(HorizonParseError::TruncatedPage);
+    }
+
+    let mut seen_ids: Vec<String> = Vec::with_capacity(records.len());
+    let mut deposits = Vec::new();
+    for op in records {
+        if string(op, "transaction_hash")? != expected_hash {
+            return Err(HorizonParseError::Mismatch("transaction_hash"));
+        }
+        if required(op, "transaction_successful")?.as_bool() != Some(true) {
+            return Err(HorizonParseError::Mismatch("transaction_successful"));
+        }
+
+        let fields = object(op)?;
+        let paging_token = fields
+            .get("paging_token")
+            .map(|value| canonical_operation_id(value, "paging_token"));
+        let operation_id = fields
+            .get("id")
+            .map(|value| canonical_operation_id(value, "id"));
+        let id = match (paging_token, operation_id) {
+            (Some(Ok(paging_token)), Some(Ok(operation_id))) => {
+                if paging_token != operation_id {
+                    return Err(HorizonParseError::Mismatch("operation id"));
+                }
+                paging_token
+            }
+            (Some(Ok(paging_token)), None) => paging_token,
+            (None, Some(Ok(operation_id))) => operation_id,
+            (Some(Err(error)), _) | (_, Some(Err(error))) => return Err(error),
+            (None, None) => return Err(HorizonParseError::Missing("paging_token")),
+        };
+        let encoded_id = id
+            .parse::<u64>()
+            .map_err(|_| HorizonParseError::Invalid("operation id"))?;
+        if encoded_id > i64::MAX as u64 {
+            return Err(HorizonParseError::Invalid("operation id"));
+        }
+        if encoded_id >> 32 != u64::from(expected_ledger) {
+            return Err(HorizonParseError::Mismatch("operation ledger"));
+        }
+        if seen_ids.iter().any(|seen| seen == &id) {
+            return Err(HorizonParseError::Ambiguous);
+        }
+        seen_ids.push(id.clone());
+
+        let operation_type = string(op, "type")?;
+        let (kind, destination, amount_stroops) = match operation_type.as_str() {
+            "create_account" => (
+                DepositKind::CreateAccount,
+                string(op, "account")?,
+                parse_xlm_to_stroops(&string(op, "starting_balance")?)
+                    .map_err(|_| HorizonParseError::Invalid("starting_balance"))?,
+            ),
+            "payment" => {
+                let asset_type = string(op, "asset_type")?;
+                if asset_type != "native" {
+                    continue;
+                }
+                (
+                    DepositKind::NativePayment,
+                    string(op, "to")?,
+                    parse_xlm_to_stroops(&string(op, "amount")?)
+                        .map_err(|_| HorizonParseError::Invalid("amount"))?,
+                )
+            }
+            // Other well-formed Stellar operation types do not represent an
+            // XLM custody deposit. Common transaction and identity fields
+            // above are still validated before safely ignoring them.
+            _ => continue,
+        };
+        if amount_stroops == 0 {
+            return Err(HorizonParseError::Invalid("amount"));
+        }
+        if destination == expected_destination {
+            deposits.push(FinalizedDeposit {
+                transaction_hash: expected_hash.to_owned(),
+                ledger: expected_ledger,
+                operation_id: id,
+                destination,
+                amount_stroops,
+                kind,
+            });
+        }
+    }
+    Ok(deposits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +488,18 @@ mod tests {
     }
     const HASH: &str = "ef0fe04ac3c7de7228ca2598886059868ad05c224a041e8b2d9ee2a8a9dd6894";
     const DEST: &str = "GAYOLLLUIZE4DZMBB2ZBKGBUBZLIOYU6XFLW37GBP2VZD3ABNXCW4BVA";
+    const OTHER_DEST: &str = "GBYOLLLUIZE4DZMBB2ZBKGBUBZLIOYU6XFLW37GBP2VZD3ABNXCW4BVB";
+
+    fn custody_operation(id: &str, kind: &str, destination: &str, amount: &str) -> String {
+        match kind {
+            "create_account" => format!(
+                r#"{{"paging_token":"{id}","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"{amount}","account":"{destination}"}}"#
+            ),
+            _ => format!(
+                r#"{{"paging_token":"{id}","transaction_hash":"{HASH}","transaction_successful":true,"type":"payment","asset_type":"native","amount":"{amount}","to":"{destination}"}}"#
+            ),
+        }
+    }
 
     #[test]
     fn parses_account_snapshot_and_sponsorship_counts() {
@@ -535,6 +656,86 @@ mod tests {
         assert_eq!(
             parse_deposit_operations(other.as_bytes(), HASH, 27_984_461, DEST, 20_000_000, 200),
             Err(HorizonParseError::Mismatch("transaction_hash"))
+        );
+    }
+
+    #[test]
+    fn custody_parser_returns_each_matching_operation_with_its_actual_amount() {
+        let first = custody_operation("120192344791343105", "create_account", DEST, "2.0000000");
+        let second = custody_operation("120192344791343106", "payment", DEST, "3.2500000");
+        let json = format!(r#"{{"_embedded":{{"records":[{first},{second}]}}}}"#);
+        let deposits =
+            parse_custody_deposits(&json.into_bytes(), HASH, 27_984_461, DEST, 200).unwrap();
+        assert_eq!(deposits.len(), 2);
+        assert_eq!(deposits[0].amount_stroops, 20_000_000);
+        assert_eq!(deposits[0].kind, DepositKind::CreateAccount);
+        assert_eq!(deposits[0].operation_id, "120192344791343105");
+        assert_eq!(deposits[1].amount_stroops, 32_500_000);
+        assert_eq!(deposits[1].kind, DepositKind::NativePayment);
+        assert_eq!(deposits[1].operation_id, "120192344791343106");
+    }
+
+    #[test]
+    fn custody_parser_skips_valid_unrelated_destinations() {
+        let unrelated = custody_operation("120192344791343105", "payment", OTHER_DEST, "1.5");
+        let matching = custody_operation("120192344791343106", "payment", DEST, "2");
+        let json = format!(r#"{{"_embedded":{{"records":[{unrelated},{matching}]}}}}"#);
+        let deposits =
+            parse_custody_deposits(&json.into_bytes(), HASH, 27_984_461, DEST, 200).unwrap();
+        assert_eq!(deposits.len(), 1);
+        assert_eq!(deposits[0].operation_id, "120192344791343106");
+        assert_eq!(deposits[0].amount_stroops, 20_000_000);
+    }
+
+    #[test]
+    fn custody_parser_skips_other_valid_operations_and_issued_asset_payments() {
+        let options = format!(
+            r#"{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true,"type":"set_options"}}"#
+        );
+        let issued_payment = format!(
+            r#"{{"paging_token":"120192344791343106","transaction_hash":"{HASH}","transaction_successful":true,"type":"payment","asset_type":"credit_alphanum4","amount":"5.0","to":"{DEST}","asset_code":"USD","asset_issuer":"{OTHER_DEST}"}}"#
+        );
+        let matching = custody_operation("120192344791343107", "payment", DEST, "2");
+        let json =
+            format!(r#"{{"_embedded":{{"records":[{options},{issued_payment},{matching}]}}}}"#);
+        let deposits =
+            parse_custody_deposits(json.as_bytes(), HASH, 27_984_461, DEST, 200).unwrap();
+        assert_eq!(deposits.len(), 1);
+        assert_eq!(deposits[0].operation_id, "120192344791343107");
+        assert_eq!(deposits[0].amount_stroops, 20_000_000);
+    }
+
+    #[test]
+    fn custody_parser_rejects_missing_operation_type_or_payment_asset_type() {
+        let missing_type = format!(
+            r#"{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true}}"#
+        );
+        let missing_asset = format!(
+            r#"{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true,"type":"payment","amount":"1","to":"{DEST}"}}"#
+        );
+        for row in [missing_type, missing_asset] {
+            let json = format!(r#"{{"_embedded":{{"records":[{row}]}}}}"#);
+            assert!(parse_custody_deposits(json.as_bytes(), HASH, 27_984_461, DEST, 200).is_err());
+        }
+    }
+
+    #[test]
+    fn custody_parser_rejects_duplicate_ids_even_when_destination_is_unrelated() {
+        let row = custody_operation("120192344791343105", "payment", OTHER_DEST, "1");
+        let json = format!(r#"{{"_embedded":{{"records":[{row},{row}]}}}}"#);
+        assert_eq!(
+            parse_custody_deposits(json.as_bytes(), HASH, 27_984_461, DEST, 200),
+            Err(HorizonParseError::Ambiguous)
+        );
+    }
+
+    #[test]
+    fn custody_parser_rejects_potentially_truncated_page() {
+        let row = custody_operation("120192344791343105", "payment", DEST, "1");
+        let json = format!(r#"{{"_embedded":{{"records":[{row}]}}}}"#);
+        assert_eq!(
+            parse_custody_deposits(json.as_bytes(), HASH, 27_984_461, DEST, 1),
+            Err(HorizonParseError::TruncatedPage)
         );
     }
 }
