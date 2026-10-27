@@ -7113,15 +7113,12 @@ async fn stability_pool_liquidate(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
-    // (it would strand the seized XRP and burn SP depositors), so reject
-    // native-XRP here. Native-XRP absorption goes through the dedicated flow
-    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
-    // and external liquidators through liquidate_vault_partial /
-    // partial_liquidate_vault.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+    // Generic SP and bot liquidation paths cannot deliver collateral held on
+    // native external chains. XRP absorption and external-liquidator routes use
+    // their dedicated flows.
+    if rumi_protocol_backend::vault::vault_is_native_external(vault_id) {
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+            "Native external collateral cannot use the generic stability-pool or bot liquidation path".to_string(),
         ));
     }
     let caller = ic_cdk::api::caller();
@@ -7229,15 +7226,12 @@ async fn stability_pool_liquidate_debt_burned(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
-    // (it would strand the seized XRP and burn SP depositors), so reject
-    // native-XRP here. Native-XRP absorption goes through the dedicated flow
-    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
-    // and external liquidators through liquidate_vault_partial /
-    // partial_liquidate_vault.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+    // Generic SP and bot liquidation paths cannot deliver collateral held on
+    // native external chains. XRP absorption and external-liquidator routes use
+    // their dedicated flows.
+    if rumi_protocol_backend::vault::vault_is_native_external(vault_id) {
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+            "Native external collateral cannot use the generic stability-pool or bot liquidation path".to_string(),
         ));
     }
     let caller = ic_cdk::api::caller();
@@ -7770,15 +7764,12 @@ async fn stability_pool_liquidate_with_reserves(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
-    // (it would strand the seized XRP and burn SP depositors), so reject
-    // native-XRP here. Native-XRP absorption goes through the dedicated flow
-    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
-    // and external liquidators through liquidate_vault_partial /
-    // partial_liquidate_vault.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+    // Generic SP and bot liquidation paths cannot deliver collateral held on
+    // native external chains. XRP absorption and external-liquidator routes use
+    // their dedicated flows.
+    if rumi_protocol_backend::vault::vault_is_native_external(vault_id) {
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+            "Native external collateral cannot use the generic stability-pool or bot liquidation path".to_string(),
         ));
     }
     let caller = ic_cdk::api::caller();
@@ -8120,8 +8111,8 @@ async fn stability_pool_liquidate_with_reserves_v2(
             validate_liquidation_not_frozen()?;
             validate_price_for_liquidation()?;
             validate_freshness_for_vault(vault_id).await?;
-            if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
-                return Err(ProtocolError::GenericError("Native-XRP collateral cannot use the 3USD reserve path".into()));
+            if rumi_protocol_backend::vault::vault_is_native_external(vault_id) {
+                return Err(ProtocolError::GenericError("Native external collateral cannot use the 3USD reserve path".into()));
             }
             rumi_protocol_backend::management::validate_three_usd_ledger(
                 read_state(|s| s.three_pool_canister), three_usd_ledger,
@@ -11803,15 +11794,12 @@ fn get_bot_cr_tolerance_bps() -> u64 {
 #[update]
 async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
     validate_call().await?;
-    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
-    // (it would strand the seized XRP and burn SP depositors), so reject
-    // native-XRP here. Native-XRP absorption goes through the dedicated flow
-    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
-    // and external liquidators through liquidate_vault_partial /
-    // partial_liquidate_vault.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+    // Generic SP and bot liquidation paths cannot deliver collateral held on
+    // native external chains. XRP absorption and external-liquidator routes use
+    // their dedicated flows.
+    if rumi_protocol_backend::vault::vault_is_native_external(vault_id) {
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+            "Native external collateral cannot use the generic stability-pool or bot liquidation path".to_string(),
         ));
     }
     let caller = ic_cdk::api::caller();

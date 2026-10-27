@@ -97,6 +97,20 @@ Stellar's official docs describe account/transaction result distinctions includi
 - Store each XLM claim separately from XRP, with claimant, custody owner/nonce, gross stroops, destination, creation time, optional exact settlement intent, and quarantine reason. Persist the transaction hash, source sequence, network, fee, time bounds, and exact envelope intent before submit. Serialize all settlements for one custody account. A submit timeout leaves the intent unresolved; query that hash before any retry. A confirmed success clears the claim after exact payment verification. A confirmed failure charges the proven fee once. Hash not found before expiry stays in flight; after expiry, an unchanged source sequence permits replacement, while an advanced sequence quarantines. Query or provider errors never authorize a new payment.
 - At settlement, reserve the live minimum account balance plus all unresolved gross claims, require `gross > fee`, and pay `gross - fee` to an existing classic `G…` destination. The current codec has no `CreateAccount` payout, memo, muxed-account, or fee-bump support. Add transaction failure and actual-fee parsing, POST submission, sibling-claim reconciliation, and operator recovery before enabling claims.
 
+#### XRP route audit for XLM activation
+
+The current source has two kinds of XRP checks. Generic ICRC paths must reject **all** external-native custody; XRP-only claim/absorb paths must retain their XRP predicate and gain a separate Stellar implementation. The following source locations are the audit checklist at this branch's base; re-run the search before activation because line numbers will move.
+
+| Source locations | Required XLM treatment |
+| --- | --- |
+| `state.rs` ICRC pull preflight, redemption candidates/simulation, and bot routing | Already use `is_native_external`; keep this invariant. |
+| `vault.rs` generic redemption candidates near 214, ICRC open/add near 3017/6399/9524/9699/9861 | Reject XLM before any synthetic-principal ledger call; use dedicated Stellar receipt flow. |
+| `vault.rs` generic payout queue near 3837 and withdraw/close near 9973/10231/10513/10675 | Create durable XLM claims and preserve the locked account reserve; never pass XLM to ICRC transfers. |
+| `vault.rs` manual liquidation near 11111/11548 and SP write-down near 11980 | Use XLM claim output or reject before any debt write-down/burn when the payout path is unsupported. |
+| `main.rs` legacy SP/bot/3USD reserve paths near 7116/7232/7773/8123/11806 | Explicitly reject XLM until each path has a Stellar-aware settlement result. |
+| `sp_liquidation.rs` `xrp_claim_id` response and XRP-specific absorb/settle APIs | Add an XLM claim result and reconciliation path; do not relabel an XRP claim as generic. |
+| `main.rs` generic config update near 18169 | Currently denies XLM; keep the denial until all above routes, oracle quorum, key/network policy, and recovery are proven. |
+
 ### WP5 — Frontend, Candid, and operator observability
 
 - Add user flows for open address, deposit confirmation, available collateral, withdraw/close, external Stellar payout address, claim status, retry, and unresolved/ambiguous settlement. Never show “received” until chain confirmation.
