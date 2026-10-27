@@ -17459,15 +17459,15 @@ async fn set_collateral_status(
             "Collateral type not found".to_string(),
         ));
     }
-    if collateral_type == rumi_protocol_backend::state::xlm_collateral_principal()
+    let is_native_xlm = collateral_type == rumi_protocol_backend::state::xlm_collateral_principal()
         || read_state(|s| {
             s.get_collateral_config(&collateral_type)
                 .map(|cfg| cfg.custody() == rumi_protocol_backend::state::CustodyKind::NativeXlm)
                 .unwrap_or(false)
-        })
-    {
+        });
+    if is_native_xlm && native_xlm_status_enables_admission(status) {
         return Err(ProtocolError::GenericError(
-            "Native-XLM collateral status changes are unsupported until the Stellar lifecycle is complete".to_string(),
+            "Native-XLM collateral cannot be activated until the Stellar lifecycle is complete".to_string(),
         ));
     }
     if collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
@@ -17491,6 +17491,37 @@ async fn set_collateral_status(
         status
     );
     Ok(())
+}
+
+fn native_xlm_status_enables_admission(
+    status: rumi_protocol_backend::state::CollateralStatus,
+) -> bool {
+    matches!(
+        status,
+        rumi_protocol_backend::state::CollateralStatus::Active
+    )
+}
+
+#[cfg(test)]
+mod native_xlm_status_admission_tests {
+    use super::native_xlm_status_enables_admission;
+    use rumi_protocol_backend::state::CollateralStatus;
+
+    #[test]
+    fn rejects_admission_but_allows_emergency_and_wind_down_statuses() {
+        assert!(native_xlm_status_enables_admission(CollateralStatus::Active));
+        for status in [
+            CollateralStatus::Paused,
+            CollateralStatus::Frozen,
+            CollateralStatus::Sunset,
+            CollateralStatus::Deprecated,
+        ] {
+            assert!(
+                !native_xlm_status_enables_admission(status),
+                "{status:?} must remain available for containment or wind-down"
+            );
+        }
+    }
 }
 
 /// Wave-14a CDP-14 follow-up: set the per-collateral XRC source-count floor
