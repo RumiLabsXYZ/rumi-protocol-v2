@@ -589,8 +589,9 @@ canisters:
   #   3. embed candid:service metadata so query tools and dashboards see the
   #      candid interface without a sidecar file
   #   4. `ic-wasm <out> -o <out> shrink --keep-name-section`
-  #   5. `gzip -9 -n -f <out>` (best compression, no filename/timestamp header)
-  #   6. `scripts/verify-xrpl-icusd-artifact.sh --require-mainnet <out>` inspects the
+  #   5. `ic-wasm <out> -o <out> optimize O1 --keep-name-section`
+  #   6. `gzip -9 -n -f <out>` (best compression, no filename/timestamp header)
+  #   7. `scripts/verify-xrpl-icusd-artifact.sh --require-mainnet <out>` inspects the
   #      FINAL gzip: it must carry the `rumi:xrpl-environment` = production marker and
   #      must NOT carry the xrpl-testnet-fixture marker or its marker query.
   #
@@ -613,6 +614,8 @@ canisters:
             - cp target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm "$ICP_WASM_OUTPUT_PATH"
             - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/rumi_protocol_backend/rumi_protocol_backend.did -v public
             - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section
+            # Preserve the established 256 KiB executable-code reserve.
+            - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" optimize O1 --keep-name-section
             - gzip -9 -n -f "$ICP_WASM_OUTPUT_PATH"
             - mv "${ICP_WASM_OUTPUT_PATH}.gz" "$ICP_WASM_OUTPUT_PATH"
             - scripts/verify-xrpl-icusd-artifact.sh --require-mainnet "$ICP_WASM_OUTPUT_PATH"
