@@ -394,6 +394,19 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   negative control with an unknown card was rejected); item 2 and BB-28 are now done, so no item is
   ready. The derive script was left byte-identical to its pre-task version.
 
+## Milestone 17 (2026-10-26): priority cutover complete
+
+- Alden made the Lookout priority feature live and completed the initial priority cutover and
+  publication. Miles independently checked that the scoped manifest's priority path reads this
+  worktree's unchanged priority JSON and that a `--dry-run` reports board, presentation and
+  priorities all unchanged. Guide: `outputs/PRIORITIES.md` in the Lookout repository.
+- From now on the priority list publishes with the cards, summary and glossary through the same
+  manifest and scoped identity: dry-run, publish only changed content, then a no-op readback
+  (operating rules, event rule and "Priority selection" clause 6).
+- Unchanged: the six-item ranking and statuses (no item is ready; rank 1 still waits on Rob
+  unlocking Rabby and approving the staging connection), and every bridge, wallet, production,
+  signing and merge boundary. Only the initial priority-publishing hold was released.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

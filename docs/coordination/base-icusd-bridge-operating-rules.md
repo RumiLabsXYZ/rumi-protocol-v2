@@ -51,9 +51,11 @@ Scope and limits (unchanged by the approval):
 
 Event rule (owned by this worktree's coordinator under Rob's standing approval; no setup-owner or
 root approval needed): after each material change to the canonical board, update the short
-summary and any affected glossary entries in the presentation sidecar, re-derive the projection
-(which also validates the sidecar), and run the same scoped publisher with `--dry-run`. If it reports a change, publish with
-`--publish`, then confirm an immediate `--dry-run` reports the exact source as already published
+summary and any affected glossary entries in the presentation sidecar and, when affected, the
+priority list and the board's priority section; re-derive the projection (which also validates
+the sidecar); run the offline priority validation ("Priority selection", clause 5); then run the
+same scoped publisher with `--dry-run`. If it reports a change to the board, presentation or
+priorities, publish with `--publish`, then confirm an immediate `--dry-run` reports the exact source as already published
 (no-op). Never republish identical data. Record each published revision and source revision in
 the local publisher record outside this public repository, not here. No hourly monitor or
 additional timer.
@@ -97,10 +99,15 @@ Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirror
    publisher's exported `validatePriorities` on the JSON against that projection, and confirm the
    board's priority table lists the same items, order and status. No publisher run and no API call
    is part of this check; no repository helper code is added for it.
-6. Publication: priority metadata joins the existing sanitized publication flow only after Alden
-   (the Lookout owner) completes the priority cutover and confirms readiness. Until then nothing is
-   published for priorities; the 2026-10-26 checkpoint that introduced this rule was intentionally
-   left unpublished, including its card changes.
+6. Publication (priority cutover complete, 2026-10-26): Alden (the Lookout owner) made the
+   priority feature live and completed the initial priority cutover and publication; the scoped
+   manifest's priority path reads this worktree's priority JSON, and Miles' independent
+   `--dry-run` reported board, presentation and priorities all unchanged. From now on the priority
+   list publishes with the cards, summary and glossary through the same manifest and scoped
+   identity under the event rule above: dry-run, publish only changed content, then an immediate
+   no-op readback. Exact backend identifiers, revisions and source hashes stay in the private
+   publication record, never in this repository. Only the initial priority-publishing hold was
+   released; every other hold is unchanged.
 
 ## Card ID mapping
 
