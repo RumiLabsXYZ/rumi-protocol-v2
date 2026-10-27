@@ -28,8 +28,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. New fallback routes fail closed at source level, but Cargo tests/build have not rerun after commit 3e12fba5; claim/intent state remains dormant.",
-      "nextAction": "Implement provider/key/network binding and deposit credit/receipt/tombstone lifecycle after the source-only helpers and guards are validated; preserve WP3 blocked until end-to-end evidence exists.",
+      "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. Recent fallback and SP retry guards are source-only and uncompiled; claim/intent state remains dormant.",
+      "nextAction": "Validate provider/key/network binding and implement deposit credit/receipt/tombstone lifecycle after source helpers and guards are Cargo-tested; preserve WP3 blocked until end-to-end evidence exists.",
       "cardIds": ["WP3"]
     },
     {
@@ -45,7 +45,7 @@
       "title": "User flows, Candid, and monitoring",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Implement supported XLM vault, deposit, withdrawal, and claim flows with explicit pending and unresolved states; keep them unavailable until route and integration safety is resolved.",
+      "nextAction": "Regenerate and verify Candid/frontend declarations after the developer-gated XLM key setter/getter change, then implement supported flows with explicit pending/unresolved states; keep them unavailable until route and integration safety is resolved.",
       "cardIds": ["WP5"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused validation after 5964c17c when the shared slot is available; then complete testnet, frontend integration, reserve/oracle checks, and release review. Keep the XRP post-sign status race as a separate reuse caution, not an XLM gate.",
+      "nextAction": "Run focused validation after fcf37cc4 when the shared slot is available; then complete testnet, frontend integration, reserve/oracle checks, and release review. Keep the XRP post-sign status race as a separate reuse caution, not an XLM gate.",
       "cardIds": ["WP6"]
     },
     {

@@ -29,7 +29,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Source-only guards now fail closed on unsupported generic and native-XLM fallback paths. Commits b5f1a236 and 108e6f96 add emergency freeze/pause and canonical operation IDs; 5964c17c adds signed amount/ledger bounds and tests, all still uncompiled/unrun. A pure credit helper is under active source work but is not a live deposit flow. WP3 remains blocked: there is no XLM deposit/borrow endpoint or live credit/receipt/tombstone lifecycle. Key/network/provider binding, reserve freshness/oracle verification, and testnet/frontend integration remain open. No XLM admission is proved.",
+      "evidenceText": "Source-only guards now fail closed on unsupported generic and native-XLM fallback paths. Commits b5f1a236 and 108e6f96 add emergency freeze/pause and canonical operation IDs; 5964c17c adds signed amount/ledger bounds and tests, all still uncompiled/unrun. Commit fcf37cc4 adds an SP retry fail-closed guard before payout, also uncompiled/unrun. A pure credit helper is under active source work but is not a live deposit flow. WP3 remains blocked: there is no XLM deposit/borrow endpoint or live credit/receipt/tombstone lifecycle. Key/network/provider binding, reserve freshness/oracle verification, and testnet/frontend integration remain open. No XLM admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -45,7 +45,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Integrate Candid, user flows, and operator monitoring",
-      "evidenceText": "Earlier Candid regeneration and compatibility checks passed. The latest source adds fail-closed frontend/status handling, but it remains uncompiled/unrun; complete XLM frontend integration and lifecycle flows remain open. No supported XLM vault, deposit, withdrawal, or claim user flow is available.",
+      "evidenceText": "Earlier Candid regeneration and compatibility checks passed. A source-only developer-gated XLM key setter/getter has since been added and changes the Candid interface; generated `.did` and frontend declarations still need canonical regeneration, and no compile has been claimed. Fail-closed frontend/status changes also remain uncompiled/unrun. XLM frontend integration and supported deposit/withdrawal/claim lifecycle flows remain open.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34, before recent commits. Commits 567fb435, b5f1a236, 108e6f96, and 5964c17c add provider fanout/tests, emergency freeze/pause, canonical operation IDs, and signed amount/ledger bounds/tests; none has been compiled or run. The pure credit source helper and Stability Pool retry guard are being developed by source agents; neither is verified. Major open work: XLM key/network/provider binding; deposit credit, receipt, and tombstone wiring; current reserve freshness/oracle; claim settlement; testnet, frontend, and release. Mara Junior's first read-only audit and second design review are complete; this is not full research completion. The live XRP post-sign status race is a separate reuse caution, not a required XLM gate. WP3/WP4 remain blocked; no admission or deployment is proved.",
+      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34, before recent commits. Commits 567fb435, b5f1a236, 108e6f96, and 5964c17c add provider fanout/tests, emergency freeze/pause, canonical operation IDs, and signed amount/ledger bounds/tests; none has been compiled or run. Commit fcf37cc4 adds an SP retry fail-closed guard before payout, also uncompiled. A developer-gated key setter/getter changes Candid; generated declarations remain stale pending canonical regeneration. A pure credit helper remains under source work and unverified. Major open work: XLM key/network/provider binding; deposit credit, receipt, and tombstone wiring; current reserve freshness/oracle; claim settlement; testnet, frontend, and release. Mara Junior's first read-only audit and second design review are complete; this is not full research completion. The live XRP post-sign status race is a separate reuse caution, not a required XLM gate. WP3/WP4 remain blocked; no admission or deployment is proved.",
       "evidenceLinks": []
     },
     {
