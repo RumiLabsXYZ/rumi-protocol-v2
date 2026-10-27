@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Persistent pending-deposit/receipt state passed its 1/1 migration test; the focused Stellar suite passed 34/34 and the library check passed after initial wrappers/state. The final 10B cycle-budget edit is not Cargo-verified. The maps are unused by a live flow; no Horizon outcall or deposit/claim lifecycle exists. Snapshot consistency and single-provider trust remain unresolved.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Source-only review approved generic fail-closed custody guards, but no Cargo tests/build were rerun after commit 011c0b72 or the final 10B cycle-budget edit. Remaining XRP-only withdrawal, close, and manual-liquidation branches would fall through to ICRC if XLM became Active, so WP3/WP4 remain blocked; Frozen config keeps them unreachable now. No live deposit/claim lifecycle exists.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},

@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run Cargo verification after the final 10B Operations-call cycle-budget edit, then resolve snapshot consistency and single-provider trust before implementing actual outcalls and deposit/claim lifecycle. Keep WP1 in progress.",
+      "nextAction": "Run Cargo tests/build after the final 10B cycle-budget and 011c0b72 route changes when the shared slot is available; then resolve snapshot consistency and single-provider trust before actual outcalls or lifecycle work.",
       "cardIds": ["WP1"]
     },
     {
@@ -21,7 +21,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run targeted Cargo verification after the final cycle-budget edit; keep pending-deposit and receipt state dormant until a complete live deposit flow is implemented.",
+      "nextAction": "Re-run targeted Cargo verification after the final cycle-budget and route edits; keep pending-deposit and receipt state dormant until a complete live deposit flow is implemented.",
       "cardIds": ["WP2"]
     },
     {
@@ -35,9 +35,9 @@
     {
       "id": "claims-exits-liquidation",
       "title": "Claims, exits, and liquidation handling",
-      "status": "ready",
-      "blockedReason": "",
-      "nextAction": "Implement durable XLM payout claims and preserve activation holds for incomplete liquidation paths.",
+      "status": "blocked",
+      "blockedReason": "Remaining XRP-only withdrawal, close, and manual-liquidation payout branches fall through to ICRC if XLM becomes Active; the plan requires custody-aware withdrawal/close guards and guarded manual-liquidation claim handling (native-xlm-collateral-2026-10-27.md:86,89). Frozen config and generic update denial currently keep these paths unreachable.",
+      "nextAction": "Add and review fail-closed guards or XLM-specific payout routes for the remaining withdrawal, close, and manual-liquidation branches before clearing WP4.",
       "cardIds": ["WP4"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run focused tests and library check after the unverified 10B cycle-budget edit, then add backend integration and actual Horizon outcall coverage before testnet work.",
+      "nextAction": "Re-run focused tests/build after the 10B cycle-budget and route changes when the shared slot is available; then cover the remaining fall-through paths, backend integration, and actual Horizon outcalls before testnet work.",
       "cardIds": ["WP6"]
     },
     {
