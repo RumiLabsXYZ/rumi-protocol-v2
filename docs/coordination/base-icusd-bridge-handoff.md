@@ -389,6 +389,9 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   sign-in (milestone 15) stands.
 - Not published: Alden owns the initial priority cutover and publication and has not confirmed
   readiness, so this checkpoint (including its card changes) stays local until then.
+- Done: committed and pushed as `ae72444b`, validated offline with the publisher's own
+  `validatePriorities` (accepted unchanged; a negative control with an unknown card was rejected)
+  and with the derive script; item 2 and BB-28 are now done, so no item is ready.
 
 ## Held live actions
 

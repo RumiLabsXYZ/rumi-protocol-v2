@@ -279,10 +279,10 @@
     },
     {
       "id": "BB-28",
-      "state": "in_progress",
+      "state": "done",
       "owner": "coordinator",
       "scope": "Priorities and supervisor operating rules",
-      "evidenceText": "proof=source; Priority list (base-icusd-bridge-priorities.json), board priority section and selection rule; validated offline against the publisher's priority rules; not published (Alden owns the priority cutover)",
+      "evidenceText": "proof=source; Priority list, board priority section and selection rule committed and pushed (ae72444b); validated offline with the publisher's own priority validator and the derive script; not published (Alden owns the priority cutover)",
       "evidenceLinks": []
     }
   ]

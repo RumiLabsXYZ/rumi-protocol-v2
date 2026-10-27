@@ -13,9 +13,9 @@
     {
       "id": "priorities-and-handoff",
       "title": "Keep priorities and test handoff current",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Validate this priority list, the board, summary and glossary offline, then commit and push them. Priority publication waits for Alden's cutover.",
+      "nextAction": "None for this checkpoint. Ongoing upkeep follows the priority selection rule at each later checkpoint.",
       "cardIds": [
         "BB-28"
       ]
