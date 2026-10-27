@@ -19,7 +19,7 @@ pub enum HorizonParseError {
 pub struct AccountSnapshot {
     pub account_id: String,
     pub sequence: u64,
-    pub observed_ledger: u32,
+    pub account_last_modified_ledger: u32,
     pub native_balance_stroops: u64,
     pub subentry_count: u32,
     pub num_sponsoring: u32,
@@ -84,9 +84,9 @@ pub fn parse_account(body: &[u8], expected_id: &str) -> Result<AccountSnapshot, 
     if sequence > i64::MAX as u64 {
         return Err(HorizonParseError::Invalid("sequence"));
     }
-    let observed_ledger = uint32(&v, "observed_ledger")?;
-    if observed_ledger == 0 {
-        return Err(HorizonParseError::Invalid("observed_ledger"));
+    let account_last_modified_ledger = uint32(&v, "account_last_modified_ledger")?;
+    if account_last_modified_ledger == 0 {
+        return Err(HorizonParseError::Invalid("account_last_modified_ledger"));
     }
     let balances = required(&v, "balances")?
         .as_array()
@@ -106,7 +106,7 @@ pub fn parse_account(body: &[u8], expected_id: &str) -> Result<AccountSnapshot, 
     Ok(AccountSnapshot {
         account_id,
         sequence,
-        observed_ledger,
+        account_last_modified_ledger,
         native_balance_stroops: native.ok_or(HorizonParseError::Missing("native balance"))?,
         subentry_count: uint32(&v, "subentry_count")?,
         num_sponsoring: uint32(&v, "num_sponsoring")?,
@@ -245,12 +245,12 @@ mod tests {
 
     #[test]
     fn parses_account_snapshot_and_sponsorship_counts() {
-        let json = br#"{"account_id":"G","sequence":"42","observed_ledger":42,"subentry_count":2,"num_sponsoring":1,"num_sponsored":3,"balances":[{"asset_type":"native","balance":"12.3400001"},{"asset_type":"credit_alphanum4","balance":"9.0"}]}"#;
+        let json = br#"{"account_id":"G","sequence":"42","account_last_modified_ledger":42,"subentry_count":2,"num_sponsoring":1,"num_sponsored":3,"balances":[{"asset_type":"native","balance":"12.3400001"},{"asset_type":"credit_alphanum4","balance":"9.0"}]}"#;
         let a = parse_account(json, "G").unwrap();
         assert_eq!(
             (
                 a.sequence,
-                a.observed_ledger,
+                a.account_last_modified_ledger,
                 a.native_balance_stroops,
                 a.subentry_count,
                 a.num_sponsoring,
@@ -261,12 +261,12 @@ mod tests {
     }
 
     #[test]
-    fn account_requires_positive_numeric_observed_ledger() {
+    fn account_requires_positive_u32_last_modified_ledger() {
         for json in [
             br#"{"account_id":"G","sequence":"1","balances":[{"asset_type":"native","balance":"1"}]}"#.as_slice(),
-            br#"{"account_id":"G","sequence":"1","observed_ledger":"42","balances":[{"asset_type":"native","balance":"1"}]}"#,
-            br#"{"account_id":"G","sequence":"1","observed_ledger":0,"balances":[{"asset_type":"native","balance":"1"}]}"#,
-            br#"{"account_id":"G","sequence":"1","observed_ledger":4294967296,"balances":[{"asset_type":"native","balance":"1"}]}"#,
+            br#"{"account_id":"G","sequence":"1","account_last_modified_ledger":"42","balances":[{"asset_type":"native","balance":"1"}]}"#,
+            br#"{"account_id":"G","sequence":"1","account_last_modified_ledger":0,"balances":[{"asset_type":"native","balance":"1"}]}"#,
+            br#"{"account_id":"G","sequence":"1","account_last_modified_ledger":4294967296,"balances":[{"asset_type":"native","balance":"1"}]}"#,
         ] {
             assert!(parse_account(json, "G").is_err());
         }
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_native_balance_and_non_native_payment() {
-        let dup=br#"{"account_id":"G","sequence":"1","observed_ledger":1,"balances":[{"asset_type":"native","balance":"1"},{"asset_type":"native","balance":"2"}]}"#;
+        let dup=br#"{"account_id":"G","sequence":"1","account_last_modified_ledger":1,"balances":[{"asset_type":"native","balance":"1"},{"asset_type":"native","balance":"2"}]}"#;
         assert_eq!(parse_account(dup, "G"), Err(HorizonParseError::Ambiguous));
         let json = format!(
             r#"{{"_embedded":{{"records":[{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true,"type":"payment","asset_type":"credit_alphanum4","amount":"2.0000000","to":"{DEST}"}}]}}}}"#

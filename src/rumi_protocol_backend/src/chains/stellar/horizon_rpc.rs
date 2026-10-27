@@ -63,21 +63,24 @@ pub fn account_request(network: Network, account_id: &str) -> Option<CanisterHtt
     ))
 }
 
-/// Request one exact ledger so its reserve is bound to the account response's
-/// observed-ledger header rather than a separate moving latest-ledger query.
-fn ledger_reserve_url(network: Network, observed_ledger: u32) -> Option<String> {
-    if observed_ledger == 0 {
+/// Request the ledger at the account body's last-modified ledger. This is a
+/// historical reference only; it does not prove the current reserve.
+fn ledger_reserve_url(network: Network, account_last_modified_ledger: u32) -> Option<String> {
+    if account_last_modified_ledger == 0 {
         return None;
     }
-    Some(format!("{}/ledgers/{observed_ledger}", network.base_url()))
+    Some(format!(
+        "{}/ledgers/{account_last_modified_ledger}",
+        network.base_url()
+    ))
 }
 
 pub fn ledger_reserve_request(
     network: Network,
-    observed_ledger: u32,
+    account_last_modified_ledger: u32,
 ) -> Option<CanisterHttpRequestArgument> {
     Some(get_request(
-        ledger_reserve_url(network, observed_ledger)?,
+        ledger_reserve_url(network, account_last_modified_ledger)?,
         MAX_LEDGER_RESPONSE_BYTES,
         "stellar_transform_ledger",
     ))
@@ -162,6 +165,17 @@ pub fn transform_account(args: TransformArgs) -> HttpResponse {
         Ok(v) => v,
         Err(response) => return response,
     };
+    let account_last_modified_ledger = v
+        .get("last_modified_ledger")
+        .and_then(Value::as_u64)
+        .and_then(|ledger| u32::try_from(ledger).ok())
+        .filter(|ledger| *ledger > 0);
+    let Some(account_last_modified_ledger) = account_last_modified_ledger else {
+        return reduced_response(
+            candid::Nat::from(200u16),
+            b"{\"parse_error\":true}".to_vec(),
+        );
+    };
     let balances = v
         .get("balances")
         .and_then(Value::as_array)
@@ -171,31 +185,10 @@ pub fn transform_account(args: TransformArgs) -> HttpResponse {
                 .map(|row| json!({ "asset_type": field(row, "asset_type"), "balance": field(row, "balance") }))
                 .collect::<Vec<_>>()
         });
-    let mut observed_ledger = None;
-    let mut conflicting_header = false;
-    for header in &args.response.headers {
-        if header.name.eq_ignore_ascii_case("latest-ledger") {
-            let value = header
-                .value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
-                .then(|| header.value.parse::<u32>().ok())
-                .flatten()
-                .filter(|ledger| *ledger > 0);
-            match (observed_ledger, value) {
-                (None, Some(ledger)) => observed_ledger = Some(ledger),
-                (Some(existing), Some(ledger)) if existing == ledger => {}
-                _ => conflicting_header = true,
-            }
-        }
-    }
-    if conflicting_header {
-        observed_ledger = None;
-    }
     let reduced = json!({
         "account_id": field(&v, "account_id"),
         "sequence": field(&v, "sequence"),
-        "observed_ledger": observed_ledger,
+        "account_last_modified_ledger": account_last_modified_ledger,
         "balances": balances,
         "subentry_count": field(&v, "subentry_count"),
         "num_sponsoring": field(&v, "num_sponsoring"),
@@ -324,32 +317,11 @@ mod tests {
     }
 
     #[test]
-    fn account_transform_extracts_latest_ledger_header_case_insensitively() {
-        let mut response = args(200, br#"{"account_id":"G","sequence":"4","subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000"}]}"#);
-        response.response.headers.push(
-            ic_cdk::api::management_canister::http_request::HttpHeader {
-                name: "lAtEsT-lEdGeR".to_string(),
-                value: "42".to_string(),
-            },
-        );
-        let body = transform_account(response).body;
-        let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value.get("observed_ledger"), Some(&json!(42)));
-    }
-
-    #[test]
-    fn account_transform_fails_closed_for_missing_malformed_or_conflicting_ledger_headers() {
-        let account = br#"{"account_id":"G","sequence":"4","subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000"}]}"#;
-        let mut missing = args(200, account);
-        let mut malformed = args(200, account);
-        malformed.response.headers.push(
-            ic_cdk::api::management_canister::http_request::HttpHeader {
-                name: "Latest-Ledger".to_string(),
-                value: "4x".to_string(),
-            },
-        );
-        let mut conflicting = args(200, account);
-        conflicting.response.headers.extend([
+    fn account_transform_ignores_moving_headers_and_uses_body_ledger() {
+        let body = br#"{"account_id":"G","sequence":"4","last_modified_ledger":42,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000"}]}"#;
+        let baseline = transform_account(args(200, body));
+        let mut changed_header = args(200, body);
+        changed_header.response.headers.extend([
             ic_cdk::api::management_canister::http_request::HttpHeader {
                 name: "Latest-Ledger".to_string(),
                 value: "42".to_string(),
@@ -359,16 +331,29 @@ mod tests {
                 value: "43".to_string(),
             },
         ]);
-        for response in [missing, malformed, conflicting] {
-            let body = transform_account(response).body;
-            let value: Value = serde_json::from_slice(&body).unwrap();
-            assert!(value.get("observed_ledger").unwrap().is_null());
+        let transformed = transform_account(changed_header);
+        assert_eq!(transformed.body, baseline.body);
+        let value: Value = serde_json::from_slice(&transformed.body).unwrap();
+        assert_eq!(value.get("account_last_modified_ledger"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn account_transform_fails_closed_for_missing_or_malformed_body_ledger() {
+        for account in [
+            br#"{"account_id":"G","sequence":"4","subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[]}"#.as_slice(),
+            br#"{"account_id":"G","sequence":"4","last_modified_ledger":"42","subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[]}"#,
+            br#"{"account_id":"G","sequence":"4","last_modified_ledger":0,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[]}"#,
+            br#"{"account_id":"G","sequence":"4","last_modified_ledger":4294967296,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[]}"#,
+        ] {
+            let transformed = transform_account(args(200, account));
+            let value: Value = serde_json::from_slice(&transformed.body).unwrap();
+            assert_eq!(value, json!({"parse_error": true}));
         }
     }
 
     #[test]
     fn account_transform_drops_volatile_and_non_native_fields() {
-        let transformed = transform_account(args(200, br#"{"account_id":"G","sequence":"4","subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000"},{"asset_type":"credit_alphanum4","balance":"99"}],"last_modified_time":"volatile"}"#));
+        let transformed = transform_account(args(200, br#"{"account_id":"G","sequence":"4","last_modified_ledger":42,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000"},{"asset_type":"credit_alphanum4","balance":"99"}],"last_modified_time":"volatile"}"#));
         let body = String::from_utf8(transformed.body).unwrap();
         assert!(body.contains("1.0000000"));
         assert!(!body.contains("credit_alphanum4"));

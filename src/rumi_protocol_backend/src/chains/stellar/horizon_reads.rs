@@ -1,9 +1,11 @@
 //! Typed read-only Stellar Horizon HTTPS outcalls.
 //!
 //! These functions use one fixed Horizon provider selected by the closed
-//! [`Network`] enum. The reserve read is bound to the ledger reported by the
-//! account response, but that provider-supplied binding is not independent
-//! provider verification or proof of finality. Transaction and operation reads
+//! [`Network`] enum. The reserve read is bound to the account body's
+//! last-modified ledger, but that historical reserve is not evidence of the
+//! current reserve or independent provider verification. A future credit path
+//! must compare current reserve observations independently and conservatively.
+//! Transaction and operation reads
 //! remain separate observations.
 //! There is intentionally no transaction submission or deposit-credit path here.
 
@@ -61,26 +63,30 @@ pub async fn fetch_account_snapshot(
     horizon_parse::parse_account(&body, account_id).map_err(parse_error)
 }
 
-/// Fetch the exact ledger observed alongside an account response and validate
-/// its reserve value. The caller must pass `AccountSnapshot::observed_ledger`.
+/// Fetch the historical ledger named by the account body's last-modified field.
+/// Its reserve is not proof of the current reserve and must not alone authorize
+/// collateral credit. The caller passes `AccountSnapshot::account_last_modified_ledger`.
 pub async fn fetch_ledger_reserve(
     network: Network,
-    observed_ledger: u32,
+    account_last_modified_ledger: u32,
 ) -> Result<LedgerReserve, String> {
-    if observed_ledger == 0 {
-        return Err("Horizon observed ledger must be positive".to_string());
+    if account_last_modified_ledger == 0 {
+        return Err("Horizon account last-modified ledger must be positive".to_string());
     }
     let body = read(
-        horizon_rpc::ledger_reserve_request(network, observed_ledger)
-            .ok_or_else(|| "invalid Horizon observed ledger".to_string())?,
+        horizon_rpc::ledger_reserve_request(network, account_last_modified_ledger)
+            .ok_or_else(|| "invalid Horizon account last-modified ledger".to_string())?,
         READ_CYCLES,
     )
     .await?;
-    parse_exact_ledger_reserve(&body, observed_ledger)
+    parse_exact_ledger_reserve(&body, account_last_modified_ledger)
 }
 
-fn parse_exact_ledger_reserve(body: &[u8], observed_ledger: u32) -> Result<LedgerReserve, String> {
-    horizon_parse::parse_ledger_reserve(body, observed_ledger).map_err(parse_error)
+fn parse_exact_ledger_reserve(
+    body: &[u8],
+    account_last_modified_ledger: u32,
+) -> Result<LedgerReserve, String> {
+    horizon_parse::parse_ledger_reserve(body, account_last_modified_ledger).map_err(parse_error)
 }
 
 /// Fetch a transaction by hash and return its ledger only when it is
