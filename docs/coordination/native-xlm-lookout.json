@@ -13,7 +13,7 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "Locked Cargo check passed for the backend library and binary after the Frozen NativeXlm state scaffold and read-only Horizon request/transform callbacks were wired. The focused `chains::stellar` Cargo library suite passed 32/32; the XLM config tests passed 2/2 and legacy custody decode passed 1/1. The earlier standalone groups passed address 6/6, amount/reserve 7/7, XDR native Payment 4/4, and Horizon parser 5/5; XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. Candid generation and compatibility checks passed, with declarations regenerated. No actual Horizon outcalls or vault/deposit/claim lifecycle are proved. Independent read-only review identified a latent NativeXlm-to-ICRC routing hazard; integration remains unresolved. No XLM registration, deployment, or collateral admission is proved.",
+      "evidenceText": "Typed read-only Horizon wrappers and persistent deposit state are now present. The focused `chains::stellar` Cargo suite passed 34/34 and the deposit-state migration test passed 1/1; backend library check passed after initial wrapper/state changes. These results predate the final cycle-budget change from 2B to 10B cycles for a 256 KiB Operations call; that edit has not been rerun under Cargo. Wrappers have not made an actual Horizon outcall, and the stored deposit/receipt maps are not used by a live flow. Snapshot consistency and single-provider trust remain unresolved. No vault/deposit/claim lifecycle, XLM registration, deployment, or collateral admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -21,7 +21,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Add stable state and an XLM launch guard",
-      "evidenceText": "A source scaffold adds a Frozen NativeXlm config constructor that clones risk/curve fields from a supplied current XRP config, sets XLM to 7 decimals and a 1 XLM minimum, and clears observations. State config tests passed 2/2; legacy custody decode passed 1/1. Generic update_collateral_config rejects both the canonical XLM key and NativeXlm. Candid declarations were regenerated, and the regeneration plus non-regeneration compatibility checks passed. This is source/test evidence only: the config remains Frozen and XLM is not registered, deployed, or admitted as collateral.",
+      "evidenceText": "A source scaffold adds a Frozen NativeXlm config constructor that clones risk/curve fields from a supplied current XRP config, sets XLM to 7 decimals and a 1 XLM minimum, and clears observations. State config tests passed 2/2 and legacy custody decode passed 1/1. Generic update_collateral_config rejects both the canonical XLM key and NativeXlm. Persistent serde-defaulted XlmPendingDeposit state and a permanent `(tx hash, operation id)` receipt map were added; their CBOR round-trip/old-snapshot default test passed 1/1. An independent read-only review found no stable-upgrade blocker but noted these maps are unused by a live deposit flow. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "The focused `chains::stellar` Cargo library suite passed 32/32; XLM config tests passed 2/2 and legacy custody decode passed 1/1. The earlier standalone groups passed address 6/6, amount/reserve 7/7, XDR native Payment 4/4, and Horizon parser 5/5. Candid regeneration and non-regeneration compatibility checks passed after declaration regeneration. Locked Cargo check passed for backend lib and bin. No actual Horizon outcalls exist. Full `cargo test` previously stopped at 11 GiB free disk with exit 130 and has no full-suite verdict. Independent read-only review identified a latent NativeXlm-to-ICRC routing hazard. No vault lifecycle, XLM registration, deployment, or collateral admission is proved.",
+      "evidenceText": "Focused `chains::stellar` Cargo suite passed 34/34; deposit-state migration test passed 1/1. Backend library check passed after initial wrapper/state changes. The final change from 2B to 10B cycles for the 256 KiB Operations call was made afterward and has not been verified under Cargo. Thus these pass results do not include that final cycle-budget edit. No actual Horizon outcall or live deposit/claim/vault lifecycle exists. Full `cargo test` has no full-suite verdict. Snapshot consistency, single-provider trust, and the latent NativeXlm-to-ICRC routing hazard remain unresolved. No XLM registration, deployment, or collateral admission is proved.",
       "evidenceLinks": []
     },
     {

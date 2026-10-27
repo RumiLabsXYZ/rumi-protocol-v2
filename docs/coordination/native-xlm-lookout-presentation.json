@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Locked backend lib/bin check passed; the focused Stellar suite passed 32/32, XLM config tests 2/2, and legacy custody decode 1/1. Candid declarations were regenerated and both compatibility checks passed. No actual Horizon outcalls or vault/deposit/claim lifecycle exist. XRC XLM/USD quorum is unproven, and the latent NativeXlm-to-ICRC routing hazard remains before activation.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Persistent pending-deposit/receipt state passed its 1/1 migration test; the focused Stellar suite passed 34/34 and the library check passed after initial wrappers/state. The final 10B cycle-budget edit is not Cargo-verified. The maps are unused by a live flow; no Horizon outcall or deposit/claim lifecycle exists. Snapshot consistency and single-provider trust remain unresolved.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},

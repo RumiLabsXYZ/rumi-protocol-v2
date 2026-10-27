@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Implement and validate actual Horizon outcalls plus the vault/deposit/claim lifecycle. Keep WP1 in progress; the focused suite and compile checks do not prove live network behavior.",
+      "nextAction": "Re-run Cargo verification after the final 10B Operations-call cycle-budget edit, then resolve snapshot consistency and single-provider trust before implementing actual outcalls and deposit/claim lifecycle. Keep WP1 in progress.",
       "cardIds": ["WP1"]
     },
     {
@@ -21,7 +21,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Continue validating the Frozen NativeXlm constructor and update guard; Candid declarations have been regenerated and both compatibility checks passed.",
+      "nextAction": "Re-run targeted Cargo verification after the final cycle-budget edit; keep pending-deposit and receipt state dormant until a complete live deposit flow is implemented.",
       "cardIds": ["WP2"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Add backend integration and actual Horizon outcall coverage before testnet work; the focused 32/32 suite is not a full cargo test or live-network verdict.",
+      "nextAction": "Re-run focused tests and library check after the unverified 10B cycle-budget edit, then add backend integration and actual Horizon outcall coverage before testnet work.",
       "cardIds": ["WP6"]
     },
     {
