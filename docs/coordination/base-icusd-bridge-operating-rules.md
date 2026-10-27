@@ -117,12 +117,13 @@ Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirror
    their item is clear; link a card to more than one item only when it belongs to each; leave
    shared or ambiguous cards unlinked and record why in the handoff. Coverage is not a quota. A
    membership change touches only `cardIds`: never alter an item's id, title, status, reason, next
-   action or rank to fit a link. Badge readiness hold: the first membership update (2026-10-27)
-   stays unpublished until Alden confirms the badge feature is live. Any publish would carry the
-   current priority list, so until then there is no publisher run (dry-run included) or Lookout
-   API call from this worktree (a board change meanwhile is recorded locally and reported to Miles), and no retry of
-   or route around any rejected upload. After Alden confirms, membership changes publish under the
-   event rule like any other priority change.
+   action or rank to fit a link. Badge readiness hold: the existing manifest's publish path
+   includes this priority list, so the changed membership checkpoint of 2026-10-27 stays
+   unpublished until Alden confirms the badge feature is live. Its review used offline checks only;
+   no API call is needed for it. Until that confirmation, do not publish, do not retry or route
+   around any rejected upload, and record any board change locally and report it to Miles. The
+   hold covers publishing only, not otherwise-authorized read-only diagnostics. After Alden
+   confirms, membership changes publish under the event rule like any other priority change.
 
 ## Card ID mapping
 
