@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo tests/build after 52730be0 when the shared slot is available; verify provider binding, transaction-status parser and 39 tests, fee_charged preservation, 404 problem handling, provider independence, and evidence freshness.",
+      "nextAction": "Run focused Cargo/dfx tests after eb379f9c when the shared slot is available; verify the transaction-status parser's 39 tests and typed 200/404 transport, then resolve provider independence and evidence freshness before live calls.",
       "cardIds": ["WP1"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused validation after 52730be0 when the shared slot is available; resolve fee and 404 evidence handling, provider independence, and freshness before status integration, then complete testnet/frontend/release review. Keep the XRP post-sign race as separate reuse caution, not an XLM gate.",
+      "nextAction": "Run focused Cargo/dfx validation after eb379f9c when the shared slot is available; resolve provider independence and evidence freshness before live status calls, then complete deposit/claim settlement, testnet, frontend, oracle, and release work. Keep the XRP post-sign race separate, not an XLM gate.",
       "cardIds": ["WP6"]
     },
     {
