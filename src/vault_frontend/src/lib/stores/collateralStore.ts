@@ -79,18 +79,21 @@ function createCollateralStore() {
           const ledgerId = config.ledger_canister_id.toText();
 
           // How the collateral is custodied. Absent (legacy) => IcrcLedger.
-          // NativeXrp is held off-chain on the XRP Ledger: its `ledger_canister_id`
-          // is a SYNTHETIC key, not a real canister, so it has no icrc1_symbol.
+          // Native external assets use synthetic keys, not ledger canisters.
           const ck = config.custody_kind?.[0];
-          const custodyKind: 'IcrcLedger' | 'NativeXrp' =
-            ck && 'NativeXrp' in ck ? 'NativeXrp' : 'IcrcLedger';
+          const custodyKind: 'IcrcLedger' | 'NativeXrp' | 'NativeXlm' =
+            ck && 'NativeXrp' in ck ? 'NativeXrp' :
+            ck && 'NativeXlm' in ck ? 'NativeXlm' : 'IcrcLedger';
           const isNativeXrp = custodyKind === 'NativeXrp';
+          const isNativeXlm = custodyKind === 'NativeXlm';
 
-          // Symbol: native-XRP is fixed (no ledger to query); everything else reads
-          // icrc1_symbol off its ledger.
+          // Native external symbols are known statically; only ICRC assets query
+          // their ledger for a symbol.
           let symbol = principalText.substring(0, 5).toUpperCase();
           if (isNativeXrp) {
             symbol = 'XRP';
+          } else if (isNativeXlm) {
+            symbol = 'XLM';
           } else {
             try {
               const ledgerActor = await TokenService.createAnonymousActor(ledgerId, ICRC1_IDL);

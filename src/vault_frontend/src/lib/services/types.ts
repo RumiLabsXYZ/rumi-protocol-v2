@@ -218,5 +218,5 @@ export interface CollateralInfo {
   ledgerFee: number;            // Transfer fee in native units
   color: string;                // UI badge color
   status: string;               // "Active", "Paused", "Frozen", etc.
-  custodyKind?: 'IcrcLedger' | 'NativeXrp'; // How the collateral is custodied; NativeXrp = off-chain XRPL via threshold Ed25519 (no real ICRC ledger)
+  custodyKind?: 'IcrcLedger' | 'NativeXrp' | 'NativeXlm'; // Native external assets use synthetic keys, not ICRC ledgers.
 }

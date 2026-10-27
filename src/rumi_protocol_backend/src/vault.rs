@@ -3832,11 +3832,18 @@ pub(crate) fn queue_collateral_payout_linked_with_receipt_and_fee(
     reserve_ingress_key: Option<crate::state::ThreeUsdReserveIngressKey>,
     fee_override: Option<u64>,
 ) -> (Option<u64>, Option<u128>) {
-    let is_xrp = s
+    let custody = s
         .get_collateral_config(&collateral_type)
-        .map(|c| c.is_native_xrp())
-        .unwrap_or(false);
-    if is_xrp {
+        .map(|c| c.custody());
+    if collateral_type == crate::state::xlm_collateral_principal()
+        || custody == Some(crate::state::CustodyKind::NativeXlm)
+    {
+        // This synchronous helper cannot return a route error. Trap before any
+        // ICRC call or payout completion so the message rolls back atomically.
+        // Native XLM has no supported payout lifecycle yet.
+        panic!("Native-XLM collateral cannot enter the generic payout queue");
+    }
+    if custody == Some(crate::state::CustodyKind::NativeXrp) {
         (Some(record_xrp_claim(
             s,
             recipient,
@@ -4911,8 +4918,12 @@ fn reject_native_xlm_on_unsupported_route(vault_id: u64) -> Result<(), ProtocolE
                         .map(|c| c.custody() == crate::state::CustodyKind::NativeXlm)
                         .unwrap_or(false)
             })
-            .unwrap_or(false)
     });
+    let Some(is_native_xlm) = is_native_xlm else {
+        return Err(ProtocolError::GenericError(format!(
+            "Vault #{vault_id} not found"
+        )));
+    };
     if is_native_xlm {
         return Err(ProtocolError::GenericError(
             "Native-XLM collateral is unsupported on this route".to_string(),
@@ -13845,8 +13856,8 @@ mod sp_writedown_native_xrp_guard_tests {
         }
     }
 
-    /// Native-external custody includes XRP and XLM; ICRC collateral and a
-    /// missing vault must both read false so the guard preserves ICRC routes.
+    /// Native-external custody includes XRP and XLM; the unsupported-route
+    /// guard also rejects missing IDs so callers cannot treat unknown vaults as ICRC.
     #[test]
     fn native_external_vault_predicate_covers_xrp_and_xlm_only() {
         install_two_collateral_state(2, 1);
@@ -13880,6 +13891,10 @@ mod sp_writedown_native_xrp_guard_tests {
         assert!(
             !vault_is_native_external(999),
             "missing vault must not be flagged"
+        );
+        assert!(
+            reject_native_xlm_on_unsupported_route(999).is_err(),
+            "missing vault must fail closed on guarded routes"
         );
     }
 

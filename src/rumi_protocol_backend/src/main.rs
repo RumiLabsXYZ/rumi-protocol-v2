@@ -17384,27 +17384,33 @@ async fn backfill_collateral_symbols() -> Result<Vec<(Principal, String)>, Proto
         ));
     }
 
-    // Snapshot the collaterals still missing a symbol: (principal, is_native_xrp).
-    let missing: Vec<(Principal, bool)> = read_state(|s| {
+    // Snapshot missing symbols and their custody kinds. Native external assets
+    // have synthetic keys, never real ICRC ledgers.
+    let missing: Vec<(Principal, rumi_protocol_backend::state::CustodyKind)> = read_state(|s| {
         s.collateral_configs
             .iter()
             .filter(|(_, cfg)| cfg.symbol.is_none())
-            .map(|(ct, cfg)| (*ct, cfg.is_native_xrp()))
+            .map(|(ct, cfg)| (*ct, cfg.custody()))
             .collect()
     });
 
     let mut filled: Vec<(Principal, String)> = Vec::new();
-    for (ct, is_native_xrp) in missing {
-        // Native-XRP uses a synthetic ledger key — there is no ICRC ledger to
-        // query, so its symbol is known statically.
-        let symbol = if is_native_xrp {
-            "XRP".to_string()
+    for (ct, custody) in missing {
+        // Native assets use synthetic keys; do not call icrc1_symbol on them.
+        let symbol = if ct == rumi_protocol_backend::state::xlm_collateral_principal() {
+            "XLM".to_string()
         } else {
-            match ic_cdk::call::<(), (String,)>(ct, "icrc1_symbol", ()).await {
-                Ok((s,)) => s,
-                Err((code, msg)) => {
-                    log!(INFO, "[backfill_collateral_symbols] WARNING: icrc1_symbol from {} failed: {:?} {} — leaving unset", ct, code, msg);
-                    continue;
+            match custody {
+                rumi_protocol_backend::state::CustodyKind::NativeXrp => "XRP".to_string(),
+                rumi_protocol_backend::state::CustodyKind::NativeXlm => "XLM".to_string(),
+                rumi_protocol_backend::state::CustodyKind::IcrcLedger => {
+                    match ic_cdk::call::<(), (String,)>(ct, "icrc1_symbol", ()).await {
+                        Ok((s,)) => s,
+                        Err((code, msg)) => {
+                            log!(INFO, "[backfill_collateral_symbols] WARNING: icrc1_symbol from {} failed: {:?} {} — leaving unset", ct, code, msg);
+                            continue;
+                        }
+                    }
                 }
             }
         };
@@ -17451,6 +17457,17 @@ async fn set_collateral_status(
     if !exists {
         return Err(ProtocolError::GenericError(
             "Collateral type not found".to_string(),
+        ));
+    }
+    if collateral_type == rumi_protocol_backend::state::xlm_collateral_principal()
+        || read_state(|s| {
+            s.get_collateral_config(&collateral_type)
+                .map(|cfg| cfg.custody() == rumi_protocol_backend::state::CustodyKind::NativeXlm)
+                .unwrap_or(false)
+        })
+    {
+        return Err(ProtocolError::GenericError(
+            "Native-XLM collateral status changes are unsupported until the Stellar lifecycle is complete".to_string(),
         ));
     }
     if collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
