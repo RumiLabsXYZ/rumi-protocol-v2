@@ -7,9 +7,10 @@ pub mod address;
 pub mod amount;
 pub mod codec;
 pub mod horizon_parse;
+pub mod horizon_provider_fanout;
+pub mod horizon_quorum;
 pub mod horizon_reads;
 pub mod horizon_rpc;
-pub mod horizon_quorum;
 pub mod ted25519;
 
 pub use address::{

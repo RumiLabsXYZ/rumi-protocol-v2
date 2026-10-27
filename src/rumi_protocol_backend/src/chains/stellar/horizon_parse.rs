@@ -33,6 +33,12 @@ pub struct LedgerReserve {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LatestLedgerReserve {
+    pub reserve: LedgerReserve,
+    pub closed_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FinalizedDeposit {
     pub transaction_hash: String,
     pub ledger: u32,
@@ -135,6 +141,63 @@ pub fn parse_ledger_reserve(
         sequence,
         base_reserve_in_stroops,
     })
+}
+
+/// Parse the deterministic reduction of `GET /ledgers?order=desc&limit=1`.
+/// `closed_at` is retained for caller-controlled freshness policy.
+pub fn parse_latest_ledger_reserve(body: &[u8]) -> Result<LatestLedgerReserve, HorizonParseError> {
+    let v: Value = serde_json::from_slice(body).map_err(|_| HorizonParseError::Json)?;
+    let sequence = uint32(&v, "sequence")?;
+    let base_reserve_in_stroops = uint(&v, "base_reserve_in_stroops")?;
+    let closed_at = string(&v, "closed_at")?;
+    if sequence == 0 || base_reserve_in_stroops == 0 || !valid_utc_timestamp(&closed_at) {
+        return Err(HorizonParseError::Invalid("latest ledger"));
+    }
+    Ok(LatestLedgerReserve {
+        reserve: LedgerReserve {
+            sequence,
+            base_reserve_in_stroops,
+        },
+        closed_at,
+    })
+}
+
+fn valid_utc_timestamp(value: &str) -> bool {
+    let Some(value) = value.strip_suffix('Z') else {
+        return false;
+    };
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if (value.contains('.') && fraction.is_empty())
+        || (!fraction.is_empty() && !fraction.bytes().all(|byte| byte.is_ascii_digit()))
+        || whole.len() != 19
+        || whole.as_bytes().get(4) != Some(&b'-')
+        || whole.as_bytes().get(7) != Some(&b'-')
+        || whole.as_bytes().get(10) != Some(&b'T')
+        || whole.as_bytes().get(13) != Some(&b':')
+        || whole.as_bytes().get(16) != Some(&b':')
+    {
+        return false;
+    }
+    let number = |start, end| whole[start..end].parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        number(0, 4),
+        number(5, 7),
+        number(8, 10),
+        number(11, 13),
+        number(14, 16),
+        number(17, 19),
+    ) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    day > 0 && day <= days && hour < 24 && minute < 60 && second <= 60
 }
 
 /// Validate a successful transaction response and return its finalized ledger.
@@ -240,6 +303,27 @@ pub fn parse_deposit_operations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_ledger_parser_requires_bounded_valid_fields() {
+        let valid = br#"{"sequence":42,"base_reserve_in_stroops":5000000,"closed_at":"2026-10-27T12:00:00Z"}"#;
+        let parsed = parse_latest_ledger_reserve(valid).unwrap();
+        assert_eq!(parsed.reserve.sequence, 42);
+        assert_eq!(parsed.reserve.base_reserve_in_stroops, 5_000_000);
+        assert_eq!(parsed.closed_at, "2026-10-27T12:00:00Z");
+
+        for invalid in [
+            br#"{"sequence":42,"base_reserve_in_stroops":5000000}"#.as_slice(),
+            br#"{"sequence":"42","base_reserve_in_stroops":5000000,"closed_at":"x"}"#,
+            br#"{"sequence":0,"base_reserve_in_stroops":5000000,"closed_at":"x"}"#,
+            br#"{"sequence":42,"base_reserve_in_stroops":0,"closed_at":"x"}"#,
+            br#"{"sequence":42,"base_reserve_in_stroops":5000000,"closed_at":"x"}"#,
+            br#"{"sequence":42,"base_reserve_in_stroops":5000000,"closed_at":null}"#,
+            br#"not-json"#,
+        ] {
+            assert!(parse_latest_ledger_reserve(invalid).is_err());
+        }
+    }
     const HASH: &str = "ef0fe04ac3c7de7228ca2598886059868ad05c224a041e8b2d9ee2a8a9dd6894";
     const DEST: &str = "GAYOLLLUIZE4DZMBB2ZBKGBUBZLIOYU6XFLW37GBP2VZD3ABNXCW4BVA";
 

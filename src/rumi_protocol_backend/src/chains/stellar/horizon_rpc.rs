@@ -17,6 +17,7 @@ const TESTNET_URL: &str = "https://horizon-testnet.stellar.org";
 
 pub const MAX_ACCOUNT_RESPONSE_BYTES: u64 = 16_384;
 pub const MAX_LEDGER_RESPONSE_BYTES: u64 = 4_096;
+pub const MAX_LATEST_LEDGER_RESPONSE_BYTES: u64 = 8_192;
 pub const MAX_TRANSACTION_RESPONSE_BYTES: u64 = 8_192;
 pub const MAX_OPERATIONS_RESPONSE_BYTES: u64 = 262_144;
 pub const OPERATIONS_PAGE_LIMIT: usize = 200;
@@ -30,7 +31,7 @@ impl Network {
     }
 }
 
-fn get_request(
+pub(super) fn request_at(
     url: String,
     max_response_bytes: u64,
     transform_name: &str,
@@ -56,11 +57,38 @@ fn account_url(network: Network, account_id: &str) -> Option<String> {
 }
 
 pub fn account_request(network: Network, account_id: &str) -> Option<CanisterHttpRequestArgument> {
-    Some(get_request(
+    Some(request_at(
         account_url(network, account_id)?,
         MAX_ACCOUNT_RESPONSE_BYTES,
         "stellar_transform_account",
     ))
+}
+
+/// Build a latest-ledger list request against a caller-configured Horizon
+/// origin. The origin is validated by the dormant provider fanout layer.
+pub fn latest_ledger_reserve_request(base_url: &str) -> Option<CanisterHttpRequestArgument> {
+    if !is_https_origin(base_url) {
+        return None;
+    }
+    Some(request_at(
+        format!(
+            "{}/ledgers?order=desc&limit=1",
+            base_url.trim_end_matches('/')
+        ),
+        MAX_LATEST_LEDGER_RESPONSE_BYTES,
+        "stellar_transform_ledger",
+    ))
+}
+
+fn is_https_origin(value: &str) -> bool {
+    let Some(authority) = value.strip_prefix("https://") else {
+        return false;
+    };
+    !authority.is_empty()
+        && !authority.contains('/')
+        && !authority.contains('?')
+        && !authority.contains('#')
+        && !authority.contains('@')
 }
 
 /// Request the ledger at the account body's last-modified ledger. This is a
@@ -79,7 +107,7 @@ pub fn ledger_reserve_request(
     network: Network,
     account_last_modified_ledger: u32,
 ) -> Option<CanisterHttpRequestArgument> {
-    Some(get_request(
+    Some(request_at(
         ledger_reserve_url(network, account_last_modified_ledger)?,
         MAX_LEDGER_RESPONSE_BYTES,
         "stellar_transform_ledger",
@@ -94,7 +122,7 @@ fn transaction_url(network: Network, hash: &str) -> Option<String> {
 }
 
 pub fn transaction_request(network: Network, hash: &str) -> Option<CanisterHttpRequestArgument> {
-    Some(get_request(
+    Some(request_at(
         transaction_url(network, hash)?,
         MAX_TRANSACTION_RESPONSE_BYTES,
         "stellar_transform_transaction",
@@ -124,7 +152,7 @@ pub fn transaction_operations_request(
     hash: &str,
     limit: usize,
 ) -> Option<CanisterHttpRequestArgument> {
-    Some(get_request(
+    Some(request_at(
         transaction_operations_url(network, hash, limit)?,
         MAX_OPERATIONS_RESPONSE_BYTES,
         "stellar_transform_operations",
@@ -202,10 +230,25 @@ pub fn transform_ledger(args: TransformArgs) -> HttpResponse {
         Ok(v) => v,
         Err(response) => return response,
     };
-    let reduced = json!({
-        "sequence": field(&v, "sequence"),
-        "base_reserve_in_stroops": field(&v, "base_reserve_in_stroops"),
-    });
+    let reduced = if let Some(records) = v.pointer("/_embedded/records").and_then(Value::as_array) {
+        if records.len() != 1 {
+            return reduced_response(
+                candid::Nat::from(200u16),
+                b"{\"parse_error\":true}".to_vec(),
+            );
+        }
+        let record = &records[0];
+        json!({
+            "sequence": field(record, "sequence"),
+            "base_reserve_in_stroops": field(record, "base_reserve_in_stroops"),
+            "closed_at": field(record, "closed_at"),
+        })
+    } else {
+        json!({
+            "sequence": field(&v, "sequence"),
+            "base_reserve_in_stroops": field(&v, "base_reserve_in_stroops"),
+        })
+    };
     reduced_response(candid::Nat::from(200u16), reduced.to_string().into_bytes())
 }
 
@@ -314,6 +357,46 @@ mod tests {
         assert!(body.contains("5000000"));
         assert!(body.contains("42"));
         assert!(!body.contains("volatile"));
+    }
+
+    #[test]
+    fn latest_ledger_collection_transform_requires_exactly_one_record() {
+        let record = r#"{"sequence":42,"base_reserve_in_stroops":5000000,"closed_at":"2026-10-27T12:00:00Z"}"#;
+        let one = format!(r#"{{"_embedded":{{"records":[{record}]}}}}"#);
+        let transformed = transform_ledger(args(200, one.as_bytes()));
+        let parsed =
+            crate::chains::stellar::horizon_parse::parse_latest_ledger_reserve(&transformed.body)
+                .unwrap();
+        assert_eq!(parsed.reserve.sequence, 42);
+        assert_eq!(parsed.reserve.base_reserve_in_stroops, 5_000_000);
+        assert_eq!(parsed.closed_at, "2026-10-27T12:00:00Z");
+
+        for records in ["[]".to_string(), format!("[{record},{record}]")] {
+            let body = format!(r#"{{"_embedded":{{"records":{records}}}}}"#);
+            let transformed = transform_ledger(args(200, body.as_bytes()));
+            assert_eq!(transformed.body, br#"{"parse_error":true}"#);
+            assert!(
+                crate::chains::stellar::horizon_parse::parse_latest_ledger_reserve(
+                    &transformed.body
+                )
+                .is_err()
+            );
+        }
+
+        let malformed = transform_ledger(args(200, br#"{"_embedded":{"records":{}}}"#));
+        assert!(
+            crate::chains::stellar::horizon_parse::parse_latest_ledger_reserve(&malformed.body)
+                .is_err()
+        );
+
+        let missing_time = transform_ledger(args(
+            200,
+            br#"{"_embedded":{"records":[{"sequence":42,"base_reserve_in_stroops":5000000}]}}"#,
+        ));
+        assert!(
+            crate::chains::stellar::horizon_parse::parse_latest_ledger_reserve(&missing_time.body)
+                .is_err()
+        );
     }
 
     #[test]
