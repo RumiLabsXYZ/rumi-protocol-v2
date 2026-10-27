@@ -1,36 +1,36 @@
 # Native XLM collateral implementation plan
 
-**Status:** implementation plan only; no XLM collateral implementation or deployment is proved by this document. **Target:** native XLM held on Stellar, collateralizing icUSD debt on the Internet Computer. Rob's request authorizes implementation and deployment; this document records the evidence and prerequisites needed to carry that instruction out safely. Signing, broadcasting, and moving funds are distinct actions and require their own explicit authorization.
+**Status:** plan plus partial WP1 implementation: standalone classic-address and exact-stroop helpers are present, with 11 standalone unit tests passing. No XLM vault endpoint, custody account, deposit credit, payout, registration, or deployment exists. **Target:** native XLM held on Stellar, collateralizing icUSD debt on the Internet Computer. Rob's request authorizes implementation and deployment; this document records the evidence and prerequisites needed to carry that instruction out safely. Signing, broadcasting, and moving funds are distinct actions and require their own explicit authorization.
 
 ## Source baseline and scope
 
 The existing native-XRP rail is the closest in-repository analogue: it derives chain-specific Ed25519 custody keys, queries a foreign chain by HTTPS outcalls, verifies deposits, and settles native-asset withdrawals. The XRP custody and vault patterns are in `src/rumi_protocol_backend/src/chains/xrp/`, `src/rumi_protocol_backend/src/state.rs` (`xrp_collateral_config`, `CustodyKind`, `XrpPendingDeposit`, `XrpClaim`) and `src/rumi_protocol_backend/src/vault.rs` (`open_xrp_vault`, `confirm_xrp_deposit`, claim settlement). XRP collateral is not an ICRC asset; the XLM implementation should keep native XLM on Stellar and mint icUSD only on the IC, following the existing foreign-collateral model.
 
-The XRP design spec is useful for architecture, but its numeric debt cap is stale relative to current code **and live configuration**. The current `xrp_collateral_config` sets **250,000,000,000 e8s ($2,500)** on fresh registration. A read-only mainnet `get_collateral_config` query on 2026-10-27 for the native-XRP principal returned **3,000,000,000,000 e8s ($30,000)** and `Active` status. Rob asked for the parameters *set for XRP*, so the live config is the parity target. The existing launch guardrail preserves an already registered debt ceiling rather than clamping it (`state.rs` around `enforce_xrp_launch_guardrails`). Keep that distinction explicit in XLM registration, migration, and activation design.
+The XRP design spec is useful for architecture, but its numeric parameters are stale relative to current live configuration. The current `xrp_collateral_config` source sets a **$2,500** debt ceiling, 150% borrow threshold, 133% liquidation ratio, and 12% bonus on fresh registration. A read-only mainnet `get_collateral_config` query on 2026-10-27 for the native-XRP principal returned a **$30,000** ceiling and `Active` status, with 128% borrow threshold, 117% liquidation ratio, and 7.5% bonus. The Candid `blob` ratios were decoded using the repo's `rust_decimal::Decimal::deserialize` byte format. Rob asked for the parameters *set for XRP*, so the live config is the parity target. The existing launch guardrail preserves an already registered debt ceiling rather than clamping it (`state.rs` around `enforce_xrp_launch_guardrails`). Keep that distinction explicit in XLM registration, migration, and activation design.
 
 Current XRP also has more lifecycle behavior than the older 2026-06 design spec describes, including manual claims, settlement reconciliation, and a dedicated Stability Pool absorb flow. Before implementation, inventory the current `vault.rs`, `state.rs`, `lib.rs`, `stability_pool` source, and public Candid/UI paths at the chosen base commit. Match supported user-visible paths or document a deliberately narrower launch scope with a hard activation gate; do not infer full parity from the old spec.
 
 ## XRP risk parameters to reuse
 
-These values combine the source constructor in `src/rumi_protocol_backend/src/state.rs` near `xrp_collateral_config` (around lines 1835–1887) with a read-only 2026-10-27 mainnet query of `tfesu-vyaaa-aaaap-qrd7a-cai.get_collateral_config(5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i)`. Before registration, re-read the live XRP config and match its risk fields; the query result is a snapshot, not a permanent setting.
+These values combine the source constructor in `src/rumi_protocol_backend/src/state.rs` near `xrp_collateral_config` (around lines 1835–1887) with a read-only 2026-10-27 mainnet query of `tfesu-vyaaa-aaaap-qrd7a-cai.get_collateral_config(5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i)`. Ratio blobs use the `rust_decimal` serialization documented by the locally pinned crate. Before registration, re-read the live XRP config and match its risk fields; the query result is a snapshot, not a permanent setting.
 
 | Parameter | XRP source value | XLM implementation treatment |
 | --- | --- | --- |
-| Borrow threshold | 1.50 (150%) | Reuse exactly |
-| Liquidation ratio | 1.33 (133%) | Reuse exactly |
-| Recovery target | 1.50 × configured recovery multiplier; source documents 1.0333 ≈ 1.55 (155%) | Reuse multiplier and verify the effective target in tests |
-| Liquidation bonus | 1.12 multiplier (12% collateral penalty) | Reuse exactly; test the multiplier interpretation |
+| Borrow threshold | 1.50 (150%) source default; **1.28 (128%) live** | Match freshly read live XRP |
+| Liquidation ratio | 1.33 (133%) source default; **1.17 (117%) live** | Match freshly read live XRP |
+| Recovery target | Source default near 155%; **1.32266666666666666624 (~132.27%) live** | Match live value and test the effective target |
+| Liquidation bonus | 1.12 (12%) source default; **1.075 (7.5%) live** | Match live value; test the multiplier interpretation |
 | Debt ceiling | 250,000,000,000 e8s ($2,500) source default; **3,000,000,000,000 e8s ($30,000) live** | Match the live XRP ceiling at activation; re-read before the change and verify readback |
 | Minimum vault debt | 10,000,000 e8s (0.1 icUSD; matches ICP) | Reuse exactly |
-| Borrowing fee and base APR | Copied from ICP config at collateral registration | Reuse the registration-time copy behavior; inspect current ICP config at implementation |
+| Borrowing fee and base APR | Copied from ICP at source registration; **0.002 (0.2%) fee and 0.015 (1.5%) APR live** | Match freshly read live XRP, including any runtime overrides |
 | Dynamic interest curve | `rate_curve: None` source default; **explicit Linear curve live** | Copy the live XRP curve and verify the full markers in readback |
 | Borrowing-fee curve | Uses global `borrowing_fee_curve` behavior | Reuse current source semantics |
 | Ledger fee | 0 in the collateral accounting config | Do not use as Stellar transaction fee; charge/allocate actual XLM network fees in settlement accounting |
 | Decimals | XRP uses 6 | XLM uses 7 stroops-per-lumen decimal places; checked conversions throughout |
-| Minimum collateral deposit | XRP config currently 1,000,000 drops (1 XRP) net of reserve | Establish a Stellar-specific minimum after account activation/base-reserve and fee model are verified; do not copy 1 XRP numerically |
+| Minimum collateral deposit | 1,000,000 drops (1 XRP) net of reserve, source and live | Use 1 XLM (10,000,000 stroops) net of the live Stellar reserve and fee budget; confirm activation funding model |
 | Oracle | XRC XRP/USD; no explicit `min_xrc_sources` in this constructor | Confirm XRC supports the exact XLM/USD identifier and source floor; test stale/unavailable/fallback behavior before registration |
 
-The older XRP design spec records the shared 150% / 133% / 155% / 12% risk shape and a $200 ceiling. Current source supersedes that historical note, and current live XRP config supersedes the source constructor for Rob's parity request. The read-only query also returned a 1 XRP net minimum deposit, XRC XRP/USD, `min_xrc_sources = null`, zero ledger fee, and an explicit rate curve. It does not by itself prove every runtime policy that may affect borrowing.
+The older XRP design spec records a 150% / 133% / 155% / 12% risk shape and a $200 ceiling. Current source supersedes that historical note, and current live XRP config supersedes the source constructor for Rob's parity request. The read-only query also returned XRC XRP/USD, `min_xrc_sources = null`, zero ledger fee, and an explicit rate curve. It does not by itself prove every runtime policy that may affect borrowing.
 
 ## Stellar-specific design requirements
 
@@ -112,7 +112,7 @@ Mainnet is the requested target after WP0–WP6. Do not treat code merge, CI, de
 
 1. Pre-deploy packet: reviewed source revision; green exact-head required CI; independent audit disposition; source-matched optimized Wasm and size/hash; regenerated Candid; backup/recovery and rollback plan; monitoring/incident owner; current Stellar reserve/fee/provider/oracle settings; controller/key/network identity checks.
 2. Apply Rob's deployment authorization to the verified Rumi backend canister and exact reviewed module. Verify installed module hash and exposed API against the pinned build; record pre/post canister version and controllers.
-3. Register XLM in Frozen/Disabled state first. Read back the full config and verify the exact 150%/133%/155%/12% risk values, **the freshly re-read live XRP ceiling (currently $30,000)**, fee/interest curves, oracle source/quorum/freshness, minimum debt, decimals, custody kind, and min-deposit/reserve logic. Check XLM is excluded from unsupported ICRC, bot, redemption, and SP routes.
+3. Register XLM in Frozen/Disabled state first. Read back the full config and verify **the freshly re-read live XRP risk parameters** (currently 128%/117%/~132.27%/7.5%, 0.2% fee, 1.5% base APR, $30,000 ceiling, and explicit Linear curve), oracle source/quorum/freshness, minimum debt, decimals, custody kind, and min-deposit/reserve logic. Check XLM is excluded from unsupported ICRC, bot, redemption, and SP routes.
 4. Prove production threshold key derivation and verification without moving user funds; verify unique XLM derivation domain and network binding. Confirm operator recovery and claim reconciliation paths.
 5. Once the preconditions are met, enable the configured collateral under Rob's request to enable native XLM. Record the exact runtime config before and after activation. A live pilot deposit and payout involve funds movement and need separate authorization; until then, verify admission and accounting with deterministic and testnet evidence.
 6. Increase the cap or user access only through a later reviewed decision. Pause/freeze on oracle stale/quorum loss, provider disagreement, unresolved submit ambiguity, reserve shortfall, sequence conflict, invariant mismatch, or monitoring failure.

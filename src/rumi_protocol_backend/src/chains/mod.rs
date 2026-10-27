@@ -156,6 +156,7 @@ pub mod multi_chain_state;
 pub mod recovery;
 pub mod settlement_queue;
 pub mod solana;
+pub mod stellar;
 pub mod supply;
 pub mod vault;
 pub mod xrp;
