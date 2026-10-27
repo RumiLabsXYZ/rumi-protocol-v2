@@ -76,6 +76,30 @@ fn uint32(v: &Value, key: &'static str) -> Result<u32, HorizonParseError> {
     u32::try_from(uint(v, key)?).map_err(|_| HorizonParseError::Invalid(key))
 }
 
+fn canonical_operation_id(value: &Value, field: &'static str) -> Result<String, HorizonParseError> {
+    let id = match value {
+        Value::String(id) => id.clone(),
+        Value::Number(number) => number
+            .as_u64()
+            .map(|number| number.to_string())
+            .ok_or(HorizonParseError::Invalid(field))?,
+        _ => return Err(HorizonParseError::Invalid(field)),
+    };
+    if id.is_empty()
+        || id.len() > 20
+        || !id.bytes().all(|byte| byte.is_ascii_digit())
+        || id.starts_with('0')
+        || id
+            .parse::<u64>()
+            .ok()
+            .filter(|number| *number != 0)
+            .is_none()
+    {
+        return Err(HorizonParseError::Invalid(field));
+    }
+    Ok(id)
+}
+
 /// Parse `GET /accounts/:id`. Requires the one native balance and rejects
 /// duplicate native rows or non-native balance records masquerading as XLM.
 pub fn parse_account(body: &[u8], expected_id: &str) -> Result<AccountSnapshot, HorizonParseError> {
@@ -244,16 +268,25 @@ pub fn parse_deposit_operations(
         if string(op, "transaction_hash")? != expected_hash {
             return Err(HorizonParseError::Mismatch("transaction_hash"));
         }
-        let id = string(op, "paging_token")
-            .or_else(|_| string(op, "id"))
-            .or_else(|_| uint(op, "id").map(|n| n.to_string()))?;
-        if id.is_empty()
-            || id.len() > 20
-            || !id.bytes().all(|b| b.is_ascii_digit())
-            || id.parse::<u64>().ok().filter(|n| *n != 0).is_none()
-        {
-            return Err(HorizonParseError::Invalid("paging_token"));
-        }
+        let fields = object(op)?;
+        let paging_token = fields
+            .get("paging_token")
+            .map(|value| canonical_operation_id(value, "paging_token"));
+        let operation_id = fields
+            .get("id")
+            .map(|value| canonical_operation_id(value, "id"));
+        let id = match (paging_token, operation_id) {
+            (Some(Ok(paging_token)), Some(Ok(operation_id))) => {
+                if paging_token != operation_id {
+                    return Err(HorizonParseError::Mismatch("operation id"));
+                }
+                paging_token
+            }
+            (Some(Ok(paging_token)), None) => paging_token,
+            (None, Some(Ok(operation_id))) => operation_id,
+            (Some(Err(error)), _) | (_, Some(Err(error))) => return Err(error),
+            (None, None) => return Err(HorizonParseError::Missing("paging_token")),
+        };
         if operation_ids.iter().any(|seen| seen == &id) {
             return Err(HorizonParseError::Ambiguous);
         }
@@ -366,6 +399,30 @@ mod tests {
         assert_eq!(d.kind, DepositKind::CreateAccount);
         assert_eq!(d.amount_stroops, 20_000_000);
         assert_eq!(d.operation_id, "120192344791343105");
+    }
+
+    #[test]
+    fn rejects_noncanonical_operation_ids() {
+        for field in ["paging_token", "id"] {
+            let json = format!(
+                r#"{{"_embedded":{{"records":[{{"{field}":"0123","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}]}}}}"#
+            );
+            assert_eq!(
+                parse_deposit_operations(json.as_bytes(), HASH, 27_984_461, DEST, 20_000_000, 200),
+                Err(HorizonParseError::Invalid(field))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_paging_token_and_operation_id() {
+        let json = format!(
+            r#"{{"_embedded":{{"records":[{{"paging_token":"123","id":"124","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}]}}}}"#
+        );
+        assert_eq!(
+            parse_deposit_operations(json.as_bytes(), HASH, 27_984_461, DEST, 20_000_000, 200),
+            Err(HorizonParseError::Mismatch("operation id"))
+        );
     }
 
     #[test]
