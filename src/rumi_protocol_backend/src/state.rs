@@ -2053,8 +2053,9 @@ pub enum XlmDepositKind {
 }
 
 /// Permanent deduplication receipt for one finalized Stellar operation.
-/// Identity is the exact `(transaction_hash, operation_id)` map key; both are
-/// opaque strings and rows are retained permanently to prevent replay.
+/// Identity is the exact `(transaction_hash, operation_id)` map key. The
+/// operation ID is the canonical SEP-35 decimal ID, including its embedded
+/// ledger; rows are retained permanently to prevent replay.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct XlmDepositReceipt {
     pub vault_id: u64,

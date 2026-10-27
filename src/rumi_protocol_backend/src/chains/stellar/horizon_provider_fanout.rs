@@ -5,6 +5,7 @@
 //! credentials are embedded here.
 
 use super::{
+    codec::Network,
     horizon_parse::{self, AccountSnapshot, LatestLedgerReserve},
     horizon_quorum, horizon_rpc,
 };
@@ -14,6 +15,24 @@ use ic_cdk::api::management_canister::http_request::{http_request, CanisterHttpR
 pub struct HorizonProvider {
     pub identity: String,
     pub base_url: String,
+}
+
+/// Provider whose Horizon root response has been checked against the selected
+/// Stellar network. Fields are private so callers cannot assert validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedHorizonProvider {
+    provider: HorizonProvider,
+    network: Network,
+}
+
+impl ValidatedHorizonProvider {
+    pub fn identity(&self) -> &str {
+        &self.provider.identity
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,6 +48,7 @@ pub enum ProviderConfigError {
     DuplicateIdentity(usize),
     InvalidHttpsOrigin(usize),
     DuplicateOrigin(usize),
+    NetworkVerificationFailed(usize),
 }
 
 impl HorizonProviderConfig {
@@ -68,6 +88,28 @@ impl HorizonProviderConfig {
             providers[index] = Some(provider.clone());
         }
         Ok(providers.map(|provider| provider.expect("validated provider slot")))
+    }
+
+    /// Validate all configured providers against their root resource before
+    /// permitting any account, transaction, or ledger evidence request.
+    pub async fn validate_for_network(
+        &self,
+        network: Network,
+    ) -> Result<[ValidatedHorizonProvider; 3], ProviderConfigError> {
+        let providers = self.validate()?;
+        let mut validated: [Option<ValidatedHorizonProvider>; 3] = [None, None, None];
+        for (index, provider) in providers.into_iter().enumerate() {
+            let verified = async {
+                let request = horizon_rpc::root_request(&provider.base_url)?;
+                let body = read_request(request).await.ok()?;
+                horizon_rpc::validate_root_network(&body, network).ok()?;
+                Some(ValidatedHorizonProvider { provider, network })
+            }
+            .await;
+            validated[index] =
+                Some(verified.ok_or(ProviderConfigError::NetworkVerificationFailed(index))?);
+        }
+        Ok(validated.map(|provider| provider.expect("verified provider slot")))
     }
 }
 
@@ -116,7 +158,8 @@ fn canonical_https_origin(value: &str) -> Option<String> {
     }
 }
 
-async fn read_latest(provider: &HorizonProvider) -> Result<LatestLedgerReserve, String> {
+async fn read_latest(provider: &ValidatedHorizonProvider) -> Result<LatestLedgerReserve, String> {
+    let provider = &provider.provider;
     let request = horizon_rpc::latest_ledger_reserve_request(&provider.base_url)
         .ok_or_else(|| "invalid configured Horizon origin".to_string())?;
     let (response,) = http_request(request, super::horizon_reads::READ_CYCLES)
@@ -154,9 +197,11 @@ async fn read_request(request: CanisterHttpRequestArgument) -> Result<Vec<u8>, S
 /// must independently enforce their minimum sequence and maximum age policy.
 pub async fn fetch_latest_reserve_observations(
     config: &HorizonProviderConfig,
+    network: Network,
 ) -> Result<([Option<LatestLedgerReserve>; 3], u64), String> {
     let providers = config
-        .validate()
+        .validate_for_network(network)
+        .await
         .map_err(|error| format!("invalid Horizon provider configuration: {error:?}"))?;
     let mut observations: [Option<LatestLedgerReserve>; 3] = [None, None, None];
     for (index, provider) in providers.iter().enumerate() {
@@ -174,14 +219,16 @@ pub async fn fetch_latest_reserve_observations(
 /// existing complete-snapshot quorum. No result is returned without quorum.
 pub async fn fetch_account_snapshot_quorum(
     config: &HorizonProviderConfig,
+    network: Network,
     account_id: &str,
 ) -> Result<AccountSnapshot, String> {
     let providers = config
-        .validate()
+        .validate_for_network(network)
+        .await
         .map_err(|error| format!("invalid Horizon provider configuration: {error:?}"))?;
     let mut observations = [None, None, None];
     for (index, provider) in providers.iter().enumerate() {
-        let Some(request) = account_request_for_provider(provider, account_id) else {
+        let Some(request) = account_request_for_provider(&provider.provider, account_id) else {
             continue;
         };
         if let Ok(body) = read_request(request).await {
@@ -196,14 +243,17 @@ pub async fn fetch_account_snapshot_quorum(
 /// strict affirmative-transaction quorum.
 pub async fn fetch_transaction_ledger_quorum(
     config: &HorizonProviderConfig,
+    network: Network,
     transaction_hash: &str,
 ) -> Result<u32, String> {
     let providers = config
-        .validate()
+        .validate_for_network(network)
+        .await
         .map_err(|error| format!("invalid Horizon provider configuration: {error:?}"))?;
     let mut observations = [None, None, None];
     for (index, provider) in providers.iter().enumerate() {
-        let Some(request) = transaction_request_for_provider(provider, transaction_hash) else {
+        let Some(request) = transaction_request_for_provider(&provider.provider, transaction_hash)
+        else {
             continue;
         };
         if let Ok(body) = read_request(request).await {
@@ -342,6 +392,18 @@ mod tests {
         assert_eq!(providers[0].identity, "alpha");
         assert_eq!(providers[1].identity, "beta");
         assert_eq!(providers[2].identity, "gamma");
+    }
+
+    #[test]
+    fn network_maps_to_the_canonical_stellar_passphrase() {
+        assert_eq!(
+            Network::Public.passphrase(),
+            "Public Global Stellar Network ; September 2015"
+        );
+        assert_eq!(
+            Network::Test.passphrase(),
+            "Test SDF Network ; September 2015"
+        );
     }
 
     #[test]

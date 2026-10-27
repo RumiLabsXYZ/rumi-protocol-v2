@@ -15,16 +15,16 @@ pub enum Network {
 }
 
 impl Network {
-    fn passphrase(self) -> &'static [u8] {
+    pub(crate) fn passphrase(self) -> &'static str {
         match self {
-            Self::Public => b"Public Global Stellar Network ; September 2015",
-            Self::Test => b"Test SDF Network ; September 2015",
+            Self::Public => "Public Global Stellar Network ; September 2015",
+            Self::Test => "Test SDF Network ; September 2015",
         }
     }
 
     /// Return Stellar's network ID, SHA-256 of the canonical passphrase.
     pub fn network_id(self) -> [u8; 32] {
-        Sha256::digest(self.passphrase()).into()
+        Sha256::digest(self.passphrase().as_bytes()).into()
     }
 }
 

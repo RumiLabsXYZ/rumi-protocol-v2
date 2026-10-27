@@ -21,6 +21,7 @@ pub const MAX_LATEST_LEDGER_RESPONSE_BYTES: u64 = 8_192;
 pub const MAX_TRANSACTION_RESPONSE_BYTES: u64 = 8_192;
 pub const MAX_OPERATIONS_RESPONSE_BYTES: u64 = 262_144;
 pub const OPERATIONS_PAGE_LIMIT: usize = 200;
+pub const MAX_ROOT_RESPONSE_BYTES: u64 = 8_192;
 
 impl Network {
     fn base_url(self) -> &'static str {
@@ -78,6 +79,79 @@ pub fn latest_ledger_reserve_request(base_url: &str) -> Option<CanisterHttpReque
         MAX_LATEST_LEDGER_RESPONSE_BYTES,
         "stellar_transform_ledger",
     ))
+}
+
+/// Build Horizon's root-resource request, which reports the network's
+/// `network_passphrase` and is used to bind a configured provider to `Network`.
+pub fn root_request(base_url: &str) -> Option<CanisterHttpRequestArgument> {
+    if !is_https_origin(base_url) {
+        return None;
+    }
+    Some(request_at(
+        base_url.trim_end_matches('/').to_string(),
+        MAX_ROOT_RESPONSE_BYTES,
+        "stellar_transform_ledger",
+    ))
+}
+
+#[derive(Debug)]
+struct HorizonRootPassphrase(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for HorizonRootPassphrase {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{IgnoredAny, MapAccess, Visitor};
+        use std::fmt;
+
+        struct RootVisitor;
+        impl<'de> Visitor<'de> for RootVisitor {
+            type Value = HorizonRootPassphrase;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Horizon root JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut passphrase = None;
+                let mut seen = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "network_passphrase" {
+                        if seen {
+                            return Err(serde::de::Error::custom(
+                                "duplicate network_passphrase field",
+                            ));
+                        }
+                        seen = true;
+                        passphrase = Some(map.next_value::<String>()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(HorizonRootPassphrase(passphrase))
+            }
+        }
+
+        deserializer.deserialize_map(RootVisitor)
+    }
+}
+
+/// Parse exactly one top-level Horizon root passphrase. Duplicate keys,
+/// missing values, non-string values, and malformed JSON are rejected.
+pub fn parse_root_network_passphrase(body: &[u8]) -> Result<String, ()> {
+    let HorizonRootPassphrase(passphrase) = serde_json::from_slice(body).map_err(|_| ())?;
+    passphrase.filter(|value| !value.is_empty()).ok_or(())
+}
+
+/// Require a normalized Horizon root passphrase to match the selected network.
+pub fn validate_root_network(body: &[u8], network: Network) -> Result<(), ()> {
+    (parse_root_network_passphrase(body)? == network.passphrase())
+        .then_some(())
+        .ok_or(())
 }
 
 fn is_https_origin(value: &str) -> bool {
@@ -230,6 +304,23 @@ pub fn transform_ledger(args: TransformArgs) -> HttpResponse {
         Ok(v) => v,
         Err(response) => return response,
     };
+    if v.get("network_passphrase").is_some() {
+        let passphrase = match parse_root_network_passphrase(&args.response.body) {
+            Ok(passphrase) => passphrase,
+            Err(()) => {
+                return reduced_response(
+                    candid::Nat::from(200u16),
+                    b"{\"parse_error\":true}".to_vec(),
+                )
+            }
+        };
+        return reduced_response(
+            candid::Nat::from(200u16),
+            json!({ "network_passphrase": passphrase })
+                .to_string()
+                .into_bytes(),
+        );
+    }
     let reduced = if let Some(records) = v.pointer("/_embedded/records").and_then(Value::as_array) {
         if records.len() != 1 {
             return reduced_response(
@@ -334,6 +425,77 @@ mod tests {
         assert!(
             transaction_operations_url(Network::Public, hash, OPERATIONS_PAGE_LIMIT + 1).is_none()
         );
+    }
+
+    #[test]
+    fn root_request_targets_provider_origin_with_bounded_deterministic_transform() {
+        let request = root_request("https://horizon.example/").unwrap();
+        assert_eq!(request.url, "https://horizon.example");
+        assert_eq!(request.max_response_bytes, Some(MAX_ROOT_RESPONSE_BYTES));
+        assert!(request.transform.is_some());
+    }
+
+    #[test]
+    fn root_passphrase_normalization_rejects_missing_ambiguous_or_malformed_values() {
+        let passphrase = "Test SDF Network ; September 2015";
+        assert_eq!(
+            parse_root_network_passphrase(
+                format!(r#"{{"network_passphrase":"{passphrase}","other":1}}"#).as_bytes()
+            ),
+            Ok(passphrase.to_string())
+        );
+        for body in [
+            br#"{"network_passphrase":""}"#.as_slice(),
+            br#"{"network_passphrase":null}"#.as_slice(),
+            br#"{"other":1}"#.as_slice(),
+            br#"{"network_passphrase":"one","network_passphrase":"two"}"#.as_slice(),
+            br#"not-json"#.as_slice(),
+        ] {
+            assert_eq!(parse_root_network_passphrase(body), Err(()));
+        }
+    }
+
+    #[test]
+    fn root_passphrase_mapping_accepts_only_the_selected_stellar_network() {
+        assert_eq!(
+            validate_root_network(
+                br#"{"network_passphrase":"Public Global Stellar Network ; September 2015"}"#,
+                Network::Public,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_root_network(
+                br#"{"network_passphrase":"Test SDF Network ; September 2015"}"#,
+                Network::Test,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_root_network(
+                br#"{"network_passphrase":"Test SDF Network ; September 2015"}"#,
+                Network::Public,
+            ),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn root_transform_reduces_response_to_the_single_network_binding_field() {
+        let transformed = transform_ledger(args(
+            200,
+            br#"{"network_passphrase":"Public Global Stellar Network ; September 2015","horizon_version":"ignored","history_latest_ledger":42}"#,
+        ));
+        assert_eq!(
+            transformed.body,
+            br#"{"network_passphrase":"Public Global Stellar Network ; September 2015"}"#
+        );
+
+        let ambiguous = transform_ledger(args(
+            200,
+            br#"{"network_passphrase":"one","network_passphrase":"two"}"#,
+        ));
+        assert_eq!(ambiguous.body, br#"{"parse_error":true}"#);
     }
 
     #[test]
