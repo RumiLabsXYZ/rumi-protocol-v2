@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Pure 2-of-3 matching helpers are committed but uncompiled and unwired; no provider config, live calls, or credit exists. WP3/WP4 remain blocked without supported deposit or payout lifecycles. Mara Junior Opus read-only coordination across deposit proof, XRP claim reuse, and release prerequisites is underway; research is not complete. Provider candidates remain unvalidated.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Earlier 34/34 Stellar Cargo tests predate later claim/quorum/route changes; those changes remain uncompiled. Pure 2-of-3 helpers are unwired, with no provider config, live calls, or credit. WP3/WP4 remain blocked. Mara Junior Opus read-only coordination across deposit proof, XRP claim reuse, and release prerequisites is in progress, not complete.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
