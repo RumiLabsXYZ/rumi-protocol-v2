@@ -10910,6 +10910,7 @@ pub struct RepayAndCloseSuccess {
 pub async fn repay_and_close_vault(arg: VaultArg) -> Result<RepayAndCloseSuccess, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let vault_id = arg.vault_id;
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_and_close_{}", vault_id))?;
     // AR-B-003: per-vault op lock spanning repay + withdraw + close.
     let _vault_op_guard = match VaultLiquidationGuard::new(vault_id) {
@@ -12651,6 +12652,7 @@ async fn liquidate_vault_debt_already_burned_inner(
 
 pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
