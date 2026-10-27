@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Mara",
       "scope": "Complete the XLM parity and threat model",
-      "evidenceText": "Design decision: use one Stellar account per vault, funded and activated by the user's wallet through CreateAccount. Connected-wallet support for this flow remains to verify. Separately, a read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. Those differ from the XRP source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present constructor values as current live parity. XRP evidence only; no XLM registration, deployment, or live config is proved.",
+      "evidenceText": "Design decision: use one Stellar account per vault, funded and activated by the user's wallet through CreateAccount. Connected-wallet support for this flow remains to verify, and XRC XLM/USD live source quorum is unproven. Separately, a read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. Those differ from the XRP source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present constructor values as current live parity. XRP evidence only; no XLM registration, deployment, or live config is proved.",
       "evidenceLinks": []
     },
     {
@@ -13,23 +13,23 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "The typed threshold signer compiles under cargo +1.92.0 `check --locked -p rumi_protocol_backend --lib` (29 existing warnings); the wired Horizon parser passed the same check. Standalone results: classic StrKey 6/6, amount helper 5/5, XDR native Payment 4/4, and Horizon parser 5/5. The XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. The signer role remains in progress, and its four unit tests have not run. Independent read-only Luna reviews found no confirmed standalone defects, but integration remains unresolved. No backend integration tests, vault endpoints, XLM registration, deployment, or collateral admission are proved.",
+      "evidenceText": "Locked Cargo check passed for the backend library and binary after the Frozen NativeXlm state scaffold and read-only Horizon request/transform callbacks were wired. The focused `chains::stellar` Cargo library suite passed 32/32; the XLM config tests passed 2/2 and legacy custody decode passed 1/1. The earlier standalone groups passed address 6/6, amount/reserve 7/7, XDR native Payment 4/4, and Horizon parser 5/5; XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. Candid generation and compatibility checks passed, with declarations regenerated. No actual Horizon outcalls or vault/deposit/claim lifecycle are proved. Independent read-only review identified a latent NativeXlm-to-ICRC routing hazard; integration remains unresolved. No XLM registration, deployment, or collateral admission is proved.",
       "evidenceLinks": []
     },
     {
       "id": "WP2",
-      "state": "Ready",
+      "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Add stable state and an XLM launch guard",
-      "evidenceText": "Define upgrade-safe custody, deposit, sequence, and claim state, with a default-frozen registration and explicit launch guard. Preserve existing registered risk limits during guardrail enforcement.",
+      "evidenceText": "A source scaffold adds a Frozen NativeXlm config constructor that clones risk/curve fields from a supplied current XRP config, sets XLM to 7 decimals and a 1 XLM minimum, and clears observations. State config tests passed 2/2; legacy custody decode passed 1/1. Generic update_collateral_config rejects both the canonical XLM key and NativeXlm. Candid declarations were regenerated, and the regeneration plus non-regeneration compatibility checks passed. This is source/test evidence only: the config remains Frozen and XLM is not registered, deployed, or admitted as collateral.",
       "evidenceLinks": []
     },
     {
       "id": "WP3",
-      "state": "Ready",
+      "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Credit only unique, validated native-XLM payments to the expected Stellar account and network. Account for live reserve and fees with checked conversions; prevent replay and reject ambiguous or unsupported transfers.",
+      "evidenceText": "Independent read-only review identified a latent NativeXlm-to-ICRC routing hazard in `src/rumi_protocol_backend/src/vault.rs`. The implementation plan requires routing NativeXlm away from ICRC add/deposit endpoints before ledger calls (`docs/plans/native-xlm-collateral-2026-10-27.md:86`). No XLM deposit or borrow endpoint exists; no lifecycle or collateral admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -42,18 +42,18 @@
     },
     {
       "id": "WP5",
-      "state": "Ready",
+      "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Integrate Candid, user flows, and operator monitoring",
-      "evidenceText": "Add the supported XLM deposit, collateral, withdrawal, and claim-status flows, with explicit pending and unresolved states. Keep generated declarations aligned and expose enough operator evidence for safe reconciliation.",
+      "evidenceText": "Candid regeneration passed with `RUMI_REGEN_DID=1 cargo +1.92.0 test --locked -p rumi_protocol_backend --bin rumi_protocol_backend check_candid_interface_compatibility -- --exact --nocapture`; `scripts/regenerate-declarations.sh rumi_protocol_backend` ran, and the non-regeneration compatibility test passed. No XLM vault, deposit, withdrawal, or claim endpoints or user flows are present. Keep interface and lifecycle work in progress.",
       "evidenceLinks": []
     },
     {
       "id": "WP6",
-      "state": "Ready",
+      "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Twenty unique standalone tests passed: classic StrKey 6/6, amount helper 5/5, XDR native Payment 4/4, and Horizon parser 5/5. The XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. The typed signer and Horizon parser compile under cargo +1.92.0 `check --locked -p rumi_protocol_backend --lib` with 29 existing warnings. Four signer unit tests remain unrun. Full `cargo test` compilation stopped at 11 GiB free disk with exit 130 and has no test verdict. Independent read-only Luna reviews found no confirmed standalone defects; integration remains unresolved. No vault endpoints, registration, deployment, or collateral admission is proved.",
+      "evidenceText": "The focused `chains::stellar` Cargo library suite passed 32/32; XLM config tests passed 2/2 and legacy custody decode passed 1/1. The earlier standalone groups passed address 6/6, amount/reserve 7/7, XDR native Payment 4/4, and Horizon parser 5/5. Candid regeneration and non-regeneration compatibility checks passed after declaration regeneration. Locked Cargo check passed for backend lib and bin. No actual Horizon outcalls exist. Full `cargo test` previously stopped at 11 GiB free disk with exit 130 and has no full-suite verdict. Independent read-only review identified a latent NativeXlm-to-ICRC routing hazard. No vault lifecycle, XLM registration, deployment, or collateral admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -61,7 +61,7 @@
       "state": "Blocked",
       "owner": "Rumi release owner",
       "scope": "Prepare deployment, configuration, and activation evidence",
-      "evidenceText": "Blocked until implementation, exact-head review and CI, artifact verification, audit disposition, rollback and monitoring plans, and current Stellar oracle, reserve, fee, provider, and key checks are evidenced. Deployment and activation remain separate proof points from signing, broadcasting, and moving funds.",
+      "evidenceText": "Blocked until implementation, exact-head review and CI, artifact verification, audit disposition, rollback and monitoring plans, and current Stellar oracle quorum, reserve, fee, provider, and key checks are evidenced. XRC XLM/USD live quorum is unproven. Deployment and activation remain separate proof points from signing, broadcasting, and moving funds.",
       "evidenceLinks": []
     }
   ]

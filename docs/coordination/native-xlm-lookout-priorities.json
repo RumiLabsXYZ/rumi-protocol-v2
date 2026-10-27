@@ -5,7 +5,7 @@
       "title": "XLM parity and threat model",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Verify connected-wallet support for funding and activating each per-vault Stellar account through CreateAccount; retain separate XRP-only parity evidence and keep XLM registration/deployment unclaimed.",
+      "nextAction": "Verify connected-wallet CreateAccount support and establish XRC XLM/USD live source quorum; retain separate XRP-only parity evidence and keep XLM registration/deployment unclaimed.",
       "cardIds": ["WP0"]
     },
     {
@@ -13,23 +13,23 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Finish the typed threshold-key signer role and run its four unit tests, then add Cargo/backend integration and vault endpoint coverage. Keep WP1 in progress until those steps are complete.",
+      "nextAction": "Implement and validate actual Horizon outcalls plus the vault/deposit/claim lifecycle. Keep WP1 in progress; the focused suite and compile checks do not prove live network behavior.",
       "cardIds": ["WP1"]
     },
     {
       "id": "stable-state-launch-guard",
       "title": "Stable state and XLM launch guard",
-      "status": "ready",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Implement upgrade-safe XLM state and a default-frozen registration guard.",
+      "nextAction": "Continue validating the Frozen NativeXlm constructor and update guard; Candid declarations have been regenerated and both compatibility checks passed.",
       "cardIds": ["WP2"]
     },
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "ready",
-      "blockedReason": "",
-      "nextAction": "Implement unique payment verification with reserve-aware checked accounting and replay protection.",
+      "status": "blocked",
+      "blockedReason": "Independent read-only review identified a latent NativeXlm-to-ICRC routing hazard in src/rumi_protocol_backend/src/vault.rs; the implementation plan requires excluding NativeXlm from ICRC add/deposit endpoints before ledger calls (docs/plans/native-xlm-collateral-2026-10-27.md:86).",
+      "nextAction": "Resolve the NativeXlm-to-ICRC routing hazard, then implement unique payment verification with reserve-aware checked accounting and replay protection.",
       "cardIds": ["WP3"]
     },
     {
@@ -43,24 +43,24 @@
     {
       "id": "frontend-candid-monitoring",
       "title": "User flows, Candid, and monitoring",
-      "status": "ready",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Add supported XLM collateral and claim flows with explicit pending and unresolved states.",
+      "nextAction": "Implement supported XLM vault, deposit, withdrawal, and claim flows with explicit pending and unresolved states; keep them unavailable until route and integration safety is resolved.",
       "cardIds": ["WP5"]
     },
     {
       "id": "test-review-testnet",
       "title": "Tests, independent review, and testnet",
-      "status": "ready",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "When disk space permits, rerun full cargo test for a real verdict; run the four signer unit tests and add Horizon/signer backend integration coverage before testnet work.",
+      "nextAction": "Add backend integration and actual Horizon outcall coverage before testnet work; the focused 32/32 suite is not a full cargo test or live-network verdict.",
       "cardIds": ["WP6"]
     },
     {
       "id": "release-activation-evidence",
       "title": "Release, configuration, and activation evidence",
       "status": "blocked",
-      "blockedReason": "The implementation and required review, CI, artifact, audit, operational, and current network evidence are not complete.",
+      "blockedReason": "The implementation and required review, CI, artifact, audit, operational, and current network evidence are not complete; XRC XLM/USD live quorum is unproven.",
       "nextAction": "Keep registration frozen while implementation and the pre-deploy evidence packet are completed.",
       "cardIds": ["WP7"]
     }

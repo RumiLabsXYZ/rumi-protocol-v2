@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM is not registered, deployed, or admitted as collateral. The typed signer and wired Horizon parser pass cargo +1.92.0 `check --locked -p rumi_protocol_backend --lib` (29 existing warnings). Twenty standalone tests passed across StrKey, amounts, XDR, and Horizon parsing; four signer tests are unrun. Full cargo test stopped at disk pressure without a verdict. No vault endpoints or integration evidence yet; independent read-only reviews found no confirmed standalone defects, but integration remains unresolved.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Locked backend lib/bin check passed; the focused Stellar suite passed 32/32, XLM config tests 2/2, and legacy custody decode 1/1. Candid declarations were regenerated and both compatibility checks passed. No actual Horizon outcalls or vault/deposit/claim lifecycle exist. XRC XLM/USD quorum is unproven, and the latent NativeXlm-to-ICRC routing hazard remains before activation.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
