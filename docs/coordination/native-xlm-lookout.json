@@ -13,7 +13,7 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "Commits 4d52680b and 7658ed2f add dormant pure credit/key state, multi-operation receipt parsing, and permanent custody attribution/status. The parser and state are source-only, uncompiled, and unrun; they do not establish live credit or settlement. Earlier provider fanout, freeze/pause, operation identity, signed bounds, and route guards likewise remain uncompiled/unrun. A provider network-binding agent is still working; there is no independent provider configuration or live call. Earlier focused `chains::stellar` Cargo tests passed 34/34 before these changes. No actual Horizon outcall or live deposit credit exists; pending claims/receipts remain dormant state, not a live lifecycle. No XLM registration, deployment, or collateral admission is proved.",
+      "evidenceText": "Commit 52730be0 adds a dormant, unregistered 1,307-line transaction-status parser/quorum/replacement policy with 39 tests; none have run and no Cargo verification occurred. Provider network binding landed in 756ff1a5 but remains uncompiled. Integration blockers remain: the current transaction transform drops `fee_charged`; `read_request` rejects 404 and the transform discards the problem body; provider independence and evidence freshness are unresolved. The parser and policy do not establish live settlement. Earlier focused `chains::stellar` Cargo tests passed 34/34 before these changes. No live Horizon outcall, deposit credit, registration, deployment, or collateral admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -21,7 +21,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Add stable state and an XLM launch guard",
-      "evidenceText": "Commits 4d52680b and 7658ed2f add dormant pure credit/key state, a multi-operation receipt parser, and permanent custody attribution/status. These source changes are uncompiled/unrun and are not wired into a live lifecycle. Claim/intent/receipt state remains dormant and creates no live credit. Generated Candid and frontend declarations remain stale after the key setter change. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
+      "evidenceText": "Commits 4d52680b and 7658ed2f add dormant pure credit/key state, a multi-operation receipt parser, and permanent custody attribution/status. Commit 52730be0 adds dormant transaction-status parsing/quorum/replacement policy; its 39 tests are unrun and the policy is unregistered. Provider network binding from 756ff1a5 is uncompiled. These source changes are not wired into a live lifecycle. Claim/intent/receipt/status state remains dormant and creates no live credit. Generated Candid and frontend declarations remain stale after the key setter change. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
       "evidenceLinks": []
     },
     {
@@ -29,7 +29,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Commits 4d52680b and 7658ed2f add dormant pure credit/key state and multi-operation receipt parsing with permanent custody attribution/status; all are source-only, uncompiled, and unrun. Provider network binding remains under active work. WP3 remains blocked: there is no live XLM deposit/borrow endpoint or credit/receipt/tombstone lifecycle. Key/network/provider binding, reserve freshness/oracle verification, and testnet/frontend integration remain open. No live provider/oracle evidence, XLM admission, or deployment is proved.",
+      "evidenceText": "Commits 4d52680b and 7658ed2f add dormant pure credit/key state and multi-operation receipt parsing with permanent custody attribution/status. Commit 52730be0 adds a dormant unregistered transaction-status parser/quorum/replacement policy (39 tests, all unrun); provider binding from 756ff1a5 is uncompiled. WP3 remains blocked: there is no live XLM deposit/borrow endpoint or credit/receipt/tombstone lifecycle. Integration blockers include dropped `fee_charged`, rejected 404 responses with discarded problem bodies, unresolved provider independence, and evidence freshness. Key/network binding, reserve/oracle checks, and testnet/frontend integration remain open. No live provider/oracle evidence, XLM admission, or deployment is proved.",
       "evidenceLinks": []
     },
     {
@@ -37,7 +37,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement XLM claims, exits, and liquidation handling",
-      "evidenceText": "Fail-closed payout and route/status/frontend guards remain source-only. Commit 7658ed2f adds multi-operation receipt parsing and permanent custody attribution/status, but these changes are uncompiled/unrun and do not implement claim settlement. Mara Junior's transaction-status review file is underway. Claim settlement/payout remains unsupported, so WP4 stays blocked. A live XRP post-sign status race is a separate claim-reuse caution, not an XLM-specific required gate. Key/network/provider binding, current reserve/oracle checks, and testnet/release work remain open. Frozen config prevents XLM admission.",
+      "evidenceText": "Fail-closed payout and route/status/frontend guards remain source-only. Commit 52730be0 adds a dormant, unregistered transaction-status parser/quorum/replacement policy with 39 unrun tests; it does not implement a live claim settlement. Integration blockers include dropped `fee_charged`, rejected 404 responses and discarded problem bodies, unresolved provider independence, and evidence freshness. Claim settlement/payout remains unsupported, so WP4 stays blocked. A live XRP post-sign status race is a separate claim-reuse caution, not an XLM-specific required gate. Key/network/provider binding, reserve/oracle checks, and testnet/release work remain open. Frozen config prevents XLM admission.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before recent commits. Commits 4d52680b and 7658ed2f add dormant pure credit/key state, multi-operation receipt parsing, and permanent custody attribution/status; these and prior fanout, freeze/pause, signed-bound, and route guards are uncompiled/unrun. The provider network-binding agent is still working, and generated Candid/frontend declarations remain stale. Mara Junior's first and second read-only design reviews are complete; a separate transaction-status review file is now underway. Major open work: provider/key/network binding; deposit credit/receipt/tombstone wiring; current reserve freshness/oracle; claim settlement; testnet, frontend, and release. The live XRP post-sign status race is a separate reuse caution, not a required XLM gate. WP3/WP4 remain blocked; there is no live provider/oracle proof, admission, or deployment.",
+      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before recent commits. Commit 756ff1a5 adds provider network binding, still uncompiled. Commit 52730be0 adds a dormant, unregistered 1,307-line transaction-status parser/quorum/replacement policy with 39 tests, all unrun. Integration blockers: transaction transform drops `fee_charged`; `read_request` rejects 404 and the transform discards problem bodies; provider independence and evidence freshness remain unresolved. Generated Candid/frontend declarations remain stale. Major open work: compile/test, provider independence, fresh evidence handling, deposit credit/receipt/tombstone wiring, reserve/oracle, claim settlement, testnet, frontend, and release. The live XRP post-sign status race is a separate reuse caution, not an XLM gate. WP3/WP4 remain blocked; no live provider/oracle proof, admission, or deployment.",
       "evidenceLinks": []
     },
     {
