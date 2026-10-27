@@ -4898,6 +4898,29 @@ pub fn vault_is_native_xrp(vault_id: u64) -> bool {
     })
 }
 
+/// Reject native-XLM collateral at routes whose external-asset handling is
+/// currently implemented only for XRP. Falling through to the generic ICRC
+/// transfer path would treat an external-rail asset as an IC ledger balance.
+fn reject_native_xlm_on_xrp_only_route(vault_id: u64) -> Result<(), ProtocolError> {
+    let is_native_xlm = read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| {
+                v.collateral_type == crate::state::xlm_collateral_principal()
+                    || s.get_collateral_config(&v.collateral_type)
+                        .map(|c| c.custody() == crate::state::CustodyKind::NativeXlm)
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    });
+    if is_native_xlm {
+        return Err(ProtocolError::GenericError(
+            "Native-XLM collateral is unsupported on this XRP-only route".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// True iff a vault's collateral is held outside an IC ICRC ledger.
 /// Generic bot and stability-pool paths must reject all such collateral because
 /// they settle using the IC collateral ledger rather than the native rail.
@@ -9994,6 +10017,7 @@ fn native_xrp_reserve_locked_message() -> String {
 
 pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let caller = ic_cdk::caller();
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     let _guard_principal = GuardPrincipal::new(caller, &format!("close_vault_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
@@ -10164,6 +10188,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 
 pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     let _guard_principal =
         GuardPrincipal::new(caller, &format!("withdraw_collateral_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
@@ -10351,6 +10376,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
 }
 pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_partial_{}", vault_id))?;
     // AR-B-003: per-vault op lock. The post-await commit debits the vault by
     // the pre-await withdraw amount; without this lock a concurrent
@@ -10605,6 +10631,7 @@ async fn withdraw_and_close_vault_internal(
     caller: Principal,
     vault_id: u64,
 ) -> Result<Option<u64>, ProtocolError> {
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     log!(
         INFO,
         "[withdraw_and_close] Request for vault #{} by principal {}",
@@ -10936,6 +10963,7 @@ pub async fn liquidate_vault_partial(
     icusd_amount: u64,
 ) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     let guard_principal =
         GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
@@ -11343,6 +11371,7 @@ pub async fn liquidate_vault_partial_with_stable(
     token_type: StableTokenType,
 ) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
+    reject_native_xlm_on_xrp_only_route(vault_id)?;
     let guard_principal =
         GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
@@ -13281,6 +13310,7 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 
 pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
+    reject_native_xlm_on_xrp_only_route(arg.vault_id)?;
     let guard_principal =
         GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
     reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
@@ -13797,8 +13827,20 @@ mod sp_writedown_native_xrp_guard_tests {
         assert!(vault_is_native_external(2), "native-XRP vault must be flagged");
         assert!(vault_is_native_external(3), "native-XLM vault must be flagged");
         assert!(
+            reject_native_xlm_on_xrp_only_route(3).is_err(),
+            "native-XLM must not reach XRP-only payout paths"
+        );
+        assert!(
+            reject_native_xlm_on_xrp_only_route(2).is_ok(),
+            "native-XRP behavior must remain available"
+        );
+        assert!(
             !vault_is_native_external(1),
             "ICRC (ICP) vault must not be flagged"
+        );
+        assert!(
+            reject_native_xlm_on_xrp_only_route(1).is_ok(),
+            "ICRC behavior must remain available"
         );
         assert!(
             !vault_is_native_external(999),
