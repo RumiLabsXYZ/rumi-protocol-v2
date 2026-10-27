@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Finish the typed threshold-key signer role and carry standalone StrKey, amount, and XDR vector results into backend integration and vault endpoint coverage.",
+      "nextAction": "Finish the typed threshold-key signer role and run its four unit tests, then add Cargo/backend integration and vault endpoint coverage. Keep WP1 in progress until those steps are complete.",
       "cardIds": ["WP1"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "ready",
       "blockedReason": "",
-      "nextAction": "Add Cargo/backend integration tests and vault endpoint coverage, then proceed to isolated testnet work; standalone 6/6, 5/5, and 4/4 checks do not prove deployment or admission.",
+      "nextAction": "When disk space permits, rerun full cargo test for a real verdict; run the four signer unit tests and add Horizon/signer backend integration coverage before testnet work.",
       "cardIds": ["WP6"]
     },
     {

@@ -13,7 +13,7 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "Standalone results: classic StrKey 6/6, amount helper 5/5, and XDR native Payment 4/4. The XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. No Cargo/backend integration test, vault endpoints, XLM registration, or deployment is proved. The signer worker is still implementing the typed threshold-key role.",
+      "evidenceText": "The typed threshold signer compiles under cargo +1.92.0 `check --locked -p rumi_protocol_backend --lib` (29 existing warnings); the wired Horizon parser passed the same check. Standalone results: classic StrKey 6/6, amount helper 5/5, XDR native Payment 4/4, and Horizon parser 5/5. The XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. The signer role remains in progress, and its four unit tests have not run. Independent read-only Luna reviews found no confirmed standalone defects, but integration remains unresolved. No backend integration tests, vault endpoints, XLM registration, deployment, or collateral admission are proved.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "Ready",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Standalone results: classic StrKey 6/6, amount helper 5/5, and XDR native Payment 4/4; the XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. These are isolated checks only: no Cargo/backend integration test, vault endpoints, XLM registration, or deployment is proved. Continue backend integration, deposit, replay, provider disagreement, ambiguous-submit, sequence, reserve, fee, retry, and testnet coverage; keep it separate from mainnet admission or transaction evidence.",
+      "evidenceText": "Twenty unique standalone tests passed: classic StrKey 6/6, amount helper 5/5, XDR native Payment 4/4, and Horizon parser 5/5. The XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. The typed signer and Horizon parser compile under cargo +1.92.0 `check --locked -p rumi_protocol_backend --lib` with 29 existing warnings. Four signer unit tests remain unrun. Full `cargo test` compilation stopped at 11 GiB free disk with exit 130 and has no test verdict. Independent read-only Luna reviews found no confirmed standalone defects; integration remains unresolved. No vault endpoints, registration, deployment, or collateral admission is proved.",
       "evidenceLinks": []
     },
     {
