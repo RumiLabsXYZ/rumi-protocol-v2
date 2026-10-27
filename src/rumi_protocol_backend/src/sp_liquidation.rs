@@ -1918,6 +1918,11 @@ pub async fn execute(request_id_arg: Vec<u8>) -> Result<SpLiquidationReceipt, Pr
     if matches!(journal.phase, SpLiquidationPhase::PayoutSettled | SpLiquidationPhase::Cancelled | SpLiquidationPhase::PaymentNoEffect(_)) {
         return Ok(receipt(&journal));
     }
+    // The first-dispatch quote check is intentionally skipped after an
+    // ambiguous payment attempt so retries preserve the frozen payment tuple.
+    // Recheck this unsupported rail independently before any resume path can
+    // commit accounting or enqueue a generic collateral payout.
+    crate::vault::reject_native_xlm_collateral_type(journal.collateral_type)?;
     if matches!(journal.phase, SpLiquidationPhase::DebtCommitted | SpLiquidationPhase::PayoutSubmitted | SpLiquidationPhase::PayoutNoEffect(_)) {
         settle_post_accounting(key, &journal).await?;
         return settle_payout(key, caller).await;

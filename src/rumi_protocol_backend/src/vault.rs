@@ -3838,8 +3838,9 @@ pub(crate) fn queue_collateral_payout_linked_with_receipt_and_fee(
     if collateral_type == crate::state::xlm_collateral_principal()
         || custody == Some(crate::state::CustodyKind::NativeXlm)
     {
-        // This synchronous helper cannot return a route error. Trap before any
-        // ICRC call or payout completion so the message rolls back atomically.
+        // This synchronous helper cannot return a route error. Trap before the
+        // generic ICRC queue is entered; this only rolls back the current
+        // message segment and cannot undo a payment committed by an earlier await.
         // Native XLM has no supported payout lifecycle yet.
         panic!("Native-XLM collateral cannot enter the generic payout queue");
     }
@@ -4039,6 +4040,16 @@ pub(crate) fn apply_sp_liquidation_in_state(
         .get(&quote.vault_id)
         .cloned()
         .ok_or_else(|| format!("Vault #{} disappeared before debt commit", quote.vault_id))?;
+    if vault_snapshot.collateral_type == crate::state::xlm_collateral_principal()
+        || state
+            .get_collateral_config(&vault_snapshot.collateral_type)
+            .map(|config| config.custody() == crate::state::CustodyKind::NativeXlm)
+            .unwrap_or(false)
+    {
+        return Err(
+            "Native-XLM collateral is unsupported on the generic SP liquidation rail".into(),
+        );
+    }
     if vault_snapshot.collateral_type != quote.collateral_type
         || vault_snapshot.borrowed_icusd_amount.to_u64() < quote.debt_e8s
         || vault_snapshot.collateral_amount < quote.collateral_gross_raw
@@ -4924,6 +4935,26 @@ fn reject_native_xlm_on_unsupported_route(vault_id: u64) -> Result<(), ProtocolE
             "Vault #{vault_id} not found"
         )));
     };
+    if is_native_xlm {
+        return Err(ProtocolError::GenericError(
+            "Native-XLM collateral is unsupported on this route".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Check a journal-pinned collateral key without requiring its vault row to
+/// still exist. Non-XLM keys with missing configs remain eligible for their
+/// normal receipt settlement paths.
+pub(crate) fn reject_native_xlm_collateral_type(
+    collateral_type: Principal,
+) -> Result<(), ProtocolError> {
+    let is_native_xlm = collateral_type == crate::state::xlm_collateral_principal()
+        || read_state(|s| {
+            s.get_collateral_config(&collateral_type)
+                .map(|config| config.custody() == crate::state::CustodyKind::NativeXlm)
+                .unwrap_or(false)
+        });
     if is_native_xlm {
         return Err(ProtocolError::GenericError(
             "Native-XLM collateral is unsupported on this route".to_string(),
@@ -13881,6 +13912,18 @@ mod sp_writedown_native_xrp_guard_tests {
             "native-XRP behavior must remain available"
         );
         assert!(
+            reject_native_xlm_collateral_type(xrp_collateral_principal()).is_ok(),
+            "journal-pinned native-XRP collateral must remain available"
+        );
+        assert!(
+            reject_native_xlm_collateral_type(xlm_collateral_principal()).is_err(),
+            "journal-pinned native-XLM collateral must be rejected"
+        );
+        assert!(
+            reject_native_xlm_collateral_type(Principal::from_slice(&[99])).is_ok(),
+            "a missing non-XLM collateral config must not block receipt settlement"
+        );
+        assert!(
             !vault_is_native_external(1),
             "ICRC (ICP) vault must not be flagged"
         );
@@ -13895,6 +13938,42 @@ mod sp_writedown_native_xrp_guard_tests {
         assert!(
             reject_native_xlm_on_unsupported_route(999).is_err(),
             "missing vault must fail closed on guarded routes"
+        );
+    }
+
+    #[test]
+    fn generic_sp_liquidation_rejects_xlm_before_mutating_vault_state() {
+        install_two_collateral_state(2, 1);
+        let before = read_state(|state| {
+            let vault = state.vault_id_to_vaults.get(&3).unwrap();
+            (vault.borrowed_icusd_amount, vault.collateral_amount)
+        });
+        let quote = crate::sp_liquidation::SpLiquidationQuote {
+            vault_id: 3,
+            collateral_type: xlm_collateral_principal(),
+            collateral_ledger: xlm_collateral_principal(),
+            collateral_decimals: 7,
+            collateral_price: rust_decimal::Decimal::new(1, 1),
+            collateral_price_e8s: 10_000_000,
+            collateral_price_usd: UsdIcp::from(rust_decimal::Decimal::new(1, 1)),
+            collateral_ledger_fee_raw: 1,
+            debt_e8s: 1,
+            collateral_gross_raw: 2,
+            collateral_net_raw: 1,
+            protocol_cut_raw: 0,
+            interest_share_e8s: 0,
+        };
+        let result = mutate_state(|state| {
+            apply_sp_liquidation_in_state(state, &quote, Principal::anonymous(), 7)
+        });
+        assert!(matches!(result, Err(ref error) if error.contains("Native-XLM")));
+        let after = read_state(|state| {
+            let vault = state.vault_id_to_vaults.get(&3).unwrap();
+            (vault.borrowed_icusd_amount, vault.collateral_amount)
+        });
+        assert_eq!(
+            after, before,
+            "XLM rejection must precede debt/collateral mutation"
         );
     }
 
