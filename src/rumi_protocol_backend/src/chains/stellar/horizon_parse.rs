@@ -42,7 +42,7 @@ pub struct LatestLedgerReserve {
 pub struct FinalizedDeposit {
     pub transaction_hash: String,
     pub ledger: u32,
-    /// Opaque Horizon operation identity. Do not interpret the token's bit layout.
+    /// Canonical SEP-35 operation ID, whose high 32 bits encode `ledger`.
     pub operation_id: String,
     pub destination: String,
     pub amount_stroops: u64,
@@ -287,6 +287,15 @@ pub fn parse_deposit_operations(
             (Some(Err(error)), _) | (_, Some(Err(error))) => return Err(error),
             (None, None) => return Err(HorizonParseError::Missing("paging_token")),
         };
+        let operation_id_value = id
+            .parse::<u64>()
+            .map_err(|_| HorizonParseError::Invalid("operation id"))?;
+        if operation_id_value > i64::MAX as u64 {
+            return Err(HorizonParseError::Invalid("operation id"));
+        }
+        if (operation_id_value >> 32) != u64::from(expected_ledger) {
+            return Err(HorizonParseError::Mismatch("operation ledger"));
+        }
         if operation_ids.iter().any(|seen| seen == &id) {
             return Err(HorizonParseError::Ambiguous);
         }
@@ -315,6 +324,9 @@ pub fn parse_deposit_operations(
             }
             _ => continue,
         };
+        if amount == 0 {
+            return Err(HorizonParseError::Invalid("amount"));
+        }
         if destination != expected_destination || amount != expected_amount_stroops {
             return Err(HorizonParseError::Mismatch("deposit"));
         }
@@ -422,6 +434,39 @@ mod tests {
         assert_eq!(
             parse_deposit_operations(json.as_bytes(), HASH, 27_984_461, DEST, 20_000_000, 200),
             Err(HorizonParseError::Mismatch("operation id"))
+        );
+    }
+
+    #[test]
+    fn operation_id_ledger_must_match_expected_transaction_ledger() {
+        let json = format!(
+            r#"{{"_embedded":{{"records":[{{"paging_token":"120192344791343106","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}]}}}}"#
+        );
+        assert_eq!(
+            parse_deposit_operations(json.as_bytes(), HASH, 27_984_462, DEST, 20_000_000, 200),
+            Err(HorizonParseError::Mismatch("operation ledger"))
+        );
+    }
+
+    #[test]
+    fn rejects_operation_ids_outside_signed_sep35_range() {
+        let json = format!(
+            r#"{{"_embedded":{{"records":[{{"paging_token":"18446744073709551615","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}]}}}}"#
+        );
+        assert_eq!(
+            parse_deposit_operations(json.as_bytes(), HASH, 27_984_461, DEST, 20_000_000, 200),
+            Err(HorizonParseError::Invalid("operation id"))
+        );
+    }
+
+    #[test]
+    fn rejects_zero_transaction_deposit_amount() {
+        let json = format!(
+            r#"{{"_embedded":{{"records":[{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"0.0000000","account":"{DEST}"}}]}}}}"#
+        );
+        assert_eq!(
+            parse_deposit_operations(json.as_bytes(), HASH, 27_984_461, DEST, 0, 200),
+            Err(HorizonParseError::Invalid("amount"))
         );
     }
 

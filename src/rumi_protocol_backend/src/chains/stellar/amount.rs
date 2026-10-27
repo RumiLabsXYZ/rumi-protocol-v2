@@ -8,6 +8,8 @@ use core::fmt;
 
 /// Number of stroops in one XLM.
 pub const STROOPS_PER_XLM: u64 = 10_000_000;
+/// Stellar XDR amounts are signed 64-bit integers measured in stroops.
+pub const MAX_XLM_STROOPS: u64 = i64::MAX as u64;
 /// Number of decimal places supported by Stellar amounts.
 pub const XLM_DECIMALS: usize = 7;
 
@@ -20,7 +22,7 @@ pub enum AmountError {
     InvalidCharacter,
     /// The amount had more than seven fractional decimal places.
     TooManyDecimalPlaces,
-    /// The amount or sum of deductions exceeded the `u64` stroop range.
+    /// The amount exceeded Stellar's signed 64-bit stroop range.
     Overflow,
     /// The live base reserve is zero or sponsorship counts cannot describe a
     /// valid non-negative account reserve requirement.
@@ -114,9 +116,13 @@ pub fn parse_xlm_to_stroops(amount: &str) -> Result<u64, AmountError> {
         }
     };
 
-    whole_stroops
+    let stroops = whole_stroops
         .checked_add(fractional_stroops)
-        .ok_or(AmountError::Overflow)
+        .ok_or(AmountError::Overflow)?;
+    if stroops > MAX_XLM_STROOPS {
+        return Err(AmountError::Overflow);
+    }
+    Ok(stroops)
 }
 
 fn parse_digits(digits: &str) -> Result<u64, AmountError> {
@@ -184,13 +190,13 @@ mod tests {
     }
 
     #[test]
-    fn accepts_u64_max_and_rejects_amount_overflow() {
+    fn accepts_stellar_i64_max_and_rejects_amount_overflow() {
         assert_eq!(
-            parse_xlm_to_stroops("1844674407370.9551615").unwrap(),
-            u64::MAX
+            parse_xlm_to_stroops("922337203685.4775807").unwrap(),
+            MAX_XLM_STROOPS
         );
         assert_eq!(
-            parse_xlm_to_stroops("1844674407370.9551616"),
+            parse_xlm_to_stroops("922337203685.4775808"),
             Err(AmountError::Overflow)
         );
     }
