@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo tests/build after 445ebec4 when the shared slot is available; test the account, transaction-ledger, and exact deposit-receipt quorum helpers, then resolve independent provider configuration before wiring.",
+      "nextAction": "Run focused Cargo tests/build after 62550164 when the shared slot is available; verify provider-fanout code and its focused tests, then resolve independent provider configuration before wiring.",
       "cardIds": ["WP1"]
     },
     {
@@ -29,7 +29,7 @@
       "title": "Verified deposits and borrowing",
       "status": "blocked",
       "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. New fallback routes fail closed at source level, but Cargo tests/build have not rerun after commit 3e12fba5; claim/intent state remains dormant.",
-      "nextAction": "Continue read-only deposit-proof coordination; after Cargo verifies the source guards and quorum work is resolved, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
+      "nextAction": "Continue the second read-only design review; after Cargo verifies the latest guards and provider fanout, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
       "cardIds": ["WP3"]
     },
     {
@@ -37,7 +37,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Continue read-only XRP claim-reuse review; Cargo-verify the fail-closed route guards, then implement and validate the supported XLM-specific payout/claim lifecycle before clearing WP4.",
+      "nextAction": "Continue the second read-only design review; Cargo-verify the latest fail-closed route/status/frontend guards, then implement and validate the supported XLM-specific payout/claim lifecycle before clearing WP4.",
       "cardIds": ["WP4"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run focused tests/build after 445ebec4 when the shared slot is available; test all pure quorum/matching helpers and validate deterministic historical-ledger handling, then review provider wiring before backend integration, real outcalls, or testnet work.",
+      "nextAction": "Re-run focused tests/build after 62550164 when the shared slot is available; verify provider fanout and fail-closed route/status/frontend guards before backend integration, real outcalls, or testnet work.",
       "cardIds": ["WP6"]
     },
     {
