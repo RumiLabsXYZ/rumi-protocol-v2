@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo tests/build after 5964c17c when the shared slot is available; verify provider fanout and signed bounds, then resolve XLM key/network/provider binding and oracle/reserve freshness.",
+      "nextAction": "Run focused Cargo tests/build after 7658ed2f when the shared slot is available; verify provider fanout, multi-op receipt parsing, custody attribution/status, and signed bounds, then validate provider network binding and oracle/reserve freshness.",
       "cardIds": ["WP1"]
     },
     {
@@ -21,7 +21,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Cargo-verify the emergency freeze/pause, canonical operation IDs, signed amount/ledger bounds, and credit helpers; keep receipt/tombstone state dormant until integrated into a complete deposit-credit flow.",
+      "nextAction": "Cargo-verify the emergency freeze/pause, canonical operation IDs, signed bounds, credit/key state, and custody attribution; keep receipt/tombstone state dormant until integrated into a complete deposit-credit flow.",
       "cardIds": ["WP2"]
     },
     {
@@ -29,7 +29,7 @@
       "title": "Verified deposits and borrowing",
       "status": "blocked",
       "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. Recent fallback and SP retry guards are source-only and uncompiled; claim/intent state remains dormant.",
-      "nextAction": "Validate provider/key/network binding and implement deposit credit/receipt/tombstone lifecycle after source helpers and guards are Cargo-tested; preserve WP3 blocked until end-to-end evidence exists.",
+      "nextAction": "Verify provider/key/network binding and implement live deposit credit/receipt/tombstone lifecycle after the source helpers and guards are compiled and tested; preserve WP3 blocked until end-to-end evidence exists.",
       "cardIds": ["WP3"]
     },
     {
@@ -37,7 +37,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Implement and validate XLM claim settlement and supported payout lifecycle; preserve WP4 blocked until settlement and testnet evidence exists.",
+      "nextAction": "Complete transaction-status review, then implement and validate XLM claim settlement and supported payout lifecycle; preserve WP4 blocked until settlement and testnet evidence exists.",
       "cardIds": ["WP4"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused validation after fcf37cc4 when the shared slot is available; then complete testnet, frontend integration, reserve/oracle checks, and release review. Keep the XRP post-sign status race as a separate reuse caution, not an XLM gate.",
+      "nextAction": "Run focused validation after 7658ed2f when the shared slot is available; verify custody/status and receipt handling, then complete testnet, frontend integration, reserve/oracle checks, and release review. Keep the XRP post-sign status race as a separate reuse caution, not an XLM gate.",
       "cardIds": ["WP6"]
     },
     {

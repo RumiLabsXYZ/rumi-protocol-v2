@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Provider fanout, freeze/pause, operation-ID, signed-bound, key-setter, route/status/frontend, and SP retry changes are source-only and uncompiled. Key setter changed Candid; generated declarations remain stale pending regeneration. WP3/WP4 remain blocked; deposit credit/receipt/tombstone and claim settlement are absent. Mara Junior's first audit and second design review are complete; wider work continues.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Dormant credit/key state and multi-operation receipt/custody attribution/status changes are source-only, uncompiled, and unrun. Candid declarations remain stale; provider network binding and Mara Junior's transaction-status review are underway. WP3/WP4 remain blocked with no live provider/oracle proof or deposit/claim lifecycle.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
