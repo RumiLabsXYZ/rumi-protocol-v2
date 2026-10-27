@@ -27,6 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parent
 BOARD = ROOT / "base-icusd-bridge-kanban.md"
 OUT = ROOT / "base-icusd-bridge-lookout.json"
 PRESENTATION = ROOT / "base-icusd-bridge-presentation.json"
+PRIORITIES = ROOT / "base-icusd-bridge-priorities.json"
 
 # Public board links only (no local paths, no payloads).
 LINKS = {
@@ -107,6 +108,7 @@ def main() -> None:
     OUT.write_text(json.dumps({"cards": cards}, indent=2) + "\n")
     print(f"wrote {len(cards)} cards to {OUT.name}")
     check_presentation(cards)
+    check_priorities(cards)
 
 
 # Mirrors safeField in the Lookout publisher: text it would redact must not be here.
@@ -175,6 +177,71 @@ def check_presentation(cards: list) -> None:
     print(f"presentation ok: summary {len(summary)} chars, {len(glossary)} definitions")
     if unused:
         print(f"note: {len(unused)} terms do not appear in the card text they apply to: {', '.join(unused)}")
+
+
+
+PRIORITY_FIELDS = ["id", "title", "status", "blockedReason", "nextAction", "cardIds"]
+PRIORITY_STATUSES = {"ready", "in_progress", "blocked", "paused", "done"}
+
+
+def check_priorities(cards: list) -> None:
+    """Validate the priority list (the publisher's rules) and its mirror in the board."""
+    raw = json.loads(PRIORITIES.read_text(encoding="utf-8"))
+    problems = []
+    if not isinstance(raw, dict) or set(raw) != {"items"} or not isinstance(raw.get("items"), list):
+        raise SystemExit("priority list must be exactly {items: [...]}")
+    items = raw["items"]
+    if len(items) > 30:
+        problems.append(f"{len(items)} items (max 30)")
+    ids = {c["id"] for c in cards}
+    seen = set()
+    for n, it in enumerate(items):
+        if not isinstance(it, dict) or set(it) != set(PRIORITY_FIELDS):
+            problems.append(f"item {n} must have exactly {PRIORITY_FIELDS}")
+            continue
+        if not all(isinstance(it[k], str) for k in PRIORITY_FIELDS[:5]) or not isinstance(it["cardIds"], list):
+            problems.append(f"item {n} has a field of the wrong type")
+            continue
+        pid = it["id"]
+        if not pid or len(pid) > 80 or pid in seen:
+            problems.append(f"item {n} id {pid!r} is empty, too long or repeated")
+        seen.add(pid)
+        if not it["title"] or len(it["title"]) > 160:
+            problems.append(f"{pid}: title must be 1..160 characters")
+        if it["status"] not in PRIORITY_STATUSES:
+            problems.append(f"{pid}: invalid status {it['status']!r}")
+        if len(it["blockedReason"]) > 600 or len(it["nextAction"]) > 600:
+            problems.append(f"{pid}: text over 600 characters")
+        if it["status"] in ("blocked", "paused") and not it["blockedReason"].strip():
+            problems.append(f"{pid}: {it['status']} needs a blockedReason")
+        if it["status"] in ("ready", "in_progress") and not it["nextAction"].strip():
+            problems.append(f"{pid}: {it['status']} needs a nextAction")
+        if len(it["cardIds"]) > 100 or len(set(it["cardIds"])) != len(it["cardIds"]):
+            problems.append(f"{pid}: too many or repeated cardIds")
+        for cid in it["cardIds"]:
+            if cid not in ids:
+                problems.append(f"{pid}: unknown card {cid!r}")
+        for t in [it["title"], it["blockedReason"], it["nextAction"], pid]:
+            for pattern in REDACTIONS:
+                if re.search(pattern, t):
+                    problems.append(f"{pid}: publisher would redact part of: {t[:60]!r}")
+            if "\u2014" in t:
+                problems.append(f"{pid}: em dash")
+    # The board's "Priorities" table must list the same items, in the same order and status.
+    section = BOARD.read_text().split("## Priorities (authoritative order)", 1)
+    rows = []
+    if len(section) == 2:
+        for line in section[1].split("\n## ", 1)[0].splitlines():
+            m = re.match(r"\| (\d+) \| `([^`]+)`: .*? \| ([a-z_]+) \|", line)
+            if m:
+                rows.append((int(m.group(1)), m.group(2), m.group(3)))
+    expected = [(n + 1, it["id"], it["status"]) for n, it in enumerate(items) if isinstance(it, dict)]
+    if rows != expected:
+        problems.append(f"board priority table {rows} does not match the JSON {expected}")
+    if problems:
+        raise SystemExit("priority list invalid:\n  " + "\n  ".join(problems))
+    order = ", ".join(f"{n + 1}:{it['id']}={it['status']}" for n, it in enumerate(items))
+    print(f"priorities ok: {len(items)} items ({order})")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,12 @@ These rules apply to every agent working in this worktree on the Base bridge.
   status (at most 600 characters) and up to 200 term definitions (`cardId` scopes a term to one
   card, for example R1 on a review card). It is board visibility only, held to the same
   sanitization limits, and never adds fields to the cards. The derive script validates it.
+- Priority list: `docs/coordination/base-icusd-bridge-priorities.json`, shape
+  `{items:[{id, title, status, blockedReason, nextAction, cardIds}]}` and nothing else; array order
+  is the rank; status is one of `ready`, `in_progress`, `blocked`, `paused`, `done`; at most 30
+  items; every field present (empty strings allowed); `blocked` and `paused` need a reason that
+  says what clears it, `ready` and `in_progress` need a next action; card ids must be current board
+  cards. Same sanitization limits as the projection. Mirrored in the board's "Priorities" section.
 - Milestone handoff: `docs/coordination/base-icusd-bridge-handoff.md`.
 
 ## Lookout publication rule
@@ -70,6 +76,28 @@ Rumi operational snapshot upload, because approval of the exact payload and priv
 was not explicit enough. That command did not run and no cards were uploaded; a "FIRST
 OPERATIONAL UPLOAD HELD" rule applied here until Rob's approval above resolved the boundary. The
 hold never gated implementation or tests.
+
+## Priority selection
+
+Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirrored in the board's
+"Priorities" section). Miles decides ranking and execution; the coordinator maintains the list.
+
+1. Work on the highest-ranked item that is `ready` or `in_progress` and that you are authorized
+   and assigned to do.
+2. When an item blocks, record why and what clears it in `blockedReason`, then immediately select
+   the next ready item. Never invent work or take unrelated protected Rumi work to fill a gap; if
+   nothing is ready, say so and name the blockers.
+3. Re-evaluate at every checkpoint, worker completion, unblock event and existing wake-up. Return
+   to higher-ranked work at the next safe checkpoint.
+4. Never interrupt an irreversible action in progress, never assign a second owner to the same
+   work, never override `paused` items or any hold, and never create a timer or monitor for this.
+5. Keep the priority JSON, the board's priority section and cards, the summary and the glossary
+   aligned in the same checkpoint; the derive script checks the JSON against the cards and the
+   board.
+6. Publication: priority metadata joins the existing sanitized publication flow only after Alden
+   (the Lookout owner) completes the priority cutover and confirms readiness. Until then nothing is
+   published for priorities; the 2026-10-26 checkpoint that introduced this rule was intentionally
+   left unpublished, including its card changes.
 
 ## Card ID mapping
 

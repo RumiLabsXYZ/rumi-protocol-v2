@@ -12,6 +12,26 @@ definitions; update it with every material board change.
 - Delivery: local implementation complete; draft PR RumiLabsXYZ/rumi-protocol-v2#591 open, not merged, not deployed. Miles (supervisor) accepted the local implementation and reviewable draft PR milestone at `5fdf2145`, relying on the recorded local test and review evidence. That acceptance is not production safety, live readiness, or approval to merge, deploy, sign, fund or change roles.
 - Lookout: Rob approved uploading this board's sanitized metadata to his private Lookout backend, and future sanitized updates (2026-10-24, verified by Miles; see `base-icusd-bridge-operating-rules.md`). The first snapshot was published after the setup owner's cutover and verified as a no-op readback; this worktree's coordinator now publishes each changed sanitized checkpoint (see the event rule there).
 
+## Priorities (authoritative order)
+
+Ranked sub-projects for this board. `base-icusd-bridge-priorities.json` holds the same list (array
+order is the rank) and is the machine-readable source; this table must match it exactly, which the
+derive script checks. Miles (supervisor) decides ranking and execution; the coordinator maintains
+this list and the JSON. Selection rule: `base-icusd-bridge-operating-rules.md`, "Priority selection".
+
+| Rank | Item | Status | Cards | Blocker and what clears it | Next action |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `browser-round-trip`: Finish real-wallet browser acceptance | blocked | BB-27 | The Rabby wallet is locked and its unlock request timed out, so no Base account is connected yet. Cleared when Rob unlocks Rabby and approves the staging page's connection request. | After the unblock: connect the Base wallet, then test transaction consent and rejection in both directions, the synthetic browser round trip and reload recovery. The real Internet Identity sign-in is already proven. |
+| 2 | `priorities-and-handoff`: Keep priorities and test handoff current | in_progress | BB-28 | - | Validate this priority list, the board, summary and glossary offline, then commit and push them. Priority publication waits for Alden's cutover. |
+| 3 | `acceptance-handoff`: Close browser evidence and PR handoff | blocked | BB-14, BB-22, BB-27 | Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work. | Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge. |
+| 4 | `production-launch`: Production launch | paused | (broad scope) | Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test. | - |
+| 5 | `implementation-local-verification`: Implementation and local verification | done | BB-01, BB-10, BB-18, BB-19, BB-20, BB-22 | - | - |
+| 6 | `cli-public-test`: Public synthetic CLI round trip | done | BB-24, BB-25 | - | - |
+
+Once item 2 is done, no item in this board is ready: item 1 waits on Rob unlocking the Base
+wallet, item 3 on item 1, and item 4 on a separate production authorization. That is the actual
+state, not a gap to fill with other work.
+
 ## Proof levels
 
 | Level | Meaning |
@@ -79,7 +99,8 @@ run record, never on this board.
 | BB-24 Base Sepolia phase 1: ICP side (packet steps A to E) | done | supervisor (Miles) | none (public executor) | BB-23 | Installed: both isolated test modules match the packet hashes; controller checks passed; test RPC chain-id quorum verified. Runtime frozen at 4169feb8 | public-installed |
 | BB-25 Base Sepolia phase 2: Base side (packet steps F to J) | done | supervisor (Miles) | none (public executor) | BB-24 | CLI synthetic test: deposit Delivered; return burn finalized; release Released; readbacks match packet vectors; fresh audit coverage, supply bound, exact match true; zero pending; remaining Base tokens fully backed; bridge stopped | public-settled |
 | BB-26 Isolated test UI: staging recon and recipe | done | coordinator (Opus 5.5 / Opus 5.5) + worker W8 (Sonnet / Sonnet) + worker W9 (Haiku / Haiku) | read-only source; tracked recipe doc | BB-25 | Recipe written from read-only source checks: ids alone do not isolate the app, so a throwaway copy gets a bridge-only shell, test-only ids, no polling, no production II origin and a request guard. Not compiled or run | source |
-| BB-27 Isolated test UI: browser acceptance | in progress (Base wallet, consent and recovery next) | supervisor (Miles), with Rob for real-wallet gestures | none (live and browser execution) | BB-26 | Real II sign-in (existing session reused) returned a non-anonymous principal to the staging page; guard blocked nothing. Earlier: rendering and fixture wallet checks. Pending: Base wallet, consent and rejection, round trip, recovery | staging-auth |
+| BB-27 Isolated test UI: browser acceptance | blocked (Rabby locked; Rob to unlock and approve) | supervisor (Miles), with Rob for real-wallet gestures | none (live and browser execution) | BB-26 | Real II sign-in proven (staging-auth). Blocked: Rabby is locked and its unlock timed out, so no Base account is connected; Rob must unlock it and approve the staging connection. No transfer, seed or funding sent; bridge stopped | staging-auth |
+| BB-28 Priorities and supervisor operating rules | in progress | coordinator (Opus 5.5 / Opus 5.5) | docs/coordination priorities, board, rules, handoff | BB-27 | Priority list (base-icusd-bridge-priorities.json), board priority section and selection rule; validated offline against the publisher's priority rules; not published (Alden owns the priority cutover) | source |
 
 ## Regression evidence (backend untouched)
 
@@ -123,3 +144,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-25: BB-26 done: staging recipe `docs/coordination/base-icusd-bridge-staging-recipe.md` (bridge-only throwaway copy; no tracked file changes); BB-27 waits for Miles' review before the single dev server.
 - 2026-10-25: BB-27 in progress at staging-fixture: Miles rendered the isolated copy and ran fixture wallet checks; the paused rendering window is closed and the test bridge stopped again; real-wallet gestures (Rob) come next, then the browser round trip and recovery checks.
 - 2026-10-25: BB-27 at staging-auth: a real Internet Identity sign-in (existing browser session reused, no new credential or passkey ceremony) returned a non-anonymous principal to the staging page with the guard at zero blocks; no transaction, restart, module, role or funding change.
+- 2026-10-26: priority list and selection rule added (BB-28; Rob's request relayed by Miles); BB-27 blocked on the locked Base wallet; this checkpoint is intentionally not published (Alden owns the priority cutover).

@@ -369,6 +369,27 @@ this pass. Runtime and source unchanged (`4169feb8`).
 Rule recorded (recipe section 5): verify the local server is reachable at every handoff and
 before every wallet step. A previously rendered tab is not proof it is still running.
 
+## Milestone 16 (2026-10-26): priority list and selection rule (BB-28)
+
+Rob asked for ordered sub-project priorities and supervisor operating rules (relayed and verified
+by Miles). Miles decides ranking and execution; the coordinator maintains the list.
+
+- `base-icusd-bridge-priorities.json` (array order is the rank), mirrored in the board's
+  "Priorities" section; the selection rule is in the operating rules ("Priority selection").
+- Order: 1 browser-round-trip (blocked: Rabby is locked and its unlock timed out; clears when Rob
+  unlocks it and approves the staging connection), 2 priorities-and-handoff (this checkpoint),
+  3 acceptance-handoff (blocked until BB-27 settles and fresh reconciliation and review evidence
+  exists; no merge authority), 4 production-launch (paused on a separate Rob authorization and a
+  reviewed launch scope), 5 implementation-local-verification (done), 6 cli-public-test (done).
+- After item 2 no item is ready; the actual blockers are the locked Base wallet and a production
+  authorization that is deliberately out of scope.
+- BB-27 status (Miles, sanitized): no Base account connected, no browser transfer, synthetic seed
+  or test-ETH funding sent; the test bridge is stopped again; two read-only providers agree on the
+  reviewed test contract, its runtime and its pre-test counters. The real Internet Identity
+  sign-in (milestone 15) stands.
+- Not published: Alden owns the initial priority cutover and publication and has not confirmed
+  readiness, so this checkpoint (including its card changes) stays local until then.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

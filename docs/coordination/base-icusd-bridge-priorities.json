@@ -1,0 +1,70 @@
+{
+  "items": [
+    {
+      "id": "browser-round-trip",
+      "title": "Finish real-wallet browser acceptance",
+      "status": "blocked",
+      "blockedReason": "The Rabby wallet is locked and its unlock request timed out, so no Base account is connected yet. Cleared when Rob unlocks Rabby and approves the staging page's connection request.",
+      "nextAction": "After the unblock: connect the Base wallet, then test transaction consent and rejection in both directions, the synthetic browser round trip and reload recovery. The real Internet Identity sign-in is already proven.",
+      "cardIds": [
+        "BB-27"
+      ]
+    },
+    {
+      "id": "priorities-and-handoff",
+      "title": "Keep priorities and test handoff current",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Validate this priority list, the board, summary and glossary offline, then commit and push them. Priority publication waits for Alden's cutover.",
+      "cardIds": [
+        "BB-28"
+      ]
+    },
+    {
+      "id": "acceptance-handoff",
+      "title": "Close browser evidence and PR handoff",
+      "status": "blocked",
+      "blockedReason": "Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work.",
+      "nextAction": "Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge.",
+      "cardIds": [
+        "BB-14",
+        "BB-22",
+        "BB-27"
+      ]
+    },
+    {
+      "id": "production-launch",
+      "title": "Production launch",
+      "status": "paused",
+      "blockedReason": "Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test.",
+      "nextAction": "",
+      "cardIds": []
+    },
+    {
+      "id": "implementation-local-verification",
+      "title": "Implementation and local verification",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-01",
+        "BB-10",
+        "BB-18",
+        "BB-19",
+        "BB-20",
+        "BB-22"
+      ]
+    },
+    {
+      "id": "cli-public-test",
+      "title": "Public synthetic CLI round trip",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-24",
+        "BB-25"
+      ]
+    }
+  ]
+}
