@@ -135,3 +135,19 @@ Main independently set the backend to `opt-level = "z"`. This branch now uses ma
 | `xrp_native_e2e_pic` | 4 of 4 passed, 0 `[gated]` |
 
 Both PocketIC suites ran against the shrunk production artifact itself, which now fits PocketIC 7's 10 MiB cap. They no longer need a separate size-optimised test build.
+
+## After merging main `01615221` (backend `optimize O1` code reserve)
+
+The `icp.yaml` conflict kept both sides: main's new `ic-wasm optimize O1` step, and this branch's final artifact gate. The production marker section (`icp:public rumi:xrpl-environment`) survives `optimize O1`, and the gate passes on the final gzip.
+
+| Check | Result |
+| --- | --- |
+| Release code section | 9,648,104 bytes (77% of the 12 MiB limit) |
+| Backend library | 1495 passed |
+| Bin, including Candid compatibility | 85 passed |
+| Fixture XRP | 302 passed |
+| `xrpl_icusd_e2e_pic` | 17 of 17 passed |
+| `xrp_native_e2e_pic` | 4 of 4 passed, 0 `[gated]` |
+| Frontend | 1298 passed |
+
+Both PocketIC suites ran against the optimized production artifact.
