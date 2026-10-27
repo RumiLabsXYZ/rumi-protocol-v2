@@ -261,6 +261,32 @@ pub fn transaction_operations_request(
     ))
 }
 
+/// Build an operations request against a caller-configured Horizon origin.
+/// Origin, transaction hash, and page limit use the same checks as the
+/// corresponding canonical-network request builder.
+pub fn transaction_operations_request_at(
+    base_url: &str,
+    hash: &str,
+    limit: usize,
+) -> Option<CanisterHttpRequestArgument> {
+    if !is_https_origin(base_url)
+        || !is_valid_transaction_hash(hash)
+        || limit == 0
+        || limit > OPERATIONS_PAGE_LIMIT
+    {
+        return None;
+    }
+    let url = format!(
+        "{}/transactions/{hash}/operations?limit={limit}&order=asc",
+        base_url.trim_end_matches('/')
+    );
+    Some(request_at(
+        url,
+        MAX_OPERATIONS_RESPONSE_BYTES,
+        "stellar_transform_operations",
+    ))
+}
+
 fn reduced_response(status: candid::Nat, body: Vec<u8>) -> HttpResponse {
     HttpResponse {
         status,
@@ -504,6 +530,38 @@ mod tests {
         assert!(
             transaction_operations_url(Network::Public, hash, OPERATIONS_PAGE_LIMIT + 1).is_none()
         );
+        let configured = transaction_operations_request_at(
+            "https://configured.example",
+            hash,
+            OPERATIONS_PAGE_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(
+            configured.url,
+            format!(
+                "https://configured.example/transactions/{hash}/operations?limit=200&order=asc"
+            )
+        );
+        assert_eq!(
+            configured.max_response_bytes,
+            Some(MAX_OPERATIONS_RESPONSE_BYTES)
+        );
+        assert!(configured.transform.is_some());
+        assert!(transaction_operations_request_at("http://bad.example", hash, 200).is_none());
+        assert!(
+            transaction_operations_request_at("https://configured.example/", hash, 200).is_none()
+        );
+        assert!(transaction_operations_request_at("https://bad.example/path", hash, 200).is_none());
+        assert!(
+            transaction_operations_request_at("https://configured.example", "bad", 200).is_none()
+        );
+        assert!(transaction_operations_request_at("https://configured.example", hash, 0).is_none());
+        assert!(transaction_operations_request_at(
+            "https://configured.example",
+            hash,
+            OPERATIONS_PAGE_LIMIT + 1,
+        )
+        .is_none());
     }
 
     #[test]

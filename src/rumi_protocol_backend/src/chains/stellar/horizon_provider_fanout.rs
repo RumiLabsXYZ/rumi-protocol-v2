@@ -6,7 +6,7 @@
 
 use super::{
     codec::Network,
-    horizon_parse::{self, AccountSnapshot, LatestLedgerReserve},
+    horizon_parse::{self, AccountSnapshot, FinalizedDeposit, LatestLedgerReserve},
     horizon_quorum, horizon_rpc,
 };
 use ic_cdk::api::management_canister::http_request::{http_request, CanisterHttpRequestArgument};
@@ -337,6 +337,51 @@ pub async fn fetch_transaction_status_evidence(
         )
         .ok_or_else(|| "invalid configured Horizon transaction request".to_string())?;
         observations[index] = read_transaction_status(request).await.ok();
+    }
+    Ok(observations)
+}
+
+/// Fetch one bounded transaction-operations page from each provider after
+/// binding all provider roots to the selected network. Each slot contains that
+/// provider's parsed page or `None` when its request is unavailable/invalid.
+/// This returns raw slot evidence only; it does not claim quorum or credit.
+pub async fn fetch_custody_deposit_observations(
+    config: &HorizonProviderConfig,
+    network: Network,
+    transaction_hash: &str,
+    expected_ledger: u32,
+    expected_destination: &str,
+) -> Result<[Option<Vec<FinalizedDeposit>>; 3], String> {
+    if transaction_hash.len() != 64
+        || !transaction_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("invalid Stellar transaction hash".to_string());
+    }
+    let providers = config
+        .validate_for_network(network)
+        .await
+        .map_err(|error| format!("invalid Horizon provider configuration: {error:?}"))?;
+    let mut observations = [None, None, None];
+    for (index, provider) in providers.iter().enumerate() {
+        let Some(request) = horizon_rpc::transaction_operations_request_at(
+            &provider.provider.base_url,
+            transaction_hash,
+            horizon_rpc::OPERATIONS_PAGE_LIMIT,
+        ) else {
+            continue;
+        };
+        if let Ok(body) = read_request(request).await {
+            observations[index] = horizon_parse::parse_custody_deposits(
+                &body,
+                transaction_hash,
+                expected_ledger,
+                expected_destination,
+                horizon_rpc::OPERATIONS_PAGE_LIMIT,
+            )
+            .ok();
+        }
     }
     Ok(observations)
 }
