@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Mara",
       "scope": "Complete the XLM parity and threat model",
-      "evidenceText": "A read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. These differ from the source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present those as current live parity. This is XRP evidence only; no XLM deployment or live config is proved. Confirm the Stellar-specific network, key, account-reserve, sequence, provider, and liquidation assumptions before expanding the rail.",
+      "evidenceText": "Design decision: use one Stellar account per vault, funded and activated by the user's wallet through CreateAccount. Connected-wallet support for this flow remains to verify. Separately, a read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. Those differ from the XRP source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present constructor values as current live parity. XRP evidence only; no XLM registration, deployment, or live config is proved.",
       "evidenceLinks": []
     },
     {
@@ -13,7 +13,7 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "Address derivation work is active for a bounded address subset. The rail still needs independent Stellar SDK vectors for transaction encoding, hashing, signing, network binding, and malformed-input cases.",
+      "evidenceText": "Standalone results: classic StrKey 6/6, amount helper 5/5, and XDR native Payment 4/4. The XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. No Cargo/backend integration test, vault endpoints, XLM registration, or deployment is proved. The signer worker is still implementing the typed threshold-key role.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "Ready",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "The bounded XLM amount helper passed 5/5 standalone rustc tests for exact conversion, overflow, input syntax, reserve-aware spendable balance, and underflow. This is isolated helper evidence, not integration or release proof. Continue deterministic deposit, replay, provider disagreement, ambiguous submit, sequence, reserve, fee, and retry coverage; keep testnet separate from mainnet admission or transaction evidence.",
+      "evidenceText": "Standalone results: classic StrKey 6/6, amount helper 5/5, and XDR native Payment 4/4; the XDR signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. These are isolated checks only: no Cargo/backend integration test, vault endpoints, XLM registration, or deployment is proved. Continue backend integration, deposit, replay, provider disagreement, ambiguous-submit, sequence, reserve, fee, retry, and testnet coverage; keep it separate from mainnet admission or transaction evidence.",
       "evidenceLinks": []
     },
     {

@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM collateral remains in planning and early implementation; no XLM deployment or live config is proved. The read-only mainnet XRP config observed 2026-10-27 was Active with a $30,000 ceiling and Linear curve; decoded live values are 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% fee, 1.5% base APR, and about 132.2667% recovery target. These differ from constructor values. The bounded amount helper passed 5/5 standalone tests, not integration or release evidence.",
+  "summary": "Native XLM is not registered or deployed. Design chose per-vault Stellar accounts funded and activated by the user's wallet via CreateAccount; wallet support remains unverified. Standalone results: StrKey 6/6, amount 5/5, XDR native Payment 4/4; signing hash and 216-byte envelope match an offline Stellar SDK 14.2.0 vector. No Cargo/backend integration tests or vault endpoints yet; the signer worker is implementing the typed threshold-key role. XRP readback is XRP-only evidence.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
