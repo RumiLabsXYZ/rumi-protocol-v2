@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Pure 2-of-3 account/reserve, transaction-ledger, and exact deposit-receipt matching helpers are committed in source, but uncompiled and unwired. No provider configuration, live calls, or credit exists; ledger transform is historical reserve evidence only. WP3/WP4 remain blocked without supported deposit or payout lifecycles. Provider candidates remain unvalidated; direct probes were blocked by local DNS sandbox.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Pure 2-of-3 matching helpers are committed but uncompiled and unwired; no provider config, live calls, or credit exists. WP3/WP4 remain blocked without supported deposit or payout lifecycles. Mara Junior Opus read-only coordination across deposit proof, XRP claim reuse, and release prerequisites is underway; research is not complete. Provider candidates remain unvalidated.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},

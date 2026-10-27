@@ -29,7 +29,7 @@
       "title": "Verified deposits and borrowing",
       "status": "blocked",
       "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. New fallback routes fail closed at source level, but Cargo tests/build have not rerun after commit 3e12fba5; claim/intent state remains dormant.",
-      "nextAction": "After Cargo verifies the source guards and quorum work is resolved, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
+      "nextAction": "Continue read-only deposit-proof coordination; after Cargo verifies the source guards and quorum work is resolved, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
       "cardIds": ["WP3"]
     },
     {
@@ -37,7 +37,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Cargo-verify the new fail-closed route guards, then implement and validate the supported XLM-specific payout/claim lifecycle before clearing WP4.",
+      "nextAction": "Continue read-only XRP claim-reuse review; Cargo-verify the fail-closed route guards, then implement and validate the supported XLM-specific payout/claim lifecycle before clearing WP4.",
       "cardIds": ["WP4"]
     },
     {
@@ -61,7 +61,7 @@
       "title": "Release, configuration, and activation evidence",
       "status": "blocked",
       "blockedReason": "The implementation and required review, CI, artifact, audit, operational, and current network evidence are not complete; XRC XLM/USD live quorum is unproven.",
-      "nextAction": "Keep registration frozen while implementation and the pre-deploy evidence packet are completed.",
+      "nextAction": "Continue read-only release-prerequisite coordination; keep registration frozen while implementation and the pre-deploy evidence packet are completed.",
       "cardIds": ["WP7"]
     }
   ]

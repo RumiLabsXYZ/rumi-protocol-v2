@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Mara",
       "scope": "Complete the XLM parity and threat model",
-      "evidenceText": "Design decision: use one Stellar account per vault, funded and activated by the user's wallet through CreateAccount. Connected-wallet support remains to verify. XRC source can represent XLM/USD; its generic defaults include received-rate floor 3 and freshness up to 120 seconds, but live XLM source quorum and quote are unverified. The read-only IC connector refused the backend because its service-discoverability manifest is missing; the direct XRC sample is a paid update and was not called. Direct endpoint probes could not run under the local DNS sandbox. Do not infer oracle readiness or activation. A 2-of-3 independent provider-result quorum is the Horizon target; provider selection is unresolved and the pure helper has no provider wiring. SDF public Horizon, Tatum authenticated Horizon, and Blockdaemon authenticated Horizon are research candidates; Ankr is a fourth candidate. None is validated or provisioned. Separately, a read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. Those differ from the XRP source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present constructor values as current live parity. XRP evidence only; no XLM registration, deployment, or live config is proved.",
+      "evidenceText": "Design decision: use one Stellar account per vault, funded and activated by the user's wallet through CreateAccount. Connected-wallet support remains to verify. XRC source can represent XLM/USD; its generic defaults include received-rate floor 3 and freshness up to 120 seconds, but live XLM source quorum and quote are unverified. The read-only IC connector refused the backend because its service-discoverability manifest is missing; the direct XRC sample is a paid update and was not called. Direct endpoint probes could not run under the local DNS sandbox. Mara Junior Opus read-only coordination is underway across deposit proof, XRP claim reuse, and release prerequisites; research is not complete. Do not infer oracle readiness or activation. A 2-of-3 independent provider-result quorum is the Horizon target; provider selection is unresolved and pure helpers have no provider wiring. SDF public Horizon, Tatum authenticated Horizon, and Blockdaemon authenticated Horizon are research candidates; Ankr is a fourth candidate. None is validated or provisioned. Separately, a read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. Those differ from the XRP source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present constructor values as current live parity. XRP evidence only; no XLM registration, deployment, or live config is proved.",
       "evidenceLinks": []
     },
     {
@@ -29,7 +29,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Earlier source changes added fail-closed guards to generic ICRC entrypoints. Commit 3e12fba5 adds fail-closed handling for XLM borrow, full-liquidation, repay-close, and push-sweep fallback paths; claim/intent records remain dormant only. Cargo tests/build have not rerun after the current source changes. WP3 remains blocked because no XLM deposit/borrow endpoint or live credit lifecycle exists; the current Frozen config and generic update denial keep XLM unreachable. No XLM admission is proved.",
+      "evidenceText": "Earlier source changes added fail-closed guards to generic ICRC entrypoints. Commit 3e12fba5 adds fail-closed handling for XLM borrow, full-liquidation, repay-close, and push-sweep fallback paths; claim/intent records remain dormant only. Read-only deposit-proof coordination is underway and not complete. Cargo tests/build have not rerun after the current source changes. WP3 remains blocked because no XLM deposit/borrow endpoint or live credit lifecycle exists; the current Frozen config and generic update denial keep XLM unreachable. No XLM admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -37,7 +37,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement XLM claims, exits, and liquidation handling",
-      "evidenceText": "Commits 6da8cd46 and 3e12fba5 add source-level fail-closed handling for unsupported XLM withdrawal, close, full-liquidation, repay-close, and push-sweep fallback routes; these reject XLM rather than routing it through ICRC. Claim/intent state remains dormant only. WP4 remains blocked because no supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Frozen config and generic update denial prevent XLM admission now. Cargo tests/build have not rerun after the current changes.",
+      "evidenceText": "Commits 6da8cd46 and 3e12fba5 add source-level fail-closed handling for unsupported XLM withdrawal, close, full-liquidation, repay-close, and push-sweep fallback routes; these reject XLM rather than routing it through ICRC. Read-only XRP claim-reuse review is underway and not complete. Claim/intent state remains dormant only. WP4 remains blocked because no supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Frozen config and generic update denial prevent XLM admission now. Cargo tests/build have not rerun after the current changes.",
       "evidenceLinks": []
     },
     {
@@ -61,7 +61,7 @@
       "state": "Blocked",
       "owner": "Rumi release owner",
       "scope": "Prepare deployment, configuration, and activation evidence",
-      "evidenceText": "Blocked until implementation, exact-head review and CI, artifact verification, audit disposition, rollback and monitoring plans, and current Stellar oracle quorum, reserve, fee, provider, and key checks are evidenced. XRC XLM/USD live quorum is unproven. Deployment and activation remain separate proof points from signing, broadcasting, and moving funds.",
+      "evidenceText": "Read-only release-prerequisite coordination is underway and not complete. Release remains blocked until implementation, exact-head review and CI, artifact verification, audit disposition, rollback and monitoring plans, and current Stellar oracle quorum, reserve, fee, provider, and key checks are evidenced. XRC XLM/USD live quorum is unproven. Deployment and activation remain separate proof points from signing, broadcasting, and moving funds.",
       "evidenceLinks": []
     }
   ]
