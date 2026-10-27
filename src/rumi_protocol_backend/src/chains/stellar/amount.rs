@@ -22,6 +22,9 @@ pub enum AmountError {
     TooManyDecimalPlaces,
     /// The amount or sum of deductions exceeded the `u64` stroop range.
     Overflow,
+    /// The live base reserve is zero or sponsorship counts cannot describe a
+    /// valid non-negative account reserve requirement.
+    InvalidReserveInputs,
     /// Reserve, pending obligations, and fee budget exceeded the balance.
     InsufficientBalance,
 }
@@ -35,6 +38,7 @@ impl fmt::Display for AmountError {
                 f.write_str("XLM amount has more than seven decimal places")
             }
             Self::Overflow => f.write_str("XLM amount exceeds the stroop range"),
+            Self::InvalidReserveInputs => f.write_str("invalid Stellar reserve inputs"),
             Self::InsufficientBalance => {
                 f.write_str("balance does not cover reserve, obligations, and fee budget")
             }
@@ -43,6 +47,35 @@ impl fmt::Display for AmountError {
 }
 
 impl std::error::Error for AmountError {}
+
+/// Calculate an account's live minimum XLM balance in stroops.
+///
+/// Stellar's minimum balance is `(2 + subentry_count + num_sponsoring -
+/// num_sponsored) * base_reserve`. The base reserve must come from the current
+/// ledger; it is not a fixed protocol constant. Sponsoring adds reserve units
+/// to this account, while sponsored entries remove them.
+pub fn minimum_balance_stroops(
+    base_reserve_in_stroops: u64,
+    subentry_count: u32,
+    num_sponsoring: u32,
+    num_sponsored: u32,
+) -> Result<u64, AmountError> {
+    if base_reserve_in_stroops == 0 {
+        return Err(AmountError::InvalidReserveInputs);
+    }
+
+    let reserve_units = 2_u64
+        .checked_add(u64::from(subentry_count))
+        .and_then(|units| units.checked_add(u64::from(num_sponsoring)))
+        .ok_or(AmountError::Overflow)?;
+    let reserve_units = reserve_units
+        .checked_sub(u64::from(num_sponsored))
+        .ok_or(AmountError::InvalidReserveInputs)?;
+
+    reserve_units
+        .checked_mul(base_reserve_in_stroops)
+        .ok_or(AmountError::Overflow)
+}
 
 /// Parse a non-negative decimal XLM amount into stroops without floating point.
 ///
@@ -182,6 +215,30 @@ mod tests {
         assert_eq!(
             spendable_stroops(20_000_000, 5_000_000, &[1_000_000, 2_000_000], 10_000),
             Ok(11_990_000)
+        );
+    }
+
+    #[test]
+    fn computes_live_minimum_balance_with_sponsorship_counts() {
+        // (2 + 4 subentries + 3 sponsored by this account - 2 sponsored for
+        // this account) * 5,000,000 stroops.
+        assert_eq!(minimum_balance_stroops(5_000_000, 4, 3, 2), Ok(35_000_000));
+        assert_eq!(minimum_balance_stroops(5_000_000, 0, 0, 0), Ok(10_000_000));
+    }
+
+    #[test]
+    fn rejects_invalid_or_overflowing_live_reserve_inputs() {
+        assert_eq!(
+            minimum_balance_stroops(0, 0, 0, 0),
+            Err(AmountError::InvalidReserveInputs)
+        );
+        assert_eq!(
+            minimum_balance_stroops(1, 0, 0, 3),
+            Err(AmountError::InvalidReserveInputs)
+        );
+        assert_eq!(
+            minimum_balance_stroops(u64::MAX, 0, 0, 0),
+            Err(AmountError::Overflow)
         );
     }
 

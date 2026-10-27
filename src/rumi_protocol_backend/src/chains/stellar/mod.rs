@@ -14,8 +14,8 @@ pub use address::{
     is_valid_classic_address,
 };
 pub use amount::{
-    format_stroops, parse_xlm_to_stroops, spendable_stroops, AmountError, STROOPS_PER_XLM,
-    XLM_DECIMALS,
+    format_stroops, minimum_balance_stroops, parse_xlm_to_stroops, spendable_stroops, AmountError,
+    STROOPS_PER_XLM, XLM_DECIMALS,
 };
 pub use codec::{
     encode_signed_envelope, signing_payload_hash, CodecError, Network, Payment, SigningMaterial,
