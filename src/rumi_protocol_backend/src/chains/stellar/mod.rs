@@ -8,6 +8,7 @@ pub mod amount;
 pub mod codec;
 pub mod config;
 pub mod credit;
+pub mod deposit_evidence;
 pub mod horizon_parse;
 pub mod horizon_provider_fanout;
 pub mod horizon_quorum;
