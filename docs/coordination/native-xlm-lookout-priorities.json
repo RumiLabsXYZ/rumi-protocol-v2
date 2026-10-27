@@ -4,7 +4,6 @@
       "id": "stellar-threat-model",
       "title": "XLM parity and threat model",
       "status": "in_progress",
-      "blockedReason": "",
       "blockedReason": "XRC source supports XLM/USD and defaults to a received-rate floor of 3 and freshness up to 120 seconds, but live XLM quote/quorum is unknown. The read-only connector refused the backend for lack of a service-discoverability manifest; the direct XRC sample is a paid update and was not called.",
       "nextAction": "Verify connected-wallet CreateAccount support and establish an authorized read-only path for the XRC XLM/USD live quote/quorum; assess SDF, Tatum, Blockdaemon, and Ankr research candidates for provider selection and the 2-of-3 result target.",
       "cardIds": ["WP0"]
@@ -14,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run Cargo tests/build after commit 6da8cd46 when the shared slot is available; review the Latest-Ledger transform concern, validate and select research candidates, and test the 2-of-3 target before actual outcalls or lifecycle work.",
+      "nextAction": "Run focused Cargo tests/build after commit 3e12fba5 when the shared slot is available; validate transform consistency and complete the quorum helper, then resolve provider selection before actual outcalls or lifecycle work.",
       "cardIds": ["WP1"]
     },
     {
@@ -22,22 +21,22 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Cargo-verify the account-to-exact-ledger reserve binding when the shared slot is available; keep pending-deposit and receipt state dormant until a complete live deposit flow is implemented.",
+      "nextAction": "Cargo-verify the account-to-exact-ledger reserve binding and deterministic historical-ledger transform; keep pending claim/intent and receipt state dormant until a complete live deposit/credit flow is implemented.",
       "cardIds": ["WP2"]
     },
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "No XLM deposit or borrow endpoint/lifecycle exists. The generic routes now fail closed at source level, but Cargo tests/build have not rerun after the latest guard changes.",
-      "nextAction": "After Cargo verifies the source guards, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
+      "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. New fallback routes fail closed at source level, but Cargo tests/build have not rerun after commit 3e12fba5; claim/intent state remains dormant.",
+      "nextAction": "After Cargo verifies the source guards and quorum work is resolved, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
       "cardIds": ["WP3"]
     },
     {
       "id": "claims-exits-liquidation",
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
-      "blockedReason": "No supported XLM claim, withdrawal, close, or manual-liquidation payout lifecycle exists. Unsupported XLM routes now fail closed in source, but the latest guards have not been Cargo-tested; Frozen config and generic update denial keep XLM unreachable meanwhile.",
+      "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
       "nextAction": "Cargo-verify the new fail-closed route guards, then implement and validate the supported XLM-specific payout/claim lifecycle before clearing WP4.",
       "cardIds": ["WP4"]
     },
@@ -54,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run focused tests/build after commit 6da8cd46 when the shared slot is available; test Latest-Ledger transform consensus and independent provider results before backend integration, real outcalls, or testnet work.",
+      "nextAction": "Re-run focused tests/build after commit 3e12fba5 when the shared slot is available; validate deterministic historical-ledger handling and complete quorum helper/provider review before backend integration, real outcalls, or testnet work.",
       "cardIds": ["WP6"]
     },
     {
