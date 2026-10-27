@@ -6,6 +6,7 @@
 pub mod address;
 pub mod amount;
 pub mod codec;
+pub mod horizon_parse;
 pub mod ted25519;
 
 pub use address::{
