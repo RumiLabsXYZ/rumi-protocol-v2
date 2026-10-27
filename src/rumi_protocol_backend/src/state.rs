@@ -30,6 +30,72 @@ macro_rules! ensure_eq {
 }
 
 #[cfg(test)]
+mod xlm_deposit_state_compat_tests {
+    use super::{State, XlmDepositKind, XlmDepositReceipt, XlmPendingDeposit};
+    use candid::Principal;
+
+    #[test]
+    fn xlm_pending_and_receipt_state_round_trips_and_legacy_snapshot_defaults_empty() {
+        let mut state = State::default();
+        state.xlm_pending_deposits.insert(
+            17,
+            XlmPendingDeposit {
+                owner: Principal::from_slice(&[1]),
+                custody_address: "G-custody".to_string(),
+                derivation_nonce: 17,
+                network_id: [0x42; 32],
+                opened_at_ns: 100,
+                expires_at_ns: 200,
+            },
+        );
+        state.xlm_deposit_receipts.insert(
+            ("tx-hash".to_string(), "opaque-op-9".to_string()),
+            XlmDepositReceipt {
+                vault_id: 17,
+                owner: Principal::from_slice(&[1]),
+                destination: "G-custody".to_string(),
+                ledger: 44,
+                gross_stroops: 100,
+                credited_stroops: 75,
+                kind: XlmDepositKind::CreateAccount,
+                confirmed_at_ns: 150,
+            },
+        );
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.xlm_pending_deposits, state.xlm_pending_deposits);
+        assert_eq!(restored.xlm_deposit_receipts, state.xlm_deposit_receipts);
+
+        let mut old_map =
+            match ciborium::de::from_reader::<ciborium::value::Value, _>(bytes.as_slice()).unwrap() {
+                ciborium::value::Value::Map(fields) => fields,
+                other => panic!("expected State CBOR map, got {other:?}"),
+            };
+        old_map.retain(|(key, _)| {
+            !matches!(key, ciborium::value::Value::Text(name)
+                if name == "xlm_pending_deposits" || name == "xlm_deposit_receipts")
+        });
+        let mut old_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(old_map), &mut old_bytes).unwrap();
+        let old: State = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
+        assert!(old.xlm_pending_deposits.is_empty());
+        assert!(old.xlm_deposit_receipts.is_empty());
+
+        // Map keys remain exact pairs, so the same operation token in another
+        // transaction is distinct.
+        let existing = ("tx-hash".to_string(), "opaque-op-9".to_string());
+        let same_operation_in_another_transaction = state.xlm_deposit_receipts[&existing].clone();
+        state.xlm_deposit_receipts.insert(
+            ("tx-other".to_string(), "opaque-op-9".to_string()),
+            same_operation_in_another_transaction,
+        );
+        assert_eq!(state.xlm_deposit_receipts.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod treasury_interest_snapshot_tests {
     use super::{
         BorrowMintTuple, State, TreasuryInterestMintJournal, TreasuryInterestMintPhase,
@@ -1822,6 +1888,41 @@ pub struct XrpPendingDeposit {
     /// was not recorded before this field existed.
     #[serde(default = "default_xrp_pending_reserve_base_drops")]
     pub reserve_base_drops: u64,
+}
+
+/// Dormant native-XLM deposit attribution reserved for the future Stellar
+/// deposit flow. Expiry is recorded for policy decisions, but must never erase
+/// the owner/address attribution of an account that may already be funded.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XlmPendingDeposit {
+    pub owner: Principal,
+    pub custody_address: String,
+    pub derivation_nonce: u64,
+    pub network_id: [u8; 32],
+    pub opened_at_ns: u64,
+    pub expires_at_ns: u64,
+}
+
+/// The native XLM operation type that justified a durable deposit receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum XlmDepositKind {
+    CreateAccount,
+    NativePayment,
+}
+
+/// Permanent deduplication receipt for one finalized Stellar operation.
+/// Identity is the exact `(transaction_hash, operation_id)` map key; both are
+/// opaque strings and rows are retained permanently to prevent replay.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XlmDepositReceipt {
+    pub vault_id: u64,
+    pub owner: Principal,
+    pub destination: String,
+    pub ledger: u32,
+    pub gross_stroops: u64,
+    pub credited_stroops: u64,
+    pub kind: XlmDepositKind,
+    pub confirmed_at_ns: u64,
 }
 
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
@@ -4553,6 +4654,15 @@ pub struct State {
     #[serde(default)]
     pub xrp_pending_deposits: BTreeMap<u64, XrpPendingDeposit>,
 
+    /// Native-XLM pending deposits, keyed by reserved vault ID. This state is
+    /// intentionally dormant until the Stellar deposit endpoints are added.
+    #[serde(default)]
+    pub xlm_pending_deposits: BTreeMap<u64, XlmPendingDeposit>,
+    /// Permanent native-XLM finalized-operation tombstones keyed by exact
+    /// `(transaction hash, opaque operation identity)`; never pruned or reused.
+    #[serde(default)]
+    pub xlm_deposit_receipts: BTreeMap<(String, String), XlmDepositReceipt>,
+
     /// P4: native-XRP collateral that has left a vault and is owed to a claimant
     /// (owner withdrawal, liquidation payout, or redemption payout), settled later
     /// via `settle_xrp_claim` (a threshold-signed XRPL Payment from the vault's
@@ -4911,6 +5021,8 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xlm_pending_deposits: BTreeMap::new(),
+            xlm_deposit_receipts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -5232,6 +5344,8 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xlm_pending_deposits: BTreeMap::new(),
+            xlm_deposit_receipts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,

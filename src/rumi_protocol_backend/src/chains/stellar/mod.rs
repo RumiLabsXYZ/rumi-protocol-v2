@@ -7,6 +7,7 @@ pub mod address;
 pub mod amount;
 pub mod codec;
 pub mod horizon_parse;
+pub mod horizon_reads;
 pub mod horizon_rpc;
 pub mod ted25519;
 
