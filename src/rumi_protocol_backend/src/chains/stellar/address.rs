@@ -126,7 +126,7 @@ fn base32_decode(encoded: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
-    // SEP-0023 v1.4.0 valid non-multiplexed account vector.
+    // SEP-0023 valid non-multiplexed account vector.
     const OFFICIAL_ADDRESS: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
     const OFFICIAL_PUBLIC_KEY: [u8; 32] = [
         0x3f, 0x0c, 0x34, 0xbf, 0x93, 0xad, 0x0d, 0x99, 0x71, 0xd0, 0x4c, 0xcc, 0x90, 0xf7, 0x05,

@@ -1,10 +1,11 @@
-//! Stellar's network-independent address codecs.
+//! Native Stellar XLM primitives: classic addresses, amounts, and Payment XDR.
 //!
-//! This module only handles classic Ed25519 account `G…` StrKeys. It does not
-//! validate account existence, muxed accounts, contracts, or network state.
+//! These pure helpers do not validate account existence, custody state,
+//! transaction inclusion, signatures, or network state.
 
 pub mod address;
 pub mod amount;
+pub mod codec;
 
 pub use address::{
     classic_address_from_ed25519_pubkey, ed25519_pubkey_from_classic_address,
@@ -13,4 +14,7 @@ pub use address::{
 pub use amount::{
     format_stroops, parse_xlm_to_stroops, spendable_stroops, AmountError, STROOPS_PER_XLM,
     XLM_DECIMALS,
+};
+pub use codec::{
+    encode_signed_envelope, signing_payload_hash, CodecError, Network, Payment, SigningMaterial,
 };
