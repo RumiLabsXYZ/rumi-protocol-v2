@@ -3,7 +3,7 @@
 //! Callers must place each distinct provider in a separate fixed slot. This
 //! module does not establish provider independence or perform network I/O.
 
-use super::horizon_parse::{AccountSnapshot, FinalizedDeposit, LedgerReserve};
+use super::horizon_parse::{AccountSnapshot, FinalizedDeposit, LatestLedgerReserve, LedgerReserve};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuorumError {
@@ -11,6 +11,49 @@ pub enum QuorumError {
     ConflictingAccountState,
     ConflictingTransactionLedger,
     ConflictingDepositReceipt,
+    ConflictingLatestLedgerReserve,
+}
+
+/// Require two identical latest-ledger observations. A newer dissent or a
+/// same-sequence conflict makes the alleged latest observation ambiguous.
+/// Older affirmative observations may contribute a larger base reserve, which
+/// is applied conservatively without changing the agreed sequence or timestamp.
+pub fn latest_ledger_reserve_quorum(
+    observations: [Option<LatestLedgerReserve>; 3],
+) -> Result<LatestLedgerReserve, QuorumError> {
+    for left in 0..3 {
+        let Some(candidate) = observations[left].as_ref() else {
+            continue;
+        };
+        for right in (left + 1)..3 {
+            if observations[right].as_ref() != Some(candidate) {
+                continue;
+            }
+
+            let mut conservative_base_reserve = candidate.reserve.base_reserve_in_stroops;
+            for (slot, dissent) in observations.iter().enumerate() {
+                if slot == left || slot == right {
+                    continue;
+                }
+                let Some(dissent) = dissent else {
+                    continue;
+                };
+                if dissent.reserve.sequence > candidate.reserve.sequence
+                    || (dissent.reserve.sequence == candidate.reserve.sequence
+                        && dissent != candidate)
+                {
+                    return Err(QuorumError::ConflictingLatestLedgerReserve);
+                }
+                conservative_base_reserve =
+                    conservative_base_reserve.max(dissent.reserve.base_reserve_in_stroops);
+            }
+
+            let mut result = candidate.clone();
+            result.reserve.base_reserve_in_stroops = conservative_base_reserve;
+            return Ok(result);
+        }
+    }
+    Err(QuorumError::NoQuorum)
 }
 
 /// Accept two identical complete snapshots, including their deterministic
@@ -146,6 +189,13 @@ mod tests {
         }
     }
 
+    fn latest_reserve(sequence: u32, value: u64, closed_at: &str) -> LatestLedgerReserve {
+        LatestLedgerReserve {
+            reserve: reserve(sequence, value),
+            closed_at: closed_at.to_string(),
+        }
+    }
+
     fn deposit(ledger: u32, operation_id: &str, amount_stroops: u64) -> FinalizedDeposit {
         FinalizedDeposit {
             transaction_hash: "TX_HASH".to_string(),
@@ -223,6 +273,58 @@ mod tests {
     fn does_not_fall_back_to_one_reserve_provider() {
         assert_eq!(
             ledger_reserve_quorum([Some(reserve(42, 5_000_000)), None, None]),
+            Err(QuorumError::NoQuorum)
+        );
+    }
+
+    #[test]
+    fn latest_reserve_quorum_keeps_agreed_identity_and_maximum_older_reserve() {
+        let agreed = latest_reserve(43, 5_000_000, "2026-10-27T12:00:00Z");
+        let result = latest_ledger_reserve_quorum([
+            Some(agreed.clone()),
+            Some(agreed),
+            Some(latest_reserve(42, 6_000_000, "2026-10-27T11:59:55Z")),
+        ])
+        .unwrap();
+        assert_eq!(result.reserve.sequence, 43);
+        assert_eq!(result.reserve.base_reserve_in_stroops, 6_000_000);
+        assert_eq!(result.closed_at, "2026-10-27T12:00:00Z");
+    }
+
+    #[test]
+    fn latest_reserve_quorum_rejects_newer_dissent() {
+        let agreed = latest_reserve(43, 5_000_000, "2026-10-27T12:00:00Z");
+        assert_eq!(
+            latest_ledger_reserve_quorum([
+                Some(agreed.clone()),
+                Some(agreed),
+                Some(latest_reserve(44, 5_000_000, "2026-10-27T12:00:05Z")),
+            ]),
+            Err(QuorumError::ConflictingLatestLedgerReserve)
+        );
+    }
+
+    #[test]
+    fn latest_reserve_quorum_rejects_same_sequence_conflict() {
+        let agreed = latest_reserve(43, 5_000_000, "2026-10-27T12:00:00Z");
+        assert_eq!(
+            latest_ledger_reserve_quorum([
+                Some(agreed.clone()),
+                Some(agreed),
+                Some(latest_reserve(43, 6_000_000, "2026-10-27T12:00:00Z")),
+            ]),
+            Err(QuorumError::ConflictingLatestLedgerReserve)
+        );
+    }
+
+    #[test]
+    fn latest_reserve_quorum_requires_two_identical_observations() {
+        assert_eq!(
+            latest_ledger_reserve_quorum([
+                Some(latest_reserve(43, 5_000_000, "2026-10-27T12:00:00Z")),
+                Some(latest_reserve(42, 5_000_000, "2026-10-27T11:59:55Z")),
+                None,
+            ]),
             Err(QuorumError::NoQuorum)
         );
     }
