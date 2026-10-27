@@ -10,8 +10,8 @@ before designing or reviewing Solana/ICP work. The Rumi repository is the
 canonical, versioned home for that guide. If this skill is installed on another
 machine, locate that repository rather than assuming this absolute path exists.
 If the local checkout has not incorporated the guide yet, read it from the
-repository with `git show origin/codex/solana-icp-knowledge:docs/solana-icp-knowledge.md`
-or from the published PR #593. Do not copy its contents into another repo as
+repository with `git show origin/main:docs/solana-icp-knowledge.md`
+after fetching `origin/main`, or from merged PR #593. Do not copy its contents into another repo as
 the primary source.
 
 Treat the guide as a code and lesson index. Verify current owning source,
