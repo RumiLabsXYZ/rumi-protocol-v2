@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Typed 200/404 transport from three network-bound providers now preserves fee and not-found evidence in source; no Cargo/dfx test or live call has verified it. The status policy's 39 tests remain unrun. Provider independence and evidence freshness remain unresolved. WP3/WP4 remain blocked; no live provider/oracle proof or deposit/claim lifecycle.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Pure deposit evidence now checks 2-of-3 receipt agreement, dissent, reserve freshness, first-funding attribution/replay, and claim reservations for CreateAccount or native Payment. Tests/compile remain unrun; no open/confirm endpoints, provider quorum, atomic mutation, or live credit. WP3/WP4 remain blocked.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},

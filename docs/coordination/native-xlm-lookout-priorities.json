@@ -5,7 +5,7 @@
       "title": "XLM parity and threat model",
       "status": "in_progress",
       "blockedReason": "XRC source supports XLM/USD and defaults to a received-rate floor of 3 and freshness up to 120 seconds, but live XLM quote/quorum is unknown. The read-only connector refused the backend for lack of a service-discoverability manifest; the direct XRC sample is a paid update and was not called.",
-      "nextAction": "Verify connected-wallet CreateAccount support and establish an authorized read-only path for the XRC XLM/USD live quote/quorum; validate SDF, Tatum, Blockdaemon, or Ankr endpoints when DNS access is available and resolve provider selection.",
+      "nextAction": "Verify connected-wallet CreateAccount and native Payment first-funding support; establish an authorized read-only path for XRC XLM/USD and independently validate provider endpoints when DNS access is available.",
       "cardIds": ["WP0"]
     },
     {
@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo/dfx tests after eb379f9c when the shared slot is available; verify the transaction-status parser's 39 tests and typed 200/404 transport, then resolve provider independence and evidence freshness before live calls.",
+      "nextAction": "Run focused Cargo tests after 9f8eb5a7 when the shared slot is available; verify the deposit_evidence tests and status policy's 39 tests, then build open/confirm endpoints with provider quorum and atomic state mutation only after evidence review.",
       "cardIds": ["WP1"]
     },
     {
@@ -28,8 +28,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. Recent fallback and SP retry guards are source-only and uncompiled; claim/intent state remains dormant.",
-      "nextAction": "Verify provider/key/network binding and implement live deposit credit/receipt/tombstone lifecycle after the source helpers and guards are compiled and tested; preserve WP3 blocked until end-to-end evidence exists.",
+      "blockedReason": "The new pure deposit_evidence decision helper is not wired into open/confirm endpoints, provider-account quorum, or atomic mutation; no live credit lifecycle exists. Tests and compilation are pending.",
+      "nextAction": "Compile/test the pure decision module, resolve independent provider binding, then implement endpoints and atomic deposit credit/receipt/tombstone lifecycle; preserve WP3 blocked until end-to-end evidence exists.",
       "cardIds": ["WP3"]
     },
     {
@@ -37,7 +37,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Complete transaction-status review, then implement and validate XLM claim settlement and supported payout lifecycle; preserve WP4 blocked until settlement and testnet evidence exists.",
+      "nextAction": "Compile/test claim reservation decisions, then implement and validate XLM claim settlement and supported payout lifecycle; preserve WP4 blocked until settlement and testnet evidence exists.",
       "cardIds": ["WP4"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo/dfx validation after eb379f9c when the shared slot is available; resolve provider independence and evidence freshness before live status calls, then complete deposit/claim settlement, testnet, frontend, oracle, and release work. Keep the XRP post-sign race separate, not an XLM gate.",
+      "nextAction": "Run focused Cargo validation after 9f8eb5a7 when the shared slot is available; resolve live provider independence and freshness, then complete endpoints, settlement, testnet, frontend, oracle, and release work. Keep the XRP post-sign race separate, not an XLM gate.",
       "cardIds": ["WP6"]
     },
     {
