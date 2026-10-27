@@ -438,18 +438,24 @@ pub fn transform_operations(args: TransformArgs) -> HttpResponse {
     let reduced_records = records.map(|rows| {
         rows.iter()
             .map(|op| {
-                json!({
-                    "paging_token": field(op, "paging_token"),
-                    "id": field(op, "id"),
-                    "transaction_hash": field(op, "transaction_hash"),
-                    "transaction_successful": field(op, "transaction_successful"),
-                    "type": field(op, "type"),
-                    "account": field(op, "account"),
-                    "starting_balance": field(op, "starting_balance"),
-                    "asset_type": field(op, "asset_type"),
-                    "to": field(op, "to"),
-                    "amount": field(op, "amount"),
-                })
+                let mut reduced = serde_json::Map::new();
+                for key in [
+                    "paging_token",
+                    "id",
+                    "transaction_hash",
+                    "transaction_successful",
+                    "type",
+                    "account",
+                    "starting_balance",
+                    "asset_type",
+                    "to",
+                    "amount",
+                ] {
+                    if let Some(value) = field(op, key) {
+                        reduced.insert(key.to_string(), value.clone());
+                    }
+                }
+                Value::Object(reduced)
             })
             .collect::<Vec<_>>()
     });
@@ -746,6 +752,44 @@ mod tests {
         assert!(body.contains("transaction_hash"));
         assert!(body.contains("2.0000000"));
         assert!(!body.contains("volatile"));
+    }
+
+    #[test]
+    fn operation_transform_preserves_id_only_and_paging_token_only_rows() {
+        let operation_id = (42_u64 << 32) + 1;
+        for identity_field in ["id", "paging_token"] {
+            let body = format!(
+                r#"{{"_embedded":{{"records":[{{"{identity_field}":"{operation_id}","transaction_hash":"H","transaction_successful":true,"type":"payment","asset_type":"native","to":"G","amount":"2.0000000"}}]}}}}"#
+            );
+            let transformed = transform_operations(args(200, body.as_bytes()));
+            assert!(
+                crate::chains::stellar::horizon_parse::parse_custody_deposits(
+                    &transformed.body,
+                    "H",
+                    42,
+                    "G",
+                    OPERATIONS_PAGE_LIMIT,
+                )
+                .is_ok(),
+                "transform should preserve a row with only {identity_field}"
+            );
+        }
+    }
+
+    #[test]
+    fn operation_transform_preserves_explicit_null_identity_for_parser_rejection() {
+        let body = br#"{"_embedded":{"records":[{"paging_token":null,"transaction_hash":"H","transaction_successful":true,"type":"payment","asset_type":"native","to":"G","amount":"2.0000000"}]}}"#;
+        let transformed = transform_operations(args(200, body));
+        assert!(
+            crate::chains::stellar::horizon_parse::parse_custody_deposits(
+                &transformed.body,
+                "H",
+                42,
+                "G",
+                OPERATIONS_PAGE_LIMIT,
+            )
+            .is_err()
+        );
     }
 
     #[test]
