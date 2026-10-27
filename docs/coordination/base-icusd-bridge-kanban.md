@@ -21,16 +21,23 @@ this list and the JSON. Selection rule: `base-icusd-bridge-operating-rules.md`, 
 
 | Rank | Item | Status | Cards | Blocker and what clears it | Next action |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `browser-round-trip`: Finish real-wallet browser acceptance | blocked | BB-27 | The Rabby wallet is locked and its unlock request timed out, so no Base account is connected yet. Cleared when Rob unlocks Rabby and approves the staging page's connection request. | After the unblock: connect the Base wallet, then test transaction consent and rejection in both directions, the synthetic browser round trip and reload recovery. The real Internet Identity sign-in is already proven. |
+| 1 | `browser-round-trip`: Finish real-wallet browser acceptance | blocked | BB-26, BB-27 | The Rabby wallet is locked and its unlock request timed out, so no Base account is connected yet. Cleared when Rob unlocks Rabby and approves the staging page's connection request. | After the unblock: connect the Base wallet, then test transaction consent and rejection in both directions, the synthetic browser round trip and reload recovery. The real Internet Identity sign-in is already proven. |
 | 2 | `priorities-and-handoff`: Keep priorities and test handoff current | done | BB-28 | - | None for this checkpoint. Ongoing upkeep follows the priority selection rule at each later checkpoint. |
 | 3 | `acceptance-handoff`: Close browser evidence and PR handoff | blocked | BB-14, BB-22, BB-27 | Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work. | Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge. |
-| 4 | `production-launch`: Production launch | paused | (broad scope) | Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test. | - |
-| 5 | `implementation-local-verification`: Implementation and local verification | done | BB-01, BB-10, BB-18, BB-19, BB-20, BB-22 | - | - |
-| 6 | `cli-public-test`: Public synthetic CLI round trip | done | BB-24, BB-25 | - | - |
+| 4 | `production-launch`: Production launch | paused | none | Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test. | - |
+| 5 | `implementation-local-verification`: Implementation and local verification | done | BB-R1, BB-R2, BB-R3, BB-R4, BB-01, BB-02, BB-03, BB-04, BB-05, BB-06, BB-07, BB-08, BB-09a, BB-09b, BB-10, BB-12, BB-13, BB-05b, BB-15, BB-16, BB-17, BB-18, BB-19, BB-20, BB-22 | - | - |
+| 6 | `cli-public-test`: Public synthetic CLI round trip | done | BB-11, BB-21, BB-23, BB-24, BB-25 | - | - |
 
 No item in this board is ready: item 1 waits on Rob unlocking the Base wallet and approving the
 staging connection, item 3 on item 1, and item 4 on a separate production authorization. That is
 the actual state, not a gap to fill with other work.
+
+Card membership: the Cards column (each item's `cardIds`) decides which cards Lookout badges with
+that item's rank. Links are set from each card's scope, files, dependencies and evidence, never its
+title alone (operating rules, "Priority selection", clause 7). 34 of the 35 cards are linked.
+BB-00 (baseline and inventory) stays unlinked because it serves every item. BB-22 and BB-27 each
+belong to two items: BB-22 finishes the implementation reviews and is review evidence for the PR
+handoff, and BB-27 is the browser test that item 3 also waits on.
 
 ## Proof levels
 
@@ -147,3 +154,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-26: priority list and selection rule added (BB-28; Rob's request relayed by Miles); BB-27 blocked on the locked Base wallet; this checkpoint is intentionally not published (Alden owns the priority cutover).
 - 2026-10-26: BB-28 done (ae72444b pushed and validated offline); no item is ready; still unpublished pending Alden's cutover.
 - 2026-10-26: Alden's priority cutover is complete (priority feature live, initial priority publication done; Miles' independent dry-run: board, presentation and priorities unchanged); priorities now follow the normal changed-event publication.
+- 2026-10-27: priority card membership reviewed for Lookout's card badges (Rob's request): only `cardIds` changed, linking 34 of 35 cards (11 before; BB-00 unlinked); ranking, statuses and board cards unchanged; not published until Alden confirms the badge feature is live.

@@ -7,6 +7,7 @@
       "blockedReason": "The Rabby wallet is locked and its unlock request timed out, so no Base account is connected yet. Cleared when Rob unlocks Rabby and approves the staging page's connection request.",
       "nextAction": "After the unblock: connect the Base wallet, then test transaction consent and rejection in both directions, the synthetic browser round trip and reload recovery. The real Internet Identity sign-in is already proven.",
       "cardIds": [
+        "BB-26",
         "BB-27"
       ]
     },
@@ -47,8 +48,27 @@
       "blockedReason": "",
       "nextAction": "",
       "cardIds": [
+        "BB-R1",
+        "BB-R2",
+        "BB-R3",
+        "BB-R4",
         "BB-01",
+        "BB-02",
+        "BB-03",
+        "BB-04",
+        "BB-05",
+        "BB-06",
+        "BB-07",
+        "BB-08",
+        "BB-09a",
+        "BB-09b",
         "BB-10",
+        "BB-12",
+        "BB-13",
+        "BB-05b",
+        "BB-15",
+        "BB-16",
+        "BB-17",
         "BB-18",
         "BB-19",
         "BB-20",
@@ -62,6 +82,9 @@
       "blockedReason": "",
       "nextAction": "",
       "cardIds": [
+        "BB-11",
+        "BB-21",
+        "BB-23",
         "BB-24",
         "BB-25"
       ]

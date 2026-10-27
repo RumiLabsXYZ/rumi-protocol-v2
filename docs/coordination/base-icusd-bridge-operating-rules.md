@@ -52,7 +52,8 @@ Scope and limits (unchanged by the approval):
 Event rule (owned by this worktree's coordinator under Rob's standing approval; no setup-owner or
 root approval needed): after each material change to the canonical board, update the short
 summary and any affected glossary entries in the presentation sidecar and, when affected, the
-priority list and the board's priority section; re-derive the projection (which also validates
+priority list (including card membership, "Priority selection", clause 7) and the board's priority
+section; re-derive the projection (which also validates
 the sidecar); run the offline priority validation ("Priority selection", clause 5); then run the
 same scoped publisher with `--dry-run`. If it reports a change to the board, presentation or
 priorities, publish with `--publish`, then confirm an immediate `--dry-run` reports the exact source as already published
@@ -97,7 +98,7 @@ Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirror
    aligned in the same checkpoint. Offline validation at each checkpoint: re-derive the card
    projection, then run a temporary validator kept outside the repository that calls the Lookout
    publisher's exported `validatePriorities` on the JSON against that projection, and confirm the
-   board's priority table lists the same items, order and status. No publisher run and no API call
+   board's priority table lists the same items, order, status and cards. No publisher run and no API call
    is part of this check; no repository helper code is added for it.
 6. Publication (priority cutover complete, 2026-10-26): Alden (the Lookout owner) made the
    priority feature live and completed the initial priority cutover and publication; the scoped
@@ -108,6 +109,20 @@ Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirror
    no-op readback. Exact backend identifiers, revisions and source hashes stay in the private
    publication record, never in this repository. Only the initial priority-publishing hold was
    released; every other hold is unchanged.
+7. Card membership (Lookout card badges, 2026-10-27): Lookout badges a card only from an item's
+   explicit `cardIds` and the item's array rank (the item title shows on hover), never by guessing
+   from titles or keywords. When a card is added or its scope changes, choose its item from the
+   card's actual scope, files, dependencies and evidence, never its title alone, and update
+   `cardIds` and the board table's Cards column in the same checkpoint. Link completed cards when
+   their item is clear; link a card to more than one item only when it belongs to each; leave
+   shared or ambiguous cards unlinked and record why in the handoff. Coverage is not a quota. A
+   membership change touches only `cardIds`: never alter an item's id, title, status, reason, next
+   action or rank to fit a link. Badge readiness hold: the first membership update (2026-10-27)
+   stays unpublished until Alden confirms the badge feature is live. Any publish would carry the
+   current priority list, so until then there is no publisher run (dry-run included) or Lookout
+   API call from this worktree (a board change meanwhile is recorded locally and reported to Miles), and no retry of
+   or route around any rejected upload. After Alden confirms, membership changes publish under the
+   event rule like any other priority change.
 
 ## Card ID mapping
 

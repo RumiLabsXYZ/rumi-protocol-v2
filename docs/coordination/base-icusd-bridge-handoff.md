@@ -407,6 +407,38 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   unlocking Rabby and approving the staging connection), and every bridge, wallet, production,
   signing and merge boundary. Only the initial priority-publishing hold was released.
 
+## Milestone 18 (2026-10-27): priority card membership for Lookout badges
+
+- Request: Rob asked for priority badges on Lookout cards (relayed by Alden; Miles read Rob's
+  message himself). A badge comes only from an item's explicit `cardIds` and its array rank, with
+  the item title on hover, never from keyword guessing.
+- Review: each card's scope, owned files, dependencies and evidence on the canonical board were
+  checked against the six items, together with Miles' proposed links. Only `cardIds` changed in
+  the priority JSON; every item's id, title, status, blocked reason, next action and rank is
+  unchanged, and every earlier link is kept.
+- Links: `browser-round-trip` BB-26 (the staging recipe browser acceptance runs from) and BB-27;
+  `priorities-and-handoff` BB-28; `acceptance-handoff` BB-14, BB-22, BB-27; `production-launch`
+  none; `implementation-local-verification` 25 cards (recon BB-R1 to BB-R4, design BB-01, code
+  BB-02 to BB-08, harness and local scenarios BB-09a and BB-09b, frontend BB-10, reviews BB-12 and
+  BB-13, fixes BB-05b, BB-15, BB-16, BB-17, follow-ups BB-18 to BB-20 and their focused reviews
+  BB-22); `cli-public-test` BB-11 (the Base Sepolia test runbook), BB-21 (read-only preflight),
+  BB-23 (deployment packet), BB-24 and BB-25 (execution).
+- Coverage: 11 of 35 distinct cards linked before, 34 of 35 after. Unlinked: BB-00 (baseline and
+  inventory), which owns the coordination docs and serves every item. Two cards are linked to two
+  items: BB-22 (it finishes the implementation reviews and is review evidence for the PR handoff)
+  and BB-27 (the browser test, which item 3 also waits on). BB-14 stays only under the PR handoff
+  because it is the PR card itself.
+- Rule: "Priority selection" clause 7 in the operating rules covers membership upkeep; clause 5's
+  offline check now also compares the board table's Cards column with the JSON.
+- Not published: Alden has not yet confirmed the badge feature is live and asked that this update
+  wait, so there was no publisher run or Lookout API call. Validation was entirely offline (the
+  publisher's exported `validatePriorities` against the re-derived projection, card references,
+  and table alignment through a temporary validator outside the repository). After Alden confirms,
+  normal same-manifest changed-event publication applies.
+- Unchanged: board cards, states, owners and proof levels (the derived projection is byte-identical);
+  no item is ready; BB-27 stays blocked until Rob unlocks Rabby and approves the staging connection;
+  every production, merge, signing and funds boundary.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
