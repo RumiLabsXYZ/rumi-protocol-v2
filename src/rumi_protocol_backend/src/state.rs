@@ -1925,6 +1925,55 @@ pub struct XlmDepositReceipt {
     pub confirmed_at_ns: u64,
 }
 
+/// Dormant native-XLM liability created when collateral leaves a vault. The
+/// claimant is separate from the custody owner because protocol payouts may go
+/// to someone other than the vault owner. This is not exposed through Candid
+/// until a complete settlement lifecycle is implemented.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XlmClaim {
+    pub vault_id: u64,
+    pub custody_owner: Principal,
+    /// Vault derivation nonce used with `custody_owner` to identify the account.
+    pub custody_nonce: u64,
+    pub claimant: Principal,
+    pub gross_stroops: u64,
+    /// Existing classic Stellar account selected as the payout destination.
+    pub destination: String,
+    /// Stellar network ID (SHA-256 of the network passphrase).
+    pub network_id: [u8; 32],
+    /// Fee budget reserved from the custody account for this claim.
+    pub reserved_fee_stroops: u64,
+    pub created_at_ns: u64,
+    pub status: XlmClaimStatus,
+    /// Durable pre-submit record. Retries must reconcile this exact transaction
+    /// before considering a replacement.
+    #[serde(default)]
+    pub settlement_intent: Option<XlmSettlementIntent>,
+}
+
+/// Persisted native-XLM claim lifecycle; no transitions are implemented yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum XlmClaimStatus {
+    Pending,
+    InFlight,
+    Settled,
+    Failed,
+    Quarantined,
+}
+
+/// Exact transaction material and bounds persisted before Stellar submission.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XlmSettlementIntent {
+    /// Canonical signed Stellar TransactionEnvelope XDR.
+    pub envelope_xdr: Vec<u8>,
+    /// Transaction hash computed for this envelope and network.
+    pub transaction_hash: [u8; 32],
+    /// Source account sequence used by the transaction.
+    pub sequence: i64,
+    pub min_time: u64,
+    pub max_time: u64,
+}
+
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
 /// no IC ledger, so this reserved principal is only an opaque key (15 bytes — not a
 /// valid 10-byte canister id, so it cannot collide with a real canister). The XRP
@@ -4663,6 +4712,13 @@ pub struct State {
     #[serde(default)]
     pub xlm_deposit_receipts: BTreeMap<(String, String), XlmDepositReceipt>,
 
+    /// Dormant native-XLM claims, keyed by a monotonic claim ID.
+    #[serde(default)]
+    pub xlm_claims: BTreeMap<u64, XlmClaim>,
+    /// Monotonic allocator for native-XLM claim IDs.
+    #[serde(default)]
+    pub next_xlm_claim_id: u64,
+
     /// P4: native-XRP collateral that has left a vault and is owed to a claimant
     /// (owner withdrawal, liquidation payout, or redemption payout), settled later
     /// via `settle_xrp_claim` (a threshold-signed XRPL Payment from the vault's
@@ -5023,6 +5079,8 @@ impl Default for State {
             xrp_pending_deposits: BTreeMap::new(),
             xlm_pending_deposits: BTreeMap::new(),
             xlm_deposit_receipts: BTreeMap::new(),
+            xlm_claims: BTreeMap::new(),
+            next_xlm_claim_id: 0,
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -5346,6 +5404,8 @@ impl From<InitArg> for State {
             xrp_pending_deposits: BTreeMap::new(),
             xlm_pending_deposits: BTreeMap::new(),
             xlm_deposit_receipts: BTreeMap::new(),
+            xlm_claims: BTreeMap::new(),
+            next_xlm_claim_id: 0,
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -14724,6 +14784,57 @@ mod tests {
             ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
         assert!(restored.xrp_claims.is_empty());
         assert_eq!(restored.next_xrp_claim_id, 0);
+    }
+
+    #[test]
+    fn xlm_claims_default_empty_on_old_snapshot_and_round_trip() {
+        let mut state = test_state();
+        let claim = XlmClaim {
+            vault_id: 17,
+            custody_owner: Principal::from_slice(&[0x11; 16]),
+            custody_nonce: 17,
+            claimant: Principal::from_slice(&[0x22; 16]),
+            gross_stroops: 12_345_678,
+            destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF".to_string(),
+            network_id: [0x33; 32],
+            reserved_fee_stroops: 100,
+            created_at_ns: 456,
+            status: XlmClaimStatus::InFlight,
+            settlement_intent: Some(XlmSettlementIntent {
+                envelope_xdr: vec![1, 2, 3, 4],
+                transaction_hash: [0x44; 32],
+                sequence: 91,
+                min_time: 500,
+                max_time: 600,
+            }),
+        };
+        state.xlm_claims.insert(8, claim.clone());
+        state.next_xlm_claim_id = 9;
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+        let restored: State = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(restored.xlm_claims.get(&8), Some(&claim));
+        assert_eq!(restored.next_xlm_claim_id, 9);
+
+        // A snapshot from before native-XLM claims had these fields decodes to
+        // empty claims and the initial monotonic allocator value.
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut entries) => {
+                entries.retain(|(key, _)| {
+                    !matches!(key, ciborium::Value::Text(name) if name == "xlm_claims" || name == "next_xlm_claim_id")
+                });
+                entries
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut old_snapshot = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut old_snapshot).unwrap();
+        let old: State = ciborium::de::from_reader(old_snapshot.as_slice())
+            .expect("pre-claim snapshot must decode");
+        assert!(old.xlm_claims.is_empty());
+        assert_eq!(old.next_xlm_claim_id, 0);
     }
 
     #[test]
