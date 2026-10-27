@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Pure deposit evidence now checks 2-of-3 receipt agreement, dissent, reserve freshness, first-funding attribution/replay, and claim reservations for CreateAccount or native Payment. Tests/compile remain unrun; no open/confirm endpoints, provider quorum, atomic mutation, or live credit. WP3/WP4 remain blocked.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Pure latest-ledger reserve logic requires two matching full observations, rejects sequence dissent, and conservatively carries higher prior reserves; four tests are unrun. This does not prove provider independence or live freshness. No endpoint integration, atomic mutation, or live credit. WP3/WP4/release remain blocked.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
