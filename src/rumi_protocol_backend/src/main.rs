@@ -9703,6 +9703,13 @@ fn stellar_transform_transaction(
 }
 
 #[query]
+fn stellar_transform_transaction_status(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::stellar::horizon_rpc::transform_transaction_status(args)
+}
+
+#[query]
 fn stellar_transform_operations(
     args: ic_cdk::api::management_canister::http_request::TransformArgs,
 ) -> ic_cdk::api::management_canister::http_request::HttpResponse {

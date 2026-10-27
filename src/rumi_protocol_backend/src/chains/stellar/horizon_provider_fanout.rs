@@ -25,6 +25,25 @@ pub struct ValidatedHorizonProvider {
     network: Network,
 }
 
+/// HTTP-status evidence for one transaction lookup. `NotFound` is explicitly
+/// separate from a found transaction and must never be interpreted as success.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransactionStatusHttpEvidence {
+    Http200(Vec<u8>),
+    Http404NotFound(Vec<u8>),
+}
+
+impl TransactionStatusHttpEvidence {
+    /// Return the HTTP code and normalized body expected by the pure status
+    /// classifier. The tuple preserves 404 as a not-found observation.
+    pub fn status_and_body(&self) -> (u16, &[u8]) {
+        match self {
+            Self::Http200(body) => (200, body),
+            Self::Http404NotFound(body) => (404, body),
+        }
+    }
+}
+
 impl ValidatedHorizonProvider {
     pub fn identity(&self) -> &str {
         &self.provider.identity
@@ -192,6 +211,32 @@ async fn read_request(request: CanisterHttpRequestArgument) -> Result<Vec<u8>, S
     Ok(response.body)
 }
 
+async fn read_transaction_status(
+    request: CanisterHttpRequestArgument,
+) -> Result<TransactionStatusHttpEvidence, String> {
+    let (response,) = http_request(request, super::horizon_reads::READ_CYCLES)
+        .await
+        .map_err(|(code, message)| {
+            format!("Horizon HTTPS outcall rejected ({code:?}): {message}")
+        })?;
+    classify_transaction_status_response(response.status, response.body)
+}
+
+fn classify_transaction_status_response(
+    status: candid::Nat,
+    body: Vec<u8>,
+) -> Result<TransactionStatusHttpEvidence, String> {
+    if status == candid::Nat::from(200u16) {
+        Ok(TransactionStatusHttpEvidence::Http200(body))
+    } else if status == candid::Nat::from(404u16) {
+        Ok(TransactionStatusHttpEvidence::Http404NotFound(body))
+    } else {
+        Err(format!(
+            "Horizon transaction status request returned unsupported status {status}"
+        ))
+    }
+}
+
 /// Read one latest-ledger reserve observation from each configured provider.
 /// The quorum result is an observed reserve, not proof of freshness. Callers
 /// must independently enforce their minimum sequence and maximum age policy.
@@ -262,6 +307,38 @@ pub async fn fetch_transaction_ledger_quorum(
     }
     horizon_quorum::transaction_ledger_quorum(observations)
         .map_err(|error| format!("Horizon transaction quorum failed: {error:?}"))
+}
+
+/// Fetch a transaction-status response from each independently configured
+/// provider after binding all three roots to `network`. A slot is `None` when
+/// its request/outcall/status is unavailable; only HTTP 200 and 404 enter as
+/// typed status evidence. This does not classify success or claim settlement.
+pub async fn fetch_transaction_status_evidence(
+    config: &HorizonProviderConfig,
+    network: Network,
+    transaction_hash: &str,
+) -> Result<[Option<TransactionStatusHttpEvidence>; 3], String> {
+    if transaction_hash.len() != 64
+        || !transaction_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("invalid Stellar transaction hash".to_string());
+    }
+    let providers = config
+        .validate_for_network(network)
+        .await
+        .map_err(|error| format!("invalid Horizon provider configuration: {error:?}"))?;
+    let mut observations = [None, None, None];
+    for (index, provider) in providers.iter().enumerate() {
+        let request = horizon_rpc::transaction_status_request_at(
+            &provider.provider.base_url,
+            transaction_hash,
+        )
+        .ok_or_else(|| "invalid configured Horizon transaction request".to_string())?;
+        observations[index] = read_transaction_status(request).await.ok();
+    }
+    Ok(observations)
 }
 
 /// Build an account request for the configured endpoint without changing the
@@ -407,6 +484,30 @@ mod tests {
     }
 
     #[test]
+    fn transaction_status_evidence_preserves_404_as_not_found() {
+        let found = TransactionStatusHttpEvidence::Http200(b"{}".to_vec());
+        assert_eq!(found.status_and_body(), (200, b"{}".as_slice()));
+        let not_found = TransactionStatusHttpEvidence::Http404NotFound(
+            br#"{"type":"https://stellar.org/horizon-errors/not_found","status":404}"#.to_vec(),
+        );
+        let (status, body) = not_found.status_and_body();
+        assert_eq!(status, 404);
+        assert!(String::from_utf8_lossy(body).contains("not_found"));
+        assert!(matches!(
+            classify_transaction_status_response(candid::Nat::from(200u16), b"{}".to_vec()),
+            Ok(TransactionStatusHttpEvidence::Http200(_))
+        ));
+        assert!(matches!(
+            classify_transaction_status_response(candid::Nat::from(404u16), b"{}".to_vec()),
+            Ok(TransactionStatusHttpEvidence::Http404NotFound(_))
+        ));
+        assert!(
+            classify_transaction_status_response(candid::Nat::from(500u16), b"{}".to_vec())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn provider_requests_use_configured_origin_and_fixed_paths() {
         let provider = HorizonProvider {
             identity: "provider".into(),
@@ -424,6 +525,9 @@ mod tests {
             transaction.url,
             format!("https://horizon.example/transactions/{hash}")
         );
+        let status = horizon_rpc::transaction_status_request_at(&provider.base_url, hash).unwrap();
+        assert_eq!(status.url, transaction.url);
+        assert!(status.transform.is_some());
         let latest = horizon_rpc::latest_ledger_reserve_request(&provider.base_url).unwrap();
         assert_eq!(
             latest.url,

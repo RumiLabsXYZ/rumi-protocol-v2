@@ -14,6 +14,7 @@ pub mod horizon_quorum;
 pub mod horizon_reads;
 pub mod horizon_rpc;
 pub mod ted25519;
+pub mod transaction_status;
 
 pub use address::{
     classic_address_from_ed25519_pubkey, ed25519_pubkey_from_classic_address,

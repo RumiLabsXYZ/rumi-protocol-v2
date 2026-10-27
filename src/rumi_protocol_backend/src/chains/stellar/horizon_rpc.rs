@@ -203,6 +203,34 @@ pub fn transaction_request(network: Network, hash: &str) -> Option<CanisterHttpR
     ))
 }
 
+/// Build the isolated status-read request. Its transform preserves the
+/// Horizon transaction fee on 200 and a reduced not_found problem on 404.
+pub fn transaction_status_request(
+    network: Network,
+    hash: &str,
+) -> Option<CanisterHttpRequestArgument> {
+    Some(request_at(
+        transaction_url(network, hash)?,
+        MAX_TRANSACTION_RESPONSE_BYTES,
+        "stellar_transform_transaction_status",
+    ))
+}
+
+/// Status request for a caller-configured Horizon origin.
+pub fn transaction_status_request_at(
+    base_url: &str,
+    hash: &str,
+) -> Option<CanisterHttpRequestArgument> {
+    if !is_https_origin(base_url) || !is_valid_transaction_hash(hash) {
+        return None;
+    }
+    Some(request_at(
+        format!("{}/transactions/{hash}", base_url.trim_end_matches('/')),
+        MAX_TRANSACTION_RESPONSE_BYTES,
+        "stellar_transform_transaction_status",
+    ))
+}
+
 fn is_valid_transaction_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -356,6 +384,51 @@ pub fn transform_transaction(args: TransformArgs) -> HttpResponse {
     reduced_response(candid::Nat::from(200u16), reduced.to_string().into_bytes())
 }
 
+/// Deterministically reduce a transaction response for status evidence while
+/// preserving the HTTP distinction between a found record and not_found.
+pub fn transform_transaction_status(args: TransformArgs) -> HttpResponse {
+    if args.response.status == candid::Nat::from(404u16) {
+        let value = serde_json::from_slice::<Value>(&args.response.body);
+        let reduced = value.ok().and_then(|value| {
+            let object = value.as_object()?;
+            let status = object.get("status")?.as_u64()?;
+            let problem_type = object.get("type")?.as_str()?;
+            (status == 404 && problem_type.ends_with("not_found") && problem_type.len() <= 256)
+                .then(|| json!({ "type": problem_type, "status": 404 }))
+        });
+        return reduced_response(
+            candid::Nat::from(404u16),
+            reduced
+                .unwrap_or_else(|| json!({ "parse_error": true }))
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    if args.response.status != candid::Nat::from(200u16) {
+        return reduced_response(args.response.status, b"{\"http_error\":true}".to_vec());
+    }
+    let value = match parse_body(&args) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Some(object) = value.as_object() else {
+        return reduced_response(
+            candid::Nat::from(200u16),
+            b"{\"parse_error\":true}".to_vec(),
+        );
+    };
+    let mut reduced = serde_json::Map::new();
+    for key in ["hash", "successful", "ledger", "fee_charged"] {
+        if let Some(value) = object.get(key) {
+            reduced.insert(key.to_string(), value.clone());
+        }
+    }
+    reduced_response(
+        candid::Nat::from(200u16),
+        Value::Object(reduced).to_string().into_bytes(),
+    )
+}
+
 pub fn transform_operations(args: TransformArgs) -> HttpResponse {
     let v = match parse_body(&args) {
         Ok(v) => v,
@@ -433,6 +506,65 @@ mod tests {
         assert_eq!(request.url, "https://horizon.example");
         assert_eq!(request.max_response_bytes, Some(MAX_ROOT_RESPONSE_BYTES));
         assert!(request.transform.is_some());
+    }
+
+    #[test]
+    fn transaction_status_request_is_bounded_and_validates_hash() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let request = transaction_status_request(Network::Test, hash).unwrap();
+        assert_eq!(
+            request.url,
+            format!("https://horizon-testnet.stellar.org/transactions/{hash}")
+        );
+        assert_eq!(
+            request.max_response_bytes,
+            Some(MAX_TRANSACTION_RESPONSE_BYTES)
+        );
+        assert!(request.transform.is_some());
+        assert!(transaction_status_request(Network::Public, "bad-hash").is_none());
+        assert_eq!(
+            transaction_status_request_at("https://configured.example", hash)
+                .unwrap()
+                .url,
+            format!("https://configured.example/transactions/{hash}")
+        );
+    }
+
+    #[test]
+    fn transaction_status_transform_preserves_fee_and_reduces_not_found_problem() {
+        let transformed = transform_transaction_status(args(
+            200,
+            br#"{"hash":"abc","successful":false,"ledger":42,"fee_charged":"100","volatile":"drop"}"#,
+        ));
+        let found: Value = serde_json::from_slice(&transformed.body).unwrap();
+        assert_eq!(found["fee_charged"], "100");
+        assert_eq!(found["successful"], false);
+        assert!(found.get("volatile").is_none());
+
+        let not_found = transform_transaction_status(args(
+            404,
+            br#"{"type":"https://stellar.org/horizon-errors/not_found","status":404,"title":"volatile detail","detail":"do not preserve"}"#,
+        ));
+        assert_eq!(not_found.status, candid::Nat::from(404u16));
+        let problem: Value = serde_json::from_slice(&not_found.body).unwrap();
+        assert_eq!(problem["status"], 404);
+        assert_eq!(
+            problem["type"],
+            "https://stellar.org/horizon-errors/not_found"
+        );
+        assert!(problem.get("detail").is_none());
+        assert!(problem.get("title").is_none());
+
+        let unrecognized = transform_transaction_status(args(404, br#"{"detail":"volatile"}"#));
+        assert_eq!(unrecognized.status, candid::Nat::from(404u16));
+        assert_eq!(unrecognized.body, br#"{"parse_error":true}"#);
+    }
+
+    #[test]
+    fn transaction_status_transform_keeps_non_evidence_statuses_rejected() {
+        let transformed = transform_transaction_status(args(503, br#"{"detail":"unstable"}"#));
+        assert_eq!(transformed.status, candid::Nat::from(503u16));
+        assert_eq!(transformed.body, br#"{"http_error":true}"#);
     }
 
     #[test]
