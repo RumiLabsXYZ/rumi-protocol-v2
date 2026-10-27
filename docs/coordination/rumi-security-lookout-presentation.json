@@ -1,0 +1,9 @@
+{
+  "summary": "The Stability Pool and Points source changes are merged, but merge alone does not settle user obligations or prove the current live state. Bram is checking production receipts and reconciling the audit findings. Release and public status updates will follow only after those facts are verified.",
+  "glossary": [
+    {"term": "Stability Pool", "definition": "The pool that absorbs certain liquidations and receives protocol interest.", "cardId": "SEC-01"},
+    {"term": "Wasm", "definition": "The compiled canister program installed on the Internet Computer. A merged source change may differ from the installed program.", "cardId": "SEC-01"},
+    {"term": "held epoch", "definition": "A points period paused for operator review before its rewards are finalized.", "cardId": "SEC-03"},
+    {"term": "archive", "definition": "An older ledger block range served from a ledger archive canister.", "cardId": "SEC-04"}
+  ]
+}

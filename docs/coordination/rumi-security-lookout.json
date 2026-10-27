@@ -1,0 +1,44 @@
+{
+  "cards": [
+    {
+      "id": "SEC-01",
+      "state": "In progress",
+      "owner": "Bram",
+      "scope": "Verify Stability Pool recovery and current rails",
+      "evidenceText": "PR #590 is merged. Current installed state, interest receipts, remaining holds, and source-to-Wasm binding still require a fresh review.",
+      "evidenceLinks": [{"title": "Stability Pool rails PR", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/590"}]
+    },
+    {
+      "id": "SEC-02",
+      "state": "In progress",
+      "owner": "Bram",
+      "scope": "Reconcile accepted security findings",
+      "evidenceText": "Compare the prior audits and later fixes with current main and live modules. Track source, deployment, and historical obligations separately.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "SEC-03",
+      "state": "Ready",
+      "owner": "Bram",
+      "scope": "Verify Points held-epoch resolution",
+      "evidenceText": "PR #583 is merged. Current installed module, operator decision, and reward receipts need a fresh check before recovery is called complete.",
+      "evidenceLinks": [{"title": "Points recovery PR", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/583"}]
+    },
+    {
+      "id": "SEC-04",
+      "state": "Review",
+      "owner": "Bram",
+      "scope": "Check 3pool payout and archive recovery",
+      "evidenceText": "Verify exact receipt proof and pending payout identities. Keep ambiguous outcomes held until positive evidence or a safe recovery route is shown.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "SEC-05",
+      "state": "Blocked",
+      "owner": "Bram",
+      "scope": "Refresh release and public security status",
+      "evidenceText": "Waiting for current live readback and finding closure evidence. Any public update must state verified production status without private exploit detail.",
+      "evidenceLinks": [{"title": "Public security status", "url": "https://rumiprotocol.com/security/october-2026"}]
+    }
+  ]
+}

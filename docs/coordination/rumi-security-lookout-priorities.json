@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "id": "sp-live-recovery",
+      "title": "Stability Pool live recovery",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Verify current installed state, interest receipts, and any remaining holds before changing release status.",
+      "cardIds": ["SEC-01"]
+    },
+    {
+      "id": "audit-closure",
+      "title": "Remaining security findings",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Update the finding matrix against current source and live evidence, preserving unresolved liabilities.",
+      "cardIds": ["SEC-02", "SEC-04"]
+    },
+    {
+      "id": "points-recovery",
+      "title": "Points held epoch",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Check installed Points source, held-epoch status, operator decision, and reward receipts.",
+      "cardIds": ["SEC-03"]
+    },
+    {
+      "id": "release-report",
+      "title": "Release and public status",
+      "status": "blocked",
+      "blockedReason": "Current live readback and accepted-finding closure evidence are not yet recorded in this board.",
+      "nextAction": "Once verified, update the release record and public page with the observed state.",
+      "cardIds": ["SEC-05"]
+    }
+  ]
+}
