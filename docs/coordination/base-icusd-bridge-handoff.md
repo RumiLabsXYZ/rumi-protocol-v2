@@ -390,8 +390,9 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Not published: Alden owns the initial priority cutover and publication and has not confirmed
   readiness, so this checkpoint (including its card changes) stays local until then.
 - Done: committed and pushed as `ae72444b`, validated offline with the publisher's own
-  `validatePriorities` (accepted unchanged; a negative control with an unknown card was rejected)
-  and with the derive script; item 2 and BB-28 are now done, so no item is ready.
+  `validatePriorities` through a temporary validator outside the repository (accepted unchanged; a
+  negative control with an unknown card was rejected); item 2 and BB-28 are now done, so no item is
+  ready. The derive script was left byte-identical to its pre-task version.
 
 ## Held live actions
 

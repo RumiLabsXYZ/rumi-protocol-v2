@@ -92,8 +92,11 @@ Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirror
 4. Never interrupt an irreversible action in progress, never assign a second owner to the same
    work, never override `paused` items or any hold, and never create a timer or monitor for this.
 5. Keep the priority JSON, the board's priority section and cards, the summary and the glossary
-   aligned in the same checkpoint; the derive script checks the JSON against the cards and the
-   board.
+   aligned in the same checkpoint. Offline validation at each checkpoint: re-derive the card
+   projection, then run a temporary validator kept outside the repository that calls the Lookout
+   publisher's exported `validatePriorities` on the JSON against that projection, and confirm the
+   board's priority table lists the same items, order and status. No publisher run and no API call
+   is part of this check; no repository helper code is added for it.
 6. Publication: priority metadata joins the existing sanitized publication flow only after Alden
    (the Lookout owner) completes the priority cutover and confirms readiness. Until then nothing is
    published for priorities; the 2026-10-26 checkpoint that introduced this rule was intentionally

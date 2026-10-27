@@ -15,8 +15,8 @@ definitions; update it with every material board change.
 ## Priorities (authoritative order)
 
 Ranked sub-projects for this board. `base-icusd-bridge-priorities.json` holds the same list (array
-order is the rank) and is the machine-readable source; this table must match it exactly, which the
-derive script checks. Miles (supervisor) decides ranking and execution; the coordinator maintains
+order is the rank) and is the machine-readable source; this table must match it exactly (checked
+offline at each checkpoint, see the operating rules). Miles (supervisor) decides ranking and execution; the coordinator maintains
 this list and the JSON. Selection rule: `base-icusd-bridge-operating-rules.md`, "Priority selection".
 
 | Rank | Item | Status | Cards | Blocker and what clears it | Next action |
@@ -100,7 +100,7 @@ run record, never on this board.
 | BB-25 Base Sepolia phase 2: Base side (packet steps F to J) | done | supervisor (Miles) | none (public executor) | BB-24 | CLI synthetic test: deposit Delivered; return burn finalized; release Released; readbacks match packet vectors; fresh audit coverage, supply bound, exact match true; zero pending; remaining Base tokens fully backed; bridge stopped | public-settled |
 | BB-26 Isolated test UI: staging recon and recipe | done | coordinator (Opus 5.5 / Opus 5.5) + worker W8 (Sonnet / Sonnet) + worker W9 (Haiku / Haiku) | read-only source; tracked recipe doc | BB-25 | Recipe written from read-only source checks: ids alone do not isolate the app, so a throwaway copy gets a bridge-only shell, test-only ids, no polling, no production II origin and a request guard. Not compiled or run | source |
 | BB-27 Isolated test UI: browser acceptance | blocked (Rabby locked; Rob to unlock and approve) | supervisor (Miles), with Rob for real-wallet gestures | none (live and browser execution) | BB-26 | Real II sign-in proven (staging-auth). Blocked: Rabby is locked and its unlock timed out, so no Base account is connected; Rob must unlock it and approve the staging connection. No transfer, seed or funding sent; bridge stopped | staging-auth |
-| BB-28 Priorities and supervisor operating rules | done | coordinator (Opus 5.5 / Opus 5.5) | docs/coordination priorities, board, rules, handoff | BB-27 | Priority list, board priority section and selection rule committed and pushed (ae72444b); validated offline with the publisher's own priority validator and the derive script; not published (Alden owns the priority cutover) | source |
+| BB-28 Priorities and supervisor operating rules | done | coordinator (Opus 5.5 / Opus 5.5) | docs/coordination priorities, board, rules, handoff | BB-27 | Priority list, board priority section and selection rule pushed (ae72444b); validated offline with the publisher's own validator run from outside the repo; not published (Alden owns the priority cutover) | source |
 
 ## Regression evidence (backend untouched)
 
