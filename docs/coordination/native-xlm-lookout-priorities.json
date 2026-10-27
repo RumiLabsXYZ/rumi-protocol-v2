@@ -13,7 +13,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo tests/build after 62550164 when the shared slot is available; verify provider-fanout code and its focused tests, then resolve independent provider configuration before wiring.",
+      "nextAction": "Run focused Cargo tests/build after 5964c17c when the shared slot is available; verify provider fanout and signed bounds, then resolve XLM key/network/provider binding and oracle/reserve freshness.",
       "cardIds": ["WP1"]
     },
     {
@@ -21,7 +21,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Cargo-verify the account-to-exact-ledger reserve binding and new transaction/deposit-receipt matching helpers; keep pending claim/intent and receipt state dormant until a complete live deposit/credit flow is implemented.",
+      "nextAction": "Cargo-verify the emergency freeze/pause, canonical operation IDs, signed amount/ledger bounds, and credit helpers; keep receipt/tombstone state dormant until integrated into a complete deposit-credit flow.",
       "cardIds": ["WP2"]
     },
     {
@@ -29,7 +29,7 @@
       "title": "Verified deposits and borrowing",
       "status": "blocked",
       "blockedReason": "No XLM deposit/borrow endpoint or live credit lifecycle exists. New fallback routes fail closed at source level, but Cargo tests/build have not rerun after commit 3e12fba5; claim/intent state remains dormant.",
-      "nextAction": "Continue the second read-only design review; after Cargo verifies the latest guards and provider fanout, implement and validate the XLM-specific deposit/borrow lifecycle with reserve-aware checked accounting and replay protection.",
+      "nextAction": "Implement provider/key/network binding and deposit credit/receipt/tombstone lifecycle after the source-only helpers and guards are validated; preserve WP3 blocked until end-to-end evidence exists.",
       "cardIds": ["WP3"]
     },
     {
@@ -37,7 +37,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Continue the second read-only design review; Cargo-verify the latest fail-closed route/status/frontend guards, then implement and validate the supported XLM-specific payout/claim lifecycle before clearing WP4.",
+      "nextAction": "Implement and validate XLM claim settlement and supported payout lifecycle; preserve WP4 blocked until settlement and testnet evidence exists.",
       "cardIds": ["WP4"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Re-run focused tests/build after 62550164 when the shared slot is available; verify provider fanout and fail-closed route/status/frontend guards before backend integration, real outcalls, or testnet work.",
+      "nextAction": "Run focused validation after 5964c17c when the shared slot is available; then complete testnet, frontend integration, reserve/oracle checks, and release review. Keep the XRP post-sign status race as a separate reuse caution, not an XLM gate.",
       "cardIds": ["WP6"]
     },
     {
@@ -61,7 +61,7 @@
       "title": "Release, configuration, and activation evidence",
       "status": "blocked",
       "blockedReason": "The implementation and required review, CI, artifact, audit, operational, and current network evidence are not complete; XRC XLM/USD live quorum is unproven.",
-      "nextAction": "Continue read-only release-prerequisite coordination; keep registration frozen while implementation and the pre-deploy evidence packet are completed.",
+      "nextAction": "Complete key/network/provider binding, current reserve/oracle checks, claim settlement, testnet, frontend, and release prerequisites while registration remains frozen.",
       "cardIds": ["WP7"]
     }
   ]

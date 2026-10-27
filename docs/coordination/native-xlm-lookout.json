@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Mara",
       "scope": "Complete the XLM parity and threat model",
-      "evidenceText": "Design decision: use one Stellar account per vault, funded and activated by the user's wallet through CreateAccount. Connected-wallet support remains to verify. XRC source can represent XLM/USD; its generic defaults include received-rate floor 3 and freshness up to 120 seconds, but live XLM source quorum and quote are unverified. The read-only IC connector refused the backend because its service-discoverability manifest is missing; the direct XRC sample is a paid update and was not called. Direct endpoint probes could not run under the local DNS sandbox. Mara Junior's first read-only Sonnet/Haiku audit is complete; a second design review is underway. Do not infer research completion, oracle readiness, or activation. A 2-of-3 independent provider-result quorum is the Horizon target; provider selection remains unresolved and source helpers have no provider wiring. SDF public Horizon, Tatum authenticated Horizon, and Blockdaemon authenticated Horizon are research candidates; Ankr is a fourth candidate. None is validated or provisioned. Separately, a read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. Those differ from the XRP source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present constructor values as current live parity. XRP evidence only; no XLM registration, deployment, or live config is proved.",
+      "evidenceText": "Design decision: use one Stellar account per vault, funded and activated by the user's wallet through CreateAccount. Connected-wallet support remains to verify. XRC source can represent XLM/USD; its generic defaults include received-rate floor 3 and freshness up to 120 seconds, but live XLM source quorum and quote are unverified. The read-only IC connector refused the backend because its service-discoverability manifest is missing; the direct XRC sample is a paid update and was not called. Direct endpoint probes could not run under the local DNS sandbox. Mara Junior's first read-only audit and second Sonnet/Haiku design review are complete; open design, implementation, and release work remains. A 2-of-3 independent provider-result quorum is the Horizon target; provider selection remains unresolved and source helpers have no provider wiring. SDF public Horizon, Tatum authenticated Horizon, and Blockdaemon authenticated Horizon are research candidates; Ankr is a fourth candidate. None is validated or provisioned. Separately, a read-only mainnet XRP config check on 2026-10-27 returned Active, a $30,000 debt ceiling (3,000,000,000,000 e8s), and an explicit Linear rate curve. Decoded live values are a 128% borrow threshold, 117% liquidation ratio, 7.5% liquidation bonus, 0.2% borrowing fee, 1.5% base APR, and 132.266666666666666624% recovery target. Those differ from the XRP source constructor's $2,500 ceiling and 150%/133%/12% parameters; do not present constructor values as current live parity. XRP evidence only; no XLM registration, deployment, or live config is proved.",
       "evidenceLinks": []
     },
     {
@@ -13,7 +13,7 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "Commit 567fb435 adds source-only provider fanout and focused tests, but those tests have not run. Commit 62550164 adds fail-closed route/status/frontend guards; they are uncompiled and unrun. Earlier pure account/reserve, transaction-ledger, and exact deposit-receipt matching helpers also remain without independent provider configuration/wiring or live calls. Direct provider endpoint probes could not run under local DNS sandbox; candidates remain unvalidated. The last focused `chains::stellar` Cargo suite passed 34/34 and deposit-state migration test passed 1/1 before these changes. No actual Horizon outcall or live deposit credit exists. Pending claim/intent records are dormant state only, not a lifecycle. No vault/deposit/claim lifecycle, XLM registration, deployment, or collateral admission is proved.",
+      "evidenceText": "Commit 567fb435 adds source-only provider fanout and focused tests, still unrun. Commit b5f1a236 adds an emergency freeze/pause; 108e6f96 adds canonical operation IDs; 5964c17c adds signed amount/ledger bounds and tests. These additions remain uncompiled/unrun. Commit 62550164 added fail-closed route/status/frontend guards, also uncompiled/unrun. The pure 2-of-3 matching helpers remain without independent provider configuration or live calls. Direct provider endpoint probes could not run under local DNS sandbox; candidates remain unvalidated. Earlier focused `chains::stellar` Cargo tests passed 34/34 before these changes. No actual Horizon outcall or live deposit credit exists; pending claims/receipts remain dormant state, not a live lifecycle. No XLM registration, deployment, or collateral admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -21,7 +21,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Add stable state and an XLM launch guard",
-      "evidenceText": "A source scaffold adds a Frozen NativeXlm config constructor that clones risk/curve fields from a supplied current XRP config, sets XLM to 7 decimals and a 1 XLM minimum, and clears observations. State config tests passed 2/2 and legacy custody decode passed 1/1 before the latest route/reserve-binding changes. Generic update_collateral_config rejects both the canonical XLM key and NativeXlm. Persistent serde-defaulted XlmPendingDeposit state and permanent receipt data exist; prior CBOR round-trip/old-snapshot default test passed 1/1. Commit 445ebec4 adds pure 2-of-3 transaction-ledger matching and exact deposit-receipt helpers, but neither is wired into live processing or Cargo-tested. Claim/intent records remain dormant: they do not drive a live flow, create credit, or prove provider quorum. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
+      "evidenceText": "A source scaffold adds a Frozen NativeXlm config constructor and generic update_collateral_config rejects the canonical XLM key and NativeXlm. Persistent pending-deposit and receipt state plus pure quorum/matching helpers exist in source, but are not wired into live processing or Cargo-verified. Commits b5f1a236 and 108e6f96 add an emergency freeze/pause and canonical operation IDs; 5964c17c adds signed amount/ledger bounds and tests, unrun. Claim/intent/receipt state remains dormant and creates no live credit. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
       "evidenceLinks": []
     },
     {
@@ -29,7 +29,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Earlier source changes added fail-closed guards to generic ICRC entrypoints and unsupported borrow/full-liquidation/repay-close/push-sweep fallbacks. Commit 62550164 adds further source-only fail-closed route/status/frontend guards; these changes are uncompiled and unrun. Mara Junior's first read-only deposit-proof audit is complete, but a second design review remains underway. WP3 remains blocked because no XLM deposit/borrow endpoint or live credit lifecycle exists; claim/intent records remain dormant, and Frozen config and generic update denial keep XLM unreachable. No XLM admission is proved.",
+      "evidenceText": "Source-only guards now fail closed on unsupported generic and native-XLM fallback paths. Commits b5f1a236 and 108e6f96 add emergency freeze/pause and canonical operation IDs; 5964c17c adds signed amount/ledger bounds and tests, all still uncompiled/unrun. A pure credit helper is under active source work but is not a live deposit flow. WP3 remains blocked: there is no XLM deposit/borrow endpoint or live credit/receipt/tombstone lifecycle. Key/network/provider binding, reserve freshness/oracle verification, and testnet/frontend integration remain open. No XLM admission is proved.",
       "evidenceLinks": []
     },
     {
@@ -37,7 +37,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement XLM claims, exits, and liquidation handling",
-      "evidenceText": "Commits 6da8cd46 and 3e12fba5 add source-level fail-closed handling for unsupported XLM withdrawal, close, full-liquidation, repay-close, and push-sweep fallback routes. Commit 62550164 adds further source-only fail-closed route/status/frontend guards; uncompiled and unrun. Mara Junior's first read-only XRP claim-reuse audit is complete, with second design review underway. Claim/intent state remains dormant only. WP4 remains blocked because no supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Frozen config and generic update denial prevent XLM admission now.",
+      "evidenceText": "Commits 6da8cd46, 3e12fba5, and 62550164 added source-level fail-closed payout and route/status/frontend guards. Commits b5f1a236 and 108e6f96 add emergency freeze/pause and canonical operation IDs; 5964c17c adds signed bounds/tests, all uncompiled/unrun. Claim settlement and payout remain unsupported, so WP4 stays blocked. A live XRP post-sign status race is a separate claim-reuse caution, not an XLM-specific required gate. Key/network/provider binding, current reserve/oracle checks, and testnet/release work remain open. Frozen config prevents XLM admission.",
       "evidenceLinks": []
     },
     {
@@ -45,7 +45,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Integrate Candid, user flows, and operator monitoring",
-      "evidenceText": "Candid regeneration passed with `RUMI_REGEN_DID=1 cargo +1.92.0 test --locked -p rumi_protocol_backend --bin rumi_protocol_backend check_candid_interface_compatibility -- --exact --nocapture`; `scripts/regenerate-declarations.sh rumi_protocol_backend` ran, and the non-regeneration compatibility test passed. No XLM vault, deposit, withdrawal, or claim endpoints or user flows are present. Keep interface and lifecycle work in progress.",
+      "evidenceText": "Earlier Candid regeneration and compatibility checks passed. The latest source adds fail-closed frontend/status handling, but it remains uncompiled/unrun; complete XLM frontend integration and lifecycle flows remain open. No supported XLM vault, deposit, withdrawal, or claim user flow is available.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "The plan status paragraph was clarified in commit 70bae78b: focused `chains::stellar` Cargo tests passed 34/34 at an earlier source state. Commits 567fb435 (provider fanout and tests) and 62550164 (route/status/frontend fail-closed guards) are source-only and uncompiled/unrun; do not treat the earlier test result as validating them. Existing quorum/matching helpers remain unwired, with no independent provider config or live calls. The deterministic `last_modified_ledger` transform is historical reserve evidence only. Direct endpoint probes were blocked by local DNS sandbox; candidates remain unvalidated and there is no live credit. Mara Junior's first read-only audit is complete and second design review is underway. WP3/WP4 remain blocked; no registration, deployment, or collateral admission is proved.",
+      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34, before recent commits. Commits 567fb435, b5f1a236, 108e6f96, and 5964c17c add provider fanout/tests, emergency freeze/pause, canonical operation IDs, and signed amount/ledger bounds/tests; none has been compiled or run. The pure credit source helper and Stability Pool retry guard are being developed by source agents; neither is verified. Major open work: XLM key/network/provider binding; deposit credit, receipt, and tombstone wiring; current reserve freshness/oracle; claim settlement; testnet, frontend, and release. Mara Junior's first read-only audit and second design review are complete; this is not full research completion. The live XRP post-sign status race is a separate reuse caution, not a required XLM gate. WP3/WP4 remain blocked; no admission or deployment is proved.",
       "evidenceLinks": []
     },
     {
@@ -61,7 +61,7 @@
       "state": "Blocked",
       "owner": "Rumi release owner",
       "scope": "Prepare deployment, configuration, and activation evidence",
-      "evidenceText": "Mara Junior's first read-only release-prerequisite Sonnet/Haiku audit is complete; a second design review is underway. Release remains blocked until implementation, exact-head review and CI, artifact verification, audit disposition, rollback and monitoring plans, and current Stellar oracle quorum, reserve, fee, provider, and key checks are evidenced. XRC XLM/USD live quorum is unproven. Deployment and activation remain separate proof points from signing, broadcasting, and moving funds.",
+      "evidenceText": "Mara Junior's first read-only audit and second Sonnet/Haiku design review are complete, while broader release work remains open. Outstanding items include XLM key/network/provider binding, current reserve freshness and oracle validation, testnet/frontend integration, claim settlement, exact-head validation, artifact review, and rollback/monitoring. Release is blocked. The live XRP post-sign status race remains a separate XRP reuse caution, not a required XLM gate. No deployment or activation is proved.",
       "evidenceLinks": []
     }
   ]

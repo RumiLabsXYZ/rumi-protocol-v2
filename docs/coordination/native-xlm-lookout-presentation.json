@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Earlier 34/34 Stellar tests predate provider fanout and route/status/frontend guards, which remain uncompiled and unrun. WP3/WP4 remain blocked with no live credit or supported payout lifecycle. Mara Junior's first read-only Sonnet/Haiku audit is complete; second design review is underway. Provider config and live calls remain absent.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Provider fanout, freeze/pause, operation-ID, signed-bound, and route/status/frontend changes are source-only and uncompiled/unrun. WP3/WP4 remain blocked; deposit credit/receipt/tombstone and claim settlement are absent. Key/network/provider binding, reserve freshness/oracle, testnet/frontend/release remain open. Mara Junior's first audit and second design review are complete; wider research continues.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
