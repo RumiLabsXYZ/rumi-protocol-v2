@@ -1771,12 +1771,11 @@ pub struct CollateralConfig {
     #[serde(default)]
     pub min_xrc_sources: Option<u32>,
     /// How this collateral is custodied. `None`/absent (every legacy collateral)
-    /// resolves to `IcrcLedger` via `custody()`. `Some(NativeXrp)` routes the
-    /// deposit/withdraw/liquidation custody touchpoints through `chains::xrp`
-    /// (threshold-Ed25519 XRPL addresses) instead of ICRC transfers; for such a
-    /// config `ledger_canister_id` is only a synthetic map key (no IC ledger
-    /// exists). New in P2 — `#[serde(default)]` lets an old ciborium snapshot
-    /// decode cleanly to `None` (State is ciborium/serde-encoded — see storage.rs).
+    /// resolves to `IcrcLedger` via `custody()`. `NativeXrp` routes through the
+    /// XRPL threshold-Ed25519 rail. `NativeXlm` reserves Stellar custody identity
+    /// for a frozen scaffold; no XLM custody operations are enabled here. For
+    /// either native kind, `ledger_canister_id` is only a synthetic map key.
+    /// `#[serde(default)]` lets old ciborium snapshots decode to `None`.
     #[serde(default)]
     pub custody_kind: Option<CustodyKind>,
     /// Human-readable token symbol (e.g. "ICP", "ckXAUT"). Used to name the
@@ -1793,12 +1792,14 @@ pub struct CollateralConfig {
 }
 
 /// How a collateral's underlying asset is custodied. `IcrcLedger` (the legacy /
-/// absent default) is held on an IC ICRC ledger; `NativeXrp` is held on the XRP
-/// Ledger via threshold Ed25519 (`chains::xrp`). See `CollateralConfig::custody_kind`.
+/// absent default) is held on an IC ICRC ledger; `NativeXrp` and `NativeXlm` are
+/// held on their respective external ledgers via threshold Ed25519. See
+/// `CollateralConfig::custody_kind`.
 #[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum CustodyKind {
     IcrcLedger,
     NativeXrp,
+    NativeXlm,
 }
 
 /// P3: a native-XRP vault awaiting its on-chain deposit. Created by
@@ -1830,6 +1831,12 @@ pub struct XrpPendingDeposit {
 /// `NativeXrp` and its `ledger_canister_id` is this same synthetic value.
 pub fn xrp_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xrp-native")
+}
+
+/// Synthetic `collateral_type` / `CollateralConfig` map key for native XLM. This is an
+/// opaque principal only; Stellar has no IC ledger canister. Keep it distinct from XRP.
+pub fn xlm_collateral_principal() -> Principal {
+    Principal::from_slice(b"rumi-xlm-native")
 }
 
 /// P5: the `CollateralConfig` for native-XRP collateral. Parameters (Rob's):
@@ -1885,6 +1892,53 @@ pub fn xrp_collateral_config(
         custody_kind: Some(CustodyKind::NativeXrp),
         symbol: Some("XRP".to_string()),
     }
+}
+
+/// Builds a frozen native-XLM scaffold from a freshly supplied native-XRP config.
+/// Cloning the supplied config keeps XLM's risk and curve parameters aligned with
+/// XRP's current configured values rather than this source constructor's historical
+/// defaults. Only chain-specific identity/units and fields that must not carry over
+/// cached XRP observations are replaced. This does not register or activate XLM.
+pub fn xlm_collateral_config(
+    xrp_live_config: &CollateralConfig,
+) -> Result<CollateralConfig, &'static str> {
+    if !xrp_live_config.is_native_xrp() {
+        return Err("XLM scaffold requires a NativeXrp source config");
+    }
+    if xrp_live_config.ledger_canister_id != xrp_collateral_principal()
+        || xrp_live_config.decimals != 6
+    {
+        return Err("XLM scaffold requires the native-XRP synthetic collateral config");
+    }
+    match &xrp_live_config.price_source {
+        PriceSource::Xrc {
+            base_asset,
+            quote_asset,
+            ..
+        } if base_asset == "XRP" && quote_asset == "USD" => {}
+        _ => return Err("XLM scaffold requires an XRP/USD XRC source config"),
+    }
+
+    let mut config = xrp_live_config.clone();
+    config.ledger_canister_id = xlm_collateral_principal();
+    config.decimals = 7;
+    config.price_source = PriceSource::Xrc {
+        base_asset: "XLM".to_string(),
+        base_asset_class: XrcAssetClass::Cryptocurrency,
+        quote_asset: "USD".to_string(),
+        quote_asset_class: XrcAssetClass::FiatCurrency,
+    };
+    config.status = CollateralStatus::Frozen;
+    config.last_price = None;
+    config.last_price_timestamp = None;
+    config.current_base_rate = Ratio::new(dec!(0));
+    config.last_redemption_time = 0;
+    config.min_collateral_deposit = 10_000_000; // 1 XLM (stroops), net of reserve/fee budget.
+    config.ledger_fee = 0; // XLM network fees are accounted per claim, not as an ICRC fee.
+    config.custody_kind = Some(CustodyKind::NativeXlm);
+    config.symbol = Some("XLM".to_string());
+    config.display_color = Some("#08B5E5".to_string());
+    Ok(config)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2038,6 +2092,15 @@ impl CollateralConfig {
     /// ICRC deposit/withdraw/liquidation transfer paths do NOT apply to it.
     pub fn is_native_xrp(&self) -> bool {
         self.custody() == CustodyKind::NativeXrp
+    }
+
+    /// True for collateral held outside an IC ICRC ledger, which must not enter
+    /// generic ledger transfer or redemption paths.
+    pub fn is_native_external(&self) -> bool {
+        matches!(
+            self.custody(),
+            CustodyKind::NativeXrp | CustodyKind::NativeXlm
+        )
     }
 }
 
@@ -5960,7 +6023,7 @@ impl State {
             VaultCollateralPullRequest::OpenVault { collateral_type, amount_e8s } => {
                 let config = self.get_collateral_config(collateral_type).ok_or("collateral is not configured")?;
                 if config.ledger_canister_id != ledger { return Err("collateral ledger changed during pull preflight".into()); }
-                if config.is_native_xrp() || !config.status.allows_open() {
+                if config.is_native_external() || !config.status.allows_open() {
                     return Err("collateral no longer accepts ICRC-2 vault opens".into());
                 }
                 if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
@@ -5968,7 +6031,7 @@ impl State {
             VaultCollateralPullRequest::OpenVaultAndBorrow { collateral_type, amount_e8s, .. } => {
                 let config = self.get_collateral_config(collateral_type).ok_or("collateral is not configured")?;
                 if config.ledger_canister_id != ledger { return Err("collateral ledger changed during pull preflight".into()); }
-                if self.mode == Mode::ReadOnly || config.is_native_xrp() || !config.status.allows_open() || !config.status.allows_borrow() {
+                if self.mode == Mode::ReadOnly || config.is_native_external() || !config.status.allows_open() || !config.status.allows_borrow() {
                     return Err("collateral or protocol mode no longer accepts vault opens and borrows".into());
                 }
                 if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
@@ -5978,7 +6041,7 @@ impl State {
                 if vault.owner != owner { return Err("caller no longer owns the target vault".into()); }
                 let config = self.get_collateral_config(&vault.collateral_type).ok_or("vault collateral is not configured")?;
                 if config.ledger_canister_id != ledger { return Err("vault collateral ledger changed during pull preflight".into()); }
-                if config.is_native_xrp() || !config.status.allows_add_collateral() {
+                if config.is_native_external() || !config.status.allows_add_collateral() {
                     return Err("collateral no longer accepts ICRC-2 margin additions".into());
                 }
                 if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
@@ -6531,7 +6594,7 @@ impl State {
             let Some(config) = self.get_collateral_config(&ct) else {
                 continue;
             };
-            if !config.status.allows_redemption() || config.is_native_xrp() {
+            if !config.status.allows_redemption() || config.is_native_external() {
                 continue;
             }
             let Some(price) = config.last_price.filter(|p| p.is_finite() && *p > 0.0) else {
@@ -7831,16 +7894,15 @@ impl State {
 
     /// Whether the liquidation bot may be offered vaults of this collateral
     /// type. Requires the operator allowlist AND a custody kind the bot can
-    /// actually settle: native-XRP collateral is claim-based (XRPL side), so
-    /// the bot is refused regardless of `bot_allowed_collateral_types` and the
-    /// cascade falls through to the stability pool's native-XRP absorb path.
+    /// actually settle: external-native collateral is not an ICRC payout, so
+    /// the bot is refused regardless of `bot_allowed_collateral_types`.
     pub fn vault_routable_to_bot(&self, collateral_type: &Principal) -> bool {
         if !self.bot_allowed_collateral_types.contains(collateral_type) {
             return false;
         }
         !self
             .get_collateral_config(collateral_type)
-            .map(|c| c.is_native_xrp())
+            .map(|c| c.is_native_external())
             .unwrap_or(false)
     }
 
@@ -9051,7 +9113,7 @@ impl State {
             }
             if self
                 .get_collateral_config(&resolved_ct)
-                .map(|config| !config.status.allows_redemption() || config.is_native_xrp())
+                .map(|config| !config.status.allows_redemption() || config.is_native_external())
                 .unwrap_or(true)
             {
                 continue;
@@ -9206,7 +9268,7 @@ impl State {
                 decimals: 0,
             };
         };
-        if !config.status.allows_redemption() || config.is_native_xrp() {
+        if !config.status.allows_redemption() || config.is_native_external() {
             return RedemptionSimulationPlan {
                 vaults: Vec::new(),
                 price: collateral_price.0,
@@ -13006,6 +13068,29 @@ mod tests {
         cfg.custody_kind = Some(CustodyKind::NativeXrp);
         assert_eq!(cfg.custody(), CustodyKind::NativeXrp);
         assert!(cfg.is_native_xrp());
+        assert!(cfg.is_native_external());
+        cfg.custody_kind = Some(CustodyKind::NativeXlm);
+        assert!(!cfg.is_native_xrp());
+        assert!(cfg.is_native_external());
+    }
+
+    #[test]
+    fn old_custody_kind_encoding_still_decodes() {
+        #[derive(Serialize)]
+        enum LegacyCustodyKind {
+            IcrcLedger,
+            NativeXrp,
+        }
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&LegacyCustodyKind::NativeXrp, &mut bytes).unwrap();
+        let restored: CustodyKind = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored, CustodyKind::NativeXrp);
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&LegacyCustodyKind::IcrcLedger, &mut bytes).unwrap();
+        let restored: CustodyKind = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored, CustodyKind::IcrcLedger);
     }
 
     #[test]
@@ -13103,6 +13188,90 @@ mod tests {
             }
             other => panic!("expected XRC price source, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn xlm_scaffold_copies_supplied_xrp_risk_and_curve_parameters_but_stays_frozen() {
+        let mut source = xrp_collateral_config(
+            Ratio::new(dec!(0.002)),
+            Ratio::new(dec!(0.015)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        // Represent current configured values rather than the historical source defaults.
+        source.borrow_threshold_ratio = Ratio::new(dec!(1.28));
+        source.liquidation_ratio = Ratio::new(dec!(1.17));
+        source.liquidation_bonus = Ratio::new(dec!(1.075));
+        source.recovery_target_cr = Ratio::new(dec!(1.322666666666666666));
+        source.debt_ceiling = 3_000_000_000_000;
+        source.ledger_fee = 12;
+        source.rate_curve = Some(RateCurve {
+            markers: vec![RateMarker {
+                cr_level: Ratio::new(dec!(1.28)),
+                multiplier: Ratio::new(dec!(1.1)),
+            }],
+            method: InterpolationMethod::Linear,
+        });
+        source.last_price = Some(0.5);
+        source.last_price_timestamp = Some(123);
+
+        let config = xlm_collateral_config(&source).unwrap();
+        assert_eq!(config.ledger_canister_id, xlm_collateral_principal());
+        assert_eq!(xlm_collateral_principal().as_slice().len(), 15);
+        assert_ne!(config.ledger_canister_id, xrp_collateral_principal());
+        assert_eq!(config.decimals, 7);
+        assert_eq!(config.custody_kind, Some(CustodyKind::NativeXlm));
+        assert!(config.is_native_external());
+        assert!(!config.is_native_xrp());
+        assert_eq!(config.status, CollateralStatus::Frozen);
+        assert_eq!(config.min_collateral_deposit, 10_000_000);
+        assert_eq!(config.ledger_fee, 0);
+        assert_eq!(config.symbol.as_deref(), Some("XLM"));
+        assert_eq!(config.last_price, None);
+        assert_eq!(config.last_price_timestamp, None);
+
+        assert_eq!(config.borrow_threshold_ratio, source.borrow_threshold_ratio);
+        assert_eq!(config.liquidation_ratio, source.liquidation_ratio);
+        assert_eq!(config.liquidation_bonus, source.liquidation_bonus);
+        assert_eq!(config.recovery_target_cr, source.recovery_target_cr);
+        assert_eq!(config.debt_ceiling, source.debt_ceiling);
+        assert_eq!(config.min_vault_debt, source.min_vault_debt);
+        assert_eq!(config.borrowing_fee, source.borrowing_fee);
+        assert_eq!(config.interest_rate_apr, source.interest_rate_apr);
+        assert_eq!(config.recovery_borrowing_fee, source.recovery_borrowing_fee);
+        assert_eq!(
+            config.recovery_interest_rate_apr,
+            source.recovery_interest_rate_apr
+        );
+        assert_eq!(config.rate_curve, source.rate_curve);
+        assert_eq!(config.min_xrc_sources, source.min_xrc_sources);
+        assert!(matches!(
+            &config.price_source,
+            PriceSource::Xrc { base_asset, quote_asset, .. }
+                if base_asset == "XLM" && quote_asset == "USD"
+        ));
+    }
+
+    #[test]
+    fn xlm_scaffold_rejects_non_xrp_or_non_xrp_usd_source_config() {
+        let mut source = xrp_collateral_config(
+            Ratio::new(dec!(0.002)),
+            Ratio::new(dec!(0.015)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        source.custody_kind = None;
+        assert!(xlm_collateral_config(&source).is_err());
+
+        source.custody_kind = Some(CustodyKind::NativeXrp);
+        source.ledger_canister_id = Principal::from_slice(&[0x42]);
+        assert!(xlm_collateral_config(&source).is_err());
+        source.ledger_canister_id = xrp_collateral_principal();
+        source.price_source = PriceSource::Xrc {
+            base_asset: "BTC".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
+        };
+        assert!(xlm_collateral_config(&source).is_err());
     }
 
     #[test]

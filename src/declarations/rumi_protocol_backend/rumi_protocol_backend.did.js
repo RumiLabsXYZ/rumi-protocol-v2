@@ -518,6 +518,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const CustodyKind = IDL.Variant({
     'IcrcLedger' : IDL.Null,
+    'NativeXlm' : IDL.Null,
     'NativeXrp' : IDL.Null,
   });
   const CollateralConfig = IDL.Record({
@@ -3466,6 +3467,26 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Nat64, IDL.Nat64],
         [Result_7],
         [],
+      ),
+    'stellar_transform_account' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'stellar_transform_ledger' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'stellar_transform_operations' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'stellar_transform_transaction' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
       ),
     'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_44], []),
     'sweep_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result_1], []),

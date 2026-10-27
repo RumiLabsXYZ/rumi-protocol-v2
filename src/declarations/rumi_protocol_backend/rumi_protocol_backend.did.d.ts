@@ -448,6 +448,7 @@ export interface ConsentMessageSpec {
   'device_spec' : [] | [DeviceSpec],
 }
 export type CustodyKind = { 'IcrcLedger' : null } |
+  { 'NativeXlm' : null } |
   { 'NativeXrp' : null };
 export interface CycleManagerCyclesStatus {
   'idle_burn_cycles_per_day' : [] | [bigint],
@@ -3040,6 +3041,10 @@ export interface _SERVICE {
   >,
   'start_cksol_deposit' : ActorMethod<[], Result_43>,
   'start_cksol_deposit_paid' : ActorMethod<[bigint, bigint], Result_7>,
+  'stellar_transform_account' : ActorMethod<[TransformArgs], HttpResponse>,
+  'stellar_transform_ledger' : ActorMethod<[TransformArgs], HttpResponse>,
+  'stellar_transform_operations' : ActorMethod<[TransformArgs], HttpResponse>,
+  'stellar_transform_transaction' : ActorMethod<[TransformArgs], HttpResponse>,
   'submit_burn_proof' : ActorMethod<[number, string], Result_44>,
   'sweep_xrp_pending_open' : ActorMethod<[bigint], Result_1>,
   'unfreeze_protocol' : ActorMethod<[], Result_1>,

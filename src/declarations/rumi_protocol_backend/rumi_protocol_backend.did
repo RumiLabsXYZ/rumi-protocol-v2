@@ -441,7 +441,7 @@ type ConsentMessageSpec = record {
   metadata : ConsentMessageMetadata;
   device_spec : opt DeviceSpec;
 };
-type CustodyKind = variant { IcrcLedger; NativeXrp };
+type CustodyKind = variant { IcrcLedger; NativeXlm; NativeXrp };
 type CycleManagerCyclesStatus = record {
   idle_burn_cycles_per_day : opt nat;
   stable_memory_bytes : opt nat64;
@@ -2590,6 +2590,10 @@ service : (ProtocolArg) -> {
   stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_29);
   start_cksol_deposit : () -> (Result_43);
   start_cksol_deposit_paid : (nat64, nat64) -> (Result_7);
+  stellar_transform_account : (TransformArgs) -> (HttpResponse) query;
+  stellar_transform_ledger : (TransformArgs) -> (HttpResponse) query;
+  stellar_transform_operations : (TransformArgs) -> (HttpResponse) query;
+  stellar_transform_transaction : (TransformArgs) -> (HttpResponse) query;
   submit_burn_proof : (nat32, text) -> (Result_44);
   sweep_xrp_pending_open : (nat64) -> (Result_1);
   unfreeze_protocol : () -> (Result_1);

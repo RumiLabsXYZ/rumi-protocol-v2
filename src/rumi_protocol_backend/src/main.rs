@@ -9679,6 +9679,36 @@ fn xrp_transform_tx(
     rumi_protocol_backend::chains::xrp::xrp_rpc::transform_tx(args)
 }
 
+// Read-only Stellar Horizon response reducers. Native-XLM custody endpoints
+// are not enabled by these transform callbacks.
+#[query]
+fn stellar_transform_account(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::stellar::horizon_rpc::transform_account(args)
+}
+
+#[query]
+fn stellar_transform_ledger(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::stellar::horizon_rpc::transform_ledger(args)
+}
+
+#[query]
+fn stellar_transform_transaction(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::stellar::horizon_rpc::transform_transaction(args)
+}
+
+#[query]
+fn stellar_transform_operations(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::stellar::horizon_rpc::transform_operations(args)
+}
+
 /// Developer-only guard for the experimental XRP observability endpoints below.
 fn xrp_require_developer() -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
@@ -18134,6 +18164,16 @@ async fn update_collateral_config(
     if config.ledger_canister_id != collateral_type {
         return Err(ProtocolError::GenericError(
             "ledger_canister_id in config must match collateral_type".to_string(),
+        ));
+    }
+    // Native XLM has only a frozen state scaffold so far. Keep the generic
+    // configuration endpoint from activating it before custody routes exist.
+    if collateral_type == rumi_protocol_backend::state::xlm_collateral_principal()
+        || config.custody_kind == Some(rumi_protocol_backend::state::CustodyKind::NativeXlm)
+    {
+        return Err(ProtocolError::GenericError(
+            "Native XLM collateral is unavailable until its custody lifecycle is implemented"
+                .to_string(),
         ));
     }
     let configured_xrp_key = read_state(|s| s.xrp_schnorr_key_name.clone());
