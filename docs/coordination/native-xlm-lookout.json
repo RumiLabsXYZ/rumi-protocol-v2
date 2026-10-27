@@ -13,7 +13,7 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "Commit 9998f7cb adds pure latest-ledger reserve quorum: two identical full observations are required; newer or same-sequence dissent is rejected; an older higher reserve is carried conservatively with the agreed sequence and `closed_at`. Four focused tests exist but are unrun; only scoped rustfmt/diff checks passed, with Cargo/dfx held by other work. This is local decision logic, not evidence of independent providers or live freshness. Commit 9f8eb5a7 also adds pure receipt/credit decisions, but no open/confirm endpoints, provider account quorum, atomic mutation, or admission exists. No live Horizon outcall or deposit credit is proved.",
+      "evidenceText": "Commit bdb7d742 preserves omitted optional `id` and `paging_token` fields in the deterministic Horizon operations transform; pure tests cover each field alone and explicit null, but are unrun. Commit 54c175cf adds bounded operations requests to each configured origin and fixed-slot three-provider custody deposit observations after network-root validation. Scoped rustfmt/diff checks passed; there are no Cargo tests, live outcalls, quorum, credit, or admission. This fetch fanout does not establish provider independence or live evidence freshness. Earlier latest-ledger reserve quorum and deposit-evidence helpers remain pure decision logic only.",
       "evidenceLinks": []
     },
     {
@@ -21,7 +21,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Add stable state and an XLM launch guard",
-      "evidenceText": "Commit 9998f7cb adds pure latest-ledger reserve agreement rules, with four focused unrun tests; the freshness predicate does not establish live observation freshness or provider independence. Commit 9f8eb5a7 adds pure receipt/credit decision rules, also uncompiled/unrun. No provider quorum wiring, open/confirm endpoints, or atomic state mutation exists. Credit/key/receipt/status state is dormant. Generated Candid and frontend declarations remain stale after the key setter change. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
+      "evidenceText": "The latest-ledger reserve and deposit-evidence modules remain pure, uncompiled decision logic. Commit bdb7d742 adds optional operations identity preservation with unrun tests; commit 54c175cf adds bounded provider fetches and fixed-slot observations after network-root validation. No quorum/credit/admission or atomic state mutation is integrated. Credit/key/receipt/status state remains dormant. Generated Candid and frontend declarations remain stale after the key setter change. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
       "evidenceLinks": []
     },
     {
@@ -29,7 +29,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Pure source now provides two-observation latest-ledger reserve agreement and CreateAccount/native-Payment deposit evidence decisions, including dissent rejection, attribution/replay/live-vault checks, and claim gross-plus-fee reservations. Four reserve-quorum tests are added but unrun; no Cargo/dfx verification. No provider account quorum, open/confirm endpoints, atomic state mutation, or live credit exists. WP3 remains blocked; provider independence, actual observation freshness/oracle, and testnet/frontend integration remain open. No live provider/oracle proof, XLM admission, or deployment is proved.",
+      "evidenceText": "Pure source provides reserve-agreement and CreateAccount/native-Payment deposit-evidence decisions. Commits bdb7d742 and 54c175cf preserve optional operation identity and fetch bounded three-provider custody observations after network-root validation; scoped format/diff checks only. No Cargo tests or live outcalls. There is still no quorum/credit/admission, open/confirm endpoint, or atomic state mutation. WP3 remains blocked; independent provider trust, live freshness/oracle, credit lifecycle, and testnet/frontend remain open. No live provider/oracle proof, XLM admission, or deployment is proved.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these commits. Commit 9998f7cb adds pure latest-ledger reserve quorum (two identical full observations; reject newer or same-sequence dissent; carry older higher reserve conservatively) with four focused tests that remain unrun. Only scoped rustfmt/diff checks passed; no Cargo/dfx run due shared heavy hold. This local rule does not prove provider independence or live freshness. No endpoint integration or atomic mutation exists; status parser's 39 tests also remain unrun. Remaining blockers include provider independence, actual reserve/oracle freshness, full deposit credit and claim settlement, frontend/testnet, and release. WP3/WP4/release remain blocked; no live provider/oracle proof, admission, or deployment.",
+      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these commits. Commit bdb7d742 adds pure tests for preserving optional `id` and `paging_token` (including explicit null), unrun. Commit 54c175cf adds bounded per-origin operations fetches and fixed-slot three-provider custody observations after network-root validation; scoped rustfmt/diff checks passed, but no Cargo/dfx tests or live outcalls ran. This is fetch capability, not provider independence, quorum, live freshness, credit, or admission. Reserve helper's four tests and status policy's 39 tests remain unrun. Remaining blockers include provider trust/freshness, deposit credit, claim settlement, oracle, frontend/testnet, and release. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
       "evidenceLinks": []
     },
     {

@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Pure latest-ledger reserve logic requires two matching full observations, rejects sequence dissent, and conservatively carries higher prior reserves; four tests are unrun. This does not prove provider independence or live freshness. No endpoint integration, atomic mutation, or live credit. WP3/WP4/release remain blocked.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Deterministic transform now preserves optional operation identity; bounded per-origin fetches return fixed-slot three-provider observations after network-root validation. Scoped format/diff checks only; no Cargo tests or live calls. Fetch fanout is not provider quorum, credit, or admission. WP3/WP4/release remain blocked.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
