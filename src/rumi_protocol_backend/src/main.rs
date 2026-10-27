@@ -1012,6 +1012,15 @@ fn post_upgrade(arg: ProtocolArg) {
             previous
         );
     }
+    if let Some(previous) =
+        rumi_protocol_backend::state::enforce_xlm_key_policy_guardrail(&mut state)
+    {
+        log!(
+            INFO,
+            "[upgrade]: froze native-XLM collateral from {:?} while Stellar custody lifecycle remains dormant",
+            previous
+        );
+    }
     for (collateral_type, decimals, previous_status) in
         rumi_protocol_backend::state::freeze_unsupported_collateral_precision(&mut state)
     {
@@ -9774,6 +9783,37 @@ fn set_xrp_schnorr_key_name(name: String) -> Result<(), ProtocolError> {
 #[query]
 fn get_xrp_schnorr_key_name() -> String {
     rumi_protocol_backend::chains::xrp::config::xrp_schnorr_key_name()
+}
+
+/// Select the threshold Ed25519 key/network for dormant native-XLM custody.
+/// Key selection is permitted only before any XLM collateral or accounting state.
+#[candid_method(update)]
+#[update]
+fn set_xlm_stellar_key_name(name: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !read_state(|state| state.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only developer can set the Stellar key".to_string(),
+        ));
+    }
+    let changed = mutate_state(|state| {
+        let changed = rumi_protocol_backend::state::validate_xlm_stellar_key_change(state, &name)
+            .map_err(|error| ProtocolError::GenericError(error.to_string()))?;
+        if changed {
+            state.xlm_stellar_key_name = name.clone();
+        }
+        Ok(changed)
+    })?;
+    if changed {
+        log!(INFO, "[set_xlm_stellar_key_name] Stellar key selected: {}", name);
+    }
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_xlm_stellar_key_name() -> String {
+    read_state(|state| state.xlm_stellar_key_name.clone())
 }
 
 /// P1 observability (developer-gated, no funds touched): derive the protocol's XRP

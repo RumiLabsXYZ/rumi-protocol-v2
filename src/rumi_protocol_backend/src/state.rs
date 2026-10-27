@@ -75,13 +75,16 @@ mod xlm_deposit_state_compat_tests {
             };
         old_map.retain(|(key, _)| {
             !matches!(key, ciborium::value::Value::Text(name)
-                if name == "xlm_pending_deposits" || name == "xlm_deposit_receipts")
+                if name == "xlm_pending_deposits"
+                    || name == "xlm_deposit_receipts"
+                    || name == "xlm_stellar_key_name")
         });
         let mut old_bytes = Vec::new();
         ciborium::ser::into_writer(&ciborium::value::Value::Map(old_map), &mut old_bytes).unwrap();
         let old: State = ciborium::de::from_reader(old_bytes.as_slice()).unwrap();
         assert!(old.xlm_pending_deposits.is_empty());
         assert!(old.xlm_deposit_receipts.is_empty());
+        assert_eq!(old.xlm_stellar_key_name, "test_key_1");
 
         // Map keys remain exact pairs, so the same operation token in another
         // transaction is distinct.
@@ -92,6 +95,41 @@ mod xlm_deposit_state_compat_tests {
             same_operation_in_another_transaction,
         );
         assert_eq!(state.xlm_deposit_receipts.len(), 2);
+    }
+
+    #[test]
+    fn xlm_key_policy_round_trips_and_locks_after_xlm_state_exists() {
+        let mut state = State::default();
+        assert_eq!(state.xlm_stellar_key_name, "test_key_1");
+        assert_eq!(
+            super::validate_xlm_stellar_key_change(&state, "key_1"),
+            Ok(true)
+        );
+        state.xlm_stellar_key_name = "key_1".to_string();
+        assert_eq!(
+            super::validate_xlm_stellar_key_change(&state, "key_1"),
+            Ok(false)
+        );
+        assert!(super::validate_xlm_stellar_key_change(&state, "key_10").is_err());
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.xlm_stellar_key_name, "key_1");
+
+        state.xlm_pending_deposits.insert(
+            5,
+            XlmPendingDeposit {
+                owner: Principal::from_slice(&[1]),
+                custody_address: "G-custody".to_string(),
+                derivation_nonce: 5,
+                network_id: [0x42; 32],
+                opened_at_ns: 100,
+                expires_at_ns: 200,
+            },
+        );
+        assert!(super::xlm_stellar_key_is_immutable(&state));
+        assert!(super::validate_xlm_stellar_key_change(&state, "test_key_1").is_err());
     }
 }
 
@@ -1184,6 +1222,9 @@ fn default_chains_ecdsa_key_name() -> String {
 fn default_xrp_schnorr_key_name() -> String {
     crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME.to_string()
 }
+fn default_xlm_stellar_key_name() -> String {
+    crate::chains::stellar::config::default_key_name()
+}
 
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
@@ -1987,6 +2028,64 @@ pub fn xrp_collateral_principal() -> Principal {
 /// opaque principal only; Stellar has no IC ledger canister. Keep it distinct from XRP.
 pub fn xlm_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xlm-native")
+}
+
+/// Whether persisted state already binds native XLM to a key or network.
+/// Once true, the configured Stellar key remains immutable even if the vault
+/// has since closed or its collateral is frozen.
+pub fn xlm_stellar_key_is_immutable(state: &State) -> bool {
+    let xlm = xlm_collateral_principal();
+    state.collateral_configs.contains_key(&xlm)
+        || state.collateral_to_vault_ids.contains_key(&xlm)
+        || state
+            .collateral_configs
+            .values()
+            .any(|config| config.custody() == CustodyKind::NativeXlm)
+        || !state.xlm_pending_deposits.is_empty()
+        || !state.xlm_deposit_receipts.is_empty()
+        || !state.xlm_claims.is_empty()
+        || state.next_xlm_claim_id > 0
+        || state
+            .vault_id_to_vaults
+            .values()
+            .any(|vault| vault.collateral_type == xlm)
+}
+
+/// Validate the dormant native-XLM key selector. The names follow the existing
+/// IC threshold-key convention; this policy does not assert that either key is
+/// currently provisioned on a particular subnet.
+pub fn validate_xlm_stellar_key_change(state: &State, name: &str) -> Result<bool, &'static str> {
+    if crate::chains::stellar::config::network_for_key_name(name).is_none() {
+        return Err("unsupported Stellar key name (expected test_key_1 or key_1)");
+    }
+    if name == state.xlm_stellar_key_name {
+        return Ok(false);
+    }
+    if xlm_stellar_key_is_immutable(state) {
+        return Err("cannot change the Stellar key after native-XLM config, pending, receipt, claim, or vault state exists");
+    }
+    Ok(true)
+}
+
+/// Upgrade backstop for pre-existing state. Native XLM remains frozen across
+/// upgrades while its lifecycle is dormant; an unknown key/network mapping is
+/// an additional reason that can never be bypassed by a legacy Active status.
+pub fn enforce_xlm_key_policy_guardrail(state: &mut State) -> Option<CollateralStatus> {
+    let xlm = xlm_collateral_principal();
+    let mut previous = None;
+    for (collateral_type, config) in &mut state.collateral_configs {
+        if *collateral_type != xlm && config.custody() != CustodyKind::NativeXlm {
+            continue;
+        }
+        if !matches!(
+            config.status,
+            CollateralStatus::Frozen | CollateralStatus::Deprecated
+        ) {
+            previous.get_or_insert(config.status);
+            config.status = CollateralStatus::Frozen;
+        }
+    }
+    previous
 }
 
 /// P5: the `CollateralConfig` for native-XRP collateral. Parameters (Rob's):
@@ -4077,6 +4176,11 @@ pub struct State {
     /// XRP custody address.
     #[serde(default = "default_xrp_schnorr_key_name")]
     pub xrp_schnorr_key_name: String,
+    /// Native-XLM threshold Ed25519 key selector. Defaults to the test network;
+    /// production must explicitly select `key_1` before any XLM state exists.
+    /// This remains separate from XRP's Schnorr key and the EVM tECDSA key.
+    #[serde(default = "default_xlm_stellar_key_name")]
+    pub xlm_stellar_key_name: String,
     pub fee: Ratio,
     pub developer_principal: Principal,
     /// Optional narrowly-scoped principal (audit F-01) that may ONLY call
@@ -4932,6 +5036,7 @@ impl Default for State {
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
+            xlm_stellar_key_name: default_xlm_stellar_key_name(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             price_pusher_principal: None,
@@ -5141,6 +5246,7 @@ impl From<InitArg> for State {
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
+            xlm_stellar_key_name: default_xlm_stellar_key_name(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,
@@ -13446,6 +13552,31 @@ mod tests {
             quote_asset_class: XrcAssetClass::FiatCurrency,
         };
         assert!(xlm_collateral_config(&source).is_err());
+    }
+
+    #[test]
+    fn xlm_upgrade_guard_freezes_legacy_active_configuration() {
+        let mut state = test_state();
+        let xrp = xrp_collateral_config(
+            Ratio::new(dec!(0.002)),
+            Ratio::new(dec!(0.015)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        let mut xlm = xlm_collateral_config(&xrp).unwrap();
+        xlm.status = CollateralStatus::Active;
+        state
+            .collateral_configs
+            .insert(xlm_collateral_principal(), xlm);
+        state.xlm_stellar_key_name = "test_key_1".to_string();
+
+        assert_eq!(
+            enforce_xlm_key_policy_guardrail(&mut state),
+            Some(CollateralStatus::Active)
+        );
+        assert_eq!(
+            state.collateral_configs[&xlm_collateral_principal()].status,
+            CollateralStatus::Frozen
+        );
     }
 
     #[test]

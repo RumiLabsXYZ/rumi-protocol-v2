@@ -132,6 +132,7 @@ mod tests {
             sequence,
             account_last_modified_ledger: ledger,
             native_balance_stroops: balance,
+            native_selling_liabilities_stroops: 0,
             subentry_count: 2,
             num_sponsoring: 0,
             num_sponsored: 0,

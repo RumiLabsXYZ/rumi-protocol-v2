@@ -21,6 +21,7 @@ pub struct AccountSnapshot {
     pub sequence: u64,
     pub account_last_modified_ledger: u32,
     pub native_balance_stroops: u64,
+    pub native_selling_liabilities_stroops: u64,
     pub subentry_count: u32,
     pub num_sponsoring: u32,
     pub num_sponsored: u32,
@@ -122,6 +123,7 @@ pub fn parse_account(body: &[u8], expected_id: &str) -> Result<AccountSnapshot, 
         .as_array()
         .ok_or(HorizonParseError::Invalid("balances"))?;
     let mut native = None;
+    let mut native_selling_liabilities = None;
     for b in balances {
         if string(b, "asset_type")? == "native" {
             if native.is_some() {
@@ -131,6 +133,10 @@ pub fn parse_account(body: &[u8], expected_id: &str) -> Result<AccountSnapshot, 
                 parse_xlm_to_stroops(&string(b, "balance")?)
                     .map_err(|_| HorizonParseError::Invalid("balance"))?,
             );
+            native_selling_liabilities = Some(
+                parse_xlm_to_stroops(&string(b, "selling_liabilities")?)
+                    .map_err(|_| HorizonParseError::Invalid("selling_liabilities"))?,
+            );
         }
     }
     Ok(AccountSnapshot {
@@ -138,6 +144,8 @@ pub fn parse_account(body: &[u8], expected_id: &str) -> Result<AccountSnapshot, 
         sequence,
         account_last_modified_ledger,
         native_balance_stroops: native.ok_or(HorizonParseError::Missing("native balance"))?,
+        native_selling_liabilities_stroops: native_selling_liabilities
+            .ok_or(HorizonParseError::Missing("native selling liabilities"))?,
         subentry_count: uint32(&v, "subentry_count")?,
         num_sponsoring: uint32(&v, "num_sponsoring")?,
         num_sponsored: uint32(&v, "num_sponsored")?,
@@ -374,18 +382,19 @@ mod tests {
 
     #[test]
     fn parses_account_snapshot_and_sponsorship_counts() {
-        let json = br#"{"account_id":"G","sequence":"42","account_last_modified_ledger":42,"subentry_count":2,"num_sponsoring":1,"num_sponsored":3,"balances":[{"asset_type":"native","balance":"12.3400001"},{"asset_type":"credit_alphanum4","balance":"9.0"}]}"#;
+        let json = br#"{"account_id":"G","sequence":"42","account_last_modified_ledger":42,"subentry_count":2,"num_sponsoring":1,"num_sponsored":3,"balances":[{"asset_type":"native","balance":"12.3400001","selling_liabilities":"0.0000001"},{"asset_type":"credit_alphanum4","balance":"9.0"}]}"#;
         let a = parse_account(json, "G").unwrap();
         assert_eq!(
             (
                 a.sequence,
                 a.account_last_modified_ledger,
                 a.native_balance_stroops,
+                a.native_selling_liabilities_stroops,
                 a.subentry_count,
                 a.num_sponsoring,
                 a.num_sponsored
             ),
-            (42, 42, 123_400_001, 2, 1, 3)
+            (42, 42, 123_400_001, 1, 2, 1, 3)
         );
     }
 
@@ -398,6 +407,20 @@ mod tests {
             br#"{"account_id":"G","sequence":"1","account_last_modified_ledger":4294967296,"balances":[{"asset_type":"native","balance":"1"}]}"#,
         ] {
             assert!(parse_account(json, "G").is_err());
+        }
+    }
+
+    #[test]
+    fn account_requires_valid_native_selling_liabilities() {
+        for balance_row in [
+            r#"{"asset_type":"native","balance":"1"}"#,
+            r#"{"asset_type":"native","balance":"1","selling_liabilities":null}"#,
+            r#"{"asset_type":"native","balance":"1","selling_liabilities":"-1"}"#,
+        ] {
+            let json = format!(
+                r#"{{"account_id":"G","sequence":"1","account_last_modified_ledger":1,"subentry_count":0,"num_sponsoring":0,"num_sponsored":0,"balances":[{balance_row}]}}"#
+            );
+            assert!(parse_account(json.as_bytes(), "G").is_err());
         }
     }
 

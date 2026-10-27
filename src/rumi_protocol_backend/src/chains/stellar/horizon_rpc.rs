@@ -210,7 +210,7 @@ pub fn transform_account(args: TransformArgs) -> HttpResponse {
         .map(|rows| {
             rows.iter()
                 .filter(|row| row.get("asset_type").and_then(Value::as_str) == Some("native"))
-                .map(|row| json!({ "asset_type": field(row, "asset_type"), "balance": field(row, "balance") }))
+                .map(|row| json!({ "asset_type": field(row, "asset_type"), "balance": field(row, "balance"), "selling_liabilities": field(row, "selling_liabilities") }))
                 .collect::<Vec<_>>()
         });
     let reduced = json!({
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn account_transform_ignores_moving_headers_and_uses_body_ledger() {
-        let body = br#"{"account_id":"G","sequence":"4","last_modified_ledger":42,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000"}]}"#;
+        let body = br#"{"account_id":"G","sequence":"4","last_modified_ledger":42,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000","selling_liabilities":"0.1000000"}]}"#;
         let baseline = transform_account(args(200, body));
         let mut changed_header = args(200, body);
         changed_header.response.headers.extend([
@@ -436,9 +436,10 @@ mod tests {
 
     #[test]
     fn account_transform_drops_volatile_and_non_native_fields() {
-        let transformed = transform_account(args(200, br#"{"account_id":"G","sequence":"4","last_modified_ledger":42,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000"},{"asset_type":"credit_alphanum4","balance":"99"}],"last_modified_time":"volatile"}"#));
+        let transformed = transform_account(args(200, br#"{"account_id":"G","sequence":"4","last_modified_ledger":42,"subentry_count":1,"num_sponsoring":0,"num_sponsored":0,"balances":[{"asset_type":"native","balance":"1.0000000","selling_liabilities":"0.1000000"},{"asset_type":"credit_alphanum4","balance":"99"}],"last_modified_time":"volatile"}"#));
         let body = String::from_utf8(transformed.body).unwrap();
         assert!(body.contains("1.0000000"));
+        assert!(body.contains("0.1000000"));
         assert!(!body.contains("credit_alphanum4"));
         assert!(!body.contains("volatile"));
     }
