@@ -1,19 +1,18 @@
 //! Typed read-only Stellar Horizon HTTPS outcalls.
 //!
 //! These functions use one fixed Horizon provider selected by the closed
-//! [`Network`] enum. They do not establish independent-provider quorum or a
-//! common ledger snapshot across calls. Callers must treat the returned
-//! account, reserve, transaction, and operation reads as separate observations.
+//! [`Network`] enum. The reserve read is bound to the ledger reported by the
+//! account response, but that provider-supplied binding is not independent
+//! provider verification or proof of finality. Transaction and operation reads
+//! remain separate observations.
 //! There is intentionally no transaction submission or deposit-credit path here.
-
-use ic_cdk::api::management_canister::http_request::{http_request, HttpResponse};
-use serde_json::Value;
 
 use super::{
     codec::Network,
     horizon_parse::{self, AccountSnapshot, FinalizedDeposit, HorizonParseError, LedgerReserve},
     horizon_rpc,
 };
+use ic_cdk::api::management_canister::http_request::{http_request, HttpResponse};
 
 /// Match the established XRP read outcall budget. Horizon requests are GETs
 /// with explicit response byte limits in `horizon_rpc`.
@@ -62,27 +61,26 @@ pub async fn fetch_account_snapshot(
     horizon_parse::parse_account(&body, account_id).map_err(parse_error)
 }
 
-/// Fetch the newest ledger returned by Horizon and validate its reserve value.
-/// The sequence is extracted only to bind the strict reserve parser to the
-/// sequence returned in the same response.
-pub async fn fetch_latest_ledger_reserve(network: Network) -> Result<LedgerReserve, String> {
+/// Fetch the exact ledger observed alongside an account response and validate
+/// its reserve value. The caller must pass `AccountSnapshot::observed_ledger`.
+pub async fn fetch_ledger_reserve(
+    network: Network,
+    observed_ledger: u32,
+) -> Result<LedgerReserve, String> {
+    if observed_ledger == 0 {
+        return Err("Horizon observed ledger must be positive".to_string());
+    }
     let body = read(
-        horizon_rpc::latest_ledger_reserve_request(network),
+        horizon_rpc::ledger_reserve_request(network, observed_ledger)
+            .ok_or_else(|| "invalid Horizon observed ledger".to_string())?,
         READ_CYCLES,
     )
     .await?;
-    parse_latest_ledger_reserve(&body)
+    parse_exact_ledger_reserve(&body, observed_ledger)
 }
 
-fn parse_latest_ledger_reserve(body: &[u8]) -> Result<LedgerReserve, String> {
-    let reduced: Value = serde_json::from_slice(&body)
-        .map_err(|error| format!("Horizon latest ledger JSON is invalid: {error}"))?;
-    let sequence = reduced
-        .get("sequence")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| "Horizon latest ledger has no valid sequence".to_string())?;
-    horizon_parse::parse_ledger_reserve(&body, sequence).map_err(parse_error)
+fn parse_exact_ledger_reserve(body: &[u8], observed_ledger: u32) -> Result<LedgerReserve, String> {
+    horizon_parse::parse_ledger_reserve(body, observed_ledger).map_err(parse_error)
 }
 
 /// Fetch a transaction by hash and return its ledger only when it is
@@ -142,15 +140,22 @@ mod tests {
     }
 
     #[test]
-    fn latest_ledger_sequence_is_required_and_bounded() {
+    fn exact_ledger_sequence_must_match_observation() {
         let valid = br#"{"sequence":42,"base_reserve_in_stroops":5000000}"#;
-        assert_eq!(parse_latest_ledger_reserve(valid).unwrap().sequence, 42);
-        assert!(parse_latest_ledger_reserve(
-            br#"{"sequence":4294967296,"base_reserve_in_stroops":5000000}"#
+        assert_eq!(parse_exact_ledger_reserve(valid, 42).unwrap().sequence, 42);
+        assert!(parse_exact_ledger_reserve(
+            br#"{"sequence":4294967296,"base_reserve_in_stroops":5000000}"#,
+            42,
         )
         .is_err());
-        assert!(parse_latest_ledger_reserve(
-            br#"{"sequence":"42","base_reserve_in_stroops":5000000}"#
+        assert!(parse_exact_ledger_reserve(
+            br#"{"sequence":"42","base_reserve_in_stroops":5000000}"#,
+            42,
+        )
+        .is_err());
+        assert!(parse_exact_ledger_reserve(
+            br#"{"sequence":43,"base_reserve_in_stroops":5000000}"#,
+            42,
         )
         .is_err());
     }
