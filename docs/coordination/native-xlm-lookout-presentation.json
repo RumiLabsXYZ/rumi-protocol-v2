@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Latest reserve fetch now returns the full agreed sequence, closed_at, and conservative reserve, but has no callers. Scoped rustfmt/diff checks only; no Cargo tests or live outcalls. This does not prove provider independence or live freshness. WP3/WP4/release remain blocked.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. A dormant working-tree claim recorder stores the claimant, custody binding, destination, network, gross amount, and fee reservation; it is uncommitted, unwired, uncompiled, and untested, with no signing/submission. WP3/WP4/release remain blocked.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},

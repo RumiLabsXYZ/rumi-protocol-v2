@@ -37,7 +37,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Compile/test claim reservation decisions, then implement and validate XLM claim settlement and supported payout lifecycle; preserve WP4 blocked until settlement and testnet evidence exists.",
+      "nextAction": "Compile/test the dormant claim recorder when authorized build capacity is available, then implement and validate XLM claim settlement/reconciliation; preserve WP4 blocked until payout lifecycle evidence exists.",
       "cardIds": ["WP4"]
     },
     {

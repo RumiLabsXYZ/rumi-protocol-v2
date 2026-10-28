@@ -37,7 +37,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement XLM claims, exits, and liquidation handling",
-      "evidenceText": "The pure deposit-evidence helper reserves unsettled claim gross plus fee, but does not implement live claim settlement or payout. Transaction-status transport preserves fee and normalized not-found evidence in source; its 39 policy tests remain unrun. No Cargo/dfx test or live call has verified transport or claim reservations. Provider independence and live evidence freshness remain unresolved, so WP4 stays blocked. The XRP post-sign status race is a separate reuse caution, not an XLM-specific required gate. Reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission.",
+      "evidenceText": "The current working tree adds dormant `record_xlm_claim` source in `vault.rs`, storing the vault/custody binding, claimant, gross stroops, destination, network, and fee reservation as Pending state. It does not sign or submit a Stellar transaction and must remain unwired until settlement/reconciliation exists. This change is uncommitted, uncompiled, and untested. Transaction-status transport's 39 policy tests remain unrun. Provider independence and live evidence freshness remain unresolved, so WP4 stays blocked. The XRP post-sign status race is a separate reuse caution, not an XLM-specific required gate. Reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these commits. Commit 3ff9f64e wires full latest-ledger quorum into `fetch_latest_reserve_observations`, returning sequence, `closed_at`, and conservative reserve rather than a value-only amount; no callers yet. Commits bdb7d742 and 54c175cf add optional operation identity and bounded fixed-slot provider fetches. Scoped rustfmt/diff checks passed, but no Cargo tests or live outcalls ran; shared heavy work is held with about 16 GiB free (~1%). Reserve tests and status-policy tests remain unrun. This does not prove provider independence, live freshness, credit, or admission. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
+      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these changes. Commit 3ff9f64e adds full latest-ledger quorum fetch output, with no callers yet. The current working tree adds a dormant `record_xlm_claim` helper in `vault.rs`; it is uncommitted, unwired, uncompiled, and untested. No live outcalls or Cargo verification have run. Provider independence, live freshness, credit, and settlement remain unproved. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
       "evidenceLinks": []
     },
     {
