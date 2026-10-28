@@ -458,6 +458,20 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Publication evidence stays in the private local publisher record; this is a metadata checkpoint,
   not browser settlement or production readiness.
 
+### Milestone 19 publication disposition
+
+- Local checks passed: 35-card projection, both summary limits, unchanged 113-entry glossary,
+  unchanged explicit card memberships, and only BB-27 evidence changed. The local projection
+  validator now accepts optional `plainSummary`; valid legacy/dual summaries pass, while
+  overlong, private-path and non-text plain summaries are rejected. The real publisher's dry-run
+  accepted the checkpoint and reported pending board/presentation/plain-summary/priority changes.
+- The `--publish` command was then rejected before execution by automatic approval review because
+  exact payload/private-destination authorization could not be verified. No upload occurred and
+  no post-publication no-op is claimed. Exact input fingerprints are saved privately.
+- This is now an active publication hold under the operating rules. No retries, alternate
+  executors or payload wrappers, and no relay to Nora for upload. Source maintenance continues;
+  publication needs the original review boundary resolved with exact human approval.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

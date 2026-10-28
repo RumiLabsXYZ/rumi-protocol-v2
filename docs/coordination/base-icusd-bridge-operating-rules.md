@@ -90,6 +90,19 @@ was not explicit enough. That command did not run and no cards were uploaded; a 
 OPERATIONAL UPLOAD HELD" rule applied here until Rob's approval above resolved the boundary. The
 hold never gated implementation or tests.
 
+### Active publication hold (2026-10-27)
+
+Automatic approval review rejected the dual-status checkpoint's existing-manifest `--publish`
+command before execution. The stated reason was insufficiently clear user authorization for this
+exact internal metadata payload and private Lookout destination. No upload occurred. The earlier
+badge-readiness condition is satisfied, but this new actual rejection is a separate boundary.
+Do not retry or use another identity, tool, wrapper, changed projection or coordinating agent to
+publish the rejected/equivalent payload. Local board and summary maintenance may continue.
+Miles must obtain exact human approval or resolve the original review boundary before publication.
+The reviewed upload consists of the existing Lookout card projection, presentation (both summaries
+and unchanged glossary) and priorities through the existing scoped manifest. Exact source revision
+and input fingerprints are retained in the private local publication record.
+
 ## Priority selection
 
 Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirrored in the board's
