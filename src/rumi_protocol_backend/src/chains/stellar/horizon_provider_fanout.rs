@@ -237,13 +237,14 @@ fn classify_transaction_status_response(
     }
 }
 
-/// Read one latest-ledger reserve observation from each configured provider.
-/// The quorum result is an observed reserve, not proof of freshness. Callers
-/// must independently enforce their minimum sequence and maximum age policy.
+/// Read one latest-ledger reserve observation from each configured provider
+/// and return the fixed slots plus an agreed latest-ledger observation. The
+/// quorum result is not proof of wall-clock freshness; callers must apply their
+/// own sequence and maximum-age policy before using it for a credit decision.
 pub async fn fetch_latest_reserve_observations(
     config: &HorizonProviderConfig,
     network: Network,
-) -> Result<([Option<LatestLedgerReserve>; 3], u64), String> {
+) -> Result<([Option<LatestLedgerReserve>; 3], LatestLedgerReserve), String> {
     let providers = config
         .validate_for_network(network)
         .await
@@ -252,12 +253,9 @@ pub async fn fetch_latest_reserve_observations(
     for (index, provider) in providers.iter().enumerate() {
         observations[index] = read_latest(provider).await.ok();
     }
-    let reserve_inputs = observations
-        .clone()
-        .map(|item| item.map(|latest| latest.reserve));
-    let reserve = horizon_quorum::ledger_reserve_quorum(reserve_inputs)
-        .map_err(|error| format!("Horizon reserve quorum failed: {error:?}"))?;
-    Ok((observations, reserve))
+    let latest_reserve = horizon_quorum::latest_ledger_reserve_quorum(observations.clone())
+        .map_err(|error| format!("Horizon latest-ledger reserve quorum failed: {error:?}"))?;
+    Ok((observations, latest_reserve))
 }
 
 /// Fetch an account snapshot from every configured provider and apply the
