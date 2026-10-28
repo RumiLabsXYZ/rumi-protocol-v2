@@ -13,7 +13,7 @@
       "state": "In progress",
       "owner": "XLM StrKey worker",
       "scope": "Build the Stellar rail and independent address and transaction vectors",
-      "evidenceText": "Commit bdb7d742 preserves omitted optional `id` and `paging_token` fields in the deterministic Horizon operations transform; pure tests cover each field alone and explicit null, but are unrun. Commit 54c175cf adds bounded operations requests to each configured origin and fixed-slot three-provider custody deposit observations after network-root validation. Scoped rustfmt/diff checks passed; there are no Cargo tests, live outcalls, quorum, credit, or admission. This fetch fanout does not establish provider independence or live evidence freshness. Earlier latest-ledger reserve quorum and deposit-evidence helpers remain pure decision logic only.",
+      "evidenceText": "Commit 3ff9f64e changes `fetch_latest_reserve_observations` to apply full latest-ledger quorum and return agreed `LatestLedgerReserve` data (sequence, `closed_at`, and conservative reserve) instead of a value-only amount. No callers exist yet. Commits bdb7d742 and 54c175cf add optional operation identity preservation and bounded fixed-slot provider fetches. Scoped rustfmt/diff checks passed; no Cargo tests or live outcalls have run. This source path does not establish provider independence or live freshness; there is no credit/admission lifecycle.",
       "evidenceLinks": []
     },
     {
@@ -21,7 +21,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Add stable state and an XLM launch guard",
-      "evidenceText": "The latest-ledger reserve and deposit-evidence modules remain pure, uncompiled decision logic. Commit bdb7d742 adds optional operations identity preservation with unrun tests; commit 54c175cf adds bounded provider fetches and fixed-slot observations after network-root validation. No quorum/credit/admission or atomic state mutation is integrated. Credit/key/receipt/status state remains dormant. Generated Candid and frontend declarations remain stale after the key setter change. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
+      "evidenceText": "Commit 3ff9f64e exposes the full agreed latest-ledger reserve record from the fetch helper; it has no callers and remains uncompiled. Commits bdb7d742 and 54c175cf add deterministic operation identity and bounded provider observations, also without Cargo or live-call verification. Credit/key/receipt/status state remains dormant; no deposit or claim mutation is integrated. Generated Candid and frontend declarations remain stale after the key setter change. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
       "evidenceLinks": []
     },
     {
@@ -29,7 +29,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Pure source provides reserve-agreement and CreateAccount/native-Payment deposit-evidence decisions. Commits bdb7d742 and 54c175cf preserve optional operation identity and fetch bounded three-provider custody observations after network-root validation; scoped format/diff checks only. No Cargo tests or live outcalls. There is still no quorum/credit/admission, open/confirm endpoint, or atomic state mutation. WP3 remains blocked; independent provider trust, live freshness/oracle, credit lifecycle, and testnet/frontend remain open. No live provider/oracle proof, XLM admission, or deployment is proved.",
+      "evidenceText": "Commit 3ff9f64e routes latest-reserve fetch through full observation quorum and returns sequence, `closed_at`, and conservative reserve, but no callers use it. This is not live reserve proof. No Cargo tests or live outcalls have run (shared heavy hold; about 16 GiB free, roughly 1%). There is still no deposit/borrow endpoint, atomic credit mutation, or admission. WP3 remains blocked; provider independence, live freshness/oracle, and testnet/frontend integration remain open. No live provider/oracle proof, XLM admission, or deployment is proved.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these commits. Commit bdb7d742 adds pure tests for preserving optional `id` and `paging_token` (including explicit null), unrun. Commit 54c175cf adds bounded per-origin operations fetches and fixed-slot three-provider custody observations after network-root validation; scoped rustfmt/diff checks passed, but no Cargo/dfx tests or live outcalls ran. This is fetch capability, not provider independence, quorum, live freshness, credit, or admission. Reserve helper's four tests and status policy's 39 tests remain unrun. Remaining blockers include provider trust/freshness, deposit credit, claim settlement, oracle, frontend/testnet, and release. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
+      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these commits. Commit 3ff9f64e wires full latest-ledger quorum into `fetch_latest_reserve_observations`, returning sequence, `closed_at`, and conservative reserve rather than a value-only amount; no callers yet. Commits bdb7d742 and 54c175cf add optional operation identity and bounded fixed-slot provider fetches. Scoped rustfmt/diff checks passed, but no Cargo tests or live outcalls ran; shared heavy work is held with about 16 GiB free (~1%). Reserve tests and status-policy tests remain unrun. This does not prove provider independence, live freshness, credit, or admission. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
       "evidenceLinks": []
     },
     {
