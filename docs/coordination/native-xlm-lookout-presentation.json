@@ -1,6 +1,6 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Commit 8dd604c7 adds pure fixed-slot status classification and a dormant fetch-to-quorum wrapper; rustfmt/diff checks passed, but no Cargo tests/build or live calls ran. The wrapper is not claim settlement; WP3/WP4/release remain blocked.",
-  "plainSummary": "Native XLM collateral is still unavailable to users. A transaction-status helper has been added, but it has not been tested or connected to deposits or payouts. Provider reliability, pricing, full deposits and claim settlement, and release checks still need verification before activation.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Commit ac8ba7ea adds fail-closed checks to dormant claim recording for fee bounds, classic destinations, and key/network match, plus focused test source. Neither is compiled or tested; the helper remains unwired and does not settle claims. WP4 remains blocked.",
+  "plainSummary": "Native XLM collateral is still unavailable to users. The dormant claim recorder now checks the payout amount, destination format, and network before saving a claim, but the change has not been compiled or tested. Claims are not connected to actual payouts, so more work and verification are needed before XLM can be offered.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
