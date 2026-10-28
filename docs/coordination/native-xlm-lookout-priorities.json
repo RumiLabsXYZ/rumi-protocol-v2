@@ -21,7 +21,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Cargo-verify the emergency freeze/pause, canonical operation IDs, signed bounds, credit/key state, and custody attribution; keep receipt/tombstone state dormant until integrated into a complete deposit-credit flow.",
+      "nextAction": "Cargo-verify the guarded pending-deposit/attribution insertion and existing key/credit state; keep it dormant until public open/confirm APIs and atomic credit flow are implemented.",
       "cardIds": ["WP2"]
     },
     {
@@ -29,7 +29,7 @@
       "title": "Verified deposits and borrowing",
       "status": "blocked",
       "blockedReason": "The new pure deposit_evidence decision helper is not wired into open/confirm endpoints, provider-account quorum, or atomic mutation; no live credit lifecycle exists. Tests and compilation are pending.",
-      "nextAction": "Compile/test pure reserve and receipt decisions, resolve provider independence and live observation freshness, then implement endpoints and atomic deposit credit/receipt/tombstone lifecycle; preserve WP3 blocked until end-to-end evidence exists.",
+      "nextAction": "Compile/test the pending-row and reserve/receipt decisions, then implement public open/confirm, key derivation, provider binding, and atomic deposit credit/receipt/tombstone lifecycle; preserve WP3 blocked until end-to-end evidence exists.",
       "cardIds": ["WP3"]
     },
     {

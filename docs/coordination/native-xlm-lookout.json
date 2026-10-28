@@ -21,7 +21,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Add stable state and an XLM launch guard",
-      "evidenceText": "Commit 3ff9f64e exposes the full agreed latest-ledger reserve record from the fetch helper; it has no callers and remains uncompiled. Commits bdb7d742 and 54c175cf add deterministic operation identity and bounded provider observations, also without Cargo or live-call verification. Credit/key/receipt/status state remains dormant; no deposit or claim mutation is integrated. Generated Candid and frontend declarations remain stale after the key setter change. Config remains Frozen; XLM is not registered, deployed, or admitted as collateral.",
+      "evidenceText": "Commit d45c8332 adds `State::reserve_xlm_pending_deposit`: a dormant synchronous pending row plus permanent attribution insertion for caller-supplied freshly reserved vault ID and derived classic address, guarded by key/network match, collisions, expiry, and active capacity. Focused test source was added, but no Cargo tests/build were run. This does not provide public open/confirm APIs, key derivation, outcalls, or credit. Claim/key/receipt/status state remains dormant; generated Candid/frontend declarations remain stale. Config remains Frozen; XLM is not registered, deployed, or admitted.",
       "evidenceLinks": []
     },
     {
@@ -29,7 +29,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement verified XLM deposits and borrowing",
-      "evidenceText": "Commit 3ff9f64e routes latest-reserve fetch through full observation quorum and returns sequence, `closed_at`, and conservative reserve, but no callers use it. This is not live reserve proof. No Cargo tests or live outcalls have run (shared heavy hold; about 16 GiB free, roughly 1%). There is still no deposit/borrow endpoint, atomic credit mutation, or admission. WP3 remains blocked; provider independence, live freshness/oracle, and testnet/frontend integration remain open. No live provider/oracle proof, XLM admission, or deployment is proved.",
+      "evidenceText": "Commit d45c8332 adds a dormant synchronous pending-deposit row and permanent custody attribution insertion with key/network, collision, expiry, and active-capacity guards. It accepts a caller-supplied freshly reserved vault ID and derived classic address; focused test source exists but Cargo tests/build remain unrun. No public open/confirm API, key derivation, Horizon outcall, or deposit credit is implemented. WP3 remains blocked; provider independence, live reserve/oracle freshness, atomic credit, and testnet/frontend integration remain open. No admission or deployment is proved.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these changes. Commit ac8ba7ea adds fail-closed input checks to the dormant claim recorder and focused test source; neither has been compiled or run because Pendle holds the shared heavy slot. Commit 8dd604c7's status wrapper also remains untested and has no live calls. The claim helper remains unwired. Provider independence, live freshness, credit, and settlement remain unproved. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
+      "evidenceText": "Commit d45c8332 adds a guarded dormant pending-deposit recorder, with focused test source but no Cargo test/build. It has no caller/API, derivation path, outcall, or credit mutation. Earlier status and claim helpers remain unverified. Provider independence, live freshness, credit, and settlement remain unproved. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
       "evidenceLinks": []
     },
     {

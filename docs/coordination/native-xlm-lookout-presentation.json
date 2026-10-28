@@ -1,6 +1,6 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Commit ac8ba7ea adds fail-closed checks to dormant claim recording for fee bounds, classic destinations, and key/network match, plus focused test source. Neither is compiled or tested; the helper remains unwired and does not settle claims. WP4 remains blocked.",
-  "plainSummary": "Native XLM collateral is still unavailable to users. The dormant claim recorder now checks the payout amount, destination format, and network before saving a claim, but the change has not been compiled or tested. Claims are not connected to actual payouts, so more work and verification are needed before XLM can be offered.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Commit d45c8332 adds guarded dormant pending-deposit and attribution state for a caller-reserved vault ID/address, with focused test source but no Cargo verification. No public open/confirm API, derivation, outcall, or credit exists; WP3 remains blocked.",
+  "plainSummary": "Native XLM is still unavailable to users. A new helper can record a pending deposit after a vault and address are supplied, but it does not create the vault, contact Stellar, or credit collateral, and it has not been tested. Public deposit flows and release checks remain unfinished.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
