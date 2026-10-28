@@ -3765,6 +3765,23 @@ pub(crate) fn record_xlm_claim(
     reserved_fee_stroops: u64,
     now_ns: u64,
 ) -> Result<u64, ProtocolError> {
+    if reserved_fee_stroops == 0 || gross_stroops <= reserved_fee_stroops {
+        return Err(ProtocolError::GenericError(
+            "Native-XLM claim must exceed its nonzero reserved fee".to_string(),
+        ));
+    }
+    if !crate::chains::stellar::is_valid_classic_address(&destination) {
+        return Err(ProtocolError::GenericError(
+            "Native-XLM claim destination must be a classic Stellar account".to_string(),
+        ));
+    }
+    let selected_network = crate::chains::stellar::config::selection_from_state(s)
+        .map_err(|reason| ProtocolError::GenericError(reason.to_string()))?;
+    if network_id != selected_network.network.network_id() {
+        return Err(ProtocolError::GenericError(
+            "Native-XLM claim network does not match the custody key".to_string(),
+        ));
+    }
     let claim_id = s.next_xlm_claim_id;
     let next_claim_id = claim_id.checked_add(1).ok_or_else(|| {
         ProtocolError::GenericError("Native-XLM claim id space exhausted".to_string())
@@ -5889,6 +5906,52 @@ mod xrp_p4_tests {
         assert_eq!(c0.custody_owner, owner);
         assert_eq!(c0.custody_nonce, 7);
         assert_eq!(c0.drops, 4_000_000);
+    }
+
+    #[test]
+    fn record_xlm_claim_rejects_invalid_fee_destination_and_network_before_mutation() {
+        use crate::chains::stellar::{classic_address_from_ed25519_pubkey, codec::Network};
+
+        let mut state = crate::state::State::default();
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let destination = classic_address_from_ed25519_pubkey(&[0x11; 32]);
+        let network_id = Network::Test.network_id();
+        let make_claim = |state: &mut crate::state::State,
+                          gross: u64,
+                          fee: u64,
+                          destination: String,
+                          network_id: [u8; 32]| {
+            record_xlm_claim(
+                state,
+                7,
+                owner,
+                7,
+                owner,
+                gross,
+                destination,
+                network_id,
+                fee,
+                100,
+            )
+        };
+        assert!(make_claim(&mut state, 100, 100, destination.clone(), network_id).is_err());
+        assert!(make_claim(&mut state, 101, 0, destination.clone(), network_id).is_err());
+        assert!(make_claim(&mut state, 101, 100, "bad".into(), network_id).is_err());
+        assert!(make_claim(
+            &mut state,
+            101,
+            100,
+            destination.clone(),
+            Network::Public.network_id(),
+        )
+        .is_err());
+        assert!(state.xlm_claims.is_empty());
+        assert_eq!(state.next_xlm_claim_id, 0);
+
+        let id = make_claim(&mut state, 101, 100, destination, network_id).unwrap();
+        assert_eq!(id, 0);
+        assert_eq!(state.next_xlm_claim_id, 1);
+        assert_eq!(state.xlm_claims.get(&id).unwrap().gross_stroops, 101);
     }
 
     #[test]
