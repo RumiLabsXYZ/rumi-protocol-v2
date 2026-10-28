@@ -1,5 +1,5 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. A dormant working-tree claim recorder stores the claimant, custody binding, destination, network, gross amount, and fee reservation; it is uncommitted, unwired, uncompiled, and untested, with no signing/submission. WP3/WP4/release remain blocked.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Commit 465f1082 adds a dormant claim recorder for claimant, custody binding, destination, network, gross, and fee; it is pushed but unwired, uncompiled, and untested, with no signing/submission. WP3/WP4/release remain blocked.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
