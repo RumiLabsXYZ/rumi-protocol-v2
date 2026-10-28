@@ -37,7 +37,7 @@
       "title": "Claims, exits, and liquidation handling",
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
-      "nextAction": "Compile/test the dormant claim recorder when authorized build capacity is available, then implement and validate XLM claim settlement/reconciliation; preserve WP4 blocked until payout lifecycle evidence exists.",
+      "nextAction": "Compile/test fixed-slot status classification and the dormant fetch-to-quorum wrapper when build capacity is available, then integrate and validate XLM claim settlement/reconciliation; preserve WP4 blocked until payout lifecycle evidence exists.",
       "cardIds": ["WP4"]
     },
     {
@@ -53,7 +53,7 @@
       "title": "Tests, independent review, and testnet",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo validation after 3ff9f64e when the shared slot is available; verify reserve quorum and freshness, resolve provider independence, then complete endpoint wiring, settlement, testnet, frontend, oracle, and release work. Keep the XRP post-sign race separate, not an XLM gate.",
+      "nextAction": "Run focused Cargo validation after 8dd604c7 when the shared slot is available; verify fixed-slot classification/wrapper plus reserve quorum and freshness, resolve provider independence, then complete endpoint wiring, settlement, testnet, frontend, oracle, and release work. Keep the XRP post-sign race separate, not an XLM gate.",
       "cardIds": ["WP6"]
     },
     {

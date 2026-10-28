@@ -37,7 +37,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement XLM claims, exits, and liquidation handling",
-      "evidenceText": "Commit 465f1082 adds dormant `record_xlm_claim` source in `vault.rs`, storing the vault/custody binding, claimant, gross stroops, destination, network, and fee reservation as Pending state. It does not sign or submit a Stellar transaction and remains unwired pending settlement/reconciliation. The helper is pushed but uncompiled and untested. Transaction-status transport's 39 policy tests remain unrun. Provider independence and live evidence freshness remain unresolved, so WP4 stays blocked. The XRP post-sign status race is a separate reuse caution, not an XLM-specific required gate. Reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission.",
+      "evidenceText": "Commit 8dd604c7 adds pure fixed-slot transaction-status provider classification and a dormant fetch-to-quorum wrapper; `transaction_status.rs` also has documentation corrections. Rustfmt/diff checks passed, but no Cargo tests/build or live calls were run. This wrapper does not implement claim settlement or payout; the policy's 39 tests remain unrun. Commit 465f1082's claim recorder remains unwired. Provider independence and evidence freshness remain unresolved, so WP4 stays blocked. The XRP post-sign status race is a separate reuse caution, not an XLM-specific required gate. Reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these changes. Commit 3ff9f64e adds full latest-ledger quorum fetch output, with no callers yet. Commit 465f1082 adds the dormant `record_xlm_claim` helper; it is pushed but uncompiled, untested, and unwired. No live outcalls or Cargo verification have run. Provider independence, live freshness, credit, and settlement remain unproved. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
+      "evidenceText": "Earlier focused `chains::stellar` Cargo tests passed 34/34 before these changes. Commit 8dd604c7 adds a dormant fetch-to-quorum transaction-status wrapper and pure fixed-slot classification; it remains uncompiled/unrun with no live calls. Commit 465f1082's claim recorder remains unwired. Provider independence, live freshness, credit, and settlement remain unproved. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
       "evidenceLinks": []
     },
     {
