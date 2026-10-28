@@ -5632,6 +5632,97 @@ impl From<InitArg> for State {
 }
 
 impl State {
+    /// Atomically reserve a derived Stellar address for a freshly allocated
+    /// vault ID. The caller must pass the ID allocated for this open attempt by
+    /// `increment_vault_id`; other reservations may interleave during address
+    /// derivation. The counter bound below cannot prove historical freshness.
+    /// Derivation and network calls stay with a future caller.
+    pub fn reserve_xlm_pending_deposit(
+        &mut self,
+        vault_id: u64,
+        owner: Principal,
+        custody_address: String,
+        network_id: [u8; 32],
+        opened_at_ns: u64,
+        expires_at_ns: u64,
+    ) -> Result<(), &'static str> {
+        const MAX_PENDING_PER_OWNER: usize = 10;
+        const MAX_PENDING_GLOBAL: usize = 10_000;
+        const MIN_LIFETIME_NS: u64 = 60 * 1_000_000_000;
+        const MAX_LIFETIME_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+
+        let selection = crate::chains::stellar::config::selection_from_state(self)
+            .map_err(|_| "unsupported Stellar key/network configuration")?;
+        if selection.network.network_id() != network_id {
+            return Err("Stellar network does not match configured key");
+        }
+        if !crate::chains::stellar::is_valid_classic_address(&custody_address) {
+            return Err("invalid Stellar classic custody address");
+        }
+        if vault_id == 0
+            || vault_id >= self.next_available_vault_id
+            || self.vault_id_to_vaults.contains_key(&vault_id)
+        {
+            return Err("vault ID was not reserved or is already in use");
+        }
+        if self.xlm_pending_deposits.contains_key(&vault_id) {
+            return Err("XLM pending vault ID collision");
+        }
+        if self.xrp_pending_deposits.contains_key(&vault_id) {
+            return Err("vault ID collides with pending XRP deposit");
+        }
+        if self.xlm_custody_attributions.contains_key(&custody_address) {
+            return Err("XLM custody address is already attributed");
+        }
+        let lifetime = expires_at_ns
+            .checked_sub(opened_at_ns)
+            .ok_or("XLM pending expiry precedes opening time")?;
+        if opened_at_ns == 0 || !(MIN_LIFETIME_NS..=MAX_LIFETIME_NS).contains(&lifetime) {
+            return Err("XLM pending expiry is outside the allowed lifetime");
+        }
+        let active = |d: &&XlmPendingDeposit| {
+            matches!(
+                d.status,
+                XlmPendingDepositStatus::Open | XlmPendingDepositStatus::Pending
+            )
+        };
+        if self.xlm_pending_deposits.values().filter(active).count() >= MAX_PENDING_GLOBAL {
+            return Err("XLM pending-deposit capacity is full");
+        }
+        if self
+            .xlm_pending_deposits
+            .values()
+            .filter(active)
+            .filter(|d| d.owner == owner)
+            .count()
+            >= MAX_PENDING_PER_OWNER
+        {
+            return Err("owner XLM pending-deposit capacity is full");
+        }
+
+        self.xlm_custody_attributions.insert(
+            custody_address.clone(),
+            XlmCustodyAttribution {
+                owner,
+                derivation_nonce: vault_id,
+                network_id,
+            },
+        );
+        self.xlm_pending_deposits.insert(
+            vault_id,
+            XlmPendingDeposit {
+                owner,
+                custody_address,
+                derivation_nonce: vault_id,
+                network_id,
+                opened_at_ns,
+                expires_at_ns,
+                status: XlmPendingDepositStatus::Open,
+            },
+        );
+        Ok(())
+    }
+
     /// Record a failed 3USD refund attempt while retaining the liability row,
     /// including when the automatic retry cap is reached.
     pub fn note_pending_3usd_refund_failure(&mut self, nonce: u128) -> Option<u8> {
@@ -16602,5 +16693,167 @@ mod add_margin_checked_transition_tests {
             Err(ProtocolError::GenericError(_))
         ));
         assert_eq!(state.vault_id_to_vaults.get(&41).unwrap().collateral_amount, u64::MAX);
+    }
+}
+#[cfg(test)]
+mod xlm_pending_reservation_tests {
+    use super::{State, XlmPendingDepositStatus};
+    use candid::Principal;
+
+    fn address(seed: u8) -> String {
+        crate::chains::stellar::classic_address_from_ed25519_pubkey(&[seed; 32])
+    }
+
+    fn reserve(
+        state: &mut State,
+        id: u64,
+        owner: Principal,
+        address: String,
+    ) -> Result<(), &'static str> {
+        let network = crate::chains::stellar::config::selection_from_state(state)
+            .unwrap()
+            .network;
+        state.reserve_xlm_pending_deposit(
+            id,
+            owner,
+            address,
+            network.network_id(),
+            1_000_000_000,
+            3_600_000_000_000,
+        )
+    }
+
+    #[test]
+    fn inserts_pending_row_and_permanent_attribution_together() {
+        let mut state = State::default();
+        let id = state.increment_vault_id();
+        let owner = Principal::from_slice(&[1]);
+        let address = address(7);
+        reserve(&mut state, id, owner, address.clone()).unwrap();
+        let pending = &state.xlm_pending_deposits[&id];
+        let attribution = &state.xlm_custody_attributions[&address];
+        assert_eq!(pending.status, XlmPendingDepositStatus::Open);
+        assert_eq!(pending.owner, owner);
+        assert_eq!(pending.derivation_nonce, id);
+        assert_eq!(attribution.owner, owner);
+        assert_eq!(attribution.derivation_nonce, id);
+        assert_eq!(attribution.network_id, pending.network_id);
+    }
+
+    #[test]
+    fn bad_key_network_address_and_expiry_fail_without_mutation() {
+        let mut state = State::default();
+        let id = state.increment_vault_id();
+        let owner = Principal::from_slice(&[1]);
+        let address = address(8);
+        let network = crate::chains::stellar::config::selection_from_state(&state)
+            .unwrap()
+            .network
+            .network_id();
+        assert!(state
+            .reserve_xlm_pending_deposit(
+                id,
+                owner,
+                address.clone(),
+                [0x55; 32],
+                1_000_000_000,
+                3_600_000_000_000
+            )
+            .is_err());
+        assert!(state
+            .reserve_xlm_pending_deposit(
+                id,
+                owner,
+                "invalid".into(),
+                network,
+                1_000_000_000,
+                3_600_000_000_000
+            )
+            .is_err());
+        assert!(state
+            .reserve_xlm_pending_deposit(
+                id,
+                owner,
+                address.clone(),
+                network,
+                2_000_000_000,
+                1_000_000_000
+            )
+            .is_err());
+        state.xlm_stellar_key_name = "unsupported".into();
+        assert!(state
+            .reserve_xlm_pending_deposit(
+                id,
+                owner,
+                address,
+                network,
+                1_000_000_000,
+                3_600_000_000_000
+            )
+            .is_err());
+        assert!(state.xlm_pending_deposits.is_empty());
+        assert!(state.xlm_custody_attributions.is_empty());
+    }
+
+    #[test]
+    fn rejects_id_address_reuse_and_per_owner_overflow() {
+        let mut state = State::default();
+        let owner = Principal::from_slice(&[1]);
+        let first = state.increment_vault_id();
+        let repeated_address = address(9);
+        reserve(&mut state, first, owner, repeated_address.clone()).unwrap();
+        let second = state.increment_vault_id();
+        assert!(reserve(&mut state, second, owner, repeated_address).is_err());
+        assert!(state
+            .reserve_xlm_pending_deposit(
+                first,
+                owner,
+                address(10),
+                crate::chains::stellar::config::selection_from_state(&state)
+                    .unwrap()
+                    .network
+                    .network_id(),
+                1_000_000_000,
+                3_600_000_000_000
+            )
+            .is_err());
+        for seed in 11..20 {
+            let id = state.increment_vault_id();
+            reserve(&mut state, id, owner, address(seed)).unwrap();
+        }
+        let overflow = state.increment_vault_id();
+        assert!(reserve(&mut state, overflow, owner, address(20)).is_err());
+        assert_eq!(state.xlm_pending_deposits.len(), 10);
+        assert_eq!(state.xlm_custody_attributions.len(), 10);
+    }
+
+    #[test]
+    fn rejects_vault_id_already_reserved_by_xrp() {
+        let mut state = State::default();
+        let id = state.increment_vault_id();
+        let owner = Principal::from_slice(&[1]);
+        state.xrp_pending_deposits.insert(
+            id,
+            super::XrpPendingDeposit {
+                owner,
+                custody_address: "rExample".into(),
+                derivation_nonce: id,
+                opened_at_ns: 1_000_000_000,
+                reserve_base_drops: 0,
+            },
+        );
+
+        assert!(reserve(&mut state, id, owner, address(21)).is_err());
+        assert!(state.xlm_pending_deposits.is_empty());
+        assert!(state.xlm_custody_attributions.is_empty());
+    }
+
+    #[test]
+    fn rejects_unallocated_zero_vault_id() {
+        let mut state = State::default();
+        let owner = Principal::from_slice(&[1]);
+        assert!(reserve(&mut state, 0, owner, address(22)).is_err());
+        assert!(state.xlm_pending_deposits.is_empty());
+        assert!(state.xlm_custody_attributions.is_empty());
     }
 }
