@@ -3748,6 +3748,53 @@ pub(crate) fn record_xrp_claim(
     claim_id
 }
 
+/// Dormant native-XLM counterpart to `record_xrp_claim`. This persists the
+/// claimant, source-vault custody binding, destination, network, and fee budget
+/// without signing or submitting a Stellar transaction. Keep this helper
+/// unwired until the complete settlement and reconciliation lifecycle exists.
+#[allow(dead_code)]
+pub(crate) fn record_xlm_claim(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    custody_owner: Principal,
+    custody_nonce: u64,
+    claimant: Principal,
+    gross_stroops: u64,
+    destination: String,
+    network_id: [u8; 32],
+    reserved_fee_stroops: u64,
+    now_ns: u64,
+) -> Result<u64, ProtocolError> {
+    let claim_id = s.next_xlm_claim_id;
+    let next_claim_id = claim_id.checked_add(1).ok_or_else(|| {
+        ProtocolError::GenericError("Native-XLM claim id space exhausted".to_string())
+    })?;
+    if s.xlm_claims.contains_key(&claim_id) {
+        return Err(ProtocolError::GenericError(
+            "Native-XLM claim id is already in use".to_string(),
+        ));
+    }
+
+    s.xlm_claims.insert(
+        claim_id,
+        crate::state::XlmClaim {
+            vault_id,
+            custody_owner,
+            custody_nonce,
+            claimant,
+            gross_stroops,
+            destination,
+            network_id,
+            reserved_fee_stroops,
+            created_at_ns: now_ns,
+            status: crate::state::XlmClaimStatus::Pending,
+            settlement_intent: None,
+        },
+    );
+    s.next_xlm_claim_id = next_claim_id;
+    Ok(claim_id)
+}
+
 /// P4: queue a collateral payout to `recipient`. ICRC collateral -> a
 /// PendingMarginTransfer (the ICRC transfer machinery pays it). Native-XRP -> an
 /// XrpClaim instead (settled later via settle_xrp_claim from the vault's custody
