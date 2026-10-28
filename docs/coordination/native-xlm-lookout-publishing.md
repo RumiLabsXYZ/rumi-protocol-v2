@@ -1,0 +1,7 @@
+# Native XLM Lookout publishing
+
+Maintain the private XLM project inputs in this repository and publish only the sanitized projection to the `rumi-native-xlm` Lookout project. The manifest is `docs/coordination/native-xlm-lookout-manifest.json`; its curated board, presentation, and priority sidecars sit in this directory. Lookout's GitHub repository is public, so keep project inputs and operational details here.
+
+Keep two distinct status strings in `native-xlm-lookout-presentation.json`. `summary` is the technical status. `plainSummary` is 2–3 short sentences, at most 600 Unicode codepoints, describing overall progress, what works, the current blocker, and the next step in ordinary language. Keep the existing glossary unchanged unless a term actually changes. Update **both** summaries whenever task movement, blockers, priorities, or overall progress change. Source, test, merge, deployment, activation, signing, broadcast, and settlement are separate claims.
+
+After a meaningful change, use the scoped manifest to run a dry-run, publish, then dry-run again. Require the second dry-run to report the board unchanged and presentation and priorities unchanged. Confirm the returned Lookout revision and readback before reporting publication. Use the publisher at `/Users/robertripley/coding/lookout-kanban/scripts/publisher.mjs` and the schema guidance at `/Users/robertripley/coding/lookout-kanban/docs/PUBLISHING.md`.
