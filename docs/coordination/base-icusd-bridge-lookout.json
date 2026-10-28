@@ -274,7 +274,7 @@
       "state": "blocked",
       "owner": "supervisor",
       "scope": "Isolated test UI: browser acceptance",
-      "evidenceText": "proof=staging-auth; Real II sign-in proven (staging-auth). Blocked: Rabby is locked and its unlock timed out, so no Base account is connected; Rob must unlock it and approve the staging connection. No transfer, seed or funding sent; bridge stopped",
+      "evidenceText": "proof=staging-auth; Earlier real staging sign-in proven. Renewed sign-in awaits Touch ID; Rabby unlock/connection pending. Test-network read-only checks pass; no browser transfer, seed or funding; bridge stopped. Rob completes sign-in and wallet approval next",
       "evidenceLinks": []
     },
     {

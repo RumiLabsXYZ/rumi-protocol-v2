@@ -1,5 +1,5 @@
 {
-  "summary": "The Rumi-to-Base bridge passed its isolated command-line test on Base's public test network with synthetic test tokens, and a real Internet Identity sign-in works in the isolated staging copy of the Bridge page. The browser test is now paused because the Base wallet is locked; it continues once Rob unlocks it and approves the connection. Production use, real icUSD, Base mainnet and merging are not done.",
+  "summary": "Canonical escrow bridge: local implementation/reviews and isolated Base Sepolia CLI round trip passed. Staging Internet Identity authentication was previously verified; the renewed browser session awaits Touch ID and Rabby unlock/connection. Browser settlement and reload recovery remain unverified; the synthetic bridge is stopped with all four pauses retained. PR #591 stays unmerged; production icUSD, Base mainnet and real funds remain out of scope.",
   "glossary": [
     {
       "term": "proof=source",
@@ -464,5 +464,6 @@
       "term": "Rabby",
       "definition": "The Base wallet browser extension used for the browser test. It must be unlocked by its owner before the page can connect to it."
     }
-  ]
+  ],
+  "plainSummary": "The bridge software passed local checks, and moving test tokens to Base and back worked in a separate command-line test. The browser test is waiting for Rob to finish signing in and unlock his Base wallet. Next we will connect that wallet and test both directions and recovery after reloading; production use is not approved."
 }

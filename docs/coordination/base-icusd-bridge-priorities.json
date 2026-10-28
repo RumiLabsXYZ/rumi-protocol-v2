@@ -4,8 +4,8 @@
       "id": "browser-round-trip",
       "title": "Finish real-wallet browser acceptance",
       "status": "blocked",
-      "blockedReason": "The Rabby wallet is locked and its unlock request timed out, so no Base account is connected yet. Cleared when Rob unlocks Rabby and approves the staging page's connection request.",
-      "nextAction": "After the unblock: connect the Base wallet, then test transaction consent and rejection in both directions, the synthetic browser round trip and reload recovery. The real Internet Identity sign-in is already proven.",
+      "blockedReason": "The renewed staging identity sign-in awaits Rob's Touch ID, and Rabby unlock and connection are still pending. Cleared when Rob completes sign-in, unlocks Rabby and approves the staging connection.",
+      "nextAction": "After sign-in and wallet approval: connect the Base wallet, then test transaction consent and rejection, the synthetic browser round trip and reload recovery. Earlier real Internet Identity sign-in remains scoped proof.",
       "cardIds": [
         "BB-26",
         "BB-27"

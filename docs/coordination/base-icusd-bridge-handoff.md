@@ -439,6 +439,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   no item is ready; BB-27 stays blocked until Rob unlocks Rabby and approves the staging connection;
   every production, merge, signing and funds boundary.
 
+## Milestone 19 (2026-10-27): two maintained project statuses
+
+- Rob's direct dual-status standard was independently verified by Miles in Alden's chat, turn
+  `01a18127-91be-7022-80a5-4088d969b9d7`. The maintained presentation now keeps Technical in
+  `summary` and a separate 2–3 sentence `plainSummary`, each at most 600 Unicode codepoints.
+  The glossary is unchanged. Both summaries follow the same source revision and proof limits.
+- Current BB-27: prior real staging identity sign-in remains verified, but the renewed browser
+  session awaits Rob's Touch ID and Rabby unlock/connection. Read-only test-network checks pass;
+  no browser transfer, seed or funding occurred. The test bridge is stopped with all pauses.
+- The previous badge-readiness hold is satisfied: Miles independently read Alden's final
+  deployed-badge confirmation in turn `01a17f5e-a18f-7982-919b-caba43c022f5`. Prepared memberships
+  are unchanged. Every real denial and live-action boundary remains; this is no production grant.
+- Nora's ongoing coordinator duty is the operating event rule: during active work, promptly
+  update canonical cards, both summaries, affected glossary and explicit memberships after task
+  movement; same scoped dry-run, changed-only publish, immediate no-op readback. No new timer and
+  no promise of automatic updates while inactive. Keep private inputs out of Lookout's public repo.
+- Publication evidence stays in the private local publisher record; this is a metadata checkpoint,
+  not browser settlement or production readiness.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

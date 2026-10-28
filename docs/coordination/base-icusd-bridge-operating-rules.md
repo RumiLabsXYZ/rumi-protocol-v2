@@ -50,8 +50,13 @@ Scope and limits (unchanged by the approval):
    changes, live signing or broadcast, and funding all stay held.
 
 Event rule (owned by this worktree's coordinator under Rob's standing approval; no setup-owner or
-root approval needed): after each material change to the canonical board, update the short
-summary and any affected glossary entries in the presentation sidecar and, when affected, the
+root approval needed): while actively working, promptly record every material task movement,
+progress/evidence, owner, blocker, next action or priority change on the canonical board. Update
+BOTH statuses in the presentation sidecar: `summary` is Technical and `plainSummary` is a separate
+2–3 short-sentence general-reader account of progress, what works, the blocker and the next step.
+Each is at most 600 Unicode codepoints; avoid unexplained acronyms, hashes or engineering
+chronology in `plainSummary`. Keep their facts and proof limits aligned; source, tests, merge,
+deployment, execution and settlement are distinct claims. Update affected glossary entries and the
 priority list (including card membership, "Priority selection", clause 7) and the board's priority
 section; re-derive the projection (which also validates
 the sidecar); run the offline priority validation ("Priority selection", clause 5); then run the
@@ -59,7 +64,12 @@ same scoped publisher with `--dry-run`. If it reports a change to the board, pre
 priorities, publish with `--publish`, then confirm an immediate `--dry-run` reports the exact source as already published
 (no-op). Never republish identical data. Record each published revision and source revision in
 the local publisher record outside this public repository, not here. No hourly monitor or
-additional timer.
+additional timer. This duty applies while actively working; it does not promise automatic updates
+while this chat is inactive. Both summaries bind to the exact board source revision; verify both
+in the changed-only publication and immediate no-op readback. Keep real project inputs and
+production publisher configuration private; the Lookout code repository is public. A real hold
+or denial must be recorded as a visibility blocker and reported to Miles and Rob, never bypassed.
+Schema: the Lookout repository's `docs/PUBLISHING.md`.
 
 Presentation cutover (2026-10-24, complete): the root Lookout owner built the board's status and
 definitions feature and made the first presentation upload; the publisher manifest now reads
@@ -117,13 +127,12 @@ Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirror
    their item is clear; link a card to more than one item only when it belongs to each; leave
    shared or ambiguous cards unlinked and record why in the handoff. Coverage is not a quota. A
    membership change touches only `cardIds`: never alter an item's id, title, status, reason, next
-   action or rank to fit a link. Badge readiness hold: the existing manifest's publish path
-   includes this priority list, so the changed membership checkpoint of 2026-10-27 stays
-   unpublished until Alden confirms the badge feature is live. Its review used offline checks only;
-   no API call is needed for it. Until that confirmation, do not publish, do not retry or route
-   around any rejected upload, and record any board change locally and report it to Miles. The
-   hold covers publishing only, not otherwise-authorized read-only diagnostics. After Alden
-   confirms, membership changes publish under the event rule like any other priority change.
+   action or rank to fit a link. Badge readiness hold resolved (2026-10-27): Miles independently
+   read Alden's final response in turn `01a17f5e-a18f-7982-919b-caba43c022f5`, confirming the card
+   badges are live and deployed frontend assets were verified. This satisfies the temporary
+   sequencing condition for the prepared membership checkpoint. Membership changes now publish
+   under the same event rule. Only this readiness condition is cleared; real denials and all
+   bridge, production, merge, signing, funding and credential boundaries stay unchanged.
 
 ## Card ID mapping
 

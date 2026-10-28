@@ -10,8 +10,8 @@ level. Paths, hashes longer than a short commit id, addresses and URLs are remov
 and text over 240 characters is cut at a clause or word boundary and marked.
 
 It also validates docs/coordination/base-icusd-bridge-presentation.json, the
-hand-maintained presentation sidecar ({summary, glossary:[{term, definition, cardId?}]})
-that gives the board a short plain-English status and term definitions. The sidecar is
+hand-maintained presentation sidecar ({summary, plainSummary?, glossary:[{term, definition, cardId?}]})
+that gives the board technical and plain-English statuses and term definitions. The sidecar is
 never rewritten here; the check mirrors the Lookout publisher's limits and fails if the
 publisher's redaction would change any text.
 This script never uploads anything. Publishing is done separately by the scoped Lookout
@@ -123,8 +123,8 @@ def check_presentation(cards: list) -> None:
     """Validate the presentation sidecar against the publisher's rules and the cards."""
     raw = json.loads(PRESENTATION.read_text(encoding="utf-8"))
     problems = []
-    if not isinstance(raw, dict) or set(raw) != {"summary", "glossary"}:
-        problems.append("top level must be exactly {summary, glossary}")
+    if not isinstance(raw, dict) or not {"summary", "glossary"} <= set(raw) or not set(raw) <= {"summary", "plainSummary", "glossary"}:
+        problems.append("top level must have summary, glossary and optional plainSummary only")
         raw = raw if isinstance(raw, dict) else {}
     summary, glossary = raw.get("summary"), raw.get("glossary")
     if not isinstance(summary, str) or not summary.strip():
@@ -142,6 +142,14 @@ def check_presentation(cards: list) -> None:
     all_text = " ".join(text_by_id.values())
     seen, total, unused = set(), len(summary), []
     texts = [summary]
+    if "plainSummary" in raw:
+        plain_summary = raw["plainSummary"]
+        if not isinstance(plain_summary, str) or not plain_summary.strip():
+            problems.append("plainSummary must be non-empty text")
+        else:
+            if len(plain_summary) > 600:
+                problems.append(f"plainSummary is {len(plain_summary)} characters (max 600)")
+            texts.append(plain_summary)
     for i, item in enumerate(glossary):
         if not isinstance(item, dict) or not set(item) <= {"term", "definition", "cardId"} or not {"term", "definition"} <= set(item):
             problems.append(f"glossary[{i}] must have term, definition and optional cardId only")
