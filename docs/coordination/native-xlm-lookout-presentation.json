@@ -1,6 +1,6 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Commit d45c8332 adds guarded dormant pending-deposit and attribution state for a caller-reserved vault ID/address, with focused test source but no Cargo verification. No public open/confirm API, derivation, outcall, or credit exists; WP3 remains blocked.",
-  "plainSummary": "Native XLM is still unavailable to users. A new helper can record a pending deposit after a vault and address are supplied, but it does not create the vault, contact Stellar, or credit collateral, and it has not been tested. Public deposit flows and release checks remain unfinished.",
+  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Official-doc research now lists SDF, Tatum, Blockdaemon, Ankr, and QuickNode as Horizon candidates, with Blockdaemon mainnet history documented as full history. None is provisioned or probed; network passphrase, operator independence, and quotas remain unverified. WP0/provider selection remains blocked.",
+  "plainSummary": "Native XLM collateral is still unavailable to users. Research has identified five possible Horizon providers, but none has been set up or tested, and we have not verified the Stellar network identity, provider independence, or quotas. Provider selection and release checks remain open.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},

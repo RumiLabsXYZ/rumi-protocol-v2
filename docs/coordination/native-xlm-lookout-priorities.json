@@ -5,7 +5,7 @@
       "title": "XLM parity and threat model",
       "status": "in_progress",
       "blockedReason": "XRC source supports XLM/USD and defaults to a received-rate floor of 3 and freshness up to 120 seconds, but live XLM quote/quorum is unknown. The read-only connector refused the backend for lack of a service-discoverability manifest; the direct XRC sample is a paid update and was not called.",
-      "nextAction": "Verify connected-wallet CreateAccount and native Payment first-funding support; establish an authorized read-only path for XRC XLM/USD and independently validate provider endpoints when DNS access is available.",
+      "nextAction": "Verify connected-wallet CreateAccount/native Payment support and XRC XLM/USD; verify Stellar root passphrase, provider operator independence and quotas, then select/provision a 2-of-3 set from the documented candidates before any live probes.",
       "cardIds": ["WP0"]
     },
     {
