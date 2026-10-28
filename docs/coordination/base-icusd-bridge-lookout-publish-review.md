@@ -18,15 +18,15 @@ Lookout's public GitHub repository.
 
 ## Exact readable inputs
 
-These files are pushed on `codex/base-icusd-bridge` at commit `3fc6c1c6`.
+These files are pushed on `codex/base-icusd-bridge` at commit `d74e35f0`.
 The source revision accepted by the publisher dry-run is
 `89b8797df65d655c76ce3131b88d7d74e2fdd459d95fab6b4b9105f580c931f7`.
 
-- [docs/coordination/base-icusd-bridge-lookout.json](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/3fc6c1c6/docs/coordination/base-icusd-bridge-lookout.json)
+- [docs/coordination/base-icusd-bridge-lookout.json](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/d74e35f0/docs/coordination/base-icusd-bridge-lookout.json)
   SHA-256: `9319bdb6a9364ddd79a898af1364f1973f1f401faa41b8be20d539b846dbcdf8`
-- [docs/coordination/base-icusd-bridge-presentation.json](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/3fc6c1c6/docs/coordination/base-icusd-bridge-presentation.json)
-  SHA-256: `b52a3d5cf1edd5dcab5844a3faee642829680e8c632e9c0ebb7ce921384fe11a`
-- [docs/coordination/base-icusd-bridge-priorities.json](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/3fc6c1c6/docs/coordination/base-icusd-bridge-priorities.json)
+- [docs/coordination/base-icusd-bridge-presentation.json](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/d74e35f0/docs/coordination/base-icusd-bridge-presentation.json)
+  SHA-256: `ab82e39c83c036e4558aabd24fb3d68f5a857e3ee715b1ea46777a8b973fe47c`
+- [docs/coordination/base-icusd-bridge-priorities.json](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/d74e35f0/docs/coordination/base-icusd-bridge-priorities.json)
   SHA-256: `d725b7d3f00c5009c8d15f2cdb24bd9f2cffc4f5a893f616d019c1ff20c9ecc0`
 
 ## What the payload says
@@ -51,3 +51,7 @@ Approve uploading these three fingerprinted sanitized inputs to that existing pr
 project using its existing scoped publisher, followed by read-only verification. This approval
 would resolve this exact metadata-upload hold only; every bridge, credential, production and
 merge boundary remains unchanged.
+
+Writing correction on 2026-10-28: the plain-English status is now 51 words. Technical, glossary,
+cards and priorities are unchanged from the reviewed checkpoint. This updates the readable
+approval inputs only; the prior rejection still holds and no publish retry was attempted.
