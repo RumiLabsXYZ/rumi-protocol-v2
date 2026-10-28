@@ -1,5 +1,6 @@
 {
   "summary": "The Stability Pool and Points source changes are merged, but merge alone does not settle user obligations or prove the current live state. Bram is checking production receipts and reconciling the audit findings. Release and public status updates will follow only after those facts are verified.",
+  "plainSummary": "The security review is still underway. Recent fixes are in the code, and we are checking what is actually running and whether past obligations were settled. We will update the public status after those checks.",
   "glossary": [
     {"term": "Stability Pool", "definition": "The pool that absorbs certain liquidations and receives protocol interest.", "cardId": "SEC-01"},
     {"term": "Wasm", "definition": "The compiled canister program installed on the Internet Computer. A merged source change may differ from the installed program.", "cardId": "SEC-01"},
