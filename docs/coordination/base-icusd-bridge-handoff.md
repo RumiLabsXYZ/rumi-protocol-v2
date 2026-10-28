@@ -472,6 +472,23 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   executors or payload wrappers, and no relay to Nora for upload. Source maintenance continues;
   publication needs the original review boundary resolved with exact human approval.
 
+## Milestone 20 (2026-10-28): plain-English writing correction
+
+- Miles independently read Rob's direct correction in Alden's chat, turn
+  `01a1848c-5a49-7f70-be08-4b66d0d8878c`. The plain status now uses three short sentences for a
+  reader outside the project: what works, what still blocks the useful result, and what happens
+  next including Rob's action. The stronger 35–60 word standard is in the operating event rule.
+- Plain status: "The bridge has moved test tokens to Base and back, but that was done outside
+  the app. We still need to prove the same trip works through the browser. Rob needs to finish
+  signing in and unlock his wallet; then we can test sending tokens both ways and reopening the
+  page."
+- The technical status, glossary, cards, priorities and proof limits are unchanged. This is a
+  writing correction, not new browser evidence. No runtime or wallet action was attempted.
+- The actual publication rejection recorded in milestone 19 remains active. The general writing
+  instruction does not resolve approval for the exact rejected metadata and destination. No
+  publish retry, alternate executor or relay is authorized; readable review inputs are updated
+  for the revised plain status and remain held for exact approval.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

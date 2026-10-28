@@ -465,5 +465,5 @@
       "definition": "The Base wallet browser extension used for the browser test. It must be unlocked by its owner before the page can connect to it."
     }
   ],
-  "plainSummary": "The bridge software passed local checks, and moving test tokens to Base and back worked in a separate command-line test. The browser test is waiting for Rob to finish signing in and unlock his Base wallet. Next we will connect that wallet and test both directions and recovery after reloading; production use is not approved."
+  "plainSummary": "The bridge has moved test tokens to Base and back, but that was done outside the app. We still need to prove the same trip works through the browser. Rob needs to finish signing in and unlock his wallet; then we can test sending tokens both ways and reopening the page."
 }

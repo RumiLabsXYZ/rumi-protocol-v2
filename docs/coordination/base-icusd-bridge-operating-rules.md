@@ -53,10 +53,15 @@ Event rule (owned by this worktree's coordinator under Rob's standing approval; 
 root approval needed): while actively working, promptly record every material task movement,
 progress/evidence, owner, blocker, next action or priority change on the canonical board. Update
 BOTH statuses in the presentation sidecar: `summary` is Technical and `plainSummary` is a separate
-2–3 short-sentence general-reader account of progress, what works, the blocker and the next step.
-Each is at most 600 Unicode codepoints; avoid unexplained acronyms, hashes or engineering
-chronology in `plainSummary`. Keep their facts and proof limits aligned; source, tests, merge,
-deployment, execution and settlement are distinct claims. Update affected glossary entries and the
+2–3 short sentences, normally 35–60 words, for someone who does not work on the code. Say what
+someone can actually do today or how far along the useful result is; name the main thing blocking
+the next useful result; then say what happens next and whether Rob needs to do anything. Use
+ordinary words, not technical phrases with their abbreviations expanded. No hashes, review
+numbers, test counts, acronyms, task labels, release codes, engineering chronology or lists of
+technical caveats. Keep the detailed evidence in Technical and the task cards. Read it aloud:
+if a friend outside the project would need an explanation, rewrite it. Each summary is at most
+600 Unicode codepoints. Keep their facts and proof limits aligned; code, tests, deployment,
+execution and settlement are distinct claims, expressed plainly without a disclaimer list. Update affected glossary entries and the
 priority list (including card membership, "Priority selection", clause 7) and the board's priority
 section; re-derive the projection (which also validates
 the sidecar); run the offline priority validation ("Priority selection", clause 5); then run the
