@@ -1,7 +1,8 @@
 //! Pure, fail-closed classification of Stellar transaction status evidence.
 //!
-//! DORMANT AND UNREGISTERED. This module is not declared in `mod.rs`, makes no
-//! network calls, submits nothing, credits nothing, and mutates no state. It
+//! DORMANT AND UNWIRED. This module is declared for pure code and tests, but
+//! no canister API invokes its verdicts. It makes no network calls, submits
+//! nothing, credits nothing, and mutates no state. It
 //! only turns already-fetched Horizon `GET /transactions/{hash}` responses into
 //! typed observations, combines up to three independent observations into a
 //! quorum verdict, and maps that verdict (plus caller-supplied expiry and

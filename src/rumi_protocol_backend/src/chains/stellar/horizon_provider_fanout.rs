@@ -7,7 +7,7 @@
 use super::{
     codec::Network,
     horizon_parse::{self, AccountSnapshot, FinalizedDeposit, LatestLedgerReserve},
-    horizon_quorum, horizon_rpc,
+    horizon_quorum, horizon_rpc, transaction_status,
 };
 use ic_cdk::api::management_canister::http_request::{http_request, CanisterHttpRequestArgument};
 
@@ -339,6 +339,38 @@ pub async fn fetch_transaction_status_evidence(
     Ok(observations)
 }
 
+/// Reduce fixed-slot HTTP evidence to a fail-closed transaction verdict. A
+/// missing provider response stays unavailable; HTTP 404 is only NotFound when
+/// its problem body passes the status parser. This is still read-only evidence,
+/// not permission to settle or replace a claim.
+pub fn classify_transaction_status_evidence(
+    observations: &[Option<TransactionStatusHttpEvidence>; 3],
+    transaction_hash: &str,
+) -> transaction_status::StatusQuorum {
+    let parsed = observations.each_ref().map(|observation| {
+        observation.as_ref().map(|response| {
+            let (status, body) = response.status_and_body();
+            transaction_status::parse_transaction_observation(status, body, transaction_hash)
+        })
+    });
+    transaction_status::transaction_status_quorum(&parsed, transaction_hash)
+}
+
+/// Bind configured provider roots to the selected network, fetch all three
+/// transaction-status slots, then apply the pure verdict reducer. This remains
+/// dormant until claim reconciliation verifies the exact payment and fee.
+pub async fn fetch_transaction_status_quorum(
+    config: &HorizonProviderConfig,
+    network: Network,
+    transaction_hash: &str,
+) -> Result<transaction_status::StatusQuorum, String> {
+    let observations = fetch_transaction_status_evidence(config, network, transaction_hash).await?;
+    Ok(classify_transaction_status_evidence(
+        &observations,
+        transaction_hash,
+    ))
+}
+
 /// Fetch one bounded transaction-operations page from each provider after
 /// binding all provider roots to the selected network. Each slot contains that
 /// provider's parsed page or `None` when its request is unavailable/invalid.
@@ -547,6 +579,37 @@ mod tests {
         assert!(
             classify_transaction_status_response(candid::Nat::from(500u16), b"{}".to_vec())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn transaction_status_http_slots_reach_quorum_without_promoting_missing_evidence() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let found = TransactionStatusHttpEvidence::Http200(
+            format!(r#"{{"hash":"{hash}","ledger":91,"successful":true,"fee_charged":"100"}}"#)
+                .into_bytes(),
+        );
+        let missing = TransactionStatusHttpEvidence::Http404NotFound(
+            br#"{"type":"https://stellar.org/horizon-errors/not_found","status":404}"#.to_vec(),
+        );
+        let two_found = [Some(found.clone()), Some(found.clone()), None];
+        assert!(matches!(
+            classify_transaction_status_evidence(&two_found, hash),
+            transaction_status::StatusQuorum::ConfirmedApplied {
+                ledger: 91,
+                fee_charged_stroops: 100,
+                ..
+            }
+        ));
+        let one_found = [Some(found), Some(missing.clone()), None];
+        assert_eq!(
+            classify_transaction_status_evidence(&one_found, hash),
+            transaction_status::StatusQuorum::AffirmativeUnconfirmed
+        );
+        let two_missing = [Some(missing.clone()), Some(missing), None];
+        assert_eq!(
+            classify_transaction_status_evidence(&two_missing, hash),
+            transaction_status::StatusQuorum::NotFoundAgreed
         );
     }
 
