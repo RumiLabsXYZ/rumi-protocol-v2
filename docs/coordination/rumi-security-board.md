@@ -14,7 +14,8 @@ Updated: 2026-10-27. Coordinator: Bram. This board tracks the security review; t
 
 - The first active priority is SEC-01. If it blocks, record the blocker and continue SEC-02 or SEC-03 without duplicating another owner's release work.
 - No card authorizes a canister install, activation, signing, funds movement, or release of a hold. Use the separate approved release procedure for those actions.
-- Keep the Lookout projection, presentation, and priorities in this directory aligned with each meaningful board checkpoint. Only sanitized summaries and public links may leave the repository.
+- Whenever a task's state, owner, blocker, next step, evidence, or priority changes, update the canonical board and its sanitized Lookout projection, technical summary, plain-English summary, and ranked priorities as applicable. Publish promptly with the project-scoped identity, then read back the exact revision. This applies while the coordinator is actively working; it is not an unattended sync.
+- Keep explicit card-to-subproject links in the priority sidecar. If a card has no certain link, leave it unlinked until its owner classifies it. Only sanitized summaries and public links may leave the repository.
 - Run the Lookout publisher from the Rumi repository root using this directory's manifest. Dry-run first, publish changed data, then dry-run again. The source path in the manifest is relative to the command's working directory.
 
 ## Evidence
