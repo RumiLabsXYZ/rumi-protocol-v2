@@ -1,6 +1,6 @@
 {
   "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Official-doc research now lists SDF, Tatum, Blockdaemon, Ankr, and QuickNode as Horizon candidates, with Blockdaemon mainnet history documented as full history. None is provisioned or probed; network passphrase, operator independence, and quotas remain unverified. WP0/provider selection remains blocked.",
-  "plainSummary": "Native XLM collateral is still unavailable to users. Research has identified five possible Horizon providers, but none has been set up or tested, and we have not verified the Stellar network identity, provider independence, or quotas. Provider selection and release checks remain open.",
+  "plainSummary": "XLM cannot be used as collateral in Rumi yet. We have started building it, but deposits and payouts are unfinished, and the services that check XLM payments have not been set up. We’ll finish and test those pieces next; Rob needs to sign in to Claude Code to start the junior assistant he requested.",
   "glossary": [
     {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
     {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
