@@ -25,6 +25,14 @@
       "evidenceLinks": []
     },
     {
+      "id": "D1",
+      "state": "In progress",
+      "owner": "Mara Junior / Sonnet",
+      "scope": "Demo: open an XLM pending deposit and show its custody address",
+      "evidenceText": "Demo-first source task started in the isolated Mara Junior branch: an authorized owner should receive a unique threshold-derived Stellar classic address backed by a durable pending row and permanent owner/network attribution. Opening must credit no collateral and mint no icUSD. No source result, build, test, generated Candid, testnet flow, or deployment is claimed yet. Full deposit confirmation and borrowing remain separate blocked work. Shared heavy build allocation is absent and disk headroom is below the current floor.",
+      "evidenceLinks": []
+    },
+    {
       "id": "WP3",
       "state": "Blocked",
       "owner": "Rumi implementation team",
@@ -37,7 +45,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement XLM claims, exits, and liquidation handling",
-      "evidenceText": "Commit ac8ba7ea hardens dormant `record_xlm_claim`: it rejects zero or excessive reserved fees, non-classic destinations, and a network ID inconsistent with the selected key before mutating state. Focused test source was added, but compilation/tests remain unrun because Pendle holds the shared heavy slot. The helper remains unwired and does not sign, submit, or settle a claim. WP4 stays blocked; provider independence, evidence freshness, reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission. The plan now specifies fresh, ordered, intent-bound provider evidence before a replacement payout; the dormant pure retry helper still relies on its future caller for that binding. Mara Junior committed an isolated, untested two-commit source candidate for a bound pure replacement reducer. Independent review held integration: the 404 response and account/ledger scalars still rely on a future trusted provider adapter to prove request hash, provider, freshness, and persisted-intent provenance. No reachable payout retry exists; the main XLM branch does not contain this candidate. Junior commit 421c3e61 adds an isolated typed Horizon status/checkpoint/account read seam and private-field evidence construction. Independent review found no concrete new internal bypass, but caller-built intent and cross-read provider monotonicity remain unproven. No build/tests ran, no main-branch cherry-pick, and payout wiring remains held.",
+      "evidenceText": "Commit ac8ba7ea hardens dormant `record_xlm_claim`: it rejects zero or excessive reserved fees, non-classic destinations, and a network ID inconsistent with the selected key before mutating state. Focused test source was added, but compilation/tests remain unrun because the shared heavy slot is not allocated to XLM. The helper remains unwired and does not sign, submit, or settle a claim. WP4 stays blocked; provider independence, evidence freshness, reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission. The plan now specifies fresh, ordered, intent-bound provider evidence before a replacement payout; the dormant pure retry helper still relies on its future caller for that binding. Mara Junior committed an isolated, untested two-commit source candidate for a bound pure replacement reducer. Independent review held integration: the 404 response and account/ledger scalars still rely on a future trusted provider adapter to prove request hash, provider, freshness, and persisted-intent provenance. No reachable payout retry exists; the main XLM branch does not contain this candidate. Junior commit 421c3e61 adds an isolated typed Horizon status/checkpoint/account read seam and private-field evidence construction. Independent review found no concrete new internal bypass, but caller-built intent and cross-read provider monotonicity remain unproven. No build/tests ran, no main-branch cherry-pick, and payout wiring remains held.",
       "evidenceLinks": []
     },
     {

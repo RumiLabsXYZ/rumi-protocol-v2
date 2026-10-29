@@ -1,12 +1,24 @@
 {
   "items": [
     {
+      "id": "xlm-demo-open-address",
+      "title": "Demo: open XLM custody address",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Mara Junior delegates the smallest authorized open-address endpoint to Sonnet, then Haiku reviews basic caller, key/network, and durable-state integrity. Compile and smoke-check when the shared slot and disk floor permit.",
+      "cardIds": [
+        "D1"
+      ]
+    },
+    {
       "id": "stellar-threat-model",
       "title": "XLM parity and threat model",
       "status": "in_progress",
       "blockedReason": "XRC source supports XLM/USD and defaults to a received-rate floor of 3 and freshness up to 120 seconds, but live XLM quote/quorum is unknown. The read-only connector refused the backend for lack of a service-discoverability manifest; the direct XRC sample is a paid update and was not called.",
       "nextAction": "Verify connected-wallet CreateAccount/native Payment support and XRC XLM/USD; verify Stellar root passphrase, provider operator independence and quotas, then select/provision a 2-of-3 set from the documented candidates before any live probes.",
-      "cardIds": ["WP0"]
+      "cardIds": [
+        "WP0"
+      ]
     },
     {
       "id": "stellar-rail-vectors",
@@ -14,7 +26,9 @@
       "status": "in_progress",
       "blockedReason": "",
       "nextAction": "Run focused Cargo tests after 3ff9f64e when the shared slot is available; add a caller for the full LatestLedgerReserve record only after validating quorum semantics, provider independence, and evidence freshness.",
-      "cardIds": ["WP1"]
+      "cardIds": [
+        "WP1"
+      ]
     },
     {
       "id": "stable-state-launch-guard",
@@ -22,7 +36,9 @@
       "status": "in_progress",
       "blockedReason": "",
       "nextAction": "Cargo-verify the guarded pending-deposit/attribution insertion and existing key/credit state; keep it dormant until public open/confirm APIs and atomic credit flow are implemented.",
-      "cardIds": ["WP2"]
+      "cardIds": [
+        "WP2"
+      ]
     },
     {
       "id": "verified-deposit-borrow",
@@ -30,7 +46,9 @@
       "status": "blocked",
       "blockedReason": "The new pure deposit_evidence decision helper is not wired into open/confirm endpoints, provider-account quorum, or atomic mutation; no live credit lifecycle exists. Tests and compilation are pending.",
       "nextAction": "Compile/test the pending-row and reserve/receipt decisions, then implement public open/confirm, key derivation, provider binding, and atomic deposit credit/receipt/tombstone lifecycle; preserve WP3 blocked until end-to-end evidence exists.",
-      "cardIds": ["WP3"]
+      "cardIds": [
+        "WP3"
+      ]
     },
     {
       "id": "claims-exits-liquidation",
@@ -38,7 +56,9 @@
       "status": "blocked",
       "blockedReason": "No supported XLM claim, withdrawal, close, or liquidation payout lifecycle exists. Unsupported routes fail closed in source, but the current guards have not been Cargo-tested; claim/intent state is dormant and Frozen config keeps XLM unreachable.",
       "nextAction": "Compile/test the claim recorder's fee, destination, and key/network guards when the shared heavy slot is available; then integrate and validate XLM claim settlement/reconciliation, keeping WP4 blocked until payout lifecycle evidence exists.",
-      "cardIds": ["WP4"]
+      "cardIds": [
+        "WP4"
+      ]
     },
     {
       "id": "frontend-candid-monitoring",
@@ -46,7 +66,9 @@
       "status": "in_progress",
       "blockedReason": "",
       "nextAction": "Regenerate and verify Candid/frontend declarations after the developer-gated XLM key setter/getter change, then implement supported flows with explicit pending/unresolved states; keep them unavailable until route and integration safety is resolved.",
-      "cardIds": ["WP5"]
+      "cardIds": [
+        "WP5"
+      ]
     },
     {
       "id": "test-review-testnet",
@@ -54,7 +76,9 @@
       "status": "in_progress",
       "blockedReason": "",
       "nextAction": "Run focused Cargo validation after 8dd604c7 when the shared slot is available; verify fixed-slot classification/wrapper plus reserve quorum and freshness, resolve provider independence, then complete endpoint wiring, settlement, testnet, frontend, oracle, and release work. Keep the XRP post-sign race separate, not an XLM gate.",
-      "cardIds": ["WP6"]
+      "cardIds": [
+        "WP6"
+      ]
     },
     {
       "id": "release-activation-evidence",
@@ -62,7 +86,9 @@
       "status": "blocked",
       "blockedReason": "The implementation and required review, CI, artifact, audit, operational, and current network evidence are not complete; XRC XLM/USD live quorum is unproven.",
       "nextAction": "Complete key/network/provider binding, current reserve/oracle checks, claim settlement, testnet, frontend, and release prerequisites while registration remains frozen.",
-      "cardIds": ["WP7"]
+      "cardIds": [
+        "WP7"
+      ]
     }
   ]
 }
