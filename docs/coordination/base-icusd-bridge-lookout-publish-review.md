@@ -1,8 +1,11 @@
 # Rumi Base bridge: exact sanitized Lookout upload review
 
-Status: **HELD. No upload executed.** Automatic approval review rejected the existing publisher
-command because authorization for this exact internal metadata payload and private destination
-could not be verified. Do not retry indirectly or use a different executor.
+Status: **Historical review; missing-visible-authorization hold resolved on 2026-10-29.**
+The original command was rejected before execution. Miles independently verified Rob's renewed
+standing authorization for sanitized updates to this same private project via its same scoped
+publisher. This file preserves the reviewed input provenance; it is no longer an approval gate.
+A genuinely new review rejection must still stop its action; no indirect retry or alternate
+executor is allowed.
 
 ## Destination and operation
 
@@ -45,7 +48,7 @@ existing authorized private Lookout audience; that disclosure is the action need
 It does not merge, deploy or activate the bridge, sign/broadcast transactions, fund anything,
 or prove browser settlement or production readiness.
 
-## Requested exact approval
+## Historical requested approval (superseded by renewed standing scope)
 
 Approve uploading these three fingerprinted sanitized inputs to that existing private Lookout
 project using its existing scoped publisher, followed by read-only verification. This approval
@@ -55,3 +58,11 @@ merge boundary remains unchanged.
 Writing correction on 2026-10-28: the plain-English status is now 51 words. Technical, glossary,
 cards and priorities are unchanged from the reviewed checkpoint. This updates the readable
 approval inputs only; the prior rejection still holds and no publish retry was attempted.
+
+October 29 disposition: the renewed standing human scope resolves the old missing-visible-
+authorization hold for routine sanitized board metadata. Historical fingerprints above remain
+unchanged. Publication results are recorded privately after the normal scoped verification.
+
+Completed October 29: the original scoped publisher accepted the prepared inputs under renewed
+standing authority. The immediate read-only verification reported board, both summaries, glossary,
+priorities and repository association unchanged. Exact receipt and fingerprints remain private.

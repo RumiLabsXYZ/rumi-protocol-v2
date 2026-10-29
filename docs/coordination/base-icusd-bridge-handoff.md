@@ -489,6 +489,27 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   publish retry, alternate executor or relay is authorized; readable review inputs are updated
   for the revised plain status and remain held for exact approval.
 
+## Milestone 21 (2026-10-29): renewed private board publishing scope
+
+- Miles independently verified Rob's direct zero-friction stale-page instruction in Alden's
+  turn `01a189b2-fe21-7b53-8e88-c18d11712115`, and read the private publishing guide's October 29
+  standing scope. Routine sanitized updates to the same private backend via the same canonical
+  bridge manifest and scoped identity no longer wait on the historical missing-visible-approval
+  note. The operating instructions now preserve that rejection as history, not an active gate.
+- The prepared 51-word plain status, Technical status, glossary, cards and priorities retain their
+  actual evidence ceiling; no fresh browser or chain observation is claimed. No completion times
+  are invented. No product runtime, wallet, governance or financial action is part of this pass.
+- Publication uses the original dry-run, changed-only publish and no-op readback. A genuinely new
+  review rejection still stops the action; no rerouting, duplicate publisher or additional timer.
+  Exact publication results and fingerprints stay in the private local publisher record.
+- Completed: original scoped publisher accepted the changed-only upload. Immediate authenticated
+  dry-run reports board, Technical/glossary, Plain English, priorities and repository association
+  all unchanged. The live mirror contains the prepared 35 cards and 51-word plain status, bound
+  to the same source revision. The historical authorization hold is resolved; no fresh rejection.
+- Routine metadata upkeep now follows the existing event rule without per-checkpoint permission.
+  No additional timer or publisher was created, and no bridge runtime, wallet or financial action
+  was attempted. This handoff-only receipt does not trigger another publication.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -95,18 +95,34 @@ was not explicit enough. That command did not run and no cards were uploaded; a 
 OPERATIONAL UPLOAD HELD" rule applied here until Rob's approval above resolved the boundary. The
 hold never gated implementation or tests.
 
-### Active publication hold (2026-10-27)
+### Current standing publication authorization (renewed 2026-10-29)
 
-Automatic approval review rejected the dual-status checkpoint's existing-manifest `--publish`
-command before execution. The stated reason was insufficiently clear user authorization for this
-exact internal metadata payload and private Lookout destination. No upload occurred. The earlier
-badge-readiness condition is satisfied, but this new actual rejection is a separate boundary.
-Do not retry or use another identity, tool, wrapper, changed projection or coordinating agent to
-publish the rejected/equivalent payload. Local board and summary maintenance may continue.
-Miles must obtain exact human approval or resolve the original review boundary before publication.
-The reviewed upload consists of the existing Lookout card projection, presentation (both summaries
-and unchanged glossary) and priorities through the existing scoped manifest. Exact source revision
-and input fingerprints are retained in the private local publication record.
+Miles independently read Rob's direct request in Alden's Lookout owner chat, turn
+`01a189b2-fe21-7b53-8e88-c18d11712115`: Rob raised the stale-page automatic-review hold and said
+he wants "zero friction for them keeping the live page updated". The maintained private Lookout
+publishing guide's October 29 scope renews his earlier approval of future sanitized updates for
+all connected projects, including this bridge project.
+
+Routine sanitized cards, Technical and Plain English statuses, glossary, priorities, genuine
+completion times and repository metadata may publish to the SAME private Lookout backend using
+this project's SAME canonical manifest, publisher and scoped identity. Validate inputs, publish
+changed content, verify exact source-revision binding and immediate no-op readback. No new
+per-checkpoint permission request, timer, watcher or alternative publisher. Keep the canonical
+board authoritative, preserve genuine observation times, and keep the plain status understandable
+to someone outside the project. No new completion metadata is inferred from an upload date.
+
+The October 27 rejection remains historical evidence: its command did not run, and no upload
+occurred then. Its missing-visible-authorization condition is resolved by this renewed direct
+human request; do not perpetuate that obsolete blanket hold. The exact input review document is
+retained for provenance, not as a pending approval gate.
+
+Excluded: credentials, private keys, addresses, balances, transaction payloads, raw provider or
+support records and unrelated private content. Publishing does not authorize product release,
+private-source transfer, governance, signing, broadcast, settlement or funds movement. Separate
+source/provider/release and financial holds remain unchanged. A genuinely NEW tool-review
+rejection stops that action and must be reported with its exact reason; never reroute or blindly
+retry it. Schema/length validation failures are data errors to fix. Current private guide:
+the Lookout repository's `outputs/PUBLISHING.md`, October 29 standing authorization.
 
 ## Priority selection
 
