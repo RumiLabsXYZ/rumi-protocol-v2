@@ -4,8 +4,8 @@
       "id": "xlm-demo-open-address",
       "title": "Demo: open XLM custody address",
       "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Mara Junior delegates the smallest authorized open-address endpoint to Sonnet, then Haiku reviews basic caller, key/network, and durable-state integrity. Compile and smoke-check when the shared slot and disk floor permit.",
+      "blockedReason": "Test-build-only source exists but shared build allocation is absent and disk headroom is below the current floor; test-build Candid and real derive are unverified.",
+      "nextAction": "When Cody allocates the heavy slot and disk is above the floor, compile the test feature, verify its Candid interface and focused open-flow test, then smoke the real threshold derive on an isolated test canister. Keep production interface generation and key admission separate.",
       "cardIds": [
         "D1"
       ]

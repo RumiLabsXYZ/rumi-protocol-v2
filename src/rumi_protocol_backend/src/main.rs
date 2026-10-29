@@ -9879,6 +9879,20 @@ async fn open_xrp_vault() -> Result<rumi_protocol_backend::vault::XrpVaultOpenIn
     check_postcondition(rumi_protocol_backend::vault::open_xrp_vault().await)
 }
 
+/// Native-XLM isolated demo: allocate a vault id and return its unique Stellar
+/// custody address. Compiled out of the production Wasm; the default test key
+/// must never be locked by an address open on the production backend.
+/// Developer-only. Credits no collateral, creates no Vault, mints no icUSD.
+#[cfg(feature = "test_endpoints")]
+#[candid_method(update)]
+#[update]
+async fn open_xlm_vault() -> Result<rumi_protocol_backend::vault::XlmVaultOpenInfo, ProtocolError> {
+    // Opening an address does not use a price. Preserve authentication and the
+    // protocol freeze guard without making this demo depend on an XRC refresh.
+    validate_authenticated_not_frozen()?;
+    check_postcondition(rumi_protocol_backend::vault::open_xlm_vault().await)
+}
+
 /// P3 (native-XRP collateral): verify the deposit to a vault's custody address and
 /// credit it as collateral (creating the Vault with zero debt). Owner-only,
 /// idempotent. Borrow icUSD afterwards via the normal `borrow_from_vault`.

@@ -3584,6 +3584,126 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     })
 }
 
+/// Return value for `open_xlm_vault`: the allocated vault id, the threshold-derived
+/// Stellar classic custody address for (caller, vault id), the Stellar network
+/// passphrase the address belongs to, and when the open address expires.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct XlmVaultOpenInfo {
+    pub vault_id: u64,
+    pub custody_address: String,
+    pub network_passphrase: String,
+    pub expires_at_ns: u64,
+}
+
+/// Lifetime of an unfunded XLM open address. Inside the 60s..30d bounds enforced by
+/// `State::reserve_xlm_pending_deposit`. Expiry never erases the address attribution.
+pub const XLM_OPEN_ADDRESS_LIFETIME_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+
+/// Pure: expiry for an open address, failing on overflow instead of wrapping.
+pub(crate) fn xlm_open_expiry_ns(opened_at_ns: u64) -> Result<u64, ProtocolError> {
+    opened_at_ns
+        .checked_add(XLM_OPEN_ADDRESS_LIFETIME_NS)
+        .ok_or_else(|| ProtocolError::GenericError("XLM open expiry overflow".to_string()))
+}
+
+/// Native-XLM demo flow: allocate a vault id and the unique threshold-derived Stellar
+/// custody address for (caller, vault id), and record it as an `Open` pending deposit.
+/// NO collateral is credited, NO Vault is created, NO icUSD is minted. Developer-only
+/// (like the other experimental chain endpoints) because the first open locks the
+/// Stellar key selection (`xlm_stellar_key_is_immutable`).
+///
+/// Id behavior mirrors `open_xrp_vault`: the id comes from the monotonic counter before
+/// derivation; a derive or reservation failure just leaves a harmless gap in the id
+/// sequence (never reused, no state written).
+pub async fn open_xlm_vault() -> Result<XlmVaultOpenInfo, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer may call the experimental XLM endpoints".to_string(),
+        ));
+    }
+    let guard_principal = GuardPrincipal::new(caller, "open_xlm_vault")?;
+
+    // Key/network guard: fail closed BEFORE allocating an id or deriving.
+    let selection = match read_state(|s| crate::chains::stellar::config::selection_from_state(s)) {
+        Ok(selection) => selection,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(e.to_string()));
+        }
+    };
+
+    // Do not bypass a Frozen/Deprecated XLM collateral config. (Absent config is the
+    // demo state: opening an address admits nothing.)
+    let xlm_ct = crate::state::xlm_collateral_principal();
+    let blocked = read_state(|s| {
+        s.get_collateral_config(&xlm_ct)
+            .map(|c| !c.status.allows_open() || c.custody() != crate::state::CustodyKind::NativeXlm)
+            .unwrap_or(false)
+    });
+    if blocked {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "XLM collateral is not accepting new vaults.".to_string(),
+        ));
+    }
+
+    // Reserve a vault_id (also the derivation nonce), as `open_xrp_vault` does.
+    let vault_id = mutate_state(|s| s.increment_vault_id());
+
+    let custody_address = match crate::chains::stellar::derive_stellar_address(
+        crate::chains::stellar::StellarKeyRole::Custody {
+            owner: caller,
+            nonce: vault_id,
+        },
+        &selection.key_name,
+    )
+    .await
+    {
+        Ok((_pubkey, addr)) => addr,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xlm custody derive failed: {e}"
+            )));
+        }
+    };
+
+    let opened_at_ns = ic_cdk::api::time();
+    let expires_at_ns = match xlm_open_expiry_ns(opened_at_ns) {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+    let network_id = selection.network.network_id();
+    let reserved = mutate_state(|s| {
+        s.reserve_xlm_pending_deposit(
+            vault_id,
+            caller,
+            custody_address.clone(),
+            network_id,
+            opened_at_ns,
+            expires_at_ns,
+        )
+    });
+    if let Err(e) = reserved {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "xlm pending-deposit reservation rejected: {e}"
+        )));
+    }
+
+    guard_principal.complete();
+    Ok(XlmVaultOpenInfo {
+        vault_id,
+        custody_address,
+        network_passphrase: selection.network.passphrase().to_string(),
+        expires_at_ns,
+    })
+}
+
 /// Pure: collateral drops to credit from a verified XRP custody balance, net of the
 /// base reserve the user funds. Errors if nothing is creditable (balance ≤ reserve),
 /// the net exceeds u64 drops, or the net is below the per-collateral minimum.
@@ -16499,5 +16619,44 @@ mod add_margin_overflow_tests {
         assert!(!payout_state.cas_reserve_redemption_phase(9, &payout_submitted, ReserveRedemptionPhase::PayoutAmbiguous).is_some(),
             "the original callback cannot overwrite a reconciler's newer state");
         assert!(payout_state.check_invariants().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod xlm_open_tests {
+    use super::{xlm_open_expiry_ns, XLM_OPEN_ADDRESS_LIFETIME_NS};
+    use crate::state::{State, XlmPendingDepositStatus};
+    use candid::Principal;
+
+    #[test]
+    fn open_expiry_is_accepted_by_reservation_and_overflow_fails_closed() {
+        let mut state = State::default();
+        let owner = Principal::from_slice(&[7]);
+        let vault_id = state.increment_vault_id();
+        let address = crate::chains::stellar::classic_address_from_ed25519_pubkey(&[9; 32]);
+        let network = crate::chains::stellar::config::selection_from_state(&state)
+            .unwrap()
+            .network;
+        let opened = 1_000_000_000u64;
+        let expires = xlm_open_expiry_ns(opened).unwrap();
+        assert_eq!(expires - opened, XLM_OPEN_ADDRESS_LIFETIME_NS);
+        state
+            .reserve_xlm_pending_deposit(
+                vault_id,
+                owner,
+                address.clone(),
+                network.network_id(),
+                opened,
+                expires,
+            )
+            .unwrap();
+        // Opening credits nothing and creates no Vault.
+        assert!(state.vault_id_to_vaults.is_empty());
+        assert_eq!(
+            state.xlm_pending_deposits[&vault_id].status,
+            XlmPendingDepositStatus::Open
+        );
+        assert_eq!(state.xlm_custody_attributions[&address].owner, owner);
+        assert!(xlm_open_expiry_ns(u64::MAX).is_err());
     }
 }
