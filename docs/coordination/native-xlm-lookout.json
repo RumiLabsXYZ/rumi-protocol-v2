@@ -37,7 +37,7 @@
       "state": "Blocked",
       "owner": "Rumi implementation team",
       "scope": "Implement XLM claims, exits, and liquidation handling",
-      "evidenceText": "Commit ac8ba7ea hardens dormant `record_xlm_claim`: it rejects zero or excessive reserved fees, non-classic destinations, and a network ID inconsistent with the selected key before mutating state. Focused test source was added, but compilation/tests remain unrun because Pendle holds the shared heavy slot. The helper remains unwired and does not sign, submit, or settle a claim. WP4 stays blocked; provider independence, evidence freshness, reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission. The plan now specifies fresh, ordered, intent-bound provider evidence before a replacement payout; the dormant pure retry helper still relies on its future caller for that binding.",
+      "evidenceText": "Commit ac8ba7ea hardens dormant `record_xlm_claim`: it rejects zero or excessive reserved fees, non-classic destinations, and a network ID inconsistent with the selected key before mutating state. Focused test source was added, but compilation/tests remain unrun because Pendle holds the shared heavy slot. The helper remains unwired and does not sign, submit, or settle a claim. WP4 stays blocked; provider independence, evidence freshness, reserve/oracle checks, testnet, frontend, and release remain open. Frozen config prevents XLM admission. The plan now specifies fresh, ordered, intent-bound provider evidence before a replacement payout; the dormant pure retry helper still relies on its future caller for that binding. Mara Junior committed an isolated, untested two-commit source candidate for a bound pure replacement reducer. Independent review held integration: the 404 response and account/ledger scalars still rely on a future trusted provider adapter to prove request hash, provider, freshness, and persisted-intent provenance. No reachable payout retry exists; the main XLM branch does not contain this candidate.",
       "evidenceLinks": []
     },
     {
@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Validate the rail with tests, independent review, and Stellar testnet evidence",
-      "evidenceText": "Commit d45c8332 adds a guarded dormant pending-deposit recorder, with focused test source but no Cargo test/build. It has no caller/API, derivation path, outcall, or credit mutation. Earlier status and claim helpers remain unverified. Provider independence, live freshness, credit, and settlement remain unproved. WP3/WP4/release remain blocked; no live proof, admission, or deployment.",
+      "evidenceText": "Commit d45c8332 adds a guarded dormant pending-deposit recorder, with focused test source but no Cargo test/build. It has no caller/API, derivation path, outcall, or credit mutation. Earlier status and claim helpers remain unverified. Provider independence, live freshness, credit, and settlement remain unproved. WP3/WP4/release remain blocked; no live proof, admission, or deployment. A separate junior-branch retry-evidence candidate is under source review and has not been compiled or tested; it is not main-branch validation.",
       "evidenceLinks": []
     },
     {
