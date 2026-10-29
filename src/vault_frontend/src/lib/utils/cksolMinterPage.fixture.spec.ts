@@ -51,6 +51,14 @@ describe('ckSOL real page', () => {
     fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle(); button('Get my SOL').click(); await settle();
     expect(fx.address).toHaveBeenCalledWith(ownerA); expect(host.textContent).toContain(ownerA.toText());
   });
+  it('keeps the address and quote during a same-owner wallet balance refresh', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle();
+    button('Get my SOL').click(); await settle();
+    fx.wallet.set({isConnected:true,principal:ownerA,balance:42}); await settle();
+    expect(host.textContent).toContain('GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax');
+    expect(host.textContent).not.toContain('Paid deposit processing is unavailable');
+    expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
   it.each(['plug','internet-identity','oisy'])('routes paid processing for %s through its connected owner session', async walletType => {
     fx.oisy=walletType==='oisy'; fx.auth.set({walletType}); fx.wallet.set({isConnected:true,principal:ownerA});
     Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>fn({})}});
@@ -91,7 +99,7 @@ describe('ckSOL real page', () => {
     fx.wallet.set({isConnected:true,principal:ownerA}); fx.loadPaid.mockReturnValue(null); fx.recoverPaid.mockResolvedValue(funded);
     render(); await settle();
     expect(fx.recoverPaid).toHaveBeenCalled();expect(host.textContent).toContain('Paid payment sequence: 12');
-    expect(host.textContent).toContain('Refundable cycles: 55');expect(button('Resume minter dispatch')).toBeTruthy();expect(button('Claim unused cycles refund')).toBeTruthy();
+    expect(host.textContent).toContain('Refundable cycles: 0.000000000055T cycles');expect(button('Resume minter dispatch')).toBeTruthy();expect(button('Claim unused cycles refund')).toBeTruthy();
   });
   it('allows the owner to acknowledge a rejected legacy attempt before paid processing', async () => {
     fx.wallet.set({isConnected:true,principal:ownerA});
