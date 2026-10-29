@@ -1,12 +1,35 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. Deposits, payouts, and provider setup remain incomplete. Rob is signed in to Claude Code; Mara Junior completed a read-only Sonnet/Haiku gap review, and Mara is checking its proposed findings. This is design input, not build or live validation. No provider endpoints are provisioned or probed; network passphrase, operator independence, and quotas remain unverified. WP0/provider selection remains blocked.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Deposits, payouts, and the services that check XLM payments are unfinished. A review raised questions about recovering deposits we cannot credit and retrying payouts safely; we will check those questions before testing, and Rob does not need to act now.",
+  "summary": "Native XLM is Frozen, unregistered, undeployed, and not admitted. Mara Junior delegated two read-only Sonnet/Haiku reviews; independent review confirmed latent uncredited-deposit and payout-retry evidence gaps. The plan now records owner-bound recovery and fresh, intent-bound replacement evidence; neither path is reachable. The key setter guard exists, correcting an earlier concern, but generated Candid is stale. No providers or XLM oracle quorum are proven. Pendle holds the shared heavy build slot; later source remains untested. WP0/provider selection is blocked.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. We have clarified how to handle deposits that cannot be credited and what proof is needed before retrying a payout, but the deposit and payout features are unfinished. Next we will build and test those paths when shared capacity is available; Rob does not need to act now.",
   "glossary": [
-    {"term": "Stellar", "definition": "The external network where native XLM collateral is held and payments are confirmed."},
-    {"term": "StrKey", "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.", "cardId": "WP1"},
-    {"term": "Stroops", "definition": "The smallest native XLM unit; one XLM is ten million stroops.", "cardId": "WP3"},
-    {"term": "Frozen", "definition": "A registration state that prevents collateral admission until the configured checks and release process permit activation.", "cardId": "WP2"},
-    {"term": "Claim", "definition": "A durable record for a payout that remains owed until its external Stellar transfer is reconciled.", "cardId": "WP4"},
-    {"term": "Testnet", "definition": "Stellar's separate testing network; testnet success does not establish mainnet readiness or activity.", "cardId": "WP6"}
+    {
+      "term": "Stellar",
+      "definition": "The external network where native XLM collateral is held and payments are confirmed."
+    },
+    {
+      "term": "StrKey",
+      "definition": "Stellar's human-readable encoding for account public keys and related values; it does not prove that an account exists or that a payment is valid.",
+      "cardId": "WP1"
+    },
+    {
+      "term": "Stroops",
+      "definition": "The smallest native XLM unit; one XLM is ten million stroops.",
+      "cardId": "WP3"
+    },
+    {
+      "term": "Frozen",
+      "definition": "A registration state that prevents collateral admission until the configured checks and release process permit activation.",
+      "cardId": "WP2"
+    },
+    {
+      "term": "Claim",
+      "definition": "A durable record for a payout that remains owed until its external Stellar transfer is reconciled.",
+      "cardId": "WP4"
+    },
+    {
+      "term": "Testnet",
+      "definition": "Stellar's separate testing network; testnet success does not establish mainnet readiness or activity.",
+      "cardId": "WP6"
+    }
   ]
 }
