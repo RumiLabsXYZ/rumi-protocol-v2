@@ -1,5 +1,5 @@
 {
-  "summary": "Scope widened to nine-chain icUSD groundwork (Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad, Solana, Sui, XRPL): representations backed by locked canonical ICP icUSD, kept apart from debt-backed chain supply. Research running: BB-30 repository reuse (Haiku), BB-31 EVM and BB-32 native-chain official sources (Sonnet). Shared escrow and profile contract and per-chain groundwork are queued behind it. Base: isolated Sepolia CLI round trip public-settled; browser acceptance (BB-27) blocked on Touch ID and Rabby. No deploy, signing, funding or merge.",
+  "summary": "Scope widened to nine-chain icUSD groundwork (Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad, Solana, Sui, XRPL): representations backed by locked canonical ICP icUSD, kept apart from debt-backed chain supply. Research: BB-30 reuse and BB-31 EVM facts done (HyperEVM and Monad read-evidence blockers recorded); BB-32 native facts and BB-41 open XRPL PR inventory running. Shared contract and per-chain work queued. Base: Sepolia CLI round trip public-settled; browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
   "glossary": [
     {
       "term": "proof=source",

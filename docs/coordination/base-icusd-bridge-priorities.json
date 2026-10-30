@@ -16,11 +16,12 @@
       "title": "Research what each of the nine chains needs",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Three workers are collecting repository reuse (BB-30, Haiku) and official-source facts for the six EVM chains (BB-31, Sonnet) and for Solana, Sui and XRPL (BB-32, Sonnet). Next: review the three files and start the shared escrow contract.",
+      "nextAction": "BB-30 (repository reuse) and BB-31 (six EVM chains) are done. Still running: BB-32 (Solana, Sui and XRPL facts, Sonnet) and BB-41 (what the open XRPL icUSD PR defines, Haiku). Next: start the shared escrow contract when BB-32 returns.",
       "cardIds": [
         "BB-30",
         "BB-31",
-        "BB-32"
+        "BB-32",
+        "BB-41"
       ]
     },
     {
@@ -38,7 +39,7 @@
       "title": "Reuse the Base design for Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad",
       "status": "blocked",
       "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the EVM facts (BB-31).",
-      "nextAction": "Name the config-only and code-change seams for each EVM chain and the smallest generalization of the Base bridge, without changing Base behavior.",
+      "nextAction": "Name the config-only and code-change seams for each EVM chain and the smallest generalization of the Base bridge, without changing Base behavior. Keep HyperEVM (historical state) and Monad (Verified execution state) as disabled activation blockers.",
       "cardIds": [
         "BB-34"
       ]
@@ -57,7 +58,7 @@
       "id": "xrpl-groundwork",
       "title": "XRPL groundwork",
       "status": "blocked",
-      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the native-chain facts (BB-32).",
+      "blockedReason": "Queued: needs the shared escrow contract (BB-33), the native-chain facts (BB-32) and the open XRPL icUSD PR inventory (BB-41).",
       "nextAction": "Choose between issued currency and Multi-Purpose Token, the issuer and holder opt-in model, the ICP signing and RPC path and the finality wait, then write implementation-ready XRPL next steps.",
       "cardIds": [
         "BB-37"

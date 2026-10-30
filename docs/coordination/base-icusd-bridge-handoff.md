@@ -584,6 +584,35 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Concurrency now: two Sonnet lanes (W11, W12) and one Haiku task (W10), the stated maximum. The next
   lane starts only when one of these finishes; no lane is duplicated.
 
+## Milestone 25 (2026-10-30): first research accepted
+
+- BB-30 accepted. The coordinator spot-checked four of its citations against source. Miles found one
+  stale row: it described the debt invariant from the old header of `chains/supply.rs`; the function
+  bodies (lines 96-178) compare `sum(chain_supplies)` with debt plus reserve backing plus pending chain
+  burn. The coordinator corrected the inventory from the bodies (no backend or runtime change) and
+  added a note: one shared canister would collide on the release indexes keyed by bare sequence, the
+  per-lane nonce, the single chain id, contract binding and supply snapshot; separate per-destination
+  instances isolate all of these. The live Base signing domains stay unchanged. The Haiku slot was
+  busy with BB-41, so W10 was not reopened.
+- BB-31 accepted. The coordinator rechecked Robinhood Chain's chain ids on the official page (4663
+  mainnet, 46630 testnet). Two focused constraints from Miles are recorded in the EVM facts file as
+  disabled activation blockers: HyperEVM's default RPC serves only `latest` calls, while the observer
+  needs numbered finalized historical state (archive-capable independent providers or an observer
+  redesign); Monad's `finalized` tag fixes ordering only, so receipts, logs and the supply audit must
+  come from a Verified block (finalized minus the execution delay, from a primary source).
+- BB-41 dispatched: a read-only inventory of open PR #586 (XRPL icUSD borrow and repay, disabled by
+  default), so XRPL groundwork neither duplicates nor collides with it. The PR is not modified.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W10 | BB-30 | Haiku | `claude-haiku-5-5` | finished, accepted |
+  | W11 | BB-31 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W12 | BB-32 | Sonnet | `claude-sonnet-5-5` | running |
+  | W13 | BB-41 | Haiku | `claude-haiku-5-5` | running |
+
+- Concurrency: one Sonnet lane (W12) and one Haiku task (W13). BB-33 waits for BB-32, so the second
+  Sonnet slot is idle rather than starting work ahead of its dependency.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
