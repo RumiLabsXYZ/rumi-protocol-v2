@@ -335,15 +335,15 @@
     },
     {
       "id": "BB-35",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Solana groundwork",
-      "evidenceText": "proof=none; Token standard and authority, exact allowed transfer and burn instructions with owner and memo checks, custodied returns paid only after a final burn, ICP signing and RPC path, finality, trust limits, next steps",
+      "evidenceText": "proof=source; Exact mint, return and burn shapes with owner, mint and memo checks; strays refunded, never credited; custodied returns paid after a final burn; durable-nonce retries; SOL RPC canister id resolved; C4 unavailable",
       "evidenceLinks": []
     },
     {
       "id": "BB-36",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui groundwork",
       "evidenceText": "proof=none; Plan the small Move gate wrapping TreasuryCap (mint-id consumption, counters, recipient-bound returns), UpgradeCap as a separate disclosed authority, signing and RPC path, finality, trust limits",
@@ -362,7 +362,7 @@
       "state": "done",
       "owner": "worker-sonnet",
       "scope": "Disabled destination profiles and validator",
-      "evidenceText": "proof=local-test; Profile crate: typed profiles, validator rules V1 to V11, nine disabled profiles (20 networks); worker's run: 51 tests passed and the dry run exits 0; finality values, custody blocker and lossless string amounts checked",
+      "evidenceText": "proof=local-test; Profile crate: typed profiles, validator V1 to V11, nine disabled profiles (20 networks); 51 tests passed; Miles reran the dry run (exit 0, 0 violations) and accepted it at source and local-CLI level",
       "evidenceLinks": []
     },
     {

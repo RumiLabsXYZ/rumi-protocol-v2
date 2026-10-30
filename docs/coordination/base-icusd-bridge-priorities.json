@@ -47,9 +47,9 @@
     {
       "id": "solana-groundwork",
       "title": "Solana groundwork",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "W18 (Sonnet) is writing the Solana note: exact mint, return and burn instruction shapes with owner and memo checks, custodied returns paid only after a final burn, durable-nonce retries, the SOL RPC canister id and D3. Read-only.",
+      "nextAction": "",
       "cardIds": [
         "BB-35"
       ]
@@ -67,9 +67,9 @@
     {
       "id": "sui-groundwork",
       "title": "Sui groundwork",
-      "status": "blocked",
-      "blockedReason": "Queued: starts when the Solana note (BB-35) returns and frees a Sonnet lane.",
-      "nextAction": "Plan the small Sui Move gate wrapping TreasuryCap (mint-id consumption, counters, recipient-bound returns) with UpgradeCap kept as a separate disclosed authority, the GraphQL RPC path and checkpoint finality.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "W20 (Sonnet) is writing the Sui note: the small Move gate wrapping TreasuryCap (consumed mint ids, counters, recipient-bound returns), UpgradeCap as a separate disclosed authority, signing, checkpoint finality and the GraphQL RPC path. Read-only.",
       "cardIds": [
         "BB-36"
       ]

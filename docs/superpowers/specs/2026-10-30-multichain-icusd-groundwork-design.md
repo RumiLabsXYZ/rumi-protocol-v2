@@ -155,6 +155,10 @@ circulating_total   = circulating_on_icp + sum over d in D of circulating_dest_d
 families whose return burns atomically). Custodied unburned return inventory is therefore excluded from circulation
 exactly once, while it stays backed by escrow through `RC_d` or `BU_d` until its burn is final. `E_X` and
 `issued_outstanding_X` appear only in their own terms.
+On Solana the measured return-account balance can also hold strays (transfers that failed the exact-shape check,
+never credited, still part of `O_d`, awaiting refund to the verified sender). They are reported as `stray_d`, excluded from
+circulation while held, and checked by `custody_measured == RC_d + BU_d + stray_d` (BB-35, `chain-solana.md`); an
+unexplained excess halts credits.
 
 Each instance exposes a per-destination audit query (the Base `get_supply_audit` shape: `E`, every bucket, `U`, surplus, last
 final supply, C-status). An aggregator (analytics or a read-only script, BB-40) sums them and must re-read the escrow balance

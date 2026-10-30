@@ -754,6 +754,29 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   | W18 | BB-35 | Sonnet | `claude-sonnet-5-5` | running |
   | W19 | BB-37 | Sonnet | `claude-sonnet-5-5` | running |
 
+## Milestone 33 (2026-10-30): Solana note accepted; Sui started
+
+- BB-35 accepted (`docs/coordination/multichain/chain-solana.md`). It plans on D3 (memo plus durable nonce) with exact shapes:
+  mint `[AdvanceNonce, CreateIdempotent ATA, MintToChecked(8), Memo]`; user return exactly one top-level `TransferChecked(8)` into
+  the canonical return account authorized by the owner plus exactly one return memo (ComputeBudget the only other allowed
+  instruction); burn `[AdvanceNonce, BurnChecked(8) by the return owner, Memo]`. Anything else is a stray: never credited, refunded
+  to the verified sender. History availability is a mandatory mitigation with blocker `solana-history-availability-unmeasured`; C4
+  is stated as unavailable. The SOL RPC canister id is resolved on paper to DFINITY's published production id (README, the NNS
+  proposal thread and the IC dashboard agree; the other id fails its checksum); the profile keeps the blocker as an activation
+  re-verification. Only published Solana program ids appear in the note.
+- The coordinator checked the stray accounting: strays stay in `O_d`, the audit is `custody_measured == RC_d + BU_d + stray_d`,
+  and they are excluded from circulation while held. One line added to the design's section 2.4.
+- Profile refresh deferred: the chain notes propose profile changes (Solana `burn_id` domain and `mint-account` role, the resolved
+  SOL RPC wording, others to come from BB-36 and BB-37). They will be applied in one pass by the same builder (W16) during BB-40,
+  not as a second build now.
+- BB-36 (W20) dispatched read-only.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W18 | BB-35 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W19 | BB-37 | Sonnet | `claude-sonnet-5-5` | running |
+  | W20 | BB-36 | Sonnet | `claude-sonnet-5-5` | running |
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
