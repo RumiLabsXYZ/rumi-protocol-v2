@@ -7285,6 +7285,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rumi_bridge_destinations"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rumi_cycle_manager"
 version = "0.1.0"
 dependencies = [

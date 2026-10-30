@@ -57,9 +57,9 @@
     {
       "id": "xrpl-groundwork",
       "title": "XRPL groundwork",
-      "status": "blocked",
-      "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up.",
-      "nextAction": "Plan on PR #586's issued-currency import and return seam with 15-significant-digit caps on each operation and on total outstanding (MPT deferred), and specify the missing no-vault return as a follow-up to that PR, not an edit to it.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "W19 (Sonnet) is writing the XRPL note on PR #586's issued-currency seam: the missing no-vault return specified as a follow-up to that PR, 15-digit per-operation and total caps, holder trust lines and trust limits. Read-only.",
       "cardIds": [
         "BB-37"
       ]
@@ -68,7 +68,7 @@
       "id": "sui-groundwork",
       "title": "Sui groundwork",
       "status": "blocked",
-      "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up.",
+      "blockedReason": "Queued: starts when the Solana note (BB-35) returns and frees a Sonnet lane.",
       "nextAction": "Plan the small Sui Move gate wrapping TreasuryCap (mint-id consumption, counters, recipient-bound returns) with UpgradeCap kept as a separate disclosed authority, the GraphQL RPC path and checkpoint finality.",
       "cardIds": [
         "BB-36"
@@ -77,9 +77,9 @@
     {
       "id": "destination-profiles",
       "title": "Disabled destination profiles for all nine chains and a validator",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "W16 (Sonnet) is building the profile crate, validator and nine disabled profiles, then runs its focused tests and dry run. It is the only build lane.",
+      "nextAction": "",
       "cardIds": [
         "BB-38"
       ]

@@ -1,0 +1,447 @@
+{
+  "schema_version": 1,
+  "id": "xrpl",
+  "display_name": "XRP Ledger",
+  "family": "xrpl",
+  "topology": {
+    "kind": {
+      "value": "backend_module",
+      "rationale": "PR #586 already is a backend module with one XRPL icUSD lane; no XRPL bridge instance and no second XRPL token (design section 1.4).",
+      "status": "recommendation"
+    },
+    "wasm_family": null,
+    "existing_work": {
+      "value": "pr586",
+      "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    }
+  },
+  "representation": {
+    "standard": {
+      "value": "xrpl_iou",
+      "rationale": "PR #586 implements an escrow-backed trust-line issued currency with exact decimal parsing and caps. D2 (settled for planning) keeps that lane; Multi-Purpose Token is deferred, not a replacement gate.",
+      "status": "planning_decision"
+    },
+    "backing": "escrow_locked_icusd",
+    "debt_creating": false,
+    "decimals": 8,
+    "amount_bounds": {
+      "value": {
+        "min_e8s": "1",
+        "max_e8s": "999999999999999",
+        "max_outstanding_e8s": "999999999999999",
+        "encoding": "xrpl_decimal_15"
+      },
+      "source_url": "https://xrpl.org/docs/references/protocol/data-types/currency-formats",
+      "verified": "2026-10-30",
+      "source_kind": "derived"
+    }
+  },
+  "signing": {
+    "scheme": "schnorr_ed25519",
+    "key_name": {
+      "value": {
+        "mainnet": "key_1",
+        "testnet": "test_key_1"
+      },
+      "source_url": "https://docs.internetcomputer.org/concepts/chain-key-cryptography.md",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    "derivation_domain": [
+      "rumi",
+      "xrpl-icusd",
+      "v1",
+      "{network_identity}"
+    ],
+    "domains": {
+      "mint_id": null,
+      "remint_id": null,
+      "return_id": null,
+      "escrow_label": "rumi:xrpl-icusd:escrow:v1"
+    },
+    "signed_payload": {
+      "value": "Ed25519 over the 0x53545800 prefix followed by the canonical serialization without TxnSignature; no pre-hash.",
+      "source_url": "https://xrpl.org/docs/references/protocol/binary-format",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "wallet": {
+    "standard": "vendor_specific",
+    "named": {
+      "value": [
+        "Xaman"
+      ],
+      "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    }
+  },
+  "prerequisites": [
+    {
+      "value": {
+        "id": "issuer-funding",
+        "text": "The issuer account must be funded from outside: 1 XRP base reserve plus 0.2 XRP per owned object.",
+        "unavoidable": true
+      },
+      "source_url": "https://xrpl.org/docs/concepts/accounts/reserves",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    {
+      "value": {
+        "id": "holder-trust-line",
+        "text": "Holders must create a trust line to the issuer before they can receive icUSD.",
+        "unavoidable": true
+      },
+      "source_url": "https://xrpl.org/docs/concepts/tokens/fungible-tokens/trust-line-tokens",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  ],
+  "open_decisions": [
+    {
+      "id": "D2",
+      "topic": "XRPL trust-line token (PR #586) or Multi-Purpose Token",
+      "choice": {
+        "value": "issued_currency_lane_mpt_deferred",
+        "rationale": "Design section 12 (settled for planning): XRPL uses PR #586's issued-currency escrow and import seam; MPT is deferred, not a replacement gate; the no-vault canonical return stays a named missing implementation.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D7",
+      "topic": "XRPL precision caps: 15 versus 16 digits",
+      "choice": {
+        "value": "15_digit_caps_per_operation_and_total_outstanding",
+        "rationale": "Design section 12 (settled for planning): conservative 15-significant-digit caps (999999999999999 e8s) on each operation AND on total outstanding, with exact rejection or holding of inexact amounts.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D9",
+      "topic": "Testnet escrow: real icUSD ledger or a test ledger",
+      "choice": {
+        "value": "synthetic_test_ledgers",
+        "rationale": "Design section 12 (settled for planning): synthetic test ledgers for future testnet demos; no real canonical icUSD is locked for a new testnet rollout under this groundwork.",
+        "status": "planning_decision"
+      }
+    }
+  ],
+  "networks": [
+    {
+      "network_id": "xrpl-mainnet",
+      "role": "mainnet",
+      "identity": {
+        "value": {
+          "kind": "xrpl_network_id",
+          "value": "0"
+        },
+        "source_url": "https://xrpl.org/docs/references/protocol/transactions/common-fields",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "xrpl-pr586-unmerged",
+          "text": "PR #586 is open and unmerged and its issuance lane is disabled by default. Nothing here claims deployment.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q8"
+        },
+        {
+          "id": "xrpl-return-intent-missing",
+          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4"
+        },
+        {
+          "id": "xrpl-outcall-port-unknown",
+          "text": "Support for non-443 ports in HTTPS outcalls is not established, and s1.ripple.com serves on a non-default port.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/sources-native.md open question 3"
+        },
+        {
+          "id": "xrpl-wallet-xaman-only",
+          "text": "The PR #586 frontend supports Xaman only (manual address or QR fallback). No other XRPL wallet connector was found.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q6"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "xrpl_validated",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": "validated",
+            "required_result": "tesSUCCESS",
+            "execution_delay_blocks": null,
+            "typical_wait": "validated ledger with tesSUCCESS; wait time not stated in the facts files"
+          },
+          "source_url": "https://xrpl.org/docs/concepts/transactions/finality-of-results/look-up-transaction-results",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "https_outcall_jsonrpc",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "PR #586 reads need READ_QUORUM = 2 identical reduced responses.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "xrplcluster.com",
+            "xrpl.link",
+            "s1.ripple.com"
+          ],
+          "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+          "verified": "2026-10-30",
+          "source_kind": "repo"
+        },
+        "outcall_notes": {
+          "value": "Reads and submits go through HTTPS outcalls to rippled JSON-RPC with a read quorum of 2 identical reduced responses. No official ICP canister exists for XRPL, and non-443 port support is not established.",
+          "source_url": "https://skills.internetcomputer.org/.well-known/skills/https-outcalls/SKILL.md",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "xrpl-testnet",
+      "role": "testnet",
+      "identity": {
+        "value": {
+          "kind": "xrpl_network_id",
+          "value": "1"
+        },
+        "source_url": "https://xrpl.org/docs/references/protocol/transactions/common-fields",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "xrpl-pr586-unmerged",
+          "text": "PR #586 is open and unmerged and its issuance lane is disabled by default. Nothing here claims deployment.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q8"
+        },
+        {
+          "id": "xrpl-return-intent-missing",
+          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4"
+        },
+        {
+          "id": "xrpl-outcall-port-unknown",
+          "text": "Support for non-443 ports in HTTPS outcalls is not established, and s1.ripple.com serves on a non-default port.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/sources-native.md open question 3"
+        },
+        {
+          "id": "xrpl-wallet-xaman-only",
+          "text": "The PR #586 frontend supports Xaman only (manual address or QR fallback). No other XRPL wallet connector was found.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q6"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "xrpl_validated",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": "validated",
+            "required_result": "tesSUCCESS",
+            "execution_delay_blocks": null,
+            "typical_wait": "validated ledger with tesSUCCESS; wait time not stated in the facts files"
+          },
+          "source_url": "https://xrpl.org/docs/concepts/transactions/finality-of-results/look-up-transaction-results",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "https_outcall_jsonrpc",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "PR #586 reads need READ_QUORUM = 2 identical reduced responses.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "s.altnet.rippletest.net",
+            "testnet.xrpl-labs.com"
+          ],
+          "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+          "verified": "2026-10-30",
+          "source_kind": "repo"
+        },
+        "outcall_notes": {
+          "value": "Reads and submits go through HTTPS outcalls to rippled JSON-RPC with a read quorum of 2 identical reduced responses. No official ICP canister exists for XRPL, and non-443 port support is not established.",
+          "source_url": "https://skills.internetcomputer.org/.well-known/skills/https-outcalls/SKILL.md",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "xrpl-devnet",
+      "role": "devnet",
+      "identity": {
+        "value": {
+          "kind": "xrpl_network_id",
+          "value": "2"
+        },
+        "source_url": "https://xrpl.org/docs/references/protocol/transactions/common-fields",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "xrpl-pr586-unmerged",
+          "text": "PR #586 is open and unmerged and its issuance lane is disabled by default. Nothing here claims deployment.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q8"
+        },
+        {
+          "id": "xrpl-return-intent-missing",
+          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4"
+        },
+        {
+          "id": "xrpl-outcall-port-unknown",
+          "text": "Support for non-443 ports in HTTPS outcalls is not established, and s1.ripple.com serves on a non-default port.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/sources-native.md open question 3"
+        },
+        {
+          "id": "xrpl-wallet-xaman-only",
+          "text": "The PR #586 frontend supports Xaman only (manual address or QR fallback). No other XRPL wallet connector was found.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q6"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "single-keyless-endpoint",
+          "text": "Only one keyless public read endpoint is listed for XRPL Devnet. A quorum of 2 independent providers needs more providers, and keyed provider URLs conflict with the no-secrets-in-state rule.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/sources-native.md section 3 row 1"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "xrpl_validated",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": "validated",
+            "required_result": "tesSUCCESS",
+            "execution_delay_blocks": null,
+            "typical_wait": "validated ledger with tesSUCCESS; wait time not stated in the facts files"
+          },
+          "source_url": "https://xrpl.org/docs/concepts/transactions/finality-of-results/look-up-transaction-results",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "https_outcall_jsonrpc",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "PR #586 reads need READ_QUORUM = 2 identical reduced responses.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "s.devnet.rippletest.net"
+          ],
+          "source_url": "https://xrpl.org/docs/tutorials/public-servers",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Reads and submits go through HTTPS outcalls to rippled JSON-RPC with a read quorum of 2 identical reduced responses. No official ICP canister exists for XRPL, and non-443 port support is not established.",
+          "source_url": "https://skills.internetcomputer.org/.well-known/skills/https-outcalls/SKILL.md",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    }
+  ]
+}

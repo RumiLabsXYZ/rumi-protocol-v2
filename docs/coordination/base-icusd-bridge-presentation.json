@@ -1,5 +1,5 @@
 {
-  "summary": "Nine-chain icUSD groundwork: representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Done: research, the shared escrow design (BB-33, accounting corrected for custodied returns), frontend wallet requirements and the EVM steps (BB-34; Monad delay sourced). In progress: BB-38 profile crate and validator (the only build) and BB-35 Solana. Sui, XRPL and the plan are queued. Base browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
+  "summary": "Nine-chain icUSD groundwork: representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Done: research, shared escrow design (planning decisions settled except D6), frontend wallet requirements, EVM steps, and BB-38: profile crate with validator V1 to V11 and nine disabled profiles (51 tests passed, dry run exit 0). In progress: BB-35 Solana and BB-37 XRPL. Sui and the plan are queued. Base browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
   "glossary": [
     {
       "term": "proof=source",
@@ -505,5 +505,5 @@
       "definition": "A checked-in description of one destination chain (network, token, decimals, signing, finality and wallets) with a source for each fact. Profiles start disabled and cannot turn anything on."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. The plan for keeping the token fully backed on eight more networks is written; the detailed checks are underway. Rob only needs to finish that sign-in now; a few design choices will need his decision later."
+  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. The plan for eight more networks is written, and each has a checked description that keeps it switched off. Rob only needs to finish that sign-in now; control of each piece is his call later."
 }

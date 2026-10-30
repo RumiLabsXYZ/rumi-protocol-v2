@@ -351,7 +351,7 @@
     },
     {
       "id": "BB-37",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL groundwork",
       "evidenceText": "proof=none; Plan on PR #586's issued currency (MPT deferred) with 15-digit per-operation and total caps, holder trust lines, the missing no-vault return, ICP signing and RPC path, finality, reserves and trust limits",
@@ -359,10 +359,10 @@
     },
     {
       "id": "BB-38",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Disabled destination profiles and validator",
-      "evidenceText": "proof=none; New library crate with typed profiles, validator rules V1 to V11, nine disabled JSON profiles, focused tests and a dry run; no canister changes; the only build lane",
+      "evidenceText": "proof=local-test; Profile crate: typed profiles, validator rules V1 to V11, nine disabled profiles (20 networks); worker's run: 51 tests passed and the dry run exits 0; finality values, custody blocker and lossless string amounts checked",
       "evidenceLinks": []
     },
     {

@@ -723,6 +723,31 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   BB-36 and BB-37 acceptance and their priority items follow D4, D2 and D7. W18 (BB-35) and W16 (BB-38) were told the
   decisions that affect them.
 
+## Milestone 32 (2026-10-30): destination profiles and validator accepted
+
+- BB-38 accepted: new library crate `src/rumi_bridge_destinations` (types, validator rules V1 to V11, nine JSON profiles
+  embedded with `include_str!`, focused tests, `examples/dry_run.rs`). No existing canister changes or depends on it; the root
+  `Cargo.toml` gains one `members` line and `Cargo.lock` one package entry (serde and serde_json only).
+- Miles' scoped preview (three notes) went to the same worker, W16, which applied them: V5 now checks finality VALUES (EVM and
+  Solana `finalized`, Sui checkpoint fields, XRPL `validated` plus `tesSUCCESS`, Monad a sourced positive delay of 3 or the
+  unresolved blocker), with negative tests for `latest`, `processed`, a zero or missing Monad delay; `solana-return-custody` is a
+  required Solana blocker with a missing-blocker test; amount bounds are canonical decimal strings parsed to checked u64, with an
+  exact u64::MAX round trip and rejection of non-canonical strings and bare numbers.
+- Evidence (W16's run, the mission's one build lane): `cargo fmt -p rumi_bridge_destinations` clean;
+  `cargo test --offline -p rumi_bridge_destinations` 51 passed, 0 failed; `cargo run --offline -p rumi_bridge_destinations
+  --example dry_run -- 2026-10-30` exit 0 with 20 network lines, all `status=disabled`. The coordinator read the code paths for
+  the three notes, the workspace diff and a hygiene scan of the profiles (no addresses, hashes, local paths or keyed URLs) and
+  did not rerun the tests.
+- Recorded gaps: no Sui devnet record (no stable identifier published), Ethereum endpoint list empty (none on ethereum.org; the
+  EVM RPC canister has built-in providers), Solana named wallets empty (none sourced).
+- BB-37 (W19) dispatched read-only on PR #586's seam.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W16 | BB-38 | Sonnet | `claude-sonnet-5-5` | finished, accepted (build lane) |
+  | W18 | BB-35 | Sonnet | `claude-sonnet-5-5` | running |
+  | W19 | BB-37 | Sonnet | `claude-sonnet-5-5` | running |
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
