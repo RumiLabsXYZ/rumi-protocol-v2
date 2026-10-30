@@ -860,6 +860,52 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   | W16 | BB-40 profile refresh | Sonnet | `claude-sonnet-5-5` | resumed (build lane) |
   | W21 | BB-40 step extraction | Haiku | `claude-haiku-5-5` | running (scratch output only) |
 
+## Milestone 38 (2026-10-30): groundwork close-out, BB-40 in Review
+
+- Final profile refresh by the same single builder (W16), no Cargo changes: Solana `solana-unattributed-burn-policy` (now
+  required), `solana-history-availability-unmeasured`, `burn_id` domain and roles, SOL RPC re-verification wording; XRPL devnet
+  record removed, `{network_name}` derivation template, per-network port blocker, the PR #586 wiring gaps as blockers; Sui
+  prerequisites, roles and five blockers including `sui-epoch-expiry-nonexecution-proof`; the style-only em-dash test dropped.
+  Focused run: `cargo test --offline -p rumi_bridge_destinations` 63 passed, 0 failed; dry run exit 0, 9 profiles, 19 networks,
+  0 violations. The coordinator scanned the profiles statically (no private data, all disabled) and did not rerun the tests.
+  Not applied, recorded in the deferral lane: Solana refund-id domain and extra Solana fields.
+- Plan: `docs/superpowers/plans/2026-10-30-multichain-icusd-groundwork.md`. Queued future cards BB-42 to BB-61 in six paused
+  subprojects ranked after the Base browser test: EVM family, shared reporting and frontend, Solana, XRPL follow-ups to PR #586,
+  Sui, and Rob's D6 decision. Miles' scheduling notes applied: BB-47 and BB-51 do not wait on BB-58 (preference only), BB-53
+  waits on D6 only for live authority steps, BB-55 may use a stacked or rebased #586 branch, the external Move review is deferred
+  pre-real-value work. Nothing starts, deploys, signs or funds by default.
+- PR #591: title and description rewritten for the Base bridge plus nine-chain groundwork; historical Base pins kept (`4169feb8`,
+  raw Wasm `a0049b9a`, install artifact `0b324387`, the check table); prior Base public-test proof kept apart from host-only
+  groundwork; browser-wallet acceptance and production activation stated as not established. Still a draft, open, unmerged,
+  head `9806e539` at the edit. Verified before writing: no bridge, backend, Foundry, frontend or declaration file changed after
+  `4169feb8`; since `c82f2880` the only non-docs change is the new library crate and its workspace line.
+- Deferral lane: `docs/coordination/demo-deferred/multichain-icusd.md` (MC-DEF-1 to MC-DEF-6, actual shortcuts only). The central
+  index `docs/coordination/DEMO_DEFERRED_WORK.md` lives in the primary checkout, which holds protected unrelated changes, so its
+  link line is left for Miles to add rather than written from here.
+- Proposed durable lessons (proposal only, no persona or catalog write): plan section 6, with code pointers (finality values,
+  not just the rule enum; canonical decimal strings for shared JSON amount bounds).
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W16 | BB-38 and BB-40 profile refresh | Sonnet | `claude-sonnet-5-5` | finished |
+  | W21 | BB-40 step extraction (scratch output) | Haiku | `claude-haiku-5-5` | finished |
+
+  All workers in this mission: W10, W13, W21 Haiku; W11, W12, W14 to W20 Sonnet; no Codex agent; no lane was duplicated.
+
+- Accepted (Miles): `9806e539` at groundwork source and local-CLI level. He reviewed the final type, validator and test diff
+  and the plan and priority corrections, and independently ran the rebuilt dry run (9 profiles, 19 networks, all disabled,
+  0 violations); the runtime, backend, Foundry and frontend diff since `c82f2880` is empty. W16's 63 passing tests were not
+  rerun. BB-40 is done; BB-42 to BB-61 stay queued and no implementation has started.
+- Final pins: branch `codex/base-icusd-bridge`; groundwork acceptance commit `9806e539`; Base code candidate `4169feb8`, raw
+  Wasm sha256 `a0049b9a...e157`, install artifact sha256 `0b324387...929a` (full values in PR #591 and the review record);
+  baseline `main` `32358d23`, multichain freshness check `origin/main` `39da7d1f`. Commands: `cargo test --offline -p
+  rumi_bridge_destinations` (63 passed), `cargo run --offline -p rumi_bridge_destinations --example dry_run -- 2026-10-30`
+  (exit 0), `python3 docs/coordination/base-icusd-bridge-lookout-derive.py`, the offline priority validator, then the scoped
+  Lookout publisher's dry run, changed-only publish and no-op readback.
+- Final Lookout state: published changed-only through the same scoped manifest and identity; the immediate dry run reported
+  the board (68 cards: 20 Queue, 1 Blocked, 47 Done), both summaries, glossary, priorities and repository unchanged. Exact
+  revisions are in the private publisher record.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

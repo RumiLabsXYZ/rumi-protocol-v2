@@ -375,10 +375,10 @@
     },
     {
       "id": "BB-40",
-      "state": "In progress",
+      "state": "done",
       "owner": "coordinator",
       "scope": "Integrated implementation plan, local smoke and PR update",
-      "evidenceText": "proof=none; Integrated plan with queued future cards for all nine chains; one profile refresh by the same builder; draft PR description rewritten; no merge, deploy, signing or funding step executable by default",
+      "evidenceText": "proof=local-test; Plan and 20 queued cards in six paused subprojects; profile refresh: 63 passed, dry run 19 networks, 0 violations; PR #591 rewritten, draft, unmerged; Miles accepted 9806e539 at source and local-CLI level",
       "evidenceLinks": []
     },
     {

@@ -1,5 +1,5 @@
 {
-  "summary": "Nine-chain icUSD groundwork: representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Done: research, shared escrow design, frontend wallets, EVM, Solana, XRPL (on PR #586) and Sui (Move gate) notes, and the profile crate with validator and nine disabled profiles. In progress: BB-40 integrated plan with queued future cards, the final profile refresh and the draft PR rewrite. Base browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
+  "summary": "Nine-chain icUSD groundwork complete and accepted by Miles at source and local-CLI level (9806e539): shared escrow design; EVM, Solana, XRPL and Sui notes; disabled-profile crate (63 tests passed; dry run 9 profiles, 19 networks, 0 violations); integrated plan with 20 queued future cards in six paused subprojects. PR #591 rewritten, still draft and unmerged. Base: Sepolia CLI round trip public-settled; browser test BB-27 blocked on Rob. Nothing deployed, signed, funded or activated; D6 open.",
   "glossary": [
     {
       "term": "proof=source",
@@ -503,7 +503,11 @@
     {
       "term": "destination profile",
       "definition": "A checked-in description of one destination chain (network, token, decimals, signing, finality and wallets) with a source for each fact. Profiles start disabled and cannot turn anything on."
+    },
+    {
+      "term": "paused",
+      "definition": "A priority status for queued future work that has not started and begins only when Rob or Miles opens that phase."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. Plans for all eight new networks are written and switched off; build steps are being lined up for later. Rob only needs to finish that sign-in now; control of each piece is his call later."
+  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. Plans for eight more networks are finished and switched off, and the build steps are queued for later. Rob only needs to finish that sign-in now; control of each piece is his call later."
 }

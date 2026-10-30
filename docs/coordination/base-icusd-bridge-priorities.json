@@ -14,9 +14,9 @@
     {
       "id": "integrated-plan",
       "title": "Integrated implementation plan and local smoke",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Coordinator: queued future cards and plan written; final profile refresh done; rewrite the draft PR description, publish and hand to Miles. No merge.",
+      "nextAction": "",
       "cardIds": [
         "BB-40"
       ]
