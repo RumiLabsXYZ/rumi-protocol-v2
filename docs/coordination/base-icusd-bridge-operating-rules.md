@@ -1,6 +1,8 @@
 # Base icUSD bridge: worktree operating rules
 
-These rules apply to every agent working in this worktree on the Base bridge.
+These rules apply to every agent working in this worktree on the Base bridge and, from 2026-10-30,
+on the nine-chain Multichain icUSD groundwork (same board, same Lookout project, display title
+"Rumi · Multichain icUSD").
 
 ## Coordination files
 
@@ -22,6 +24,11 @@ These rules apply to every agent working in this worktree on the Base bridge.
   says what clears it, `ready` and `in_progress` need a next action; card ids must be current board
   cards. Same sanitization limits as the projection. Mirrored in the board's "Priorities" section.
 - Milestone handoff: `docs/coordination/base-icusd-bridge-handoff.md`.
+- Card states and Lookout columns: the board's "Card states" section. The derive script maps each
+  state to a Lookout column, and the private manifest lists the column order (Queue, Ready, In
+  progress, Review, blocked, done). A new state needs its column in the manifest in the same
+  checkpoint, or the publisher rejects the snapshot. Queued means waiting, never running or done.
+- Multichain worker files: `docs/coordination/multichain/`, one owner per file (named on its card).
 
 ## Lookout publication rule
 
@@ -184,3 +191,12 @@ rather than renaming board cards.
 
 No merge, deploy, live signing or broadcast, funds movement, or controller/role changes.
 Public-testnet steps are prepared as a runbook only.
+
+Multichain groundwork (Rob, 2026-10-30, relayed by Miles): authorized for repository and official
+documentation research, additive local groundwork, local tests with ephemeral keys and local
+transactions, commits, push and a draft PR update. Not authorized: any new deployment (including
+public testnets), live signing or broadcast, funding, governance, controller or role changes,
+private key or password access, production activation, or merge. Workers are Claude Sonnet
+(research, architecture, code) and Claude Haiku (inventory, documentation, mechanical checks)
+subagents only, at most two Sonnet lanes plus one Haiku task at once, with the actual model read
+from each run's record. No Codex agents.

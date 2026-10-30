@@ -12,13 +12,95 @@
       ]
     },
     {
-      "id": "priorities-and-handoff",
-      "title": "Keep priorities and test handoff current",
-      "status": "done",
+      "id": "multichain-recon",
+      "title": "Research what each of the nine chains needs",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "None for this checkpoint. Ongoing upkeep follows the priority selection rule at each later checkpoint.",
+      "nextAction": "Three workers are collecting repository reuse (BB-30, Haiku) and official-source facts for the six EVM chains (BB-31, Sonnet) and for Solana, Sui and XRPL (BB-32, Sonnet). Next: review the three files and start the shared escrow contract.",
       "cardIds": [
-        "BB-28"
+        "BB-30",
+        "BB-31",
+        "BB-32"
+      ]
+    },
+    {
+      "id": "shared-escrow-contract",
+      "title": "Shared escrow accounting and destination-profile contract",
+      "status": "blocked",
+      "blockedReason": "Queued: starts when the three research cards (BB-30, BB-31, BB-32) return and are reviewed.",
+      "nextAction": "Write the canonical escrow design for all nine chains: locked ICP icUSD backs every representation with no new debt, kept apart from debt-backed chain supply, eight-decimal value, chain and network separated ids, nonces and escrows, unknown outcomes held until reconciled.",
+      "cardIds": [
+        "BB-33"
+      ]
+    },
+    {
+      "id": "evm-expansion",
+      "title": "Reuse the Base design for Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad",
+      "status": "blocked",
+      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the EVM facts (BB-31).",
+      "nextAction": "Name the config-only and code-change seams for each EVM chain and the smallest generalization of the Base bridge, without changing Base behavior.",
+      "cardIds": [
+        "BB-34"
+      ]
+    },
+    {
+      "id": "solana-groundwork",
+      "title": "Solana groundwork",
+      "status": "blocked",
+      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the native-chain facts (BB-32).",
+      "nextAction": "Choose the token standard and authority model, the ICP signing and RPC path and the finality wait, then write implementation-ready Solana next steps.",
+      "cardIds": [
+        "BB-35"
+      ]
+    },
+    {
+      "id": "xrpl-groundwork",
+      "title": "XRPL groundwork",
+      "status": "blocked",
+      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the native-chain facts (BB-32).",
+      "nextAction": "Choose between issued currency and Multi-Purpose Token, the issuer and holder opt-in model, the ICP signing and RPC path and the finality wait, then write implementation-ready XRPL next steps.",
+      "cardIds": [
+        "BB-37"
+      ]
+    },
+    {
+      "id": "sui-groundwork",
+      "title": "Sui groundwork",
+      "status": "blocked",
+      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the native-chain facts (BB-32).",
+      "nextAction": "Choose the coin standard and treasury and upgrade custody, the ICP signing and RPC path and the finality wait, then write implementation-ready Sui next steps.",
+      "cardIds": [
+        "BB-36"
+      ]
+    },
+    {
+      "id": "destination-profiles",
+      "title": "Disabled destination profiles for all nine chains and a validator",
+      "status": "blocked",
+      "blockedReason": "Queued: needs the profile schema from BB-33 and the facts from BB-31 and BB-32.",
+      "nextAction": "Check in nine disabled-by-default profiles with a source for each fact, plus a focused validator and dry run that reject activation, missing sources and decimal mismatches.",
+      "cardIds": [
+        "BB-38"
+      ]
+    },
+    {
+      "id": "frontend-chain-wallets",
+      "title": "Frontend chain selection and wallet requirements",
+      "status": "blocked",
+      "blockedReason": "Queued: needs the wallet facts from BB-31 and BB-32.",
+      "nextAction": "List each chain's wallet connection standard and the page changes needed to choose a destination. Read-only; no interface build yet.",
+      "cardIds": [
+        "BB-39"
+      ]
+    },
+    {
+      "id": "integrated-plan",
+      "title": "Integrated implementation plan and local smoke",
+      "status": "blocked",
+      "blockedReason": "Queued: needs the EVM, native-chain, profile and frontend cards (BB-34 to BB-39).",
+      "nextAction": "Write the sequential implementation plan from the actual missing seams with owners and focused commands, run the validator and existing focused checks once, and update the draft PR without merging.",
+      "cardIds": [
+        "BB-40"
       ]
     },
     {
@@ -31,6 +113,17 @@
         "BB-14",
         "BB-22",
         "BB-27"
+      ]
+    },
+    {
+      "id": "priorities-and-handoff",
+      "title": "Keep priorities and test handoff current",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "None for this checkpoint. Ongoing upkeep follows the priority selection rule at each later checkpoint.",
+      "cardIds": [
+        "BB-28",
+        "BB-29"
       ]
     },
     {

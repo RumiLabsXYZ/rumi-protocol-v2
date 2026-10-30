@@ -533,6 +533,35 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - The next product step remains the authorized browser demo after Rob's sign-in and wallet
   access. No feature/release work, new checks, wallet action or financial operation was undertaken.
 
+## Milestone 23 (2026-10-30): nine-chain groundwork started
+
+- Rob authorized groundwork for icUSD on Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad,
+  Solana, Sui and XRPL; Miles relayed the mission. Same coordinator, board, worktree and Lookout
+  project; Claude Sonnet and Haiku subagents only.
+- Baseline: branch head `c82f2880`; `origin/main` at `39da7d1f`, 36 commits past the branch base,
+  none touching chain, bridge, Foundry or Base-bridge frontend code. Disk about 47 GiB free (95%
+  used); no worktree cleanup attempted, since the earlier removal pass was denied.
+- Worker models, read from each run's own record (the model field on its replies), not from task
+  names: a Sonnet probe ran as `claude-sonnet-5-5` and a Haiku probe as `claude-haiku-5-5`; BB-30 runs
+  on Haiku 5.5, BB-31 and BB-32 on Sonnet 5.5. This Desktop session's `claude auth status` reports
+  signed in (claude.ai, first party), while Miles' standalone CLI reported signed out; the working
+  path is this session's own subagents. No Codex agent was used.
+- Board: Lookout display title "Rumi · Multichain icUSD" through the same manifest (project id
+  unchanged). Queued cards map to a real `Queue` state; the manifest's column order is Queue, Ready,
+  In progress, Review, blocked, done. Offline check with the publisher's snapshot code and Lookout's
+  frontend column helper: six displayed columns, every card in exactly one, and a control without
+  Queue is rejected. Without a configured order the publisher would put Queue after Done.
+- Priorities: 15 ranked items. The Base browser test stays first (next demo step, waiting on Rob);
+  nine-chain research is the highest unblocked item; the shared escrow contract, EVM reuse, Solana,
+  XRPL, Sui, profiles, frontend wallets and the integrated plan are queued in that order. The
+  publisher's own validator passes; 46 of 47 cards linked (BB-00 unlinked as the shared baseline).
+- Publication: same manifest and scoped identity; the dry run reported board, both summaries and
+  priorities changed; the publish succeeded; the immediate dry run reported everything unchanged.
+  Exact revisions are in the private publisher record.
+- Next: review BB-30 to BB-32 when they return, then one Sonnet owner for the shared contract
+  (BB-33), then two Sonnet lanes at a time over BB-34 to BB-39 by rank, then integration (BB-40).
+  No actual omission has been recorded in the deferral ledger yet.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

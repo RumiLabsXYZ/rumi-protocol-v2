@@ -33,7 +33,8 @@ LINKS = {
     "BB-14": [{"title": "Draft PR #591", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/591"}],
 }
 
-STATE = {"done": "done", "in progress": "in_progress", "todo": "todo", "blocked": "blocked", "held": "held"}
+# Lookout shows one column per state; "queued" cards land in the Queue column (manifest column order).
+STATE = {"done": "done", "blocked": "blocked", "queued": "Queue", "ready": "Ready", "in progress": "In progress", "review": "Review", "todo": "todo", "held": "held"}
 
 
 def sanitize(text: str) -> str:

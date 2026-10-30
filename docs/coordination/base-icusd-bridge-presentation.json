@@ -1,5 +1,5 @@
 {
-  "summary": "Canonical escrow bridge: local implementation/reviews and isolated Base Sepolia CLI round trip passed. Staging Internet Identity authentication was previously verified; the renewed browser session awaits Touch ID and Rabby unlock/connection. Browser settlement and reload recovery remain unverified; the synthetic bridge is stopped with all four pauses retained. PR #591 stays unmerged; production icUSD, Base mainnet and real funds remain out of scope.",
+  "summary": "Scope widened to nine-chain icUSD groundwork (Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad, Solana, Sui, XRPL): representations backed by locked canonical ICP icUSD, kept apart from debt-backed chain supply. Research running: BB-30 repository reuse (Haiku), BB-31 EVM and BB-32 native-chain official sources (Sonnet). Shared escrow and profile contract and per-chain groundwork are queued behind it. Base: isolated Sepolia CLI round trip public-settled; browser acceptance (BB-27) blocked on Touch ID and Rabby. No deploy, signing, funding or merge.",
   "glossary": [
     {
       "term": "proof=source",
@@ -463,7 +463,47 @@
     {
       "term": "Rabby",
       "definition": "The Base wallet browser extension used for the browser test. It must be unlocked by its owner before the page can connect to it."
+    },
+    {
+      "term": "Queue",
+      "definition": "Board column for planned, scoped work that has not started. A queued card waits for the cards it depends on; it is not running and not finished."
+    },
+    {
+      "term": "Ethereum",
+      "definition": "The main Ethereum network. One of the nine planned destinations; nothing is deployed there."
+    },
+    {
+      "term": "Arbitrum",
+      "definition": "A network that runs on top of Ethereum and settles back to it. A planned destination; nothing is deployed there."
+    },
+    {
+      "term": "Robinhood Chain",
+      "definition": "Robinhood's own blockchain network, not the crypto trading in its brokerage app. A planned destination; its network details are being checked against official sources."
+    },
+    {
+      "term": "HyperEVM",
+      "definition": "The Ethereum-compatible smart-contract layer of the Hyperliquid network, separate from HyperCore, Hyperliquid's own trading layer. A planned destination."
+    },
+    {
+      "term": "Monad",
+      "definition": "An Ethereum-compatible network. Rumi has separate lending code for it; a bridged token there would be new and kept apart from that code."
+    },
+    {
+      "term": "Solana",
+      "definition": "A fast network that is not Ethereum-compatible, with its own token standard and signing scheme. A planned destination."
+    },
+    {
+      "term": "Sui",
+      "definition": "A network built on the Move language that is not Ethereum-compatible. A planned destination; Rumi has no code for it yet."
+    },
+    {
+      "term": "XRPL",
+      "definition": "The XRP Ledger. Rumi already accepts native XRP as collateral; a bridged dollar token there would be new and separate."
+    },
+    {
+      "term": "destination profile",
+      "definition": "A checked-in description of one destination chain (network, token, decimals, signing, finality and wallets) with a source for each fact. Profiles start disabled and cannot turn anything on."
     }
   ],
-  "plainSummary": "The bridge has moved test tokens to Base and back, but that was done outside the app. We still need to prove the same trip works through the browser. Rob needs to finish signing in and unlock his wallet; then we can test sending tokens both ways and reopening the page."
+  "plainSummary": "Moving test tokens to Base and back already works outside the app; testing it in the browser waits for Rob to sign in and unlock his wallet. Meanwhile, research has started on bringing the same dollar token to eight more networks before anything is built. Nothing needs Rob except that sign-in, and nothing new is live."
 }

@@ -284,6 +284,102 @@
       "scope": "Priorities and supervisor operating rules",
       "evidenceText": "proof=source; Priority list, board priority section and selection rule pushed (ae72444b); validated offline with the publisher's own validator run from outside the repo; published at Alden's priority cutover, readback unchanged",
       "evidenceLinks": []
+    },
+    {
+      "id": "BB-29",
+      "state": "Review",
+      "owner": "coordinator",
+      "scope": "Multichain board: rename, Queue column and ranked priorities",
+      "evidenceText": "proof=source; Board widened to nine chains; queued cards map to a real Lookout Queue state, checked offline with the publisher and the frontend column helper; priorities re-ranked with explicit cards; awaiting Miles",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-30",
+      "state": "In progress",
+      "owner": "worker-haiku",
+      "scope": "Cross-chain reuse inventory for all nine chains",
+      "evidenceText": "proof=none; Read-only repository inventory with file references: reuse, change or missing for each module and each chain. No builds",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-31",
+      "state": "In progress",
+      "owner": "worker-sonnet",
+      "scope": "EVM official-source facts: Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad",
+      "evidenceText": "proof=none; Network identity, finality, RPC path, signing and wallet facts from primary sources with links and the date checked; nothing guessed",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-32",
+      "state": "In progress",
+      "owner": "worker-sonnet",
+      "scope": "Native official-source facts: Solana, Sui, XRPL",
+      "evidenceText": "proof=none; Token standard, eight-decimal fit, ICP signature scheme, finality, RPC path, wallets and prerequisites from primary sources with links and the date checked",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-33",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "Shared escrow accounting and destination-profile contract",
+      "evidenceText": "proof=none; Escrow for all nine: backed by locked ICP icUSD, no new debt, apart from debt-backed chain supply; eight-decimal value; chain and network separated ids, nonces and escrows; unknown outcomes held until reconciled",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-34",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "Six-EVM readiness and Base-bridge reuse",
+      "evidenceText": "proof=none; For each EVM chain: config only or code change against the Base design, the smallest generalization seam and next steps; Base behavior unchanged",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-35",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "Solana groundwork",
+      "evidenceText": "proof=none; Token standard and authority model, ICP signing and RPC path, finality wait, prerequisites, trust limits stated plainly and implementation-ready next steps",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-36",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "Sui groundwork",
+      "evidenceText": "proof=none; Coin standard, treasury and upgrade custody, ICP signing and RPC path, finality wait, prerequisites, trust limits and implementation-ready next steps",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-37",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "XRPL groundwork",
+      "evidenceText": "proof=none; Issued currency or Multi-Purpose Token, issuer and holder opt-in, ICP signing and RPC path, finality wait, reserves, trust limits and implementation-ready next steps",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-38",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "Disabled destination profiles and validator",
+      "evidenceText": "proof=none; Nine checked-in profiles, disabled by default, each fact with its source and status; a focused validator and dry run that fail on activation, missing sources or decimal mismatch",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-39",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "Frontend chain selection and wallet requirements",
+      "evidenceText": "proof=none; Each chain's wallet connection standard and the page changes needed to choose a destination; read-only, no interface build",
+      "evidenceLinks": []
+    },
+    {
+      "id": "BB-40",
+      "state": "Queue",
+      "owner": "coordinator",
+      "scope": "Integrated implementation plan, local smoke and PR update",
+      "evidenceText": "proof=none; Sequential plan from the actual missing seams with owners and focused commands; validator and existing focused checks run once; draft PR updated, no merge",
+      "evidenceLinks": []
     }
   ]
 }
