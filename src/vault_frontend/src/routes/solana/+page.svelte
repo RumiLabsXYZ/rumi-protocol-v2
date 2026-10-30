@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
-  import { openOisySignerChannel } from '$lib/services/oisySigner';
+  import { beginCksolOisyAction, type CksolOisyAction } from '$lib/services/cksolOisySigner';
   import { auth, walletSessionGeneration } from '$lib/services/auth';
   import { collateralStore } from '$lib/stores/collateralStore';
   import { CANISTER_IDS } from '$lib/config';
@@ -126,7 +126,8 @@
     const e=epoch,text=ownerText,account=owner,quote=paymentQuote;
     if(!navigator.locks) { error='This browser cannot safely coordinate paid deposits across tabs. Use a browser with Web Locks support.'; return; }
     busy=true;error='';notice='';
-    try { if(oisy) await openOisySignerChannel(account);
+    let signerAction: CksolOisyAction | null = null;
+    try { if(oisy) { signerAction=beginCksolOisyAction(account); await signerAction.ready; }
       if(!live(e,text)) return;
       await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{
       if(!lock) throw new Error('A paid ckSOL payment is active in another tab.');
@@ -134,7 +135,7 @@
       const result=await submitCksolPayment(quote,account,localStorage,()=>live(e,text));
       if(live(e,text)) { adoptPaidIntent(result); paymentQuote=null; notice=result.message??'Payment request saved. Refresh the receipt before taking another action.'; }
     }); } catch(err) { if(live(e,text)) { error=String(err); try { paymentIntent=loadCksolPayment(localStorage,text); } catch {} } }
-    finally { if(live(e,text)) busy=false; }
+    finally { await signerAction?.close().catch(() => {}); if(live(e,text)) busy=false; }
   }
   async function refreshPaidReceipt() {
     if(!owner||busy) return; const e=epoch,text=ownerText,account=owner; busy=true;error='';
@@ -144,27 +145,30 @@
   async function refundPaidCycles() {
     if(!owner||!paymentIntent||!paymentIntent.receipt||busy) return;
     const e=epoch,text=ownerText,account=owner,payment=paymentIntent.receipt; busy=true;error='';
+    let signerAction: CksolOisyAction | null = null;
     try { if(!navigator.locks) throw new Error('Web Locks support is required to claim a refund safely.');
-      if(oisy) await openOisySignerChannel(account);
+      if(oisy) { signerAction=beginCksolOisyAction(account); await signerAction.ready; }
       if(!live(e,text)) return;
       await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{if(!lock) throw new Error('A paid ckSOL payment is active in another tab.'); if(!live(e,text)) return; const result=await claimCksolRefund(account,payment,()=>live(e,text)); if('Err' in result) throw new Error(String(result.Err)); const recovered=await recoverCksolPayment(account,localStorage); if(live(e,text)&&recovered) adoptPaidIntent(recovered);});
-    } catch(err) { if(live(e,text)) error=String(err); } finally { if(live(e,text)) busy=false; }
+    } catch(err) { if(live(e,text)) error=String(err); } finally { await signerAction?.close().catch(() => {}); if(live(e,text)) busy=false; }
   }
   async function resumePaidDispatch() {
     if(!owner||!paymentIntent||busy) return; const e=epoch,text=ownerText,account=owner,displayed=paymentIntent; busy=true;error='';
+    let signerAction: CksolOisyAction | null = null;
     try { if(!navigator.locks) throw new Error('Web Locks support is required to resume safely.');
-      if(oisy) await openOisySignerChannel(account);
+      if(oisy) { signerAction=beginCksolOisyAction(account); await signerAction.ready; }
       if(!live(e,text)) return;
       await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{if(!lock) throw new Error('A paid ckSOL payment is active in another tab.'); if(!live(e,text)) return; const resumed=await resumeFundedCksolPayment(account,displayed,localStorage,()=>live(e,text)); if(!live(e,text))return; adoptPaidIntent(resumed);});
-    } catch(err) { if(live(e,text)) error=String(err); } finally { if(live(e,text)) busy=false; }
+    } catch(err) { if(live(e,text)) error=String(err); } finally { await signerAction?.close().catch(() => {}); if(live(e,text)) busy=false; }
   }
   async function continuePaidApproval() {
     if(!owner||!paymentIntent||busy) return;const e=epoch,text=ownerText,account=owner,displayed=paymentIntent;busy=true;error='';
+    let signerAction: CksolOisyAction | null = null;
     try { if(!navigator.locks) throw new Error('Web Locks support is required to continue safely.');
-      if(oisy) await openOisySignerChannel(account);
+      if(oisy) { signerAction=beginCksolOisyAction(account); await signerAction.ready; }
       if(!live(e,text)) return;
       await navigator.locks.request(cksolPaymentKey(text),{ifAvailable:true},async lock=>{if(!lock) throw new Error('A paid ckSOL payment is active in another tab.');if(!live(e,text))return;const latest=loadCksolPayment(localStorage,text);if(!latest||latest.sequence!==displayed.sequence)throw new Error('Saved payment changed in another tab. Refresh it before continuing.');const continued=await continueApprovedCksolPayment(account,latest,localStorage,()=>live(e,text));if(live(e,text))adoptPaidIntent(continued);});
-    } catch(err) { if(live(e,text)) error=String(err); } finally { if(live(e,text))busy=false; }
+    } catch(err) { if(live(e,text)) error=String(err); } finally { await signerAction?.close().catch(() => {}); if(live(e,text))busy=false; }
   }
   async function acknowledgeDeposit() {
     if(!owner) return;

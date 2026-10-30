@@ -5,9 +5,9 @@ const fx = vi.hoisted(() => {
   function store<T>(v: T) { const listeners = new Set<(v:T)=>void>(); return { subscribe(fn:(v:T)=>void) { listeners.add(fn); fn(v); return () => { listeners.delete(fn); }; }, set(n:T) { v=n; listeners.forEach(fn=>fn(v)); } }; }
   return { wallet: store<any>({ isConnected: false, principal: null }), generation: store(0), auth: store<any>({walletType:'plug'}), collaterals: store<any>({ collaterals: [] }),
     info: vi.fn(), attempt: vi.fn(), address: vi.fn(), quote: vi.fn(), submit: vi.fn(), depositStatus: vi.fn(), withdrawalStatus: vi.fn(), balance: vi.fn(), acknowledge: vi.fn(), oisy: false, saved: null as any,
-    paidQuote: vi.fn(), submitPaid: vi.fn(), loadPaid: vi.fn(), recoverPaid: vi.fn(), claimRefund: vi.fn(), resumePaid: vi.fn(), continuePaid: vi.fn(), openSigner: vi.fn() };
+    paidQuote: vi.fn(), submitPaid: vi.fn(), loadPaid: vi.fn(), recoverPaid: vi.fn(), claimRefund: vi.fn(), resumePaid: vi.fn(), continuePaid: vi.fn(), openSigner: vi.fn(), closeSigner: vi.fn() };
 });
-vi.mock('$lib/services/oisySigner', () => ({ openOisySignerChannel: fx.openSigner }));
+vi.mock('$lib/services/cksolOisySigner', () => ({ beginCksolOisyAction: (owner:any) => ({ready:fx.openSigner(owner),close:fx.closeSigner}) }));
 vi.mock('$lib/stores/wallet', () => ({ walletStore: fx.wallet }));
 vi.mock('$lib/services/auth', () => ({ walletSessionGeneration: fx.generation, auth: fx.auth }));
 vi.mock('$lib/services/protocol/walletOperations', () => ({ isOisyWallet: () => fx.oisy }));
@@ -30,7 +30,7 @@ async function settle() { for(let i=0;i<20;i++) { await Promise.resolve(); flush
 function button(text:string) { return [...host.querySelectorAll('button')].find(b=>b.textContent?.includes(text))!; }
 function render() { instance=mount(Page,{target:host}); flushSync(); }
 beforeEach(() => {
-  vi.clearAllMocks(); fx.openSigner.mockReset(); fx.openSigner.mockResolvedValue(undefined); fx.acknowledge.mockReset(); fx.oisy=false; fx.saved=null;
+  vi.clearAllMocks(); fx.openSigner.mockReset(); fx.openSigner.mockResolvedValue(undefined); fx.closeSigner.mockResolvedValue(undefined); fx.acknowledge.mockReset(); fx.oisy=false; fx.saved=null;
   fx.wallet.set({isConnected:false,principal:null}); fx.generation.set(0);
   fx.info.mockResolvedValue({ minimum_deposit_amount:20_000_000n, minimum_withdrawal_amount:2_000_000n, withdrawal_fee:1_000_000n, deposit_sol_required_cycles:1_000_000_000_000n });
   fx.attempt.mockResolvedValue([]); fx.balance.mockResolvedValue(1_000_000_000n);
@@ -92,7 +92,7 @@ describe('ckSOL real page', () => {
     fx.openSigner.mockRejectedValueOnce(new Error('Signer window could not be opened'));
     Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>fn({})}});
     render(); await settle(); button('Get my SOL').click(); await settle(); button('Approve and process').click(); await settle();
-    expect(host.textContent).toContain('Signer window could not be opened'); expect(fx.submitPaid).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('Signer window could not be opened'); expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.closeSigner).toHaveBeenCalledOnce();
   });
   it('opens OISY again from the separate processing click without approving cycles again', async () => {
     fx.oisy=true; fx.auth.set({walletType:'oisy'}); fx.wallet.set({isConnected:true,principal:ownerA});
@@ -102,7 +102,7 @@ describe('ckSOL real page', () => {
     Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>{await Promise.resolve();return fn({});}}});
     render(); await settle(); button('Process my deposit').click();
     expect(fx.openSigner).toHaveBeenCalledWith(ownerA);
-    await settle(); expect(host.textContent).toContain('FundingPending'); expect(fx.submitPaid).not.toHaveBeenCalled();
+    await settle(); expect(host.textContent).toContain('FundingPending'); expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.closeSigner).toHaveBeenCalledOnce();
   });
   it('adopts a successful payment receipt deposit id and checks its minter status', async () => {
     fx.wallet.set({isConnected:true,principal:ownerA});

@@ -60,6 +60,7 @@ vi.mock('../stores/wallet', () => ({
 	}
 }));
 vi.mock('./auth', () => ({ auth: fx.auth, walletSessionGeneration: fx.generation }));
+vi.mock('./cksolOisySigner', () => ({ getCksolOisySignerAgent: vi.fn(async () => ({})) }));
 vi.mock('./oisySigner', () => ({
 	getOisySignerAgent: vi.fn(async () => ({})),
 	createOisyActor: vi.fn((id: string) => {
