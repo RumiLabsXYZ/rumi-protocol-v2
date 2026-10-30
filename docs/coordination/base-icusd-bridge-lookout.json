@@ -343,10 +343,10 @@
     },
     {
       "id": "BB-36",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Sui groundwork",
-      "evidenceText": "proof=none; Plan the small Move gate wrapping TreasuryCap (mint-id consumption, counters, recipient-bound returns), UpgradeCap as a separate disclosed authority, signing and RPC path, finality, trust limits",
+      "evidenceText": "proof=source; Move gate specified: init (cap 0), mint with consumed mint ids, bridge_out bound to an ICP account, limits and version guard; two Sui digests and the equivocation lock sourced; UpgradeCap a mint-path authority",
       "evidenceLinks": []
     },
     {
@@ -375,10 +375,10 @@
     },
     {
       "id": "BB-40",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "coordinator",
       "scope": "Integrated implementation plan, local smoke and PR update",
-      "evidenceText": "proof=none; Sequential plan from the actual missing seams with owners and focused commands; validator and existing focused checks run once; draft PR updated, no merge",
+      "evidenceText": "proof=none; Integrated plan with queued future cards for all nine chains; one profile refresh by the same builder; draft PR description rewritten; no merge, deploy, signing or funding step executable by default",
       "evidenceLinks": []
     },
     {

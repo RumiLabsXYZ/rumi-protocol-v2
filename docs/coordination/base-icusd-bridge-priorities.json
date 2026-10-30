@@ -67,9 +67,9 @@
     {
       "id": "sui-groundwork",
       "title": "Sui groundwork",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "W20 (Sonnet) is writing the Sui note: the small Move gate wrapping TreasuryCap (consumed mint ids, counters, recipient-bound returns), UpgradeCap as a separate disclosed authority, signing, checkpoint finality and the GraphQL RPC path. Read-only.",
+      "nextAction": "",
       "cardIds": [
         "BB-36"
       ]
@@ -97,9 +97,9 @@
     {
       "id": "integrated-plan",
       "title": "Integrated implementation plan and local smoke",
-      "status": "blocked",
-      "blockedReason": "Queued: needs the EVM, native-chain, profile and frontend cards (BB-34 to BB-39).",
-      "nextAction": "Write the sequential implementation plan from the actual missing seams with owners and focused commands, run the validator and existing focused checks once, and update the draft PR without merging.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Coordinator writes the plan and queued future cards for all nine chains; W16 applies the final profile refresh and reruns its focused checks; then the draft PR description is rewritten. No merge.",
       "cardIds": [
         "BB-40"
       ]

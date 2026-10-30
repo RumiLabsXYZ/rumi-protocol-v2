@@ -837,6 +837,24 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   | W19 | BB-37 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
   | W20 | BB-36 | Sonnet | `claude-sonnet-5-5` | running |
 
+## Milestone 37 (2026-10-30): Sui note accepted; BB-40 started
+
+- BB-36 accepted (`docs/coordination/multichain/chain-sui.md`). It specifies the D4 Move gate `rumi_icusd_gate`: `init` (wraps
+  `TreasuryCap` in a shared gate, supply cap 0 so it is disabled on chain), `mint` (aborts on a consumed mint id, updates the minted
+  total), `bridge_out` (burns, computes `transfer_id`, increments the counter, emits `BridgeOut` with the ICP account), `set_limits`
+  and a version guard `migrate` (old package versions stay callable after an upgrade). Design corrections applied: the signing
+  digest and the lookup transaction digest are different hashes; the equivocation lock is sourced, so same-bytes retries are
+  mandatory; `TreasuryCap` lives inside the gate, so `UpgradeCap` custody is a mint-path authority.
+- All nine chains now have accepted groundwork notes. BB-40 started: the coordinator writes the plan and queued cards; W16 was
+  resumed for the single final profile refresh (Solana, XRPL and Sui items from the chain notes, plus dropping the style-only
+  em-dash test).
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W20 | BB-36 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W16 | BB-40 profile refresh | Sonnet | `claude-sonnet-5-5` | resumed (build lane) |
+  | W21 | BB-40 step extraction | Haiku | `claude-haiku-5-5` | running (scratch output only) |
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
