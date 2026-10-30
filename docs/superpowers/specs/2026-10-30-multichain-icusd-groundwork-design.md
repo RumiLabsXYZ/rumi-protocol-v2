@@ -1,6 +1,7 @@
 # Multichain icUSD groundwork: shared escrow accounting and destination-profile contract
 
 Status: design only. Card BB-33 (worker W14), 2026-10-30, worktree branch `codex/base-icusd-bridge`.
+Accounting corrected by the coordinator after Miles' review (sections 2.2 to 2.4 and the Solana row of 6.3).
 Accepted by the coordinator with three wording edits (section 4 test labeled future implementation; section 11 decisions gate implementation, not groundwork; BB-39 marked done).
 Nothing here deploys, enables, funds or signs anything. Every destination stays `disabled`.
 
@@ -100,30 +101,61 @@ touch `MultiChainState`. Escrowed icUSD is ordinary ICP ledger supply. No destin
 | `E_d` | Ledger balance of destination `d`'s own escrow account | escrow balance | escrow balance |
 | `O_d` | Destination outstanding: finalized delivered mints minus finalized processed returns | `outstanding_base` | `O` |
 | `PM_d` | Escrowed, not yet delivered (includes deposit fee; held re-mints) | `pending_mint` | `D` |
-| `PR_d` | Finalized valid returns not yet released | `pending_release` | `R` |
+| `RC_d` | ReturnCustodied: finalized valid returns whose destination tokens sit in the canister-owned return account, not yet burned (custodied-return families only) | n/a (Base burns in `bridgeOut`) | n/a (a payment to the issuer redeems) |
+| `BU_d` | BurnUnknown: custodied returns whose burn was signed but is not yet final or reconciled | n/a | n/a |
+| `PR_d` | PendingRelease, payable: finalized valid returns whose destination tokens are already destroyed (burned atomically by the return, or by a finalized burn), not yet released on ICP | `pending_release` | `R` |
 | `RF_d`, `H_d` | Refunds in progress; held claims | `pending_refund`, `held` | `H` |
 | `F_d` | Fees earned, not swept | `fees` | fee reserve |
 | `U_d` | Outflow of escrow transfers whose outcome is unknown | `unknown_outflow` | in `ic_fee_reserve` terms |
 
-`L_d = O_d + PM_d + PR_d + RF_d + H_d + F_d`. Origin tag per claim: `imported` (existing canonical icUSD pulled
+`L_d = O_d + PM_d + RC_d + BU_d + PR_d + RF_d + H_d + F_d`; each e8 of liability is in exactly one bucket. Origin tag per claim: `imported` (existing canonical icUSD pulled
 with ICRC-2) or `debt_originated` (PR #586 borrow path only). Only `imported` counts toward the "no new debt" claim.
 
 ### 2.3 Invariants (per destination, enforced inside its own instance)
 
+Correction (Miles' review, 2026-10-30): an earlier draft added the Solana return account to C2 without taking the same
+units out of `PR_d`, so a valid return awaiting its burn was counted twice. Return states are now disjoint.
+
 - **C1:** `E_d >= L_d - U_d`. Violation halts that destination only (`accounting.rs:237-259`).
-- **C2:** `supply_d(final head) <= O_d + M_inflight_d`, where `M_inflight_d <= PM_d`.
-- **Derived bound (the requested statement):** `supply_d + (PM_d - M_inflight_d) + PR_d + RF_d + H_d + F_d <= L_d <= E_d + U_d`. Destination supply plus every other open claim never exceeds locked escrow.
-- **C3:** exact `supply_d == O_d` when quiescent and fully observed.
+- **C2:** `supply_d(final head) <= O_d + M_inflight_d + RC_d + BU_d`, where `M_inflight_d <= PM_d`. Families whose return
+  destroys the tokens in the same transaction (EVM `bridgeOut`, the Sui gate module, an XRPL payment to the issuer) always
+  have `RC_d = BU_d = 0`.
+- **Derived bound:** `supply_d + (PM_d - M_inflight_d) + PR_d + RF_d + H_d + F_d <= L_d <= E_d + U_d`. Custodied and
+  burn-unknown return units are counted once, inside `supply_d`, and never also in `PR_d`.
+- **What the bound means:** destination supply plus every other open claim never exceeds the escrow balance ADJUSTED for
+  unknown outflows. `E_d + U_d` is adjusted coverage, not proof that every unit is still physically locked: an escrow
+  transfer whose outcome is unknown may already have left. The bound is exact again once each `U_d` attempt is reconciled
+  as the same attempt (6.2).
+- **Custodied return lifecycle (Solana memo option; Sui no-module fallback):** a finalized valid transfer into the
+  canister-owned return account moves the amount from `O_d` to `RC_d`; signing the burn moves it to `BU_d`; a finalized
+  burn moves it to `PR_d` (supply drops by the same amount). A burn proven not to have landed returns it to `RC_d` (the
+  tokens are still in custody); a different transaction consuming the same nonce halts the lane (6.2 rule 4). **No ICP
+  payout from escrow while a unit is in `RC_d` or `BU_d`.**
+- **C3:** when quiescent (no in-flight mints, no custodied or burn-unknown returns) and fully observed, `supply_d == O_d`.
 - **C4 (cumulative mints):** needs an on-chain monotone mint counter. EVM has `totalMinted` (`BridgedIcUSD.sol` mint, line 227). Solana without a program and Sui without the Move module have none (6.3), so a foreign mint that is burned again before the next check is invisible there. Recorded as a known gap, not hidden.
-- **Solana return account:** tokens sitting in the canister's return account count as supply until the canister burns them, so its C2 bound adds `R_unburned_d`.
 
 ### 2.4 Aggregate reporting lives outside any one canister
 
+Index sets, so no escrow account or destination supply is counted twice:
+
+- `D` = bridge-instance destination networks whose escrow account is on the production icUSD ledger (mainnet instances;
+  a testnet instance enters `D` only if, under D9, it escrows real icUSD; test-ledger instances never do).
+- `X` = the XRPL lane of PR #586 (a backend module, one escrow account). `X` is NOT a member of `D`.
+
 ```
-total_icusd          = icp_ledger_total_supply + sum(debt_backed_chain_supplies)
-circulating_on_icp   = icp_ledger_total_supply - sum_d(E_d) - E_xrpl
-circulating_total    = circulating_on_icp + sum_d(supply_d) + xrpl_supply + sum(debt_backed_chain_supplies)
+total_icusd         = icp_ledger_total_supply + sum(debt_backed_chain_supplies)    (escrow-backed tokens add nothing)
+escrow_locked       = sum over d in D of E_d  +  E_X
+circulating_on_icp  = icp_ledger_total_supply - escrow_locked
+circulating_dest_d  = supply_d - custody_d   for d in D
+circulating_xrpl    = issued_outstanding_X   (held off the issuer; a payment to the issuer redeems, so no custody term)
+circulating_total   = circulating_on_icp + sum over d in D of circulating_dest_d + circulating_xrpl
+                      + sum(debt_backed_chain_supplies)
 ```
+
+`custody_d` is the balance of `d`'s canister-owned return account read at the same final head as `supply_d` (zero for
+families whose return burns atomically). Custodied unburned return inventory is therefore excluded from circulation
+exactly once, while it stays backed by escrow through `RC_d` or `BU_d` until its burn is final. `E_X` and
+`issued_outstanding_X` appear only in their own terms.
 
 Each instance exposes a per-destination audit query (the Base `get_supply_audit` shape: `E`, every bucket, `U`, surplus, last
 final supply, C-status). An aggregator (analytics or a read-only script, BB-40) sums them and must re-read the escrow balance
@@ -242,7 +274,7 @@ The EVM contract does both (`mintConsumed`, `bridgeOutUsed`, and `BridgeOut` car
 | Chain | (a) Return bound to an ICP account and a durable unique id | (b) Mint retry cannot mint twice | Smallest guard | Status |
 | --- | --- | --- | --- | --- |
 | EVM | `BridgeOut(transferId, from, amount, sequence, principal, subaccount)`; unique `transferId` | `mintConsumed[mintId]`, plus lane nonce | The deployed contract | Exists (Base) |
-| Solana (R, D3) | Holder signs one transaction: `TransferChecked` (8 decimals) to a canister-owned return account plus an SPL Memo `rumi1\|<principal>\|<subaccount>\|<client_nonce>`. Amount is read from finalized token balance changes, never the memo. Return id = tx signature. No valid memo: refund to the verified sender, never credited to an ICP account. | Mint tx = `[AdvanceNonce, CreateIdempotent ATA, MintToChecked(8), Memo(mint_id)]` on a per-op durable nonce account. Persist unsigned message and nonce binding, then sign, then send. The nonce advances when it lands, so the same bytes or a same-nonce replacement can land only once. Reconcile: read the nonce account at `finalized`; look up each recorded signature; else find the memo `mint_id` via signature history. A different transaction that consumed the nonce halts the lane. | No program: Memo plus durable nonce. Stronger option: a small program with a `consumed[mint_id]` PDA and a `bridge_out` that burns and emits the ICP account (adds a program upgrade authority). | **Implementation missing** (observer, nonce lane, memo parser). No on-chain consumed record, so C4 is unavailable without the program (2.3). RPC history retention bounds how late a memo lookup works (unmeasured). |
+| Solana (R, D3) | Holder signs one transaction: `TransferChecked` (8 decimals) to a canister-owned return account plus an SPL Memo `rumi1\|<principal>\|<subaccount>\|<client_nonce>`. The observer credits a return only when the finalized transaction has exactly the allowed shape: one top-level `TransferChecked` of the escrow mint (decimals 8) into the canister-owned return account, authorized by the source token account's owner (or an authority the profile explicitly allows), plus one Memo instruction in the same transaction naming the ICP account. It verifies mint, source owner or authority, destination account and decimals from the instruction itself and cross-checks pre and post token balances; a net balance delta alone is never credited. Other shapes (unchecked `Transfer`, several transfers, inner-instruction transfers, missing or mismatched memo) are refunded to the verified sender. Credited tokens enter `RC_d` (2.3) and pay out only after their burn is final. Return id = tx signature. No valid memo: refund to the verified sender, never credited to an ICP account. | Mint tx = `[AdvanceNonce, CreateIdempotent ATA, MintToChecked(8), Memo(mint_id)]` on a per-op durable nonce account. Persist unsigned message and nonce binding, then sign, then send. The nonce advances when it lands, so the same bytes or a same-nonce replacement can land only once. Reconcile: read the nonce account at `finalized`; look up each recorded signature; else find the memo `mint_id` via signature history. A different transaction that consumed the nonce halts the lane. | No program: Memo plus durable nonce. Stronger option: a small program with a `consumed[mint_id]` PDA and a `bridge_out` that burns and emits the ICP account (adds a program upgrade authority). | **Implementation missing** (observer, nonce lane, memo parser). No on-chain consumed record, so C4 is unavailable without the program (2.3). RPC history retention bounds how late a memo lookup works (unmeasured). |
 | Sui (R, D4) | A plain coin transfer carries no ICP account (the Coin and wallet docs read describe no memo). A Move module `bridge_out(coin, icp_principal, icp_subaccount, client_nonce)` burns the coin, stores `transfer_id`, increments a counter and emits `BridgeOut`. Fallback with no module: a per-intent derived deposit address (extra gas and sponsorship work). | The module wraps `TreasuryCap` and aborts `mint(mint_id, ...)` if `mint_id` was consumed, with `minted_total`. Attempt identity is the transaction digest (hash of the unsigned bytes, sources-native.md section 2 row 4). Retry the same bytes; look up by digest. The module is the on-chain backstop. | Move module `rumi_icusd_gate` (consumed table, counters, `BridgeOut` event). | **Implementation missing.** Unverified (not in facts files): signing two different transactions on the same owned-object version may lock the objects until epoch end, so rule 6.2 (same bytes) also matters here. |
 | XRPL (PR #586) | Payment of the token to the issuer with a canister-prepared, never-reused destination tag; dedup `(network, issuer, tx hash)`; only `delivered_amount` credited (`repay.rs:431`) | Issuer sequencer is single-flight; unsigned bytes, signature and signed blob persisted before submit; resubmit the same blob (`MAX_SUBMITS 8`, resubmit after 20 s); a signed ambiguity blocks claim resolution (`issuance.rs:163` `plan_resolution`) | Existing lane | Exists for issuance. The no-vault return intent is **implementation missing** (1.4). |
 
@@ -393,7 +425,7 @@ A data-only alternative (JSON plus a script) would give up typed validation; I f
 1. **BB-38 (profiles and validator):** build the crate (9.5), nine disabled profiles, rules V1 to V11. First, because every later card cites a profile. No dependency.
 2. **D-decisions D1, D3, D4, D5 (Rob and Miles):** these gate IMPLEMENTATION of the EVM, Solana and Sui families, not groundwork. BB-34 to BB-36 proceed on the recommendations in section 12 and keep each decision visibly open.
 3. **BB-34 (EVM reuse):** per `reuse-inventory.md` 2b: chain allow-list and provider variants (`rpc.rs:217-223`, `state.rs:235-247`), domain slug test reproducing Base strings exactly, per-chain head selection (Monad Verified head, Robinhood tag probe), HyperEVM held at its blocker. Order inside EVM: Ethereum, Arbitrum, then Robinhood, then Monad and HyperEVM.
-4. **BB-35 (Solana):** decide D3; specify the nonce lane, memo parser, return account and burn; resolve the SOL RPC canister id; choose Token-2022 or classic SPL after wallet checks; use the PocketIC Schnorr seams (6.4) as the harness.
+4. **BB-35 (Solana):** specify the exact allowed transfer and burn instruction shapes, token owner and authority checks and memo association (6.3), and the custodied return lifecycle with no payout before a final burn (2.3); decide D3; specify the nonce lane, memo parser, return account and burn; resolve the SOL RPC canister id; choose Token-2022 or classic SPL after wallet checks; use the PocketIC Schnorr seams (6.4) as the harness.
 5. **BB-36 (Sui):** specify the Move gate, the GraphQL provider and the `UpgradeCap` policy; check the equivocation hazard against Sui docs.
 6. **BB-37 (XRPL):** specify the no-vault return intent as a follow-up to #586, decide D2 and D7, confirm outcall port support. No edit to #586.
 7. **BB-39 (frontend wallets, done as a requirements note):** its section 6 is future implementation backlog: wallet-standard connectors (Solana, Sui), XRPL wallet beyond Xaman, chain-table rows, library policy (`baseBridge` avoids EVM libraries by design).

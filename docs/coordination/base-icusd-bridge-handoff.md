@@ -677,6 +677,21 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 
 - Concurrency: two Sonnet lanes; the Haiku slot is idle because no narrow task is ready.
 
+## Milestone 29 (2026-10-30): accounting correction to the shared design
+
+- Miles accepted BB-33's direction (per-instance actors, unchanged Base domains, PR #586 as the XRPL seam, a
+  default-disabled validator) and found one accounting error: the Solana return account was added to C2 without removing
+  the same units from `PR_d`, so a valid return awaiting its burn was counted twice.
+- The coordinator corrected the design (sections 2.2 to 2.4 and the Solana row of 6.3) instead of reopening W14, because
+  both Sonnet slots were busy and nothing downstream had used the equations yet: new disjoint buckets `RC_d`
+  (ReturnCustodied) and `BU_d` (BurnUnknown); `PR_d` is payable only after the tokens are destroyed; no ICP payout while a
+  unit is custodied or its burn is unknown; C2 and the derived bound count custodied units once; aggregate reporting uses
+  explicit index sets (bridge destinations `D`, the XRPL lane `X` outside `D`) and subtracts the measured custody balance
+  once; `E_d + U_d` is described as coverage adjusted for unknown outflows, not proof of a physical lock; the Solana
+  observer must check the exact allowed instruction, mint, owner or authority and memo, never a net balance delta alone.
+- BB-35's acceptance now names those checks. W16 (BB-38) was asked to add a `solana-return-custody` blocker to the Solana
+  profile. No runtime code changed and no test was added or run for this correction.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

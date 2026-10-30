@@ -338,7 +338,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Solana groundwork",
-      "evidenceText": "proof=none; Token standard and authority model, ICP signing and RPC path, finality wait, prerequisites, trust limits stated plainly and implementation-ready next steps",
+      "evidenceText": "proof=none; Token standard and authority, exact allowed transfer and burn instructions with owner and memo checks, custodied returns paid only after a final burn, ICP signing and RPC path, finality, trust limits, next steps",
       "evidenceLinks": []
     },
     {
