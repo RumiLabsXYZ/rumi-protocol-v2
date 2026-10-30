@@ -277,7 +277,7 @@ value, XRPL `Sequence` with `LastLedgerSequence`, Sui owned-object versions). Si
 1. Persist the unsigned bytes and the token before the first signing call.
 2. Rebroadcast the same signed bytes; broadcast errors and "already known" lead to receipt or status checks, never to a new transaction (Base design 7.6).
 3. A replacement at the **same token** is allowed only when no recorded attempt has landed and the token is unconsumed.
-4. A **new token** (new nonce or `Sequence`) only after the old one is proven consumed or expired. A consumed token with no matching landed attempt halts that lane; nothing is re-signed (Base design 11a).
+4. A **new token** (new nonce or `Sequence`) only after the old one is proven consumed or expired, where expiry counts only if the chain gives authoritative non-execution proof. On Sui, epoch advancement plus a missing digest is NOT that proof: the attempt stays held, delivery is reconciled from the gate's consumed mint-id record, and no refund or second payable claim is created (blocker `sui-epoch-expiry-nonexecution-proof`, unresolved activation seam). A consumed token with no matching landed attempt halts that lane; nothing is re-signed (Base design 11a).
 5. After `SYS_UNKNOWN` or `CANISTER_ERROR` a signature may already exist (sources-native.md ICP-side table), so a lost sign reply means "re-sign the same unsigned bytes", not "start over". The facts files do not say whether IC Ed25519 signing is deterministic, so Solana and XRPL key reconciliation on the message and token, not on one signature.
 6. ICP ledger calls: resend the identical `(created_at_time, memo)` tuple; only `Ok` or `Duplicate` proves success; ICRC-3 search after `TooOld` (Base design 7.4).
 

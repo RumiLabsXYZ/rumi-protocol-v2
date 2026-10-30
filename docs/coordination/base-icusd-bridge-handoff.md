@@ -848,6 +848,11 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - All nine chains now have accepted groundwork notes. BB-40 started: the coordinator writes the plan and queued cards; W16 was
   resumed for the single final profile refresh (Solana, XRPL and Sui items from the chain notes, plus dropping the style-only
   em-dash test).
+- Sui correction (Miles, after acceptance; applied by the coordinator): section 3 rule 4 of `chain-sui.md` no longer lets
+  epoch advancement plus a missing digest authorize a replacement or refund. Attempts stay held until authoritative non-execution
+  proof; delivery is reconciled from the gate's consumed mint-id record; no second payable claim. Unresolved activation seam
+  `sui-epoch-expiry-nonexecution-proof`, also in the design's 6.2 rule 4 and added to W16's refresh batch. No new research or
+  build gate.
 
   | Handle | Card | Requested | Actual (run record) | State |
   | --- | --- | --- | --- | --- |
