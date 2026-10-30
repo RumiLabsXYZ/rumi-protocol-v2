@@ -160,3 +160,9 @@ quorum of independent providers the bridge requires. Reads must never fall back 
 
 Base, Ethereum, Arbitrum and Robinhood Chain keep the existing finalized-head model, subject to this
 file's open questions (for example whether Robinhood Chain's public RPC serves a real `finalized` tag).
+
+Coordinator reconciliation (2026-10-30, after BB-34): the Monad execution delay IS sourced. Monad's developer summary
+(https://docs.monad.xyz/developer-essentials/summary, verified 2026-10-30) says Verified ("state root finality") comes
+three blocks after Finalized; the block-states page gives only the formula `latest_finalized_block - execution_delay`.
+So the Verified head is finalized minus 3 blocks. The `monad-verified-head` blocker stays, because the observer's head
+selection still needs a code change; only the "value unsourced" part is resolved.

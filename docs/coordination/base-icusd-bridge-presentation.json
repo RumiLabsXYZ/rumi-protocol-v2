@@ -1,5 +1,5 @@
 {
-  "summary": "Nine-chain icUSD groundwork: representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Research, the shared escrow design (BB-33: one instance per destination network, Base APIs unchanged, PR #586 as the XRPL seam, nine open decisions) and frontend wallet requirements are done. In progress: BB-38 profile crate and validator (the only build) and BB-34 EVM steps. Solana, Sui, XRPL and the plan are queued. Base browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
+  "summary": "Nine-chain icUSD groundwork: representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Done: research, the shared escrow design (BB-33, accounting corrected for custodied returns), frontend wallet requirements and the EVM steps (BB-34; Monad delay sourced). In progress: BB-38 profile crate and validator (the only build) and BB-35 Solana. Sui, XRPL and the plan are queued. Base browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
   "glossary": [
     {
       "term": "proof=source",

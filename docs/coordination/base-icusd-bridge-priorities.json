@@ -37,9 +37,9 @@
     {
       "id": "evm-expansion",
       "title": "Reuse the Base design for Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "W17 (Sonnet) is writing the EVM-family steps: the in-place change list that keeps Base identical, per-chain head selection, and the HyperEVM and Monad read-evidence blockers. Read-only.",
+      "nextAction": "",
       "cardIds": [
         "BB-34"
       ]
@@ -47,9 +47,9 @@
     {
       "id": "solana-groundwork",
       "title": "Solana groundwork",
-      "status": "blocked",
-      "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up after BB-34 or BB-38.",
-      "nextAction": "Choose the token standard and authority model, the ICP signing and RPC path and the finality wait, then write implementation-ready Solana next steps.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "W18 (Sonnet) is writing the Solana note: exact mint, return and burn instruction shapes with owner and memo checks, custodied returns paid only after a final burn, durable-nonce retries, the SOL RPC canister id and D3. Read-only.",
       "cardIds": [
         "BB-35"
       ]

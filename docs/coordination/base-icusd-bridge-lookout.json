@@ -327,15 +327,15 @@
     },
     {
       "id": "BB-34",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Six-EVM readiness and Base-bridge reuse",
-      "evidenceText": "proof=none; For each EVM chain: config only or code change against the Base design, the smallest generalization seam and next steps, with the HyperEVM and Monad read-evidence blockers kept; Base behavior unchanged",
+      "evidenceText": "proof=source; In-place EVM change list keeping Base identical, per-chain head rules, HyperEVM and Monad blockers kept; Monad delay sourced as 3 blocks; D1a, D1c and the D5 x D8 coupling recorded; citations spot-checked",
       "evidenceLinks": []
     },
     {
       "id": "BB-35",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana groundwork",
       "evidenceText": "proof=none; Token standard and authority, exact allowed transfer and burn instructions with owner and memo checks, custodied returns paid only after a final burn, ICP signing and RPC path, finality, trust limits, next steps",

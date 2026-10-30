@@ -692,6 +692,23 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - BB-35's acceptance now names those checks. W16 (BB-38) was asked to add a `solana-return-custody` blocker to the Solana
   profile. No runtime code changed and no test was added or run for this correction.
 
+## Milestone 30 (2026-10-30): EVM steps accepted; Solana started
+
+- BB-34 accepted (`docs/coordination/multichain/chain-evm.md`). The coordinator spot-checked `validate_init` (state.rs:240),
+  `validate_rpc_services` (285), `to_rpc_service` (rpc.rs:217) and `finalized_head` (742). Two conflicts it raised were checked:
+  the contract hard-codes `ERC20("Rumi icUSD", "icUSD")` (`BridgedIcUSD.sol:157`), so identical bytecode (D5) cannot also give
+  Monad's escrow token a distinct name (D8): the decisions are coupled. The facts file both gave and denied a Monad delay;
+  Monad's developer summary states Verified is three blocks after Finalized, now recorded as sourced (the observer change and
+  its blocker remain). New open decisions D1a (method names under one Candid) and D1c (keyed providers versus no secrets in
+  state) are in the design's section 12.
+- BB-35 (W18) dispatched read-only. BB-38 (W16) still running; it was told the Monad delay value and the Solana custody blocker.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W17 | BB-34 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W18 | BB-35 | Sonnet | `claude-sonnet-5-5` | running |
+  | W16 | BB-38 | Sonnet | `claude-sonnet-5-5` | running (build lane) |
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

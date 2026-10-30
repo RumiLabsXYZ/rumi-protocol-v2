@@ -245,7 +245,7 @@ and never share the `rumi:base-bridge:*` prefix. If a migration is ever needed, 
 | Arbitrum | `finalized` = batch in an Ethereum finalized block (about 13 min after posting) | sources-evm.md section 3 row 3 |
 | Robinhood | Ethereum finality of the posted batch; `finalized` tag support UNVERIFIED, probe before relying | sources-evm.md section 4 row 3, section 8 Q1 |
 | HyperEVM | HyperBFT commit; tag and reorg semantics UNVERIFIED. **Blocker:** default RPC serves `eth_call` at `latest` only, but the observer needs numbered finalized state (`observer.rs:261-297, 612-648, 905-922`) | sources-evm.md addendum |
-| Monad | **Verified**, not just `finalized`: head = finalized minus the execution delay (delay value not in the primary page). Receipts, logs and supply read at `finalized` are ordering-level evidence only. **Blocker:** observer head-selection change | sources-evm.md addendum; docs.monad.xyz block-states |
+| Monad | **Verified**, not just `finalized`: head = finalized minus the execution delay, which Monad's developer summary gives as three blocks (verified 2026-10-30; the block-states page gives only the formula). Receipts, logs and supply read at `finalized` are ordering-level evidence only. **Blocker:** observer head-selection change | sources-evm.md addendum; docs.monad.xyz block-states |
 | Solana | `finalized` commitment (under Alpenglow `confirmed` equals `finalized`) | sources-native.md section 1 row 5 |
 | Sui | Finalized checkpoint containing the transaction digest; reads pinned to a checkpoint | sources-native.md section 2 row 5 |
 | XRPL | Validated ledger with `tesSUCCESS`, `ledger_index: validated`, `delivered_amount`, read quorum 2 | `issuer_rpc.rs:62, 115`; `xrp_rpc.rs:435` (PR #586) |
@@ -444,6 +444,9 @@ A data-only alternative (JSON plus a script) would give up typed validation; I f
 | D7 | XRPL precision caps: 15 versus 16 digits; whether a trust-line limit enforces it. | 15-digit caps until verified. |
 | D8 | Naming: escrow-backed and debt-backed icUSD on one chain (Monad). | Distinct names or labels. |
 | D9 | Testnet escrow: real icUSD ledger or a test ledger. | Test ledger (a testnet token should not lock real icUSD). Not grounded in a source. |
+| D1a | Raised by BB-34: one Wasm has one Candid, so an in-place EVM generalization cannot give each instance its own method names (1.5). Options: keep the Base method names on every EVM instance, or add generic methods additively while Base keeps its names. | Additive generic methods, Base names kept; decide with D1. |
+| D1c | Raised by BB-34: Robinhood Chain and HyperEVM publish one keyless public endpoint each, so a quorum may need keyed providers, which conflicts with keeping no secrets in canister state. | Keyless independent providers only until a reviewed key-handling design exists; otherwise the chain stays disabled. |
+| D5 x D8 | Raised by BB-34: identical bytecode hard-codes `ERC20("Rumi icUSD", "icUSD")` (`foundry/src/BridgedIcUSD.sol:157`), so on Monad, where a debt-backed IcUSD also exists, D8's distinct name needs a new reviewed contract (constructor name and symbol) or a label-only answer in wallets and the app. | Decide D5 and D8 together. |
 
 ## 13. Not grounded in source
 
@@ -451,5 +454,5 @@ A data-only alternative (JSON plus a script) would give up typed validation; I f
 - The controller set of any mainnet canister, and the per-canister threshold-key derivation rule beyond what the Base design states.
 - Sui equivocation behavior, Solana freeze-authority mutability, XRPL trust-line limit as a balance bound, XRPL on-chain mantissa width beyond 15 digits.
 - Whether the IC Ed25519 and ECDSA paths pass in the PocketIC seams in 6.4; no test was run.
-- Monad execution delay value, Robinhood and HyperEVM `finalized` tag support, the SOL RPC canister id, and cycle costs of any new outcall or signing path.
+- Robinhood and HyperEVM `finalized` tag support (the Monad delay is now sourced as three blocks), the SOL RPC canister id, and cycle costs of any new outcall or signing path.
 - A dedicated XRPL no-vault return operation: absent from the PR #586 endpoint list I read; bodies of `observer.rs`, `retention.rs` and `settlement.rs` were not read in depth (BB-41).
