@@ -795,6 +795,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Queued for the single profile refresh pass by W16 during BB-40: add `solana-unattributed-burn-policy` to the Solana profile
   and to the validator's required Solana blockers, with a missing-blocker test, alongside the earlier Solana items.
 
+## Milestone 35 (2026-10-30): final-integration notes received; BB-40 checklist
+
+- Solana main-text contradiction fixed: section 3 of `chain-solana.md` no longer requires global supply to fall by exactly our
+  burn. `BU_d -> PR_d` now needs finalized success, message bytes equal to the stored `BurnChecked` message (nonce, signer
+  roles, mint, return account, amount, memo) and the return account down by that amount in the same transaction; section 12
+  stays as history and the plan is internally consistent.
+- BB-40 checklist from Miles' final notes (to run once BB-36 and BB-37 return; no new review round, builder, deployment or
+  live action):
+  1. Rewrite PR #591's title and body for the final Base implementation plus nine-chain groundwork: keep the exact historical
+     Base code and test pins and limits; separate prior Base public-test proof (isolated Sepolia CLI round trip, staging
+     sign-in) from current host-only groundwork; keep browser-wallet acceptance and production activation unproven; link the
+     design, plan and host verification; no private records, addresses, balances or transactions; no merge.
+  2. One profile refresh by the same builder (W16): Solana `solana-unattributed-burn-policy` (profile, required list, missing
+     test), `burn_id` domain and `mint-account` role, resolved SOL RPC wording; any XRPL and Sui profile mismatches; drop the
+     style-only `sources_contain_no_em_dashes` unit test; keep the meaningful mutations, exact amounts and finality checks;
+     report final test counts honestly.
+  3. Concrete future queued cards for all nine destinations with owners, paths, dependencies and focused commands, ranked
+     subprojects, implementation left queued (at most two Sonnet lanes plus one Haiku task if started later); Base browser
+     consent stays separate; no deployment, signing or funding step executable by default.
+  4. A small proposed persona or catalog lesson with code pointers (finality-rule enums need value checks; shared JSON amount
+     bounds use canonical decimal strings). Proposal only: no memory or catalog write.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

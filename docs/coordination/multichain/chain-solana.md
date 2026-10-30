@@ -73,11 +73,11 @@ Signers: `fee-payer`, `return-owner`. v1 burns one return per transaction (simpl
 mint landed:   PM_d --finalized--> O_d
 return valid:  O_d  --finalized valid return (2.2)--> RC_d      (supply unchanged, tokens in return ATA)
 burn signed:   RC_d --burn message persisted, then signed--> BU_d
-burn final:    BU_d --finalized, err null, memo + balance deltas match--> PR_d   (supply -amount)
+burn final:    BU_d --finalized, err null, exact stored BurnChecked message, return ATA -amount--> PR_d
 burn failed:   BU_d --proven not landed (nonce consumed by our cancel or by our err-landed burn)--> RC_d
 PR_d --ICP escrow release saga (reuse)--> done
 ```
-- **No ICP payout while a unit is in `RC_d` or `BU_d`.** Transition `BU_d -> PR_d` needs the burn transaction itself: finalized, `meta.err == null`, memo = our `burn_id`, return ATA down by the amount, and the mint supply read afterwards down by the same amount. A different transaction consuming the burn nonce halts the lane (6.2 rule 4).
+- **No ICP payout while a unit is in `RC_d` or `BU_d`.** Transition `BU_d -> PR_d` needs the burn transaction itself: finalized, `meta.err == null`, message bytes equal to the stored unsigned `BurnChecked` message (nonce, signer roles, mint, return account, amount, memo `burn_id`), and the return ATA down by exactly that amount in the same transaction. The mint's global supply difference is not used: unrelated owner burns (section 12) can change it. A different transaction consuming the burn nonce halts the lane (6.2 rule 4).
 - **Custody read for reporting:** `custody_d` = token balance of the return ATA, `supply_d` = mint supply, both at `finalized`. Two reads are two heads, so a valid pair is `supply, custody, supply` with the two supply reads equal and no own mint or burn in flight; otherwise retry. A single `getMultipleAccounts` response has one context slot but is not in the SOL RPC method table (S7) and a raw `jsonRequest` keeps `context`, which may defeat provider consensus (**U**). Audit check: `custody_measured == RC_d + BU_d + stray_d`; an unexplained excess after the cursor reaches head halts credits and raises an alarm. Strays are reported separately and excluded from circulation while held (section 2.4 term `custody_d`).
 - C1 and C2 as in section 2.3. C3 is not an unconditional equality on Solana: holders can burn (section 12). **C4 is unavailable** (6).
 
