@@ -6,7 +6,8 @@ import { CONFIG, CANISTER_IDS } from '../config';
 import { ICRC1_IDL } from '../idls/ledger.idl.js';
 import { walletStore } from '../stores/wallet';
 import { auth, walletSessionGeneration } from './auth';
-import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import { createOisyActor } from './oisySigner';
+import { getCksolOisySignerAgent } from './cksolOisySigner';
 import { getCksolRelay, type IntentStore } from './cksolMinter';
 
 export type PaymentPhase =
@@ -407,7 +408,7 @@ export async function submitCksolPayment(
 		wt = q.walletType;
 	const ledgerActor: any =
 		wt === 'oisy'
-			? createOisyActor(q.cycles_ledger.toText(), ICRC1_IDL, await getOisySignerAgent(owner))
+			? createOisyActor(q.cycles_ledger.toText(), ICRC1_IDL, await getCksolOisySignerAgent(owner))
 			: await walletStore.getActor(q.cycles_ledger.toText(), ICRC1_IDL);
 	if (!isLive(owner, g, wt, live)) throw new Error('Wallet session changed.');
 	await verifySigner(ledgerActor, owner);
@@ -484,7 +485,7 @@ export async function submitCksolPayment(
 	try {
 		const updateActor: any =
 			wt === 'oisy'
-				? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getOisySignerAgent(owner))
+				? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getCksolOisySignerAgent(owner))
 				: await walletStore.getActor(CONFIG.currentCanisterId, PaidBackendIDL);
 		if (!isLive(owner, g, wt, live)) return intent;
 		await verifySigner(updateActor, owner);
@@ -540,7 +541,7 @@ export async function claimCksolRefund(
 	if (!isLive(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
 	const actor: any =
 		walletType === 'oisy'
-			? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getOisySignerAgent(owner))
+			? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getCksolOisySignerAgent(owner))
 			: await walletStore.getActor(CONFIG.currentCanisterId, PaidBackendIDL);
 	if (!isLive(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
 	await verifySigner(actor, owner);
@@ -568,7 +569,7 @@ export async function resumeFundedCksolPayment(
 	saveCksolPayment(storage, intent);
 	const actor: any =
 		walletType === 'oisy'
-			? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getOisySignerAgent(owner))
+			? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getCksolOisySignerAgent(owner))
 			: await walletStore.getActor(CONFIG.currentCanisterId, PaidBackendIDL);
 	if (!isLive(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
 	await verifySigner(actor, owner);
@@ -634,7 +635,7 @@ export async function continueApprovedCksolPayment(
 	try {
 		const actor: any =
 			walletType === 'oisy'
-				? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getOisySignerAgent(owner))
+				? createOisyActor(CONFIG.currentCanisterId, PaidBackendIDL, await getCksolOisySignerAgent(owner))
 				: await walletStore.getActor(CONFIG.currentCanisterId, PaidBackendIDL);
 		if (!isLive(owner, generation, walletType, live)) return intent;
 		await verifySigner(actor, owner);

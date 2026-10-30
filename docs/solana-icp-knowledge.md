@@ -57,3 +57,11 @@ Add a short dated entry with: the observed behavior, environment and version,
 evidence link or file/commit, what changed, and whether it remains verified.
 Prefer updating a stale claim over appending a contradictory one. Never put
 secrets, wallet seed material, or unreviewed live action instructions here.
+
+## 2026-10-30 — ckSOL OISY channel ownership
+
+Rumi bundles an older PNP signer and a direct `@icp-sdk/signer` 5.3.1 signer. Both default postMessage transports name the popup from the OISY origin, and closing either channel closes that physical window. Independent SDK timers can therefore interfere even after the ckSOL click opened its own channel. The direct SDK also retains its establishing promise after an opening failure; reusing that Signer can yield out of the next click before attempting another opening.
+
+The ckSOL source isolates each paid action in a fresh Signer and uniquely named popup, opened synchronously before awaiting any network call or Web Lock. Its own auto-close is disabled only for that action and the page closes the channel in `finally`. Default SDK behavior elsewhere and existing vault-recovery records remain unchanged. See `src/vault_frontend/src/lib/services/cksolOisySigner.ts`, its `.spec.ts`, and the `/solana` page handlers. Installed-SDK reproductions and 81 focused ckSOL checks support this source behavior; real wallet consent and mint/refund receipts remain separate proof.
+
+For assets-only releases, read the live asset interface. This frontend's `list` accepts optional `start`/`length` and defaults to 100 records. An older uploader using an empty record reads only the first page and can trap on duplicate creates. Full pagination and updating every existing encoding of mutable entry files (especially `/index.html` gzip) are necessary for a correct content update; an independent `/index.html.gz` asset key is not that gzip encoding. The October 30 release receipt is `docs/operations/cksol-processing-ui-release-20261030.md`.
