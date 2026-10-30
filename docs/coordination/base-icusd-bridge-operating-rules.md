@@ -124,6 +124,11 @@ rejection stops that action and must be reported with its exact reason; never re
 retry it. Schema/length validation failures are data errors to fix. Current private guide:
 the Lookout repository's `outputs/PUBLISHING.md`, October 29 standing authorization.
 
+Audit maintenance: historical milestone receipts do not override this current standing scope.
+On October 30 Miles checked the maintained rules, handoff and saved automation configuration;
+obsolete present-tense handoff bans were marked historical and no bridge recurring prompt remained.
+With no task movement, verify the same source readback instead of republishing for freshness.
+
 ## Priority selection
 
 Applies to this board's ranked list (`base-icusd-bridge-priorities.json`, mirrored in the board's

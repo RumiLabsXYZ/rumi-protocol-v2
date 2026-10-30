@@ -1,8 +1,15 @@
 # Base icUSD bridge: milestone handoff
 
 Compact status for supervisors. The canonical board is `base-icusd-bridge-kanban.md`; this file
-summarizes it at milestones. Evidence here is local only (source, unit, PocketIC, anvil). Nothing
-has been deployed, signed live, broadcast to a public network, or funded.
+is chronological milestone history. Older statements describe their dated checkpoint, not current
+authority. Use the current operating rules and the latest milestone for ongoing decisions.
+
+Current retained evidence: the isolated synthetic command-line test moved test tokens to Base and
+back. The real browser trip still awaits Rob's sign-in and Base-wallet unlock/connection; no new
+browser settlement is claimed. Routine sanitized Lookout updates are authorized through the
+existing scoped publisher without per-checkpoint questions. The live mirror was verified current
+on October 30 without uploading unchanged data. Earlier missing-visible-authorization holds are
+historical, resolved by the October 29 renewal; genuinely new rejections and unrelated holds stand.
 
 ## Where
 
@@ -458,7 +465,7 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Publication evidence stays in the private local publisher record; this is a metadata checkpoint,
   not browser settlement or production readiness.
 
-### Milestone 19 publication disposition
+### Milestone 19 publication disposition (historical; resolved at milestone 21)
 
 - Local checks passed: 35-card projection, both summary limits, unchanged 113-entry glossary,
   unchanged explicit card memberships, and only BB-27 evidence changed. The local projection
@@ -468,9 +475,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - The `--publish` command was then rejected before execution by automatic approval review because
   exact payload/private-destination authorization could not be verified. No upload occurred and
   no post-publication no-op is claimed. Exact input fingerprints are saved privately.
-- This is now an active publication hold under the operating rules. No retries, alternate
-  executors or payload wrappers, and no relay to Nora for upload. Source maintenance continues;
-  publication needs the original review boundary resolved with exact human approval.
+- At that checkpoint, the rejection created an active publication hold and no alternate executor
+  or wrapper was used. This receipt is historical: Rob's October 29 renewed standing metadata
+  authorization resolved its missing-visible-approval condition, as recorded at milestone 21.
+  It is not an ongoing ban on routine sanitized publishing.
 
 ## Milestone 20 (2026-10-28): plain-English writing correction
 
@@ -484,10 +492,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   page."
 - The technical status, glossary, cards, priorities and proof limits are unchanged. This is a
   writing correction, not new browser evidence. No runtime or wallet action was attempted.
-- The actual publication rejection recorded in milestone 19 remains active. The general writing
-  instruction does not resolve approval for the exact rejected metadata and destination. No
-  publish retry, alternate executor or relay is authorized; readable review inputs are updated
-  for the revised plain status and remain held for exact approval.
+- At this October 28 checkpoint, the milestone 19 publication rejection was still active and
+  no publish retry or alternative executor was used. This historical state was superseded by
+  Rob's October 29 renewed standing authorization and successful publication at milestone 21;
+  it does not require per-checkpoint approval today.
 
 ## Milestone 21 (2026-10-29): renewed private board publishing scope
 
@@ -509,6 +517,21 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Routine metadata upkeep now follows the existing event rule without per-checkpoint permission.
   No additional timer or publisher was created, and no bridge runtime, wallet or financial action
   was attempted. This handoff-only receipt does not trigger another publication.
+
+## Milestone 22 (2026-10-30): bounded stale-hold audit
+
+- Miles independently verified Rob's all-supervisor stale-hold audit request in Alden's turn
+  `01a18eb6-9686-7091-9b4e-0bb8d1f20b97`. The operating rules already carry the renewed October 29
+  scope and the same scoped manifest/identity. Two historical handoff statements using present
+  tense were corrected to avoid reviving a resolved ban; original rejection evidence is preserved.
+- No matching bridge publishing/supervision automation prompt was found in the saved automation
+  configuration. No timer, service, alternate writer or team was created.
+- The authenticated existing publisher dry-run reports the canonical 35-card board, Technical and
+  Plain English statuses, glossary, priorities and repository association all unchanged. No new
+  unpublished task movement or sync blocker was found; no upload or artificial freshness update
+  occurred. Exact revision/source match and input fingerprints are recorded privately.
+- The next product step remains the authorized browser demo after Rob's sign-in and wallet
+  access. No feature/release work, new checks, wallet action or financial operation was undertaken.
 
 ## Held live actions
 
