@@ -79,7 +79,7 @@ PR_d --ICP escrow release saga (reuse)--> done
 ```
 - **No ICP payout while a unit is in `RC_d` or `BU_d`.** Transition `BU_d -> PR_d` needs the burn transaction itself: finalized, `meta.err == null`, memo = our `burn_id`, return ATA down by the amount, and the mint supply read afterwards down by the same amount. A different transaction consuming the burn nonce halts the lane (6.2 rule 4).
 - **Custody read for reporting:** `custody_d` = token balance of the return ATA, `supply_d` = mint supply, both at `finalized`. Two reads are two heads, so a valid pair is `supply, custody, supply` with the two supply reads equal and no own mint or burn in flight; otherwise retry. A single `getMultipleAccounts` response has one context slot but is not in the SOL RPC method table (S7) and a raw `jsonRequest` keeps `context`, which may defeat provider consensus (**U**). Audit check: `custody_measured == RC_d + BU_d + stray_d`; an unexplained excess after the cursor reaches head halts credits and raises an alarm. Strays are reported separately and excluded from circulation while held (section 2.4 term `custody_d`).
-- C1 and C2 as in section 2.3. C3 holds when nothing is in flight and `stray_d` is 0 or reported. **C4 is unavailable** (6).
+- C1 and C2 as in section 2.3. C3 is not an unconditional equality on Solana: holders can burn (section 12). **C4 is unavailable** (6).
 
 ## 4. Idempotent mints and same-attempt reconciliation
 **Per-operation durable nonce accounts (R).** A pool of N nonce accounts (profile `nonce_pool_size`, start 4; rent about 1,447,680 lamports each, repo `NONCE_ACCOUNT_RENT_LAMPORTS`, consistent with S14's rent constants). An account is reserved by one operation from message persistence until its attempt is proven consumed, then reusable (its stored value changed). Authority = `fee-payer`, so a cancel needs one signature. Creation: **R** use `CreateAccountWithSeed` with base = `fee-payer` so one signature suffices instead of the repo's two (**U:** instruction not read from a source here; hand-encode like `create_account_instruction`). Bootstrap needs one real blockhash: use the README route (`getSlot` then `getBlock`, S7) rather than the repo's operator-supplied override, later creations can themselves be nonce-led.
@@ -88,7 +88,7 @@ PR_d --ICP escrow release saga (reuse)--> done
 **Reconcile each tick (read the nonce account at `finalized`; reuse `sol_rpc::parse_nonce_account_blockhash`; also check owner = System program and authority = `fee-payer` each read):**
 1. Stored value == recorded: no attempt landed (as of finalized). The signed bytes may still land, so rebroadcast the SAME bytes (all send errors, including preflight "already processed", are maybe-sent). Never a new nonce.
 2. **Cancel (R):** after `cancel_after` without landing, persist and sign an advance-only message on the same nonce (recorded as another attempt). When the nonce advances, check all attempts. Only if the cancel landed with `err == null` is the mint proven not delivered; then re-issue the same `mint_id` on a fresh nonce value.
-3. Stored value advanced: look up each recorded signature (`getTransaction` base64, finalized). Landed with `err == null` and message bytes equal to the recorded bytes: Delivered. Landed with `err != null`: not delivered (fee lost, nonce consumed); re-sign allowed on the new value. None found: `getSignaturesForAddress(nonce account, before = ...)` returns the few transactions that wrote this account, newest first (**R:** a bounded search key, not global history; confirm in a test); fetch the newest, read its memo. Memo = our `mint_id` with an unrecorded signature: adopt it as the landed attempt. A different transaction consumed our nonce: **halt the lane**, re-sign nothing.
+3. Stored value advanced: look up each recorded signature (`getTransaction` base64, finalized). Landed with `err == null` and message bytes equal to the recorded bytes: Delivered. Landed with `err != null`: not delivered (fee lost, nonce consumed); re-sign allowed on the new value. None found: `getSignaturesForAddress(nonce account, before = ...)` returns the few transactions that wrote this account, newest first (**R:** a bounded search key, not global history; confirm in a test); fetch the newest, read its memo. A memo is discovery only, never proof (coordinator correction, section 12): the consuming transaction is adopted only if it is finalized, executed successfully, and its message bytes equal the stored unsigned message (same nonce account and value, signer roles, mint, recipient account and amount), the same checks as the recorded-signature path. Anything different or unverifiable is held and halts the lane, with no replacement mint and no refund. A different transaction consumed our nonce: **halt the lane**, re-sign nothing.
 4. Lookups return null or `Inconsistent`: keep waiting. **Absence never proves non-delivery once the nonce has advanced.**
 **A lane (or the destination) halts when:** a different transaction consumed a recorded nonce; the nonce advanced and no consumer is found within `history_horizon` (below); nonce owner or authority changed; supply exceeds `O_d + M_inflight + RC_d + BU_d` (C2); an unexplained custody excess persists; C1 fails. Pauses never forget signed attempts (section 8).
 **Archival history availability (MANDATORY with D3; how the plan ensures it):**
@@ -164,3 +164,29 @@ Settle in the profile: D3 `memo_plus_durable_nonce` (settled), D9 `test_ledger` 
 - Token-2022 and metadata display in named wallets; which Memo program version is deployed; whether metadata authorities can be set to `None`; whether token tag 255 `Batch` is deployed.
 - Whether IC Ed25519 signing is deterministic; measured signing and RPC cycle costs; per-provider archival depth behind the SOL RPC canister; raw `jsonRequest` consensus behavior; whether `getSignaturesForAddress` on a nonce account lists only its writers as assumed; `CreateAccountWithSeed` for nonce accounts; `getSlot`+`getBlock` blockhash freshness on mainnet.
 - The freeze-authority finding (S1, S2) and the CRC check are source reading and local arithmetic, not executed network tests.
+
+## 12. Coordinator addendum: two corrections (Miles' review, 2026-10-30)
+
+D3 (memo plus durable nonce) stands. Both items are known semantics of the chosen design, recorded as plan corrections.
+
+1. **Recovered signatures need exact-message proof.** In section 4 step 3, finding our `mint_id` memo in a transaction that
+   consumed the nonce is discovery, not proof. A nonce-authority or fee-payer signer could submit an advance-only transaction
+   carrying our memo and make a missing mint look delivered. Adoption requires finalized successful execution AND message
+   bytes equal to the stored unsigned message (nonce account and value, signer roles, mint, recipient account, amount). A
+   different or unverifiable consuming message is held and halts the lane; no replacement and no refund is invented.
+2. **Ordinary holder burns.** Under classic SPL and under the chosen Token-2022 metadata-only allow-list, a token account's
+   owner or delegate can execute `Burn` or `BurnChecked`, which lowers mint supply
+   (https://solana.com/docs/tokens/basics/burn-tokens, read 2026-10-30). A holder can burn without our return memo: `O_d`
+   stays the same and supply falls. Backing stays safe (escrow simply over-covers), but exact equality fails. So:
+   - our own burn is proven by finalized success plus the exact `BurnChecked` message bytes and the return account's balance
+     effect, never by the change in global supply;
+   - C3 becomes `supply_d + UB_d == O_d`, where `UB_d` is cumulative unattributed holder burn; until a burn observer exists,
+     only `supply_d <= O_d` is checked and the gap is reported as unattributed;
+   - activation prerequisite and policy, blocker `solana-unattributed-burn-policy`: no ICP credit without a recipient-bound
+     claim; no automatic escrow sweep or refund; no global halt solely from a legitimate supply decrease. The `UB_d`
+     accounting seam is **implementation missing**. No permissioned-burn extension or program is added silently, and C4
+     still does not exist.
+
+Future focused implementation tests (not groundwork gates): (a) an advance-only transaction that consumes the mint nonce
+and carries our memo is NOT adopted and holds the lane; (b) a holder `BurnChecked` without a memo lowers supply, leaves
+`O_d` unchanged, credits nothing, halts nothing and is reported as unattributed.

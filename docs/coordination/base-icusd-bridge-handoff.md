@@ -777,6 +777,24 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   | W19 | BB-37 | Sonnet | `claude-sonnet-5-5` | running |
   | W20 | BB-36 | Sonnet | `claude-sonnet-5-5` | running |
 
+## Milestone 34 (2026-10-30): two Solana corrections
+
+- Miles' review of BB-35 (D3 kept). Applied by the coordinator as a paper correction, no program rewrite and no tests:
+  1. Section 4 adopted an unrecorded signature on finding our memo. A memo is discovery only: adoption now needs finalized
+     successful execution AND message bytes equal to the stored unsigned message (nonce account and value, signer roles, mint,
+     recipient, amount), else hold and halt. An advance-only transaction carrying our memo must not make a missing mint look
+     delivered.
+  2. Classic SPL and Token-2022 let any owner or delegate burn, lowering supply without a return. Our burn is proven by its
+     exact `BurnChecked` bytes and the return account's balance effect, never the global supply change. C3 becomes
+     `supply_d + UB_d == O_d` (`UB_d` = unattributed holder burns; zero on EVM, the Sui gate and XRPL); until a burn observer
+     exists only `supply_d <= O_d` is checked. Policy blocker `solana-unattributed-burn-policy`: no ICP credit without a
+     recipient-bound claim, no automatic escrow sweep or refund, no global halt from a legitimate supply decrease; the
+     accounting seam is implementation missing.
+- Updated: `chain-solana.md` (step 3 wording, C3 line, new section 12 with two future adversarial tests) and the design (burn
+  lifecycle, C3, the Solana guard row, V7's Solana blocker list).
+- Queued for the single profile refresh pass by W16 during BB-40: add `solana-unattributed-burn-policy` to the Solana profile
+  and to the validator's required Solana blockers, with a missing-blocker test, alongside the earlier Solana items.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

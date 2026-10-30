@@ -338,7 +338,7 @@
       "state": "done",
       "owner": "worker-sonnet",
       "scope": "Solana groundwork",
-      "evidenceText": "proof=source; Exact mint, return and burn shapes with owner, mint and memo checks; strays refunded, never credited; custodied returns paid after a final burn; durable-nonce retries; SOL RPC canister id resolved; C4 unavailable",
+      "evidenceText": "proof=source; Exact Solana shapes with owner, mint and memo checks; a memo is discovery only, adoption needs exact message bytes; strays refunded; holder burns tracked as unattributed with a named policy blocker; C4 unavailable",
       "evidenceLinks": []
     },
     {
