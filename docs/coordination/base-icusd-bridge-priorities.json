@@ -59,7 +59,7 @@
       "title": "XRPL groundwork",
       "status": "blocked",
       "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up.",
-      "nextAction": "Choose between issued currency and Multi-Purpose Token, the issuer and holder opt-in model, the ICP signing and RPC path and the finality wait, then write implementation-ready XRPL next steps.",
+      "nextAction": "Plan on PR #586's issued-currency import and return seam with 15-significant-digit caps on each operation and on total outstanding (MPT deferred), and specify the missing no-vault return as a follow-up to that PR, not an edit to it.",
       "cardIds": [
         "BB-37"
       ]
@@ -69,7 +69,7 @@
       "title": "Sui groundwork",
       "status": "blocked",
       "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up.",
-      "nextAction": "Choose the coin standard and treasury and upgrade custody, the ICP signing and RPC path and the finality wait, then write implementation-ready Sui next steps.",
+      "nextAction": "Plan the small Sui Move gate wrapping TreasuryCap (mint-id consumption, counters, recipient-bound returns) with UpgradeCap kept as a separate disclosed authority, the GraphQL RPC path and checkpoint finality.",
       "cardIds": [
         "BB-36"
       ]

@@ -37,7 +37,7 @@ Recommendation (R): derive everything from the chain id through one static table
 
 **Other decisions surfaced (D, not steps):** **D1c** keyed providers (Robinhood recommends Alchemy, S 4 row 1; `Custom` has no headers by design, `types.rs:63-65`): adding headers changes Candid and puts secrets in state. R: do not; find keyless independent endpoints or leave Robinhood blocked.
 
-### 1.1 The one test that proves Base is unchanged (future implementation test, not a groundwork gate)
+### 1.1 Base domain and id regression check (future implementation test, not a groundwork gate; it checks domains and ids only, not all Base behavior)
 
 `ids::tests::base_slug_reproduces_live_strings` (new, in `ids.rs`). For chain ids 8453, 84532 and 31337 it asserts, against literals copied from the pre-change code:
 - mint domain equals `rumi.icusd.base.mint.v1`, re-mint domain equals `rumi.icusd.base.remint.v1`, and `BRIDGE_OUT_DOMAIN` equals `rumi.icusd.base.bridge-out.v1` (a constant under every slug);
@@ -121,7 +121,7 @@ Plug points:
 
 ## 5. Implementation sequence (future steps; nothing is run now)
 
-Order follows G section 11: Ethereum, Arbitrum, Robinhood, then Monad and HyperEVM. Owner for each: `<owner>`. D1, D1a, D1b, D5, D6 must be decided before S2.
+Order follows G section 11: Ethereum, Arbitrum, Robinhood, then Monad and HyperEVM. Owners are assigned by BB-40 (the integrated plan). D1, D1a, D1b and D5 are settled for planning (design section 12); D6 stays open and gates only live activation, not these source steps.
 
 | Step | Files | Focused check (later) | Size |
 |---|---|---|---|
@@ -152,3 +152,4 @@ Frontend actor lookup by `network_id` belongs to BB-39, not here.
   names need either the Base names on every EVM instance or additive generic methods), D1c (keyed RPC providers versus
   the no-secrets-in-state rule), and the D5 and D8 coupling (identical bytecode hard-codes `ERC20("Rumi icUSD", "icUSD")`
   at `foundry/src/BridgedIcUSD.sol:157`, so a distinct Monad name needs a new reviewed contract or a label-only answer).
+- Decisions applied (Miles, 2026-10-30): D1 in place on a working branch with no deployed upgrade; D1a legacy Base-named methods kept on new EVM instances; D1b additive native RPC variants where useful; D5 identical bytecode; D8 explicit escrow-backed labels and exact binding on Monad. All execution and deploy checks listed here are future implementation work, not groundwork gates.

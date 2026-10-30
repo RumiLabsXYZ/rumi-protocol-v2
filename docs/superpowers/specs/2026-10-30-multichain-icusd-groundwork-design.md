@@ -80,8 +80,7 @@ separate artifact is D1, because it touches reviewed Base source. The deployed B
 Two options exist: a `destination` argument on one shared interface, or one canister per destination with the frontend choosing the actor.
 **R: per-destination instances, frontend selects the actor.** The instance is found from the profile `network_id` (9.3 `instance_ref`).
 No Base API change follows: the reviewed Base canister keeps its Candid (`bridge_to_base`, `notify_base_bridge_out`, `get_base_addresses`, `get_supply_audit`, `lib.rs:93, 143, 163`) and its state unchanged.
-A shared `destination` argument would change Base Candid and re-key the singleton state (1.1), so it is rejected for groundwork. New instances name their own methods
-(for example `bridge_to_<slug>`); `baseBridge/bridgeActor.ts` (`getBridgeCanisterId`, one canister) gains a lookup keyed by `network_id` in BB-39, not a change to the Base actor.
+A shared `destination` argument would change Base Candid and re-key the singleton state (1.1), so it is rejected for groundwork. Decided (D1a): new EVM instances run the same generalized Wasm and therefore initially keep the legacy Base-named Candid methods and fields (one Wasm exports one interface); the naming is documented and the frontend routes by the per-network actor. Generic aliases are optional future API cleanup, not a groundwork gate. `baseBridge/bridgeActor.ts` (`getBridgeCanisterId`, one canister) gains a lookup keyed by `network_id` in later frontend work, not a change to the Base actor.
 
 ## 2. Accounting (B)
 
@@ -332,7 +331,7 @@ Groundwork adds no Base fix and no test gate for the paused case; the state is o
 ### 9.1 Fact wrapper
 
 `Fact<T> = { value: T, source_url: string, verified: "YYYY-MM-DD", source_kind: primary | secondary | repo | derived }`.
-`Decision<T> = { value: T, rationale: string, status: "recommendation" }`. Identity fields must be `primary`; `secondary` is never accepted for them.
+`Decision<T> = { value: T, rationale: string, status: "recommendation" | "planning_decision" }`; `planning_decision` records a settled planning assumption (section 12) and never activates anything. Identity fields must be `primary`; `secondary` is never accepted for them.
 
 ### 9.2 Profile (one JSON file per chain, nine files)
 
@@ -423,7 +422,7 @@ A data-only alternative (JSON plus a script) would give up typed validation; I f
 ## 11. Sequenced next steps (K)
 
 1. **BB-38 (profiles and validator):** build the crate (9.5), nine disabled profiles, rules V1 to V11. First, because every later card cites a profile. No dependency.
-2. **D-decisions D1, D3, D4, D5 (Rob and Miles):** these gate IMPLEMENTATION of the EVM, Solana and Sui families, not groundwork. BB-34 to BB-36 proceed on the recommendations in section 12 and keep each decision visibly open.
+2. **D-decisions:** settled for planning on 2026-10-30 except D6 (section 12). They shape implementation plans; none authorizes a live action.
 3. **BB-34 (EVM reuse):** per `reuse-inventory.md` 2b: chain allow-list and provider variants (`rpc.rs:217-223`, `state.rs:235-247`), domain slug test reproducing Base strings exactly, per-chain head selection (Monad Verified head, Robinhood tag probe), HyperEVM held at its blocker. Order inside EVM: Ethereum, Arbitrum, then Robinhood, then Monad and HyperEVM.
 4. **BB-35 (Solana):** specify the exact allowed transfer and burn instruction shapes, token owner and authority checks and memo association (6.3), and the custodied return lifecycle with no payout before a final burn (2.3); decide D3; specify the nonce lane, memo parser, return account and burn; resolve the SOL RPC canister id; choose Token-2022 or classic SPL after wallet checks; use the PocketIC Schnorr seams (6.4) as the harness.
 5. **BB-36 (Sui):** specify the Move gate, the GraphQL provider and the `UpgradeCap` policy; check the equivocation hazard against Sui docs.
@@ -432,6 +431,22 @@ A data-only alternative (JSON plus a script) would give up typed validation; I f
 8. **BB-40 (integrated plan):** the aggregator and analytics subtraction (2.4), per-destination audit queries, cycle cost measurement per instance, activation order and the separate real-network signing step.
 
 ## 12. Open decisions for Rob and Miles
+
+**Settled for planning (Miles, under Rob's implementation-decision authority, 2026-10-30).** These are planning
+assumptions; they authorize no deployment, live upgrade, signing, funding, controller change or merge.
+
+- **D1:** in-place source generalization on a working branch, Base behavior and stable state preserved; no deployed Base canister is upgraded; the EVM stack is not copied into a second artifact.
+- **D1a:** new EVM instances keep the legacy Base-named Candid methods and fields at first, documented, routed by the per-network actor; generic aliases are optional later.
+- **D1b:** additive native RPC-service variants where useful; the absence of a published endpoint list does not prove `Custom` impossible or force this API change; the provider and finality requirements still apply.
+- **D2 and D7:** XRPL uses PR #586's issued-currency escrow and import seam; MPT is deferred, not a replacement gate; conservative 15-significant-digit caps on each operation AND on total outstanding, with exact rejection or holding of inexact amounts; the no-vault canonical return stays a named missing implementation.
+- **D3:** Solana's first plan uses memo plus durable nonce with exact instruction, mint, owner and memo verification and the RC/BU/PR lifecycle; same-attempt reconciliation and archival history availability are mandatory; the missing monotone mint counter (C4) stays explicit; a program guard is a stronger later option, not a research gate.
+- **D4:** plan the small Sui Move gate wrapping `TreasuryCap`, mint-id consumption, counters and recipient-bound returns; `UpgradeCap` stays a separate, disclosed authority; custody and live changes remain held.
+- **D5:** reuse identical `BridgedIcUSD` bytecode, keeping `CONTRACT_VERSION` and its Base-labelled bridge-out domain; chain id and contract stay in the id preimages; only new off-chain instance domains are chain-qualified, and Base reproduces its strings exactly.
+- **D8:** Monad uses explicit chain and escrow-backed labels plus exact contract binding; a new on-chain symbol is optional later; the debt token is never bound as a bridge token, nor the reverse.
+- **D9:** synthetic test ledgers for future testnet demos; no real canonical icUSD is locked for a new testnet rollout under this groundwork.
+- **Still open, D6:** actual controllers, production custody and authority activation are separate future decisions; no controller set is invented here. It does not block disabled groundwork.
+
+The table below keeps the original options and tradeoffs for reference.
 
 | Id | Decision | Recommendation and tradeoff |
 | --- | --- | --- |

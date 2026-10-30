@@ -346,7 +346,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Sui groundwork",
-      "evidenceText": "proof=none; Coin standard, treasury and upgrade custody, ICP signing and RPC path, finality wait, prerequisites, trust limits and implementation-ready next steps",
+      "evidenceText": "proof=none; Plan the small Move gate wrapping TreasuryCap (mint-id consumption, counters, recipient-bound returns), UpgradeCap as a separate disclosed authority, signing and RPC path, finality, trust limits",
       "evidenceLinks": []
     },
     {
@@ -354,7 +354,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "XRPL groundwork",
-      "evidenceText": "proof=none; Issued currency or Multi-Purpose Token, issuer and holder opt-in, ICP signing and RPC path, finality wait, reserves, trust limits and implementation-ready next steps",
+      "evidenceText": "proof=none; Plan on PR #586's issued currency (MPT deferred) with 15-digit per-operation and total caps, holder trust lines, the missing no-vault return, ICP signing and RPC path, finality, reserves and trust limits",
       "evidenceLinks": []
     },
     {

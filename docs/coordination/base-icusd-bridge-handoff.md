@@ -709,6 +709,20 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   | W18 | BB-35 | Sonnet | `claude-sonnet-5-5` | running |
   | W16 | BB-38 | Sonnet | `claude-sonnet-5-5` | running (build lane) |
 
+## Milestone 31 (2026-10-30): planning decisions applied
+
+- Miles settled the routine design decisions for planning under Rob's implementation-decision authority; they authorize no
+  deployment, live upgrade, signing, funding, controller change or merge. D1 in-place generalization on a working branch;
+  D1a legacy Base-named methods on new EVM instances; D1b additive native RPC variants where useful; D2 and D7 PR #586's
+  issued currency with 15-digit per-operation and total caps, MPT deferred; D3 Solana memo plus durable nonce with
+  mandatory same-attempt reconciliation and archival history, C4 limit explicit; D4 Sui Move gate with a separate
+  UpgradeCap authority; D5 identical bytecode; D8 Monad escrow-backed labels and exact binding; D9 synthetic test ledgers.
+  D6 (controllers, custody, authority activation) stays open and does not block disabled groundwork.
+- Applied: design section 12 (settled block), 1.5 (D1a naming), 9.1 (`planning_decision` status); the EVM note's
+  "proves Base is unchanged" heading now reads as a domain and id regression check only, and owners are assigned by BB-40;
+  BB-36 and BB-37 acceptance and their priority items follow D4, D2 and D7. W18 (BB-35) and W16 (BB-38) were told the
+  decisions that affect them.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
