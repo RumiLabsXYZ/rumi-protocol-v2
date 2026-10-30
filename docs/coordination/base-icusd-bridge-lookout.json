@@ -367,10 +367,10 @@
     },
     {
       "id": "BB-39",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Frontend chain selection and wallet requirements",
-      "evidenceText": "proof=none; Each chain's wallet connection standard and the page changes needed to choose a destination; read-only, no interface build",
+      "evidenceText": "proof=source; EVM wallets reuse the existing EIP-1193 code; Solana and Sui need Wallet Standard libraries; XRPL comes from PR #586; saved intents need a destination key; a disabled destination must block both directions",
       "evidenceLinks": []
     },
     {

@@ -641,6 +641,18 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 
 - Concurrency: two Sonnet lanes (W14, W15); the Haiku slot is idle because no narrow task is ready.
 
+## Milestone 27 (2026-10-30): frontend wallet requirements accepted
+
+- BB-39 accepted. The coordinator checked two findings in source: `IcpToBaseIntent` has no chain field
+  (`src/vault_frontend/src/lib/services/baseBridge/intents.ts` lines 28-42), and the pause or halt gate
+  `bridgeBlocked` exists only in `IcpToBaseForm.svelte` (line 67). So saved intents need a destination
+  key and a version bump, and a disabled destination must block both directions before any wallet or
+  signer call. EVM chains reuse the existing EIP-1193 wallet code with new chain rows; Solana and Sui
+  need Wallet Standard libraries (named, not installed); XRPL wallet support comes from PR #586, which
+  allows only Payment and TrustSet, so Multi-Purpose Token opt-in would be a gap.
+- W15 (BB-39, `claude-sonnet-5-5`) finished. Running: W14 (BB-33, `claude-sonnet-5-5`). Every other
+  queued card depends on BB-33, so no lane starts until it returns.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

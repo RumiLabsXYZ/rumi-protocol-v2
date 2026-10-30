@@ -87,9 +87,9 @@
     {
       "id": "frontend-chain-wallets",
       "title": "Frontend chain selection and wallet requirements",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "W15 (Sonnet) is writing the read-only wallet and destination-selection requirements for all nine chains.",
+      "nextAction": "",
       "cardIds": [
         "BB-39"
       ]
