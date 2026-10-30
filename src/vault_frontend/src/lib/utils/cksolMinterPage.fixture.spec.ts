@@ -5,8 +5,9 @@ const fx = vi.hoisted(() => {
   function store<T>(v: T) { const listeners = new Set<(v:T)=>void>(); return { subscribe(fn:(v:T)=>void) { listeners.add(fn); fn(v); return () => { listeners.delete(fn); }; }, set(n:T) { v=n; listeners.forEach(fn=>fn(v)); } }; }
   return { wallet: store<any>({ isConnected: false, principal: null }), generation: store(0), auth: store<any>({walletType:'plug'}), collaterals: store<any>({ collaterals: [] }),
     info: vi.fn(), attempt: vi.fn(), address: vi.fn(), quote: vi.fn(), submit: vi.fn(), depositStatus: vi.fn(), withdrawalStatus: vi.fn(), balance: vi.fn(), acknowledge: vi.fn(), oisy: false, saved: null as any,
-    paidQuote: vi.fn(), submitPaid: vi.fn(), loadPaid: vi.fn(), recoverPaid: vi.fn(), claimRefund: vi.fn(), resumePaid: vi.fn(), continuePaid: vi.fn() };
+    paidQuote: vi.fn(), submitPaid: vi.fn(), loadPaid: vi.fn(), recoverPaid: vi.fn(), claimRefund: vi.fn(), resumePaid: vi.fn(), continuePaid: vi.fn(), openSigner: vi.fn() };
 });
+vi.mock('$lib/services/oisySigner', () => ({ openOisySignerChannel: fx.openSigner }));
 vi.mock('$lib/stores/wallet', () => ({ walletStore: fx.wallet }));
 vi.mock('$lib/services/auth', () => ({ walletSessionGeneration: fx.generation, auth: fx.auth }));
 vi.mock('$lib/services/protocol/walletOperations', () => ({ isOisyWallet: () => fx.oisy }));
@@ -29,7 +30,7 @@ async function settle() { for(let i=0;i<20;i++) { await Promise.resolve(); flush
 function button(text:string) { return [...host.querySelectorAll('button')].find(b=>b.textContent?.includes(text))!; }
 function render() { instance=mount(Page,{target:host}); flushSync(); }
 beforeEach(() => {
-  vi.clearAllMocks(); fx.acknowledge.mockReset(); fx.oisy=false; fx.saved=null;
+  vi.clearAllMocks(); fx.openSigner.mockReset(); fx.openSigner.mockResolvedValue(undefined); fx.acknowledge.mockReset(); fx.oisy=false; fx.saved=null;
   fx.wallet.set({isConnected:false,principal:null}); fx.generation.set(0);
   fx.info.mockResolvedValue({ minimum_deposit_amount:20_000_000n, minimum_withdrawal_amount:2_000_000n, withdrawal_fee:1_000_000n, deposit_sol_required_cycles:1_000_000_000_000n });
   fx.attempt.mockResolvedValue([]); fx.balance.mockResolvedValue(1_000_000_000n);
@@ -67,6 +68,41 @@ describe('ckSOL real page', () => {
     button('Get my SOL').click(); await settle(); button('Approve and process').click(); await settle();
     expect(fx.submitPaid).toHaveBeenCalledOnce(); expect(fx.submitPaid.mock.calls[0][0]).toEqual(expect.objectContaining({approval_amount:1_001_100_000_000n}));
     expect(fx.submitPaid.mock.calls[0][1]).toBe(ownerA); expect(host.textContent).toContain('FundingPending');
+  });
+  it('opens the OISY channel during the click before asynchronous locks and payment submission', async () => {
+    fx.oisy=true; fx.auth.set({walletType:'oisy'}); fx.wallet.set({isConnected:true,principal:ownerA});
+    let inClick=false, finishChannel!:()=>void;
+    const enter=()=>{inClick=true;}, leave=()=>{inClick=false;};
+    window.addEventListener('click',enter,true); window.addEventListener('click',leave);
+    fx.openSigner.mockImplementation(() => {
+      if(!inClick) throw new Error('Signer window should not be opened outside of click handler');
+      return new Promise<void>(resolve=>{finishChannel=resolve;});
+    });
+    Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>{await Promise.resolve();return fn({});}}});
+    fx.submitPaid.mockResolvedValue({owner:ownerA.toText(),sequence:'1',phase:'Receipt',createdAt:1,receipt:{phase:'FundingPending'}});
+    try {
+      render(); await settle(); button('Get my SOL').click(); await settle(); button('Approve and process').click();
+      expect(fx.openSigner).toHaveBeenCalledWith(ownerA);
+      await settle(); expect(fx.submitPaid).not.toHaveBeenCalled();
+      finishChannel(); await settle(); expect(host.textContent).toContain('FundingPending');
+    } finally { window.removeEventListener('click',enter,true); window.removeEventListener('click',leave); }
+  });
+  it('does not submit a payment when the OISY channel cannot open', async () => {
+    fx.oisy=true; fx.auth.set({walletType:'oisy'}); fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.openSigner.mockRejectedValueOnce(new Error('Signer window could not be opened'));
+    Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>fn({})}});
+    render(); await settle(); button('Get my SOL').click(); await settle(); button('Approve and process').click(); await settle();
+    expect(host.textContent).toContain('Signer window could not be opened'); expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+  it('opens OISY again from the separate processing click without approving cycles again', async () => {
+    fx.oisy=true; fx.auth.set({walletType:'oisy'}); fx.wallet.set({isConnected:true,principal:ownerA});
+    const approved={owner:ownerA.toText(),sequence:'1',phase:'Approved',createdAt:1,approvalBlock:'7'};
+    fx.loadPaid.mockReturnValue(approved); fx.recoverPaid.mockResolvedValue(approved);
+    fx.continuePaid.mockResolvedValue({...approved,phase:'Receipt',receipt:{phase:'FundingPending'}});
+    Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>{await Promise.resolve();return fn({});}}});
+    render(); await settle(); button('Process my deposit').click();
+    expect(fx.openSigner).toHaveBeenCalledWith(ownerA);
+    await settle(); expect(host.textContent).toContain('FundingPending'); expect(fx.submitPaid).not.toHaveBeenCalled();
   });
   it('adopts a successful payment receipt deposit id and checks its minter status', async () => {
     fx.wallet.set({isConnected:true,principal:ownerA});
