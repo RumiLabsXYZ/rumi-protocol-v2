@@ -905,6 +905,11 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Final Lookout state: published changed-only through the same scoped manifest and identity; the immediate dry run reported
   the board (68 cards: 20 Queue, 1 Blocked, 47 Done), both summaries, glossary, priorities and repository unchanged. Exact
   revisions are in the private publisher record.
+- Final readbacks (Miles, 2026-10-30): Lookout revision 37 shows "Rumi · Multichain icUSD" with 68 cards, Queue 20,
+  In progress 0, the ranked future subprojects paused and BB-27 blocked. GitHub showed PR #591 open, draft and unmerged with the
+  rewritten description at `9806e539`; the branch then gained only the docs close-out commit `9eb95661` and this note. Miles
+  added the branch-URL link to this lane file in the primary checkout's `DEMO_DEFERRED_WORK.md` index, preserving its contents.
+  Groundwork is closed; BB-42 to BB-61 stay queued and no implementation has started.
 
 ## Held live actions
 
