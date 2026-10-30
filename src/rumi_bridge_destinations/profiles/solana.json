@@ -26,7 +26,8 @@
         "min_e8s": "1",
         "max_e8s": "18446744073709551615",
         "max_outstanding_e8s": null,
-        "encoding": "u64"
+        "encoding": "u64",
+        "basis": null
       },
       "source_url": "https://docs.rs/spl-token-interface/latest/spl_token_interface/state/struct.Mint.html",
       "verified": "2026-10-30",
@@ -50,10 +51,17 @@
       "{role}",
       "{network_identity}"
     ],
+    "roles": [
+      "mint-authority",
+      "fee-payer",
+      "return-owner",
+      "mint-account"
+    ],
     "domains": {
       "mint_id": "rumi.icusd.sol.mint.v1",
       "remint_id": "rumi.icusd.sol.remint.v1",
       "return_id": "rumi.icusd.sol.return.v1",
+      "burn_id": "rumi.icusd.sol.burn.v1",
       "escrow_label": "rumi-icusd-sol-bridge:escrow:v1"
     },
     "signed_payload": {
@@ -128,15 +136,27 @@
         },
         {
           "id": "sol-rpc-canister-id-conflict",
-          "text": "DFINITY docs and the sol-rpc-canister README list different canister ids. Confirm which is current before wiring anything.",
+          "text": "Activation re-verification of DFINITY's published production SOL RPC canister id, tghme-zyaaa-aaaar-qarca-cai. The dfinity README states it on the fiduciary subnet, the DFINITY forum names it as production deployed with proposal 136985, and the dashboard API shows that proposal executed on 2025-06-16 with the canister controlled by the NNS root. DFINITY's own docs pages print a different id that fails the principal checksum (a docs typo to report). At activation, re-check the controller and the latest module on the dashboard.",
           "kind": "external",
-          "source": "docs/coordination/multichain/sources-native.md open question 1"
+          "source": "docs/coordination/multichain/chain-solana.md sections 5 and 9; docs/coordination/multichain/sources-native.md open question 1"
         },
         {
           "id": "solana-return-custody",
           "text": "Returns are held in a canister-owned return account until a finalized burn. No ICP payout happens before the burn is final. The observer must verify the exact allowed transfer instruction, the mint, the owner or authority and the memo association, and never credit a net balance delta alone.",
           "kind": "code",
           "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-unattributed-burn-policy",
+          "text": "Holder burns can lower supply without a return: a token account owner or delegate can run Burn or BurnChecked, which lowers mint supply and leaves the outstanding amount unchanged. No ICP credit without a recipient-bound claim, no automatic escrow sweep or refund, and no global halt solely from a legitimate supply decrease. Until a burn observer exists only supply at most outstanding is checked and the gap is reported as unattributed. The unattributed-burn accounting seam is implementation missing.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-solana.md section 12 (item 2); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-history-availability-unmeasured",
+          "text": "Before activation, show through the SOL RPC canister that getTransaction, getSignaturesForAddress and getSignatureStatuses with searchTransactionHistory return Consistent results for a signature older than the history horizon. A validator's local ledger serves history on the order of days and no retention figure is stated, so late memo and signature lookups are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 4 (P5) and 9"
         },
         {
           "id": "solana-return-observer-missing",
@@ -243,15 +263,27 @@
         },
         {
           "id": "sol-rpc-canister-id-conflict",
-          "text": "DFINITY docs and the sol-rpc-canister README list different canister ids. Confirm which is current before wiring anything.",
+          "text": "Activation re-verification of DFINITY's published production SOL RPC canister id, tghme-zyaaa-aaaar-qarca-cai. The dfinity README states it on the fiduciary subnet, the DFINITY forum names it as production deployed with proposal 136985, and the dashboard API shows that proposal executed on 2025-06-16 with the canister controlled by the NNS root. DFINITY's own docs pages print a different id that fails the principal checksum (a docs typo to report). At activation, re-check the controller and the latest module on the dashboard.",
           "kind": "external",
-          "source": "docs/coordination/multichain/sources-native.md open question 1"
+          "source": "docs/coordination/multichain/chain-solana.md sections 5 and 9; docs/coordination/multichain/sources-native.md open question 1"
         },
         {
           "id": "solana-return-custody",
           "text": "Returns are held in a canister-owned return account until a finalized burn. No ICP payout happens before the burn is final. The observer must verify the exact allowed transfer instruction, the mint, the owner or authority and the memo association, and never credit a net balance delta alone.",
           "kind": "code",
           "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-unattributed-burn-policy",
+          "text": "Holder burns can lower supply without a return: a token account owner or delegate can run Burn or BurnChecked, which lowers mint supply and leaves the outstanding amount unchanged. No ICP credit without a recipient-bound claim, no automatic escrow sweep or refund, and no global halt solely from a legitimate supply decrease. Until a burn observer exists only supply at most outstanding is checked and the gap is reported as unattributed. The unattributed-burn accounting seam is implementation missing.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-solana.md section 12 (item 2); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-history-availability-unmeasured",
+          "text": "Before activation, show through the SOL RPC canister that getTransaction, getSignaturesForAddress and getSignatureStatuses with searchTransactionHistory return Consistent results for a signature older than the history horizon. A validator's local ledger serves history on the order of days and no retention figure is stated, so late memo and signature lookups are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 4 (P5) and 9"
         },
         {
           "id": "solana-return-observer-missing",
@@ -364,15 +396,27 @@
         },
         {
           "id": "sol-rpc-canister-id-conflict",
-          "text": "DFINITY docs and the sol-rpc-canister README list different canister ids. Confirm which is current before wiring anything.",
+          "text": "Activation re-verification of DFINITY's published production SOL RPC canister id, tghme-zyaaa-aaaar-qarca-cai. The dfinity README states it on the fiduciary subnet, the DFINITY forum names it as production deployed with proposal 136985, and the dashboard API shows that proposal executed on 2025-06-16 with the canister controlled by the NNS root. DFINITY's own docs pages print a different id that fails the principal checksum (a docs typo to report). At activation, re-check the controller and the latest module on the dashboard.",
           "kind": "external",
-          "source": "docs/coordination/multichain/sources-native.md open question 1"
+          "source": "docs/coordination/multichain/chain-solana.md sections 5 and 9; docs/coordination/multichain/sources-native.md open question 1"
         },
         {
           "id": "solana-return-custody",
           "text": "Returns are held in a canister-owned return account until a finalized burn. No ICP payout happens before the burn is final. The observer must verify the exact allowed transfer instruction, the mint, the owner or authority and the memo association, and never credit a net balance delta alone.",
           "kind": "code",
           "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-unattributed-burn-policy",
+          "text": "Holder burns can lower supply without a return: a token account owner or delegate can run Burn or BurnChecked, which lowers mint supply and leaves the outstanding amount unchanged. No ICP credit without a recipient-bound claim, no automatic escrow sweep or refund, and no global halt solely from a legitimate supply decrease. Until a burn observer exists only supply at most outstanding is checked and the gap is reported as unattributed. The unattributed-burn accounting seam is implementation missing.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-solana.md section 12 (item 2); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-history-availability-unmeasured",
+          "text": "Before activation, show through the SOL RPC canister that getTransaction, getSignaturesForAddress and getSignatureStatuses with searchTransactionHistory return Consistent results for a signature older than the history horizon. A validator's local ledger serves history on the order of days and no retention figure is stated, so late memo and signature lookups are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 4 (P5) and 9"
         },
         {
           "id": "solana-return-observer-missing",

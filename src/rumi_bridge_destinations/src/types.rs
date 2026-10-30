@@ -190,6 +190,9 @@ pub struct AmountBounds {
     #[serde(with = "opt_u64_string")]
     pub max_outstanding_e8s: Option<u64>,
     pub encoding: Encoding,
+    /// Why the bound is what it is, when the basis needs saying (for example
+    /// Sui's conservative bound).
+    pub basis: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +227,8 @@ pub struct Domains {
     pub mint_id: Option<String>,
     pub remint_id: Option<String>,
     pub return_id: Option<String>,
+    /// Custodied-return families only (Solana); atomic burns have no burn id.
+    pub burn_id: Option<String>,
     pub escrow_label: String,
 }
 
@@ -232,8 +237,13 @@ pub struct Domains {
 pub struct Signing {
     pub scheme: Scheme,
     pub key_name: Fact<KeyNames>,
-    /// Path template; must contain the `{network_identity}` element.
+    /// Path template. It carries exactly one network element: `{network_identity}`
+    /// (chain identity), or `{network_name}` for XRPL, whose PR #586 path uses
+    /// the network names "mainnet" and "testnet". It carries one `{lane}` or
+    /// `{role}` element when `roles` is not empty.
     pub derivation_domain: Vec<String>,
+    /// Separate keys (least privilege) that fill the `{lane}` or `{role}` element.
+    pub roles: Vec<String>,
     pub domains: Domains,
     pub signed_payload: Fact<String>,
 }

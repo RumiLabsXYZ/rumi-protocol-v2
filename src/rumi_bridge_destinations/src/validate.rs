@@ -37,6 +37,10 @@ const LIVE_BASE_STRINGS: [&str; 6] = [
 
 /// The template element every derivation domain must contain (V6).
 const IDENTITY_ELEMENT: &str = "{network_identity}";
+/// ... or, for XRPL only, the network name that PR #586 puts in its path.
+const NAME_ELEMENT: &str = "{network_name}";
+/// Elements that a signing role fills.
+const ROLE_ELEMENTS: [&str; 2] = ["{lane}", "{role}"];
 
 /// Blockers that explain a provider shortage (V9).
 const PROVIDER_SHORTAGE_BLOCKERS: [&str; 2] =
@@ -182,14 +186,13 @@ fn v1_identity(profiles: &[Profile], out: &mut Out) {
             if !network_ids.insert(n.network_id.clone()) {
                 add(out, "V1", format!("duplicate network id {}", n.network_id));
             }
-            if n.role == Role::Devnet
-                && !matches!(p.family, Family::Solana | Family::Sui | Family::Xrpl)
-            {
+            // PR #586's XrplNetwork has only Mainnet and Testnet, so no XRPL devnet record can be served.
+            if n.role == Role::Devnet && !matches!(p.family, Family::Solana | Family::Sui) {
                 add(
                     out,
                     "V1",
                     format!(
-                        "{}: devnet is only allowed for solana, sui and xrpl",
+                        "{}: devnet is only allowed for solana and sui",
                         n.network_id
                     ),
                 );
@@ -714,6 +717,23 @@ fn v5_family(profiles: &[Profile], out: &mut Out) {
                     ),
                 );
             }
+            if p.family == Family::Xrpl {
+                let want_id = match n.role {
+                    Role::Mainnet => "0",
+                    Role::Testnet => "1",
+                    Role::Devnet => "2",
+                };
+                if value != want_id {
+                    add(
+                        out,
+                        "V5",
+                        format!(
+                            "{id}: xrpl network id {value} does not match role {}",
+                            label(&n.role)
+                        ),
+                    );
+                }
+            }
             // Monad must use the verified head; no other chain may.
             let want_rule = if p.id == "monad" {
                 FinalityRule::MonadVerified
@@ -777,20 +797,73 @@ fn v6_signing(profiles: &[Profile], out: &mut Out) {
                 ),
             );
         }
-        let identity_elements = s
-            .derivation_domain
-            .iter()
-            .filter(|e| *e == IDENTITY_ELEMENT)
-            .count();
-        if identity_elements != 1 {
+        let (want, forbidden) = if p.family == Family::Xrpl {
+            (NAME_ELEMENT, IDENTITY_ELEMENT)
+        } else {
+            (IDENTITY_ELEMENT, NAME_ELEMENT)
+        };
+        if s.derivation_domain.iter().filter(|e| *e == want).count() != 1 {
             add(
                 out,
                 "V6",
                 format!(
-                    "{}: derivation_domain must contain {IDENTITY_ELEMENT} exactly once",
+                    "{}: derivation_domain must contain {want} exactly once",
                     p.id
                 ),
             );
+        }
+        if s.derivation_domain.iter().any(|e| e == forbidden) {
+            add(
+                out,
+                "V6",
+                format!(
+                    "{}: derivation_domain must not contain {forbidden} for family {}",
+                    p.id,
+                    label(&p.family)
+                ),
+            );
+        }
+        let role_elements = s
+            .derivation_domain
+            .iter()
+            .filter(|e| ROLE_ELEMENTS.contains(&e.as_str()))
+            .count();
+        if role_elements > 1 {
+            add(
+                out,
+                "V6",
+                format!("{}: derivation_domain has more than one role element", p.id),
+            );
+        }
+        if role_elements == 1 && s.roles.is_empty() {
+            add(
+                out,
+                "V6",
+                format!(
+                    "{}: derivation_domain has a role element but no roles are listed",
+                    p.id
+                ),
+            );
+        }
+        if role_elements == 0 && !s.roles.is_empty() {
+            add(
+                out,
+                "V6",
+                format!(
+                    "{}: roles are listed but derivation_domain has no role element",
+                    p.id
+                ),
+            );
+        }
+        let mut seen_roles = BTreeSet::new();
+        for r in &s.roles {
+            if !valid_slug(r) || !seen_roles.insert(r.clone()) {
+                add(
+                    out,
+                    "V6",
+                    format!("{}: role {r:?} is not a unique lower-case slug", p.id),
+                );
+            }
         }
         let mut domain_strings: Vec<&String> = s.derivation_domain.iter().collect();
         domain_strings.extend(
@@ -798,6 +871,7 @@ fn v6_signing(profiles: &[Profile], out: &mut Out) {
                 &s.domains.mint_id,
                 &s.domains.remint_id,
                 &s.domains.return_id,
+                &s.domains.burn_id,
             ]
             .into_iter()
             .flatten(),
@@ -820,6 +894,7 @@ fn v6_signing(profiles: &[Profile], out: &mut Out) {
             .iter()
             .chain(&s.domains.remint_id)
             .chain(&s.domains.return_id)
+            .chain(&s.domains.burn_id)
             .chain([&s.domains.escrow_label])
         {
             if let Some(owner) = domain_owners.insert(d.clone(), p.id.clone()) {
@@ -833,32 +908,41 @@ fn v6_signing(profiles: &[Profile], out: &mut Out) {
             }
         }
         for n in &p.networks {
-            let identity = format!(
-                "{}:{}",
-                label(&n.identity.value.kind),
-                n.identity.value.value
-            );
-            let path = s
-                .derivation_domain
-                .iter()
-                .map(|e| {
-                    if e == IDENTITY_ELEMENT {
-                        identity.as_str()
-                    } else {
-                        e.as_str()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("/");
-            if let Some(prev) = expanded_paths.insert(path, n.network_id.clone()) {
-                add(
-                    out,
-                    "V6",
-                    format!(
-                        "{}: derivation path is not unique (same as {prev})",
-                        n.network_id
-                    ),
-                );
+            let network_element = if p.family == Family::Xrpl {
+                label(&n.role)
+            } else {
+                format!(
+                    "{}:{}",
+                    label(&n.identity.value.kind),
+                    n.identity.value.value
+                )
+            };
+            let roles: Vec<&str> = if s.roles.is_empty() {
+                vec![""]
+            } else {
+                s.roles.iter().map(String::as_str).collect()
+            };
+            for role in roles {
+                let path = s
+                    .derivation_domain
+                    .iter()
+                    .map(|e| match e.as_str() {
+                        IDENTITY_ELEMENT | NAME_ELEMENT => network_element.as_str(),
+                        "{lane}" | "{role}" => role,
+                        other => other,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if let Some(prev) = expanded_paths.insert(path, n.network_id.clone()) {
+                    add(
+                        out,
+                        "V6",
+                        format!(
+                            "{}: derivation path is not unique (same as {prev})",
+                            n.network_id
+                        ),
+                    );
+                }
             }
         }
     }
@@ -880,6 +964,7 @@ fn required_blockers(profile_id: &str) -> &'static [&'static str] {
             "solana-guard-missing",
             "sol-rpc-canister-id-conflict",
             "solana-return-custody",
+            "solana-unattributed-burn-policy",
         ],
         "sui" => &["sui-gate-module-missing", "sui-rpc-provider-contract"],
         "xrpl" => &["xrpl-pr586-unmerged", "xrpl-return-intent-missing"],

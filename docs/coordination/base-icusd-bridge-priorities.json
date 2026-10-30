@@ -12,6 +12,110 @@
       ]
     },
     {
+      "id": "integrated-plan",
+      "title": "Integrated implementation plan and local smoke",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Coordinator: queued future cards and plan written; final profile refresh done; rewrite the draft PR description, publish and hand to Miles. No merge.",
+      "cardIds": [
+        "BB-40"
+      ]
+    },
+    {
+      "id": "evm-implementation",
+      "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
+      "status": "paused",
+      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. HyperEVM and Monad also keep their read-evidence blockers.",
+      "nextAction": "Start with BB-42 (slug templates and the Base domain regression check), then BB-43.",
+      "cardIds": [
+        "BB-42",
+        "BB-43",
+        "BB-44",
+        "BB-45",
+        "BB-46"
+      ]
+    },
+    {
+      "id": "shared-reporting-frontend",
+      "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
+      "status": "paused",
+      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. ",
+      "nextAction": "Start with BB-58 (aggregate reporting and analytics escrow subtraction) and BB-59 (destination selection).",
+      "cardIds": [
+        "BB-58",
+        "BB-59",
+        "BB-60"
+      ]
+    },
+    {
+      "id": "solana-implementation",
+      "title": "Solana implementation (memo plus durable nonce)",
+      "status": "paused",
+      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. ",
+      "nextAction": "Start with BB-47 (instance skeleton and message builders); doing BB-58 first is a scheduling preference, not a prerequisite.",
+      "cardIds": [
+        "BB-47",
+        "BB-48",
+        "BB-49",
+        "BB-50"
+      ]
+    },
+    {
+      "id": "xrpl-follow-ups",
+      "title": "XRPL follow-ups to PR #586",
+      "status": "paused",
+      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. Local work may use a stacked or rebased PR #586 branch; no merge is required for it.",
+      "nextAction": "Start with BB-55 (15-digit wiring and cap clamps) on PR #586's head or a branch stacked on it.",
+      "cardIds": [
+        "BB-55",
+        "BB-56",
+        "BB-57"
+      ]
+    },
+    {
+      "id": "sui-implementation",
+      "title": "Sui implementation (Move gate)",
+      "status": "paused",
+      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. ",
+      "nextAction": "Start with BB-51 (Move gate package and unit tests); doing BB-58 first is a scheduling preference, not a prerequisite. External Move review is deferred to pre-real-value work.",
+      "cardIds": [
+        "BB-51",
+        "BB-52",
+        "BB-53",
+        "BB-54"
+      ]
+    },
+    {
+      "id": "authority-decision-d6",
+      "title": "Decide controllers, custody and authority activation (D6)",
+      "status": "paused",
+      "blockedReason": "Rob's decision, not yet made; it gates live activation of any network, not source work.",
+      "nextAction": "Rob and Miles choose controllers and custody per network when activation is planned.",
+      "cardIds": [
+        "BB-61"
+      ]
+    },
+    {
+      "id": "acceptance-handoff",
+      "title": "Close browser evidence and PR handoff",
+      "status": "blocked",
+      "blockedReason": "Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work.",
+      "nextAction": "Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge.",
+      "cardIds": [
+        "BB-14",
+        "BB-22",
+        "BB-27"
+      ]
+    },
+    {
+      "id": "production-launch",
+      "title": "Production launch",
+      "status": "paused",
+      "blockedReason": "Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test.",
+      "nextAction": "",
+      "cardIds": []
+    },
+    {
       "id": "multichain-recon",
       "title": "Research what each of the nine chains needs",
       "status": "done",
@@ -95,28 +199,6 @@
       ]
     },
     {
-      "id": "integrated-plan",
-      "title": "Integrated implementation plan and local smoke",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Coordinator writes the plan and queued future cards for all nine chains; W16 applies the final profile refresh and reruns its focused checks; then the draft PR description is rewritten. No merge.",
-      "cardIds": [
-        "BB-40"
-      ]
-    },
-    {
-      "id": "acceptance-handoff",
-      "title": "Close browser evidence and PR handoff",
-      "status": "blocked",
-      "blockedReason": "Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work.",
-      "nextAction": "Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge.",
-      "cardIds": [
-        "BB-14",
-        "BB-22",
-        "BB-27"
-      ]
-    },
-    {
       "id": "priorities-and-handoff",
       "title": "Keep priorities and test handoff current",
       "status": "done",
@@ -126,14 +208,6 @@
         "BB-28",
         "BB-29"
       ]
-    },
-    {
-      "id": "production-launch",
-      "title": "Production launch",
-      "status": "paused",
-      "blockedReason": "Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test.",
-      "nextAction": "",
-      "cardIds": []
     },
     {
       "id": "implementation-local-verification",

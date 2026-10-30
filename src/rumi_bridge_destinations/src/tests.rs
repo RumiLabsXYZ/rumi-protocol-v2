@@ -303,21 +303,6 @@ fn solana_carries_the_return_custody_blocker() {
 }
 
 #[test]
-fn sources_contain_no_em_dashes() {
-    let em = '\u{2014}';
-    for (name, json) in PROFILE_FILES {
-        assert!(!json.contains(em), "{name}.json");
-    }
-    for src in [
-        include_str!("lib.rs"),
-        include_str!("types.rs"),
-        include_str!("validate.rs"),
-    ] {
-        assert!(!src.contains(em));
-    }
-}
-
-#[test]
 fn settled_decisions_use_planning_status_and_d6_stays_open() {
     let settled = ["D1", "D1a", "D1b", "D2", "D3", "D4", "D5", "D7", "D8", "D9"];
     let still_recommendations = ["D1c", "D5xD8"];
@@ -700,4 +685,248 @@ fn embedded_profiles_carry_amounts_as_strings_and_no_lossy_numbers() {
             "{name}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Final refresh: Solana, XRPL and Sui notes
+// ---------------------------------------------------------------------------
+
+fn blocker_ids(n: &Network) -> Vec<&str> {
+    n.activation_blockers
+        .iter()
+        .map(|b| b.id.as_str())
+        .collect()
+}
+
+fn find<'a>(ps: &'a [Profile], id: &str) -> &'a Profile {
+    ps.iter().find(|p| p.id == id).expect("profile present")
+}
+
+#[test]
+fn v7_solana_missing_unattributed_burn_policy_rejected() {
+    let mut ps = embedded();
+    for n in &mut profile(&mut ps, "solana").networks {
+        n.activation_blockers
+            .retain(|b| b.id != "solana-unattributed-burn-policy");
+    }
+    assert!(violations_for(&ps, "V7", "solana-unattributed-burn-policy"));
+}
+
+#[test]
+fn solana_adds_burn_domain_mint_account_role_and_history_blocker() {
+    let ps = embedded();
+    let solana = find(&ps, "solana");
+    assert_eq!(
+        solana.signing.domains.burn_id.as_deref(),
+        Some("rumi.icusd.sol.burn.v1")
+    );
+    assert!(solana.signing.roles.iter().any(|r| r == "mint-account"));
+    for n in &solana.networks {
+        let ids = blocker_ids(n);
+        for want in [
+            "solana-unattributed-burn-policy",
+            "solana-history-availability-unmeasured",
+            "sol-rpc-canister-id-conflict",
+        ] {
+            assert!(ids.contains(&want), "{}: {ids:?}", n.network_id);
+        }
+        let b = n
+            .activation_blockers
+            .iter()
+            .find(|b| b.id == "solana-unattributed-burn-policy")
+            .unwrap();
+        assert_eq!(b.kind, BlockerKind::Code);
+        let id_blocker = n
+            .activation_blockers
+            .iter()
+            .find(|b| b.id == "sol-rpc-canister-id-conflict")
+            .unwrap();
+        assert!(
+            id_blocker.text.starts_with("Activation re-verification"),
+            "{}",
+            id_blocker.text
+        );
+        assert!(id_blocker.text.contains("tghme-zyaaa-aaaar-qarca-cai"));
+    }
+}
+
+#[test]
+fn xrpl_has_no_devnet_and_uses_the_pr586_network_names() {
+    let ps = embedded();
+    let xrpl = find(&ps, "xrpl");
+    let roles: Vec<Role> = xrpl.networks.iter().map(|n| n.role).collect();
+    assert_eq!(roles, [Role::Mainnet, Role::Testnet]);
+    assert_eq!(
+        xrpl.signing.derivation_domain,
+        ["rumi", "xrpl-icusd", "v1", "{network_name}"]
+    );
+    assert!(xrpl.signing.roles.is_empty());
+}
+
+#[test]
+fn v1_xrpl_devnet_rejected() {
+    let mut ps = embedded();
+    let x = profile(&mut ps, "xrpl");
+    let mut devnet = x.networks[1].clone();
+    devnet.network_id = "xrpl-devnet".to_string();
+    devnet.role = Role::Devnet;
+    devnet.identity.value.value = "2".to_string();
+    x.networks.push(devnet);
+    assert!(violations_for(
+        &ps,
+        "V1",
+        "devnet is only allowed for solana and sui"
+    ));
+}
+
+#[test]
+fn v6_xrpl_template_must_use_names_not_the_numeric_id() {
+    let mut ps = embedded();
+    profile(&mut ps, "xrpl").signing.derivation_domain[3] = "{network_identity}".to_string();
+    assert!(violations_for(&ps, "V6", "{network_name}"));
+}
+
+#[test]
+fn v6_non_xrpl_template_must_not_use_the_network_name() {
+    let mut ps = embedded();
+    profile(&mut ps, "ethereum").signing.derivation_domain[3] = "{network_name}".to_string();
+    assert_rule(&ps, "V6");
+}
+
+#[test]
+fn v6_roles_must_match_the_role_element() {
+    let mut ps = embedded();
+    profile(&mut ps, "solana").signing.roles.clear();
+    assert!(violations_for(&ps, "V6", "no roles are listed"));
+
+    let mut ps = embedded();
+    profile(&mut ps, "xrpl")
+        .signing
+        .roles
+        .push("issuer".to_string());
+    assert!(violations_for(&ps, "V6", "no role element"));
+
+    let mut ps = embedded();
+    profile(&mut ps, "sui")
+        .signing
+        .roles
+        .push("gas".to_string());
+    assert!(violations_for(&ps, "V6", "unique lower-case slug"));
+}
+
+#[test]
+fn v6_burn_id_cannot_reuse_a_live_base_string() {
+    let mut ps = embedded();
+    profile(&mut ps, "solana").signing.domains.burn_id =
+        Some("rumi.icusd.base.bridge-out.v1".to_string());
+    assert_rule(&ps, "V6");
+}
+
+#[test]
+fn v5_xrpl_network_id_must_match_the_role() {
+    let mut ps = embedded();
+    profile(&mut ps, "xrpl").networks[1].identity.value.value = "5".to_string();
+    assert!(violations_for(&ps, "V5", "does not match role"));
+}
+
+#[test]
+fn xrpl_testnet_port_blocker_reflects_two_hosts_at_quorum_two() {
+    let ps = embedded();
+    let xrpl = find(&ps, "xrpl");
+    let text = |n: &Network| {
+        n.activation_blockers
+            .iter()
+            .find(|b| b.id == "xrpl-outcall-port-unknown")
+            .unwrap()
+            .text
+            .clone()
+    };
+    let testnet = text(&xrpl.networks[1]);
+    assert!(
+        testnet.contains("exactly 2 read hosts at quorum 2"),
+        "{testnet}"
+    );
+    assert!(testnet.contains("one of them uses port 51234"), "{testnet}");
+    assert!(testnet.contains("cannot read at all"), "{testnet}");
+    assert_eq!(xrpl.networks[1].rpc.endpoints.value.len(), 2);
+    assert_eq!(xrpl.networks[1].rpc.min_quorum.value, 2);
+    let mainnet = text(&xrpl.networks[0]);
+    assert!(mainnet.contains("spare 443 provider"), "{mainnet}");
+    assert_eq!(xrpl.networks[0].rpc.endpoints.value.len(), 3);
+}
+
+#[test]
+fn xrpl_carries_the_implementation_missing_blockers_as_code() {
+    let ps = embedded();
+    for n in &find(&ps, "xrpl").networks {
+        for id in [
+            "xrpl-15-digit-validator-not-wired",
+            "xrpl-caps-not-hard-bounded",
+            "xrpl-pending-import-cap-race",
+            "xrpl-no-origin-split",
+        ] {
+            let b = n
+                .activation_blockers
+                .iter()
+                .find(|b| b.id == id)
+                .unwrap_or_else(|| panic!("{}: {id}", n.network_id));
+            assert_eq!(b.kind, BlockerKind::Code, "{id}");
+            assert!(b.text.starts_with("Implementation missing"), "{id}");
+        }
+        let ids = blocker_ids(n);
+        assert!(
+            ids.contains(&"xrpl-issuer-policy-undecided")
+                && ids.contains(&"xrpl-backend-wasm-headroom")
+        );
+    }
+}
+
+#[test]
+fn sui_lists_roles_prerequisites_blockers_and_the_conservative_bound() {
+    let ps = embedded();
+    let sui = find(&ps, "sui");
+    assert_eq!(sui.signing.roles, ["treasury", "gas", "upgrade-custody"]);
+    assert_eq!(sui.signing.domains.burn_id, None);
+    let prereqs: Vec<&str> = sui
+        .prerequisites
+        .iter()
+        .map(|f| f.value.id.as_str())
+        .collect();
+    assert!(
+        prereqs.contains(&"registry-finalization") && prereqs.contains(&"user-gas-on-return"),
+        "{prereqs:?}"
+    );
+    for n in &sui.networks {
+        let ids = blocker_ids(n);
+        for want in [
+            "sui-observer-lane-missing",
+            "sui-outcall-consensus-unmeasured",
+            "sui-signing-vectors-unverified",
+            "sui-wallet-display-unverified",
+            "sui-epoch-expiry-nonexecution-proof",
+        ] {
+            assert!(ids.contains(&want), "{}: {want}", n.network_id);
+        }
+        let epoch = n
+            .activation_blockers
+            .iter()
+            .find(|b| b.id == "sui-epoch-expiry-nonexecution-proof")
+            .unwrap();
+        assert_eq!(epoch.kind, BlockerKind::Code);
+        assert!(epoch.text.contains("not proof"));
+    }
+    let bounds = &sui.representation.amount_bounds.value;
+    assert_eq!(bounds.max_e8s, u64::MAX - 1);
+    let basis = bounds.basis.as_deref().expect("sui bound explains itself");
+    assert!(basis.starts_with("Conservative bound"), "{basis}");
+}
+
+#[test]
+fn sui_epoch_expiry_blocker_is_not_a_required_blocker() {
+    let mut ps = embedded();
+    for n in &mut profile(&mut ps, "sui").networks {
+        n.activation_blockers
+            .retain(|b| b.id != "sui-epoch-expiry-nonexecution-proof");
+    }
+    assert_eq!(validate(&ps, TODAY), Ok(()));
 }

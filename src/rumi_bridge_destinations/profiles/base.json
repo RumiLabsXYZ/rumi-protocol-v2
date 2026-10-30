@@ -31,7 +31,8 @@
         "min_e8s": "1",
         "max_e8s": "18446744073709551615",
         "max_outstanding_e8s": null,
-        "encoding": "u64"
+        "encoding": "u64",
+        "basis": null
       },
       "source_url": "foundry/src/BridgedIcUSD.sol",
       "verified": "2026-10-30",
@@ -55,10 +56,15 @@
       "{lane}",
       "{network_identity}"
     ],
+    "roles": [
+      "minter",
+      "admin"
+    ],
     "domains": {
       "mint_id": "rumi.icusd.base.mint.v1",
       "remint_id": "rumi.icusd.base.remint.v1",
       "return_id": "rumi.icusd.base.bridge-out.v1",
+      "burn_id": null,
       "escrow_label": "rumi-icusd-base-bridge:escrow:v1"
     },
     "signed_payload": {
