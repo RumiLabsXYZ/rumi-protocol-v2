@@ -65,6 +65,8 @@ export interface CksolPaymentIntent {
 
 let anonymousBackend: any;
 const STALE_PAYMENT_SEQUENCE_ERROR = 'Refresh the ckSOL payment sequence';
+// PostMessageTransport rejects this before opening a channel or sending a call.
+const UNSENT_OISY_CLICK_ERROR = 'Error: Signer window should not be opened outside of click handler, see: https://github.com/slide-computer/signer-js/blob/main/packages/signer-web/README.md#channels-must-be-established-in-a-click-handler';
 const PaymentPhaseIDL = IDL.Variant({
 	FundingPending: IDL.Null,
 	FundingUnknown: IDL.Null,
@@ -257,8 +259,29 @@ export async function recoverCksolPayment(owner: Principal, storage: IntentStore
 		invalidRaw = storage.getItem(cksolPaymentKey(owner.toText()));
 		if (!invalidRaw) throw error;
 	}
+	const originalRaw = storage.getItem(cksolPaymentKey(owner.toText()));
+	const generation = get(walletSessionGeneration);
 	const receipt = await readCksolPayment(owner);
-	if (!receipt) return saved;
+	if (!receipt) {
+		// Recover only this known pre-send UI failure. Lost replies and all other
+		// unknown outcomes remain held. Keep the original journal for support.
+		if (saved?.phase === 'ApprovalUnknown' && saved.approvalBlock === undefined &&
+			saved.message === UNSENT_OISY_CLICK_ERROR && get(auth).walletType === 'oisy') {
+			try {
+				const q = await quoteCksolPayment(owner, 'oisy');
+				if (q.allowance === 0n && q.next_sequence === BigInt(saved.sequence) &&
+					isLive(owner, generation, 'oisy', () => true) &&
+					storage.getItem(cksolPaymentKey(saved.owner)) === originalRaw) {
+					storage.setItem(`${cksolPaymentKey(saved.owner)}:unsent-approval:${saved.sequence}:${saved.createdAt}`, originalRaw!);
+					const recovered: CksolPaymentIntent = { ...saved, phase: 'NotStarted',
+						message: 'OISY blocked the approval before sending it. No cycles allowance or backend payment was found. You can review the fee and retry.' };
+					saveCksolPayment(storage, recovered);
+					return recovered;
+				}
+			} catch { /* Preserve the held journal if any reconciliation check fails. */ }
+		}
+		return saved;
+	}
 	if (saved && BigInt(receipt.sequence) === BigInt(saved.sequence)) {
 		saved.phase = 'Receipt';
 		saved.receipt = receipt;
@@ -322,10 +345,9 @@ export async function submitCksolPayment(
 		q.owner !== owner.toText() ||
 		q.walletType !== walletType ||
 		q.sessionGeneration !== get(walletSessionGeneration) ||
-		Date.now() - q.quotedAt > 60_000 ||
 		!isLive(owner, q.sessionGeneration, walletType, live)
 	)
-		throw new Error('Wallet session or quote changed. Refresh before approving.');
+		throw new Error('Wallet session changed. Refresh before approving.');
 	const key = cksolPaymentKey(q.owner);
 	let intent = loadCksolPayment(storage, q.owner);
 	const backend: any = backendActor();
@@ -361,6 +383,7 @@ export async function submitCksolPayment(
 		throw new Error('Resolve the saved payment receipt before starting another payment.');
 	if (previous && !['Complete', 'FundingRejected'].includes(previous.phase))
 		throw new Error('A previous payment is unresolved. Refresh its receipt before starting again.');
+	// Revalidate displayed terms after the user has sent SOL; display age alone is not a payment change.
 	const fresh = await quoteCksolPayment(owner, walletType);
 	if (!isLive(owner, q.sessionGeneration, walletType, live))
 		throw new Error('Wallet session changed.');
@@ -428,6 +451,13 @@ export async function submitCksolPayment(
 	intent.approvalBlock = BigInt(approval.Ok).toString();
 	saveCksolPayment(storage, intent);
 	if (!isLive(owner, g, wt, live)) return intent;
+	if (wt === 'oisy') {
+		// The SDK closes its channel 200 ms after a signed response. A fresh
+		// click must open the next channel before the network quote and start.
+		intent.message = 'Cycles approved. SOL processing has not started. Click Process my deposit to authorize processing.';
+		saveCksolPayment(storage, intent);
+		return intent;
+	}
 	// Refresh all backend terms immediately before the irreversible dispatch.
 	const before = await quoteCksolPayment(owner, wt);
 	if (before.next_sequence !== seq) {

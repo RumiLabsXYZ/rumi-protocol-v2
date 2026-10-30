@@ -73,6 +73,7 @@ vi.mock('./cksolMinter', () => ({ getCksolRelay: () => fx.relayQuery }));
 import {
 	PaidBackendIDL,
 	claimCksolRefund,
+	continueApprovedCksolPayment,
 	cksolPaymentKey,
 	loadCksolPayment,
 	quoteCksolPayment,
@@ -169,7 +170,7 @@ describe('user-funded ckSOL payment', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 	});
-	it.each(['plug', 'internet-identity', 'oisy'])(
+	it.each(['plug', 'internet-identity'])(
 		'approves and dispatches sequentially for %s',
 		async (walletType) => {
 			const { ledger, storage } = setup(walletType);
@@ -186,9 +187,74 @@ describe('user-funded ckSOL payment', () => {
 					expires_at: [expect.any(BigInt)]
 				})
 			);
-			if (walletType === 'oisy') expect(fx.oisyActor).toHaveBeenCalledTimes(2);
 		}
 	);
+	it('saves the OISY approval for a separate processing click after the channel can close', async () => {
+		const { storage } = setup('oisy');
+		const q = await quoteCksolPayment(owner, 'oisy');
+		const approved = await submitCksolPayment(q, owner, storage, live);
+		expect(approved.phase).toBe('Approved');
+		expect(approved.approvalBlock).toBe('7');
+		expect(fx.calls).toEqual(['approve']);
+		fx.ledgerQuery.icrc2_allowance.mockResolvedValue({allowance: approvalAmount, expires_at: []});
+		const result = await continueApprovedCksolPayment(owner, approved, storage, live);
+		expect(result.phase).toBe('Receipt');
+		expect(result.receipt.phase).toBe('FundingPending');
+		expect(fx.calls).toEqual(['approve', 'start']);
+	});
+	it('revalidates an old displayed quote after the user sends SOL', async () => {
+		const { storage } = setup();
+		const q = await quoteCksolPayment(owner, 'plug');
+		q.quotedAt -= 5 * 60_000;
+		const intent = await submitCksolPayment(q, owner, storage, live);
+		expect(intent.phase).toBe('Receipt');
+		expect(intent.approvalAmount).toBe('1001100000000');
+		expect(intent.receipt.phase).toBe('FundingPending');
+	});
+	it('blocks changed terms when revalidating an old displayed quote', async () => {
+		const { ledger, storage } = setup();
+		const q = await quoteCksolPayment(owner, 'plug');
+		q.quotedAt -= 5 * 60_000;
+		fx.backendQuery.get_cksol_payment_quote.mockResolvedValueOnce(quoteReply(2n));
+		await expect(submitCksolPayment(q, owner, storage, live)).rejects.toThrow('Payment quote changed');
+		expect(ledger.icrc2_approve).not.toHaveBeenCalled();
+		expect(loadCksolPayment(storage, owner.toText())).toBeNull();
+	});
+	it('blocks an old quote from a replaced wallet session before approval', async () => {
+		const { ledger, storage } = setup();
+		const q = await quoteCksolPayment(owner, 'plug');
+		q.quotedAt -= 5 * 60_000;
+		fx.generation.set(1);
+		await expect(submitCksolPayment(q, owner, storage, live)).rejects.toThrow('Wallet session');
+		expect(ledger.icrc2_approve).not.toHaveBeenCalled();
+		expect(loadCksolPayment(storage, owner.toText())).toBeNull();
+	});
+	it('reconciles the known unsent OISY popup failure without discarding the original record', async () => {
+		const { storage } = setup('oisy');
+		const saved = { owner: owner.toText(), sequence: '1', phase: 'ApprovalUnknown', createdAt: 123,
+			message: 'Error: Signer window should not be opened outside of click handler, see: https://github.com/slide-computer/signer-js/blob/main/packages/signer-web/README.md#channels-must-be-established-in-a-click-handler' };
+		const raw = JSON.stringify(saved);
+		storage.setItem(cksolPaymentKey(owner.toText()), raw);
+		const recovered = await recoverCksolPayment(owner, storage);
+		expect(recovered?.phase).toBe('NotStarted');
+		expect(storage.getItem(`${cksolPaymentKey(owner.toText())}:unsent-approval:1:123`)).toBe(raw);
+		expect(fx.calls).toEqual([]);
+	});
+	it('preserves a popup-failure journal when an allowance exists', async () => {
+		const { storage } = setup('oisy');
+		const saved = { owner: owner.toText(), sequence: '1', phase: 'ApprovalUnknown', createdAt: 123,
+			message: 'Error: Signer window should not be opened outside of click handler, see: https://github.com/slide-computer/signer-js/blob/main/packages/signer-web/README.md#channels-must-be-established-in-a-click-handler' };
+		storage.setItem(cksolPaymentKey(owner.toText()), JSON.stringify(saved));
+		fx.ledgerQuery.icrc2_allowance.mockResolvedValueOnce({ allowance: approvalAmount, expires_at: [] });
+		expect((await recoverCksolPayment(owner, storage))?.phase).toBe('ApprovalUnknown');
+		expect(fx.calls).toEqual([]);
+	});
+	it('preserves an actual lost approval reply even with no current allowance or backend receipt', async () => {
+		const { storage } = setup('oisy');
+		storage.setItem(cksolPaymentKey(owner.toText()), JSON.stringify({owner:owner.toText(),sequence:'1',phase:'ApprovalUnknown',createdAt:123,message:'approval response lost'}));
+		expect((await recoverCksolPayment(owner, storage))?.phase).toBe('ApprovalUnknown');
+		expect(fx.calls).toEqual([]);
+	});
 	it('keeps the same intent after a lost approval response and never reapproves', async () => {
 		const { ledger, storage } = setup();
 		ledger.icrc2_approve.mockRejectedValueOnce(new Error('approval response lost'));
