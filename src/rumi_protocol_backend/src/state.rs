@@ -1897,6 +1897,21 @@ pub struct XrpLaunchGuardrailMigration {
 /// (the audit's F-01 fix). Intentionally idempotent so upgrades, replay recovery,
 /// and tests can call it without a one-shot migration flag. The debt ceiling is NOT
 /// clamped here — XRP uses a normal `debt_ceiling` like every other collateral.
+/// Key gate for native-XRP collateral activation. Normal builds: the production
+/// Schnorr key only (unchanged). The default-off `xrpl-testnet-fixture` artifact:
+/// `test_key_1` only (`network::require_collateral_key`), so the testnet fixture can
+/// activate XRP collateral and can never do so with the production key.
+pub fn xrp_collateral_key_ok(key: &str) -> bool {
+    #[cfg(feature = "xrpl-testnet-fixture")]
+    {
+        crate::chains::xrp::network::require_collateral_key(key).is_ok()
+    }
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
+    {
+        crate::chains::xrp::config::is_xrp_production_key_name(key)
+    }
+}
+
 pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMigration {
     let mut migration = XrpLaunchGuardrailMigration::default();
     let xrp_ct = xrp_collateral_principal();
@@ -1904,7 +1919,7 @@ pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMig
         return migration;
     };
 
-    if !crate::chains::xrp::config::is_xrp_production_key_name(&state.xrp_schnorr_key_name)
+    if !xrp_collateral_key_ok(&state.xrp_schnorr_key_name)
         && !matches!(
             config.status,
             CollateralStatus::Frozen | CollateralStatus::Deprecated
@@ -1956,11 +1971,16 @@ pub fn validate_xrp_launch_config_update(
     if !matches!(
         config.status,
         CollateralStatus::Frozen | CollateralStatus::Deprecated
-    ) && !crate::chains::xrp::config::is_xrp_production_key_name(configured_key)
+    ) && !xrp_collateral_key_ok(configured_key)
     {
+        let kind = if crate::chains::xrp::network::FIXTURE_BUILD {
+            "fixture"
+        } else {
+            "production"
+        };
         return Err(ProtocolError::GenericError(format!(
-            "XRP collateral cannot be activated without production Schnorr key {} (configured: {})",
-            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+            "XRP collateral cannot be activated without {kind} Schnorr key {} (configured: {})",
+            crate::chains::xrp::network::expected_collateral_key_name(),
             configured_key
         )));
     }
@@ -4537,6 +4557,12 @@ pub struct State {
     /// snapshot that lacks this key decodes with the field defaulting to 0.
     #[serde(default)]
     pub chain_vault_id_counter: u64,
+
+    /// XRPL icUSD lane (Task 3): configuration (DISABLED by default), operations,
+    /// durable reservations/exclusions, issuer sequencer state. `#[serde(default)]`
+    /// so a pre-lane snapshot decodes to a disabled, empty lane.
+    #[serde(default)]
+    pub xrpl_icusd: crate::xrpl_icusd::XrplIcusdState,
 }
 
 /// Upgrade-safe gate between the non-journaled V1 reserve path and V2's
@@ -4854,6 +4880,7 @@ impl Default for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            xrpl_icusd: Default::default(),
         }
     }
 }
@@ -5175,6 +5202,7 @@ impl From<InitArg> for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            xrpl_icusd: Default::default(),
         }
     }
 }
@@ -6520,6 +6548,7 @@ impl State {
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -7006,6 +7035,12 @@ impl State {
     /// Re-keying inside passive accrual would be O(N log N) per timer tick for
     /// zero ordering benefit at the band tolerance scale (default 1% CR).
     pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
+        // XRPL icUSD lane: while a repayment burn is unresolved the vault's accrual
+        // clock is frozen at the saved settlement cutoff (every accrual path, including
+        // `Event::AccrueInterest` replay, defers this vault; others continue normally).
+        if self.xrpl_icusd.accrual_frozen_vaults.contains(&vault_id) {
+            return;
+        }
         // Phase 1: compute rate (immutable borrow of self)
         let rate_and_elapsed = {
             let s: &State = &*self;
@@ -7073,7 +7108,11 @@ impl State {
                 .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
             s.vault_id_to_vaults
                 .iter()
-                .filter(|(_, v)| v.borrowed_icusd_amount.0 > 0 && v.last_accrual_time < now_nanos)
+                .filter(|(id, v)| {
+                    v.borrowed_icusd_amount.0 > 0
+                        && v.last_accrual_time < now_nanos
+                        && !s.xrpl_icusd.accrual_frozen_vaults.contains(id)
+                })
                 .map(|(id, vault)| {
                     let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
                     let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
@@ -7118,7 +7157,13 @@ impl State {
     /// will re-accumulate before the next harvest). `borrowed_icusd_amount` is unchanged
     /// so user debt is unaffected.
     pub fn harvest_accrued_interest(&mut self) {
-        for vault in self.vault_id_to_vaults.values_mut() {
+        for (vault_id, vault) in self.vault_id_to_vaults.iter_mut() {
+            // XRPL icUSD lane: the accrued allocation of a vault with an unresolved
+            // repayment burn is part of the saved cutoff snapshot; harvesting it now
+            // would let the settlement distribute the same interest twice.
+            if self.xrpl_icusd.accrual_frozen_vaults.contains(vault_id) {
+                continue;
+            }
             let interest = vault.accrued_interest.to_u64();
             if interest > 0 {
                 *self
@@ -7865,7 +7910,9 @@ impl State {
                     None => continue, // index drift — ignore
                 };
                 visited += 1;
-                if vault.bot_processing {
+                if vault.bot_processing
+                    || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
+                {
                     continue;
                 }
                 if compute_collateral_ratio(vault, rate, self)
@@ -8104,22 +8151,11 @@ impl State {
                 // clamp instead of asserting so any residual drift degrades
                 // to a smaller applied repayment, never a trap-after-pull.
                 let repayed_amount = repayed_amount.min(vault.borrowed_icusd_amount);
-                let interest_share =
-                    if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                        let share = crate::numeric::checked_proportional_amount(
-                            repayed_amount.0,
-                            vault.borrowed_icusd_amount.0,
-                            vault.accrued_interest.0,
-                        )
-                        .unwrap_or(0);
-                        // INT-001: also cap by `repayed_amount` so the saturating
-                        // subtraction below cannot lose principal silently. The
-                        // deduct-side clamp keeps `accrued <= borrowed`, but defense
-                        // in depth here pins the property even on legacy state.
-                        ICUSD::new(share.min(vault.accrued_interest.0).min(repayed_amount.0))
-                    } else {
-                        ICUSD::new(0)
-                    };
+                let interest_share = ICUSD::new(proportional_repay_interest_share(
+                    repayed_amount.0,
+                    vault.borrowed_icusd_amount.0,
+                    vault.accrued_interest.0,
+                ));
                 // INT-001: saturating subtraction so a stale `accrued > borrowed`
                 // state cannot panic the canister via `Token::Sub`. With the
                 // `.min(repayed_amount)` cap above this can never under-flow
@@ -8795,6 +8831,7 @@ impl State {
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -9038,6 +9075,7 @@ impl State {
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -9230,6 +9268,7 @@ impl State {
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -9371,6 +9410,7 @@ impl State {
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -10284,6 +10324,48 @@ pub fn has_pending_borrow_mint(vault_id: u64) -> bool {
             .borrow()
             .as_ref()
             .is_some_and(|s| s.pending_borrow_mints.contains_key(&vault_id))
+    })
+}
+
+/// Interest portion of a repayment: proportional to how much of the vault's debt is
+/// accrued interest. The ONE formula shared by the legacy `repay_to_vault` and the
+/// XRPL lane's non-mutating cutoff snapshot.
+pub fn proportional_repay_interest_share(repay: u64, debt: u64, accrued: u64) -> u64 {
+    if accrued > 0 && debt > 0 {
+        let share = crate::numeric::checked_proportional_amount(repay, debt, accrued).unwrap_or(0);
+        // INT-001: also cap by `repay` so the saturating subtraction in the caller
+        // cannot lose principal silently. The deduct-side clamp keeps
+        // `accrued <= borrowed`, but defense in depth pins the property on legacy state.
+        share.min(accrued).min(repay)
+    } else {
+        0
+    }
+}
+
+/// Safe pre-initialization probe: a durable XRPL icUSD operation excludes the vault
+/// from every conflicting mutation (see `xrpl_icusd::xrpl_vault_excluded`).
+pub fn has_xrpl_vault_exclusion(vault_id: u64) -> bool {
+    __STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| crate::xrpl_icusd::xrpl_vault_excluded(s, vault_id))
+    })
+}
+
+/// Durable XRPL borrow reservations `(for collateral, total)`; `(0, 0)` before init.
+pub fn xrpl_durable_reserved(collateral: Principal) -> (u64, u64) {
+    __STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map(|s| {
+                (
+                    s.xrpl_icusd.durable_reserved_for(collateral),
+                    s.xrpl_icusd.durable_reserved_total(),
+                )
+            })
+            .unwrap_or((0, 0))
     })
 }
 
@@ -13106,6 +13188,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     fn xrp_launch_guardrails_freeze_non_production_key_without_clamping_ceiling() {
         let mut state = test_state();
         let xrp = xrp_collateral_principal();
@@ -13150,6 +13233,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     fn xrp_launch_config_update_allows_any_ceiling_but_keeps_key_gate() {
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
@@ -13176,6 +13260,80 @@ mod tests {
             ),
             Err(ProtocolError::GenericError(_))
         ));
+    }
+
+    /// Fixture build: `test_key_1` activates XRP collateral (no freeze, update
+    /// accepted) and the production key is rejected, so the testnet fixture can never
+    /// activate collateral with `key_1`.
+    #[test]
+    #[cfg(feature = "xrpl-testnet-fixture")]
+    fn xrp_fixture_build_activates_with_test_key_and_refuses_production_key() {
+        let mut state = test_state();
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.status = CollateralStatus::Active;
+        state.collateral_configs.insert(xrp, cfg.clone());
+        state.xrp_schnorr_key_name =
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME.to_string();
+        let migration = enforce_xrp_launch_guardrails(&mut state);
+        assert_eq!(migration.previous_status, None, "test_key_1 must not freeze the fixture");
+        assert_eq!(state.collateral_configs[&xrp].status, CollateralStatus::Active);
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
+        )
+        .is_ok());
+        // The production key is refused (and a state on it is frozen) in the fixture.
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+        )
+        .is_err());
+        state.xrp_schnorr_key_name =
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME.to_string();
+        assert_eq!(
+            enforce_xrp_launch_guardrails(&mut state).previous_status,
+            Some(CollateralStatus::Active)
+        );
+    }
+
+    /// Normal build: the original behaviour, byte for byte: only `key_1` activates.
+    #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
+    fn xrp_normal_build_key_gate_is_production_only() {
+        assert!(xrp_collateral_key_ok(
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME
+        ));
+        assert!(!xrp_collateral_key_ok(
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME
+        ));
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.status = CollateralStatus::Active;
+        let err = validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
+        )
+        .unwrap_err();
+        match err {
+            ProtocolError::GenericError(m) => assert_eq!(
+                m,
+                "XRP collateral cannot be activated without production Schnorr key key_1 (configured: test_key_1)",
+                "the normal-build message is unchanged"
+            ),
+            other => panic!("unexpected error {other:?}"),
+        }
     }
 
     #[test]

@@ -215,7 +215,19 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None, false, None)
+        Self::acquire(vault_id, None, false, None, true)
+    }
+
+    /// Per-vault lock for settling an EXISTING XRP claim (`settle_xrp_claim`). The
+    /// claim's custody nonce is the source vault id; the lock only serializes the
+    /// custody address' XRPL Sequence. Settling pays out collateral that already left
+    /// the vault's books and never touches the vault's debt, interest or collateral
+    /// accounting, so the XRPL icUSD lane's durable vault exclusion (which protects a
+    /// saved debt/interest snapshot or a headroom reservation) does not apply. Every
+    /// other guard (push sweeps, SP journals, pending borrow mints, in-flight
+    /// operations) still does.
+    pub fn new_for_claim_settlement(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None, false, None, false)
     }
 
     /// Acquire the lock only for the exact caller/vault add-margin retry whose
@@ -225,7 +237,7 @@ impl VaultLiquidationGuard {
         vault_id: u64,
         owner: Principal,
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, Some(owner), false, None)
+        Self::acquire(vault_id, Some(owner), false, None, true)
     }
 
     /// Only the already-authorized exact borrow retry may pass its own
@@ -242,18 +254,20 @@ impl VaultLiquidationGuard {
                 "Vault #{vault_id} has an unresolved bot liquidation; retry after it settles"
             )));
         }
-        Self::acquire(vault_id, None, true, None)
+        Self::acquire(vault_id, None, true, None, true)
     }
 
     /// Acquire a vault for the exact caller-owned ordinary SP journal. A
     /// durable prepared/submitted journal is a reservation across upgrades;
     /// no other caller or request may enter the vault while it is unresolved.
+    /// The XRPL icUSD exclusion still applies: a liquidation must not run while
+    /// an XRPL borrow mint or repayment burn on this vault is unresolved.
     pub fn new_for_sp_liquidation_retry(
         vault_id: u64,
         caller: Principal,
         request_id: [u8; 32],
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None, false, Some((caller, request_id)))
+        Self::acquire(vault_id, None, false, Some((caller, request_id)), true)
     }
 
     fn acquire(
@@ -263,6 +277,7 @@ impl VaultLiquidationGuard {
         // The ordinary stability-pool journal is the only durable owner that
         // may retry a reserved vault. `None` is used by every legacy path.
         sp_retry: Option<(Principal, [u8; 32])>,
+        respect_xrpl_exclusion: bool,
     ) -> Result<Self, crate::ProtocolError> {
         let pending = read_state(|s| {
             s.push_sweep_journals
@@ -299,6 +314,15 @@ impl VaultLiquidationGuard {
         if !allow_pending_borrow && crate::state::has_pending_borrow_mint(vault_id) {
             return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
                 "Vault #{vault_id} has an unresolved icUSD mint; retry the exact borrow to reconcile it"
+            )));
+        }
+        // XRPL icUSD lane: a durable operation (unresolved borrow mint, or an
+        // admitted repayment burn) excludes every conflicting mutation of this
+        // vault. This also covers the borrow-retry and push-sweep-retry entries:
+        // neither retry is an XRPL-lane operation.
+        if respect_xrpl_exclusion && crate::state::has_xrpl_vault_exclusion(vault_id) {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} is locked by an unresolved XRPL icUSD operation; retry after it settles"
             )));
         }
         LIQUIDATING_VAULTS.with(|set| {
@@ -392,13 +416,87 @@ pub struct BorrowReservationGuard {
     amount: u64,
 }
 
+/// In-flight (heap) reservations: `(this collateral, all collaterals)`.
+pub fn heap_borrow_reserved(collateral: Principal) -> (u64, u64) {
+    BORROW_RESERVATIONS.with(|r| {
+        let map = r.borrow();
+        (
+            map.get(&collateral).copied().unwrap_or(0),
+            map.values().copied().sum(),
+        )
+    })
+}
+
+/// Pure headroom rule shared by every admission (legacy heap reservation and the
+/// XRPL lane's durable reservation): committed + every reservation bucket + the new
+/// amount must fit under the per-collateral ceiling and the global mint cap.
+#[allow(clippy::too_many_arguments)]
+fn headroom_rule(
+    coll_reserved: u64,
+    total_reserved: u64,
+    amount: u64,
+    current_collateral_debt: u64,
+    debt_ceiling: u64,
+    current_global_borrowed: u64,
+    global_cap: u64,
+) -> Result<(), String> {
+    if current_collateral_debt
+        .saturating_add(coll_reserved)
+        .saturating_add(amount)
+        > debt_ceiling
+    {
+        return Err(format!(
+            "Borrow would exceed debt ceiling incl in-flight ({} + {} + {} > {})",
+            current_collateral_debt, coll_reserved, amount, debt_ceiling
+        ));
+    }
+    if current_global_borrowed
+        .saturating_add(total_reserved)
+        .saturating_add(amount)
+        > global_cap
+    {
+        return Err(format!(
+            "Borrow would exceed global icUSD mint cap incl in-flight ({} + {} + {} > {})",
+            current_global_borrowed, total_reserved, amount, global_cap
+        ));
+    }
+    Ok(())
+}
+
+/// Read-only headroom check against committed debt, the legacy heap reservations
+/// (read here) and the durable XRPL reservations (passed in). Used by the XRPL lane,
+/// whose reservation is a durable operation inserted in the same synchronous block.
+#[allow(clippy::too_many_arguments)]
+pub fn check_borrow_headroom(
+    collateral: Principal,
+    amount: u64,
+    current_collateral_debt: u64,
+    debt_ceiling: u64,
+    current_global_borrowed: u64,
+    global_cap: u64,
+    durable_collateral: u64,
+    durable_total: u64,
+) -> Result<(), String> {
+    let (heap_coll, heap_total) = heap_borrow_reserved(collateral);
+    headroom_rule(
+        heap_coll.saturating_add(durable_collateral),
+        heap_total.saturating_add(durable_total),
+        amount,
+        current_collateral_debt,
+        debt_ceiling,
+        current_global_borrowed,
+        global_cap,
+    )
+}
+
 impl BorrowReservationGuard {
     /// Reserve `amount` for `collateral` iff, counting all in-flight
     /// reservations, the per-collateral ceiling and the global mint cap both
     /// still hold. The committed aggregates (`current_collateral_debt`,
-    /// `current_global_borrowed`) are read by the caller and passed in. Returns
-    /// `Err` (no reservation taken) when a concurrent in-flight borrow has
-    /// already consumed the headroom.
+    /// `current_global_borrowed`) are read by the caller and passed in. The
+    /// durable XRPL-lane reservations are read from state here, so EVERY caller
+    /// counts them without remembering to. Returns `Err` (no reservation taken)
+    /// when a concurrent in-flight borrow has already consumed the headroom.
     pub fn try_reserve(
         collateral: Principal,
         amount: u64,
@@ -407,32 +505,45 @@ impl BorrowReservationGuard {
         current_global_borrowed: u64,
         global_cap: u64,
     ) -> Result<Self, String> {
+        let (durable_collateral, durable_total) = crate::state::xrpl_durable_reserved(collateral);
+        Self::try_reserve_with_durable(
+            collateral,
+            amount,
+            current_collateral_debt,
+            debt_ceiling,
+            current_global_borrowed,
+            global_cap,
+            durable_collateral,
+            durable_total,
+        )
+    }
+
+    /// As [`Self::try_reserve`], with the durable XRPL reservations given explicitly
+    /// (the check and the heap insert happen in one synchronous section).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_reserve_with_durable(
+        collateral: Principal,
+        amount: u64,
+        current_collateral_debt: u64,
+        debt_ceiling: u64,
+        current_global_borrowed: u64,
+        global_cap: u64,
+        durable_collateral: u64,
+        durable_total: u64,
+    ) -> Result<Self, String> {
         BORROW_RESERVATIONS.with(|r| {
             let mut map = r.borrow_mut();
             let coll_reserved: u64 = map.get(&collateral).copied().unwrap_or(0);
             let total_reserved: u64 = map.values().copied().sum();
-
-            if current_collateral_debt
-                .saturating_add(coll_reserved)
-                .saturating_add(amount)
-                > debt_ceiling
-            {
-                return Err(format!(
-                    "Borrow would exceed debt ceiling incl in-flight ({} + {} + {} > {})",
-                    current_collateral_debt, coll_reserved, amount, debt_ceiling
-                ));
-            }
-            if current_global_borrowed
-                .saturating_add(total_reserved)
-                .saturating_add(amount)
-                > global_cap
-            {
-                return Err(format!(
-                    "Borrow would exceed global icUSD mint cap incl in-flight ({} + {} + {} > {})",
-                    current_global_borrowed, total_reserved, amount, global_cap
-                ));
-            }
-
+            headroom_rule(
+                coll_reserved.saturating_add(durable_collateral),
+                total_reserved.saturating_add(durable_total),
+                amount,
+                current_collateral_debt,
+                debt_ceiling,
+                current_global_borrowed,
+                global_cap,
+            )?;
             *map.entry(collateral).or_insert(0) += amount;
             Ok(Self { collateral, amount })
         })
@@ -594,6 +705,34 @@ mod vault_liquidation_guard_tests {
         });
         let _guard = VaultLiquidationGuard::new_for_borrow_retry(vault_id)
             .expect("retry may acquire only after both persisted bot markers clear");
+    }
+
+    #[test]
+    fn claim_settlement_guard_ignores_only_the_xrpl_exclusion() {
+        let vault_id = 4242;
+        let mut state = crate::state::State::default();
+        // A durable XRPL operation excludes the vault from conflicting mutations.
+        state.xrpl_icusd.vault_exclusions.insert(vault_id);
+        crate::state::replace_state(state);
+        assert!(
+            VaultLiquidationGuard::new(vault_id).is_err(),
+            "debt-touching mutations stay excluded"
+        );
+        assert!(VaultLiquidationGuard::new_for_borrow_retry(vault_id).is_err());
+        // Settling an existing XRP claim pays out collateral that is already off the
+        // vault's books and never touches debt: it must not be blocked.
+        let held = VaultLiquidationGuard::new_for_claim_settlement(vault_id)
+            .expect("claim settlement is not blocked by the XRPL exclusion");
+        // It still serializes against every other operation on the same vault (the
+        // custody address' XRPL Sequence).
+        assert!(VaultLiquidationGuard::new_for_claim_settlement(vault_id).is_err());
+        assert!(VaultLiquidationGuard::new(vault_id).is_err());
+        drop(held);
+        // A pending borrow mint / push sweep keeps blocking it (unchanged).
+        crate::state::mutate_state(|s| {
+            s.xrpl_icusd.vault_exclusions.clear();
+        });
+        let _ok = VaultLiquidationGuard::new_for_claim_settlement(vault_id).unwrap();
     }
 
     #[test]

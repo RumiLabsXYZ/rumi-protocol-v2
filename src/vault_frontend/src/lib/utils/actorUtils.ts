@@ -1,4 +1,5 @@
 import { Actor, HttpAgent } from "@dfinity/agent";
+import { LOCAL_IC_HOST } from "../localNetwork";
 
 // In-memory cache for anonymous actors
 const actorCache = new Map<string, any>();
@@ -12,7 +13,7 @@ export const createAnonymousActorHelper = (canisterId: string, idl: any) => {
   const agent = new HttpAgent({
     host:
       process.env.DFX_NETWORK !== "ic"
-        ? "http://localhost:4943"
+        ? LOCAL_IC_HOST
         : "https://icp0.io",
   });
 

@@ -349,6 +349,8 @@
       <p class="xrp-muted">No pending XRP deposits or claims.</p>
     {/if}
   {/if}
+
+  <!-- XRPL icUSD lane: trust line, borrow to XRPL, repay with XRPL icUSD (Task 6). -->
 </section>
 
 <style>

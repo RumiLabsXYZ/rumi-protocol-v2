@@ -1,5 +1,6 @@
 import { Principal } from "@dfinity/principal";
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS, vault_frontend } from '../config';
+import { LOCAL_IC_HOST, LOCAL_II_OVERRIDDEN, LOCAL_II_URL, LOCAL_REPLICA_PORT } from '../localNetwork';
 import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
@@ -105,7 +106,7 @@ export async function silentPlugReconnect(): Promise<{owner: Principal} | null> 
       const targets = getAllDelegationTargets();
       await (window.ic.plug as any).createAgent({
         whitelist: targets,
-        host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io'
+        host: CONFIG.isLocal ? LOCAL_IC_HOST : 'https://icp0.io'
       });
 
       const principal = await window.ic.plug.agent.getPrincipal();
@@ -133,7 +134,7 @@ export async function connectWithComprehensivePermissions(walletId: string): Pro
       // Request ALL canister permissions upfront for Plug
       const comprehensivePermissions = {
         whitelist: getAllDelegationTargets(),
-        host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://icp0.io',
+        host: CONFIG.isLocal ? LOCAL_IC_HOST : 'https://icp0.io',
         timeout: 60000
       };
       
@@ -216,7 +217,7 @@ export function initializePNP(): PNP {
     // Create PNP with beta API configuration using ConfigBuilder
     globalPnp = createPNP(
       ConfigBuilder.create()
-        .withEnvironment(network, CONFIG.isLocal ? { replica: 4943, frontend: 5173 } : undefined)
+        .withEnvironment(network, CONFIG.isLocal ? { replica: LOCAL_REPLICA_PORT, frontend: 5173 } : undefined)
         .withDelegation({
           timeout: BigInt(86400000000000), // 24 hours in nanoseconds
           targets: delegationTargets
@@ -224,7 +225,8 @@ export function initializePNP(): PNP {
         .withSecurity(CONFIG.isLocal, true) // fetchRootKey for local, verify signatures
         .withIcAdapters({
           // Enable all IC wallets including Oisy
-          ii: { enabled: true },
+          // Local dev override only: point II at the retargeted local II canister.
+          ii: CONFIG.isLocal && LOCAL_II_OVERRIDDEN ? { enabled: true, iiProviderUrl: LOCAL_II_URL } : { enabled: true },
           plug: { 
             enabled: true,
             whitelist: delegationTargets // Plug-specific whitelist
