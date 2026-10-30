@@ -562,6 +562,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   (BB-33), then two Sonnet lanes at a time over BB-34 to BB-39 by rank, then integration (BB-40).
   No actual omission has been recorded in the deferral ledger yet.
 
+## Milestone 24 (2026-10-30): board accepted; worker record
+
+- Miles independently verified the live board (title, Queue with all eight queued cards, the three
+  research cards in progress, the Base blocker and history kept) and accepted BB-29 for board and
+  interface behavior. BB-29 is done, so the `priorities-and-handoff` item's Done status is consistent.
+  The board's membership note now names item 11 (the PR handoff), not item 3, as also waiting on BB-27.
+- Worker record. Handles are the coordinator's worker labels; each label maps to one subagent run in
+  this Desktop session, which the coordinator keeps for resuming that same run (the session's internal
+  run identifiers are not written to this public repository). Actual model is the model field on the
+  run's own replies.
+
+  | Handle | Card | Requested | Actual (run record) | Owned path | State |
+  | --- | --- | --- | --- | --- | --- |
+  | P1 | availability probe | Sonnet | `claude-sonnet-5-5` | none | finished |
+  | P2 | availability probe | Haiku | `claude-haiku-5-5` | none | finished |
+  | W10 | BB-30 | Haiku | `claude-haiku-5-5` | `docs/coordination/multichain/reuse-inventory.md` | running |
+  | W11 | BB-31 | Sonnet | `claude-sonnet-5-5` | `docs/coordination/multichain/sources-evm.md` | running |
+  | W12 | BB-32 | Sonnet | `claude-sonnet-5-5` | `docs/coordination/multichain/sources-native.md` | running |
+
+- Concurrency now: two Sonnet lanes (W11, W12) and one Haiku task (W10), the stated maximum. The next
+  lane starts only when one of these finishes; no lane is duplicated.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -287,10 +287,10 @@
     },
     {
       "id": "BB-29",
-      "state": "Review",
+      "state": "done",
       "owner": "coordinator",
       "scope": "Multichain board: rename, Queue column and ranked priorities",
-      "evidenceText": "proof=source; Board widened to nine chains; queued cards map to a real Lookout Queue state, checked offline with the publisher and the frontend column helper; priorities re-ranked with explicit cards; awaiting Miles",
+      "evidenceText": "proof=source; Board widened to nine chains; queued cards map to a real Lookout Queue state, checked offline with the publisher and the frontend column helper; priorities re-ranked with explicit cards; Miles verified the live board and accepted it",
       "evidenceLinks": []
     },
     {
