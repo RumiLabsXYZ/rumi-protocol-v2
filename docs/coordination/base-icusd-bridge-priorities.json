@@ -14,9 +14,9 @@
     {
       "id": "multichain-recon",
       "title": "Research what each of the nine chains needs",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "BB-30 (repository reuse) and BB-31 (six EVM chains) are done. Still running: BB-32 (Solana, Sui and XRPL facts, Sonnet) and BB-41 (what the open XRPL icUSD PR defines, Haiku). Next: start the shared escrow contract when BB-32 returns.",
+      "nextAction": "",
       "cardIds": [
         "BB-30",
         "BB-31",
@@ -27,9 +27,9 @@
     {
       "id": "shared-escrow-contract",
       "title": "Shared escrow accounting and destination-profile contract",
-      "status": "blocked",
-      "blockedReason": "Queued: starts when the three research cards (BB-30, BB-31, BB-32) return and are reviewed.",
-      "nextAction": "Write the canonical escrow design for all nine chains: locked ICP icUSD backs every representation with no new debt, kept apart from debt-backed chain supply, eight-decimal value, chain and network separated ids, nonces and escrows, unknown outcomes held until reconciled.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "W14 (Sonnet) is writing the shared design, with Miles' constraints: local replica vs PocketIC Ed25519, return binding and idempotent retries for native tokens, and PR #586's XRPL escrow path as the default seam.",
       "cardIds": [
         "BB-33"
       ]
@@ -87,9 +87,9 @@
     {
       "id": "frontend-chain-wallets",
       "title": "Frontend chain selection and wallet requirements",
-      "status": "blocked",
-      "blockedReason": "Queued: needs the wallet facts from BB-31 and BB-32.",
-      "nextAction": "List each chain's wallet connection standard and the page changes needed to choose a destination. Read-only; no interface build yet.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "W15 (Sonnet) is writing the read-only wallet and destination-selection requirements for all nine chains.",
       "cardIds": [
         "BB-39"
       ]

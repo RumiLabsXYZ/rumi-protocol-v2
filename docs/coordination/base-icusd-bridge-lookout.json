@@ -311,18 +311,18 @@
     },
     {
       "id": "BB-32",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Native official-source facts: Solana, Sui, XRPL",
-      "evidenceText": "proof=none; Token standard, eight-decimal fit, ICP signature scheme, finality, RPC path, wallets and prerequisites from primary sources with links and the date checked",
+      "evidenceText": "proof=source; Primary-source facts for Solana, Sui and XRPL with links; Alpenglow and Sui RPC change rechecked; local replica vs PocketIC Ed25519 corrected (existing test seams, not rerun); MPT kept as a recommendation",
       "evidenceLinks": []
     },
     {
       "id": "BB-33",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Shared escrow accounting and destination-profile contract",
-      "evidenceText": "proof=none; Escrow for all nine: backed by locked ICP icUSD, no new debt, apart from debt-backed chain supply; eight-decimal value; chain and network separated ids, nonces and escrows; unknown outcomes held until reconciled",
+      "evidenceText": "proof=none; Escrow design for all nine: no new debt, apart from debt-backed supply, 8-decimal rules, chain and network separated ids, return binding and idempotent retries, same-attempt reconciliation, PR #586 as the XRPL seam",
       "evidenceLinks": []
     },
     {
@@ -367,7 +367,7 @@
     },
     {
       "id": "BB-39",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Frontend chain selection and wallet requirements",
       "evidenceText": "proof=none; Each chain's wallet connection standard and the page changes needed to choose a destination; read-only, no interface build",
@@ -383,10 +383,10 @@
     },
     {
       "id": "BB-41",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-haiku",
       "scope": "Existing XRPL icUSD PR #586: read-only inventory",
-      "evidenceText": "proof=none; What token the open PR defines on XRPL, whether debt- or escrow-backed, its issuer and signing model, and any collision with an escrow-backed bridge token; PR left untouched",
+      "evidenceText": "proof=source; Open PR #586 issues an escrow-backed XRPL icUSD on trust lines inside the backend (borrow path under vault debt, import path no debt, apart from chain supply); coordinator checked its issuance module; PR untouched",
       "evidenceLinks": []
     }
   ]

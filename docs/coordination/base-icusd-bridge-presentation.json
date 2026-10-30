@@ -1,5 +1,5 @@
 {
-  "summary": "Scope widened to nine-chain icUSD groundwork (Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad, Solana, Sui, XRPL): representations backed by locked canonical ICP icUSD, kept apart from debt-backed chain supply. Research: BB-30 reuse and BB-31 EVM facts done (HyperEVM and Monad read-evidence blockers recorded); BB-32 native facts and BB-41 open XRPL PR inventory running. Shared contract and per-chain work queued. Base: Sepolia CLI round trip public-settled; browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
+  "summary": "Nine-chain icUSD groundwork (Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad, Solana, Sui, XRPL): representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Research done (BB-30, BB-31, BB-32, BB-41; HyperEVM and Monad read blockers; PR #586 is the XRPL escrow seam). In progress: BB-33 shared escrow contract and BB-39 frontend wallets (Sonnet). Per-chain work, profiles and plan queued. Base: Sepolia CLI round trip public-settled; browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
   "glossary": [
     {
       "term": "proof=source",
@@ -505,5 +505,5 @@
       "definition": "A checked-in description of one destination chain (network, token, decimals, signing, finality and wallets) with a source for each fact. Profiles start disabled and cannot turn anything on."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back already works outside the app; testing it in the browser waits for Rob to sign in and unlock his wallet. Meanwhile, research has started on bringing the same dollar token to eight more networks before anything is built. Nothing needs Rob except that sign-in, and nothing new is live."
+  "plainSummary": "Moving test tokens to Base and back already works outside the app; testing it in the browser waits for Rob to sign in and unlock his wallet. Research on eight more networks is done, and the shared design for keeping the token fully backed is being written. Nothing needs Rob except that sign-in, and nothing new is live."
 }

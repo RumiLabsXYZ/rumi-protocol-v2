@@ -613,6 +613,34 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Concurrency: one Sonnet lane (W12) and one Haiku task (W13). BB-33 waits for BB-32, so the second
   Sonnet slot is idle rather than starting work ahead of its dependency.
 
+## Milestone 26 (2026-10-30): research done; shared contract started
+
+- BB-32 accepted. The coordinator rechecked Alpenglow being live on Solana mainnet-beta (Anza's page:
+  "confirmed = finalized") and that its Sui RPC claim cites Sui's own docs (JSON-RPC off on Foundation
+  mainnet nodes; gRPC and GraphQL instead). Its "live query" lines were public read-only reads, no
+  transaction. Correction from Miles, recorded in the file: the "Ed25519 only on mainnet" quote is about
+  the dfx local replica; PocketIC can provision threshold Schnorr Ed25519 keys and this worktree has
+  existing seams (`solana_m2_pic.rs`, `xrp_native_e2e_pic.rs`, best-effort `solana_m2_sign_pic.rs`).
+  They are capability evidence, not proof of a passing run; none was rerun.
+- BB-41 accepted. The coordinator read PR #586's `xrpl_icusd/issuance.rs` on its head commit: imports
+  pull the user's canonical icUSD into escrow with no debt; the borrow path sits under ordinary vault
+  debt; neither touches the debt-backed chain supply. The PR was not modified.
+- BB-33 (W14) and BB-39 (W15) dispatched. Miles' constraints were forwarded to W14 mid-run: keep the
+  local replica, PocketIC capability and execution proof distinct; native token programs alone lack
+  consumed-mint and bridge-out semantics, so returns must bind to an ICP account and a durable
+  operation id and retried mints must be idempotent (name the smallest guard or reconciliation seam);
+  PR #586's import and return path is the default XRPL seam, with its debt distinction, exact decimal
+  parser and caps kept, and the Multi-Purpose Token choice recorded as an open decision.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W12 | BB-32 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W13 | BB-41 | Haiku | `claude-haiku-5-5` | finished, accepted |
+  | W14 | BB-33 | Sonnet | `claude-sonnet-5-5` | running |
+  | W15 | BB-39 | Sonnet | `claude-sonnet-5-5` | running |
+
+- Concurrency: two Sonnet lanes (W14, W15); the Haiku slot is idle because no narrow task is ready.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
