@@ -653,6 +653,30 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - W15 (BB-39, `claude-sonnet-5-5`) finished. Running: W14 (BB-33, `claude-sonnet-5-5`). Every other
   queued card depends on BB-33, so no lane starts until it returns.
 
+## Milestone 28 (2026-10-30): shared design accepted; profiles and EVM lanes started
+
+- BB-33 accepted (`docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md`). The coordinator read it in full.
+  It recommends one bridge instance per destination network with the frontend choosing the actor, so the reviewed Base
+  APIs, Candid, stable layout and live signing domains stay unchanged; PR #586's XRPL lane is the XRPL seam (no second
+  token); escrow buckets stay apart from the debt invariant (debt plus reserve backing plus pending chain burn); amounts
+  are exact on eight chains and bounded at 15 significant digits for XRPL trust-line tokens, never rounded; unknown
+  outcomes are reconciled as the same attempt (unsigned bytes plus a single-use sequencing token); Solana and Sui need an
+  explicit guard for return binding and idempotent mints (implementation missing); the dfx local replica, PocketIC
+  capability and execution proof are kept apart. It defines the profile schema and validator rules V1 to V11 and lists nine
+  open decisions (D1 to D9) for Rob and Miles.
+- Coordinator edits: the per-family negative decoder test is labeled future implementation; decisions D1, D3, D4 and D5
+  gate implementation, not groundwork, so BB-34 to BB-36 proceed on the stated recommendations; BB-39 is marked done.
+- Dispatched: BB-38 (W16), the profile crate, validator and nine disabled profiles, the mission's only build lane; BB-34
+  (W17), the read-only EVM-family steps.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W14 | BB-33 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W16 | BB-38 | Sonnet | `claude-sonnet-5-5` | running (build lane) |
+  | W17 | BB-34 | Sonnet | `claude-sonnet-5-5` | running |
+
+- Concurrency: two Sonnet lanes; the Haiku slot is idle because no narrow task is ready.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -319,15 +319,15 @@
     },
     {
       "id": "BB-33",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Shared escrow accounting and destination-profile contract",
-      "evidenceText": "proof=none; Escrow design for all nine: no new debt, apart from debt-backed supply, 8-decimal rules, chain and network separated ids, return binding and idempotent retries, same-attempt reconciliation, PR #586 as the XRPL seam",
+      "evidenceText": "proof=source; Design: one bridge instance per destination network; Base APIs and domains unchanged; PR #586 is the XRPL seam; native guards named; profile schema and rules V1 to V11; nine open decisions; three coordinator edits",
       "evidenceLinks": []
     },
     {
       "id": "BB-34",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Six-EVM readiness and Base-bridge reuse",
       "evidenceText": "proof=none; For each EVM chain: config only or code change against the Base design, the smallest generalization seam and next steps, with the HyperEVM and Monad read-evidence blockers kept; Base behavior unchanged",
@@ -359,10 +359,10 @@
     },
     {
       "id": "BB-38",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Disabled destination profiles and validator",
-      "evidenceText": "proof=none; Nine checked-in profiles, disabled by default, each fact with its source and status; a focused validator and dry run that fail on activation, missing sources or decimal mismatch",
+      "evidenceText": "proof=none; New library crate with typed profiles, validator rules V1 to V11, nine disabled JSON profiles, focused tests and a dry run; no canister changes; the only build lane",
       "evidenceLinks": []
     },
     {

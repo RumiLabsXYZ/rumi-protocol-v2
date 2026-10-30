@@ -1,5 +1,5 @@
 {
-  "summary": "Nine-chain icUSD groundwork (Ethereum, Base, Arbitrum, Robinhood Chain, HyperEVM, Monad, Solana, Sui, XRPL): representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Research done (BB-30, BB-31, BB-32, BB-41) and frontend wallet requirements done (BB-39). In progress: BB-33 shared escrow contract (Sonnet); per-chain work, profiles and plan queued behind it. Base: Sepolia CLI round trip public-settled; browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
+  "summary": "Nine-chain icUSD groundwork: representations backed by locked canonical ICP icUSD, apart from debt-backed chain supply. Research, the shared escrow design (BB-33: one instance per destination network, Base APIs unchanged, PR #586 as the XRPL seam, nine open decisions) and frontend wallet requirements are done. In progress: BB-38 profile crate and validator (the only build) and BB-34 EVM steps. Solana, Sui, XRPL and the plan are queued. Base browser test BB-27 blocked on Rob. No deploy, signing, funding or merge.",
   "glossary": [
     {
       "term": "proof=source",
@@ -505,5 +505,5 @@
       "definition": "A checked-in description of one destination chain (network, token, decimals, signing, finality and wallets) with a source for each fact. Profiles start disabled and cannot turn anything on."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back already works outside the app; testing it in the browser waits for Rob to sign in and unlock his wallet. Research on eight more networks is done, and the shared design for keeping the token fully backed is being written. Nothing needs Rob except that sign-in, and nothing new is live."
+  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. The plan for keeping the token fully backed on eight more networks is written; the detailed checks are underway. Rob only needs to finish that sign-in now; a few design choices will need his decision later."
 }

@@ -27,9 +27,9 @@
     {
       "id": "shared-escrow-contract",
       "title": "Shared escrow accounting and destination-profile contract",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "W14 (Sonnet) is writing the shared design, with Miles' constraints: local replica vs PocketIC Ed25519, return binding and idempotent retries for native tokens, and PR #586's XRPL escrow path as the default seam.",
+      "nextAction": "",
       "cardIds": [
         "BB-33"
       ]
@@ -37,9 +37,9 @@
     {
       "id": "evm-expansion",
       "title": "Reuse the Base design for Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad",
-      "status": "blocked",
-      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the EVM facts (BB-31).",
-      "nextAction": "Name the config-only and code-change seams for each EVM chain and the smallest generalization of the Base bridge, without changing Base behavior. Keep HyperEVM (historical state) and Monad (Verified execution state) as disabled activation blockers.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "W17 (Sonnet) is writing the EVM-family steps: the in-place change list that keeps Base identical, per-chain head selection, and the HyperEVM and Monad read-evidence blockers. Read-only.",
       "cardIds": [
         "BB-34"
       ]
@@ -48,7 +48,7 @@
       "id": "solana-groundwork",
       "title": "Solana groundwork",
       "status": "blocked",
-      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the native-chain facts (BB-32).",
+      "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up after BB-34 or BB-38.",
       "nextAction": "Choose the token standard and authority model, the ICP signing and RPC path and the finality wait, then write implementation-ready Solana next steps.",
       "cardIds": [
         "BB-35"
@@ -58,7 +58,7 @@
       "id": "xrpl-groundwork",
       "title": "XRPL groundwork",
       "status": "blocked",
-      "blockedReason": "Queued: needs the shared escrow contract (BB-33), the native-chain facts (BB-32) and the open XRPL icUSD PR inventory (BB-41).",
+      "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up.",
       "nextAction": "Choose between issued currency and Multi-Purpose Token, the issuer and holder opt-in model, the ICP signing and RPC path and the finality wait, then write implementation-ready XRPL next steps.",
       "cardIds": [
         "BB-37"
@@ -68,7 +68,7 @@
       "id": "sui-groundwork",
       "title": "Sui groundwork",
       "status": "blocked",
-      "blockedReason": "Queued: needs the shared escrow contract (BB-33) and the native-chain facts (BB-32).",
+      "blockedReason": "Queued: the shared design (BB-33) is done; starts when a Sonnet lane frees up.",
       "nextAction": "Choose the coin standard and treasury and upgrade custody, the ICP signing and RPC path and the finality wait, then write implementation-ready Sui next steps.",
       "cardIds": [
         "BB-36"
@@ -77,9 +77,9 @@
     {
       "id": "destination-profiles",
       "title": "Disabled destination profiles for all nine chains and a validator",
-      "status": "blocked",
-      "blockedReason": "Queued: needs the profile schema from BB-33 and the facts from BB-31 and BB-32.",
-      "nextAction": "Check in nine disabled-by-default profiles with a source for each fact, plus a focused validator and dry run that reject activation, missing sources and decimal mismatches.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "W16 (Sonnet) is building the profile crate, validator and nine disabled profiles, then runs its focused tests and dry run. It is the only build lane.",
       "cardIds": [
         "BB-38"
       ]
