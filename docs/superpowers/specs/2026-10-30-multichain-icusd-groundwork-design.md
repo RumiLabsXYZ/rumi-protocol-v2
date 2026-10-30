@@ -70,7 +70,7 @@ separate artifact is D1, because it touches reviewed Base source. The deployed B
 
 - **R: no second XRPL icUSD token, no XRPL bridge instance, no new XRPL escrow.** The lane is `State.xrpl_icusd` in the backend (`xrpl_icusd/state.rs:20`), disabled by default (`types.rs:364-380`).
 - Its escrow is `(backend, sha256("rumi:xrpl-icusd:escrow:v1"))` (`types.rs:33-41`), its issuer key path is `[rumi, xrpl-icusd, v1, network]` (`types.rs:59-66`). Both are kept; no other instance may reuse them (BB-41 Q7).
-- **Debt-backed versus no-debt stays split** (BB-41 Q2). Debt-backed: `borrow_to_xrpl` (EscrowMint under a vault borrow) and repayment (`EscrowBurn`, then the debt change). No-debt: `issue_xrpl_from_canonical` (`ImportPull`, `issuance.rs:1-8`) and `CanonicalReturn` (escrow to the owner's canonical account, `issuance.rs:276-325`, `types.rs:400-411`). Groundwork scope is the no-debt pair. Units from the borrow path are debt-originated and are reported by origin, never as zero-debt backing.
+- **Debt-backed versus no-debt stays split** (BB-41 Q2). Debt-backed: `borrow_to_xrpl` (EscrowMint under a vault borrow) and repayment (`EscrowBurn`, then the debt change). No-debt: `issue_xrpl_from_canonical` (`ImportPull`, `issuance.rs:1-8`) and `CanonicalReturn` (escrow to the owner's canonical account, `issuance.rs:276-325`, `types.rs:400-411`). Groundwork scope is the no-debt pair. Units from the borrow path are debt-originated and are reported by origin, never as zero-debt backing. Correction from BB-37 (`chain-xrpl.md`, checked by the coordinator on `b02584e4`): `CanonicalReturn` (`begin_receive_canonical`, `issuance.rs:271-325`) pays escrow back for claims that were NOT delivered and for held repayments; it does not bring DELIVERED XRPL icUSD back to ICP. That is exactly the missing no-vault return below, and `create_intent` (`repay.rs:137`) requires a native-XRP vault with debt, so it cannot serve as that return.
 - **Gap found (F, grep of the PR #586 endpoint list, `main.rs:9805-9880`):** the return side is shaped around vault repayment intents (`create_intent`, `repay.rs:137`, binds a vault, payer and never-reused destination tag). Unattributed XRPL payments are refunded on XRPL with no debt credit (`apply_verified_return`, `repay.rs:431`), and a held repayment can go back to the owner's canonical account (`ReceiveCanonicalHeld`, `repay.rs` near 1093 and 1161). I found no dedicated no-vault "return XRPL icUSD to my ICP account" operation. **Implementation missing.** BB-37 specifies it as a follow-up after #586 merges, not an edit to #586.
 - Bucket mapping (`xrpl_icusd/state.rs:119-135`): `D` = PM, `O` = O, `R` = PR, `H` = H and RF, `ic_fee_reserve_e8s` = fee reserve. `D` carries `in_flight` (signed issuance that may already be on XRPL), the analogue of `M_inflight`.
 - **D2 (open): trust-line issued currency (PR #586) versus Multi-Purpose Token (BB-32 recommendation).** IOU: already implemented and exact-parsed, but exact only to 15 significant digits (section 3) and holders need a trust line. MPT: exact int63 at `AssetScale` 8, mainnet amendment enabled, but flags are fixed at creation, holders must `MPTokenAuthorize`, wallet support varies, and it replaces the implemented lane. R: keep the IOU lane as the groundwork seam and record MPT as the alternative.
@@ -108,7 +108,8 @@ touch `MultiChainState`. Escrowed icUSD is ordinary ICP ledger supply. No destin
 | `U_d` | Outflow of escrow transfers whose outcome is unknown | `unknown_outflow` | in `ic_fee_reserve` terms |
 
 `L_d = O_d + PM_d + RC_d + BU_d + PR_d + RF_d + H_d + F_d`; each e8 of liability is in exactly one bucket. Origin tag per claim: `imported` (existing canonical icUSD pulled
-with ICRC-2) or `debt_originated` (PR #586 borrow path only). Only `imported` counts toward the "no new debt" claim.
+with ICRC-2) or `debt_originated` (PR #586 borrow path only). Only `imported` counts toward the "no new debt" claim. PR #586's `O` has no
+origin split yet (BB-37), so the XRPL origin report is implementation missing.
 
 ### 2.3 Invariants (per destination, enforced inside its own instance)
 
@@ -185,7 +186,11 @@ All amounts cross ICP as u64 e8s (`BridgedIcUSD.sol` natspec: "the ICP side acco
 | XRPL MPT (alternative, D2) | `int63`, `AssetScale` 8 | Yes | 92,233,720,368.54775807 icUSD | Above `MaximumAmount`; 0 |
 
 XRPL details (F): `validate_normal_request` requires positive, at most 8 decimals, at most 15 significant digits and a
-whole e8s value that fits `u64` (`issued_amount.rs:241-262`). `try_from_e8s` fails with `TooPrecise` when an amount needs
+whole e8s value that fits `u64` (`issued_amount.rs:241-262`). Correction from BB-37: its wrapper `parse_normal_request` has no
+non-test caller in PR #586 (coordinator checked by `git grep` on `b02584e4`), so the 15-digit rule exists but is not yet applied
+to request paths; the configured caps accept any u64; and pending imports can race past the total-outstanding cap. Wiring the
+validator into the import and return requests, bounding both caps at 999,999,999,999,999 e8s (D7) and counting pending imports
+against the total cap are implementation missing, as follow-ups to #586 (no edit to #586). `try_from_e8s` fails with `TooPrecise` when an amount needs
 more than 16 digits (`issued_amount.rs:305-309`); it never rounds. Receipts keep any valid mantissa and exponent, and totals
 are tracked in 1e-40 units, finer values being refused and held (`types.rs:117`). The docs state 15-digit precision;
 the on-chain mantissa width beyond that was not verified (sources-native.md section 3 row 3).
@@ -357,7 +362,7 @@ Groundwork adds no Base fix and no test gate for the paused case; the state is o
 | `representation.backing` | enum | `escrow_locked_icusd` only | Backing | constant |
 | `representation.debt_creating` | bool | `false` only | No new debt | constant |
 | `representation.decimals` | u8 | `8` only | Decimals | `8` |
-| `representation.amount_bounds` | object | `min_e8s >= 1`; `max_e8s`; `encoding` in `u64`, `int63`, `xrpl_decimal_15` | Exact range (section 3) | `u64`, 18446744073709551615 |
+| `representation.amount_bounds` | object | `min_e8s >= 1`; `max_e8s`; `max_outstanding_e8s` (required for `xrpl_decimal_15`, at most 999999999999999); `encoding` in `u64`, `int63`, `xrpl_decimal_15`; amounts as canonical decimal strings | Exact range (section 3) | `u64`, 18446744073709551615 |
 | `signing.scheme` | enum | `ecdsa_secp256k1`, `schnorr_ed25519` | IC threshold scheme | EVM: ECDSA (sources-evm.md section 0) |
 | `signing.key_name` | object | `mainnet = key_1`, `testnet = test_key_1` | IC key names | `key_1` (cycle-costs page) |
 | `signing.derivation_domain` | string[] | template with a `{network_identity}` element | Path (section 5.1) | `[rumi-icusd-sol-bridge, v1, {role}, {network_identity}]` |
@@ -428,7 +433,7 @@ A data-only alternative (JSON plus a script) would give up typed validation; I f
 | Monad | EVM instance per network | ERC-20 (name distinct from debt `IcUSD`, D8) | **Verified** head (finalized minus execution delay) | tECDSA | `Custom` 143/10143 | As Ethereum | D1; **Verified-head observer change**; explicit gas limits; reserve-aware funding; log range chunking |
 | Solana | Solana-family instance per cluster | Token-2022 (8 decimals; metadata extensions only) or classic SPL | `finalized` | Schnorr Ed25519 (`sign_with_schnorr`) | SOL RPC canister (id conflict open); no `getLatestBlockhash` | `chains/solana/{ted25519,sol_rpc,settlement}.rs` patterns | D3 guard; return observer; nonce lane; ATA rent funding; Solana wallet connector; SOL RPC id |
 | Sui | Sui-family instance per network | Currency Standard coin plus Move gate | Finalized checkpoint | Schnorr Ed25519, flag `0x00`, BLAKE2b-256 intent digest | HTTPS outcalls to GraphQL (JSON-RPC gone; gRPC unproven) | None in repo | Move module (D4); provider contract; `UpgradeCap` policy; Sui wallet connector |
-| XRPL | Backend module (PR #586), no instance | Trust-line `icUSD` (D2 vs MPT) | Validated ledger, `tesSUCCESS`, `delivered_amount` | Schnorr Ed25519 over `STX\0` prefix | HTTPS outcalls to rippled JSON-RPC, quorum 2 | `xrpl_icusd/**`, `chains/xrp/**` on `b02584e4` | PR #586 unmerged and disabled; no-vault return intent missing; non-443 outcall port unknown; Xaman only |
+| XRPL | Backend module (PR #586), no instance | Trust-line `icUSD` (D2 vs MPT) | Validated ledger, `tesSUCCESS`, `delivered_amount` | Schnorr Ed25519 over `STX\0` prefix | HTTPS outcalls to rippled JSON-RPC, quorum 2 | `xrpl_icusd/**`, `chains/xrp/**` on `b02584e4` | PR #586 unmerged and disabled; no-vault return intent missing; 15-digit validator not wired, caps unbounded, pending-import cap race and no origin split (BB-37); non-443 outcall port unknown; backend Wasm at 9,648,104 bytes against PocketIC 7's 10 MiB cap (12 MiB production limit); Xaman only |
 
 ## 11. Sequenced next steps (K)
 

@@ -57,9 +57,9 @@
     {
       "id": "xrpl-groundwork",
       "title": "XRPL groundwork",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "W19 (Sonnet) is writing the XRPL note on PR #586's issued-currency seam: the missing no-vault return specified as a follow-up to that PR, 15-digit per-operation and total caps, holder trust lines and trust limits. Read-only.",
+      "nextAction": "",
       "cardIds": [
         "BB-37"
       ]

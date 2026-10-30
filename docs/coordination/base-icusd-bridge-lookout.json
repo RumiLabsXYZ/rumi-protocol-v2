@@ -351,10 +351,10 @@
     },
     {
       "id": "BB-37",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "XRPL groundwork",
-      "evidenceText": "proof=none; Plan on PR #586's issued currency (MPT deferred) with 15-digit per-operation and total caps, holder trust lines, the missing no-vault return, ICP signing and RPC path, finality, reserves and trust limits",
+      "evidenceText": "proof=source; Plan on PR #586's issued currency with the missing no-vault return specified; found the 15-digit validator unwired, caps unbounded, a pending-import cap race and no origin split; PR untouched",
       "evidenceLinks": []
     },
     {

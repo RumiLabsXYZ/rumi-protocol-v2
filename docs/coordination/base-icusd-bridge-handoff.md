@@ -817,6 +817,26 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   4. A small proposed persona or catalog lesson with code pointers (finality-rule enums need value checks; shared JSON amount
      bounds use canonical decimal strings). Proposal only: no memory or catalog write.
 
+## Milestone 36 (2026-10-30): XRPL note accepted
+
+- BB-37 accepted (`docs/coordination/multichain/chain-xrpl.md`; PR #586 untouched). The no-vault return is specified as a
+  follow-up to #586: an ICP-side intent binds the destination account, payer, amount and a never-reused tag; the observer accepts
+  only a quorum-read, validated, `tesSUCCESS` Payment to the issuer with that tag from that payer, credited on `delivered_amount`;
+  payout is an escrow-to-owner ledger job; it never touches a vault or debt.
+- The coordinator checked two of its corrections on `b02584e4`: `parse_normal_request` (the 15-digit check) has no non-test
+  caller, and `begin_receive_canonical` returns escrow for undelivered claims, not delivered tokens. Other findings recorded as
+  implementation missing in the design: caps accept any u64, pending imports can race past the total cap, `O` has no origin
+  split. Implementation constraint: the backend Wasm is 9,648,104 bytes, against PocketIC 7's 10 MiB cap and the 12 MiB
+  production limit.
+- Profile refresh items added for W16 (BB-40): the XRPL devnet record is unsupported by #586 (remove or mark unsupported), the
+  derivation template must use #586's network names rather than a numeric id, and the testnet RPC blocker should reflect two
+  hosts at quorum two with one on a non-443 port. The design's 9.2 now lists `max_outstanding_e8s`.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W19 | BB-37 | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W20 | BB-36 | Sonnet | `claude-sonnet-5-5` | running |
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
