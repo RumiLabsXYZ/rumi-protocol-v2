@@ -741,6 +741,12 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Recorded gaps: no Sui devnet record (no stable identifier published), Ethereum endpoint list empty (none on ethereum.org; the
   EVM RPC canister has built-in providers), Solana named wallets empty (none sourced).
 - BB-37 (W19) dispatched read-only on PR #586's seam.
+- Miles accepted BB-38 at source and local-CLI level on `570b2fae`: he independently ran the built dry-run example for
+  2026-10-30 (exit 0, 9 profiles, 20 disabled networks, 0 violations), inspected the three fixes, and confirmed by `git diff`
+  that no bridge, backend, Foundry or frontend runtime file changed since `c82f2880`. No tests were duplicated.
+- BB-40 direction (Miles): turn the concrete implementation next steps into scoped QUEUED cards and ranked subprojects so
+  the Queue stays useful after groundwork closes. Queued means not started: no rollout, runtime implementation, new broad
+  test or review gate, or live action begins from this.
 
   | Handle | Card | Requested | Actual (run record) | State |
   | --- | --- | --- | --- | --- |
