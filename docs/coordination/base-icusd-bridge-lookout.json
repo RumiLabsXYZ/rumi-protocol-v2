@@ -479,10 +479,10 @@
     },
     {
       "id": "BB-53",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a, 53b and 53c accepted at component scope (53c: e4ee506a with correction 53c21490, return observer paying only from the durable record, monitors, audit). 53d in progress (W29)",
+      "evidenceText": "proof=local-test; In Review: 53a to 53c accepted; 53d delivered at 29295fb4 (W29, local): independent Sui supply reader for the host collector, Gate decode, fixtures; 351 Sui and 138/235 collector tests",
       "evidenceLinks": []
     },
     {

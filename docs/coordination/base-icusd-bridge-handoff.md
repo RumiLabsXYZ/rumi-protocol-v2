@@ -2721,6 +2721,42 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   and provider cadence, foreign mints identified only by counters, frequent not-evaluated C3, D6 and controller trust, module
   bytes unobserved. Same W29 continues 53d; same W28 continues BB-54 on the frozen interface.
 
+## Milestone 116 (2026-10-31): BB-53 53d delivered; whole BB-53 in Review
+
+- W29 (`claude-sonnet-5-5`) committed `29295fb4c7d2aba2e8ed8bc31f5e1f981d30fe9f` "feat(collector): independent Sui supply reader,
+  Gate decode and fixtures (BB-53 53d)", local only, parent `97f63935`. Coordinator scope check: eight files in
+  `src/rumi_bridge_destinations` (`collect.rs`, `live/{ic,mod,sui}.rs`, the `collect_live` example docs, two new fixtures) plus
+  MC-DEF-15 in the deferred log; no frontend, declaration, lock or generator file; the frozen Sui `.did`, `Cargo.lock`, every
+  `Cargo.toml` and the profiles unchanged since `e4ee506a`; `git diff --check` exits 0. W29's report on the accepted 53c
+  correction (`53c21490`) arrived with it and matches milestone 115; its 53d work in progress was kept in the worktree with a
+  patch and tarball (sha256 `bbe1f733...` and `6373fae6...`) in the coordinator scratchpad `53d-wip/`.
+- What works (mocks and fixtures only): `Readings::sui_supply` (a source without it fails by name), Sui read before the ICP-side
+  numbers with the finality rule, the Gate's minted minus burned equal to supply, custody zero by the atomic-burn design, a Sui
+  audit reporting RC, BU or stray refused, and the report printing the actual checkpoint, digest, epoch and counters; the host
+  reader `live/sui.rs` (feature `live-transport`): GraphQL over the existing transport, one answer per provider bound to the
+  profile's chain identifier, the head an operator checkpoint or the quorum-th highest, lagging providers not voting, Gate
+  checks (configured id, type, shared owner, version 1, stored chain identifier, supply identity, table sizes equal to counters,
+  distinct ids, 8 decimals through `coinMetadata`), GraphQL errors excluding a provider, a quorum of identical answers, the Gate
+  layout decoded independently and tested against the canister's golden `GATE_BCS`; `live/ic.rs` instance audit from
+  `get_buckets` and `get_config` pinned against the unchanged `.did`; an unconfigured Sui destination a named gap; D/X uniqueness,
+  the EVM, Solana and XRPL readers and the XRPL floor unchanged.
+- Checks (saved logs in the coordinator scratchpad): Sui crate 351 passed (`53d-sui-tests.log`), clippy and wasm32 clean; collector
+  138 passed default and 235 with `live-transport`; collector clippy shows only the three known `validate.rs` baseline lints and is
+  clean with that one lint allowed; fixture CLI: `collect_base_plus_sui.json` status ok, no flags; `collect_sui_supply_over_books.json`
+  flags `SupplyBoundBroken` (300000001 against 300000000 outstanding); a copy without the Sui reading is rejected by name; the
+  existing fixtures keep their outcomes. Failing development runs listed by W29 were all test-code or documentation fixes (an
+  expected error text, two compile errors in new tests, six `type_complexity` lints, a fixture description), none in production.
+- Integration cases: W29 mapped each brief item to existing named tests (round trip, eight-decimal fees, lost ledger, sign and
+  broadcast replies, wrong request, account, network, Gate, type, recipient and id, duplicate return, delayed admission and
+  callbacks, sequence gap and foreign mint, expiry plus missing digest held, upgrade and recovery) plus the new collector
+  round-trip tests, rather than duplicating them.
+- Omissions (MC-DEF-15): mocks and fixtures only (schema-derived shapes, no provider answered); `coinMetadata` takes no checkpoint
+  and returns null before the Gate's separate registration (the read then fails by name, never assuming 8 decimals); an operator
+  checkpoint needs every voting provider to serve it (retention unmeasured); no proof of package or UpgradeCap control (D6) or
+  module digest; custody zero by design, not measured; the instance's own Gate observation deliberately not read; the 53c
+  correction's heap-only token and hint cursor restart after an upgrade, C1 can stay not evaluated under constant deposit churn,
+  and one persistent unindexed hint costs one pass per 60 s until its 2 h expiry.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
