@@ -1892,6 +1892,20 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   Wasm 4,010,100 bytes); a proof row records CI run 41174255809 on `932ef8fa` (success; existing hosted workflow only);
   49c, 49d, BB-51 and BB-52 are named as local working milestones not in the head; the XRPL exclusion stays.
 
+## Milestone 85 (2026-10-31): BB-49 49d reviewed
+
+- Miles (`review-bb49d.md`): burn_saga, the release binding, claim extraction and ids and the custody monitor were inspected;
+  RC to BU to PR, the exact `burn_id([return_id])` binding with the saved recipient, amount, sender and proof, once-only
+  outcome marks and per-outer-transfer refund ids align. One bounded correction: `monitor::custody` checks idle only before
+  its awaits and reads the books only after, and equal supply reads do not fence an ordinary transfer, so a valid return
+  credited during the custody read can be judged against the pre-transfer balance and falsely accumulate deficit strikes;
+  fix by capturing book state and observer progress before the reads and revalidating after, deferring changed readings.
+  The 49c transaction-identity helper is reused for the secondary `getTransaction` in `apply_burns` and `apply_claim`.
+- Actual omission logged: MC-DEF-10 (CPI or inner transfers create no automatic refund claim and stay an unattributed held
+  stray). The credits-halt held state and its `admin_clear_credits_halt` recovery are documented rather than automated.
+- Same W28: the 49c fix commit, then this 49d correction as its own commit, each with red and green evidence; then the
+  builder slot goes to W29 for BB-52; then 49e. The rest of 49d can be accepted with these corrections.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
