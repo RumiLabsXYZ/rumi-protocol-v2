@@ -2956,6 +2956,19 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Same W28: one bounded correction on `412f1fda` with old-red and new-green F-1 and F-4 regressions, affected specs only, one
   svelte-check and build. Full BB-54 stays in Review; no frontend push.
 
+## Milestone 124 (2026-10-31): BB-60 profile upkeep dispatched
+
+- Miles (`next-bb60-profile-upkeep.md`): BB-60's plan includes profile updates as implementations land. The existing Haiku worker
+  W23 (`ad59f9244120369af`, requested Haiku) refreshes only the free-text descriptions and blocker source-reference strings in
+  `src/rumi_bridge_destinations/profiles/*.json` where accepted source contradicts them (for example `sui.json` saying no Sui code
+  exists or nothing is built, `solana.json` saying the observer, nonce lane, unattributed-burn seam and wallet connector do not
+  exist). Every `status` (disabled), `instance_ref` (null), claim and config field, every blocker id and kind (V7 requires the
+  historical ids) and every external verification date stays as is; historical ids that have landed in source say so and name the
+  remaining deployment, binding, live-evidence, custody, D6 or provider hold. The Sui frontend (BB-54) stays described as in
+  Review; the XRPL branch stays local and unpushed. Data-only verification by W23 (JSON parse and a structural before-and-after
+  comparison); the coordinator runs the existing profile dry-run once afterwards. Does not gate BB-54. Lanes: W28 on the BB-54
+  correction plus this one Haiku task.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
