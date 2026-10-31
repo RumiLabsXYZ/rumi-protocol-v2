@@ -407,18 +407,18 @@
     },
     {
       "id": "BB-44",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "EVM: additive native RPC variants with regenerated declarations",
-      "evidenceText": "proof=none; Resumed 2026-10-30 from its preserved partial edits on 324e6d13: additive Ethereum, Ethereum Sepolia and Arbitrum One native provider variants, row-bound; .did and bindings by the canonical script; legacy stored config decode",
+      "evidenceText": "proof=local-test; 0bf16f9f: additive EthMainnet, EthSepolia, ArbitrumOne provider variants, each valid only on its own row; input-only Candid widened (didc check passes), bindings by script; legacy config bytes pinned; 503 unit tests",
       "evidenceLinks": []
     },
     {
       "id": "BB-45",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "EVM: per-chain defaults and a sibling Foundry deploy script",
-      "evidenceText": "proof=none; Opens the install gate for Ethereum, Arbitrum and Monad in source with local init and head-rule tests; Robinhood waits on its probe, HyperEVM on archive providers or a redesign; catalog stays disabled; gas defaults; new deploy script",
+      "evidenceText": "proof=none; Claimed 2026-10-30 from 0bf16f9f: opens install for Ethereum, Arbitrum and Monad in source with per-chain defaults and local tests; Robinhood, HyperEVM stay blocked; sibling deploy script; catalog stays disabled",
       "evidenceLinks": []
     },
     {
