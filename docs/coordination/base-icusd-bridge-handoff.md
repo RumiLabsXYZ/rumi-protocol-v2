@@ -1746,6 +1746,11 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   untracked `move/` package and W28's active 49c writes left unstaged. Miles alone monitors hosted CI at the new head.
 - Pushed at 05:51 UTC: `667d8bbc..932ef8fa` (15 commits, Solana crate and coordination docs only), remote head verified
   equal to local `932ef8fa`. Later commits are local until the next cohort.
+- Miles' checkpoint: PR #591 open, draft and unmerged at `932ef8fa1454e91a332ac4d76094c03b6931b84a`; hosted CI run
+  41174255809 in progress for that head (started 05:51:48 UTC), monitored by Miles only. He hashed the downloaded Sui archive
+  himself (matches `861f8833...`) and observed `sui 1.82.3-bf4073918ed3`, so the local tooling is verified. His Lookout
+  browser view was stuck connecting (last independent read at revision 79) while the scoped publisher read back revision 84
+  unchanged (coordinator dry run after the push); a browser visibility issue, not a bridge gate.
 
 ## Held live actions
 
