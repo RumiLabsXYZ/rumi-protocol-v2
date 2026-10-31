@@ -90,6 +90,8 @@
    */
   const solanaConfig = $derived(selected && isEnabled(selected) && selected.family === 'solana' ? (selected.native ?? null) : null);
   const eyebrow = $derived(selected && selected.family === 'solana' ? 'INTERNET COMPUTER ↔ SOLANA' : 'INTERNET COMPUTER ↔ BASE');
+  /** The chain the header copy names, derived from the selected destination (Base for every EVM entry, as before). */
+  const chainName = $derived(selected && selected.family === 'solana' ? 'Solana' : 'Base');
 
   /** The newest status of one destination, read at the moment a flow asks. */
   function freshDestination(id: string): DestinationView | null {
@@ -122,7 +124,7 @@
     <p class="eyebrow">{eyebrow}</p>
     <h1 class="page-title">Bridge icUSD</h1>
     <p class="subtitle">
-      Move icUSD between the Internet Computer and Base. Every icUSD on Base is backed one to one by icUSD held in the bridge's escrow on the Internet Computer. Bridging does not borrow or create debt.
+      Move icUSD between the Internet Computer and {chainName}. Every icUSD on {chainName} is backed one to one by icUSD held in the bridge's escrow on the Internet Computer. Bridging does not borrow or create debt.
     </p>
   </header>
 

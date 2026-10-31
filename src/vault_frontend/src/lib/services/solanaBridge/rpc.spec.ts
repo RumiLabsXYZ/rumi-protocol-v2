@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createFetchSolanaRpc, SolanaRpcError } from './rpc';
+import { createFetchSolanaRpc, resolveSolanaRpc, SolanaRpcError, type SolanaRpcEndpoint } from './rpc';
+import { SOLANA_RPC_ENDPOINTS } from './endpoints';
+import { SOLANA_MAINNET, SOLANA_DEVNET } from './networks';
 
 /** A mocked `fetch`: the adapter is never pointed at a real node by a spec. */
 function node(handler: (method: string, params: unknown[]) => unknown) {
@@ -66,5 +68,44 @@ describe('the keyless Solana adapter', () => {
     await expect(down.getBlockHeight()).rejects.toThrow('could not be reached (offline)');
     const bad = createFetchSolanaRpc('https://node.example.invalid', (async () => ({ ok: false, status: 503, json: async () => ({}) })) as never);
     await expect(bad.getBlockHeight()).rejects.toThrow('HTTP 503');
+  });
+});
+
+describe('the deployment-time endpoint seam', () => {
+  const fetchLog: Array<{ url: string; method: string }> = [];
+  const fetchImpl = (async (url: string, init: { body: string }) => {
+    const body = JSON.parse(init.body);
+    fetchLog.push({ url, method: body.method });
+    return { ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: body.id, result: 4242 }) };
+  }) as never;
+  const mainnet = { networkId: SOLANA_MAINNET.networkId, genesisHash: SOLANA_MAINNET.genesisHash };
+  const entry = (overrides: Partial<SolanaRpcEndpoint> = {}): SolanaRpcEndpoint => ({ ...mainnet, url: 'https://rpc.example.invalid/path', ...overrides });
+
+  it('ships EMPTY: no endpoint, no probe, no adapter', () => {
+    expect(SOLANA_RPC_ENDPOINTS).toEqual([]);
+    expect(resolveSolanaRpc(mainnet, SOLANA_RPC_ENDPOINTS, fetchImpl)).toBeNull();
+    expect(fetchLog).toHaveLength(0);
+  });
+
+  it('builds the REAL adapter for an entry keyed to this network and genesis, and uses exactly that URL', async () => {
+    const rpc = resolveSolanaRpc(mainnet, [entry()], fetchImpl);
+    expect(rpc).not.toBeNull();
+    expect(await rpc!.getBlockHeight()).toBe(4242n);
+    expect(fetchLog).toEqual([{ url: 'https://rpc.example.invalid/path', method: 'getBlockHeight' }]);
+  });
+
+  it('never uses an entry written for another network or another genesis hash', () => {
+    expect(resolveSolanaRpc(mainnet, [entry({ networkId: SOLANA_DEVNET.networkId })], fetchImpl)).toBeNull();
+    expect(resolveSolanaRpc(mainnet, [entry({ genesisHash: SOLANA_DEVNET.genesisHash })], fetchImpl)).toBeNull();
+    expect(resolveSolanaRpc({ networkId: SOLANA_DEVNET.networkId, genesisHash: SOLANA_DEVNET.genesisHash }, [entry()], fetchImpl)).toBeNull();
+  });
+
+  it('treats an empty, malformed or insecure URL as not configured', () => {
+    for (const url of ['', '   ', 'not a url', 'http://rpc.example.invalid', 'ftp://rpc.example.invalid', 'javascript:alert(1)']) {
+      expect(resolveSolanaRpc(mainnet, [entry({ url })], fetchImpl), url).toBeNull();
+    }
+    // A local development node may use plain http.
+    expect(resolveSolanaRpc(mainnet, [entry({ url: 'http://127.0.0.1:8899' })], fetchImpl)).not.toBeNull();
+    expect(resolveSolanaRpc(mainnet, [entry({ url: 'http://localhost:8899' })], fetchImpl)).not.toBeNull();
   });
 });

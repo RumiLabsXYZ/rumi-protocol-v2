@@ -40,6 +40,8 @@ const mocks = vi.hoisted(() => {
     buildSolanaPrepareDeps: vi.fn(),
     getSolanaRpc: vi.fn(),
     registry: { get: vi.fn(), on: vi.fn() },
+    endpoints: [] as Array<{ networkId: string; genesisHash: string; url: string }>,
+    realGetSolanaRpc: null as unknown as (network: unknown) => unknown,
   };
 });
 
@@ -79,12 +81,21 @@ vi.mock('$lib/services/solanaBridge/solanaActor', async (importOriginal) => ({
   loadSolanaDestination: mocks.loadSolanaDestination,
   getAnonymousSolanaBridge: mocks.getAnonymousSolana,
 }));
-vi.mock('$lib/services/solanaBridge/solanaDeps', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/services/solanaBridge/solanaDeps')>()),
-  createSolanaSigners: mocks.createSolanaSigners,
-  buildSolanaPrepareDeps: mocks.buildSolanaPrepareDeps,
-  getSolanaRpc: mocks.getSolanaRpc,
+vi.mock('$lib/services/solanaBridge/endpoints', () => ({
+  get SOLANA_RPC_ENDPOINTS() {
+    return mocks.endpoints;
+  },
 }));
+vi.mock('$lib/services/solanaBridge/solanaDeps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('$lib/services/solanaBridge/solanaDeps')>();
+  mocks.realGetSolanaRpc = original.getSolanaRpc as never;
+  return {
+    ...original,
+    createSolanaSigners: mocks.createSolanaSigners,
+    buildSolanaPrepareDeps: mocks.buildSolanaPrepareDeps,
+    getSolanaRpc: mocks.getSolanaRpc,
+  };
+});
 
 import Page from './+page.svelte';
 import { makeBridgeInfo, TEST_OWNER } from '$lib/services/baseBridge/testSupport';
@@ -146,6 +157,7 @@ const signers = {
 };
 
 const fill = (byte: number, n = 32) => new Uint8Array(n).fill(byte);
+const hexOf = (bytes: ArrayLike<number>) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 let standard: ReturnType<typeof makeStandardWallet>;
 
 function enableSolana() {
@@ -161,6 +173,7 @@ beforeEach(() => {
   standard = makeStandardWallet('Fake Wallet', [makeAccount(KEYS.holder)]);
   standard.signer = signWith(fill(0xe5, 64)) as never;
   mocks.flags.enabled = true;
+  mocks.endpoints.length = 0;
   mocks.principal.set(TEST_OWNER);
   mocks.generation.set(0);
   mocks.loadBridgeConfig.mockReset().mockImplementation(async () => resolveBridgeConfig(makeBridgeInfo()));
@@ -194,6 +207,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   if (instance) unmount(instance as any);
   instance = undefined;
   host.remove();
@@ -293,6 +307,10 @@ describe('an enabled Solana instance (injected fixture)', () => {
     expect(option('solana-mainnet')!.hasAttribute('aria-disabled')).toBe(false);
     await selectSolana();
     expect(host.textContent).toContain('INTERNET COMPUTER ↔ SOLANA');
+    // The subtitle follows the selected destination.
+    expect(host.querySelector('.subtitle')!.textContent).toContain('between the Internet Computer and Solana.');
+    expect(host.querySelector('.subtitle')!.textContent).toContain('Every icUSD on Solana is backed one to one');
+    expect(host.querySelector('.subtitle')!.textContent).not.toContain('Base');
     expect(host.querySelector('#tab-icp-to-solana')!.getAttribute('aria-selected')).toBe('true');
     expect(host.querySelector('#tab-solana-to-icp')).toBeTruthy();
     expect(host.textContent).toContain('ICP to Solana');
@@ -498,7 +516,60 @@ describe('an enabled Solana instance (injected fixture)', () => {
     chain.height = 1_001n;
     click(/^Check the evidence$/);
     await settle();
-    expect(host.querySelector('[data-testid="evidence"]')!.textContent).toContain('Not found on Solana');
+    // Absence plus expiry is NOT proof that it never executed: the attempt stays held, with no way to forget it.
+    expect(host.querySelector('[data-testid="evidence"]')!.textContent).toContain('Not found, outcome unknown');
+    expect(host.querySelector('[data-testid="evidence"]')!.textContent).not.toMatch(/never landed|No icUSD moved/);
+    expect(button(/discard/i)).toBeUndefined();
+    const kept = new SolanaIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).list();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ id: stored.id, status: 'held', messageHex: stored.messageHex });
+    expect(standard.signs).toHaveLength(0);
+    expect(chain.sent).toHaveLength(0);
+  });
+
+  /** A wallet that signs and sends, then fails ambiguously, and the transaction the wallet in fact broadcast. */
+  async function heldSendOnlyAttempt(): Promise<{ stored: SolReturnIntent; wire: Uint8Array }> {
+    standard = makeStandardWallet('Send Only', [makeAccount(KEYS.holder)], {
+      [SOLANA_SIGN_TRANSACTION]: undefined,
+      [SOLANA_SIGN_AND_SEND_TRANSACTION]: {
+        version: '1.0.0',
+        supportedTransactionVersions: ['legacy'],
+        signAndSendTransaction: async () => {
+          throw new Error('RPC timeout while confirming');
+        },
+      },
+    });
+    await openReturnTab();
+    type('#sol-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Sign in your Solana wallet$/);
+    await settle();
+    const stored = new SolanaIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).list()[0] as SolReturnIntent;
+    const message = Uint8Array.from(stored.messageHex.match(/../g)!.map((h) => parseInt(h, 16)));
+    return { stored, wire: Uint8Array.from([1, ...fill(0xe5, 64), ...message]) };
+  }
+
+  it('does not let a held attempt go while Solana\'s failure of it is not final yet', async () => {
+    const { stored, wire } = await heldSendOnlyAttempt();
+    // The wallet in fact broadcast it, and its execution failed, but only at "confirmed" so far.
+    landOn(chain, wire, 'confirmed', true);
+    click(/^Check the evidence$/);
+    await settle();
+    expect(host.querySelector('[data-testid="tracking"]')!.textContent).toContain('Failed, but not final yet');
+    expect(button(/discard/i)).toBeUndefined();
+    const kept = new SolanaIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).list();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ id: stored.id, messageHex: stored.messageHex });
+    expect(standard.signs).toHaveLength(0);
+  });
+
+  it('lets a held attempt go once Solana FINALIZES its failure', async () => {
+    const { wire } = await heldSendOnlyAttempt();
+    landOn(chain, wire, 'finalized', true);
+    click(/^Check the evidence$/);
+    await settle();
+    expect(host.querySelector('[data-testid="evidence"]')!.textContent).toContain('The transaction failed on Solana');
     click(/^Discard this attempt$/);
     await settle();
     expect(new SolanaIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).list()).toHaveLength(0);
@@ -596,6 +667,141 @@ describe('an enabled Solana instance (injected fixture)', () => {
     expect(standard.signs).toHaveLength(0);
     expect(chain.sent).toHaveLength(0);
   });
+
+  it('never offers to forget a bridge request that may have been submitted: the original is retried under its own id, with no second request', async () => {
+    enableSolana();
+    render();
+    await settle();
+    await selectSolana();
+    await connectWallet();
+    // The bridge call is lost (the ingress is still pending), and the query by request id finds nothing yet.
+    signers.bridge.bridge_to_solana.mockRejectedValueOnce(new Error('ingress timed out'));
+    type('#sol-icp-amount', '2');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Approve and bridge$/);
+    await settle();
+    expect(host.textContent).toContain('not confirmed yet');
+    expect(button(/discard/i)).toBeUndefined();
+    const journal = () => new SolanaIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).list();
+    expect(journal()).toHaveLength(1);
+    const originalId = journal()[0].id;
+    // The old update executes late. The only way forward is the same request id, which returns the existing deposit.
+    signers.bridge.bridge_to_solana.mockImplementationOnce(async (args: { client_request_id: Uint8Array }) => ({ Ok: makeSolDeposit({ client_request_id: args.client_request_id, status: { Escrowed: null } }) }));
+    click(/^Retry with the same request$/);
+    await settle();
+    const ids = signers.bridge.bridge_to_solana.mock.calls.map((call) => hexOf(call[0].client_request_id));
+    expect(ids).toEqual([originalId, originalId]);
+    expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(journal()).toHaveLength(1);
+    expect(journal()[0]).toMatchObject({ id: originalId, status: 'submitted' });
+  });
+
+  it('after a reload, an approved request whose bridge call may have started offers only the same-id continuation and blocks a fresh start', async () => {
+    enableSolana();
+    render();
+    await settle();
+    await selectSolana();
+    await connectWallet();
+    signers.bridge.bridge_to_solana.mockRejectedValueOnce(new Error('ingress timed out'));
+    type('#sol-icp-amount', '2');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Approve and bridge$/);
+    await settle();
+    const journal = () => new SolanaIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).list();
+    expect(journal()).toHaveLength(1);
+    expect(journal()[0].status).toBe('approved');
+    const originalId = journal()[0].id;
+
+    // Reload. The earlier request is shown and the query by request id still finds nothing.
+    unmount(instance as any);
+    host.innerHTML = '';
+    render();
+    await settle();
+    await selectSolana();
+    await connectWallet();
+    // A fresh start with a new request id is refused: no second approval, no second bridge request.
+    type('#sol-icp-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Approve and bridge$/);
+    await settle();
+    expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(signers.bridge.bridge_to_solana).toHaveBeenCalledTimes(1);
+    expect(journal()).toHaveLength(1);
+    // The earlier request resumes: no discard, only the same-id continuation.
+    click(/^Check status$/);
+    await settle();
+    expect(host.textContent).toContain('Approval confirmed');
+    expect(button(/discard/i)).toBeUndefined();
+    signers.bridge.bridge_to_solana.mockImplementationOnce(async (args: { client_request_id: Uint8Array }) => ({ Ok: makeSolDeposit({ client_request_id: args.client_request_id, status: { Escrowed: null } }) }));
+    click(/^Bridge to Solana$/);
+    await settle();
+    const ids = signers.bridge.bridge_to_solana.mock.calls.map((call) => hexOf(call[0].client_request_id));
+    expect(ids).toEqual([originalId, originalId]);
+    expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(journal()).toHaveLength(1);
+    expect(journal()[0]).toMatchObject({ id: originalId, status: 'submitted' });
+  });
+
+  /** A fake Solana node behind the global fetch: records every request so a spec can see which URL was used. */
+  function stubNode() {
+    const log: Array<{ url: string; method: string }> = [];
+    const stub = vi.fn(async (url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body);
+      log.push({ url, method: body.method });
+      const result =
+        body.method === 'getTokenAccountsByOwner'
+          ? { value: [{ pubkey: KEYS.holderSource, account: { owner: makeSolanaConfig().tokenProgramId, data: { parsed: { info: { tokenAmount: { amount: '5000000000' } } } } } }] }
+          : body.method === 'getLatestBlockhash'
+            ? { value: { blockhash: base58Encode(fill(0x77)), lastValidBlockHeight: 1000 } }
+            : 900;
+      return { ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: body.id, result }) };
+    });
+    vi.stubGlobal('fetch', stub);
+    return { log, stub };
+  }
+
+  it('with an endpoint configured for this network and genesis, the REAL adapter serves the return flow', async () => {
+    mocks.getSolanaRpc.mockImplementation((network: unknown) => mocks.realGetSolanaRpc(network));
+    const cfg = makeSolanaConfig();
+    mocks.endpoints.push({ networkId: cfg.network.networkId, genesisHash: cfg.network.genesisHash, url: 'https://rpc.test.invalid/solana' });
+    const { log } = stubNode();
+    await openReturnTab();
+    expect(log.map((entry) => entry.method)).toContain('getTokenAccountsByOwner');
+    expect(new Set(log.map((entry) => entry.url))).toEqual(new Set(['https://rpc.test.invalid/solana']));
+    expect(host.querySelector<HTMLSelectElement>('#sol-ret-source')!.value).toBe(KEYS.holderSource);
+    type('#sol-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    expect(host.querySelector('[data-testid="return-account"]')!.textContent).toContain(cfg.returnAccount);
+    expect(log.map((entry) => entry.method)).toContain('getLatestBlockhash');
+    // The adapter is keyless: reviewing asked the wallet for nothing.
+    expect(standard.signs).toHaveLength(0);
+    expect(log.map((entry) => entry.method)).not.toContain('sendTransaction');
+  });
+
+  it('with no endpoint configured, a return cannot be prepared and no node is ever contacted', async () => {
+    mocks.getSolanaRpc.mockImplementation((network: unknown) => mocks.realGetSolanaRpc(network));
+    const { stub } = stubNode();
+    await openReturnTab();
+    expect(stub).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('no Solana node configured');
+    expect((button(/^Review transfer$/) as HTMLButtonElement).disabled).toBe(true);
+    expect(host.querySelector<HTMLSelectElement>('#sol-ret-source')!.value).toBe('');
+    expect(standard.signs).toHaveLength(0);
+  });
+
+  it('ignores an endpoint written for another genesis hash', async () => {
+    mocks.getSolanaRpc.mockImplementation((network: unknown) => mocks.realGetSolanaRpc(network));
+    const cfg = makeSolanaConfig();
+    mocks.endpoints.push({ networkId: cfg.network.networkId, genesisHash: '4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY', url: 'https://rpc.test.invalid/other' });
+    const { stub } = stubNode();
+    await openReturnTab();
+    expect(stub).not.toHaveBeenCalled();
+    expect((button(/^Review transfer$/) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
 
 describe('Base is unchanged by the Solana branch', () => {
@@ -607,6 +813,7 @@ describe('Base is unchanged by the Solana branch', () => {
     expect(host.querySelector('#icp-amount')).toBeTruthy();
     expect(host.querySelector('#tab-icp-to-base')).toBeTruthy();
     expect(host.textContent).toContain('INTERNET COMPUTER ↔ BASE');
+    expect(host.querySelector('.subtitle')!.textContent).toContain('between the Internet Computer and Base. Every icUSD on Base is backed one to one');
     expectNoSolanaWalletActivity();
     expect(mocks.createSolanaSigners).not.toHaveBeenCalled();
   });

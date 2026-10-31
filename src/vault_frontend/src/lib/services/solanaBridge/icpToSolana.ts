@@ -292,7 +292,7 @@ export function startIcpToSolana(deps: SolDepositDeps, quote: IcpToBaseQuote, em
     return Promise.resolve();
   }
   if (unresolvedDeposits(deps.store).length > 0) {
-    emit({ type: 'blocked', message: 'An earlier bridge request on this device has no recorded outcome yet. Resolve or discard it first.' });
+    emit({ type: 'blocked', message: 'An earlier bridge request on this device has no recorded outcome yet. Check its status and continue it with the same request first.' });
     return Promise.resolve();
   }
   const intent: SolDepositIntent = {
@@ -455,10 +455,6 @@ export async function findDepositByRequestId(deps: Pick<SolDepositDeps, 'reads' 
 export async function resumeIcpToSolana(deps: SolDepositDeps, intent: SolDepositIntent, emit: Emit): Promise<void> {
   emit({ type: 'resume_started', intent });
   await resolveUncertain(deps, intent, emit, '', null, true);
-}
-
-export function discardDeposit(deps: Pick<SolDepositDeps, 'store'>, intent: SolDepositIntent): void {
-  deps.store.remove(intent.id);
 }
 
 function forget(deps: SolDepositDeps, intent: SolDepositIntent): void {

@@ -144,3 +144,40 @@ export function createFetchSolanaRpc(url: string, fetchImpl: Fetch = (input, ini
     },
   };
 }
+
+/** One deployment-time endpoint, keyed to the Solana network it serves and that network's genesis hash. */
+export interface SolanaRpcEndpoint {
+  networkId: string;
+  genesisHash: string;
+  url: string;
+}
+
+function usableEndpointUrl(raw: string): string | null {
+  const text = raw.trim();
+  if (text === '') return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  if (url.protocol === 'https:' || (url.protocol === 'http:' && local)) return url.toString();
+  return null;
+}
+
+/**
+ * The keyless adapter for a network, from the deployment-time endpoint list. Null when no entry matches BOTH the network id
+ * and its genesis hash, or when the matching entry's URL is empty, malformed or insecure. With the shipped (empty) list it
+ * is always null; no node is contacted here, and the adapter only talks when a flow calls it.
+ */
+export function resolveSolanaRpc(
+  network: { networkId: string; genesisHash: string },
+  endpoints: readonly SolanaRpcEndpoint[],
+  fetchImpl?: Fetch,
+): SolanaRpc | null {
+  const entry = endpoints.find((e) => e.networkId === network.networkId && e.genesisHash === network.genesisHash);
+  if (!entry) return null;
+  const url = usableEndpointUrl(entry.url);
+  return url ? createFetchSolanaRpc(url, fetchImpl) : null;
+}

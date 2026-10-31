@@ -318,6 +318,40 @@ describe('signing with a wallet that signs and sends', () => {
     expect(h.store.list()).toHaveLength(0);
   });
 
+  it('keeps the original when the wallet broadcasts and then throws a transport error that only sounds like a refusal', async () => {
+    for (const text of ['connection closed', 'Transaction cancelled by the relay', 'request denied: HTTP 429 from the node', 'popup closed unexpectedly', 'WebSocket was closed before the confirmation arrived']) {
+      const h = harness({ wallet: sendOnly });
+      const p = await plan(h);
+      h.wallet.onSignAndSend = async () => {
+        // The wallet really broadcast the transaction, then lost its connection.
+        landOn(h.chain, Uint8Array.from([1, ...fill(0xe5, 64), ...p.message]));
+        throw new Error(text);
+      };
+      await startReturn(h.deps, p, h.emit);
+      expect(last(h), text).toMatchObject({ type: 'held' });
+      const held = only(h);
+      expect(held, text).toMatchObject({ status: 'held', signMode: 'sign_and_send', messageHex: toHex(p.message), nonce: p.nonce, blockhash: p.blockhash.blockhash });
+      // The record is durable: a fresh store over the same storage sees the same original.
+      expect(new SolanaIntentStore(h.storage, TEST_OWNER_TEXT).list()[0], text).toMatchObject({ id: held.id, status: 'held', messageHex: toHex(p.message) });
+      // Zero fresh signing, nothing rebuilt.
+      expect(h.wallet.calls, text).toHaveLength(1);
+      expect(h.chain.callsTo('getLatestBlockhash'), text).toHaveLength(1);
+      expect(h.chain.sent, text).toHaveLength(0);
+    }
+  });
+
+  it('still clears cleanly on an explicit user rejection, whatever its message says', async () => {
+    for (const message of ['User rejected the request.', 'closed', 'Transaction cancelled']) {
+      const h = harness({ wallet: sendOnly });
+      h.wallet.onSignAndSend = async () => {
+        throw rejection(message);
+      };
+      await startReturn(h.deps, await plan(h), h.emit);
+      expect(last(h), message).toEqual({ type: 'declined' });
+      expect(h.store.list(), message).toHaveLength(0);
+    }
+  });
+
   it('HOLDS the original intent on an ambiguous answer and never rebuilds or signs again', async () => {
     for (const ambiguous of [
       async () => {
@@ -506,21 +540,22 @@ describe('reload without resubmission', () => {
     expect(verdictOf(evidence)).toBe('credited');
   });
 
-  it('allows discarding only on proof that nothing moved', async () => {
+  it('allows discarding only a never-asked attempt or a FINALIZED failure; absence and expiry prove nothing', async () => {
     const h = harness({ wallet: { signs: false, sendsAndSigns: true } });
     h.wallet.onSignAndSend = async () => {
       throw new Error('timeout');
     };
     await startReturn(h.deps, await plan(h), h.emit);
     const held = only(h);
-    // The blockhash expired and nothing landed: provably not landed.
+    // The blockhash expired and the node knows nothing of it. That is NOT proof that it never executed.
     h.chain.height = 1_001n;
     const expired = await reconcileReturn(h.deps, held);
-    expect(verdictOf(expired)).toBe('not_landed');
-    expect(discardReturn(h.deps, held, verdictOf(expired))).toEqual({ ok: true });
-    expect(h.store.list()).toHaveLength(0);
+    expect(expired.chain).toEqual({ kind: 'not_found', blockhashExpired: true });
+    expect(verdictOf(expired)).toBe('unknown');
+    expect(discardReturn(h.deps, held, verdictOf(expired))).toMatchObject({ ok: false });
+    expect(h.store.list()).toHaveLength(1);
 
-    // A saved signature that landed but failed in execution moved no icUSD.
+    // A saved signature whose failure is FINALIZED moved no icUSD.
     const g = harness();
     await startReturn(g.deps, await plan(g), g.emit);
     const sent = only(g);
@@ -623,9 +658,111 @@ describe('status: pending, then burn, then final release', () => {
   it('describes each stage of the evidence in plain words', () => {
     const base = { signature: 'S', recovered: false, ret: null, release: null };
     expect(describeReturnProgress(null).label).toBe('Sent to Solana');
-    expect(describeReturnProgress({ ...base, chain: { kind: 'failed_on_chain' } })).toMatchObject({ label: 'The transaction failed on Solana', terminal: true });
-    expect(describeReturnProgress({ ...base, chain: { kind: 'not_found', blockhashExpired: true } }).label).toBe('Not found on Solana');
+    expect(describeReturnProgress({ ...base, chain: { kind: 'failed_on_chain', finalized: true } })).toMatchObject({ label: 'The transaction failed on Solana', terminal: true });
+    expect(describeReturnProgress({ ...base, chain: { kind: 'failed_on_chain', finalized: false } })).toMatchObject({ label: 'Failed, but not final yet', terminal: false });
+    const expiredText = describeReturnProgress({ ...base, chain: { kind: 'not_found', blockhashExpired: true } });
+    expect(expiredText).toMatchObject({ label: 'Not found, outcome unknown', terminal: false });
+    expect(expiredText.detail).not.toMatch(/never landed|No icUSD moved/);
+    expect(expiredText.detail).toMatch(/not proof/i);
     expect(describeReturnProgress({ ...base, chain: { kind: 'unavailable', message: 'x' } }).label).toBe('Checking');
+  });
+});
+
+describe('evidence never authorises forgetting an uncertain transfer', () => {
+  it('keeps a sent but unindexed transfer held after its blockhash expires', async () => {
+    const h = harness();
+    await startReturn(h.deps, await plan(h), h.emit);
+    const sent = only(h);
+    expect(sent.status).toBe('sent');
+    // The node has not indexed it (no status, nothing in the listing) and the blockhash is now too old to land.
+    h.chain.height = 1_001n;
+    const evidence = await reconcileReturn(h.deps, sent);
+    expect(evidence.chain).toEqual({ kind: 'not_found', blockhashExpired: true });
+    expect(verdictOf(evidence)).toBe('unknown');
+    expect(mayDiscard(sent, verdictOf(evidence))).toBe(false);
+    expect(discardReturn(h.deps, sent, verdictOf(evidence))).toMatchObject({ ok: false });
+    // The original identity is retained and nothing was signed or sent again.
+    expect(h.store.list()).toHaveLength(1);
+    expect(h.store.get(sent.id)).toMatchObject({ id: sent.id, messageHex: sent.messageHex, signature: sent.signature, nonce: sent.nonce });
+    expect(h.wallet.calls).toHaveLength(1);
+    expect(h.chain.sent).toHaveLength(1);
+  });
+
+  it('keeps a wallet-sent transfer held when it fell outside the 25 signatures that are searched', async () => {
+    const h = harness({ wallet: { signs: false, sendsAndSigns: true } });
+    const p = await plan(h);
+    h.wallet.onSignAndSend = async () => {
+      // The wallet really broadcast it, then lost its reply.
+      landOn(h.chain, Uint8Array.from([1, ...fill(0xe5, 64), ...p.message]));
+      throw new Error('timeout');
+    };
+    await startReturn(h.deps, p, h.emit);
+    const held = only(h);
+    expect(held.status).toBe('held');
+    // Thirty newer signatures push it out of the search window, and the blockhash has expired.
+    for (let i = 0; i < 30; i++) h.chain.listing.unshift({ signature: `Newer${i}`, failed: false });
+    h.chain.height = 1_001n;
+    const evidence = await reconcileReturn(h.deps, held);
+    expect(evidence.signature).toBeNull();
+    expect(verdictOf(evidence)).toBe('unknown');
+    expect(discardReturn(h.deps, held, verdictOf(evidence))).toMatchObject({ ok: false });
+    expect(h.store.list()).toHaveLength(1);
+    expect(h.wallet.calls).toHaveLength(1);
+  });
+
+  it.each(['processed', 'confirmed'] as const)('does not treat a %s failure as definitive: the same signature can still finalize successfully', async (confirmation) => {
+    const h = harness();
+    await startReturn(h.deps, await plan(h), h.emit);
+    const sent = only(h);
+    h.chain.statuses.set(sent.signature!, { confirmation, failed: true, slot: 9n });
+    const early = await reconcileReturn(h.deps, sent);
+    expect(verdictOf(early)).not.toBe('failed_on_chain');
+    expect(mayDiscard(sent, verdictOf(early))).toBe(false);
+    expect(discardReturn(h.deps, sent, verdictOf(early))).toMatchObject({ ok: false });
+    expect(h.store.list()).toHaveLength(1);
+    // The fork it failed on is dropped and the transfer finalizes successfully.
+    h.chain.statuses.set(sent.signature!, { confirmation: 'finalized', failed: false, slot: 12n });
+    const later = await reconcileReturn(h.deps, sent);
+    expect(verdictOf(later)).toBe('landed');
+    expect(mayDiscard(sent, verdictOf(later))).toBe(false);
+    expect(discardReturn(h.deps, sent, verdictOf(later))).toMatchObject({ ok: false });
+    expect(h.store.list()).toHaveLength(1);
+  });
+
+  it('counts a finalized failure of a signature the wallet REPORTED only when that transaction carries the saved message', async () => {
+    const h = harness({ wallet: { signs: false, sendsAndSigns: true } });
+    const p = await plan(h);
+    await startReturn(h.deps, p, h.emit);
+    const sent = only(h);
+    expect(sent).toMatchObject({ status: 'sent', signMode: 'sign_and_send' });
+    h.chain.statuses.set(sent.signature!, { confirmation: 'finalized', failed: true, slot: 9n });
+    // The transaction behind the reported signature is unknown, or is some other message: not proof about ours.
+    let evidence = await reconcileReturn(h.deps, sent);
+    expect(evidence.chain.kind).toBe('unavailable');
+    expect(verdictOf(evidence)).toBe('unknown');
+    const other = buildReturnMessage({ tokenProgram: 'token2022', mint: fill(0x44), returnOwner: fill(0x33), roleKeys: [fill(0x11), fill(0x22)], holder: pubkeyFromBase58(KEYS.holder)!, sourceTokenAccount: pubkeyFromBase58(KEYS.holderSource)!, amount: 300_000_000n, memo: p.memo, recentBlockhash: fill(0x78) });
+    h.chain.landed.set(sent.signature!, Uint8Array.from([1, ...fill(0xe5, 64), ...other.message]));
+    evidence = await reconcileReturn(h.deps, sent);
+    expect(verdictOf(evidence)).toBe('unknown');
+    expect(discardReturn(h.deps, sent, verdictOf(evidence))).toMatchObject({ ok: false });
+    expect(h.store.list()).toHaveLength(1);
+    // Carrying exactly the saved message, the finalized failure is definitive.
+    h.chain.landed.set(sent.signature!, Uint8Array.from([1, ...fill(0xe5, 64), ...p.message]));
+    evidence = await reconcileReturn(h.deps, sent);
+    expect(evidence.chain).toEqual({ kind: 'failed_on_chain', finalized: true });
+    expect(discardReturn(h.deps, sent, verdictOf(evidence))).toEqual({ ok: true });
+  });
+
+  it('allows a discard once the failure of the exact saved attempt is FINALIZED', async () => {
+    const h = harness();
+    await startReturn(h.deps, await plan(h), h.emit);
+    const sent = only(h);
+    h.chain.statuses.set(sent.signature!, { confirmation: 'finalized', failed: true, slot: 9n });
+    const evidence = await reconcileReturn(h.deps, sent);
+    expect(evidence.chain).toEqual({ kind: 'failed_on_chain', finalized: true });
+    expect(verdictOf(evidence)).toBe('failed_on_chain');
+    expect(discardReturn(h.deps, sent, verdictOf(evidence))).toEqual({ ok: true });
+    expect(h.store.list()).toHaveLength(0);
   });
 });
 

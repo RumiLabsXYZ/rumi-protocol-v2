@@ -16,7 +16,8 @@ import { resolveSolanaConfig, type SolanaBridgeConfig } from './config';
 import type { IcpToBaseConfig, PrepareDeps, SolDepositDeps } from './icpToSolana';
 import type { ReturnDeps } from './solanaToIcp';
 import type { SolanaIntentStore } from './intents';
-import type { SolanaRpc } from './rpc';
+import { resolveSolanaRpc, type SolanaRpc } from './rpc';
+import { SOLANA_RPC_ENDPOINTS } from './endpoints';
 import type { SolanaWalletSession } from './walletStandard';
 import { getAnonymousAgent, getAnonymousSolanaBridge, getSolanaBridgeCanisterId } from './solanaActor';
 
@@ -41,12 +42,12 @@ export async function createSolanaSigners(): Promise<SolanaSigners> {
 }
 
 /**
- * The keyless Solana node adapter for a network. No endpoint is configured in this build, so it is null and an enabled
- * Solana destination cannot be reached with it: enabling one needs a deployment-time endpoint (an activation step that
- * is held). The specs inject their own.
+ * The keyless Solana node adapter for a network, from the deployment-time endpoint list (`endpoints.ts`, empty in every
+ * build today). Null when no endpoint is configured for this network and genesis: a Solana to ICP return then cannot be
+ * prepared, and the page says so. A configured endpoint is served by the real `createFetchSolanaRpc`.
  */
-export function getSolanaRpc(_network: SolanaBridgeConfig['network']): SolanaRpc | null {
-  return null;
+export function getSolanaRpc(network: SolanaBridgeConfig['network']): SolanaRpc | null {
+  return resolveSolanaRpc(network, SOLANA_RPC_ENDPOINTS);
 }
 
 /** Anonymous reads used to build a quote. Nothing here opens a wallet prompt. */

@@ -70,7 +70,11 @@ export function isUsableSolanaWallet(wallet: Wallet): boolean {
 
 const REJECTED = /reject|denied|declin|cancel|closed|dismiss|not approved/i;
 
-/** Whether an error is the user saying no (nothing was signed or sent). */
+/**
+ * Whether an error LOOKS like the user saying no. Message matching is a hint, never proof. Use it only where the wallet
+ * cannot have broadcast anything (`solana:signTransaction` returns signed bytes and sends nothing), where a wrong guess
+ * only changes the wording. For a wallet that signs AND sends, use `isExplicitUserRejection`.
+ */
 export function isWalletRejection(error: unknown): boolean {
   if (error && typeof error === 'object') {
     const e = error as { code?: unknown; name?: unknown; message?: unknown };
@@ -79,6 +83,16 @@ export function isWalletRejection(error: unknown): boolean {
     if (typeof e.message === 'string') return REJECTED.test(e.message);
   }
   return typeof error === 'string' && REJECTED.test(error);
+}
+
+/**
+ * A refusal the wallet raised BEFORE it signed or broadcast anything: the explicit user-rejection code (4001, the code the
+ * Solana wallets raise when the user dismisses the prompt). Message text and error names are NOT proof: a wallet that
+ * already broadcast can throw "connection closed" or a timeout that merely sounds like a refusal. Only this signal may
+ * clear a sign-and-send attempt; anything else keeps the original attempt held.
+ */
+export function isExplicitUserRejection(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 4001;
 }
 
 /** What the transfer flows need from a connected wallet. */

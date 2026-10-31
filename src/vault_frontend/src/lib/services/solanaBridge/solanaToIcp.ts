@@ -16,10 +16,16 @@
  *    (`signed`) BEFORE anything is broadcast, then `sent`. The wallet call is the first asynchronous step of the click.
  *  - A wallet that returns signed bytes is checked: the bytes must be our message, signed once. A wallet that
  *    changed the transaction gets nothing broadcast (the bridge would read it as a stray, not a return).
- *  - A rejection is clean (nothing was signed): the attempt is forgotten. An AMBIGUOUS sign-and-send result (the wallet
- *    may have broadcast) holds the ORIGINAL intent. It is never rebuilt, never signed again and never replaced
+ *  - A rejection is clean (nothing was signed): the attempt is forgotten. For a wallet that signs AND sends, only the
+ *    explicit user-rejection code counts (`isExplicitUserRejection`); message text such as "closed" or "cancelled" is
+ *    not proof, because a wallet can broadcast and then lose its connection. Any other sign-and-send error, and any
+ *    AMBIGUOUS result, holds the ORIGINAL intent. It is never rebuilt, never signed again and never replaced
  *    automatically; the holder resolves it with evidence (the saved signature, a search for our exact message in the
- *    wallet's recent transactions, the bridge's own records). A passed blockhash alone is never a permit to retry.
+ *    wallet's recent transactions, the bridge's own records).
+ *  - ABSENCE IS NOT PROOF. The search reads only the latest wallet signatures and a node answers null for anything
+ *    pruned or not yet indexed, so "not found" stays unknown even after the blockhash expired. Only a FINALIZED failure
+ *    of the exact saved attempt lets it be forgotten (a failure seen at processed or confirmed can still be replaced
+ *    by a successful finalized execution of the same signature).
  *  - A rebroadcast sends the SAME saved bytes (the same signature), so it cannot pay twice.
  *  - A wallet callback or a signature is a hint. Only the bridge canister's release record settles a return.
  *  - A wallet is asked only after `assertCanSign` agrees (a disabled destination never reaches it), and only while the
@@ -39,7 +45,7 @@ import type { BlockhashInfo, HolderTokenAccount, SolanaRpc } from './rpc';
 import { SolIntentStoreError, type SolanaIntentStore, type SolReturnIntent } from './intents';
 import { describeSolRelease, describeSolReturn } from './status';
 import { buildReturnMessage, checkSignedTransaction, messageOfWire, unsignedTransactionBytes } from './transaction';
-import { isWalletRejection, type SolanaWalletSession } from './walletStandard';
+import { isExplicitUserRejection, isWalletRejection, type SolanaWalletSession } from './walletStandard';
 
 // ---------------------------------------------------------------------------
 // Pure: the draft
@@ -212,8 +218,16 @@ export async function prepareReturn(deps: ReturnDeps, input: ReturnDraftInput): 
 export type ChainEvidence =
   | { kind: 'finalized'; slot: bigint }
   | { kind: 'in_flight'; confirmation: 'processed' | 'confirmed' }
-  | { kind: 'failed_on_chain' }
-  /** The node does not know the signature. `blockhashExpired` says whether that blockhash can still land. */
+  /**
+   * The node reports that the exact saved attempt failed in execution. Only a FINALIZED failure is definitive: a failure
+   * seen at processed or confirmed can still be replaced by a successful finalized execution of the same signature.
+   */
+  | { kind: 'failed_on_chain'; finalized: boolean }
+  /**
+   * The node does not know the signature. This is NOT proof that the transfer never executed: the search reads only the
+   * latest wallet signatures and a node answers null for anything pruned, not yet indexed or unknown. `blockhashExpired`
+   * only says the blockhash can no longer be included; it never makes absence a proof.
+   */
   | { kind: 'not_found'; blockhashExpired: boolean | null }
   | { kind: 'unavailable'; message: string };
 
@@ -232,12 +246,11 @@ export type ReturnVerdict =
   | 'credited'
   /** Finalized on Solana; the bridge will credit it (or can be told). */
   | 'landed'
+  /** Seen on Solana but not final yet (including a failure that is not final). It can still change. */
   | 'in_flight'
-  /** It landed and failed in execution: the tokens did not move. Safe to discard. */
+  /** The exact saved attempt FAILED in execution and Solana FINALIZED that failure: the tokens did not move. */
   | 'failed_on_chain'
-  /** Not on chain and its blockhash can no longer land. Safe to discard. */
-  | 'not_landed'
-  /** Cannot tell yet. */
+  /** Cannot tell. This includes "not found", even after the blockhash expired: absence is never proof. */
   | 'unknown';
 
 export function verdictOf(evidence: ReturnEvidence): ReturnVerdict {
@@ -248,24 +261,32 @@ export function verdictOf(evidence: ReturnEvidence): ReturnVerdict {
     case 'in_flight':
       return 'in_flight';
     case 'failed_on_chain':
-      return 'failed_on_chain';
-    case 'not_found':
-      return evidence.chain.blockhashExpired === true ? 'not_landed' : 'unknown';
+      return evidence.chain.finalized ? 'failed_on_chain' : 'in_flight';
     default:
+      // not_found (even with an expired blockhash) and unavailable.
       return 'unknown';
   }
 }
 
-/** Whether the original attempt may be forgotten: the wallet was never asked, or the evidence proves it moved nothing. */
+/**
+ * Whether the original attempt may be forgotten: the wallet was never asked, or Solana FINALIZED a failure of the exact
+ * saved attempt. Absence, expiry and an unfinalized failure never qualify.
+ */
 export function mayDiscard(intent: SolReturnIntent, verdict: ReturnVerdict | null): boolean {
   if (intent.status === 'prepared') return true;
-  return verdict === 'failed_on_chain' || verdict === 'not_landed';
+  return verdict === 'failed_on_chain';
 }
 
 function returnIdOf(intent: SolReturnIntent, signature: string): string | null {
   const genesis = pubkeyFromBase58(intent.genesisHash);
   const sig = signatureFromBase58(signature);
   return genesis && sig ? returnId(genesis, sig) : null;
+}
+
+async function carriesSavedMessage(rpc: SolanaRpc, signature: string, message: Bytes): Promise<boolean> {
+  const wire = await rpc.getTransactionWire(signature);
+  const found = wire ? messageOfWire(wire) : null;
+  return !!found && bytesEqual(found, message);
 }
 
 /**
@@ -296,7 +317,16 @@ export async function reconcileReturn(deps: Pick<ReturnDeps, 'rpc' | 'reads'>, i
   try {
     const status = signature ? await deps.rpc.getSignatureStatus(signature) : null;
     if (status) {
-      chain = status.failed ? { kind: 'failed_on_chain' } : status.confirmation === 'finalized' ? { kind: 'finalized', slot: status.slot } : { kind: 'in_flight', confirmation: status.confirmation };
+      const finalizedFailure = status.failed && status.confirmation === 'finalized';
+      // A signature the wallet REPORTED (sign and send) is not derived from our bytes: before a finalized failure can count
+      // as definitive, the transaction behind it must carry exactly the saved message.
+      if (finalizedFailure && !recovered && intent.signMode === 'sign_and_send' && message !== null && !(await carriesSavedMessage(deps.rpc, signature as string, message))) {
+        chain = { kind: 'unavailable', message: 'Solana reports a failure for the signature the wallet gave, but that transaction could not be matched to the saved message, so it is not treated as proof.' };
+      } else if (status.failed) {
+        chain = { kind: 'failed_on_chain', finalized: finalizedFailure };
+      } else {
+        chain = status.confirmation === 'finalized' ? { kind: 'finalized', slot: status.slot } : { kind: 'in_flight', confirmation: status.confirmation };
+      }
     } else {
       let expired: boolean | null = null;
       if (intent.lastValidBlockHeight !== null) expired = (await deps.rpc.getBlockHeight()) > BigInt(intent.lastValidBlockHeight);
@@ -559,7 +589,9 @@ async function askWallet(deps: ReturnDeps, session: SolanaWalletSession, message
   try {
     signatureBytes = await session.signAndSendTransaction(transaction, chain);
   } catch (error) {
-    if (isWalletRejection(error)) {
+    // Only an explicit user-rejection code clears the attempt. A wallet that already broadcast can throw text such as
+    // "connection closed"; message matching is not proof, so anything else keeps the original attempt held.
+    if (isExplicitUserRejection(error)) {
       forget(deps, intent);
       emit({ type: 'declined' });
       return;
@@ -629,14 +661,14 @@ export function rebroadcastReturn(deps: ReturnDeps, intent: SolReturnIntent, emi
   return broadcast(deps, intent, signed, emit);
 }
 
-/** Forget an attempt the evidence proves moved nothing (or one the wallet was never asked about). */
+/** Forget an attempt whose FINALIZED failure proves it moved nothing (or one the wallet was never asked about). */
 export function discardReturn(
   deps: Pick<ReturnDeps, 'store'>,
   intent: SolReturnIntent,
   verdict: ReturnVerdict | null,
 ): { ok: true } | { ok: false; message: string } {
   if (!mayDiscard(intent, verdict)) {
-    return { ok: false, message: 'This attempt cannot be discarded yet: the chain has not shown that it moved nothing. It stays on this device.' };
+    return { ok: false, message: 'This attempt cannot be discarded: Solana has not finalized a failure of it. Not finding it is not proof that it never executed, so it stays on this device, unchanged.' };
   }
   try {
     deps.store.remove(intent.id);
@@ -706,12 +738,18 @@ export function describeReturnProgress(evidence: ReturnEvidence | null): { label
     case 'in_flight':
       return { label: 'Waiting for finality', detail: `Solana reports the transaction as ${evidence.chain.confirmation}. The bridge acts only on finalized transfers.`, terminal: false };
     case 'failed_on_chain':
-      return { label: 'The transaction failed on Solana', detail: 'It landed but did not execute, so no icUSD moved. You can start again.', terminal: true };
+      return evidence.chain.finalized
+        ? { label: 'The transaction failed on Solana', detail: 'Solana finalized the failure: it landed but did not execute, so no icUSD moved. You can start again.', terminal: true }
+        : {
+            label: 'Failed, but not final yet',
+            detail: 'Solana reports a failure that is not final yet. A result that is not final can still change, so the attempt stays saved and nothing is sent or signed again.',
+            terminal: false,
+          };
     case 'not_found':
       return {
-        label: evidence.chain.blockhashExpired ? 'Not found on Solana' : 'Not found yet',
+        label: evidence.chain.blockhashExpired ? 'Not found, outcome unknown' : 'Not found yet',
         detail: evidence.chain.blockhashExpired
-          ? 'The transaction never landed and its blockhash has expired, so it can no longer land. No icUSD moved.'
+          ? "Solana did not report this transaction and its blockhash has expired. That is not proof that it did not execute: this check reads only recent history, and a node can have pruned it or not indexed it. The attempt stays saved and nothing is sent or signed again. Only a finalized result on Solana or the bridge's own records settle it."
           : 'Solana does not know the transaction yet. It may still land; it is kept until the evidence settles it.',
         terminal: false,
       };

@@ -9,6 +9,7 @@ import {
   STANDARD_EVENTS,
   createSolanaWalletStore,
   isUsableSolanaWallet,
+  isExplicitUserRejection,
   isWalletRejection,
 } from './walletStandard';
 
@@ -148,5 +149,21 @@ describe('what counts as the user saying no', () => {
     expect(isWalletRejection(new Error('Unexpected error'))).toBe(false);
     expect(isWalletRejection(undefined)).toBe(false);
     expect(vi.isMockFunction(isWalletRejection)).toBe(false);
+  });
+});
+
+describe('what counts as a reliable refusal BEFORE a wallet broadcasts', () => {
+  it('accepts only the explicit user-rejection code, never message text or names', () => {
+    expect(isExplicitUserRejection(Object.assign(new Error('x'), { code: 4001 }))).toBe(true);
+    expect(isExplicitUserRejection(Object.assign(new Error('connection closed'), { code: 4001 }))).toBe(true);
+    for (const text of ['User rejected the request.', 'connection closed', 'cancelled', 'denied', 'popup closed', 'dismissed', 'declined', 'not approved']) {
+      expect(isExplicitUserRejection(new Error(text)), text).toBe(false);
+    }
+    expect(isExplicitUserRejection('rejected')).toBe(false);
+    expect(isExplicitUserRejection(Object.assign(new Error('x'), { name: 'UserRejectedRequestError' }))).toBe(false);
+    expect(isExplicitUserRejection(Object.assign(new Error('x'), { code: '4001' }))).toBe(false);
+    expect(isExplicitUserRejection(Object.assign(new Error('x'), { code: -32603 }))).toBe(false);
+    expect(isExplicitUserRejection(undefined)).toBe(false);
+    expect(isExplicitUserRejection(null)).toBe(false);
   });
 });

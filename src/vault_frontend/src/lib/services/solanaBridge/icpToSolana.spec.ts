@@ -1,4 +1,5 @@
 import { Principal } from '@dfinity/principal';
+import * as flows from './icpToSolana';
 import { describe, expect, it, vi } from 'vitest';
 import type { ApproveArgs } from '$declarations/icusd_ledger/icusd_ledger.did';
 import type { BridgeToSolanaArgs, DepositView, Result_2 } from '$declarations/rumi_icusd_sol_bridge/rumi_icusd_sol_bridge.did';
@@ -275,6 +276,40 @@ describe('what is refused before any signer call', () => {
     await bridgeAfterApproval(h.deps, intent, h.emit);
     expect(h.events[h.events.length - 1]).toMatchObject({ type: 'blocked', message: expect.stringContaining('another destination') });
     expect(h.bridge).not.toHaveBeenCalled();
+  });
+});
+
+describe('an unanswered bridge request is never forgotten', () => {
+  const hex = (bytes: ArrayLike<number>) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+
+  it('offers no way to forget a request that may have been submitted', () => {
+    expect(flows).not.toHaveProperty('discardDeposit');
+  });
+
+  it('keeps the original under its own id: delayed old update, absent query, blocked fresh start, same-id retry, no second request', async () => {
+    const h = harness();
+    // The bridge call is lost: the ingress is still pending when the page asks.
+    h.bridge.mockRejectedValueOnce(new Error('ingress timed out'));
+    await startIcpToSolana(h.deps, quote({ allowanceE8s: 1_000_000_000n }), h.emit);
+    expect(types(h)).toContain('lookup_not_found');
+    const original = h.store.list()[0] as SolDepositIntent;
+    expect(h.bridge).toHaveBeenCalledTimes(1);
+
+    // The user tries a fresh start with a new request id: refused, nothing is sent, nothing is forgotten.
+    await startIcpToSolana(h.deps, quote({ allowanceE8s: 1_000_000_000n }), h.emit);
+    expect(h.events[h.events.length - 1]).toMatchObject({ type: 'blocked' });
+    expect(h.bridge).toHaveBeenCalledTimes(1);
+    expect(h.store.list()).toHaveLength(1);
+
+    // The old update executes late. Retrying under the SAME id returns the existing deposit.
+    h.bridge.mockImplementationOnce(async (args: BridgeToSolanaArgs) => ({ Ok: makeSolDeposit({ client_request_id: args.client_request_id }) }));
+    await retryIcpToSolana(h.deps, original, h.emit);
+    expect(h.events[h.events.length - 1]).toMatchObject({ type: 'submit_ok' });
+    const ids = h.bridge.mock.calls.map((call) => hex((call[0] as BridgeToSolanaArgs).client_request_id));
+    expect(ids).toEqual([original.id, original.id]);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(h.store.list()).toHaveLength(1);
+    expect(h.store.list()[0]).toMatchObject({ id: original.id, status: 'submitted' });
   });
 });
 
