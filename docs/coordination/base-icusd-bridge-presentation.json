@@ -1,5 +1,5 @@
 {
-  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: EVM source BB-42 to BB-45, EVM supply reporting BB-58, frontend BB-59 and BB-60, XRPL caps BB-55. In Review: BB-47 (Solana components), BB-48 (SOL RPC mirror, nonce pool, reconcile, probe tool, lane fixes) and BB-56 (XRPL no-vault return; fee race being reproduced). In progress on Sonnet: BB-57 part A (XRPL endpoints, Candid, cards). BB-46 held; BB-27 waits on Rob. Nothing merged, deployed, signed or enabled.",
+  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: EVM source BB-42 to BB-45, EVM supply reporting BB-58, frontend BB-59 and BB-60, XRPL caps BB-55, Solana RPC and nonce reconcile BB-48. In Review: BB-47 (Solana components) and BB-56 (XRPL no-vault return). In progress on Sonnet: BB-49 (Solana lanes, ledger saga, refunds, custody, reader) and BB-57 (XRPL endpoints, cards, origin report). BB-46 held; BB-27 waits on Rob. Nothing merged, deployed, signed or enabled.",
   "glossary": [
     {
       "term": "proof=source",
@@ -509,5 +509,5 @@
       "definition": "A priority status for queued future work that has not started and begins only when Rob or Miles opens that phase."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. The bridge code now supports three more networks in testing, the app refuses networks that are not ready, and Solana work has begun. Nothing new is switched on."
+  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. Three more networks are ready in testing, and the Solana and XRP Ledger versions are now being built and checked piece by piece. Nothing new is switched on."
 }

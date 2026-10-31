@@ -1410,6 +1410,21 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   guard before the first await released in `finally`; persisted requests still resume and unknown outcomes keep them.
   Optional if tiny: check the returned ICP destination owner and subaccount in `startReturnIntent`.
 
+## Milestone 63 (2026-10-31): BB-48 accepted; BB-49 started
+
+- Accepted (Miles, `accept-bb48.md`): BB-48 at source and local-test component level, core `45ecd9fe`, offline probe and
+  runbook `d1bc0bca`, lane correction `614ced92`. He inspected the lane, nonce, index and record changes, the halt,
+  cursor-reset and stale-slot regressions and the legacy CBOR decode coverage, and checked the Solana source is unchanged
+  from `614ced92`. Evidence: 253 tests (2 ignored image helpers), clippy in both feature modes, production Wasm 1,272,089
+  bytes. Not claimed: public RPC behavior, history retention, live signing or settlement. Nonblocking: an extra blank line at
+  the end of `history_probe.rs` (`git diff --check`), removed in W28's next scoped edit.
+- BB-49 sent to the same W28 in bounded sub-milestones, each its own commit and report: 49a real signer behind the seam,
+  timer, mint creation and bind checks, nonce pool bootstrap; 49b the carried ledger saga with endpoints; 49c mint saga,
+  strict finalized return verification, strays with the per-transfer refund locator; 49d burn lane gating, custody (deficit
+  never OK), unattributed holder-burn seam; 49e the Solana reader for the BB-58 collector (W28 owns those collector files for
+  that step only). BB-47 stays in Review until its carried items are accepted under BB-49. W28 stays the single serialized
+  Rust and release builder and yields when W29's BB-57 part B needs it.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

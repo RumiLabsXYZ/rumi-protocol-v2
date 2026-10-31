@@ -439,18 +439,18 @@
     },
     {
       "id": "BB-48",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Solana: SOL RPC mirror and durable-nonce reconciliation",
-      "evidenceText": "proof=local-test; 45ecd9fe core, d1bc0bca probe tool (offline only), 614ced92 lane fixes (halt fence, fair paging, slot generation; 7 failing tests reproduced first); 253 tests, clippy clean, Wasm builds; fixture pinned to upstream",
+      "evidenceText": "proof=local-test; Miles accepted 45ecd9fe, d1bc0bca, 614ced92: typed SOL RPC mirror, nonce pool, persist before sign, same-attempt reconcile, offline probe tool; halt fence, fair paging, slot generation; 253 tests; no public RPC claim",
       "evidenceLinks": []
     },
     {
       "id": "BB-49",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Lanes, strict verifier, strays refunded, no payout before a final burn, custody audit (deficits never OK), holder-burn seam, collector reader; plus from BB-47: persisted ledger saga and refund ids with a per-transfer locator",
+      "evidenceText": "proof=none; In progress in five sub-milestones: signer, timer, bind and bootstrap; carried ledger saga; mint saga, strict return verifier, refund locator; burn lane, custody (deficit never OK), holder-burn seam; Solana collector reader",
       "evidenceLinks": []
     },
     {
