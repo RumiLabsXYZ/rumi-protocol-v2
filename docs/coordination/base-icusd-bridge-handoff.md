@@ -1710,6 +1710,27 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   extracts locally and uses it only for `sui move test` (no wallet, network initialization or public execution). Miles also
   verified the clean XRPL pin `46cf6b34` and its diff-check; BB-57 acceptance confirmed, no more reruns.
 
+## Milestone 78 (2026-10-31): BB-49 corrections delivered
+
+- `bc96f166` (49a preparation fence) and `23dfe841` (49b proof-only refunds and fair ledger-queue paging), W28, local, each
+  committed on a tree of HEAD plus only that commit's files. Reproduction methods: the 49b correction 1 case and the three
+  starvation cases on the literal pre-fix files (all failed: Abandon returned Ok with state Abandoned; "the deposit was
+  refunded AND the saved original still landed: supply without backing"; "the newer ... was starved by older unresolved
+  ones"); two 49a cases on the literal pre-fix `bootstrap.rs` (the older preparation's record replaced the newer signed and
+  sent attempt; a creation restarted for an existing mint); one 49a case by disabling both new checks in `ensure_tx`
+  (equal to the pre-fix code, which had neither), failing with `Sent { target: Mint, fresh: true }`. Logs in the coordinator
+  scratchpad (`b_head_before.txt`, `a_head_before.txt`, `a_guard_disabled_before.txt`, `b_after.txt`).
+- Content: `ensure_tx` captures the record before its awaits and rechecks it and the forward-only target claim at the commit;
+  `SolOp::refund_eligibility()` (Unsigned, ProvenNotDelivered, Unresolved) from typed, generation-bound `non_delivery`
+  proofs (serialized only when non-empty, older images decode); Abandon of an Unresolved mint refused with an actionable
+  message; `refund_preconditions` re-checks eligibility; per-queue cursors with a 64-id window for pulls, refunds, holds and
+  releases; the paging bound documented as ceil(active / min(limit, QUEUE_SCAN)); both `.did` files regenerated with
+  `refund_eligibility : opt RefundEligibility`.
+- Worker run: `bc96f166` tree 344 tests, `23dfe841` tree 357 tests, both feature modes; clippy clean; Wasm 4,010,100 bytes;
+  golden 0 mismatches; diff-check clean. Coordinator check: both commits stay inside the Solana crate; diff-check clean;
+  golden reference `mismatches: 0`; the saved red logs show the failing-before runs.
+- W28 continues 49c, 49d (with the carried return_id binding) and 49e; W29 continues BB-51 with `sui move test` only.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
