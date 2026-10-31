@@ -1128,8 +1128,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   and runtime-code check, 513 unit tests and forge 17 plus 17). No public deployment and no measured new-chain gas is claimed.
 - Wording note applied by the coordinator (comment only, `chains.rs` Arbitrum defaults): simulation at the configured limit
   lowers the risk of a paid revert but cannot rule one out after state or fee changes. No behavior change; not rebuilt.
-- EVM family source work through BB-45 is accepted. Next ranked EVM card: BB-46 (probe tooling and runbooks only; execution
-  held). Lanes stay W25 (BB-58 corrections) and W27 (BB-59).
+- EVM family source work through BB-45 is accepted. Miles' priority decision: BB-46 needs public activation evidence and
+  stays held (board `blocked`); optional probe tooling and runbooks are deferred preparation, not a lane, and BB-46 is never
+  Done from tooling alone. Order: BB-59 review, then BB-60 (next bounded source card), then BB-47 Solana. Lanes stay W25
+  (BB-58 corrections) and W27 (BB-59).
 
 ## Held live actions
 

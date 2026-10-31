@@ -423,10 +423,10 @@
     },
     {
       "id": "BB-46",
-      "state": "Queue",
+      "state": "blocked",
       "owner": "worker-sonnet",
       "scope": "EVM: per-chain activation evidence (Robinhood, Monad, HyperEVM)",
-      "evidenceText": "proof=none; Held for separate probe authorization: Robinhood keyless providers and finalized tag, Monad fast-tag consensus, HyperEVM archive providers or a reviewed observer redesign",
+      "evidenceText": "proof=none; Held: needs public activation evidence under separate probe authorization (Robinhood finalized tag and keyless providers, Monad fast-tag consensus, HyperEVM archive providers); optional probe tooling deferred; not Done from tooling",
       "evidenceLinks": []
     },
     {
