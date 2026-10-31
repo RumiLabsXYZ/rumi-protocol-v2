@@ -511,10 +511,10 @@
     },
     {
       "id": "BB-57",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Declarations regenerated canonically; return and opt-in cards; XRPL PocketIC suite with negatives; Wasm under the 10 MiB cap; also the XRPL lane reader (E_X, issued outstanding) for the BB-58 collector (moved)",
+      "evidenceText": "proof=none; Part A in progress (same W29, local branch stacked on PR 586): return endpoints, OperationKindTag::Return, .did and bindings by script, Candid check reviewed not bypassed, Return and opt-in cards; Wasm and PocketIC wait for the builder",
       "evidenceLinks": []
     },
     {

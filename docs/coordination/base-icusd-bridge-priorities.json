@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-55 correction and BB-56 in Review (868ebca8, e48dc18d; local branch, not pushed). Next: BB-57 source part (endpoints, Candid, declarations, frontend Return and opt-in cards); its Wasm size check and PocketIC run go through the one builder when free.",
+      "nextAction": "BB-55 correction and BB-56 in Review (local branch). BB-57 part A in progress (same W29): endpoints, Candid and declarations, frontend Return and opt-in cards. Part B (Wasm size under 10 MiB, XRPL PocketIC suite) runs on the single builder lane when it frees.",
       "cardIds": [
         "BB-55",
         "BB-56",
