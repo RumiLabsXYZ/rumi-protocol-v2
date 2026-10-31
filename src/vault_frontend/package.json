@@ -59,6 +59,7 @@
 		"@dfinity/principal": "2.3.0",
 		"@icp-sdk/core": "^5.4.0",
 		"@icp-sdk/signer": "^5.3.1",
+		"@mysten/sui": "2.38.0",
 		"@slide-computer/signer": "^4.2.2",
 		"@slide-computer/signer-agent": "^4.2.2",
 		"@slide-computer/signer-web": "^4.2.2",

@@ -125,7 +125,7 @@ describe('the destination list', () => {
   it('builds an enabled entry only from a passing answer, and a disabled one with the reason otherwise', () => {
     const ok = solanaDestination({ ok: true, config: makeSolanaConfig() }, SOL_BRIDGE_ID);
     expect(ok).toMatchObject({ id: 'solana-mainnet', family: 'solana', status: 'enabled', reason: null, actorCanisterId: SOL_BRIDGE_ID, config: null });
-    expect(ok.native?.mint).toBe(KEYS.mint);
+    expect(ok.native?.family === 'solana' ? ok.native.mint : null).toBe(KEYS.mint);
     const refused = solanaDestination(resolveSolanaConfig(makeSolBridgeInfo({ initialized: false }), makeSolBootstrap(), SOL_BRIDGE_ID), SOL_BRIDGE_ID);
     expect(refused).toMatchObject({ status: 'disabled', native: null });
     expect(refused.reason).toContain('not set up');

@@ -26,14 +26,16 @@ import {
 } from './chains';
 import type { SolanaBridgeConfig, SolanaConfigResult } from '../solanaBridge/config';
 import { SOLANA_MAINNET } from '../solanaBridge/networks';
+import type { SuiBridgeConfig, SuiConfigResult } from '../suiBridge/config';
+import { SUI_MAINNET } from '../suiBridge/networks';
 
 /**
  * The live configuration of a non-EVM (native) bridge instance. A native instance is NOT an EVM `BridgeConfig` with
  * other field names (it has a mint, a return account and a genesis hash instead of a contract and a chain id), so it has
- * its own field, next to `config`, and the page branches on `family`. Solana is the only native family so far; a later
- * family adds its own member to this union.
+ * its own field, next to `config`, and the page branches on `family`. Solana and Sui are the native families so far; a
+ * later family adds its own member to this union (discriminated by `config.family`).
  */
-export type NativeDestinationConfig = SolanaBridgeConfig;
+export type NativeDestinationConfig = SolanaBridgeConfig | SuiBridgeConfig;
 
 export type DestinationFamily = 'evm' | 'solana' | 'sui' | 'xrpl';
 export type DestinationNetwork = 'mainnet' | 'testnet';
@@ -176,9 +178,28 @@ export function unavailableSolanaDestination(): DestinationView {
   };
 }
 
+/** The static, disabled Sui row. No Sui instance is configured, so it has no actor and cannot be selected. */
+export function unavailableSuiDestination(): DestinationView {
+  return {
+    id: SUI_MAINNET.networkId,
+    profileId: 'sui',
+    family: 'sui',
+    name: SUI_MAINNET.name,
+    chainId: SUI_MAINNET.chainIdentifier,
+    network: 'mainnet',
+    status: 'disabled',
+    reason: `Not available yet: there is no icUSD bridge to ${SUI_MAINNET.name} at the moment.`,
+    limits: null,
+    fees: null,
+    actorCanisterId: null,
+    config: null,
+    native: null,
+  };
+}
+
 /** The native (non-EVM) rows that are not offered. */
 export function unavailableNativeDestinations(): DestinationView[] {
-  return [unavailableSolanaDestination()];
+  return [unavailableSolanaDestination(), unavailableSuiDestination()];
 }
 
 /**
@@ -232,6 +253,58 @@ export function withSolanaDestination(list: readonly DestinationView[], solana: 
   return list.some((entry) => entry.id === solana.id) ? list.map((entry) => (entry.id === solana.id ? solana : entry)) : [...list, solana];
 }
 
+/**
+ * The Sui entry from the result of resolving the instance's answers. An enabled entry exists only while the canister's own
+ * answer passes every identity check (`resolveSuiConfig`); a paused direction does not disable it. Otherwise it is
+ * disabled with the reason.
+ */
+export function suiDestination(result: SuiConfigResult, actorCanisterId: string | null): DestinationView {
+  if (result.ok) {
+    const { config } = result;
+    return {
+      id: config.network.networkId,
+      profileId: 'sui',
+      family: 'sui',
+      name: config.network.name,
+      chainId: config.network.chainIdentifier,
+      network: config.network.role === 'mainnet' ? 'mainnet' : 'testnet',
+      status: 'enabled',
+      reason: null,
+      limits: { minDepositE8s: config.minDepositE8s, maxDepositE8s: config.maxDepositE8s, minBridgeOutE8s: config.minBridgeOutE8s },
+      fees: { depositFeeE8s: config.depositFeeE8s, releaseFeeE8s: config.releaseFeeE8s, ledgerFeeE8s: null },
+      actorCanisterId,
+      config: null,
+      native: config,
+    };
+  }
+  const network = result.network;
+  return {
+    id: network?.networkId ?? SUI_MAINNET.networkId,
+    profileId: 'sui',
+    family: 'sui',
+    name: network?.name ?? SUI_MAINNET.name,
+    chainId: network?.chainIdentifier ?? '',
+    network: network && network.role !== 'mainnet' ? 'testnet' : 'mainnet',
+    status: 'disabled',
+    reason: result.message,
+    limits: null,
+    fees: null,
+    actorCanisterId,
+    config: null,
+    native: null,
+  };
+}
+
+/** The Sui row to show when its instance could not be read at all. */
+export function unreachableSuiDestination(message: string, actorCanisterId: string | null): DestinationView {
+  return { ...unavailableSuiDestination(), reason: `The Sui bridge could not be reached: ${message}`, actorCanisterId };
+}
+
+/** Put a Sui entry in a list: it replaces the static row of the same network, else it is added after the others. */
+export function withSuiDestination(list: readonly DestinationView[], sui: DestinationView): DestinationView[] {
+  return list.some((entry) => entry.id === sui.id) ? list.map((entry) => (entry.id === sui.id ? sui : entry)) : [...list, sui];
+}
+
 /** The full list: Base first, then the static disabled entries. */
 export function buildDestinations(base: BridgeConfigResult, baseActorCanisterId: string | null): DestinationView[] {
   return [baseDestination(base, baseActorCanisterId), ...unavailableEvmDestinations(), ...unavailableNativeDestinations()];
@@ -257,6 +330,15 @@ export function unreachableDestinations(message: string, baseActorCanisterId: st
     ...unavailableEvmDestinations(),
     ...unavailableNativeDestinations(),
   ];
+}
+
+/**
+ * The list when NO Base instance is configured (an empty canister id): Base is a disabled row that says it is not available
+ * yet, and no request was made for it. Native instances, if any, replace their own rows after this.
+ */
+export function unconfiguredDestinations(): DestinationView[] {
+  const [base, ...rest] = unreachableDestinations('', null);
+  return [{ ...base, reason: 'Not available yet: there is no icUSD bridge to Base at the moment.' }, ...rest];
 }
 
 // ---------------------------------------------------------------------------

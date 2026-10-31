@@ -117,7 +117,7 @@
         <a href="/bitcoin/borrow" class="footer-link">Borrow with Bitcoin</a>
       {:else}
       <a href="/redeem" class="footer-link">Redeem</a>
-      {#if BRIDGE_ENABLED}<a href="/bridge" class="footer-link">Base Bridge</a>{/if}
+      {#if BRIDGE_ENABLED}<a href="/bridge" class="footer-link">Bridge</a>{/if}
       <a href="/solana" class="footer-link">ckSOL Minter</a>
       <a href="/doge" class="footer-link">ckDOGE Minter</a>
       <a href="/bitcoin" class="footer-link">Bitcoin Minter</a>

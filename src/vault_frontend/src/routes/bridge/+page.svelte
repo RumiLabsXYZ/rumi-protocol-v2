@@ -3,6 +3,7 @@
   import { BRIDGE_ENABLED } from '$lib/config';
   import { principal as principalStore } from '$lib/stores/wallet';
   import { loadDestinations } from '$lib/services/baseBridge/destinationLoader';
+  import { getBridgeCanisterId } from '$lib/services/baseBridge/bridgeActor';
   import {
     findDestination,
     isEnabled,
@@ -67,9 +68,9 @@
   }
 
   onMount(() => {
-    // Nothing is called until the bridge canister id is configured.
+    // Nothing is called until a bridge canister id is configured. Browser EVM wallets are looked up only for Base.
     if (!BRIDGE_ENABLED) return;
-    void evm.init();
+    if (baseConfigured) void evm.init();
     void refreshConfig();
     const timer = setInterval(refreshConfig, 60_000);
     return () => clearInterval(timer);
@@ -88,10 +89,14 @@
    * own answer), so the Solana panel, its wallet store and its journal exist only then: while Solana is a disabled row,
    * nothing about it is mounted and no Solana wallet is ever discovered, connected or asked to sign.
    */
-  const solanaConfig = $derived(selected && isEnabled(selected) && selected.family === 'solana' ? (selected.native ?? null) : null);
-  const eyebrow = $derived(selected && selected.family === 'solana' ? 'INTERNET COMPUTER ↔ SOLANA' : 'INTERNET COMPUTER ↔ BASE');
+  const solanaConfig = $derived(selected && isEnabled(selected) && selected.native?.family === 'solana' ? selected.native : null);
+  /** The same for Sui: its panel (and the Sui SDK behind it) is only ever loaded for an ENABLED Sui entry. */
+  const suiConfig = $derived(selected && isEnabled(selected) && selected.native?.family === 'sui' ? selected.native : null);
+  const eyebrow = $derived(selected?.family === 'solana' ? 'INTERNET COMPUTER ↔ SOLANA' : selected?.family === 'sui' ? 'INTERNET COMPUTER ↔ SUI' : 'INTERNET COMPUTER ↔ BASE');
   /** The chain the header copy names, derived from the selected destination (Base for every EVM entry, as before). */
-  const chainName = $derived(selected && selected.family === 'solana' ? 'Solana' : 'Base');
+  const chainName = $derived(selected?.family === 'solana' ? 'Solana' : selected?.family === 'sui' ? 'Sui' : 'Base');
+  /** Base is configured only when its canister id is. A native-only deployment never touches the browser's EVM wallets. */
+  const baseConfigured = getBridgeCanisterId() !== '';
 
   /** The newest status of one destination, read at the moment a flow asks. */
   function freshDestination(id: string): DestinationView | null {
@@ -150,6 +155,20 @@
         onRecheck={refreshConfig}
         {principal}
       />
+    {/key}
+  {:else if suiConfig && selected}
+    {@const suiDestinationId = selected.id}
+    {#key selected.id}
+      {#await import('$lib/components/bridge/SuiBridgePanel.svelte') then loaded}
+        {@const SuiBridgePanel = loaded.default}
+        <SuiBridgePanel
+          config={suiConfig}
+          destination={selected}
+          readFreshDestination={() => freshDestination(suiDestinationId)}
+          onRecheck={refreshConfig}
+          {principal}
+        />
+      {/await}
     {/key}
   {:else if !config || !selected}
     <section class="glass-card unavailable" aria-live="polite">
