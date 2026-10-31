@@ -3258,6 +3258,19 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   brief item 4; the same W29 restores them, values taking effect only through an approved class C scope.
 - Review diffs in the coordinator scratchpad `bb61/`.
 
+## Milestone 137 (2026-10-31): D6 decision packet frozen for review
+
+- W29 committed `d2cb5537` "docs(multichain): D6 packet restore value rows in decision form (BB-61 prep)" (pathspec, the D6 file only, 5
+  insertions): the Sui cap holders and upgrade policy, the EVM admin delay, guardian and caps, and the XRPL `allow_clawback` and
+  `no_freeze` rows restored with the same empty placeholders, plus a note that a recorded value takes effect only through an approved
+  class C scope and is not itself an approval. Coordinator check: no placeholder from W23's draft is missing now; the A/B/C structure
+  and Boundary text unchanged; the file matches the commit, 165 lines, no em dashes; `git diff --check` clean; tree clean.
+- Frozen candidate for Miles' review: `docs/coordination/multichain/authority-decision-d6.md` at `d2cb5537`, built from `73a03575`
+  (W29 draft), `92631f9d` (W23 wording pass, swept into a coordinator commit, milestone 135), `012b7f65` (W29 factual corrections)
+  and `d2cb5537`. Review copies in the coordinator scratchpad `bb61/`: the frozen file and the full diff from `73a03575`.
+- Still a proposal, unadopted; BB-61 stays queued for Rob's D6 decision; nothing pushed. A further Haiku wording pass is optional and
+  only after the facts are accepted.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
