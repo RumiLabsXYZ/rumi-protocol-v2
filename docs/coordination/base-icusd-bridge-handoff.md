@@ -3231,6 +3231,33 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   worker's staged changes are never swept in.
 - Next: the same W29 applies Miles' six factual corrections on top of W23's draft, committing with an explicit pathspec.
 
+## Milestone 136 (2026-10-31): D6 packet factual corrections
+
+- W29 (requested Sonnet; actual `claude-sonnet-5-5`) committed `012b7f65` "docs(multichain): D6 packet factual corrections (BB-61 prep)",
+  local only, the D6 file only (pathspec commit), 160 lines, on W23's draft. It covers Miles' six review points and his three extra points:
+  - the Sui version guard stated from `GM:360-370` (no automatic freeze; the `GM:357-359` comment marked body vs comment), with the
+    official Sui upgrade doc cited as read by Miles;
+  - the Sui demo split into temporary setup custody and three UNADOPTED settled choices (A: keep a compatible or additive UpgradeCap
+    as a disclosed operator-mint trust choice; B: dependency-only or immutable, irreversible; C: a future separately authorized
+    canister custody signing path, not implemented); no-operator issuance never waived silently;
+  - OpenZeppelin cited from the local files (`AccessControl.sol`, `AccessControlDefaultAdminRules.sol`), with Miles' byte comparison
+    credited to him;
+  - the decision form split into class A (ordinary test-wallet operations), B (canister operations, each through the existing action
+    packet and required approvals) and C (role, cap, controller and policy actions, proposed scopes, off by default), and the
+    Boundary text saying a standing grant covers class A only;
+  - qualified key-name and Solana wording;
+  - a test wallet that is either a specifically identified existing dedicated wallet under its own unchanged scope or a new
+    dedicated one;
+  - "several controllers are not a multisig" in section 3 and 4.2;
+  - EVM `admin_set_rpc_services` controller-only in its body (`admin.rs:238`), the module header (`admin.rs:3-4`) stale, the provider
+    set a trust root;
+  - W23's unclear points resolved from source.
+- Coordinator checks: the committed file is the current text; no em dashes, local paths or identity-like strings; label counts present
+  (PROPOSAL 4, UNADOPTED 2, UNKNOWN 7, UNVERIFIED 8, INFERENCE 7, LIVE HOLD 3). Finding: the restructured form dropped the value rows for
+  the Sui cap holders and upgrade policy, the EVM admin delay, guardian and caps, and the XRPL flags (16 placeholders to 13), contrary to
+  brief item 4; the same W29 restores them, values taking effect only through an approved class C scope.
+- Review diffs in the coordinator scratchpad `bb61/`.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
