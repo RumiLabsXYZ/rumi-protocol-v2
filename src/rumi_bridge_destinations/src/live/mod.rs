@@ -1,0 +1,538 @@
+//! Live client transport for the supply collector (card BB-58, feature
+//! `live-transport`, off by default).
+//!
+//! [`LiveReadings`] implements [`crate::collect::Readings`] over two small
+//! transports, so the collector, the boundary checks and the report are exactly
+//! the ones the fixture run uses:
+//!
+//! * [`ic`]: an [`ic::IcQuery`] for the ICP ledger (`icrc1_total_supply`,
+//!   `icrc1_balance_of`) and the backend's per-chain recorded supply. The real
+//!   implementation is `ic-agent`: anonymous identity, query calls only, response
+//!   verification left on.
+//! * [`evm`]: a [`evm::JsonRpcTransport`] per destination, with the bridge
+//!   canister's head rule driven by the profile (finalized quorum, Monad
+//!   verified = finalized minus 3, blocked rows ask nothing) and `totalSupply`
+//!   read at a NUMBERED block. `latest` is never sent.
+//!
+//! Every report from here is labelled `source: live` and carries the read time
+//! and the head height of each EVM reading, so it cannot be mistaken for a
+//! fixture run (which prints `source: fixture`).
+//!
+//! # Safety posture
+//!
+//! There are NO built-in endpoints, canister ids or token addresses: all of them
+//! come from the explicit endpoint config ([`LiveConfig`]) the operator passes.
+//! Nothing in this crate runs these clients by itself. The tests use mocked
+//! transports and one loopback server only. Executing the real clients against
+//! IC mainnet or a public EVM RPC is a separate, held step.
+//!
+//! Unavailable by design: Solana, Sui and the XRPL lane (see
+//! [`crate::collect`]); a profile whose head is blocked; a backend without the
+//! per-chain query or without configured chain ids. Each is a named error, never
+//! a zero.
+
+pub mod evm;
+pub mod ic;
+
+use std::collections::BTreeMap;
+
+use candid::Principal;
+use serde::Deserialize;
+
+use crate::collect::{EvmSupply, ReadError, Readings};
+use crate::escrow::EscrowBinding;
+use crate::types::Network;
+
+// ---------------------------------------------------------------------------
+// Endpoint config
+// ---------------------------------------------------------------------------
+
+/// The explicit endpoint config file. Nothing here has a default.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveConfig {
+    pub ic: IcConfig,
+    /// EVM destinations by network id (as in the profile catalog).
+    #[serde(default)]
+    pub evm: BTreeMap<String, EvmConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IcConfig {
+    /// Replica API URL (https, or http on loopback).
+    pub url: String,
+    /// The production icUSD ledger canister, as principal text.
+    pub ledger: String,
+    /// The backend and the debt-backed chains to sum. Omit it and the
+    /// debt-backed supply reading is Unavailable.
+    #[serde(default)]
+    pub backend: Option<BackendConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackendConfig {
+    pub canister: String,
+    pub debt_backed_chain_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvmConfig {
+    /// The bridged icUSD token, `0x` plus 40 hex characters.
+    pub token: String,
+    /// Provider URLs (https, or http on loopback). They may carry keys and are
+    /// never printed.
+    pub providers: Vec<String>,
+}
+
+fn parse_principal(text: &str, what: &str) -> Result<Principal, String> {
+    // Reject non-canonical text so a mistyped id cannot name another canister.
+    let bytes = crate::escrow::principal_text_to_bytes(text)
+        .map_err(|e| format!("{what} is not a principal: {e}"))?;
+    Ok(Principal::from_slice(&bytes))
+}
+
+fn parse_token(text: &str) -> Result<[u8; 20], String> {
+    let digits = text
+        .strip_prefix("0x")
+        .ok_or("a token address must start with 0x")?;
+    if digits.len() != 40 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("a token address must be 0x plus 40 hex characters".into());
+    }
+    let mut out = [0u8; 20];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// LiveReadings
+// ---------------------------------------------------------------------------
+
+/// One EVM destination's token and transport.
+pub struct EvmSource {
+    pub token: [u8; 20],
+    pub transport: Box<dyn evm::JsonRpcTransport>,
+}
+
+/// [`Readings`] over the IC query client and the EVM JSON-RPC clients.
+pub struct LiveReadings {
+    ic: Box<dyn ic::IcQuery>,
+    ledger: Principal,
+    backend: Option<(Principal, Vec<u32>)>,
+    evm: BTreeMap<String, EvmSource>,
+    read_at_unix: u64,
+}
+
+impl LiveReadings {
+    /// Assemble from already-built transports (this is what the tests use).
+    pub fn new(
+        ic: Box<dyn ic::IcQuery>,
+        ledger: Principal,
+        backend: Option<(Principal, Vec<u32>)>,
+        evm: BTreeMap<String, EvmSource>,
+        read_at_unix: u64,
+    ) -> LiveReadings {
+        LiveReadings {
+            ic,
+            ledger,
+            backend,
+            evm,
+            read_at_unix,
+        }
+    }
+
+    /// Build the real clients from an endpoint config. This constructs HTTP
+    /// clients only; no request is sent until a reading is taken.
+    pub fn from_config(config: &LiveConfig, read_at_unix: u64) -> Result<LiveReadings, String> {
+        let ledger = parse_principal(&config.ic.ledger, "ic.ledger")?;
+        let backend = match &config.ic.backend {
+            Some(b) => Some((
+                parse_principal(&b.canister, "ic.backend.canister")?,
+                b.debt_backed_chain_ids.clone(),
+            )),
+            None => None,
+        };
+        let ic = ic::AgentQuery::new(&config.ic.url)?;
+        let mut evm_sources = BTreeMap::new();
+        for (id, c) in &config.evm {
+            let token = parse_token(&c.token).map_err(|e| format!("evm.{id}.token: {e}"))?;
+            let transport = evm::ReqwestJsonRpc::new(c.providers.clone())
+                .map_err(|e| format!("evm.{id}.providers: {e}"))?;
+            evm_sources.insert(
+                id.clone(),
+                EvmSource {
+                    token,
+                    transport: Box::new(transport),
+                },
+            );
+        }
+        Ok(LiveReadings::new(
+            Box::new(ic),
+            ledger,
+            backend,
+            evm_sources,
+            read_at_unix,
+        ))
+    }
+}
+
+impl Readings for LiveReadings {
+    fn source(&self) -> &'static str {
+        "live"
+    }
+
+    fn notes(&self) -> Vec<String> {
+        vec![
+            format!(
+                "read_at: {} (unix {})",
+                format_utc(self.read_at_unix),
+                self.read_at_unix
+            ),
+            "ic reads are anonymous query calls with response verification on; evm reads are totalSupply at the numbered head shown per destination".to_string(),
+        ]
+    }
+
+    fn icp_ledger_total_supply(&self) -> Result<u128, ReadError> {
+        ic::ledger_total_supply(self.ic.as_ref(), &self.ledger)
+    }
+
+    fn icrc1_balance_of(&self, binding: &EscrowBinding) -> Result<u128, ReadError> {
+        ic::ledger_balance_of(self.ic.as_ref(), &self.ledger, binding)
+    }
+
+    fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError> {
+        match &self.backend {
+            Some((backend, chains)) => ic::backend_chain_supplies(self.ic.as_ref(), backend, chains),
+            None => Err(ReadError::UnavailableGap(
+                "the endpoint config names no backend canister, so the debt-backed chain supplies cannot be read".into(),
+            )),
+        }
+    }
+
+    fn evm_total_supply(&self, network: &Network) -> Result<EvmSupply, ReadError> {
+        match self.evm.get(&network.network_id) {
+            Some(src) => evm::read_total_supply(src.transport.as_ref(), &src.token, network),
+            None => Err(ReadError::UnavailableGap(format!(
+                "the endpoint config has no token and providers for {}",
+                network.network_id
+            ))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Time
+// ---------------------------------------------------------------------------
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for a unix time in seconds (proleptic Gregorian,
+/// civil-from-days).
+pub fn format_utc(unix: u64) -> String {
+    let days = (unix / 86_400) as i64;
+    let secs = unix % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        secs / 3_600,
+        (secs % 3_600) / 60,
+        secs % 60
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregate::{Catalog, DestinationConfig};
+    use crate::collect::{collect, render, CollectConfig};
+    use crate::live::evm::tests::{assert_numbered_or_finalized, network, Mock, Script};
+    use crate::live::ic::IcQueryError;
+    use candid::{CandidType, Deserialize as CandidDeserialize, Nat};
+    use serde_json::{json, Value};
+    use std::cell::RefCell;
+
+    fn p(b: u8) -> Principal {
+        Principal::from_slice(&[b, 0xAA])
+    }
+
+    fn binding_for(id: &str) -> EscrowBinding {
+        EscrowBinding::from_principal_bytes(format!("syn-{id}").as_bytes(), None)
+    }
+
+    #[derive(CandidType, CandidDeserialize)]
+    enum St {
+        Registered,
+    }
+    #[derive(CandidType, CandidDeserialize)]
+    struct Full {
+        status: Option<St>,
+        chain_supply_e8s: Nat,
+        extra: bool,
+    }
+
+    /// An IC that answers like a small ledger and backend.
+    struct FakeIc {
+        total: u128,
+        balance: u128,
+        chain_supply: u128,
+        backend_has_query: bool,
+        calls: RefCell<Vec<String>>,
+    }
+    impl ic::IcQuery for FakeIc {
+        fn query(&self, _c: &Principal, method: &str, _a: &[u8]) -> Result<Vec<u8>, IcQueryError> {
+            self.calls.borrow_mut().push(method.to_string());
+            match method {
+                "icrc1_total_supply" => Ok(candid::encode_one(Nat::from(self.total)).unwrap()),
+                "icrc1_balance_of" => Ok(candid::encode_one(Nat::from(self.balance)).unwrap()),
+                "get_chain_public_launch_status" if self.backend_has_query => {
+                    Ok(candid::encode_one(Full {
+                        status: Some(St::Registered),
+                        chain_supply_e8s: Nat::from(self.chain_supply),
+                        extra: true,
+                    })
+                    .unwrap())
+                }
+                "get_chain_public_launch_status" => {
+                    Err(IcQueryError::MethodNotFound("has no query method".into()))
+                }
+                other => Err(IcQueryError::Failed(format!("unexpected {other}"))),
+            }
+        }
+    }
+
+    fn provider(finalized: u64, supply: u128) -> Script {
+        Box::new(move |method, params: &Value| {
+            let hash = |n: u64| format!("0x{:064x}", n);
+            match method {
+                "eth_getBlockByNumber" => {
+                    let tag = params[0].as_str().unwrap();
+                    let n = if tag == "finalized" {
+                        finalized
+                    } else {
+                        u64::from_str_radix(tag.trim_start_matches("0x"), 16).unwrap()
+                    };
+                    Ok(json!({"number": format!("0x{n:x}"), "hash": hash(n)}))
+                }
+                "eth_call" => Ok(json!(format!("0x{:064x}", supply))),
+                other => Err(format!("unexpected {other}")),
+            }
+        })
+    }
+
+    fn live(ic: FakeIc, with_backend: bool) -> LiveReadings {
+        let mut evm_map = BTreeMap::new();
+        evm_map.insert(
+            "base-mainnet".to_string(),
+            EvmSource {
+                token: [0x22; 20],
+                transport: Box::new(Mock::new(vec![
+                    provider(1000, 20_000_000_000),
+                    provider(1000, 20_000_000_000),
+                    provider(1000, 20_000_000_000),
+                ])),
+            },
+        );
+        let backend = with_backend.then(|| (p(2), vec![1030u32]));
+        LiveReadings::new(Box::new(ic), p(1), backend, evm_map, 1_700_000_000)
+    }
+
+    fn base_config() -> CollectConfig {
+        CollectConfig {
+            destinations: vec![DestinationConfig {
+                network_id: "base-mainnet".into(),
+                in_d: true,
+                escrow: Some(binding_for("base-mainnet")),
+            }],
+            xrpl: None,
+        }
+    }
+
+    fn ic_ok() -> FakeIc {
+        FakeIc {
+            total: 100_000_000_000,
+            balance: 20_000_000_000,
+            chain_supply: 500_000_000,
+            backend_has_query: true,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn live_readings_drive_the_collector_and_label_the_report_live() {
+        let readings = live(ic_ok(), true);
+        let catalog = Catalog::embedded().unwrap();
+        let got = collect(&base_config(), &catalog, &readings).unwrap();
+
+        assert_eq!(got.source, "live");
+        // total_icusd = ledger + debt-backed; escrow 200 locked, 200 on Base.
+        assert_eq!(got.report.total_icusd, 100_500_000_000);
+        assert_eq!(got.report.escrow_locked, 20_000_000_000);
+        assert_eq!(got.report.circulating_on_icp, 80_000_000_000);
+        assert_eq!(got.report.circulating_total, 100_500_000_000);
+        assert_eq!(got.heads.len(), 1);
+        assert_eq!(got.heads[0].block, 1000);
+
+        let text = render(&got);
+        assert!(text.starts_with("source: live\n"), "{text}");
+        assert!(
+            text.contains("read_at: 2023-11-14T22:13:20Z (unix 1700000000)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("head base-mainnet: EvmTag block 1000"),
+            "{text}"
+        );
+        assert!(!text.contains("source: fixture"), "{text}");
+        assert!(!text.contains("not live data"), "{text}");
+    }
+
+    #[test]
+    fn a_fixture_report_never_looks_live() {
+        let fx = crate::collect::FixtureReadings::parse(include_str!(
+            "../../fixtures/collect_base_only.json"
+        ))
+        .unwrap();
+        let catalog = Catalog::embedded().unwrap();
+        let got = collect(&fx.config, &catalog, &fx.readings).unwrap();
+        let text = render(&got);
+        assert!(text.starts_with("source: fixture\n"));
+        assert!(!text.contains("source: live"));
+        assert!(!text.contains("read_at"));
+    }
+
+    #[test]
+    fn evm_requests_through_live_readings_are_numbered_or_finalized_only() {
+        let mock = Mock::new(vec![
+            provider(1000, 1),
+            provider(1000, 1),
+            provider(1000, 1),
+        ]);
+        let net = network("base-mainnet");
+        let t: &dyn evm::JsonRpcTransport = &mock;
+        evm::read_total_supply(t, &[0x22; 20], &net).unwrap();
+        assert_numbered_or_finalized(&mock);
+    }
+
+    #[test]
+    fn a_backend_without_the_query_makes_the_debt_backed_reading_unavailable() {
+        let mut ic = ic_ok();
+        ic.backend_has_query = false;
+        let readings = live(ic, true);
+        let catalog = Catalog::embedded().unwrap();
+        let err = collect(&base_config(), &catalog, &readings).unwrap_err();
+        match err {
+            crate::collect::CollectError::Read {
+                error: ReadError::UnavailableGap(g),
+                what,
+            } => {
+                assert!(g.contains("get_chain_public_launch_status"), "{g}");
+                assert!(what.contains("debt-backed"), "{what}");
+            }
+            other => panic!("expected an unavailable gap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_backend_in_the_config_is_unavailable_not_zero() {
+        let readings = live(ic_ok(), false);
+        let catalog = Catalog::embedded().unwrap();
+        let err = collect(&base_config(), &catalog, &readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::collect::CollectError::Read { error: ReadError::UnavailableGap(g), .. }
+                    if g.contains("no backend canister")
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_evm_destination_without_a_configured_source_is_unavailable() {
+        let readings = live(ic_ok(), true);
+        let catalog = Catalog::embedded().unwrap();
+        let net = catalog.lookup("ethereum-mainnet").unwrap().1.clone();
+        assert!(matches!(
+            readings.evm_total_supply(&net),
+            Err(ReadError::UnavailableGap(g)) if g.contains("ethereum-mainnet")
+        ));
+    }
+
+    #[test]
+    fn collection_still_refuses_solana_and_the_lane_under_live_readings() {
+        let readings = live(ic_ok(), true);
+        let catalog = Catalog::embedded().unwrap();
+        let cfg = CollectConfig {
+            destinations: vec![DestinationConfig {
+                network_id: "solana-mainnet".into(),
+                in_d: true,
+                escrow: Some(binding_for("solana-mainnet")),
+            }],
+            xrpl: None,
+        };
+        let err = collect(&cfg, &catalog, &readings).unwrap_err();
+        assert!(err.to_string().contains("BB-49"), "{err}");
+        // Nothing was read on the IC side before the refusal.
+    }
+
+    #[test]
+    fn utc_formatting_matches_known_instants() {
+        assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(format_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(format_utc(4_102_444_799), "2099-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn endpoint_config_is_strict_and_has_no_defaults() {
+        let ok = r#"{
+            "ic": {"url": "https://ic.example.invalid", "ledger": "aaaaa-aa"},
+            "evm": {"base-mainnet": {"token": "0x1111111111111111111111111111111111111111",
+                                       "providers": ["https://a.example.invalid"]}}
+        }"#;
+        let c: LiveConfig = serde_json::from_str(ok).unwrap();
+        assert!(c.ic.backend.is_none());
+        assert_eq!(c.evm.len(), 1);
+        // Unknown fields are refused, and ic is required (no built-in endpoint).
+        assert!(
+            serde_json::from_str::<LiveConfig>(r#"{"ic":{"url":"u","ledger":"l","x":1}}"#).is_err()
+        );
+        assert!(serde_json::from_str::<LiveConfig>("{}").is_err());
+
+        assert!(parse_token("0x1111111111111111111111111111111111111111").is_ok());
+        assert!(parse_token("1111111111111111111111111111111111111111").is_err());
+        assert!(parse_token("0x11").is_err());
+        assert!(parse_principal("not a principal", "x").is_err());
+        assert!(parse_principal("ryjl3-tyaaa-aaaaa-aaaba-cai", "x").is_ok());
+        // Building the real clients sends nothing, but still validates URLs.
+        let bad: LiveConfig = serde_json::from_str(
+            r#"{"ic": {"url": "http://example.invalid", "ledger": "ryjl3-tyaaa-aaaaa-aaaba-cai"}}"#,
+        )
+        .unwrap();
+        assert!(LiveReadings::from_config(&bad, 0).is_err());
+        // A well-formed config builds the real clients without sending anything.
+        let good: LiveConfig = serde_json::from_str(
+            r#"{"ic": {"url": "https://ic.example.invalid",
+                        "ledger": "ryjl3-tyaaa-aaaaa-aaaba-cai",
+                        "backend": {"canister": "ryjl3-tyaaa-aaaaa-aaaba-cai",
+                                    "debt_backed_chain_ids": [1]}},
+                "evm": {"base-mainnet": {"token": "0x1111111111111111111111111111111111111111",
+                                           "providers": ["https://a.example.invalid",
+                                                         "https://b.example.invalid"]}}}"#,
+        )
+        .unwrap();
+        let built = LiveReadings::from_config(&good, 1_700_000_000).unwrap();
+        assert_eq!(built.source(), "live");
+    }
+}

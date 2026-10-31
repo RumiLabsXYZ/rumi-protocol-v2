@@ -28,12 +28,16 @@
 //! * [`FixtureReadings`] replays numbers from a local JSON file. Its
 //!   [`Readings::source`] is `fixture`, and [`render`] prints that as the first
 //!   line, so a fixture run can never read as a live one.
-//! * Live transport (an IC query client for the ledger and the backend, and an
-//!   EVM JSON-RPC client for `totalSupply`): source not written yet. It is
-//!   queued next on BB-58 for the same owner, to be verified with a local
-//!   mocked transport and never run against public networks under the current
-//!   hold. It adds a scoped client dependency, so it lands as its own pass
-//!   with its own Cargo change. This crate makes no network call today.
+//! * `LiveReadings` (module `live`, cargo feature `live-transport`, off by
+//!   default) implements `Readings` over an IC query client (`ic-agent`,
+//!   anonymous, response verification on) and an EVM JSON-RPC client (`reqwest`),
+//!   with the bridge canister's head rule driven by the profile. Its
+//!   `Readings::source` is `live`, and the report carries the read time and the
+//!   head height of each EVM reading. It is verified here with mocked
+//!   transports only and is never run against public networks under the current
+//!   hold; the `collect_live` example needs an explicit endpoint config and an
+//!   explicit `--live` argument. A default build of this crate makes no network
+//!   call and pulls none of those dependencies.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -77,6 +81,9 @@ pub struct EvmSupply {
 pub enum ReadError {
     /// No adapter exists yet; `card` delivers it.
     Unavailable { card: &'static str },
+    /// The source cannot be read for a named reason (a blocked head, a missing
+    /// query, a missing config entry). Never a zero.
+    UnavailableGap(String),
     /// The read failed (transport error, or a fixture without the entry).
     Failed(String),
 }
@@ -87,6 +94,7 @@ impl fmt::Display for ReadError {
             ReadError::Unavailable { card } => {
                 write!(f, "unavailable: the source is delivered by card {card}")
             }
+            ReadError::UnavailableGap(gap) => write!(f, "unavailable: {gap}"),
             ReadError::Failed(why) => write!(f, "{why}"),
         }
     }
@@ -104,6 +112,11 @@ pub trait Readings {
     fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError>;
     /// Token `totalSupply` of an EVM destination at its settlement head.
     fn evm_total_supply(&self, network: &Network) -> Result<EvmSupply, ReadError>;
+    /// Extra label lines printed under `source:` (for example the read time of
+    /// a live source). A fixture has none.
+    fn notes(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +144,8 @@ pub struct HeadNote {
 pub struct Collected {
     /// The [`Readings::source`] label.
     pub source: &'static str,
+    /// The [`Readings::notes`] lines (read time of a live source).
+    pub notes: Vec<String>,
     /// The measured inputs the aggregate used.
     pub input: AggregateInput,
     pub report: AggregateReport,
@@ -313,6 +328,7 @@ pub fn collect(
     let report = aggregate(&input, catalog).map_err(CollectError::Rejected)?;
     Ok(Collected {
         source: readings.source(),
+        notes: readings.notes(),
         input,
         report,
         heads,
@@ -328,6 +344,10 @@ pub fn format_e8s(v: u128) -> String {
 pub fn render(c: &Collected) -> String {
     let mut out = String::new();
     out.push_str(&format!("source: {}\n", c.source));
+    for note in &c.notes {
+        out.push_str(note);
+        out.push('\n');
+    }
     if c.source == "fixture" {
         out.push_str(
             "recorded fixture readings from a local file; no network was queried; not live data\n",
