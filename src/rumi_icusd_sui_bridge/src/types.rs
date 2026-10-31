@@ -71,7 +71,7 @@ pub struct ConfigView {
     pub initialized: bool,
     pub network: SuiNetwork,
     pub chain_identifier: String,
-    /// The RPC form: the first four bytes of the chain identifier.
+    /// JSON-RPC's form, display only: the first four bytes of the chain identifier, in hex.
     pub short_chain_id: String,
     pub schnorr_key_name: String,
     pub instance_salt: String,

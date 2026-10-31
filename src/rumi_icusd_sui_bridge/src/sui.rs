@@ -91,6 +91,8 @@ pub fn format_digest_base58(d: &Bytes32) -> String {
 
 /// The RPC "chain identifier": the first four bytes of the genesis checkpoint digest, as
 /// lowercase hex (`sui-types` `digests.rs`, `ChainIdentifier` Display).
+/// JSON-RPC's form, for display only: GraphQL's `chainIdentifier` is the full Base58 genesis
+/// digest and is never compared in this short form.
 pub fn short_chain_id(full: &Bytes32) -> String {
     hex::encode(&full[..4])
 }

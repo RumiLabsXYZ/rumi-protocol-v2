@@ -10,6 +10,10 @@
 //! (the SDL, read 2026-10-31). The fixtures in the tests are SCHEMA-DERIVED: hand-built to the
 //! SDL, never captured from a live provider. Facts used:
 //!
+//! * `Query.chainIdentifier: String!`, documented as "The network's genesis checkpoint digest
+//!   (uniquely identifies the network), Base58-encoded." (`schema.graphql`; `src/api/query.rs`
+//!   returns `Base58::encode(chain_id.wait().await.as_bytes())`): the FULL 32-byte genesis digest,
+//!   NOT JSON-RPC's four-byte hex form;
 //! * `Query.chainIdentifier: String!`;
 //! * `Query.checkpoint(sequenceNumber: UInt53, digest: String): Checkpoint` and
 //!   `Checkpoint { digest: String, epoch: Epoch, sequenceNumber: UInt53! }`, `Epoch { epochId: UInt53! }`;
@@ -25,11 +29,13 @@
 //!   `DynamicField { name: MoveValue, value: DynamicFieldValue }`,
 //!   `union DynamicFieldValue = MoveObject | MoveValue`.
 //!
-//! Assumed, not verified against a provider: for a *dynamic field* (as opposed to a dynamic object
-//! field) `DynamicField.value` is the stored value `V` itself, so its `bcs` is the BCS of
-//! `MintRecord` or `ReturnRecord`, not of the framework's `Field<K, V>` wrapper. The decoders and
-//! fixtures here follow that reading; if a provider returns the wrapper the entry fails to decode
-//! and is excluded (`Malformed`/`Identity`), never accepted.
+//! For a *dynamic field* (as opposed to a dynamic object field) `DynamicField.value` is the stored
+//! value `V` itself, so its `bcs` is the BCS of `MintRecord` or `ReturnRecord`, not of the
+//! framework's `Field<K, V>` wrapper. This matches the pinned source (the coordinator's source
+//! pass: at mainnet-v1.82.3 `dynamic_field.rs` `native()` and `value()` extract `V` from the
+//! wrapper); provider behavior is unmeasured. The decoders and fixtures follow that reading; if a
+//! provider returned the wrapper the entry would fail to decode and be excluded
+//! (`Malformed`/`Identity`), never accepted. No wrapper parser exists by design.
 //!
 //! Unmeasured and therefore disabled by default: a provider's keyless availability, its
 //! retention, its real response shapes (JSON-number versus string `UInt53`, the `repr` address
@@ -37,9 +43,11 @@
 //! `UInt53` and both short and long package address forms in a type `repr`.
 //!
 //! Every query asks for `chainIdentifier` in the same request, so a response always identifies
-//! the network it came from. A provider whose identifier is not the configured network's is
+//! the network it came from. A provider whose reported digest is not exactly the configured
+//! network's 32 bytes (the other network, short hex, malformed Base58, wrong-length Base58) is
 //! excluded before the quorum counts it.
 
+use crate::ids::SuiNetwork;
 use crate::gate::{decode_gate, decode_mint_record, decode_return_record, ConfiguredGate, GateObject, MintRecord, ReturnRecord, GATE_STRUCT};
 use crate::sui::{format_address, parse_address_padded, parse_digest_base58, Bytes32};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -210,6 +218,7 @@ pub fn request_object_at_checkpoint(address: &Bytes32, checkpoint: u64) -> Graph
 }
 
 /// An object at an exact version (the fallback for old checkpoints, chain-sui.md section 4).
+/// Read the response with [`parse_object_at_version`]: [`parse_object`] accepts any version.
 pub fn request_object_at_version(address: &Bytes32, version: u64) -> GraphqlRequest {
     GraphqlRequest { query: QUERY_OBJECT_AT_VERSION, variables: json!({ "a": format_address(address), "v": checked_uint53(version) }) }
 }
@@ -309,14 +318,26 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Result<&'a str, Exclusion> {
     v.get(key).and_then(Value::as_str).ok_or_else(|| Exclusion::Malformed(format!("missing string field {key}")))
 }
 
-/// The provider must report exactly the configured network's four-byte chain identifier.
-pub fn check_chain_identifier(data: &Value, expected_short: &str) -> Result<(), Exclusion> {
+/// The Base58 genesis checkpoint digest a provider must report for `network`: the form
+/// `Query.chainIdentifier` returns (`sui-indexer-alt-graphql`, mainnet-v1.82.3).
+pub fn expected_chain_identifier(network: SuiNetwork) -> String {
+    crate::sui::format_digest_base58(&network.chain_identifier())
+}
+
+/// The provider must report exactly the configured network's genesis checkpoint digest.
+/// `Query.chainIdentifier` is that digest Base58-encoded, so the reported value must decode to
+/// exactly 32 bytes and equal the configured digest (`expected_genesis_b58`, normally
+/// [`expected_chain_identifier`]). The four-byte hex of JSON-RPC is never accepted here, nor is a
+/// string with characters outside the Base58 alphabet or a decoded length other than 32.
+pub fn check_chain_identifier(data: &Value, expected_genesis_b58: &str) -> Result<(), Exclusion> {
     let reported = str_field(data, "chainIdentifier")?;
-    let well_formed = reported.len() == 8 && reported.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    if !well_formed {
-        return malformed("chainIdentifier is not 8 lowercase hex digits");
-    }
-    if reported != expected_short {
+    let reported_digest =
+        parse_digest_base58(reported).map_err(|_| Exclusion::Malformed("chainIdentifier is not a 32-byte Base58 genesis digest".into()))?;
+    // A configuration that is not itself a 32-byte Base58 digest matches nothing: every provider
+    // is excluded rather than compared against a malformed expectation.
+    let expected = parse_digest_base58(expected_genesis_b58)
+        .map_err(|_| Exclusion::Identity("the configured chain identifier is not a 32-byte Base58 genesis digest".into()))?;
+    if reported_digest != expected {
         return Err(Exclusion::WrongNetwork(reported.to_string()));
     }
     Ok(())
@@ -330,8 +351,8 @@ pub struct CheckpointFact {
 }
 
 /// A checkpoint reading. `None` means the provider has no such checkpoint (yet).
-pub fn parse_checkpoint(data: &Value, requested: u64, expected_short: &str) -> Result<Option<CheckpointFact>, Exclusion> {
-    check_chain_identifier(data, expected_short)?;
+pub fn parse_checkpoint(data: &Value, requested: u64, expected_genesis_b58: &str) -> Result<Option<CheckpointFact>, Exclusion> {
+    check_chain_identifier(data, expected_genesis_b58)?;
     let c = match data.get("checkpoint") {
         Some(Value::Null) => return Ok(None),
         Some(c) if c.is_object() => c,
@@ -363,8 +384,8 @@ pub struct ObjectFact {
 }
 
 /// An object reading. `None` means the provider says the object does not exist there.
-pub fn parse_object(data: &Value, requested: &Bytes32, expected_short: &str) -> Result<Option<ObjectFact>, Exclusion> {
-    check_chain_identifier(data, expected_short)?;
+pub fn parse_object(data: &Value, requested: &Bytes32, expected_genesis_b58: &str) -> Result<Option<ObjectFact>, Exclusion> {
+    check_chain_identifier(data, expected_genesis_b58)?;
     let o = match data.get("object") {
         Some(Value::Null) => return Ok(None),
         Some(o) if o.is_object() => o,
@@ -389,6 +410,25 @@ pub fn parse_object(data: &Value, requested: &Bytes32, expected_short: &str) -> 
     let type_repr = contents.get("type").and_then(|t| t.get("repr")).and_then(Value::as_str).ok_or_else(|| Exclusion::Malformed("missing type repr".into()))?.to_string();
     let contents_bcs = STANDARD.decode(str_field(contents, "bcs")?).map_err(|_| Exclusion::Malformed("contents bcs is not base64".into()))?;
     Ok(Some(ObjectFact { address, version, digest, owner, type_repr, contents_bcs }))
+}
+
+/// An object reading for a request made with [`request_object_at_version`]. Same checks as
+/// [`parse_object`] plus the requested version: a response for another version (right address,
+/// right network) is an `Identity` exclusion, so it can never become a usable or agreeing fact.
+/// `None` (a null object) stays a missing reading.
+pub fn parse_object_at_version(
+    data: &Value,
+    requested: &Bytes32,
+    requested_version: u64,
+    expected_genesis_b58: &str,
+) -> Result<Option<ObjectFact>, Exclusion> {
+    let object = parse_object(data, requested, expected_genesis_b58)?;
+    match object {
+        Some(o) if o.version != requested_version => {
+            identity(format!("the object is at version {}, not the requested version {requested_version}", o.version))
+        }
+        other => Ok(other),
+    }
 }
 
 /// The gate as observed through one provider, after every check against the configuration.
@@ -427,8 +467,8 @@ pub struct TableEntryFact {
 
 /// A table entry reading for `key`. `None` means the provider has no such dynamic field. It
 /// never means "not delivered": absence is only meaningful once the attempt is proven dead.
-pub fn parse_table_entry(data: &Value, key: &Bytes32, expected_short: &str) -> Result<Option<TableEntryFact>, Exclusion> {
-    check_chain_identifier(data, expected_short)?;
+pub fn parse_table_entry(data: &Value, key: &Bytes32, expected_genesis_b58: &str) -> Result<Option<TableEntryFact>, Exclusion> {
+    check_chain_identifier(data, expected_genesis_b58)?;
     let address = match data.get("address") {
         Some(a) if a.is_object() => a,
         // The Address object always exists in the schema; null means the provider does not
@@ -616,7 +656,10 @@ pub fn canonicalize_response(body: &[u8], max_bytes: usize) -> Result<Vec<u8>, S
     if let Some(data) = obj.get("data") {
         keep.insert("data".into(), data.clone());
     }
-    if let Some(errors) = obj.get("errors").and_then(Value::as_array) {
+    if let Some(errors) = obj.get("errors") {
+        // `parse_envelope` rejects any `errors` member that is not an array, so the transform must
+        // not erase one: refusing it here keeps a rejected reply rejected after canonicalization.
+        let errors = errors.as_array().ok_or("the errors member is not an array")?;
         let messages: Vec<Value> = errors
             .iter()
             .take(4)
@@ -636,7 +679,8 @@ mod tests {
     use crate::sui::format_digest_base58;
     use crate::vectors::*;
 
-    const SHORT: &str = "4c78adac";
+    const TESTNET_B58: &str = "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD";
+    const MAINNET_B58: &str = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S";
 
     fn gate_object_json(chain: &str, address: &str, owner: Value, type_repr: &str, bcs_b64: &str) -> Value {
         json!({ "data": {
@@ -653,7 +697,7 @@ mod tests {
 
     fn good_gate_json() -> Value {
         gate_object_json(
-            SHORT,
+            TESTNET_B58,
             &format_address(&GATE_ID),
             json!({ "__typename": "Shared", "initialSharedVersion": 42 }),
             &configured().gate_type(),
@@ -710,39 +754,40 @@ mod tests {
 
     #[test]
     fn the_chain_identifier_must_be_the_configured_networks() {
-        let ok = json!({ "chainIdentifier": SHORT });
-        assert!(check_chain_identifier(&ok, SHORT).is_ok());
-        assert_eq!(check_chain_identifier(&json!({ "chainIdentifier": "35834a8a" }), SHORT), Err(Exclusion::WrongNetwork("35834a8a".into())));
-        assert!(matches!(check_chain_identifier(&json!({ "chainIdentifier": "4C78ADAC" }), SHORT), Err(Exclusion::Malformed(_))));
-        assert!(matches!(check_chain_identifier(&json!({ "chainIdentifier": "4c78ad" }), SHORT), Err(Exclusion::Malformed(_))));
-        assert!(matches!(check_chain_identifier(&json!({}), SHORT), Err(Exclusion::Malformed(_))));
-        assert_eq!(SuiNetwork::Testnet.short_chain_id(), SHORT);
+        assert_eq!(expected_chain_identifier(SuiNetwork::Testnet), TESTNET_B58);
+        assert_eq!(expected_chain_identifier(SuiNetwork::Mainnet), MAINNET_B58);
+        let ok = json!({ "chainIdentifier": TESTNET_B58 });
+        assert!(check_chain_identifier(&ok, TESTNET_B58).is_ok());
+        assert_eq!(check_chain_identifier(&json!({ "chainIdentifier": MAINNET_B58 }), TESTNET_B58), Err(Exclusion::WrongNetwork(MAINNET_B58.into())));
+        assert!(matches!(check_chain_identifier(&json!({}), TESTNET_B58), Err(Exclusion::Malformed(_))));
+        // JSON-RPC's four-byte hex is not this field's form (more cases in graphql_identity_tests).
+        assert!(check_chain_identifier(&json!({ "chainIdentifier": SuiNetwork::Testnet.short_chain_id() }), TESTNET_B58).is_err());
     }
 
     #[test]
     fn checkpoints_are_checked_against_the_request() {
-        let d = |cp: Value| json!({ "chainIdentifier": SHORT, "checkpoint": cp });
+        let d = |cp: Value| json!({ "chainIdentifier": TESTNET_B58, "checkpoint": cp });
         let good = json!({ "sequenceNumber": 500, "digest": format_digest_base58(&[3; 32]), "epoch": { "epochId": 77 } });
-        let fact = parse_checkpoint(&d(good.clone()), 500, SHORT).unwrap().unwrap();
+        let fact = parse_checkpoint(&d(good.clone()), 500, TESTNET_B58).unwrap().unwrap();
         assert_eq!(fact, CheckpointFact { sequence: 500, digest: [3; 32], epoch: 77 });
         // UInt53 as a string works too.
         let as_string = json!({ "sequenceNumber": "500", "digest": format_digest_base58(&[3; 32]), "epoch": { "epochId": "77" } });
-        assert_eq!(parse_checkpoint(&d(as_string), 500, SHORT).unwrap().unwrap().epoch, 77);
-        assert_eq!(parse_checkpoint(&d(Value::Null), 500, SHORT), Ok(None), "no such checkpoint yet is a missing reading");
-        assert!(matches!(parse_checkpoint(&d(good.clone()), 501, SHORT), Err(Exclusion::Identity(_))), "another checkpoint");
+        assert_eq!(parse_checkpoint(&d(as_string), 500, TESTNET_B58).unwrap().unwrap().epoch, 77);
+        assert_eq!(parse_checkpoint(&d(Value::Null), 500, TESTNET_B58), Ok(None), "no such checkpoint yet is a missing reading");
+        assert!(matches!(parse_checkpoint(&d(good.clone()), 501, TESTNET_B58), Err(Exclusion::Identity(_))), "another checkpoint");
         let bad_digest = json!({ "sequenceNumber": 500, "digest": "abc", "epoch": { "epochId": 77 } });
-        assert!(matches!(parse_checkpoint(&d(bad_digest), 500, SHORT), Err(Exclusion::Malformed(_))));
+        assert!(matches!(parse_checkpoint(&d(bad_digest), 500, TESTNET_B58), Err(Exclusion::Malformed(_))));
         let no_epoch = json!({ "sequenceNumber": 500, "digest": format_digest_base58(&[3; 32]) });
-        assert!(parse_checkpoint(&d(no_epoch), 500, SHORT).is_err());
-        let wrong_net = json!({ "chainIdentifier": "35834a8a", "checkpoint": good });
-        assert!(matches!(parse_checkpoint(&wrong_net, 500, SHORT), Err(Exclusion::WrongNetwork(_))));
+        assert!(parse_checkpoint(&d(no_epoch), 500, TESTNET_B58).is_err());
+        let wrong_net = json!({ "chainIdentifier": MAINNET_B58, "checkpoint": good });
+        assert!(matches!(parse_checkpoint(&wrong_net, 500, TESTNET_B58), Err(Exclusion::WrongNetwork(_))));
     }
 
     #[test]
     fn the_gate_reading_is_accepted_only_when_every_identity_matches() {
         let cfg = configured();
         let data = data_of(&good_gate_json());
-        let obj = parse_object(&data, &GATE_ID, SHORT).unwrap().unwrap();
+        let obj = parse_object(&data, &GATE_ID, TESTNET_B58).unwrap().unwrap();
         assert_eq!(obj.version, 105);
         assert_eq!(obj.owner, OwnerFact::Shared { initial_shared_version: 42 });
         let fact = interpret_gate(&obj, &cfg, &TESTNET_CHAIN_IDENTIFIER).unwrap();
@@ -751,23 +796,23 @@ mod tests {
         assert_eq!(fact.gate.supply_cap, 1000 * 100_000_000);
 
         // Another object than requested.
-        assert!(matches!(parse_object(&data, &[0x6b; 32], SHORT), Err(Exclusion::Identity(_))));
+        assert!(matches!(parse_object(&data, &[0x6b; 32], TESTNET_B58), Err(Exclusion::Identity(_))));
         // Short and long address forms of the request normalize.
         let mut short_form = good_gate_json();
         short_form["data"]["object"]["address"] = json!(format!("0x{}", "6a".repeat(32)).to_uppercase().replace("0X", "0x"));
-        assert!(parse_object(&data_of(&short_form), &GATE_ID, SHORT).unwrap().is_some());
+        assert!(parse_object(&data_of(&short_form), &GATE_ID, TESTNET_B58).unwrap().is_some());
         // A null object is a missing reading, not an error and not zero.
-        let missing = json!({ "chainIdentifier": SHORT, "object": null });
-        assert_eq!(parse_object(&missing, &GATE_ID, SHORT), Ok(None));
+        let missing = json!({ "chainIdentifier": TESTNET_B58, "object": null });
+        assert_eq!(parse_object(&missing, &GATE_ID, TESTNET_B58), Ok(None));
         // Wrong network.
         let mut wn = good_gate_json();
-        wn["data"]["chainIdentifier"] = json!("35834a8a");
-        assert!(matches!(parse_object(&data_of(&wn), &GATE_ID, SHORT), Err(Exclusion::WrongNetwork(_))));
+        wn["data"]["chainIdentifier"] = json!(MAINNET_B58);
+        assert!(matches!(parse_object(&data_of(&wn), &GATE_ID, TESTNET_B58), Err(Exclusion::WrongNetwork(_))));
 
         let reject = |mutate: &dyn Fn(&mut Value)| {
             let mut v = good_gate_json();
             mutate(&mut v);
-            match parse_object(&data_of(&v), &GATE_ID, SHORT) {
+            match parse_object(&data_of(&v), &GATE_ID, TESTNET_B58) {
                 Ok(Some(o)) => interpret_gate(&o, &cfg, &TESTNET_CHAIN_IDENTIFIER).is_err(),
                 Ok(None) => false,
                 Err(_) => true,
@@ -783,7 +828,7 @@ mod tests {
         assert!(reject(&|v| v["data"]["object"]["digest"] = json!("0OIl")), "a malformed digest");
         assert!(reject(&|v| v["data"]["object"]["asMoveObject"] = Value::Null), "no Move contents");
         // Same bytes, but the configured network is mainnet: the gate's chain identifier differs.
-        let o = parse_object(&data, &GATE_ID, SHORT).unwrap().unwrap();
+        let o = parse_object(&data, &GATE_ID, TESTNET_B58).unwrap().unwrap();
         assert!(interpret_gate(&o, &cfg, &crate::ids::MAINNET_CHAIN_IDENTIFIER).is_err());
         // A different configured gate id.
         let other = ConfiguredGate { gate: [0x6b; 32], ..cfg };
@@ -791,7 +836,7 @@ mod tests {
     }
 
     fn entry_json(name_b64: &str, typename: &str, repr: &str, bcs_b64: &str) -> Value {
-        json!({ "chainIdentifier": SHORT, "address": { "dynamicField": {
+        json!({ "chainIdentifier": TESTNET_B58, "address": { "dynamicField": {
             "name": { "bcs": name_b64 },
             "value": { "__typename": typename, "type": { "repr": repr }, "bcs": bcs_b64 }
         }}})
@@ -804,34 +849,34 @@ mod tests {
         let bcs_b64 = STANDARD.encode(hex::decode(MINT_RECORD_BCS).unwrap());
         let good = entry_json(MINT_ID_NAME_B64, "MoveValue", &record_type, &bcs_b64);
         let key = mint_id_bytes();
-        let entry = parse_table_entry(&good, &key, SHORT).unwrap().unwrap();
+        let entry = parse_table_entry(&good, &key, TESTNET_B58).unwrap().unwrap();
         let rec = interpret_mint_entry(&entry, &cfg).unwrap();
         assert_eq!((rec.recipient, rec.amount, rec.sequence), (RECIPIENT, AMOUNT, 4));
 
         // A null dynamic field is Missing, not "not delivered".
-        let none = json!({ "chainIdentifier": SHORT, "address": { "dynamicField": null } });
-        assert_eq!(parse_table_entry(&none, &key, SHORT), Ok(None));
+        let none = json!({ "chainIdentifier": TESTNET_B58, "address": { "dynamicField": null } });
+        assert_eq!(parse_table_entry(&none, &key, TESTNET_B58), Ok(None));
         // The field returned is for another key.
         let other_key = STANDARD.encode(crate::gate::table_key_bcs(&[0x99; 32]));
         let wrong_key = entry_json(&other_key, "MoveValue", &record_type, &bcs_b64);
-        assert!(matches!(parse_table_entry(&wrong_key, &key, SHORT), Err(Exclusion::Identity(_))));
+        assert!(matches!(parse_table_entry(&wrong_key, &key, TESTNET_B58), Err(Exclusion::Identity(_))));
         // A dynamic OBJECT field (value is an object) is not a table value.
         let object_value = entry_json(MINT_ID_NAME_B64, "MoveObject", &record_type, &bcs_b64);
-        assert!(matches!(parse_table_entry(&object_value, &key, SHORT), Err(Exclusion::Malformed(_))));
+        assert!(matches!(parse_table_entry(&object_value, &key, TESTNET_B58), Err(Exclusion::Malformed(_))));
         // Wrong value type: a ReturnRecord where a MintRecord is required, and another package.
         let ret_type = format!("0x{}::rumi_icusd_gate::ReturnRecord", hex::encode(PACKAGE));
-        let wrong_type = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &ret_type, &bcs_b64), &key, SHORT).unwrap().unwrap();
+        let wrong_type = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &ret_type, &bcs_b64), &key, TESTNET_B58).unwrap().unwrap();
         assert!(interpret_mint_entry(&wrong_type, &cfg).is_err());
         let foreign = format!("0x{}::rumi_icusd_gate::MintRecord", "71".repeat(32));
-        let foreign_entry = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &foreign, &bcs_b64), &key, SHORT).unwrap().unwrap();
+        let foreign_entry = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &foreign, &bcs_b64), &key, TESTNET_B58).unwrap().unwrap();
         assert!(interpret_mint_entry(&foreign_entry, &cfg).is_err());
         // Truncated record bytes.
         let short = STANDARD.encode(&hex::decode(MINT_RECORD_BCS).unwrap()[..40]);
-        let truncated = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &record_type, &short), &key, SHORT).unwrap().unwrap();
+        let truncated = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &record_type, &short), &key, TESTNET_B58).unwrap().unwrap();
         assert!(interpret_mint_entry(&truncated, &cfg).is_err());
         // Return records go through the same path.
         let ret_b64 = STANDARD.encode(hex::decode(RETURN_RECORD_BCS).unwrap());
-        let ret = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &ret_type, &ret_b64), &key, SHORT).unwrap().unwrap();
+        let ret = parse_table_entry(&entry_json(MINT_ID_NAME_B64, "MoveValue", &ret_type, &ret_b64), &key, TESTNET_B58).unwrap().unwrap();
         assert_eq!(interpret_return_entry(&ret, &cfg).unwrap().client_nonce, 42);
         assert!(interpret_return_entry(&entry, &cfg).is_err());
     }
@@ -859,7 +904,7 @@ mod tests {
         assert!(matches!(tally::<u32>(&[], RULE), Verdict::Unavailable(_)));
         assert!(matches!(tally::<u32>(&[(id("a"), Missing), (id("b"), Excluded(Exclusion::Transport("x".into())))], RULE), Verdict::Unavailable(_)));
         // Excluded providers are set aside before counting.
-        let wrong = Excluded(Exclusion::WrongNetwork("35834a8a".into()));
+        let wrong = Excluded(Exclusion::WrongNetwork(MAINNET_B58.into()));
         assert_eq!(tally(&[(id("a"), fact(7)), (id("b"), fact(7)), (id("c"), wrong.clone())], RULE), Verdict::Agreed(7));
         assert!(matches!(tally(&[(id("a"), fact(7)), (id("b"), wrong.clone())], RULE), Verdict::Unavailable(_)), "a wrong-network provider never makes up a quorum");
         // A larger quorum needs more agreement.
@@ -871,7 +916,7 @@ mod tests {
         assert_eq!(tally(&[(id("a"), fact(7)), (id("a"), fact(7))], RULE), Verdict::Held(HoldReason::DuplicateProvider("a".into())));
         // The audit trail names what was set aside.
         let readings = [(id("a"), fact(7)), (id("b"), wrong)];
-        assert_eq!(exclusions(&readings), vec![(id("b"), Exclusion::WrongNetwork("35834a8a".into()))]);
+        assert_eq!(exclusions(&readings), vec![(id("b"), Exclusion::WrongNetwork(MAINNET_B58.into()))]);
     }
 
     #[test]
@@ -879,16 +924,16 @@ mod tests {
         let cfg = configured();
         let body = serde_json::to_vec(&good_gate_json()).unwrap();
         let parse = |d: &Value| {
-            parse_object(d, &GATE_ID, SHORT).and_then(|o| match o {
+            parse_object(d, &GATE_ID, TESTNET_B58).and_then(|o| match o {
                 Some(o) => interpret_gate(&o, &cfg, &TESTNET_CHAIN_IDENTIFIER).map(Some),
                 None => Ok(None),
             })
         };
         assert!(matches!(outcome_from_body(&body, parse), Outcome::Fact(f) if f.initial_shared_version == 42));
-        assert!(matches!(outcome_from_body(br#"{"data":{"chainIdentifier":"4c78adac","object":null}}"#, parse), Outcome::Missing));
+        assert!(matches!(outcome_from_body(format!(r#"{{"data":{{"chainIdentifier":"{TESTNET_B58}","object":null}}}}"#).as_bytes(), parse), Outcome::Missing));
         assert!(matches!(outcome_from_body(b"", parse), Outcome::Excluded(Exclusion::Transport(_))));
         assert!(matches!(outcome_from_body(br#"{"errors":[{"message":"boom"}]}"#, parse), Outcome::Excluded(Exclusion::Transport(_))));
-        assert!(matches!(outcome_from_body(br#"{"data":{"chainIdentifier":"35834a8a","object":null}}"#, parse), Outcome::Excluded(Exclusion::WrongNetwork(_))));
+        assert!(matches!(outcome_from_body(format!(r#"{{"data":{{"chainIdentifier":"{MAINNET_B58}","object":null}}}}"#).as_bytes(), parse), Outcome::Excluded(Exclusion::WrongNetwork(_))));
     }
 
     #[test]

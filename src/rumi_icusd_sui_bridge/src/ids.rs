@@ -16,7 +16,8 @@
 //! `chain` field and the Gate's `chain_identifier` use). Only two are accepted, taken from the
 //! base58 constants in `sui-types` `digests.rs` at mainnet-v1.82.3 and decoded by hand
 //! (`MAINNET_CHAIN_IDENTIFIER_BASE58`, `TESTNET_CHAIN_IDENTIFIER_BASE58`); the decoded
-//! four-byte prefixes `35834a8a` and `4c78adac` match the RPC chain identifiers. Anything else
+//! four-byte prefixes `35834a8a` and `4c78adac` match JSON-RPC's chain identifiers (GraphQL
+//! reports the full Base58 digest). Anything else
 //! is refused rather than guessed.
 
 use crate::sui::{short_chain_id, Bytes32};

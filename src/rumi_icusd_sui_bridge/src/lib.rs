@@ -77,6 +77,8 @@ pub mod types;
 #[cfg(test)]
 #[allow(dead_code)]
 mod vectors;
+#[cfg(test)]
+mod graphql_identity_tests;
 
 use candid::Principal;
 use ids::SuiRole;
