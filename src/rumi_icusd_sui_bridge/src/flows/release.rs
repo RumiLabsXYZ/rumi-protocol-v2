@@ -227,15 +227,16 @@ pub fn open_release(v: &VerifiedReturn) -> Result<OpenOutcome, OpenError> {
 // ---------------------------------------------------------------------------
 
 /// User hint: "check this Sui transaction sooner" (a base58 typed transaction digest). Never settles
-/// anything: it is stored, bounded per caller and in all, and expires.
-pub fn record_hint(digest_text: String) -> BridgeResult<()> {
+/// anything: it is stored, bounded per caller and in all, and expires. `Ok(true)` when the hint is new,
+/// `Ok(false)` when the same digest was already pending (a repeat changes nothing).
+pub fn record_hint(digest_text: String) -> BridgeResult<bool> {
     let caller = admin::require_authenticated()?;
     let digest = parse_digest_base58(digest_text.trim()).map_err(|e| BridgeError::InvalidArgument(format!("digest: {e}")))?;
     let now = env::now_ns();
     state::mutate_runtime(|c| {
         c.hints.retain(|x| now.saturating_sub(x.submitted_at_ns) < HINT_TTL_NS);
         if c.hints.iter().any(|x| x.digest == digest) {
-            return Ok(());
+            return Ok(false);
         }
         if c.hints.iter().filter(|x| x.submitted_by == caller).count() >= MAX_HINTS_PER_CALLER {
             return Err(BridgeError::TooManyActiveOperations);
@@ -244,13 +245,35 @@ pub fn record_hint(digest_text: String) -> BridgeResult<()> {
             c.hints.remove(0);
         }
         c.hints.push(Hint { digest, submitted_by: caller, submitted_at_ns: now });
-        Ok(())
+        Ok(true)
     })
 }
 
-/// The unexpired hints, oldest first (what the return observer reads).
+/// The unexpired hints, oldest first.
 pub fn live_hints(now: u64) -> Vec<Hint> {
     state::read_runtime(|c| c.hints.iter().filter(|h| now.saturating_sub(h.submitted_at_ns) < HINT_TTL_NS).cloned().collect())
+}
+
+/// The next window of at most `limit` live hints for the return observer: the hints in `(submitted_at_ns,
+/// digest)` order starting after the last one the previous pass read, wrapping to the oldest. This is the
+/// same fair rotation the saga queues use ([`state::next_deposits`]): a hint that cannot be read (not
+/// indexed, a provider error) delays the ones behind it by at most one rotation, never forever, and a pass
+/// reads no more than `limit` of them. With `n` live hints every one is read within `ceil(n / limit)`
+/// passes. Reading a hint changes nothing about it.
+pub fn next_hints(now: u64, limit: usize) -> Vec<Hint> {
+    let mut live = live_hints(now);
+    if live.is_empty() || limit == 0 {
+        return vec![];
+    }
+    let key = |h: &Hint| (h.submitted_at_ns, h.digest);
+    live.sort_by_key(key);
+    let start = match state::hint_cursor() {
+        Some(after) => live.iter().position(|h| key(h) > after).unwrap_or(0),
+        None => 0,
+    };
+    let window: Vec<Hint> = (0..live.len().min(limit)).map(|i| live[(start + i) % live.len()].clone()).collect();
+    state::set_hint_cursor(window.last().map(key));
+    window
 }
 
 // ---------------------------------------------------------------------------

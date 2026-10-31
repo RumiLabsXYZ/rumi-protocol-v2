@@ -26,6 +26,8 @@ pub struct Inputs<'a> {
     pub chain: &'a ChainObservation,
     pub checkpoint: u64,
     pub escrow_balance: Option<u128>,
+    /// Why there is no balance to compare, when the caller knows (default text otherwise).
+    pub escrow_unread: Option<&'a str>,
     pub books: &'a OwnBooks,
     pub last_final_checkpoint: u64,
     pub caught_up: bool,
@@ -53,7 +55,7 @@ pub fn evaluate(i: &Inputs) -> Vec<CheckResult> {
     out.push(result(
         "C1 escrow covers liabilities",
         match i.escrow_balance {
-            None => not_evaluated("the escrow balance could not be read from the ledger"),
+            None => not_evaluated(i.escrow_unread.unwrap_or("the escrow balance could not be read from the ledger")),
             Some(balance) => match check_coverage(b, balance) {
                 Ok(r) if r.ok => CheckOutcome::Ok,
                 Ok(r) => breach(format!("the ledger shows {} in escrow but {} is required ({} short)", r.escrow_balance, r.required, r.deficit.unwrap_or(0)), BreachScope::Bridge),
@@ -198,7 +200,7 @@ mod tests {
     }
 
     fn run(c: &ChainObservation, b: &OwnBooks, escrow: Option<u128>, caught_up: bool) -> Vec<CheckResult> {
-        evaluate(&Inputs { chain: c, checkpoint: 1_000, escrow_balance: escrow, books: b, last_final_checkpoint: 900, caught_up, gap: None, active_op: false })
+        evaluate(&Inputs { chain: c, checkpoint: 1_000, escrow_balance: escrow, escrow_unread: None, books: b, last_final_checkpoint: 900, caught_up, gap: None, active_op: false })
     }
 
     fn outcome<'a>(r: &'a [CheckResult], prefix: &str) -> &'a CheckOutcome {
@@ -227,6 +229,25 @@ mod tests {
     }
 
     #[test]
+    fn a_balance_the_caller_could_not_match_with_the_books_is_not_evaluated_with_its_reason_and_never_a_breach() {
+        let why = "the books changed while the escrow balance was being read";
+        let r = evaluate(&Inputs {
+            chain: &chain(),
+            checkpoint: 1_000,
+            escrow_balance: None,
+            escrow_unread: Some(why),
+            books: &books(),
+            last_final_checkpoint: 900,
+            caught_up: true,
+            gap: None,
+            active_op: false,
+        });
+        assert!(matches!(outcome(&r, "C1"), CheckOutcome::NotEvaluated { reason } if reason == why));
+        // The other checks do not depend on the balance.
+        assert!(r.iter().filter(|c| !c.name.starts_with("C1")).all(|c| c.outcome == CheckOutcome::Ok), "{r:?}");
+    }
+
+    #[test]
     fn c2_halts_the_bridge_when_the_chain_holds_more_than_the_books_explain() {
         let mut c = chain();
         c.total_supply = 501;
@@ -250,7 +271,7 @@ mod tests {
         flying.inflight_ops = 1;
         flying.buckets.pending_mint = 10;
         assert!(matches!(outcome(&run(&chain(), &flying, Some(510), true), "C3"), CheckOutcome::NotEvaluated { reason } if reason.contains("in flight")));
-        let behind = evaluate(&Inputs { chain: &chain(), checkpoint: 800, escrow_balance: Some(500), books: &books(), last_final_checkpoint: 900, caught_up: true, gap: None, active_op: false });
+        let behind = evaluate(&Inputs { chain: &chain(), checkpoint: 800, escrow_balance: Some(500), escrow_unread: None, books: &books(), last_final_checkpoint: 900, caught_up: true, gap: None, active_op: false });
         assert!(matches!(outcome(&behind, "C3"), CheckOutcome::NotEvaluated { reason } if reason.contains("behind our last finalized mint")));
         assert!(matches!(outcome(&behind, "C4 mint"), CheckOutcome::NotEvaluated { .. }));
         // Quiescent: more supply than outstanding halts the bridge, less halts only the lane.
@@ -319,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_gap_is_a_hold_not_a_pass() {
-        let r = evaluate(&Inputs { chain: &chain(), checkpoint: 1_000, escrow_balance: Some(500), books: &books(), last_final_checkpoint: 0, caught_up: false, gap: Some("sequence 3 is missing"), active_op: false });
+        let r = evaluate(&Inputs { chain: &chain(), checkpoint: 1_000, escrow_balance: Some(500), escrow_unread: None, books: &books(), last_final_checkpoint: 0, caught_up: false, gap: Some("sequence 3 is missing"), active_op: false });
         assert!(matches!(outcome(&r, "returns complete"), CheckOutcome::NotEvaluated { reason } if reason.contains("sequence 3")));
     }
 

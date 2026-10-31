@@ -103,6 +103,8 @@ pub enum LedgerFault {
 }
 
 type ExecHook = Box<dyn Fn(&LedgerOp)>;
+/// Called with the account of every `balance_of` after its value is read and before the reply returns.
+type BalanceHook = Box<dyn Fn(&Account)>;
 
 /// A simulated icUSD ledger: balances, ICRC-2 allowances, a block log, the 24 hour deduplication
 /// window of ICRC-1 (a repeated identical tuple returns the original block), fee checking and
@@ -119,6 +121,10 @@ pub struct MockLedger {
     /// Called at the top of `execute`, before anything happens: lets a test look at the stored state
     /// at the moment of the send.
     pub on_execute: RefCell<Option<ExecHook>>,
+    /// Called inside `balance_of` AFTER the balance is read and BEFORE it is returned: whatever the hook
+    /// changes locally happens while the read is in flight, and the reply is the older value (the await
+    /// interleaving of a real ledger call).
+    pub on_balance_of: RefCell<Option<BalanceHook>>,
     /// Make `search` fail with this error.
     pub search_error: RefCell<Option<String>>,
     pub search_calls: RefCell<Vec<(u64, u64)>>,
@@ -145,6 +151,7 @@ impl MockLedger {
             sent: RefCell::default(),
             minting: RefCell::new(Some(Account { owner: candid::Principal::from_slice(&[0x4d; 10]), subaccount: None })),
             on_execute: RefCell::new(None),
+            on_balance_of: RefCell::new(None),
             search_error: RefCell::new(None),
             search_calls: RefCell::default(),
             fee_calls: Cell::new(0),
@@ -312,7 +319,11 @@ impl IcpLedger for MockLedger {
     }
 
     async fn balance_of(&self, account: Account) -> Result<u128, String> {
-        Ok(self.balance(&account))
+        let balance = self.balance(&account);
+        if let Some(hook) = self.on_balance_of.borrow().as_ref() {
+            hook(&account);
+        }
+        Ok(balance)
     }
 
     async fn allowance(&self, account: Account, spender: Account) -> Result<(u128, Option<u64>), String> {

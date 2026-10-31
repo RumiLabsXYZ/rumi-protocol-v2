@@ -276,11 +276,14 @@ async fn request_deposit_refund(id: u64) -> BridgeResult<DepositView> {
 /// never settles anything.
 #[ic_cdk::update]
 fn notify_sui_return(digest: String) -> BridgeResult<()> {
-    flows::release::record_hint(digest)?;
-    // The return observer reads a hinted transaction on its next pass; wake it now. The hint pays nothing:
-    // a return is opened only from the Gate's durable record.
-    state::mutate_runtime(|c| c.observer.next_run_ns = 0);
-    timer::schedule_soon();
+    // The return observer reads a hinted transaction on a pass of its own schedule. A NEW hint pulls that pass
+    // forward to one busy interval after the last (never below it, never through a provider wait); a repeat
+    // changes nothing and wakes nothing. The hint pays nothing: a return is opened only from the Gate's
+    // durable record.
+    if flows::release::record_hint(digest)? {
+        flows::observer::wake_for_new_hint();
+        timer::schedule_soon();
+    }
     Ok(())
 }
 

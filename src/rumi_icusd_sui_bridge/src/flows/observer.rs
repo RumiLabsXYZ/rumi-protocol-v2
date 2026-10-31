@@ -25,6 +25,27 @@
 //!
 //! Idle, the observer wakes every five minutes and reads the head and the Gate; with work pending it works
 //! every pass. A pass makes a bounded number of quorum reads (a scan budget, a hint limit, a verify limit).
+//! Only the clock decides when a pass runs: a hint never bypasses `next_run_ns` (a missing one schedules a
+//! wait like any other unavailable read), and a genuinely new hint only pulls the next run forward to one
+//! busy interval after the last pass ([`wake_for_new_hint`]) unless a provider wait is in force. The hints a
+//! pass reads rotate through the live ones ([`release::next_hints`]), so unreadable hints cannot occupy every
+//! slot.
+//!
+//! # Coherence and stale continuations (review correction F1)
+//!
+//! A pass reads across awaits and then compares what it saw with the books, so two fences keep the
+//! comparison honest:
+//!
+//! * **Overtaken passes stop.** Every pass takes a token when it begins to read; after each await it checks
+//!   that no newer pass has begun, and an overtaken pass returns without writing a cursor, a gap, a wait,
+//!   a monitor report or a schedule. (The timer reclaims a guard left by a slow pass after ten minutes, so
+//!   two passes can be in flight.) The cursors are also written monotonically, so even a write that slipped
+//!   through could not move them back.
+//! * **The escrow balance is compared only with the books it was requested against.** The books are
+//!   captured immediately before the ledger query and compared with the books when the reply arrives. A
+//!   difference (a deposit pull settled, a refund moved) means the reply may predate it, so C1 reports
+//!   `NotEvaluated` for this pass and the next pass reads again. It never halts on, and never passes, a
+//!   balance it cannot match with a book state. C2 to C4 do not use the balance and are unaffected.
 
 use crate::bind::{exclusion_text, lane_identity, LaneIdentity};
 use crate::env;
@@ -39,7 +60,27 @@ use crate::reads::{interpret_bridge_out_event, EventFact, ExecStatus};
 use crate::state::{
     self, AuditCtx, Candidate, CandidateSource, ChainObservation, Claim, MonitorReport, ObserverProblem, OwnBooks, ReadyReturn, MAX_CANDIDATES, MAX_PROBLEMS,
 };
+use std::cell::Cell;
 use std::collections::BTreeSet;
+
+thread_local! {
+    /// The newest observer pass that has begun to read. Heap only, on purpose: a pass in flight cannot
+    /// outlive an upgrade, so after one the count simply starts again.
+    static LATEST_PASS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Start a pass: its token is the new latest.
+fn begin_pass() -> u64 {
+    LATEST_PASS.with(|p| {
+        let next = p.get() + 1;
+        p.set(next);
+        next
+    })
+}
+
+fn is_latest_pass(token: u64) -> bool {
+    LATEST_PASS.with(|p| p.get() == token)
+}
 
 /// Wake interval when nothing is pending.
 pub const IDLE_INTERVAL_NS: u64 = 300 * 1_000_000_000;
@@ -292,12 +333,20 @@ async fn scan_window<T: SuiTransport>(mirror: &Mirror<'_, T>, cfg: &ConfiguredGa
 
 /// Hints name transactions; their events name candidates. A hint is consumed once its transaction is final
 /// and read, whatever it turns out to contain.
-async fn process_hints<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIdentity, chain: &Hash32, head: u64) {
-    let hints = release::live_hints(env::now_ns());
-    for h in hints.into_iter().take(MAX_HINTS_PER_PASS) {
-        let t = match settle("hinted transaction", mirror.tx_events(&h.digest).await) {
+async fn process_hints<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIdentity, chain: &Hash32, head: u64, current: &dyn Fn() -> bool) {
+    // A bounded, rotating window over the live hints: unreadable ones cannot occupy every slot.
+    for h in release::next_hints(env::now_ns(), MAX_HINTS_PER_PASS) {
+        let verdict = mirror.tx_events(&h.digest).await;
+        if !current() {
+            return;
+        }
+        let t = match settle("hinted transaction", verdict) {
             Ok(Some(t)) => t,
-            Ok(None) => continue, // not indexed or not final yet: kept until it expires
+            Ok(None) => {
+                // Not indexed or not final yet: kept until it expires, and the pass waits before it asks again.
+                set_wait(Some(format!("the hinted transaction {} is not served yet", crate::sui::format_digest_base58(&h.digest))));
+                continue;
+            }
             Err(w) => {
                 set_wait(Some(w));
                 continue;
@@ -327,7 +376,7 @@ async fn process_hints<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIdentit
 }
 
 /// Fetch and verify the durable record of every candidate not yet verified (bounded per pass).
-async fn verify_candidates<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIdentity, chain: &Hash32, gate: &GateObject, head: u64) {
+async fn verify_candidates<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIdentity, chain: &Hash32, gate: &GateObject, head: u64, current: &dyn Fn() -> bool) {
     let pending: Vec<Candidate> = state::read_runtime(|c| c.observer.candidates.iter().filter(|x| x.ready.is_none()).take(MAX_VERIFY_PER_PASS).cloned().collect());
     for cand in pending {
         let tid = ids::transfer_id(chain, &id.cfg.gate, &cand.sender, cand.nonce);
@@ -350,7 +399,11 @@ async fn verify_candidates<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIde
             }
         };
         // The transaction: executed successfully at a finalized checkpoint we have reached.
-        match settle("transaction", mirror.transaction(&cand.tx_digest).await) {
+        let tx_verdict = mirror.transaction(&cand.tx_digest).await;
+        if !current() {
+            return;
+        }
+        match settle("transaction", tx_verdict) {
             Err(w) => {
                 set_wait(Some(w));
                 continue;
@@ -370,7 +423,11 @@ async fn verify_candidates<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIde
             Ok(Some(_)) => {}
         }
         // The durable record: the proof.
-        match settle("return record", mirror.return_entry(&id.cfg, &gate.returns_table, head, &tid).await) {
+        let record_verdict = mirror.return_entry(&id.cfg, &gate.returns_table, head, &tid).await;
+        if !current() {
+            return;
+        }
+        match settle("return record", record_verdict) {
             Err(w) => set_wait(Some(w)),
             Ok(None) => retry(format!("no durable record for transfer id {} at checkpoint {head}", hex::encode(tid))),
             Ok(Some(rec)) => match verify_return(&id.cfg, chain, gate, head, &cand, &tid, &rec) {
@@ -390,20 +447,28 @@ async fn verify_candidates<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIde
 // The pass
 // ---------------------------------------------------------------------------
 
-fn monitor_run(head: u64, cp: &CheckpointFact, gate: &GateObject, escrow: Option<u128>) {
-    let (buckets, o, minted_count, minted_e8s, returned_e8s, last_final, active_op) = state::read_runtime(|c| {
-        (c.buckets, c.observer.clone(), c.minted_count, c.minted_e8s, c.returned_e8s, c.last_final_checkpoint, c.active_mint_op.is_some())
-    });
-    let caught_up = o.scanned_through >= head && o.verified_through == gate.bridge_out_count && o.candidates.is_empty();
-    let books = OwnBooks {
-        buckets,
-        minted_count,
-        minted_e8s,
-        verified_through: o.verified_through,
-        returned_e8s,
+/// The books the monitors compare, as they stand now.
+fn own_books() -> OwnBooks {
+    state::read_runtime(|c| OwnBooks {
+        buckets: c.buckets,
+        minted_count: c.minted_count,
+        minted_e8s: c.minted_e8s,
+        verified_through: c.observer.verified_through,
+        returned_e8s: c.returned_e8s,
         inflight_mint_e8s: state::inflight_mint_e8s(),
-        inflight_ops: u64::from(active_op),
-    };
+        inflight_ops: u64::from(c.active_mint_op.is_some()),
+    })
+}
+
+/// Run the monitors. `escrow` is the ledger's reply and `books_at_request` the books when that request was
+/// sent; if the books have changed since, the reply cannot be matched with them (a settled pull, say, is in
+/// the books but may not be in the balance) and C1 is deferred. Returns whether it was.
+fn monitor_run(head: u64, cp: &CheckpointFact, gate: &GateObject, escrow: Option<u128>, books_at_request: &OwnBooks) -> bool {
+    let (o, last_final, active_op) = state::read_runtime(|c| (c.observer.clone(), c.last_final_checkpoint, c.active_mint_op.is_some()));
+    let books = own_books();
+    let deferred = escrow.is_some() && *books_at_request != books;
+    let escrow = if deferred { None } else { escrow };
+    let caught_up = o.scanned_through >= head && o.verified_through == gate.bridge_out_count && o.candidates.is_empty();
     let chain = ChainObservation {
         total_supply: gate.total_supply,
         supply_cap: gate.supply_cap,
@@ -417,6 +482,7 @@ fn monitor_run(head: u64, cp: &CheckpointFact, gate: &GateObject, escrow: Option
         chain: &chain,
         checkpoint: head,
         escrow_balance: escrow,
+        escrow_unread: deferred.then_some("the books changed while the escrow balance was being read, so it cannot be compared with them; the next pass reads it again"),
         books: &books,
         last_final_checkpoint: last_final,
         caught_up,
@@ -427,6 +493,7 @@ fn monitor_run(head: u64, cp: &CheckpointFact, gate: &GateObject, escrow: Option
     obs(|ob| ob.caught_up = caught_up);
     state::mutate_runtime(|c| c.monitor = Some(report.clone()));
     monitor::apply(&report);
+    deferred
 }
 
 /// One observer pass: open what is ready; if due, read the head and the Gate, scan, take hints, verify
@@ -436,22 +503,34 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
     // Releases that are ready need no outcall: a mint delivered since the last pass may have unblocked one.
     open_ready_returns();
     let now = env::now_ns();
-    let (paused, due, started, observed) =
-        state::read_runtime(|c| (c.config.pauses.observer, now >= c.observer.next_run_ns, c.observer.started, c.observed.clone()));
-    let hinted = !release::live_hints(now).is_empty();
-    if paused || observed.is_none() || (!due && !hinted) {
+    let (paused, due, observed) = state::read_runtime(|c| (c.config.pauses.observer, now >= c.observer.next_run_ns, c.observed.clone()));
+    // Only the clock decides. A hint does not bypass `next_run_ns` (a missing one schedules a wait like any
+    // other unavailable read); a genuinely new one pulls it forward in `wake_for_new_hint`.
+    if paused || observed.is_none() || !due {
         return;
     }
     let Ok(id) = lane_identity() else { return };
     let Ok(mirror) = Mirror::from_state(transport) else { return };
     let chain = mirror.chain_identifier();
+    // From here the pass awaits. If a newer pass begins meanwhile (the timer reclaims a guard left behind by
+    // a slow pass), this one is overtaken and must leave the cursors, the monitors and the schedule alone.
+    let me = begin_pass();
+    let current = move || is_latest_pass(me);
     let schedule = |busy: bool, waited: bool| {
         let step = if waited { WAIT_INTERVAL_NS } else if busy { BUSY_INTERVAL_NS } else { IDLE_INTERVAL_NS };
-        obs(|o| o.next_run_ns = env::now_ns().saturating_add(step));
+        let at = env::now_ns();
+        obs(|o| {
+            o.last_run_ns = at;
+            o.next_run_ns = at.saturating_add(step);
+        });
     };
 
     // The finalized checkpoint this pass works at.
-    let head = match settle("head", mirror.head().await) {
+    let head_verdict = mirror.head().await;
+    if !current() {
+        return;
+    }
+    let head = match settle("head", head_verdict) {
         Ok(Some(h)) => h,
         Ok(None) => {
             set_wait(Some("the providers have no checkpoint yet".into()));
@@ -466,7 +545,11 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
         set_wait(Some(format!("the providers' head {head} is behind the {} this observer already worked at", state::read_runtime(|c| c.observer.last_head))));
         return schedule(true, true);
     }
-    let cp = match settle("checkpoint", mirror.checkpoint(head).await) {
+    let checkpoint_verdict = mirror.checkpoint(head).await;
+    if !current() {
+        return;
+    }
+    let cp = match settle("checkpoint", checkpoint_verdict) {
         Ok(Some(c)) => c,
         Ok(None) => {
             set_wait(Some(format!("the providers do not yet serve checkpoint {head}")));
@@ -477,7 +560,11 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
             return schedule(true, true);
         }
     };
-    let gate = match settle("gate", mirror.gate(&id.cfg, head).await) {
+    let gate_verdict = mirror.gate(&id.cfg, head).await;
+    if !current() {
+        return;
+    }
+    let gate = match settle("gate", gate_verdict) {
         Ok(Some(g)) => g.gate,
         Ok(None) => {
             record_problem(format!("the configured gate does not exist as of checkpoint {head}"), None);
@@ -489,14 +576,15 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
         }
     };
     set_wait(None);
-    if !started {
-        let start = observed.as_ref().map(|o| o.checkpoint).unwrap_or(0);
-        obs(|o| {
+    // The cursors only move forward: whatever another pass wrote while this one read is kept.
+    let start = observed.as_ref().map(|o| o.checkpoint).unwrap_or(0);
+    obs(|o| {
+        if !o.started {
             o.started = true;
             o.scanned_through = start;
-        });
-    }
-    obs(|o| o.last_head = head);
+        }
+        o.last_head = o.last_head.max(head);
+    });
 
     // Nothing new on chain: the Gate's own counter says every return up to this checkpoint is already
     // verified, so no event needs listing and the scan cursor can move up to it. (This is what keeps an
@@ -517,7 +605,11 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
     while state::read_runtime(|c| c.observer.scanned_through) < head && budget > 0 {
         let (a, w) = state::read_runtime(|c| (c.observer.scanned_through, if c.observer.window == 0 { MAX_WINDOW } else { c.observer.window }));
         let b = head.min(a + w);
-        let listed = match scan_window(&mirror, &id.cfg, a, b, &mut budget).await {
+        let scanned = scan_window(&mirror, &id.cfg, a, b, &mut budget).await;
+        if !current() {
+            return;
+        }
+        let listed = match scanned {
             Ok(e) => Some(e),
             Err(ScanError::Budget) => {
                 // The window needed more queries than a pass may make: look at a smaller one next time.
@@ -542,7 +634,11 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
         let at_end = if b == head {
             gate.clone()
         } else {
-            match settle("gate", mirror.gate(&id.cfg, b).await) {
+            let end_verdict = mirror.gate(&id.cfg, b).await;
+            if !current() {
+                return;
+            }
+            match settle("gate", end_verdict) {
                 Ok(Some(g)) => g.gate,
                 Ok(None) => break,
                 Err(why) => {
@@ -554,7 +650,7 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
         let (verified, cands) = state::read_runtime(|c| (c.observer.verified_through, c.observer.candidates.clone()));
         match first_unaccounted(verified, &cands, at_end.bridge_out_count) {
             None => obs(|o| {
-                o.scanned_through = b;
+                o.scanned_through = o.scanned_through.max(b);
                 o.gap = None;
                 if listed.is_some() {
                     o.window = (w * 2).min(MAX_WINDOW);
@@ -572,8 +668,14 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
     }
 
     // Hints, then verification of everything found, then the opening (strictly in sequence).
-    process_hints(&mirror, &id, &chain, head).await;
-    verify_candidates(&mirror, &id, &chain, &gate, head).await;
+    process_hints(&mirror, &id, &chain, head, &current).await;
+    if !current() {
+        return;
+    }
+    verify_candidates(&mirror, &id, &chain, &gate, head, &current).await;
+    if !current() {
+        return;
+    }
     // A hint may have supplied what a gap lacked.
     let (verified, cands, scanned) = state::read_runtime(|c| (c.observer.verified_through, c.observer.candidates.clone(), c.observer.scanned_through));
     if scanned >= head && first_unaccounted(verified, &cands, gate.bridge_out_count).is_none() {
@@ -581,12 +683,31 @@ pub async fn observer_pass<T: SuiTransport, L: IcpLedger>(transport: &T, ledger:
     }
     open_ready_returns();
 
-    // The monitors, from the independent observations just made and the books as they now stand.
+    // The monitors, from the independent observations just made and the books as they now stand. The books
+    // are captured when the escrow balance is requested and compared when it arrives (see the module docs).
     let escrow_account = state::read_runtime(|c| c.escrow_account(env::canister_id()));
-    let escrow = ledger.balance_of(escrow_account).await.ok();
-    monitor_run(head, &cp, &gate, escrow);
+    let books_at_request = own_books();
+    let balance = ledger.balance_of(escrow_account).await;
+    if !current() {
+        return;
+    }
+    let deferred = monitor_run(head, &cp, &gate, balance.ok(), &books_at_request);
 
-    let busy = state::read_runtime(|c| !c.observer.candidates.is_empty() || c.observer.gap.is_some() || !c.observer.caught_up) || !release::live_hints(env::now_ns()).is_empty();
+    let busy = deferred
+        || state::read_runtime(|c| !c.observer.candidates.is_empty() || c.observer.gap.is_some() || !c.observer.caught_up)
+        || !release::live_hints(env::now_ns()).is_empty();
     let waited = state::read_runtime(|c| c.observer.last_wait.is_some());
     schedule(busy, waited);
+}
+
+/// A genuinely new hint (`notify_sui_return`) pulls the next pass forward to one busy interval after the
+/// last one, so a user's return is picked up in about half a minute instead of five. It never goes below
+/// that spacing, and it never shortens a provider wait: a pending or repeated hint cannot be used to make
+/// the observer read the head, the Gate and a transaction faster than its own schedule says.
+pub fn wake_for_new_hint() {
+    obs(|o| {
+        if o.last_wait.is_none() {
+            o.next_run_ns = o.next_run_ns.min(o.last_run_ns.saturating_add(BUSY_INTERVAL_NS));
+        }
+    });
 }

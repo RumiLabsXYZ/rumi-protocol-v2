@@ -960,6 +960,10 @@ pub struct ObserverState {
     pub problems: Vec<ObserverProblem>,
     #[serde(default)]
     pub next_run_ns: u64,
+    /// When the last pass finished its reads and scheduled the next (0: never). A new hint may pull
+    /// `next_run_ns` forward only to this plus one busy interval.
+    #[serde(default)]
+    pub last_run_ns: u64,
     /// The highest rounded head the observer has worked at.
     #[serde(default)]
     pub last_head: u64,
@@ -1402,6 +1406,20 @@ pub fn set_queue_cursor(q: Queue, cursor: Option<u64>) {
     QUEUE_CURSORS.with(|c| c.borrow_mut()[q.slot()] = cursor);
 }
 
+thread_local! {
+    /// The `(submitted_at_ns, digest)` of the last hint the return observer read: the next window starts
+    /// after it, so unreadable hints cannot occupy every slot of a pass. Heap only, like the queue cursors.
+    static HINT_CURSOR: RefCell<Option<(u64, Hash32)>> = const { RefCell::new(None) };
+}
+
+pub fn hint_cursor() -> Option<(u64, Hash32)> {
+    HINT_CURSOR.with(|c| *c.borrow())
+}
+
+pub fn set_hint_cursor(cursor: Option<(u64, Hash32)>) {
+    HINT_CURSOR.with(|c| *c.borrow_mut() = cursor);
+}
+
 /// The next window of an active index: up to `limit` entries after `after` (exclusive), wrapping to
 /// the lowest keys when the end is reached (the wrapped keys are all `<= after`, so none repeats).
 fn index_window<V: Storable + Clone>(m: &StableBTreeMap<u64, V, Mem>, after: Option<u64>, limit: usize) -> Vec<(u64, V)> {
@@ -1736,6 +1754,7 @@ pub fn reset_runtime_for_tests() {
     SENDER_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_SENDER_RELEASES)));
     RELEASE_BY_SEQUENCE.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_RELEASE_BY_SEQUENCE)));
     QUEUE_CURSORS.with(|c| *c.borrow_mut() = [None; 8]);
+    HINT_CURSOR.with(|c| *c.borrow_mut() = None);
 }
 
 #[cfg(test)]
@@ -1911,6 +1930,21 @@ mod tests {
         assert!(!decoded.may_be_complete(), "the gas role never signed and nothing is unknown for it");
         // And the current image round-trips exactly.
         assert_eq!(try_cbor_decode::<MintAttempt>(&cbor_encode(&a)).unwrap(), a);
+    }
+
+    #[test]
+    fn an_observer_state_written_before_the_run_clock_existed_decodes_with_it_at_zero() {
+        // The review correction added `last_run_ns` (additive, serde default): an image without it decodes.
+        use ciborium::Value;
+        let current = ObserverState { next_run_ns: 77, last_run_ns: 55, verified_through: 3, ..ObserverState::default() };
+        assert_eq!(try_cbor_decode::<ObserverState>(&cbor_encode(&current)).unwrap(), current);
+        let v: Value = ciborium::de::from_reader(cbor_encode(&current).as_slice()).unwrap();
+        let Value::Map(entries) = v else { panic!("a CBOR map") };
+        let kept: Vec<(Value, Value)> = entries.into_iter().filter(|(k, _)| !matches!(k, Value::Text(t) if t == "last_run_ns")).collect();
+        let mut old = Vec::new();
+        ciborium::ser::into_writer(&Value::Map(kept), &mut old).unwrap();
+        let decoded: ObserverState = try_cbor_decode(&old).expect("an older image decodes");
+        assert_eq!((decoded.last_run_ns, decoded.next_run_ns, decoded.verified_through), (0, 77, 3));
     }
 
     #[test]

@@ -538,3 +538,356 @@ fn open_release_is_reached_only_from_the_observer_and_the_verified_return_is_bui
     // And that one construction reads the stored, record-verified `ReadyReturn`, never an event.
     assert!(obs.contains("let r = cand.ready.clone().expect(\"position() found a ready candidate\");"));
 }
+
+// ---------------------------------------------------------------------------
+// Review correction (Miles, first 53c review): F1 coherent snapshots and stale continuations,
+// F2 hint fairness and the observer's rate
+// ---------------------------------------------------------------------------
+//
+// Each test below was run against the unchanged 53c code first (red) and then against the correction
+// (green); the logs and the assertions that failed are in the handback.
+
+use crate::testkit::block_on;
+use std::cell::Cell;
+use std::rc::Rc;
+
+fn served_total(l: &Lane) -> usize {
+    l.sim.served.borrow().len()
+}
+
+fn head_queries(l: &Lane) -> usize {
+    l.sim.served.borrow().iter().filter(|q| q.starts_with("query{chainIdentifier ch")).count()
+}
+
+/// Run `f` once, while a provider request that `trigger` selects is in flight: a competing event at an
+/// await point of the observer pass under test.
+fn during_the_read(l: &Rc<Lane>, trigger: fn(&str) -> bool, f: impl Fn(&Lane) + 'static) {
+    let fired = Cell::new(false);
+    let weak = Rc::downgrade(l);
+    *l.sim.on_serve.borrow_mut() = Some(Box::new(move |q| {
+        if trigger(q) && !fired.replace(true) {
+            f(&weak.upgrade().expect("the lane outlives its hooks"));
+        }
+    }));
+}
+
+fn is_the_gate_read(q: &str) -> bool {
+    q.contains("object(address:$a,atCheckpoint:$c)") && q.contains("... on Shared{initialSharedVersion}")
+}
+
+fn is_an_event_listing(q: &str) -> bool {
+    q == crate::reads::QUERY_EVENTS
+}
+
+/// A newer observer pass overtakes the one in flight: its guard was left behind and is reclaimed ten
+/// minutes later, a return lands on Sui, and a whole pass (ICP side, mint lane, observer) runs to the end.
+/// The head, the cursors and the books it leaves behind are returned to the test.
+fn a_newer_pass_overtakes(l: &Lane, new_return: bool) -> (u64, u64) {
+    if new_return {
+        l.sim.bridge_out(HOLDER, 1, 2 * E8, principal(0x41), [0u8; 32]);
+    }
+    l.sim.advance(300);
+    test_env::advance_secs(11 * 60);
+    block_on(crate::timer::run_full(&l.fx.ledger, &l.net(), &l.signer, env::now_ns()));
+    state::read_runtime(|c| (c.observer.last_head, c.observer.scanned_through))
+}
+
+fn caught_up_after_minting(l: &Lane, amount: u64) {
+    minted(l, amount, 1);
+    until(l, 20, || state::read_runtime(|c| c.observer.caught_up));
+    l.ticks(1);
+}
+
+#[test]
+fn f1_a_deposit_pull_that_settles_while_the_escrow_balance_is_in_flight_defers_c1_and_never_halts_a_covered_bridge() {
+    let l = Rc::new(lane());
+    caught_up_after_minting(&l, 5 * E8);
+    assert_eq!(check("C1"), CheckOutcome::Ok);
+    // Another user's deposit pull settles while the ledger query for the escrow balance is in flight. The
+    // reply is the balance BEFORE the pull; the books, when it arrives, already hold the pull.
+    let fired = Rc::new(Cell::new(false));
+    let (flag, weak) = (fired.clone(), Rc::downgrade(&l));
+    *l.fx.ledger.on_balance_of.borrow_mut() = Some(Box::new(move |account| {
+        if *account == escrow() && !flag.replace(true) {
+            let l = weak.upgrade().unwrap();
+            escrowed(&l.fx, 0x22, 3 * E8, 9);
+            test_env::set_caller(user(0x21));
+        }
+    }));
+    state::mutate_runtime(|r| r.observer.next_run_ns = 0);
+    l.tick();
+    assert!(fired.get(), "the pull settled inside the balance read");
+    assert_eq!(buckets().pending_mint, (3 * E8) as u128, "the books hold the new pull");
+    // A fully backed bridge is not halted by a read that predates a book change it did not see.
+    assert!(!state::is_halted(), "false C1 halt: {:?}", state::read_runtime(|c| c.halted.clone()));
+    assert!(!state::is_mint_lane_halted());
+    assert!(matches!(check("C1"), CheckOutcome::NotEvaluated { reason } if reason.contains("changed while the escrow balance was being read")), "{:?}", check("C1"));
+    let report = state::read_runtime(|c| c.monitor.clone()).unwrap();
+    assert_eq!(report.escrow_balance, None, "a balance that cannot be compared with these books is not recorded as the check's input");
+    // The other checks still ran against the same books and observation.
+    for name in ["C2", "C4 mint", "C4 return"] {
+        assert_eq!(check(name), CheckOutcome::Ok, "{name}");
+    }
+    // The next pass reads a balance that matches stable books, and C1 holds.
+    l.tick();
+    assert_eq!(check("C1"), CheckOutcome::Ok);
+    assert!(!state::is_halted());
+    assert_covered(&l.fx);
+}
+
+#[test]
+fn f1_a_real_shortfall_is_still_found_on_the_pass_after_a_deferral() {
+    let l = Rc::new(lane());
+    caught_up_after_minting(&l, 5 * E8);
+    // The escrow really lost one icUSD.
+    l.fx.ledger.debit(&escrow(), E8 as u128);
+    let fired = Rc::new(Cell::new(false));
+    let (flag, weak) = (fired.clone(), Rc::downgrade(&l));
+    *l.fx.ledger.on_balance_of.borrow_mut() = Some(Box::new(move |account| {
+        if *account == escrow() && !flag.replace(true) {
+            let l = weak.upgrade().unwrap();
+            escrowed(&l.fx, 0x22, 3 * E8, 9);
+            test_env::set_caller(user(0x21));
+        }
+    }));
+    state::mutate_runtime(|r| r.observer.next_run_ns = 0);
+    l.tick();
+    assert!(fired.get());
+    // This pass cannot compare the balance with the books, so it decides nothing ...
+    assert!(!state::is_halted(), "the first pass could not compare a balance with the books");
+    assert!(matches!(check("C1"), CheckOutcome::NotEvaluated { .. }));
+    // ... and the next pass, with stable books, finds the shortfall and halts. Nothing was switched off.
+    l.tick();
+    assert!(matches!(check("C1"), CheckOutcome::Breach { scope: state::BreachScope::Bridge, .. }), "{:?}", check("C1"));
+    assert!(state::is_halted());
+    assert!(state::read_runtime(|c| c.halted.clone().unwrap().reason).contains("C1"));
+}
+
+#[test]
+fn f1_an_observer_pass_overtaken_at_its_gate_read_halts_nothing_and_moves_no_cursor_back() {
+    let l = Rc::new(lane());
+    caught_up_after_minting(&l, 5 * E8);
+    let finished = Rc::new(Cell::new((0u64, 0u64)));
+    let out = finished.clone();
+    // The pass in flight read the head and the checkpoint, and is waiting for the Gate. Meanwhile a return
+    // burns 2 icUSD on Sui and a newer pass runs to the end and opens it.
+    during_the_read(&l, is_the_gate_read, move |l| out.set(a_newer_pass_overtakes(l, true)));
+    state::mutate_runtime(|r| r.observer.next_run_ns = 0);
+    let monitor_before = state::read_runtime(|c| c.monitor.clone()).unwrap().checkpoint;
+    l.tick();
+    let (newer_head, newer_scan) = finished.get();
+    assert!(newer_head > monitor_before, "the newer pass worked at a later checkpoint");
+    assert_eq!(state::read_runtime(|c| c.observer.verified_through), 1, "the newer pass opened the return");
+    // The older pass (its Gate read says zero returns) finishes after the newer one. It must neither halt the
+    // bridge by comparing that older Gate with the newer books (C4 and C2), nor roll the cursors back.
+    let o = state::read_runtime(|c| c.observer.clone());
+    let halted = state::read_runtime(|c| c.halted.clone());
+    assert!(
+        halted.is_none() && !state::is_mint_lane_halted() && o.last_head >= newer_head && o.scanned_through >= newer_scan,
+        "false halt: {halted:?}; last_head {newer_head} -> {}, scanned_through {newer_scan} -> {}",
+        o.last_head,
+        o.scanned_through
+    );
+    assert_eq!(state::read_runtime(|c| c.monitor.clone()).unwrap().checkpoint, newer_head, "the last monitor run is the newer pass's");
+    // Everything carries on: the return is paid once and the checks agree.
+    until(&l, 20, released_any);
+    l.ticks(4);
+    assert!(!state::is_halted());
+    assert_eq!(l.fx.ledger.balance(&dest()), (2 * E8 - FEE) as u128);
+    for name in ["C1", "C2", "C4 mint", "C4 return"] {
+        assert_eq!(check(name), CheckOutcome::Ok, "{name}");
+    }
+}
+
+fn released_any() -> bool {
+    state::read_runtime(|c| c.observer.verified_through) == 1 && state::active_release_count() == 0
+}
+
+#[test]
+fn f1_an_observer_pass_overtaken_while_listing_events_never_writes_an_older_scan_cursor() {
+    let l = Rc::new(lane());
+    caught_up_after_minting(&l, 5 * E8);
+    // The return exists before the pass starts, so the older pass lists it while a newer pass overtakes it.
+    l.sim.bridge_out(HOLDER, 1, 2 * E8, principal(0x41), [0u8; 32]);
+    let finished = Rc::new(Cell::new((0u64, 0u64)));
+    let out = finished.clone();
+    during_the_read(&l, is_an_event_listing, move |l| out.set(a_newer_pass_overtakes(l, false)));
+    state::mutate_runtime(|r| r.observer.next_run_ns = 0);
+    l.tick();
+    let (newer_head, newer_scan) = finished.get();
+    assert!(newer_head > 0 && newer_scan > 0, "the newer pass ran");
+    let o = state::read_runtime(|c| c.observer.clone());
+    assert!(
+        o.last_head >= newer_head && o.scanned_through >= newer_scan,
+        "cursor rollback: last_head {newer_head} -> {}, scanned_through {newer_scan} -> {}",
+        o.last_head,
+        o.scanned_through
+    );
+    assert!(!state::is_halted());
+    // The progress is monotone from here on and the return is paid once.
+    let mut last = (o.last_head, o.scanned_through);
+    for _ in 0..8 {
+        l.tick();
+        let o = state::read_runtime(|c| c.observer.clone());
+        assert!(o.last_head >= last.0 && o.scanned_through >= last.1, "{last:?} -> {:?}", (o.last_head, o.scanned_through));
+        last = (o.last_head, o.scanned_through);
+    }
+    assert_eq!(l.fx.ledger.balance(&dest()), (2 * E8 - FEE) as u128);
+    assert!(!state::is_halted());
+}
+
+fn tx_event_reads(l: &Rc<Lane>) -> Rc<Cell<u32>> {
+    let n = Rc::new(Cell::new(0u32));
+    let count = n.clone();
+    *l.sim.on_serve.borrow_mut() = Some(Box::new(move |q| {
+        if q == crate::reads::QUERY_TX_EVENTS {
+            count.set(count.get() + 1);
+        }
+    }));
+    n
+}
+
+#[test]
+fn f2_three_persistent_unreadable_hints_do_not_starve_a_real_return_and_the_reads_per_pass_stay_capped() {
+    let l = Rc::new(lane());
+    minted(&l, 9 * E8, 1);
+    // A real return the event index never shows: only a hint can find it.
+    let (tx, tid) = l.sim.bridge_out(HOLDER, 1, 2 * E8, principal(0x41), [0u8; 32]);
+    all_providers(&l, Provider { hide_events_from: Some(l.sim.tx(&tx).unwrap().checkpoint), ..Provider::default() });
+    // Three hints for transactions that are not indexed (the oldest three), then the real one.
+    for n in 0..3u8 {
+        crate::notify_sui_return(format_digest_base58(&[0xe0 + n; 32])).unwrap();
+        test_env::advance_secs(1);
+    }
+    crate::notify_sui_return(format_digest_base58(&tx)).unwrap();
+    let reads = tx_event_reads(&l);
+    let mut per_pass = vec![];
+    for _ in 0..16 {
+        let before = reads.get();
+        l.tick();
+        per_pass.push(reads.get() - before);
+        if released(&tid) {
+            break;
+        }
+    }
+    assert!(released(&tid), "three unreadable hints monopolised the hint work: reads per tick {per_pass:?}");
+    // At most three hints are read per pass (a hint read asks each of the three providers once).
+    assert!(per_pass.iter().all(|n| *n as usize <= observer::MAX_HINTS_PER_PASS * 3), "{per_pass:?}");
+    assert!(per_pass.iter().any(|n| *n > 0), "{per_pass:?}");
+    // It was recovered within a bounded number of passes: ceil(4 hints / 3 per pass) = 2, plus the
+    // ticks the wait between passes takes and the ledger transfer.
+    assert!(per_pass.len() <= 10, "{per_pass:?}");
+    assert_eq!(l.fx.ledger.balance(&dest()), (2 * E8 - FEE) as u128);
+    // The three unreadable hints are still there (they expire on their own), and nothing else was paid.
+    assert_eq!(state::read_runtime(|c| c.hints.len()), 3);
+    assert_eq!(l.fx.ledger.blocks.borrow().iter().filter(|b| b.kind == state::LedgerOpKind::Release).count(), 1);
+}
+
+#[test]
+fn f2_a_missing_hint_schedules_a_wait_and_neither_a_duplicate_notify_nor_a_pass_before_it_is_due_makes_an_outcall() {
+    let l = Rc::new(lane());
+    caught_up_after_minting(&l, 5 * E8);
+    let unknown = [0xee; 32];
+    assert!(crate::notify_sui_return(format_digest_base58(&unknown)).is_ok());
+    // A genuinely new hint wakes the idle observer within the busy interval: the next tick runs a pass.
+    let before = served_total(&l);
+    l.tick();
+    let first = served_total(&l);
+    assert!(first > before, "the new hint woke the observer");
+    // The hinted transaction is not indexed: the pass waits (the provider-wait interval), it does not retry
+    // on the next timer tick.
+    let (next, now) = (state::read_runtime(|c| c.observer.next_run_ns), env::now_ns());
+    assert!(state::read_runtime(|c| c.observer.last_wait.is_some()), "a missing hint is a wait");
+    assert_eq!(next, now + observer::WAIT_INTERVAL_NS, "the wait interval, not the busy one");
+    // A duplicate notification changes nothing and wakes nothing.
+    assert!(crate::notify_sui_return(format_digest_base58(&unknown)).is_ok());
+    assert_eq!(state::read_runtime(|c| c.observer.next_run_ns), next, "a duplicate hint erased the wait");
+    assert_eq!(state::read_runtime(|c| c.hints.len()), 1);
+    // Another timer pass before the wait is over makes no outcall at all.
+    l.tick();
+    assert_eq!(served_total(&l), first, "a pass before the wait was over made fresh outcalls");
+    assert_eq!(state::read_runtime(|c| c.observer.next_run_ns), next);
+    // A genuine later hint, submitted during the wait, does not shorten it either ...
+    all_providers(&l, Provider { hide_events_from: Some(l.sim.head.get() + 1), ..Provider::default() });
+    let (tx, tid) = l.sim.bridge_out(HOLDER, 1, 2 * E8, principal(0x41), [0u8; 32]);
+    assert!(crate::notify_sui_return(format_digest_base58(&tx)).is_ok());
+    assert_eq!(state::read_runtime(|c| c.observer.next_run_ns), next, "a new hint during a provider wait erased the wait");
+    assert_eq!(served_total(&l), first);
+    // ... and is read as soon as the wait is over: the return is opened and paid.
+    until(&l, 12, || released(&tid));
+    assert_eq!(l.fx.ledger.balance(&dest()), (2 * E8 - FEE) as u128);
+    assert!(!state::is_halted());
+}
+
+#[test]
+fn f2_a_burst_of_new_hints_is_one_bounded_wake_up_not_a_pass_per_notification() {
+    let l = Rc::new(lane());
+    caught_up_after_minting(&l, 5 * E8);
+    let heads_before = head_queries(&l);
+    // Four callers each hint a different unindexed transaction at the same instant.
+    for who in 0..4u8 {
+        test_env::set_caller(user(0x30 + who));
+        crate::notify_sui_return(format_digest_base58(&[0xd0 + who; 32])).unwrap();
+    }
+    test_env::set_caller(user(0x21));
+    l.ticks(2); // one minute
+    // One pass (a head read from each of three providers), then the wait it scheduled.
+    assert_eq!(head_queries(&l) - heads_before, 3, "a pass per notification, or per tick");
+    // The reads of that pass were capped.
+    assert!(state::read_runtime(|c| c.observer.last_wait.is_some()));
+}
+
+#[test]
+fn f2_a_new_hint_wakes_an_idle_observer_one_busy_interval_after_its_last_pass_and_not_sooner() {
+    let l = Rc::new(lane());
+    caught_up_after_minting(&l, 5 * E8);
+    let o = state::read_runtime(|c| c.observer.clone());
+    assert_eq!(o.next_run_ns, o.last_run_ns + observer::IDLE_INTERVAL_NS, "idle: five minutes");
+    assert!(o.last_wait.is_none());
+    // A new hint pulls the next run forward, to one busy interval after the last pass.
+    crate::notify_sui_return(format_digest_base58(&[0xa1; 32])).unwrap();
+    let woken = state::read_runtime(|c| c.observer.next_run_ns);
+    assert_eq!(woken, o.last_run_ns + observer::BUSY_INTERVAL_NS);
+    // More new hints in the same minute do not pull it further forward.
+    for n in 0..3u8 {
+        test_env::set_caller(user(0x40 + n));
+        crate::notify_sui_return(format_digest_base58(&[0xa2 + n; 32])).unwrap();
+    }
+    test_env::set_caller(user(0x21));
+    assert_eq!(state::read_runtime(|c| c.observer.next_run_ns), woken);
+    // And a repeat of a pending hint does not either.
+    crate::notify_sui_return(format_digest_base58(&[0xa1; 32])).unwrap();
+    assert_eq!(state::read_runtime(|c| c.observer.next_run_ns), woken);
+    // A run that is later than that is never delayed by it: the wake-up only ever moves the run earlier.
+    state::mutate_runtime(|c| c.observer.next_run_ns = 0);
+    crate::notify_sui_return(format_digest_base58(&[0xb0; 32])).unwrap();
+    assert_eq!(state::read_runtime(|c| c.observer.next_run_ns), 0);
+}
+
+#[test]
+fn f2_hints_are_read_in_a_rotation_that_wraps_survives_removal_and_never_exceeds_the_limit() {
+    use crate::state::Hint;
+    let l = lane();
+    let _ = &l;
+    let now = env::now_ns();
+    let hint = |n: u8| Hint { digest: [n; 32], submitted_by: user(0x21), submitted_at_ns: now - (10 - n as u64) };
+    state::mutate_runtime(|c| c.hints = (1..=7).map(hint).collect());
+    let digests = |v: Vec<Hint>| v.into_iter().map(|h| h.digest[0]).collect::<Vec<_>>();
+    // Seven hints, three per pass: 1-3, 4-6, 7 then wrap to 1-2, then on from 3.
+    assert_eq!(digests(release::next_hints(now, 3)), vec![1, 2, 3]);
+    assert_eq!(digests(release::next_hints(now, 3)), vec![4, 5, 6]);
+    assert_eq!(digests(release::next_hints(now, 3)), vec![7, 1, 2]);
+    assert_eq!(digests(release::next_hints(now, 3)), vec![3, 4, 5]);
+    // The hint the cursor sits on is consumed: the window continues after its place in the order.
+    state::mutate_runtime(|c| c.hints.retain(|h| h.digest[0] != 5));
+    assert_eq!(digests(release::next_hints(now, 3)), vec![6, 7, 1]);
+    // Fewer hints than the limit: each is read once per pass, none twice.
+    state::mutate_runtime(|c| c.hints.retain(|h| h.digest[0] <= 2));
+    assert_eq!(digests(release::next_hints(now, 3)), vec![2, 1]);
+    // Nothing live, or a zero limit, reads nothing; expired hints are not read.
+    assert!(release::next_hints(now, 0).is_empty());
+    state::mutate_runtime(|c| c.hints.clear());
+    assert!(release::next_hints(now, 3).is_empty());
+    state::mutate_runtime(|c| c.hints = vec![hint(1)]);
+    assert!(release::next_hints(now + release::HINT_TTL_NS + 1, 3).is_empty());
+}
