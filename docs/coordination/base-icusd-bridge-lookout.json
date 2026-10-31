@@ -458,7 +458,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Solana: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; In Review with a correction (W28): four findings in adcbf1a9; uncertain Solana and ICP attempts must stay held (no forget on absence, expiry, nonfinal failure or transport errors); real RPC seam wired",
+      "evidenceText": "proof=local-test; In Review: adcbf1a9, 25b9d4d9 and F1 to F4 correction 053f8ed5 (W28, local): uncertain attempts stay held, strict user rejection, no ICP-side discard, real RPC seam; 20 red, 193 green, typecheck at baseline",
       "evidenceLinks": []
     },
     {

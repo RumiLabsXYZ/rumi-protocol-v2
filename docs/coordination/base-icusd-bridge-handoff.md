@@ -2323,6 +2323,44 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   the journal changes; reuse unchanged broad evidence. No wallet, signing, probe, broadcast, deploy or merge. Only W28 and W29
   stay active.
 
+## Milestone 102 (2026-10-31): BB-50 F1 to F4 correction delivered; first pass closed
+
+- Miles finished the first BB-50 source pass (`review-bb50-recovery.md`, "Rest-of-pass"): at frozen `25b9d4d9` the native
+  `DestinationView` seam, a Solana panel mounted only for an enabled entry, a separate default-empty instance id, an explicit
+  Wallet Standard click, exact-account and chain checks, the legacy TransferChecked plus memo builder, the backend's frozen
+  reference bytes for both token programs and the ComputeBudget variant, anonymous history, release-record terminal statuses,
+  same-byte rebroadcast and the Oisy two-click ICP side are in place; no other confirmed essential finding. Generated Solana
+  declarations have canonical script entries; Base API consumers unchanged; `git diff --check 1bc67680..25b9d4d9` exits 0; no
+  Rust or backend edit. Miles read the saved `bb50/` evidence (702 passed with 1 skip, typecheck at baseline, build and auth
+  asset check exit 0, generator exit 0) as original-candidate evidence, not acceptance of F1 to F4 or live wallet proof. F1 to
+  F4 are the complete correction list; the crypto swap is deferred.
+- W28 (`claude-sonnet-5-5`) committed `053f8ed52fc1bdbcf5bbbfd5f958e1463b272b15` "fix(frontend): BB-50 recovery safety,
+  ICP-side discard and Solana node seam (F1 to F4)", local only: 14 files under `src/vault_frontend` plus MC-DEF-12; no EVM,
+  Base or Rust file; `git diff --check` exits 0.
+  - F1: `not_found` is always unknown (no `not_landed`); an unfinalized failure is in flight; `mayDiscard` allows only a
+    never-asked attempt or a finalized failure; a finalized failure of a wallet-reported signature counts only when that
+    transaction carries the saved message; the "never landed" copy is gone.
+  - F2: `isExplicitUserRejection` accepts only code 4001 and guards sign-and-send; the loose matcher stays only for plain
+    `signTransaction`, where nothing can have been broadcast.
+  - F3: `discardDeposit` and both Discard buttons are removed; an approved or uncertain request continues under its own id only.
+  - F4: `endpoints.ts` ships `SOLANA_RPC_ENDPOINTS = []`; `resolveSolanaRpc` needs a match on network id and genesis hash and a
+    valid URL (plain http only for localhost) and builds the real adapter; no endpoint added, nothing probed.
+  - Subtitle: the `/bridge` header names the selected destination (wording only).
+- Evidence (saved files in the coordinator scratchpad `bb50/`): `red_f1_f4_original_code.txt`, the final tests against the
+  seven original source files (checked out from HEAD, then restored and `cmp`-verified): 20 failed, 76 passed in 5 spec files,
+  with assertions such as "expected 'not_landed' to be 'unknown'", "connection closed: expected { type: 'declined' } to match
+  object { type: 'held' }", the Discard button present, and no `getTokenAccountsByOwner` request because `getSolanaRpc` was
+  null. One finalized-failure discard test fails only on the new `finalized` field; one page test passes on both.
+  `green_f1_f4_final.txt`: 10 files, 193 passed. `final_check.txt`: 30 errors, 66 warnings, 25 files, identical to the
+  baseline. `final_build.txt`: exit 0 with the Internet Identity asset check. Unchanged suites not rerun.
+- Product consequence for Miles: a held sign-and-send attempt with no finalized failure, credit or release has no discard path,
+  and a possibly submitted ICP request keeps blocking new ICP-to-Solana transfers on that device until it is continued under
+  the same id. A risk-acknowledged abandon action would need a product decision. The endpoint seam does not verify a live
+  node's genesis (that would be a probe; left for activation).
+- Resource inventory (Miles, 08:06Z): 70 registered worktrees, 0 eligible, 69 blocked; 15 GiB free. The prior cleanup denial
+  stands; no removal or cleanup retry through another executor; current targets reused; one Rust builder; no new worktree or
+  large binary download.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
