@@ -1425,6 +1425,38 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   that step only). BB-47 stays in Review until its carried items are accepted under BB-49. W28 stays the single serialized
   Rust and release builder and yields when W29's BB-57 part B needs it.
 
+## Milestone 64 (2026-10-31): XRPL return corrections accepted; origin model for adjudication
+
+- Accepted (Miles, `accept-xrpl-return-fixes.md`): `0b73ae95` (fee-backing fence) and `dd817f27` (single in-flight return
+  payment) at source level; scoped `git diff --check` clean. Focused terminal results already run by W29 (no repeat):
+  - `0a315971` (BB-57 part A): `xrpl_icusd` 162 passed; `check_candid_interface_compatibility` ok after regenerating the
+    `.did` (it failed first with "Right side is missing method prepare_xrpl_return"); `didc check` new against old exits 1
+    with exactly one incompatibility, the new `OperationKindTag::Return` output case (runbook: frontend declarations first,
+    then the backend, review the CLI warning and never pass `-y`); xrpl vitest 5 files, 175 passed; `npm run check` 30
+    errors, 66 warnings unchanged.
+  - `0b73ae95`: reproduction "holder backing was consumed: ledger 90, liabilities 100, status Shortfall { short_e8s: 10 }";
+    after the fix `xrpl_icusd` 167 passed and the Candid check ok. A transient fence epoch (never serialized) moves on every
+    proven ledger job; the shared `check_canonical_return_backing` rule refuses a reading taken under an older epoch for all
+    three CanonicalReturn paths; persisted tuples and reconciliation unchanged.
+  - `dd817f27`: reproduction "expected spy to be called 1 times, but got 2 times" for `signAndSubmit` and for `resumeRequest`;
+    after the fix the controller spec 66 passed and all xrpl vitest 183 passed; check unchanged. The returned ICP destination
+    is now also checked (owner and subaccount, none and all-zero equal).
+- BB-56 stays in Review only for the carried origin report; BB-57 stays in progress (origin report, collector reader,
+  Wasm size and PocketIC).
+- Origin model from W29 for Miles (no source yet): cumulative exact counters in the lane state (CBOR snapshot, so additive
+  serde-default fields decode old snapshots): `delivered_import`, `delivered_borrow`, `delivered_refund`, `returned_total`,
+  `legacy_outstanding_at_init`, `origin_counters_since_ns`. Deliveries add at the single D to O step; every O reduction
+  (repayment, return, quarantine, unattributed) adds only to `returned_total`; no origin counter ever decreases. Legacy
+  initialization at post-upgrade sets `legacy_outstanding_at_init = O`. Check: `O = legacy + imports + borrows + refunds -
+  returned`, reported, never hidden. One new query `get_xrpl_icusd_supply_report` (exact decimal strings, `counters_since_ns`,
+  `reconciles`). Wording: delivered since a date by imports, borrows (debt recorded on ICP) and refunds, legacy origin not
+  recorded, outstanding O fungible, returned R; never debt-free or debt-backed, never an origin for returned tokens. Open
+  questions: refunds as a third bucket or folded into another; legacy initialization at post-upgrade or lazily at first
+  delivery.
+- W29 meanwhile builds the XRPL lane reader for the BB-58 collector on the bridge branch (`src/rumi_bridge_destinations`
+  only; independent reads of `E_X` and the issuer's validated obligations with a provider quorum; mocks only), before W28's
+  Solana reader step touches the same crate.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
