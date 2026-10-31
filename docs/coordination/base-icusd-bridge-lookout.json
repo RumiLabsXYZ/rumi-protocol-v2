@@ -490,7 +490,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; In Review: 37f9c77c and root fixes 412f1fda accepted in part; W28 fixes W29's F-1 (release bound to the exact attempt) and F-4 (instance binding, both directions); F-2 and F-3 disclosed limits",
+      "evidenceText": "proof=local-test; In Review: 37f9c77c with accepted root fixes 412f1fda; W28 now fixes W29's F-1 (release bound to the exact attempt) and F-4 (instance binding, both directions); F-2 and F-3 are disclosed limits",
       "evidenceLinks": []
     },
     {
