@@ -70,6 +70,27 @@ pub struct SimMint {
     pub from_cp: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimReturn {
+    pub sender: Bytes32,
+    pub amount: u64,
+    pub sequence: u64,
+    pub principal: Vec<u8>,
+    pub subaccount: Vec<u8>,
+    pub nonce: u64,
+    pub from_cp: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimEvent {
+    pub cp: u64,
+    pub tx: Bytes32,
+    pub index: u64,
+    pub sender: Bytes32,
+    pub type_repr: String,
+    pub bcs: Vec<u8>,
+}
+
 #[derive(Clone, Debug)]
 pub struct SimGate {
     pub version: u64,
@@ -81,6 +102,7 @@ pub struct SimGate {
     pub mint_count: u64,
     pub bridge_out_count: u64,
     pub mints: BTreeMap<Bytes32, SimMint>,
+    pub returns: BTreeMap<Bytes32, SimReturn>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +145,10 @@ pub struct Provider {
     pub lose_send_reply: bool,
     /// Add this `errors` member (any JSON, valid or malformed) to the head reply, next to its data.
     pub head_errors: Option<Value>,
+    /// Events at or after this checkpoint are invisible to range queries (an event index that lags or pruned them).
+    pub hide_events_from: Option<u64>,
+    /// Answer every event-range query with a null connection (the range is not served).
+    pub events_unserved: bool,
 }
 
 /// A callback run with the query text of every request a simulated provider serves.
@@ -152,6 +178,9 @@ pub struct ChainSim {
     /// Called with the query text of every request a provider serves, before it answers: lets a test
     /// change local state while a read is in flight (an await interleaving).
     pub on_serve: RefCell<Option<ServeHook>>,
+    pub events: RefCell<Vec<SimEvent>>,
+    /// When set, every following `bridge_out` lands at this checkpoint (many events in one checkpoint).
+    pub batch_cp: Cell<Option<u64>>,
 }
 
 fn digest_of(tag: &str, id: &Bytes32, version: u64) -> Bytes32 {
@@ -181,6 +210,7 @@ impl ChainSim {
                 mint_count: 0,
                 bridge_out_count: 0,
                 mints: BTreeMap::new(),
+                returns: BTreeMap::new(),
             }),
             txs: RefCell::new(BTreeMap::new()),
             accepted: RefCell::new(vec![]),
@@ -195,6 +225,8 @@ impl ChainSim {
             next_lamport: Cell::new(100),
             rejections: RefCell::new(vec![]),
             on_serve: RefCell::new(None),
+            events: RefCell::new(vec![]),
+            batch_cp: Cell::new(None),
         };
         let cfg = sim_cfg();
         let treasury = address_from_ed25519(&treasury_key);
@@ -336,6 +368,62 @@ impl ChainSim {
         self.bump(&SIM_MINT_CAP, cp);
         self.bump(&SIM_GAS_COIN, cp);
         self.txs.borrow_mut().insert(digest, SimTx { status: SimStatus::Success, checkpoint: cp, epoch: self.epoch() });
+    }
+
+    pub fn push_event(&self, cp: u64, tx: Bytes32, sender: Bytes32, type_repr: String, bcs: Vec<u8>) {
+        let index = self.events.borrow().iter().filter(|e| e.tx == tx).count() as u64;
+        self.events.borrow_mut().push(SimEvent { cp, tx, index, sender, type_repr, bcs });
+    }
+
+    /// A holder returns coin: burn `amount`, record the return and emit `BridgeOut`. Returns the transaction
+    /// digest and the Gate's transfer id. The event body carries what the Gate would emit.
+    pub fn bridge_out(&self, sender: Bytes32, nonce: u64, amount: u64, principal: Vec<u8>, subaccount: [u8; 32]) -> (Bytes32, Bytes32) {
+        self.bridge_out_inner(sender, nonce, amount, principal, subaccount, None)
+    }
+
+    /// As [`Self::bridge_out`] but the emitted EVENT claims `(amount, sequence)` instead of the truth (the
+    /// durable record stays true): a forged or incoherent event.
+    pub fn bridge_out_with_false_event(&self, sender: Bytes32, nonce: u64, amount: u64, principal: Vec<u8>, subaccount: [u8; 32], claimed: (u64, u64)) -> (Bytes32, Bytes32) {
+        self.bridge_out_inner(sender, nonce, amount, principal, subaccount, Some(claimed))
+    }
+
+    fn bridge_out_inner(&self, sender: Bytes32, nonce: u64, amount: u64, principal: Vec<u8>, subaccount: [u8; 32], claimed: Option<(u64, u64)>) -> (Bytes32, Bytes32) {
+        let id = crate::ids::transfer_id(&self.genesis, &SIM_GATE, &sender, nonce);
+        let cp = self.batch_cp.get().unwrap_or(self.head.get() + 1);
+        self.head.set(self.head.get().max(cp));
+        let (sequence, burned_total, supply) = {
+            let mut g = self.gate.borrow_mut();
+            assert!(!g.returns.contains_key(&id), "a (sender, nonce) is used once");
+            assert!(g.total_supply >= amount, "cannot burn more than the supply");
+            g.bridge_out_count += 1;
+            g.burned_total += amount as u128;
+            g.total_supply -= amount;
+            let sequence = g.bridge_out_count;
+            g.returns.insert(id, SimReturn { sender, amount, sequence, principal: principal.clone(), subaccount: subaccount.to_vec(), nonce, from_cp: cp });
+            (sequence, g.burned_total, g.total_supply)
+        };
+        self.sync_gate(cp);
+        let tx = digest_of("bridge_out", &sender, nonce);
+        let (ev_amount, ev_sequence) = claimed.unwrap_or((amount, sequence));
+        let mut w = Writer::new();
+        w.bytes(&id).raw(&sender).u64(ev_amount).u64(ev_sequence).bytes(&principal).bytes(&subaccount).u64(nonce).u128(burned_total).u64(supply);
+        self.push_event(cp, tx, sender, format!("{}::rumi_icusd_gate::BridgeOut", pkg()), w.into_bytes());
+        self.txs.borrow_mut().insert(tx, SimTx { status: SimStatus::Success, checkpoint: cp, epoch: self.epoch() });
+        (tx, id)
+    }
+
+    /// An event that looks like a `BridgeOut` but is of another package (a lookalike), in its own successful
+    /// transaction. No durable record exists for it.
+    pub fn emit_lookalike_bridge_out(&self, other_package: Bytes32, sender: Bytes32, nonce: u64, amount: u64) -> Bytes32 {
+        let cp = self.head.get() + 1;
+        self.head.set(cp);
+        let id = crate::ids::transfer_id(&self.genesis, &SIM_GATE, &sender, nonce);
+        let tx = digest_of("lookalike", &sender, nonce);
+        let mut w = Writer::new();
+        w.bytes(&id).raw(&sender).u64(amount).u64(1).bytes(&[1, 2, 3]).bytes(&[0u8; 32]).u64(nonce).u128(amount as u128).u64(0);
+        self.push_event(cp, tx, sender, format!("0x{}::rumi_icusd_gate::BridgeOut", hex::encode(other_package)), w.into_bytes());
+        self.txs.borrow_mut().insert(tx, SimTx { status: SimStatus::Success, checkpoint: cp, epoch: self.epoch() });
+        tx
     }
 
     /// The chain the providers serve has no such object (it was never published here, or is not served).
@@ -540,8 +628,29 @@ impl ChainSim {
             q if q == graphql::QUERY_TABLE_ENTRY => {
                 let table = id_of("t")?;
                 let c = vars["c"].as_u64().ok_or("missing c")?;
-                if c > head || table != SIM_MINTS_TABLE {
+                if c > head || (table != SIM_MINTS_TABLE && table != SIM_RETURNS_TABLE) {
                     data.insert("address".into(), json!({ "dynamicField": Value::Null }));
+                } else if table == SIM_RETURNS_TABLE {
+                    let name_b64 = vars["n"]["bcs"].as_str().ok_or("missing name")?;
+                    let name_bcs = STANDARD.decode(name_b64).map_err(|e| e.to_string())?;
+                    let key: Bytes32 = name_bcs[name_bcs.len() - 32..].try_into().map_err(|_| "bad key".to_string())?;
+                    let entry = self.gate.borrow().returns.get(&key).filter(|r| r.from_cp <= c).cloned();
+                    match entry {
+                        None => {
+                            data.insert("address".into(), json!({ "dynamicField": Value::Null }));
+                        }
+                        Some(r) => {
+                            let mut w = Writer::new();
+                            w.raw(&r.sender).u64(r.amount).u64(r.sequence).bytes(&r.principal).bytes(&r.subaccount).u64(r.nonce);
+                            data.insert(
+                                "address".into(),
+                                json!({ "dynamicField": {
+                                    "name": { "bcs": name_b64 },
+                                    "value": { "__typename": "MoveValue", "type": { "repr": format!("{}::rumi_icusd_gate::ReturnRecord", pkg()) }, "bcs": STANDARD.encode(w.into_bytes()) }
+                                } }),
+                            );
+                        }
+                    }
                 } else {
                     let name_b64 = vars["n"]["bcs"].as_str().ok_or("missing name")?;
                     let name_bcs = STANDARD.decode(name_b64).map_err(|e| e.to_string())?;
@@ -564,6 +673,52 @@ impl ChainSim {
                         }
                     }
                 }
+            }
+            q if q == reads::QUERY_EVENTS => {
+                let f = &vars["f"];
+                let (ty, after, before) = (f["type"].as_str().ok_or("missing type")?.to_string(), f["afterCheckpoint"].as_u64().ok_or("missing after")?, f["beforeCheckpoint"].as_u64().ok_or("missing before")?);
+                if p.events_unserved {
+                    data.insert("events".into(), Value::Null);
+                } else {
+                    let all: Vec<SimEvent> = self
+                        .events
+                        .borrow()
+                        .iter()
+                        .filter(|e| e.type_repr == ty && e.cp > after && e.cp < before && e.cp <= head && p.hide_events_from.is_none_or(|h| e.cp < h))
+                        .cloned()
+                        .collect();
+                    let has_next = all.len() > reads::EVENTS_PAGE;
+                    let nodes: Vec<Value> = all
+                        .iter()
+                        .take(reads::EVENTS_PAGE)
+                        .map(|e| json!({ "sequenceNumber": e.index, "transaction": { "digest": format_digest_base58(&e.tx) }, "sender": { "address": format_address(&e.sender) },
+                            "contents": { "type": { "repr": e.type_repr }, "bcs": STANDARD.encode(&e.bcs) } }))
+                        .collect();
+                    data.insert("events".into(), json!({ "pageInfo": { "hasNextPage": has_next }, "nodes": nodes }));
+                }
+            }
+            q if q == reads::QUERY_TX_EVENTS => {
+                let d = crate::sui::parse_digest_base58(vars["d"].as_str().ok_or("missing d")?).map_err(|e| format!("{e}"))?;
+                let found = self.txs.borrow().get(&d).filter(|t| t.checkpoint <= head).cloned();
+                data.insert(
+                    "transaction".into(),
+                    match found {
+                        None => Value::Null,
+                        Some(t) => {
+                            let nodes: Vec<Value> = self
+                                .events
+                                .borrow()
+                                .iter()
+                                .filter(|e| e.tx == d)
+                                .map(|e| json!({ "sequenceNumber": e.index, "sender": { "address": format_address(&e.sender) }, "contents": { "type": { "repr": e.type_repr }, "bcs": STANDARD.encode(&e.bcs) } }))
+                                .collect();
+                            json!({ "digest": format_digest_base58(&d), "effects": {
+                                "status": if t.status == SimStatus::Success { "SUCCESS" } else { "FAILURE" },
+                                "checkpoint": { "sequenceNumber": t.checkpoint },
+                                "events": { "pageInfo": { "hasNextPage": false }, "nodes": nodes } } })
+                        }
+                    },
+                );
             }
             q if q == reads::QUERY_COIN_METADATA => {
                 let md = self.coin_metadata.borrow().clone();
@@ -628,7 +783,7 @@ pub fn gate_contents(g: &SimGate) -> Vec<u8> {
     w.bytes(&crate::ids::TESTNET_CHAIN_IDENTIFIER);
     w.u64(g.supply_cap).u64(g.min_bridge_out).u128(g.minted_total).u128(g.burned_total).u64(g.mint_count).u64(g.bridge_out_count);
     w.raw(&SIM_MINTS_TABLE).u64(g.mints.len() as u64);
-    w.raw(&SIM_RETURNS_TABLE).u64(g.bridge_out_count);
+    w.raw(&SIM_RETURNS_TABLE).u64(g.returns.len() as u64);
     w.into_bytes()
 }
 

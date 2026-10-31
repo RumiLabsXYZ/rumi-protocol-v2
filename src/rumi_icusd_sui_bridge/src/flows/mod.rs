@@ -5,5 +5,6 @@
 pub mod deposit;
 pub mod ledger_ops;
 pub mod mint;
+pub mod observer;
 pub mod release;
 pub mod remint;

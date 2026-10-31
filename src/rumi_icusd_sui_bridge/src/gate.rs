@@ -101,6 +101,12 @@ impl ConfiguredGate {
         format!("0x{}::{MODULE}::{GATE_STRUCT}", hex::encode(self.package))
     }
 
+    /// `0x<package>::rumi_icusd_gate::<name>`: the fully qualified type of one of this package's own
+    /// non-generic structs (an event type filter, an object type).
+    pub fn struct_type(&self, name: &str) -> String {
+        format!("0x{}::{MODULE}::{name}", hex::encode(self.package))
+    }
+
     /// `0x<package>::rumi_icusd_gate::RUMI_ICUSD_GATE`, the currency's coin type.
     pub fn coin_type(&self) -> String {
         format!("0x{}::{MODULE}::{COIN_STRUCT}", hex::encode(self.package))
@@ -267,6 +273,72 @@ pub fn decode_return_record(bytes: &[u8]) -> Result<ReturnRecord, GateError> {
     Ok(rec)
 }
 
+/// The `BridgeOut` event (`emit` in `bridge_out`). It can DISCOVER a return; it is never proof of one: the
+/// durable `returns` record is. Layout (Move struct order):
+/// `transfer_id: vector<u8>, sender: address, amount: u64, sequence: u64, icp_principal: vector<u8>,
+/// icp_subaccount: vector<u8>, client_nonce: u64, burned_total: u128, supply: u64`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BridgeOutEvent {
+    pub transfer_id: Vec<u8>,
+    pub sender: Bytes32,
+    pub amount: u64,
+    pub sequence: u64,
+    pub icp_principal: Vec<u8>,
+    pub icp_subaccount: Vec<u8>,
+    pub client_nonce: u64,
+    pub burned_total: u128,
+    pub supply: u64,
+}
+
+pub fn decode_bridge_out_event(bytes: &[u8]) -> Result<BridgeOutEvent, GateError> {
+    let mut r = Reader::new(bytes);
+    let e = BridgeOutEvent {
+        transfer_id: r.bytes(64)?,
+        sender: r.raw::<32>()?,
+        amount: r.u64()?,
+        sequence: r.u64()?,
+        icp_principal: r.bytes(64)?,
+        icp_subaccount: r.bytes(64)?,
+        client_nonce: r.u64()?,
+        burned_total: r.u128()?,
+        supply: r.u64()?,
+    };
+    r.finish()?;
+    if e.transfer_id.len() != MINT_ID_LEN || e.amount == 0 || e.sequence == 0 {
+        return mismatch("a BridgeOut event has a malformed transfer id, a zero amount or a zero sequence");
+    }
+    Ok(e)
+}
+
+/// The `Minted` event: `mint_id: vector<u8>, recipient: address, amount: u64, sequence: u64,
+/// minted_total: u128, supply: u64`. Discovery only, like [`BridgeOutEvent`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MintedEvent {
+    pub mint_id: Vec<u8>,
+    pub recipient: Bytes32,
+    pub amount: u64,
+    pub sequence: u64,
+    pub minted_total: u128,
+    pub supply: u64,
+}
+
+pub fn decode_minted_event(bytes: &[u8]) -> Result<MintedEvent, GateError> {
+    let mut r = Reader::new(bytes);
+    let e = MintedEvent {
+        mint_id: r.bytes(64)?,
+        recipient: r.raw::<32>()?,
+        amount: r.u64()?,
+        sequence: r.u64()?,
+        minted_total: r.u128()?,
+        supply: r.u64()?,
+    };
+    r.finish()?;
+    if e.mint_id.len() != MINT_ID_LEN || e.amount == 0 || e.sequence == 0 {
+        return mismatch("a Minted event has a malformed mint id, a zero amount or a zero sequence");
+    }
+    Ok(e)
+}
+
 /// The BCS of a table key (`vector<u8>`): the value the GraphQL `DynamicFieldName.bcs` carries.
 pub fn table_key_bcs(key: &Bytes32) -> Vec<u8> {
     let mut w = crate::bcs::Writer::new();
@@ -281,6 +353,43 @@ mod tests {
 
     fn cfg() -> ConfiguredGate {
         configured()
+    }
+
+    #[test]
+    fn the_event_decoders_follow_the_move_struct_order_and_the_gates_own_bounds() {
+        let mut w = crate::bcs::Writer::new();
+        w.bytes(&[0xab; 32]).raw(&[0x44; 32]).u64(7 * 100_000_000).u64(3).bytes(&[1, 2, 3]).bytes(&[0u8; 32]).u64(99).u128(10).u64(5);
+        let e = decode_bridge_out_event(&w.into_bytes()).unwrap();
+        assert_eq!((e.transfer_id.clone(), e.sender, e.amount, e.sequence, e.client_nonce, e.burned_total, e.supply), (vec![0xab; 32], [0x44; 32], 700_000_000, 3, 99, 10, 5));
+        assert_eq!((e.icp_principal, e.icp_subaccount), (vec![1, 2, 3], vec![0u8; 32]));
+        let bad = |f: &dyn Fn(&mut crate::bcs::Writer)| {
+            let mut w = crate::bcs::Writer::new();
+            f(&mut w);
+            decode_bridge_out_event(&w.into_bytes()).is_err()
+        };
+        assert!(bad(&|w| {
+            w.bytes(&[0xab; 31]).raw(&[0x44; 32]).u64(1).u64(1).bytes(&[1]).bytes(&[0u8; 32]).u64(0).u128(0).u64(0);
+        }), "a 31-byte transfer id");
+        assert!(bad(&|w| {
+            w.bytes(&[0xab; 32]).raw(&[0x44; 32]).u64(0).u64(1).bytes(&[1]).bytes(&[0u8; 32]).u64(0).u128(0).u64(0);
+        }), "a zero amount");
+        assert!(bad(&|w| {
+            w.bytes(&[0xab; 32]).raw(&[0x44; 32]).u64(1).u64(0).bytes(&[1]).bytes(&[0u8; 32]).u64(0).u128(0).u64(0);
+        }), "a zero sequence");
+        assert!(bad(&|w| {
+            w.bytes(&[0xab; 32]).raw(&[0x44; 32]).u64(1).u64(1).bytes(&[1]);
+        }), "truncated");
+        let mut t = crate::bcs::Writer::new();
+        t.bytes(&[0xab; 32]).raw(&[0x44; 32]).u64(1).u64(1).bytes(&[1]).bytes(&[0u8; 32]).u64(0).u128(0).u64(0).u8(9);
+        assert!(decode_bridge_out_event(&t.into_bytes()).is_err(), "trailing bytes");
+        let mut m = crate::bcs::Writer::new();
+        m.bytes(&[0xcd; 32]).raw(&[0x55; 32]).u64(8).u64(2).u128(100).u64(40);
+        let me = decode_minted_event(&m.into_bytes()).unwrap();
+        assert_eq!((me.mint_id, me.recipient, me.amount, me.sequence, me.minted_total, me.supply), (vec![0xcd; 32], [0x55; 32], 8, 2, 100, 40));
+        let mut z = crate::bcs::Writer::new();
+        z.bytes(&[0xcd; 32]).raw(&[0x55; 32]).u64(0).u64(2).u128(100).u64(40);
+        assert!(decode_minted_event(&z.into_bytes()).is_err());
+        assert_eq!(cfg().struct_type("BridgeOut"), format!("0x{}::rumi_icusd_gate::BridgeOut", "70".repeat(32)));
     }
 
     #[test]

@@ -484,3 +484,153 @@ pub struct LaneSettingsArg {
     pub gas_budget: u64,
     pub max_attempts: u32,
 }
+
+// ---------------------------------------------------------------------------
+// Return observer, monitors and audit views (53c)
+// ---------------------------------------------------------------------------
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum BreachScopeView {
+    Bridge,
+    MintLane,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CheckOutcomeView {
+    Ok,
+    Breach { detail: String, scope: BreachScopeView },
+    NotEvaluated { reason: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CheckView {
+    pub name: String,
+    pub outcome: CheckOutcomeView,
+}
+
+/// What the providers reported about the Gate at the stated finalized checkpoint.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GateObservationView {
+    pub total_supply: u64,
+    pub supply_cap: u64,
+    pub minted_total: u128,
+    pub burned_total: u128,
+    pub mint_count: u64,
+    pub bridge_out_count: u64,
+    pub gate_version: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct IndependentObservationsView {
+    /// The finalized checkpoint the Gate was read at, and when the monitors last ran. `None` before the
+    /// first monitor run.
+    pub checkpoint: Option<u64>,
+    pub checkpoint_digest: Option<String>,
+    pub epoch: Option<u64>,
+    pub observed_at_ns: Option<u64>,
+    pub gate: Option<GateObservationView>,
+    /// The icUSD ledger's balance of the escrow account when the monitors last ran.
+    pub escrow_balance_e8s: Option<u128>,
+    /// What the providers agreed the configured deployment is (`observe_deployment`).
+    pub deployment: Option<ObservedDeploymentView>,
+}
+
+/// This canister's own accounting, as it stands now.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SelfReportedView {
+    pub buckets: BucketsView,
+    pub minted_count: u64,
+    pub minted_e8s: u128,
+    pub returns_verified_through: u64,
+    pub returned_e8s: u128,
+    pub inflight_mint_e8s: u128,
+    pub inflight_mint_ops: u64,
+}
+
+/// Liabilities that are pending, held or in doubt.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingHeldView {
+    pub pending_mint_e8s: u128,
+    pub pending_release_e8s: u128,
+    pub pending_refund_e8s: u128,
+    pub held_e8s: u128,
+    pub unknown_outflow_e8s: u128,
+    pub reserved_pulls_e8s: u128,
+    /// Counted among the first 1,000 non-terminal records.
+    pub held_releases: u64,
+    pub held_deposits: u64,
+    pub active_deposits: u64,
+    pub active_releases: u64,
+    pub active_mint_op: Option<u64>,
+    /// Why anything is held or waiting right now.
+    pub reasons: Vec<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LastCheckedView {
+    pub checkpoint: Option<u64>,
+    pub at_ns: Option<u64>,
+    pub age_ns: Option<u64>,
+    /// True when the monitors have never run or last ran more than fifteen minutes ago.
+    pub stale: bool,
+    /// The observer was fully caught up at that checkpoint.
+    pub caught_up: bool,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AuditReport {
+    pub generated_at_ns: u64,
+    pub independent: IndependentObservationsView,
+    pub self_reported: SelfReportedView,
+    /// The books exactly as they were when the checks last ran (what they were compared against).
+    pub books_at_last_check: Option<BucketsView>,
+    pub pending_and_held: PendingHeldView,
+    pub last_checked: LastCheckedView,
+    pub checks: Vec<CheckView>,
+    /// What this report does not establish.
+    pub disclosures: Vec<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CandidateSourceView {
+    Event,
+    Hint,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CandidateView {
+    /// `0x` and 64 hex.
+    pub sui_sender: String,
+    pub client_nonce: u64,
+    /// Base58 typed digest of the transaction that named it.
+    pub tx_digest: String,
+    pub source: CandidateSourceView,
+    pub claimed_sequence: u64,
+    pub claimed_amount_e8s: u64,
+    /// Verified against the Gate's durable record and waiting for its turn.
+    pub verified: bool,
+    pub waiting: Option<String>,
+    pub tries: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ObserverProblemView {
+    pub at_ns: u64,
+    pub note: String,
+    pub tx_digest: Option<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ObserverView {
+    pub started: bool,
+    pub scanned_through: u64,
+    pub returns_verified_through: u64,
+    pub next_sequence: u64,
+    pub last_head: u64,
+    pub caught_up: bool,
+    pub gap: Option<String>,
+    pub last_wait: Option<String>,
+    pub next_run_ns: u64,
+    pub candidates: Vec<CandidateView>,
+    pub problems: Vec<ObserverProblemView>,
+}

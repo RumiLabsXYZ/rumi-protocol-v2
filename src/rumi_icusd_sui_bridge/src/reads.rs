@@ -21,6 +21,13 @@
 //!   TransactionEffects }` and `TransactionEffects { status: ExecutionStatus, executionError:
 //!   ExecutionError, checkpoint: Checkpoint, epoch: Epoch }`, `enum ExecutionStatus { SUCCESS,
 //!   FAILURE }`, `ExecutionError { abortCode: BigInt, message: String! }`;
+//! * `Query.events(first, after, last, before, filter: EventFilter): EventConnection` with
+//!   `EventFilter { afterCheckpoint, atCheckpoint, beforeCheckpoint (strict bounds), type, module, sender }`
+//!   ("fully qualified type name" accepted), `EventConnection { nodes, edges, pageInfo }`,
+//!   `Event { sequenceNumber: UInt53!, transaction: Transaction, sender: Address, contents: MoveValue }`
+//!   (all read from the SDL at `mainnet-v1.82.3`); `PageInfo.hasNextPage` is the standard Relay field and
+//!   its definition was not in the SDL text read. `TransactionEffects.events(first, ...)` is the same
+//!   connection for one transaction. Events can DISCOVER a return; the durable `returns` record proves it.
 //! * `Mutation.executeTransaction(transactionDataBcs: Base64!, signatures: [Base64!]!):
 //!   ExecutionResult!` ("waits until the transaction has reached finality ... or returns the error
 //!   that prevented finality") with `ExecutionResult { effects: TransactionEffects }`.
@@ -47,6 +54,7 @@ use crate::graphql::{
     check_chain_identifier, identity, malformed, parse_object, str_field, uint53, Exclusion, GraphqlRequest, ObjectFact, OwnerFact,
 };
 use crate::sui::{format_address, parse_address_padded, parse_digest_base58, Bytes32};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 
 /// The head the transform returns is rounded down to a multiple of this many checkpoints, so every
@@ -67,6 +75,15 @@ pub const QUERY_COIN_METADATA: &str = "query($t:String!){chainIdentifier coinMet
 pub const QUERY_TRANSACTION: &str =
     "query($d:String!){chainIdentifier transaction(digest:$d){digest effects{status executionError{abortCode message} checkpoint{sequenceNumber} epoch{epochId}}}}";
 pub const MUTATION_EXECUTE: &str = "mutation($t:Base64!,$s:[Base64!]!){executeTransaction(transactionDataBcs:$t,signatures:$s){effects{digest status}}}";
+
+/// The events of one exact type in a checkpoint range `(after, before)` (both strict), at most a page.
+pub const QUERY_EVENTS: &str = "query($f:EventFilter!){chainIdentifier events(first:20,filter:$f){pageInfo{hasNextPage} nodes{sequenceNumber transaction{digest} sender{address} contents{type{repr} bcs}}}}";
+/// The events of one transaction, with its status and checkpoint.
+pub const QUERY_TX_EVENTS: &str = "query($d:String!){chainIdentifier transaction(digest:$d){digest effects{status checkpoint{sequenceNumber} events(first:20){pageInfo{hasNextPage} nodes{sequenceNumber sender{address} contents{type{repr} bcs}}}}}}";
+/// The page size the queries above ask for; a full page with `hasNextPage` is never treated as complete.
+/// Twenty `BridgeOut` events (about 600 bytes each as JSON) fit the default 16 KiB response cap with room;
+/// fifty did not, and a response over the cap is refused by the transform.
+pub const EVENTS_PAGE: usize = 20;
 
 pub fn request_head() -> GraphqlRequest {
     GraphqlRequest { query: QUERY_HEAD, variables: json!({}) }
@@ -89,6 +106,20 @@ pub fn request_coin_metadata(coin_type: &str) -> GraphqlRequest {
 
 pub fn request_transaction(digest: &Bytes32) -> GraphqlRequest {
     GraphqlRequest { query: QUERY_TRANSACTION, variables: json!({ "d": crate::sui::format_digest_base58(digest) }) }
+}
+
+/// Events of type `event_type` (fully qualified) strictly after `after_checkpoint` and strictly before
+/// `before_checkpoint`.
+pub fn request_events(event_type: &str, after_checkpoint: u64, before_checkpoint: u64) -> GraphqlRequest {
+    assert!(before_checkpoint <= crate::graphql::MAX_UINT53, "UInt53 values are exact only below 2^53");
+    GraphqlRequest {
+        query: QUERY_EVENTS,
+        variables: json!({ "f": { "type": event_type, "afterCheckpoint": after_checkpoint, "beforeCheckpoint": before_checkpoint } }),
+    }
+}
+
+pub fn request_tx_events(digest: &Bytes32) -> GraphqlRequest {
+    GraphqlRequest { query: QUERY_TX_EVENTS, variables: json!({ "d": crate::sui::format_digest_base58(digest) }) }
 }
 
 /// `executeTransaction` for one signed transaction: the base64 BCS and the base64 wire signatures.
@@ -422,6 +453,135 @@ pub fn parse_transaction(data: &Value, requested: &Bytes32, expected_genesis_b58
     Ok(Some(TransactionFact { digest, status, checkpoint, epoch }))
 }
 
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+/// One emitted event as a provider reported it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventFact {
+    /// The emitting transaction (zero in a single-transaction reading, where the caller knows it).
+    pub tx_digest: Bytes32,
+    pub index: u64,
+    pub sender: Bytes32,
+    pub type_repr: String,
+    pub bcs: Vec<u8>,
+}
+
+/// A page of events and whether the provider has more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventsPage {
+    pub events: Vec<EventFact>,
+    pub has_next: bool,
+}
+
+fn parse_event_node(n: &Value, tx: Option<&Bytes32>) -> Result<EventFact, Exclusion> {
+    let tx_digest = match tx {
+        Some(d) => *d,
+        None => parse_digest_base58(
+            n.get("transaction").and_then(|t| t.get("digest")).and_then(Value::as_str).ok_or_else(|| Exclusion::Malformed("an event without its transaction digest".into()))?,
+        )
+        .map_err(|e| Exclusion::Malformed(format!("event transaction digest: {e}")))?,
+    };
+    let index = uint53(n.get("sequenceNumber").unwrap_or(&Value::Null), "event sequenceNumber")?;
+    let sender = parse_address_padded(
+        n.get("sender").and_then(|s| s.get("address")).and_then(Value::as_str).ok_or_else(|| Exclusion::Malformed("an event without its sender".into()))?,
+    )
+    .map_err(|e| Exclusion::Malformed(format!("event sender: {e}")))?;
+    let contents = n.get("contents").filter(|c| c.is_object()).ok_or_else(|| Exclusion::Malformed("an event without contents".into()))?;
+    let type_repr = contents.get("type").and_then(|t| t.get("repr")).and_then(Value::as_str).ok_or_else(|| Exclusion::Malformed("an event without a type".into()))?.to_string();
+    let bcs = STANDARD.decode(str_field(contents, "bcs")?).map_err(|_| Exclusion::Malformed("event bcs is not base64".into()))?;
+    Ok(EventFact { tx_digest, index, sender, type_repr, bcs })
+}
+
+fn parse_connection(conn: &Value, tx: Option<&Bytes32>) -> Result<EventsPage, Exclusion> {
+    let nodes = conn.get("nodes").and_then(Value::as_array).ok_or_else(|| Exclusion::Malformed("an event connection without nodes".into()))?;
+    if nodes.len() > EVENTS_PAGE {
+        return malformed("a page larger than the page size asked for");
+    }
+    let has_next = conn
+        .get("pageInfo")
+        .and_then(|p| p.get("hasNextPage"))
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Exclusion::Malformed("an event connection without pageInfo.hasNextPage".into()))?;
+    let events = nodes.iter().map(|n| parse_event_node(n, tx)).collect::<Result<Vec<_>, _>>()?;
+    Ok(EventsPage { events, has_next })
+}
+
+/// A range of events of one type. `None` (a null connection) means the provider does not serve the
+/// range, NOT that there are no events: an empty list is the `Some` page with no events.
+pub fn parse_events(data: &Value, expected_genesis_b58: &str) -> Result<Option<EventsPage>, Exclusion> {
+    check_chain_identifier(data, expected_genesis_b58)?;
+    match data.get("events") {
+        Some(Value::Null) => Ok(None),
+        Some(c) if c.is_object() => parse_connection(c, None).map(Some),
+        _ => malformed("events is missing"),
+    }
+}
+
+/// A transaction with its events, as final as the chain says: executed in a checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxEventsFact {
+    pub digest: Bytes32,
+    pub success: bool,
+    pub checkpoint: u64,
+    pub page: EventsPage,
+}
+
+/// The events of `requested`. `None`: the provider has no such transaction, or has it without a
+/// checkpoint (not final).
+pub fn parse_tx_events(data: &Value, requested: &Bytes32, expected_genesis_b58: &str) -> Result<Option<TxEventsFact>, Exclusion> {
+    check_chain_identifier(data, expected_genesis_b58)?;
+    let t = match data.get("transaction") {
+        Some(Value::Null) => return Ok(None),
+        Some(t) if t.is_object() => t,
+        _ => return malformed("transaction is missing"),
+    };
+    let digest = parse_digest_base58(str_field(t, "digest")?).map_err(|e| Exclusion::Malformed(format!("transaction digest: {e}")))?;
+    if &digest != requested {
+        return identity("the transaction is not the one requested");
+    }
+    let effects = match t.get("effects") {
+        Some(Value::Null) => return Ok(None),
+        Some(e) if e.is_object() => e,
+        _ => return malformed("a transaction without effects"),
+    };
+    let checkpoint = match effects.get("checkpoint") {
+        Some(Value::Null) => return Ok(None),
+        Some(c) if c.is_object() => uint53(c.get("sequenceNumber").unwrap_or(&Value::Null), "checkpoint sequenceNumber")?,
+        _ => return malformed("effects.checkpoint is missing"),
+    };
+    let success = match str_field(effects, "status")? {
+        "SUCCESS" => true,
+        "FAILURE" => false,
+        other => return malformed(format!("unknown execution status {other}")),
+    };
+    let conn = effects.get("events").filter(|c| c.is_object()).ok_or_else(|| Exclusion::Malformed("effects.events is missing".into()))?;
+    let page = parse_connection(conn, Some(&digest))?;
+    Ok(Some(TxEventsFact { digest, success, checkpoint, page }))
+}
+
+/// A `BridgeOut` event of exactly this package: the exact type, a decodable body, and an event sender that
+/// is the body's sender. It names a CANDIDATE; the durable record decides.
+pub fn interpret_bridge_out_event(e: &EventFact, cfg: &ConfiguredGate) -> Result<crate::gate::BridgeOutEvent, Exclusion> {
+    if !cfg.type_repr_matches(&e.type_repr, "BridgeOut") {
+        return identity(format!("the event type {:?} is not the configured BridgeOut type", e.type_repr));
+    }
+    let ev = crate::gate::decode_bridge_out_event(&e.bcs).map_err(|x| Exclusion::Identity(format!("{x}")))?;
+    if ev.sender != e.sender {
+        return identity("the event's sender is not the sender of its transaction");
+    }
+    Ok(ev)
+}
+
+/// A `Minted` event of exactly this package (discovery of foreign mint ids only).
+pub fn interpret_minted_event(e: &EventFact, cfg: &ConfiguredGate) -> Result<crate::gate::MintedEvent, Exclusion> {
+    if !cfg.type_repr_matches(&e.type_repr, "Minted") {
+        return identity(format!("the event type {:?} is not the configured Minted type", e.type_repr));
+    }
+    crate::gate::decode_minted_event(&e.bcs).map_err(|x| Exclusion::Identity(format!("{x}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,5 +822,122 @@ mod tests {
         assert!(matches!(parse_transaction(&weird, &d, TESTNET_B58), Err(Exclusion::Malformed(_))));
         let missing = tx_json(&d, json!({ "checkpoint": { "sequenceNumber": 1 }, "epoch": { "epochId": 4 } }));
         assert!(matches!(parse_transaction(&missing, &d, TESTNET_B58), Err(Exclusion::Malformed(_))));
+    }
+
+    fn bridge_out_bcs(sender: Bytes32, amount: u64, seq: u64, nonce: u64) -> Vec<u8> {
+        let mut w = crate::bcs::Writer::new();
+        w.bytes(&[0x9a; 32]).raw(&sender).u64(amount).u64(seq).bytes(&[1, 2, 3]).bytes(&[0u8; 32]).u64(nonce).u128(amount as u128).u64(0);
+        w.into_bytes()
+    }
+
+    fn node(tx: Option<&Bytes32>, idx: u64, sender: Bytes32, repr: &str, bcs: &[u8]) -> Value {
+        let mut n = json!({ "sequenceNumber": idx, "sender": { "address": format_address(&sender) }, "contents": { "type": { "repr": repr }, "bcs": STANDARD.encode(bcs) } });
+        if let Some(t) = tx {
+            n["transaction"] = json!({ "digest": format_digest_base58(t) });
+        }
+        n
+    }
+
+    #[test]
+    fn event_requests_pin_the_type_and_the_open_checkpoint_interval() {
+        let r = request_events("0x1::m::E", 10, 20);
+        assert_eq!(r.variables, json!({ "f": { "type": "0x1::m::E", "afterCheckpoint": 10, "beforeCheckpoint": 20 } }));
+        assert!(r.query.contains("first:20") && r.query.contains("hasNextPage") && r.query.contains("chainIdentifier"));
+        assert_eq!(request_tx_events(&[3; 32]).variables, json!({ "d": format_digest_base58(&[3; 32]) }));
+        for q in [QUERY_EVENTS, QUERY_TX_EVENTS] {
+            assert!(q.len() < 400 && !q.contains('"'), "{q}");
+        }
+    }
+
+    #[test]
+    fn an_event_range_is_a_page_and_a_null_connection_is_not_an_empty_one() {
+        let cfg = cfg();
+        let repr = cfg.struct_type("BridgeOut");
+        let tx = [0x61; 32];
+        let sender = [0x44; 32];
+        let good = data(json!({ "chainIdentifier": TESTNET_B58, "events": { "pageInfo": { "hasNextPage": false }, "nodes": [node(Some(&tx), 0, sender, &repr, &bridge_out_bcs(sender, 500, 1, 7))] } }));
+        let page = parse_events(&good, TESTNET_B58).unwrap().unwrap();
+        assert_eq!((page.events.len(), page.has_next, page.events[0].tx_digest, page.events[0].index), (1, false, tx, 0));
+        let ev = interpret_bridge_out_event(&page.events[0], &cfg).unwrap();
+        assert_eq!((ev.amount, ev.sequence, ev.client_nonce, ev.sender), (500, 1, 7, sender));
+        // Empty is a page; null is "not served".
+        let empty = data(json!({ "chainIdentifier": TESTNET_B58, "events": { "pageInfo": { "hasNextPage": false }, "nodes": [] } }));
+        assert_eq!(parse_events(&empty, TESTNET_B58), Ok(Some(EventsPage { events: vec![], has_next: false })));
+        let null = data(json!({ "chainIdentifier": TESTNET_B58, "events": null }));
+        assert_eq!(parse_events(&null, TESTNET_B58), Ok(None));
+        // Malformed shapes are exclusions.
+        for bad in [
+            json!({ "pageInfo": { "hasNextPage": false } }),
+            json!({ "nodes": [] }),
+            json!({ "pageInfo": { "hasNextPage": "no" }, "nodes": [] }),
+            json!({ "pageInfo": { "hasNextPage": false }, "nodes": [node(None, 0, sender, &repr, &[])] }),
+            json!({ "pageInfo": { "hasNextPage": false }, "nodes": (0..=EVENTS_PAGE as u64).map(|i| node(Some(&tx), i, sender, &repr, &[])).collect::<Vec<_>>() }),
+        ] {
+            let d = data(json!({ "chainIdentifier": TESTNET_B58, "events": bad }));
+            assert!(matches!(parse_events(&d, TESTNET_B58), Err(Exclusion::Malformed(_))), "{d}");
+        }
+        let wrong = data(json!({ "chainIdentifier": "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S", "events": null }));
+        assert!(matches!(parse_events(&wrong, TESTNET_B58), Err(Exclusion::WrongNetwork(_))));
+    }
+
+    #[test]
+    fn a_lookalike_or_inconsistent_bridge_out_event_is_never_a_candidate() {
+        let cfg = cfg();
+        let tx = [0x61; 32];
+        let sender = [0x44; 32];
+        let body = bridge_out_bcs(sender, 500, 1, 7);
+        let lookalike_pkg = format!("0x{}::rumi_icusd_gate::BridgeOut", "71".repeat(32));
+        let lookalike_mod = format!("0x{}::other_module::BridgeOut", "70".repeat(32));
+        let lookalike_name = cfg.struct_type("BridgeOutX");
+        for (what, repr) in [("another package", lookalike_pkg), ("another module", lookalike_mod), ("another struct", lookalike_name)] {
+            let f = EventFact { tx_digest: tx, index: 0, sender, type_repr: repr, bcs: body.clone() };
+            assert!(matches!(interpret_bridge_out_event(&f, &cfg), Err(Exclusion::Identity(_))), "{what}");
+        }
+        let good_type = cfg.struct_type("BridgeOut");
+        // The transaction sender is not the body's sender.
+        assert!(matches!(interpret_bridge_out_event(&EventFact { tx_digest: tx, index: 0, sender: [0x45; 32], type_repr: good_type.clone(), bcs: body.clone() }, &cfg), Err(Exclusion::Identity(_))));
+        // A body that breaks the Gate's own bounds.
+        let mut zero = crate::bcs::Writer::new();
+        zero.bytes(&[0x9a; 32]).raw(&sender).u64(0).u64(1).bytes(&[1]).bytes(&[0u8; 32]).u64(0).u128(0).u64(0);
+        assert!(matches!(interpret_bridge_out_event(&EventFact { tx_digest: tx, index: 0, sender, type_repr: good_type, bcs: zero.into_bytes() }, &cfg), Err(Exclusion::Identity(_))));
+    }
+
+    #[test]
+    fn a_transactions_events_need_a_checkpoint_and_the_digest_asked_for() {
+        let cfg = cfg();
+        let tx = [0x61; 32];
+        let sender = [0x44; 32];
+        let repr = cfg.struct_type("BridgeOut");
+        let page = |success: &str, cp: Value| {
+            data(json!({ "chainIdentifier": TESTNET_B58, "transaction": { "digest": format_digest_base58(&tx), "effects": {
+                "status": success, "checkpoint": cp,
+                "events": { "pageInfo": { "hasNextPage": false }, "nodes": [node(None, 0, sender, &repr, &bridge_out_bcs(sender, 500, 1, 7))] } } } }))
+        };
+        let f = parse_tx_events(&page("SUCCESS", json!({ "sequenceNumber": 900 })), &tx, TESTNET_B58).unwrap().unwrap();
+        assert_eq!((f.digest, f.success, f.checkpoint, f.page.events.len(), f.page.events[0].tx_digest), (tx, true, 900, 1, tx));
+        let failed = parse_tx_events(&page("FAILURE", json!({ "sequenceNumber": 900 })), &tx, TESTNET_B58).unwrap().unwrap();
+        assert!(!failed.success);
+        // Not final yet (no checkpoint) or unknown: no reading, not an empty one.
+        assert_eq!(parse_tx_events(&page("SUCCESS", Value::Null), &tx, TESTNET_B58), Ok(None));
+        let null = data(json!({ "chainIdentifier": TESTNET_B58, "transaction": null }));
+        assert_eq!(parse_tx_events(&null, &tx, TESTNET_B58), Ok(None));
+        assert!(matches!(parse_tx_events(&page("SUCCESS", json!({ "sequenceNumber": 900 })), &[0x62; 32], TESTNET_B58), Err(Exclusion::Identity(_))));
+        assert!(matches!(parse_tx_events(&page("WEIRD", json!({ "sequenceNumber": 900 })), &tx, TESTNET_B58), Err(Exclusion::Malformed(_))));
+    }
+
+    #[test]
+    fn a_full_page_of_the_largest_bridge_out_events_fits_the_default_response_cap() {
+        let cfg = cfg();
+        let repr = cfg.struct_type("BridgeOut");
+        let sender = [0x44; 32];
+        let mut w = crate::bcs::Writer::new();
+        // The largest legal event: a 29-byte principal.
+        w.bytes(&[0x9a; 32]).raw(&sender).u64(u64::MAX).u64(u64::MAX).bytes(&[0xff; 29]).bytes(&[0xff; 32]).u64(u64::MAX).u128(u128::MAX).u64(u64::MAX);
+        let bcs = w.into_bytes();
+        let nodes: Vec<Value> = (0..EVENTS_PAGE as u64).map(|i| node(Some(&[0x61; 32]), i, sender, &repr, &bcs)).collect();
+        let body = serde_json::to_vec(&json!({ "data": { "chainIdentifier": TESTNET_B58, "events": { "pageInfo": { "hasNextPage": true }, "nodes": nodes } } })).unwrap();
+        let cap = crate::graphql::MirrorSettings::default().max_response_bytes as usize;
+        assert!(body.len() < cap, "a page of {EVENTS_PAGE} events is {} bytes, over the default cap {cap}", body.len());
+        assert!(crate::graphql::canonicalize_response(&body, cap).is_ok());
     }
 }

@@ -14,6 +14,17 @@ type AuditEntry = record {
   note : text;
   transition : opt Transition;
 };
+type AuditReport = record {
+  pending_and_held : PendingHeldView;
+  self_reported : SelfReportedView;
+  generated_at_ns : nat64;
+  disclosures : vec text;
+  independent : IndependentObservationsView;
+  checks : vec CheckView;
+  last_checked : LastCheckedView;
+  books_at_last_check : opt BucketsView;
+};
+type BreachScopeView = variant { MintLane; Bridge };
 type BridgeArg = variant { Upgrade : UpgradeArgs; Init : InitArgs };
 type BridgeFees = record { release_fee_e8s : nat64; deposit_fee_e8s : nat64 };
 type BridgeLimits = record {
@@ -43,6 +54,24 @@ type BucketsView = record {
   held : nat;
   pending_release : nat;
 };
+type CandidateSourceView = variant { Event; Hint };
+type CandidateView = record {
+  verified : bool;
+  tries : nat32;
+  sui_sender : text;
+  source : CandidateSourceView;
+  claimed_amount_e8s : nat64;
+  claimed_sequence : nat64;
+  tx_digest : text;
+  waiting : opt text;
+  client_nonce : nat64;
+};
+type CheckOutcomeView = variant {
+  Ok;
+  Breach : record { detail : text; scope : BreachScopeView };
+  NotEvaluated : record { reason : text };
+};
+type CheckView = record { name : text; outcome : CheckOutcomeView };
 type ConfigView = record {
   signing_enabled : bool;
   bridge_version : text;
@@ -141,6 +170,15 @@ type GateBindingView = record {
   gate_type : text;
   package_id : text;
 };
+type GateObservationView = record {
+  bridge_out_count : nat64;
+  mint_count : nat64;
+  supply_cap : nat64;
+  burned_total : nat;
+  gate_version : nat64;
+  total_supply : nat64;
+  minted_total : nat;
+};
 type HttpHeader = record { value : text; name : text };
 type HttpResponse = record {
   status : nat;
@@ -153,6 +191,15 @@ type Icrc21Error = variant {
   ConsentMessageUnavailable : ErrorInfo;
 };
 type Icrc28TrustedOriginsResponse = record { trusted_origins : vec text };
+type IndependentObservationsView = record {
+  deployment : opt ObservedDeploymentView;
+  checkpoint : opt nat64;
+  gate : opt GateObservationView;
+  observed_at_ns : opt nat64;
+  escrow_balance_e8s : opt nat;
+  epoch : opt nat64;
+  checkpoint_digest : opt text;
+};
 type InitArgs = record {
   fee_recipient : opt Account;
   fees : opt BridgeFees;
@@ -164,6 +211,13 @@ type InitArgs = record {
   limits : opt BridgeLimits;
 };
 type LaneSettingsArg = record { gas_budget : nat64; max_attempts : nat32 };
+type LastCheckedView = record {
+  at_ns : opt nat64;
+  checkpoint : opt nat64;
+  age_ns : opt nat64;
+  stale : bool;
+  caught_up : bool;
+};
 type LineDisplayPage = record { lines : vec text };
 type ListDepositsArgs = record { start_after : opt nat64; limit : nat32 };
 type ListDepositsForOwnerArgs = record {
@@ -262,11 +316,43 @@ type ObservedDeploymentView = record {
   symbol : text;
   checkpoint_digest : text;
 };
+type ObserverProblemView = record {
+  at_ns : nat64;
+  note : text;
+  tx_digest : opt text;
+};
+type ObserverView = record {
+  gap : opt text;
+  scanned_through : nat64;
+  started : bool;
+  returns_verified_through : nat64;
+  caught_up : bool;
+  problems : vec ObserverProblemView;
+  next_sequence : nat64;
+  last_head : nat64;
+  next_run_ns : nat64;
+  last_wait : opt text;
+  candidates : vec CandidateView;
+};
 type Pauses = record {
   mints : bool;
   observer : bool;
   releases : bool;
   deposits : bool;
+};
+type PendingHeldView = record {
+  pending_refund_e8s : nat;
+  reasons : vec text;
+  reserved_pulls_e8s : nat;
+  pending_mint_e8s : nat;
+  active_releases : nat64;
+  held_releases : nat64;
+  active_deposits : nat64;
+  held_e8s : nat;
+  pending_release_e8s : nat;
+  held_deposits : nat64;
+  active_mint_op : opt nat64;
+  unknown_outflow_e8s : nat;
 };
 type ProviderConfig = record { id : text; url : text };
 type ReleaseStatus = variant {
@@ -307,6 +393,15 @@ type RoleView = record {
   role : SuiRole;
   derivation_path : vec text;
   address : opt text;
+};
+type SelfReportedView = record {
+  minted_e8s : nat;
+  inflight_mint_e8s : nat;
+  inflight_mint_ops : nat64;
+  minted_count : nat64;
+  returned_e8s : nat;
+  returns_verified_through : nat64;
+  buckets : BucketsView;
 };
 type StandardRecord = record { url : text; name : text };
 type SuiBridgeError = variant {
@@ -382,6 +477,7 @@ service : (BridgeArg) -> {
   bridge_version : () -> (text) query;
   derive_role_keys : () -> (Result_3);
   get_audit_log : (nat64, nat32) -> (vec AuditEntry) query;
+  get_audit_report : () -> (AuditReport) query;
   get_buckets : () -> (BucketsView) query;
   get_config : () -> (ConfigView) query;
   get_deposit : (nat64) -> (opt DepositView) query;
@@ -389,6 +485,7 @@ service : (BridgeArg) -> {
   get_mint_lane : () -> (MintLaneView) query;
   get_mint_op : (nat64) -> (opt MintOpView) query;
   get_observed_deployment : () -> (opt ObservedDeploymentView) query;
+  get_observer : () -> (ObserverView) query;
   get_release : (text) -> (opt ReleaseView) query;
   get_roles : () -> (vec RoleView) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;

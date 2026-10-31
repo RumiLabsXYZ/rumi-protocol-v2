@@ -20,9 +20,9 @@
 //!   a table entry or a transaction it never means "did not happen";
 //! * a send is "maybe sent" by construction: its outcome is never evidence.
 
-use crate::gate::{ConfiguredGate, MintRecord};
+use crate::gate::{ConfiguredGate, MintRecord, ReturnRecord};
 use crate::graphql::{
-    self, exclusions, interpret_gate, interpret_mint_entry, outcome_from_body, parse_checkpoint, parse_object, parse_object_at_version, parse_table_entry,
+    self, exclusions, interpret_gate, interpret_mint_entry, interpret_return_entry, outcome_from_body, parse_checkpoint, parse_object, parse_object_at_version, parse_table_entry,
     request_chain_identifier, request_checkpoint, request_object_at_checkpoint, request_object_at_version, request_table_entry, tally, CheckpointFact,
     Exclusion, GateFact, GraphqlRequest, MirrorSettings, ObjectFact, Outcome, ProviderConfig, QuorumRule, Verdict,
 };
@@ -289,6 +289,42 @@ impl<'a, T: SuiTransport> Mirror<'a, T> {
             Some(entry) => interpret_mint_entry(&entry, &cfg).map(Some),
         })
         .await
+    }
+
+    /// `returns[transfer_id]` as of `checkpoint`: the durable record, with the value type checked. This is
+    /// the proof of a return; `AgreedMissing` means the providers agree it is not there at that checkpoint.
+    pub async fn return_entry(&self, cfg: &ConfiguredGate, table: &Bytes32, checkpoint: u64, transfer_id: &Bytes32) -> Verdict<ReturnRecord> {
+        let expected = self.genesis_b58.clone();
+        let cfg = *cfg;
+        let key = *transfer_id;
+        self.read(CallKind::Read, &request_table_entry(table, checkpoint, &key), move |d| match parse_table_entry(d, &key, &expected)? {
+            None => Ok(None),
+            Some(entry) => interpret_return_entry(&entry, &cfg).map(Some),
+        })
+        .await
+    }
+
+    /// Events of one of this package's struct types (`name`, for example `BridgeOut`) strictly between two
+    /// checkpoints. A provider that returns an event of any other type is excluded. A null connection is a
+    /// range the provider does not serve (`AgreedMissing`), never "no events".
+    pub async fn events(&self, cfg: &ConfiguredGate, name: &'static str, after_checkpoint: u64, before_checkpoint: u64) -> Verdict<EventsPage> {
+        let expected = self.genesis_b58.clone();
+        let cfg = *cfg;
+        self.read(CallKind::Read, &request_events(&cfg.struct_type(name), after_checkpoint, before_checkpoint), move |d| {
+            let Some(page) = parse_events(d, &expected)? else { return Ok(None) };
+            if let Some(foreign) = page.events.iter().find(|e| !cfg.type_repr_matches(&e.type_repr, name)) {
+                return Err(Exclusion::Identity(format!("an event of type {:?} in a query for {name}", foreign.type_repr)));
+            }
+            Ok(Some(page))
+        })
+        .await
+    }
+
+    /// The events of one transaction (a hint's discovery), with its status and finalized checkpoint.
+    pub async fn tx_events(&self, digest: &Bytes32) -> Verdict<TxEventsFact> {
+        let expected = self.genesis_b58.clone();
+        let digest = *digest;
+        self.read(CallKind::Read, &request_tx_events(&digest), move |d| parse_tx_events(d, &digest, &expected)).await
     }
 
     pub async fn transaction(&self, digest: &Bytes32) -> Verdict<TransactionFact> {

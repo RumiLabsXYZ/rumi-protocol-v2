@@ -2,8 +2,9 @@
 //! capability only: nothing is deployed, signed, funded, broadcast or read from a network, and the
 //! Sui profile stays `disabled`. 53a is the ICP-side saga and accounting (escrow pull, refund,
 //! release, fee sweep); 53b adds the observed binding, the HTTPS-outcall transport (disabled by
-//! default, exercised only against a simulated chain) and the mint lane; the return observer and
-//! the monitors (53c) and the wallet surface (BB-54) do not exist yet.
+//! default, exercised only against a simulated chain) and the mint lane; 53c adds the return observer
+//! (Sui `bridge_out` burns become ICP releases only through the Gate's durable record), the C1 to C4
+//! monitors and the audit report. The wallet surface (BB-54) does not exist yet.
 //!
 //! One canister instance serves one network (settled topology D1). The design is
 //! `docs/coordination/multichain/chain-sui.md`; the Move package it talks to is
@@ -27,7 +28,10 @@
 //! * 53b: `reads` (the head, checkpoint-with-gas, owned-object, coin-metadata, transaction and
 //!   `executeTransaction` shapes), `mirror` (the transport trait, the real outcall transport and the
 //!   per-provider quorum), `bind` (the observed deployment), `flows::mint` (the lane) and
-//!   `flows::remint` (held releases back to their Sui sender).
+//!   `flows::remint` (held releases back to their Sui sender);
+//! * 53c: `flows::observer` (events and hints discover, the durable `ReturnRecord` proves, releases open in
+//!   Gate sequence order), `monitor` (C1 to C4 from independent observations against the books, halting on
+//!   a breach) and the audit report (`views::audit_report`).
 //!
 //! # Sources (pinned, official; read 2026-10-31)
 //!
@@ -89,6 +93,7 @@ pub mod icrc21;
 pub mod ids;
 pub mod ledger;
 pub mod mirror;
+pub mod monitor;
 pub mod reads;
 pub mod runtime;
 pub mod schnorr;
@@ -113,6 +118,8 @@ mod saga_tests;
 mod chain_sim;
 #[cfg(test)]
 mod lane_tests;
+#[cfg(test)]
+mod observer_tests;
 
 use candid::Principal;
 use ids::SuiRole;
@@ -269,7 +276,12 @@ async fn request_deposit_refund(id: u64) -> BridgeResult<DepositView> {
 /// never settles anything.
 #[ic_cdk::update]
 fn notify_sui_return(digest: String) -> BridgeResult<()> {
-    flows::release::record_hint(digest)
+    flows::release::record_hint(digest)?;
+    // The return observer reads a hinted transaction on its next pass; wake it now. The hint pays nothing:
+    // a return is opened only from the Gate's durable record.
+    state::mutate_runtime(|c| c.observer.next_run_ns = 0);
+    timer::schedule_soon();
+    Ok(())
 }
 
 #[ic_cdk::query]
@@ -346,6 +358,20 @@ fn get_buckets() -> BucketsView {
 #[ic_cdk::query]
 fn get_observed_deployment() -> Option<ObservedDeploymentView> {
     state::read_runtime(|c| c.observed.as_ref().map(views::observed_view))
+}
+
+/// The return observer: its cursor, the returns it has heard of and verified, any gap, and its problems.
+#[ic_cdk::query]
+fn get_observer() -> ObserverView {
+    views::observer_view()
+}
+
+/// The audit report: independent observations (the Gate at a finalized checkpoint through the provider
+/// quorum, the escrow balance from the ledger) kept apart from the self-reported books, the pending and
+/// held liabilities, the last checked checkpoint, and the invariant checks C1 to C4.
+#[ic_cdk::query]
+fn get_audit_report() -> AuditReport {
+    views::audit_report(env::now_ns())
 }
 
 /// Whether the mint lane would run now, and what it is waiting for.
@@ -730,6 +756,8 @@ mod endpoint_tests {
             "get_buckets",
             "get_audit_log",
             "get_observed_deployment",
+            "get_observer",
+            "get_audit_report",
             "get_mint_lane",
             "get_mint_op",
             "list_mint_ops",

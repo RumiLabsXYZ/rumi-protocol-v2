@@ -805,6 +805,8 @@ fn a_mint_id_that_is_already_consumed_with_no_operation_of_ours_halts_the_lane()
 #[test]
 fn a_held_release_is_re_minted_to_the_sui_sender_and_the_books_close() {
     let l = lane();
+    // These tests fabricate a return in the books without a Sui burn; the observer's monitors (53c) would rightly flag that, so it is paused here.
+    state::mutate_runtime(|r| r.config.pauses.observer = true);
     // A return whose saved ICP destination is this very canister cannot be paid: it opens held.
     let b = burned_with(&l.fx, 5 * E8, 1, acct(env::canister_id()), SENDER);
     assert!(matches!(release::open_release(&b).unwrap(), release::OpenOutcome::Opened(ReleaseState::Held { .. })));
@@ -834,6 +836,8 @@ fn a_held_release_is_re_minted_to_the_sui_sender_and_the_books_close() {
 #[test]
 fn a_remint_that_fails_is_not_refunded_to_icp_but_an_admin_can_retry_it_once_every_attempt_is_proven_dead() {
     let l = lane();
+    // The return is fabricated in the books without a Sui burn; the observer's monitors would flag that, so it is paused here.
+    state::mutate_runtime(|r| r.config.pauses.observer = true);
     state::mutate_runtime(|r| r.config.lane.max_attempts = 1);
     let b = burned_with(&l.fx, 5 * E8, 1, acct(env::canister_id()), SENDER);
     release::open_release(&b).unwrap();
@@ -993,6 +997,8 @@ fn a_gate_that_is_not_the_configured_one_and_a_mint_cap_that_moved_halt_the_lane
 #[test]
 fn the_gate_sequence_is_recorded_not_assumed_and_a_refresh_follows_the_counters() {
     let l = lane();
+    // This test pins the lane's recording of the Gate sequence; the observer's foreign-mint monitor (tested separately) is paused.
+    state::mutate_runtime(|r| r.config.pauses.observer = true);
     // A mint by someone else comes first (another id): ours lands second.
     l.sim.foreign_mint([0x31; 32], [0x41; 32], 7);
     l.sim.advance(100);
@@ -1033,6 +1039,8 @@ fn exact_version_reads_have_exactly_one_entry_point() {
 #[test]
 fn an_unresolved_attempt_is_checked_on_a_decaying_schedule_so_a_long_hold_costs_few_outcalls() {
     let l = lane();
+    // This test measures the lane's own outcall cost; the observer is paused so it is not counted.
+    state::mutate_runtime(|r| r.config.pauses.observer = true);
     escrowed(&l.fx, 0x21, 5 * E8, 1);
     *l.sim.mode.borrow_mut() = ExecMode::Drop;
     l.ticks(2);

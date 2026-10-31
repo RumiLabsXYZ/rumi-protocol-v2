@@ -122,7 +122,8 @@ pub async fn run_once<L: IcpLedger>(ledger: &L, now: u64) -> RunReport {
     RunReport { skipped: false }
 }
 
-/// One full background pass: the ICP side, the re-mint driver, then one step of the mint lane. The
+/// One full background pass: the ICP side, the re-mint driver, one step of the mint lane, then the return
+/// observer (which opens releases from verified returns and runs the monitors). The
 /// lane only runs when its own conditions hold (`flows::mint::blocked_by` is empty), so an
 /// unconfigured instance, a disabled mirror or a halt makes this equal to [`run_once`].
 pub async fn run_full<L: IcpLedger, T: crate::mirror::SuiTransport, S: crate::schnorr::RoleSigner>(ledger: &L, transport: &T, signer: &S, now: u64) -> RunReport {
@@ -135,6 +136,7 @@ pub async fn run_full<L: IcpLedger, T: crate::mirror::SuiTransport, S: crate::sc
     ledger_pass(ledger).await;
     crate::flows::remint::process_remints();
     crate::flows::mint::mint_pass(transport, signer).await;
+    crate::flows::observer::observer_pass(transport, ledger).await;
     RunReport { skipped: false }
 }
 

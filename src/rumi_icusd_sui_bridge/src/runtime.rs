@@ -380,6 +380,22 @@ pub struct BridgeCore {
     /// or disagreeing answer, so a persistent outage does not burn cycles every pass).
     #[serde(default)]
     pub gather_retry_at_ns: u64,
+    /// The return observer's cursor, candidates and sequence progress (53c).
+    #[serde(default)]
+    pub observer: ObserverState,
+    /// Mints this canister has settled as delivered: how many, and their total (e8s). The Gate's own
+    /// counters must agree (C4).
+    #[serde(default)]
+    pub minted_count: u64,
+    #[serde(default)]
+    pub minted_e8s: u128,
+    /// The total (e8s) of the releases opened from verified returns; the Gate's `burned_total` must agree
+    /// when the observer is caught up (C4).
+    #[serde(default)]
+    pub returned_e8s: u128,
+    /// The last monitor run.
+    #[serde(default)]
+    pub monitor: Option<MonitorReport>,
 }
 
 impl Default for BridgeCore {
@@ -406,6 +422,11 @@ impl Default for BridgeCore {
             last_final_checkpoint: 0,
             lane_wait: None,
             gather_retry_at_ns: 0,
+            observer: ObserverState::default(),
+            minted_count: 0,
+            minted_e8s: 0,
+            returned_e8s: 0,
+            monitor: None,
         }
     }
 }
@@ -852,6 +873,178 @@ impl MintOp {
 }
 
 cbor_storable!(MintOp);
+
+// ---------------------------------------------------------------------------
+// Return observer and monitors (53c)
+// ---------------------------------------------------------------------------
+
+pub const MAX_CANDIDATES: usize = 64;
+pub const MAX_PROBLEMS: usize = 32;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateSource {
+    /// Found in a `BridgeOut` event scan.
+    Event,
+    /// Named by a user's `notify_sui_return` hint.
+    Hint,
+}
+
+/// What a `BridgeOut` event CLAIMED. Never a basis for payment: it is compared with the durable record.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Claim {
+    pub transfer_id: Hash32,
+    pub amount_e8s: u64,
+    pub sequence: u64,
+    pub icp_principal: Vec<u8>,
+    pub icp_subaccount: Vec<u8>,
+}
+
+/// A return verified against the Gate's durable `ReturnRecord` at a finalized checkpoint, waiting for its
+/// turn in Gate sequence order. The fields are the record's, not the event's.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReadyReturn {
+    pub transfer_id: Hash32,
+    pub gate_sequence: u64,
+    pub sui_sender: Hash32,
+    pub client_nonce: u64,
+    pub amount_e8s: u64,
+    pub icp_principal: Vec<u8>,
+    pub icp_subaccount: Vec<u8>,
+    pub tx_digest: Hash32,
+    pub checkpoint: u64,
+}
+
+/// A return the observer has heard of and not yet settled. Keyed by `(sender, nonce)`, the only things
+/// the transfer id is computed from besides the network and the Gate.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub sender: Hash32,
+    pub nonce: u64,
+    pub tx_digest: Hash32,
+    pub source: CandidateSource,
+    pub claim: Claim,
+    pub found_at_ns: u64,
+    #[serde(default)]
+    pub tries: u32,
+    #[serde(default)]
+    pub ready: Option<ReadyReturn>,
+    /// Why it is not opened yet (for example the mint it returns is not applied to the books).
+    #[serde(default)]
+    pub waiting: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ObserverProblem {
+    pub at_ns: u64,
+    pub note: String,
+    #[serde(default)]
+    pub tx_digest: Option<Hash32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ObserverState {
+    /// `scanned_through` is meaningful only once true.
+    #[serde(default)]
+    pub started: bool,
+    /// Events of every checkpoint up to this one have been listed, and the Gate's own return counter at
+    /// that checkpoint is accounted for by returns this canister has verified or holds as candidates.
+    #[serde(default)]
+    pub scanned_through: u64,
+    /// The highest Gate `bridge_out` sequence whose return has been opened as a release (releases are
+    /// opened strictly in sequence order; the next one is this plus one).
+    #[serde(default)]
+    pub verified_through: u64,
+    #[serde(default)]
+    pub candidates: Vec<Candidate>,
+    #[serde(default)]
+    pub problems: Vec<ObserverProblem>,
+    #[serde(default)]
+    pub next_run_ns: u64,
+    /// The highest rounded head the observer has worked at.
+    #[serde(default)]
+    pub last_head: u64,
+    /// Observer fully caught up at `last_head`: scanned through it, the Gate's return counter equals
+    /// `verified_through`, and nothing is pending.
+    #[serde(default)]
+    pub caught_up: bool,
+    /// An unexplained gap: the Gate reports returns that no event or hint has accounted for.
+    #[serde(default)]
+    pub gap: Option<String>,
+    /// Why the last pass stopped early (providers unavailable or disagreeing, a stale head), if it did.
+    #[serde(default)]
+    pub last_wait: Option<String>,
+    /// How many checkpoints the next event window covers (0 means the maximum). It shrinks when a window
+    /// needs more queries than a pass may make, and doubles back after a window completes, so a busy
+    /// stretch is always reached by a pass that fits its budget.
+    #[serde(default)]
+    pub window: u64,
+}
+
+/// What a breached invariant stops.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BreachScope {
+    /// The whole bridge halts (releases, refunds and sweeps stop): escrow may be short, or supply may exceed
+    /// what the books can explain.
+    Bridge,
+    /// Only the mint lane halts: the books claim more than the chain shows.
+    MintLane,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CheckOutcome {
+    Ok,
+    /// A violated invariant (what was found).
+    Breach { detail: String, scope: BreachScope },
+    /// Could not be evaluated now (why): never a pass.
+    NotEvaluated { reason: String },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CheckResult {
+    pub name: String,
+    pub outcome: CheckOutcome,
+}
+
+/// What the providers reported about the Gate at one finalized checkpoint (INDEPENDENT observation).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChainObservation {
+    pub total_supply: u64,
+    pub supply_cap: u64,
+    pub minted_total: u128,
+    pub burned_total: u128,
+    pub mint_count: u64,
+    pub bridge_out_count: u64,
+    pub gate_version: u64,
+}
+
+/// What this canister's own books said when the checks ran (SELF-REPORT).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OwnBooks {
+    pub buckets: Buckets,
+    pub minted_count: u64,
+    pub minted_e8s: u128,
+    pub verified_through: u64,
+    pub returned_e8s: u128,
+    pub inflight_mint_e8s: u128,
+    pub inflight_ops: u64,
+}
+
+/// The last monitor run: independent observations kept apart from the self-reported books, with the
+/// finalized checkpoint they were made at.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MonitorReport {
+    pub at_ns: u64,
+    pub checkpoint: u64,
+    pub checkpoint_digest: Hash32,
+    pub epoch: u64,
+    pub chain: ChainObservation,
+    /// The icUSD ledger balance of the escrow account, read from the ledger at `at_ns` (independent of
+    /// the books), if the read succeeded.
+    pub escrow_balance: Option<u128>,
+    pub books: OwnBooks,
+    pub caught_up: bool,
+    pub checks: Vec<CheckResult>,
+}
 
 // ---------------------------------------------------------------------------
 // Audit log

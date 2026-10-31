@@ -196,3 +196,160 @@ pub fn mint_lane_view() -> MintLaneView {
         observed: c.observed.as_ref().map(observed_view),
     })
 }
+
+// ---------------------------------------------------------------------------
+// Return observer, monitors and audit (53c)
+// ---------------------------------------------------------------------------
+
+use crate::state::{BreachScope, CandidateSource, CheckOutcome};
+
+/// The monitors are stale when they have not run for this long.
+pub const MONITOR_STALE_NS: u64 = 15 * 60 * 1_000_000_000;
+
+pub fn observer_view() -> ObserverView {
+    state::read_runtime(|c| {
+        let o = &c.observer;
+        ObserverView {
+            started: o.started,
+            scanned_through: o.scanned_through,
+            returns_verified_through: o.verified_through,
+            next_sequence: o.verified_through + 1,
+            last_head: o.last_head,
+            caught_up: o.caught_up,
+            gap: o.gap.clone(),
+            last_wait: o.last_wait.clone(),
+            next_run_ns: o.next_run_ns,
+            candidates: o
+                .candidates
+                .iter()
+                .map(|x| CandidateView {
+                    sui_sender: format_address(&x.sender),
+                    client_nonce: x.nonce,
+                    tx_digest: format_digest_base58(&x.tx_digest),
+                    source: match x.source {
+                        CandidateSource::Event => CandidateSourceView::Event,
+                        CandidateSource::Hint => CandidateSourceView::Hint,
+                    },
+                    claimed_sequence: x.claim.sequence,
+                    claimed_amount_e8s: x.claim.amount_e8s,
+                    verified: x.ready.is_some(),
+                    waiting: x.waiting.clone(),
+                    tries: x.tries,
+                })
+                .collect(),
+            problems: o
+                .problems
+                .iter()
+                .map(|p| ObserverProblemView { at_ns: p.at_ns, note: p.note.clone(), tx_digest: p.tx_digest.as_ref().map(format_digest_base58) })
+                .collect(),
+        }
+    })
+}
+
+fn check_view(c: &state::CheckResult) -> CheckView {
+    CheckView {
+        name: c.name.clone(),
+        outcome: match &c.outcome {
+            CheckOutcome::Ok => CheckOutcomeView::Ok,
+            CheckOutcome::Breach { detail, scope } => CheckOutcomeView::Breach {
+                detail: detail.clone(),
+                scope: match scope {
+                    BreachScope::Bridge => BreachScopeView::Bridge,
+                    BreachScope::MintLane => BreachScopeView::MintLane,
+                },
+            },
+            CheckOutcome::NotEvaluated { reason } => CheckOutcomeView::NotEvaluated { reason: reason.clone() },
+        },
+    }
+}
+
+/// The audit report: current independent observations kept apart from the self-reported books, the
+/// pending and held liabilities, and the checkpoint the last check was made at. Nothing here reads a
+/// provider: it reports what the last monitor run recorded and what the books say now.
+pub fn audit_report(now_ns: u64) -> AuditReport {
+    let (monitor, buckets, minted_count, minted_e8s, verified, returned, observed, active_op, wait, halted, lane_halted, observer_gap, last_wait) = state::read_runtime(|c| {
+        (
+            c.monitor.clone(),
+            c.buckets,
+            c.minted_count,
+            c.minted_e8s,
+            c.observer.verified_through,
+            c.returned_e8s,
+            c.observed.clone(),
+            c.active_mint_op,
+            c.lane_wait.clone(),
+            c.halted.as_ref().map(|h| h.reason.clone()),
+            c.mint_lane_halted.as_ref().map(|h| h.reason.clone()),
+            c.observer.gap.clone(),
+            c.observer.last_wait.clone(),
+        )
+    });
+    let held_releases = state::releases_in_state(|r| matches!(r.state, state::ReleaseState::Held { .. }), 1_000).len() as u64;
+    let held_deposits = state::deposits_in_state(|d| matches!(d.state, state::DepositState::MintHeld { .. }), 1_000).len() as u64;
+    let mut reasons = vec![];
+    for (label, v) in [("bridge halted", halted), ("mint lane halted", lane_halted), ("returns gap", observer_gap), ("mint lane waiting", wait), ("observer waiting", last_wait)] {
+        if let Some(v) = v {
+            reasons.push(format!("{label}: {v}"));
+        }
+    }
+    let age = monitor.as_ref().map(|m| now_ns.saturating_sub(m.at_ns));
+    let independent = IndependentObservationsView {
+        checkpoint: monitor.as_ref().map(|m| m.checkpoint),
+        checkpoint_digest: monitor.as_ref().map(|m| format_digest_base58(&m.checkpoint_digest)),
+        epoch: monitor.as_ref().map(|m| m.epoch),
+        observed_at_ns: monitor.as_ref().map(|m| m.at_ns),
+        gate: monitor.as_ref().map(|m| GateObservationView {
+            total_supply: m.chain.total_supply,
+            supply_cap: m.chain.supply_cap,
+            minted_total: m.chain.minted_total,
+            burned_total: m.chain.burned_total,
+            mint_count: m.chain.mint_count,
+            bridge_out_count: m.chain.bridge_out_count,
+            gate_version: m.chain.gate_version,
+        }),
+        escrow_balance_e8s: monitor.as_ref().and_then(|m| m.escrow_balance),
+        deployment: observed.as_ref().map(observed_view),
+    };
+    AuditReport {
+        generated_at_ns: now_ns,
+        independent,
+        self_reported: SelfReportedView {
+            buckets: BucketsView::from(&buckets),
+            minted_count,
+            minted_e8s,
+            returns_verified_through: verified,
+            returned_e8s: returned,
+            inflight_mint_e8s: state::inflight_mint_e8s(),
+            inflight_mint_ops: u64::from(active_op.is_some()),
+        },
+        books_at_last_check: monitor.as_ref().map(|m| BucketsView::from(&m.books.buckets)),
+        pending_and_held: PendingHeldView {
+            pending_mint_e8s: buckets.pending_mint,
+            pending_release_e8s: buckets.pending_release,
+            pending_refund_e8s: buckets.pending_refund,
+            held_e8s: buckets.held,
+            unknown_outflow_e8s: buckets.unknown_outflow,
+            reserved_pulls_e8s: buckets.reserved_pulls,
+            held_releases,
+            held_deposits,
+            active_deposits: state::active_deposit_count(),
+            active_releases: state::active_release_count(),
+            active_mint_op: active_op,
+            reasons,
+        },
+        last_checked: LastCheckedView {
+            checkpoint: monitor.as_ref().map(|m| m.checkpoint),
+            at_ns: monitor.as_ref().map(|m| m.at_ns),
+            age_ns: age,
+            stale: age.is_none_or(|a| a > MONITOR_STALE_NS),
+            caught_up: monitor.as_ref().is_some_and(|m| m.caught_up),
+        },
+        checks: monitor.as_ref().map(|m| m.checks.iter().map(check_view).collect()).unwrap_or_default(),
+        disclosures: vec![
+            "Independent observations are provider-quorum readings of the Gate at the stated finalized checkpoint and the icUSD ledger's balance of the escrow account; they are only as good as the providers, none of which is contracted or measured.".into(),
+            "Self-reported books are this canister's own accounting and counters; they are compared with the observations, not proven by them.".into(),
+            "The package and its UpgradeCap and controllers (D6) remain a disclosed root of trust: nothing here asserts that a mutable package cannot change issuance.".into(),
+            "The published module bytes were not compared with a build, and nothing was captured from a live provider.".into(),
+        ],
+    }
+}

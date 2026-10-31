@@ -568,6 +568,9 @@ fn finish_delivered(op_id: u64, generation: u32, tx_digest: Option<Hash32>, chec
         c.active_mint_op = None;
         c.last_final_checkpoint = c.last_final_checkpoint.max(checkpoint);
         c.lane_wait = None;
+        // The Gate's own counters must agree with these (C4).
+        c.minted_count += 1;
+        c.minted_e8s += op.amount_e8s as u128;
     });
     Ok(())
 }
