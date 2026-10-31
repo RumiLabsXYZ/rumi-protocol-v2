@@ -546,7 +546,7 @@
       "state": "Queue",
       "owner": "supervisor",
       "scope": "Decision D6: controllers, production custody and authority activation",
-      "evidenceText": "proof=none; Rob decides controllers and custody per network (EVM admin, Solana mint authority, Sui UpgradeCap, XRPL issuer policy); gates live activation, not source work",
+      "evidenceText": "proof=none; Queued for Rob's D6 decision (not decided). Accepted preparation: decision packet docs/coordination/multichain/authority-decision-d6.md at 266a7f9c; options unadopted; gates live activation, not source work",
       "evidenceLinks": []
     },
     {

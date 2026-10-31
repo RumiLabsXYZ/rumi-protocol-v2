@@ -3290,6 +3290,36 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   `94296ceedf01a6075561f2eb3052076e8cf5a214f0646874baac95d32f974d09`. Review copies in the coordinator scratchpad `bb61/` (the frozen
   file and the full diff from `73a03575`). Proposal only; BB-61 queued; nothing pushed.
 
+## Milestone 139 (2026-10-31): BB-61 decision preparation accepted; D6 not decided
+
+- Miles (`accept-bb61-prep.md`) accepted `docs/coordination/multichain/authority-decision-d6.md` at
+  `266a7f9c4d724fffd92eaec28cdad95ebc58c411` (blob `c22c80876e6a4eae09e906dcc9fa7b5328aea647`, SHA256
+  `94296ceedf01a6075561f2eb3052076e8cf5a214f0646874baac95d32f974d09`, independently matched) as optional source-grounded decision
+  preparation only: not D6 completion, not a source or demo gate, not production readiness or live authorization. BB-61 stays queued
+  for Rob's decision; every option in the packet is unadopted. Pinned link for future review:
+  https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/266a7f9c4d724fffd92eaec28cdad95ebc58c411/docs/coordination/multichain/authority-decision-d6.md
+- Authorship and models: W29 (requested Sonnet; actual `claude-sonnet-5-5`) wrote the draft `73a03575`, the factual corrections
+  `012b7f65`, the restored form value rows `d2cb5537` and the final wording `266a7f9c`; W23 (requested Haiku; actual
+  `claude-haiku-5-5`) made the wording-only readability pass, which landed in the coordinator's commit `92631f9d` through the shared
+  index (milestone 135; history kept, no rewrite).
+- What Miles checked: the current BridgedIcUSD roles, mint, pauses and config; the pinned OpenZeppelin inherited role bodies (the
+  local files match the official locked commit); the EVM, Solana and Sui admin and controller guards; the network key allowlists; the
+  Sui Move mint, return, limits, version, migration and role definitions; the accepted local XRPL issuer policy, setup sequence,
+  config and controller checks and the Payment and AccountSet builder. Official Sui upgrade and package docs and the ICP
+  controller-trust doc support the qualified platform statements; no external platform execution was tested. XRPL stays
+  architectural observations of the separate accepted local branch, with no source relay or push retry.
+- Corrections that hold: Sui upgrades do not automatically freeze a Gate; compatible or additive UpgradeCap custody is an issuance
+  trust path; the restrictive or immutable alternatives and a future signing path stay unadopted options with honest limits; several
+  IC controllers are not a multisig; controller-only RPC replacement follows the function body, not the stale header; ordinary
+  test-wallet use differs from issuance, escrow and controller authority; explicitly registered existing dedicated test wallets are
+  allowed under their existing scope; the form records cap holders, policy, delay, guardian, limits and flags with empty values; class
+  B and C scopes can be authorized together in advance without repeated prompts while the actual required approvals still apply;
+  XRPL false/false skips the optional flag steps and the policy locks once setup starts, with external flag behavior not re-proven.
+- Miles' source inventory `db24716f..3529062d` changes only the board, the handoff and the new packet; root diff-check clean.
+- Hosted CI: run 41193536473 on `db24716f` completed SUCCESS (Miles; the Stability Pool workflow only).
+- After this delivery all workers stand by. The overall goal stays incomplete: the browser and wallet test, BB-46 probes, D6, native
+  activation and the denied XRPL publication remain held.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

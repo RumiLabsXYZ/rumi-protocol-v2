@@ -91,7 +91,7 @@
       "title": "Decide controllers, custody and authority activation (D6)",
       "status": "paused",
       "blockedReason": "Rob's decision, not yet made; it gates live activation of any network, not source work.",
-      "nextAction": "Rob and Miles choose controllers and custody per network when activation is planned.",
+      "nextAction": "Rob decides with Miles. A source-grounded decision packet (docs/coordination/multichain/authority-decision-d6.md at 266a7f9c) is accepted as preparation only: an authority inventory, unadopted demo and production options and an empty decision form. D6 itself is not decided.",
       "cardIds": [
         "BB-61"
       ]
