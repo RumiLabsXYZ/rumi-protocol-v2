@@ -463,10 +463,10 @@
     },
     {
       "id": "BB-51",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: Move gate package and Move unit tests",
-      "evidenceText": "proof=none; Gate with supply cap 0 at init, consumed mint ids, recipient-bound bridge_out, limits and version guard; Move unit tests pass; an external Move review is deferred to pre-real-value work",
+      "evidenceText": "proof=none; Started 2026-10-31: Move gate package in its own new directory; source and tests being written; running sui move test waits for approval to download the pinned official Sui CLI (367 MB)",
       "evidenceLinks": []
     },
     {
@@ -511,10 +511,10 @@
     },
     {
       "id": "BB-57",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Accepted: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45; artifact checked (Code section 9,707,926 bytes). Part B first run: 17 passed, 7 new Return tests failed at setup (fixture key); fixing and rerunning those 7",
+      "evidenceText": "proof=local-integration; Miles accepted at source and local-PocketIC level: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45, 46cf6b34; 7 new Return PocketIC cases pass; Code section 9,707,926 bytes; artifact verified; not public-chain proof",
       "evidenceLinks": []
     },
     {

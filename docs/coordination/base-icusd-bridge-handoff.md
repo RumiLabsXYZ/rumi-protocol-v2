@@ -1678,6 +1678,34 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Order after part B: the Rust build slot returns to W28 first (its BB-49 reproductions and corrections); after part B is
   accepted, W29's next card is BB-51 (Sui Move gate, `next-bb51.md`); no third lane.
 
+## Milestone 77 (2026-10-31): BB-57 accepted; BB-51 started
+
+- BB-57 part B `46cf6b34` (W29, XRPL branch, test file only; production source unchanged): the `backend_wasm()` comment now
+  separates the suite's PocketIC 7 limit from the live 12 MiB Code-section limit. Artifact at `8ecab197`: raw 15,406,721
+  bytes; final module 10,697,560 (sha256 `c0901b9f...`); gzip 2,621,444 (sha256 `16504db9...`, the file the suite loaded);
+  Code section 9,707,926 bytes (headroom 777,834 under the PocketIC 7 cap and 2,612,842 under 12 MiB less 256 KiB; +59,822
+  since `b02584e4`). The coordinator ran `scripts/verify-xrpl-icusd-artifact.sh --require-mainnet` once on that gzip
+  artifact: "OK release artifact ... (environment=production)", exit 0 (the worker's own earlier run was not in its log).
+  PocketIC server 7.0.0 (crate 6.0.0). Results: first full run 17 passed, 7 failed at setup (EXIT 101; fixture key);
+  after the fixture fix the seven Return cases passed (239.13 s); the upgrade test was then strengthened and rerun alone (1
+  passed, 39.21 s). The public-testnet rehearsal file was not run. New cases:
+  `return_endpoints_authenticate_respect_the_frozen_gate_and_need_the_fee_surplus`,
+  `return_pays_the_bound_account_once_from_the_surplus_and_the_origin_report_reconciles`,
+  `return_wrong_tag_wrong_payer_and_consumed_tag_payments_are_refunded_never_credited`,
+  `return_partial_path_sendmax_and_expired_payments_are_refunded_never_credited`,
+  `return_payout_lost_reply_is_reconciled_by_duplicate_with_exactly_one_transfer`,
+  `return_payout_too_old_after_loss_is_proven_by_the_block_scan`,
+  `return_in_the_snapshot_survives_an_upgrade_and_the_origin_report_persists`. Weaker spots stated by the worker: anonymous
+  callers covered by the ingress refusal; the frozen-gate check asserts an error without its variant; TooOld proven by
+  outcome. Red and green logs kept in the coordinator scratchpad. Disk 20 GiB free after (+743 MiB of build output).
+- Accepted (Miles): BB-57 at source and local-PocketIC level; not public-chain proof. XRPL follow-ups (BB-55 to BB-57) are
+  complete on the local branch `codex/xrpl-icusd-followups` (push denied, held; never relayed through the base branch).
+- BB-51 started by the same W29 in a new directory `move/rumi_icusd_gate/` on the bridge branch. The Sui CLI is not on this
+  machine; the exact official asset proposed is MystenLabs/sui release `mainnet-v1.82.3`,
+  `sui-mainnet-v1.82.3-macos-arm64.tgz`, 366,870,778 bytes, sha256
+  `861f8833c5c7008c86aca50e925043baa8e04332dcbd846cc6c31ea0eee16be9`; downloading it awaits explicit approval. W29 writes
+  source and tests meanwhile and runs no `sui` command.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

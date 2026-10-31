@@ -63,9 +63,9 @@
     {
       "id": "xrpl-follow-ups",
       "title": "XRPL follow-ups to PR #586",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "BB-57: only part B remains (backend Wasm code-section size and artifact binding, the XRPL PocketIC suite with negatives), run once by the same W29 in the single builder slot at W28's next clean boundary.",
+      "nextAction": "",
       "cardIds": [
         "BB-55",
         "BB-56",
@@ -75,9 +75,9 @@
     {
       "id": "sui-implementation",
       "title": "Sui implementation (Move gate)",
-      "status": "paused",
-      "blockedReason": "Source-authorized; next in rank after XRPL. When BB-51 reaches a free lane, its worker installs a pinned official Sui CLI, verified and kept local to the workspace or a temporary folder, as normal implementation tooling. Its reader for the BB-58 collector rides on BB-53.",
-      "nextAction": "Start with BB-51 (Move gate package and unit tests); doing BB-58 first is a scheduling preference, not a prerequisite. External Move review is deferred to pre-real-value work.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "BB-51 in progress (W29): the Move gate package and tests; running them needs the official Sui CLI download (pinned release asset), which awaits explicit approval. Then BB-52, BB-53 (with the Sui collector reader) and BB-54.",
       "cardIds": [
         "BB-51",
         "BB-52",
