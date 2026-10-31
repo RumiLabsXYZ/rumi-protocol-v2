@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; 49a e6a542be component-reviewed: two fixes queued for the same W28 after 49b (bootstrap replies fenced to their exact attempt; metadata authorities none or canister); extension ids now source-pinned. 49b in progress",
+      "evidenceText": "proof=none; 49a e6a542be and 49b 12dfee35 component-reviewed; fixes in progress (same W28): bootstrap reply fence, metadata authorities, refund only after proof (not admin Abandon), fair ledger-queue paging; then 49c to 49e",
       "evidenceLinks": []
     },
     {

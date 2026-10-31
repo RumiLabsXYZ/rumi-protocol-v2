@@ -1610,6 +1610,20 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   crate, and the live-proof limits (no public RPC, history retention, real signing, settlement or wallet display). The XRPL
   follow-ups to PR #586 are stated as a separate local branch, NOT part of this PR, with its push denied and held.
 
+## Milestone 74 (2026-10-31): BB-49 49b reviewed
+
+- 49b `12dfee35` (W28, local; worker report pending). Miles (`review-bb49b.md`): caller-owned pull and allowance, durable
+  request ids and tuples, copied ICRC-3 reconciliation, disjoint fee and outflow accounting and the final-burn prerequisite
+  align. Two corrections: (1) `abandon_held_mint` plus `request_refund` let an admin reason string authorize a refund while a
+  signed durable-nonce original is still unknown, so the original could land after the ICP refund and leave unbacked supply;
+  only a typed, generation-bound finalized owned cancel or failed original may authorize the refund (an unsupported Abandon
+  may answer Held or Recheck); (2) `deposits_in_state`, `releases_in_state` and `reconcile_pulls` take the oldest N, so old
+  unresolved entries can starve newer ones; bounded fair paging as in BB-48. Reproductions first.
+- Carried reminder for 49d (not a 49b blocker): `open_release` must bind `b.return_id` and the destination to the saved
+  verified return through `burn_id([return_id])` and the stored return account and amount.
+- Builder sequence: W28 commits its 49a fixes and stops building; W29 runs BB-57 part B; W28 writes the 49b corrections
+  meanwhile without building, then reproduces, checks and commits them after part B.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
