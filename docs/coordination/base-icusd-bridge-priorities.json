@@ -78,7 +78,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 and BB-52 done. BB-53 in progress (same W29, sole Rust builder): 53a accepted; 53b (1b71eae8) in review with a focused correction (per-role signing uncertainty never cleared by a later refusal; pause and halt rechecked before the final send); then 53c continues, then 53d. Then BB-54.",
+      "nextAction": "BB-51 and BB-52 done. BB-53 in progress (same W29, sole Rust builder): 53a accepted; 53b (1b71eae8 with corrections e2507b16 and 5da0804e) in Miles' review; 53c (verified returns, monitors, audit, release) in progress; then 53d. Then BB-54.",
       "cardIds": [
         "BB-51",
         "BB-52",

@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b 1b71eae8 in review: F1 and F2 fixed (e2507b16); F3 (head transform keeps GraphQL errors) and F4 (current final checkpoint at admission) in progress (W29)",
+      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b 1b71eae8 in review with corrections e2507b16 (F1, F2) and 5da0804e (F3, F4), all delivered; 306 tests, clippy and wasm32 clean. 53c in progress (W29)",
       "evidenceLinks": []
     },
     {

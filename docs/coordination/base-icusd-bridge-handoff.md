@@ -2549,6 +2549,31 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Hosted CI: run 41184115864 on exact `ff3dfec8` completed SUCCESS (Miles, GitHub connector). Watch closed; no rerun. The existing
   Stability Pool workflow, not Sui, Solana, Move or frontend coverage.
 
+## Milestone 110 (2026-10-31): BB-53 53b F3 and F4 corrected
+
+- W29 committed `5da0804e921acc315e928af06399f79a29bcda0f` "fix(sui): head transform keeps GraphQL errors unusable; admission
+  re-checks facts against current state (BB-53 53b review F3, F4)", local only, on `6864f6f2`; `1b71eae8` and `e2507b16` untouched.
+  W29 had committed F3 alone as `8801f837` before the F4 instruction arrived, never reported it, and amended it into this commit;
+  `8801f837` is no longer on the branch (an unreachable local object). Coordinator scope check: seven crate files (`chain_sim`,
+  `flows/mint`, `lane_tests`, `lib`, `mirror`, `reads`, `types`); no `Cargo.lock` or `.did` change; `git diff --check` exits 0.
+- F3: `canonicalize_head` first runs the shared `graphql::canonicalize_response` policy, then keeps that `errors` member next to
+  the rounded data, so a nonempty errors array still excludes the provider and a malformed one is refused; rounding and the
+  network-identity exclusion unchanged. `transform_sui_send` not changed; send wording now "HTTP-acknowledged (maybe sent)".
+  A send-reply test documenting that nothing settles from a send reply passes on both versions.
+- F4: a synchronous `facts_current()` at the start of both `create_op` and `append_attempt` refuses facts older than the current
+  `last_final_checkpoint`, a gas coin that is no longer the configured one, or a gas budget raised since the balance check; a
+  refusal admits nothing and the next pass re-gathers; exact attempts once a signature may exist untouched. Test hook:
+  `ChainSim.on_serve`. Nonblocking: `signing_enabled` documented as a legacy, non-authoritative placeholder (always false,
+  enforcing nothing), with `get_mint_lane` named as the readiness seam; no value change.
+- Evidence (saved logs in the coordinator scratchpad): `53b-f3-red.log` 2 failed, 1 passed on the old code (errors dropped:
+  "left: Null, right: Array [...boom]"; "a reply with errors became a usable head: Agreed(1100)"); `53b-f3-green.log` 5 passed;
+  `53b-f4-red.log` 3 failed ("no operation was admitted from refs older than the current floor left: 1 right: 0", "no attempt was
+  appended from stale refs left: 2 right: 1", "gas coin reconfigured: nothing admitted from a pre-await snapshot left: 1 right:
+  0"); `53b-f4-green.log` 3 passed, each also showing recovery with fresh references; `53b-f3f4-full-tests.log` 306 passed, 0
+  failed; `53b-f3f4-clippy.log` exit 0 (three lints in W29's new test and simulator code fixed first, log overwritten);
+  `53b-f3f4-wasm.log` exit 0.
+- 53b (with both corrections) waits for Miles' acceptance; W29 resumed 53c from `5da0804e`.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
