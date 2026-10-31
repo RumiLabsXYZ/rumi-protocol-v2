@@ -307,8 +307,11 @@ impl BootstrapTarget {
 /// One bootstrap transaction for one target. Persisted BEFORE it is signed, like a lane attempt:
 /// the exact bytes, then every signature, then the transaction ids. These transactions use a real
 /// recent blockhash (no nonce exists yet) and are idempotent in effect (the target account either
-/// exists or not; the driver reads it before every send), so an expired one is replaced by a fresh
-/// one rather than reconciled.
+/// exists or not; the driver reads it before every send), so one older than the retry cadence is
+/// replaced by a fresh one rather than reconciled. That is a retry rule for fixed-address account
+/// creation only (see `bootstrap.rs`), never a proof that the older transaction cannot execute.
+/// The attempt is identified by `created_at_ns` and the exact `message` bytes; every continuation
+/// after an await checks both before it writes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapTx {
     pub target: BootstrapTarget,

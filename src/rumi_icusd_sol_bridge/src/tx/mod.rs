@@ -103,11 +103,14 @@ pub const TAG_BATCH: u8 = 255;
 pub const ATA_CREATE_IDEMPOTENT_TAG: u8 = 1;
 /// `SystemInstruction::CreateAccount`, bincode `u32` little-endian.
 pub const SYSTEM_CREATE_ACCOUNT_TAG: u32 = 0;
-/// `TokenInstruction::InitializeMint2` (both token programs). **U:** the tag value and the
-/// `[tag, decimals, mint_authority 32, freeze COption (1-byte flag + 32)]` layout are read from the
-/// SPL token instruction enum order (0 InitializeMint .. 12 TransferChecked .. 14 MintToChecked ..
-/// 15 BurnChecked .. 20 InitializeMint2), consistent with the checked tags above; there is no
-/// `spl-token` source in this repo or its registry to read it from.
+/// `TokenInstruction::InitializeMint2` (both token programs). Source pin (a reading of the
+/// official source, not proof about an installed program or any wallet): tag 20 is `InitializeMint2`
+/// in `solana-program/token` at f62a0b05415e64b0af0823864bbb2df2a49f5d49,
+/// `interface/src/instruction.rs` lines 635-644
+/// (https://github.com/solana-program/token/blob/f62a0b05415e64b0af0823864bbb2df2a49f5d49/interface/src/instruction.rs#L635).
+/// The data layout built here, `[tag, decimals, mint_authority 32, freeze COption (1-byte flag +
+/// 32)]`, is this crate's encoding and is checked by its own golden vectors; activation still runs
+/// the real program against it (blocker `solana-token-program-wallet-check`).
 pub const TAG_INITIALIZE_MINT2: u8 = 20;
 /// Size of a mint account without extensions (both token programs).
 pub const MINT_ACCOUNT_SPACE: u64 = 82;

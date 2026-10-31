@@ -416,6 +416,8 @@ pub enum Scripted {
 }
 
 type SignHook = Box<dyn Fn(&SignCall)>;
+/// Decides the outcome of one specific sign call (by role and message), ahead of the script.
+type SignOverride = Box<dyn Fn(&SignCall) -> Option<Scripted>>;
 
 #[derive(Default)]
 pub struct MockSigner {
@@ -424,6 +426,8 @@ pub struct MockSigner {
     /// When set, the same (role, message) signed twice gives two different signatures.
     pub nondeterministic: Cell<bool>,
     pub on_call: RefCell<Option<SignHook>>,
+    /// Fails (or leaves unknown) the sign calls it selects, whatever their position in the script.
+    pub override_call: RefCell<Option<SignOverride>>,
     counter: Cell<u64>,
 }
 
@@ -469,8 +473,9 @@ impl TxSigner for MockSigner {
         if let Some(hook) = self.on_call.borrow().as_ref() {
             hook(&call);
         }
+        let forced = self.override_call.borrow().as_ref().and_then(|f| f(&call));
         self.calls.borrow_mut().push(call);
-        match self.script.borrow_mut().pop_front() {
+        match forced.or_else(|| self.script.borrow_mut().pop_front()) {
             Some(Scripted::Fail(e)) => return SignOutcome::Failed(e),
             Some(Scripted::Unknown(e)) => return SignOutcome::Unknown(e),
             None => {}

@@ -2,6 +2,9 @@
 //! return account and bind, with the persist-before-sign discipline on every creation transaction.
 
 use crate::bootstrap::*;
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::rc::Rc;
 use crate::lane::{ensure_keys, SubmitRequest};
 use crate::mint::fixtures::*;
 use crate::nonce;
@@ -270,4 +273,157 @@ fn the_status_query_shows_what_to_fund_and_where_the_bind_stands() {
     let s = crate::get_bootstrap_status();
     assert_eq!((s.mint_state, s.pool_free, s.pool_unverified, s.pending_bootstrap_txs), (MintState::Bound, 4, 0, 0));
     assert!(s.return_account.is_some() && s.bind_note.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// A reply that arrives after its attempt was replaced (Miles' correction to 49a)
+//
+// `timer::RunGuard` reclaims a pass after ten minutes while an older pass may still be awaiting a
+// signer or the RPC, and `ensure_tx` replaces a creation transaction after the TTL. The older pass's
+// continuation must then touch nothing of the replacement: a signature belongs to the exact message
+// it signed, and a failure or a send note describes the attempt it was about. A time-based test
+// proves nothing here; these tests replace the stored attempt while the call is in flight.
+// ---------------------------------------------------------------------------
+
+/// The attempt a later pass would store for the mint after the TTL: another blockhash, so other
+/// message bytes, no signatures yet.
+fn newer_mint_attempt(created_at_ns: u64) -> BootstrapTx {
+    let profile = state::read_core(|c| c.creation_profile()).unwrap();
+    let unsigned = crate::tx::builders::build_mint_creation_message(&profile, crate::tx::MINT_RENT_LAMPORTS, [0x6c; 32]).unwrap();
+    let signers = unsigned.required_signers().to_vec();
+    BootstrapTx {
+        target: BootstrapTarget::Mint,
+        recent_blockhash: [0x6c; 32],
+        message: unsigned.message_bytes,
+        signers,
+        signatures: vec![],
+        tx_ids: vec![],
+        created_at_ns,
+        sign_failures: 0,
+        last_sign_error: None,
+        broadcast_count: 0,
+        last_broadcast_ns: None,
+        last_broadcast_note: None,
+    }
+}
+
+/// A fixture whose first pass has derived the keys and created everything except the mint's
+/// transaction: the pool accounts exist, so the mint is the only creation in flight.
+fn fixture_with_only_the_mint_pending() -> Fixture {
+    let fx = Fixture::unbootstrapped(1);
+    block_on(ensure_keys(&fx.signer)).unwrap();
+    for lane in Lane::ALL {
+        let (_, address) = nonce::slot_address(&FEE_PAYER, lane, 0).unwrap();
+        fx.chain.add_nonce_account(address, &FEE_PAYER, &slot_initial_value(lane, 0));
+    }
+    fx.chain.auto_apply_creation.set(false);
+    fx
+}
+
+/// The signature the mock signer returns for the stored message of `tx`, per signer.
+fn expected_signature(tx: &BootstrapTx, signer: &crate::tx::Pubkey) -> crate::tx::Signature {
+    let role = if *signer == FEE_PAYER { crate::ids::KeyRole::FeePayer } else { crate::ids::KeyRole::MintAccount };
+    MockSigner::signature_for(role, &tx.message, 0)
+}
+
+#[test]
+fn a_delayed_sign_reply_never_joins_the_message_that_replaced_its_attempt() {
+    let fx = fixture_with_only_the_mint_pending();
+    // Pass 1 stores the mint's attempt and starts signing it; while the FIRST signature is being
+    // produced, a newer pass (after the TTL) replaces the attempt with another message.
+    let replaced = Rc::new(Cell::new(false));
+    let flag = replaced.clone();
+    fx.signer.on_call.replace(Some(Box::new(move |call| {
+        let Some(old) = state::get_bootstrap_tx(BootstrapTarget::Mint.key()) else { return };
+        if !flag.get() && call.message == old.message && old.message != newer_mint_attempt(0).message {
+            flag.set(true);
+            state::put_bootstrap_tx(&newer_mint_attempt(old.created_at_ns + secs(BOOTSTRAP_TX_RETRY_SECS + 1)));
+        }
+    })));
+    let r = run(&fx, T0);
+    assert!(replaced.get(), "the replacement happened during the sign call");
+    let tx = state::get_bootstrap_tx(BootstrapTarget::Mint.key()).unwrap();
+    assert_eq!(tx.message, newer_mint_attempt(0).message, "the stored attempt is the newer one");
+    for record in &tx.signatures {
+        assert_eq!(
+            record.signature.0,
+            expected_signature(&tx, &record.signer),
+            "a signature of the OLD message was attached to the NEW message (signer {:?})",
+            record.signer
+        );
+    }
+    // The old pass stopped at once: it neither signed nor sent anything for the replacement.
+    assert!(tx.signatures.is_empty() && tx.tx_ids.is_empty(), "{tx:?}");
+    assert!(
+        r.bootstrap.iter().any(|e| matches!(e, BootstrapEvent::Waiting { why } if why.contains("Mint") && why.contains("signatures"))),
+        "{:?}",
+        r.bootstrap
+    );
+    // What the late reply said is kept as evidence, with the signature itself, and touches no record.
+    let old_message = state::audit_page(0, 100);
+    assert!(old_message.iter().any(|a| a.note.contains("signature ") && a.note.contains("replaced meanwhile; discarded")), "{old_message:?}");
+    // The newer attempt is signed and sent by the next pass with ITS bytes only.
+    let r = run(&fx, T0 + secs(BOOTSTRAP_TX_RETRY_SECS + 2));
+    assert!(r.bootstrap.iter().any(|e| matches!(e, BootstrapEvent::Sent { target: BootstrapTarget::Mint, .. })), "{:?}", r.bootstrap);
+    let tx = state::get_bootstrap_tx(BootstrapTarget::Mint.key()).unwrap();
+    assert_eq!(tx.signatures.len(), 2);
+    for record in &tx.signatures {
+        assert_eq!(record.signature.0, expected_signature(&tx, &record.signer));
+    }
+}
+
+#[test]
+fn a_delayed_sign_failure_does_not_mark_the_replacement_attempt() {
+    let fx = fixture_with_only_the_mint_pending();
+    let old_message: Rc<RefCell<Option<Vec<u8>>>> = Rc::default();
+    let seen = old_message.clone();
+    let failing = old_message.clone();
+    // The sign call for the mint's first message fails, and while it is in flight the attempt is
+    // replaced.
+    let replaced = Rc::new(Cell::new(false));
+    let flag = replaced.clone();
+    fx.signer.override_call.replace(Some(Box::new(move |call| {
+        (failing.borrow().as_ref() == Some(&call.message)).then(|| Scripted::Fail("signer unavailable".into()))
+    })));
+    fx.signer.on_call.replace(Some(Box::new(move |call| {
+        let Some(old) = state::get_bootstrap_tx(BootstrapTarget::Mint.key()) else { return };
+        if !flag.get() && call.message == old.message && old.message != newer_mint_attempt(0).message {
+            flag.set(true);
+            *seen.borrow_mut() = Some(old.message.clone());
+            state::put_bootstrap_tx(&newer_mint_attempt(old.created_at_ns + secs(BOOTSTRAP_TX_RETRY_SECS + 1)));
+        }
+    })));
+    run(&fx, T0);
+    assert!(replaced.get());
+    let tx = state::get_bootstrap_tx(BootstrapTarget::Mint.key()).unwrap();
+    assert_ne!(Some(tx.message.clone()), old_message.borrow().clone());
+    assert_eq!(tx.sign_failures, 0, "the old attempt's failure was charged to the new one");
+    assert_eq!(tx.last_sign_error, None);
+}
+
+#[test]
+fn a_delayed_send_note_does_not_overwrite_the_replacement_attempt() {
+    let fx = fixture_with_only_the_mint_pending();
+    // The mint's transaction is signed and sent; while the send is in flight the attempt is replaced.
+    let replaced = Rc::new(Cell::new(false));
+    let flag = replaced.clone();
+    fx.chain.on_send.replace(Some(Box::new(move |wire| {
+        let Ok((_, message)) = crate::tx::split_wire_transaction(wire) else { return };
+        let Some(old) = state::get_bootstrap_tx(BootstrapTarget::Mint.key()) else { return };
+        if !flag.get() && message == old.message && old.message != newer_mint_attempt(0).message {
+            flag.set(true);
+            state::put_bootstrap_tx(&newer_mint_attempt(old.created_at_ns + secs(BOOTSTRAP_TX_RETRY_SECS + 1)));
+        }
+    })));
+    run(&fx, T0);
+    assert!(replaced.get(), "the replacement happened during the send");
+    let tx = state::get_bootstrap_tx(BootstrapTarget::Mint.key()).unwrap();
+    assert_eq!(tx.message, newer_mint_attempt(0).message);
+    assert_eq!(tx.last_broadcast_note, None, "the old send's note was written onto the new attempt");
+    assert_eq!((tx.broadcast_count, tx.last_broadcast_ns), (0, None));
+    assert!(tx.signatures.is_empty() && tx.tx_ids.is_empty(), "nothing of the old attempt joined the new one");
+    assert!(
+        state::audit_page(0, 100).iter().any(|a| a.note.contains("send result") && a.note.contains("replaced meanwhile; discarded")),
+        "the old send's result is kept as evidence"
+    );
 }

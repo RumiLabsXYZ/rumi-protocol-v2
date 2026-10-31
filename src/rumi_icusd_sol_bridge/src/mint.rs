@@ -9,7 +9,7 @@
 //! mint authority is our `mint-authority` key; the freeze authority is none (in both token
 //! programs it can then never be added, note section 1); `decimals == 8`; the supply is 0 on first
 //! bind; and the extension list is a subset of the allow-list `{MetadataPointer pointing at the
-//! mint itself, TokenMetadata}`. Anything else (the note names `TransferFeeConfig`,
+//! mint itself, TokenMetadata}`, each with an authority of none or ours (below). Anything else (the note names `TransferFeeConfig`,
 //! `ScaledUiAmount`, `InterestBearingConfig`, the confidential extensions, `PermanentDelegate`,
 //! `TransferHook`, `DefaultAccountState`, `NonTransferable`, `MintCloseAuthority`, `Pausable` and
 //! `PermissionedBurn`) fails the bind. The check is an allow-list, so extension types this crate has
@@ -20,13 +20,31 @@
 //! owner field is the `return-owner` key, with no delegate, no close authority and not native;
 //! Token-2022 extensions on it are limited to `ImmutableOwner`.
 //!
-//! **Unverified (U), fail closed.** The extension type ids and the TLV framing are read from the
-//! spl-token-2022 `ExtensionType`/TLV layout as remembered, because no `spl-token` source is in this
-//! repo or its registry. Because the check is an allow-list, a wrong id can only make a legitimate
-//! mint FAIL to bind (the safe direction), never admit a forbidden one. Activation re-checks the ids
-//! against the program source (blocker `solana-token-program-wallet-check` and the metadata
-//! authority question of the note). In-mint metadata is checked here when present but is NOT created
-//! by the bootstrap (its instruction layouts have no offline source either).
+//! **Metadata authorities.** When a `MetadataPointer` or a `TokenMetadata` extension is present, its
+//! authority field (the first 32 bytes of the value, an optional non-zero key: all zero is none)
+//! must be none or the canister's own `mint-authority` role key. The design's authority matrix
+//! (section 7) allows the Token-2022 metadata update authority to be none or the canister and
+//! nothing else; a foreign pointer authority could re-point the metadata, and a foreign update
+//! authority could rewrite the name and symbol users see. Another role key of ours (fee payer,
+//! return owner, the one-time mint-account key) is just as foreign here. The pointer is judged
+//! before the metadata. A bound mint is re-checked by the same function, so a foreign authority
+//! cannot appear later without failing the reverify.
+//!
+//! **Source pins (a reading of source and layout documents, not proof about the installed program
+//! or any wallet).** The extension type ids come from the official `solana-program/token-2022` at
+//! b5b7511e5d4f19a6a118b858d83a7fe3b0017b1e, `interface/src/extension/mod.rs` lines 1074-1121
+//! (`ImmutableOwner = 7`, `MetadataPointer = 18`, `TokenMetadata = 19`;
+//! https://github.com/solana-program/token-2022/blob/b5b7511e5d4f19a6a118b858d83a7fe3b0017b1e/interface/src/extension/mod.rs#L1074).
+//! The account-type framing byte (offset 165, after zero padding) and the role of the metadata
+//! extensions are as described at https://www.solana-program.com/docs/token-2022. The check is an
+//! allow-list of three ids, so a wrong id would have two effects, not one: a legitimate mint could
+//! fail to bind, and an extension whose real id differs could be read as one of the allowed three.
+//! What stands in the way of the second is the exact shape demanded of each allowed extension
+//! (a pointer of exactly 64 bytes naming the mint itself, metadata for this mint, authorities none
+//! or ours), and activation re-checks the ids and the live account against the installed program
+//! (blocker `solana-token-program-wallet-check`). In-mint metadata is checked here when present;
+//! its name, symbol and URI are NOT created by the bootstrap (a disclosed deferred omission: this
+//! crate has no instruction encoder for them).
 
 use crate::records::MintState;
 use crate::sol_rpc::{AccountSnapshot, RpcFailure, SolRpc};
@@ -41,7 +59,8 @@ pub const TOKEN_ACCOUNT_LEN: usize = 165;
 pub const ACCOUNT_TYPE_MINT: u8 = 1;
 pub const ACCOUNT_TYPE_TOKEN_ACCOUNT: u8 = 2;
 
-/// Token-2022 extension type ids (U, see the module docs).
+/// Token-2022 extension type ids, pinned in the module docs to the official source (a reading, not
+/// installed-program proof).
 pub const EXT_IMMUTABLE_OWNER: u16 = 7;
 pub const EXT_METADATA_POINTER: u16 = 18;
 pub const EXT_TOKEN_METADATA: u16 = 19;
@@ -83,8 +102,12 @@ pub enum BindProblem {
     SupplyNotZero(u64),
     ExtensionNotAllowed(u16),
     MetadataPointerElsewhere,
+    /// The metadata pointer's authority is neither none nor the `mint-authority` role key.
+    MetadataPointerAuthority(Pubkey),
     TokenMetadataWithoutPointer,
     TokenMetadataWrongMint,
+    /// The token metadata's update authority is neither none nor the `mint-authority` role key.
+    MetadataUpdateAuthority(Pubkey),
     ReturnWrongOwner(Pubkey),
     ReturnBadData(String),
     ReturnNotInitialized(u8),
@@ -255,6 +278,7 @@ pub fn check_mint(snapshot: &AccountSnapshot, exp: &BindExpectations, first_bind
                 if value.len() != 64 || value[32..64] != exp.mint {
                     return Err(BindProblem::MetadataPointerElsewhere);
                 }
+                check_metadata_authority(&value[..32], exp, BindProblem::MetadataPointerAuthority)?;
                 pointer = true;
             }
             EXT_TOKEN_METADATA => metadata = Some(value),
@@ -269,8 +293,19 @@ pub fn check_mint(snapshot: &AccountSnapshot, exp: &BindExpectations, first_bind
         if value.len() < 64 || value[32..64] != exp.mint {
             return Err(BindProblem::TokenMetadataWrongMint);
         }
+        check_metadata_authority(&value[..32], exp, BindProblem::MetadataUpdateAuthority)?;
     }
     Ok(view)
+}
+
+/// An optional non-zero key (all zero is none) must be none or the `mint-authority` role key.
+fn check_metadata_authority(field: &[u8], exp: &BindExpectations, problem: fn(Pubkey) -> BindProblem) -> Result<(), BindProblem> {
+    let Ok(key) = Pubkey::try_from(field) else { return Err(BindProblem::MintBadData("metadata authority field is not 32 bytes".into())) };
+    if key == [0u8; 32] || key == exp.mint_authority {
+        Ok(())
+    } else {
+        Err(problem(key))
+    }
 }
 
 /// The return account checks. `snapshot` is the account at the canonical ATA address.
@@ -551,7 +586,7 @@ mod tests {
         // No extension, a pointer at the mint, and pointer + metadata all pass.
         assert!(check_mint(&with(&[]), &exp(tp), true).is_ok());
         assert!(check_mint(&with(&[(EXT_METADATA_POINTER, pointer_value(None, &MINT))]), &exp(tp), true).is_ok());
-        let both = with(&[(EXT_METADATA_POINTER, pointer_value(Some(&[1; 32]), &MINT)), (EXT_TOKEN_METADATA, metadata_value(&MINT))]);
+        let both = with(&[(EXT_METADATA_POINTER, pointer_value(Some(&MINT_AUTHORITY), &MINT)), (EXT_TOKEN_METADATA, metadata_value(&MINT))]);
         assert!(check_mint(&both, &exp(tp), true).is_ok());
         // A pointer at another account, or a metadata entry without a pointer or for another mint, fails.
         assert_eq!(check_mint(&with(&[(EXT_METADATA_POINTER, pointer_value(None, &[7; 32]))]), &exp(tp), true).unwrap_err(), BindProblem::MetadataPointerElsewhere);
@@ -570,6 +605,50 @@ mod tests {
         // A forbidden extension next to an allowed one still fails.
         let mixed = with(&[(EXT_METADATA_POINTER, pointer_value(None, &MINT)), (12, vec![0; 32])]);
         assert_eq!(check_mint(&mixed, &exp(tp), true).unwrap_err(), BindProblem::ExtensionNotAllowed(12));
+    }
+
+    #[test]
+    fn metadata_authorities_must_be_none_or_the_canisters_mint_authority_key() {
+        let tp = TokenProgram::Token2022;
+        let base = || mint_data(Some(&MINT_AUTHORITY), 0, 8, true, None);
+        let with = |entries: &[(u16, Vec<u8>)]| AccountSnapshot { owner: tp.id(), data: extended_mint(base(), entries) };
+        let metadata_with = |update_authority: Option<&Pubkey>| {
+            let mut v = metadata_value(&MINT);
+            if let Some(a) = update_authority {
+                v[..32].copy_from_slice(a);
+            }
+            v
+        };
+        // The pointer's authority: none and the mint-authority key pass; anything else is refused,
+        // another role key of ours included (only the mint-authority role may keep a metadata power).
+        for ok in [None, Some(&MINT_AUTHORITY)] {
+            let pointer = with(&[(EXT_METADATA_POINTER, pointer_value(ok, &MINT))]);
+            assert!(check_mint(&pointer, &exp(tp), true).is_ok(), "{ok:?}");
+        }
+        for foreign in [[1u8; 32], FEE_PAYER, RETURN_OWNER, MINT] {
+            let pointer = with(&[(EXT_METADATA_POINTER, pointer_value(Some(&foreign), &MINT))]);
+            assert_eq!(check_mint(&pointer, &exp(tp), true).unwrap_err(), BindProblem::MetadataPointerAuthority(foreign));
+            // A bound mint is re-checked by the same function: a foreign authority never slips in later.
+            assert_eq!(check_mint(&pointer, &exp(tp), false).unwrap_err(), BindProblem::MetadataPointerAuthority(foreign));
+        }
+        // The metadata's update authority: the same rule.
+        let pointer = (EXT_METADATA_POINTER, pointer_value(None, &MINT));
+        for ok in [None, Some(&MINT_AUTHORITY)] {
+            let both = with(&[pointer.clone(), (EXT_TOKEN_METADATA, metadata_with(ok))]);
+            assert!(check_mint(&both, &exp(tp), true).is_ok(), "{ok:?}");
+        }
+        for foreign in [[2u8; 32], FEE_PAYER, RETURN_OWNER] {
+            let both = with(&[pointer.clone(), (EXT_TOKEN_METADATA, metadata_with(Some(&foreign)))]);
+            assert_eq!(check_mint(&both, &exp(tp), true).unwrap_err(), BindProblem::MetadataUpdateAuthority(foreign));
+            assert_eq!(check_mint(&both, &exp(tp), false).unwrap_err(), BindProblem::MetadataUpdateAuthority(foreign));
+        }
+        // Both foreign: the pointer is judged first (a stable, testable order).
+        let both_foreign = with(&[(EXT_METADATA_POINTER, pointer_value(Some(&[1; 32]), &MINT)), (EXT_TOKEN_METADATA, metadata_with(Some(&[2; 32])))]);
+        assert_eq!(check_mint(&both_foreign, &exp(tp), true).unwrap_err(), BindProblem::MetadataPointerAuthority([1; 32]));
+        // The ordinary checks and the empty-extension path are unchanged.
+        assert!(check_mint(&with(&[]), &exp(tp), true).is_ok());
+        assert!(check_mint(&good_mint(tp), &exp(tp), true).is_ok());
+        assert_eq!(check_mint(&AccountSnapshot { owner: tp.id(), data: mint_data(Some(&[9; 32]), 0, 8, true, None) }, &exp(tp), true).unwrap_err(), BindProblem::MintAuthority(Some([9; 32])));
     }
 
     #[test]

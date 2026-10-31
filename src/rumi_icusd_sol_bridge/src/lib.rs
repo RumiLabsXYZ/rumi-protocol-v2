@@ -63,7 +63,12 @@
 //!   does not assume either way.
 //! * `CreateAccountWithSeed` for the nonce accounts is now read from `solana-system-interface`
 //!   3.2.0 (U resolved on paper); the resulting message is golden-vectored like the others.
-//! * Not touched here: whether the Token-2022 metadata authorities can be set to `None`.
+//! * Token-2022 metadata: the bind requires every metadata authority to be none or the canister's
+//!   `mint-authority` key (`mint::check_mint`). The bootstrap creates the mint WITHOUT the metadata
+//!   extensions (name, symbol and URI creation is a disclosed deferred omission), so whether the
+//!   program accepts `None` authorities at creation is not exercised here. Extension and tag ids
+//!   carry source pins (`mint.rs`, `tx/mod.rs`) that are a reading of source, not installed-program
+//!   or wallet proof.
 
 pub mod accounting;
 pub mod admin;
