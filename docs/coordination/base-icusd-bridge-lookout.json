@@ -551,10 +551,10 @@
     },
     {
       "id": "BB-62",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "EVM: uncertain ICP-to-Base request stays bound to its id",
-      "evidenceText": "proof=local-test; f4ae611c delivered for review (W28, local): the ICP-to-Base form no longer discards a possibly submitted request; same-id continuation only; 4 red (3 behavior, 1 shape) plus a two-id characterization run; 145 green",
+      "evidenceText": "proof=local-test; Done (Miles) at source and local-test scope: f4ae611c; a possibly submitted ICP-to-Base request continues under its own id only. Not browser wallet, deploy or live recovery proof; joins the next source batch",
       "evidenceLinks": []
     }
   ]

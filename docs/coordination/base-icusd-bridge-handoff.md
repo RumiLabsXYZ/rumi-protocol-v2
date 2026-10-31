@@ -2416,6 +2416,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
     transfers on that device until it is; in the Oisy flow an approved request has no cancel before the second click (the
     allowance stays and can expire); no durable never-submitted marker (no new cancellation protocol, per the brief).
 
+## Milestone 105 (2026-10-31): BB-62 accepted; W28 waits for BB-54 interfaces
+
+- Miles (`accept-bb62.md`) accepted BB-62 at source and local-test scope at `f4ae611c` (four frontend files, diff-check 0):
+  the BB-50 F3 repair reused; `discardIntent` and the approved and uncertain Discard buttons removed; an absent request query
+  never frees a fresh id; approved and reloaded requests continue under the same id; journal and reducer schemas and Oisy
+  two-click signing unchanged; no contract, backend, generated binding or production change. Miles read the raw saved evidence
+  (`red_characterization_original.txt` showing two bridge request ids `[16, 17]` from the original code, a characterization of
+  the old bug rather than a green fix; `red_bb62_original_code.txt` 4 failed, 142 passed with the service-level blocking already
+  passing before, as disclosed; 536 passed with 1 existing skip; check at baseline; build exit 0). Not proof of a browser wallet,
+  deploy or live duplicate recovery. The trade-off stands: possibly submitted legacy prepared or approved requests block fresh
+  ICP-to-Base requests and only continue under their own id; no cancel before the second click without a durable
+  never-submitted distinction.
+- BB-62 stays local for the next coherent source batch (for example with an accepted Sui component); the running CI on
+  `ff3dfec8` (run 41184115864) is Miles' one monitored job and is not superseded for this repair.
+- BB-54 boundary check (coordinator): the canister interface BB-54 would call is not frozen. W29's uncommitted 53b work changes
+  `rumi_icusd_sui_bridge.did` (mint lane, mint operations, observed deployment), and 53c will add the return verification
+  statuses. A Sui-side-only slice is the only candidate (Wallet Standard discovery and connect, Sui address validation, the
+  `transfer_id` from the accepted BB-52 domain, a `bridge_out` builder for the accepted Move signature at `23f75ef1`, an intent
+  journal), and it needs a dependency decision first (the `sui:signAndExecuteTransaction` feature takes a transaction object,
+  normally from `@mysten/sui`). Without page wiring it would be the detached library BB-50 ruled out, so W28 waits rather than
+  starting it. W29 continues 53b, 53c and 53d as the sole Rust builder.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
