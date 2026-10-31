@@ -8,7 +8,7 @@ use crate::flows::release::{self, BurnedReturn, OpenError};
 use crate::flows::{deposit, ledger_ops};
 use crate::ids::{self, TransferLocator};
 use crate::monitor;
-use crate::observer::ObserverEvent;
+use crate::observer::{ObserverEvent, OBSERVER_IDLE_INTERVAL_NS};
 use crate::records::{OpKind, OpPayload, OpState, Sig};
 use crate::saga49c_tests::{
     ata, credited, good_meta, land_valid_return, memo, observe, observer_world, profile, return_wire, run_monitors, set_supply, strays, HOLDER, SRC,
@@ -286,10 +286,14 @@ fn an_unrelated_burn_of_an_equal_amount_cannot_authorize_another_return_or_recip
 // Custody
 // ---------------------------------------------------------------------------
 
-fn set_ata_balance(fx: &Fixture, amount: u64) {
+fn set_ata_on(chain: &MockChain, amount: u64) {
     let tp = state::read_core(|c| c.config.token_program);
     let base = crate::mint::fixtures::token_account_data(&MINT, &RETURN_OWNER, amount, None, 1, None);
-    fx.chain.set_account(ata(), tp.id(), crate::mint::fixtures::extended_token_account(base, &[(crate::mint::EXT_IMMUTABLE_OWNER, vec![])]));
+    chain.set_account(ata(), tp.id(), crate::mint::fixtures::extended_token_account(base, &[(crate::mint::EXT_IMMUTABLE_OWNER, vec![])]));
+}
+
+fn set_ata_balance(fx: &Fixture, amount: u64) {
+    set_ata_on(&fx.chain, amount);
 }
 
 fn caught_up() {
@@ -708,4 +712,153 @@ fn a_return_reaches_icp_only_after_its_burn_is_final_through_the_timer_pass_sequ
     let m = run(now + secs(520) + monitor::MONITOR_INTERVAL_NS + 1).monitor;
     assert_eq!((m.c1, m.c2, m.halted), (Some(true), Some(true), false), "{m:?}");
     let _ = (deposit::MAX_REFUNDS_PER_TICK, ledger_ops::SEARCH_BLOCKS_PER_TICK);
+}
+
+// ---------------------------------------------------------------------------
+// Review of ea5be6ba: the custody read is fenced to unchanged books
+// ---------------------------------------------------------------------------
+
+/// While the monitor's read of the return account is in flight (its reply is the snapshot from before
+/// the transfer), a legitimate return lands, the REAL observer verifies and books it (`O -> RC`, no
+/// burn settles), and the on-chain account rises. Supply does not move: a transfer leaves it unchanged.
+fn a_return_lands_during_the_ata_read(fx: &Fixture, tag: u8, amount: u64, balance_after: u64) {
+    let now = env::now_ns();
+    fx.chain.on_account_read_of.borrow_mut().push((
+        ata(),
+        Box::new(move |chain, _| {
+            let (wire, msg) = return_wire(&HOLDER, &SRC, amount, memo(tag as u64), tag);
+            chain.land_with_meta(&wire, false, good_meta(&msg, &HOLDER, &SRC, amount, 10 * amount, 0), &[ata()]);
+            let events = block_on(crate::observer::observe(chain, now));
+            assert_eq!(credited(&events), 1, "the observer must book the legitimate return: {events:?}");
+            set_ata_on(chain, balance_after);
+        }),
+    ));
+}
+
+#[test]
+fn a_return_booked_during_the_custody_read_defers_the_reading_instead_of_judging_a_deficit() {
+    let fx = observer_world();
+    caught_up();
+    set_supply(&fx, 1_000 * E8);
+    set_ata_balance(&fx, 0);
+    // A fully backed bridge with empty custody: the first reading is clean.
+    assert_eq!(run_monitors(&fx).custody, Some(CustodyStatus::Ok));
+
+    // Reading 1: a return of 5 icUSD is booked while the account read returns its old snapshot (0).
+    a_return_lands_during_the_ata_read(&fx, 1, 5 * E8, 5 * E8);
+    let r = run_monitors(&fx);
+    assert_eq!(buckets().return_custodied, (5 * E8) as u128, "the legitimate return is booked");
+    assert_eq!(r.custody, None, "a reading whose books changed under it must not be judged: {r:?}");
+    assert!(r.notes.iter().any(|n| n.contains("changed during the reading")), "{r:?}");
+    assert_eq!(state::read_core(|c| c.monitor.custody_strikes), 0);
+    assert!(!r.halted && !state::is_halted());
+
+    // Reading 2 repeats it with a second return (the observer's idle interval has passed).
+    test_env::advance_secs(OBSERVER_IDLE_INTERVAL_NS / 1_000_000_000 + 1);
+    a_return_lands_during_the_ata_read(&fx, 2, 3 * E8, 8 * E8);
+    let r = run_monitors(&fx);
+    assert_eq!(buckets().return_custodied, (8 * E8) as u128);
+    assert_eq!(r.custody, None, "{r:?}");
+    assert_eq!(state::read_core(|c| c.monitor.custody_strikes), 0, "no deficit strikes accumulated");
+    assert!(!r.halted && !state::is_halted(), "a fully backed bridge must not halt: {r:?}");
+    assert!(state::read_core(|c| c.observer.credits_halted.is_none()));
+
+    // Nothing moves during the next reading: the books and the account agree.
+    let r = run_monitors(&fx);
+    assert_eq!(r.custody, Some(CustodyStatus::Ok), "{r:?}");
+    assert_eq!(state::read_core(|c| c.monitor.custody_strikes), 0);
+    assert_covered(&fx);
+}
+
+#[test]
+fn a_deferred_custody_reading_does_not_clear_a_credits_halt() {
+    let fx = observer_world();
+    caught_up();
+    set_supply(&fx, 1_000 * E8);
+    set_ata_balance(&fx, 0);
+    state::mutate_core(|c| c.observer.credits_halted = Some("held for review".into()));
+    // A burn settling in the books during the read would also make the pair stale; here a stray is booked.
+    fx.chain.on_account_read_of.borrow_mut().push((
+        ata(),
+        Box::new(|_chain, _| {
+            state::apply_transitions(&[Transition::StrayObserved { amount: E8 }], crate::state::AuditCtx::note("booked during the read")).unwrap();
+        }),
+    ));
+    let r = run_monitors(&fx);
+    assert_eq!(r.custody, None, "{r:?}");
+    assert!(state::read_core(|c| c.observer.credits_halted.is_some()), "a reading that was not judged cannot lift the hold");
+}
+
+// ---------------------------------------------------------------------------
+// Review of ea5be6ba: the secondary lookup of a burn or a refund is bound to the finalized operation
+// ---------------------------------------------------------------------------
+
+/// The wrong answers for an operation's signature, each carrying the perfect balance effect: the stored
+/// message under another first signature, the right signatures over a message the operation never
+/// stored, and the stored message with fewer signatures than its header requires.
+fn wrong_answers(wire: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+    let (sigs, message_bytes) = split_wire_transaction(wire).unwrap();
+    assert!(sigs.len() >= 2, "the bridge's own transactions carry two signatures");
+    let mut other_first = sigs.clone();
+    other_first[0] = [0x99; 64];
+    let mut other = decoded(wire);
+    other.recent_blockhash = [0xaa; 32];
+    vec![
+        ("the stored message under another first signature", assemble_wire_tx(&other_first, message_bytes).unwrap()),
+        ("the right signatures over a message the operation never stored", assemble_wire_tx(&sigs, &crate::tx::serialize_message(&other).unwrap()).unwrap()),
+        ("fewer signatures than the header requires", assemble_wire_tx(&sigs[..1], message_bytes).unwrap()),
+    ]
+}
+
+#[test]
+fn a_burn_is_applied_only_from_the_transaction_that_was_asked_for_and_stored() {
+    let amount = 5 * E8;
+    for case in 0..3 {
+        let (fx, r, burn_op) = burning_return(amount);
+        let wire = fx.wire_of(burn_op, 0);
+        let sig = first_signature(&wire);
+        assert!(fx.chain.land(&wire, false));
+        lane_tick(&fx);
+        assert!(matches!(state::get_op(burn_op).unwrap().state, OpState::Delivered { .. }));
+        let meta = own_meta(&wire, &[(ata(), Some(RETURN_OWNER), amount, 0)]);
+        let (name, wrong) = wrong_answers(&wire).remove(case);
+        fx.chain.land_under(sig, &wrong, false, meta.clone(), &[]);
+        process_burns(&fx);
+        assert!(matches!(state::get_return(&r.return_id).unwrap().state, ReturnState::Burning { .. }), "{name}: applied from a wrong answer");
+        assert_eq!((buckets().pending_release, state::active_release_count()), (0, 0), "{name}");
+        assert!(!state::is_halted(), "{name}: a wrong answer waits, it does not halt");
+        // The genuine answer arrives: applied.
+        fx.chain.land_under(sig, &wire, false, meta, &[]);
+        process_burns(&fx);
+        assert!(matches!(state::get_return(&r.return_id).unwrap().state, ReturnState::Burned { .. }), "{name}");
+    }
+}
+
+#[test]
+fn a_refund_is_settled_only_from_the_transaction_that_was_asked_for_and_stored() {
+    for case in 0..3 {
+        let fx = observer_world();
+        let sig_stray = two_transfer_stray(&fx, 2 * E8, 3 * E8, 7);
+        observe(&fx);
+        let tp = state::read_core(|c| c.config.token_program);
+        let base = crate::mint::fixtures::token_account_data(&MINT, &ALICE, 8 * E8, None, 1, None);
+        fx.chain.set_account(ALICE_SRC, tp.id(), crate::mint::fixtures::extended_token_account(base, &[(crate::mint::EXT_IMMUTABLE_OWNER, vec![])]));
+        block_on(burn_saga::refund_claims(&fx.chain, &fx.signer, env::now_ns()));
+        let ClaimState::Refunding { op_id } = stray_of(&sig_stray).claims[0].state else { panic!("claim 0 must be refunding") };
+        let wire = fx.wire_of(op_id, 0);
+        let sig = first_signature(&wire);
+        assert!(fx.chain.land(&wire, false));
+        lane_tick(&fx);
+        let meta = own_meta(&wire, &[(ata(), Some(RETURN_OWNER), 5 * E8, 3 * E8), (ALICE_SRC, Some(ALICE), 8 * E8, 10 * E8)]);
+        let (name, wrong) = wrong_answers(&wire).remove(case);
+        fx.chain.land_under(sig, &wrong, false, meta.clone(), &[]);
+        let before = buckets();
+        block_on(burn_saga::refund_claims(&fx.chain, &fx.signer, env::now_ns()));
+        assert!(matches!(stray_of(&sig_stray).claims[0].state, ClaimState::Refunding { .. }), "{name}: settled from a wrong answer");
+        assert_eq!(buckets(), before, "{name}");
+        assert!(!state::is_halted(), "{name}");
+        fx.chain.land_under(sig, &wire, false, meta, &[]);
+        block_on(burn_saga::refund_claims(&fx.chain, &fx.signer, env::now_ns()));
+        assert_eq!(stray_of(&sig_stray).claims[0].state, ClaimState::Refunded { op_id }, "{name}");
+    }
 }

@@ -558,14 +558,17 @@ pub fn account_from_wire(info: Option<wire::AccountInfo>) -> RpcResult<Option<Ac
 /// signature, so the returned wire's own first signature must equal the requested one, and it must
 /// carry exactly the signature count its header names. Anything else is a wrong answer from the RPC
 /// (the same valid bytes under another key would otherwise become a second identity), never a
-/// transaction to record anything from. A message that does not decode strictly is still bound by the
-/// signature list the wire itself carries.
+/// transaction to record anything from. This is an identity check only: when the message cannot be
+/// decoded here, the wire's own signature list is still read and its first signature must still equal
+/// the requested one. Judging the message (strict return classification, which decodes it and treats
+/// what it does not support as a stray) is a separate step that always follows.
 pub fn check_bound(requested: &Signature, tx: &LandedTx) -> Result<(), String> {
     let first = match decode_wire_transaction(&tx.wire) {
         Ok((signatures, _, _)) => signatures.first().copied(),
         Err(TxError::SignatureCountMismatch { header, wire }) => {
             return Err(format!("the returned transaction carries {wire} signatures but its header requires {header}"));
         }
+        // The message did not decode in `decode_wire_transaction`: only the signature list is read here.
         Err(_) => match split_wire_transaction(&tx.wire) {
             Ok((signatures, _)) => signatures.first().copied(),
             Err(e) => return Err(format!("the returned transaction bytes do not parse: {e}")),

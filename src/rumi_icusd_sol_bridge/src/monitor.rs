@@ -17,9 +17,16 @@
 //! nothing is credited, and nothing halts. C4 does not exist under the memo plus durable-nonce guard.
 //!
 //! **Custody (49d).** `custody_measured == RC + BU + stray` is read as `supply, custody, supply` at
-//! `finalized`, only when the observer is at the head of the return account, and the pair is used only
-//! if both supply reads are equal (a burn or a mint that landed between the reads changes the supply,
-//! so the pair is retried). Then:
+//! `finalized`, only when the observer is at the head of the return account. The pair is used only if
+//! both supply reads are equal, but that is a LIMITED consistency check: an equal supply shows that no
+//! mint or burn changed the total, it is not proof that nothing happened (an ordinary token transfer
+//! into the return account leaves the supply unchanged, and the three reads are three separate
+//! requests, not one snapshot). So the reading is also fenced to the books: the custody-relevant books
+//! (`RC`, `BU`, `stray`, the refunds in flight) and the observer's progress (processed count, cursor,
+//! walk, queue) are captured before the first read and compared after the last. If anything moved
+//! (the observer credited a return, a burn or a refund settled, another monitor run overlapped), the
+//! reading is DEFERRED to the next interval: it is not judged, it adds or resets no strike, and it
+//! does not lift a credits halt. Then:
 //! * an EXCESS (tokens the books cannot explain) halts credits, not the bridge, once a second reading
 //!   confirms it, and lifts when a reading finds none; a stray the observer has since recorded
 //!   explains it;
@@ -188,12 +195,34 @@ async fn read_supply<R: SolRpc>(rpc: &R, profile: &crate::tx::builders::TxProfil
     parse_mint(&snapshot.data, profile.token_program).map(|v| v.supply as u128)
 }
 
-/// The custody reading: `supply, custody, supply` (see the module docs).
+/// What a custody reading is judged against, captured before its reads and compared after them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BookFence {
+    return_custodied: u128,
+    burn_unknown: u128,
+    stray: u128,
+    refunding: u128,
+    processed: u64,
+    cursor: Option<crate::records::Sig>,
+    walk_active: bool,
+    caught_up: bool,
+    queue_len: u64,
+}
+
+fn book_fence() -> BookFence {
+    let (return_custodied, burn_unknown, stray, processed, cursor, walk_active, caught_up) = state::read_core(|c| {
+        (c.buckets.return_custodied, c.buckets.burn_unknown, c.buckets.stray, c.observer.processed, c.observer.cursor, c.observer.walk_active, c.observer.caught_up)
+    });
+    BookFence { return_custodied, burn_unknown, stray, refunding: state::refunding_claims_total(), processed, cursor, walk_active, caught_up, queue_len: state::observer_queue_len() }
+}
+
+/// The custody reading: `supply, custody, supply`, fenced to unchanged books (see the module docs).
 async fn custody<R: SolRpc>(rpc: &R, profile: &crate::tx::builders::TxProfile, now: u64, report: &mut MonitorReport) {
     if !idle() {
         report.notes.push("custody: the observer is not at the head of the return account; not read".into());
         return;
     }
+    let fence = book_fence();
     let Ok(ata) = profile.return_ata() else { return };
     let first = match read_supply(rpc, profile).await {
         Ok(v) => v,
@@ -236,6 +265,13 @@ async fn custody<R: SolRpc>(rpc: &R, profile: &crate::tx::builders::TxProfile, n
     };
     if first != second {
         report.notes.push("custody: the supply changed during the reading (a burn or a mint landed); retried next interval".into());
+        return;
+    }
+    // Revalidate after the awaits, in the same synchronous step that reads the books: a return credited,
+    // a burn or refund settled, or another run overlapping while the reads were in flight means the
+    // account snapshot and the books may describe different moments. Not judged, nothing cleared.
+    if !idle() || book_fence() != fence {
+        report.notes.push("custody: the books or the observer changed during the reading (a return was credited, or a burn or refund settled); not judged, retried next interval".into());
         return;
     }
     let buckets: Buckets = state::read_core(|c| c.buckets);

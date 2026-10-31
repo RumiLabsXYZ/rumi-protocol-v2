@@ -267,7 +267,7 @@ fn the_binding_check_itself() {
     assert!(check_bound(&s, &tx(vec![0])).is_err(), "zero signatures");
     assert!(check_bound(&s, &tx(vec![])).is_err(), "empty");
     let (_, message_bytes) = split_wire_transaction(&wire).unwrap();
-    // A message that does not decode strictly is still bound by the wire's own first signature.
+    // Whatever the message is, the first signature of the wire must still be the requested one.
     let garbage = assemble_wire_tx(&[s], &[0xff, 0xff, 0xff]).unwrap();
     assert_eq!(check_bound(&s, &tx(garbage)), Ok(()));
     let two = assemble_wire_tx(&[s, [3; 64]], message_bytes).unwrap();

@@ -96,6 +96,20 @@ pub fn verify_effect(tx: &LandedTx, mint: &Pubkey, ata: &Pubkey, destination: Op
     Effect::Verified
 }
 
+/// The response to the secondary lookup must be the finalized operation whose effect is being read:
+/// the transaction asked for (its own first signature and the signature count its header names, see
+/// [`crate::sol_rpc::check_bound`]) carrying, byte for byte, a message this operation stored. A wrong
+/// answer is not judged and not applied; the operation is looked up again on a later pass.
+fn bound_to_operation(op: &crate::records::SolOp, signature: &crate::records::Sig, tx: &LandedTx) -> Result<(), String> {
+    crate::sol_rpc::check_bound(&signature.0, tx)?;
+    let (_, message_bytes) = split_wire_transaction(&tx.wire).map_err(|e| format!("the returned transaction bytes do not parse: {e}"))?;
+    if op.attempts.iter().any(|a| a.message == message_bytes) {
+        Ok(())
+    } else {
+        Err("the returned message is not one this operation stored".into())
+    }
+}
+
 fn burns_allowed() -> bool {
     state::read_core(|c| c.halted.is_none() && c.tx_profile().is_ok()) && state::lane_halt(crate::records::Lane::Burn).is_none()
 }
@@ -175,6 +189,9 @@ pub async fn apply_burns<R: SolRpc>(rpc: &R) -> usize {
             Ok(Some(tx)) => tx,
             Ok(None) | Err(_) => continue,
         };
+        if bound_to_operation(&op, &signature, &tx).is_err() {
+            continue;
+        }
         match verify_effect(&tx, &profile.mint, &ata, None, r.amount) {
             Effect::Verified => {}
             Effect::Unavailable(_) => continue,
@@ -365,6 +382,9 @@ async fn apply_claim<R: SolRpc>(
         Ok(Some(tx)) => tx,
         Ok(None) | Err(_) => return 0,
     };
+    if bound_to_operation(&op, &signature, &tx).is_err() {
+        return 0;
+    }
     match verify_effect(&tx, &profile.mint, ata, Some(&dest_account), op.amount) {
         Effect::Verified => {}
         Effect::Unavailable(_) => return 0,
