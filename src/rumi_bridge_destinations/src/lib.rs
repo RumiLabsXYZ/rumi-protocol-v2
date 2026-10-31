@@ -10,6 +10,7 @@
 
 use serde::Serialize;
 
+pub mod aggregate;
 pub mod types;
 pub mod validate;
 

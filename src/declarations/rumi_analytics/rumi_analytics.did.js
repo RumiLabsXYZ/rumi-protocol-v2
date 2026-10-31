@@ -16,6 +16,11 @@ export const idlFactory = ({ IDL }) => {
     'total_events' : IDL.Nat64,
   });
   const Result = IDL.Variant({ 'Ok' : BackfillProgress, 'Err' : IDL.Text });
+  const Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -507,9 +512,13 @@ export const idlFactory = ({ IDL }) => {
   const ResetErrorCountersArgs = IDL.Record({
     'sources' : IDL.Opt(IDL.Vec(IDL.Text)),
   });
-  const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   return IDL.Service({
     'admin_backfill_add_margin_events' : IDL.Func([IDL.Nat64], [Result], []),
+    'admin_set_bridge_escrow_accounts' : IDL.Func(
+        [IDL.Vec(Account)],
+        [Result_1],
+        [],
+      ),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],

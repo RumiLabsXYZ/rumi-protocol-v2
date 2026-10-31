@@ -8,7 +8,7 @@
 //! tuning), and both are runtime-overridable via the admin `set_pull_schedule`
 //! endpoint. See `pull_schedule.rs` for the pure logic.
 
-use crate::{collectors, pull_schedule, sources, state, tailing};
+use crate::{bridge_escrow, collectors, pull_schedule, sources, state, tailing};
 use std::cell::Cell;
 use std::time::Duration;
 
@@ -184,17 +184,47 @@ async fn run_source(source_id: u8) {
     }
 }
 
-async fn refresh_supply_cache() {
-    let ledger = state::read_state(|s| s.sources.icusd_ledger);
-    match sources::icusd_ledger::icrc1_total_supply(ledger).await {
-        Ok(total) => {
-            state::mutate_state(|s| s.circulating_supply_icusd_e8s = Some(total));
-        }
-        Err(e) => {
-            ic_cdk::println!("rumi_analytics: supply refresh failed: {}", e);
-            state::mutate_state(|s| s.error_counters.icusd_ledger += 1);
-        }
+/// Refresh the cached circulating icUSD supply.
+///
+/// With no bridge escrow accounts configured this is `icrc1_total_supply`,
+/// unchanged. With accounts configured it is `total - sum(escrow balances)`
+/// (BB-58). A failed read or an inconsistent sum keeps the previous cached
+/// value and increments the `icusd_ledger` error counter; the raw total is
+/// never published while accounts are configured.
+pub(crate) async fn refresh_supply_cache() {
+    let (ledger, accounts) = state::read_state(|s| {
+        (
+            s.sources.icusd_ledger,
+            bridge_escrow::configured_accounts(s),
+        )
+    });
+    let result = read_circulating_supply(ledger, &accounts).await;
+    if let Err(e) = &result {
+        ic_cdk::println!("rumi_analytics: supply refresh failed: {}", e);
     }
+    state::mutate_state(|s| {
+        bridge_escrow::apply_refresh_result(s, &accounts, result);
+    });
+}
+
+/// Read the total supply and, when escrow accounts are configured, each
+/// account's balance, then combine them with `circulating_after_escrow`.
+async fn read_circulating_supply(
+    ledger: candid::Principal,
+    accounts: &[icrc_ledger_types::icrc1::account::Account],
+) -> Result<u128, String> {
+    let total = sources::icusd_ledger::icrc1_total_supply(ledger).await?;
+    if accounts.is_empty() {
+        return Ok(total);
+    }
+    let reads = futures::future::join_all(
+        accounts
+            .iter()
+            .map(|account| sources::icusd_ledger::icrc1_balance_of(ledger, account)),
+    )
+    .await;
+    let balances = reads.into_iter().collect::<Result<Vec<u128>, String>>()?;
+    bridge_escrow::circulating_after_escrow(total, &balances).map_err(|e| e.to_string())
 }
 
 async fn daily_snapshot() {
