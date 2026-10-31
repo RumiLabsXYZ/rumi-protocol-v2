@@ -2858,6 +2858,41 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Nonblocking: MintHeld's "was not sent" wording; "did not complete" is more accurate.
 - Same W28, one focused correction with old-red and new-green evidence; svelte-check and build once. No live action or new worker.
 
+## Milestone 121 (2026-10-31): BB-54 F1 to F3 corrected; e5c04cef pushed and green
+
+- Push: `e5c04cef5afdcfaefa562887532859790a7327d2` pushed by exact commit at 2026-10-31 09:33 UTC (fast-forward from `97f63935`):
+  53d (`29295fb4`) and records; dirty BB-54 excluded; no XRPL, backend, frontend, declaration, lock or generator file. Run
+  41189208931 on the exact head completed SUCCESS (Miles; watch closed; the intermediate `97f63935` run superseded). It is the
+  existing Stability Pool deposit-intent workflow, not Sui, Move or frontend coverage.
+- PR description correction: the coordinator refresh at the `4d3db00f` push (07:23 UTC) replaced the groundwork table row
+  "`cargo test --offline -p rumi_bridge_destinations` | 63 passed, 0 failed" (Host verification at `9806e539`) with the
+  `5885e248` collector text instead of the Part 3 row, so the published description showed a wrong groundwork row until the
+  `e5c04cef` refresh restored it and updated the Part 3 row (now at `29295fb4`). No code or evidence affected.
+- Miles' forms and history pass (`review-bb54-remainder.md`) added F3 and found otherwise: ICP requests persisted before first
+  effects and kept under their own ids after an absent lookup or reload, the configured ledger checked during quote preparation,
+  approve, bridge and refund signer calls without a preceding await, network and instance kept in intents, only the enabled
+  selected native family mounted, history anonymous-read only; frozen diff-check passes.
+- W28 committed `412f1fda54bb270863518477f81d906d7a172fb2` "fix(frontend): BB-54 first-review corrections (F1 module flag, F2 stalled
+  reads, F3 notify click)", local only, parent `0a24053c`; nine files under `src/vault_frontend/src/`; `git diff --check` exits 0.
+  - F1: `resolveSuiConfig` no longer gates on `module_digest_observed` (the accepted `bind.rs` at `29295fb4` always stores false);
+    every real check kept; the value carried as `moduleBytesMatched` and disclosed in the panel; fixtures default to the real false.
+  - F2: `loadDestinations` uses one local timer (`READ_DEADLINE_MS = 8_000`, cleared in `finally`): a native read always gets the
+    bound, Base gets it once a native instance is configured, a lone Base is awaited as before; a stalled family's row says it
+    did not answer within 8 seconds; Base-only last-good and error behavior unchanged.
+  - F3: the form prepares the ICP actors before offering "Tell the bridge now" (preparing never notifies); a distinct prepare click
+    when they are not ready; `tellBridge` is synchronous and calls `notifyReturn` directly from the click, doing nothing if the
+    actors are not ready; nothing queued or run on reload; approve, bridge and refund untouched. Wording: "The mint did not
+    complete" and `SUI RETURN`.
+- Evidence (saved files in the coordinator scratchpad `bb54f/`): `red_f1_f2_old_code.txt` 46 failed, 12 passed (about 35 of those are
+  fixture-enabled tests failing for the same single F1 cause, not independent defects; quoted "The Sui bridge has not matched the
+  published Gate module, so it is not offered."); `red_f2_isolated_old_code.txt` 4 failed, 1 passed by design (the old fixture value
+  set temporarily so F1 did not mask F2, then restored); `red_f3_old_form.txt` 4 failed ("notify_sui_return must be called
+  synchronously inside the click: expected "spy" to be called 1 times, but got 0 times", the Discard-style button present twice, and
+  "expected 'SOLANA RETURN' to be 'SUI RETURN'"); the held-mint wording has no separate red. `final_focused_vitest.txt` 9 files, 202
+  passed; `final_check.txt` 30 errors, 66 warnings, 25 files, equal to the baseline; `final_build.txt` exit 0. Two failing
+  development runs, both test fixes (a selector scoped to the right panel; a one-shot mock made persistent).
+- W29's independent return and signing review on frozen `37f9c77c` is still pending; Miles adjudicates both.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

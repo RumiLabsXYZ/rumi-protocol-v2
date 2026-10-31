@@ -490,7 +490,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; 37f9c77c in Review: Miles found two integration defects (a module-digest gate the real canister can never pass; loading still waits on unrelated reads); W28 fixes them. W29's return review continues",
+      "evidenceText": "proof=local-test; In Review: 37f9c77c plus correction 412f1fda (W28: real canister enables the page, stalled reads stay local, notify inside the click); 202 focused green. W29's return review pending",
       "evidenceLinks": []
     },
     {
