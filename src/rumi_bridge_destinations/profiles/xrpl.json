@@ -157,9 +157,9 @@
         },
         {
           "id": "xrpl-return-intent-missing",
-          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586.",
+          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586. The return source (BB-56, with the BB-57 cases) is accepted at source and focused-test level on a separate local branch that was not pushed (local commits up to 46cf6b34). It is not in PR #586, not on this branch and not in PR #591. Still held: the PR #586 merge or a stacked branch, deployment, and live or public-chain evidence.",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4; BB-56 e48dc18d and BB-57 46cf6b34 (unpublished local branch, not pushed)"
         },
         {
           "id": "xrpl-wallet-xaman-only",
@@ -169,19 +169,19 @@
         },
         {
           "id": "xrpl-15-digit-validator-not-wired",
-          "text": "Implementation missing. The 15-digit request validator (validate_normal_request and parse_normal_request) has no caller outside tests, and the frontend parser accepts up to u64. The 15-digit bound holds only if a controller sets both caps at or below 999999999999999 e8s.",
+          "text": "Missing on PR #586 and on this branch. A local follow-up accepted at source and focused-test level (BB-55, f887fab5 with 868ebca8) wires the validator on a separate local branch that was not pushed; it is not in PR #586, this branch or PR #591. The 15-digit request validator (validate_normal_request and parse_normal_request) has no caller outside tests, and the frontend parser accepts up to u64. The 15-digit bound holds only if a controller sets both caps at or below 999999999999999 e8s.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-xrpl.md section 3; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 3"
         },
         {
           "id": "xrpl-caps-not-hard-bounded",
-          "text": "Implementation missing. Config accepts any u64 for both caps. Clamp both to 999999999999999 e8s when applying config and again inside the per-operation check and the return-intent creation, add the issuer snapshot ceiling as a coverage condition, and clamp in the frontend parser before an amount is shown. The holder trust-line limit defaults to the outstanding cap, so an unclamped cap writes a limit longer than 15 digits.",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5 with 868ebca8), on a separate local branch that was not pushed, clamps the caps and checks the ceiling before any new attempt; it is not in PR #586, this branch or PR #591. Config accepts any u64 for both caps. Clamp both to 999999999999999 e8s when applying config and again inside the per-operation check and the return-intent creation, add the issuer snapshot ceiling as a coverage condition, and clamp in the frontend parser before an amount is shown. The holder trust-line limit defaults to the outstanding cap, so an unclamped cap writes a limit longer than 15 digits.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-xrpl.md section 3 (items 1, 3, 4 and 5)"
         },
         {
           "id": "xrpl-pending-import-cap-race",
-          "text": "Implementation missing. An import still in its ledger-pull phase is neither in the delivery bucket nor a reservation, so concurrent imports can each pass the cap check and together exceed the total cap (from reading the source, not tested). Count pending-pull amounts and re-check when the import advances.",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5), on a separate local branch that was not pushed, counts pending imports; it is not in PR #586, this branch or PR #591. An import still in its ledger-pull phase is neither in the delivery bucket nor a reservation, so concurrent imports can each pass the cap check and together exceed the total cap (from reading the source, not tested). Count pending-pull amounts and re-check when the import advances.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-xrpl.md section 3 (item 2)"
         },
@@ -292,9 +292,9 @@
         },
         {
           "id": "xrpl-return-intent-missing",
-          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586.",
+          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586. The return source (BB-56, with the BB-57 cases) is accepted at source and focused-test level on a separate local branch that was not pushed (local commits up to 46cf6b34). It is not in PR #586, not on this branch and not in PR #591. Still held: the PR #586 merge or a stacked branch, deployment, and live or public-chain evidence.",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4; BB-56 e48dc18d and BB-57 46cf6b34 (unpublished local branch, not pushed)"
         },
         {
           "id": "xrpl-wallet-xaman-only",
@@ -304,19 +304,19 @@
         },
         {
           "id": "xrpl-15-digit-validator-not-wired",
-          "text": "Implementation missing. The 15-digit request validator (validate_normal_request and parse_normal_request) has no caller outside tests, and the frontend parser accepts up to u64. The 15-digit bound holds only if a controller sets both caps at or below 999999999999999 e8s.",
+          "text": "Missing on PR #586 and on this branch. A local follow-up accepted at source and focused-test level (BB-55, f887fab5 with 868ebca8) wires the validator on a separate local branch that was not pushed; it is not in PR #586, this branch or PR #591. The 15-digit request validator (validate_normal_request and parse_normal_request) has no caller outside tests, and the frontend parser accepts up to u64. The 15-digit bound holds only if a controller sets both caps at or below 999999999999999 e8s.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-xrpl.md section 3; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 3"
         },
         {
           "id": "xrpl-caps-not-hard-bounded",
-          "text": "Implementation missing. Config accepts any u64 for both caps. Clamp both to 999999999999999 e8s when applying config and again inside the per-operation check and the return-intent creation, add the issuer snapshot ceiling as a coverage condition, and clamp in the frontend parser before an amount is shown. The holder trust-line limit defaults to the outstanding cap, so an unclamped cap writes a limit longer than 15 digits.",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5 with 868ebca8), on a separate local branch that was not pushed, clamps the caps and checks the ceiling before any new attempt; it is not in PR #586, this branch or PR #591. Config accepts any u64 for both caps. Clamp both to 999999999999999 e8s when applying config and again inside the per-operation check and the return-intent creation, add the issuer snapshot ceiling as a coverage condition, and clamp in the frontend parser before an amount is shown. The holder trust-line limit defaults to the outstanding cap, so an unclamped cap writes a limit longer than 15 digits.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-xrpl.md section 3 (items 1, 3, 4 and 5)"
         },
         {
           "id": "xrpl-pending-import-cap-race",
-          "text": "Implementation missing. An import still in its ledger-pull phase is neither in the delivery bucket nor a reservation, so concurrent imports can each pass the cap check and together exceed the total cap (from reading the source, not tested). Count pending-pull amounts and re-check when the import advances.",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5), on a separate local branch that was not pushed, counts pending imports; it is not in PR #586, this branch or PR #591. An import still in its ledger-pull phase is neither in the delivery bucket nor a reservation, so concurrent imports can each pass the cap check and together exceed the total cap (from reading the source, not tested). Count pending-pull amounts and re-check when the import advances.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-xrpl.md section 3 (item 2)"
         },

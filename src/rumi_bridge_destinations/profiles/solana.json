@@ -130,9 +130,9 @@
       "activation_blockers": [
         {
           "id": "solana-guard-missing",
-          "text": "Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured).",
+          "text": "The memo-bound guard and the durable-nonce lane are accepted at local source and test scope (BB-47 to BB-49, src/rumi_icusd_sol_bridge). Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured). Still held: live Solana evidence, deployment, and the history measurement (solana-history-availability-unmeasured).",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3)"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3); src/rumi_icusd_sol_bridge/src/memo.rs (BB-47, df53ea32) and nonce.rs (BB-48, 45ecd9fe, 614ced92)"
         },
         {
           "id": "sol-rpc-canister-id-conflict",
@@ -160,15 +160,15 @@
         },
         {
           "id": "solana-return-observer-missing",
-          "text": "No return observer or memo parser exists. The backend deposit watch polls balances, not burns.",
+          "text": "The return observer and memo parser are accepted at local source and test scope (BB-49 49c: src/rumi_icusd_sol_bridge/src/observer.rs; memo parser src/rumi_icusd_sol_bridge/src/memo.rs from BB-47). Still held: live Solana evidence, deployment, and custody activation proof. The backend deposit watch polls balances, not burns.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; src/rumi_icusd_sol_bridge/src/observer.rs (BB-49 49c)"
         },
         {
           "id": "solana-nonce-lane-missing",
-          "text": "No durable-nonce lane exists for escrow mints. getLatestBlockhash is not supported by the SOL RPC canister, so a durable nonce account per in-flight operation is the alternative.",
+          "text": "A durable-nonce pool and lane are accepted at local source and test scope (BB-48: 45ecd9fe, 614ced92; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs), with one reserved nonce slot per in-flight operation. Still held: live nonce accounts, deployment, and mainnet or testnet evidence. getLatestBlockhash is not supported by the SOL RPC canister, so the durable nonce pool is the path used.",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs (BB-48, 45ecd9fe, 614ced92)"
         },
         {
           "id": "solana-ata-rent-funding",
@@ -178,9 +178,9 @@
         },
         {
           "id": "solana-wallet-connector-missing",
-          "text": "No Solana wallet connector exists in the frontend. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
+          "text": "A Solana Wallet Standard connector is accepted at local source and injected-flow scope (BB-50: adcbf1a9, 25b9d4d9, 053f8ed5; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts). It is not a real wallet, provider or live proof. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts (BB-50, 053f8ed5)"
         },
         {
           "id": "controller-model-undecided",
@@ -257,9 +257,9 @@
       "activation_blockers": [
         {
           "id": "solana-guard-missing",
-          "text": "Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured).",
+          "text": "The memo-bound guard and the durable-nonce lane are accepted at local source and test scope (BB-47 to BB-49, src/rumi_icusd_sol_bridge). Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured). Still held: live Solana evidence, deployment, and the history measurement (solana-history-availability-unmeasured).",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3)"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3); src/rumi_icusd_sol_bridge/src/memo.rs (BB-47, df53ea32) and nonce.rs (BB-48, 45ecd9fe, 614ced92)"
         },
         {
           "id": "sol-rpc-canister-id-conflict",
@@ -287,15 +287,15 @@
         },
         {
           "id": "solana-return-observer-missing",
-          "text": "No return observer or memo parser exists. The backend deposit watch polls balances, not burns.",
+          "text": "The return observer and memo parser are accepted at local source and test scope (BB-49 49c: src/rumi_icusd_sol_bridge/src/observer.rs; memo parser src/rumi_icusd_sol_bridge/src/memo.rs from BB-47). Still held: live Solana evidence, deployment, and custody activation proof. The backend deposit watch polls balances, not burns.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; src/rumi_icusd_sol_bridge/src/observer.rs (BB-49 49c)"
         },
         {
           "id": "solana-nonce-lane-missing",
-          "text": "No durable-nonce lane exists for escrow mints. getLatestBlockhash is not supported by the SOL RPC canister, so a durable nonce account per in-flight operation is the alternative.",
+          "text": "A durable-nonce pool and lane are accepted at local source and test scope (BB-48: 45ecd9fe, 614ced92; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs), with one reserved nonce slot per in-flight operation. Still held: live nonce accounts, deployment, and mainnet or testnet evidence. getLatestBlockhash is not supported by the SOL RPC canister, so the durable nonce pool is the path used.",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs (BB-48, 45ecd9fe, 614ced92)"
         },
         {
           "id": "solana-ata-rent-funding",
@@ -305,9 +305,9 @@
         },
         {
           "id": "solana-wallet-connector-missing",
-          "text": "No Solana wallet connector exists in the frontend. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
+          "text": "A Solana Wallet Standard connector is accepted at local source and injected-flow scope (BB-50: adcbf1a9, 25b9d4d9, 053f8ed5; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts). It is not a real wallet, provider or live proof. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts (BB-50, 053f8ed5)"
         },
         {
           "id": "controller-model-undecided",
@@ -390,9 +390,9 @@
       "activation_blockers": [
         {
           "id": "solana-guard-missing",
-          "text": "Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured).",
+          "text": "The memo-bound guard and the durable-nonce lane are accepted at local source and test scope (BB-47 to BB-49, src/rumi_icusd_sol_bridge). Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured). Still held: live Solana evidence, deployment, and the history measurement (solana-history-availability-unmeasured).",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3)"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3); src/rumi_icusd_sol_bridge/src/memo.rs (BB-47, df53ea32) and nonce.rs (BB-48, 45ecd9fe, 614ced92)"
         },
         {
           "id": "sol-rpc-canister-id-conflict",
@@ -420,15 +420,15 @@
         },
         {
           "id": "solana-return-observer-missing",
-          "text": "No return observer or memo parser exists. The backend deposit watch polls balances, not burns.",
+          "text": "The return observer and memo parser are accepted at local source and test scope (BB-49 49c: src/rumi_icusd_sol_bridge/src/observer.rs; memo parser src/rumi_icusd_sol_bridge/src/memo.rs from BB-47). Still held: live Solana evidence, deployment, and custody activation proof. The backend deposit watch polls balances, not burns.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; src/rumi_icusd_sol_bridge/src/observer.rs (BB-49 49c)"
         },
         {
           "id": "solana-nonce-lane-missing",
-          "text": "No durable-nonce lane exists for escrow mints. getLatestBlockhash is not supported by the SOL RPC canister, so a durable nonce account per in-flight operation is the alternative.",
+          "text": "A durable-nonce pool and lane are accepted at local source and test scope (BB-48: 45ecd9fe, 614ced92; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs), with one reserved nonce slot per in-flight operation. Still held: live nonce accounts, deployment, and mainnet or testnet evidence. getLatestBlockhash is not supported by the SOL RPC canister, so the durable nonce pool is the path used.",
           "kind": "code",
-          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5"
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs (BB-48, 45ecd9fe, 614ced92)"
         },
         {
           "id": "solana-ata-rent-funding",
@@ -438,9 +438,9 @@
         },
         {
           "id": "solana-wallet-connector-missing",
-          "text": "No Solana wallet connector exists in the frontend. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
+          "text": "A Solana Wallet Standard connector is accepted at local source and injected-flow scope (BB-50: adcbf1a9, 25b9d4d9, 053f8ed5; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts). It is not a real wallet, provider or live proof. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts (BB-50, 053f8ed5)"
         },
         {
           "id": "controller-model-undecided",
