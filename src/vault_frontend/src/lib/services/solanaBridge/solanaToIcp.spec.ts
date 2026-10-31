@@ -665,4 +665,3 @@ describe('the state machine', () => {
     expect(reduceSolReturn({ kind: 'draft' }, { type: 'session_changed' })).toEqual({ kind: 'session_changed' });
   });
 });
-

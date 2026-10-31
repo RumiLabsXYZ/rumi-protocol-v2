@@ -775,4 +775,3 @@ export async function notifyReturn(
     return { ok: false, message: `The hint did not return a result (${errorMessage(error)}). The bridge still finds the transfer by itself.` };
   }
 }
-

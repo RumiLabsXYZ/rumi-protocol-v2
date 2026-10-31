@@ -143,4 +143,3 @@ export function buildSolanaToIcpDeps(opts: {
     isCurrent: opts.isCurrent,
   };
 }
-

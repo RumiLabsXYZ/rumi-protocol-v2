@@ -528,4 +528,3 @@ export async function requestSolDepositRefund(
     return { ok: false, message: `The refund request did not return a result (${errorMessage(error)}). Check the deposit status before trying again.` };
   }
 }
-

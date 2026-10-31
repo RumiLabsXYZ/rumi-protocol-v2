@@ -144,4 +144,3 @@ export function createFetchSolanaRpc(url: string, fetchImpl: Fetch = (input, ini
     },
   };
 }
-
