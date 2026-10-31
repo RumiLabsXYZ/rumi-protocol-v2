@@ -447,10 +447,10 @@
     },
     {
       "id": "BB-49",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Accepted: 49a, 49b, 49c (dba814d6, e3516aea), 49d (ea5be6ba, 4394b472) at source and local-test scope; pushed in head f91bf92d. 49e (Solana collector reader) in progress (W28, builder slot)",
+      "evidenceText": "proof=none; Accepted: 49a to 49d (pushed in f91bf92d). 49e delivered for review: 5885e248 (W28, local), Solana supply and custody reader for the host collector; mocks and fixtures only; no public RPC",
       "evidenceLinks": []
     },
     {

@@ -2075,6 +2075,42 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Hosted CI: Miles observed run 41178738885 on pushed `f91bf92d`, in progress. It is the existing Stability Pool deposit-intent
   workflow, not proof that the Solana or Sui requirements ran in hosted CI. Miles alone watches; no second watch or rerun.
 
+## Milestone 93 (2026-10-31): BB-49 49e delivered; CI success on f91bf92d
+
+- W28 (`claude-sonnet-5-5`) committed `5885e248f8df3f572938d43ad0f2bcb69d2667f9` "feat(multichain): Solana supply and custody
+  reader for the supply collector (BB-49 49e)", local only. Coordinator scope check: only `src/rumi_bridge_destinations`
+  (`collect.rs`, `live/{mod,ic,evm,solana}.rs`, the `collect_live` example docs and a new `collect_base_plus_solana.json`
+  fixture) and `chain-solana.md` section 13.2; no Cargo, lock, Sui or XRPL file; `git diff --check` exits 0.
+- What it does: the host reader (feature `live-transport`) reads the mint and the return account in one `getMultipleAccounts`
+  response per provider at `finalized`, so supply and custody share one context slot; providers are bound to the profile's
+  genesis hash; the agreed slot is the second-highest finalized `getSlot` (quorum 2); a provider whose context is below it does
+  not vote; a quorum of identical (supply, custody) answers wins. Accounts are parsed from raw SPL layouts (owner program, an
+  initialized 8-decimal mint, an initialized token account of that mint), never a provider's `jsonParsed` view. The collector
+  reads Solana before any ICP-side number, refuses a wrong head rule and custody above supply, requires the instance's
+  self-reported return custody, unknown burns and stray (assembled from `get_buckets` and `get_bridge_info`, record shapes
+  pinned to the Solana `.did`; never assumed zero), and the Solana supply bound counts RC and BU. This is the host collector
+  calling providers directly, not the canister's SOL RPC path.
+- Stated limits: Solana serves account state only at a node's own commitment, so the read cannot be pinned to one historical
+  slot; a change between providers shows as disagreement and fails the collection. The aggregate treats a landed but unapplied
+  burn as a custody Failure, stricter than the instance's Reconciling tolerance; the remedy is to collect again after the
+  instance applies it. No public RPC, no live transport run.
+- Evidence (saved files in the coordinator scratchpad `49e/`, not copied output): before the change, the pre-49e
+  `collect_fixture` rejects the new fixture (exit 2, unknown field `solana_supplies`) and, with the Solana fields stripped,
+  exits 1 ("cannot read destination supply of solana-mainnet: unavailable"). After: exit 0, flags none, status ok, Solana
+  circulating 89.50000000 (supply 102 less custody 12.5). Default tests 125 passed (116 before); `live-transport` 205 passed
+  (the crate was unchanged since `91a27a45`, where 176 passed). Clippy all targets exit 0 in both modes with only the
+  pre-existing `manual_is_multiple_of` lint allowed: the crate already failed `-D warnings` on three such hits in
+  `validate.rs` under toolchain 1.92 (baseline saved, exit 101), which W28 left untouched. wasm32 check exit 0 (host crate, not
+  a canister). Twelve single-line guard mutations each fail a named test (one test strengthened after its mutation survived).
+- Hosted CI: Miles verified run 41178738885 on exact pushed `f91bf92d` completed SUCCESS at 07:09:19 UTC. It is the existing
+  Stability Pool deposit-intent workflow, not native Solana or Sui test coverage. Watch stopped; no rerun.
+- BB-52 source clarification (Miles, addendum to `review-bb52-foundation-remaining.md`): at mainnet-v1.82.3
+  `sui-indexer-alt-graphql` `src/api/types/dynamic_field.rs`, `native()` (L708-738) separates the value bytes and layout from
+  the `Field<K,V>` wrapper and `value()` (L520-532) builds the MoveValue from V, so the selected `dynamicField { value }`
+  exposes V. BB-52's unwrapped mint and return decoders match that source; provider behavior stays unmeasured; no wrapper parser
+  or new gate. This narrows the wrapper limit stated in milestone 90.
+- Builder slot: released by W28, now with W29 for the BB-52 F1 to F3 correction.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
