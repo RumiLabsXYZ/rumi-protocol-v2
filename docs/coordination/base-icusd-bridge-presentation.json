@@ -1,5 +1,5 @@
 {
-  "summary": "Nine-chain icUSD groundwork complete and accepted by Miles at source and local-CLI level (9806e539): shared escrow design; EVM, Solana, XRPL and Sui notes; disabled-profile crate (63 tests passed; dry run 9 profiles, 19 networks, 0 violations); integrated plan with 20 queued future cards in six paused subprojects. PR #591 rewritten, still draft and unmerged. Base: Sepolia CLI round trip public-settled; browser test BB-27 blocked on Rob. Nothing deployed, signed, funded or activated; D6 open.",
+  "summary": "Implementation opened 2026-10-30 (Rob via Miles): local source for the queued EVM and shared-reporting cards, a couple at a time. BB-42 in progress on Sonnet (Base-only chain table, slug templates, byte-for-byte Base id pins); a read-only BB-58 analytics inventory runs on Haiku. The Base Sepolia CLI round trip passed earlier; the browser-wallet test (BB-27) still waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled. Solana, XRPL and Sui are source-authorized but held behind by rank; D6 stays open.",
   "glossary": [
     {
       "term": "proof=source",
@@ -509,5 +509,5 @@
       "definition": "A priority status for queued future work that has not started and begins only when Rob or Miles opens that phase."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. Plans for eight more networks are finished and switched off, and the build steps are queued for later. Rob only needs to finish that sign-in now; control of each piece is his call later."
+  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test still waits for Rob to sign in and unlock his wallet. Work has now started on letting the bridge serve more networks, beginning with shared naming rules that keep Base exactly as it is. Nothing new is switched on."
 }

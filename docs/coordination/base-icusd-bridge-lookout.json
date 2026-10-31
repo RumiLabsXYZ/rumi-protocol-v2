@@ -391,10 +391,10 @@
     },
     {
       "id": "BB-42",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "EVM: slug templates, Base-only chain table and Base domain regression check",
-      "evidenceText": "proof=none; A base slug reproduces the live Base domains, escrow label, key root and salt byte for byte; focused ids tests pass; no deployed upgrade",
+      "evidenceText": "proof=none; Claimed 2026-10-30 from 1701ebf7: Base-only chain table, slug templates for the two mint domains, escrow label, key root and salt; Base strings and ids pinned byte for byte [truncated]",
       "evidenceLinks": []
     },
     {
@@ -519,10 +519,10 @@
     },
     {
       "id": "BB-58",
-      "state": "Queue",
-      "owner": "worker-sonnet",
+      "state": "In progress",
+      "owner": "worker-haiku",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=none; Per-destination audits summed outside any canister with index sets D and X, custody and strays counted once; analytics subtracts escrow from circulating supply",
+      "evidenceText": "proof=none; Only a read-only inventory of the analytics supply formula and its focused tests runs now; source edits wait for BB-42 acceptance and a Sonnet owner",
       "evidenceLinks": []
     },
     {

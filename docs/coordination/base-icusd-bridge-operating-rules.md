@@ -2,7 +2,7 @@
 
 These rules apply to every agent working in this worktree on the Base bridge and, from 2026-10-30,
 on the nine-chain Multichain icUSD groundwork (same board, same Lookout project, display title
-"Rumi · Multichain icUSD").
+"Rumi · Multichain icUSD"), and from the evening of 2026-10-30 on its local implementation (BB-42 to BB-60).
 
 ## Coordination files
 
@@ -200,3 +200,24 @@ private key or password access, production activation, or merge. Workers are Cla
 (research, architecture, code) and Claude Haiku (inventory, documentation, mechanical checks)
 subagents only, at most two Sonnet lanes plus one Haiku task at once, with the actual model read
 from each run's record. No Codex agents.
+
+Multichain implementation (Rob, 2026-10-30, relayed by Miles): Rob's goal is "Work through your prioritized queue of
+tasks with Sonnet and Haiku. Keep the work focused on a couple of tasks at a time. Keep the lookout board updated."
+Authorized: local source and dependency changes for BB-42 to BB-60 in rank order, isolated local tests with ephemeral
+keys and transactions, commits, push, the draft PR and the same sanitized Lookout metadata. Still not authorized: merge,
+deployment, public signing, broadcast or funding, governance, controller or role changes, production or new-network
+activation, and any wallet use (BB-27 stays blocked on Rob's own sign-in and wallet consent). BB-46 live probes and BB-61
+custody decisions stay held; their source and runbooks may be prepared. Staffing as for the groundwork, plus one build
+executor and exclusive file ownership per card; the coordinator owns shared interfaces and integration.
+
+Historical claims versus new work: the groundwork statements that no bridge runtime, backend, Foundry, frontend or
+declaration file changed after `4169feb8` describe commits up to `1701ebf7` only. From BB-42 on, implementation cards
+change bridge runtime source by design. Each card must keep the Base Candid interface, stable-state decoding, signing
+bytes and durable ids unchanged unless the card says otherwise, and no configured chain beyond Base is enabled.
+
+Delivery policy: the primary checkout's `docs/coordination/DEMO_FIRST_DELIVERY_POLICY.md` applies (focused functional and
+required checks only, reuse valid evidence, focused review for a concrete changed signing, domain or accounting risk, no
+standing review committee). Actual omissions go in `docs/coordination/demo-deferred/multichain-icusd.md`. An unknown
+transaction outcome is reconciled on the same attempt before any retry. Worker skills: `rust-canister-engineering` and
+`canister-security` for canister cards, `evm-rpc` for the EVM RPC paths, `icp-cli` only for local tooling questions.
+Disk is near full: reuse this worktree's `target/`, add no worktree or target directory, delete nothing as a workaround.

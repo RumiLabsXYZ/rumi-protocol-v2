@@ -24,9 +24,9 @@
     {
       "id": "evm-implementation",
       "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
-      "status": "paused",
-      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. HyperEVM and Monad also keep their read-evidence blockers.",
-      "nextAction": "Start with BB-42 (slug templates and the Base domain regression check), then BB-43.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "BB-42 in progress (slug templates and the Base domain regression check, Sonnet worker); then BB-43, then BB-44 and BB-45. BB-46 live probes stay held for separate authorization; HyperEVM and Monad keep their read-evidence blockers.",
       "cardIds": [
         "BB-42",
         "BB-43",
@@ -38,9 +38,9 @@
     {
       "id": "shared-reporting-frontend",
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
-      "status": "paused",
-      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. ",
-      "nextAction": "Start with BB-58 (aggregate reporting and analytics escrow subtraction) and BB-59 (destination selection).",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "A short read-only BB-58 inventory of the analytics supply formula runs now (Haiku); BB-58 source edits start after BB-42 is accepted, then BB-59 after BB-43, then BB-60.",
       "cardIds": [
         "BB-58",
         "BB-59",
@@ -51,7 +51,7 @@
       "id": "solana-implementation",
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "paused",
-      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. ",
+      "blockedReason": "Source-authorized since 2026-10-30, held behind higher-ranked work: Rob asked for a couple of tasks at a time, so this starts when EVM and shared reporting source work closes or a real dependency frees a lane.",
       "nextAction": "Start with BB-47 (instance skeleton and message builders); doing BB-58 first is a scheduling preference, not a prerequisite.",
       "cardIds": [
         "BB-47",
@@ -64,7 +64,7 @@
       "id": "xrpl-follow-ups",
       "title": "XRPL follow-ups to PR #586",
       "status": "paused",
-      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. Local work may use a stacked or rebased PR #586 branch; no merge is required for it.",
+      "blockedReason": "Source-authorized since 2026-10-30, held behind higher-ranked work: Rob asked for a couple of tasks at a time, so this starts when EVM and shared reporting source work closes or a real dependency frees a lane.",
       "nextAction": "Start with BB-55 (15-digit wiring and cap clamps) on PR #586's head or a branch stacked on it.",
       "cardIds": [
         "BB-55",
@@ -76,7 +76,7 @@
       "id": "sui-implementation",
       "title": "Sui implementation (Move gate)",
       "status": "paused",
-      "blockedReason": "Queued future implementation, not started: begins only when Rob or Miles opens the implementation phase. ",
+      "blockedReason": "Source-authorized since 2026-10-30, held behind higher-ranked work: Rob asked for a couple of tasks at a time, so this starts when EVM and shared reporting source work closes or a real dependency frees a lane.",
       "nextAction": "Start with BB-51 (Move gate package and unit tests); doing BB-58 first is a scheduling preference, not a prerequisite. External Move review is deferred to pre-real-value work.",
       "cardIds": [
         "BB-51",

@@ -911,6 +911,26 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   added the branch-URL link to this lane file in the primary checkout's `DEMO_DEFERRED_WORK.md` index, preserving its contents.
   Groundwork is closed; BB-42 to BB-61 stay queued and no implementation has started.
 
+## Milestone 39 (2026-10-30): implementation phase opened; BB-42 started
+
+- Rob's goal (relayed by Miles): "Work through your prioritized queue of tasks with Sonnet and Haiku. Keep the work focused
+  on a couple of tasks at a time. Keep the lookout board updated." This opens local source delivery of BB-42 to BB-60 in rank
+  order. Same coordinator, board, Lookout project, branch and worktree. Starting head `1701ebf7`; the groundwork evidence on
+  `9806e539` (63 host tests, dry run 9 profiles and 19 networks) stays valid until a card changes that crate.
+- Historical claims versus new work: every earlier statement that no bridge runtime, backend, Foundry, frontend or
+  declaration file changed after `4169feb8` covers commits up to `1701ebf7` only. BB-42 onward change bridge runtime source by
+  design, keeping the Base Candid interface, stable-state decoding, signing bytes and durable ids unless a card says otherwise.
+- Still held: merge, deployment, public signing, broadcast or funding, governance, controller or role changes, production or
+  new-network activation, any wallet use (BB-27), BB-46 live probes and BB-61 custody decisions.
+- Priorities: `evm-implementation` and `shared-reporting-frontend` in progress; Solana, XRPL and Sui source-authorized but held
+  behind them by rank; D6 and production launch unchanged.
+- Staffing at dispatch (actual models read from each run's record right after start):
+
+  | Handle | Card | Scope | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- | --- |
+  | W22 | BB-42 | `ids.rs`, new `chains.rs`, `lib.rs`, one `state.rs` call site and test call sites; sole build executor | Sonnet | `claude-sonnet-5-5` | running |
+  | W23 | BB-58 inventory | read-only: analytics supply formula, bridge audit fields, focused test commands; no build | Haiku | `claude-haiku-5-5` | running |
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
