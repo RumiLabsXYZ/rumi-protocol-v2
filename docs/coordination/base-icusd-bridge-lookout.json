@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b delivered for review: 1b71eae8 (W29, local), HTTPS transport, observed binding, mint lane, held-release re-mint; 294 tests, clippy and wasm32 clean. 53c in progress",
+      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b 1b71eae8 in review with a correction (W29): a later signing refusal must not clear an earlier unknown signature; a pause or halt must stop the final send",
       "evidenceLinks": []
     },
     {

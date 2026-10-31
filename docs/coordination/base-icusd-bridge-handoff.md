@@ -2485,6 +2485,22 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   refunds it; one operation at a time.
 - Next: 53c from `1b71eae8` (verified returns from the durable ReturnRecord, monitors, audit, release).
 
+## Milestone 107 (2026-10-31): BB-53 53b first review, correction
+
+- Miles (`review-bb53b-first.md`) at frozen `1b71eae8`; 53b not accepted yet, the review of transport, binding and the lane
+  continues.
+- F1: `flows/mint.rs` `begin_sign` marks the role's signature as possibly existing, but `finish_sign(Failed)` clears the flag
+  unconditionally. With Treasury Unknown and Gas Signed, a later same-attempt Treasury retry that fails definitely clears the
+  earlier uncertainty, the attempt looks incomplete, and `admin_abandon_mint_op` or `check_unsigned_expiry` can judge it never
+  signed, fail it to a held deposit and enable a refund through `prior_ops_provably_dead`. A later refusal does not prove an
+  earlier call never signed. Fix: durable per-role signing-outcome tracking with a continuation fence; only a verified stored
+  signature resolves that role's uncertainty; a first-call definite refusal keeps its ordinary behavior.
+- F2: after the final Gas signing await, `drive_op` calls `maybe_send`, which has no `lane_guard`, so a mint pause or bridge halt
+  set during that await does not stop the broadcast. Fix: recheck the current pause and halt before persisting or invoking a
+  send; the signed attempt stays held with its exact bytes; existing reconciliation policy unchanged.
+- Same W29, one focused correction with old-red and new-green lane regressions through the actual `mint_pass` and `ChainSim`;
+  53c work in progress preserved and resumed after it. One Rust builder; no new reviewer, CLI or public probe.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
