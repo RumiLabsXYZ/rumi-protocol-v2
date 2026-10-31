@@ -108,8 +108,12 @@ touch `MultiChainState`. Escrowed icUSD is ordinary ICP ledger supply. No destin
 | `U_d` | Outflow of escrow transfers whose outcome is unknown | `unknown_outflow` | in `ic_fee_reserve` terms |
 
 `L_d = O_d + PM_d + RC_d + BU_d + PR_d + RF_d + H_d + F_d`; each e8 of liability is in exactly one bucket. Origin tag per claim: `imported` (existing canonical icUSD pulled
-with ICRC-2) or `debt_originated` (PR #586 borrow path only). Only `imported` counts toward the "no new debt" claim. PR #586's `O` has no
-origin split yet (BB-37), so the XRPL origin report is implementation missing.
+with ICRC-2) or `debt_originated` (PR #586 borrow path only). Only the import operation creates no borrowing debt. For the fungible XRPL
+lane the accepted report (Miles, 2026-10-31, BB-57) is a cumulative movement report, not a per-token origin split: exact
+delivered-by-import, delivered-by-borrow and delivered-by-refund totals since a recorded time, `returned_total` for every
+O reduction, a one-time `legacy_outstanding_at_init`, and the visible reconciliation
+`O = legacy + import + borrow + refund - returned`. Outstanding tokens are fungible and are never assigned an origin, and
+all issued `O` is never labelled debt-free.
 
 ### 2.3 Invariants (per destination, enforced inside its own instance)
 

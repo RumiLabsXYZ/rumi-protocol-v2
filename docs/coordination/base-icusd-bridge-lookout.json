@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; 0a315971 part A and dd817f27 (single in-flight pay, accepted). Now: XRPL lane reader for the collector; then the origin report once its model is adjudicated, and Wasm size and PocketIC on the builder lane",
+      "evidenceText": "proof=none; 0a315971 part A and dd817f27 accepted fixes. Now the XRPL lane reader for the collector; then the adjudicated cumulative origin movement report (one query, exact counters, one-time baseline); then Wasm size and PocketIC once",
       "evidenceLinks": []
     },
     {

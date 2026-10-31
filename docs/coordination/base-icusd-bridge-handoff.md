@@ -1457,6 +1457,22 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   only; independent reads of `E_X` and the issuer's validated obligations with a provider quorum; mocks only), before W28's
   Solana reader step touches the same crate.
 
+## Milestone 65 (2026-10-31): origin model adjudicated
+
+- Miles (`xrpl-origin-decision.md`): proceed with the cumulative movement model. Refunds stay a third delivered bucket;
+  counters are exact, cumulative, never rounded, saturated or decremented; each finalized D to O and each actual O reduction
+  is counted once at its existing single transition, with replay and idempotency preserved. The legacy baseline is set once
+  after the snapshot is restored, in `on_post_upgrade` before the timer, with an explicit persisted marker and an
+  ensure-initialized guard before any O mutation (a return may come first); repeated upgrades never reset it; no inference
+  from pruned history. The report gives exact decimal strings, the since time, aggregate fungible O, current R separately and
+  the visible reconciliation; `returned_total` measures removed XRPL obligations, not completed ICP payouts; debt-backed
+  `chain_supplies` and vault debt untouched. One additive query with canonical bindings is required; a frontend display is
+  optional. PocketIC and the Wasm size run once at the final source pin in the builder slot.
+- Wording updated in the design (section 2.2) and the plan rows from "origin split for outstanding" to this movement report,
+  so no reviewer is promised a per-token origin.
+- Queued for the same W29 after its XRPL reader commit; W28 keeps BB-49; collector crate ownership stays disjoint between
+  the native reader steps.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

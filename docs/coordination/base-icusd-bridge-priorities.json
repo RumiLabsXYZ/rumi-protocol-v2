@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-56 in Review for the origin report (model sent to Miles). BB-57 in progress (same W29): XRPL lane reader for the collector now, then the adjudicated origin report, then part B (Wasm size under 10 MiB, PocketIC) when the builder lane frees.",
+      "nextAction": "BB-57 in progress (same W29): XRPL lane reader for the collector, then the adjudicated origin movement report (refunds a third bucket; one-time baseline after restore, never reset), then part B (Wasm size and the XRPL PocketIC suite) once at the final pin in the builder slot. BB-56 closes with the report.",
       "cardIds": [
         "BB-55",
         "BB-56",
