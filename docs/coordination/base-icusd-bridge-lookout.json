@@ -495,18 +495,18 @@
     },
     {
       "id": "BB-55",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "XRPL: 15-digit wiring and cap clamps on PR #586's module",
-      "evidenceText": "proof=local-test; f887fab5 not accepted yet (Miles): a cap-held claim can be reissued while the cap still refuses it, and resumed issuance can cross the ceiling before detection; same W29 makes a separate small fix commit",
+      "evidenceText": "proof=local-test; f887fab5 plus 868ebca8: reissue of a cap-held claim respects current caps (counted once); exposure checked against the ceiling before any new issuer attempt or signature; reproduced first; 161 focused tests; local branch",
       "evidenceLinks": []
     },
     {
       "id": "BB-56",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "XRPL: no-vault return to an ICP account",
-      "evidenceText": "proof=none; Claimed 2026-10-31 on the same stacked branch: no-vault canonical return as an internal module API (tag, attribution on delivered amount, payout job, refunds, separation from repayment); Candid and endpoints stay for BB-57",
+      "evidenceText": "proof=local-test; e48dc18d: no-vault return internals: lifetime-bound destination, tag from the repayment counter, credit on delivered amount from the bound payer only, persisted payout job, refunds, no vault effects; 155 focused tests; no Candid",
       "evidenceLinks": []
     },
     {

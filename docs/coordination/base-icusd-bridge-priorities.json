@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-55 correction (same W29, separate small commit): reissue and resumed issuance must respect the current caps and the 15-digit ceiling before any attempt or signature. BB-56 in progress (same W29). Then BB-57.",
+      "nextAction": "BB-55 correction and BB-56 in Review (868ebca8, e48dc18d; local branch, not pushed). Next: BB-57 source part (endpoints, Candid, declarations, frontend Return and opt-in cards); its Wasm size check and PocketIC run go through the one builder when free.",
       "cardIds": [
         "BB-55",
         "BB-56",

@@ -1304,6 +1304,35 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   same persisted attempt reused for unknown outcomes; historical repayment and refund amounts stay exact. Reproduction first;
   focused `xrpl_icusd` tests only.
 
+## Milestone 58 (2026-10-31): batched push; BB-55 correction and BB-56 in Review
+
+- Push (Miles' cadence): one batched push at 04:00:16 UTC, `10c18502..2d5201b4` (15 commits) to `codex/base-icusd-bridge`;
+  remote head verified equal to local `2d5201b4`. Evidence from here on is again local until the next cohort push.
+- BB-56 `e48dc18d` (W29, local branch `codex/xrpl-icusd-followups`): `returns.rs` and `return_tests.rs`; `prepare_xrpl_return`
+  internal API (lifetime-bound destination, an all-zero subaccount stored as none; tag from the repayment counter indexed in
+  `tag_index`; same nonce returns the same operation and tag; 7-day expiry; exact Payment JSON without Paths, SendMax or
+  Flags); attribution only for a validated `tesSUCCESS` payment from the bound payer to an open return tag, credited from
+  `delivered_amount`, with the trust-line check and quarantine; `O` down at attribution, value held, credited whole e8s shown
+  as `R` until the payout block is fetched back and matched; refunds through the existing aggregate path; the tag's handler
+  chosen by operation kind, no vault, freeze, event or burn effects. Worker run: `xrpl_icusd` 155 passed (129 plus 26);
+  `check_candid_interface_compatibility` passes. State: a new enum variant only; a pre-BB-56 snapshot decodes; a snapshot
+  holding a Return cannot be read by an older module (rollback after the first Return unsupported). Interim item for Miles:
+  `OperationKind::tag()` maps Return to the Candid-visible `Repayment` label until BB-57 adds `OperationKindTag::Return`; no
+  endpoint creates a Return before then. Origin split of outstanding supply left for BB-57 (needs counters and Candid).
+- BB-55 correction `868ebca8` (W29, on top of BB-56, because BB-56's uncommitted edits touched the same issuance and
+  reissue paths): reproduction first (`Ok(Reissue)` under a lowered per-operation cap; four new tests failed with the ceiling
+  stubbed); `ReissueXrpl` respects the current effective caps in both `plan_resolution` and `apply_reissue` without counting
+  the claim twice; `ReceiveCanonical` unchanged; `check_issuance_ceiling` (recorded `O` plus signed in-flight issuance plus
+  the new payment against 999,999,999,999,999 e8s, from the authoritative buckets) runs in `drive_delivery` before any
+  outcall or signature and again in `begin_attempt`; ambiguous attempts still reconcile on the same attempt. Worker run:
+  `xrpl_icusd` 161 passed. Coordinator review: both commits stay inside `xrpl_icusd`; PR #586's branch still at `b02584e4`.
+- XRPL branch push: checked first that the only workflow (`sp-deposit-intent-proof.yml`) triggers on `pull_request` only, so a
+  branch push without a PR starts no hosted run. The push was then DENIED by the automatic review. Exact action:
+  `git push -u origin codex/xrpl-icusd-followups` (from the XRPL follow-up checkout). Exact reason: "Permission for this
+  action was denied by the Claude Code auto mode classifier. Reason: The server-side auto mode classifier judged this action
+  dangerous (it gave no explanation)." Not retried by any other route. Read-only check afterwards: no remote follow-ups
+  branch exists; PR #586's branch unchanged at `b02584e4`; the work is local at `868ebca8`.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
