@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-59 correction in progress (same W27: bind ICP to Base retries to the intent's destination), then BB-60 (profile reader, per-network destination keys, EVM profile upkeep) with the same owner.",
+      "nextAction": "BB-59 and BB-60 in Review (103ad82c, 28ba5867). Remaining frontend family connectors (BB-50 Solana, BB-54 Sui) follow their family cards.",
       "cardIds": [
         "BB-58",
         "BB-59",

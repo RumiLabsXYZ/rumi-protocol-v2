@@ -1187,6 +1187,30 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   instance never share one new intent destination key, and a keyless legacy intent binds to the page's Base network. The
   coordinator runs the Rust validator and dry run at integration (W28 stays the sole Rust builder).
 
+## Milestone 52 (2026-10-31): BB-59 fix and BB-60 delivered
+
+- BB-59 fix `103ad82c` (W27, same run; local, not pushed): `submitToBridge` refuses, synchronously and before any signer
+  call, an intent whose destination differs from the deps' destination (`intentBindingMessage`); the intent and request id
+  are left unchanged. Already-run results from W27's handback: `signingGuard.spec.ts` 6 failed and 25 passed before the fix
+  (reproduction), 31 passed after; all bridge specs 17 files, 485 passed, 1 skipped; `npm run check` 30 errors and 66
+  warnings, problem list identical to baseline. Miles found the source sound; acceptance pending this receipt.
+- BB-60 `28ba5867` (W27, same run): pure `profiles.ts` reader (amounts validated as canonical decimal u64 strings, a JSON
+  number there is an error; identities stay strings; duplicates refused) with `profiles.spec.ts` over the real nine files;
+  not wired into the page (the files carry about 165 KB of internal prose); destination ids are now profile network ids
+  (`base-mainnet`, `base-sepolia`, `ethereum-mainnet`, ...), the Base key comes from the configured actor's chain id (8453,
+  84532, 31337; an unknown chain is a disabled `base-unknown` that never gets a writable key); keyless legacy intents belong
+  only to the page's Base destination; a version 2 intent keyed with a bare family label is unreadable and goes to the
+  existing recovered path. EVM profile upkeep: `evm-wasm-generalization` retired on the five EVM profiles and replaced by
+  `evm-instance-not-activated` (external); Monad and Arbitrum code blockers reworded to the remaining measurements or the
+  fast-tag probe; Robinhood and HyperEVM blockers say the chain table keeps those rows closed; status stays `disabled`,
+  `instance_ref` null; Base, Solana, Sui and XRPL profiles untouched. Worker run: bridge vitest 18 files, 521 passed, 1
+  skipped; check at baseline; build passes. Coordinator check: `cargo test --offline -p rumi_bridge_destinations` 107 passed
+  and the dry run `OK: 9 profiles, 19 networks, 0 violations (date 2026-10-31)` on the edited profiles; reran the bridge
+  vitest at `28ba5867` (521 passed, 1 skipped).
+- Naming note for BB-46: the chain table's Robinhood blocker is `robinhood-finalized-tag-probe` while the profile id the
+  validator requires is `robinhood-finalized-tag-unverified`; align them when BB-46 flips the row.
+- Lanes: W28 (BB-47, sole Rust builder) running; W27 free.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
