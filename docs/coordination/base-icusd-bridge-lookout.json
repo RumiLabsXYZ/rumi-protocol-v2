@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b 1b71eae8 in review with corrections e2507b16 (F1, F2) and 5da0804e (F3, F4), all delivered; 306 tests, clippy and wasm32 clean. 53c in progress (W29)",
+      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b accepted (Miles) at component scope: 1b71eae8 with e2507b16 and 5da0804e (transport, observed binding, mint lane, re-mint). 53c in progress (W29), then 53d",
       "evidenceLinks": []
     },
     {
@@ -490,7 +490,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Sui: Wallet Standard connector and return flow",
-      "evidenceText": "proof=none; Sui Wallet Standard adapter, address validator and return flow; disabled destination makes zero wallet calls; focused vitest passes",
+      "evidenceText": "proof=none; Waits for frozen Sui interfaces (53c return views). When it starts: real /bridge page flow and recovery, readiness from get_mint_lane; the pinned official @mysten/sui npm SDK is allowed; no CLI, keys or network",
       "evidenceLinks": []
     },
     {

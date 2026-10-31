@@ -2574,6 +2574,41 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   `53b-f3f4-wasm.log` exit 0.
 - 53b (with both corrections) waits for Miles' acceptance; W29 resumed 53c from `5da0804e`.
 
+## Milestone 111 (2026-10-31): BB-53 53b accepted
+
+- Miles (`accept-bb53b.md`) accepted 53b at source and local-test component scope: feature `1b71eae8`, F1 and F2 `e2507b16`,
+  F3 and F4 `5da0804e921acc315e928af06399f79a29bcda0f`. The F3-only `8801f837` was amended locally into `5da0804e` on the same
+  `6864f6f2` parent with an identical `reads.rs` correction; final evidence uses `5da0804e`. Whole BB-53 stays in progress.
+- Accepted corrections: per-role clean-start and latest-call fences keep earlier or overlapping unknown signatures across a later
+  refusal (old images default the counters to 0 and keep their unknown flags); pause and halt rechecked synchronously at send,
+  keeping the exact signed attempt; the head transform uses the shared errors policy before tally (the send transform stays a
+  constant maybe-sent acknowledgement, never proof of execution or non-execution); the current final-checkpoint floor and gas
+  coin and budget rechecked in both create and append admission after the async gather.
+- Positive source as Miles recorded it: provider identity and version exclusions before a strict quorum; observed binding
+  separate from configured identity; cap and gas ownership and layout validation; typed transaction digest distinct from the
+  signing digest; the operation and deposit link committed synchronously before signing; every prior attempt and the back-index
+  checked before retry or refund (the 53a MC-DEF-11 placeholder now implemented); delivery from a consumed mint id with matching
+  recipient and amount, unknown expiry held; re-mint H to PM to O in its own id domain with no debt, payable claim or gas paid
+  from backing; stable maps 14 and 15 with additive defaults; no new public proof-accepting payout endpoint. Not touched: the
+  backend, debt `chain_supplies` or any repayment contract.
+- Evidence read directly by Miles (not rerun): F1 and F2 red 3 failed 2 passed, green 5, full 300; F3 red 2 failed 1 passed
+  including `Agreed(1100)` from raw errors, green 5; F4 red 3 failed, green 3 with fresh-read recovery; final 306 passed, 0
+  failed; clippy and the wasm32 check finish; `candid_interface_matches_checked_in_did` passes; frozen diff-check clean. A wasm32
+  check is not an installed or release Wasm proof. The pinned schema, `query.rs` and `CoinMetadata::by_coin_type` agree with the
+  queries, with the registry currency supported before the legacy fallback (source check, not a provider capture).
+- Limits kept (MC-DEF-13): simulated chain and schema-derived responses; no public RPC or real threshold call; gas, cycles,
+  availability, retention, head cadence and aborted-object-version behavior unmeasured; no module bytes, UpgradeCap or
+  regulated-state proof; unknown signed outcomes can stay held indefinitely; controller and admin trust roots disclosed.
+  `ConfigView.signing_enabled` is a legacy, non-authoritative, always-false field, not an enforcement switch; BB-54 must use
+  `get_mint_lane` `ready` and `blocked_by`.
+- BB-54 dependency decision (Miles): the minimal official `@mysten/sui` npm SDK (and Wallet Standard types if required), pinned
+  exact with the lock updated per the official current source and docs, is allowed for local BB-54 code and tests when its real
+  page-flow task starts; no Sui CLI, default wallet, bootstrap or key access; endpoints and profiles stay empty and disabled; no
+  real wallet or network call; no further dependency approval needed. Full page integration and recovery remain BB-54's
+  definition of done. W28 waits until the return-facing interfaces are frozen.
+- Push: accepted BB-62 and 53b with their corrections and records form the next push to PR #591; W29's uncommitted 53c edits and
+  the denied XRPL work are excluded.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
