@@ -2969,6 +2969,38 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   comparison); the coordinator runs the existing profile dry-run once afterwards. Does not gate BB-54. Lanes: W28 on the BB-54
   correction plus this one Haiku task.
 
+## Milestone 125 (2026-10-31): BB-54 W29 F-1 and F-4 corrected
+
+- W28 committed `25852bb246635dc7916b6307b7ed2227888bcde9` "fix(frontend): BB-54 W29 findings F-1 (exact release binding) and F-4
+  (exact saved-bridge binding)", local only, on `8f9af1e0` (over `412f1fda`, which is intact). Coordinator scope check: 11 files,
+  all Sui frontend (`suiBridge/` services and specs, `SuiToIcpForm.svelte`, `IcpToSuiForm.svelte`, `bridgeSui.spec.ts`); no shared
+  EVM or Solana source; `git diff --check` exits 0.
+- F-1: `matchRelease` compares a returned record with the attempt's transfer id, sender, client nonce, exact amount, ICP owner
+  and subaccount (default and explicit all-zero the same canonical account) and the saved typed digest; each difference names the
+  record's actual value; `ReturnEvidence.deviation` added and `release` holds a record only when it is exactly this attempt; a
+  mismatch is verdict `deviation` ("The bridge recorded a different transfer"), never credited or done and not discardable;
+  `trackReturn` stops polling on a deviation and marks done only from a validated release; banner and card share the result
+  ("You reviewed: ..."). A swallowed read `catch` that could hide a programming error was moved out of the comparison path.
+- F-4: `savedIdentityMessage` and `identityMatches` in `config.ts` compare the persisted instance canister, full chain identifier,
+  package, Gate and coin type with the bridge in use, for return and deposit intents. Return direction: checked before
+  `continuePrepared`, `rebroadcastReturn` and in `startReturn`; `reconcileReturn` reads nothing from the new canister or node for
+  an earlier bridge's attempt and returns `wrong_instance` naming the original bridge. ICP direction: checked in `resumeIcpToSui`
+  (no lookup), `bridgeAfterApproval`, `retryIcpToSui` and `submitToBridge`; forms refuse an old deposit and tag an earlier
+  bridge's row. Shared EVM and Solana signing helpers unchanged.
+- F-3: an SDK "needs a Sui client" or zkLogin error now returns `unsupported_signature` ("NOT found invalid, but it cannot be
+  accepted here"); validation never skipped. F-2: the safe hold unchanged; the banner states that an attempt interrupted while
+  the wallet was open cannot be told apart from one another page is still waiting on. An earlier bridge's `prepared` attempt stays
+  discardable (the wallet was never asked); other unresolved old-bridge attempts still block a new return on the device.
+- Evidence (saved files in the coordinator scratchpad `bb54g/`): `red_all_old_code.txt` restored the six `412f1fda` source files and
+  ran the new specs: 18 failed, 85 passed (2 shape-only for the new `deviation` field, 1 wording, the rest behavior: for example
+  "a Released record for another amount must leave the original held: expected 'done' to be 'held'", "another subaccount: expected
+  'credited' to be 'deviation'", a prepared attempt and a signed rebroadcast of another bridge "expected { type: 'sent' } to match
+  object { type: 'blocked' }", the old code reading the new canister for the old transfer id, an approved ICP request resumed on
+  another bridge, and an old broadcast return shown as Released from the new canister); `final_focused_vitest.txt` 10 files, 178
+  passed; `final_check.txt` 30 errors, 66 warnings, 25 files, equal to the baseline; `final_build.txt` exit 0. Selected-family
+  page specs for Base and Solana not rerun (no shared source changed).
+- Omissions: no zkLogin or multisig verifier; a wallet-reported digest not kept as a hint; W29's other observations deferred.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
