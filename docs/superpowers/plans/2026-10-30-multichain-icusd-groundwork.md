@@ -46,8 +46,8 @@ Source: `docs/coordination/multichain/chain-evm.md` (changes C1 to C11, steps S1
 | BB-42 | Slug templates for domains, escrow label, key root and salt; chain table with Base rows only; Base domain and id regression check (C1, C2, C8, T1) | `src/rumi_icusd_bridge/src/ids.rs`, `state.rs` (or a new `chains.rs`), `lib.rs` | BB-40 | `cargo test -p rumi_icusd_bridge --lib ids::tests` | S |
 | BB-43 | Table-driven init and RPC validation; head-rule dispatcher (finalized tag with quorum, Monad Verified head at finalized minus 3, Blocked); existing finalized-head, init and ICRC-21 tests unchanged (C3, C4, C7, C9, T2 to T8) | `state.rs`, `evm/rpc.rs`, `observer.rs`, `icrc21.rs`, `views.rs` | BB-42 | `cargo test -p rumi_icusd_bridge --lib state::tests::init_validation` and `--lib evm::rpc::tests` | M |
 | BB-44 | Additive native RPC-service variants (D1b), declarations regenerated canonically (C5, C6) | `types.rs`, `evm/rpc.rs`, `rumi_icusd_bridge.did`, generated declarations | BB-43 | `cargo test -p rumi_icusd_bridge --lib candid_interface_matches_checked_in_did` | S |
-| BB-45 | Per-chain defaults (gas caps, gas limits, log chunk sizes, Monad reserve) and a sibling Foundry deploy script with its own allow-list (C10, C11, CFG-2 to 7); the existing Base script is not edited | `state.rs`, `admin.rs`, `foundry/script/` (new), `foundry/test/` | BB-43 | `forge test --match-contract <new deploy test>` and `cargo test -p rumi_icusd_bridge --lib admin::tests` | M |
-| BB-46 | Per-chain activation evidence, held for separate authorization: Robinhood keyless providers and `finalized` tag probe, Monad fast-tag consensus, HyperEVM exit (archive-capable independent providers or a reviewed observer redesign) | profile notes and evidence only | BB-43, separate probe authorization | read-only probe records (none run now) | L |
+| BB-45 | Per-chain defaults (gas caps, gas limits, log chunk sizes, Monad reserve) and a sibling Foundry deploy script with its own allow-list (C10, C11, CFG-2 to 7); the existing Base script is not edited. **Delivers actual configurable EVM source support:** opens the canister install gate for the Ethereum, Arbitrum and Monad rows (mainnet and testnet), so their init, RPC validation and head-rule paths run in local tests. Robinhood's gate opens only with its BB-46 tag probe record (head rule stays `Blocked` until then); HyperEVM's only with archive-capable independent providers or a reviewed observer redesign (`hyperevm-historical-state`). Catalog profiles stay `disabled`; real installs and activation stay held. Ethereum's realistic providers come from BB-44's native variants (not a source gate) | `state.rs`, `admin.rs`, `foundry/script/` (new), `foundry/test/` | BB-43 | `forge test --match-contract <new deploy test>` and `cargo test -p rumi_icusd_bridge --lib admin::tests` | M |
+| BB-46 | Per-chain activation evidence, held for separate authorization: Robinhood keyless providers and `finalized` tag probe (a passing record flips the Robinhood row's head rule and install gate in this card), Monad fast-tag consensus, HyperEVM exit (archive-capable independent providers or a reviewed observer redesign; a redesign is new source work with its own card) | profile notes and evidence only | BB-43, separate probe authorization | read-only probe records (none run now) | L |
 
 ### 3.2 Shared reporting and frontend (rank 4)
 
@@ -96,6 +96,10 @@ Source: `docs/coordination/multichain/chain-sui.md` (sections 2 to 4 and 8).
 | BB-61 | D6: controllers, production custody (EVM admin, Solana mint authority, Sui UpgradeCap, XRPL issuer policy) and authority activation per network | Rob, with Miles | none; gates live activation, not source work |
 
 ## 4. Activation prerequisites (stay disabled until all hold)
+
+Source support and activation are separate. BB-43 adds the non-Base EVM rows with the install gate closed as an interim
+state; BB-45 opens it at source level for the supported rows (above). The catalog `disabled` status, real installs and
+activation below are unaffected by that.
 
 Each profile in `src/rumi_bridge_destinations/profiles/` lists its blockers; the validator rejects any enabled status. The
 main ones: HyperEVM historical state; Monad Verified head; Robinhood `finalized` tag and keyless providers; Solana guard,

@@ -26,7 +26,7 @@
       "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-43 in progress (Sonnet); then BB-44 and BB-45. BB-46 live probes stay held for separate authorization; HyperEVM and Monad keep their read-evidence blockers.",
+      "nextAction": "BB-43 in progress (Sonnet); then BB-44 (native providers) and BB-45, which opens the install gate for Ethereum, Arbitrum and Monad at source level. Robinhood waits on its BB-46 probe and HyperEVM on archive-capable providers or an observer redesign; BB-46 probes stay held for separate authorization.",
       "cardIds": [
         "BB-42",
         "BB-43",

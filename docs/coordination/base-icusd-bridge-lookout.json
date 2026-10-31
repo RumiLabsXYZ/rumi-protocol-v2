@@ -402,7 +402,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "EVM: table-driven init and RPC validation, per-chain head rules",
-      "evidenceText": "proof=none; Claimed 2026-10-30 from c57c6009: table-driven install and RPC validation, head-rule dispatcher (finalized tag with quorum, Monad Verified at finalized minus 3, Blocked), non-Base rows present but install-disabled [truncated]",
+      "evidenceText": "proof=none; Interim: non-Base rows exist with the install gate closed; BB-45 opens supported rows. Table-driven install and RPC checks; head rules (finalized tag, Monad finalized minus 3, Blocked); Base tests unmodified; no Candid change",
       "evidenceLinks": []
     },
     {
@@ -418,7 +418,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "EVM: per-chain defaults and a sibling Foundry deploy script",
-      "evidenceText": "proof=none; Gas caps, limits, log chunks and Monad reserve per chain; new deploy script with its own allow-list; existing Base script untouched; focused forge and admin tests pass",
+      "evidenceText": "proof=none; Opens the install gate for Ethereum, Arbitrum and Monad in source, with local init and head-rule tests; Robinhood waits on its probe, HyperEVM on archive providers or a redesign; catalog stays disabled; gas defaults; new deploy script",
       "evidenceLinks": []
     },
     {
