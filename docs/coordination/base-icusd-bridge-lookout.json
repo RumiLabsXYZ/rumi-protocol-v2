@@ -458,7 +458,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Solana: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; In Review with a correction (W28): Miles found two recovery defects in adcbf1a9 (absence plus expiry or a nonfinal failure must stay held; a generic transport error must not erase a sign-and-send attempt)",
+      "evidenceText": "proof=local-test; In Review with a correction (W28): four findings in adcbf1a9; uncertain Solana and ICP attempts must stay held (no forget on absence, expiry, nonfinal failure or transport errors); real RPC seam wired",
       "evidenceLinks": []
     },
     {

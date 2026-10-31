@@ -2290,8 +2290,18 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   errors stay held; Base flows unchanged.
 - Crypto: keep the tested `bytes.ts`; switching to the already-locked noble primitives is optional cleanup before client money,
   not a gate, recorded in the deferred log with the correction.
-- Same W28, one focused commit with red-then-green regressions (sent but unindexed then expired; processed and confirmed
-  failures that later finalize successfully; finalized failure; broadcast then "connection closed"; explicit user rejection).
+- F3 (added): `IcpToSolanaForm.svelte` `discard()` allows removal when the flow is uncertain and the request-id lookup is
+  absent, but the original ingress can still execute and pull, so a fresh start could create a second request id and a second
+  pull. Fix: no discard for a potentially submitted request (including an approved snapshot whose bridge call may have started
+  before a reload); same-id continuation only; a never-submitted cancel only if that stage is durably distinguished before the
+  bridge effect; read errors stay unavailable.
+- F4 (added, completion gap): `solanaDeps.ts` `getSolanaRpc` always returns null and `createFetchSolanaRpc` is unused by the
+  product, so the real route could never prepare a return. Fix: the smallest deployment-time RPC configuration seam, empty by
+  default and keyed to the expected network and genesis, wired to the real adapter; no endpoint chosen, no probe.
+- Same W28, one focused commit for F1 to F4 with red-then-green regressions (sent but unindexed then expired; processed and
+  confirmed failures that later finalize successfully; finalized failure; broadcast then "connection closed"; explicit user
+  rejection; delayed old bridge update plus absent query plus a fresh start; the real factory with mocked fetch and the page's
+  configured and unconfigured paths), with `svelte-check` and the build rerun once.
   No Rust rebuild, broad suite or live action; W29 stays the sole Rust builder.
 
 ## Held live actions
