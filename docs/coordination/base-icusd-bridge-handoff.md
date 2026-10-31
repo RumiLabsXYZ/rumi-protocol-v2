@@ -2383,6 +2383,39 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   evm-implementation item is in progress for it while BB-46 probes stay separately held. W29 continues 53b as the sole Rust
   builder. The prioritized queue stays active: BB-62, Sui 53b to 53d, BB-54 and the held live work are not done.
 
+## Milestone 104 (2026-10-31): cohort pushed at ff3dfec8; BB-62 delivered
+
+- Push: `ff3dfec8ed382202e66489072e57184532a3f0c5` pushed by exact commit at 2026-10-31 08:19 UTC (fast-forward from `4d3db00f`):
+  53a (`7eaef24f`), BB-50 (`adcbf1a9`, `25b9d4d9`, `053f8ed5`) and their records; no XRPL file. CI run 41184115864 (the existing
+  Stability Pool deposit-intent workflow) in progress when listed once. Miles' receipt (`pushed-bb50-checkpoint.md`): GitHub
+  confirms head `ff3dfec8`, base `32358d23`, open, draft, unmerged; the `4d3db00f..ff3dfec8` inventory matches accepted 53a,
+  BB-50 (with hygiene and recovery) and canonical docs, generated declarations, lock and script; no denied XRPL or existing
+  backend files; unfinished 53b outside the commit. Miles owns the sole CI monitor; that workflow is not native, Move,
+  collector or frontend coverage. PR #591 description refreshed, with two wording cleanups from the receipt (BB-58 source done
+  versus the held analytics escrow configuration; the groundwork activation-blocker list marked historical, the Sui
+  epoch-expiry item not a local source gate).
+- BB-62: W28 (requested Sonnet; actual `claude-sonnet-5-5`) committed `f4ae611c528e24089b9abd2b85437c9396b1d382` "fix(frontend):
+  BB-62 an unanswered Base bridge request is never forgotten", local only, parent `ff3dfec8` (W28's report named `20c9af6e`;
+  the coordinator verified the actual parent). Four files under `src/vault_frontend/src` (`icpToBase.ts`,
+  `IcpToBaseForm.svelte`, `icpToBase.spec.ts`, `bridgePage.spec.ts`); `git diff --check` exits 0; no Rust, contract, backend or
+  Sui file.
+  - Repair (reusing the accepted BB-50 F3 repair): `discardIntent` removed; both Discard buttons gone (the approved panel,
+    including after a reload through `resume_approved`, and the uncertain `not_found` panel); the approved panel no longer says
+    nothing was sent; the `not_found` text says absence does not prove it was never sent; `resume_approved` continues under the
+    same id; reducer and journal shape unchanged (so no localStorage-unavailable or newer-version test was needed); Oisy two-click
+    consent, same-id retry and saved intents unchanged; Base-to-ICP `discardUnsentIntent` (chain-checked) untouched.
+  - Evidence (saved files in the coordinator scratchpad `bb62/`): `red_bb62_original_code.txt` 4 failed, 142 passed: 3 behavior
+    failures (the Discard button present in the Oisy approved state and in the uncertain panel; the copy) and 1 shape failure
+    (`discardIntent` existed); the service-level fresh-start test passes on both versions because the original service already
+    blocked a fresh start, the hole being the UI discard. `red_characterization_original.txt`: a temporary test (removed) on the
+    original code discarded after an absent query and started again, producing two bridge request ids `["16","17"]`.
+    `green_bb62_service_and_page.txt` 145 passed; `green_bb62_baseBridge_and_bridge_routes.txt` 18 files, 536 passed, 1
+    pre-existing skip (Base happy path and Oisy two-click included); `final_check.txt` 30 errors, 66 warnings, 25 files, equal to
+    the baseline; `final_build.txt` exit 0 with the Internet Identity asset check.
+  - Consequences: a possibly submitted ICP-to-Base request cannot be cancelled, only continued, and blocks new ICP-to-Base
+    transfers on that device until it is; in the Oisy flow an approved request has no cancel before the second click (the
+    allowance stays and can expire); no durable never-submitted marker (no new cancellation protocol, per the brief).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
