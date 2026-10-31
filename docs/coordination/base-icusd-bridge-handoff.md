@@ -1031,6 +1031,26 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Still open on BB-58 (not Done): the real client transport (IC query and EVM JSON-RPC), queued next for the same owner with
   mocked-transport tests; running it against public networks stays held.
 
+## Milestone 44 (2026-10-30): BB-43 accepted; BB-58 components accepted; BB-44 resumed
+
+- Accepted (Miles) at source and local-test level: BB-43 through `685984b9` (dispatcher, table and the three corrected proof
+  paths; request-body regressions keep Base and number Monad's Verified head). BB-58 components `15bb73dc` and `78e8ae3d`
+  (D/X boundary, normalized escrow identity, collector; Miles independently ran `collect_fixture`: Base exit 0, overlap exit 1,
+  both `source: fixture`, no calls). BB-58 stays open for the real IC query and EVM transport source and later native
+  adapters.
+- Dispatch (two Sonnet lanes, one release builder): W25 resumed (same run) on the BB-58 transport, feature-gated in
+  `rumi_bridge_destinations`, mocked transports only, never run live; W26 resumed (same run) on BB-44 from its preserved
+  patch, which applied cleanly to `324e6d13`; W26 is the only release builder.
+
+  | Handle | Card | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- |
+  | W25 | BB-58 transport | Sonnet | `claude-sonnet-5-5` | running |
+  | W26 | BB-44 | Sonnet | `claude-sonnet-5-5` | running |
+
+- PR #591 description rewritten in place (draft, open, unmerged, head `324e6d13`): "Three parts"; the Base checks are stated
+  for `4169feb8` only, with runtime unchanged only through `1701ebf7`; new Part 3 lists the cards, commits, acceptance,
+  checks and the MC-DEF-7 omission; holds now name public queries and analytics escrow configuration.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

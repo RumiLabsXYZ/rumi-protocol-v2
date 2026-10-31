@@ -1,5 +1,5 @@
 {
-  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: BB-42 (c57c6009, Base ids pinned). In Review: BB-43 (fecaf9d5 plus 685984b9: table-driven install and RPC checks; head rules incl. Monad finalized minus 3, now also for refunds and final nonces; 490 unit tests) and BB-58 (analytics escrow subtraction; collector reading every number itself with a typed D/X boundary; real client transport still open). BB-44 restarts after BB-43 is accepted. BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
+  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: BB-42 (c57c6009, Base ids pinned) and BB-43 (fecaf9d5 plus 685984b9: table-driven install and RPC checks; head rules incl. Monad finalized minus 3 for refunds and final nonces). BB-58 components accepted (analytics escrow subtraction; collector with a typed D/X boundary); open for the real client transport (Sonnet). BB-44 in progress on Sonnet (native Ethereum and Arbitrum providers). BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
   "glossary": [
     {
       "term": "proof=source",
@@ -509,5 +509,5 @@
       "definition": "A priority status for queued future work that has not started and begins only when Rob or Miles opens that phase."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. The bridge now knows the rules for more networks, keeps Base unchanged, and is learning to count locked tokens only once. Nothing new is switched on."
+  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. The bridge now follows each network's own rules while keeping Base unchanged, and supply reports count locked tokens once. Nothing new is switched on."
 }

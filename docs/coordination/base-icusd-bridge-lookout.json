@@ -399,18 +399,18 @@
     },
     {
       "id": "BB-43",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "EVM: table-driven init and RPC validation, per-chain head rules",
-      "evidenceText": "proof=local-test; fecaf9d5 plus 685984b9: refund mint check and both final-nonce proofs read at the settlement head (Base finalized tag unchanged, Monad numbered, blocked chains send nothing); raw tag left only in the dispatcher; 490 unit tests",
+      "evidenceText": "proof=local-test; Miles accepted fecaf9d5 plus 685984b9: table-driven install and RPC checks; head rules, with refunds and final nonces at the settlement head (Base unchanged, Monad numbered, blocked chains send nothing); 490 unit tests, clippy, Wasm",
       "evidenceLinks": []
     },
     {
       "id": "BB-44",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "EVM: additive native RPC variants with regenerated declarations",
-      "evidenceText": "proof=none; Paused to keep two Sonnet lanes: W26 (Sonnet 5.5) was stopped minutes after start and its uncommitted partial edits were saved privately; restarts after BB-43 is accepted",
+      "evidenceText": "proof=none; Resumed 2026-10-30 from its preserved partial edits on 324e6d13: additive Ethereum, Ethereum Sepolia and Arbitrum One native provider variants, row-bound; .did and bindings by the canonical script; legacy stored config decode",
       "evidenceLinks": []
     },
     {
@@ -519,10 +519,10 @@
     },
     {
       "id": "BB-58",
-      "state": "Review",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=local-test; 15bb73dc plus 78e8ae3d: typed D/X boundary rejects XRPL in D and repeated escrow; collector reads every number itself (fixture run exits 0, overlap exits 1); real client transport still open on this card, not Done",
+      "evidenceText": "proof=local-test; Miles accepted components 15bb73dc (analytics escrow subtraction) and 78e8ae3d (collector, typed D/X boundary); card open: same owner now writes the real IC query and EVM client transport, mocked tests only",
       "evidenceLinks": []
     },
     {
