@@ -3051,6 +3051,29 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Lesson for the coordinator: a pre-push scope check must fail the push on any unexpected path, not only print it, and must not
   filter commits by subject prefix.
 
+## Milestone 128 (2026-10-31): BB-60 profile upkeep handed back
+
+- W23 (requested Haiku; actual Haiku 5.5, `claude-haiku-5-5`, as stated by its runtime) committed two profile-only commits by explicit
+  path: `875a1428` (Solana, Sui and XRPL text, already in the pushed head `f8b4cae1`, see milestone 127) and `a73731a8` ("docs(profiles):
+  Sui profile text reflects BB-54 acceptance (BB-60 upkeep)", local only, on `f8b4cae1`, under the coordinator's `acddb10f`). W23
+  wrote the follow-up because BB-54's acceptance post-dated its brief; reverting `a73731a8` alone restores the Review wording.
+- Changed leaves against `4eb43dce` (W23's count, 52): `sui.json` topology rationale, the `signed_payload` description and the text
+  and source of `sui-gate-module-missing`, `sui-observer-lane-missing`, `sui-signing-vectors-unverified` and
+  `sui-wallet-connector-missing` on both networks; `solana.json` text and source of `solana-guard-missing`,
+  `solana-return-observer-missing`, `solana-nonce-lane-missing` and `solana-wallet-connector-missing` on three networks;
+  `xrpl.json` text and source of `xrpl-return-intent-missing` and text of `xrpl-15-digit-validator-not-wired`,
+  `xrpl-caps-not-hard-bounded` and `xrpl-pending-import-cap-race`. The six EVM profiles unchanged. Ids, kinds, status,
+  `instance_ref`, claims, config, verified dates and source URLs byte-identical (W23's structural comparison PASS, saved in the
+  coordinator scratchpad `bb60/`); W23's hygiene mirror of V7 and V10 found no problem.
+- Coordinator checks: a structural comparison of `a73731a8` against its parent shows only `sui.json` prose fields changed; the
+  existing profile dry run on the final tree passes (`OK: 9 profiles, 19 networks, 0 violations (date 2026-10-30)`); `git diff --check`
+  clean.
+- W23's notes: the Solana unattributed-burn text was left unchanged because the C2 monitor reports the gap but the attribution seam
+  is still missing in source; the XRPL text names unpushed local commit pins (`f887fab5`, `868ebca8`, `e48dc18d`, `46cf6b34`) while
+  saying they are on a separate unpublished branch and not in PR #586, this branch or PR #591 (W23 offers to reword); statements
+  left unchanged as uncertain include `xrpl-no-origin-split`, `xrpl-wallet-xaman-only` and several Sui and Solana holds.
+- Awaiting Miles' factual and structural review of both commits; `a73731a8` is held back from any push until then.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
