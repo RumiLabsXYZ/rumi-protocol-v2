@@ -1861,6 +1861,33 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   go through the coordinator; W29 asks the coordinator for the single Rust builder slot before any cargo command, scheduled
   around W28's sub-milestones; only accepted frozen patterns are copied (Solana through `23dfe841`, or Base).
 
+## Milestone 84 (2026-10-31): BB-49 49d delivered
+
+- 49d `ea5be6ba` (W28, local; Solana crate plus the `chain-solana.md` sections 2.4, 3 and new 13.1): one burn per custodied
+  return keyed `burn_id([return_id])` (RC to BU); BU to PR and `open_release` in one synchronous step, only after the lane
+  adopted the exact stored BurnChecked bytes as final AND a separate `getTransaction` shows the return account down by
+  exactly the amount with no other account of the mint changed (unreported balances wait; any other effect halts); no
+  automatic BU to RC. `open_release` requires `burn_id([return_id])`, the return in `Burning{burn_op}`, and amount, sender,
+  recipient, signature and slot equal to the stored verified return. Custody read `supply, custody, supply`, valid only with
+  equal supply reads and an empty observer queue at the head; a deficit up to BU plus open refund claims is held for
+  reconciliation, anything larger is never OK and halts after two readings; an excess halts credits only (lifted when the
+  books explain it or by the new `admin_clear_credits_halt(note)`). Holder-burn seam: a memo-less BurnChecked lowers supply,
+  credits nothing, halts nothing, reported as unattributed (blocker `solana-unattributed-burn-policy`). Stray refunds: id v2
+  `rumi.icusd.sol.refund.v2` over genesis, mint, salt, stray signature and the transfer locator (outer plus optional inner
+  index), amount and recipient out of the id; one claim per outer TransferChecked bound to its source account and amount;
+  a claim settles only after a final exact balance effect; dust, unverified senders and foreign sources retained. Schema 6,
+  MemoryId 23, `.did` files regenerated; refund goldens in `ids.rs` and the Python reference.
+- Worker run: 412 tests (2 ignored) both feature modes; clippy clean (all targets, history_probe, wasm32); Wasm about 4.68 MB;
+  golden 0 mismatches; diff-check clean. All 49d code is new, so its guards are shown by 19 regression tests plus nine
+  single-line mutations that each fail their named test. Coordinator check: scope as stated, diff-check clean, golden 0.
+- Points for Miles from W28: (1) custody pair validity is an equal-supply-reads rule with the BU plus open-claims deficit
+  tolerance, documented as a deviation in section 3; (2) a credits halt does not auto-lift while a valid return waits in the
+  observer queue (custody is not read until the queue is empty), `admin_clear_credits_halt` is the exit; (3) in `apply_burns`
+  `BurnFinalized` is applied before `open_release`, so a refusal (only on corrupt state) halts with PR already booked; (4)
+  CPI transfers never create claims and stay an unattributed part of the stray; (5) a new one-shot test hook
+  `MockChain.on_account_read_of`.
+- Next: W28 does the two 49c fixes, then pauses so W29 can use the single Rust builder slot for BB-52, then 49e.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
