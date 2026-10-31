@@ -1751,6 +1751,12 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   himself (matches `861f8833...`) and observed `sui 1.82.3-bf4073918ed3`, so the local tooling is verified. His Lookout
   browser view was stuck connecting (last independent read at revision 79) while the scoped publisher read back revision 84
   unchanged (coordinator dry run after the push); a browser visibility issue, not a bridge gate.
+- Sui CLI build context (Miles, `sui-local-build-context.md`): in mainnet-v1.82.3 every `sui move` command loads a wallet
+  context; without `--client.config` it uses the default client config, and if that is missing an empty answer (including
+  stdin EOF) creates a default keystore and key plus a public-network config and prints a recovery phrase. W29 now uses an
+  explicit disposable local-only `--client.config` with an empty keystore and a loopback-only environment, never the default
+  wallet or a public RPC. Coordinator check: `~/.sui` does not exist, so no default config or key was created there; W29
+  reports any other evidence of created key material by existence and path only (never contents), marked never to be used.
 
 ## Held live actions
 
