@@ -231,6 +231,80 @@ describe('ICP to Base: a DISABLED destination gets no signing request', () => {
   });
 });
 
+describe('ICP to Base: a saved request is sent only to its own destination', () => {
+  /** A request made for another destination, as a later build could have saved it. */
+  const foreign = (status: IcpToBaseIntent['status'] = 'approved'): IcpToBaseIntent => ({ ...approvedIntent('arbitrum'), status });
+
+  /** The same request as the Base-only app saved it: version 1, no destination key. */
+  const legacy = (status: IcpToBaseIntent['status'] = 'approved'): IcpToBaseIntent => {
+    const { destination: _destination, ...rest } = approvedIntent();
+    return { ...rest, v: 1, status };
+  };
+
+  for (const separateApproval of [false, true]) {
+    it(`the second click does not send another destination's request to enabled Base (popup signer: ${separateApproval})`, async () => {
+      const h = icpHarness(makeSigning(), { separateApproval });
+      h.store.put(foreign());
+      await bridgeAfterApproval(h.deps, foreign(), h.emit);
+      expect(h.bridgeToBase).not.toHaveBeenCalled();
+      expect(h.approve).not.toHaveBeenCalled();
+      expect(h.events.at(-1)).toMatchObject({ type: 'blocked', message: expect.stringContaining('arbitrum') });
+      expect(h.events.at(-1)).toMatchObject({ message: expect.stringContaining(NOT_SIGNED_NOTE) });
+      // The same durable request, untouched: its recovery stays with its own destination.
+      expect(h.store.list()).toEqual([foreign()]);
+    });
+  }
+
+  for (const status of ['prepared', 'approved', 'submitted'] as const) {
+    it(`a retry of another destination's ${status} request sends nothing and leaves it as it was`, async () => {
+      const h = icpHarness(makeSigning());
+      h.store.put(foreign(status));
+      await retryIcpToBase(h.deps, foreign(status), h.emit);
+      expect(h.bridgeToBase).not.toHaveBeenCalled();
+      expect(h.approve).not.toHaveBeenCalled();
+      expect(h.events.at(-1)).toMatchObject({ type: 'blocked', message: expect.stringContaining(NOT_SIGNED_NOTE) });
+      expect(h.store.list()).toEqual([foreign(status)]);
+    });
+  }
+
+  it('refuses before the signer is reached, with no await in front of the check', () => {
+    const h = icpHarness(makeSigning());
+    h.store.put(foreign());
+    const promise = bridgeAfterApproval(h.deps, foreign(), h.emit);
+    // Synchronously, before any microtask: the refusal is already out, and no signer was touched.
+    expect(h.events.map((event) => event.type)).toContain('blocked');
+    expect(h.bridgeToBase).not.toHaveBeenCalled();
+    return promise;
+  });
+
+  it('a legacy Base request (no key) is sent on the second click, with its own request id', async () => {
+    const h = icpHarness(makeSigning());
+    h.store.put(legacy());
+    const promise = bridgeAfterApproval(h.deps, legacy(), h.emit);
+    // The first signer call of the click is still synchronous.
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
+    await promise;
+    expect(h.bridgeToBase).toHaveBeenCalledWith(expect.objectContaining({ client_request_id: new Uint8Array(16).fill(0xcd) }));
+    expect(h.events.map((event) => event.type)).toEqual(['bridge_started', 'submit_ok']);
+  });
+
+  it('a legacy Base request (no key) is sent on retry, with its own request id', async () => {
+    const h = icpHarness(makeSigning());
+    h.store.put(legacy('submitted'));
+    await retryIcpToBase(h.deps, legacy('submitted'), h.emit);
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
+    expect(h.bridgeToBase).toHaveBeenCalledWith(expect.objectContaining({ client_request_id: new Uint8Array(16).fill(0xcd) }));
+    expect(h.events.map((event) => event.type)).toEqual(['retry', 'submit_ok']);
+  });
+
+  it('a request that names Base is sent too', async () => {
+    const h = icpHarness(makeSigning());
+    h.store.put(approvedIntent('base'));
+    await bridgeAfterApproval(h.deps, approvedIntent('base'), h.emit);
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('ICP to Base: PAUSED is not DISABLED', () => {
   it('a paused, halted Base still reaches the signer (the form and the canister gate it, as before)', async () => {
     const h = icpHarness(makeSigning(pausedBase()));

@@ -65,7 +65,7 @@ import {
   type IntentStore,
   type RandomBytes,
 } from './intents';
-import { signingBlockMessage, type SigningContext } from './signingGuard';
+import { intentBindingMessage, signingBlockMessage, type SigningContext } from './signingGuard';
 import {
   abortableSleep,
   bridgeErrorKind,
@@ -672,7 +672,9 @@ export function retryIcpToBase(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emi
 async function submitToBridge(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit: Emit): Promise<void> {
   // Every path to `bridge_to_base` (second click, retry, and the step after an approval that may have taken
   // a while) passes here. Synchronous, so the first signer call of a click still has no await in front of it.
-  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' });
+  // Two questions: may this destination sign at all, and does THIS saved request belong to it? A request
+  // saved for another destination is neither sent nor rewritten; its recovery stays with its own destination.
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' }) ?? intentBindingMessage(deps.signing, intent);
   if (notAllowed) {
     emit({ type: 'blocked', message: notAllowed });
     return;

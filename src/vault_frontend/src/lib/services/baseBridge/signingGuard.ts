@@ -18,6 +18,7 @@
  */
 
 import type { DestinationView } from './destinations';
+import { intentDestination, type BridgeIntent } from './intents';
 
 export type SigningBlockCode = 'destination_disabled' | 'destination_unknown' | 'wrong_network';
 
@@ -103,6 +104,17 @@ export function signingBlockMessage(signing: SigningContext, walletState: Signin
     if (error instanceof SigningBlockedError) return error.message;
     throw error;
   }
+}
+
+/**
+ * A saved request is bound to the destination it was made for. Handing it to the flow of another
+ * destination must send nothing: the text says why, or null when the request belongs here. A keyless
+ * (legacy) request belongs to Base. Synchronous, and the request itself is left exactly as it was.
+ */
+export function intentBindingMessage(signing: SigningContext, intent: Pick<BridgeIntent, 'destination'>): string | null {
+  const owner = intentDestination(intent);
+  if (owner === signing.destination.id) return null;
+  return `This saved request is for another destination (${owner}), so it cannot be sent to ${signing.destination.name}. ${NOT_SIGNED_NOTE}`;
 }
 
 /** Attach the signing context to the dependencies a builder produced. */
