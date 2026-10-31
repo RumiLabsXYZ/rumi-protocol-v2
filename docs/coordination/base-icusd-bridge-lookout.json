@@ -391,18 +391,18 @@
     },
     {
       "id": "BB-42",
-      "state": "In progress",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "EVM: slug templates, Base-only chain table and Base domain regression check",
-      "evidenceText": "proof=none; Claimed 2026-10-30 from 1701ebf7: Base-only chain table, slug templates for the two mint domains, escrow label, key root and salt; Base strings and ids pinned byte for byte [truncated]",
+      "evidenceText": "proof=local-test; Miles accepted c57c6009: Base-only chain table; slug templates; Base domains, escrow subaccount, key paths, salt label and golden mint and re-mint ids pinned (coordinator matched all six ids with an independent EVM tool) [truncated]",
       "evidenceLinks": []
     },
     {
       "id": "BB-43",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "EVM: table-driven init and RPC validation, per-chain head rules",
-      "evidenceText": "proof=none; Finalized tag with quorum, Monad Verified head at finalized minus 3, Blocked rule; existing finalized-head, init and ICRC-21 tests unchanged",
+      "evidenceText": "proof=none; Claimed 2026-10-30 from c57c6009: table-driven install and RPC validation, head-rule dispatcher (finalized tag with quorum, Monad Verified at finalized minus 3, Blocked), non-Base rows present but install-disabled [truncated]",
       "evidenceLinks": []
     },
     {
@@ -520,9 +520,9 @@
     {
       "id": "BB-58",
       "state": "In progress",
-      "owner": "worker-haiku",
+      "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=none; Only a read-only inventory of the analytics supply formula and its focused tests runs now; source edits wait for BB-42 acceptance and a Sonnet owner",
+      "evidenceText": "proof=none; Claimed 2026-10-30 from c57c6009: analytics subtracts admin-configured escrow accounts (optional state field with a legacy-decode test, never publishes the raw total once configured) [truncated]",
       "evidenceLinks": []
     },
     {

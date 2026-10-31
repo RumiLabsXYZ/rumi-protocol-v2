@@ -1,5 +1,5 @@
 {
-  "summary": "Implementation opened 2026-10-30 (Rob via Miles): local source for the queued EVM and shared-reporting cards, a couple at a time. BB-42 in progress on Sonnet (Base-only chain table, slug templates, byte-for-byte Base id pins); a read-only BB-58 analytics inventory runs on Haiku. The Base Sepolia CLI round trip passed earlier; the browser-wallet test (BB-27) still waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled. Solana, XRPL and Sui are source-authorized but held behind by rank; D6 stays open.",
+  "summary": "Implementation phase (Rob via Miles, 2026-10-30), a couple of cards at a time. BB-42 done: Miles accepted c57c6009 at source and local-test level (Base-only chain table, slug templates, Base strings and ids pinned, independent cast vectors, 453 unit tests). In progress on Sonnet: BB-43 (table-driven install and RPC validation, head rules, non-Base rows install-disabled) and BB-58 (analytics subtracts configured escrow; host-only aggregate with D and X counted once). BB-27 still waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
   "glossary": [
     {
       "term": "proof=source",
@@ -509,5 +509,5 @@
       "definition": "A priority status for queued future work that has not started and begins only when Rob or Miles opens that phase."
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test still waits for Rob to sign in and unlock his wallet. Work has now started on letting the bridge serve more networks, beginning with shared naming rules that keep Base exactly as it is. Nothing new is switched on."
+  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. Shared naming rules for more networks are done and leave Base unchanged; next come per-network safety checks and a supply figure that stops counting locked tokens twice. Nothing new is switched on."
 }

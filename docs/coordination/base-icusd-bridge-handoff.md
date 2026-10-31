@@ -929,7 +929,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   | Handle | Card | Scope | Requested | Actual (run record) | State |
   | --- | --- | --- | --- | --- | --- |
   | W22 | BB-42 | `ids.rs`, new `chains.rs`, `lib.rs`, one `state.rs` call site and test call sites; sole build executor | Sonnet | `claude-sonnet-5-5` | running |
-  | W23 | BB-58 inventory | read-only: analytics supply formula, bridge audit fields, focused test commands; no build | Haiku | `claude-haiku-5-5` | running |
+  | W23 | BB-58 inventory | read-only: analytics supply formula, bridge audit fields, focused test commands; no build | Haiku | `claude-haiku-5-5` | finished (coordinator spot-checked) |
+
+## Milestone 40 (2026-10-30): BB-42 accepted; BB-43 and BB-58 started
+
+- BB-42 `c57c6009` (W22): `chains.rs` (Base rows 8453, 84532, 31337, slug `base`), slug templates for the mint and re-mint
+  domains, escrow label, key root and salt label in `ids.rs`; the removed constants survive only as test pins;
+  `ids::chain_slug` panics on an unknown id instead of falling back to Base; `post_upgrade` refuses a stored chain id with no
+  profile. Worker run: `cargo test --offline -p rumi_icusd_bridge --lib` 453 passed (baseline 445); clippy clean; release Wasm
+  3,850,049 bytes; no `.did`, declaration or Cargo change. Coordinator check: reran the unit tests (453 passed) and recomputed
+  all six golden mint and re-mint ids with Foundry `cast` from the pre-change domain strings (all equal).
+- Accepted (Miles): `c57c6009` at source and local-test level after reviewing all six files (template strings, hash input
+  order, key bytes, init salt and escrow preserved; unknown chains fail closed; no Candid or stable shape change).
+- Dispatched with exclusive files (both read from their run records as `claude-sonnet-5-5`):
+
+  | Handle | Card | Scope | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- | --- |
+  | W22 | BB-42 | as above | Sonnet | `claude-sonnet-5-5` | finished, accepted |
+  | W24 | BB-43 | `chains.rs`, `state.rs`, `evm/rpc.rs`, `observer.rs`, `icrc21.rs`, `views.rs`, `ids.rs` tests; only release builder | Sonnet | `claude-sonnet-5-5` | running |
+  | W25 | BB-58 | `src/rumi_analytics/**`, its declarations by the canonical script, `rumi_bridge_destinations` aggregate module; unit tests only | Sonnet | `claude-sonnet-5-5` | running |
+
+  One builder: W24 alone runs release Wasm builds; W25 runs unit tests only, and both share this worktree's `target/`, where
+  cargo's lock serializes the runs.
 
 ## Held live actions
 

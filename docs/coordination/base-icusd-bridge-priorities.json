@@ -26,7 +26,7 @@
       "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-42 in progress (slug templates and the Base domain regression check, Sonnet worker); then BB-43, then BB-44 and BB-45. BB-46 live probes stay held for separate authorization; HyperEVM and Monad keep their read-evidence blockers.",
+      "nextAction": "BB-43 in progress (Sonnet); then BB-44 and BB-45. BB-46 live probes stay held for separate authorization; HyperEVM and Monad keep their read-evidence blockers.",
       "cardIds": [
         "BB-42",
         "BB-43",
@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "A short read-only BB-58 inventory of the analytics supply formula runs now (Haiku); BB-58 source edits start after BB-42 is accepted, then BB-59 after BB-43, then BB-60.",
+      "nextAction": "BB-58 in progress (Sonnet, analytics and host-only aggregate); then BB-59 after BB-43, then BB-60.",
       "cardIds": [
         "BB-58",
         "BB-59",
