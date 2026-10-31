@@ -3120,6 +3120,27 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   `42a799ae` and this record (coordinator docs); files: the handoff, the board, `sui.json`, `xrpl.json`; nothing uncommitted. The push
   waits for Miles' review of the final profile diff.
 
+## Milestone 131 (2026-10-31): BB-60 upkeep accepted; final coherent refresh
+
+- Miles (`accept-bb60-upkeep.md`) accepted the profile upkeep at source and metadata scope: final `6b545dd9da1eb8a71719dcf559aef393542702ce`
+  with `875a142830f91f1f4b84a8af93764eb5358f9c6c` and `a73731a8` (requested Haiku; actual `claude-haiku-5-5`). Not activation or live
+  proof. Miles read all three diffs and the accepted Sui observer (`53c21490`), `bind.rs` (`5da0804e`, `module_digest_observed` false)
+  and the Solana monitor and accounting (`4394b472`, the stronger UB seam explicitly missing), and compared all nine profiles at
+  `875a1428^` against `6b545dd9`: exactly 52 permitted string leaves differ (Solana 24, Sui 18, XRPL 10), only the topology
+  rationale, the `signed_payload` description or per-network blocker text and source; every key, type, list length, claim, config
+  value, verified date, external URL, blocker id and kind, disabled status and null `instance_ref` unchanged; all 19 networks disabled;
+  root diff-check clean; the coordinator's frozen-candidate dry run read (`OK: 9 profiles, 19 networks, 0 violations`).
+- Milestones 127 to 130 keep the disclosure that `875a1428` was pushed in `f8b4cae1` before this review, contrary to the intended
+  exclusion; this acceptance does not rewrite that fact; history preserved and repaired forward.
+- Coherent refresh: the BB-62 card and the EVM item now say BB-62 is in the pushed head (since `2bb8e816`); the paragraph after the
+  priorities table now says items 3 to 7 have delivered source accepted at source and local-test scope, item 3 blocked only on the
+  held BB-46 probes, item 6's XRPL source on a separate local branch whose publication push was denied, and no network activated.
+- Hosted CI: Miles verified run 41191717045 on exact `f8b4cae1` completed SUCCESS at 10:18 UTC (watch closed; the Stability Pool
+  workflow only) and confirmed the PR's CI and disclosure refresh was already present.
+- After this push all workers stand by: W28 and W29 (Sonnet) and W23 (Haiku). The overall goal stays incomplete: real browser
+  acceptance awaits Rob's sign-in and wallet gestures; BB-46 public probes, D6, native activation and live proof and the denied
+  XRPL publication stay held.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

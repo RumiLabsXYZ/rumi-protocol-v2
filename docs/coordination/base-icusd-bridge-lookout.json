@@ -538,7 +538,7 @@
       "state": "done",
       "owner": "worker-sonnet",
       "scope": "Shared: profile consumption and upkeep",
-      "evidenceText": "proof=local-test; Miles accepted 28ba5867: pure profile reader (decimal strings, real-profile parity, not page-wired); per-network keys, unknown chains closed; EVM profile upkeep, still disabled; Rust validator 107, dry run clean",
+      "evidenceText": "proof=local-test; Miles accepted 28ba5867 (profile reader) and the profile text upkeep 875a1428, a73731a8, 6b545dd9 (W23, Haiku 5.5): 52 text and source leaves only; all 19 networks disabled; dry run clean",
       "evidenceLinks": []
     },
     {
@@ -554,7 +554,7 @@
       "state": "done",
       "owner": "worker-sonnet",
       "scope": "EVM: uncertain ICP-to-Base request stays bound to its id",
-      "evidenceText": "proof=local-test; Done (Miles) at source and local-test scope: f4ae611c; a possibly submitted ICP-to-Base request continues under its own id only. Not browser wallet, deploy or live recovery proof; joins the next source batch",
+      "evidenceText": "proof=local-test; Done (Miles) at source and local-test scope: f4ae611c, in the pushed head since 2bb8e816; a possibly submitted ICP-to-Base request continues under its own id only. Not browser wallet or live proof",
       "evidenceLinks": []
     }
   ]
