@@ -241,7 +241,10 @@ pub const CHAIN_LOCAL_ANVIL: u64 = 31337;
 ///
 /// The chain id and key name are checked against the chain table (`chains.rs`): the chain
 /// must have a row, the row must be enabled for install, and the key must be one the row
-/// allows. Every non-Base row is disabled today, so only the Base chains install.
+/// allows. The gas settings and the log range the config starts with come from the row's
+/// `defaults`; a Base row yields exactly the values `GasSettings::default()` and
+/// `ObserverSettings::default()` have always had. Robinhood Chain and HyperEVM rows are
+/// disabled and refuse install.
 pub fn validate_init(args: &InitArgs) -> Result<BridgeConfig, String> {
     let chain = args.base_chain_id;
     let key = args.ecdsa_key_name.as_str();
@@ -277,8 +280,22 @@ pub fn validate_init(args: &InitArgs) -> Result<BridgeConfig, String> {
         fee_recipient: args.fee_recipient,
         rpc_services: args.rpc_services.clone(),
         min_quorum: args.min_quorum,
+        gas: gas_defaults(&row.defaults),
+        observer: ObserverSettings { logs_chunk_blocks: row.defaults.logs_chunk_blocks, ..ObserverSettings::default() },
         ..BridgeConfig::default()
     })
+}
+
+/// The gas settings a fresh instance of a chain starts with.
+pub fn gas_defaults(d: &chains::ChainDefaults) -> GasSettings {
+    GasSettings {
+        max_fee_per_gas_wei: d.max_fee_per_gas_wei,
+        max_priority_fee_per_gas_wei: d.max_priority_fee_per_gas_wei,
+        mint_gas_limit: d.mint_gas_limit,
+        admin_gas_limit: d.admin_gas_limit,
+        min_gas_reserve_wei: d.min_gas_reserve_wei,
+        replace_after_secs: d.replace_after_secs,
+    }
 }
 
 /// The most RPC providers the bridge accepts.
@@ -1516,7 +1533,11 @@ pub(crate) mod tests {
         assert!(validate_init(&init_args(CHAIN_BASE_SEPOLIA, "test_key_1")).is_ok());
         assert!(validate_init(&init_args(CHAIN_LOCAL_ANVIL, "key_1")).is_err());
         assert!(validate_init(&init_args(CHAIN_LOCAL_ANVIL, "dfx_test_key")).is_ok());
-        assert!(validate_init(&init_args(1, "key_1")).is_err());
+        // Ethereum mainnet is an installable row (BB-45): its own key rule applies.
+        assert!(validate_init(&init_args(1, "key_1")).is_ok());
+        assert!(validate_init(&init_args(1, "test_key_1")).is_err());
+        // Robinhood Chain stays held, and a chain id with no row is unsupported.
+        assert!(validate_init(&init_args(4663, "key_1")).is_err());
         assert!(validate_init(&init_args(1030, "key_1")).is_err());
     }
 
@@ -1557,11 +1578,15 @@ pub(crate) mod tests {
         assert_eq!(msg(CHAIN_BASE_SEPOLIA, "dfx_test_key"), "unsupported chain id 84532 / key dfx_test_key");
         assert_eq!(msg(1030, "key_1"), "unsupported chain id 1030 / key key_1");
         assert_eq!(msg(0, "test_key_1"), "unsupported chain id 0 / key test_key_1");
-        // The disabled rows name the chain and the reason.
-        let e = msg(10143, "test_key_1");
-        assert!(e.starts_with("Monad testnet (chain id 10143) cannot be installed: "), "{e}");
+        // The rows that stay disabled name the chain and the reason.
+        let e = msg(46630, "test_key_1");
+        assert!(e.starts_with("Robinhood Chain testnet (chain id 46630) cannot be installed: robinhood-finalized-tag-probe"), "{e}");
         let e = msg(999, "key_1");
-        assert_eq!(e, "HyperEVM (chain id 999) cannot be installed: hyperevm-historical-state");
+        assert!(e.starts_with("HyperEVM (chain id 999) cannot be installed: hyperevm-historical-state"), "{e}");
+        // The rows BB-45 opened report key errors in the same shape as Base.
+        assert_eq!(msg(1, "test_key_1"), "Ethereum mainnet requires key_1, got test_key_1");
+        assert_eq!(msg(143, "test_key_1"), "Monad mainnet requires key_1, got test_key_1");
+        assert_eq!(msg(10143, "key_1"), "unsupported chain id 10143 / key key_1");
         // The gate is checked before the key: a wrong key on a disabled row reports the gate.
         assert_eq!(msg(4663, "dfx_test_key"), msg(4663, "key_1"));
     }
@@ -1791,20 +1816,35 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn native_providers_do_not_open_the_install_gate() {
-        // A valid native set for a described but disabled chain is still refused at install:
-        // the gate is checked before the providers.
+    fn native_providers_install_on_their_own_row_and_nowhere_else() {
+        // A native set is a valid install for the row that lists the family (BB-45 opened
+        // the rows), with that row's key, and for no other row.
         for family in [chains::NativeProvider::EthMainnet, chains::NativeProvider::EthSepolia, chains::NativeProvider::ArbitrumOne] {
-            let row = chains::native_owner(family).unwrap();
-            let key = row.allowed_keys[0];
-            let mut a = init_args(row.chain_id, key);
+            let owner = chains::native_owner(family).unwrap();
+            let key = owner.allowed_keys[0];
+            let mut a = init_args(owner.chain_id, key);
             a.rpc_services = built_in_set(family);
             a.min_quorum = 3;
-            let e = validate_init(&a).unwrap_err();
-            assert!(e.contains("cannot be installed") && e.contains(row.display_name), "{e}");
-            // Upgrade does not look at the gate: the same set is a valid stored configuration.
-            let stored = BridgeConfig { chain_id: row.chain_id, rpc_services: a.rpc_services.clone(), min_quorum: 3, ..BridgeConfig::default() };
-            assert!(validate_stored_rpc_config(&stored).is_ok(), "{}", row.chain_id);
+            let config = validate_init(&a).unwrap_or_else(|e| panic!("{}: {e}", owner.chain_id));
+            assert_eq!(config.chain_id, owner.chain_id);
+            assert_eq!(config.rpc_services, a.rpc_services);
+            assert!(validate_stored_rpc_config(&config).is_ok(), "{}", owner.chain_id);
+            // The same set on any other installable row is refused with the family's message.
+            for other in TABLE_IDS {
+                let row = chains::profile(other).unwrap();
+                if other == owner.chain_id || !matches!(row.install, InstallGate::Enabled) {
+                    continue;
+                }
+                let mut b = init_args(other, row.allowed_keys[0]);
+                b.rpc_services = built_in_set(family);
+                b.min_quorum = 3;
+                assert_eq!(
+                    validate_init(&b).unwrap_err(),
+                    format!("{} providers are only valid for chain {}", family.variant_name(), owner.chain_id),
+                    "{} on {other}",
+                    family.variant_name()
+                );
+            }
         }
     }
 
@@ -1922,8 +1962,9 @@ pub(crate) mod tests {
         assert_eq!(cbor_decode::<BridgeConfig>(&cbor_encode(&eth)), eth);
 
         // Downgrade caveat: the pre-BB-44 enum has no such variant, so a module of that shape
-        // cannot decode a set that stores one. Only a non-Base row can hold one, and those
-        // rows cannot be installed, so no live instance can be in this state.
+        // cannot decode a set that stores one. Only the Ethereum and Arbitrum rows can hold
+        // one (a Base row refuses them), so once such an instance is installed an upgrade to
+        // a module older than BB-44 would trap on decode: never roll those instances back.
         for v in &new_variants {
             let bytes = cbor_encode(&Providers { rpc_services: vec![v.clone()] });
             let as_old: Result<Providers<Old>, _> = ciborium::de::from_reader(bytes.as_slice());
