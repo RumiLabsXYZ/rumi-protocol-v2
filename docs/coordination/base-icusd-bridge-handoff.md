@@ -2177,6 +2177,40 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   capability versions under an immutable reference input and after a failed execution. W29 continues through 53a to 53d with
   a frozen commit and compact evidence at each handback.
 
+## Milestone 97 (2026-10-31): BB-53 53a delivered; CI success on 4d3db00f
+
+- W29 (`claude-sonnet-5-5`) committed `7eaef24fe2712302b673627be23f25fb9e9b31dd` "feat(sui): canonical ICP ledger saga, accounting
+  and stable runtime core (BB-53 53a)", local only. Coordinator scope check: 23 files, only `src/rumi_icusd_sui_bridge/`, the
+  crate's own `Cargo.lock` dependency lines (no new package: `ic-cdk-timers`, `icrc-ledger-types` at the Rumi fork rev
+  `fc278709`, `num-traits`, `serde_bytes` were already locked) and MC-DEF-11 in the deferred log; `git diff --check` exits 0;
+  W28's frontend work untouched.
+- What works at the pin (source plus simulated-ledger tests): the ICRC-2 pull, refund, release and fee-sweep saga with the
+  exact tuple stored before the first send and escrow outflow reserved before it is sent, same-tuple resend in the dedup
+  window and a bounded ICRC-3 search after it (`ledger.rs` byte-identical to the Solana `4394b472` body); real-caller and
+  allowance binding with `(caller, client_request_id)` idempotency and limits; strict Sui recipient parsing; the mint id
+  derived only after the pull block is proven; disjoint O, PM, PR, RF, H, F, reserved-pull and unknown-outflow buckets (no RC,
+  BU or stray) with ghost-total property tests; `open_release(&VerifiedReturn)` as the only constructor of a fresh release,
+  applying O to PR in the same step, idempotent on the Gate `transfer_id`, halting on conflicting content or a second id for
+  one Gate sequence, with the saved ICP principal and subaccount immutable and an unpayable destination or fee gap held, never
+  dropped; `notify_sui_return` hints that settle nothing; a second stable cell and maps for request, owner, sender, Gate
+  sequence and active queues; fair bounded queues, history, audit log, halt and noted `clear_halt`, bounded admin setters,
+  ICRC-21 for the three user calls; a ledger-only timer. Unchanged: the Move placeholder, backend lending and `chain_supplies`,
+  Sui disabled, `signing_enabled` false, no HTTP or Sui call, no key use.
+- Checks (saved logs `53a-*.log` in the coordinator scratchpad): crate tests 240 passed, 0 failed; clippy `-D warnings` exit 0
+  after three lint fixes (one `large_enum_variant` allow with a comment); wasm32 check exit 0; `.did` regenerated through the
+  crate's canonical test path, with existing methods kept, Result types renumbered and `UpgradeArgs` gaining admins. No red
+  record: 53a corrects no known defect; the Solana 49b corrections are carried as ported tests that pass. One test expectation
+  (listing order) was corrected in the test, not the code. `cargo fmt` not applied (no lane rustfmt config).
+- Omissions (MC-DEF-11): simulated ledger only, not a real ICRC ledger or PocketIC; the refund proof fails closed for any
+  deposit with an abandoned mint operation until 53b's lane records can prove non-landing; an upgrade from a BB-52 image traps
+  with a clear message because the runtime cell was never initialized (nothing deployed); the held-release re-mint has records
+  but no driver until 53b; the operation itself arrives in 53b; timer cycle cost unmeasured (MC-DEF-4); no release Wasm size
+  measured.
+- Hosted CI: Miles verified run 41180397304 on exact pushed `4d3db00f` completed SUCCESS at 07:33:48 UTC. It is the existing
+  Stability Pool deposit-intent workflow, not native Solana, Sui, collector or Move test coverage. Watch closed; no rerun.
+  Miles also checked the canonical projection: BB-49 and BB-52 local Done and BB-50 and BB-53 In progress are accurate.
+- Next: W29 continues to 53b from `7eaef24f`; W28 continues BB-50.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

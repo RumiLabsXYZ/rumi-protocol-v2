@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; In progress (W29, sole Rust builder): 53a ICP ledger saga, accounting and runtime core, then 53b transport, binding and mint lane, 53c verified returns, monitors and release, 53d host collector and integration evidence",
+      "evidenceText": "proof=none; 53a delivered for review: 7eaef24f (W29, local), ICP ledger saga, disjoint accounting, release from a verified return only, runtime core; 240 tests, clippy and wasm32 clean. 53b in progress",
       "evidenceLinks": []
     },
     {
