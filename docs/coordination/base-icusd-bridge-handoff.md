@@ -1924,6 +1924,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   addition only, fetched within scope; hashlib boundary vectors kept as tests); an offline `sui keytool decode-or-verify-tx`
   cross-check is allowed only after the pinned source shows it cannot bootstrap a wallet or read the default config, with an
   empty temporary keystore, `printf 'n\n'` input, no network and `~/.sui` confirmed still absent afterwards.
+- Follow-up: W29 swapped in RustCrypto `blake2` `=0.10.6` (`Blake2b<U32>`, as the official Rust SDK uses) and kept the hashlib
+  vectors. It did NOT run the `sui keytool` cross-check: the pinned `SuiCommand::KeyTool` arm reads the client config from
+  `sui_config_dir()` before applying `--keystore-path`, which the condition forbids. The coordinator dropped that oracle;
+  BB-52's vectors stand on the independent Python reference and the pinned sources, not on the official SDK or CLI binary.
 - Stated limits: the vectors come from W29's reference, not yet from the official SDK or CLI; GraphQL fixtures are built
   from the SDL, not captured from a provider; no provider, HTTP transport or signature verification in production; the
   IC `sign_with_schnorr` mapping for Sui is unrun.
