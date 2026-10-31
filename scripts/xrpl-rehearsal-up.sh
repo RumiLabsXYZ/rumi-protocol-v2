@@ -16,8 +16,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR="${REHEARSAL_DIR:-$ROOT/target/xrpl-rehearsal}"
 POCKET_IC="${POCKET_IC_BIN:-$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir | xargs dirname)/pocket-ic}"
 SERVER_PORT=4951
-II_RELEASE="https://github.com/dfinity/internet-identity/releases/download/release-2026-05-26-be"
-II_BACKEND_SHA=80946901c67705df8c56236d0cb4732d21f4988a655e6662abe7c5d396e3f903
+# Single-canister II dev build; newer split releases need a gateway newer than PocketIC 7.
+II_RELEASE="https://github.com/dfinity/internet-identity/releases/download/release-2025-01-24"
 REBUILD=0
 [[ "${1:-}" == "--rebuild" ]] && REBUILD=1
 
@@ -28,9 +28,9 @@ fetch_checked() { # url dest sha256
   if [[ ! -f "$2" ]]; then curl -fsSL "$1" -o "$2.part" && mv "$2.part" "$2"; fi
   echo "$3  $2" | shasum -a 256 -c - >/dev/null || { echo "sha256 mismatch for $2"; rm -f "$2"; exit 1; }
 }
-fetch_checked "$II_RELEASE/internet_identity_dev.wasm.gz" "$DIR/ii.wasm.gz" "$II_BACKEND_SHA"
-FRONT_SHA="$(curl -fsSL "$II_RELEASE/internet_identity_frontend.wasm.gz.sha256" | awk '{print $1}')"
-fetch_checked "$II_RELEASE/internet_identity_frontend.wasm.gz" "$DIR/ii_frontend.wasm.gz" "$FRONT_SHA"
+II_SHA="$(curl -fsSL "$II_RELEASE/internet_identity_dev.wasm.gz.sha256" | awk '{print $1}')"
+rm -f "$DIR/ii.wasm.gz" "$DIR/ii_frontend.wasm.gz"
+fetch_checked "$II_RELEASE/internet_identity_dev.wasm.gz" "$DIR/ii.wasm.gz" "$II_SHA"
 
 if [[ $REBUILD == 1 || ! -f "$DIR/backend_fixture.wasm.gz" ]]; then
   # PocketIC 7 caps the code section at 10 MiB, so the rehearsal uses a size-optimised fixture build.

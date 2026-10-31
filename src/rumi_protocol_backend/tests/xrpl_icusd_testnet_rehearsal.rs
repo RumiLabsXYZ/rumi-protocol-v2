@@ -248,28 +248,12 @@ fn build_local(operator_genesis_e8s: u64) -> Local {
     pic.install_canister(backend, read_wasm("REHEARSAL_BACKEND_WASM", "backend_fixture.wasm.gz"), encode_args((init,)).unwrap(), None);
     pic.set_controllers(backend, None, vec![ctrl()]).expect("set controllers");
 
-    // Internet Identity (release-2026-05-26-be) is split in two canisters: the DEV backend and
-    // the asset-serving frontend. The frontend sits at the mainnet II id (the id the vault
-    // frontend override uses in the browser URL); the backend gets any id on the II subnet.
-    // dummy_auth is enabled on both so a rehearsal login needs no passkey/captcha.
-    let ii_subnet = pic.get_subnet(ii).expect("ii subnet");
-    let ii_backend = pic.create_canister_on_subnet(None, None, ii_subnet);
-    pic.add_cycles(ii_backend, 100_000_000_000_000);
-    let backend_arg = candid_parser::parse_idl_args(
-        "(opt record { captcha_config = opt record { max_unsolved_captchas = 50 : nat64; captcha_trigger = variant { Static = variant { CaptchaDisabled } } }; dummy_auth = opt opt record { prompt_for_index = false } })",
-    )
-    .expect("ii backend arg")
-    .to_bytes()
-    .expect("ii backend arg bytes");
-    pic.install_canister(ii_backend, read_wasm("REHEARSAL_II_WASM", "ii.wasm.gz"), backend_arg, None);
-    let frontend_arg = candid_parser::parse_idl_args(&format!(
-        "(record {{ backend_canister_id = principal \"{ii_backend}\"; backend_origin = \"http://localhost:{}\"; fetch_root_key = opt true; dev_csp = opt true; dummy_auth = opt opt record {{ prompt_for_index = false }} }})",
-        port()
-    ))
-    .expect("ii frontend arg")
-    .to_bytes()
-    .expect("ii frontend arg bytes");
-    pic.install_canister(ii, read_wasm("REHEARSAL_II_FRONTEND_WASM", "ii_frontend.wasm.gz"), frontend_arg, None);
+    // Internet Identity: the single-canister DEV build from release-2025-01-24, installed at the
+    // II id the vault frontend override uses. Newer split-canister releases call
+    // `/api/v3/.../read_state`, which the PocketIC 7 gateway this harness runs on does not serve,
+    // so their login never completes. Login uses a local passkey (Touch ID in Chrome).
+    pic.install_canister(ii, read_wasm("REHEARSAL_II_WASM", "ii.wasm.gz"), encode_args((None::<()>,)).unwrap(), None);
+    let ii_backend = ii;
 
     for _ in 0..10 {
         pic.tick();
