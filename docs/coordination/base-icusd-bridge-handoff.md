@@ -1670,6 +1670,11 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   `configure_xrpl_icusd` because `return_fx` configured `test_key_1` without the suite's local key_1 setup. The same W29 adds
   the existing fixture setter, keeps the first red log, does not touch the production key guard or rebuild the unchanged
   Wasm, and reruns only the seven Return cases. BB-57 stays in progress until they execute past setup and pass.
+- Focused rerun (Miles read the log): 6 of the 7 Return cases passed; only the upgrade case failed, at its second intent,
+  with CoverageUnavailable after an unknown-but-landed first payout (escrow 60 versus the conservative O 60 + R 40). The guard
+  is correct and stays; no top-up to bypass it. The test is reordered (the second intent prepared while still covered, before
+  the first lost payout is staged; then upgrade and prove the same operation, tuple, account, tag and counters survive, with
+  R and the phase advancing only through authoritative reconciliation) and only it is rerun.
 - Order after part B: the Rust build slot returns to W28 first (its BB-49 reproductions and corrections); after part B is
   accepted, W29's next card is BB-51 (Sui Move gate, `next-bb51.md`); no third lane.
 

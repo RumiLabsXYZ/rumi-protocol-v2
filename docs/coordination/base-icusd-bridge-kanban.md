@@ -294,3 +294,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-31: hosted CI run 41169908635 on 667d8bbc succeeded (04:57:09 UTC, verified by Miles); later local commits are outside that pin.
 - 2026-10-31: Miles independently checked the BB-57 part B artifact at 8ecab197 (Code section 9,707,926 bytes, under 12 MiB and under the old 10 MiB minus 256 KiB); the suite result is pending. Next: slot back to W28, then BB-51 to W29 after part B acceptance.
 - 2026-10-31: BB-57 part B first run (read by Miles): EXIT 101, 17 passed, the 7 new Return tests failed at configure_xrpl_icusd (return_fx lacked the local key_1 setup). Same W29 fixes the fixture and reruns only those 7 against the same artifact.
+- 2026-10-31: BB-57 part B focused rerun: 6 Return cases passed; the upgrade case failed at its second intent on the (correct) coverage guard; the same W29 reorders that test's setup and reruns only it, with no guard change or top-up.
