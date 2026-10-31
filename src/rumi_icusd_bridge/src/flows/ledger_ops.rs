@@ -1,0 +1,736 @@
+//! Generic lifecycle for persisted ledger operations (pulls, releases, refunds, sweeps).
+
+use crate::accounting::Transition;
+use crate::env;
+use crate::ledger::{self, CallOutcome, LedgerRejection, Resolution, SearchOutcome};
+use crate::state::{self, AuditCtx, DepositState, LedgerOp, LedgerOpKind, LedgerOpStatus, ReleaseState};
+use icrc_ledger_types::icrc1::account::Account;
+
+/// Retry the identical tuple only while comfortably inside the ledger's 24 h dedup
+/// window; after that, resolve by ICRC-3 search.
+pub const DEDUP_SAFE_WINDOW_NS: u64 = (24 * 3_600 - 30 * 60) * 1_000_000_000;
+/// An attempt without a recorded outcome is treated as ambiguous after this long.
+pub const STALE_ATTEMPT_NS: u64 = 120 * 1_000_000_000;
+pub const SEARCH_BLOCKS_PER_TICK: u64 = 500;
+
+/// Where an operation is stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpRef {
+    Pull(u64),
+    Refund(u64),
+    Release([u8; 32]),
+    Sweep(u64),
+}
+
+impl OpRef {
+    fn ctx(&self, note: impl Into<String>) -> AuditCtx {
+        match self {
+            OpRef::Pull(id) | OpRef::Refund(id) => AuditCtx::deposit(*id, note),
+            OpRef::Release(t) => AuditCtx::release(*t, note),
+            OpRef::Sweep(id) => AuditCtx::note(format!("sweep {id}: {}", note.into())),
+        }
+    }
+}
+
+pub fn load_op(r: &OpRef) -> Option<LedgerOp> {
+    match r {
+        OpRef::Pull(id) => state::get_deposit(*id).and_then(|d| d.pull),
+        OpRef::Refund(id) => state::get_deposit(*id).and_then(|d| d.refund),
+        OpRef::Release(t) => state::get_release(t).and_then(|x| x.transfer),
+        OpRef::Sweep(id) => state::read_core(|c| c.sweeps.iter().find(|s| s.id == *id).map(|s| s.op.clone())),
+    }
+}
+
+pub fn store_op(r: &OpRef, op: LedgerOp) {
+    let now = env::now_ns();
+    match r {
+        OpRef::Pull(id) => {
+            if let Some(mut d) = state::get_deposit(*id) {
+                d.pull = Some(op);
+                d.updated_at_ns = now;
+                state::put_deposit(&d);
+            }
+        }
+        OpRef::Refund(id) => {
+            if let Some(mut d) = state::get_deposit(*id) {
+                d.refund = Some(op);
+                d.updated_at_ns = now;
+                state::put_deposit(&d);
+            }
+        }
+        OpRef::Release(t) => {
+            if let Some(mut x) = state::get_release(t) {
+                x.transfer = Some(op);
+                x.updated_at_ns = now;
+                state::put_release(&x);
+            }
+        }
+        OpRef::Sweep(id) => state::mutate_core(|c| {
+            if let Some(s) = c.sweeps.iter_mut().find(|s| s.id == *id) {
+                s.op = op;
+            }
+        }),
+    }
+}
+
+pub fn is_terminal(op: &LedgerOp) -> bool {
+    matches!(op.status, LedgerOpStatus::Succeeded { .. } | LedgerOpStatus::Failed { .. })
+}
+
+/// The raw result of one send, tagged with the attempt number it belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentAttempt {
+    pub attempt: u32,
+    pub outcome: CallOutcome,
+}
+
+/// Send one attempt of the persisted tuple. Returns the raw outcome tagged with its
+/// attempt number, or `None` when there is nothing to send. Classify it with
+/// `apply_outcome`, which uses the op as stored AFTER the await.
+pub async fn attempt(r: &OpRef) -> Option<SentAttempt> {
+    let mut op = load_op(r)?;
+    if is_terminal(&op) {
+        return None;
+    }
+    let now = env::now_ns();
+    // A previous attempt whose outcome was never recorded (trap after send, or a call
+    // still in flight elsewhere) may have executed.
+    if op.attempts > 0 && matches!(op.status, LedgerOpStatus::Pending) {
+        op.ambiguous_seen = true;
+        op.status = LedgerOpStatus::Unknown { last_error: "previous attempt outcome was not recorded".into() };
+    }
+    if op.kind != LedgerOpKind::Pull && !op.outflow_reserved {
+        let amount = op.escrow_outflow();
+        if let Err(e) = state::apply_transition(Transition::OutflowUnknown { amount }, r.ctx("reserve outflow before send")) {
+            state::halt(format!("cannot reserve escrow outflow: {e}"));
+            return None;
+        }
+        op.outflow_reserved = true;
+    }
+    op.attempts = op.attempts.saturating_add(1);
+    op.last_attempt_ns = Some(now);
+    store_op(r, op.clone());
+
+    let attempt_no = op.attempts;
+    let ledger_id = state::read_core(|c| c.config.icusd_ledger);
+    let outcome = ledger::execute(ledger_id, &op).await;
+    Some(SentAttempt { attempt: attempt_no, outcome })
+}
+
+/// Apply the outcome of a send. The classification uses the op as stored now, not the
+/// copy taken before the await, so a slow reply cannot use stale `ambiguous_seen`. A
+/// non-success reply from an older attempt (a newer send of the same tuple has started
+/// since) proves nothing about the newer send, so it only marks the op unknown.
+pub fn apply_outcome(r: &OpRef, sent: SentAttempt) {
+    let Some(mut op) = load_op(r) else { return };
+    if is_terminal(&op) {
+        return;
+    }
+    let res = ledger::classify(&op, &sent.outcome);
+    if sent.attempt != op.attempts && !matches!(res, Resolution::Succeeded { .. }) {
+        op.ambiguous_seen = true;
+        op.status = LedgerOpStatus::Unknown {
+            last_error: format!("late reply from attempt {} while attempt {} is outstanding", sent.attempt, op.attempts),
+        };
+        store_op(r, op);
+        return;
+    }
+    apply_resolution(r, res);
+}
+
+/// Completion bucket changes for a proven success, by kind. `None` means the parent
+/// record is not in a state that expects this completion.
+fn completion(r: &OpRef, op: &LedgerOp) -> Option<Vec<Transition>> {
+    match r {
+        OpRef::Pull(id) => {
+            let d = state::get_deposit(*id)?;
+            matches!(d.state, DepositState::PullPending | DepositState::PullUnknown)
+                .then(|| vec![Transition::PullSucceeded { amount: d.amount_e8s }])
+        }
+        OpRef::Refund(id) => {
+            let d = state::get_deposit(*id)?;
+            matches!(d.state, DepositState::Refunding).then(|| vec![Transition::RefundCompleted { amount: d.amount_e8s }])
+        }
+        OpRef::Release(t) => {
+            let x = state::get_release(t)?;
+            matches!(x.state, ReleaseState::Pending)
+                .then(|| vec![Transition::ReleaseCompleted { amount: x.amount_e8s, release_fee: x.release_fee_e8s }])
+        }
+        OpRef::Sweep(_) => Some(vec![Transition::SweepCompleted { amount: op.escrow_outflow() }]),
+    }
+}
+
+fn mark_parent_succeeded(r: &OpRef) {
+    let now = env::now_ns();
+    match r {
+        OpRef::Pull(id) => {
+            if let Some(mut d) = state::get_deposit(*id) {
+                d.state = DepositState::Escrowed;
+                d.updated_at_ns = now;
+                state::put_deposit(&d);
+            }
+        }
+        OpRef::Refund(id) => {
+            if let Some(mut d) = state::get_deposit(*id) {
+                d.state = DepositState::Refunded;
+                d.updated_at_ns = now;
+                state::put_deposit(&d);
+            }
+        }
+        OpRef::Release(t) => {
+            if let Some(mut x) = state::get_release(t) {
+                x.state = ReleaseState::Released;
+                x.updated_at_ns = now;
+                state::put_release(&x);
+            }
+        }
+        OpRef::Sweep(_) => {}
+    }
+}
+
+/// Apply a resolution to the stored op and its parent. Synchronous: no awaits.
+pub fn apply_resolution(r: &OpRef, res: Resolution) {
+    let Some(mut op) = load_op(r) else { return };
+    if is_terminal(&op) {
+        return;
+    }
+    let now = env::now_ns();
+    match res {
+        Resolution::Succeeded { block_index } => {
+            let Some(mut ts) = completion(r, &op) else {
+                state::halt(format!("{r:?}: ledger success but parent record is not awaiting it"));
+                op.status = LedgerOpStatus::Succeeded { block_index };
+                store_op(r, op);
+                return;
+            };
+            if op.outflow_reserved {
+                ts.insert(0, Transition::OutflowResolved { amount: op.escrow_outflow() });
+            }
+            op.status = LedgerOpStatus::Succeeded { block_index };
+            op.outflow_reserved = false;
+            if let Err(e) = state::apply_transitions(&ts, r.ctx(format!("ledger block {block_index}"))) {
+                // The ledger moved funds; record that truth, then stop everything.
+                state::halt(format!("{r:?}: accounting rejected a proven ledger success: {e}"));
+                store_op(r, op);
+                return;
+            }
+            store_op(r, op);
+            mark_parent_succeeded(r);
+        }
+        Resolution::RetrySameTuple(note) => {
+            if op.ambiguous_seen {
+                op.status = LedgerOpStatus::Unknown { last_error: note };
+            } else {
+                // A definite no-effect reply: no earlier send is unresolved.
+                op.status = LedgerOpStatus::Pending;
+                op.attempts = 0;
+            }
+            // Keep the outflow reservation: the same tuple will be sent again.
+            store_op(r, op);
+        }
+        Resolution::RebuildTuple(rej) => {
+            // Only reachable without any ambiguous attempt: nothing moved.
+            release_reservation(r, &mut op);
+            match r {
+                OpRef::Pull(_) => fail_pull(r, op, format!("ledger rejected the pull: {rej:?}")),
+                _ => rebuild_escrow_tuple(r, op, Some(rej), now),
+            }
+        }
+        Resolution::Failed(reason) => {
+            release_reservation(r, &mut op);
+            match r {
+                OpRef::Pull(_) => fail_pull(r, op, reason),
+                _ => {
+                    // The escrow cannot lack funds or allowance while coverage holds.
+                    state::halt(format!("{r:?}: escrow transfer rejected: {reason}"));
+                    op.status = LedgerOpStatus::Pending;
+                    op.attempts = 0;
+                    store_op(r, op);
+                }
+            }
+        }
+        Resolution::Unknown(reason) => {
+            op.ambiguous_seen = true;
+            op.status = LedgerOpStatus::Unknown { last_error: reason };
+            store_op(r, op);
+        }
+    }
+}
+
+fn release_reservation(r: &OpRef, op: &mut LedgerOp) {
+    if op.outflow_reserved {
+        let amount = op.escrow_outflow();
+        if let Err(e) = state::apply_transition(Transition::OutflowResolved { amount }, r.ctx("outflow proven not executed")) {
+            state::halt(format!("cannot release outflow reservation: {e}"));
+        }
+        op.outflow_reserved = false;
+    }
+}
+
+fn fail_pull(r: &OpRef, mut op: LedgerOp, reason: String) {
+    let OpRef::Pull(id) = r else { return };
+    let Some(mut d) = state::get_deposit(*id) else { return };
+    if !matches!(d.state, DepositState::PullPending | DepositState::PullUnknown) {
+        return;
+    }
+    op.status = LedgerOpStatus::Failed { reason: reason.clone() };
+    if let Err(e) = state::apply_transition(Transition::PullFailed { amount: d.amount_e8s }, r.ctx(&reason)) {
+        state::halt(format!("pull failure accounting: {e}"));
+        return;
+    }
+    state::mutate_core(|c| {
+        c.windows.admitted_in_window = c.windows.admitted_in_window.saturating_sub(d.amount_e8s as u128);
+    });
+    d.pull = Some(op);
+    d.state = DepositState::PullFailed { reason };
+    d.updated_at_ns = env::now_ns();
+    state::put_deposit(&d);
+}
+
+/// Replace an escrow transfer tuple after a proven no-effect outcome (new timestamp,
+/// possibly a new ledger fee). The escrow outflow is unchanged by construction.
+pub fn rebuild_escrow_tuple(r: &OpRef, mut op: LedgerOp, rej: Option<LedgerRejection>, now: u64) {
+    if let Some(LedgerRejection::BadFee { expected_fee }) = rej {
+        let outflow = op.escrow_outflow();
+        state::mutate_core(|c| c.ledger_fee_e8s = Some(expected_fee));
+        if outflow <= expected_fee {
+            match r {
+                OpRef::Release(t) => {
+                    hold_release_for_fees(t, outflow, expected_fee);
+                    return;
+                }
+                _ => {
+                    state::halt(format!("{r:?}: ledger fee {expected_fee} consumes the whole transfer"));
+                    return;
+                }
+            }
+        }
+        op.fee_e8s = Some(expected_fee);
+        op.amount_e8s = outflow - expected_fee;
+    }
+    op.created_at_time = now;
+    op.attempts = 0;
+    op.ambiguous_seen = false;
+    op.status = LedgerOpStatus::Pending;
+    op.search_from_block = state::read_core(|c| c.ledger_tip_lower_bound);
+    op.search_next_block = None;
+    op.outflow_reserved = false;
+    store_op(r, op);
+    state::append_audit(None, r.ctx("ledger tuple rebuilt after proven no-effect outcome"));
+}
+
+fn hold_release_for_fees(t: &[u8; 32], outflow: u64, fee: u64) {
+    let Some(mut x) = state::get_release(t) else { return };
+    if !matches!(x.state, ReleaseState::Pending) {
+        return;
+    }
+    if let Err(e) = state::apply_transition(
+        Transition::ReleaseHeld { amount: x.amount_e8s },
+        AuditCtx::release(*t, "release cannot cover fees; held for re-mint"),
+    ) {
+        state::halt(format!("release hold accounting: {e}"));
+        return;
+    }
+    x.transfer = None;
+    x.state = ReleaseState::Held { reason: format!("amount after bridge fee ({outflow} e8s) does not cover the ledger fee ({fee} e8s)") };
+    x.updated_at_ns = env::now_ns();
+    state::put_release(&x);
+}
+
+/// Drive an operation whose outcome is unknown (or whose attempt went stale) toward a
+/// proven result. Within the dedup window the identical tuple is resent; afterwards the
+/// ledger history is searched.
+pub async fn reconcile(r: &OpRef) {
+    let Some(op) = load_op(r) else { return };
+    if is_terminal(&op) {
+        return;
+    }
+    let now = env::now_ns();
+    let stale_pending = matches!(op.status, LedgerOpStatus::Pending)
+        && op.attempts > 0
+        && op.last_attempt_ns.map(|t| now.saturating_sub(t) >= STALE_ATTEMPT_NS).unwrap_or(true);
+    let unknown = matches!(op.status, LedgerOpStatus::Unknown { .. });
+    let unsent = matches!(op.status, LedgerOpStatus::Pending) && op.attempts == 0;
+    if !(stale_pending || unknown || unsent) {
+        return;
+    }
+    if unsent || now < op.created_at_time.saturating_add(DEDUP_SAFE_WINDOW_NS) {
+        if let Some(sent) = attempt(r).await {
+            apply_outcome(r, sent);
+        }
+        return;
+    }
+    // Outside the safe dedup window: search for the exact block. The search awaits, so
+    // note exactly which tuple and send history it is about; the result is applied only
+    // to an op that is still that tuple (see `apply_search_outcome`).
+    let basis = SearchBasis::of(&op);
+    let ledger_id = state::read_core(|c| c.config.icusd_ledger);
+    let from = op.search_next_block.unwrap_or(op.search_from_block);
+    let outcome = ledger::search(ledger_id, &op, from, SEARCH_BLOCKS_PER_TICK, now).await;
+    apply_search_outcome(r, &basis, outcome, env::now_ns());
+}
+
+/// Identity of what an ICRC-3 search looked at: the tuple that defines the ledger
+/// transaction and the send history at the moment the search started.
+///
+/// A proof that the tuple never executed is only a statement about THAT tuple, up to the
+/// ledger tip the search reached. If the op changed while the search awaited (a new send
+/// of the same tuple, a rebuilt tuple with a new `created_at_time`, a reset), the proof no
+/// longer covers the op as it stands and must be discarded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchBasis {
+    kind: LedgerOpKind,
+    from: Account,
+    to: Account,
+    spender: Option<Account>,
+    amount_e8s: u64,
+    fee_e8s: Option<u64>,
+    memo: Vec<u8>,
+    created_at_time: u64,
+    /// Send history: a send after the search started may execute after the tip it read.
+    attempts: u32,
+    last_attempt_ns: Option<u64>,
+    /// Where the search window of this tuple starts (reset by a rebuild).
+    search_from_block: u64,
+}
+
+impl SearchBasis {
+    pub fn of(op: &LedgerOp) -> SearchBasis {
+        SearchBasis {
+            kind: op.kind,
+            from: op.from,
+            to: op.to,
+            spender: op.spender,
+            amount_e8s: op.amount_e8s,
+            fee_e8s: op.fee_e8s,
+            memo: op.memo.clone(),
+            created_at_time: op.created_at_time,
+            attempts: op.attempts,
+            last_attempt_ns: op.last_attempt_ns,
+            search_from_block: op.search_from_block,
+        }
+    }
+
+    /// True when `cur` is still the searched tuple with the same send history, and still
+    /// in a state that allows a search (not terminal; unknown, or sent without a recorded
+    /// outcome).
+    pub fn still_describes(&self, cur: &LedgerOp) -> bool {
+        !is_terminal(cur) && searchable(cur) && *self == SearchBasis::of(cur)
+    }
+}
+
+/// The states `reconcile` searches from: an unknown outcome, or a sent attempt whose
+/// outcome was never recorded. An op that was never sent has nothing to search for.
+fn searchable(op: &LedgerOp) -> bool {
+    matches!(op.status, LedgerOpStatus::Unknown { .. }) || (matches!(op.status, LedgerOpStatus::Pending) && op.attempts > 0)
+}
+
+/// Apply the result of an ICRC-3 search to the op as stored now. Synchronous. A "never
+/// executed" proof, and the progress of an unfinished search, are applied only when the
+/// op is still what the search looked at (`basis`); otherwise they are dropped and the
+/// next pass decides afresh. A found block is applied regardless: the ledger executed
+/// that transfer, which is a fact, not an inference about the op's current shape.
+pub fn apply_search_outcome(r: &OpRef, basis: &SearchBasis, outcome: SearchOutcome, now: u64) {
+    match outcome {
+        SearchOutcome::Found { block_index } => apply_resolution(r, Resolution::Succeeded { block_index }),
+        SearchOutcome::NotFoundYet { next_block, .. } => {
+            if let Some(mut cur) = load_op(r) {
+                if basis.still_describes(&cur) {
+                    cur.search_next_block = Some(next_block);
+                    store_op(r, cur);
+                }
+            }
+        }
+        SearchOutcome::ProvenAbsent => {
+            let Some(mut cur) = load_op(r) else { return };
+            if is_terminal(&cur) {
+                return;
+            }
+            if !basis.still_describes(&cur) {
+                state::append_audit(
+                    None,
+                    r.ctx("ICRC-3 absence proof discarded: the operation changed while the search was running"),
+                );
+                return;
+            }
+            state::append_audit(None, r.ctx("ICRC-3 search proved the tuple never executed"));
+            release_reservation(r, &mut cur);
+            match r {
+                OpRef::Pull(_) => fail_pull(r, cur, "pull never executed (proven by ledger history search)".into()),
+                _ => rebuild_escrow_tuple(r, cur, None, now),
+            }
+        }
+        SearchOutcome::Error(e) => {
+            state::append_audit(None, r.ctx(format!("ledger search error: {e}")));
+        }
+    }
+}
+
+/// Outcome for a freshly sent call, used by tests to drive `apply_resolution`.
+pub fn resolution_for(op: &LedgerOp, outcome: &CallOutcome) -> Resolution {
+    ledger::classify(op, outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flows::deposit::tests::setup_bound;
+    use crate::ledger::LedgerRejection;
+    use crate::state::DepositState;
+    use crate::types::BridgeToBaseArgs;
+    use candid::Principal;
+
+    fn admitted() -> u64 {
+        setup_bound();
+        let args = BridgeToBaseArgs {
+            amount_e8s: 100_000_000,
+            base_recipient: "0x00000000000000000000000000000000000000aa".into(),
+            from_subaccount: None,
+            client_request_id: serde_bytes::ByteBuf::from(vec![1; 16]),
+            expected_deposit_fee_e8s: 0,
+        };
+        crate::flows::deposit::admit(Principal::from_slice(&[0x11; 29]), &args).unwrap().id
+    }
+
+    fn mark_sent(id: u64) -> u32 {
+        let r = OpRef::Pull(id);
+        let mut op = load_op(&r).unwrap();
+        if op.attempts > 0 && matches!(op.status, LedgerOpStatus::Pending) {
+            op.ambiguous_seen = true;
+            op.status = LedgerOpStatus::Unknown { last_error: "stale".into() };
+        }
+        op.attempts += 1;
+        let n = op.attempts;
+        store_op(&r, op);
+        n
+    }
+
+    #[test]
+    fn late_no_effect_reply_from_an_older_attempt_cannot_fail_the_op() {
+        let id = admitted();
+        let first = mark_sent(id);
+        // The reply to attempt 1 is slow; meanwhile the timer resends the same tuple.
+        let second = mark_sent(id);
+        assert_eq!((first, second), (1, 2));
+        // Attempt 1's typed no-effect reply arrives late.
+        apply_outcome(
+            &OpRef::Pull(id),
+            SentAttempt { attempt: first, outcome: CallOutcome::Rejected(LedgerRejection::InsufficientAllowance { allowance: 0 }) },
+        );
+        let d = state::get_deposit(id).unwrap();
+        assert!(matches!(d.state, DepositState::PullPending | DepositState::PullUnknown), "{:?}", d.state);
+        assert!(matches!(d.pull.as_ref().unwrap().status, LedgerOpStatus::Unknown { .. }));
+        // Attempt 2 proves the transfer happened (Duplicate of attempt 1's block).
+        apply_outcome(&OpRef::Pull(id), SentAttempt { attempt: second, outcome: CallOutcome::Accepted { block_index: 4 } });
+        assert_eq!(state::get_deposit(id).unwrap().state, DepositState::Escrowed);
+    }
+
+    #[test]
+    fn success_from_an_older_attempt_still_counts() {
+        let id = admitted();
+        let first = mark_sent(id);
+        let _second = mark_sent(id);
+        apply_outcome(&OpRef::Pull(id), SentAttempt { attempt: first, outcome: CallOutcome::Accepted { block_index: 9 } });
+        assert_eq!(state::get_deposit(id).unwrap().state, DepositState::Escrowed);
+    }
+
+    // -----------------------------------------------------------------------
+    // ICRC-3 search results are applied only to the op the search looked at
+    // -----------------------------------------------------------------------
+
+    const T0: u64 = 1_700_000_000_000_000_000;
+    const DAY: u64 = 24 * 3_600 * 1_000_000_000;
+
+    /// A refund whose first send had an unknown outcome and is old enough to be searched.
+    fn refunding_with_unknown_outcome() -> (OpRef, u64) {
+        crate::flows::deposit::tests::setup_bound();
+        let owner = Principal::from_slice(&[0x11; 29]);
+        let escrow = crate::state::read_core(|c| c.escrow_account(crate::env::canister_id()));
+        let mut d = crate::state::tests::sample_deposit(5, owner);
+        d.state = DepositState::Refunding;
+        d.refund = Some(LedgerOp {
+            kind: LedgerOpKind::Refund,
+            from: escrow,
+            to: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
+            spender: None,
+            amount_e8s: 90,
+            fee_e8s: Some(10),
+            memo: vec![7; 8],
+            created_at_time: T0,
+            attempts: 2,
+            ambiguous_seen: true,
+            status: LedgerOpStatus::Unknown { last_error: "timeout".into() },
+            search_from_block: 5,
+            search_next_block: Some(40),
+            last_attempt_ns: Some(T0 + 1_000),
+            outflow_reserved: false,
+        });
+        state::put_deposit(&d);
+        (OpRef::Refund(5), T0 + DAY + 3_600 * 1_000_000_000)
+    }
+
+    #[test]
+    fn proven_absent_rebuilds_an_unchanged_escrow_op() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        let op = load_op(&r).unwrap();
+        assert_eq!(op.created_at_time, now, "a fresh tuple");
+        assert_eq!((op.attempts, op.ambiguous_seen, op.search_next_block), (0, false, None));
+        assert_eq!(op.status, LedgerOpStatus::Pending);
+        assert_eq!(op.search_from_block, 77, "the search window restarts at the known tip");
+        assert_eq!((op.amount_e8s, op.fee_e8s), (90, Some(10)), "same amounts");
+    }
+
+    #[test]
+    fn proven_absent_is_dropped_when_an_attempt_was_sent_during_the_search() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        // While the search awaited, the same tuple was sent again.
+        let mut op = load_op(&r).unwrap();
+        op.attempts += 1;
+        op.last_attempt_ns = Some(now - 1);
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op, "the proof does not cover the newer send");
+        // A newer send with an identical attempt count (a reset then a resend) is also
+        // told apart by its send time.
+        let mut op2 = load_op(&r).unwrap();
+        op2.attempts -= 1;
+        op2.last_attempt_ns = Some(now - 2);
+        store_op(&r, op2.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op2);
+    }
+
+    #[test]
+    fn proven_absent_is_dropped_when_the_tuple_was_rebuilt_during_the_search() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let mut op = load_op(&r).unwrap();
+        op.created_at_time = now - 5;
+        op.attempts = 2;
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op, "a proof about the old tuple says nothing about the new one");
+        // Same for any other field of the tuple.
+        for tweak in [
+            |o: &mut LedgerOp| o.amount_e8s += 1,
+            |o: &mut LedgerOp| o.fee_e8s = Some(11),
+            |o: &mut LedgerOp| o.memo = vec![8; 8],
+            |o: &mut LedgerOp| o.search_from_block += 1,
+        ] {
+            let (r, now) = refunding_with_unknown_outcome();
+            let basis = SearchBasis::of(&load_op(&r).unwrap());
+            let mut op = load_op(&r).unwrap();
+            tweak(&mut op);
+            store_op(&r, op.clone());
+            apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+            assert_eq!(load_op(&r).unwrap(), op);
+        }
+    }
+
+    #[test]
+    fn proven_absent_is_dropped_when_the_op_left_the_state_that_allowed_the_search() {
+        // Reset to unsent (a definite no-effect reply arrived meanwhile).
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Pending;
+        op.attempts = 0;
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op);
+
+        // Same attempt count and tuple, but the op is no longer searchable (never sent).
+        let (r, now) = refunding_with_unknown_outcome();
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Pending;
+        op.attempts = 0;
+        op.last_attempt_ns = None;
+        store_op(&r, op.clone());
+        let basis = SearchBasis::of(&op);
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op, "an unsent op has nothing to prove absent");
+
+        // Already terminal.
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Succeeded { block_index: 9 };
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap(), op);
+
+        // Stale-pending (sent, no outcome recorded) is searchable and rebuilds.
+        let (r, now) = refunding_with_unknown_outcome();
+        let mut op = load_op(&r).unwrap();
+        op.status = LedgerOpStatus::Pending;
+        store_op(&r, op.clone());
+        let basis = SearchBasis::of(&op);
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        assert_eq!(load_op(&r).unwrap().created_at_time, now);
+    }
+
+    #[test]
+    fn proven_absent_fails_an_unchanged_pull_and_leaves_a_changed_one_alone() {
+        let id = admitted();
+        let _ = mark_sent(id);
+        let _ = mark_sent(id);
+        let r = OpRef::Pull(id);
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        // A third send races in: the pull must not be failed on the old proof.
+        let _ = mark_sent(id);
+        let now = T0 + 2 * DAY;
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        let d = state::get_deposit(id).unwrap();
+        assert!(matches!(d.state, DepositState::PullPending | DepositState::PullUnknown), "{:?}", d.state);
+        assert!(!is_terminal(d.pull.as_ref().unwrap()));
+        // With nothing changed, the same proof fails the pull and releases the reservation.
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        apply_search_outcome(&r, &basis, SearchOutcome::ProvenAbsent, now);
+        let d = state::get_deposit(id).unwrap();
+        assert!(matches!(d.state, DepositState::PullFailed { .. }), "{:?}", d.state);
+        assert_eq!(state::read_core(|c| c.buckets.reserved_pulls), 0);
+    }
+
+    #[test]
+    fn search_progress_is_recorded_only_for_the_searched_tuple() {
+        let (r, now) = refunding_with_unknown_outcome();
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        apply_search_outcome(&r, &basis, SearchOutcome::NotFoundYet { next_block: 60, tip: 100 }, now);
+        assert_eq!(load_op(&r).unwrap().search_next_block, Some(60));
+        // The tuple is rebuilt meanwhile: the old search position must not leak into it.
+        let mut op = load_op(&r).unwrap();
+        op.created_at_time = now - 1;
+        op.search_next_block = None;
+        store_op(&r, op.clone());
+        apply_search_outcome(&r, &basis, SearchOutcome::NotFoundYet { next_block: 90, tip: 100 }, now);
+        assert_eq!(load_op(&r).unwrap(), op);
+    }
+
+    #[test]
+    fn a_found_block_is_applied_whatever_the_op_looks_like_now() {
+        let id = admitted();
+        let _ = mark_sent(id);
+        let r = OpRef::Pull(id);
+        let basis = SearchBasis::of(&load_op(&r).unwrap());
+        let _ = mark_sent(id);
+        apply_search_outcome(&r, &basis, SearchOutcome::Found { block_index: 12 }, T0);
+        assert_eq!(state::get_deposit(id).unwrap().state, DepositState::Escrowed);
+    }
+
+    #[test]
+    fn classification_uses_the_op_as_stored_after_the_await() {
+        let id = admitted();
+        let n = mark_sent(id);
+        // While the call was in flight something else marked the op ambiguous.
+        let r = OpRef::Pull(id);
+        let mut op = load_op(&r).unwrap();
+        op.ambiguous_seen = true;
+        store_op(&r, op);
+        apply_outcome(&r, SentAttempt { attempt: n, outcome: CallOutcome::Rejected(LedgerRejection::InsufficientFunds { balance: 0 }) });
+        let d = state::get_deposit(id).unwrap();
+        assert!(!matches!(d.state, DepositState::PullFailed { .. }), "a no-effect reply after ambiguity is not proof");
+    }
+}

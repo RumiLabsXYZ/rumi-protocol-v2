@@ -2,7 +2,9 @@
 //! See docs/plans/2026-04-07-rumi-analytics-design.md.
 
 use candid::Principal;
+use icrc_ledger_types::icrc1::account::Account;
 
+mod bridge_escrow;
 mod collectors;
 mod http;
 pub mod pull_schedule;
@@ -802,6 +804,38 @@ fn set_pull_schedule(period_secs: u64, tick_secs: u64) -> Result<(), String> {
         tick_secs,
         caller
     );
+    Ok(())
+}
+
+/// Admin: configure the bridge escrow accounts whose icUSD balances are
+/// subtracted from the ledger total when the circulating supply is refreshed
+/// (BB-58). icUSD held in escrow backs a bridged token on another chain, so
+/// the raw `icrc1_total_supply` double counts it. Pass one ICRC-1 account per
+/// bridge destination on the production ledger plus the XRPL lane's escrow,
+/// each once. The list replaces the previous one; an empty list restores the
+/// unadjusted behavior. At most 32 accounts, no duplicate (a missing
+/// subaccount and the all-zero subaccount are the same account), no anonymous
+/// owner.
+///
+/// A changed list clears the cached supply, so `/api/supply` answers "supply
+/// not yet cached" until the refresh that is started here (or the next
+/// scheduled one) repopulates it under the new list.
+#[ic_cdk_macros::update]
+fn admin_set_bridge_escrow_accounts(accounts: Vec<Account>) -> Result<(), String> {
+    let admin = state::read_state(|s| s.admin);
+    let caller = ic_cdk::caller();
+    require_admin(caller, admin)?;
+    let changed = state::mutate_state(|s| bridge_escrow::apply_accounts(s, accounts))?;
+    let count = state::read_state(|s| bridge_escrow::configured_accounts(s).len());
+    ic_cdk::println!(
+        "[admin_set_bridge_escrow_accounts] accounts={} changed={} (caller={})",
+        count,
+        changed,
+        caller
+    );
+    if changed {
+        ic_cdk::spawn(timers::refresh_supply_cache());
+    }
     Ok(())
 }
 

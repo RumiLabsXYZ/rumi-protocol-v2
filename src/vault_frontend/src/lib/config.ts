@@ -57,11 +57,30 @@ export const CANISTER_IDS = {
   // DFINITY ckETH minter also operates the ckERC20 rails (including ckUSDC).
   CKERC20_MINTER: "sv3dd-oaaaa-aaaar-qacoa-cai",
   CKETH_LEDGER: "ss2fx-dyaaa-aaaar-qacoq-cai",
+  // Rumi icUSD <-> Base bridge canister (rumi_icusd_bridge). Empty until the
+  // canister is deployed; filling it in flips BRIDGE_ENABLED true so /bridge
+  // and its nav links appear.
+  ICUSD_BRIDGE: "",
+  // Rumi icUSD <-> Solana bridge canister (rumi_icusd_sol_bridge). Empty: the Solana destination stays a disabled
+  // row, no actor is created and no wallet is asked. Only a configured, initialized instance can enable it.
+  ICUSD_SOL_BRIDGE: "",
+  // Rumi icUSD <-> Sui bridge canister (rumi_icusd_sui_bridge). Empty: the Sui destination stays a disabled row, no actor
+  // is created and no wallet is asked. Only a configured instance whose own answers pass every identity check can enable it.
+  ICUSD_SUI_BRIDGE: "",
 } as const;
 
 /** The /points airdrop section is shown only once the rumi_points canister id
  *  is configured above. Flip on by filling RUMI_POINTS at deploy time. */
 export const POINTS_ENABLED: boolean = CANISTER_IDS.RUMI_POINTS !== "";
+
+/** The /bridge page (icUSD between the Internet Computer and another network) is shown once ANY supported bridge
+ *  instance is configured above: the Base one, the Solana one or the Sui one. An empty id is "not configured" and makes
+ *  no request. The string casts keep the comparison valid whether an id is empty or filled in. A native-only
+ *  deployment (Sui configured, Base not) therefore still gets the page. */
+export const BRIDGE_ENABLED: boolean =
+  (CANISTER_IDS.ICUSD_BRIDGE as string) !== "" ||
+  (CANISTER_IDS.ICUSD_SOL_BRIDGE as string) !== "" ||
+  (CANISTER_IDS.ICUSD_SUI_BRIDGE as string) !== "";
 
 /**
  * AMM1 (3USD/ICP) liquidity deposits are paused (2026-07-23): the pool card is
@@ -101,6 +120,9 @@ export const LOCAL_CANISTER_IDS = {
   STABILITY_POOL: "tmhzi-dqaaa-aaaap-qrd6q-cai",
   INTERNET_IDENTITY: "rdmx6-jaaaa-aaaaa-aaadq-cai", // Local II canister
   CYCLE_SENTINEL: "",
+  ICUSD_BRIDGE: "",
+  ICUSD_SOL_BRIDGE: "",
+  ICUSD_SUI_BRIDGE: "",
 } as const;
 
 export const isCycleSentinelConfigured = CANISTER_IDS.CYCLE_SENTINEL.trim().length > 0;
