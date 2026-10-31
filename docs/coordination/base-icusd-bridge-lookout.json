@@ -450,7 +450,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Strict return verifier, strays refunded, no payout before a final burn, custody audit, unattributed holder-burn seam; holder-burn adversarial test passes",
+      "evidenceText": "proof=none; Strict return verifier, strays refunded, no payout before a final burn, custody audit, unattributed holder-burn seam; also the Solana supply and custody reader for the BB-58 collector (moved from BB-58)",
       "evidenceLinks": []
     },
     {
@@ -482,7 +482,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; Persist before sign; epoch expiry plus a missing digest never authorizes replacement or refund; delivery reconciled from consumed mint ids; audit query",
+      "evidenceText": "proof=none; Persist before sign; epoch expiry plus a missing digest never authorizes replacement or refund; delivery from consumed mint ids; audit query; also the Sui supply reader for the BB-58 collector (moved from BB-58)",
       "evidenceLinks": []
     },
     {
@@ -514,15 +514,15 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Declarations regenerated canonically; return and opt-in cards; XRPL PocketIC suite with negatives run serially; backend Wasm kept under PocketIC 7's 10 MiB cap",
+      "evidenceText": "proof=none; Declarations regenerated canonically; return and opt-in cards; XRPL PocketIC suite with negatives; Wasm under the 10 MiB cap; also the XRPL lane reader (E_X, issued outstanding) for the BB-58 collector (moved)",
       "evidenceLinks": []
     },
     {
       "id": "BB-58",
-      "state": "Review",
+      "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=local-test; Components accepted (15bb73dc, 78e8ae3d); 8b88a96f adds the real IC query and EVM client transport behind a feature, quorum reads at the settlement head, mocked tests only (127 pass), never run live; native adapters go with family cards",
+      "evidenceText": "proof=local-test; Open. 8b88a96f transport is source and mock evidence only; Miles' corrections queued for the same owner: provider chain-id binding, count-once chain ids, per-instance audit query collection with independent C1 and supply checks",
       "evidenceLinks": []
     },
     {

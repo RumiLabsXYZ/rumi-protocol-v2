@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-58 transport in Review (8b88a96f; running it against public networks stays held; Solana, Sui and XRPL adapters land with BB-49, BB-53 and BB-57). BB-59 in progress (Sonnet, frontend only), then BB-60.",
+      "nextAction": "BB-59 in progress (Sonnet, frontend only). BB-58 stays open: same owner W25 takes Miles' corrections at the next free lane (provider chain-id binding, count-once chain ids, per-instance audit queries with independent checks); mocks only, no public call. Then BB-60.",
       "cardIds": [
         "BB-58",
         "BB-59",

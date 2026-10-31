@@ -1085,6 +1085,15 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   compared). Not exercised: `ic-agent` query-signature verification against a replica. crates.io was reached once to fetch
   the new crates.
 - Proposal for Miles: close BB-58 on this transport and track the Solana, Sui and XRPL readers on BB-49, BB-53 and BB-57.
+- Miles' review of `8b88a96f` (source and mock evidence only; IC method, signature and record slice match the backend
+  Candid; anonymous query-only with default verification kept): not closed. (1) `live/evm.rs` never asks `eth_chainId`, so a
+  manifest labelled for one network with another network's providers could vote; providers must be bound to the profile's
+  chain identity before head and supply votes, blocked profiles still sending nothing. (2) `live/ic.rs` sums a raw chain-id
+  list, so `[1030, 1030]` doubles one supply; duplicates must be rejected before any query. (3) The accepted per-destination
+  audit query collection (plan line 56, design 2.4) is still missing from `Readings`. The native readers move to BB-49,
+  BB-53 and BB-57, whose cards and plan rows now name them (bookkeeping, not completion evidence). BB-58 back to Queue; the
+  bounded correction goes to the same W25 at the next free lane, with W26 (BB-45) and W27 (BB-59) left running and no third
+  lane.
 - Running (two Sonnet lanes): BB-45 (W26, only Rust and Wasm release builder) and BB-59 (W27, new run, `claude-sonnet-5-5`,
   frontend only: `baseBridge` services, bridge components and route; focused vitest, `npm run check` against its baseline,
   one `npm run build`).
