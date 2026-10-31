@@ -287,3 +287,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-31: BB-56 done (Miles accepted the origin component 8ecab197; with e48dc18d, 0b73ae95 and 0a315971 its agreed source and focused-test requirements are met). BB-57 stays in progress.
 - 2026-10-31: XRPL collector floor flag delivered (91a27a45, W29); coordinator replayed Miles' repro with the built binary (exit 3 with XrplEscrowBelowIssued) and the equal-escrow fixture (exit 0).
 - 2026-10-31: Miles accepted the XRPL floor flag 91a27a45; BB-57 has only part B left. Proposed durable lesson 4 added to the plan (proposal only): both XRPL origins are escrow-backed.
+- 2026-10-31: cohort push 2d5201b4..667d8bbc (21 commits, incl. 91a27a45) at 04:46 UTC; PR #591 description refreshed for the current source (generic EVM source, analytics, collector, frontend, Solana canister in progress; XRPL follow-ups local and not part of the PR).

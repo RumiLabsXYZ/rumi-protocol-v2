@@ -1597,6 +1597,19 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   are escrow-backed; borrow creates debt AND mints the exact net into the escrow, so debt provenance is never an exemption
   from escrow coverage and never belongs in debt-backed `chain_supplies`.
 
+## Milestone 73 (2026-10-31): cohort push and PR refresh
+
+- Push (Miles' cohort decision): one push at 04:46 UTC, `2d5201b4..667d8bbc` (21 commits, including `91a27a45`), after the
+  coordinator docs checkpoint; remote head verified equal to local `667d8bbc`. W28's uncommitted 49b files were not staged.
+  Miles had verified the previous hosted run at `2d5201b4` succeeded; no manual rerun, one monitor (his).
+- PR #591 description rewritten in place (draft, open, unmerged, head `667d8bbc`): Part 1 no longer says every consumer is
+  untouched without qualification (Part 3 changes the bridge source and analytics; the backend stays unchanged on this
+  branch); Part 2 is labelled docs and a host-only profile crate written before Part 3; Part 3 lists every card with its
+  commits and acceptance level (BB-42 to BB-45, BB-58 to BB-60 and the BB-57 collector pieces accepted; BB-47 components in
+  Review; BB-48 accepted; BB-49 in progress with the two accepted 49a findings and MC-DEF-8; BB-46 held), the latest check per
+  crate, and the live-proof limits (no public RPC, history retention, real signing, settlement or wallet display). The XRPL
+  follow-ups to PR #586 are stated as a separate local branch, NOT part of this PR, with its push denied and held.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
