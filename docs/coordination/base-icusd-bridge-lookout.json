@@ -455,10 +455,10 @@
     },
     {
       "id": "BB-50",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Solana: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; In Review: adcbf1a9, 25b9d4d9 and F1 to F4 correction 053f8ed5 (W28, local): uncertain attempts stay held, strict user rejection, no ICP-side discard, real RPC seam; 20 red, 193 green, typecheck at baseline",
+      "evidenceText": "proof=local-test; Done (Miles) at source and local injected-flow scope: adcbf1a9, 25b9d4d9, 053f8ed5 (F1 to F4). Not a real wallet, provider, genesis probe, deployment or settlement proof",
       "evidenceLinks": []
     },
     {
@@ -551,10 +551,10 @@
     },
     {
       "id": "BB-62",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "EVM: uncertain ICP-to-Base request stays bound to its id",
-      "evidenceText": "proof=none; Queued for W28 after BB-50 acceptance: the EVM flow lets an uncertain ICP-to-Base request be discarded or resumed after an absent query (source finding, no live duplicate); reuse the BB-50 F3 repair",
+      "evidenceText": "proof=none; In progress (W28): an uncertain ICP-to-Base request stays bound to its id (no discard after an absent query, approved snapshots continue under the same id); reuses the accepted BB-50 F3 repair",
       "evidenceLinks": []
     }
   ]

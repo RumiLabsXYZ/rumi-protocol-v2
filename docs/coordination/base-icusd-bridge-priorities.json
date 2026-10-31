@@ -24,9 +24,9 @@
     {
       "id": "evm-implementation",
       "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
-      "status": "blocked",
+      "status": "in_progress",
       "blockedReason": "EVM source cards BB-42 to BB-45 are accepted. BB-46 needs public activation evidence: a separate authorization to run read-only probes (Robinhood finalized tag and keyless providers, Monad fast-tag consensus, HyperEVM archive providers). Optional probe tooling is deferred.",
-      "nextAction": "When probes are authorized: run them read-only and record the evidence; a passing Robinhood record flips its row's head rule and install gate. BB-62 (the EVM uncertain-request repair, same W28) is queued after BB-50 acceptance.",
+      "nextAction": "BB-62 in progress (same W28): the EVM uncertain-request repair. BB-46 activation probes stay separately held until authorized; when they are, run them read-only and record the evidence (a passing Robinhood record flips its row's head rule and install gate).",
       "cardIds": [
         "BB-42",
         "BB-43",
@@ -51,9 +51,9 @@
     {
       "id": "solana-implementation",
       "title": "Solana implementation (memo plus durable nonce)",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "BB-47, BB-48 and BB-49 done. BB-50 in Review: adcbf1a9, 25b9d4d9 and the F1 to F4 correction 053f8ed5 (same W28) delivered to Miles. Then BB-62 (EVM repair, same W28). Solana stays disabled; activation needs its own authorization.",
+      "nextAction": "BB-47 to BB-50 done at source and local-test scope. Activation, a real wallet round trip, provider and history evidence and Rob's D6 custody decision stay separately held; Solana stays disabled.",
       "cardIds": [
         "BB-47",
         "BB-48",

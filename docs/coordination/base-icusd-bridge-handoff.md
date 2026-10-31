@@ -2361,6 +2361,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   stands; no removal or cleanup retry through another executor; current targets reused; one Rust builder; no new worktree or
   large binary download.
 
+## Milestone 103 (2026-10-31): BB-50 accepted; BB-62 started
+
+- Miles (`accept-bb50.md`) accepted BB-50 at source and local injected-browser-flow scope: `adcbf1a9`, hygiene `25b9d4d9` and
+  correction `053f8ed5` (F1 to F4). Not deployment or real wallet settlement. Miles inspected the native destination seam, the
+  enabled-only panel, both forms, the Wallet Standard adapter, the intent store and recovery paths, the strict memo and legacy
+  transaction with reference fixtures, config and actor wiring, status and history and the generated entry changes; frozen
+  diff-check passes.
+- Evidence as Miles recorded it (read, not rerun): original candidate 702 passed, 1 skip; the correction's red file shows 20
+  failed, 76 passed, which includes missing-new-helper and UI-shape failures and is NOT 20 independently proven runtime
+  defects, with actual `not_landed`, connection-closed, wrong Discard UI and missing node-call failures; final 10 files, 193
+  passed; `svelte-check` 30 errors, 66 warnings, 25 files (exit 1 at the existing baseline, no bridge diagnostics); build exit 0
+  with the auth asset check; the canonical declaration script exit 0 with a matching Solana `.did`.
+- Limits: injected fixtures only, no real wallet or browser signing, provider, genesis probe, deployment or settlement; the
+  configured RPC mapping is operator-declared and a single-node browser read, not independently verified network identity or
+  canister settlement proof; history bounded to 20 per listing and the pending local journal to 120; the `bytes.ts` primitives
+  and reference vectors kept (MC-DEF-12); uncertain user attempts can stay held without an abandon action, deliberately, with no
+  risk-acknowledgement dialog or cancellation protocol requested.
+- Board: BB-50 done; the Solana priority item is done at source and local-test scope (activation, a real wallet round trip,
+  provider and history evidence and D6 stay held). BB-62 in progress for the same W28 from `next-evm-uncertain-journal.md`; the
+  evm-implementation item is in progress for it while BB-46 probes stay separately held. W29 continues 53b as the sole Rust
+  builder. The prioritized queue stays active: BB-62, Sui 53b to 53d, BB-54 and the held live work are not done.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
