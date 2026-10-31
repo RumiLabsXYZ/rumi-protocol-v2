@@ -427,3 +427,89 @@ fn a_delayed_send_note_does_not_overwrite_the_replacement_attempt() {
         "the old send's result is kept as evidence"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The preparation of an attempt (the blockhash reads before the first persist) is fenced too
+//
+// `ensure_tx` captures none, or an older record, then awaits `getSlot` and `getBlock`, then commits
+// the new attempt. An older pass can wait there while a reclaimed or newer pass stores, signs and
+// sends another attempt, or while the target is created and verified. The old reply must then write
+// nothing and the old pass must neither sign nor send.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_older_preparation_never_overwrites_a_newer_attempt_stored_while_it_waited() {
+    let fx = fixture_with_only_the_mint_pending();
+    // While pass 1 waits for the slot read, a newer pass stores the mint's attempt, signs it with both
+    // signers and sends it: every signature, the transaction id and the send note are recorded.
+    let newer: Rc<RefCell<Option<BootstrapTx>>> = Rc::default();
+    let sink = newer.clone();
+    fx.chain.on_slot_read.replace(Some(Box::new(move |_chain| {
+        let mut tx = newer_mint_attempt(T0 + secs(1));
+        for signer in tx.signers.clone() {
+            let signature = Sig(expected_signature(&tx, &signer));
+            tx.signatures.push(SignatureRecord { signer, signature, at_ns: T0 + secs(1) });
+        }
+        let first = tx.latest_signatures().expect("fully signed")[0];
+        tx.tx_ids.push(Sig(first));
+        tx.broadcast_count = 1;
+        tx.last_broadcast_ns = Some(T0 + secs(1));
+        tx.last_broadcast_note = Some("sent, rpc returned the newer attempt's id".into());
+        state::put_bootstrap_tx(&tx);
+        *sink.borrow_mut() = Some(tx);
+    })));
+    let r = run(&fx, T0);
+    assert!(newer.borrow().is_some(), "the newer attempt was stored while the older preparation waited");
+    let stored = state::get_bootstrap_tx(BootstrapTarget::Mint.key()).unwrap();
+    assert_eq!(Some(stored), newer.borrow().clone(), "the newer attempt is intact: nothing of the old preparation overwrote it");
+    assert_eq!(fx.signer.call_count(), 0, "the older preparation stopped before signing");
+    assert!(fx.chain.sent().is_empty(), "and before sending");
+    assert!(
+        r.bootstrap.iter().any(|e| matches!(e, BootstrapEvent::Waiting { why } if why.contains("superseded"))),
+        "{:?}",
+        r.bootstrap
+    );
+}
+
+#[test]
+fn an_older_preparation_cannot_restart_the_creation_of_a_target_created_meanwhile() {
+    let fx = fixture_with_only_the_mint_pending();
+    // None, then a newer attempt, which lands and is verified (its record is removed), then none
+    // again: the stored record is back to what the older preparation captured, but the mint exists.
+    fx.chain.on_slot_read.replace(Some(Box::new(|chain| {
+        state::put_bootstrap_tx(&newer_mint_attempt(T0 + secs(1)));
+        chain.set_account(MINT, TokenProgram::Token2022.id(), mint_data(Some(&MINT_AUTHORITY), 0, 8, true, None));
+        state::mutate_core(|c| {
+            c.mint_state = MintState::DeployedUnbound;
+            c.mint = Some(MINT);
+        });
+        state::remove_bootstrap_tx(BootstrapTarget::Mint.key());
+    })));
+    let r = run(&fx, T0);
+    assert_eq!(state::get_bootstrap_tx(BootstrapTarget::Mint.key()), None, "no creation was restarted for a mint that exists");
+    assert_eq!(fx.signer.call_count(), 0, "nothing was signed");
+    assert!(fx.chain.sent().is_empty(), "nothing was sent");
+    assert!(
+        r.bootstrap.iter().any(|e| matches!(e, BootstrapEvent::Waiting { why } if why.contains("superseded"))),
+        "{:?}",
+        r.bootstrap
+    );
+    assert_eq!(state::read_core(|c| c.mint_state), MintState::DeployedUnbound, "the claim did not move back");
+}
+
+#[test]
+fn a_target_that_is_already_created_is_not_prepared_at_all() {
+    // The caller's own read of the target was an await: if the claim moved on meanwhile, ensure_tx
+    // does not even spend the blockhash reads.
+    let fx = fixture_with_only_the_mint_pending();
+    state::mutate_core(|c| c.mint_state = MintState::DeployedUnbound);
+    let slots_before = fx.chain.call_count("get_slot");
+    let tx_before = state::get_bootstrap_tx(BootstrapTarget::Mint.key());
+    let mut blockhash: Option<[u8; 32]> = None;
+    let profile = state::read_core(|c| c.creation_profile()).unwrap();
+    let build = |hash| crate::tx::builders::build_mint_creation_message(&profile, crate::tx::MINT_RENT_LAMPORTS, hash).map_err(|e| format!("{e}"));
+    let event = block_on(ensure_tx(&fx.chain, &fx.signer, BootstrapTarget::Mint, build, T0, &mut blockhash));
+    assert!(matches!(event, BootstrapEvent::Waiting { ref why } if why.contains("already created")), "{event:?}");
+    assert_eq!(fx.chain.call_count("get_slot"), slots_before, "no blockhash walk");
+    assert_eq!(state::get_bootstrap_tx(BootstrapTarget::Mint.key()), tx_before);
+}

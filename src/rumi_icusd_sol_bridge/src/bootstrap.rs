@@ -27,7 +27,10 @@
 //! failure or a send note describes the attempt it was about. Each await is therefore followed by a
 //! write that checks the stored attempt is still the one the call was made for (the time it was
 //! persisted and its exact message bytes), and a reply of a replaced attempt is kept only as an
-//! audit note.
+//! audit note. The PREPARATION of a new attempt (the blockhash reads before the first persist) is
+//! fenced the same way: it captures the stored record before its awaits and commits only if that
+//! record is unchanged and the target is still missing, so an older pass can neither overwrite a
+//! newer attempt nor restart the creation of a target that was verified or bound meanwhile.
 //!
 //! The fee payer needs SOL before any of this can land (blocker `solana-fee-payer-funding`): until
 //! it is funded the sends fail at preflight, the failure is recorded as a note, and the driver
@@ -194,9 +197,33 @@ async fn broadcast_bootstrap<R: SolRpc>(rpc: &R, key: u32, attempt: &AttemptId, 
     }
 }
 
+/// Whether `target` is still waiting to be created, by the claims the bootstrap itself advances:
+/// a pool slot is `Unverified` until its account is read back, the mint is `None` until it exists
+/// and passed its checks, and the return account is missing only while the mint is
+/// `DeployedUnbound`. These only move forward (a slot is `Unverified` again only by an explicit
+/// admin abandon, which also wants a fresh read), so once a target is verified or bound no creation
+/// may start for it again, whatever an older pass still believes it read.
+fn target_is_missing(target: BootstrapTarget) -> bool {
+    match target {
+        BootstrapTarget::PoolSlot { lane, index } => state::get_slot(lane, index).is_some_and(|s| s.state == SlotState::Unverified),
+        BootstrapTarget::Mint => state::read_core(|c| c.mint_state == MintState::None),
+        BootstrapTarget::ReturnAta => state::read_core(|c| c.mint_state == MintState::DeployedUnbound),
+    }
+}
+
+/// The commit of a preparation: nothing may have changed since it began. The stored record must be
+/// exactly what was captured before the awaits (none, or the same older attempt), and the target
+/// must still be missing. Otherwise another pass prepared, signed or sent an attempt, or the target
+/// was verified and its record removed (none, then an attempt, then none again): the old preparation
+/// stops here and writes nothing.
+fn preparation_is_current(target: BootstrapTarget, key: u32, captured: &Option<AttemptId>) -> bool {
+    state::get_bootstrap_tx(key).map(|t| attempt_of(&t)) == *captured && target_is_missing(target)
+}
+
 /// Make sure a creation transaction for `target` exists, is signed, and is (re)sent when due. The
-/// caller has just read the target account and found it missing.
-async fn ensure_tx<R: SolRpc, S: TxSigner>(
+/// caller has just read the target account and found it missing; that read was an await, so the
+/// claim is checked again here and again at the commit.
+pub(crate) async fn ensure_tx<R: SolRpc, S: TxSigner>(
     rpc: &R,
     signer: &S,
     target: BootstrapTarget,
@@ -208,6 +235,11 @@ async fn ensure_tx<R: SolRpc, S: TxSigner>(
     let retry = BOOTSTRAP_TX_RETRY_SECS.saturating_mul(NS_PER_SEC);
     let interval = state::read_core(|c| c.config.lane.rebroadcast_interval_secs).saturating_mul(NS_PER_SEC);
     let mut fresh = false;
+    if !target_is_missing(target) {
+        return BootstrapEvent::Waiting { why: format!("{target:?}: already created, nothing to prepare") };
+    }
+    // Captured before any await: the stored record (live or older) this preparation is about.
+    let captured = state::get_bootstrap_tx(key).map(|t| attempt_of(&t));
     let live = state::get_bootstrap_tx(key).filter(|t| now.saturating_sub(t.created_at_ns) < retry);
     let attempt = match live {
         Some(t) => attempt_of(&t),
@@ -228,6 +260,12 @@ async fn ensure_tx<R: SolRpc, S: TxSigner>(
                 Ok(u) => u,
                 Err(e) => return BootstrapEvent::Waiting { why: format!("cannot build the {target:?} transaction: {e}") },
             };
+            // ---- the synchronous commit, fenced to what this preparation started from ----
+            if !preparation_is_current(target, key, &captured) {
+                return BootstrapEvent::Waiting {
+                    why: format!("{target:?}: the preparation was superseded while it waited (a newer attempt, or the target was created)"),
+                };
+            }
             // ---- persist the exact bytes BEFORE the first sign call ----
             let record = BootstrapTx {
                 target,

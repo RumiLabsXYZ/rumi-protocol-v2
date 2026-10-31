@@ -68,6 +68,10 @@ type SendHook = Box<dyn Fn(&[u8])>;
 /// hook changes is invisible to this read (the read "happened before"), as for an RPC reply that
 /// is still in flight while other messages run.
 type AccountReadHook = Box<dyn Fn(&MockChain, &Pubkey)>;
+/// Called from `get_slot` AFTER the reply was computed and BEFORE it is returned: a read that is
+/// still in flight while another pass stores, signs and sends (the preparation of a bootstrap
+/// transaction waits on exactly this read).
+type SlotReadHook = Box<dyn Fn(&MockChain)>;
 
 #[derive(Default)]
 pub struct MockChain {
@@ -84,6 +88,7 @@ pub struct MockChain {
     pub auto_land: Cell<bool>,
     pub on_send: RefCell<Option<SendHook>>,
     pub on_account_read: RefCell<Option<AccountReadHook>>,
+    pub on_slot_read: RefCell<Option<SlotReadHook>>,
     /// When set, every sent bootstrap transaction (pool account, mint, return ATA) takes effect at once.
     pub auto_apply_creation: Cell<bool>,
     pub tip_slot: Cell<u64>,
@@ -368,7 +373,13 @@ impl SolRpc for MockChain {
             Some(Fault::Error(e)) => return Err(RpcFailure::Error(e)),
             _ => {}
         }
-        Ok(self.tip_slot.get())
+        let slot = self.tip_slot.get();
+        // One-shot, like the account read hook: the hook may call back into the chain.
+        let hook = self.on_slot_read.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
+        Ok(slot)
     }
 
     async fn get_block_blockhash(&self, slot: u64) -> RpcResult<Option<[u8; 32]>> {
