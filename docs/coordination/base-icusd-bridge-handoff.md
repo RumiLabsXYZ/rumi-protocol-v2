@@ -1098,6 +1098,29 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   frontend only: `baseBridge` services, bridge components and route; focused vitest, `npm run check` against its baseline,
   one `npm run build`).
 
+## Milestone 47 (2026-10-30): BB-45 in Review; BB-58 corrections started
+
+- BB-45 `3c5029cb` (W26, same run): install gate `Enabled` in source for Ethereum 1 and 11155111, Arbitrum 42161 and 421614,
+  Monad 143 and 10143; Robinhood (4663, 46630) and HyperEVM (999, 998) stay disabled with reasons that lead with their blocker
+  ids (`robinhood-finalized-tag-probe`, `hyperevm-historical-state`). Each row carries `ChainDefaults` applied by
+  `validate_init` (Base byte-identical to the pre-table config, pinned field by field and as CBOR bytes). Sourced: Monad base
+  fee minimum 100 gwei (default cap 500 gwei), 10 MON reserve (default 15 MON), 100-block log range; HyperEVM 50-block range.
+  Unsourced starting points for `admin_set_gas`: Ethereum caps 50 and 2 gwei and 0.001 ETH reserve; Arbitrum and Robinhood
+  gas limits 600,000 and 200,000; Monad gas limits 500,000 and 150,000; all 90 s replace waits and non-Base 2,000-block
+  ranges. New `foundry/script/DeployBridgedIcUSDEvm.s.sol` (allow-list 11155111, 421614, 10143, 31337, plus 1, 42161, 143
+  each behind its own `ALLOW_<CHAIN>_MAINNET`; identical `BridgedIcUSD` bytecode with a runtime code-hash check; Base ids
+  rejected) and `foundry/test/BridgedIcUSDEvmDeploy.t.sol`. Worker run: 513 unit tests (was 503), clippy clean, release Wasm
+  3,888,045 bytes, `forge test --offline --match-contract BridgedIcUSDEvmDeploy` 17 passed and `--match-contract
+  DeployBridgedIcUSD` 17 passed (the Base script and its tests unchanged). Coordinator check: the Base script and test diff is
+  empty; `admin.rs` unchanged (defaults fit the global bounds). Still unmeasured: mint gas on Arbitrum, Monad and Ethereum
+  Sepolia, and Ethereum fee caps; Monad fast-tag consensus and D8 labels stay activation items. Downgrade caveat now live in
+  source: an Ethereum or Arbitrum instance installed with native providers must never be rolled back below BB-44.
+- PocketIC test files were not compiled in this lane; they do not import the crate, and a search found no assertion that
+  install refuses chain ids 1, 42161 or 143.
+- W26 left a filesystem-wide search for `forge` running after it finished; the coordinator stopped it (read-only, no effect).
+- BB-58 corrections dispatched to the same W25 (resumed, `claude-sonnet-5-5`): provider chain identity, count-once chain ids,
+  per-instance audit collection with independent C1 and supply checks; mocks only. Lanes: W25 and W27.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

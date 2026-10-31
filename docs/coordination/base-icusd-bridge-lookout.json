@@ -415,10 +415,10 @@
     },
     {
       "id": "BB-45",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "EVM: per-chain defaults and a sibling Foundry deploy script",
-      "evidenceText": "proof=none; Claimed 2026-10-30 from 0bf16f9f: opens install for Ethereum, Arbitrum and Monad in source with per-chain defaults and local tests; Robinhood, HyperEVM stay blocked; sibling deploy script; catalog stays disabled",
+      "evidenceText": "proof=local-test; 3c5029cb: Ethereum, Arbitrum and Monad install in source with per-chain defaults (Base byte-identical); Robinhood, HyperEVM blocked; new deploy script with mainnet flags; 513 unit tests, forge 17 plus 17; catalog disabled",
       "evidenceLinks": []
     },
     {
@@ -519,10 +519,10 @@
     },
     {
       "id": "BB-58",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=local-test; Open. 8b88a96f transport is source and mock evidence only; Miles' corrections queued for the same owner: provider chain-id binding, count-once chain ids, per-instance audit query collection with independent C1 and supply checks",
+      "evidenceText": "proof=local-test; Open. 8b88a96f transport is source and mock evidence only; same owner now applies Miles' corrections: provider chain-id binding, count-once chain ids, per-instance audit collection with independent C1 and supply checks",
       "evidenceLinks": []
     },
     {
