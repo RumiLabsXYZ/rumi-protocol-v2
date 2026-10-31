@@ -1,0 +1,3 @@
+[package]
+name = "rumi_icusd_gate"
+edition = "2024"
