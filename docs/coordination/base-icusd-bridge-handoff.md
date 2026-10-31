@@ -2034,6 +2034,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   Sui stays disabled in user-facing profiles. The quarantined bootstrap key was never used.
 - Builder slot returned to W28 for 49e (Solana collector reader, mocks and fixtures only). W29 is idle.
 
+## Milestone 91 (2026-10-31): BB-52 first source pass, two corrections
+
+- Miles (`review-bb52-foundation-first-pass.md`) read the controller and lifecycle skeleton, signer seam, mint builder and
+  decoder, Gate and table layouts and the GraphQL request, parser and quorum code at frozen `34e68d9e`. Threshold key domains,
+  both digest functions, sponsored sender and gas role separation, the strict mint-call shape and the Gate record layouts align
+  at source level. The stable core, BCS primitives, identity vectors and transform details are still under review; BB-52 stays
+  in Review and is not Done from this partial pass.
+- F1: `graphql::check_chain_identifier` requires 8 lowercase hex digits and compares a short id, but at the pinned
+  mainnet-v1.82.3 `Query.chainIdentifier` is the genesis checkpoint digest Base58-encoded (`sui-indexer-alt-graphql`
+  `schema.graphql` L3793; `src/api/query.rs` L204, `Base58::encode(chain_id...as_bytes())`; Miles read the official source, not
+  a chain). Every normal provider would be excluded. Fix: decode Base58, require 32 bytes, compare to the configured genesis
+  per provider before quorum; short ids stay only where genuinely used and are never accepted for this field.
+- F2: `request_object_at_version` promises an exact version but `parse_object` checks only the address. A request-aware check
+  must reject a right-address, right-network response at another version (104 for 105) before tally; the generic decoder may
+  stay for checkpoint reads.
+- Same W29 writes the correction now with no cargo command; red on the literal `34e68d9e` source with only the new tests, then
+  green, after W28's 49e builder turn. No public probe, CLI, wallet or config access, new dependency or SDK cross-check gate;
+  the independent-reference and unmeasured-provider limits stay. W28 keeps 49e and the builder; no new lane.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

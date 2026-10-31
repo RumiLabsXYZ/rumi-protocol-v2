@@ -77,7 +77,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 done. BB-52 delivered for review (W29, local commit 34e68d9e, not pushed). Then BB-53 (lanes, observer, custody, Sui collector reader) and BB-54 (wallet).",
+      "nextAction": "BB-51 done. BB-52 in Review at 34e68d9e: same W29 writes a bounded correction (Base58 genesis chain identity before quorum; exact-version object binding before tally), built after W28's 49e turn. Then BB-53 (lanes, observer, custody, Sui collector reader) and BB-54 (wallet).",
       "cardIds": [
         "BB-51",
         "BB-52",

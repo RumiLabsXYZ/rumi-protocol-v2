@@ -474,7 +474,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: instance skeleton, BCS builder, digests and GraphQL mirror",
-      "evidenceText": "proof=local-test; 34e68d9e delivered (W29, local, not pushed): ids, BCS builder with both digests, wire signature, Gate decoders, GraphQL quorum; 62 tests, clippy and wasm32 clean; vectors not checked against the official SDK or CLI",
+      "evidenceText": "proof=local-test; 34e68d9e in Review (W29, local, not pushed). Miles' first pass: GraphQL chain identity must be the Base58 genesis, and exact-version object reads must be bound before tally; fix being written, built after 49e",
       "evidenceLinks": []
     },
     {
