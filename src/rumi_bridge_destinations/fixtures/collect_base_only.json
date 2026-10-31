@@ -1,0 +1,35 @@
+{
+  "description": "SYNTHETIC FIXTURE, not live data. Base only, with one excluded test-ledger instance. Every number is invented and the principal below is a synthetic test principal (its bytes spell synthetic-escrow-base), not a real account. A run of this file prints source: fixture.",
+  "config": {
+    "destinations": [
+      {
+        "network_id": "base-mainnet",
+        "in_d": true,
+        "escrow": { "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f", "subaccount": null }
+      },
+      {
+        "network_id": "base-sepolia",
+        "in_d": false
+      }
+    ],
+    "xrpl": null
+  },
+  "readings": {
+    "icp_ledger_total_supply": "100000000000",
+    "debt_backed_chain_supplies": "0",
+    "icrc1_balances": [
+      {
+        "escrow": { "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f", "subaccount": null },
+        "balance": "20012345678"
+      }
+    ],
+    "evm_supplies": [
+      {
+        "network_id": "base-mainnet",
+        "supply": "20012345678",
+        "finality": "evm_tag",
+        "block": 1000
+      }
+    ]
+  }
+}

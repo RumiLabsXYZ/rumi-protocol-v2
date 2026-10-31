@@ -11,6 +11,8 @@
 use serde::Serialize;
 
 pub mod aggregate;
+pub mod collect;
+pub mod escrow;
 pub mod types;
 pub mod validate;
 

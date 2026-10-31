@@ -1,0 +1,26 @@
+{
+  "description": "SYNTHETIC FIXTURE, not live data. The rejected D/X overlap: the XRPL network xrpl-mainnet is listed as a D destination AND as the XRPL lane, both bound to one synthetic escrow (bytes spell synthetic-escrow-xrpl). Counting both would report escrow_locked 200 for a single 100 escrow, so the collector must refuse it before reading anything. A run of this file prints source: fixture and exits non-zero.",
+  "config": {
+    "destinations": [
+      {
+        "network_id": "xrpl-mainnet",
+        "in_d": true,
+        "escrow": { "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm", "subaccount": null }
+      }
+    ],
+    "xrpl": {
+      "network_id": "xrpl-mainnet",
+      "escrow": { "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm", "subaccount": null }
+    }
+  },
+  "readings": {
+    "icp_ledger_total_supply": "100000000000",
+    "debt_backed_chain_supplies": "0",
+    "icrc1_balances": [
+      {
+        "escrow": { "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm", "subaccount": null },
+        "balance": "10000000000"
+      }
+    ]
+  }
+}
