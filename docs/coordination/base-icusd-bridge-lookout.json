@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b accepted (Miles) at component scope: 1b71eae8 with e2507b16 and 5da0804e (transport, observed binding, mint lane, re-mint). 53c in progress (W29), then 53d",
+      "evidenceText": "proof=none; 53a and 53b accepted. 53c delivered for review: e4ee506a (W29, local), return observer paying only from the durable ReturnRecord, C1 to C4 monitors, audit, hint effect; 340 tests. 53d in progress",
       "evidenceLinks": []
     },
     {

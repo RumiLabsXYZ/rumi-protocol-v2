@@ -2609,6 +2609,49 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Push: accepted BB-62 and 53b with their corrections and records form the next push to PR #591; W29's uncommitted 53c edits and
   the denied XRPL work are excluded.
 
+## Milestone 112 (2026-10-31): cohort pushed at 2bb8e816; BB-53 53c delivered
+
+- Push: `2bb8e816308eb901944e38ea44911e3552411329` pushed by exact commit at 2026-10-31 08:44 UTC (fast-forward from `ff3dfec8`):
+  BB-62 (`f4ae611c`), 53b (`1b71eae8`, `e2507b16`, `5da0804e`) and records; no XRPL or backend file; W29's uncommitted 53c edits
+  excluded. Miles' receipt (`pushed-bb53b-checkpoint.md`): GitHub confirms head `2bb8e816`, base `32358d23`, open, draft,
+  unmerged; the inventory is accepted BB-62 and 53b with corrections and canonical docs, runbook and deferral only. Run
+  41185852184 on the exact head completed SUCCESS (watch closed, no rerun); prior run 41184115864 on `ff3dfec8` SUCCESS. It is the
+  existing Stability Pool deposit-intent workflow, not native, Move, collector or frontend coverage. PR #591 description
+  refreshed (BB-62 accepted, BB-53 53b accepted, the Sui check at `5da0804e`, MC-DEF-13, the CI row).
+- 53c: W29 (`claude-sonnet-5-5`) committed `e4ee506a02d3c9db2e971cee534d9b2132b7e424` "feat(sui): return observer, C1 to C4
+  monitors, audit report and the notify_sui_return effect (BB-53 53c)", local only, parent `2bb8e816`. Coordinator scope check:
+  17 files, only `src/rumi_icusd_sui_bridge/` and MC-DEF-14 in the deferred log; no `Cargo.lock` change; the `.did` only adds
+  (`get_observer`, `get_audit_report` and view types); `git diff --check` exits 0.
+- What works at the pin (simulated chain only): events and hints only discover a candidate; the observer recomputes `transfer_id`
+  from the network, configured Gate, sender and nonce, reads `returns[transfer_id]` through the Mirror at the pass's finalized
+  head, requires a successful transaction at or before it, and `verify_return()` requires the record-derived id to equal the key,
+  the candidate's and the event's, sender and nonce to match, the sequence within the Gate's `bridge_out_count`, a nonzero amount
+  within `burned_total`, the event's claim to equal the record and the Gate bounds on principal and subaccount; only then is a
+  ready return stored from the record's fields. `open_ready_returns()` is the only production caller of `open_release` and the
+  only builder of `VerifiedReturn` (a source-scan test pins it); releases open in Gate sequence order; a return whose mint is not
+  yet on the books waits. Bounded discovery (windows up to 20,000 checkpoints, 20 events per query sized to the default 16 KiB
+  cap, bisection, adaptive windows, commit only when the Gate's return counter is accounted for, otherwise a visible gap holds
+  later returns); hint effect (a candidate, never a payment). Monitors: C1 escrow against the ledger balance; C2 supply at most
+  O plus in flight; C3 supply equal to O only when quiescent, otherwise not evaluated with a reason; C4 mint and return counters
+  against the canister's own; breaches halt the bridge and lane (C1, C2, C3 over, C4 foreign or impossible returns) or the lane
+  only (C3 under, books ahead); an unevaluable check is never a pass. Audit report separating independent observations, the
+  self-reported books, the books as last checked, pending and held liabilities, the last checkpoint with age and a 15-minute stale
+  flag, and disclosures. The timer runs ledger, re-mint, lane, then observer.
+- Checks (saved logs in the coordinator scratchpad): crate tests 340 passed, 0 failed (`53c-test7.log`); clippy `-D warnings` exit 0
+  (`53c-clippy2.log`); wasm32 check exit 0 (`53c-wasm.log`); `.did` regenerated canonically (`53c-did-regen2.log`). No red claimed
+  (new feature). Failing development runs, as listed by W29 (several logs overwritten by reruns, assertions quoted): `53c-test1.log`
+  5 failures (the `.did`, then four lane tests whose fabricated state the new monitors correctly flag, fixed by pausing the
+  observer in those tests); two type errors in new tests; `53c-test3.log` a busy-window test failing because 50 events exceed the
+  16 KiB cap (code fix: page size 20 with a regression); `53c-test4.log` bisection running out of per-pass budget (code fix:
+  adaptive window and committing an unlistable window once hints account for the counter); a test reworked after the idle
+  shortcut; one clippy lint in test code. Flag for Miles: four 53b lane tests now pause the observer.
+- Omissions (MC-DEF-14): simulated chain and schema-derived event shapes (the `PageInfo.hasNextPage` SDL text not read); cycles and
+  event sizes unmeasured; one checkpoint with more than 20 BridgeOut events cannot be listed (hints are the degraded path); an
+  index that lags or prunes leaves a visible gap holding later returns, with hints as the only override; foreign mints are halted by
+  counters but not named; C3 often not evaluated; C1 relies on one ledger read per pass; breaches halt until a human clears them;
+  a fixed 15-minute stale threshold; D6 a disclosed root of trust; module bytes unobserved.
+- Next: 53d from `e4ee506a` (host collector Sui reader in `src/rumi_bridge_destinations` and the focused integration evidence).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

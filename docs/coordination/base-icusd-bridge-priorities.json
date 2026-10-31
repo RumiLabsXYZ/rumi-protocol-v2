@@ -78,7 +78,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 and BB-52 done. BB-53 in progress (same W29, sole Rust builder): 53a and 53b accepted at component scope; 53c (verified returns, monitors, audit, release) in progress; then 53d (host collector, integration evidence). Then BB-54 (Sui page and wallet, W28) once the return-facing interfaces are frozen.",
+      "nextAction": "BB-51 and BB-52 done. BB-53 in progress (same W29, sole Rust builder): 53a and 53b accepted; 53c (return observer, monitors, audit) delivered at e4ee506a for Miles' review; 53d (host collector Sui reader, integration evidence) in progress. Then BB-54 (Sui page and wallet, W28).",
       "cardIds": [
         "BB-51",
         "BB-52",
