@@ -37,6 +37,12 @@ pub enum ChainRole {
 pub enum NativeProvider {
     /// `RpcServiceConfig::BaseMainnet`: the five built-in Base mainnet providers.
     BaseMainnet,
+    /// `RpcServiceConfig::EthMainnet`: the six built-in Ethereum mainnet providers.
+    EthMainnet,
+    /// `RpcServiceConfig::EthSepolia`: the five built-in Ethereum Sepolia providers.
+    EthSepolia,
+    /// `RpcServiceConfig::ArbitrumOne`: the five built-in Arbitrum One providers.
+    ArbitrumOne,
 }
 
 impl NativeProvider {
@@ -44,6 +50,9 @@ impl NativeProvider {
     pub fn variant_name(self) -> &'static str {
         match self {
             NativeProvider::BaseMainnet => "BaseMainnet",
+            NativeProvider::EthMainnet => "EthMainnet",
+            NativeProvider::EthSepolia => "EthSepolia",
+            NativeProvider::ArbitrumOne => "ArbitrumOne",
         }
     }
 }
@@ -173,7 +182,7 @@ static CHAINS: [ChainProfile; 13] = [
         role: ChainRole::Mainnet,
         display_name: "Ethereum",
         allowed_keys: MAINNET_KEYS,
-        native: None,
+        native: Some(NativeProvider::EthMainnet),
         head_rule: HeadRule::TagFinalizedQuorum,
         install: InstallGate::Disabled(ETH_NOT_ACTIVE),
         consent_wait: ETH_WAIT,
@@ -185,7 +194,7 @@ static CHAINS: [ChainProfile; 13] = [
         role: ChainRole::Testnet,
         display_name: "Ethereum Sepolia",
         allowed_keys: TESTNET_KEYS,
-        native: None,
+        native: Some(NativeProvider::EthSepolia),
         head_rule: HeadRule::TagFinalizedQuorum,
         install: InstallGate::Disabled(ETH_NOT_ACTIVE),
         consent_wait: ETH_WAIT,
@@ -197,7 +206,7 @@ static CHAINS: [ChainProfile; 13] = [
         role: ChainRole::Mainnet,
         display_name: "Arbitrum One",
         allowed_keys: MAINNET_KEYS,
-        native: None,
+        native: Some(NativeProvider::ArbitrumOne),
         head_rule: HeadRule::TagFinalizedQuorum,
         install: InstallGate::Disabled(ARB_NOT_ACTIVE),
         consent_wait: ARB_WAIT,
@@ -300,6 +309,9 @@ pub fn profile(chain_id: u64) -> Option<&'static ChainProfile> {
 pub fn native_provider_of(cfg: &RpcServiceConfig) -> Option<NativeProvider> {
     match cfg {
         RpcServiceConfig::BaseMainnet(_) => Some(NativeProvider::BaseMainnet),
+        RpcServiceConfig::EthMainnet(_) => Some(NativeProvider::EthMainnet),
+        RpcServiceConfig::EthSepolia(_) => Some(NativeProvider::EthSepolia),
+        RpcServiceConfig::ArbitrumOne(_) => Some(NativeProvider::ArbitrumOne),
         RpcServiceConfig::Custom { .. } => None,
     }
 }
@@ -496,6 +508,57 @@ mod tests {
         assert_eq!(native_provider_of(&RpcServiceConfig::BaseMainnet(L2MainnetService::Alchemy)), Some(NativeProvider::BaseMainnet));
         assert_eq!(native_provider_of(&RpcServiceConfig::Custom { url: "https://a.example".into() }), None);
         assert_eq!(NativeProvider::BaseMainnet.variant_name(), "BaseMainnet");
+    }
+
+    #[test]
+    fn each_native_family_is_bound_to_exactly_one_row() {
+        use crate::types::{EthMainnetService, EthSepoliaService};
+        // The rows that carry a built-in family, and nothing else. Arbitrum Sepolia has none:
+        // the EVM RPC canister offers no built-in Arbitrum Sepolia provider.
+        let expected: [(u64, NativeProvider); 4] = [
+            (8453, NativeProvider::BaseMainnet),
+            (1, NativeProvider::EthMainnet),
+            (11155111, NativeProvider::EthSepolia),
+            (42161, NativeProvider::ArbitrumOne),
+        ];
+        for p in &CHAINS {
+            let want = expected.iter().find(|(id, _)| *id == p.chain_id).map(|(_, f)| *f);
+            assert_eq!(p.native, want, "row {}", p.chain_id);
+        }
+        assert_eq!(profile(421614).unwrap().native, None);
+        for (id, family) in expected {
+            assert_eq!(native_owner(family).map(|p| p.chain_id), Some(id), "{family:?}");
+            assert_eq!(CHAINS.iter().filter(|p| p.native == Some(family)).count(), 1, "{family:?}");
+        }
+        // A mainnet family sits on a Mainnet row, the Sepolia family on a Testnet row.
+        assert_eq!(profile(1).unwrap().role, ChainRole::Mainnet);
+        assert_eq!(profile(42161).unwrap().role, ChainRole::Mainnet);
+        assert_eq!(profile(11155111).unwrap().role, ChainRole::Testnet);
+
+        // Every configured variant names its family.
+        assert_eq!(native_provider_of(&RpcServiceConfig::EthMainnet(EthMainnetService::Cloudflare)), Some(NativeProvider::EthMainnet));
+        assert_eq!(native_provider_of(&RpcServiceConfig::EthSepolia(EthSepoliaService::Sepolia)), Some(NativeProvider::EthSepolia));
+        assert_eq!(native_provider_of(&RpcServiceConfig::ArbitrumOne(L2MainnetService::Llama)), Some(NativeProvider::ArbitrumOne));
+        // A family's error text names the variant exactly as the type spells it.
+        assert_eq!(NativeProvider::EthMainnet.variant_name(), "EthMainnet");
+        assert_eq!(NativeProvider::EthSepolia.variant_name(), "EthSepolia");
+        assert_eq!(NativeProvider::ArbitrumOne.variant_name(), "ArbitrumOne");
+    }
+
+    #[test]
+    fn native_providers_change_no_gate_key_or_head_rule() {
+        // The three rows that gained a family are still described but not installable, with
+        // the head rule and key rule they had before.
+        for id in [1u64, 11155111, 42161] {
+            let p = profile(id).unwrap();
+            assert!(matches!(p.install, InstallGate::Disabled(r) if !r.is_empty()), "{id}");
+            assert_eq!(p.head_rule, HeadRule::TagFinalizedQuorum, "{id}");
+            let keys: &[&str] = if p.role == ChainRole::Mainnet { &["key_1"] } else { &["test_key_1"] };
+            assert_eq!(p.allowed_keys, keys, "{id}");
+        }
+        assert_eq!(profile(1).unwrap().slug, "eth");
+        assert_eq!(profile(11155111).unwrap().slug, "eth");
+        assert_eq!(profile(42161).unwrap().slug, "arb");
     }
 
     #[test]

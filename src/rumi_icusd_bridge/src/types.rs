@@ -56,6 +56,37 @@ pub enum L2MainnetService {
     Llama,
 }
 
+/// Built-in Ethereum mainnet providers of the EVM RPC canister (six, one more than
+/// [`L2MainnetService`]: `Cloudflare`).
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EthMainnetService {
+    Alchemy,
+    Ankr,
+    BlockPi,
+    Cloudflare,
+    PublicNode,
+    Llama,
+}
+
+/// Built-in Ethereum Sepolia providers of the EVM RPC canister.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EthSepoliaService {
+    Alchemy,
+    Ankr,
+    BlockPi,
+    PublicNode,
+    Sepolia,
+}
+
+/// One RPC provider of the EVM RPC canister.
+///
+/// Stored in the config (CBOR, externally tagged by variant name), so variants are only
+/// ever added: `BaseMainnet` and `Custom` keep their encoding, and a stored set that holds
+/// only those decodes unchanged under any later version of this type. The reverse does not
+/// hold: an older module cannot decode a set that stores a later variant. Each built-in
+/// variant is valid only for the chain-table row that lists its family (`chains::NativeProvider`),
+/// which `state::validate_rpc_services` enforces. The EVM RPC canister offers no built-in
+/// Arbitrum Sepolia provider, so that row uses `Custom` URLs.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum RpcServiceConfig {
     /// EVM RPC canister built-in Base mainnet provider.
@@ -63,6 +94,12 @@ pub enum RpcServiceConfig {
     /// A custom JSON-RPC URL (Base Sepolia, local tests). No headers: secrets would be
     /// visible in canister state.
     Custom { url: String },
+    /// EVM RPC canister built-in Ethereum mainnet provider (chain 1 only).
+    EthMainnet(EthMainnetService),
+    /// EVM RPC canister built-in Ethereum Sepolia provider (chain 11155111 only).
+    EthSepolia(EthSepoliaService),
+    /// EVM RPC canister built-in Arbitrum One provider (chain 42161 only).
+    ArbitrumOne(L2MainnetService),
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]

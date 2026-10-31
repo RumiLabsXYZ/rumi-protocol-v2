@@ -2,6 +2,13 @@ export const idlFactory = ({ IDL }) => {
   const UpgradeArgs = IDL.Record({
     'admins' : IDL.Opt(IDL.Vec(IDL.Principal)),
   });
+  const EthSepoliaService = IDL.Variant({
+    'Alchemy' : IDL.Null,
+    'BlockPi' : IDL.Null,
+    'PublicNode' : IDL.Null,
+    'Ankr' : IDL.Null,
+    'Sepolia' : IDL.Null,
+  });
   const L2MainnetService = IDL.Variant({
     'Alchemy' : IDL.Null,
     'Llama' : IDL.Null,
@@ -9,9 +16,20 @@ export const idlFactory = ({ IDL }) => {
     'PublicNode' : IDL.Null,
     'Ankr' : IDL.Null,
   });
+  const EthMainnetService = IDL.Variant({
+    'Alchemy' : IDL.Null,
+    'Llama' : IDL.Null,
+    'BlockPi' : IDL.Null,
+    'Cloudflare' : IDL.Null,
+    'PublicNode' : IDL.Null,
+    'Ankr' : IDL.Null,
+  });
   const RpcServiceConfig = IDL.Variant({
+    'EthSepolia' : EthSepoliaService,
     'BaseMainnet' : L2MainnetService,
     'Custom' : IDL.Record({ 'url' : IDL.Text }),
+    'ArbitrumOne' : L2MainnetService,
+    'EthMainnet' : EthMainnetService,
   });
   const Account = IDL.Record({
     'owner' : IDL.Principal,
@@ -464,6 +482,13 @@ export const init = ({ IDL }) => {
   const UpgradeArgs = IDL.Record({
     'admins' : IDL.Opt(IDL.Vec(IDL.Principal)),
   });
+  const EthSepoliaService = IDL.Variant({
+    'Alchemy' : IDL.Null,
+    'BlockPi' : IDL.Null,
+    'PublicNode' : IDL.Null,
+    'Ankr' : IDL.Null,
+    'Sepolia' : IDL.Null,
+  });
   const L2MainnetService = IDL.Variant({
     'Alchemy' : IDL.Null,
     'Llama' : IDL.Null,
@@ -471,9 +496,20 @@ export const init = ({ IDL }) => {
     'PublicNode' : IDL.Null,
     'Ankr' : IDL.Null,
   });
+  const EthMainnetService = IDL.Variant({
+    'Alchemy' : IDL.Null,
+    'Llama' : IDL.Null,
+    'BlockPi' : IDL.Null,
+    'Cloudflare' : IDL.Null,
+    'PublicNode' : IDL.Null,
+    'Ankr' : IDL.Null,
+  });
   const RpcServiceConfig = IDL.Variant({
+    'EthSepolia' : EthSepoliaService,
     'BaseMainnet' : L2MainnetService,
     'Custom' : IDL.Record({ 'url' : IDL.Text }),
+    'ArbitrumOne' : L2MainnetService,
+    'EthMainnet' : EthMainnetService,
   });
   const Account = IDL.Record({
     'owner' : IDL.Principal,

@@ -22,7 +22,7 @@ use crate::chains::{self, HeadRule};
 use crate::evm::abi::RawLog;
 use crate::ids::hex0x;
 use crate::state;
-use crate::types::{L2MainnetService, RpcServiceConfig};
+use crate::types::{EthMainnetService, EthSepoliaService, L2MainnetService, RpcServiceConfig};
 use candid::{CandidType, Deserialize, Nat, Principal};
 use serde_json::{json, Map, Value};
 
@@ -109,27 +109,13 @@ pub struct RpcApi {
     pub headers: Option<Vec<HttpHeader>>,
 }
 
-#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EthSepoliaService {
-    Alchemy,
-    Ankr,
-    BlockPi,
-    PublicNode,
-    Sepolia,
-}
-
-#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EthMainnetService {
-    Alchemy,
-    Ankr,
-    BlockPi,
-    Cloudflare,
-    PublicNode,
-    Llama,
-}
-
-/// Only `BaseMainnet` and `Custom` are ever sent; the rest mirror the live interface so
-/// the type stays a faithful copy of it.
+/// `EthSepoliaService`, `EthMainnetService` and `L2MainnetService` are defined in
+/// `types.rs`, where `RpcServiceConfig` names them, and used here as the mirror's service
+/// enums.
+///
+/// `BaseMainnet`, `EthMainnet`, `EthSepolia`, `ArbitrumOne` and `Custom` are the arms
+/// `to_rpc_service` sends; the rest mirror the live interface so the type stays a faithful
+/// copy of it.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum RpcService {
     EthSepolia(EthSepoliaService),
@@ -220,6 +206,9 @@ pub enum RequestResult {
 pub fn to_rpc_service(cfg: &RpcServiceConfig) -> RpcService {
     match cfg {
         RpcServiceConfig::BaseMainnet(p) => RpcService::BaseMainnet(*p),
+        RpcServiceConfig::EthMainnet(p) => RpcService::EthMainnet(*p),
+        RpcServiceConfig::EthSepolia(p) => RpcService::EthSepolia(*p),
+        RpcServiceConfig::ArbitrumOne(p) => RpcService::ArbitrumOne(*p),
         RpcServiceConfig::Custom { url } => RpcService::Custom(RpcApi { url: url.clone(), headers: None }),
     }
 }
@@ -1236,6 +1225,53 @@ mod tests {
             to_rpc_service(&RpcServiceConfig::Custom { url: "https://x".into() }),
             RpcService::Custom(RpcApi { url: "https://x".into(), headers: None })
         );
+    }
+
+    #[test]
+    fn every_native_provider_maps_to_its_own_mirror_service() {
+        use crate::types::{EthMainnetService as M, EthSepoliaService as S, L2MainnetService as L};
+        let mut checked = 0;
+        for p in [M::Alchemy, M::Ankr, M::BlockPi, M::Cloudflare, M::PublicNode, M::Llama] {
+            assert_eq!(to_rpc_service(&RpcServiceConfig::EthMainnet(p)), RpcService::EthMainnet(p));
+            checked += 1;
+        }
+        for p in [S::Alchemy, S::Ankr, S::BlockPi, S::PublicNode, S::Sepolia] {
+            assert_eq!(to_rpc_service(&RpcServiceConfig::EthSepolia(p)), RpcService::EthSepolia(p));
+            checked += 1;
+        }
+        for p in [L::Alchemy, L::Ankr, L::BlockPi, L::PublicNode, L::Llama] {
+            assert_eq!(to_rpc_service(&RpcServiceConfig::ArbitrumOne(p)), RpcService::ArbitrumOne(p));
+            // The same inner provider names a different service on each chain.
+            assert_ne!(to_rpc_service(&RpcServiceConfig::ArbitrumOne(p)), to_rpc_service(&RpcServiceConfig::BaseMainnet(p)));
+            checked += 1;
+        }
+        assert_eq!(checked, 16);
+    }
+
+    #[test]
+    fn native_services_are_spelled_as_the_live_interface_spells_them() {
+        use crate::types::{EthMainnetService as M, EthSepoliaService as S, L2MainnetService as L};
+        // `request : (RpcService, text, nat64)`, the arm names and provider names exactly as
+        // the EVM RPC canister's interface (and the test relay's copy of it) writes them.
+        let cases = [
+            ("variant { EthMainnet = variant { Cloudflare } }", RpcServiceConfig::EthMainnet(M::Cloudflare)),
+            ("variant { EthMainnet = variant { Llama } }", RpcServiceConfig::EthMainnet(M::Llama)),
+            ("variant { EthSepolia = variant { Sepolia } }", RpcServiceConfig::EthSepolia(S::Sepolia)),
+            ("variant { EthSepolia = variant { PublicNode } }", RpcServiceConfig::EthSepolia(S::PublicNode)),
+            ("variant { ArbitrumOne = variant { BlockPi } }", RpcServiceConfig::ArbitrumOne(L::BlockPi)),
+            ("variant { BaseMainnet = variant { BlockPi } }", RpcServiceConfig::BaseMainnet(L::BlockPi)),
+        ];
+        for (text, cfg) in cases {
+            let args = format!(r#"({text}, "{{}}", 8192 : nat64)"#);
+            let bytes = candid_parser::parse_idl_args(&args).unwrap().to_bytes().unwrap();
+            let (service, body, cap): (RpcService, String, u64) = candid::decode_args(&bytes).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(service, to_rpc_service(&cfg), "{text}");
+            assert_eq!((body.as_str(), cap), ("{}", 8192));
+            // And our own encoding decodes back to the same service.
+            let ours = candid::encode_args((to_rpc_service(&cfg), "{}".to_string(), 8_192u64)).unwrap();
+            let (back, _, _): (RpcService, String, u64) = candid::decode_args(&ours).unwrap();
+            assert_eq!(back, service, "{text}");
+        }
     }
 
     #[test]

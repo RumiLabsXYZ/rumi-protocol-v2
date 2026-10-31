@@ -170,6 +170,21 @@ type DeviceSpec = variant {
   LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
 };
 type ErrorInfo = record { description : text };
+type EthMainnetService = variant {
+  Alchemy;
+  Llama;
+  BlockPi;
+  Cloudflare;
+  PublicNode;
+  Ankr;
+};
+type EthSepoliaService = variant {
+  Alchemy;
+  BlockPi;
+  PublicNode;
+  Ankr;
+  Sepolia;
+};
 type GasConfig = record {
   replace_after_secs : nat64;
   mint_gas_limit : nat64;
@@ -286,8 +301,11 @@ type Result_4 = variant { Ok : nat64; Err : BridgeError };
 type Result_5 = variant { Ok : BaseAddresses; Err : BridgeError };
 type Result_6 = variant { Ok : ConsentInfo; Err : Icrc21Error };
 type RpcServiceConfig = variant {
+  EthSepolia : EthSepoliaService;
   BaseMainnet : L2MainnetService;
   Custom : record { url : text };
+  ArbitrumOne : L2MainnetService;
+  EthMainnet : EthMainnetService;
 };
 type StandardRecord = record { url : text; name : text };
 type SupplyAudit = record {

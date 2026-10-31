@@ -284,9 +284,11 @@ pub fn validate_init(args: &InitArgs) -> Result<BridgeConfig, String> {
 /// The most RPC providers the bridge accepts.
 ///
 /// 5 covers all five built-in Base mainnet providers of the EVM RPC canister (the
-/// `L2MainnetService` enum: Alchemy, Ankr, BlockPi, PublicNode, Llama); the Base Sepolia
-/// runbook uses 3. Every provider is called for every request, so the cap also bounds the
-/// per-call cycle cost.
+/// `L2MainnetService` enum: Alchemy, Ankr, BlockPi, PublicNode, Llama), all five built-in
+/// Ethereum Sepolia and Arbitrum One providers, and any five of the six built-in Ethereum
+/// mainnet providers (`EthMainnetService` adds Cloudflare); the Base Sepolia runbook uses 3.
+/// Every provider is called for every request, so the cap also bounds the per-call cycle
+/// cost.
 ///
 /// Enforced by [`validate_rpc_services`], which runs at install (`validate_init`) and in
 /// `admin_set_rpc_services` before any provider call, and by
@@ -322,6 +324,9 @@ pub fn validate_rpc_services(chain_id: u64, services: &[RpcServiceConfig], min_q
         }
         let key = match s {
             RpcServiceConfig::BaseMainnet(p) => format!("base:{p:?}"),
+            RpcServiceConfig::EthMainnet(p) => format!("ethmainnet:{p:?}"),
+            RpcServiceConfig::EthSepolia(p) => format!("ethsepolia:{p:?}"),
+            RpcServiceConfig::ArbitrumOne(p) => format!("arbitrum:{p:?}"),
             RpcServiceConfig::Custom { url } => {
                 if !(url.starts_with("https://") || (row.role == ChainRole::Local && url.starts_with("http://"))) {
                     return Err(format!("RPC URL must be https: {url}"));
@@ -1655,6 +1660,279 @@ pub(crate) mod tests {
     fn all_built_in_base_providers() -> Vec<RpcServiceConfig> {
         use crate::types::L2MainnetService::*;
         [Alchemy, Ankr, BlockPi, PublicNode, Llama].into_iter().map(RpcServiceConfig::BaseMainnet).collect()
+    }
+
+    /// The built-in set of a family (every provider the family names, at most the cap).
+    /// `EthMainnet` has six built-in providers; the first five are returned, since a set
+    /// holds at most `MAX_RPC_SERVICES`.
+    fn built_in_set(family: chains::NativeProvider) -> Vec<RpcServiceConfig> {
+        use crate::types::{EthMainnetService as M, EthSepoliaService as S, L2MainnetService as L};
+        use chains::NativeProvider as F;
+        match family {
+            F::BaseMainnet => all_built_in_base_providers(),
+            F::EthMainnet => [M::Alchemy, M::Ankr, M::BlockPi, M::Cloudflare, M::PublicNode].into_iter().map(RpcServiceConfig::EthMainnet).collect(),
+            F::EthSepolia => [S::Alchemy, S::Ankr, S::BlockPi, S::PublicNode, S::Sepolia].into_iter().map(RpcServiceConfig::EthSepolia).collect(),
+            F::ArbitrumOne => [L::Alchemy, L::Ankr, L::BlockPi, L::PublicNode, L::Llama].into_iter().map(RpcServiceConfig::ArbitrumOne).collect(),
+        }
+    }
+
+    const ALL_FAMILIES: [chains::NativeProvider; 4] = [
+        chains::NativeProvider::BaseMainnet,
+        chains::NativeProvider::EthMainnet,
+        chains::NativeProvider::EthSepolia,
+        chains::NativeProvider::ArbitrumOne,
+    ];
+
+    #[test]
+    fn each_built_in_family_is_valid_only_on_the_row_that_lists_it() {
+        for family in ALL_FAMILIES {
+            let owner = chains::native_owner(family).expect("every family has an owner row").chain_id;
+            let set = built_in_set(family);
+            assert_eq!(set.len(), MAX_RPC_SERVICES);
+            for chain in TABLE_IDS {
+                let row = chains::profile(chain).unwrap();
+                let ctx = format!("{} on chain {chain}", family.variant_name());
+                for quorum in 2..=5u8 {
+                    let r = validate_rpc_services(chain, &set, quorum);
+                    if chain == owner {
+                        assert!(r.is_ok(), "{ctx} quorum {quorum}: {r:?}");
+                    } else {
+                        // The refusal is the one the Base family has always had, naming the family and its row.
+                        assert_eq!(r.unwrap_err(), format!("{} providers are only valid for chain {owner}", family.variant_name()), "{ctx}");
+                    }
+                }
+                // The quorum floor of the row still applies to the owner row.
+                if chain == owner && row.role == ChainRole::Mainnet {
+                    assert_eq!(validate_rpc_services(chain, &set, 1).unwrap_err(), format!("{} mainnet requires min_quorum >= 2", row.display_name));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_native_families_are_refused_on_every_base_chain() {
+        use crate::types::{EthMainnetService, EthSepoliaService};
+        let one_of_each = [
+            (RpcServiceConfig::EthMainnet(EthMainnetService::Alchemy), "EthMainnet providers are only valid for chain 1"),
+            (RpcServiceConfig::EthSepolia(EthSepoliaService::Sepolia), "EthSepolia providers are only valid for chain 11155111"),
+            (RpcServiceConfig::ArbitrumOne(L2MainnetService::Alchemy), "ArbitrumOne providers are only valid for chain 42161"),
+        ];
+        for chain in [CHAIN_BASE_MAINNET, CHAIN_BASE_SEPOLIA, CHAIN_LOCAL_ANVIL] {
+            for (cfg, message) in &one_of_each {
+                // Alone, and next to a valid custom provider.
+                assert_eq!(validate_rpc_services(chain, std::slice::from_ref(cfg), 1).unwrap_err().as_str(), *message, "chain {chain}");
+                let mixed = [custom_services(1)[0].clone(), cfg.clone()];
+                assert_eq!(validate_rpc_services(chain, &mixed, 1).unwrap_err().as_str(), *message, "chain {chain}");
+                // The same through install validation and the stored-config check at upgrade.
+                let key = if chain == CHAIN_BASE_MAINNET { "key_1" } else { "test_key_1" };
+                let mut a = init_args(chain, key);
+                a.rpc_services = vec![custom_services(1)[0].clone(), cfg.clone()];
+                a.min_quorum = 2;
+                assert_eq!(validate_init(&a).unwrap_err().as_str(), *message, "chain {chain}");
+                let stored = BridgeConfig { chain_id: chain, rpc_services: a.rpc_services.clone(), min_quorum: 2, ..BridgeConfig::default() };
+                let e = validate_stored_rpc_config(&stored).unwrap_err();
+                assert!(e.starts_with("stored RPC configuration is invalid") && e.ends_with(message), "{e}");
+            }
+        }
+        // The Base family is refused on the new rows the same way.
+        for chain in [1u64, 11155111, 42161] {
+            assert_eq!(
+                validate_rpc_services(chain, &all_built_in_base_providers(), 2).unwrap_err(),
+                "BaseMainnet providers are only valid for chain 8453",
+                "chain {chain}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_native_families_cannot_share_a_set() {
+        // Each member is checked against the row, so a set mixing families is refused on
+        // every row, naming the family that does not belong.
+        let mixed = vec![built_in_set(chains::NativeProvider::EthMainnet)[0].clone(), built_in_set(chains::NativeProvider::ArbitrumOne)[0].clone()];
+        assert_eq!(validate_rpc_services(1, &mixed, 2).unwrap_err(), "ArbitrumOne providers are only valid for chain 42161");
+        assert_eq!(validate_rpc_services(42161, &mixed, 2).unwrap_err(), "EthMainnet providers are only valid for chain 1");
+        // A native set may be mixed with custom URLs on its own row.
+        let mut with_custom = built_in_set(chains::NativeProvider::ArbitrumOne)[..2].to_vec();
+        with_custom.push(custom_services(1)[0].clone());
+        assert!(validate_rpc_services(42161, &with_custom, 2).is_ok());
+        assert!(validate_rpc_services(421614, &custom_services(3), 2).is_ok(), "Arbitrum Sepolia has no built-in family: custom URLs only");
+        assert!(validate_rpc_services(421614, &built_in_set(chains::NativeProvider::ArbitrumOne), 2).is_err());
+    }
+
+    #[test]
+    fn built_in_providers_dedupe_by_family_and_name() {
+        use crate::types::{EthMainnetService, EthSepoliaService};
+        let dup = |chain: u64, cfg: RpcServiceConfig| validate_rpc_services(chain, &[cfg.clone(), cfg], 1).unwrap_err();
+        assert_eq!(dup(1, RpcServiceConfig::EthMainnet(EthMainnetService::Alchemy)), "duplicate RPC service ethmainnet:Alchemy");
+        assert_eq!(dup(11155111, RpcServiceConfig::EthSepolia(EthSepoliaService::Sepolia)), "duplicate RPC service ethsepolia:Sepolia");
+        assert_eq!(dup(42161, RpcServiceConfig::ArbitrumOne(L2MainnetService::Llama)), "duplicate RPC service arbitrum:Llama");
+        // Different names of one family are different providers.
+        let two = [RpcServiceConfig::EthMainnet(EthMainnetService::Alchemy), RpcServiceConfig::EthMainnet(EthMainnetService::Cloudflare)];
+        assert!(validate_rpc_services(1, &two, 2).is_ok());
+        // The key spells the family, so a Base duplicate keeps its key.
+        assert_eq!(
+            dup(CHAIN_BASE_MAINNET, RpcServiceConfig::BaseMainnet(L2MainnetService::Ankr)),
+            "duplicate RPC service base:Ankr"
+        );
+    }
+
+    #[test]
+    fn ethereum_mainnet_has_six_built_in_providers_and_a_set_holds_five() {
+        use crate::types::EthMainnetService as M;
+        let all_six: Vec<RpcServiceConfig> =
+            [M::Alchemy, M::Ankr, M::BlockPi, M::Cloudflare, M::PublicNode, M::Llama].into_iter().map(RpcServiceConfig::EthMainnet).collect();
+        let e = validate_rpc_services(1, &all_six, 3).unwrap_err();
+        assert!(e.contains("at most 5") && e.contains("got 6"), "{e}");
+        // Any five of the six are valid, so every built-in provider is reachable.
+        for skip in 0..6 {
+            let five: Vec<RpcServiceConfig> = all_six.iter().enumerate().filter(|(i, _)| *i != skip).map(|(_, c)| c.clone()).collect();
+            assert!(validate_rpc_services(1, &five, 3).is_ok(), "skip {skip}");
+        }
+    }
+
+    #[test]
+    fn native_providers_do_not_open_the_install_gate() {
+        // A valid native set for a described but disabled chain is still refused at install:
+        // the gate is checked before the providers.
+        for family in [chains::NativeProvider::EthMainnet, chains::NativeProvider::EthSepolia, chains::NativeProvider::ArbitrumOne] {
+            let row = chains::native_owner(family).unwrap();
+            let key = row.allowed_keys[0];
+            let mut a = init_args(row.chain_id, key);
+            a.rpc_services = built_in_set(family);
+            a.min_quorum = 3;
+            let e = validate_init(&a).unwrap_err();
+            assert!(e.contains("cannot be installed") && e.contains(row.display_name), "{e}");
+            // Upgrade does not look at the gate: the same set is a valid stored configuration.
+            let stored = BridgeConfig { chain_id: row.chain_id, rpc_services: a.rpc_services.clone(), min_quorum: 3, ..BridgeConfig::default() };
+            assert!(validate_stored_rpc_config(&stored).is_ok(), "{}", row.chain_id);
+        }
+    }
+
+    /// The `RpcServiceConfig` of the module before BB-44, as stored.
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+    enum LegacyRpcServiceConfig {
+        BaseMainnet(L2MainnetService),
+        Custom { url: String },
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Providers<T> {
+        rpc_services: Vec<T>,
+    }
+
+    /// Re-encode `config` with its `rpc_services` replaced by `legacy` (encoded by the
+    /// pre-BB-44 enum), leaving every other field as the new module writes it.
+    fn encode_with_legacy_providers(config: &BridgeConfig, legacy: &[LegacyRpcServiceConfig]) -> Vec<u8> {
+        use ciborium::value::Value;
+        let Value::Map(mut fields) = Value::serialized(config).unwrap() else { panic!("a config is a CBOR map") };
+        let slot = fields.iter_mut().find(|(k, _)| k.as_text() == Some("rpc_services")).expect("rpc_services field");
+        slot.1 = Value::serialized(&legacy.to_vec()).unwrap();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&Value::Map(fields), &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn a_stored_config_with_the_legacy_provider_variants_decodes_unchanged() {
+        use LegacyRpcServiceConfig as Old;
+        let base_mainnet_old: Vec<Old> = [
+            L2MainnetService::Alchemy,
+            L2MainnetService::Ankr,
+            L2MainnetService::BlockPi,
+            L2MainnetService::PublicNode,
+            L2MainnetService::Llama,
+        ]
+        .into_iter()
+        .map(Old::BaseMainnet)
+        .collect();
+        let custom_old = vec![
+            Old::Custom { url: "https://a.example".into() },
+            Old::Custom { url: "https://b.example/path".into() },
+            Old::Custom { url: "https://c.example".into() },
+        ];
+
+        // A Base mainnet instance (five built-in providers) and a Base Sepolia instance
+        // (custom URLs), each stored by the old module's encoding of the provider list.
+        let mut mainnet = validate_init(&init_args(CHAIN_BASE_MAINNET, "key_1")).unwrap();
+        mainnet.rpc_services = all_built_in_base_providers();
+        mainnet.min_quorum = 3;
+        let mut sepolia = validate_init(&init_args(CHAIN_BASE_SEPOLIA, "test_key_1")).unwrap();
+        sepolia.rpc_services = vec![
+            RpcServiceConfig::Custom { url: "https://a.example".into() },
+            RpcServiceConfig::Custom { url: "https://b.example/path".into() },
+            RpcServiceConfig::Custom { url: "https://c.example".into() },
+        ];
+        for (config, legacy) in [(mainnet, &base_mainnet_old), (sepolia, &custom_old)] {
+            let stored_by_old_module = encode_with_legacy_providers(&config, legacy);
+            let decoded: BridgeConfig = cbor_decode(&stored_by_old_module);
+            assert_eq!(decoded, config, "chain {}", config.chain_id);
+            assert!(validate_stored_rpc_config(&decoded).is_ok(), "chain {}", config.chain_id);
+            // The new module writes the same bytes for these variants.
+            let again = cbor_encode(&decoded);
+            assert_eq!(cbor_decode::<BridgeConfig>(&again), config);
+            // And inside the whole stored core.
+            let core = BridgeCore { initialized: true, config: decoded, ..Default::default() };
+            let back: BridgeCore = cbor_decode(&cbor_encode(&core));
+            assert_eq!(back, core);
+        }
+
+        // Same provider list, same bytes, whichever enum encodes it.
+        let new_form = Providers { rpc_services: all_built_in_base_providers() };
+        let old_form = Providers { rpc_services: base_mainnet_old.clone() };
+        assert_eq!(cbor_encode(&new_form), cbor_encode(&old_form));
+        let new_form = Providers { rpc_services: vec![RpcServiceConfig::Custom { url: "https://a.example".into() }] };
+        let old_form = Providers { rpc_services: vec![Old::Custom { url: "https://a.example".into() }] };
+        assert_eq!(cbor_encode(&new_form), cbor_encode(&old_form));
+    }
+
+    #[test]
+    fn the_legacy_provider_encoding_is_pinned_byte_for_byte() {
+        // Golden bytes of `[BaseMainnet(Alchemy), Custom { url }]`, written by hand: an array of
+        // two externally tagged one-entry maps. If these change, a stored config no longer reads.
+        let mut golden: Vec<u8> = vec![0x82, 0xa1, 0x6b];
+        golden.extend_from_slice(b"BaseMainnet");
+        golden.push(0x67);
+        golden.extend_from_slice(b"Alchemy");
+        golden.extend_from_slice(&[0xa1, 0x66]);
+        golden.extend_from_slice(b"Custom");
+        golden.extend_from_slice(&[0xa1, 0x63]);
+        golden.extend_from_slice(b"url");
+        golden.push(0x71);
+        golden.extend_from_slice(b"https://a.example");
+        let expected = vec![RpcServiceConfig::BaseMainnet(L2MainnetService::Alchemy), RpcServiceConfig::Custom { url: "https://a.example".into() }];
+        assert_eq!(cbor_encode(&expected), golden);
+        assert_eq!(cbor_decode::<Vec<RpcServiceConfig>>(&golden), expected);
+    }
+
+    #[test]
+    fn new_provider_variants_round_trip_but_an_older_module_cannot_read_them() {
+        use crate::types::{EthMainnetService, EthSepoliaService};
+        use LegacyRpcServiceConfig as Old;
+        let new_variants = vec![
+            RpcServiceConfig::EthMainnet(EthMainnetService::Cloudflare),
+            RpcServiceConfig::EthSepolia(EthSepoliaService::Sepolia),
+            RpcServiceConfig::ArbitrumOne(L2MainnetService::Llama),
+        ];
+        // They round trip under the new type, alone and inside a stored config.
+        assert_eq!(cbor_decode::<Vec<RpcServiceConfig>>(&cbor_encode(&new_variants)), new_variants);
+        let mut eth = validate_init(&init_args(CHAIN_BASE_SEPOLIA, "test_key_1")).unwrap();
+        eth.chain_id = 1;
+        eth.rpc_services = built_in_set(chains::NativeProvider::EthMainnet);
+        eth.min_quorum = 3;
+        assert_eq!(cbor_decode::<BridgeConfig>(&cbor_encode(&eth)), eth);
+
+        // Downgrade caveat: the pre-BB-44 enum has no such variant, so a module of that shape
+        // cannot decode a set that stores one. Only a non-Base row can hold one, and those
+        // rows cannot be installed, so no live instance can be in this state.
+        for v in &new_variants {
+            let bytes = cbor_encode(&Providers { rpc_services: vec![v.clone()] });
+            let as_old: Result<Providers<Old>, _> = ciborium::de::from_reader(bytes.as_slice());
+            assert!(as_old.is_err(), "{v:?} must not decode as a legacy provider");
+        }
+        // A set of legacy variants alone still decodes as the legacy type: nothing else moved.
+        let legacy_only = cbor_encode(&Providers { rpc_services: all_built_in_base_providers() });
+        let as_old: Providers<Old> = ciborium::de::from_reader(legacy_only.as_slice()).unwrap();
+        assert_eq!(as_old.rpc_services.len(), 5);
     }
 
     #[test]

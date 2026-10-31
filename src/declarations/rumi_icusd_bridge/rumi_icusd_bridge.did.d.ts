@@ -180,6 +180,17 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
     }
   };
 export interface ErrorInfo { 'description' : string }
+export type EthMainnetService = { 'Alchemy' : null } |
+  { 'Llama' : null } |
+  { 'BlockPi' : null } |
+  { 'Cloudflare' : null } |
+  { 'PublicNode' : null } |
+  { 'Ankr' : null };
+export type EthSepoliaService = { 'Alchemy' : null } |
+  { 'BlockPi' : null } |
+  { 'PublicNode' : null } |
+  { 'Ankr' : null } |
+  { 'Sepolia' : null };
 export interface GasConfig {
   'replace_after_secs' : bigint,
   'mint_gas_limit' : bigint,
@@ -310,8 +321,11 @@ export type Result_5 = { 'Ok' : BaseAddresses } |
   { 'Err' : BridgeError };
 export type Result_6 = { 'Ok' : ConsentInfo } |
   { 'Err' : Icrc21Error };
-export type RpcServiceConfig = { 'BaseMainnet' : L2MainnetService } |
-  { 'Custom' : { 'url' : string } };
+export type RpcServiceConfig = { 'EthSepolia' : EthSepoliaService } |
+  { 'BaseMainnet' : L2MainnetService } |
+  { 'Custom' : { 'url' : string } } |
+  { 'ArbitrumOne' : L2MainnetService } |
+  { 'EthMainnet' : EthMainnetService };
 export interface StandardRecord { 'url' : string, 'name' : string }
 export interface SupplyAudit {
   'fees_e8s' : bigint,
