@@ -3188,6 +3188,34 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   module hash is unknown and never inferred.
 - Next: W23 (Haiku) readability and consistency pass only; then Miles reviews the frozen packet before any push. BB-61 stays queued.
 
+## Milestone 134 (2026-10-31): D6 packet first review; corrections queued
+
+- Miles (`review-bb61-first.md`) at frozen `73a03575`; not accepted. Documentation corrections only, no protocol code, gates or
+  actions; D6 stays unadopted and live actions held.
+  1. Sui version guard: `assert_version` is `gate.version == VERSION` and `migrate` requires `gate.version < VERSION`; an upgrade does
+     not change the shared Gate's stored version, so new code that bumps VERSION refuses an old Gate until migration, old code keeps
+     working until the Gate migrates, and a compatible upgrade that keeps VERSION need not block anything. No automatic global freeze.
+  2. The recommended Sui demo contradicts its own no-operator-issuance principle: a hot publisher holding a compatible UpgradeCap can
+     add code that mints from the wrapped TreasuryCap, so moving MintCap alone does not remove issuing authority. Separate temporary
+     setup custody from the settled arrangement and offer unadopted choices consistent with source (keep a compatible cap under a
+     disclosed extra operator-mint trust choice; a policy that prevents changing module bodies, with irreversible tradeoffs; or a
+     separately authorized future canister custody signing path, not implemented); decide no irreversible policy.
+  3. OpenZeppelin is available: the files are present under `foundry/lib/openzeppelin-contracts/contracts/access/` (submodule Git
+     metadata broken, source not missing); Miles compared both files byte for byte with the official commit
+     `dbb6104ce834628e473d2173bbc9d47f81a9eec3` (lengths 14810 and 7050). Cite the actual inherited role grant, revoke, delayed default
+     admin transfer and renunciation bodies where material.
+  4. The decision form's grant and role-transfer boxes conflict: separate ordinary test-wallet operations from explicit role, cap,
+     controller or policy authorization (proposed additional scopes needing their own approval), using the existing action packet and
+     required approvals rather than a new approval layer.
+  5. Qualify absolute wording: the EVM key allowlist (`chains.rs:136-139`) also permits `key_1` on Base Sepolia and `dfx_test_key`
+     locally (allowlists and defaults, not selected live config); Solana's threshold mint authority is not an absence of all human
+     authority (users control their own tokens; admins and controllers keep their listed powers); the funding wallet gets no
+     protocol mint role.
+  6. Allow a specifically identified existing dedicated test wallet under its own unchanged scope, or a new dedicated one; never
+     production, shared or quarantined keys by default; no wallet access now; the Base signer grant not expanded to other networks.
+- Sequencing: W23's readability pass finishes if it had started editing, otherwise stands down; then the same W29 makes the factual
+  corrections; W23 may tighten wording only after the facts stabilize. Miles reviews the final frozen diff before any push.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
