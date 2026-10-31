@@ -18,6 +18,7 @@
   import BridgeHistory from '$lib/components/bridge/BridgeHistory.svelte';
   import DestinationSelector from '$lib/components/bridge/DestinationSelector.svelte';
   import IcpToBaseForm from '$lib/components/bridge/IcpToBaseForm.svelte';
+  import SolanaBridgePanel from '$lib/components/bridge/SolanaBridgePanel.svelte';
 
   type Direction = 'icp_to_base' | 'base_to_icp';
 
@@ -82,6 +83,13 @@
   /** Forms, the wallet bar and the review panels exist only for an enabled destination. */
   const config = $derived(selected && isEnabled(selected) ? selected.config : null);
   const unavailableReason = $derived(selected && !isEnabled(selected) ? (selected.reason ?? '') : '');
+  /**
+   * The native Solana configuration of the selected destination. Present only for an ENABLED Solana entry (the canister's
+   * own answer), so the Solana panel, its wallet store and its journal exist only then: while Solana is a disabled row,
+   * nothing about it is mounted and no Solana wallet is ever discovered, connected or asked to sign.
+   */
+  const solanaConfig = $derived(selected && isEnabled(selected) && selected.family === 'solana' ? (selected.native ?? null) : null);
+  const eyebrow = $derived(selected && selected.family === 'solana' ? 'INTERNET COMPUTER ↔ SOLANA' : 'INTERNET COMPUTER ↔ BASE');
 
   /** The newest status of one destination, read at the moment a flow asks. */
   function freshDestination(id: string): DestinationView | null {
@@ -111,7 +119,7 @@
 
 <main class="bridge-page">
   <header class="intro">
-    <p class="eyebrow">INTERNET COMPUTER ↔ BASE</p>
+    <p class="eyebrow">{eyebrow}</p>
     <h1 class="page-title">Bridge icUSD</h1>
     <p class="subtitle">
       Move icUSD between the Internet Computer and Base. Every icUSD on Base is backed one to one by icUSD held in the bridge's escrow on the Internet Computer. Bridging does not borrow or create debt.
@@ -130,7 +138,18 @@
       <DestinationSelector destinations={shownDestinations} selectedId={selected?.id ?? null} onSelect={(id) => (chosenId = id)} />
     </section>
   {/if}
-  {#if !config || !selected}
+  {#if solanaConfig && selected}
+    {@const solanaDestinationId = selected.id}
+    {#key selected.id}
+      <SolanaBridgePanel
+        config={solanaConfig}
+        destination={selected}
+        readFreshDestination={() => freshDestination(solanaDestinationId)}
+        onRecheck={refreshConfig}
+        {principal}
+      />
+    {/key}
+  {:else if !config || !selected}
     <section class="glass-card unavailable" aria-live="polite">
       {#if unavailableReason}
         <h2>Bridge is not available yet</h2>

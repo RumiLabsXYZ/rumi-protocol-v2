@@ -148,7 +148,7 @@ describe('loadDestinations: the Base entry', () => {
 describe('the other EVM destinations', () => {
   it('lists Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad, all DISABLED, after Base', async () => {
     const list = await loadDestinations();
-    expect(list.map((destination) => destination.id)).toEqual(['base-mainnet', ...OTHER_IDS]);
+    expect(list.map((destination) => destination.id)).toEqual(['base-mainnet', ...OTHER_IDS, 'solana-mainnet']);
     for (const id of OTHER_IDS) {
       const entry = byId(list, id);
       expect(entry).toMatchObject({
@@ -165,7 +165,7 @@ describe('the other EVM destinations', () => {
 
   it('gives every chain identifier as a STRING', async () => {
     const list = await loadDestinations();
-    expect(list.map((destination) => destination.chainId)).toEqual(['8453', '1', '42161', '4663', '999', '143']);
+    expect(list.map((destination) => destination.chainId)).toEqual(['8453', '1', '42161', '4663', '999', '143', '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d']);
     for (const destination of list) expect(typeof destination.chainId).toBe('string');
   });
 
@@ -195,6 +195,7 @@ describe('destination keys are per network', () => {
       ['robinhood-mainnet', 'robinhood'],
       ['hyperevm-mainnet', 'hyperevm'],
       ['monad-mainnet', 'monad'],
+      ['solana-mainnet', 'solana'],
     ]);
     expect(new Set(list.map((destination) => destination.id)).size).toBe(list.length);
   });
@@ -221,9 +222,9 @@ describe('destination keys are per network', () => {
 describe('when the bridge cannot be reached at all', () => {
   it('shows every destination unavailable, with the reason on Base', () => {
     const list = unreachableDestinations('replica offline');
-    expect(list.map((destination) => destination.status)).toEqual(Array(6).fill('disabled'));
+    expect(list.map((destination) => destination.status)).toEqual(Array(7).fill('disabled'));
     expect(byId(list, BASE_UNKNOWN_ID).reason).toBe('The bridge could not be reached: replica offline');
-    expect(list.map((destination) => destination.id)).toEqual([BASE_UNKNOWN_ID, ...OTHER_IDS]);
+    expect(list.map((destination) => destination.id)).toEqual([BASE_UNKNOWN_ID, ...OTHER_IDS, 'solana-mainnet']);
   });
 });
 
@@ -251,7 +252,7 @@ describe('selection', () => {
 
   it('moves between ENABLED entries only, so a disabled one is never reached by a key', () => {
     const entries = twoEnabled();
-    expect(entries.map((destination) => destination.id)).toEqual(['base-mainnet', 'ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet']);
+    expect(entries.map((destination) => destination.id)).toEqual(['base-mainnet', 'ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet', 'solana-mainnet']);
     expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowRight')?.id).toBe('arbitrum-mainnet');
     expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowDown')?.id).toBe('arbitrum-mainnet');
     expect(nextEnabledDestination(entries, 'arbitrum-mainnet', 'ArrowRight')?.id).toBe('base-mainnet');

@@ -219,7 +219,7 @@ describe('the destination selector on the page', () => {
     const group = host.querySelector('[role="radiogroup"]')!;
     expect(group.getAttribute('aria-label')).toBe('Destination network');
     expect(Array.from(group.querySelectorAll('[role="radio"]')).map((entry) => entry.id)).toEqual(
-      ['base-mainnet', ...OTHER_IDS].map((id) => `destination-${id}`),
+      ['base-mainnet', ...OTHER_IDS, 'solana-mainnet'].map((id) => `destination-${id}`),
     );
 
     expect(option('base-mainnet')!.getAttribute('aria-checked')).toBe('true');
@@ -277,7 +277,7 @@ describe('the destination selector on the page', () => {
     expect(host.textContent).toContain('Bridge is not available yet');
     expect(host.textContent).toContain('The bridge could not be reached: replica offline');
     const radios = Array.from(host.querySelectorAll('[role="radio"]'));
-    expect(radios).toHaveLength(6);
+    expect(radios).toHaveLength(7);
     expect(radios.every((entry) => entry.getAttribute('aria-disabled') === 'true')).toBe(true);
     expect(host.querySelectorAll('button[role="radio"]')).toHaveLength(0);
     expect(host.querySelector('[role="tablist"]')).toBeNull();

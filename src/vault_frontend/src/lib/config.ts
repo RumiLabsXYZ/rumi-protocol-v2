@@ -61,6 +61,9 @@ export const CANISTER_IDS = {
   // canister is deployed; filling it in flips BRIDGE_ENABLED true so /bridge
   // and its nav links appear.
   ICUSD_BRIDGE: "",
+  // Rumi icUSD <-> Solana bridge canister (rumi_icusd_sol_bridge). Empty: the Solana destination stays a disabled
+  // row, no actor is created and no wallet is asked. Only a configured, initialized instance can enable it.
+  ICUSD_SOL_BRIDGE: "",
 } as const;
 
 /** The /points airdrop section is shown only once the rumi_points canister id
@@ -111,6 +114,7 @@ export const LOCAL_CANISTER_IDS = {
   INTERNET_IDENTITY: "rdmx6-jaaaa-aaaaa-aaadq-cai", // Local II canister
   CYCLE_SENTINEL: "",
   ICUSD_BRIDGE: "",
+  ICUSD_SOL_BRIDGE: "",
 } as const;
 
 export const isCycleSentinelConfigured = CANISTER_IDS.CYCLE_SENTINEL.trim().length > 0;

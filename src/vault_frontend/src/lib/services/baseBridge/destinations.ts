@@ -24,6 +24,16 @@ import {
   type BridgeConfigResult,
   type EvmDestinationChain,
 } from './chains';
+import type { SolanaBridgeConfig, SolanaConfigResult } from '../solanaBridge/config';
+import { SOLANA_MAINNET } from '../solanaBridge/networks';
+
+/**
+ * The live configuration of a non-EVM (native) bridge instance. A native instance is NOT an EVM `BridgeConfig` with
+ * other field names (it has a mint, a return account and a genesis hash instead of a contract and a chain id), so it has
+ * its own field, next to `config`, and the page branches on `family`. Solana is the only native family so far; a later
+ * family adds its own member to this union.
+ */
+export type NativeDestinationConfig = SolanaBridgeConfig;
 
 export type DestinationFamily = 'evm' | 'solana' | 'sui' | 'xrpl';
 export type DestinationNetwork = 'mainnet' | 'testnet';
@@ -66,6 +76,8 @@ export interface DestinationView {
   actorCanisterId: string | null;
   /** The live bridge configuration the EVM forms use. Present only while enabled. */
   config: BridgeConfig | null;
+  /** The live configuration of a native (non-EVM) instance. Present only while enabled; absent for every EVM entry. */
+  native?: NativeDestinationConfig | null;
 }
 
 /** The profile label of the Base bridge. */
@@ -145,9 +157,84 @@ export function unavailableEvmDestinations(): DestinationView[] {
   return EVM_DESTINATION_CHAINS.filter((chain) => !chain.testnet).map(staticDestination);
 }
 
+/** The static, disabled Solana row. No Solana instance is configured, so it has no actor and cannot be selected. */
+export function unavailableSolanaDestination(): DestinationView {
+  return {
+    id: SOLANA_MAINNET.networkId,
+    profileId: 'solana',
+    family: 'solana',
+    name: SOLANA_MAINNET.name,
+    chainId: SOLANA_MAINNET.genesisHash,
+    network: 'mainnet',
+    status: 'disabled',
+    reason: `Not available yet: there is no icUSD bridge to ${SOLANA_MAINNET.name} at the moment.`,
+    limits: null,
+    fees: null,
+    actorCanisterId: null,
+    config: null,
+    native: null,
+  };
+}
+
+/** The native (non-EVM) rows that are not offered. */
+export function unavailableNativeDestinations(): DestinationView[] {
+  return [unavailableSolanaDestination()];
+}
+
+/**
+ * The Solana entry from the result of resolving the instance's answers. An enabled entry exists only while the
+ * canister's own answer passes every check (`resolveSolanaConfig`); otherwise it is disabled with the reason.
+ */
+export function solanaDestination(result: SolanaConfigResult, actorCanisterId: string | null): DestinationView {
+  if (result.ok) {
+    const { config } = result;
+    return {
+      id: config.network.networkId,
+      profileId: 'solana',
+      family: 'solana',
+      name: config.network.name,
+      chainId: config.network.genesisHash,
+      network: config.network.role === 'mainnet' ? 'mainnet' : 'testnet',
+      status: 'enabled',
+      reason: null,
+      limits: { minDepositE8s: config.minDepositE8s, maxDepositE8s: config.maxDepositE8s, minBridgeOutE8s: 1n },
+      fees: { depositFeeE8s: config.depositFeeE8s, releaseFeeE8s: config.releaseFeeE8s, ledgerFeeE8s: null },
+      actorCanisterId,
+      config: null,
+      native: config,
+    };
+  }
+  const network = result.network;
+  return {
+    id: network?.networkId ?? SOLANA_MAINNET.networkId,
+    profileId: 'solana',
+    family: 'solana',
+    name: network?.name ?? SOLANA_MAINNET.name,
+    chainId: network?.genesisHash ?? '',
+    network: network && network.role !== 'mainnet' ? 'testnet' : 'mainnet',
+    status: 'disabled',
+    reason: result.message,
+    limits: null,
+    fees: null,
+    actorCanisterId,
+    config: null,
+    native: null,
+  };
+}
+
+/** The Solana row to show when its instance could not be read at all. */
+export function unreachableSolanaDestination(message: string, actorCanisterId: string | null): DestinationView {
+  return { ...unavailableSolanaDestination(), reason: `The Solana bridge could not be reached: ${message}`, actorCanisterId };
+}
+
+/** Put a Solana entry in a list: it replaces the static row of the same network, else it is added after the others. */
+export function withSolanaDestination(list: readonly DestinationView[], solana: DestinationView): DestinationView[] {
+  return list.some((entry) => entry.id === solana.id) ? list.map((entry) => (entry.id === solana.id ? solana : entry)) : [...list, solana];
+}
+
 /** The full list: Base first, then the static disabled entries. */
 export function buildDestinations(base: BridgeConfigResult, baseActorCanisterId: string | null): DestinationView[] {
-  return [baseDestination(base, baseActorCanisterId), ...unavailableEvmDestinations()];
+  return [baseDestination(base, baseActorCanisterId), ...unavailableEvmDestinations(), ...unavailableNativeDestinations()];
 }
 
 /** The list to show when the bridge canister could not be reached at all: every entry is unavailable. */
@@ -168,6 +255,7 @@ export function unreachableDestinations(message: string, baseActorCanisterId: st
       config: null,
     },
     ...unavailableEvmDestinations(),
+    ...unavailableNativeDestinations(),
   ];
 }
 

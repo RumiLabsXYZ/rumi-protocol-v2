@@ -33,8 +33,13 @@ export class SigningBlockedError extends Error {
 
 /** What the caller knows about the wallet it is about to ask. */
 export interface SigningWalletState {
-  /** `icp_signer` for the Internet Computer wallet, `evm` for the browser wallet on the destination chain. */
-  wallet: 'icp_signer' | 'evm';
+  /**
+   * `icp_signer` for the Internet Computer wallet, `evm` for the browser wallet on the destination chain, `solana`
+   * for a Solana Wallet Standard wallet. A Solana flow checks its own account and network before it asks (a Solana
+   * wallet account lists the chains it supports, not a single current chain), so here `solana` only means "the
+   * destination must be enabled".
+   */
+  wallet: 'icp_signer' | 'evm' | 'solana';
   /**
    * The network the EVM wallet is on, when the caller has already read it. It is never read here:
    * this function makes no wallet call. Ignored for the ICP signer.
