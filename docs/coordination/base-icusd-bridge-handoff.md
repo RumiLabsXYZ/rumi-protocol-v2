@@ -3271,6 +3271,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Still a proposal, unadopted; BB-61 stays queued for Rob's D6 decision; nothing pushed. A further Haiku wording pass is optional and
   only after the facts are accepted.
 
+## Milestone 138 (2026-10-31): D6 decision packet final candidate frozen
+
+- Miles read `012b7f65` (the substantive fixes are sound) and confirmed the restored value rows; content, not a placeholder count, is
+  what matters. W29 (`claude-sonnet-5-5`) committed `266a7f9c4d724fffd92eaec28cdad95ebc58c411` "docs(multichain): D6 packet grant-scope and XRPL flag wording
+  (BB-61 prep)", pathspec, the D6 file only, 4 insertions and 4 deletions:
+  1. Section 5: class B and class C are not included in class A authority, but an explicit grant or action packet that names those
+     scopes can cover them, together in one standing grant or one action packet; actions already named in such a grant do not each
+     need a fresh prompt; the tool and user approvals actually required still apply; no new approval layer.
+  2. Section 4.1 XRPL demo row: the misleading "(both irreversible, and no code path uses them)" replaced. With both flags false,
+     setup skips the optional AllowClawback and NoFreeze AccountSet steps (XR `xrpl_icusd/types.rs:350-361`,
+     `IssuerSetupStep::sequence_for`, confirmed by the coordinator at `46cf6b34`); the policy is fixed once setup starts
+     (`xrpl_icusd/mod.rs:196-200`); no Clawback transaction builder exists (`xrpl_icusd/settlement.rs:76-77`, Payment and AccountSet
+     only); setting either flag true has the separately disclosed ledger consequences. Proposed policy, not adopted. Flag
+     irreversibility stays UNVERIFIED in section 2.4.
+- Coordinator checks: the file matches the commit, 165 lines, no em dashes, no local paths, `git diff --check` clean, tree clean. Final
+  candidate for acceptance: commit `266a7f9c4d724fffd92eaec28cdad95ebc58c411`, file blob `c22c80876e6a4eae09e906dcc9fa7b5328aea647`, file sha256
+  `94296ceedf01a6075561f2eb3052076e8cf5a214f0646874baac95d32f974d09`. Review copies in the coordinator scratchpad `bb61/` (the frozen
+  file and the full diff from `73a03575`). Proposal only; BB-61 queued; nothing pushed.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
