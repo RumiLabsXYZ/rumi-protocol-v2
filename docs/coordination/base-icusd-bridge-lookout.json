@@ -495,10 +495,10 @@
     },
     {
       "id": "BB-55",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: 15-digit wiring and cap clamps on PR #586's module",
-      "evidenceText": "proof=none; 15-digit validator on import and return requests, both caps clamped at 999,999,999,999,999 e8s, pending imports counted, parser parity; focused tests pass",
+      "evidenceText": "proof=none; Claimed 2026-10-31 on a stacked branch at PR 586's head (PR 586 untouched): caps clamped at 15 digits, pending imports counted, snapshot ceiling, 15-digit validator wired, frontend parser parity; focused tests only",
       "evidenceLinks": []
     },
     {
@@ -527,18 +527,18 @@
     },
     {
       "id": "BB-59",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Shared: frontend destination selection and safe signing gate",
-      "evidenceText": "proof=local-test; 2191d2b6 plus 103ad82c: retry and second click refuse an intent for another destination before signing (6 failing tests reproduced, then 31 pass); legacy Base works; bridge vitest 485 at the fix; check at baseline",
+      "evidenceText": "proof=local-test; Miles accepted 2191d2b6 plus 103ad82c: destination selection, synchronous signing guard in both flows, retries bound to the intent's destination, legacy Base recovery kept; 485 then 521 bridge vitest; check at baseline",
       "evidenceLinks": []
     },
     {
       "id": "BB-60",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Shared: profile consumption and upkeep",
-      "evidenceText": "proof=local-test; 28ba5867: TS profile reader (decimal-string amounts); per-network destination keys, legacy intents bound to the page's Base network; EVM profiles updated, still disabled; 521 vitest; Rust validator 107, dry run 0 violations",
+      "evidenceText": "proof=local-test; Miles accepted 28ba5867: pure profile reader (decimal strings, real-profile parity, not page-wired); per-network keys, unknown chains closed; EVM profile upkeep, still disabled; Rust validator 107, dry run clean",
       "evidenceLinks": []
     },
     {

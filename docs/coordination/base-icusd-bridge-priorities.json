@@ -38,9 +38,9 @@
     {
       "id": "shared-reporting-frontend",
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "BB-59 and BB-60 in Review (103ad82c, 28ba5867). Remaining frontend family connectors (BB-50 Solana, BB-54 Sui) follow their family cards.",
+      "nextAction": "",
       "cardIds": [
         "BB-58",
         "BB-59",
@@ -63,9 +63,9 @@
     {
       "id": "xrpl-follow-ups",
       "title": "XRPL follow-ups to PR #586",
-      "status": "paused",
-      "blockedReason": "Source-authorized since 2026-10-30, held behind higher-ranked work: Rob asked for a couple of tasks at a time, so this starts when EVM and shared reporting source work closes or a real dependency frees a lane.",
-      "nextAction": "Start with BB-55 (15-digit wiring and cap clamps) on PR #586's head or a branch stacked on it.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "BB-55 in progress (Sonnet) on a stacked branch at PR #586's head, PR #586 itself untouched: cap clamps, pending-import counting, snapshot ceiling, validator wiring, parser parity. Then BB-56 (no-vault return) and BB-57 (Candid, cards, PocketIC, and the XRPL lane reader).",
       "cardIds": [
         "BB-55",
         "BB-56",
@@ -76,7 +76,7 @@
       "id": "sui-implementation",
       "title": "Sui implementation (Move gate)",
       "status": "paused",
-      "blockedReason": "Source-authorized since 2026-10-30, held behind higher-ranked work: Rob asked for a couple of tasks at a time, so this starts when EVM and shared reporting source work closes or a real dependency frees a lane.",
+      "blockedReason": "Source-authorized; next in rank after XRPL. BB-51 needs the Sui CLI for `sui move test`, which is not installed; installing it is a separate approval. Its reader for the BB-58 collector rides on BB-53.",
       "nextAction": "Start with BB-51 (Move gate package and unit tests); doing BB-58 first is a scheduling preference, not a prerequisite. External Move review is deferred to pre-real-value work.",
       "cardIds": [
         "BB-51",

@@ -1211,6 +1211,21 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   validator requires is `robinhood-finalized-tag-unverified`; align them when BB-46 flips the row.
 - Lanes: W28 (BB-47, sole Rust builder) running; W27 free.
 
+## Milestone 53 (2026-10-31): BB-59 and BB-60 accepted; BB-55 started
+
+- Accepted (Miles): BB-59 (`2191d2b6` plus `103ad82c`) and BB-60 (`28ba5867`) at source and local-test level. The reader is
+  pure and not wired into the page; no dynamic activation and no browser-wallet proof is claimed. The shared reporting and
+  frontend subproject is done for its current cards; the Solana and Sui wallet connectors stay on BB-50 and BB-54.
+- BB-55 (XRPL, rank ahead of Sui): Miles authorized an isolated stacked source checkout. The coordinator created
+  `.worktrees/xrpl-icusd-bb55-20261031` on new branch `codex/xrpl-icusd-followups` at PR #586's exact head
+  `b02584e4413fbffe0d65d2c6ff44d16bf82c19ed` (PR #586 open and unmerged; the protected checkout
+  `.worktrees/xrpl-icusd-20261018` and branch `codex/xrpl-icusd` untouched). Builds share this bridge worktree's `target/`
+  through `CARGO_TARGET_DIR`, serialized by cargo's lock; focused backend unit tests only, no Wasm build. Frontend parity
+  tests may reuse this worktree's installed node modules by symlink, without installing anything (PR #586 also lists
+  `xumm`). Hazard noted: an XRPL-branch backend Wasm built into the shared target would shadow this branch's; none is built.
+- Dispatched: W29 (new run, `claude-sonnet-5-5`) on BB-55. Lanes: W28 (BB-47, sole Rust build owner) and W29.
+- Sui BB-51 needs the Sui CLI, which is not installed; installing it needs its own approval.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
