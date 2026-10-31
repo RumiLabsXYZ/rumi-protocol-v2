@@ -2672,6 +2672,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   W29 was told not to change the Sui `.did` or its exported types without coordinating first; 53d should not need it.
 - Two lanes: W28 on BB-54 (frontend), W29 on 53d and any 53c review fixes (Rust, sole builder).
 
+## Milestone 114 (2026-10-31): BB-53 53c first review, correction
+
+- Miles (`review-bb53c-first.md`) at frozen `e4ee506a`; 53c not accepted, the rest of the review continues.
+- F1: `observer.rs` reads the Gate and head across awaits, then awaits `ledger.balance_of`, then runs the monitors with the older
+  observed values against the current books, with no coherence or generation fence. A deposit pull settling during the balance
+  read yields a false C1 shortfall and a halt of a fully backed bridge (the Solana 49d custody class); a slow observer pass
+  overtaken after the stale guard is reclaimed writes `last_head` and can move `scanned_through` backward, and the monitors then
+  compare an older Gate return counter with newer verified returns (a false C4 halt; C2 and C3 likewise). Fix: the smallest
+  coherent snapshot and stale-continuation fence; a monitor that cannot compare matching states defers or reports not evaluated,
+  never halts or falsely passes; an older callback never overwrites newer progress; real breaches still detected.
+- F2: `process_hints` takes the three oldest live hints and keeps unreadable ones in place, so three missing digests starve a
+  fourth valid hint until expiry; `observer_pass` ignores `next_run_ns` whenever any hint is live, and `notify_sui_return` resets
+  it even for a duplicate, defeating the wait interval. Fix: the existing fair rotating bounded-queue pattern; a new hint gets a
+  bounded wake-up, but pending or duplicate hints cannot erase a cooldown or bypass the observer rate.
+- Same W29, one bounded correction with old-red and new-green regressions (balance-await incoming pull; overtaken observer pass;
+  three unreadable hints then a real return within bounded passes and capped reads; a fake-clock call-count test). Internal
+  additive state only; the frozen frontend `.did` unchanged unless coordinated. The MC-DEF-14 dense single-checkpoint degraded
+  mode stays disclosed, not a pagination gate. 53d work in progress preserved and resumed after.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
