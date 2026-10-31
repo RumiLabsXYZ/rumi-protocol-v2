@@ -530,7 +530,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Shared: frontend destination selection and safe signing gate",
-      "evidenceText": "proof=none; Claimed 2026-10-30: destination view (Base from get_bridge_info as today, other EVM chains shown disabled), one signing guard before any wallet call, destination key on new intents with legacy records bound to Base",
+      "evidenceText": "proof=none; 2191d2b6 (476 bridge vitest, check at baseline, build passes) needs one fix (Miles): ICP to Base retry and second click must refuse an intent saved for another destination before signing; same owner",
       "evidenceLinks": []
     },
     {
@@ -538,7 +538,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Shared: profile consumption and upkeep",
-      "evidenceText": "proof=none; TypeScript reader keeps amounts as decimal strings; profiles updated as implementations land; every status stays disabled until activation is authorized",
+      "evidenceText": "proof=none; Next for the same owner: TS profile reader keeping amounts as decimal strings; per-network destination keys (mainnet and testnet never share one); legacy keyless intents bound to the page's Base network; EVM profile upkeep",
       "evidenceLinks": []
     },
     {

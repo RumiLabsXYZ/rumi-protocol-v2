@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-59 in progress (W27, frontend). After BB-59's review, BB-60 (profile reader and upkeep) takes that lane. Native reporting stays deliverable on BB-49, BB-53 and BB-57.",
+      "nextAction": "BB-59 correction in progress (same W27: bind ICP to Base retries to the intent's destination), then BB-60 (profile reader, per-network destination keys, EVM profile upkeep) with the same owner.",
       "cardIds": [
         "BB-58",
         "BB-59",

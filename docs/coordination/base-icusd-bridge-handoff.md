@@ -1167,6 +1167,26 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Lanes: W28 (BB-47, sole Rust builder) and W27 (BB-59, then BB-60). Push pause in force until 03:45 UTC; evidence after
   `10c18502` is local and not yet pushed.
 
+## Milestone 51 (2026-10-31): BB-59 delivered; one correction; BB-60 queued for the same owner
+
+- BB-59 `2191d2b6` (W27, `claude-sonnet-5-5`, local, not pushed): `destinations.ts` (Base synthesized from `get_bridge_info`
+  through the unchanged `resolveBridgeConfig`; five static disabled EVM entries with string ids), `destinationLoader.ts`,
+  synchronous `signingGuard.ts` `assertCanSign` (disabled, missing or wrong-network refusal; no pause input, so DISABLED and
+  PAUSED stay apart), guards in both flows before the first wallet or signer call, intents version 2 with a destination key
+  on new intents (legacy intents keep `v: 1`, no key, read as Base; records above version 2 stay read-only), EVM chain rows,
+  `DestinationSelector.svelte` (disabled entries not selectable or focusable) and page wiring. Worker run: bridge vitest 17
+  files, 476 passed, 1 skipped; `npm run check` 30 errors and 66 warnings before and after with identical problem lists (none
+  in bridge files); `npm run build` passes. Coordinator check: reran the bridge vitest (476 passed, 1 skipped) and read the
+  intent version logic (the record version moves to 2 while each legacy intent keeps `v: 1`, so a legacy recovery row is
+  never dropped).
+- Miles' review (`review-bb59.md`): `icpToBase.ts` `submitToBridge`, shared by second click and uncertain retry, checks that
+  the deps' destination is enabled but not that the intent's destination matches it, so an intent saved for another
+  destination could be sent through Base. Same W27 resumed: reproduce, refuse synchronously before any signer call without
+  rewriting the durable intent, focused tests for both paths and legacy Base success.
+- BB-60 then goes to the same W27, with Miles' interface rule: profile network ids are per network, so a mainnet and a testnet
+  instance never share one new intent destination key, and a keyless legacy intent binds to the page's Base network. The
+  coordinator runs the Rust validator and dry run at integration (W28 stays the sole Rust builder).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
