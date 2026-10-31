@@ -2757,6 +2757,33 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   correction's heap-only token and hint cursor restart after an upgrade, C1 can stay not evaluated under constant deposit churn,
   and one persistent unindexed hint costs one pass per 60 s until its 2 h expiry.
 
+## Milestone 117 (2026-10-31): BB-53 53d accepted; BB-53 done at source and local scope
+
+- Miles (`accept-bb53d.md`) accepted 53d at frozen `29295fb4c7d2aba2e8ed8bc31f5e1f981d30fe9f`; with 53a (`7eaef24f`), 53b (`1b71eae8`,
+  `e2507b16`, `5da0804e`) and 53c (`e4ee506a`, `53c21490`), BB-53 is done at the authorized source and local-test scope. Not BB-54's
+  wallet page, not Sui publish-ready, no release artifact install proof, no live action.
+- Source review by Miles: the live Sui reader is real source behind `live-transport` (operator-configured package, Gate and
+  providers; no defaults or new dependency; a constructor that sends nothing); each provider must report the profile's full
+  Base58 genesis; wrong-network, error and malformed answers are excluded before the tally; the read pins checkpoint number,
+  digest and epoch; lagging providers do not vote; a quorum of identical parsed answers wins, conflicts never averaged or zeroed.
+  The independent host BCS decoder follows the accepted Move Gate order including the wrapped TreasuryCap supply, and its copied
+  golden matches the accepted `vectors.rs` `GATE_BCS`. ICP escrow is read independently with ICRC-1; the canister's
+  `get_buckets` and `get_config` are self-reports beside it, decoded with the frozen `.did` fields and overflow checks. Zero
+  custody by the atomic-burn design; RC, BU or stray in a Sui audit refused. EVM, Solana and XRPL logic, the XRPL floor and backend
+  debt accounting unchanged.
+- Evidence read by Miles (no duplicate build): collector 138 passed default and 235 with `live-transport` (canned or loopback
+  inputs, not Sui observations); strict collector clippy fails only the three pre-existing `manual_is_multiple_of` warnings at
+  unchanged `validate.rs:378`, and both runs pass with that named baseline lint allowed (not unqualified strict clippy green);
+  fixture: total and circulating 1000.00000000, Base and Sui escrows counted once, Sui circulating 3.00000000, no failure flags;
+  a one-e8s excess produces `SupplyBoundBroken` and FAILURE. The 351-test Sui crate result at `53c21490` still applies (53d
+  changes no Sui canister source).
+- Limits kept: MC-DEF-13, 14 and 15 (no real GraphQL observation; registered-currency resolution, retention and cycles
+  unmeasured; arbitrary package upgrade and controller trust D6; no accepted-module hash observation; no real wallet, signature,
+  execution or settlement; no deployed-intermediate-image migration). Configured identities are operator inputs, not proven
+  deployment or controller policy. Profiles stay disabled.
+- Lanes: W28 continues BB-54; W29 stands by for concrete integration questions or accepted fixes, with no new chain, redundant
+  check or optional research.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -479,10 +479,10 @@
     },
     {
       "id": "BB-53",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=local-test; In Review: 53a to 53c accepted; 53d delivered at 29295fb4 (W29, local): independent Sui supply reader for the host collector, Gate decode, fixtures; 351 Sui and 138/235 collector tests",
+      "evidenceText": "proof=local-test; Done (Miles) at source and local-test scope, not activated: 53a 7eaef24f; 53b 1b71eae8, e2507b16, 5da0804e; 53c e4ee506a, 53c21490; 53d 29295fb4. Simulated chain and mocks only",
       "evidenceLinks": []
     },
     {
