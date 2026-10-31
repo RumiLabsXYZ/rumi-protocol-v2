@@ -1274,6 +1274,20 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - BB-56 dispatched to the same W29: no-vault canonical return internals (chain-xrpl.md section 2); Candid and endpoints stay
   with BB-57.
 
+## Milestone 56 (2026-10-31): BB-47 components accepted; obligations carried to BB-49
+
+- Miles' review of `df53ea32` (`review-bb47.md`; source and existing test and reference evidence, no new execution or live
+  proof): C1 liabilities include `RC` and `BU`, C2 includes custody and in-flight mints, `PR` grows only after a finalized
+  burn, `stray` stays a subset of `O`; the strict shape decoder correctly leaves source ownership, final execution and exact
+  token deltas to BB-49. Accepted decisions (framing, roles and key rule, burn-id list, the safe ComputeBudget allowance) are
+  recorded in `chain-solana.md` section 13.
+- Not complete in BB-47, carried to BB-49 on the same W28 path and written into the BB-49 card and plan row: the persisted
+  ledger saga for pull, refund and release; refund ids with a per-transfer locator and claims bound to the observed source
+  account and amount (with the two-transfers vector); custody wiring where an unexplained deficit is never an OK check.
+  BB-47 stays in Review (components only) until those land. BB-48 continues; it depends only on the delivered interfaces.
+- Push cadence (Miles): the one batched push now waits until 04:00 UTC; afterwards cohort batching continues rather than
+  doc-only pushes. The XRPL follow-up branch stays local until its reviewable source checkpoint.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

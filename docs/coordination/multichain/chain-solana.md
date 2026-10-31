@@ -190,3 +190,30 @@ D3 (memo plus durable nonce) stands. Both items are known semantics of the chose
 Future focused implementation tests (not groundwork gates): (a) an advance-only transaction that consumes the mint nonce
 and carries our memo is NOT adopted and holds the lane; (b) a holder `BurnChecked` without a memo lowers supply, leaves
 `O_d` unchanged, credits nothing, halts nothing and is reported as unattributed.
+
+## 13. BB-47 decisions accepted (Miles, 2026-10-31)
+
+Accepted at source and local-test level on `df53ea32` (components only; no cluster round trip):
+- Fixed, closed, prefix-free domains with u32 big-endian length framing and big-endian integer fields.
+- Four distinct genesis-bound threshold roles (`fee-payer`, `mint-authority`, `return-owner`, `mint-account`); the mainnet
+  genesis requires `key_1`, every other cluster `test_key_1`.
+- Burn ids cover an ordered, non-empty, duplicate-free list of at most 16 returns; v1 still burns one return per transaction.
+- Safe ComputeBudget allowance for a user return: zero to two built-in ComputeBudget instructions with zero account metas,
+  alongside exactly one checked transfer and exactly one memo. No other instruction is admitted by this decision. Final
+  successful execution, the source-owner check and exact token balance deltas stay mandatory in BB-49.
+
+Carried to BB-49 (not complete in BB-47):
+1. The canonical-ledger saga is copied as a client, classifier and search (`ledger.rs`) but not wired: no ledger operation is
+   stored yet. BB-49 wires persisted pull, refund and release with the same guarantees as the Base instance (exact tuple and
+   operation id saved before effects, same-attempt reconciliation after unknown outcomes, bounded archive proofs, caller and
+   allowance binding, upgrade and retry persistence, fees kept disjoint, no payout before a final burn).
+2. The proposed refund id (`rumi.icusd.sol.refund.v1` over genesis, mint, salt and the stray signature) is not a unique
+   transfer locator: one malformed transaction can carry several incoming transfers from different verified senders. Before
+   any refund id is used, extend the preimage with a stable observed transfer locator (outer instruction index plus an
+   optional inner instruction index) and bind each stored refund claim to its exact observed source account and amount.
+   Amount and recipient stay out of the id, so changing a proposed tuple cannot create a second claim for the same transfer.
+   A focused vector shows two transfers in one transaction get distinct ids and a retry of the same transfer keeps its id.
+   Return ids for a valid single-transfer return stay signature-based.
+3. Custody wiring: `check_custody` sets `ok = false` for deficits while `halt_credits` names excess only. A deficit inside an
+   unresolved own burn may be held for reconciliation; an unexplained deficit is never treated as an OK custody check. The
+   custody equation and authoritative same-attempt burn evidence stay as accepted.

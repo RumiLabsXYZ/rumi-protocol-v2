@@ -434,7 +434,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Solana: instance skeleton and message builders",
-      "evidenceText": "proof=local-test; df53ea32: new Solana bridge crate (source only): ids, memo grammar, accounting with RC, BU, stray, mint, burn, refund builders and return shape check; 12 golden vectors cross-checked 3 ways; 171 tests; Wasm builds",
+      "evidenceText": "proof=local-test; df53ea32 components accepted (Miles): ids, framing, roles, memo, accounting, builders, shape check. Stays in Review: ledger saga wiring and a per-transfer refund locator are carried to BB-49 with the same owner",
       "evidenceLinks": []
     },
     {
@@ -450,7 +450,7 @@
       "state": "Queue",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Strict return verifier, strays refunded, no payout before a final burn, custody audit, unattributed holder-burn seam; also the Solana supply and custody reader for the BB-58 collector (moved from BB-58)",
+      "evidenceText": "proof=none; Lanes, strict verifier, strays refunded, no payout before a final burn, custody audit (deficits never OK), holder-burn seam, collector reader; plus from BB-47: persisted ledger saga and refund ids with a per-transfer locator",
       "evidenceLinks": []
     },
     {
