@@ -2235,6 +2235,41 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   signing or provider behavior; profiles disabled and `signing_enabled` false at this pin.
 - Push: 53a joins the next batched source checkpoint (no push for one component or for docs alone).
 
+## Milestone 99 (2026-10-31): BB-50 delivered
+
+- W28 (requested Sonnet; actual `claude-sonnet-5-5`) committed `adcbf1a939f8c86709890af4b0afb174491965c7` "feat(frontend):
+  Solana branch of the bridge flow (BB-50)", local only, 44 files. Coordinator scope check: everything under `src/vault_frontend`
+  plus the generated `src/declarations/rumi_icusd_sol_bridge/` and the root `package-lock.json` (22 lines: `@wallet-standard/app`
+  and `@wallet-standard/base` 1.1.1 and the workspace entry; `@wallet-standard/app` pinned exact in `package.json`; no
+  `@rollup/rollup-darwin-*`). Coordinator sign-off on the two paths outside `src/vault_frontend`. The Solana `.did` is unchanged
+  since `4394b472` and the generated declaration copy is byte-identical; declarations came from `didc` through a scratch copy of
+  `scripts/regenerate-declarations.sh` with the Solana entry added (no Rust or Wasm build, no builder slot).
+- What works at the pin (source plus injected-fixture tests): a service layer (`lib/services/solanaBridge/`: memo encode and
+  parse matching `memo.rs`, a legacy return-message builder matching `build_return_message` with zero to two ComputeBudget
+  instructions, one TransferChecked to the canonical return ATA and the `rumi1|r|...` memo, ATA and return-id derivation, a
+  config resolver, a keyless node adapter, a Wallet Standard store, a persist-before-effect journal, both flows) and components
+  wired into `/bridge`. The exact return account, mint, token program, ICP destination and memo are shown before the wallet is
+  asked; a wallet-modified transaction is never broadcast; an ambiguous sign-and-send holds the original attempt and a
+  rebroadcast reuses identical bytes; signatures and callbacks are hints, only the bridge release record settles; reload resumes
+  from the journal with no wallet call. Disabled path: a static disabled Solana row, so nothing mounts and no wallet is
+  discovered, connected or asked; `ICUSD_SOL_BRIDGE` is empty in both config maps.
+- Interface: `DestinationView.native?: NativeDestinationConfig` beside the EVM `config` (Base untouched); new destination helpers;
+  the list gains a static disabled `solana-mainnet` row (seven entries); `loadDestinations` never rejects the page on a Solana
+  read failure; `signingGuard` wallet union gains `solana`; journal key `rumi:solana-bridge:v1:<principal>` in localStorage.
+- Checks (saved files in the coordinator scratchpad `bb50/`): focused Vitest 39 files, 702 passed, 1 pre-existing skip
+  (`final_focused_vitest.txt`), including 7 Solana service spec files (91 tests) and the new 15-test page spec; byte-exact
+  message, ATA, return-id and memo vectors against the backend's independent Python reference; two existing specs updated for
+  the new row (7 expected failures first, saved); `svelte-check` 30 errors, 66 warnings, 25 files, identical to the baseline
+  after fixing two of W28's own type errors (30 pre-existing errors, none in bridge files); `npm run build` exit 0. A bug in W28's
+  own new code (the Solana-to-ICP review step never prepared the ICP signers) was found and fixed while writing the page spec.
+- Coordinator findings: `git diff --check` exits 2 (five new files end with a blank line) and the repo's declaration script has
+  no Solana entry; W28 fixes both in one follow-up commit. Raised for Miles: `bytes.ts` hand-writes SHA-256 and the ed25519
+  on-curve check used for PDA and ATA derivation, while vetted `@noble/hashes` 1.8.0 and `@noble/curves` 1.9.7 are already
+  locked transitively (via `@dfinity/agent`); they match the reference vectors, and a swap would need the on-curve decode to
+  match Solana's curve25519-dalek decompression (ZIP-215, non-canonical y accepted).
+- Omissions: no Solana node endpoint is configured (`getSolanaRpc()` returns null until activation supplies one); the keyless
+  node adapter is unit-mocked only; no live browser wallet, signing, broadcast, deploy or push.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

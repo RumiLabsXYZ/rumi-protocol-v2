@@ -455,10 +455,10 @@
     },
     {
       "id": "BB-50",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Solana: Wallet Standard connector and return flow",
-      "evidenceText": "proof=none; In progress (W28): actual Solana branch of /bridge with Wallet Standard, both directions, history and reload recovery; disabled profiles make zero wallet calls; injected fixtures only",
+      "evidenceText": "proof=local-test; adcbf1a9 delivered (W28, local): Solana branch of /bridge, both directions, Wallet Standard, history, reload recovery; 702 focused tests, build passes, typecheck at baseline; whitespace and script fix pending",
       "evidenceLinks": []
     },
     {
