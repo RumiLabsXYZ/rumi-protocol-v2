@@ -1,5 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { walletSessionGeneration } from '$lib/services/auth';
+  import { beginMinterOisyAction, type MinterOisyAction } from '$lib/services/minterOisySigner';
+  import { compareAndSetCkErc20Journal, ckErc20ReceiptOutcome, advanceCkErc20MintReceipt, ckErc20WithdrawalHasDefinitiveNoBurn, type CkErc20MintReceipt } from '$lib/utils/ckerc20Reconciliation';
   import { Principal } from '@dfinity/principal';
   import { isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
   import { CANISTER_IDS } from '$lib/config';
@@ -8,6 +11,7 @@
   import { withCkErc20WithdrawalLock } from '$lib/utils/ckerc20WithdrawalLock';
   import {
     CKERC20_MINTER_DASHBOARD,
+    isCkErc20OisyWallet,
     discoverCkErc20Tokens,
     approveAndWithdrawCkErc20,
     assertTokenSupported,
@@ -61,13 +65,26 @@
   let redeemAddress = '';
   let withdrawalQuote: Awaited<ReturnType<typeof getCkErc20WithdrawalQuote>> | null = null;
   let quoteBusy = false;
+  let quoteRecipient = '';
   let busy = false;
   let notice = '';
   let error = '';
   let approveHash = '';
   let depositHash = '';
-  let pendingDeposit: { hash: string; amount: string; recipient: string; evmAccount: string; principal: string; tokenLedgerId?: string; tokenSymbol?: string; createdAt: number } | null = null;
-  let pendingWithdrawal: { amount: string; recipient: string; owner: string; tokenLedgerId?: string; tokenSymbol?: string; createdAt: number } | null = null;
+  type PendingDeposit = CkErc20MintReceipt & { hash: string; amount: string; recipient: string; evmAccount: string; principal: string; tokenLedgerId?: string; tokenSymbol?: string; createdAt: number; phase?: 'reset' | 'approval' | 'deposit' };
+  let pendingDeposit: PendingDeposit | null = null;
+  let depositJournalHeld = false;
+  let withdrawalJournalHeld = false;
+  let pendingWithdrawal: { ckEthBurn?: string; ckTokenBurn?: string; status?: string; payoutHash?: string; settled?: boolean; amount: string; recipient: string; owner: string; tokenLedgerId?: string; tokenSymbol?: string; createdAt: number } | null = null;
+  let confirmedDeposit: PendingDeposit | null = null;
+  let quoteRequestId = 0;
+  let balanceRequestId = 0;
+  let walletEpoch = 0;
+  let quoteTimer: ReturnType<typeof setTimeout> | undefined;
+  let maintenanceTimer: ReturnType<typeof setInterval> | undefined;
+  let mounted = false;
+  let quoteInputKey = '';
+  $: if (mounted) scheduleWithdrawalQuote(`${activeTab}:${connected}:${ownerPrincipal?.toText() ?? ''}:${selectedTokenLedgerId}:${redeemAmount}:${redeemAddress}`);
   let redeemIndices: { ckEth: bigint; ckToken: bigint } | null = null;
   let destroyed = false;
   let tokenSupply: bigint | null = null;
@@ -78,7 +95,7 @@
   let supplyRequestId = 0;
   $: featuredTokens = supportedTokens.filter((token) => featuredCkErc20Symbols.includes(token.symbol));
   $: otherTokens = supportedTokens.filter((token) => !featuredCkErc20Symbols.includes(token.symbol));
-  $: withdrawalPendingForOwner = !!pendingWithdrawal && !!ownerPrincipal && pendingWithdrawal.owner === ownerPrincipal.toText();
+  $: withdrawalPendingForOwner = !!pendingWithdrawal && !!ownerPrincipal && pendingWithdrawal.owner === ownerPrincipal.toText() && !pendingWithdrawal.settled;
 
   const unsubs: Array<() => void> = [];
   let previousPrincipal = '';
@@ -100,63 +117,102 @@
     localStorage.removeItem(key);
   }
 
+  function validSavedDeposit(entry: any, token: CkErc20TokenConfig, evm: string, owner: string): entry is PendingDeposit {
+    return !!entry && typeof entry === 'object' && !Array.isArray(entry)
+      && typeof entry.hash === 'string' && (entry.hash === '' || /^0x[0-9a-f]{64}$/i.test(entry.hash))
+      && typeof entry.amount === 'string' && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(entry.amount) && /[1-9]/.test(entry.amount)
+      && entry.principal === owner && entry.recipient === owner && typeof entry.evmAccount === 'string' && entry.evmAccount.toLowerCase() === evm.toLowerCase()
+      && (entry.tokenLedgerId === undefined || entry.tokenLedgerId === token.ledgerId)
+      && (entry.tokenSymbol === undefined || entry.tokenSymbol === token.symbol)
+      && typeof entry.createdAt === 'number' && Number.isFinite(entry.createdAt) && entry.createdAt >= 0
+      && (entry.phase === undefined || ['reset', 'approval', 'deposit'].includes(entry.phase))
+      && ['eventCursor', 'eventLogIndex', 'mintBlock', 'atomicAmount'].every((key) => entry[key] === undefined || (typeof entry[key] === 'string' && /^\d+$/.test(entry[key])))
+      && (entry.mintBlock === undefined || (entry.eventLogIndex !== undefined && entry.atomicAmount !== undefined && entry.erc20Address !== undefined))
+      && (entry.erc20Address === undefined || (typeof entry.erc20Address === 'string' && validateEthereumAddress(entry.erc20Address)));
+  }
+
   function syncPendingDeposit(token = selectedToken) {
     pendingDeposit = null;
+    confirmedDeposit = null;
+    depositJournalHeld = false;
     if (!evmAccount || !ownerPrincipal || ownerPrincipal.isAnonymous() || !token) return;
     try {
-      const value = localStorage.getItem(depositStorageKey(evmAccount, ownerPrincipal.toText(), token.ledgerId)) ??
-        (token.ledgerId === CANISTER_IDS.CKUSDC_LEDGER
-          ? localStorage.getItem(legacyCkUsdcDepositStorageKey(evmAccount, ownerPrincipal.toText()))
-          : null);
-      if (value) {
-        const pending = JSON.parse(value);
-        pendingDeposit = { ...pending, tokenLedgerId: pending.tokenLedgerId ?? token.ledgerId, tokenSymbol: pending.tokenSymbol ?? token.symbol };
+      const owner = ownerPrincipal.toText();
+      const keys = [depositStorageKey(evmAccount, owner, token.ledgerId)];
+      if (token.ledgerId === CANISTER_IDS.CKUSDC_LEDGER) keys.push(legacyCkUsdcDepositStorageKey(evmAccount, owner));
+      for (const key of keys) {
+        const raw = localStorage.getItem(key);
+        if (raw === null) continue;
+        const entry = JSON.parse(raw);
+        if (!validSavedDeposit(entry, token, evmAccount, owner)) { depositJournalHeld = true; continue; }
+        if (!pendingDeposit) pendingDeposit = { ...entry, tokenLedgerId: entry.tokenLedgerId ?? token.ledgerId, tokenSymbol: entry.tokenSymbol ?? token.symbol };
       }
-    } catch { /* Storage may be unavailable; the in-memory guard still applies. */ }
+      const raw = localStorage.getItem(`${keys[0]}:confirmed`);
+      if (raw !== null) {
+        const entry = JSON.parse(raw);
+        if (!validSavedDeposit(entry, token, evmAccount, owner) || !entry.hash) depositJournalHeld = true;
+        else confirmedDeposit = { ...entry, tokenLedgerId: entry.tokenLedgerId ?? token.ledgerId, tokenSymbol: entry.tokenSymbol ?? token.symbol };
+      }
+    } catch { depositJournalHeld = true; /* Saved uncertainty is never absence. */ }
   }
 
-  function savePendingDeposit(hash: string, amount: string, recipient: string, evm: string, principal: string, token: CkErc20TokenConfig) {
-    pendingDeposit = { hash, amount, recipient, evmAccount: evm, principal, tokenLedgerId: token.ledgerId, tokenSymbol: token.symbol, createdAt: Date.now() };
-    try { localStorage.setItem(depositStorageKey(evm, principal, token.ledgerId), JSON.stringify(pendingDeposit)); } catch { /* The unresolved intent written before wallet dispatch remains as a conservative lock. */ }
+  function savePendingDeposit(hash: string, expected: string | null, evm: string, principal: string, token: CkErc20TokenConfig) {
+    if (!expected) throw new Error('The transaction receipt could not be saved. Contact Rumi support before retrying.');
+    const next = JSON.stringify({ ...JSON.parse(expected), hash });
+    if (!compareAndSetCkErc20Journal(localStorage, depositStorageKey(evm, principal, token.ledgerId), expected, next)) throw new Error('Transaction tracking changed in another tab. Keep the Ethereum receipt and contact Rumi support before retrying.');
+    if (!destroyed && evmAccount === evm && ownerPrincipal?.toText() === principal && selectedTokenLedgerId === token.ledgerId) pendingDeposit = JSON.parse(next);
+    return next;
   }
 
-  function beginPendingDeposit(amount: string, recipient: string, evm: string, principal: string, token: CkErc20TokenConfig) {
-    const pending = { hash: '', amount, recipient, evmAccount: evm, principal, tokenLedgerId: token.ledgerId, tokenSymbol: token.symbol, createdAt: Date.now() };
+  function beginPendingDeposit(amount: string, recipient: string, evm: string, principal: string, token: CkErc20TokenConfig, phase: 'reset' | 'approval' | 'deposit' = 'deposit', tracking: Partial<CkErc20MintReceipt> = {}) {
+    const pending = { ...tracking, phase, hash: '', amount, recipient, evmAccount: evm, principal, tokenLedgerId: token.ledgerId, tokenSymbol: token.symbol, createdAt: Date.now() };
     localStorage.setItem(depositStorageKey(evm, principal, token.ledgerId), JSON.stringify(pending));
     pendingDeposit = pending;
   }
 
-  function clearPendingDepositMarker(evm: string, principal: string, token: CkErc20TokenConfig) {
+  function clearPendingDepositMarker(evm: string, principal: string, token: CkErc20TokenConfig, expected: string | null) {
+    if (!expected) return;
     try {
-      localStorage.removeItem(depositStorageKey(evm, principal, token.ledgerId));
-      if (token.ledgerId === CANISTER_IDS.CKUSDC_LEDGER) localStorage.removeItem(legacyCkUsdcDepositStorageKey(evm, principal));
-    } catch { /* Keep a stale persistent lock rather than risk a retry. */ }
-    if (pendingDeposit?.evmAccount.toLowerCase() === evm.toLowerCase() && pendingDeposit?.principal === principal) pendingDeposit = null;
-  }
-
-  function clearPendingDeposit() {
-    if (!pendingDeposit) return;
-    const confirmed = window.confirm('Only clear this retry lock after checking Ethereum wallet activity and confirming the deposit did not complete. Clearing it while the transaction is pending could allow a duplicate deposit.');
-    if (!confirmed) return;
-    const token = supportedTokens.find((candidate) => candidate.ledgerId === pendingDeposit?.tokenLedgerId);
-    if (!token) return;
-    clearPendingDepositMarker(pendingDeposit.evmAccount, pendingDeposit.principal, token);
+      if (compareAndSetCkErc20Journal(localStorage, depositStorageKey(evm, principal, token.ledgerId), expected, null) && evmAccount === evm && ownerPrincipal?.toText() === principal && selectedTokenLedgerId === token.ledgerId) pendingDeposit = null;
+    } catch { /* Retain a lock when durable reconciliation cannot be recorded. */ }
   }
 
   function withdrawalStorageKey(owner: string) {
     return `rumi:ckerc20:pending-withdrawal:${owner}`;
   }
 
+  function validSavedLedger(value: unknown): boolean {
+    try { return typeof value === 'string' && Principal.fromText(value).toText() === value; } catch { return false; }
+  }
+
+  function validSavedWithdrawal(entry: any, owner: string): boolean {
+    return !!entry && typeof entry === 'object' && !Array.isArray(entry)
+      && entry.owner === owner && typeof entry.amount === 'string' && /^[1-9]\d*$/.test(entry.amount)
+      && typeof entry.recipient === 'string' && validateEthereumAddress(entry.recipient)
+      && (entry.tokenLedgerId === undefined || validSavedLedger(entry.tokenLedgerId))
+      && (entry.tokenSymbol === undefined || (typeof entry.tokenSymbol === 'string' && /^ck[A-Za-z0-9]+$/.test(entry.tokenSymbol)))
+      && typeof entry.createdAt === 'number' && Number.isFinite(entry.createdAt) && entry.createdAt >= 0
+      && ['ckEthBurn', 'ckTokenBurn'].every((key) => entry[key] === undefined || (typeof entry[key] === 'string' && /^\d+$/.test(entry[key])))
+      && (entry.ckTokenBurn === undefined || entry.ckEthBurn !== undefined)
+      && (entry.status === undefined || typeof entry.status === 'string')
+      && (entry.payoutHash === undefined || entry.payoutHash === '' || (typeof entry.payoutHash === 'string' && /^0x[0-9a-f]{64}$/i.test(entry.payoutHash)))
+      && (!entry.settled || (!!entry.ckTokenBurn && /^0x[0-9a-f]{64}$/i.test(entry.payoutHash ?? '') && ['Ethereum payout finalized by the minter.', 'Ethereum payout failed; minter reports reimbursement completed.'].includes(entry.status)))
+      && (entry.settled === undefined || (typeof entry.settled === 'boolean' && (!entry.settled || !!entry.ckEthBurn)));
+  }
+
   function syncPendingWithdrawal(owner: Principal | null) {
     pendingWithdrawal = null;
+    withdrawalJournalHeld = false;
     if (!owner || owner.isAnonymous()) return;
     try {
-      const value = localStorage.getItem(withdrawalStorageKey(owner.toText())) ?? localStorage.getItem(`rumi:ckusdc:pending-withdrawal:${owner.toText()}`);
-      if (value) {
-        const pending = JSON.parse(value);
-        pendingWithdrawal = { ...pending, tokenLedgerId: pending.tokenLedgerId ?? CANISTER_IDS.CKUSDC_LEDGER, tokenSymbol: pending.tokenSymbol ?? 'ckUSDC' };
+      for (const key of [withdrawalStorageKey(owner.toText()), `rumi:ckusdc:pending-withdrawal:${owner.toText()}`]) {
+        const raw = localStorage.getItem(key);
+        if (raw === null) continue;
+        const entry = JSON.parse(raw);
+        if (!validSavedWithdrawal(entry, owner.toText())) { withdrawalJournalHeld = true; continue; }
+        if (!pendingWithdrawal || (!entry.settled && pendingWithdrawal.settled)) pendingWithdrawal = { ...entry, tokenLedgerId: entry.tokenLedgerId ?? CANISTER_IDS.CKUSDC_LEDGER, tokenSymbol: entry.tokenSymbol ?? 'ckUSDC' };
       }
-    } catch { /* Storage may be unavailable; the in-memory guard still applies. */ }
+    } catch { withdrawalJournalHeld = true; /* A damaged record must remain held. */ }
   }
 
   function markWithdrawalPending(amount: bigint, recipient: string, owner: Principal, token: CkErc20TokenConfig) {
@@ -165,18 +221,12 @@
     pendingWithdrawal = pending;
   }
 
-  function clearPendingWithdrawal() {
-    if (!pendingWithdrawal) return;
-    const confirmed = window.confirm(`Only clear this retry lock after checking the ${pendingWithdrawal.tokenSymbol ?? 'ckUSDC'} and ckETH ledger history and the minter dashboard to confirm the request was not accepted. Clearing it without reconciliation could burn the amount twice.`);
-    if (!confirmed) return;
-    try {
-      localStorage.removeItem(withdrawalStorageKey(pendingWithdrawal.owner));
-      localStorage.removeItem(`rumi:ckusdc:pending-withdrawal:${pendingWithdrawal.owner}`);
-    } catch { /* The current page lock is still cleared below. */ }
-    pendingWithdrawal = null;
-  }
-
   function resetForWallet() {
+    walletEpoch += 1;
+    quoteRequestId += 1;
+    balanceRequestId += 1;
+    refreshBusy = false;
+    quoteBusy = false;
     ckTokenBalance = null;
     ckEthBalance = null;
     notice = '';
@@ -188,7 +238,17 @@
   }
 
   onMount(() => {
+    mounted = true;
+    window.addEventListener('focus', refreshLifecycle);
+    window.addEventListener('storage', refreshLifecycle);
+    document.addEventListener('visibilitychange', refreshLifecycle);
+    maintenanceTimer = setInterval(refreshLifecycle, 15_000);
     try { evmManuallyDisconnected = sessionStorage.getItem(EVM_DISCONNECT_KEY) === 'true'; } catch { /* In-memory disconnect still works. */ }
+    unsubs.push(walletSessionGeneration.subscribe(() => {
+      resetForWallet();
+      syncPendingWithdrawal(ownerPrincipal);
+      syncPendingDeposit();
+    }));
     unsubs.push(isConnectedStore.subscribe((value) => {
       connected = value;
       if (!value) resetForWallet();
@@ -203,11 +263,17 @@
         previousPrincipal = key;
         resetForWallet();
       }
-      if (value && !value.isAnonymous()) void refreshBalances(value);
+      if (value && !value.isAnonymous()) {
+        void refreshBalances(value);
+        void reconcileDeposit();
+        void reconcileMint();
+        void reconcileWithdrawal();
+      }
     }));
     ethereumProvider = getEthereumProvider();
     accountChangedListener = (accounts) => {
       if (evmManuallyDisconnected) return;
+      evmSessionEpoch += 1;
       evmTokenBalanceRequestId += 1;
       evmTokenBalanceBusy = false;
       evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
@@ -215,10 +281,11 @@
       evmTokenBalance = null;
       evmTokenBalanceError = '';
       evmMessage = '';
-      if (evmAccount) void refreshEvmTokenBalance(evmAccount);
+      if (evmAccount) { void refreshEvmTokenBalance(evmAccount); void reconcileDeposit(); void reconcileMint(); }
     };
     chainChangedListener = (chainId) => {
       if (evmManuallyDisconnected) return;
+      evmSessionEpoch += 1;
       evmTokenBalanceRequestId += 1;
       evmTokenBalanceBusy = false;
       evmTokenBalance = null;
@@ -244,6 +311,7 @@
         if (destroyed || evmManuallyDisconnected || sessionEpoch !== evmSessionEpoch) return;
         evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
         syncPendingDeposit();
+        void reconcileDeposit();
         if (chainId === '0x1') {
           evmMessage = '';
           if (evmAccount) await refreshEvmTokenBalance(evmAccount);
@@ -256,6 +324,12 @@
 
   onDestroy(() => {
     destroyed = true;
+    mounted = false;
+    clearInterval(maintenanceTimer);
+    clearTimeout(quoteTimer);
+    window.removeEventListener('focus', refreshLifecycle);
+    window.removeEventListener('storage', refreshLifecycle);
+    document.removeEventListener('visibilitychange', refreshLifecycle);
     unsubs.forEach((unsubscribe) => unsubscribe());
     if (accountChangedListener) ethereumProvider?.removeListener?.('accountsChanged', accountChangedListener);
     if (chainChangedListener) ethereumProvider?.removeListener?.('chainChanged', chainChangedListener);
@@ -264,7 +338,7 @@
   async function refreshEvmTokenBalance(account = evmAccount, token = selectedToken) {
     const provider = getEthereumProvider();
     if (!provider || !account || !token) return;
-    const requestId = ++evmTokenBalanceRequestId;
+    const requestId = ++evmTokenBalanceRequestId, epoch = evmSessionEpoch;
     evmTokenBalanceBusy = true;
     evmTokenBalanceError = '';
     try {
@@ -285,12 +359,12 @@
       if (typeof rawBalance !== 'string' || !/^0x[0-9a-fA-F]+$/.test(rawBalance)) {
         throw new Error(`The Ethereum wallet returned an invalid ${token.symbol} balance.`);
       }
-      if (!destroyed && requestId === evmTokenBalanceRequestId && evmAccount.toLowerCase() === account.toLowerCase() && selectedTokenLedgerId === token.ledgerId) {
+      if (!destroyed && epoch === evmSessionEpoch && provider === getEthereumProvider() && requestId === evmTokenBalanceRequestId && evmAccount.toLowerCase() === account.toLowerCase() && selectedTokenLedgerId === token.ledgerId) {
         evmTokenBalance = BigInt(rawBalance);
         evmMessage = '';
       }
     } catch (cause) {
-      if (!destroyed && requestId === evmTokenBalanceRequestId) {
+      if (!destroyed && epoch === evmSessionEpoch && provider === getEthereumProvider() && requestId === evmTokenBalanceRequestId) {
         evmTokenBalance = null;
         evmTokenBalanceError = cause instanceof Error ? cause.message : `Could not read ${token.symbol} balance from Ethereum.`;
       }
@@ -306,7 +380,12 @@
 
   async function selectToken(ledgerId: string) {
     const token = supportedTokens.find((candidate) => candidate.ledgerId === ledgerId);
-    if (!token || busy || quoteBusy || refreshBusy) return;
+    if (!token || busy) return;
+    walletEpoch += 1;
+    quoteRequestId += 1;
+    balanceRequestId += 1;
+    refreshBusy = false;
+    quoteBusy = false;
     selectedTokenLedgerId = token.ledgerId;
     depositAmount = '';
     redeemAmount = '';
@@ -320,6 +399,9 @@
     approveHash = '';
     depositHash = '';
     syncPendingDeposit(token);
+    void reconcileDeposit();
+    void reconcileMint();
+    void reconcileWithdrawal();
     void refreshCirculatingSupply(token);
     if (evmAccount) void refreshEvmTokenBalance(evmAccount, token);
     if (ownerPrincipal && !ownerPrincipal.isAnonymous()) await refreshBalances(ownerPrincipal, token);
@@ -344,6 +426,9 @@
       minterReady = true;
       const token = tokens.find((candidate) => candidate.ledgerId === selectedTokenLedgerId)!;
       syncPendingDeposit(token);
+      void reconcileDeposit();
+      void reconcileMint();
+      void reconcileWithdrawal();
       void refreshCirculatingSupply(token);
       if (evmAccount) void refreshEvmTokenBalance(evmAccount, token);
       if (ownerPrincipal && !ownerPrincipal.isAnonymous()) await refreshBalances(ownerPrincipal, token);
@@ -382,6 +467,8 @@
 
   async function refreshBalances(principal = ownerPrincipal, token = selectedToken) {
     if (!principal || principal.isAnonymous() || !token || refreshBusy) return;
+    const requestId = ++balanceRequestId;
+    const epoch = walletEpoch;
     refreshBusy = true;
     try {
       const [tokenLedger, ethLedger] = await Promise.all([
@@ -392,13 +479,13 @@
         tokenLedger.icrc1_balance_of({ owner: principal, subaccount: [] }),
         ethLedger.icrc1_balance_of({ owner: principal, subaccount: [] }),
       ]);
-      if (destroyed || ownerPrincipal?.toText() !== principal.toText() || selectedTokenLedgerId !== token.ledgerId) return;
+      if (destroyed || requestId !== balanceRequestId || epoch !== walletEpoch || ownerPrincipal?.toText() !== principal.toText() || selectedTokenLedgerId !== token.ledgerId) return;
       ckTokenBalance = BigInt(tokenBalance);
       ckEthBalance = BigInt(eth);
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Could not refresh ledger balances.';
+      if (!destroyed && requestId === balanceRequestId) error = cause instanceof Error ? cause.message : 'Could not refresh ledger balances.';
     } finally {
-      refreshBusy = false;
+      if (requestId === balanceRequestId) refreshBusy = false;
     }
   }
 
@@ -426,6 +513,7 @@
       evmManuallyDisconnected = false;
       try { sessionStorage.removeItem(EVM_DISCONNECT_KEY); } catch { /* In-memory connection still works. */ }
       syncPendingDeposit();
+      void reconcileDeposit();
       void refreshEvmTokenBalance(evmAccount);
     } catch (cause) {
       evmMessage = cause instanceof Error ? cause.message : 'EVM wallet connection was not completed.';
@@ -449,15 +537,30 @@
     // Keep persistent transaction markers so reconnecting restores unresolved operations.
   }
 
-  async function waitForReceipt(hash: string, onReceipt?: () => void) {
-    const provider = getEthereumProvider();
-    if (!provider) throw new Error('EVM wallet disconnected while waiting for transaction confirmation.');
+  async function revertedReceiptIsFinal(provider: Eip1193Provider, receipt: any, account: string, current: () => boolean): Promise<boolean> {
+    try {
+      const [chain, accounts] = await Promise.all([provider.request({ method: 'eth_chainId' }), provider.request({ method: 'eth_accounts' })]);
+      if (!current() || chain !== '0x1' || !Array.isArray(accounts) || String(accounts[0]).toLowerCase() !== account.toLowerCase()) return false;
+      const finalized = await provider.request({ method: 'eth_getBlockByNumber', params: ['finalized', false] });
+      if (!current() || !finalized?.number || BigInt(receipt.blockNumber) > BigInt(finalized.number)) return false;
+      const canonical = await provider.request({ method: 'eth_getBlockByNumber', params: [receipt.blockNumber, false] });
+      const [finalChain, finalAccounts] = await Promise.all([provider.request({ method: 'eth_chainId' }), provider.request({ method: 'eth_accounts' })]);
+      return current() && finalChain === '0x1' && Array.isArray(finalAccounts) && String(finalAccounts[0]).toLowerCase() === account.toLowerCase() && canonical?.number != null && BigInt(canonical.number) === BigInt(receipt.blockNumber)
+        && String(canonical.hash).toLowerCase() === String(receipt.blockHash).toLowerCase();
+    } catch { return false; }
+  }
+
+  async function waitForReceipt(hash: string, provider: Eip1193Provider, account: string, isLive: () => boolean, onReceipt?: (outcome: 'success' | 'reverted') => void) {
+
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
       const receipt = await provider.request({ method: 'eth_getTransactionReceipt', params: [hash] });
-      if (receipt) {
-        onReceipt?.();
-        if (BigInt(receipt.status) !== 1n) throw new Error(`Ethereum transaction failed: ${hash}`);
+      if (!isLive()) throw new Error('Wallet session changed. Transaction tracking will resume when you return.');
+      const outcome = ckErc20ReceiptOutcome(hash, receipt);
+      if (outcome !== 'pending') {
+        if (outcome === 'reverted' && !await revertedReceiptIsFinal(provider, receipt, account, isLive)) throw new Error('Ethereum transaction appears reverted; waiting for Ethereum finality before allowing another submission. Tracking continues automatically.');
+        onReceipt?.(outcome);
+        if (outcome === 'reverted') throw new Error(`Ethereum transaction failed: ${hash}`);
         return receipt;
       }
       await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -470,18 +573,22 @@
     to: string,
     data: string,
     onSubmitted: (hash: string) => void,
-    onReceipt?: () => void,
+    onReceipt?: (outcome: 'success' | 'reverted') => void,
     onSubmitting?: () => void,
     onRejected?: () => void,
   ): Promise<string> {
     const provider = getEthereumProvider();
     if (!provider || !evmAccount) throw new Error('Connect an Ethereum wallet first.');
+    const epoch = evmSessionEpoch, ownerEpoch = walletEpoch, account = evmAccount;
+    const isLive = () => !destroyed && epoch === evmSessionEpoch && ownerEpoch === walletEpoch && provider === getEthereumProvider() && account.toLowerCase() === evmAccount.toLowerCase();
     const chainId = await provider.request({ method: 'eth_chainId' });
+    if (!isLive()) throw new Error('Wallet session changed. Review the request again.');
     if (chainId !== '0x1') throw new Error('Switch your EVM wallet to Ethereum Mainnet before submitting.');
     const accounts = await provider.request({ method: 'eth_accounts' });
     if (!Array.isArray(accounts) || String(accounts[0]).toLowerCase() !== evmAccount.toLowerCase()) {
       throw new Error('The selected Ethereum account changed. Reconnect it and review the recipient identity before submitting.');
     }
+    if (!isLive()) throw new Error('Wallet session changed before submission.');
     onSubmitting?.();
     let response: any;
     try {
@@ -493,7 +600,7 @@
     const hash = String(response);
     if (!/^0x[0-9a-f]{64}$/i.test(hash)) throw new Error('The wallet did not return a valid transaction hash. The submission remains locked until you reconcile Ethereum wallet activity.');
     onSubmitted(hash);
-    await waitForReceipt(hash, onReceipt);
+    await waitForReceipt(hash, provider, account, isLive, onReceipt);
     return hash;
   }
 
@@ -504,6 +611,7 @@
     depositHash = '';
     const token = selectedToken;
     if (!token) { error = 'Choose a supported ckERC20 token first.'; return; }
+    if (depositJournalHeld) { error = 'Saved deposit tracking needs support review. New deposits remain protected.'; return; }
     if (pendingDeposit) { error = pendingDeposit.hash ? `A deposit transaction is still unresolved: ${pendingDeposit.hash}. Check its status before starting another deposit.` : 'A prior deposit submission has no confirmed result. Check Ethereum wallet activity before retrying.'; return; }
     if (!connected || !ownerPrincipal || ownerPrincipal.isAnonymous()) {
       error = 'Connect an Internet Identity or another Rumi wallet first. This wallet receives the selected ckERC20 token.';
@@ -520,17 +628,26 @@
       return;
     }
     const liveOwner = ownerPrincipal;
+    const liveEvm = evmAccount, liveProvider = getEthereumProvider();
+    const depositText = depositAmount;
+    const epoch = walletEpoch, evmEpoch = evmSessionEpoch;
+    const assertLive = () => { if (destroyed || getEthereumProvider() !== liveProvider || epoch !== walletEpoch || evmEpoch !== evmSessionEpoch || ownerPrincipal?.toText() !== liveOwner.toText() || evmAccount !== liveEvm || selectedTokenLedgerId !== token.ledgerId) throw new Error('Wallet or token changed. Review the request again.'); };
     const locks = (navigator as any).locks;
     if (!locks?.request) { error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
     busy = true;
     try {
       await locks.request(`rumi:ckerc20:deposit:${evmAccount.toLowerCase()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
       if (!lock) throw new Error(`Another ${token.symbol} deposit is already active in another tab. Wait for it to finish, then check its status.`);
+      assertLive();
       syncPendingDeposit(token);
+      if (depositJournalHeld) throw new Error('Saved deposit tracking needs support review. New deposits remain protected.');
       if (pendingDeposit) throw new Error(pendingDeposit.hash ? `A deposit transaction is still unresolved: ${pendingDeposit.hash}. Check its status before starting another deposit.` : 'A prior deposit submission has no confirmed result. Check Ethereum wallet activity before retrying.');
+      if (confirmedDeposit && !confirmedDeposit.mintBlock) throw new Error('The previous Ethereum deposit is confirmed and awaiting its token mint. Progress updates automatically.');
       requirePersistentOperationState();
       const minterActor = await getCkErc20MinterActor();
       const currentInfo = await minterActor.get_minter_info();
+      const eventHead = await minterActor.get_events({ start: 0n, length: 0n });
+      const eventCursor = String(eventHead.total_event_count);
       assertTokenSupported(currentInfo, token);
       const liveMinimum = (currentInfo.minimum_deposit_amounts?.[0] ?? []).find(
         (item: any) => String(item.erc20_contract_address).toLowerCase() === token.erc20Address.toLowerCase(),
@@ -554,14 +671,21 @@
       const allowanceData = `0xdd62ed3e${encodeAddressWord(evmAccount)}${encodeAddressWord(transactionHelper)}`;
       const allowanceHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: allowanceData }, 'latest'] });
       const existingAllowance = BigInt(String(allowanceHex));
+      assertLive();
+      let depositRaw: string | null = null;
+      const sendApproval = (data: string, phase: 'reset' | 'approval') => submitEthereumTransaction(token.erc20Address, data,
+        (hash) => { approveHash = hash; depositRaw = savePendingDeposit(hash, depositRaw, liveEvm, liveOwner.toText(), token); },
+        () => clearPendingDepositMarker(liveEvm, liveOwner.toText(), token, depositRaw),
+        () => { assertLive(); beginPendingDeposit(depositText, liveOwner.toText(), liveEvm, liveOwner.toText(), token, phase); depositRaw = localStorage.getItem(depositStorageKey(liveEvm, liveOwner.toText(), token.ledgerId)); },
+        () => clearPendingDepositMarker(liveEvm, liveOwner.toText(), token, depositRaw));
       if (existingAllowance > 0n) {
         notice = `Reset the existing ${token.symbol} allowance to zero before setting this deposit amount.`;
         const resetData = `0x095ea7b3${encodeAddressWord(transactionHelper)}${encodeUint256(0n)}`;
-        approveHash = await submitEthereumTransaction(token.erc20Address, resetData, (hash) => approveHash = hash);
+        approveHash = await sendApproval(resetData, 'reset');
       }
       const approveData = `0x095ea7b3${encodeAddressWord(transactionHelper)}${encodeUint256(amount)}`;
       notice = `Approve exactly ${formatTokenAmount(amount, token.decimals)} ${token.symbol} in your Ethereum wallet.`;
-      approveHash = await submitEthereumTransaction(token.erc20Address, approveData, (hash) => approveHash = hash);
+      approveHash = await sendApproval(approveData, 'approval');
       if (ownerPrincipal?.toText() !== liveOwner.toText()) throw new Error(`${token.symbol} approval confirmed, but the receiving Internet Identity changed. No deposit was submitted. Approval transaction: ${approveHash}`);
       const latestInfo = await minterActor.get_minter_info();
       assertTokenSupported(latestInfo, token);
@@ -571,23 +695,30 @@
       }
       notice = `${token.symbol} approval confirmed. Confirm the deposit transaction in your Ethereum wallet.`;
       const liveRecipient = liveOwner.toText();
-      const liveDepositKey = depositStorageKey(evmAccount, liveRecipient, token.ledgerId);
+      assertLive();
+      const liveDepositKey = depositStorageKey(liveEvm, liveRecipient, token.ledgerId);
       depositHash = await submitEthereumTransaction(
         latestHelper,
         encodeDepositErc20(token, amount, liveOwner),
-        (hash) => { depositHash = hash; savePendingDeposit(hash, depositAmount, liveRecipient, evmAccount, liveRecipient, token); },
-        () => {
-          try { localStorage.removeItem(liveDepositKey); } catch { /* Continue with confirmed receipt. */ }
-          pendingDeposit = null;
+        (hash) => { depositHash = hash; depositRaw = savePendingDeposit(hash, depositRaw, liveEvm, liveRecipient, token); },
+        (outcome) => {
+          const raw = localStorage.getItem(liveDepositKey);
+          if (raw && raw === depositRaw && JSON.parse(raw).hash === depositHash) {
+            if (outcome === 'success') localStorage.setItem(`${liveDepositKey}:confirmed`, raw);
+            compareAndSetCkErc20Journal(localStorage, liveDepositKey, raw, null);
+            syncPendingDeposit(token);
+          }
         },
-        () => beginPendingDeposit(depositAmount, liveRecipient, evmAccount, liveRecipient, token),
-        () => clearPendingDepositMarker(evmAccount, liveRecipient, token),
+        () => { assertLive(); beginPendingDeposit(depositText, liveRecipient, liveEvm, liveRecipient, token, 'deposit', { eventCursor, atomicAmount: amount.toString(), erc20Address: token.erc20Address }); depositRaw = localStorage.getItem(liveDepositKey); },
+        () => clearPendingDepositMarker(liveEvm, liveRecipient, token, depositRaw),
       );
-      notice = `Ethereum deposit confirmed. The minter still needs to detect and mint ${token.symbol}; refresh the ICP balance to confirm arrival.`;
+      assertLive();
+      void reconcileMint();
+      notice = `Ethereum deposit confirmed. Mint progress and balances update automatically.`;
       depositAmount = '';
       });
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Deposit did not complete.';
+      if (!destroyed && epoch === walletEpoch && evmEpoch === evmSessionEpoch) error = cause instanceof Error ? cause.message : 'Deposit did not complete.';
     } finally {
       busy = false;
     }
@@ -599,7 +730,8 @@
     redeemIndices = null;
     const token = selectedToken;
     if (!token) { error = 'Choose a supported ckERC20 token first.'; return; }
-    if (pendingWithdrawal && pendingWithdrawal.owner === ownerPrincipal?.toText()) {
+    if (withdrawalJournalHeld) { error = 'Saved redemption tracking needs support review. New redemptions remain protected.'; return; }
+    if (pendingWithdrawal && !pendingWithdrawal.settled && pendingWithdrawal.owner === ownerPrincipal?.toText()) {
       error = 'A prior withdrawal request has no confirmed response. Reconcile its ledger activity and minter status before retrying.';
       return;
     }
@@ -611,44 +743,181 @@
     let amount: bigint;
     try { amount = parseTokenAmount(redeemAmount, token.decimals); }
     catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid amount.'; return; }
-    if (!withdrawalQuote || withdrawalQuote.owner.toText() !== ownerPrincipal.toText() || withdrawalQuote.amount !== amount || Date.now() - withdrawalQuote.quotedAtMs > 60_000) {
+    if (!withdrawalQuote || quoteRecipient !== redeemAddress.trim().toLowerCase() || withdrawalQuote.owner.toText() !== ownerPrincipal.toText() || withdrawalQuote.tokenLedgerId !== token.ledgerId || withdrawalQuote.amount !== amount || Date.now() - withdrawalQuote.quotedAtMs > 60_000) {
       error = 'Get a fresh fee quote for this wallet and amount before approving.';
       return;
     }
     const owner = ownerPrincipal;
     const quote = withdrawalQuote;
+    const recipient = redeemAddress.trim();
+    const epoch = walletEpoch;
+    let oisyAction: MinterOisyAction | undefined;
+    try { if (isCkErc20OisyWallet()) oisyAction = beginMinterOisyAction(owner); } catch (cause) { error = cause instanceof Error ? cause.message : 'Could not open wallet.'; return; }
     const locks = (navigator as any).locks;
-    if (!locks?.request) { error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
+    if (!locks?.request) { void oisyAction?.close().catch(() => {}); error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
     busy = true;
     try {
       await withCkErc20WithdrawalLock(locks, owner.toText(), async (lock: unknown) => {
       if (!lock) throw new Error('Another ckERC20 withdrawal for this wallet is active in another tab. Wait for it to finish, then reconcile its status.');
       syncPendingWithdrawal(owner);
-      if (pendingWithdrawal?.owner === owner.toText()) throw new Error('A prior withdrawal request has no confirmed response. Reconcile its ledger activity and minter status before retrying.');
+      if (withdrawalJournalHeld) throw new Error('Saved redemption tracking needs support review. New redemptions remain protected.');
+      if (pendingWithdrawal?.owner === owner.toText() && !pendingWithdrawal.settled) throw new Error('A prior withdrawal request has no confirmed response. Reconcile its ledger activity and minter status before retrying.');
       requirePersistentOperationState();
-      const isLive = () => !destroyed && ownerPrincipal?.toText() === owner.toText();
+      const isLive = () => !destroyed && walletEpoch === epoch && ownerPrincipal?.toText() === owner.toText() && selectedTokenLedgerId === token.ledgerId;
       const minterActor = await getCkErc20MinterActor();
       assertTokenSupported(await minterActor.get_minter_info(), token);
       notice = `Review and approve the ckETH fee and ${token.symbol} allowances in your Rumi wallet.`;
-      const recipient = redeemAddress.trim();
+      if (!isLive()) throw new Error('Wallet session changed. Review the request again.');
+      let withdrawalRaw: string | null = null;
       const result = await approveAndWithdrawCkErc20({
-        token, amount, recipient, owner, quote, isLive,
-        onWithdrawalSubmitted: () => markWithdrawalPending(amount, recipient, owner, token),
-        onWithdrawalResolved: () => {
-          try { localStorage.removeItem(withdrawalStorageKey(owner.toText())); } catch { /* Continue with resolved response. */ }
-          pendingWithdrawal = null;
+        token, amount, recipient, owner, quote, isLive, oisyAction,
+        onWithdrawalSubmitted: () => {
+          if (!isLive()) throw new Error('Wallet session changed before withdrawal.');
+          markWithdrawalPending(amount, recipient, owner, token);
+          withdrawalRaw = localStorage.getItem(withdrawalStorageKey(owner.toText()));
+        },
+        onWithdrawalResolved: (response) => {
+          const key = withdrawalStorageKey(owner.toText());
+          if (!withdrawalRaw) return;
+          const accepted = response?.Ok, partial = response?.Err?.CkErc20LedgerError;
+          const next = accepted ? JSON.stringify({ ...JSON.parse(withdrawalRaw), ckEthBurn: String(accepted.cketh_block_index), ckTokenBurn: String(accepted.ckerc20_block_index), status: 'Withdrawal accepted; Ethereum payout pending.' })
+            : partial ? JSON.stringify({ ...JSON.parse(withdrawalRaw), ckEthBurn: String(partial.cketh_block_index), status: 'Token withdrawal was rejected after the ckETH fee burn. Fee reimbursement needs minter reconciliation; contact Rumi support.' }) : ckErc20WithdrawalHasDefinitiveNoBurn(response) ? null : withdrawalRaw;
+          compareAndSetCkErc20Journal(localStorage, key, withdrawalRaw, next);
+          if (isLive()) syncPendingWithdrawal(owner);
         },
       });
+      if (!isLive()) return;
       redeemIndices = { ckEth: result.ckEthBurnBlock, ckToken: result.ckTokenBurnBlock };
       notice = 'The ckERC20 minter accepted the withdrawal request. The Ethereum payout is pending; the burn blocks below only confirm the request, not payout finality.';
       redeemAmount = '';
       });
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Withdrawal request did not complete.';
+      if (!destroyed && epoch === walletEpoch) error = cause instanceof Error ? cause.message : 'Withdrawal request did not complete.';
     } finally {
+      try { await oisyAction?.close(); } catch { /* Cleanup cannot replace the saved financial outcome. */ }
       busy = false;
+      void reconcileWithdrawal();
       if (ownerPrincipal) await refreshBalances(ownerPrincipal);
     }
+  }
+
+  function refreshLifecycle() {
+    if (destroyed || document.visibilityState === 'hidden') return;
+    syncPendingDeposit();
+    syncPendingWithdrawal(ownerPrincipal);
+    void reconcileDeposit();
+    void reconcileMint();
+    void reconcileWithdrawal();
+    if (connected) void refreshBalances();
+    if (evmAccount) void refreshEvmTokenBalance();
+    if (!busy && activeTab === 'redeem' && redeemAmount && validateEthereumAddress(redeemAddress) && (!withdrawalQuote || Date.now() - withdrawalQuote.quotedAtMs > 30_000)) void refreshWithdrawalQuote();
+  }
+
+  async function reconcileDeposit() {
+    const token = supportedTokens.find((item) => item.ledgerId === selectedTokenLedgerId), owner = ownerPrincipal, evm = evmAccount, provider = getEthereumProvider();
+    const locks = (navigator as any).locks;
+    if (depositJournalHeld || !token || !owner || !evm || !provider || !locks?.request) return;
+    const key = depositStorageKey(evm, owner.toText(), token.ledgerId);
+    let raw: string | null, entry: any;
+    try { raw = localStorage.getItem(key) ?? (token.ledgerId === CANISTER_IDS.CKUSDC_LEDGER ? localStorage.getItem(legacyCkUsdcDepositStorageKey(evm, owner.toText())) : null); if (!raw) return; entry = JSON.parse(raw); if (!validSavedDeposit(entry, token, evm, owner.toText())) return; } catch { return; }
+    if (!/^0x[0-9a-f]{64}$/i.test(entry.hash ?? '')) return;
+    const epoch = walletEpoch, evmEpoch = evmSessionEpoch;
+    const current = () => !destroyed && epoch === walletEpoch && evmEpoch === evmSessionEpoch && selectedTokenLedgerId === token.ledgerId && ownerPrincipal?.toText() === owner.toText() && evmAccount === evm && getEthereumProvider() === provider;
+    try {
+      if (await provider.request({ method: 'eth_chainId' }) !== '0x1' || !current()) return;
+      const receipt = await provider.request({ method: 'eth_getTransactionReceipt', params: [entry.hash] });
+      if (!current()) return;
+      const outcome = ckErc20ReceiptOutcome(entry.hash, receipt);
+      if (outcome === 'pending') return;
+      if (outcome === 'reverted' && !await revertedReceiptIsFinal(provider, receipt, evm, current)) {
+        if (current() && localStorage.getItem(key) === raw) notice = 'Ethereum transaction appears reverted; waiting for Ethereum finality before allowing another submission. Tracking continues automatically.';
+        return;
+      }
+      await locks.request(`rumi:ckerc20:deposit:${evm.toLowerCase()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
+        if (!lock || !current()) return;
+        const actualKey = localStorage.getItem(key) === raw ? key : legacyCkUsdcDepositStorageKey(evm, owner.toText());
+        if (localStorage.getItem(actualKey) !== raw) return;
+        if (outcome === 'success' && (!entry.phase || entry.phase === 'deposit')) localStorage.setItem(`${key}:confirmed`, raw);
+        if (!compareAndSetCkErc20Journal(localStorage, actualKey, raw, null)) return;
+        syncPendingDeposit(token);
+        void reconcileMint();
+        if (outcome === 'reverted') notice = 'Ethereum transaction reverted. No deposit was completed by this transaction. You can review and start again.';
+        else if (entry.phase === 'approval' || entry.phase === 'reset') notice = 'Ethereum allowance transaction confirmed. Review the amount and continue when ready.';
+        void refreshBalances(owner, token);
+        void refreshEvmTokenBalance(evm, token);
+      });
+    } catch { /* Keep the receipt and retry read-only tracking on the next refresh. */ }
+  }
+
+  async function reconcileMint() {
+    const token = supportedTokens.find((item) => item.ledgerId === selectedTokenLedgerId), owner = ownerPrincipal, evm = evmAccount, locks = (navigator as any).locks;
+    if (depositJournalHeld || !token || !owner || !evm || !locks?.request) return;
+    const key = `${depositStorageKey(evm, owner.toText(), token.ledgerId)}:confirmed`;
+    let raw: string | null, entry: PendingDeposit;
+    try { raw = localStorage.getItem(key); if (!raw) return; entry = JSON.parse(raw); if (!validSavedDeposit(entry, token, evm, owner.toText())) return; entry = { ...entry, tokenLedgerId: entry.tokenLedgerId ?? token.ledgerId, tokenSymbol: entry.tokenSymbol ?? token.symbol }; } catch { return; }
+    if (entry.mintBlock || entry.principal !== owner.toText() || entry.tokenLedgerId !== token.ledgerId) return;
+    const epoch = walletEpoch, evmEpoch = evmSessionEpoch;
+    const current = () => !destroyed && epoch === walletEpoch && evmEpoch === evmSessionEpoch && ownerPrincipal?.toText() === owner.toText() && selectedTokenLedgerId === token.ledgerId && evmAccount === evm;
+    try {
+      const actor = await getCkErc20MinterActor();
+      if (entry.eventCursor === undefined) {
+        const head = await actor.get_events({ start: 0n, length: 0n });
+        entry = { ...entry, eventCursor: String(head.total_event_count > 1000n ? head.total_event_count - 1000n : 0n), historyLimited: true, erc20Address: token.erc20Address, atomicAmount: parseTokenAmount(entry.amount, token.decimals).toString() };
+      }
+      const result = await actor.get_events({ start: BigInt(entry.eventCursor!), length: 1000n });
+      if (!current() || result.events.length > 1000) return;
+      const next = advanceCkErc20MintReceipt(entry, result.events);
+      let recorded = false;
+      await locks.request(`rumi:ckerc20:deposit:${evm.toLowerCase()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
+        if (!lock || !current()) return;
+        recorded = compareAndSetCkErc20Journal(localStorage, key, raw, JSON.stringify(next));
+        if (recorded) syncPendingDeposit(token);
+      });
+      if (recorded && next.mintBlock && current()) { notice = `${token.symbol} mint confirmed by the minter.`; void refreshBalances(owner, token); }
+    } catch { /* Decoder/API/history failures never turn into an unsupported mint claim. */ }
+  }
+
+  async function reconcileWithdrawal() {
+    const owner = ownerPrincipal, token = supportedTokens.find((item) => item.ledgerId === selectedTokenLedgerId), locks = (navigator as any).locks;
+    if (withdrawalJournalHeld || !owner || !token || !locks?.request) return;
+    const key = withdrawalStorageKey(owner.toText());
+    let raw: string | null, entry: any;
+    try { raw = localStorage.getItem(key); if (!raw) return; entry = JSON.parse(raw); if (!validSavedWithdrawal(entry, owner.toText())) return; } catch { return; }
+    if (entry.settled) return;
+    if (!entry.ckEthBurn || entry.tokenLedgerId !== token.ledgerId) return;
+    const epoch = walletEpoch;
+    const current = () => !destroyed && epoch === walletEpoch && ownerPrincipal?.toText() === owner.toText() && selectedTokenLedgerId === token.ledgerId;
+    try {
+      const actor = await getCkErc20MinterActor();
+      const records = await actor.withdrawal_status({ ByWithdrawalId: BigInt(entry.ckEthBurn) });
+      if (!current()) return;
+      const match = records.find((record: any) => String(record.withdrawal_id) === entry.ckEthBurn && record.from?.toText() === entry.owner && !record.from_subaccount?.length && record.token_symbol === entry.tokenSymbol && String(record.withdrawal_amount) === entry.amount && record.recipient_address?.toLowerCase() === entry.recipient.toLowerCase());
+      if (!match) return; // An empty result never resolves an uncertain request.
+      const status = match.status;
+      let text = 'Withdrawal accepted; Ethereum payout pending.', hash = '';
+      if ('TxCreated' in status) text = 'Ethereum payout is being prepared.';
+      if ('TxSent' in status) { text = 'Ethereum payout submitted; awaiting finality.'; hash = status.TxSent.transaction_hash; }
+      if (status.TxFinalized?.Success) { text = 'Ethereum payout finalized by the minter.'; hash = status.TxFinalized.Success.transaction_hash; }
+      if (status.TxFinalized?.PendingReimbursement) { text = 'Ethereum payout failed; reimbursement pending.'; hash = status.TxFinalized.PendingReimbursement.transaction_hash; }
+      if (status.TxFinalized?.Reimbursed) { text = 'Ethereum payout failed; minter reports reimbursement completed.'; hash = status.TxFinalized.Reimbursed.transaction_hash; }
+      await withCkErc20WithdrawalLock(locks, owner.toText(), async (lock) => {
+        if (!lock || !current()) return;
+        const settled = !!(status.TxFinalized?.Success || status.TxFinalized?.Reimbursed);
+        const next = JSON.stringify({ ...entry, status: text, payoutHash: hash, settled });
+        if (compareAndSetCkErc20Journal(localStorage, key, raw, next)) syncPendingWithdrawal(owner);
+      });
+    } catch { /* Unsupported/unavailable status stays pending and keeps its receipt. */ }
+  }
+
+  function scheduleWithdrawalQuote(key: string) {
+    if (key === quoteInputKey) return;
+    quoteInputKey = key;
+    quoteRequestId += 1;
+    withdrawalQuote = null;
+    quoteBusy = false;
+    clearTimeout(quoteTimer);
+    if (activeTab !== 'redeem' || !connected || !redeemAmount.trim() || !validateEthereumAddress(redeemAddress)) return;
+    quoteTimer = setTimeout(() => void refreshWithdrawalQuote(), 350);
   }
 
   async function refreshWithdrawalQuote() {
@@ -660,20 +929,23 @@
     let amount: bigint;
     try { amount = parseTokenAmount(redeemAmount, token.decimals); }
     catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid amount.'; return; }
+    const requestId = ++quoteRequestId, epoch = walletEpoch, address = redeemAddress.trim(), amountText = redeemAmount;
     quoteBusy = true;
     try {
       const owner = ownerPrincipal;
       const quote = await getCkErc20WithdrawalQuote(token, amount, owner);
-      if (destroyed || ownerPrincipal?.toText() !== owner.toText() || selectedTokenLedgerId !== token.ledgerId) return;
+      if (destroyed || requestId !== quoteRequestId || epoch !== walletEpoch || redeemAddress.trim() !== address || redeemAmount !== amountText || ownerPrincipal?.toText() !== owner.toText() || selectedTokenLedgerId !== token.ledgerId) return;
+      quoteRecipient = address.toLowerCase();
       withdrawalQuote = quote;
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Could not load a current withdrawal quote.';
+      if (requestId === quoteRequestId) error = cause instanceof Error ? cause.message : 'Could not load a current withdrawal quote.';
     } finally {
-      quoteBusy = false;
+      if (requestId === quoteRequestId) quoteBusy = false;
     }
   }
 
   function invalidateWithdrawalQuote() {
+    quoteRequestId += 1;
     withdrawalQuote = null;
   }
 
@@ -728,30 +1000,34 @@
         <div class="steps"><span class="step-current">Approve</span><i></i><span>Deposit</span><i></i><span>Minted</span></div>
         <div class="risk-note">Send only Ethereum Mainnet {selectedToken.symbol.replace(/^ck/, '')}. Minting starts after Ethereum finality and the minter’s next scan. Token and helper configuration is checked live.</div>
         <label class="field-label" for="deposit-amount">Amount to deposit</label>
-        <div class="amount-input"><input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={depositAmount} disabled={busy} /><CkErc20TokenSelect tokens={supportedTokens} selectedLedgerId={selectedTokenLedgerId} disabled={!minterReady || busy || quoteBusy || refreshBusy} label="Token to mint" id="mint-token-options" onSelect={selectToken} /></div>
+        <div class="amount-input"><input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={depositAmount} disabled={busy} /><CkErc20TokenSelect tokens={supportedTokens} selectedLedgerId={selectedTokenLedgerId} disabled={!minterReady || busy} label="Token to mint" id="mint-token-options" onSelect={selectToken} /></div>
         {#if selectedToken.minimumDepositAmount !== null}<p class="minimum-note">Minimum {formatTokenAmount(selectedToken.minimumDepositAmount, selectedToken.decimals)} {selectedToken.symbol.replace(/^ck/, '')}</p>{:else}<p class="minimum-note">Minimum deposit unavailable. Deposits for this token are disabled.</p>{/if}
         <div class="amount-meta"><span>{!evmAccount ? 'Connect Ethereum to view balance' : evmTokenBalanceBusy ? 'Reading wallet balance…' : evmTokenBalance === null ? `${selectedToken.symbol.replace(/^ck/, '')} balance unavailable` : `Ethereum: ${formatTokenAmount(evmTokenBalance, selectedToken.decimals)} ${selectedToken.symbol.replace(/^ck/, '')}`}</span><span>ICP: {ckTokenBalance === null ? '—' : `${formatTokenAmount(ckTokenBalance, selectedToken.decimals)} ${selectedToken.symbol}`}</span><div class="amount-actions"><button class="text-button" on:click={() => refreshEvmTokenBalance()} disabled={!evmAccount || evmTokenBalanceBusy || busy}>{evmTokenBalanceBusy ? 'Refreshing…' : 'Refresh'}</button><button class="text-button" on:click={setMaxDeposit} disabled={evmTokenBalance === null || evmTokenBalance <= 0n || busy}>Max</button></div></div>
         {#if evmTokenBalanceError}<p class="inline-hint">Could not read the Ethereum token balance: {evmTokenBalanceError}</p>{/if}
         <div class="destination"><span class="label">ICP RECEIVING ACCOUNT · {selectedToken.symbol}</span><code>{connected && ownerPrincipal ? ownerPrincipal.toText() : 'Connect a Rumi wallet to choose the recipient'}</code></div>
         <p class="fee-note">Your Ethereum wallet needs ETH for gas. Deposits usually take two transactions; a nonzero helper allowance may need a zero reset first. Gas is not sponsored.</p>
-        <button class="primary" on:click={submitDeposit} disabled={busy || !!pendingDeposit || !connected || !minterReady || !evmAccount || !selectedToken.minimumDepositAmount}>{pendingDeposit ? 'Check pending deposit before retrying' : busy ? 'Waiting for wallet…' : `Approve and mint ${selectedToken.symbol}`}</button>
+        <button class="primary" on:click={submitDeposit} disabled={busy || depositJournalHeld || !!pendingDeposit || (!!confirmedDeposit && !confirmedDeposit.mintBlock) || !connected || !minterReady || !evmAccount || !selectedToken.minimumDepositAmount}>{depositJournalHeld ? 'Deposit protected for support review' : pendingDeposit ? 'Tracking Ethereum transaction' : confirmedDeposit && !confirmedDeposit.mintBlock ? 'Waiting for token mint' : busy ? 'Waiting for wallet…' : `Approve and mint ${selectedToken.symbol}`}</button>
         {#if approveHash}<p class="tx-line">{selectedToken.symbol.replace(/^ck/, '')} approval: <a href={`https://etherscan.io/tx/${approveHash}`} target="_blank" rel="noreferrer">{approveHash.slice(0, 14)}…</a></p>{/if}
         {#if depositHash}<p class="tx-line">Deposit: <a href={`https://etherscan.io/tx/${depositHash}`} target="_blank" rel="noreferrer">{depositHash.slice(0, 14)}…</a> · <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Track mint</a></p>{/if}
-        {#if pendingDeposit}<div class="alert error">{#if pendingDeposit.hash}A previous {pendingDeposit.tokenSymbol ?? selectedToken.symbol} deposit is unresolved: <a href={`https://etherscan.io/tx/${pendingDeposit.hash}`} target="_blank" rel="noreferrer">check Ethereum status</a> or search the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">DFINITY minter dashboard</a>.{:else}A previous deposit submission did not return a transaction hash. Check your Ethereum wallet activity.{/if} New deposits for this token are locked. Clear the retry lock only after confirming the deposit did not complete.<button class="text-button recovery-button" on:click={clearPendingDeposit}>Clear retry lock after reconciliation</button></div>{/if}
+        {#if depositJournalHeld}<div class="alert error">Saved deposit tracking could not be read safely. New deposits remain protected. <a href="https://discord.gg/Fg5WyajwQR" target="_blank" rel="noreferrer">Contact Rumi support</a> with your Ethereum wallet activity.</div>{/if}
+        {#if pendingDeposit}<div class="alert error">{#if pendingDeposit.hash}A previous {pendingDeposit.tokenSymbol ?? selectedToken.symbol} {pendingDeposit.phase === 'reset' ? 'allowance reset' : pendingDeposit.phase === 'approval' ? 'token approval' : 'deposit'} is unresolved: <a href={`https://etherscan.io/tx/${pendingDeposit.hash}`} target="_blank" rel="noreferrer">check Ethereum status</a> or search the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">DFINITY minter dashboard</a>.{:else}A previous deposit submission did not return a transaction hash. Check your Ethereum wallet activity.{/if} We check known transactions automatically. If your wallet returned no hash, <a href="https://discord.gg/Fg5WyajwQR" target="_blank" rel="noreferrer">contact Rumi support</a> with your wallet activity before starting another deposit.</div>{/if}
+        {#if confirmedDeposit}<div class="alert notice" aria-live="polite">{#if confirmedDeposit.mintBlock}{confirmedDeposit.tokenSymbol} mint confirmed by the minter at ledger block {confirmedDeposit.mintBlock}.{:else}Ethereum deposit confirmed; awaiting {confirmedDeposit.tokenSymbol} mint. Balances refresh automatically.{#if confirmedDeposit.historyLimited} Only recent minter history is available for this older deposit. <a href="https://discord.gg/Fg5WyajwQR" target="_blank" rel="noreferrer">Contact Rumi support</a> if it remains pending.{/if}{/if} <a href={`https://etherscan.io/tx/${confirmedDeposit.hash}`} target="_blank" rel="noreferrer">Ethereum receipt</a> · <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Minter activity</a></div>{/if}
         {#if helperAddress}<p class="small-note">Live minter helper: <code>{helperAddress}</code></p>{/if}
       {:else}
         <div class="flow-heading"><div><span class="asset-kicker">REDEEM TO ETHEREUM</span><h2>{selectedToken.symbol} <i>→</i> {selectedToken.symbol.replace(/^ck/, '')}</h2></div><span class="step-current">1 / 3</span></div>
         <div class="steps"><span class="step-current">Approve fees</span><i></i><span>Approve token</span><i></i><span>Payout</span></div>
         <div class="risk-note">Redeeming uses {selectedToken.symbol} plus ckETH for the Ethereum transaction fee. Your Ethereum wallet does not sign or pay for the payout.</div>
         <label class="field-label" for="redeem-amount">Amount to redeem</label>
-        <div class="amount-input"><input id="redeem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={redeemAmount} on:input={invalidateWithdrawalQuote} disabled={busy} /><CkErc20TokenSelect tokens={supportedTokens} selectedLedgerId={selectedTokenLedgerId} disabled={!minterReady || busy || quoteBusy || refreshBusy} label="Token to redeem" id="redeem-token-options" onSelect={selectToken} /></div>
+        <div class="amount-input"><input id="redeem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={redeemAmount} on:input={invalidateWithdrawalQuote} disabled={busy} /><CkErc20TokenSelect tokens={supportedTokens} selectedLedgerId={selectedTokenLedgerId} disabled={!minterReady || busy} label="Token to redeem" id="redeem-token-options" onSelect={selectToken} /></div>
         <div class="amount-meta"><span>{ckTokenBalance === null ? 'ICP token balance unavailable' : `Balance: ${formatTokenAmount(ckTokenBalance, selectedToken.decimals)} ${selectedToken.symbol}`}</span><span>{ckEthBalance === null ? 'ckETH fee balance unavailable' : `${formatTokenAmount(ckEthBalance, 18, 8)} ckETH fee balance`}</span></div>
         <label class="field-label" for="redeem-address">Ethereum destination</label><input id="redeem-address" class="address-input" type="text" autocomplete="off" spellcheck="false" placeholder="0x…" bind:value={redeemAddress} disabled={busy} />
         <div class="wallet-row redeem-balance"><span class="label">RUMI WALLET BALANCES</span><button class="text-button" disabled={!ownerPrincipal || refreshBusy} on:click={() => refreshBalances()}>{refreshBusy ? 'Refreshing…' : 'Refresh'}</button></div>
-        <button class="secondary quote-button" on:click={refreshWithdrawalQuote} disabled={quoteBusy || busy || !connected}>{quoteBusy ? 'Loading current fees…' : 'Get current fee quote'}</button>
+        {#if quoteBusy}<p class="inline-hint" aria-live="polite">Estimating current fees…</p>{/if}
         {#if withdrawalQuote}<div class="quote-card"><span class="label">CURRENT QUOTE · REFRESHED {new Date(withdrawalQuote.quotedAtMs).toLocaleTimeString()}{#if withdrawalQuote.minterPriceTimestampMs} · MINTER PRICE {new Date(withdrawalQuote.minterPriceTimestampMs).toLocaleTimeString()}{/if}</span><div><span>{selectedToken.symbol} amount</span><strong>{formatTokenAmount(withdrawalQuote.amount, selectedToken.decimals)} {selectedToken.symbol}</strong></div><div><span>ckETH max Ethereum fee</span><strong>{formatTokenAmount(withdrawalQuote.maxTransactionFee, 18, 8)} ckETH</strong></div><div><span>ckETH allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckEthAllowance, 18, 8)} ckETH</strong></div><div><span>{selectedToken.symbol} allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckTokenAllowance, selectedToken.decimals)} {selectedToken.symbol}</strong></div><p>{withdrawalQuoteIsExecutable(withdrawalQuote) ? 'Balances cover this quote. It expires in 60 seconds.' : 'Your current balances do not cover this quote.'}</p></div>{/if}
-        {#if withdrawalPendingForOwner}<div class="alert error">A previous {pendingWithdrawal?.tokenSymbol ?? 'ckERC20'} withdrawal request has no confirmed response. Check its ckERC20 and ckETH ledger activity and the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">minter dashboard</a> before retrying. A lock prevents a second burn.<button class="text-button recovery-button" on:click={clearPendingWithdrawal}>Clear retry lock after reconciliation</button></div>{/if}
-        <button class="primary" on:click={submitWithdrawal} disabled={busy || withdrawalPendingForOwner || !connected || !minterReady || !withdrawalQuote || !withdrawalQuoteIsExecutable(withdrawalQuote)}>{withdrawalPendingForOwner ? 'Reconcile previous request first' : busy ? 'Confirm approvals in your wallet…' : `Approve and request ${selectedToken.symbol.replace(/^ck/, '')} redemption`}</button>
+        {#if withdrawalJournalHeld}<div class="alert error">Saved redemption tracking could not be read safely. New redemptions remain protected. <a href="https://discord.gg/Fg5WyajwQR" target="_blank" rel="noreferrer">Contact Rumi support</a> with your wallet activity.</div>{/if}
+        {#if withdrawalPendingForOwner && !pendingWithdrawal?.ckEthBurn}<div class="alert error">A previous {pendingWithdrawal?.tokenSymbol ?? 'ckERC20'} withdrawal request has no confirmed response. Check its ckERC20 and ckETH ledger activity and the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">minter dashboard</a> before retrying. We refresh known payouts automatically. If no burn receipt was returned, <a href="https://discord.gg/Fg5WyajwQR" target="_blank" rel="noreferrer">contact Rumi support</a> with your wallet activity. This request stays protected against a second burn.</div>{/if}
+        <button class="primary" on:click={submitWithdrawal} disabled={busy || withdrawalJournalHeld || withdrawalPendingForOwner || !connected || !minterReady || !withdrawalQuote || !withdrawalQuoteIsExecutable(withdrawalQuote)}>{withdrawalJournalHeld ? 'Redemption protected for support review' : withdrawalPendingForOwner ? 'Tracking previous redemption' : busy ? 'Confirm approvals in your wallet…' : `Approve and request ${selectedToken.symbol.replace(/^ck/, '')} redemption`}</button>
+        {#if pendingWithdrawal?.ckEthBurn}<div class="success-box" aria-live="polite">{pendingWithdrawal.status ?? 'Withdrawal accepted; Ethereum payout pending.'}<br />ckETH burn: {pendingWithdrawal.ckEthBurn}<br />{pendingWithdrawal.tokenSymbol} burn: {pendingWithdrawal.ckTokenBurn}{#if pendingWithdrawal.payoutHash}<br /><a href={`https://etherscan.io/tx/${pendingWithdrawal.payoutHash}`} target="_blank" rel="noreferrer">Ethereum payout</a>{/if}</div>{/if}
         {#if redeemIndices}<div class="success-box">Withdrawal request accepted by the minter.<br />ckETH fee burn block: {redeemIndices.ckEth}<br />{selectedToken.symbol} burn block: {redeemIndices.ckToken}<br /><a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Open ckERC20 minter dashboard</a></div>{/if}
         <p class="small-note">Before approval, current ckETH and {selectedToken.symbol} fees, balances, and the minter’s Ethereum fee estimate are checked. Approvals are limited to this withdrawal and expire after 10 minutes.</p>
       {/if}
@@ -799,9 +1075,9 @@
   input { min-width:0; width:100%; color:var(--rumi-text-primary); background:transparent; border:0; outline:none; font:inherit; font-size:19px; font-variant-numeric:tabular-nums; }.destination { display:grid; gap:4px; margin-top:6px; padding:6px 9px; border:1px solid var(--rumi-border); border-radius:7px; background:rgba(255,255,255,.015); }.destination code,.small-note code { color:var(--rumi-text-secondary); font-size:10px; overflow-wrap:anywhere; }
   .fee-note,.small-note { margin:6px 0; color:var(--rumi-text-muted); font-size:10px; line-height:1.45; }.primary { width:100%; min-height:40px; border:1px solid rgba(52,211,153,.22); border-radius:7px; background:var(--rumi-action); color:#06251b; font:inherit; font-size:12px; font-weight:700; cursor:pointer; }.primary:hover:not(:disabled) { background:var(--rumi-action-bright); }
   .inline-hint { margin:6px 0; color:var(--rumi-text-secondary); font-size:10px; line-height:1.4; }.address-input { height:43px; padding:0 11px; border:1px solid var(--rumi-border-hover); border-radius:7px; background:var(--rumi-bg-primary); font-size:14px; }
-  .quote-button { width:100%; margin:7px 0 9px; }.quote-card { display:grid; gap:7px; margin:9px 0; padding:10px; border:1px solid var(--rumi-border); border-radius:7px; background:var(--rumi-bg-primary); }.quote-card>div { display:flex; justify-content:space-between; gap:10px; color:var(--rumi-text-secondary); font-size:10px; }.quote-card strong { color:var(--rumi-text-primary); text-align:right; font-weight:600; }.quote-card p { margin:0; color:var(--rumi-text-secondary); font-size:10px; }
+  .quote-card { display:grid; gap:7px; margin:9px 0; padding:10px; border:1px solid var(--rumi-border); border-radius:7px; background:var(--rumi-bg-primary); }.quote-card>div { display:flex; justify-content:space-between; gap:10px; color:var(--rumi-text-secondary); font-size:10px; }.quote-card strong { color:var(--rumi-text-primary); text-align:right; font-weight:600; }.quote-card p { margin:0; color:var(--rumi-text-secondary); font-size:10px; }
   .redeem-balance { margin-top:8px; padding-top:8px; border-top:1px solid var(--rumi-border); }.tx-line { color:var(--rumi-text-secondary); font-size:10px; overflow-wrap:anywhere; }a { color:var(--rumi-action-bright); }
-  .text-button { display:block; margin:3px 0 0; padding:0; border:0; background:none; color:var(--rumi-action-bright); cursor:pointer; font:inherit; font-size:10px; }.recovery-button { margin-top:8px; color:#ffb3c5; text-decoration:underline; }
+  .text-button { display:block; margin:3px 0 0; padding:0; border:0; background:none; color:var(--rumi-action-bright); cursor:pointer; font:inherit; font-size:10px; }
   .alert { margin-top:10px; padding:10px 11px; border-radius:7px; font-size:10px; line-height:1.45; overflow-wrap:anywhere; }.notice { border:1px solid rgba(45,212,191,.25); background:var(--rumi-teal-dim); color:#9cebd0; }.error { border:1px solid rgba(224,107,159,.3); background:rgba(224,107,159,.09); color:#ffb3c5; }.success-box { color:#a8efda; border-color:rgba(45,212,191,.25); }
   @media(max-width:850px) { .minter-page { padding:0 22px 28px; }.page-grid { grid-template-columns:minmax(0,1fr); gap:20px; }.card { grid-row:1; padding:17px 19px; }.overview { grid-row:2; padding-top:0; }.asset-showcase { margin-top:18px; }.supply-card { max-width:500px; } }
   @media(max-width:480px) { .minter-page { padding:0 12px 24px; }.page-grid { gap:17px; }.card { padding:13px 12px; }h1 { font-size:29px; }.amount-meta { align-items:flex-start; flex-wrap:wrap; padding:4px 0; }.amount-actions { margin-left:auto; }.steps { gap:5px; font-size:9px; }.steps i { min-width:8px; } }

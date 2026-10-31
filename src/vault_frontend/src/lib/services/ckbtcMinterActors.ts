@@ -8,6 +8,7 @@ import { idlFactory as ckbtcMinterIdl } from '../idls/ckbtc_minter.idl.js';
 import { ICRC1_IDL } from '../idls/ledger.idl.js';
 import { createOisyActor, getOisySignerAgent } from './oisySigner';
 import { isOisyWallet } from './protocol/walletOperations';
+import { getMinterOisySignerAgent } from './minterOisySigner';
 
 let anonAgent: HttpAgent | null = null;
 let updateBalanceAgent: HttpAgent | null = null;
@@ -100,7 +101,7 @@ export async function submitCkbtcWithdrawal(params: CkbtcWithdrawalParams): Prom
 
   try {
     if (isOisyWallet()) {
-      const signer = await getOisySignerAgent(owner);
+      const signer = await getMinterOisySignerAgent(owner);
       if (!isLive()) return { kind: 'stale' };
       ledger = createOisyActor(ledgerCanisterId, ledgerIdl, signer);
       minter = createOisyActor(minterCanisterId, ckbtcMinterIdl, signer);

@@ -47,7 +47,70 @@ export const CKERC20_MINTER_IDL = ({ IDL }) => {
     CkErc20LedgerError: IDL.Record({ cketh_block_index: IDL.Nat, error: LedgerError }),
     TemporarilyUnavailable: IDL.Text,
   });
+  // Official cketh_minter.did: WithdrawalSearchParameter/WithdrawalDetail.
+  // https://github.com/dfinity/ic/blob/master/rs/ethereum/cketh/minter/cketh_minter.did
+  const EthTransaction = IDL.Record({ transaction_hash: IDL.Text });
+  const FinalizedStatus = IDL.Variant({
+    Success: IDL.Record({ transaction_hash: IDL.Text, effective_transaction_fee: IDL.Opt(IDL.Nat) }),
+    Reimbursed: IDL.Record({ transaction_hash: IDL.Text, reimbursed_amount: IDL.Nat, reimbursed_in_block: IDL.Nat }),
+    PendingReimbursement: EthTransaction,
+  });
+  const WithdrawalStatus = IDL.Variant({ Pending: IDL.Null, TxCreated: IDL.Null, TxSent: EthTransaction, TxFinalized: FinalizedStatus });
+  const WithdrawalDetail = IDL.Record({
+    token_symbol: IDL.Text, withdrawal_amount: IDL.Nat, max_transaction_fee: IDL.Opt(IDL.Nat),
+    withdrawal_id: IDL.Nat64, from: IDL.Principal, from_subaccount: IDL.Opt(Subaccount),
+    recipient_address: IDL.Text, status: WithdrawalStatus,
+  });
+  // Variant names verified against deployed mainnet Candid metadata (2026-10-31).
+  // Reserved intentionally discards unrelated event payloads while preserving
+  // variant compatibility. New unknown variants fail closed at the decoder.
+  const EventSource = IDL.Record({ transaction_hash: IDL.Text, log_index: IDL.Nat });
+  const eventPayloads = {
+    Init: IDL.Reserved,
+    Upgrade: IDL.Reserved,
+    AcceptedDeposit: IDL.Reserved,
+    InvalidDeposit: IDL.Reserved,
+    MintedCkEth: IDL.Reserved,
+    SyncedToBlock: IDL.Reserved,
+    SyncedErc20ToBlock: IDL.Reserved,
+    SyncedDepositWithSubaccountToBlock: IDL.Reserved,
+    AcceptedEthWithdrawalRequest: IDL.Reserved,
+    AcceptedSweeperFundingRequest: IDL.Reserved,
+    CreatedTransaction: IDL.Reserved,
+    SignedTransaction: IDL.Reserved,
+    ReplacedTransaction: IDL.Reserved,
+    FinalizedTransaction: IDL.Reserved,
+    AcceptedSweepRequest: IDL.Reserved,
+    CreatedSweeperTransaction: IDL.Reserved,
+    SignedSweeperTransaction: IDL.Reserved,
+    ReplacedSweeperTransaction: IDL.Reserved,
+    FinalizedSweeperTransaction: IDL.Reserved,
+    ReimbursedEthWithdrawal: IDL.Reserved,
+    ReimbursedErc20Withdrawal: IDL.Reserved,
+    SkippedBlock: IDL.Reserved,
+    AddedCkErc20Token: IDL.Reserved,
+    AcceptedErc20WithdrawalRequest: IDL.Reserved,
+    FailedErc20WithdrawalRequest: IDL.Reserved,
+    QuarantinedDeposit: IDL.Reserved,
+    QuarantinedReimbursement: IDL.Reserved,
+    RegisteredDepositAddresses: IDL.Reserved,
+    AutomaticDepositReceived: IDL.Reserved,
+    AttestedDepositAddress: IDL.Reserved,
+    AuthorizedDepositAddress: IDL.Reserved,
+    AcceptedErc20Deposit: IDL.Record({
+      transaction_hash: IDL.Text, block_number: IDL.Nat, log_index: IDL.Nat,
+      from_address: IDL.Text, value: IDL.Nat, principal: IDL.Principal,
+      erc20_contract_address: IDL.Text, subaccount: IDL.Opt(Subaccount),
+    }),
+    MintedCkErc20: IDL.Record({ event_source: EventSource, erc20_contract_address: IDL.Text, mint_block_index: IDL.Nat, ckerc20_token_symbol: IDL.Text }),
+  };
   return IDL.Service({
+    get_events: IDL.Func([IDL.Record({ start: IDL.Nat64, length: IDL.Nat64 })], [IDL.Record({
+      events: IDL.Vec(IDL.Record({ timestamp: IDL.Nat64, payload: IDL.Variant(eventPayloads) })), total_event_count: IDL.Nat64,
+    })], ['query']),
+    withdrawal_status: IDL.Func([IDL.Variant({
+      ByRecipient: IDL.Text, BySenderAccount: IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(Subaccount) }), ByWithdrawalId: IDL.Nat64,
+    })], [IDL.Vec(WithdrawalDetail)], ['query']),
     get_minter_info: IDL.Func([], [MinterInfo], ['query']),
     eip_1559_transaction_price: IDL.Func([IDL.Opt(PriceArg)], [TransactionPrice], ['query']),
     withdraw_erc20: IDL.Func(

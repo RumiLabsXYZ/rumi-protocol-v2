@@ -106,6 +106,15 @@ describe('ckSOL OISY action channel', () => {
 		expect([...fx.windows.values()].every((p) => p.closed)).toBe(true);
 		expect(() => getCksolOisySignerAgent(owner)).toThrow('click');
 	});
+    it('allows page and service cleanup to share the same close without affecting the next action', async () => {
+        const first=click(()=>beginCksolOisyAction(owner));await first.ready;
+        const closing=first.close();await closing;
+        const next=click(()=>beginCksolOisyAction(owner));await next.ready;
+        try {
+            expect(first.close()).toBe(closing);
+            await expect(getCksolOisySignerAgent(owner).signer.sendRequest({jsonrpc:'2.0',id:'next-action',method:'test'})).resolves.toHaveProperty('result');
+        } finally {await next.close();}
+    });
 	it('starts fresh after a failed channel opening and binds the action to its owner', async () => {
 		fx.failOpen = true;
 		const failed = click(() => beginCksolOisyAction(owner));

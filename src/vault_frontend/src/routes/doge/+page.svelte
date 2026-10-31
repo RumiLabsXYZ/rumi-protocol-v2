@@ -1,9 +1,13 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
+  import { walletSessionGeneration } from '$lib/services/auth';
   import { isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
   import { CANISTER_IDS } from '$lib/config';
-  import { getPublicMinterActor, redeemDogeWithApproval, updateDogeBalanceForOwner } from '$lib/services/ckdogeMinterActors';
+  import { getPublicMinterActor, redeemDogeWithApproval, updateDogeBalanceForOwner, DogeWithdrawalPreflightError } from '$lib/services/ckdogeMinterActors';
+  import { beginMinterOisyAction, type MinterOisyAction } from '$lib/services/minterOisySigner';
+  import { isOisyWallet } from '$lib/services/protocol/walletOperations';
+  import { readDogeWithdrawal, replaceDogeWithdrawal, withDogeWithdrawalLock, isDogeWithdrawalTerminal, type DogeWithdrawal } from '$lib/utils/dogeMinterRecovery';
   import { fetchLedgerFee, getCachedLedgerFee } from '$lib/services/ledgerFeeService';
   import { ICRC1_IDL as ckdogeLedgerIdl } from '$lib/idls/ledger.idl.js';
   import {
@@ -77,7 +81,9 @@
   let pollingStopped = false;
   let pollFatalMessage = '';
   let destroyed = false;
-  // Snapshotted at the "i sent the DOGE" click — every poll call binds to this,
+  let sessionGeneration = 0;
+  let depositCheckInFlight = false;
+  // Snapshotted when address watching starts — every poll call binds to this,
   // never to whatever wallet happens to be connected when the timer fires.
   let pollingPrincipal: Principal | null = null;
 
@@ -93,6 +99,12 @@
     utxoStatuses,
     minConfirmationsHint: minterInfoSummary?.minConfirmationsCount,
   });
+
+  $: depositStatusLabel = confirmation.phase === 'confirming'
+    ? utxoStatuses.some(status => status.kind === 'Checked')
+      ? 'Confirmed, waiting to mint'
+      : confirmation.meter ? 'Waiting for Dogecoin confirmations' : 'Watching for your DOGE deposit'
+    : confirmation.phase === 'stopped' ? 'Deposit checks paused' : confirmation.statusLabel;
 
   // ── Copy-address state ───────────────────────────────────────────────
   let addressCopied = false;
@@ -127,10 +139,85 @@
   let burnBlockIndex: bigint | null = null;
   let retrieveStatusSummary: RetrieveStatusSummary | null = null;
   let retrieveStatusLoading = false;
+  let withdrawalCheckInFlight = false;
+  let withdrawal: DogeWithdrawal | null = null;
+  let recoveryError = '';
+  let withdrawalTimer: ReturnType<typeof setTimeout> | null = null;
+  let estimateTimer: ReturnType<typeof setTimeout> | null = null;
+  let estimateGeneration = 0;
+  let estimateLoading = false;
+  let estimateValidUntil = 0;
+  let estimateFormKey = '';
+  let estimatedFormKey = '';
+
+  $: withdrawalHeld = !!withdrawal && withdrawal.phase !== 'terminal';
+  $: currentEstimateKey = `${sessionGeneration}:${redeemAddress.trim()}:${redeemDogeAmount}`;
+  $: if (isConnected && currentEstimateKey !== estimateFormKey) queueWithdrawalEstimate(currentEstimateKey);
+  function queueWithdrawalEstimate(key: string) {
+    estimateFormKey = key;
+    estimateGeneration += 1;
+    estimateValidUntil = 0;
+    withdrawalFeeSummary = '';
+    if (estimateTimer !== null) clearTimeout(estimateTimer);
+    if (isPlausibleDogecoinAddress(redeemAddress) && parseDogeAmountInput(redeemDogeAmount) !== null) {
+      estimateLoading = true;
+      estimateTimer = setTimeout(loadWithdrawalEstimate, 300);
+    } else estimateLoading = false;
+  }
+
+  function receiptStorage(): Storage { return window.localStorage; }
+  function showWithdrawal(record: DogeWithdrawal | null) {
+    withdrawal = record;
+    approveBlockIndex = record?.approveBlock !== undefined ? BigInt(record.approveBlock) : null;
+    burnBlockIndex = record?.burnBlock !== undefined ? BigInt(record.burnBlock) : null;
+    retrieveStatusSummary = record?.status ? { kind: record.status as RetrieveStatusSummary['kind'], label: record.status === 'Confirmed' ? 'Your DOGE withdrawal is confirmed.' : record.status === 'Reimbursed' ? 'The minter reimbursed your ckDOGE.' : 'Your withdrawal is processing.', txid: record.txid } : null;
+  }
+  async function restoreWithdrawal() {
+    if (!ownerPrincipal || !isConnected || typeof window === 'undefined') return;
+    const owner = ownerPrincipal.toText();
+    const generation = sessionGeneration;
+    const isLive = () => !destroyed && isConnected && sessionGeneration === generation && ownerPrincipal?.toText() === owner;
+    try {
+      await withDogeWithdrawalLock(owner, CANISTER_IDS.CKDOGE_MINTER, async () => {
+        if (!isLive()) return;
+        showWithdrawal(readDogeWithdrawal(receiptStorage(), owner, CANISTER_IDS.CKDOGE_MINTER));
+        recoveryError = '';
+      });
+      if (isLive() && burnBlockIndex !== null && withdrawal?.phase !== 'terminal') refreshRetrieveStatus();
+    } catch (error) {
+      if (isLive()) recoveryError = error instanceof Error ? error.message : 'Could not restore your withdrawal. Its receipt has been preserved.';
+    }
+  }
+  function resumeOnFocus() {
+    if (!isConnected || !ownerPrincipal) return;
+    restoreWithdrawal();
+    if (depositAddress && !isPolling) recheckAfterTimeout();
+    if (isPlausibleDogecoinAddress(redeemAddress) && parseDogeAmountInput(redeemDogeAmount) !== null && Date.now() >= estimateValidUntil) loadWithdrawalEstimate();
+  }
+  onMount(() => {
+    window.addEventListener('focus', resumeOnFocus);
+    window.addEventListener('storage', restoreWithdrawal);
+    return () => {
+      window.removeEventListener('focus', resumeOnFocus);
+      window.removeEventListener('storage', restoreWithdrawal);
+    };
+  });
 
   // Any change to isConnected/ownerPrincipal (including disconnect) must wipe every
   // piece of client-specific UI state so a new/different wallet never sees stale data.
   function resetClientState() {
+    sessionGeneration += 1;
+    estimateGeneration += 1;
+    if (withdrawalTimer !== null) clearTimeout(withdrawalTimer);
+    if (estimateTimer !== null) clearTimeout(estimateTimer);
+    withdrawalTimer = null;
+    estimateTimer = null;
+    withdrawal = null;
+    recoveryError = '';
+    estimateFormKey = '';
+    estimatedFormKey = '';
+    estimateValidUntil = 0;
+    estimateLoading = false;
     depositAddress = null;
     addressLoading = false;
     addressError = '';
@@ -167,6 +254,7 @@
   const unsubConnected = isConnectedStore.subscribe((v) => {
     isConnected = v;
     if (!v) resetClientState();
+    else queueMicrotask(restoreWithdrawal);
   });
   const unsubPrincipal = principalStore.subscribe((v) => {
     const key = principalKey(v);
@@ -174,7 +262,17 @@
     if (key !== lastPrincipalKey) {
       lastPrincipalKey = key;
       resetClientState();
+      queueMicrotask(restoreWithdrawal);
     }
+  });
+
+  let observedWalletGeneration: number | null = null;
+  const unsubWalletGeneration = walletSessionGeneration.subscribe((generation) => {
+    if (observedWalletGeneration !== null && generation !== observedWalletGeneration) {
+      resetClientState();
+      queueMicrotask(restoreWithdrawal);
+    }
+    observedWalletGeneration = generation;
   });
 
   // Auto-fetch the deposit address the moment a non-anonymous principal is
@@ -204,8 +302,9 @@
   async function requestDepositAddress() {
     if (!isConnected || !ownerPrincipal || addressLoading) return;
     const sessionKey = principalKey(ownerPrincipal);
+    const generation = sessionGeneration;
     const requestPrincipal = ownerPrincipal;
-    const isLive = () => !destroyed && principalKey(ownerPrincipal) === sessionKey;
+    const isLive = () => !destroyed && isConnected && sessionGeneration === generation && principalKey(ownerPrincipal) === sessionKey;
 
     addressLoading = true;
     addressError = '';
@@ -216,6 +315,7 @@
       const address: string = await actor.get_doge_address(args);
       if (!isLive()) return;
       depositAddress = address;
+      beginSentDogeFlow();
       minterInfoLoading = true;
       minterInfoError = false;
       try {
@@ -247,7 +347,7 @@
     }
   }
 
-  // Only starts on this explicit "I sent the DOGE" click — never automatically.
+  // The minter safely credits only the connected default account. Restore checking on address load.
   async function beginSentDogeFlow() {
     if (!isConnected || !ownerPrincipal || !depositAddress || isPolling) return;
     stopPolling();
@@ -264,9 +364,11 @@
 
   // True only if this exact poll session (component alive, polling flag on, connected
   // principal unchanged) is still the one that kicked off the in-flight call.
-  function isPollSessionLive(sessionPrincipal: Principal): boolean {
+  function isPollSessionLive(sessionPrincipal: Principal, generation = sessionGeneration): boolean {
     return (
       !destroyed &&
+      isConnected &&
+      sessionGeneration === generation &&
       isPolling &&
       pollingPrincipal !== null &&
       pollingPrincipal.toText() === sessionPrincipal.toText() &&
@@ -283,12 +385,19 @@
       pollingStopped = true;
       return;
     }
+    if (depositCheckInFlight) {
+      pollTimer = setTimeout(runUpdateBalanceCycle, 1000);
+      return;
+    }
     const sessionPrincipal = pollingPrincipal;
+    const generation = sessionGeneration;
+    const isLive = () => isPollSessionLive(sessionPrincipal, generation);
+    depositCheckInFlight = true;
     pollAttempt += 1;
 
     try {
-      const result = await updateDogeBalanceForOwner(sessionPrincipal, () => isPollSessionLive(sessionPrincipal));
-      if (!isPollSessionLive(sessionPrincipal)) return;
+      const result = await updateDogeBalanceForOwner(sessionPrincipal, isLive);
+      if (!isLive()) return;
 
       if ('Ok' in result) {
         utxoStatuses = (result.Ok as Array<Record<string, any>>).map(classifyUtxoStatus);
@@ -296,11 +405,8 @@
         const minted = utxoStatuses.find((s) => s.kind === 'Minted');
         if (minted) {
           mintedSummary = minted;
-          stopPolling();
-          pollingStopped = true;
-          return;
         }
-        const terminalNonMint = utxoStatuses.find((s) => isTerminalUtxoKind(s.kind));
+        const terminalNonMint = utxoStatuses.find((s) => s.kind !== 'Minted' && isTerminalUtxoKind(s.kind));
         if (terminalNonMint) {
           pollFatalMessage = terminalNonMint.label;
           stopPolling();
@@ -310,6 +416,7 @@
       } else if ('Err' in result) {
         const summary = summarizeUpdateBalanceError(result.Err);
         lastUpdateBalanceError = summary;
+        if (summary.pendingUtxos?.length || summary.currentConfirmations !== undefined) mintedSummary = null;
         if (!isRetryableUpdateBalanceError(summary.kind)) {
           pollFatalMessage = summary.message;
           stopPolling();
@@ -318,19 +425,18 @@
         }
       }
     } catch (err) {
-      if (!isPollSessionLive(sessionPrincipal)) return;
-      pollFatalMessage = err instanceof Error ? `Error checking your balance: ${err.message}` : 'Error checking your balance.';
-      stopPolling();
-      pollingStopped = true;
-      return;
+      if (!isLive()) return;
+      pollFatalMessage = 'Connection interrupted. We will check your deposit again automatically.';
+    } finally {
+      depositCheckInFlight = false;
     }
 
-    if (!isPollSessionLive(sessionPrincipal)) return;
+    if (!isLive()) return;
 
     if (isPollingExhausted(pollAttempt)) {
-      stopPolling();
-      pollingStopped = true;
-      return;
+      // Keep the reusable account watching while this page is open. A fresh
+      // bounded window uses the same safe credit-only request path.
+      pollAttempt = 0;
     }
 
     if (isPolling && !destroyed) {
@@ -338,8 +444,7 @@
     }
   }
 
-  // Explicit recheck after the bounded poll expires — never resumes automatically,
-  // and always binds to whoever is connected NOW (a fresh session), never the stale pollingPrincipal.
+  // Focus recovery binds to the currently connected wallet and a fresh generation.
   function recheckAfterTimeout() {
     if (!isConnected || !ownerPrincipal || isPolling) return;
     pollingPrincipal = ownerPrincipal;
@@ -366,14 +471,19 @@
       return;
     }
 
+    const generation = sessionGeneration;
+    const estimateId = ++estimateGeneration;
     const capturedPrincipalKey = principalKey(ownerPrincipal);
     const capturedRaw = redeemDogeAmount;
+    const capturedAddress = redeemAddress.trim();
     const isLive = () =>
       !destroyed &&
       isConnected &&
+      sessionGeneration === generation && estimateGeneration === estimateId &&
       principalKey(ownerPrincipal) === capturedPrincipalKey &&
-      redeemDogeAmount === capturedRaw;
+      redeemDogeAmount === capturedRaw && redeemAddress.trim() === capturedAddress;
 
+    estimateLoading = true;
     try {
       const minterActor = await getPublicMinterActor();
       const [feeResult, ledgerFee] = await Promise.all([
@@ -383,111 +493,155 @@
       if (!isLive()) return;
       const outcome = summarizeWithdrawalFeeEstimate(feeResult);
       if (outcome.success) {
+        estimateValidUntil = Date.now() + 60_000;
+        estimatedFormKey = currentEstimateKey;
+        if (estimateTimer !== null) clearTimeout(estimateTimer);
+        estimateTimer = setTimeout(loadWithdrawalEstimate, 55_000);
         const ledgerFeeStr = formatKoinuAsDoge(ledgerFee);
         withdrawalFeeSummary = `${outcome.label} + ${ledgerFeeStr} ledger fee. The approval step also charges ${ledgerFeeStr} ledger fee separately from the withdrawal transfer fee above, so two ledger fees total.`;
       } else {
         withdrawalFeeSummary = outcome.label;
       }
     } catch {
-      if (isLive()) withdrawalFeeSummary = '';
+      if (isLive()) withdrawalFeeSummary = 'Could not load fees. We will try again automatically.';
+    } finally {
+      if (isLive()) {
+        estimateLoading = false;
+        if (estimateValidUntil <= Date.now()) {
+          if (estimateTimer !== null) clearTimeout(estimateTimer);
+          estimateTimer = setTimeout(loadWithdrawalEstimate, 15_000);
+        }
+      }
     }
   }
 
-  // The ledger fee is read synchronously from the warm cache (kept warm on connect
-  // and on amount blur, both via the public/anonymous ledger actor — never a live
-  // icrc1_fee() query here, and never through the Oisy consent actor, which rejects
-  // it as an unsupported canister call). The approval amount is exactly requested +
-  // ledger fee, never more. Actor routing (Oisy signer vs standard wallet actor) and
-  // the approve-then-retrieve sequencing live in redeemDogeWithApproval so the
-  // click-to-popup gesture chain stays testable outside a component.
   async function submitRedeem() {
-    if (redeemBusy) return;
-    if (!validateRedeemForm()) return;
-    if (!isConnected || !ownerPrincipal) return;
-
-    const sessionKey = principalKey(ownerPrincipal);
+    if (redeemBusy || withdrawalHeld || recoveryError || !validateRedeemForm() || !isConnected || !ownerPrincipal) return;
+    if (estimatedFormKey !== currentEstimateKey || Date.now() >= estimateValidUntil) {
+      loadWithdrawalEstimate();
+      return;
+    }
+    const owner = ownerPrincipal.toText();
+    const requestedKoinu = parseDogeAmountInput(redeemDogeAmount)!;
+    const destination = redeemAddress.trim();
+    const quotedForm = currentEstimateKey;
     const sessionPrincipal = ownerPrincipal;
-    const isLive = () => !destroyed && principalKey(ownerPrincipal) === sessionKey;
-
+    const generation = sessionGeneration;
+    const isLive = () => !destroyed && isConnected && sessionGeneration === generation && ownerPrincipal?.toText() === owner;
+    // Open synchronously while the click still owns the browser gesture, before any await or lock.
+    let action: MinterOisyAction | null = null;
     redeemBusy = true;
     redeemError = '';
-    approveBlockIndex = null;
-    burnBlockIndex = null;
-    retrieveStatusSummary = null;
-
+    let exact: DogeWithdrawal | null = null;
     try {
-      const requestedKoinu = parseDogeAmountInput(redeemDogeAmount)!;
-      const ledgerFee = getCachedLedgerFee(CKDOGE_LEDGER_FEE_REF);
-      const approvalAmount = computeApprovalAmount(requestedKoinu, ledgerFee);
-      const approveArgs = buildApproveArgs(Principal.fromText(CANISTER_IDS.CKDOGE_MINTER), approvalAmount);
-      const retrieveArgs = buildRetrieveWithApprovalArgs(redeemAddress, requestedKoinu);
-
-      const outcome = await redeemDogeWithApproval({
-        ownerPrincipal: sessionPrincipal,
-        ledgerCanisterId: CANISTER_IDS.CKDOGE_LEDGER,
-        minterCanisterId: CANISTER_IDS.CKDOGE_MINTER,
-        ledgerIdl: ckdogeLedgerIdl,
-        approveArgs,
-        retrieveArgs,
-        isLive,
+      if (isOisyWallet()) action = beginMinterOisyAction(sessionPrincipal);
+      // Attach a rejection observer immediately while waiting for another tab's lock.
+      const ready = action?.ready;
+      ready?.catch(() => {});
+      await withDogeWithdrawalLock(owner, CANISTER_IDS.CKDOGE_MINTER, async () => {
+        if (!isLive()) return;
+        const previous = readDogeWithdrawal(receiptStorage(), owner, CANISTER_IDS.CKDOGE_MINTER);
+        if (previous && previous.phase !== 'terminal') { showWithdrawal(previous); return; }
+        if (ready) await ready;
+        if (!isLive()) return;
+        if (quotedForm !== currentEstimateKey || Date.now() >= estimateValidUntil) {
+          loadWithdrawalEstimate();
+          throw new Error('Withdrawal fees are refreshing. Review them before confirming.');
+        }
+        const ledgerFee = getCachedLedgerFee(CKDOGE_LEDGER_FEE_REF);
+        exact = { version: 1, id: crypto.randomUUID(), owner, minter: CANISTER_IDS.CKDOGE_MINTER,
+          address: destination, amount: requestedKoinu.toString(), createdAt: Date.now(), phase: 'approving' };
+        replaceDogeWithdrawal(receiptStorage(), previous, exact, owner, CANISTER_IDS.CKDOGE_MINTER);
+        showWithdrawal(exact);
+        const update = (next: DogeWithdrawal | null) => {
+          replaceDogeWithdrawal(receiptStorage(), exact, next, owner, CANISTER_IDS.CKDOGE_MINTER);
+          exact = next;
+          if (isLive()) showWithdrawal(next);
+        };
+        try {
+          const outcome = await redeemDogeWithApproval({ ownerPrincipal: sessionPrincipal,
+            ledgerCanisterId: CANISTER_IDS.CKDOGE_LEDGER, minterCanisterId: CANISTER_IDS.CKDOGE_MINTER,
+            ledgerIdl: ckdogeLedgerIdl,
+            approveArgs: buildApproveArgs(Principal.fromText(CANISTER_IDS.CKDOGE_MINTER), computeApprovalAmount(requestedKoinu, ledgerFee)),
+            retrieveArgs: buildRetrieveWithApprovalArgs(exact.address, requestedKoinu), isLive,
+            onApproved: block => update({ ...exact!, phase: 'approved', approveBlock: block.toString() }),
+            beforeRetrieve: () => update({ ...exact!, phase: 'retrieving' }),
+          });
+          // Persist authoritative responses even when the initiating wallet session has left.
+          if (outcome.kind === 'success') {
+            update({ ...exact!, phase: 'accepted', approveBlock: outcome.approveBlockIndex.toString(), burnBlock: outcome.burnBlockIndex.toString() });
+          } else if (outcome.kind === 'approve-error' || outcome.kind === 'stale' || (outcome.kind === 'retrieve-error' && outcome.definite)) {
+            update(null);
+            if (isLive() && outcome.kind !== 'stale') redeemError = outcome.message;
+          } else if (isLive() && outcome.kind === 'retrieve-error') redeemError = outcome.message;
+        } catch (error) {
+          if (error instanceof DogeWithdrawalPreflightError) update(null);
+          throw error;
+        }
       });
-
-      if (!isLive()) return;
-      switch (outcome.kind) {
-        case 'stale':
-          return;
-        case 'approve-error':
-          redeemError = `Approval failed: ${outcome.message}`;
-          return;
-        case 'retrieve-error':
-          approveBlockIndex = outcome.approveBlockIndex;
-          redeemError = outcome.message;
-          return;
-        case 'success':
-          approveBlockIndex = outcome.approveBlockIndex;
-          burnBlockIndex = outcome.burnBlockIndex;
-          return;
-      }
-    } catch (err) {
-      if (isLive()) {
-        redeemError = err instanceof Error ? `Redemption failed: ${err.message}` : 'Redemption failed.';
-      }
+      if (isLive() && burnBlockIndex !== null && withdrawal?.phase !== 'terminal') refreshRetrieveStatus();
+    } catch (error) {
+      if (isLive()) redeemError = exact ? 'We could not confirm the result. Your withdrawal is saved; do not submit it again. Contact support to reconcile this attempt.' : error instanceof Error ? error.message : 'Could not prepare your withdrawal.';
     } finally {
+      try { await action?.close(); } catch { /* A close failure never changes financial disposition. */ }
       if (isLive()) redeemBusy = false;
     }
   }
 
-  // Manual refresh only — no background tracking of the retrieval.
   async function refreshRetrieveStatus() {
-    if (burnBlockIndex === null || retrieveStatusLoading || !ownerPrincipal) return;
-    const sessionKey = principalKey(ownerPrincipal);
-    const isLive = () => !destroyed && principalKey(ownerPrincipal) === sessionKey;
-    const blockIndex = burnBlockIndex;
-
+    if (!withdrawal?.burnBlock || withdrawal.phase === 'terminal' || retrieveStatusLoading || !ownerPrincipal) return;
+    if (withdrawalTimer !== null) clearTimeout(withdrawalTimer);
+    if (withdrawalCheckInFlight) { withdrawalTimer = setTimeout(refreshRetrieveStatus, 1000); return; }
+    withdrawalCheckInFlight = true;
+    const receipt = withdrawal;
+    const generation = sessionGeneration;
+    const isLive = () => !destroyed && isConnected && sessionGeneration === generation && ownerPrincipal?.toText() === receipt.owner && withdrawal?.id === receipt.id;
     retrieveStatusLoading = true;
     try {
-      const minterActor = await getPublicMinterActor();
+      const actor = await getPublicMinterActor();
       if (!isLive()) return;
-      const status = await minterActor.retrieve_doge_status({ block_index: blockIndex });
+      const status = classifyRetrieveDogeStatus(await actor.retrieve_doge_status({ block_index: BigInt(receipt.burnBlock!) }));
+      if (status.kind === 'Reimbursed') status.label = 'Your ckDOGE has been reimbursed.';
+      if (status.kind === 'WillReimburse') status.label = 'The minter is processing your ckDOGE reimbursement.';
+      if (status.kind === 'AmountTooLow') status.label = 'This withdrawal cannot cover network fees. Contact support with your saved receipt before sending again.';
+      if (status.kind === 'Unknown') status.label = 'The minter cannot currently identify this withdrawal. Your receipt is saved; do not send again. Contact support for reconciliation.';
       if (!isLive()) return;
-      retrieveStatusSummary = classifyRetrieveDogeStatus(status);
-    } catch (err) {
-      if (isLive()) {
-        redeemError = err instanceof Error ? `Error checking withdrawal status: ${err.message}` : 'Error checking withdrawal status.';
-      }
+      await withDogeWithdrawalLock(receipt.owner, CANISTER_IDS.CKDOGE_MINTER, async () => {
+        if (!isLive()) return;
+        const current = readDogeWithdrawal(receiptStorage(), receipt.owner, CANISTER_IDS.CKDOGE_MINTER);
+        if (current?.id !== receipt.id || current.phase === 'terminal') return;
+        const next: DogeWithdrawal = { ...current, phase: isDogeWithdrawalTerminal(status.kind) ? 'terminal' : 'accepted', status: status.kind, txid: status.txid };
+        replaceDogeWithdrawal(receiptStorage(), current, next, receipt.owner, CANISTER_IDS.CKDOGE_MINTER);
+        showWithdrawal(next);
+        retrieveStatusSummary = status;
+        redeemError = '';
+      });
+    } catch {
+      if (isLive()) redeemError = 'Status is temporarily unavailable. Your withdrawal is saved and we will keep checking.';
     } finally {
-      if (isLive()) retrieveStatusLoading = false;
+      withdrawalCheckInFlight = false;
+      if (isLive()) {
+        retrieveStatusLoading = false;
+        if (!isDogeWithdrawalTerminal(withdrawal?.status)) withdrawalTimer = setTimeout(refreshRetrieveStatus, 15_000);
+      }
     }
   }
 
   onDestroy(() => {
     destroyed = true;
     stopPolling();
+    if (withdrawalTimer !== null) clearTimeout(withdrawalTimer);
+    if (estimateTimer !== null) clearTimeout(estimateTimer);
     if (addressCopyTimer !== null) clearTimeout(addressCopyTimer);
     unsubConnected();
     unsubPrincipal();
+    unsubWalletGeneration();
   });
 </script>
+
+<svelte:head>
+  <title>ckDOGE Minter | Rumi</title>
+</svelte:head>
 
 <div class="doge-page">
   <div class="doge-hero">
@@ -571,7 +725,7 @@
             {/if}
           {:else}
             <h2>Send DOGE to your address</h2>
-            <p class="doge-panel-sub">Your ckDOGE will arrive in your connected wallet.</p>
+            <p class="doge-panel-sub">Send DOGE once. We automatically detect confirmed deposits and mint ckDOGE to this wallet. You can return to this address after reloading.</p>
 
             <div class="doge-row doge-row--annotated">
               <span class="doge-row-label" id="doge-address-label">Your DOGE deposit address</span>
@@ -597,10 +751,7 @@
               </span>
             </div>
 
-            <div class="doge-row">
-              <span class="doge-row-label">Recipient principal</span>
-              <code class="doge-addr-text doge-addr-text--muted">{ownerPrincipal?.toText()}</code>
-            </div>
+            <details><summary>Account details</summary><code class="doge-addr-text doge-addr-text--muted">{ownerPrincipal?.toText()}</code></details>
 
             <div class="doge-row">
               <span class="doge-row-label">Requirements</span>
@@ -620,20 +771,8 @@
               </div>
             </div>
 
-            <p class="doge-only-send">Only send DOGE to this address.</p>
+            <div class="doge-row doge-row--annotated"><p class="doge-only-send">Only send DOGE to this address.</p><span class="doge-annotation doge-annotation--gold" aria-hidden="true"><svg class="doge-annotation-arrow" viewBox="0 0 28 32" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path d="M26,4 C 10,4 10,20 2,26" /></svg>much checking.<br />very automatic.</span></div>
 
-            {#if !isPolling && !pollingStopped}
-              <div class="doge-row doge-row--annotated">
-                <button class="doge-btn doge-btn--cta" on:click={beginSentDogeFlow}>I sent the DOGE</button>
-                <p class="doge-cta-helper">Starts checking for your deposit.</p>
-                <span class="doge-annotation doge-annotation--gold" aria-hidden="true">
-                  <svg class="doge-annotation-arrow" viewBox="0 0 28 32" preserveAspectRatio="none" aria-hidden="true" focusable="false">
-                    <path d="M26,4 C 10,4 10,20 2,26" />
-                  </svg>
-                  sent it?<br />tell the dog.
-                </span>
-              </div>
-            {/if}
           {/if}
 
           {#if isPolling || pollingStopped}
@@ -647,7 +786,7 @@
                   class:doge-status-pill--error={confirmation.phase === 'error'}
                 >
                   <span class="doge-status-dot" aria-hidden="true"></span>
-                  {confirmation.statusLabel}
+                  {depositStatusLabel}
                 </span>
 
                 {#if confirmation.phase === 'confirming' || confirmation.phase === 'stopped'}
@@ -681,7 +820,7 @@
               {#if confirmation.utxoCountLabel || confirmation.amountDetectedLabel || confirmation.nextCheckLabel}
                 <dl class="doge-ticket-details">
                   {#if confirmation.utxoCountLabel}
-                    <div class="doge-ticket-row"><dt>UTXOs</dt><dd>{confirmation.utxoCountLabel}</dd></div>
+                    <div class="doge-ticket-row"><dt>Deposits</dt><dd>{confirmation.utxoCountLabel}</dd></div>
                   {/if}
                   {#if confirmation.amountDetectedLabel}
                     <div class="doge-ticket-row"><dt>Amount detected</dt><dd>{confirmation.amountDetectedLabel}</dd></div>
@@ -708,7 +847,7 @@
 
               {#if mintedSummary}
                 <div class="doge-ticket-divider" aria-hidden="true"></div>
-                <p class="doge-success">{mintedSummary.label} (block {mintedSummary.blockIndex?.toString()})</p>
+                <p class="doge-success">{mintedSummary.label}</p><details><summary>Deposit receipt</summary><p>Mint block: {mintedSummary.blockIndex?.toString()}</p></details>
               {/if}
 
               {#if pollFatalMessage}
@@ -735,7 +874,7 @@
 
           <label class="doge-field" for="doge-redeem-address">
             Dogecoin destination address
-            <input id="doge-redeem-address" type="text" bind:value={redeemAddress} placeholder="D..." />
+            <input id="doge-redeem-address" type="text" disabled={redeemBusy || withdrawalHeld} bind:value={redeemAddress} placeholder="D..." />
           </label>
           {#if redeemAddressError}<p class="doge-error" role="alert">{redeemAddressError}</p>{/if}
 
@@ -745,33 +884,39 @@
               id="doge-redeem-amount"
               type="text"
               inputmode="decimal"
+              disabled={redeemBusy || withdrawalHeld}
               bind:value={redeemDogeAmount}
-              on:blur={loadWithdrawalEstimate}
+
               placeholder="e.g. 50"
             />
           </label>
           {#if redeemAmountError}<p class="doge-error" role="alert">{redeemAmountError}</p>{/if}
           {#if withdrawalFeeSummary}<p class="doge-panel-sub">{withdrawalFeeSummary}</p>{/if}
 
-          <button class="doge-btn doge-btn--cta" on:click={submitRedeem} disabled={redeemBusy}>
-            {redeemBusy ? 'Processing…' : 'Send it back to Dogecoin'}
+          {#if estimateLoading}<p class="doge-panel-sub">Updating withdrawal fees…</p>{/if}
+          <button class="doge-btn doge-btn--cta" on:click={submitRedeem} disabled={redeemBusy || withdrawalHeld || !!recoveryError || estimateLoading || estimatedFormKey !== currentEstimateKey || estimateValidUntil <= Date.now()}>
+            {redeemBusy ? 'Confirm in your wallet…' : withdrawalHeld ? 'Withdrawal in progress' : 'Send it back to Dogecoin'}
           </button>
+          {#if recoveryError}<p class="doge-error" role="alert">{recoveryError}</p>{/if}
+          {#if withdrawalHeld}
+            <p class="doge-panel-sub" aria-live="polite">{withdrawal?.burnBlock ? 'Your request is saved. We will follow it through to confirmation or reimbursement automatically.' : 'Your previous withdrawal needs reconciliation. Its result is uncertain. Do not send again; contact support with the saved receipt below.'}</p>
+            <a href="https://t.me/+nVydvqMbUWY3MGE5" target="_blank" rel="noreferrer">Get help with this withdrawal</a>
+          {/if}
 
           {#if redeemError}<p class="doge-error" role="alert">{redeemError}</p>{/if}
-          {#if approveBlockIndex !== null}
-            <p class="doge-panel-sub">Approval block index: {approveBlockIndex.toString()}</p>
+          {#if retrieveStatusSummary}
+            <p class="doge-panel-sub" aria-live="polite">{retrieveStatusSummary.label}</p>
           {/if}
-          {#if burnBlockIndex !== null}
-            <p class="doge-success">Burn block index: {burnBlockIndex.toString()}, confirmed on ICP.</p>
-            <button class="doge-btn" on:click={refreshRetrieveStatus} disabled={retrieveStatusLoading}>
-              {retrieveStatusLoading ? 'Checking…' : 'Refresh withdrawal status'}
-            </button>
-            {#if retrieveStatusSummary}
-              <p class="doge-panel-sub">
-                {retrieveStatusSummary.label}
-                {#if retrieveStatusSummary.txid}(txid: {retrieveStatusSummary.txid}){/if}
-              </p>
-            {/if}
+          {#if withdrawal}
+            <details>
+              <summary>Withdrawal receipt</summary>
+              <p>Reference: {withdrawal.id}</p>
+              <p>Destination: {withdrawal.address}</p>
+              <p>Amount: {formatKoinuAsDoge(BigInt(withdrawal.amount))}</p>
+              {#if approveBlockIndex !== null}<p>Approval: {approveBlockIndex.toString()}</p>{/if}
+              {#if burnBlockIndex !== null}<p>Withdrawal: {burnBlockIndex.toString()}</p>{/if}
+              {#if retrieveStatusSummary?.txid}<p>Transaction: {retrieveStatusSummary.txid}</p>{/if}
+            </details>
           {/if}
         {/if}
       </div>
@@ -1157,11 +1302,7 @@
     border-color: var(--rumi-action-bright);
   }
 
-  .doge-cta-helper {
-    font-size: 0.75rem;
-    color: var(--rumi-text-muted);
-    margin: 0.375rem 0 0;
-  }
+
 
   /* ── Status text ── */
   .doge-error {
