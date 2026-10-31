@@ -575,3 +575,174 @@ fn run_rehearsal_harness() {
         std::thread::sleep(Duration::from_secs(3600));
     }
 }
+
+// ── in-place upgrade of the LIVE rehearsal backend (state preserved) ───────────────────────────
+//
+//   REHEARSAL_SERVER_URL=http://127.0.0.1:4951 REHEARSAL_INSTANCE=0 \
+//   REHEARSAL_WASM_GZ=target/xrpl-rehearsal/backend_fixture.wasm.gz \
+//   cargo test --release -p rumi_protocol_backend --test xrpl_icusd_testnet_rehearsal \
+//     upgrade_running_rehearsal_backend -- --ignored --nocapture
+//
+// Talks to the PocketIC REST API directly (the harness process owns the instance, so no client
+// handle exists in this process). Chunked install keeps the multi-MiB module under the ingress cap.
+fn curl_status(args: &[String]) -> (u16, String) {
+    let out = Command::new("curl")
+        .args(["-sS", "--max-time", "600", "-w", "\n%{http_code}"])
+        .args(args)
+        .output()
+        .expect("curl");
+    let s = String::from_utf8_lossy(&out.stdout).to_string();
+    let (body, code) = s.rsplit_once('\n').unwrap_or((&s, "0"));
+    (code.trim().parse().unwrap_or(0), body.to_string())
+}
+
+/// POST with the PocketIC server's busy/started protocol (409 retry, 202 then poll read_graph).
+fn rest_post(path: &str, body: &Value) -> Value {
+    let server = std::env::var("REHEARSAL_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:4951".into());
+    let inst = std::env::var("REHEARSAL_INSTANCE").unwrap_or_else(|_| "0".into());
+    let f = dir().join("rest_body.json");
+    std::fs::write(&f, serde_json::to_vec(body).unwrap()).unwrap();
+    let url = format!("{server}/instances/{inst}/{path}");
+    let args = vec![
+        "-X".to_string(), "POST".into(), "-H".into(), "Content-Type: application/json".into(),
+        "--data-binary".into(), format!("@{}", f.display()), url.clone(),
+    ];
+    let t0 = Instant::now();
+    loop {
+        let (code, text) = curl_status(&args);
+        match code {
+            200 => return serde_json::from_str(&text).unwrap_or_else(|_| panic!("bad json from {url}: {text}")),
+            202 => {
+                let v: Value = serde_json::from_str(&text).expect("started json");
+                let g = format!(
+                    "{server}/read_graph/{}/{}",
+                    v["state_label"].as_str().unwrap(),
+                    v["op_id"].as_str().unwrap()
+                );
+                loop {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let (c, t) = curl_status(&["-X".into(), "GET".into(), g.clone()]);
+                    if c == 200 {
+                        return serde_json::from_str(&t).unwrap_or_else(|_| panic!("bad json from {g}: {t}"));
+                    }
+                    assert!(t0.elapsed() < Duration::from_secs(600), "timed out polling {g}: {c} {t}");
+                }
+            }
+            409 => std::thread::sleep(Duration::from_millis(200)),
+            _ => panic!("{url} -> {code}: {text}"),
+        }
+        assert!(t0.elapsed() < Duration::from_secs(600), "timed out on {url}");
+    }
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+fn unb64(s: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s).expect("base64")
+}
+
+/// Update call through the REST API; returns the raw reply bytes or panics with the reject.
+fn rest_update(sender: Principal, canister: Principal, effective: Principal, method: &str, payload: Vec<u8>) -> Vec<u8> {
+    let sub = rest_post(
+        "update/submit_ingress_message",
+        &json!({
+            "sender": b64(sender.as_slice()),
+            "canister_id": b64(canister.as_slice()),
+            "effective_principal": { "CanisterId": b64(effective.as_slice()) },
+            "method": method,
+            "payload": b64(&payload),
+        }),
+    );
+    let ok = sub.get("Ok").unwrap_or_else(|| panic!("submit {method} failed: {sub}")).clone();
+    let res = rest_post("update/await_ingress_message", &ok);
+    match res.get("Ok") {
+        Some(w) => match w.get("Reply").and_then(Value::as_str) {
+            Some(r) => unb64(r),
+            None => panic!("{method} rejected: {w}"),
+        },
+        None => panic!("{method} failed: {res}"),
+    }
+}
+
+#[test]
+#[ignore]
+fn upgrade_running_rehearsal_backend() {
+    use pocket_ic::management_canister::{
+        CanisterInstallMode, ChunkHash, InstallChunkedCodeArgs, UploadChunkArgs,
+    };
+    use sha2::{Digest, Sha256};
+    let wasm_path = std::env::var("REHEARSAL_WASM_GZ")
+        .unwrap_or_else(|_| dir().join("backend_fixture.wasm.gz").display().to_string());
+    let wasm = std::fs::read(&wasm_path).expect("wasm gz");
+    log(format!("upgrading {BACKEND_ID} with {wasm_path} ({} bytes)", wasm.len()));
+    let backend = p(BACKEND_ID);
+    let mgmt = Principal::management_canister();
+    let sender = ctrl();
+
+    let clear = rest_update(sender, mgmt, backend, "clear_chunk_store", Encode!(&pocket_ic::management_canister::CanisterIdRecord { canister_id: backend }).unwrap());
+    let _ = clear;
+    let mut hashes = vec![];
+    for chunk in wasm.chunks(1 << 20) {
+        let r = rest_update(sender, mgmt, backend, "upload_chunk", Encode!(&UploadChunkArgs { canister_id: backend, chunk: chunk.to_vec() }).unwrap());
+        let h: ChunkHash = Decode!(&r, ChunkHash).unwrap();
+        hashes.push(h);
+    }
+    log(format!("uploaded {} chunks", hashes.len()));
+    let arg = Encode!(&rumi_protocol_backend::ProtocolArg::Upgrade(rumi_protocol_backend::UpgradeArg {
+        mode: None,
+        description: Some("rehearsal: XRPL API v2 receipts".into()),
+    }))
+    .unwrap();
+    let args = InstallChunkedCodeArgs {
+        arg,
+        wasm_module_hash: Sha256::digest(&wasm).to_vec(),
+        mode: CanisterInstallMode::Upgrade(None),
+        chunk_hashes_list: hashes,
+        target_canister: backend,
+        store_canister: None,
+        sender_canister_version: None,
+    };
+    let _ = rest_update(sender, mgmt, backend, "install_chunked_code", Encode!(&args).unwrap());
+    log("UPGRADE OK");
+}
+
+/// Generic read/update call against the LIVE rehearsal instance, printed as Candid text.
+///   REHEARSAL_CALL=get_all_vaults REHEARSAL_SENDER=<principal|anon> [REHEARSAL_UPDATE=1] [REHEARSAL_ARG_HEX=<candid bytes>]
+#[test]
+#[ignore]
+fn call_running_rehearsal_backend() {
+    use candid::IDLArgs;
+    let method = std::env::var("REHEARSAL_CALL").expect("REHEARSAL_CALL");
+    let sender = match std::env::var("REHEARSAL_SENDER").as_deref() {
+        Ok("anon") | Err(_) => Principal::anonymous(),
+        Ok(t) => Principal::from_text(t).unwrap(),
+    };
+    // Empty arg list unless REHEARSAL_ARG_HEX carries pre-encoded Candid bytes.
+    let payload = match std::env::var("REHEARSAL_ARG_HEX") {
+        Ok(h) => hex::decode(h).expect("hex"),
+        Err(_) => Encode!().unwrap(),
+    };
+    let backend = p(BACKEND_ID);
+    let reply = if std::env::var("REHEARSAL_UPDATE").is_ok() {
+        rest_update(sender, backend, backend, &method, payload)
+    } else {
+        let r = rest_post(
+            "read/query",
+            &json!({
+                "sender": b64(sender.as_slice()),
+                "canister_id": b64(backend.as_slice()),
+                "effective_principal": { "CanisterId": b64(backend.as_slice()) },
+                "method": method,
+                "payload": b64(&payload),
+            }),
+        );
+        match r.get("Ok").and_then(|w| w.get("Reply")).and_then(Value::as_str) {
+            Some(x) => unb64(x),
+            None => panic!("query failed: {r}"),
+        }
+    };
+    println!("RESULT {}", IDLArgs::from_bytes(&reply).unwrap());
+}

@@ -401,11 +401,16 @@ pub enum TxOutcome {
     },
 }
 
+/// `tx` params for the any-type outcome lookup (API v2, see `RIPPLED_API_VERSION`).
+pub fn tx_outcome_params(hash: &str) -> Value {
+    json!({ "transaction": hash, "binary": false, "api_version": super::issued_rpc::RIPPLED_API_VERSION })
+}
+
 pub fn tx_outcome_plan(url: &str, hash: &str) -> CanisterHttpRequestArgument {
     build_request_to_url(
         url,
         "tx",
-        json!({ "transaction": hash, "binary": false }),
+        tx_outcome_params(hash),
         MAX_ISSUED_TX_BYTES,
         TRANSFORM_TX_ANY,
     )

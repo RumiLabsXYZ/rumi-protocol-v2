@@ -50,6 +50,14 @@ pub const TF_PARTIAL_PAYMENT: u32 = 0x0002_0000;
 
 pub const TRANSFORM_LINES: &str = "xrp_transform_lines";
 pub const TRANSFORM_ISSUED_TX: &str = "xrp_transform_issued_tx";
+/// rippled API version requested for every `tx` / `account_tx` lookup of the issued-asset
+/// lane. API v1 `tx` replies carry NO `ledger_hash` on real servers (verified live against
+/// s.altnet.rippletest.net and testnet.xrpl-labs.com), which makes the strict
+/// validated-ledger-hash receipt check impossible. API v2 returns `ledger_hash`,
+/// top-level `hash`, `tx_json`, `meta` and `validated` (and renames `Amount` to
+/// `DeliverMax` inside `tx_json`).
+pub const RIPPLED_API_VERSION: u32 = 2;
+
 pub const TRANSFORM_ACCOUNT_TX: &str = "xrp_transform_account_tx";
 pub const TRANSFORM_SERVER_INFO: &str = "xrp_transform_server_info";
 
@@ -235,7 +243,7 @@ pub fn issued_tx_request_to_url(url: &str, tx_hash: &str) -> RpcPlan {
     RpcPlan {
         url: url.to_string(),
         method: "tx",
-        params: json!({ "transaction": tx_hash, "binary": false }),
+        params: json!({ "transaction": tx_hash, "binary": false, "api_version": RIPPLED_API_VERSION }),
         max_response_bytes: MAX_ISSUED_TX_BYTES,
         transform: TRANSFORM_ISSUED_TX,
     }
@@ -256,6 +264,7 @@ pub fn account_tx_request_to_url(
         "binary": false,
         "forward": true,
         "limit": limit,
+        "api_version": RIPPLED_API_VERSION,
     });
     if let Some(m) = marker {
         params["marker"] = m.clone();
@@ -354,7 +363,9 @@ fn reduce_tx(
         "destination": pick(txj, flat, "Destination"),
         "tag": pick(txj, flat, "DestinationTag"),
         "flags": pick(txj, flat, "Flags"),
-        "amount": reduce_amount(pick(txj, flat, "Amount")),
+        // API v2 renamed the Payment `Amount` to `DeliverMax`; both are the nominal amount
+        // (evidence only, never credited: crediting uses `meta.delivered_amount`).
+        "amount": reduce_amount(pick(txj, flat, "Amount").or_else(|| pick(txj, flat, "DeliverMax"))),
         "has_paths": pick(txj, flat, "Paths").and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false),
         "has_send_max": pick(txj, flat, "SendMax").is_some(),
         "result": meta.get("TransactionResult"),
@@ -1870,12 +1881,13 @@ mod tests {
                 "DestinationTag",
                 "TransactionType",
                 "Flags",
-                "Amount",
                 "Fee",
                 "Sequence",
             ] {
                 txj[k] = flat[k].clone();
             }
+            // v2 renames Payment `Amount` to `DeliverMax`.
+            txj["DeliverMax"] = flat["Amount"].clone();
             *r = json!({
                 "tx_json": txj,
                 "meta": flat["meta"],
@@ -2509,6 +2521,154 @@ mod tests {
         assert!(LINES_CYCLES > MAX_LINES_BYTES as u128 * 800 * 13);
         assert!(TX_CYCLES > MAX_ISSUED_TX_BYTES as u128 * 800 * 13);
         assert!(check_account("rNotAnAddress").is_err());
+    }
+
+    // ---- REAL captured XRPL testnet / mainnet replies (api_version 2) -----------------
+
+    const REAL_ISSUER: &str = "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9";
+    const REAL_HOLDER: &str = "rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D";
+    const REAL_ISSUER_PAY: &str =
+        "DFEACE1C9DAFF3A507B4E3431F3972749A12A4373267FA3A46AE76AB0D2B4F83";
+    const REAL_RETURN_PAY: &str =
+        "5AE743C50D45244BDA29E5D5945099AB7BFE0939A7D1D3076312B5C6AF9D4CDD";
+    const REAL_LEDGER_HASH: &str =
+        "5FFEDFB4CFC2617853D62B766AECDA22D750C6F6E332AC51D8856FA6BEB30EFA";
+
+    fn real_asset() -> IssuedAsset {
+        IssuedAsset::icusd(REAL_ISSUER).unwrap()
+    }
+
+    fn real_lookup(raw: &[u8], hash: &str) -> Result<ReceiptLookup, ReceiptError> {
+        verify_issued_receipt_body(&reduce(raw), hash, &real_asset())
+    }
+
+    #[test]
+    fn real_v2_issuer_payment_verifies_with_exact_amounts() {
+        let raw = include_bytes!("testdata/xrpl_v2_tx_issuer_payment.json");
+        match real_lookup(raw, REAL_ISSUER_PAY).unwrap() {
+            ReceiptLookup::Verified(r) => {
+                assert_eq!(r.hash, REAL_ISSUER_PAY);
+                assert_eq!(r.ledger_hash, REAL_LEDGER_HASH);
+                assert_eq!(r.ledger_index, 21968687);
+                assert_eq!(r.account, REAL_ISSUER);
+                assert_eq!(r.destination, REAL_HOLDER);
+                assert_eq!(r.destination_tag, None);
+                // DeliverMax (v2 name of Amount) is read as the nominal amount only.
+                assert_eq!(r.nominal_amount, Some(ExactIssuedAmount::parse("4.95").unwrap()));
+                assert_eq!(r.delivered_amount, ExactIssuedAmount::parse("4.95").unwrap());
+                assert_eq!(r.credit_eligibility(), CreditEligibility::Eligible);
+                assert_eq!(r.balance_changes.len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn real_v2_tagged_return_payment_verifies_with_exact_amounts() {
+        let raw = include_bytes!("testdata/xrpl_v2_tx_tagged_return.json");
+        match real_lookup(raw, REAL_RETURN_PAY).unwrap() {
+            ReceiptLookup::Verified(r) => {
+                assert_eq!(r.account, REAL_HOLDER);
+                assert_eq!(r.destination, REAL_ISSUER);
+                assert_eq!(r.destination_tag, Some(1));
+                assert_eq!(r.delivered_amount, ExactIssuedAmount::parse("2").unwrap());
+                assert_eq!(r.nominal_amount, Some(ExactIssuedAmount::parse("2").unwrap()));
+                assert_eq!(r.credit_eligibility(), CreditEligibility::Eligible);
+                assert_eq!(r.ledger_hash.len(), 64);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn real_v1_reply_without_ledger_hash_fails_closed() {
+        // Genuine API v1 reply for the same tx: validated, success, but no ledger_hash.
+        let raw = include_bytes!("testdata/xrpl_v1_tx_issuer_payment_no_ledger_hash.json");
+        assert_eq!(
+            real_lookup(raw, REAL_ISSUER_PAY),
+            Err(ReceiptError::MissingField("ledger_hash"))
+        );
+    }
+
+    #[test]
+    fn real_v2_trustset_and_accountset_reduce_as_non_payments() {
+        for (raw, ty) in [
+            (
+                &include_bytes!("testdata/xrpl_v2_tx_trustset.json")[..],
+                "TrustSet",
+            ),
+            (
+                &include_bytes!("testdata/xrpl_v2_tx_accountset.json")[..],
+                "AccountSet",
+            ),
+        ] {
+            let reduced: Value = serde_json::from_slice(&reduce_issued_tx_body(raw)).unwrap();
+            assert_eq!(reduced["tx"]["type"], ty);
+            assert_eq!(reduced["tx"]["validated"], true);
+            assert_eq!(reduced["tx"]["result"], "tesSUCCESS");
+            assert!(reduced["tx"]["ledger_hash"].as_str().is_some());
+            assert!(reduced["tx"]["hash"].as_str().is_some());
+        }
+    }
+
+    #[test]
+    fn real_v2_account_tx_page_parses_every_entry() {
+        let raw = include_bytes!("testdata/xrpl_v2_account_tx_issuer.json");
+        let body = reduce_account_tx_body(raw);
+        let page = parse_account_tx_page(&body, 13073099, 21968758).unwrap();
+        assert_eq!(page.txs.len(), 4);
+        assert!(page.txs.iter().all(|t| t.validated
+            && t.ledger_hash.as_deref().map(is_hex64) == Some(true)));
+        assert_eq!(page.txs[0].hash, REAL_RETURN_PAY);
+        assert_eq!(page.txs[0].destination_tag, Some(1));
+        assert_eq!(page.txs[1].hash, REAL_ISSUER_PAY);
+        assert_eq!(page.txs[1].tx_type, "Payment");
+        assert_eq!(
+            page.txs[1].amount.exact_issued(&real_asset()).unwrap(),
+            ExactIssuedAmount::parse("4.95").unwrap()
+        );
+        assert_eq!(page.txs[2].tx_type, "TrustSet");
+        assert_eq!(page.txs[3].tx_type, "AccountSet");
+    }
+
+    #[test]
+    fn real_mainnet_v2_iou_payment_matches_testnet_layout() {
+        let raw = include_bytes!("testdata/xrpl_mainnet_v2_account_tx_iou_payment.json");
+        let reduced: Value = serde_json::from_slice(&reduce_account_tx_body(raw)).unwrap();
+        let t = &reduced["txs"][0];
+        assert_eq!(t["type"], "Payment");
+        assert_eq!(t["validated"], true);
+        assert!(t["ledger_hash"].as_str().map(is_hex64) == Some(true));
+        assert!(t["hash"].as_str().map(is_hex64) == Some(true));
+        assert_eq!(t["amount"]["value"].is_string(), true);
+        assert_eq!(t["delivered"]["value"].is_string(), true);
+    }
+
+    #[test]
+    fn real_account_lines_and_server_info_reduce() {
+        let lines: Value = serde_json::from_slice(&reduce_lines_body(include_bytes!(
+            "testdata/xrpl_account_lines_issuer.json"
+        )))
+        .unwrap();
+        assert_eq!(lines["validated"], true);
+        assert!(lines["ledger_hash"].as_str().map(is_hex64) == Some(true));
+        assert!(lines["lines"].as_array().map(|a| !a.is_empty()) == Some(true));
+        let info: Value = serde_json::from_slice(&reduce_server_info_body(include_bytes!(
+            "testdata/xrpl_server_info.json"
+        )))
+        .unwrap();
+        assert!(info["validated_seq"].as_u64().is_some());
+        assert!(info["validated_hash"].as_str().map(is_hex64) == Some(true));
+    }
+
+    #[test]
+    fn tx_and_account_tx_requests_pin_api_version_2() {
+        let t = issued_tx_request_to_url("https://x/", TXH);
+        assert_eq!(t.params["api_version"], 2);
+        let a = account_tx_request_to_url("https://x/", HOLDER, 1, 2, None, 10);
+        assert_eq!(a.params["api_version"], 2);
+        let any = crate::chains::xrp::issuer_rpc::tx_outcome_params(TXH);
+        assert_eq!(any["api_version"], 2);
     }
 
     #[test]

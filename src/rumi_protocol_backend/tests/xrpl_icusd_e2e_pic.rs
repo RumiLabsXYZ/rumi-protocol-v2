@@ -570,7 +570,9 @@ impl World {
         }
     }
 
-    fn tx_json(&self, t: &HistTx) -> (Value, Value) {
+    /// `(tx fields, meta)`. With `v2` the Payment amount is named `DeliverMax` (rippled
+    /// API v2); otherwise `Amount` (API v1). Mirrors the captured real replies.
+    fn tx_json(&self, t: &HistTx, v2: bool) -> (Value, Value) {
         let mut txj = json!({
             "TransactionType": t.tx_type,
             "Account": t.account,
@@ -583,7 +585,7 @@ impl World {
             txj["DestinationTag"] = json!(tag);
         }
         if let Some(a) = &t.amount {
-            txj["Amount"] = a.clone();
+            txj[if v2 { "DeliverMax" } else { "Amount" }] = a.clone();
         }
         if t.has_send_max {
             txj["SendMax"] = json!("1");
@@ -671,12 +673,24 @@ impl World {
             }
             "tx" => {
                 let hash = p.get("transaction").and_then(Value::as_str).unwrap_or_default().to_ascii_uppercase();
+                let v2 = p.get("api_version").and_then(Value::as_u64) == Some(2);
                 if let Some(t) = self.history.iter().find(|t| t.hash == hash) {
-                    let (txj, meta) = self.tx_json(t);
-                    return Some(json!({ "result": {
-                        "tx_json": txj, "hash": t.hash, "ledger_index": t.ledger,
-                        "ledger_hash": ledger_hash_of(t.ledger), "validated": true, "meta": meta
-                    } }));
+                    let (txj, meta) = self.tx_json(t, v2);
+                    if v2 {
+                        return Some(json!({ "result": {
+                            "tx_json": txj, "hash": t.hash, "ledger_index": t.ledger,
+                            "ledger_hash": ledger_hash_of(t.ledger), "validated": true, "meta": meta,
+                            "status": "success"
+                        } }));
+                    }
+                    // Real API v1 `tx` reply: flat transaction fields, NO `ledger_hash`.
+                    let mut flat = txj;
+                    flat["hash"] = json!(t.hash);
+                    flat["ledger_index"] = json!(t.ledger);
+                    flat["validated"] = json!(true);
+                    flat["meta"] = meta;
+                    flat["status"] = json!("success");
+                    return Some(json!({ "result": flat }));
                 }
                 if let Some(drops) = self.native_submits.get(&hash) {
                     return Some(json!({ "result": {
@@ -686,8 +700,14 @@ impl World {
                 }
                 if let Some((h, d)) = self.pending.iter().find(|(h, _)| *h == hash) {
                     let _ = d;
+                    if v2 {
+                        return Some(json!({ "result": {
+                            "tx_json": { "TransactionType": "Payment", "Account": self.issuer },
+                            "hash": h, "validated": false, "ledger_index": 0
+                        } }));
+                    }
                     return Some(json!({ "result": {
-                        "tx_json": { "TransactionType": "Payment", "Account": self.issuer },
+                        "TransactionType": "Payment", "Account": self.issuer,
                         "hash": h, "validated": false, "ledger_index": 0
                     } }));
                 }
@@ -735,6 +755,7 @@ impl World {
                 Some(json!({ "result": { "engine_result": "tesSUCCESS", "tx_json": { "hash": hash } } }))
             }
             "account_tx" => {
+                let v2 = p.get("api_version").and_then(Value::as_u64) == Some(2);
                 let min = p.get("ledger_index_min").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let max = p.get("ledger_index_max").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let txs: Vec<Value> = self
@@ -742,11 +763,19 @@ impl World {
                     .iter()
                     .filter(|t| t.ledger >= min && t.ledger <= max)
                     .map(|t| {
-                        let (txj, meta) = self.tx_json(t);
-                        json!({
-                            "tx_json": txj, "meta": meta, "hash": t.hash, "ledger_index": t.ledger,
-                            "ledger_hash": ledger_hash_of(t.ledger), "validated": true
-                        })
+                        let (txj, meta) = self.tx_json(t, v2);
+                        if v2 {
+                            json!({
+                                "tx_json": txj, "meta": meta, "hash": t.hash, "ledger_index": t.ledger,
+                                "ledger_hash": ledger_hash_of(t.ledger), "validated": true
+                            })
+                        } else {
+                            // Real API v1 entry: `tx` (with hash/ledger_index inside), no ledger_hash.
+                            let mut tx = txj;
+                            tx["hash"] = json!(t.hash);
+                            tx["ledger_index"] = json!(t.ledger);
+                            json!({ "tx": tx, "meta": meta, "validated": true })
+                        }
                     })
                     .collect();
                 Some(json!({ "result": {
