@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-55 in progress (Sonnet) on a stacked branch at PR #586's head, PR #586 itself untouched: cap clamps, pending-import counting, snapshot ceiling, validator wiring, parser parity. Then BB-56 (no-vault return) and BB-57 (Candid, cards, PocketIC, and the XRPL lane reader).",
+      "nextAction": "BB-55 in Review (f887fab5, stacked on PR #586's head; PR #586 untouched). BB-56 in progress (same W29): no-vault canonical return internals. Then BB-57 (Candid, declarations, frontend cards, PocketIC, XRPL lane reader).",
       "cardIds": [
         "BB-55",
         "BB-56",

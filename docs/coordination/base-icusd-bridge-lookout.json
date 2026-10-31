@@ -495,18 +495,18 @@
     },
     {
       "id": "BB-55",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "XRPL: 15-digit wiring and cap clamps on PR #586's module",
-      "evidenceText": "proof=none; Claimed 2026-10-31 on a stacked branch at PR 586's head (PR 586 untouched): caps clamped at 15 digits, pending imports counted, snapshot ceiling, 15-digit validator wired, frontend parser parity; focused tests only",
+      "evidenceText": "proof=local-test; f887fab5 on a branch stacked at PR 586's head (PR untouched): 15-digit clamp at config and request, pending imports counted (overshoot reproduced first), snapshot ceiling, validator wired, parser parity; 129 backend, 149 frontend tests",
       "evidenceLinks": []
     },
     {
       "id": "BB-56",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: no-vault return to an ICP account",
-      "evidenceText": "proof=none; Intent bound to account, payer, amount and a never-reused tag; validated tesSUCCESS payment on delivered amount; escrow-to-owner payout; never touches debt; origin split",
+      "evidenceText": "proof=none; Claimed 2026-10-31 on the same stacked branch: no-vault canonical return as an internal module API (tag, attribution on delivered amount, payout job, refunds, separation from repayment); Candid and endpoints stay for BB-57",
       "evidenceLinks": []
     },
     {

@@ -1254,6 +1254,26 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - BB-48 dispatched to the same W28 (sole Rust build owner). Its history-availability probe tooling is deferred, consistent
   with Miles' BB-46 decision; executing any probe stays held.
 
+## Milestone 55 (2026-10-31): BB-55 in Review; BB-56 started
+
+- BB-55 `f887fab5` (W29, `claude-sonnet-5-5`) on `codex/xrpl-icusd-followups`, stacked on `b02584e4` (local only, not
+  pushed; PR #586's branch still at `b02584e4` locally and on origin): `CAP_CLAMP_E8S = 999,999,999,999,999`; config
+  refuses either cap above it before applying anything; `check_caps` and intent creation use the effective (clamped) caps;
+  `outstanding_total` counts Imports in `EscrowPullPending` (reproduced first: two imports of 60 under caps of 100 both passed
+  on the unmodified code); `advance_import` re-checks both caps when the pull is proven; coverage reports `SnapshotDisagrees`
+  when the issuer snapshot exceeds the clamp; the 15-digit validator is wired into import and repayment requests; frontend
+  `parseE8s` refuses above the clamp or beyond 15 significant digits and the default TrustSet limit is clamped. No Candid or
+  stable-state change. Worker run: `xrpl_icusd` 129 passed (120 before, 121 with the reproduction); xrpl frontend specs 5
+  files, 149 passed. The frontend needed a canonical `npm ci` in that checkout (reused modules lacked vitest and `xumm`),
+  per Miles' tooling clarification; nothing was denied.
+- For Miles: when a cap is lowered between admission and the proven pull, the claim is created held (`delivery_halted`) so
+  the owner can take the canonical claim back; the owner can still choose `ReissueXrpl`, which clears the halt and bypasses
+  the lowered cap but never the clamp (left unchanged, since it affects every halted claim). The pending-import scan is
+  bounded by the existing 10,000 active-operation limit.
+- Disk: about 28 GiB free after the backend test build in the shared target and the 187 MB `npm ci` (36 GiB before).
+- BB-56 dispatched to the same W29: no-vault canonical return internals (chain-xrpl.md section 2); Candid and endpoints stay
+  with BB-57.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
