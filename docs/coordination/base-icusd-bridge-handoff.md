@@ -1666,6 +1666,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Routine comment correction for W29's part B commit: the `backend_wasm()` doc comment must distinguish the suite's historical
   PocketIC 7 limit from the current 12 MiB network Code-section limit.
 - Lookout revision 79 read back correctly by Miles.
+- Part B first run (Miles read the terminal `pic-run.log`): EXIT 101, 17 passed, all 7 new Return tests failed at
+  `configure_xrpl_icusd` because `return_fx` configured `test_key_1` without the suite's local key_1 setup. The same W29 adds
+  the existing fixture setter, keeps the first red log, does not touch the production key guard or rebuild the unchanged
+  Wasm, and reruns only the seven Return cases. BB-57 stays in progress until they execute past setup and pass.
 - Order after part B: the Rust build slot returns to W28 first (its BB-49 reproductions and corrections); after part B is
   accepted, W29's next card is BB-51 (Sui Move gate, `next-bb51.md`); no third lane.
 

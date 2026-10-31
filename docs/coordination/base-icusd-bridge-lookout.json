@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Accepted: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45. Part B running now (W29, builder slot): backend Wasm size and artifact check, XRPL PocketIC suite with the return-flow cases",
+      "evidenceText": "proof=none; Accepted: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45; artifact checked (Code section 9,707,926 bytes). Part B first run: 17 passed, 7 new Return tests failed at setup (fixture key); fixing and rerunning those 7",
       "evidenceLinks": []
     },
     {
