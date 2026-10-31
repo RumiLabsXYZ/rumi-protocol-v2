@@ -722,6 +722,8 @@ fn call_running_rehearsal_backend() {
     };
     // Empty arg list unless REHEARSAL_ARG_HEX carries pre-encoded Candid bytes.
     let payload = match std::env::var("REHEARSAL_ARG_HEX") {
+        // Preset: `(cursor: opt nat64, limit: nat32)` paging calls such as get_my_xrpl_operations.
+        Ok(h) if h == "page50" => Encode!(&Option::<u64>::None, &50u32).unwrap(),
         Ok(h) => hex::decode(h).expect("hex"),
         Err(_) => Encode!().unwrap(),
     };
