@@ -44,6 +44,12 @@
 //! underflow is an error, never a saturated or wrapped number. A custody
 //! balance that differs from `rc + bu + stray` is reported as a FAILURE flag
 //! (an unexplained excess must halt credits), not as a warning.
+//!
+//! The XRPL lane also gets a MINIMUM issued-supply floor: `E_X < issued_outstanding_X`
+//! is a FAILURE flag carrying the network id, both amounts and the gap. It is a floor
+//! on independent reads only, not proof that the lane's pending D, R, H or fees are
+//! covered (the backend's own coverage report is the full check) and not proof of
+//! theft; it halts credits and triggers no automatic recovery or funds action.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -387,6 +393,19 @@ pub enum FlagKind {
     /// The instance's self-reported destination supply differs from the
     /// independent read (both named). Info on its own.
     SelfReportedSupplyDiffers { reported: u128, independent: u128 },
+    /// The XRPL lane's escrow `E_X` is below the issued outstanding
+    /// (`E_X < issued_outstanding_X`).
+    ///
+    /// This is a MINIMUM issued-supply coverage floor on independent reads. It is
+    /// NOT proof that all of the lane's pending D, R, H or fees are covered (the
+    /// backend's own coverage report remains the full check), and it is not proof of
+    /// theft. A failure means credits must halt and the operator holds and
+    /// reconciles; nothing here triggers any automatic recovery or funds action.
+    XrplEscrowBelowIssued {
+        escrow: u128,
+        issued: u128,
+        gap: u128,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,7 +424,8 @@ impl Flag {
             | FlagKind::CustodyShortfall { .. }
             | FlagKind::AuditEscrowAccountMismatch { .. }
             | FlagKind::CoverageBroken { .. }
-            | FlagKind::SupplyBoundBroken { .. } => Severity::Failure,
+            | FlagKind::SupplyBoundBroken { .. }
+            | FlagKind::XrplEscrowBelowIssued { .. } => Severity::Failure,
         }
     }
 }
@@ -528,6 +548,18 @@ pub fn aggregate(
 
     let circulating_xrpl = match &input.xrpl {
         Some(x) => {
+            // The minimum issued-supply floor: the escrow must at least equal what
+            // is issued on the XRPL (equal or above raises nothing).
+            if x.escrow_balance < x.issued_outstanding {
+                flags.push(Flag {
+                    network_id: x.config.network_id.clone(),
+                    kind: FlagKind::XrplEscrowBelowIssued {
+                        escrow: x.escrow_balance,
+                        issued: x.issued_outstanding,
+                        gap: x.issued_outstanding - x.escrow_balance,
+                    },
+                });
+            }
             escrow_locked = add(escrow_locked, x.escrow_balance, "escrow_locked with E_X")?;
             x.issued_outstanding
         }
@@ -1162,6 +1194,38 @@ mod tests {
             run(&inp).unwrap_err(),
             AggregateError::Overflow(_)
         ));
+    }
+
+    #[test]
+    fn the_lane_escrow_floor_flags_only_when_escrow_is_below_issued() {
+        let floor = |report: &AggregateReport| {
+            report
+                .flags
+                .iter()
+                .filter(|f| matches!(f.kind, FlagKind::XrplEscrowBelowIssued { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for (escrow, issued) in [(120 * E8, 120 * E8), (121 * E8, 120 * E8), (0, 0)] {
+            let mut inp = input(1_000 * E8, 0, vec![]);
+            inp.xrpl = Some(lane("xrpl-mainnet", escrow, issued));
+            assert!(floor(&run(&inp).unwrap()).is_empty(), "{escrow} vs {issued}");
+        }
+        let mut inp = input(1_000 * E8, 0, vec![]);
+        inp.xrpl = Some(lane("xrpl-mainnet", 0, 5));
+        let report = run(&inp).unwrap();
+        let flags = floor(&report);
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].network_id, "xrpl-mainnet");
+        assert_eq!(
+            flags[0].kind,
+            FlagKind::XrplEscrowBelowIssued { escrow: 0, issued: 5, gap: 5 }
+        );
+        assert_eq!(flags[0].severity(), Severity::Failure);
+        assert!(report.has_failure());
+        // The arithmetic is unchanged by the flag.
+        assert_eq!(report.circulating_xrpl, 5);
+        assert_eq!(report.escrow_locked, 0);
     }
 
     #[test]

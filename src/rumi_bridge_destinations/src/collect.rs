@@ -732,6 +732,11 @@ pub fn render(c: &Collected) -> String {
             Severity::Failure => "FAILURE",
         };
         out.push_str(&format!("flag {sev}: {} {:?}\n", f.network_id, f.kind));
+        if matches!(f.kind, FlagKind::XrplEscrowBelowIssued { .. }) {
+            out.push_str(
+                "  note: a MINIMUM issued-supply floor only (E_X must be at least the issued outstanding); it is not proof that the lane's pending D, R, H or fees are covered (the backend's own coverage report is the full check), not proof of theft, and triggers no automatic recovery or funds action: hold credits and reconcile\n",
+            );
+        }
     }
     out.push_str(if r.has_failure() {
         "status: FAILURE flags present, credits must halt\n"
@@ -994,6 +999,7 @@ mod tests {
     const OVERLAP: &str = include_str!("../fixtures/collect_rejected_xrpl_overlap.json");
     const C1_BROKEN: &str = include_str!("../fixtures/collect_c1_broken.json");
     const BASE_PLUS_XRPL: &str = include_str!("../fixtures/collect_base_plus_xrpl.json");
+    const XRPL_BELOW_ISSUED: &str = include_str!("../fixtures/collect_xrpl_escrow_below_issued.json");
 
     fn catalog() -> Catalog {
         Catalog::embedded().expect("embedded catalog")
@@ -1153,7 +1159,7 @@ mod tests {
 
     #[test]
     fn fixture_principals_are_obviously_synthetic() {
-        for json in [BASE_ONLY, OVERLAP, C1_BROKEN, BASE_PLUS_XRPL] {
+        for json in [BASE_ONLY, OVERLAP, C1_BROKEN, BASE_PLUS_XRPL, XRPL_BELOW_ISSUED] {
             let fx = FixtureReadings::parse(json).unwrap();
             assert!(
                 fx.description.to_lowercase().contains("synthetic"),
@@ -1283,12 +1289,80 @@ mod tests {
     }
 
     #[test]
-    fn a_lane_issued_amount_above_its_escrow_is_reported_not_corrected() {
-        // The collector reports what was read: 60 issued against 50 escrowed
-        // makes circulating_total exceed total_icusd by exactly 10.
+    fn a_lane_escrow_below_the_issued_amount_is_a_failure_with_both_amounts_and_the_gap() {
+        // The collector reports what was read (60 issued, 50 escrowed: the figures
+        // are not corrected) AND raises the minimum issued-supply floor.
         let got = collect(&d_plus_x(), &catalog(), &lane_flat(200 * E8, 50 * E8, 60 * E8)).unwrap();
         assert_eq!(got.report.circulating_xrpl, 60 * E8);
         assert_eq!(got.report.circulating_total, 1_010 * E8);
+        let floor: Vec<_> = got
+            .report
+            .failures()
+            .filter(|f| matches!(f.kind, FlagKind::XrplEscrowBelowIssued { .. }))
+            .collect();
+        assert_eq!(floor.len(), 1);
+        assert_eq!(floor[0].network_id, "xrpl-mainnet");
+        assert_eq!(
+            floor[0].kind,
+            FlagKind::XrplEscrowBelowIssued {
+                escrow: 50 * E8,
+                issued: 60 * E8,
+                gap: 10 * E8
+            }
+        );
+        assert!(got.report.has_failure());
+        let text = render(&got);
+        assert!(text.contains("flag FAILURE: xrpl-mainnet XrplEscrowBelowIssued"), "{text}");
+        assert!(text.contains("MINIMUM issued-supply floor"), "{text}");
+        assert!(text.contains("not proof that the lane's pending D, R, H or fees are covered"), "{text}");
+        assert!(text.contains("not proof of theft"), "{text}");
+        assert!(text.contains("status: FAILURE flags present, credits must halt"), "{text}");
+    }
+
+    #[test]
+    fn a_lane_escrow_equal_to_or_above_the_issued_amount_raises_no_floor_flag() {
+        for (e_x, issued) in [(50 * E8, 50 * E8), (51 * E8, 50 * E8), (50 * E8 + 1, 50 * E8), (0, 0)] {
+            let got = collect(&d_plus_x(), &catalog(), &lane_flat(200 * E8, e_x, issued)).unwrap();
+            assert!(
+                !got.report
+                    .flags
+                    .iter()
+                    .any(|f| matches!(f.kind, FlagKind::XrplEscrowBelowIssued { .. })),
+                "E_X {e_x} vs issued {issued}: {:?}",
+                got.report.flags
+            );
+            assert!(!got.report.has_failure());
+        }
+        // One e8s short is enough.
+        let got = collect(&d_plus_x(), &catalog(), &lane_flat(200 * E8, 50 * E8 - 1, 50 * E8)).unwrap();
+        assert!(got.report.failures().any(|f| f.kind
+            == FlagKind::XrplEscrowBelowIssued {
+                escrow: 50 * E8 - 1,
+                issued: 50 * E8,
+                gap: 1
+            }));
+    }
+
+    #[test]
+    fn the_zero_escrow_repro_fixture_is_a_failure_not_an_ok() {
+        // Miles' repro: the lane escrow reads 0 while 50.00000001 is issued.
+        let fx = FixtureReadings::parse(XRPL_BELOW_ISSUED).unwrap();
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert_eq!(got.source, "fixture");
+        assert_eq!(got.report.circulating_xrpl, 5_000_000_001);
+        // The figures are as read (no correction)...
+        assert_eq!(got.report.circulating_total, 105_000_000_001);
+        // ...and the floor raises a failure, so credits halt.
+        assert!(got.report.has_failure(), "{:?}", got.report.flags);
+        assert!(got.report.failures().any(|f| f.kind
+            == FlagKind::XrplEscrowBelowIssued {
+                escrow: 0,
+                issued: 5_000_000_001,
+                gap: 5_000_000_001
+            }));
+        let text = render(&got);
+        assert!(!text.contains("flags: none"), "{text}");
+        assert!(text.contains("status: FAILURE"), "{text}");
     }
 
     #[test]
