@@ -8,6 +8,7 @@
 //! The `MemoryId` layout is append-only. `memory_layout_is_unique` pins it.
 
 use crate::accounting::{AccountingError, Buckets, Transition};
+use crate::chains::{self, ChainRole, InstallGate};
 use crate::ids::{self, LaneKind};
 use crate::types::{
     BridgeFees, BridgeLimits, ContractAdminAction, InitArgs, Pauses, RpcServiceConfig,
@@ -237,15 +238,25 @@ pub const CHAIN_BASE_SEPOLIA: u64 = 84532;
 pub const CHAIN_LOCAL_ANVIL: u64 = 31337;
 
 /// Validate install arguments into a config. Pure, unit tested.
+///
+/// The chain id and key name are checked against the chain table (`chains.rs`): the chain
+/// must have a row, the row must be enabled for install, and the key must be one the row
+/// allows. Every non-Base row is disabled today, so only the Base chains install.
 pub fn validate_init(args: &InitArgs) -> Result<BridgeConfig, String> {
+    let chain = args.base_chain_id;
     let key = args.ecdsa_key_name.as_str();
-    match (args.base_chain_id, key) {
-        (CHAIN_BASE_MAINNET, "key_1") => {}
-        (CHAIN_BASE_MAINNET, other) => return Err(format!("Base mainnet requires key_1, got {other}")),
-        (CHAIN_BASE_SEPOLIA, "key_1" | "test_key_1") => {}
-        (CHAIN_LOCAL_ANVIL, "test_key_1" | "dfx_test_key") => {}
-        (CHAIN_LOCAL_ANVIL, other) => return Err(format!("local chain id cannot use key {other}")),
-        (chain, k) => return Err(format!("unsupported chain id {chain} / key {k}")),
+    let Some(row) = chains::profile(chain) else {
+        return Err(format!("unsupported chain id {chain} / key {key}"));
+    };
+    if let InstallGate::Disabled(reason) = row.install {
+        return Err(format!("{} (chain id {chain}) cannot be installed: {reason}", row.display_name));
+    }
+    if !row.allowed_keys.contains(&key) {
+        return Err(match row.role {
+            ChainRole::Mainnet => format!("{} mainnet requires {}, got {key}", row.display_name, row.allowed_keys.join(" or ")),
+            ChainRole::Local => format!("local chain id cannot use key {key}"),
+            ChainRole::Testnet => format!("unsupported chain id {chain} / key {key}"),
+        });
     }
     if args.admins.is_empty() {
         return Err("at least one admin is required".into());
@@ -282,7 +293,19 @@ pub fn validate_init(args: &InitArgs) -> Result<BridgeConfig, String> {
 /// [`validate_stored_rpc_config`] on the stored set at upgrade.
 pub const MAX_RPC_SERVICES: usize = 5;
 
+/// Validate a provider set for `chain_id` by the rules of its chain table row. Pure.
+///
+/// - a built-in provider family is valid only for the row that lists it (`native`);
+/// - custom URLs are `https`, except on a `Local` row, which also accepts `http`;
+/// - `min_quorum` is at least 2 on every `Mainnet` row;
+/// - a chain id with no row is refused.
+///
+/// This does not look at the install gate: it also validates a stored set at upgrade and a
+/// proposed set in `admin_set_rpc_services`, where enablement is not in question.
 pub fn validate_rpc_services(chain_id: u64, services: &[RpcServiceConfig], min_quorum: u8) -> Result<(), String> {
+    let Some(row) = chains::profile(chain_id) else {
+        return Err(format!("unsupported chain id {chain_id}"));
+    };
     if services.is_empty() {
         return Err("at least one RPC service is required".into());
     }
@@ -291,15 +314,16 @@ pub fn validate_rpc_services(chain_id: u64, services: &[RpcServiceConfig], min_q
     }
     let mut seen = BTreeSet::new();
     for s in services {
-        let key = match s {
-            RpcServiceConfig::BaseMainnet(p) => {
-                if chain_id != CHAIN_BASE_MAINNET {
-                    return Err("BaseMainnet providers are only valid for chain 8453".into());
-                }
-                format!("base:{p:?}")
+        if let Some(family) = chains::native_provider_of(s) {
+            if row.native != Some(family) {
+                let owner = chains::native_owner(family).map(|p| p.chain_id.to_string()).unwrap_or_else(|| "no chain".into());
+                return Err(format!("{} providers are only valid for chain {owner}", family.variant_name()));
             }
+        }
+        let key = match s {
+            RpcServiceConfig::BaseMainnet(p) => format!("base:{p:?}"),
             RpcServiceConfig::Custom { url } => {
-                if !(url.starts_with("https://") || (chain_id == CHAIN_LOCAL_ANVIL && url.starts_with("http://"))) {
+                if !(url.starts_with("https://") || (row.role == ChainRole::Local && url.starts_with("http://"))) {
                     return Err(format!("RPC URL must be https: {url}"));
                 }
                 if url.len() > 256 {
@@ -315,8 +339,8 @@ pub fn validate_rpc_services(chain_id: u64, services: &[RpcServiceConfig], min_q
     if min_quorum == 0 || min_quorum as usize > services.len() {
         return Err(format!("min_quorum {min_quorum} must be in 1..={}", services.len()));
     }
-    if chain_id == CHAIN_BASE_MAINNET && min_quorum < 2 {
-        return Err("Base mainnet requires min_quorum >= 2".into());
+    if row.role == ChainRole::Mainnet && min_quorum < 2 {
+        return Err(format!("{} mainnet requires min_quorum >= 2", row.display_name));
     }
     Ok(())
 }
@@ -1514,6 +1538,114 @@ pub(crate) mod tests {
         let mut a = init_args(CHAIN_BASE_MAINNET, "key_1");
         a.min_quorum = 1;
         assert!(validate_init(&a).is_err(), "mainnet needs quorum >= 2");
+    }
+
+    /// Every chain id in the table, with the role the plan gives it.
+    const TABLE_IDS: [u64; 13] = [8453, 84532, 31337, 1, 11155111, 42161, 421614, 4663, 46630, 999, 998, 143, 10143];
+
+    #[test]
+    fn base_init_errors_keep_their_wording() {
+        let msg = |chain: u64, key: &str| validate_init(&init_args(chain, key)).unwrap_err();
+        assert_eq!(msg(CHAIN_BASE_MAINNET, "test_key_1"), "Base mainnet requires key_1, got test_key_1");
+        assert_eq!(msg(CHAIN_BASE_MAINNET, "dfx_test_key"), "Base mainnet requires key_1, got dfx_test_key");
+        assert_eq!(msg(CHAIN_LOCAL_ANVIL, "key_1"), "local chain id cannot use key key_1");
+        assert_eq!(msg(CHAIN_BASE_SEPOLIA, "dfx_test_key"), "unsupported chain id 84532 / key dfx_test_key");
+        assert_eq!(msg(1030, "key_1"), "unsupported chain id 1030 / key key_1");
+        assert_eq!(msg(0, "test_key_1"), "unsupported chain id 0 / key test_key_1");
+        // The disabled rows name the chain and the reason.
+        let e = msg(10143, "test_key_1");
+        assert!(e.starts_with("Monad testnet (chain id 10143) cannot be installed: "), "{e}");
+        let e = msg(999, "key_1");
+        assert_eq!(e, "HyperEVM (chain id 999) cannot be installed: hyperevm-historical-state");
+        // The gate is checked before the key: a wrong key on a disabled row reports the gate.
+        assert_eq!(msg(4663, "dfx_test_key"), msg(4663, "key_1"));
+    }
+
+    #[test]
+    fn base_rpc_errors_keep_their_wording() {
+        let all = all_built_in_base_providers();
+        assert_eq!(validate_rpc_services(CHAIN_BASE_MAINNET, &all, 1).unwrap_err(), "Base mainnet requires min_quorum >= 2");
+        assert_eq!(validate_rpc_services(CHAIN_BASE_SEPOLIA, &all, 2).unwrap_err(), "BaseMainnet providers are only valid for chain 8453");
+        assert_eq!(validate_rpc_services(CHAIN_LOCAL_ANVIL, &all, 2).unwrap_err(), "BaseMainnet providers are only valid for chain 8453");
+        let http = [RpcServiceConfig::Custom { url: "http://a.example".into() }];
+        assert_eq!(validate_rpc_services(CHAIN_BASE_SEPOLIA, &http, 1).unwrap_err(), "RPC URL must be https: http://a.example");
+        assert_eq!(validate_rpc_services(CHAIN_BASE_MAINNET, &http, 2).unwrap_err(), "RPC URL must be https: http://a.example");
+        assert!(validate_rpc_services(CHAIN_LOCAL_ANVIL, &http, 1).is_ok(), "plain http on the local chain");
+    }
+
+    #[test]
+    fn rpc_validation_follows_the_row_for_every_chain() {
+        let https = custom_services(3);
+        let http = vec![
+            RpcServiceConfig::Custom { url: "http://a.example".into() },
+            RpcServiceConfig::Custom { url: "http://b.example".into() },
+            RpcServiceConfig::Custom { url: "http://c.example".into() },
+        ];
+        let native = all_built_in_base_providers();
+        for chain in TABLE_IDS {
+            let row = chains::profile(chain).unwrap();
+            let is_mainnet = row.role == ChainRole::Mainnet;
+            let ctx = |what: &str| format!("chain {chain} ({:?}): {what}", row.role);
+
+            // https custom providers at quorum 2: valid on every row.
+            assert!(validate_rpc_services(chain, &https, 2).is_ok(), "{}", ctx("https quorum 2"));
+            assert!(validate_rpc_services(chain, &https, 3).is_ok(), "{}", ctx("https quorum 3"));
+            // Quorum 1 is refused on exactly the mainnet rows.
+            assert_eq!(validate_rpc_services(chain, &https, 1).is_ok(), !is_mainnet, "{}", ctx("quorum 1"));
+            if is_mainnet {
+                let e = validate_rpc_services(chain, &https, 1).unwrap_err();
+                assert_eq!(e, format!("{} mainnet requires min_quorum >= 2", row.display_name));
+            }
+            // Out-of-range quorum is refused everywhere.
+            assert!(validate_rpc_services(chain, &https, 0).is_err(), "{}", ctx("quorum 0"));
+            assert!(validate_rpc_services(chain, &https, 4).is_err(), "{}", ctx("quorum above count"));
+            // Plain http only on the Local row.
+            assert_eq!(validate_rpc_services(chain, &http, 2).is_ok(), row.role == ChainRole::Local, "{}", ctx("http"));
+            // The built-in Base providers only on the row that lists them.
+            let r = validate_rpc_services(chain, &native, 2);
+            assert_eq!(r.is_ok(), row.native == Some(chains::NativeProvider::BaseMainnet), "{}", ctx("native"));
+            if let Err(e) = r {
+                assert_eq!(e, "BaseMainnet providers are only valid for chain 8453", "{}", ctx("native error"));
+            }
+            // A mixed set is valid only where the native family is.
+            let mut mixed = native[..2].to_vec();
+            mixed.push(https[0].clone());
+            assert_eq!(validate_rpc_services(chain, &mixed, 2).is_ok(), chain == CHAIN_BASE_MAINNET, "{}", ctx("mixed"));
+            // The provider cap and duplicate rules do not depend on the row.
+            assert!(validate_rpc_services(chain, &custom_services(MAX_RPC_SERVICES + 1), 2).is_err(), "{}", ctx("cap"));
+            assert!(validate_rpc_services(chain, &[https[0].clone(), https[0].clone()], 1).is_err(), "{}", ctx("duplicate"));
+            assert!(validate_rpc_services(chain, &[], 1).is_err(), "{}", ctx("none"));
+        }
+    }
+
+    #[test]
+    fn rpc_validation_refuses_a_chain_without_a_row() {
+        for chain in [0u64, 10, 1030, 8454, u64::MAX] {
+            let e = validate_rpc_services(chain, &custom_services(3), 2).unwrap_err();
+            assert_eq!(e, format!("unsupported chain id {chain}"));
+        }
+    }
+
+    #[test]
+    fn the_stored_rpc_config_of_a_described_but_disabled_chain_is_valid_by_its_row() {
+        // Upgrade checks the stored set by the row's rules and does not look at the install
+        // gate: enablement is an install-time decision.
+        let base = validate_init(&init_args(CHAIN_BASE_SEPOLIA, "test_key_1")).unwrap();
+        for chain in [1u64, 11155111, 42161, 421614, 4663, 46630, 999, 998, 143, 10143] {
+            let row = chains::profile(chain).unwrap();
+            let c = BridgeConfig { chain_id: chain, rpc_services: custom_services(3), min_quorum: 2, ..base.clone() };
+            assert!(validate_stored_rpc_config(&c).is_ok(), "{chain}");
+            // Mainnet rows keep the quorum floor at upgrade as well.
+            let c1 = BridgeConfig { min_quorum: 1, ..c.clone() };
+            assert_eq!(validate_stored_rpc_config(&c1).is_ok(), row.role != ChainRole::Mainnet, "{chain}");
+            // And a stored Base-native provider on another chain is refused.
+            let c2 = BridgeConfig { rpc_services: all_built_in_base_providers(), ..c };
+            assert!(validate_stored_rpc_config(&c2).is_err(), "{chain}");
+        }
+        // A stored id with no row is refused with a message that names the problem.
+        let c = BridgeConfig { chain_id: 12345, rpc_services: custom_services(3), min_quorum: 2, ..base };
+        let e = validate_stored_rpc_config(&c).unwrap_err();
+        assert!(e.contains("stored RPC configuration is invalid") && e.contains("unsupported chain id 12345"), "{e}");
     }
 
     fn custom_services(n: usize) -> Vec<RpcServiceConfig> {

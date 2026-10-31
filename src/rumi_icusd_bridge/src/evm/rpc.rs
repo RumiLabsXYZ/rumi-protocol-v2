@@ -8,14 +8,17 @@
 //! difference in any field we use cannot be masked. A provider whose answer does not
 //! parse is simply a provider that did not answer.
 //!
-//! Settlement finality is Base `finalized` (L1 batch finality). `finalized_head` takes
-//! the lowest height at least `min_quorum` providers have reached and then requires a
-//! quorum on the block hash at exactly that height.
+//! Settlement finality is chosen by the head rule of the configured chain's row in the
+//! chain table (`chains.rs`). For Base that is `finalized` (L1 batch finality):
+//! `tag_finalized_quorum` takes the lowest height at least `min_quorum` providers have
+//! reached and then requires a quorum on the block hash at exactly that height.
+//! `finalized_head` is the dispatcher over the rules. No rule ever reads `latest`.
 //!
 //! Nothing here decides what a value means. Callers (the observer, the lanes, the
 //! flows) decide; this module only makes sure a decision is never taken on a value that
 //! fewer than `min_quorum` independent providers agree on.
 
+use crate::chains::{self, HeadRule};
 use crate::evm::abi::RawLog;
 use crate::ids::hex0x;
 use crate::state;
@@ -730,7 +733,68 @@ fn agreed_height(heads: &[Result<BlockRef, String>], quorum: usize) -> Result<u6
 // Reads
 // ---------------------------------------------------------------------------
 
-/// The settlement head: Base `finalized`, as a quorum value.
+/// The head rule of the configured chain, from its chain table row.
+///
+/// A chain id with no row has no rule. That cannot happen in a running canister (install
+/// admits only enabled rows and `post_upgrade` refuses a stored id with no row); it fails
+/// closed here rather than falling back to another chain's rule.
+pub fn head_rule() -> Result<HeadRule, RpcError> {
+    let chain = state::read_core(|c| c.config.chain_id);
+    match chains::profile(chain) {
+        Some(p) => Ok(p.head_rule),
+        None => Err(RpcError::NotConfigured(format!("no bridge chain profile for chain id {chain}"))),
+    }
+}
+
+/// The settlement head of the configured chain, as a quorum value. The rule comes from
+/// the chain table; no rule ever sends `latest`.
+///
+/// - `TagFinalizedQuorum`: [`tag_finalized_quorum`].
+/// - `MonadVerified { delay_blocks }`: the quorum-agreed finalized height `n` less
+///   `delay_blocks`, with the hash of that block confirmed by the same quorum.
+/// - `Blocked(reason)`: an error, before any provider is asked.
+pub async fn finalized_head() -> Result<BlockRef, RpcError> {
+    match head_rule()? {
+        HeadRule::TagFinalizedQuorum => tag_finalized_quorum().await,
+        HeadRule::MonadVerified { delay_blocks } => monad_verified_head(delay_blocks).await,
+        HeadRule::Blocked(reason) => Err(blocked_error(reason)),
+    }
+}
+
+fn blocked_error(reason: &str) -> RpcError {
+    RpcError::NotConfigured(format!("the settlement head is blocked for this chain ({reason})"))
+}
+
+/// The block tag a view call must use to read at the settlement head without first
+/// reading the head, when the rule allows it.
+///
+/// `TagFinalizedQuorum` reads at the `finalized` tag itself, which asks no provider here.
+/// The other rules have no tag that means "the settlement head", so the head is read through
+/// [`finalized_head`] and the call is pinned to its number. A blocked rule is an error.
+pub async fn settlement_block_tag() -> Result<BlockTag, RpcError> {
+    match head_rule()? {
+        HeadRule::TagFinalizedQuorum => Ok(BlockTag::Finalized),
+        HeadRule::MonadVerified { delay_blocks } => Ok(BlockTag::Number(monad_verified_head(delay_blocks).await?.number)),
+        HeadRule::Blocked(reason) => Err(blocked_error(reason)),
+    }
+}
+
+/// Monad's Verified head: the execution outputs of this block are agreed, which is what
+/// receipts, logs and contract state depend on.
+///
+/// 1. `n` = the quorum-agreed `finalized` height, with its hash agreed by the same quorum
+///    ([`tag_finalized_quorum`]). `finalized` fixes ordering only.
+/// 2. The head is `n - delay_blocks`. A chain younger than the delay has no Verified block.
+/// 3. The hash of that block is agreed by a quorum at exactly that number.
+async fn monad_verified_head(delay_blocks: u64) -> Result<BlockRef, RpcError> {
+    let finalized = tag_finalized_quorum().await?;
+    let head = finalized.number.checked_sub(delay_blocks).ok_or_else(|| {
+        RpcError::NoQuorum(format!("verified head: finalized height {} is below the execution delay of {delay_blocks} blocks", finalized.number))
+    })?;
+    block_by_number(head).await
+}
+
+/// The settlement head for a tag-based chain: `finalized`, as a quorum value.
 ///
 /// 1. Ask every provider for its `finalized` block `(number, hash)`.
 /// 2. `n` = the `min_quorum`-th highest reported number (the largest height at least
@@ -739,7 +803,7 @@ fn agreed_height(heads: &[Result<BlockRef, String>], quorum: usize) -> Result<u6
 ///    said what the block at `n` is, so that report is reused. Only providers that
 ///    reported a higher number are asked again for block `n` itself. Providers below
 ///    `n` do not vote.
-pub async fn finalized_head() -> Result<BlockRef, RpcError> {
+async fn tag_finalized_quorum() -> Result<BlockRef, RpcError> {
     let s = settings()?;
     let cap = s.block_cap();
     let replies = call_all(&s, "eth_getBlockByNumber", &json!(["finalized", false]), cap).await;
@@ -1038,9 +1102,12 @@ pub(crate) mod testutil {
         }
     }
 
+    /// Providers `p1..pn` on Base Sepolia (the head rule comes from the chain table, so a
+    /// test chain needs a profiled id; callers that need another chain set it afterwards).
     pub fn configure(n: usize, quorum: u8) {
         state::reset_for_tests();
         state::mutate_core(|c| {
+            c.config.chain_id = state::CHAIN_BASE_SEPOLIA;
             c.config.rpc_services = services(n);
             c.config.min_quorum = quorum;
             c.config.evm_rpc = Principal::from_slice(&[7; 10]);
@@ -1408,6 +1475,234 @@ mod tests {
             Ok(ok_body(block_json(103, h32(103, 0))))
         });
         assert!(matches!(block_on(finalized_head()), Err(RpcError::NoQuorum(_))));
+    }
+
+    // ----- head rules -------------------------------------------------------------
+
+    /// Point the configured chain at a table row (the head rule is read from it).
+    fn on_chain(chain_id: u64) {
+        state::mutate_core(|c| c.config.chain_id = chain_id);
+    }
+
+    type Bodies = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    /// Like `chain`, and every request body is kept.
+    fn recording_chain(heads: Vec<u64>) -> Bodies {
+        let bodies: Bodies = Default::default();
+        let sink = bodies.clone();
+        set_mock_transport(move |svc, body| {
+            sink.borrow_mut().push(body.to_string());
+            let (m, params) = request_of(body);
+            assert_eq!(m, "eth_getBlockByNumber");
+            let p = provider_index(svc);
+            let n = match params[0].as_str().unwrap() {
+                "finalized" => heads[p],
+                hex => u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap(),
+            };
+            if n > heads[p] {
+                return Ok(ok_body(Value::Null));
+            }
+            Ok(ok_body(block_json(n, h32(n, 0))))
+        });
+        bodies
+    }
+
+    /// The first parameter of every kept request, in order.
+    fn first_params(bodies: &Bodies) -> Vec<String> {
+        bodies.borrow().iter().map(|b| request_of(b).1[0].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn monad_head_is_finalized_minus_delay() {
+        configure(3, 2);
+        on_chain(10_143);
+        let bodies = recording_chain(vec![1_000, 1_000, 1_000]);
+        assert_eq!(block_on(finalized_head()), Ok(BlockRef { number: 997, hash: h32(997, 0) }));
+        // Round 1: the finalized tag from each provider. Round 2: block 997 from each.
+        let want_finalized = "finalized".to_string();
+        let want_head = quantity_param(997);
+        assert_eq!(
+            first_params(&bodies),
+            vec![want_finalized.clone(), want_finalized.clone(), want_finalized, want_head.clone(), want_head.clone(), want_head]
+        );
+        // The same on mainnet, and with providers at different heights: n is the quorum-th
+        // highest (here 1_000), so the head is 997 whatever the far-ahead provider says.
+        configure(3, 2);
+        on_chain(143);
+        let bodies = recording_chain(vec![1_000, 1_003, 998]);
+        assert_eq!(block_on(finalized_head()), Ok(BlockRef { number: 997, hash: h32(997, 0) }));
+        let last = first_params(&bodies).pop().unwrap();
+        assert_eq!(last, quantity_param(997));
+        // Quorum 3 takes the lowest height, 998, and the head is 995.
+        configure(3, 3);
+        on_chain(143);
+        recording_chain(vec![1_000, 1_003, 998]);
+        assert_eq!(block_on(finalized_head()).unwrap().number, 995);
+    }
+
+    #[test]
+    fn monad_head_hash_needs_a_quorum() {
+        configure(3, 2);
+        on_chain(10_143);
+        // Providers agree on the finalized block but p3 disagrees on the hash at the head.
+        script(|p, _, params| {
+            let n = match params[0].as_str().unwrap() {
+                "finalized" => 1_000,
+                hex => u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap(),
+            };
+            let salt = if n == 997 && p == 2 { 9 } else { 0 };
+            Ok(ok_body(block_json(n, h32(n, salt))))
+        });
+        assert_eq!(block_on(finalized_head()), Ok(BlockRef { number: 997, hash: h32(997, 0) }), "one dissenting hash is outvoted");
+        script(|p, _, params| {
+            let n = match params[0].as_str().unwrap() {
+                "finalized" => 1_000,
+                hex => u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap(),
+            };
+            Ok(ok_body(block_json(n, h32(n, if n == 997 { p as u8 } else { 0 }))))
+        });
+        assert!(matches!(block_on(finalized_head()), Err(RpcError::NoQuorum(_))), "three different hashes at the head");
+        // Too few providers serve the head block.
+        script(|p, _, params| {
+            let n = match params[0].as_str().unwrap() {
+                "finalized" => 1_000,
+                hex => u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap(),
+            };
+            if n == 997 && p != 0 {
+                return Err("down".into());
+            }
+            Ok(ok_body(block_json(n, h32(n, 0))))
+        });
+        assert!(matches!(block_on(finalized_head()), Err(RpcError::NoQuorum(_))));
+    }
+
+    #[test]
+    fn monad_head_refuses_when_finalized_is_below_delay() {
+        configure(3, 2);
+        on_chain(10_143);
+        // finalized = 2 < 3: there is no Verified block yet. Nothing is asked after the
+        // finalized round.
+        let bodies = recording_chain(vec![2, 2, 2]);
+        match block_on(finalized_head()) {
+            Err(RpcError::NoQuorum(m)) => assert!(m.contains("below the execution delay of 3"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(bodies.borrow().len(), 3, "only the finalized round was sent");
+        // finalized = 3 is exactly the delay: the head is block 0.
+        configure(3, 2);
+        on_chain(10_143);
+        recording_chain(vec![3, 3, 3]);
+        assert_eq!(block_on(finalized_head()), Ok(BlockRef { number: 0, hash: h32(0, 0) }));
+        // And the numbered tag for a view call refuses the same way.
+        configure(3, 2);
+        on_chain(10_143);
+        recording_chain(vec![2, 2, 2]);
+        assert!(matches!(block_on(settlement_block_tag()), Err(RpcError::NoQuorum(_))));
+    }
+
+    #[test]
+    fn head_rules_never_send_latest() {
+        // Every row of the chain table, through the dispatcher and the view-call tag: no
+        // request of any rule carries `latest` (or any other moving tag but `finalized`).
+        let ids = [8_453u64, 84_532, 31_337, 1, 11_155_111, 42_161, 421_614, 4_663, 46_630, 999, 998, 143, 10_143];
+        for chain_id in ids {
+            let row = chains::profile(chain_id).unwrap();
+            configure(3, 2);
+            on_chain(chain_id);
+            let bodies = recording_chain(vec![1_000, 1_000, 1_000]);
+            let head = block_on(finalized_head());
+            let tag = block_on(settlement_block_tag());
+            match row.head_rule {
+                HeadRule::Blocked(_) => {
+                    assert!(head.is_err() && tag.is_err(), "chain {chain_id}");
+                    assert!(bodies.borrow().is_empty(), "chain {chain_id}: a blocked rule sent a request");
+                }
+                _ => {
+                    assert!(head.is_ok() && tag.is_ok(), "chain {chain_id}: {head:?} {tag:?}");
+                    assert!(!bodies.borrow().is_empty() || tag == Ok(BlockTag::Finalized));
+                }
+            }
+            for b in bodies.borrow().iter() {
+                for moving in ["latest", "pending", "safe", "earliest"] {
+                    assert!(!b.contains(&format!("\"{moving}\"")), "chain {chain_id}: request carries {moving}: {b}");
+                }
+                let (m, params) = request_of(b);
+                assert_eq!(m, "eth_getBlockByNumber", "chain {chain_id}");
+                let first = params[0].as_str().unwrap();
+                assert!(first == "finalized" || first.starts_with("0x"), "chain {chain_id}: unexpected block parameter {first}");
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_rule_returns_error_without_provider_calls() {
+        for (chain_id, reason) in [
+            (4_663u64, "robinhood-finalized-tag-probe"),
+            (46_630, "robinhood-finalized-tag-probe"),
+            (999, "hyperevm-historical-state"),
+            (998, "hyperevm-historical-state"),
+        ] {
+            configure(3, 2);
+            on_chain(chain_id);
+            // A transport that must never be reached.
+            set_mock_transport(|_, _| panic!("a blocked head rule asked a provider"));
+            match block_on(finalized_head()) {
+                Err(RpcError::NotConfigured(m)) => assert!(m.contains(reason), "{m}"),
+                other => panic!("chain {chain_id}: {other:?}"),
+            }
+            match block_on(settlement_block_tag()) {
+                Err(RpcError::NotConfigured(m)) => assert!(m.contains(reason), "{m}"),
+                other => panic!("chain {chain_id}: {other:?}"),
+            }
+            assert!(mock_calls().is_empty(), "chain {chain_id}");
+        }
+        // Even with no providers configured at all the answer is the block, not a transport error.
+        state::reset_for_tests();
+        on_chain(999);
+        assert!(matches!(block_on(finalized_head()), Err(RpcError::NotConfigured(m)) if m.contains("hyperevm-historical-state")));
+    }
+
+    #[test]
+    fn a_chain_without_a_row_has_no_head_rule_and_asks_no_provider() {
+        configure(3, 2);
+        on_chain(0);
+        set_mock_transport(|_, _| panic!("an unprofiled chain asked a provider"));
+        assert!(matches!(block_on(finalized_head()), Err(RpcError::NotConfigured(m)) if m.contains("no bridge chain profile for chain id 0")));
+        assert!(matches!(block_on(settlement_block_tag()), Err(RpcError::NotConfigured(_))));
+        assert!(matches!(head_rule(), Err(RpcError::NotConfigured(_))));
+        assert!(mock_calls().is_empty());
+    }
+
+    #[test]
+    fn tag_rules_dispatch_to_the_unchanged_body() {
+        // Every TagFinalizedQuorum row sends exactly the requests the body alone sends.
+        let heads = vec![100u64, 103, 98];
+        configure(3, 2);
+        on_chain(84_532);
+        let direct = recording_chain(heads.clone());
+        let want = block_on(tag_finalized_quorum());
+        let direct_params = first_params(&direct);
+        assert_eq!(want, Ok(BlockRef { number: 100, hash: h32(100, 0) }));
+        for chain_id in [8_453u64, 84_532, 31_337, 1, 11_155_111, 42_161, 421_614] {
+            configure(3, 2);
+            on_chain(chain_id);
+            let bodies = recording_chain(heads.clone());
+            assert_eq!(block_on(finalized_head()), want, "chain {chain_id}");
+            assert_eq!(first_params(&bodies), direct_params, "chain {chain_id}");
+            assert_eq!(head_rule(), Ok(HeadRule::TagFinalizedQuorum));
+            // The view-call tag for a tag rule is the tag itself and asks no provider.
+            clear_mock_calls();
+            assert_eq!(block_on(settlement_block_tag()), Ok(BlockTag::Finalized));
+            assert!(mock_calls().is_empty());
+        }
+    }
+
+    #[test]
+    fn monad_view_calls_are_pinned_to_the_numbered_head() {
+        configure(3, 2);
+        on_chain(10_143);
+        recording_chain(vec![500, 500, 500]);
+        assert_eq!(block_on(settlement_block_tag()), Ok(BlockTag::Number(497)));
     }
 
     #[test]

@@ -403,8 +403,9 @@ mod tests {
 
     #[test]
     fn other_slugs_never_reproduce_a_base_string() {
-        // Slugs of the chains the groundwork plan names. They are NOT in the table; they are
-        // passed straight to the templates to prove a different slug moves every string.
+        // Slugs of the chains the groundwork plan names, passed straight to the templates to
+        // prove a different slug moves every string. (`non_base_rows_resolve_to_their_own_slug`
+        // checks the table rows reach these slugs through the chain id.)
         let base_strings = [
             mint_domain("base"),
             remint_domain("base"),
@@ -431,8 +432,37 @@ mod tests {
     }
 
     #[test]
+    fn non_base_rows_resolve_to_their_own_slug() {
+        // The table now describes the other chains (install still refuses them). Their ids
+        // must hash under their own slug, never under `base`.
+        let (contract, salt, transfer_id, deposit_id) = golden_inputs();
+        let base_mint = mint_id(8453, &contract, &salt, deposit_id);
+        for (chain, slug) in [
+            (1u64, "eth"),
+            (11155111, "eth"),
+            (42161, "arb"),
+            (421614, "arb"),
+            (4663, "rhood"),
+            (46630, "rhood"),
+            (999, "hyper"),
+            (998, "hyper"),
+            (143, "monad"),
+            (10143, "monad"),
+        ] {
+            assert_eq!(chain_slug(chain), slug, "chain {chain}");
+            assert_eq!(escrow_subaccount(chain), <[u8; 32]>::from(Sha256::digest(format!("rumi-icusd-{slug}-bridge:escrow:v1").as_bytes())), "chain {chain}");
+            assert_ne!(escrow_subaccount(chain), escrow_subaccount(8453), "chain {chain}");
+            assert_ne!(mint_id(chain, &contract, &salt, deposit_id), base_mint, "chain {chain}");
+            assert_eq!(derivation_path(LaneKind::Minter, chain)[0], format!("rumi-icusd-{slug}-bridge").into_bytes(), "chain {chain}");
+            assert_ne!(remint_id(chain, &contract, &salt, &transfer_id), remint_id(8453, &contract, &salt, &transfer_id), "chain {chain}");
+        }
+    }
+
+    #[test]
     fn an_unknown_chain_id_panics_instead_of_falling_back_to_base() {
-        for chain in [0u64, 1, 8454, 11155111, u64::MAX] {
+        // Ids with no row at all: the unset value, near misses of Base ids, an id the groundwork
+        // plan does not name (Conflux), and the extremes.
+        for chain in [0u64, 10, 1030, 8454, 84531, 31338, 11155112, u64::MAX] {
             let msg = std::panic::catch_unwind(|| chain_slug(chain)).expect_err("must panic").downcast::<String>().expect("string panic message");
             assert_eq!(*msg, format!("no bridge chain profile for chain id {chain}"));
             assert!(std::panic::catch_unwind(|| escrow_subaccount(chain)).is_err());

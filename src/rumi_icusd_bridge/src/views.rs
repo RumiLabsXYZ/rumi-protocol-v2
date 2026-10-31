@@ -1,6 +1,7 @@
 //! Projections from stable records to public Candid views.
 
 use crate::accounting::Buckets;
+use crate::chains::{self, HeadRule};
 use crate::env;
 use crate::ids::{self, LaneKind};
 use crate::state::{
@@ -132,6 +133,26 @@ pub fn observer_config_view(c: &BridgeCore) -> ObserverConfig {
     }
 }
 
+/// The settlement policy as text, from the configured chain's head rule in the chain table.
+/// The Base text is the one the live instance has always reported, byte for byte.
+pub fn finality_policy(chain_id: u64, min_quorum: u8, providers: usize) -> String {
+    let Some(p) = chains::profile(chain_id) else {
+        // Unreachable in a running canister: install and upgrade both require a row.
+        return format!("no bridge chain profile for chain id {chain_id}: no settlement head is read");
+    };
+    match p.head_rule {
+        HeadRule::TagFinalizedQuorum => format!(
+            "{}, lowest value agreed by {min_quorum} of {providers} providers, block hash confirmed by the same quorum",
+            p.finality_label
+        ),
+        HeadRule::MonadVerified { delay_blocks } => format!(
+            "{} (`finalized` minus {delay_blocks} blocks), `finalized` height agreed by {min_quorum} of {providers} providers, block hash confirmed by the same quorum",
+            p.finality_label
+        ),
+        HeadRule::Blocked(reason) => format!("{}: blocked, no settlement head is read ({reason})", p.finality_label),
+    }
+}
+
 pub fn bridge_info() -> BridgeInfo {
     let canister = env::canister_id();
     state::read_core(|c| BridgeInfo {
@@ -154,11 +175,7 @@ pub fn bridge_info() -> BridgeInfo {
         observer_config: observer_config_view(c),
         pauses: c.config.pauses.clone(),
         halted: c.halted.as_ref().map(|h| h.reason.clone()),
-        finality_policy: format!(
-            "Base `finalized` head (L1 batch finality), lowest value agreed by {} of {} providers, block hash confirmed by the same quorum",
-            c.config.min_quorum,
-            c.config.rpc_services.len()
-        ),
+        finality_policy: finality_policy(c.config.chain_id, c.config.min_quorum, c.config.rpc_services.len()),
         min_quorum: c.config.min_quorum,
         rpc_service_count: c.config.rpc_services.len() as u32,
         observer: ObserverStatus {
@@ -250,5 +267,42 @@ pub fn audit_entry(r: &state::AuditRecord) -> AuditEntry {
         transfer_id: r.transfer_id.map(|t| ids::hex0x(&t)),
         tx_id: r.tx_id,
         note: r.note.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_finality_policy_is_byte_identical_to_the_pre_table_text() {
+        for chain in [8453u64, 84532, 31337] {
+            assert_eq!(
+                finality_policy(chain, 2, 3),
+                "Base `finalized` head (L1 batch finality), lowest value agreed by 2 of 3 providers, block hash confirmed by the same quorum",
+                "chain {chain}"
+            );
+        }
+        assert_eq!(
+            finality_policy(8453, 3, 5),
+            "Base `finalized` head (L1 batch finality), lowest value agreed by 3 of 5 providers, block hash confirmed by the same quorum"
+        );
+    }
+
+    #[test]
+    fn other_rules_describe_themselves_and_no_row_describes_nothing() {
+        let eth = finality_policy(1, 2, 3);
+        assert!(eth.starts_with("Ethereum `finalized` head") && eth.contains("lowest value agreed by 2 of 3 providers") && !eth.contains("Base"), "{eth}");
+        assert_eq!(
+            finality_policy(10143, 2, 3),
+            "Monad Verified head (`finalized` minus 3 blocks), `finalized` height agreed by 2 of 3 providers, block hash confirmed by the same quorum"
+        );
+        assert_eq!(
+            finality_policy(999, 2, 3),
+            "HyperEVM head: blocked, no settlement head is read (hyperevm-historical-state)"
+        );
+        assert!(finality_policy(4663, 2, 3).contains("robinhood-finalized-tag-probe"));
+        let none = finality_policy(0, 2, 3);
+        assert!(none.contains("no bridge chain profile for chain id 0") && !none.contains("Base"), "{none}");
     }
 }

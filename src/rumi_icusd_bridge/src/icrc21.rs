@@ -3,6 +3,7 @@
 //! Messages state exactly what moves and what does not. Amounts are rendered from
 //! integer e8s without floating point.
 
+use crate::chains;
 use crate::ids;
 use crate::state::read_core;
 use crate::types::BridgeToBaseArgs;
@@ -93,12 +94,27 @@ fn bad_arg(e: impl std::fmt::Display) -> Icrc21Error {
     Icrc21Error::ConsentMessageUnavailable(ErrorInfo { description: format!("cannot decode arguments: {e}") })
 }
 
+/// The chain name and the delivery wait wording of the configured chain, from its row in
+/// the chain table. The method names stay Base-named (`bridge_to_base` and friends); only
+/// the words a signer reads follow the chain.
+///
+/// A chain id with no row cannot occur in a running canister (install and upgrade both
+/// require one). The neutral wording below keeps the message honest if it ever did, rather
+/// than naming Base for a chain that is not Base.
+fn chain_wording(chain_id: u64) -> (&'static str, &'static str) {
+    match chains::profile(chain_id) {
+        Some(p) => (p.display_name, p.consent_wait),
+        None => ("configured-chain", "after the chain's finality delay"),
+    }
+}
+
 pub fn consent_text(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
     match method {
         "bridge_to_base" => {
             let a = Decode!(arg, BridgeToBaseArgs).map_err(bad_arg)?;
             let recipient = ids::parse_address(&a.base_recipient).map_err(bad_arg)?;
             let (fee, chain) = read_core(|c| (c.config.fees.deposit_fee_e8s, c.config.chain_id));
+            let (name, wait) = chain_wording(chain);
             if a.expected_deposit_fee_e8s != fee {
                 return Err(Icrc21Error::ConsentMessageUnavailable(ErrorInfo {
                     description: format!(
@@ -115,11 +131,11 @@ pub fn consent_text(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
                 Some(_) => return Err(bad_arg("from_subaccount must be 32 bytes")),
             };
             Ok(format!(
-                "## Bridge icUSD to Base\n\n\
+                "## Bridge icUSD to {name}\n\n\
                  * Moves **{}** from {source} into the Rumi bridge escrow. The icUSD ledger fee is charged to you separately.\n\
-                 * Mints **{}** icUSD on Base (chain {chain}) to `{}`.\n\
+                 * Mints **{}** icUSD on {name} (chain {chain}) to `{}`.\n\
                  * Bridge fee: {}.\n\
-                 * Delivery is expected after Base L1 batch finality, about 20 minutes. Your escrowed icUSD stays locked while it circulates on Base.\n\
+                 * Delivery is expected {wait}. Your escrowed icUSD stays locked while it circulates on {name}.\n\
                  * This does not borrow or create debt.",
                 format_icusd(a.amount_e8s),
                 format_icusd(receive).trim_end_matches(" icUSD"),
@@ -130,19 +146,21 @@ pub fn consent_text(method: &str, arg: &[u8]) -> Result<String, Icrc21Error> {
         }
         "request_deposit_refund" => {
             let id = Decode!(arg, u64).map_err(bad_arg)?;
+            let (name, _) = chain_wording(read_core(|c| c.config.chain_id));
             Ok(format!(
                 "## Refund bridge deposit #{id}\n\n\
                  * Returns the escrowed icUSD of deposit #{id} to the account it came from, minus the icUSD ledger fee.\n\
-                 * Only possible when the Base mint is proven not to have happened."
+                 * Only possible when the {name} mint is proven not to have happened."
             ))
         }
         "notify_base_bridge_out" => {
             let tx = Decode!(arg, String).map_err(bad_arg)?;
             let tx = ids::hex0x(&ids::parse_bytes32(&tx).map_err(bad_arg)?);
+            let (name, _) = chain_wording(read_core(|c| c.config.chain_id));
             Ok(format!(
-                "## Report a Base bridge transaction\n\n\
-                 * Tells the bridge to check Base transaction `{tx}` sooner.\n\
-                 * This moves no funds. Settlement happens only after the bridge verifies the finalized Base event."
+                "## Report a {name} bridge transaction\n\n\
+                 * Tells the bridge to check {name} transaction `{tx}` sooner.\n\
+                 * This moves no funds. Settlement happens only after the bridge verifies the finalized {name} event."
             ))
         }
         other => Err(unsupported(other)),
@@ -285,6 +303,93 @@ mod tests {
     fn unknown_methods_and_bad_args_are_refused() {
         assert!(matches!(consent_text("admin_set_pauses", &[]), Err(Icrc21Error::UnsupportedCanisterCall(_))));
         assert!(matches!(consent_text("bridge_to_base", &[1, 2, 3]), Err(Icrc21Error::ConsentMessageUnavailable(_))));
+    }
+
+    // ----- chain wording from the table ----------------------------------------------
+
+    fn on_chain(chain: u64) {
+        crate::state::reset_for_tests();
+        crate::state::mutate_core(|c| c.config.chain_id = chain);
+    }
+
+    fn deposit_args(from_subaccount: Option<serde_bytes::ByteBuf>) -> Vec<u8> {
+        Encode!(&BridgeToBaseArgs {
+            amount_e8s: 250_000_000,
+            base_recipient: "0x00000000000000000000000000000000000000aa".into(),
+            from_subaccount,
+            client_request_id: serde_bytes::ByteBuf::from(vec![1u8; 16]),
+            expected_deposit_fee_e8s: 0,
+        })
+        .unwrap()
+    }
+
+    /// The messages exactly as the Base-only module wrote them, with the chain id spliced in.
+    /// This is the oracle for "Base text stays byte-identical".
+    fn pre_table_bridge_text(chain: u64) -> String {
+        let recipient = ids::to_checksum(&ids::parse_address("0x00000000000000000000000000000000000000aa").unwrap());
+        format!(
+            "## Bridge icUSD to Base\n\n\
+             * Moves **2.5 icUSD** from your default icUSD account into the Rumi bridge escrow. The icUSD ledger fee is charged to you separately.\n\
+             * Mints **2.5** icUSD on Base (chain {chain}) to `{recipient}`.\n\
+             * Bridge fee: 0 icUSD.\n\
+             * Delivery is expected after Base L1 batch finality, about 20 minutes. Your escrowed icUSD stays locked while it circulates on Base.\n\
+             * This does not borrow or create debt."
+        )
+    }
+
+    #[test]
+    fn base_consent_text_is_byte_identical_to_the_pre_table_text() {
+        let tx = format!("0x{}", "ab".repeat(32));
+        for chain in [8453u64, 84532, 31337] {
+            on_chain(chain);
+            assert_eq!(consent_text("bridge_to_base", &deposit_args(None)).unwrap(), pre_table_bridge_text(chain), "chain {chain}");
+            assert_eq!(
+                consent_text("request_deposit_refund", &Encode!(&7u64).unwrap()).unwrap(),
+                "## Refund bridge deposit #7\n\n\
+                 * Returns the escrowed icUSD of deposit #7 to the account it came from, minus the icUSD ledger fee.\n\
+                 * Only possible when the Base mint is proven not to have happened.",
+                "chain {chain}"
+            );
+            assert_eq!(
+                consent_text("notify_base_bridge_out", &Encode!(&tx).unwrap()).unwrap(),
+                format!(
+                    "## Report a Base bridge transaction\n\n\
+                     * Tells the bridge to check Base transaction `{tx}` sooner.\n\
+                     * This moves no funds. Settlement happens only after the bridge verifies the finalized Base event."
+                ),
+                "chain {chain}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_chains_read_their_own_name_and_wait_from_the_row() {
+        for (chain, name, wait) in [
+            (1u64, "Ethereum", "after Ethereum finalization, about 13 minutes"),
+            (11155111, "Ethereum Sepolia", "after Ethereum finalization, about 13 minutes"),
+            (42161, "Arbitrum One", "after the Arbitrum batch is finalized on Ethereum, about 13 minutes"),
+            (10143, "Monad testnet", "after Monad Verified state (Finalized plus 3 blocks), within seconds"),
+        ] {
+            on_chain(chain);
+            let text = consent_text("bridge_to_base", &deposit_args(None)).unwrap();
+            assert!(text.starts_with(&format!("## Bridge icUSD to {name}\n")), "{text}");
+            assert!(text.contains(&format!("icUSD on {name} (chain {chain}) to")), "{text}");
+            assert!(text.contains(&format!("* Delivery is expected {wait}. Your escrowed icUSD stays locked while it circulates on {name}.")), "{text}");
+            assert!(!text.contains("Base"), "chain {chain} must not name Base: {text}");
+            let tx = format!("0x{}", "cd".repeat(32));
+            let notify = consent_text("notify_base_bridge_out", &Encode!(&tx).unwrap()).unwrap();
+            assert!(notify.contains(&format!("## Report a {name} bridge transaction")) && !notify.contains("Base"), "{notify}");
+            let refund = consent_text("request_deposit_refund", &Encode!(&1u64).unwrap()).unwrap();
+            assert!(refund.contains(&format!("when the {name} mint is proven")) && !refund.contains("Base"), "{refund}");
+        }
+    }
+
+    #[test]
+    fn a_chain_without_a_row_never_reads_as_base() {
+        on_chain(0);
+        let text = consent_text("bridge_to_base", &deposit_args(None)).unwrap();
+        assert!(!text.contains("Base"), "{text}");
+        assert!(text.contains("(chain 0)"), "{text}");
     }
 
     #[test]

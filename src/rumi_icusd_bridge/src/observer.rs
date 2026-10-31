@@ -821,11 +821,19 @@ async fn scan(cfg: ScanCfg) -> Result<ObserverOutcome, String> {
 /// this often even when nothing changed, so the cursor stays near the head.
 pub const FULL_PASS_EVERY_NS: u64 = 3_600 * 1_000_000_000;
 
-/// Cheap idle probe: `bridgeOutCount()` at the `finalized` tag, one small round. Returns
+/// Cheap idle probe: `bridgeOutCount()` at the settlement head, one small round. Returns
 /// true only when a quorum agrees nothing new was burned. Any disagreement, error or
 /// change means the caller must run a full pass.
+///
+/// Where the chain's head rule is a tag (`finalized`) the probe reads at that tag, one round.
+/// Any other rule reads the numbered head first (`settlement_block_tag`), because a tag
+/// would trust ordering-only evidence; a blocked rule fails the probe, so the full pass runs
+/// and reports the block.
 async fn idle_probe_unchanged(contract: &[u8; 20], processed: u64) -> bool {
-    match rpc::eth_call(contract, &abi::encode_view(&ViewCall::BridgeOutCount), rpc::BlockTag::Finalized).await {
+    let Ok(tag) = rpc::settlement_block_tag().await else {
+        return false;
+    };
+    match rpc::eth_call(contract, &abi::encode_view(&ViewCall::BridgeOutCount), tag).await {
         Ok(ret) => abi::decode_uint_u128(&ret).map(|v| v == processed as u128).unwrap_or(false),
         Err(_) => false,
     }
@@ -1295,6 +1303,91 @@ mod tests {
         sim.borrow_mut().providers[1].down = true;
         let _ = run();
         assert!(count_of(&sim, "eth_getBlockByNumber") > 0, "probe failure falls back to a full pass");
+    }
+
+    /// Install the simulated chain and keep every request body.
+    fn install_recording(sim: Sim) -> (Rc<RefCell<Sim>>, Rc<RefCell<Vec<String>>>) {
+        let sim = Rc::new(RefCell::new(sim));
+        let bodies: Rc<RefCell<Vec<String>>> = Default::default();
+        let (s, b) = (sim.clone(), bodies.clone());
+        set_mock_transport(move |svc, body| {
+            b.borrow_mut().push(body.to_string());
+            s.borrow_mut().handle(provider_index(svc), body)
+        });
+        (sim, bodies)
+    }
+
+    /// The block parameter of every `eth_call` in `bodies`.
+    fn eth_call_blocks(bodies: &Rc<RefCell<Vec<String>>>) -> Vec<Value> {
+        bodies.borrow().iter().map(|b| request_of(b)).filter(|(m, _)| m == "eth_call").map(|(_, p)| p[1].clone()).collect()
+    }
+
+    #[test]
+    fn base_idle_probe_reads_at_the_finalized_tag() {
+        // The unchanged Base sequence, shown at the request level: one eth_call round, each
+        // call at the `finalized` tag, and no block read.
+        bound(3, 2, 100);
+        let (sim, bodies) = install_recording(Sim::new(3, 150));
+        run().unwrap();
+        bodies.borrow_mut().clear();
+        sim.borrow_mut().calls.clear();
+        assert_eq!(run().unwrap(), ObserverOutcome::default());
+        assert_eq!(eth_call_blocks(&bodies), vec![json!("finalized"); 3]);
+        assert_eq!(count_of(&sim, "eth_getBlockByNumber"), 0);
+    }
+
+    #[test]
+    fn monad_idle_probe_reads_at_the_numbered_verified_head() {
+        bound(3, 2, 100);
+        state::mutate_core(|c| c.config.chain_id = 10_143);
+        let (sim, bodies) = install_recording(Sim::new(3, 150));
+        // The first pass is a full pass: head = finalized 150 - 3.
+        run().unwrap();
+        assert_eq!(pos(), (147, 0));
+        for b in bodies.borrow().iter() {
+            assert!(!b.contains("\"latest\""), "{b}");
+        }
+        // Within the hour the idle probe runs: it reads the numbered head first (finalized
+        // round, then the hash at the head) and then bridgeOutCount pinned to that number.
+        for p in &mut sim.borrow_mut().providers {
+            p.finalized = 180;
+        }
+        bodies.borrow_mut().clear();
+        sim.borrow_mut().calls.clear();
+        assert_eq!(run().unwrap(), ObserverOutcome::default());
+        assert_eq!(eth_call_blocks(&bodies), vec![json!("0xb1"); 3], "eth_call is pinned to block 177");
+        assert!(bodies.borrow().iter().all(|b| !b.contains("\"latest\"")));
+        let blocks: Vec<Value> = bodies.borrow().iter().map(|b| request_of(b)).filter(|(m, _)| m == "eth_getBlockByNumber").map(|(_, p)| p[0].clone()).collect();
+        assert_eq!(blocks, vec![json!("finalized"), json!("finalized"), json!("finalized"), json!("0xb1"), json!("0xb1"), json!("0xb1")]);
+        assert_eq!(pos(), (147, 0), "the cursor waits for the next full pass");
+        // A burn at the Verified head is seen by the probe and forces a full pass.
+        sim.borrow_mut().add_event(1, 160, 5 * E8);
+        sim.borrow_mut().calls.clear();
+        let out = run().unwrap();
+        assert!(count_of(&sim, "eth_getLogs") > 0, "the probe saw a new burn and a full pass ran");
+        assert_eq!(out.recorded, 1);
+    }
+
+    #[test]
+    fn a_blocked_chain_asks_no_provider_for_a_head_and_fails_the_pass() {
+        for chain in [4_663u64, 999] {
+            bound(3, 2, 100);
+            state::mutate_core(|c| c.config.chain_id = chain);
+            let (sim, bodies) = install_recording(Sim::new(3, 150));
+            // Full pass: the head is blocked, the pass fails, nothing is sent.
+            let e = run().unwrap_err();
+            assert!(e.contains("blocked"), "{e}");
+            assert!(bodies.borrow().is_empty(), "chain {chain}");
+            // Within the hour the idle probe cannot read a head either: it asks nothing and
+            // hands over to the full pass, which fails the same way.
+            state::mutate_core(|c| {
+                c.observer.last_full_pass_ns = Some(crate::env::now_ns());
+                c.observer.next_attempt_ns = None;
+            });
+            assert!(run().is_err());
+            assert!(bodies.borrow().is_empty(), "chain {chain}");
+            assert!(sim.borrow().calls.is_empty());
+        }
     }
 
     #[test]
