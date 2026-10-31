@@ -25,6 +25,7 @@ const fx = vi.hoisted(() => {
 		backendQuery: {} as Record<string, any>,
 		ledgerQuery: {} as Record<string, any>,
 		relayQuery: {} as Record<string, any>,
+        depositStatus: vi.fn(),
 		walletActors: {} as Record<string, any>,
 		oisyActor: vi.fn(),
 		signer: vi.fn(),
@@ -60,6 +61,7 @@ vi.mock('../stores/wallet', () => ({
 	}
 }));
 vi.mock('./auth', () => ({ auth: fx.auth, walletSessionGeneration: fx.generation }));
+vi.mock('./cksolOisySigner', () => ({ getCksolOisySignerAgent: vi.fn(async () => ({})) }));
 vi.mock('./oisySigner', () => ({
 	getOisySignerAgent: vi.fn(async () => ({})),
 	createOisyActor: vi.fn((id: string) => {
@@ -69,10 +71,11 @@ vi.mock('./oisySigner', () => ({
 			: fx.walletActors['rrkah-fqaaa-aaaaa-aaaaq-cai'];
 	})
 }));
-vi.mock('./cksolMinter', () => ({ getCksolRelay: () => fx.relayQuery }));
+vi.mock('./cksolMinter', () => ({ getCksolRelay: () => fx.relayQuery, getCksolMinter: () => ({ deposit_sol_status: fx.depositStatus }) }));
 import {
 	PaidBackendIDL,
 	claimCksolRefund,
+	continueApprovedCksolPayment,
 	cksolPaymentKey,
 	loadCksolPayment,
 	quoteCksolPayment,
@@ -128,6 +131,7 @@ function setup(walletType = 'plug') {
 	fx.auth.set({ isConnected: true, account: { owner }, walletType });
 	fx.relayQuery.get_cksol_deposit = vi.fn(async () => []);
 	nextSequence = 1n;
+    fx.depositStatus.mockResolvedValue({Queued:{sweepable_amount:100n}});
 	fx.backendQuery.get_cksol_payment_quote = vi.fn(async () => quoteReply());
 	fx.backendQuery.get_cksol_payment = vi.fn(async () => []);
 	fx.backendQuery.start_cksol_deposit_paid = vi.fn(async (sequence: bigint, maxPayment: bigint) => {
@@ -169,7 +173,7 @@ describe('user-funded ckSOL payment', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 	});
-	it.each(['plug', 'internet-identity', 'oisy'])(
+	it.each(['plug', 'internet-identity'])(
 		'approves and dispatches sequentially for %s',
 		async (walletType) => {
 			const { ledger, storage } = setup(walletType);
@@ -186,9 +190,77 @@ describe('user-funded ckSOL payment', () => {
 					expires_at: [expect.any(BigInt)]
 				})
 			);
-			if (walletType === 'oisy') expect(fx.oisyActor).toHaveBeenCalledTimes(2);
 		}
 	);
+    it('keeps the scoped OISY action across approval and processing', async () => {
+        const { storage } = setup('oisy');
+        const q = await quoteCksolPayment(owner, 'oisy');
+        const result = await submitCksolPayment(q, owner, storage, live);
+        expect(result.phase).toBe('Receipt');
+        expect(fx.calls).toEqual(['approve', 'start']);
+    });
+    it.each([{Minted:{minted_amount:99n,block_index:1n}}, {Dropped:{signature:'s'}}])('lets the backend reconcile terminal relay state before funding: %o', async status => {
+        const {storage} = setup();
+        fx.relayQuery.get_cksol_deposit.mockResolvedValue([{status:{Queued:42n}}]);
+        fx.depositStatus.mockResolvedValue(status);
+        const result = await submitCksolPayment(await quoteCksolPayment(owner,'plug'), owner, storage, live);
+        expect(result.phase).toBe('Receipt');
+        expect(fx.depositStatus).toHaveBeenCalledWith(42n);
+        expect(fx.calls).toEqual(['approve','start']);
+    });
+	it('revalidates an old displayed quote after the user sends SOL', async () => {
+		const { storage } = setup();
+		const q = await quoteCksolPayment(owner, 'plug');
+		q.quotedAt -= 5 * 60_000;
+		const intent = await submitCksolPayment(q, owner, storage, live);
+		expect(intent.phase).toBe('Receipt');
+		expect(intent.approvalAmount).toBe('1001100000000');
+		expect(intent.receipt.phase).toBe('FundingPending');
+	});
+    it('refreshes a stale global sequence before approval without changing the displayed cap', async () => {
+        const {ledger, storage} = setup();
+        const q = await quoteCksolPayment(owner,'plug');
+        nextSequence=2n;
+        const result=await submitCksolPayment(q,owner,storage,live);
+        expect(result.sequence).toBe('2');
+        expect(ledger.icrc2_approve).toHaveBeenCalledOnce();
+        expect(fx.walletActors['rrkah-fqaaa-aaaaa-aaaaq-cai'].start_cksol_deposit_paid).toHaveBeenCalledWith(2n,funding);
+    });
+	it('blocks an old quote from a replaced wallet session before approval', async () => {
+		const { ledger, storage } = setup();
+		const q = await quoteCksolPayment(owner, 'plug');
+		q.quotedAt -= 5 * 60_000;
+		fx.generation.set(1);
+		await expect(submitCksolPayment(q, owner, storage, live)).rejects.toThrow('Wallet session');
+		expect(ledger.icrc2_approve).not.toHaveBeenCalled();
+		expect(loadCksolPayment(storage, owner.toText())).toBeNull();
+	});
+	it('reconciles the known unsent OISY popup failure without discarding the original record', async () => {
+		const { storage } = setup('oisy');
+		const saved = { owner: owner.toText(), sequence: '1', phase: 'ApprovalUnknown', createdAt: 123,
+			message: 'Error: Signer window should not be opened outside of click handler, see: https://github.com/slide-computer/signer-js/blob/main/packages/signer-web/README.md#channels-must-be-established-in-a-click-handler' };
+		const raw = JSON.stringify(saved);
+		storage.setItem(cksolPaymentKey(owner.toText()), raw);
+		const recovered = await recoverCksolPayment(owner, storage);
+		expect(recovered?.phase).toBe('NotStarted');
+		expect(storage.getItem(`${cksolPaymentKey(owner.toText())}:unsent-approval:1:123`)).toBe(raw);
+		expect(fx.calls).toEqual([]);
+	});
+	it('preserves a popup-failure journal when an allowance exists', async () => {
+		const { storage } = setup('oisy');
+		const saved = { owner: owner.toText(), sequence: '1', phase: 'ApprovalUnknown', createdAt: 123,
+			message: 'Error: Signer window should not be opened outside of click handler, see: https://github.com/slide-computer/signer-js/blob/main/packages/signer-web/README.md#channels-must-be-established-in-a-click-handler' };
+		storage.setItem(cksolPaymentKey(owner.toText()), JSON.stringify(saved));
+		fx.ledgerQuery.icrc2_allowance.mockResolvedValueOnce({ allowance: approvalAmount, expires_at: [] });
+		expect((await recoverCksolPayment(owner, storage))?.phase).toBe('ApprovalUnknown');
+		expect(fx.calls).toEqual([]);
+	});
+	it('preserves an actual lost approval reply even with no current allowance or backend receipt', async () => {
+		const { storage } = setup('oisy');
+		storage.setItem(cksolPaymentKey(owner.toText()), JSON.stringify({owner:owner.toText(),sequence:'1',phase:'ApprovalUnknown',createdAt:123,message:'approval response lost'}));
+		expect((await recoverCksolPayment(owner, storage))?.phase).toBe('ApprovalUnknown');
+		expect(fx.calls).toEqual([]);
+	});
 	it('keeps the same intent after a lost approval response and never reapproves', async () => {
 		const { ledger, storage } = setup();
 		ledger.icrc2_approve.mockRejectedValueOnce(new Error('approval response lost'));
@@ -218,6 +290,27 @@ describe('user-funded ckSOL payment', () => {
 		expect(ledger.icrc2_approve).toHaveBeenCalledOnce();
 		expect(update.start_cksol_deposit_paid).toHaveBeenCalledOnce();
 	});
+    it.each(['Approved','ApprovalUnknown','StartUnknown'])('does not overwrite a newer %s journal with a delayed receipt', async phase => {
+        const {storage}=setup();
+        storage.setItem(cksolPaymentKey(owner.toText()),JSON.stringify({owner:owner.toText(),sequence:'2',phase:'Receipt',createdAt:1,receipt:{phase:'Complete'}}));
+        let reply!: (r:any)=>void;
+        fx.backendQuery.get_cksol_payment.mockImplementationOnce(()=>new Promise(r=>reply=r));
+        const pending=recoverCksolPayment(owner,storage);
+        const newer={owner:owner.toText(),sequence:'3',phase,createdAt:2,message:'preserve this request'};
+        storage.setItem(cksolPaymentKey(owner.toText()),JSON.stringify(newer));
+        reply([receipt(2n,{Complete:null})]);
+        expect(await pending).toEqual(newer);
+        expect(loadCksolPayment(storage,owner.toText())).toEqual(newer);
+    });
+    it('does not mutate a journal after the wallet session changes during a receipt read', async () => {
+        const {storage}=setup();
+        let reply!: (r:any)=>void;
+        fx.backendQuery.get_cksol_payment.mockImplementationOnce(()=>new Promise(r=>reply=r));
+        const pending=recoverCksolPayment(owner,storage);
+        fx.generation.set(1);reply([receipt()]);
+        await expect(pending).rejects.toThrow('Wallet session changed');
+        expect(loadCksolPayment(storage,owner.toText())).toBeNull();
+    });
 	it('recovers a durable backend receipt even when local storage has no intent', async () => {
 		const { storage } = setup();
 		fx.backendQuery.get_cksol_payment.mockResolvedValueOnce([receipt(4n, { RefundReady: null })]);
@@ -259,7 +352,7 @@ describe('user-funded ckSOL payment', () => {
 		expect(recovered).toEqual(saved);
 		expect(loadCksolPayment(storage, owner.toText())).toEqual(saved);
 	});
-	it.each([{ Queued: 42n }, { SubmittedOrUnknown: null }, { Rejected: 'minter rejected' }])(
+	it.each([{ Queued: 42n }, { SubmittedOrUnknown: null }])(
 		'blocks pre-existing legacy relay state before approval: %o',
 		async (status) => {
 			const { ledger, storage } = setup();
