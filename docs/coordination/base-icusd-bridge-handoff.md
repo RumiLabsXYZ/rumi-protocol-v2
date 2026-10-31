@@ -1231,6 +1231,29 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   sufficient. An actual automatic tool-review denial is still reported with its exact action and reason, never retried
   another way. No wallet, public-probe, deploy or live authority follows from this.
 
+## Milestone 54 (2026-10-31): BB-47 in Review; BB-48 started
+
+- BB-47 `df53ea32` (W28, `claude-sonnet-5-5`, local): new crate `rumi_icusd_sol_bridge` (source only; not in dfx.json or
+  icp.yaml): `ids.rs` (Solana domains, key path `[rumi-icusd-sol-bridge, v1, role, genesis_hash_32]`, length-prefixed ids),
+  `memo.rs` (return grammar and canister memos with a rejection table), `accounting.rs` (destination-neutral buckets plus `RC`,
+  `BU`, `stray`; C1, C2, C3 and custody checks; `PR` reachable only through `BU`; exhaustive search to depth 9 and a
+  20,000-step random walk show no release from `RC` or `BU`), `tx/` (no Solana SDK; Checked tags only; legacy and v0 compile
+  and strict decode; mint, burn, refund builders; return shape checker), a skeleton canister (versioned stable core with a
+  pinned append-only MemoryId list, controller-only `set_admins`, ICRC-21 with Solana wording, three queries) and `ledger.rs`
+  copied from the Base instance (unused yet). Golden vectors: 12 messages (6 shapes, Token-2022 and classic) checked against
+  pinned hex, a hand-written oracle in `golden.rs`, and a separate Python reference that reproduces the SPL ATA known answer.
+  Worker run: 171 tests passed; clippy clean; release Wasm 1,139,005 bytes; bridge crate 513 passed. Coordinator check: the
+  commit touches only the new crate, one workspace line and one lock entry (all dependencies already locked);
+  `python3 -I tools/golden_reference.py --check` gives `mismatches: 0`.
+- Design decisions for Miles: hash framing `sha256(domain || (u32_be(len) || field)*)`; proposed refund id
+  `rumi.icusd.sol.refund.v1` keyed by genesis, mint, salt and the stray signature only; remint keyed by the held claim's return
+  id; burn id over at most 16 ordered return ids; `stray` a subset of `O`, not a liability; refund order
+  `[Advance, (Create), Memo, TransferChecked]`; mainnet genesis requires `key_1`, any other cluster `test_key_1`; a reference
+  return builder shared by the shape checker and the future connector. Named U items stay blockers in code and the crate
+  header (memo program version, unattributed burns, token-program wallet check).
+- BB-48 dispatched to the same W28 (sole Rust build owner). Its history-availability probe tooling is deferred, consistent
+  with Miles' BB-46 decision; executing any probe stays held.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

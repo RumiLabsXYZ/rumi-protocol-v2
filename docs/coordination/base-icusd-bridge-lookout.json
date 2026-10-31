@@ -431,18 +431,18 @@
     },
     {
       "id": "BB-47",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Solana: instance skeleton and message builders",
-      "evidenceText": "proof=none; Claimed 2026-10-30: new Solana bridge crate skeleton; ids, roles and memo grammar; accounting with RC, BU and stray; mint, burn and refund builders and the return shape check with golden vectors; profile stays disabled",
+      "evidenceText": "proof=local-test; df53ea32: new Solana bridge crate (source only): ids, memo grammar, accounting with RC, BU, stray, mint, burn, refund builders and return shape check; 12 golden vectors cross-checked 3 ways; 171 tests; Wasm builds",
       "evidenceLinks": []
     },
     {
       "id": "BB-48",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: SOL RPC mirror and durable-nonce reconciliation",
-      "evidenceText": "proof=none; Persist before sign; a memo is discovery only and adoption needs the exact stored message; history-availability tooling; advance-only adversarial test passes",
+      "evidenceText": "proof=none; Claimed 2026-10-31: typed SOL RPC mirror behind a mock transport; durable-nonce pool; persist before sign; same-attempt reconcile where a memo is discovery only; history probe tooling deferred",
       "evidenceLinks": []
     },
     {
