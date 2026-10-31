@@ -5,4 +5,5 @@
 pub mod deposit;
 pub mod held;
 pub mod ledger_ops;
+pub mod mint_saga;
 pub mod release;

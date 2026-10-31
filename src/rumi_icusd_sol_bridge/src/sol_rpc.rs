@@ -74,6 +74,31 @@ pub struct LandedTx {
     pub wire: Vec<u8>,
     /// `meta.status` was `Err`: the transaction landed but failed in execution.
     pub failed: bool,
+    /// The parts of `meta` the return observer decides on (49c). The lane ignores them.
+    pub meta: TxMeta,
+}
+
+/// One entry of `preTokenBalances` / `postTokenBalances`. `owner` may be omitted by the RPC
+/// (source S6), and then the entry cannot prove who owns the account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenBalanceEntry {
+    /// Index into the message's account keys (a lookup-free message: the static keys).
+    pub account_index: u8,
+    pub mint: Pubkey,
+    pub owner: Option<Pubkey>,
+    /// The raw base-unit amount.
+    pub amount: u64,
+    pub decimals: u8,
+}
+
+/// The transaction metadata the observer reads. `None` fields were not recorded by the RPC and
+/// make a return unverifiable.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TxMeta {
+    /// How many inner-instruction groups the transaction recorded; `None` if not recorded.
+    pub inner_instruction_groups: Option<u32>,
+    pub pre_token_balances: Option<Vec<TokenBalanceEntry>>,
+    pub post_token_balances: Option<Vec<TokenBalanceEntry>>,
 }
 
 /// One row of `getSignaturesForAddress` (newest first).
@@ -321,9 +346,28 @@ pub mod wire {
         Err(Reserved),
     }
 
+    /// `TokenAmount`: only the raw amount and the decimals are read.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct TokenAmount {
+        pub decimals: u8,
+        pub amount: String,
+    }
+
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    pub struct TransactionTokenBalance {
+        pub owner: Option<String>,
+        pub mint: String,
+        pub accountIndex: u8,
+        pub uiTokenAmount: TokenAmount,
+    }
+
     #[derive(CandidType, Deserialize, Clone, Debug)]
     pub struct TransactionStatusMeta {
         pub status: ExecutionStatus,
+        /// `opt vec InnerInstructions`: only the number of groups is read.
+        pub innerInstructions: Option<Vec<Reserved>>,
+        pub preTokenBalances: Option<Vec<TransactionTokenBalance>>,
+        pub postTokenBalances: Option<Vec<TransactionTokenBalance>>,
     }
 
     #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -521,7 +565,33 @@ pub fn transaction_from_wire(tx: Option<wire::EncodedConfirmedTransactionWithSta
     let wire_tx = decode_base64(&text, "transaction")?;
     // A landed transaction without metadata cannot be classified as success or failure.
     let meta = tx.transaction.meta.ok_or_else(|| RpcFailure::Error("landed transaction has no status meta".into()))?;
-    Ok(Some(LandedTx { slot: tx.slot, wire: wire_tx, failed: matches!(meta.status, wire::ExecutionStatus::Err(_)) }))
+    let failed = matches!(meta.status, wire::ExecutionStatus::Err(_));
+    let balances = |rows: Option<Vec<wire::TransactionTokenBalance>>, what: &str| -> RpcResult<Option<Vec<TokenBalanceEntry>>> {
+        rows.map(|rows| {
+            rows.into_iter()
+                .map(|r| {
+                    let mint = crate::tx::pubkey_from_base58(&r.mint).map_err(|e| RpcFailure::Error(format!("{what} mint: {e}")))?;
+                    let owner = r
+                        .owner
+                        .map(|o| crate::tx::pubkey_from_base58(&o).map_err(|e| RpcFailure::Error(format!("{what} owner: {e}"))))
+                        .transpose()?;
+                    let amount = r
+                        .uiTokenAmount
+                        .amount
+                        .parse::<u64>()
+                        .map_err(|e| RpcFailure::Error(format!("{what} amount {:?}: {e}", r.uiTokenAmount.amount)))?;
+                    Ok(TokenBalanceEntry { account_index: r.accountIndex, mint, owner, amount, decimals: r.uiTokenAmount.decimals })
+                })
+                .collect::<RpcResult<Vec<_>>>()
+        })
+        .transpose()
+    };
+    let meta_view = TxMeta {
+        inner_instruction_groups: meta.innerInstructions.map(|g| g.len() as u32),
+        pre_token_balances: balances(meta.preTokenBalances, "preTokenBalances")?,
+        post_token_balances: balances(meta.postTokenBalances, "postTokenBalances")?,
+    };
+    Ok(Some(LandedTx { slot: tx.slot, wire: wire_tx, failed, meta: meta_view }))
 }
 
 pub fn signatures_from_wire(rows: Vec<wire::ConfirmedTransactionStatusWithSignature>) -> RpcResult<Vec<SignatureEntry>> {
@@ -817,10 +887,10 @@ mod tests {
             )
         };
         let (ok,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) = candid::decode_args(&reply_bytes("getTransaction", &tx_text("variant { Ok }"))).unwrap();
-        assert_eq!(transaction_from_wire(unwrap_multi(ok).unwrap()).unwrap(), Some(LandedTx { slot: 99, wire: wire_tx.clone(), failed: false }));
+        assert_eq!(transaction_from_wire(unwrap_multi(ok).unwrap()).unwrap(), Some(LandedTx { slot: 99, wire: wire_tx.clone(), failed: false, meta: TxMeta::default() }));
         let failed_status = "variant { Err = variant { InstructionError = record { 1 : nat8; variant { Custom = 7 : nat32 } } } }";
         let (failed,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) = candid::decode_args(&reply_bytes("getTransaction", &tx_text(failed_status))).unwrap();
-        assert_eq!(transaction_from_wire(unwrap_multi(failed).unwrap()).unwrap(), Some(LandedTx { slot: 99, wire: wire_tx, failed: true }));
+        assert_eq!(transaction_from_wire(unwrap_multi(failed).unwrap()).unwrap(), Some(LandedTx { slot: 99, wire: wire_tx, failed: true, meta: TxMeta::default() }));
         let (none,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) =
             candid::decode_args(&reply_bytes("getTransaction", "(variant { Consistent = variant { Ok = null } })")).unwrap();
         assert_eq!(transaction_from_wire(unwrap_multi(none).unwrap()).unwrap(), None);
@@ -870,7 +940,7 @@ mod tests {
         let legacy = wire::EncodedConfirmedTransactionWithStatusMeta {
             slot: 1,
             transaction: wire::EncodedTransactionWithStatusMeta {
-                meta: Some(wire::TransactionStatusMeta { status: wire::ExecutionStatus::Ok }),
+                meta: Some(wire::TransactionStatusMeta { status: wire::ExecutionStatus::Ok, innerInstructions: None, preTokenBalances: None, postTokenBalances: None }),
                 transaction: wire::EncodedTransaction::legacyBinary("x".into()),
             },
         };
@@ -897,5 +967,55 @@ mod tests {
         assert!(block_on(bootstrap_blockhash(&chain, 1)).is_err(), "gives up after max_back slots");
         chain.fail_next("get_slot", crate::testkit::Fault::Inconsistent);
         assert_eq!(block_on(bootstrap_blockhash(&chain, 5)), Err(RpcFailure::Inconsistent));
+    }
+
+    #[test]
+    fn transaction_meta_carries_inner_instruction_groups_and_token_balances() {
+        use base64::Engine as _;
+        let wire_tx = vec![1u8, 2, 3, 4];
+        let tx_b64 = base64::engine::general_purpose::STANDARD.encode(&wire_tx);
+        let mint = crate::tx::pubkey_to_base58(&[0x44; 32]);
+        let owner = crate::tx::pubkey_to_base58(&[0x21; 32]);
+        let bal = |idx: u8, amount: &str, owner: Option<&str>| {
+            let owner = owner.map(|o| format!("opt \"{o}\"")).unwrap_or_else(|| "null".to_string());
+            format!(
+                r#"record {{ owner = {owner}; mint = "{mint}"; programId = null; accountIndex = {idx} : nat8; uiTokenAmount = record {{ decimals = 8 : nat8; uiAmount = null; uiAmountString = "0"; amount = "{amount}" }} }}"#
+            )
+        };
+        let reply = |inner: &str, pre: &str, post: &str| {
+            format!(
+                r#"(variant {{ Consistent = variant {{ Ok = opt record {{ slot = 7 : nat64; blockTime = null; transaction = record {{ meta = opt record {{ fee = 5000 : nat64; status = variant {{ Ok }}; innerInstructions = {inner}; postTokenBalances = {post}; preBalances = vec {{}}; postBalances = vec {{}}; returnData = null; logMessages = null; rewards = null; loadedAddresses = null; preTokenBalances = {pre}; computeUnitsConsumed = null; cost_units = null }}; transaction = variant {{ binary = record {{ "{tx_b64}"; variant {{ base64 }} }} }}; version = opt variant {{ legacy }} }} }} }} }})"#
+            )
+        };
+        let pre = format!("opt vec {{ {}; {} }}", bal(1, "500", Some(&owner)), bal(2, "100", None));
+        let post = format!("opt vec {{ {}; {} }}", bal(1, "300", Some(&owner)), bal(2, "300", None));
+        let text = reply("opt vec {}", &pre, &post);
+        let (r,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) = candid::decode_args(&reply_bytes("getTransaction", &text)).unwrap();
+        let tx = transaction_from_wire(unwrap_multi(r).unwrap()).unwrap().unwrap();
+        assert_eq!(tx.meta.inner_instruction_groups, Some(0));
+        let m = [0x44; 32];
+        assert_eq!(
+            tx.meta.pre_token_balances,
+            Some(vec![
+                TokenBalanceEntry { account_index: 1, mint: m, owner: Some([0x21; 32]), amount: 500, decimals: 8 },
+                TokenBalanceEntry { account_index: 2, mint: m, owner: None, amount: 100, decimals: 8 },
+            ])
+        );
+        assert_eq!(tx.meta.post_token_balances.as_ref().map(|b| (b[0].amount, b[1].amount)), Some((300, 300)));
+        // Not recorded stays "not recorded": the observer must not read it as empty or zero.
+        let text = reply("null", "null", "null");
+        let (r,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) = candid::decode_args(&reply_bytes("getTransaction", &text)).unwrap();
+        let tx = transaction_from_wire(unwrap_multi(r).unwrap()).unwrap().unwrap();
+        assert_eq!(tx.meta, TxMeta::default());
+        // Inner instruction groups are counted.
+        let inner = r#"opt vec { record { instructions = vec {}; index = 0 : nat8 } }"#;
+        let text = reply(inner, "null", "null");
+        let (r,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) = candid::decode_args(&reply_bytes("getTransaction", &text)).unwrap();
+        assert_eq!(transaction_from_wire(unwrap_multi(r).unwrap()).unwrap().unwrap().meta.inner_instruction_groups, Some(1));
+        // A balance the observer cannot read is an error, not a guess.
+        let bad = format!("opt vec {{ {} }}", bal(1, "not a number", None));
+        let text = reply("opt vec {}", &bad, &bad);
+        let (r,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) = candid::decode_args(&reply_bytes("getTransaction", &text)).unwrap();
+        assert!(transaction_from_wire(unwrap_multi(r).unwrap()).is_err());
     }
 }

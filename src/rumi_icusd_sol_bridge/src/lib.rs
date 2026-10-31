@@ -30,9 +30,13 @@
 //! sweeps, the persisted-tuple lifecycle with bounded ICRC-3 proofs, the user, hint and admin
 //! endpoints and the admin resolution of held operations.
 //!
-//! Still deferred (49c and 49d): the mint saga that builds a mint operation for an escrowed
-//! deposit and applies `OpEvent::Delivered` to the accounting buckets (49c), the return observer
-//! (49c), and the burn lane that custodies, burns and calls `flows::release::open_release` (49d).
+//! 49c adds the mint saga (`flows::mint_saga`: one mint operation per escrowed deposit, delivery
+//! applied to the books once, re-mints of held claims), the strict finalized return observer
+//! (`observer`: a valid return moves `O -> RC`, anything else that fills the return account is a
+//! stray) and the C1 and C2 monitors (`monitor`).
+//!
+//! Still deferred (49d): the burn lane that burns the custodied returns (`RC -> BU -> PR`), calls
+//! `flows::release::open_release`, reads custody and refunds strays.
 //!
 //! # Open (U) items this crate carries, by profile blocker id
 //!
@@ -87,7 +91,9 @@ mod lane_tests;
 pub mod ledger;
 pub mod memo;
 pub mod mint;
+pub mod monitor;
 pub mod nonce;
+pub mod observer;
 pub mod records;
 pub mod schnorr;
 pub mod sol_rpc;
@@ -102,6 +108,8 @@ pub mod views;
 
 #[cfg(test)]
 mod saga_tests;
+#[cfg(test)]
+mod saga49c_tests;
 
 use candid::Principal;
 use state::AuditCtx;
@@ -305,6 +313,46 @@ fn list_unresolved_ops(args: ListOpsArgs) -> Vec<OpView> {
     views::unresolved_ops(args.start_after, args.limit)
 }
 
+/// A verified return by its return id (64 hex).
+#[ic_cdk::query]
+fn get_return(return_id: String) -> Option<ReturnView> {
+    let id: [u8; 32] = hex::decode(return_id.trim()).ok()?.try_into().ok()?;
+    state::get_return(&id).map(|r| views::return_view(&r))
+}
+
+/// Verified returns, newest first.
+#[ic_cdk::query]
+fn list_returns(args: ListReturnsArgs) -> Vec<ReturnView> {
+    state::list_returns(args.start_after_seq, args.limit).iter().map(views::return_view).collect()
+}
+
+/// Transfers into the return account that were not valid returns, in signature order.
+#[ic_cdk::query]
+fn list_strays(args: ListStraysArgs) -> Vec<StrayView> {
+    let after = args.after.as_deref().and_then(|a| tx::signature_from_base58(a).ok()).map(records::Sig);
+    state::list_strays(after, args.limit).iter().map(views::stray_view).collect()
+}
+
+#[ic_cdk::query]
+fn get_observer_status() -> ObserverStatus {
+    views::observer_status()
+}
+
+#[ic_cdk::query]
+fn get_monitor_status() -> MonitorStatus {
+    views::monitor_status()
+}
+
+/// Read the C1 and C2 monitors now instead of waiting for the next interval.
+#[ic_cdk::update]
+async fn admin_run_monitors() -> BridgeResult<MonitorStatus> {
+    admin::require_admin()?;
+    if !timer::run_monitors_now().await {
+        return Err(BridgeError::InvalidState("the instance is not fully configured, or its escrow mint is not bound".into()));
+    }
+    Ok(views::monitor_status())
+}
+
 /// Pending return hints (what the observer will fetch early).
 #[ic_cdk::query]
 fn list_return_hints() -> Vec<HintView> {
@@ -462,6 +510,7 @@ const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
     ("admin_resolve_held_op", IngressAccess::Admin),
     ("admin_clear_lane_halt", IngressAccess::Admin),
     ("admin_run_tick", IngressAccess::Admin),
+    ("admin_run_monitors", IngressAccess::Admin),
     // Controller methods.
     ("set_admins", IngressAccess::Controller),
     #[cfg(feature = "history_probe")]
@@ -575,7 +624,7 @@ mod ingress_tests {
     #[test]
     fn every_update_endpoint_has_an_ingress_decision() {
         let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().collect();
-        let expected = if cfg!(feature = "history_probe") { 14 } else { 13 };
+        let expected = if cfg!(feature = "history_probe") { 15 } else { 14 };
         assert_eq!(updates.len(), expected, "the update endpoints are exactly the listed ones: {updates:?}");
         let listed: BTreeSet<String> = INGRESS_METHODS.iter().map(|(n, _)| n.to_string()).collect();
         let missing: Vec<_> = updates.difference(&listed).collect();
@@ -610,6 +659,7 @@ mod ingress_tests {
             "admin_resolve_held_op",
             "admin_clear_lane_halt",
             "admin_run_tick",
+            "admin_run_monitors",
         ] {
             assert!(decide(m, 100, false, true, false), "{m}: admin");
             assert!(decide(m, 100, false, false, true), "{m}: controller");

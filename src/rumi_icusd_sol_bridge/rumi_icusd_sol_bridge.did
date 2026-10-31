@@ -166,6 +166,12 @@ type DeviceSpec = variant {
   LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
 };
 type ErrorInfo = record { description : text };
+type EscrowReading = record {
+  ok : bool;
+  balance : nat;
+  at_ns : nat64;
+  required : nat;
+};
 type HeldOpResolution = variant { Abandon : record { reason : text }; Recheck };
 type HintView = record {
   signature : text;
@@ -218,7 +224,30 @@ type ListReleasesForSenderArgs = record {
   start_after_seq : opt nat64;
   limit : nat32;
 };
+type ListReturnsArgs = record { start_after_seq : opt nat64; limit : nat32 };
+type ListStraysArgs = record { after : opt text; limit : nat32 };
 type MintState = variant { None; Bound; DeployedUnbound };
+type MonitorStatus = record {
+  c1 : opt EscrowReading;
+  c2 : opt SupplyReading;
+  last_run_ns : opt nat64;
+  last_note : opt text;
+  c2_strikes : nat8;
+  c1_strikes : nat8;
+};
+type ObserverStatus = record {
+  return_account : opt text;
+  strays : nat64;
+  walk_active : bool;
+  cursor : opt text;
+  returns_active : nat64;
+  last_run_ns : opt nat64;
+  caught_up : bool;
+  last_note : opt text;
+  queued : nat64;
+  processed : nat64;
+  last_progress_ns : opt nat64;
+};
 type OpKindView = variant { Burn; Mint; Refund };
 type OpStateView = variant {
   Abandoned : record { reason : text };
@@ -279,8 +308,27 @@ type ReleaseView = record {
 type Result = variant { Ok; Err : BridgeError };
 type Result_1 = variant { Ok : OpView; Err : BridgeError };
 type Result_2 = variant { Ok : DepositView; Err : BridgeError };
-type Result_3 = variant { Ok : nat64; Err : BridgeError };
-type Result_4 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type Result_3 = variant { Ok : MonitorStatus; Err : BridgeError };
+type Result_4 = variant { Ok : nat64; Err : BridgeError };
+type Result_5 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type ReturnStatus = variant {
+  Burned : record { burn_op_id : nat64 };
+  Burning : record { burn_op_id : nat64 };
+  Custodied;
+};
+type ReturnView = record {
+  seq : nat64;
+  status : ReturnStatus;
+  return_id : text;
+  destination : Account;
+  signature : text;
+  slot : nat64;
+  sender : text;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  source_account : text;
+  client_nonce : nat64;
+};
 type RpcSettings = record {
   response_size_estimate : opt nat64;
   verify : ConsensusSetting;
@@ -291,6 +339,24 @@ type RpcSettings = record {
 type SolRpcCluster = variant { Mainnet; Testnet; Devnet };
 type SolanaInclusion = record { signature : text; slot : nat64 };
 type StandardRecord = record { url : text; name : text };
+type StrayView = record {
+  signature : text;
+  verified_sender : opt text;
+  slot : nat64;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  source_account : opt text;
+  reason : text;
+};
+type SupplyReading = record {
+  inflight_mint : nat;
+  at_ns : nat64;
+  quiescent : bool;
+  within_bound : bool;
+  unattributed_gap : opt nat;
+  supply : nat;
+  bound : nat;
+};
 type TokenProgram = variant { Classic; Token2022 };
 type Transition = variant {
   RemintDelivered : record { amount : nat64 };
@@ -318,11 +384,12 @@ service : (BridgeArg) -> {
   admin_clear_lane_halt : (Lane, text) -> (Result);
   admin_resolve_held_op : (nat64, HeldOpResolution) -> (Result_1);
   admin_retry_deposit : (nat64) -> (Result_2);
+  admin_run_monitors : () -> (Result_3);
   admin_run_tick : () -> (Result);
   admin_set_fees : (BridgeFees) -> (Result);
   admin_set_limits : (BridgeLimits) -> (Result);
   admin_set_pauses : (Pauses) -> (Result);
-  admin_sweep_fees : (nat64) -> (Result_3);
+  admin_sweep_fees : (nat64) -> (Result_4);
   bridge_to_solana : (BridgeToSolanaArgs) -> (Result_2);
   bridge_version : () -> (text) query;
   get_audit_log : (nat64, nat32) -> (vec AuditEntry) query;
@@ -331,10 +398,13 @@ service : (BridgeArg) -> {
   get_buckets : () -> (BucketsView) query;
   get_deposit : (nat64) -> (opt DepositView) query;
   get_deposit_by_request : (principal, blob) -> (opt DepositView) query;
+  get_monitor_status : () -> (MonitorStatus) query;
+  get_observer_status : () -> (ObserverStatus) query;
   get_release : (text) -> (opt ReleaseView) query;
+  get_return : (text) -> (opt ReturnView) query;
   get_sol_op : (nat64) -> (opt OpView) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
-  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_4);
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_5);
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
   list_deposits_for_owner : (ListDepositsForOwnerArgs) -> (
       vec DepositView,
@@ -345,6 +415,8 @@ service : (BridgeArg) -> {
       vec ReleaseView,
     ) query;
   list_return_hints : () -> (vec HintView) query;
+  list_returns : (ListReturnsArgs) -> (vec ReturnView) query;
+  list_strays : (ListStraysArgs) -> (vec StrayView) query;
   list_unresolved_ops : (ListOpsArgs) -> (vec OpView) query;
   notify_solana_return : (text) -> (Result);
   request_deposit_refund : (nat64) -> (Result_2);

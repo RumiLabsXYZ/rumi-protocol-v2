@@ -48,6 +48,11 @@ pub const MEM_ACTIVE_RELEASES: u8 = 14;
 pub const MEM_OWNER_RELEASES: u8 = 15;
 pub const MEM_SENDER_RELEASES: u8 = 16;
 pub const MEM_RELEASE_BY_BURN_OP: u8 = 17;
+pub const MEM_RETURNS: u8 = 18;
+pub const MEM_RETURN_BY_SEQ: u8 = 19;
+pub const MEM_ACTIVE_RETURNS: u8 = 20;
+pub const MEM_STRAYS: u8 = 21;
+pub const MEM_OBSERVER_QUEUE: u8 = 22;
 
 /// Append-only. Never reuse or reorder an id.
 pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
@@ -69,15 +74,22 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_OWNER_RELEASES, "owner_releases"),
     (MEM_SENDER_RELEASES, "sender_releases"),
     (MEM_RELEASE_BY_BURN_OP, "release_by_burn_op"),
+    (MEM_RETURNS, "returns"),
+    (MEM_RETURN_BY_SEQ, "return_by_seq"),
+    (MEM_ACTIVE_RETURNS, "active_returns"),
+    (MEM_STRAYS, "strays"),
+    (MEM_OBSERVER_QUEUE, "observer_queue"),
 ];
 
 /// 1 = BB-47 (config, buckets, halt). 2 = BB-48 (adds the SOL RPC and lane settings, the role
 /// keys, the mint, lane halts and the operation counter, all defaulted). 3 = BB-49 49a (the
 /// `mint-account` public key, the mint claim state and the last bind note, all defaulted).
 /// 4 = BB-49 49b (the ledger saga: limits, windows, id counters, ledger facts, sweeps and hints,
-/// all defaulted; the deposit and release maps are new memories). `migrate_core` moves a stored
-/// older version to the current one at upgrade.
-pub const CORE_SCHEMA_VERSION: u32 = 4;
+/// all defaulted; the deposit and release maps are new memories). 5 = BB-49 49c (the return
+/// observer and monitor state and the return sequence, all defaulted; the return, stray and
+/// observer-queue maps are new memories). `migrate_core` moves a stored older version to the
+/// current one at upgrade.
+pub const CORE_SCHEMA_VERSION: u32 = 5;
 /// Maximum page size for list queries.
 pub const MAX_PAGE: u32 = 100;
 
@@ -390,6 +402,147 @@ pub struct SweepRecord {
     pub created_at_ns: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Returns, strays, the observer and the monitors (49c)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ReturnState {
+    /// A finalized, verified return: its tokens sit in the return account (`RC`).
+    Custodied,
+    /// A burn operation exists for it (`BU`). Set by the burn lane (49d).
+    Burning { burn_op: u64 },
+    /// The burn is final and the release was opened (`PR` and beyond). Set by the burn lane (49d).
+    Burned { burn_op: u64 },
+}
+
+impl ReturnState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, ReturnState::Burned { .. })
+    }
+}
+
+/// One verified return (note section 2.2): the stored evidence the burn lane binds a release to.
+/// Created only by the observer, only from a finalized transaction that passed every strict check.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReturnRecord {
+    /// The return id, `ids::return_id(genesis, signature)`: the primary key and the dedup key.
+    pub return_id: Hash32,
+    /// Creation order (`BridgeCore::next_return_seq`).
+    pub seq: u64,
+    /// The first signature of the user's return transaction.
+    pub signature: Sig,
+    pub slot: u64,
+    /// The token account the tokens left.
+    pub source_account: Pubkey,
+    /// The verified sender: the transaction signer that owns `source_account` (pre-balance owner).
+    pub sender: Pubkey,
+    pub amount: u64,
+    /// The ICP account named by the memo.
+    pub destination: Account,
+    pub client_nonce: u64,
+    pub state: ReturnState,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+cbor_storable!(ReturnRecord);
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum StrayState {
+    /// In the return account, counted in `stray`, awaiting a refund decision (49d).
+    Held,
+}
+
+/// A transfer into the return account that failed the exact-shape check (note section 2.2 table):
+/// never credited, tracked as `stray` (a subset of `O`), refunded only to a verified sender (49d).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StrayRecord {
+    pub signature: Sig,
+    pub slot: u64,
+    /// The increase of the return account's balance.
+    pub amount: u64,
+    /// The single token account of this mint that fell by exactly `amount`, if there is one.
+    pub source_account: Option<Pubkey>,
+    /// Its pre-balance owner, if the RPC reported one and it signed the transaction.
+    pub verified_sender: Option<Pubkey>,
+    /// Why it is not a return. Text for people; no code decides on it.
+    pub reason: String,
+    pub state: StrayState,
+    pub created_at_ns: u64,
+}
+
+cbor_storable!(StrayRecord);
+
+/// Where the return observer stands (note section 4: the cursor lag alarms).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ObserverState {
+    /// The newest signature of the return account whose transactions are all processed.
+    #[serde(default)]
+    pub cursor: Option<Sig>,
+    /// A walk from the newest signature back to the cursor is in progress.
+    #[serde(default)]
+    pub walk_active: bool,
+    /// `before` of the next page of the walk (`None`: the first page).
+    #[serde(default)]
+    pub walk_before: Option<Sig>,
+    /// The newest signature this walk saw; it becomes the cursor when the walk is processed.
+    #[serde(default)]
+    pub walk_newest: Option<Sig>,
+    /// Whether the last completed walk found nothing left to process.
+    #[serde(default)]
+    pub caught_up: bool,
+    #[serde(default)]
+    pub processed: u64,
+    #[serde(default)]
+    pub last_run_ns: Option<u64>,
+    /// The last time the cursor advanced or a transaction was processed.
+    #[serde(default)]
+    pub last_progress_ns: Option<u64>,
+    #[serde(default)]
+    pub last_note: Option<String>,
+}
+
+/// One C1 reading.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EscrowSnapshot {
+    pub balance: u128,
+    pub required: u128,
+    pub ok: bool,
+    pub at_ns: u64,
+}
+
+/// One C2 reading (and C3 when quiescent).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SupplySnapshot {
+    pub supply: u128,
+    pub bound: u128,
+    pub inflight_mint: u128,
+    pub within_bound: bool,
+    pub quiescent: bool,
+    /// `O - supply` when quiescent and positive: reported, never acted on (note section 12).
+    pub unattributed_gap: Option<u128>,
+    pub at_ns: u64,
+}
+
+/// The periodic invariant monitors (C1 coverage, C2 supply bound). A violation is confirmed by a
+/// second consecutive reading before it halts anything.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct MonitorState {
+    #[serde(default)]
+    pub escrow: Option<EscrowSnapshot>,
+    #[serde(default)]
+    pub supply: Option<SupplySnapshot>,
+    #[serde(default)]
+    pub c1_strikes: u8,
+    #[serde(default)]
+    pub c2_strikes: u8,
+    #[serde(default)]
+    pub last_run_ns: Option<u64>,
+    #[serde(default)]
+    pub last_note: Option<String>,
+}
+
 pub const MAX_HINTS: usize = 256;
 pub const MAX_SWEEPS: usize = 64;
 
@@ -450,6 +603,15 @@ pub struct BridgeCore {
     /// 49b: the most recent fee sweeps (bounded; terminal ones are dropped first).
     #[serde(default)]
     pub sweeps: Vec<SweepRecord>,
+    /// 49c: the next return sequence (the creation order of return records).
+    #[serde(default)]
+    pub next_return_seq: u64,
+    /// 49c: the return observer.
+    #[serde(default)]
+    pub observer: ObserverState,
+    /// 49c: the C1 and C2 monitors.
+    #[serde(default)]
+    pub monitor: MonitorState,
 }
 
 impl Default for BridgeCore {
@@ -476,6 +638,9 @@ impl Default for BridgeCore {
             ledger_minting_account: None,
             ledger_tip_lower_bound: 0,
             sweeps: vec![],
+            next_return_seq: 0,
+            observer: ObserverState::default(),
+            monitor: MonitorState::default(),
         }
     }
 }
@@ -910,6 +1075,24 @@ thread_local! {
     /// Burn operation id to the release it made payable: one release per burn, forever.
     static RELEASE_BY_BURN_OP: RefCell<StableBTreeMap<u64, Hash32, Mem>> =
         RefCell::new(StableBTreeMap::init(mem(MEM_RELEASE_BY_BURN_OP)));
+
+    static RETURNS: RefCell<StableBTreeMap<Hash32, ReturnRecord, Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_RETURNS)));
+
+    static RETURN_BY_SEQ: RefCell<StableBTreeMap<u64, Hash32, Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_RETURN_BY_SEQ)));
+
+    /// Returns whose burn is not final, by creation sequence (oldest first).
+    static ACTIVE_RETURNS: RefCell<StableBTreeMap<u64, Hash32, Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_ACTIVE_RETURNS)));
+
+    static STRAYS: RefCell<StableBTreeMap<[u8; 64], StrayRecord, Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_STRAYS)));
+
+    /// Signatures of the return account found by the current walk and not yet processed, ordered
+    /// oldest first: `[slot BE 8][signature 64]`.
+    static OBSERVER_QUEUE: RefCell<StableBTreeMap<[u8; 72], (), Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_OBSERVER_QUEUE)));
 }
 
 fn mem(id: u8) -> Mem {
@@ -1115,6 +1298,24 @@ pub fn active_deposits_owned_by(owner: &Principal) -> usize {
     })
 }
 
+/// Tokens that exist on Solana, or may, without having been applied to the books: the mint amount of
+/// every active deposit that has a live mint operation (in flight, or held with its signed original
+/// still able to land). `check_destination_supply` adds it to the bound (C2) and the return observer
+/// uses it to tell a return that waits for its mint's settlement from a supply anomaly.
+pub fn inflight_mint_e8s() -> u128 {
+    let mut total = 0u128;
+    ACTIVE_DEPOSITS.with(|m| {
+        for (id, _) in m.borrow().iter() {
+            if let Some(d) = get_deposit(id) {
+                if d.mint_op.is_some() {
+                    total += d.mint_amount_e8s as u128;
+                }
+            }
+        }
+    });
+    total
+}
+
 pub fn index_owner_deposit(owner: &Principal, id: u64) {
     OWNER_DEPOSITS.with(|m| m.borrow_mut().insert(owner_key(owner, id), ()));
 }
@@ -1176,6 +1377,14 @@ pub enum Queue {
     Refunds,
     Holds,
     Releases,
+    /// Deposits whose mint operation may have delivered (49c).
+    MintDeliveries,
+    /// Escrowed deposits waiting for a mint operation (49c).
+    MintSubmits,
+    /// Held releases waiting to be re-minted (49c).
+    Remints,
+    /// Custodied returns waiting for a burn (49d).
+    Returns,
 }
 
 impl Queue {
@@ -1185,6 +1394,10 @@ impl Queue {
             Queue::Refunds => 1,
             Queue::Holds => 2,
             Queue::Releases => 3,
+            Queue::MintDeliveries => 4,
+            Queue::MintSubmits => 5,
+            Queue::Remints => 6,
+            Queue::Returns => 7,
         }
     }
 }
@@ -1197,7 +1410,7 @@ thread_local! {
     /// Where each queue's next window starts (the last id its previous pass examined). Heap only, on
     /// purpose: after an upgrade the walk restarts at the lowest id, and the active indexes it walks
     /// are stable, so there is nothing to rebuild.
-    static QUEUE_CURSORS: RefCell<[Option<u64>; 4]> = const { RefCell::new([None; 4]) };
+    static QUEUE_CURSORS: RefCell<[Option<u64>; 8]> = const { RefCell::new([None; 8]) };
 }
 
 pub fn queue_cursor(q: Queue) -> Option<u64> {
@@ -1371,6 +1584,137 @@ pub fn pending_release_total() -> u128 {
     total
 }
 
+// Returns and strays -----------------------------------------------------------
+
+pub fn get_return(return_id: &Hash32) -> Option<ReturnRecord> {
+    RETURNS.with(|m| m.borrow().get(return_id))
+}
+
+/// Insert or update a return and keep the active set in sync. A new return also claims its
+/// sequence slot in the by-sequence index.
+pub fn put_return(r: &ReturnRecord) {
+    RETURNS.with(|m| m.borrow_mut().insert(r.return_id, r.clone()));
+    RETURN_BY_SEQ.with(|m| m.borrow_mut().insert(r.seq, r.return_id));
+    ACTIVE_RETURNS.with(|m| {
+        if r.state.is_terminal() {
+            m.borrow_mut().remove(&r.seq);
+        } else {
+            m.borrow_mut().insert(r.seq, r.return_id);
+        }
+    });
+}
+
+pub fn active_return_count() -> u64 {
+    ACTIVE_RETURNS.with(|m| m.borrow().len())
+}
+
+/// Returns after `start_after_seq` (exclusive), newest first.
+pub fn list_returns(start_after_seq: Option<u64>, limit: u32) -> Vec<ReturnRecord> {
+    let limit = limit.clamp(1, MAX_PAGE) as usize;
+    let upper = match start_after_seq {
+        Some(0) => return vec![],
+        Some(s) => s - 1,
+        None => u64::MAX,
+    };
+    let ids: Vec<Hash32> = RETURN_BY_SEQ.with(|m| m.borrow().range(..=upper).rev().take(limit).map(|(_, v)| v).collect());
+    ids.iter().filter_map(get_return).collect()
+}
+
+/// The fair-window walk of the active returns (see [`next_deposits`]).
+pub fn next_returns(queue: Queue, limit: usize, pred: impl Fn(&ReturnRecord) -> bool) -> Vec<ReturnRecord> {
+    let window = ACTIVE_RETURNS.with(|m| index_window(&m.borrow(), queue_cursor(queue), QUEUE_SCAN));
+    let mut out = Vec::new();
+    let mut last = None;
+    for (seq, rid) in window {
+        last = Some(seq);
+        if let Some(r) = get_return(&rid) {
+            if pred(&r) {
+                out.push(r);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    set_queue_cursor(queue, last);
+    out
+}
+
+/// Sum of the amounts of returns in `Custodied` (what `RC` must hold, for the books to be checked).
+pub fn custodied_return_total() -> u128 {
+    let mut total = 0u128;
+    ACTIVE_RETURNS.with(|m| {
+        for (_, rid) in m.borrow().iter() {
+            if let Some(r) = get_return(&rid) {
+                if r.state == ReturnState::Custodied {
+                    total += r.amount as u128;
+                }
+            }
+        }
+    });
+    total
+}
+
+pub fn get_stray(signature: &Sig) -> Option<StrayRecord> {
+    STRAYS.with(|m| m.borrow().get(&signature.0))
+}
+
+pub fn put_stray(s: &StrayRecord) {
+    STRAYS.with(|m| m.borrow_mut().insert(s.signature.0, s.clone()));
+}
+
+pub fn stray_count() -> u64 {
+    STRAYS.with(|m| m.borrow().len())
+}
+
+/// Strays, ordered by signature bytes (a stable order for paging), at most `limit` after `after`.
+pub fn list_strays(after: Option<Sig>, limit: u32) -> Vec<StrayRecord> {
+    use std::ops::Bound;
+    let limit = limit.clamp(1, MAX_PAGE) as usize;
+    STRAYS.with(|m| {
+        let m = m.borrow();
+        match after {
+            Some(a) => m.range((Bound::Excluded(a.0), Bound::Unbounded)).take(limit).map(|(_, v)| v).collect(),
+            None => m.iter().take(limit).map(|(_, v)| v).collect(),
+        }
+    })
+}
+
+// The observer's queue ----------------------------------------------------------
+
+fn observer_key(slot: u64, signature: &Sig) -> [u8; 72] {
+    let mut k = [0u8; 72];
+    k[..8].copy_from_slice(&slot.to_be_bytes());
+    k[8..].copy_from_slice(&signature.0);
+    k
+}
+
+pub fn observer_queue_insert(slot: u64, signature: &Sig) {
+    OBSERVER_QUEUE.with(|m| m.borrow_mut().insert(observer_key(slot, signature), ()));
+}
+
+/// The oldest queued signature (lowest slot, then lowest signature bytes).
+pub fn observer_queue_first() -> Option<(u64, Sig)> {
+    OBSERVER_QUEUE.with(|m| {
+        m.borrow().iter().next().map(|(k, _)| {
+            let slot = u64::from_be_bytes(k[..8].try_into().unwrap_or([0; 8]));
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(&k[8..]);
+            (slot, Sig(sig))
+        })
+    })
+}
+
+pub fn observer_queue_remove(slot: u64, signature: &Sig) {
+    OBSERVER_QUEUE.with(|m| {
+        m.borrow_mut().remove(&observer_key(slot, signature));
+    });
+}
+
+pub fn observer_queue_len() -> u64 {
+    OBSERVER_QUEUE.with(|m| m.borrow().len())
+}
+
 // Bootstrap transactions ----------------------------------------------------
 
 pub fn get_bootstrap_tx(key: u32) -> Option<BootstrapTx> {
@@ -1522,7 +1866,12 @@ pub fn reset_for_tests() {
     OWNER_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_OWNER_RELEASES)));
     SENDER_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_SENDER_RELEASES)));
     RELEASE_BY_BURN_OP.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_RELEASE_BY_BURN_OP)));
-    QUEUE_CURSORS.with(|c| *c.borrow_mut() = [None; 4]);
+    RETURNS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_RETURNS)));
+    RETURN_BY_SEQ.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_RETURN_BY_SEQ)));
+    ACTIVE_RETURNS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_ACTIVE_RETURNS)));
+    STRAYS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_STRAYS)));
+    OBSERVER_QUEUE.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_OBSERVER_QUEUE)));
+    QUEUE_CURSORS.with(|c| *c.borrow_mut() = [None; 8]);
 }
 
 #[cfg(test)]
@@ -1567,7 +1916,12 @@ mod tests {
                 (14, "active_releases"),
                 (15, "owner_releases"),
                 (16, "sender_releases"),
-                (17, "release_by_burn_op")
+                (17, "release_by_burn_op"),
+                (18, "returns"),
+                (19, "return_by_seq"),
+                (20, "active_returns"),
+                (21, "strays"),
+                (22, "observer_queue")
             ]
         );
         let ids: BTreeSet<u8> = MEMORY_LAYOUT.iter().map(|(i, _)| *i).collect();
@@ -1716,6 +2070,9 @@ mod tests {
             ledger_minting_account: None,
             ledger_tip_lower_bound: 0,
             sweeps: vec![],
+            next_return_seq: 0,
+            observer: ObserverState::default(),
+            monitor: MonitorState::default(),
         }
     }
 
@@ -1739,12 +2096,12 @@ mod tests {
         }
     }
 
-    /// The current core (schema version 4): every 49b field set to a distinct value.
-    fn sample_core() -> BridgeCore {
+    /// The core as 49b wrote it (schema version 4): every 49b field set to a distinct value.
+    fn sample_core_v4() -> BridgeCore {
         let mut config = sample_core_v3().config;
         config.limits = BridgeLimits { min_deposit_e8s: 2, max_deposit_e8s: 30, max_outstanding_e8s: 400, mint_window_limit_e8s: 50, release_window_limit_e8s: 60, window_seconds: 70, max_active_per_caller: 8, max_active_global: 90 };
         BridgeCore {
-            schema_version: CORE_SCHEMA_VERSION,
+            schema_version: 4,
             config,
             next_deposit_id: 11,
             next_sweep_id: 3,
@@ -1756,6 +2113,64 @@ mod tests {
             ledger_tip_lower_bound: 99,
             sweeps: vec![SweepRecord { id: 2, amount_e8s: 100, op: sample_op(LedgerOpKind::Sweep), created_at_ns: 12 }],
             ..sample_core_v3()
+        }
+    }
+
+    /// The current core (schema version 5): every 49c field set to a distinct value.
+    fn sample_core() -> BridgeCore {
+        BridgeCore {
+            schema_version: CORE_SCHEMA_VERSION,
+            next_return_seq: 7,
+            observer: ObserverState {
+                cursor: Some(Sig([0x41; 64])),
+                walk_active: true,
+                walk_before: Some(Sig([0x42; 64])),
+                walk_newest: Some(Sig([0x43; 64])),
+                caught_up: false,
+                processed: 12,
+                last_run_ns: Some(100),
+                last_progress_ns: Some(101),
+                last_note: Some("n".into()),
+            },
+            monitor: MonitorState {
+                escrow: Some(EscrowSnapshot { balance: 9, required: 8, ok: true, at_ns: 3 }),
+                supply: Some(SupplySnapshot { supply: 5, bound: 6, inflight_mint: 1, within_bound: true, quiescent: false, unattributed_gap: Some(2), at_ns: 4 }),
+                c1_strikes: 1,
+                c2_strikes: 2,
+                last_run_ns: Some(200),
+                last_note: Some("m".into()),
+            },
+            ..sample_core_v4()
+        }
+    }
+
+    pub(crate) fn sample_return() -> ReturnRecord {
+        ReturnRecord {
+            return_id: [0x81; 32],
+            seq: 3,
+            signature: Sig([0x82; 64]),
+            slot: 555,
+            source_account: [0x83; 32],
+            sender: [0x84; 32],
+            amount: 250,
+            destination: Account { owner: Principal::from_slice(&[9; 10]), subaccount: Some([5; 32]) },
+            client_nonce: 77,
+            state: ReturnState::Burning { burn_op: 21 },
+            created_at_ns: 6,
+            updated_at_ns: 7,
+        }
+    }
+
+    pub(crate) fn sample_stray() -> StrayRecord {
+        StrayRecord {
+            signature: Sig([0x91; 64]),
+            slot: 556,
+            amount: 40,
+            source_account: Some([0x92; 32]),
+            verified_sender: Some([0x93; 32]),
+            reason: "no memo".into(),
+            state: StrayState::Held,
+            created_at_ns: 8,
         }
     }
 
@@ -1810,6 +2225,9 @@ mod tests {
             ledger_minting_account: None,
             ledger_tip_lower_bound: 0,
             sweeps: vec![],
+            next_return_seq: 0,
+            observer: ObserverState::default(),
+            monitor: MonitorState::default(),
         }
     }
 
@@ -1826,10 +2244,82 @@ mod tests {
 
     #[test]
     fn core_decodes_from_the_pinned_current_image() {
-        // Field names are the schema. Pinned from `cbor_encode(&sample_core())` at BB-49 49b.
-        let image = hex::decode(PINNED_CORE_V4).expect("hex");
+        // Field names are the schema. Pinned from `cbor_encode(&sample_core())` at BB-49 49c.
+        let image = hex::decode(PINNED_CORE_V5).expect("hex");
         assert_eq!(try_cbor_decode::<BridgeCore>(&image).unwrap(), sample_core());
         assert_eq!(cbor_encode(&sample_core()), image, "the encoding itself is stable");
+    }
+
+    /// The 49b core, byte for byte as 49b wrote it (schema version 4), still decodes after 49c
+    /// appended fields: the observer and monitor state start empty, the return sequence at zero, and
+    /// everything 49b stored keeps its value.
+    #[test]
+    fn the_49b_core_image_decodes_with_the_49c_fields_defaulted() {
+        let image = hex::decode(PINNED_CORE_V4).expect("hex");
+        let decoded = try_cbor_decode::<BridgeCore>(&image).unwrap();
+        assert_eq!(decoded.schema_version, 4);
+        assert_eq!(decoded, sample_core_v4());
+        assert_eq!((decoded.next_return_seq, decoded.observer.clone(), decoded.monitor.clone()), (0, ObserverState::default(), MonitorState::default()));
+        assert_eq!(decoded.next_deposit_id, 11, "the 49b fields keep their values");
+        assert_eq!(BridgeCore::from_bytes(decoded.to_bytes()), decoded);
+    }
+
+    /// The return and stray records are pinned like every stored record.
+    #[test]
+    fn return_and_stray_records_are_pinned() {
+        let r = sample_return();
+        assert_eq!(ReturnRecord::from_bytes(r.to_bytes()), r);
+        let image = hex::decode(PINNED_RETURN_V1).expect("hex");
+        assert_eq!(try_cbor_decode::<ReturnRecord>(&image).unwrap(), r);
+        assert_eq!(cbor_encode(&r), image);
+        let s = sample_stray();
+        assert_eq!(StrayRecord::from_bytes(s.to_bytes()), s);
+        let image = hex::decode(PINNED_STRAY_V1).expect("hex");
+        assert_eq!(try_cbor_decode::<StrayRecord>(&image).unwrap(), s);
+        assert_eq!(cbor_encode(&s), image);
+    }
+
+    #[test]
+    fn the_return_stray_and_observer_indexes_behave() {
+        reset_for_tests();
+        let mut a = sample_return();
+        a.state = ReturnState::Custodied;
+        a.seq = 0;
+        a.return_id = [1; 32];
+        let mut b = a.clone();
+        b.seq = 1;
+        b.return_id = [2; 32];
+        put_return(&a);
+        put_return(&b);
+        assert_eq!((active_return_count(), custodied_return_total()), (2, 500));
+        assert_eq!(list_returns(None, 10).iter().map(|r| r.seq).collect::<Vec<_>>(), vec![1, 0], "newest first");
+        assert_eq!(list_returns(Some(1), 10).iter().map(|r| r.seq).collect::<Vec<_>>(), vec![0]);
+        let mut burned = a.clone();
+        burned.state = ReturnState::Burned { burn_op: 3 };
+        put_return(&burned);
+        assert_eq!((active_return_count(), custodied_return_total()), (1, 250), "a burned return leaves the active set");
+        assert_eq!(next_returns(Queue::Returns, 5, |_| true).len(), 1);
+        // Strays: ordered by signature bytes, paged by `after`.
+        let mut s1 = sample_stray();
+        s1.signature = Sig([1; 64]);
+        let mut s2 = sample_stray();
+        s2.signature = Sig([2; 64]);
+        put_stray(&s2);
+        put_stray(&s1);
+        assert_eq!(stray_count(), 2);
+        assert_eq!(list_strays(None, 10).iter().map(|s| s.signature.0[0]).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(list_strays(Some(Sig([1; 64])), 10).iter().map(|s| s.signature.0[0]).collect::<Vec<_>>(), vec![2]);
+        // The observer queue is ordered by slot, then signature: oldest first.
+        observer_queue_insert(9, &Sig([5; 64]));
+        observer_queue_insert(3, &Sig([7; 64]));
+        observer_queue_insert(3, &Sig([6; 64]));
+        assert_eq!(observer_queue_len(), 3);
+        assert_eq!(observer_queue_first(), Some((3, Sig([6; 64]))));
+        observer_queue_remove(3, &Sig([6; 64]));
+        assert_eq!(observer_queue_first(), Some((3, Sig([7; 64]))));
+        observer_queue_remove(3, &Sig([7; 64]));
+        observer_queue_remove(9, &Sig([5; 64]));
+        assert_eq!(observer_queue_first(), None);
     }
 
     /// The 49a core, byte for byte as 49a wrote it (schema version 3), still decodes after 49b
@@ -1922,6 +2412,9 @@ mod tests {
                 "ledger_minting_account",
                 "ledger_tip_lower_bound",
                 "sweeps",
+                "next_return_seq",
+                "observer",
+                "monitor",
             ],
         );
         if let Value::Map(entries) = &mut old {
@@ -2209,7 +2702,10 @@ mod tests {
     #[ignore = "writes the scratch hex files that the pinned images are generated from"]
     fn zz_dump_images() {
         let dir = std::env::var("RUMI_DUMP_DIR").unwrap_or_else(|_| "/tmp".into());
-        std::fs::write(format!("{dir}/core_v4.hex"), hex::encode(cbor_encode(&sample_core()))).unwrap();
+        std::fs::write(format!("{dir}/core_v4.hex"), hex::encode(cbor_encode(&sample_core_v4()))).unwrap();
+        std::fs::write(format!("{dir}/core_v5.hex"), hex::encode(cbor_encode(&sample_core()))).unwrap();
+        std::fs::write(format!("{dir}/return_v1.hex"), hex::encode(cbor_encode(&sample_return()))).unwrap();
+        std::fs::write(format!("{dir}/stray_v1.hex"), hex::encode(cbor_encode(&sample_stray()))).unwrap();
         std::fs::write(format!("{dir}/deposit_v1.hex"), hex::encode(cbor_encode(&sample_deposit()))).unwrap();
         std::fs::write(format!("{dir}/release_v1.hex"), hex::encode(cbor_encode(&sample_release()))).unwrap();
     }
@@ -2280,7 +2776,8 @@ mod tests {
         "0c6a6d696e745f737461746565426f756e646962696e645f6e6f7465616e",
     );
 
-    /// CBOR image of `sample_core()` at BB-49 49b (schema version 4).
+    /// CBOR image of the 49b core (`sample_core_v4()`), exactly as 49b wrote it (schema version 4).
+    /// NEVER regenerate this constant: it is the snapshot an upgrade from 49b must still read.
     const PINNED_CORE_V4: &str = concat!(
         "b56e736368656d615f76657273696f6e046b696e697469616c697a6564f566636f6e666967ad6c69637573645f6c656467",
         "65724a0101010101010101010167736f6c5f7270634a02020202020202020202707363686e6f72725f6b65795f6e616d65",
@@ -2378,5 +2875,89 @@ mod tests {
         "63685f66726f6d5f626c6f636b05717365617263685f6e6578745f626c6f636b066f6c6173745f617474656d70745f6e73",
         "184e706f7574666c6f775f7265736572766564f56d637265617465645f61745f6e73036d757064617465645f61745f6e73",
         "04",
+    );
+
+    /// CBOR image of `sample_core()` at BB-49 49c (schema version 5).
+    const PINNED_CORE_V5: &str = concat!(
+        "b8186e736368656d615f76657273696f6e056b696e697469616c697a6564f566636f6e666967ad6c69637573645f6c6564",
+        "6765724a0101010101010101010167736f6c5f7270634a02020202020202020202707363686e6f72725f6b65795f6e616d",
+        "656a746573745f6b65795f316c67656e657369735f68617368982018421842184218421842184218421842184218421842",
+        "1842184218421842184218421842184218421842184218421842184218421842184218421842184218426661646d696e73",
+        "814a030303030303030303036d6665655f726563697069656e74f66d746f6b656e5f70726f6772616d69546f6b656e3230",
+        "32326c6d656d6f5f70726f6772616d982005184a1853185a18991829182106184d182418e81871186018da1838187c187c",
+        "183518b518dd18bc189218bb188118e4181f18a818401841051844188d6466656573a26f6465706f7369745f6665655f65",
+        "3873006f72656c656173655f6665655f6538730066706175736573a4686465706f73697473f5656d696e7473f46872656c",
+        "6561736573f4686f62736572766572f463727063a567636c7573746572664465766e65746676657269667968457175616c",
+        "69747968646973636f766572a1695468726573686f6c64a265746f74616c03636d696e026f6379636c65735f7065725f63",
+        "616c6c1b00000002540be40076726573706f6e73655f73697a655f657374696d617465f6646c616e65a76f6e6f6e63655f",
+        "706f6f6c5f73697a65047163616e63656c5f61667465725f7365637319012c7819726562726f6164636173745f696e7465",
+        "7276616c5f73656373181e747265636f6e63696c655f616c61726d5f7365637319038474686973746f72795f686f72697a",
+        "6f6e5f736563731954606c6d61785f7265697373756573036e646973636f7665725f6c696d69740a666c696d697473a86f",
+        "6d696e5f6465706f7369745f653873026f6d61785f6465706f7369745f653873181e736d61785f6f75747374616e64696e",
+        "675f653873190190756d696e745f77696e646f775f6c696d69745f6538731832781872656c656173655f77696e646f775f",
+        "6c696d69745f653873183c6e77696e646f775f7365636f6e64731846756d61785f6163746976655f7065725f63616c6c65",
+        "7208716d61785f6163746976655f676c6f62616c185a6d696e7374616e63655f73616c749820185a185a185a185a185a18",
+        "5a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a",
+        "185a185a676275636b657473ab6b6f75747374616e64696e67076c70656e64696e675f6d696e74007072657475726e5f63",
+        "7573746f64696564026c6275726e5f756e6b6e6f776e016f70656e64696e675f72656c65617365006e70656e64696e675f",
+        "726566756e64006468656c64006466656573006e72657365727665645f70756c6c73006f756e6b6e6f776e5f6f7574666c",
+        "6f7700657374726179036668616c746564a266726561736f6e61786561745f6e7309646b657973a4696665655f70617965",
+        "72982011111111111111111111111111111111111111111111111111111111111111116e6d696e745f617574686f726974",
+        "79982018221822182218221822182218221822182218221822182218221822182218221822182218221822182218221822",
+        "1822182218221822182218221822182218226c72657475726e5f6f776e6572982018331833183318331833183318331833",
+        "1833183318331833183318331833183318331833183318331833183318331833183318331833183318331833183318336c",
+        "6d696e745f6163636f756e7498201844184418441844184418441844184418441844184418441844184418441844184418",
+        "4418441844184418441844184418441844184418441844184418441844646d696e74982018441844184418441844184418",
+        "44184418441844184418441844184418441844184418441844184418441844184418441844184418441844184418441844",
+        "18446a6c616e655f68616c7473a2646d696e74a266726561736f6e616d6561745f6e7305646275726ef66a6e6578745f6f",
+        "705f69640c6a6d696e745f737461746565426f756e646962696e645f6e6f7465616e6f6e6578745f6465706f7369745f69",
+        "640b6d6e6578745f73776565705f696403706e6578745f72656c656173655f736571046777696e646f7773a36f77696e64",
+        "6f775f73746172745f6e73057261646d69747465645f696e5f77696e646f77067272656c65617365645f696e5f77696e64",
+        "6f77076568696e747381a3697369676e617475726558403131313131313131313131313131313131313131313131313131",
+        "31313131313131313131313131313131313131313131313131313131313131313131313131316c7375626d69747465645f",
+        "62794a040404040404040404046f7375626d69747465645f61745f6e73086e6c65646765725f6665655f65387319271076",
+        "6c65646765725f6d696e74696e675f6163636f756e74a2656f776e65724a4d4d4d4d4d4d4d4d4d4d6a7375626163636f75",
+        "6e74f6766c65646765725f7469705f6c6f7765725f626f756e6418636673776565707381a4626964026a616d6f756e745f",
+        "6538731864626f70af646b696e646553776565706466726f6da2656f776e65724a070707070707070707076a7375626163",
+        "636f756e749820080808080808080808080808080808080808080808080808080808080808080862746fa2656f776e6572",
+        "4a090909090909090909096a7375626163636f756e74f6677370656e646572f66a616d6f756e745f653873185a67666565",
+        "5f6538730a646d656d6f830102036f637265617465645f61745f74696d65184d68617474656d707473026e616d62696775",
+        "6f75735f7365656ef566737461747573a167556e6b6e6f776ea16a6c6173745f6572726f726178717365617263685f6672",
+        "6f6d5f626c6f636b05717365617263685f6e6578745f626c6f636b066f6c6173745f617474656d70745f6e73184e706f75",
+        "74666c6f775f7265736572766564f56d637265617465645f61745f6e730c6f6e6578745f72657475726e5f73657107686f",
+        "62736572766572a966637572736f7258404141414141414141414141414141414141414141414141414141414141414141",
+        "41414141414141414141414141414141414141414141414141414141414141416b77616c6b5f616374697665f56b77616c",
+        "6b5f6265666f72655840424242424242424242424242424242424242424242424242424242424242424242424242424242",
+        "424242424242424242424242424242424242424242424242426b77616c6b5f6e6577657374584043434343434343434343",
+        "43434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343",
+        "4343434343696361756768745f7570f46970726f6365737365640c6b6c6173745f72756e5f6e731864706c6173745f7072",
+        "6f67726573735f6e731865696c6173745f6e6f7465616e676d6f6e69746f72a666657363726f77a46762616c616e636509",
+        "68726571756972656408626f6bf56561745f6e730366737570706c79a766737570706c790565626f756e64066d696e666c",
+        "696768745f6d696e74016c77697468696e5f626f756e64f569717569657363656e74f470756e617474726962757465645f",
+        "676170026561745f6e73046a63315f737472696b6573016a63325f737472696b6573026b6c6173745f72756e5f6e7318c8",
+        "696c6173745f6e6f7465616d",
+    );
+    /// CBOR image of `sample_return()` as first stored (49c).
+    const PINNED_RETURN_V1: &str = concat!(
+        "ac6972657475726e5f69649820188118811881188118811881188118811881188118811881188118811881188118811881",
+        "188118811881188118811881188118811881188118811881188118816373657103697369676e6174757265584082828282",
+        "82828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282",
+        "828282828282828282828264736c6f7419022b6e736f757263655f6163636f756e74982018831883188318831883188318",
+        "83188318831883188318831883188318831883188318831883188318831883188318831883188318831883188318831883",
+        "18836673656e64657298201884188418841884188418841884188418841884188418841884188418841884188418841884",
+        "188418841884188418841884188418841884188418841884188466616d6f756e7418fa6b64657374696e6174696f6ea265",
+        "6f776e65724a090909090909090909096a7375626163636f756e7498200505050505050505050505050505050505050505",
+        "0505050505050505050505056c636c69656e745f6e6f6e6365184d657374617465a1674275726e696e67a1676275726e5f",
+        "6f70156d637265617465645f61745f6e73066d757064617465645f61745f6e7307",
+    );
+    /// CBOR image of `sample_stray()` as first stored (49c).
+    const PINNED_STRAY_V1: &str = concat!(
+        "a8697369676e61747572655840919191919191919191919191919191919191919191919191919191919191919191919191",
+        "9191919191919191919191919191919191919191919191919191919164736c6f7419022c66616d6f756e7418286e736f75",
+        "7263655f6163636f756e749820189218921892189218921892189218921892189218921892189218921892189218921892",
+        "189218921892189218921892189218921892189218921892189218926f76657269666965645f73656e6465729820189318",
+        "93189318931893189318931893189318931893189318931893189318931893189318931893189318931893189318931893",
+        "18931893189318931893189366726561736f6e676e6f206d656d6f6573746174656448656c646d637265617465645f6174",
+        "5f6e7308",
     );
 }

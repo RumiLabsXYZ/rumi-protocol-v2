@@ -787,7 +787,7 @@ fn classify_landing_table() {
     let op = the_op(id);
     let slot = slot_of(&op);
     let bound = op.attempts[0].nonce_value;
-    let landed = |wire: Vec<u8>, failed: bool| crate::sol_rpc::LandedTx { slot: 1, wire, failed };
+    let landed = |wire: Vec<u8>, failed: bool| crate::sol_rpc::LandedTx { slot: 1, wire, failed, meta: Default::default() };
     let exact = assemble_wire_tx(&[[1; 64], [2; 64]], &op.attempts[0].message).unwrap();
     assert_eq!(classify_landing(&op, &slot.address, &bound, &FEE_PAYER, &landed(exact.clone(), false)), Landing::Exact { attempt: 0, failed: false });
     assert_eq!(classify_landing(&op, &slot.address, &bound, &FEE_PAYER, &landed(exact, true)), Landing::Exact { attempt: 0, failed: true });

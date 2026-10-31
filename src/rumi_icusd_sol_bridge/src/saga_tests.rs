@@ -24,36 +24,36 @@ use icrc_ledger_types::icrc1::account::Account;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const FEE: u64 = 10_000;
-const E8: u64 = 100_000_000;
+pub(crate) const FEE: u64 = 10_000;
+pub(crate) const E8: u64 = 100_000_000;
 const HOUR: u64 = 3_600;
 
-fn user(n: u8) -> Principal {
+pub(crate) fn user(n: u8) -> Principal {
     Principal::from_slice(&[n; 10])
 }
 
-fn admin() -> Principal {
+pub(crate) fn admin() -> Principal {
     Principal::from_slice(&[3; 10])
 }
 
-fn acct(p: Principal) -> Account {
+pub(crate) fn acct(p: Principal) -> Account {
     Account { owner: p, subaccount: None }
 }
 
-fn spender() -> Account {
+pub(crate) fn spender() -> Account {
     acct(env::canister_id())
 }
 
-fn escrow() -> Account {
+pub(crate) fn escrow() -> Account {
     state::read_core(|c| c.escrow_account(env::canister_id()))
 }
 
-fn wallet() -> String {
+pub(crate) fn wallet() -> String {
     pubkey_to_base58(&RECIPIENT)
 }
 
 /// A configured instance (bound mint, deposits enabled, ledger facts known) and a funded caller.
-fn world() -> Fixture {
+pub(crate) fn world() -> Fixture {
     world_with(LaneSettings { nonce_pool_size: 2, ..LaneSettings::default() })
 }
 
@@ -62,7 +62,7 @@ fn world_without_reissue() -> Fixture {
     world_with(LaneSettings { nonce_pool_size: 2, max_reissues: 0, ..LaneSettings::default() })
 }
 
-fn world_with(lane: LaneSettings) -> Fixture {
+pub(crate) fn world_with(lane: LaneSettings) -> Fixture {
     let fx = Fixture::with_lane_settings(lane);
     state::mutate_core(|c| {
         c.config.pauses.deposits = false;
@@ -75,7 +75,7 @@ fn world_with(lane: LaneSettings) -> Fixture {
     fx
 }
 
-fn args(amount: u64, req: u8) -> BridgeToSolanaArgs {
+pub(crate) fn args(amount: u64, req: u8) -> BridgeToSolanaArgs {
     BridgeToSolanaArgs {
         amount_e8s: amount,
         solana_recipient: wallet(),
@@ -86,31 +86,31 @@ fn args(amount: u64, req: u8) -> BridgeToSolanaArgs {
 }
 
 /// Give `who` a balance and an allowance to the bridge, enough for `amount` plus the ledger fee.
-fn fund(fx: &Fixture, who: &Account, amount: u64) {
+pub(crate) fn fund(fx: &Fixture, who: &Account, amount: u64) {
     fx.ledger.credit(who, (amount + FEE) as u128);
     fx.ledger.approve(who, &spender(), (amount + FEE) as u128, None);
 }
 
-fn bridge(fx: &Fixture, a: BridgeToSolanaArgs) -> BridgeResult<DepositView> {
+pub(crate) fn bridge(fx: &Fixture, a: BridgeToSolanaArgs) -> BridgeResult<DepositView> {
     block_on(deposit::bridge_to_solana(&fx.ledger, a))
 }
 
-fn deposit_of(id: u64) -> DepositRecord {
+pub(crate) fn deposit_of(id: u64) -> DepositRecord {
     state::get_deposit(id).expect("deposit")
 }
 
-fn buckets() -> crate::accounting::Buckets {
+pub(crate) fn buckets() -> crate::accounting::Buckets {
     state::read_core(|c| c.buckets)
 }
 
 /// C1 against the simulated ledger: the escrow balance covers every liability not in doubt.
-fn assert_covered(fx: &Fixture) {
+pub(crate) fn assert_covered(fx: &Fixture) {
     let report = check_coverage(&buckets(), fx.ledger.balance(&escrow())).expect("coverage");
     assert!(report.ok, "escrow does not cover liabilities: {report:?}");
 }
 
 /// A deposit that was pulled into escrow (state `Escrowed`, backing in `pending_mint`).
-fn escrowed(fx: &Fixture, who: u8, amount: u64, req: u8) -> u64 {
+pub(crate) fn escrowed(fx: &Fixture, who: u8, amount: u64, req: u8) -> u64 {
     test_env::set_caller(user(who));
     fund(fx, &acct(user(who)), amount);
     let v = bridge(fx, args(amount, req)).expect("admitted");
@@ -119,7 +119,7 @@ fn escrowed(fx: &Fixture, who: u8, amount: u64, req: u8) -> u64 {
 }
 
 /// Stand-in for the mint saga (49c): the mint was delivered.
-fn deliver(id: u64) {
+pub(crate) fn deliver(id: u64) {
     let mut d = deposit_of(id);
     state::apply_transition(Transition::MintDelivered { amount: d.amount_e8s, fee: d.deposit_fee_e8s }, AuditCtx::deposit(id, "test delivery"))
         .expect("delivered");
@@ -128,7 +128,7 @@ fn deliver(id: u64) {
 }
 
 /// A deposit that is held with no mint operation (a preflight hold), so its owner may refund it.
-fn held_deposit(fx: &Fixture, who: u8, amount: u64, req: u8) -> u64 {
+pub(crate) fn held_deposit(fx: &Fixture, who: u8, amount: u64, req: u8) -> u64 {
     let id = escrowed(fx, who, amount, req);
     deposit::on_mint_preflight_hold(id, "mints are paused".into());
     assert!(matches!(deposit_of(id).state, DepositState::MintHeld { .. }));
@@ -854,15 +854,15 @@ fn a_fee_sweep_is_bounded_single_flight_and_resolved_like_every_escrow_transfer(
 // Releases: only from a delivered burn
 // ---------------------------------------------------------------------------
 
-const SENDER: [u8; 32] = [0x55; 32];
+pub(crate) const SENDER: [u8; 32] = [0x55; 32];
 
-fn dest() -> Account {
+pub(crate) fn dest() -> Account {
     acct(user(0x41))
 }
 
 /// Walk `amount` through the whole lifecycle to `pending_release` (as the burn lane will), with the
 /// escrow funded and a delivered burn operation. Returns the hand-over.
-fn burned(fx: &Fixture, amount: u64, tag: u8) -> BurnedReturn {
+pub(crate) fn burned(fx: &Fixture, amount: u64, tag: u8) -> BurnedReturn {
     fx.ledger.credit(&escrow(), amount as u128);
     state::apply_transitions(
         &[

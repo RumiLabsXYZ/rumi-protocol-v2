@@ -502,6 +502,107 @@ pub struct ListOpsArgs {
     pub limit: u32,
 }
 
+// ---- returns, strays, the observer and the monitors (49c) ----
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ReturnStatus {
+    /// Verified and finalized; the tokens sit in the return account.
+    Custodied,
+    Burning { burn_op_id: u64 },
+    Burned { burn_op_id: u64 },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReturnView {
+    /// 64 hex: the dedup key and the ICP transfer memo.
+    pub return_id: String,
+    pub seq: u64,
+    /// Base58 first signature of the user's return transaction.
+    pub signature: String,
+    pub slot: u64,
+    /// Base58 token account the tokens left.
+    pub source_account: String,
+    /// Base58 verified sender (owner of the source account, and the signer).
+    pub sender: String,
+    pub amount_e8s: u64,
+    pub destination: Account,
+    pub client_nonce: u64,
+    pub status: ReturnStatus,
+    pub created_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StrayView {
+    pub signature: String,
+    pub slot: u64,
+    pub amount_e8s: u64,
+    pub source_account: Option<String>,
+    pub verified_sender: Option<String>,
+    pub reason: String,
+    pub created_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListReturnsArgs {
+    pub start_after_seq: Option<u64>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListStraysArgs {
+    /// Base58 signature of the last stray of the previous page.
+    pub after: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ObserverStatus {
+    /// Base58 return account the observer lists.
+    pub return_account: Option<String>,
+    /// Base58 newest signature whose transactions are all processed.
+    pub cursor: Option<String>,
+    pub walk_active: bool,
+    pub queued: u64,
+    pub caught_up: bool,
+    pub processed: u64,
+    pub last_run_ns: Option<u64>,
+    pub last_progress_ns: Option<u64>,
+    pub last_note: Option<String>,
+    pub returns_active: u64,
+    pub strays: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EscrowReading {
+    pub balance: Nat,
+    pub required: Nat,
+    pub ok: bool,
+    pub at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SupplyReading {
+    pub supply: Nat,
+    pub bound: Nat,
+    pub inflight_mint: Nat,
+    pub within_bound: bool,
+    pub quiescent: bool,
+    /// `O - supply` when quiescent and positive: REPORTED, never acted on (blocker
+    /// `solana-unattributed-burn-policy`).
+    pub unattributed_gap: Option<Nat>,
+    pub at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MonitorStatus {
+    pub c1: Option<EscrowReading>,
+    pub c2: Option<SupplyReading>,
+    pub c1_strikes: u8,
+    pub c2_strikes: u8,
+    pub last_run_ns: Option<u64>,
+    pub last_note: Option<String>,
+}
+
 /// What an admin does with a held operation (note section 4: "resolved by hand").
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum HeldOpResolution {

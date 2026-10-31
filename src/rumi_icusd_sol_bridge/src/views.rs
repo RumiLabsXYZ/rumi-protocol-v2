@@ -125,6 +125,75 @@ pub fn audit_entry(a: &AuditRecord) -> AuditEntry {
     }
 }
 
+pub fn return_view(r: &state::ReturnRecord) -> ReturnView {
+    ReturnView {
+        return_id: hex32(&r.return_id),
+        seq: r.seq,
+        signature: signature_to_base58(&r.signature.0),
+        slot: r.slot,
+        source_account: pubkey_to_base58(&r.source_account),
+        sender: pubkey_to_base58(&r.sender),
+        amount_e8s: r.amount,
+        destination: r.destination,
+        client_nonce: r.client_nonce,
+        status: match r.state {
+            state::ReturnState::Custodied => ReturnStatus::Custodied,
+            state::ReturnState::Burning { burn_op } => ReturnStatus::Burning { burn_op_id: burn_op },
+            state::ReturnState::Burned { burn_op } => ReturnStatus::Burned { burn_op_id: burn_op },
+        },
+        created_at_ns: r.created_at_ns,
+    }
+}
+
+pub fn stray_view(s: &state::StrayRecord) -> StrayView {
+    StrayView {
+        signature: signature_to_base58(&s.signature.0),
+        slot: s.slot,
+        amount_e8s: s.amount,
+        source_account: s.source_account.as_ref().map(pubkey_to_base58),
+        verified_sender: s.verified_sender.as_ref().map(pubkey_to_base58),
+        reason: s.reason.clone(),
+        created_at_ns: s.created_at_ns,
+    }
+}
+
+pub fn observer_status() -> ObserverStatus {
+    let (o, ata) = state::read_core(|c| (c.observer.clone(), c.tx_profile().ok().and_then(|p| p.return_ata().ok())));
+    ObserverStatus {
+        return_account: ata.as_ref().map(pubkey_to_base58),
+        cursor: o.cursor.as_ref().map(|s| signature_to_base58(&s.0)),
+        walk_active: o.walk_active,
+        queued: state::observer_queue_len(),
+        caught_up: o.caught_up,
+        processed: o.processed,
+        last_run_ns: o.last_run_ns,
+        last_progress_ns: o.last_progress_ns,
+        last_note: o.last_note,
+        returns_active: state::active_return_count(),
+        strays: state::stray_count(),
+    }
+}
+
+pub fn monitor_status() -> MonitorStatus {
+    let m = state::read_core(|c| c.monitor.clone());
+    MonitorStatus {
+        c1: m.escrow.map(|e| EscrowReading { balance: candid::Nat::from(e.balance), required: candid::Nat::from(e.required), ok: e.ok, at_ns: e.at_ns }),
+        c2: m.supply.map(|s| SupplyReading {
+            supply: candid::Nat::from(s.supply),
+            bound: candid::Nat::from(s.bound),
+            inflight_mint: candid::Nat::from(s.inflight_mint),
+            within_bound: s.within_bound,
+            quiescent: s.quiescent,
+            unattributed_gap: s.unattributed_gap.map(candid::Nat::from),
+            at_ns: s.at_ns,
+        }),
+        c1_strikes: m.c1_strikes,
+        c2_strikes: m.c2_strikes,
+        last_run_ns: m.last_run_ns,
+        last_note: m.last_note,
+    }
+}
+
 pub fn hint_view(h: &Hint) -> HintView {
     HintView { signature: signature_to_base58(&h.signature.0), submitted_by: h.submitted_by, submitted_at_ns: h.submitted_at_ns }
 }

@@ -1,7 +1,8 @@
 //! The timer (49a, extended in 49b): one self-rescheduling timer runs the whole background pass in
 //! a fixed order: derive keys and bootstrap what is missing (`bootstrap::bootstrap_step`), reconcile
-//! the nonce lanes (`lane::tick`), then the ICP-side sagas (`ledger_pass`: ledger facts, pulls,
-//! preflight holds, refunds, releases, fee sweeps). Once everything is bound and no operation is
+//! the nonce lanes (`lane::tick`), the mint saga (`mint_saga`: deliveries, re-mints, new mint
+//! operations), the return observer, then the ICP-side sagas (`ledger_pass`: ledger facts, pulls,
+//! preflight holds, refunds, releases, fee sweeps) and the C1 and C2 monitors. Once everything is bound and no operation is
 //! active the pass makes only the three cheap ledger reads, so an idle bridge spends almost nothing.
 //!
 //! [`run_once`] is generic over the transport, the signer and the ledger and is what the tests
@@ -11,7 +12,9 @@
 //! so a trapped pass cannot end the chain of ticks.
 
 use crate::bootstrap::{bootstrap_step, BootstrapEvent};
-use crate::flows::{deposit, release};
+use crate::flows::{deposit, mint_saga, release};
+use crate::monitor::{self, MonitorReport};
+use crate::observer::{self, ObserverEvent};
 use crate::icp::IcpLedger;
 use crate::lane::{tick, TickReport, TxSigner};
 use crate::sol_rpc::SolRpc;
@@ -61,6 +64,10 @@ pub struct RunReport {
     pub skipped: bool,
     pub bootstrap: Vec<BootstrapEvent>,
     pub lane: TickReport,
+    /// What the return observer did (49c).
+    pub observer: Vec<ObserverEvent>,
+    /// What the C1 and C2 monitors read (49c).
+    pub monitor: MonitorReport,
 }
 
 /// How long the ledger facts are trusted while nothing is waiting on them.
@@ -121,8 +128,13 @@ pub async fn run_once<R: SolRpc, S: TxSigner, L: IcpLedger>(rpc: &R, signer: &S,
     };
     let bootstrap = bootstrap_step(rpc, signer, now).await;
     let lane = tick(rpc, signer, now).await;
+    // The mint saga applies what the lane delivered BEFORE the observer looks at returns (a return of
+    // freshly minted tokens needs the books to know they exist), and builds new mint operations.
+    mint_saga::process_mints(rpc, signer, now).await;
+    let observer = observer::observe(rpc, now).await;
     ledger_pass(ledger).await;
-    RunReport { skipped: false, bootstrap, lane }
+    let monitor = monitor::run_if_due(rpc, ledger, now).await;
+    RunReport { skipped: false, bootstrap, lane, observer, monitor }
 }
 
 /// Run one pass now (the admin's "run tick"). `false` when another pass holds the guard or the
@@ -141,6 +153,26 @@ pub async fn run_now() -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn run_now() -> bool {
+    false
+}
+
+/// Read the monitors now (the admin's "run monitors"). `false` when the instance cannot build its
+/// clients or has no bound mint.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_monitors_now() -> bool {
+    use crate::icp::CanisterLedger;
+    use crate::sol_rpc::CandidRpc;
+    let (config, now) = (state::read_core(|c| c.config.clone()), crate::env::now_ns());
+    let Ok(rpc) = CandidRpc::from_config(config.sol_rpc, config.rpc.clone()) else { return false };
+    if state::read_core(|c| c.tx_profile()).is_err() {
+        return false;
+    }
+    monitor::run(&rpc, &CanisterLedger::from_config(), now).await;
+    true
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn run_monitors_now() -> bool {
     false
 }
 

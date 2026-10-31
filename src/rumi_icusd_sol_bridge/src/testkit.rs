@@ -61,6 +61,7 @@ struct MockTx {
     wire: Vec<u8>,
     failed: bool,
     slot: u64,
+    meta: crate::sol_rpc::TxMeta,
 }
 
 type SendHook = Box<dyn Fn(&[u8])>;
@@ -191,7 +192,7 @@ impl MockChain {
         self.set_account(nonce_account, owner, nonce_account_data(1, 1, &authority, &successor(&current)));
         let slot = self.next_slot.get();
         self.next_slot.set(slot + 1);
-        self.landed.borrow_mut().insert(first, MockTx { wire: wire.to_vec(), failed, slot });
+        self.landed.borrow_mut().insert(first, MockTx { wire: wire.to_vec(), failed, slot, meta: Default::default() });
         for key in &message.account_keys {
             self.by_address.borrow_mut().entry(*key).or_default().push(first);
         }
@@ -205,8 +206,23 @@ impl MockChain {
         let first = signatures[0];
         let slot = self.next_slot.get();
         self.next_slot.set(slot + 1);
-        self.landed.borrow_mut().insert(first, MockTx { wire: wire.to_vec(), failed: false, slot });
+        self.landed.borrow_mut().insert(first, MockTx { wire: wire.to_vec(), failed: false, slot, meta: Default::default() });
         self.by_address.borrow_mut().entry(*mentions).or_default().push(first);
+    }
+
+    /// Land a transaction that is not a nonce consumer (a holder's return, a stray transfer, the
+    /// bridge's own burn) with the metadata the RPC would report for it, listed under every address
+    /// in `mentions`. Returns its first signature (the transaction id).
+    pub fn land_with_meta(&self, wire: &[u8], failed: bool, meta: crate::sol_rpc::TxMeta, mentions: &[Pubkey]) -> Signature {
+        let (signatures, _) = split_wire_transaction(wire).expect("wire");
+        let first = signatures[0];
+        let slot = self.next_slot.get();
+        self.next_slot.set(slot + 1);
+        self.landed.borrow_mut().insert(first, MockTx { wire: wire.to_vec(), failed, slot, meta });
+        for key in mentions {
+            self.by_address.borrow_mut().entry(*key).or_default().push(first);
+        }
+        first
     }
 
     /// Apply a creation transaction as the runtime would (no signature or fee checks): the pool
@@ -294,7 +310,7 @@ impl SolRpc for MockChain {
             Some(Fault::Null) => return Ok(None),
             None => {}
         }
-        Ok(self.landed.borrow().get(signature).map(|t| LandedTx { slot: t.slot, wire: t.wire.clone(), failed: t.failed }))
+        Ok(self.landed.borrow().get(signature).map(|t| LandedTx { slot: t.slot, wire: t.wire.clone(), failed: t.failed, meta: t.meta.clone() }))
     }
 
     async fn get_signatures_for_address(
@@ -594,6 +610,13 @@ impl MockLedger {
 
     pub fn credit(&self, a: &Account, amount: u128) {
         *self.balances.borrow_mut().entry(norm(a)).or_insert(0) += amount;
+    }
+
+    /// Remove funds (the escrow lost them): a deficit the monitors must catch.
+    pub fn debit(&self, a: &Account, amount: u128) {
+        let mut balances = self.balances.borrow_mut();
+        let entry = balances.entry(norm(a)).or_insert(0);
+        *entry = entry.saturating_sub(amount);
     }
 
     pub fn balance(&self, a: &Account) -> u128 {
