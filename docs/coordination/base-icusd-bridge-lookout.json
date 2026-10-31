@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; 49a e6a542be and 49b 12dfee35 component-reviewed; fixes in progress (same W28): bootstrap reply fence, metadata authorities, refund only after proof (not admin Abandon), fair ledger-queue paging; then 49c to 49e",
+      "evidenceText": "proof=none; 49a e6a542be plus fix 8198fb28; 49b 12dfee35 (ledger saga, endpoints) reviewed: proof-only refund and fair paging fixes next, after the builder slot; then 49c to 49e",
       "evidenceLinks": []
     },
     {
@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Accepted: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45 (escrow floor). Remaining only part B: backend Wasm code-section size and artifact binding, XRPL PocketIC with negatives, in the builder slot",
+      "evidenceText": "proof=none; Accepted: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45. Part B running now (W29, builder slot): backend Wasm size and artifact check, XRPL PocketIC suite with the return-flow cases",
       "evidenceLinks": []
     },
     {

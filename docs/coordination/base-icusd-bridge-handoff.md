@@ -1624,6 +1624,30 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Builder sequence: W28 commits its 49a fixes and stops building; W29 runs BB-57 part B; W28 writes the 49b corrections
   meanwhile without building, then reproduces, checks and commits them after part B.
 
+## Milestone 75 (2026-10-31): 49a correction and 49b delivered; builder to part B
+
+- 49b `12dfee35` (W28): `icp.rs` ledger seam with a mock replaying dedup, fee check, block log and ICRC-3 search;
+  `flows/ledger_ops.rs` persisted-tuple lifecycle (tuple stored and outflow reserved before the first send, identical resend
+  inside 23.5 h, bounded 500-block ICRC-3 search outside it, absence proofs tied to the unchanged tuple); deposits
+  (caller-owned pull, canister spender, mint id from the proven pull block), releases (`open_release` the only constructor,
+  requiring a Delivered burn of the same amount), held-op Recheck and Abandon, sweeps; core schema 4, MemoryIds 8 to 17,
+  pinned record images; user, query and admin endpoints with an ingress table; a `ledger_pass` on the timer. Worker run:
+  337 tests (2 ignored) in both feature modes; clippy clean; Wasm 3,979,653 bytes; golden reference 0 mismatches; six
+  mutation checks each failed their test. Under correction per milestone 74.
+- 49a correction `8198fb28` (W28): reproduced first (three fence tests and the authority test failed; outputs saved); a
+  creation attempt is identified by `created_at_ns` plus its exact bytes, every continuation after an await writes only to
+  that attempt, a late reply of a replaced attempt becomes an audit note; `check_mint` requires MetadataPointer and
+  TokenMetadata authorities to be none or the `mint-authority` key; the source pins replace the "from memory" notes; the
+  150 s value is renamed `BOOTSTRAP_TX_RETRY_SECS` and documented as a retry cadence, not an expiry proof. Worker run: 341
+  tests both modes; clippy clean; Wasm 3,992,402 bytes; golden 0 mismatches.
+- Miles' review of `8198fb28` (`review-bb49a-followup.md`): metadata authorities and the sign, sign-failure and send fences
+  are aligned; one remaining part of the same finding: `ensure_tx` awaits a blockhash and then unconditionally stores its
+  record, so an old preparation can overwrite a newer attempt; it must be fenced to the target generation captured before
+  its awaits, and a None to verified to None ABA must not restart creation of a bound target. The same W28 writes it with the
+  49b corrections while part B runs and tests after the slot returns; 49a stays in component review for this case only.
+- Builder: W28 stopped cargo; W29 now runs BB-57 part B once (backend Wasm size, artifact binding and the XRPL PocketIC suite
+  with the named return-flow cases) in the shared target. Disk about 21 GiB free.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
