@@ -2894,6 +2894,43 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   development runs, both test fixes (a selector scoped to the right panel; a one-shot mock made persistent).
 - W29's independent return and signing review on frozen `37f9c77c` is still pending; Miles adjudicates both.
 
+## Milestone 122 (2026-10-31): BB-54 root fixes accepted; W29 return review delivered
+
+- Miles (`accept-bb54-root-fixes.md`) accepted the root F1 to F3 corrections at frozen `412f1fda54bb270863518477f81d906d7a172fb2`
+  after reading the complete fix and test diff and the actual logs: the real false producer snapshot (the 46 aggregate failures
+  include fixture fallout, not 46 bugs), the isolated pending-read failures (4, not overclaimed as distinct defects), the direct
+  notify timing (0 calls at click return instead of 1; the fourth F3 assertion was the SOLANA RETURN wording, not a signing bug),
+  final 202 affected tests, the existing 30/66/25 baseline (no unqualified typecheck-green claim), the build with the Internet
+  Identity and custom-domain asset check, root diff-check clean, and the generated Sui `.did` byte-identical to the canonical one.
+  Whole BB-54 stays in Review; no frontend push yet.
+- Proposed durable lesson (for the eventual handoff only; no persona or global-memory edit): consumer readiness fixtures must be
+  producible by the actual accepted producer. A field the backend always reports false stays disclosed rather than becoming a
+  silently invented hard gate; source and build green with fabricated successful fixtures cannot establish cross-component
+  readiness. A healthy family also needs bounded independence from an unrelated pending read, not only from a rejected one.
+- W29 (requested Sonnet; actual `claude-sonnet-5-5`), independent reviewer of the native return and signing boundary at frozen
+  `37f9c77c`, read-only (frozen `git show`, the accepted Move and `ids.rs`, the installed SDK 2.38.0 source, the saved logs; no
+  test, build or edit). Verdict: not a clean pass. Full report: coordinator scratchpad `bb54-w29-return-review.md`.
+  - F-1 (Medium): the release lookup is bound to the transfer id only; `transfer_id` does not depend on amount or destination, so
+    a sign-and-execute wallet that changes the principal or amount but keeps sender and nonce is held, then "Check the evidence"
+    finds the record under the same id and marks the intent done showing the reviewed principal. No Sui-flow code compares the
+    release's digest, amount, destination, sender or nonce with the intent.
+  - F-2 (Medium, funds not at risk): a sign-only attempt interrupted while the wallet prompt is open is saved as `signing`, reloads
+    as `held`, has no digest or signed bytes, can never be discarded, rebroadcast or resolved, and blocks every later Sui return
+    on that device; sign-and-execute holds keep a wallet-reported digest only in note text.
+  - F-3 (Medium-Low): `verifyTransactionSignature` is called with no client, which the SDK requires for zkLogin, so a valid
+    zkLogin (or zkLogin multisig) signature is reported as a bad signature.
+  - F-4 (Medium-Low, conditional): a saved attempt is bound to the destination id only; instance, chain identifier, package, Gate
+    and coin type are saved but never compared with the current config, so after a redeploy on the same network a saved attempt
+    rebroadcasts against the old Gate, and Continue mixes the old package and Gate with the new shared version.
+  - Holds: the plan and returned-bytes checks; `transferId` equal to the Move and `ids.rs` (six vectors mechanically identical);
+    SDK coin, shared-object and gas-owner semantics; checks before save or broadcast; persistence before the wallet call and before
+    broadcast; only code 4001 clears a sign-and-execute attempt; no time or epoch expiry; terminal status only from the canister
+    record; empty endpoints and bridge id with lazy SDK and panel.
+  - Non-blocking observations: no split on an exact-sum coin selection; a one-tab unresolved guard; the draft check against the
+    release fee only; failed-on-chain sent attempts auto-resuming; a success style for a failed terminal result.
+  - Hygiene note: W29 wrote two temporary comparison files to `/tmp`, outside the scratchpad.
+- Next: Miles adjudicates the four findings; W28 owns any accepted fixes. Two workers only.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
