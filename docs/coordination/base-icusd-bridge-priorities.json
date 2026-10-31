@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-55 done. BB-56 in Review: the same W29 reproduces a fee-backing interleaving case first and fixes it if real. BB-57 part A in progress (endpoints, Candid, cards) with the carried origin report (model first); part B (Wasm size, PocketIC) on the builder lane when free.",
+      "nextAction": "BB-56 in Review (fee-backing race being reproduced). BB-57: part A 0a315971 reviewed; the same W29 fixes the concurrent pay-click case, then the origin report (model first); part B (Wasm size, PocketIC) on the builder lane, which W28 frees until BB-49.",
       "cardIds": [
         "BB-55",
         "BB-56",

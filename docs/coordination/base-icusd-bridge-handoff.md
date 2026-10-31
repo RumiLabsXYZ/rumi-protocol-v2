@@ -1397,6 +1397,19 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Frozen BB-48 pins for acceptance: `45ecd9fe` (core), `d1bc0bca` (probe tool and runbook), `614ced92` (lane fixes). W28's
   lane waits for Miles' acceptance, then takes BB-49.
 
+## Milestone 62 (2026-10-31): BB-57 part A reviewed
+
+- BB-57 part A `0a315971` (W29, local XRPL branch; the worker's report on it is still pending). Miles' review
+  (`review-bb57-a.md`): the distinct Return tag, actual-caller backend binding, exact Payment fields and amount, same-request
+  wallet recovery, hints-only observation and two-click Oisy behavior align; the output-variant compatibility break is
+  disclosed and the runbook must keep frontend-before-first-Return sequencing. Component review only: the BB-56 fee-race
+  disposition, origin report, XRPL collector reader, Wasm size and PocketIC checks remain.
+- Fix queued for the same W29 after its current step: `payReturn` awaits a staleness read while the phase is still
+  `prepared`, so two concurrent clicks can both reach `signAndSubmit` and create two payable Xaman requests (its key is
+  remembered only after `payload.create` returns). Reproduce with a deferred `listMyOperations` reply, then a synchronous
+  guard before the first await released in `finally`; persisted requests still resume and unknown outcomes keep them.
+  Optional if tiny: check the returned ICP destination owner and subaccount in `startReturnIntent`.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

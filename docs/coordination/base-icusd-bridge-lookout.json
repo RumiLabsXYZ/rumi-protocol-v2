@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Part A in progress (same W29): return endpoints, distinct Return tag, .did and bindings by script, Return and opt-in cards; also carried from BB-56: imported versus borrowed delivered totals (model first); Wasm and PocketIC wait",
+      "evidenceText": "proof=none; Part A 0a315971 reviewed (Miles): API, Return tag, payment and recovery align; one fix queued for the same W29 (two concurrent pay clicks could open two wallet requests). Still pending: origin report, collector reader, Wasm size, PocketIC",
       "evidenceLinks": []
     },
     {
