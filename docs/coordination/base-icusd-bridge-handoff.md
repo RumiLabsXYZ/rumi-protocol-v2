@@ -1645,6 +1645,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   record, so an old preparation can overwrite a newer attempt; it must be fenced to the target generation captured before
   its awaits, and a None to verified to None ABA must not restart creation of a bound target. The same W28 writes it with the
   49b corrections while part B runs and tests after the slot returns; 49a stays in component review for this case only.
+- Hosted CI (verified by Miles): run 41169908635 on pushed head `667d8bbc` completed SUCCESS at 04:57:09 UTC; no rerun or
+  watch until the next source cohort. Local commits after `667d8bbc` (49b `12dfee35`, 49a `8198fb28`, docs) are outside
+  that CI pin. Part B acceptance must name the new no-vault Return PocketIC cases actually covered, not treat the older
+  repayment and claim suite as equivalent.
 - Builder: W28 stopped cargo; W29 now runs BB-57 part B once (backend Wasm size, artifact binding and the XRPL PocketIC suite
   with the named return-flow cases) in the shared target. Disk about 21 GiB free.
 
