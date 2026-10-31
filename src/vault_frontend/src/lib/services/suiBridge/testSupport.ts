@@ -24,9 +24,10 @@ import type {
 } from '$declarations/rumi_icusd_sui_bridge/rumi_icusd_sui_bridge.did';
 import { suiDestination, type DestinationView } from '../baseBridge/destinations';
 import { makeSigning, type TestSigning } from '../baseBridge/testSupport';
-import { base58Encode, type Bytes } from '../solanaBridge/bytes';
+import { base58Encode, fromHex, type Bytes } from '../solanaBridge/bytes';
 import { resolveSuiConfig, type SuiBridgeConfig } from './config';
 import { SUI_MAINNET, SUI_TESTNET } from './networks';
+import type { SuiReturnIntent } from './intents';
 import type { SuiCoin, SuiExecution, SuiRpc, SuiTxStatus } from './rpc';
 import { digestOf } from './transaction';
 import {
@@ -240,6 +241,19 @@ export function makeSuiRelease(overrides: Partial<ReleaseView> = {}): ReleaseVie
     client_nonce: 1n,
     ...overrides,
   };
+}
+
+/** The canister's release record for EXACTLY this attempt: its transfer id, sender, nonce, amount, ICP account and burn digest. */
+export function releaseFor(intent: SuiReturnIntent, overrides: Partial<ReleaseView> = {}): ReleaseView {
+  return makeSuiRelease({
+    return_id: intent.transferId,
+    sui_sender: intent.sender,
+    client_nonce: BigInt(intent.nonce),
+    amount_e8s: intent.amountE8s,
+    destination: { owner: Principal.fromText(intent.icpPrincipal), subaccount: intent.icpSubaccount ? [fromHex(intent.icpSubaccount)!] : [] },
+    tx_digest: intent.digest ?? makeSuiRelease().tx_digest,
+    ...overrides,
+  });
 }
 
 export function makeCandidate(overrides: Partial<CandidateView> = {}): CandidateView {

@@ -147,3 +147,44 @@ export function resolveSuiConfig(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// The bridge a saved attempt belongs to
+// ---------------------------------------------------------------------------
+
+/** What every saved Sui attempt records about the bridge that made it (see `intents.ts`). */
+export interface SuiSavedIdentity {
+  instance: string;
+  chainIdentifier: string;
+  packageId: string;
+  gateId: string;
+  coinType: string;
+}
+
+/** Whether `saved` is the SAME bridge as `config`: the canister, the full chain identifier, the package, the Gate and the coin. */
+export function identityMatches(config: SuiBridgeConfig, saved: SuiSavedIdentity): boolean {
+  return (
+    saved.instance === config.instanceCanisterId &&
+    saved.chainIdentifier === config.network.chainIdentifier &&
+    saved.packageId === config.packageId &&
+    saved.gateId === config.gateId &&
+    saved.coinType === config.coinType
+  );
+}
+
+/**
+ * The destination slug (`sui-mainnet`) is a build constant, so it does not change when the bridge is redeployed on the same
+ * network. A saved attempt is therefore compared with the bridge NOW in use on the five facts that name it. Null when it is
+ * the same bridge; otherwise plain text that says which original bridge the attempt belongs to. A mismatch is never a
+ * reason to look anything up, continue, sign, send or forget: the attempt stays exactly as saved, and its ids stay its own.
+ * Matching on the Gate implies the Gate's immutable initial shared version, so no further field is needed.
+ */
+export function savedIdentityMessage(config: SuiBridgeConfig, saved: SuiSavedIdentity): string | null {
+  if (identityMatches(config, saved)) return null;
+  const short = (chain: string) => `${chain.slice(0, 8)}...`;
+  return (
+    `This request belongs to an earlier Sui bridge (canister ${saved.instance}, package ${saved.packageId}, Gate ${saved.gateId}, chain ${short(saved.chainIdentifier)}). ` +
+    `The bridge now in use is canister ${config.instanceCanisterId}, package ${config.packageId}, Gate ${config.gateId}, chain ${short(config.network.chainIdentifier)}. ` +
+    'It stays saved exactly as it was, and nothing was signed, approved, looked up or sent.'
+  );
+}

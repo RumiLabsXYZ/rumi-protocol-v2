@@ -44,6 +44,7 @@ import {
   makeSuiRelease,
   makeSuiSigning,
   rejection,
+  releaseFor,
   signLikeAWallet,
   type FakeSui,
   type FakeWallet,
@@ -523,7 +524,7 @@ describe('what the evidence may and may not allow', () => {
     await startReturn(h.deps, p, h.emit);
     const held = only(h);
     let evidence = await reconcileReturn(h.deps, held);
-    expect(evidence).toMatchObject({ digest: null, chain: { kind: 'no_digest' }, release: null, candidate: null });
+    expect(evidence).toMatchObject({ digest: null, chain: { kind: 'no_digest' }, release: null, deviation: null, candidate: null });
     expect(verdictOf(evidence)).toBe('unknown');
     expect(discardReturn(h.deps, held, verdictOf(evidence))).toMatchObject({ ok: false });
     h.views.candidate = makeCandidate({ client_nonce: BigInt(p.nonce) });
@@ -531,7 +532,7 @@ describe('what the evidence may and may not allow', () => {
     expect(describeReturnProgress(evidence).label).toBe('Seen by the bridge, verifying');
     expect(verdictOf(evidence)).toBe('unknown');
     const asked: string[] = [];
-    h.views.release = makeSuiRelease({ return_id: p.transferId });
+    h.views.release = releaseFor(held);
     h.deps.reads.getRelease = async (id) => (asked.push(id), h.views.release);
     evidence = await reconcileReturn(h.deps, held);
     expect(asked).toEqual([p.transferId]);
@@ -603,9 +604,9 @@ describe('status comes from the canister records only', () => {
     const script: Array<() => void> = [
       () => undefined,
       () => (h.views.candidate = makeCandidate({ client_nonce: BigInt(sent.nonce), verified: false, waiting: ['waiting for finality'] })),
-      () => (h.views.release = makeSuiRelease({ status: { Pending: null } })),
-      () => (h.views.release = makeSuiRelease({ status: { TransferUnknown: null } })),
-      () => (h.views.release = makeSuiRelease({ status: { Released: null }, release_block_index: [77n], amount_to_receive_e8s: [299_980_000n] })),
+      () => (h.views.release = releaseFor(sent, { status: { Pending: null } })),
+      () => (h.views.release = releaseFor(sent, { status: { TransferUnknown: null } })),
+      () => (h.views.release = releaseFor(sent, { status: { Released: null }, release_block_index: [77n], amount_to_receive_e8s: [299_980_000n] })),
     ];
     let step = 0;
     h.deps.sleep = async () => {
@@ -619,10 +620,212 @@ describe('status comes from the canister records only', () => {
   });
 
   it('shows held, re-minting and re-minted from the release record', () => {
-    expect(describeReturnProgress({ digest: null, chain: { kind: 'no_digest' }, release: makeSuiRelease({ status: { Held: { reason: 'bad account' } } }), candidate: null })).toMatchObject({ label: 'Held', terminal: false });
-    expect(describeReturnProgress({ digest: null, chain: { kind: 'no_digest' }, release: makeSuiRelease({ status: { Reminting: { deposit_id: 4n } } }), candidate: null }).terminal).toBe(false);
-    expect(describeReturnProgress({ digest: null, chain: { kind: 'no_digest' }, release: makeSuiRelease({ status: { Reminted: { deposit_id: 4n } } }), candidate: null })).toMatchObject({ label: 'Re-minted to your Sui address', terminal: true });
+    expect(describeReturnProgress({ digest: null, chain: { kind: 'no_digest' }, release: makeSuiRelease({ status: { Held: { reason: 'bad account' } } }), candidate: null, deviation: null })).toMatchObject({ label: 'Held', terminal: false });
+    expect(describeReturnProgress({ digest: null, chain: { kind: 'no_digest' }, release: makeSuiRelease({ status: { Reminting: { deposit_id: 4n } } }), candidate: null, deviation: null }).terminal).toBe(false);
+    expect(describeReturnProgress({ digest: null, chain: { kind: 'no_digest' }, release: makeSuiRelease({ status: { Reminted: { deposit_id: 4n } } }), candidate: null, deviation: null })).toMatchObject({ label: 'Re-minted to your Sui address', terminal: true });
     expect(describeReturnProgress(null).label).toBe('Sent to Sui');
+  });
+});
+
+describe('a release is bound to the EXACT reviewed attempt (not just its transfer id)', () => {
+  const OTHER_OWNER = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');
+
+  /** A sign-and-execute wallet that changes one thing of the reviewed call but keeps the sender and the nonce. */
+  async function changedByWallet(change: (p: ReturnPlan) => Partial<ReturnCallPlan>) {
+    const h = harness({ wallet: sendOnly });
+    const p = await plan(h);
+    h.wallet.onSignAndExecute = async () => signLikeAWallet(buildReturnTransaction({ ...callOf(p), ...change(p) }));
+    await startReturn(h.deps, p, h.emit);
+    expect(last(h)).toMatchObject({ type: 'held' });
+    return { h, p, held: only(h) };
+  }
+
+  it('holds a wallet-changed DESTINATION, and a record for the changed operation under the same id is a deviation: never credited, never done', async () => {
+    const { h, p, held } = await changedByWallet(() => ({ principalBytes: OTHER_OWNER.toUint8Array() }));
+    const before = JSON.stringify(h.store.list(), (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+    // The canister recorded what actually happened on Sui: the same sender and nonce, another ICP owner.
+    h.views.release = releaseFor(held, { destination: { owner: OTHER_OWNER, subaccount: [] }, status: { Released: null } });
+    const evidence = await reconcileReturn(h.deps, held);
+    expect(evidence.release, 'the record is not the reviewed transfer').toBeNull();
+    expect(evidence.deviation?.differences.join(' ')).toContain(OTHER_OWNER.toText());
+    expect(verdictOf(evidence)).toBe('deviation');
+    expect(verdictOf(evidence)).not.toBe('credited');
+    const progress = describeReturnProgress(evidence);
+    expect(progress).toMatchObject({ label: 'The bridge recorded a different transfer', terminal: false });
+    expect(progress.detail).toContain(OTHER_OWNER.toText());
+    expect(progress.detail).toContain('3 icUSD');
+    expect(mayDiscard(held, verdictOf(evidence))).toBe(false);
+    // Tracking (even of the original) never marks it done, and the original journal is exactly as it was.
+    expect(await trackReturn(h.deps, held, () => {})).toBe('done');
+    expect(JSON.stringify(h.store.list(), (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe(before);
+    expect(only(h)).toMatchObject({ status: 'held', nonce: p.nonce, transferId: p.transferId, icpPrincipal: TEST_OWNER_TEXT });
+    expect(h.wallet.calls).toHaveLength(1);
+    expect(h.node.executed).toHaveLength(0);
+  });
+
+  it('holds a wallet-changed AMOUNT, and a record for the changed operation under the same id is a deviation showing its actual amount', async () => {
+    const { h, held } = await changedByWallet((p) => ({ amountE8s: p.amountE8s + 1n }));
+    h.views.release = releaseFor(held, { amount_e8s: held.amountE8s + 1n, status: { Released: null } });
+    const evidence = await reconcileReturn(h.deps, held);
+    expect(evidence.release).toBeNull();
+    expect(verdictOf(evidence)).toBe('deviation');
+    expect(describeReturnProgress(evidence).detail).toContain('3.00000001 icUSD');
+    await trackReturn(h.deps, held, () => {});
+    expect(only(h).status).toBe('held');
+  });
+
+  it('never marks the journal done from a record that is not the reviewed attempt', async () => {
+    const { h, held } = await changedByWallet((p) => ({ amountE8s: p.amountE8s + 1n }));
+    h.views.release = releaseFor(held, { amount_e8s: held.amountE8s + 1n, status: { Released: null } });
+    await trackReturn(h.deps, held, () => {});
+    expect(only(h).status, 'a Released record for another amount must leave the original held').toBe('held');
+  });
+
+  it('still succeeds, credited and done, for the exact matching record (and the default and the explicit all-zero subaccount are the same account)', async () => {
+    const h = harness({ wallet: sendOnly });
+    const p = await plan(h);
+    await startReturn(h.deps, p, h.emit);
+    const sent = only(h);
+    expect(sent.status).toBe('sent');
+    h.views.release = releaseFor(sent, { status: { Pending: null }, destination: { owner: Principal.fromText(TEST_OWNER_TEXT), subaccount: [new Uint8Array(32)] } });
+    const pending = await reconcileReturn(h.deps, sent);
+    expect(pending.deviation).toBeNull();
+    expect(verdictOf(pending)).toBe('credited');
+    expect(describeReturnProgress(pending).label).toBe('Burn observed, release pending');
+    h.views.release = releaseFor(sent, { status: { Released: null } });
+    expect(await trackReturn(h.deps, sent, () => {})).toBe('done');
+    expect(only(h).status).toBe('done');
+  });
+
+  it('compares a non-default subaccount exactly: another subaccount, sender or nonce is a deviation', async () => {
+    const h = harness({ wallet: sendOnly });
+    const p = await plan(h, { ...DRAFT, subaccountText: 'ab'.repeat(32) });
+    await startReturn(h.deps, p, h.emit);
+    const sent = only(h);
+    expect(sent.icpSubaccount).toBe('ab'.repeat(32));
+    h.views.release = releaseFor(sent);
+    expect(verdictOf(await reconcileReturn(h.deps, sent))).toBe('credited');
+    for (const [name, change] of [
+      ['another subaccount', { destination: { owner: Principal.fromText(TEST_OWNER_TEXT), subaccount: [fill(0xcd)] } }],
+      ['the default subaccount', { destination: { owner: Principal.fromText(TEST_OWNER_TEXT), subaccount: [] } }],
+      ['another sender', { sui_sender: KEYS.otherHolder }],
+      ['another nonce', { client_nonce: BigInt(sent.nonce) + 1n }],
+      ['another transfer id', { return_id: 'bb'.repeat(32) }],
+    ] as const) {
+      h.views.release = releaseFor(sent, change as never);
+      const evidence = await reconcileReturn(h.deps, sent);
+      expect(verdictOf(evidence), name).toBe('deviation');
+      expect(evidence.release, name).toBeNull();
+    }
+  });
+
+  it('catches a saved-digest mismatch: the record names another burn transaction than the one this attempt saved', async () => {
+    const h = harness();
+    await startReturn(h.deps, await plan(h), h.emit);
+    const sent = only(h);
+    expect(sent.digest).toBeTruthy();
+    h.views.release = releaseFor(sent, { tx_digest: base58Encode(fill(0x31)), status: { Released: null } });
+    const evidence = await reconcileReturn(h.deps, sent);
+    expect(verdictOf(evidence)).toBe('deviation');
+    expect(evidence.deviation?.differences.join(' ')).toContain(base58Encode(fill(0x31)));
+    expect(await trackReturn(h.deps, sent, () => {})).toBe('done');
+    expect(only(h).status).toBe('sent');
+    // With no saved digest (an ambiguous attempt) the digest is not compared, every other field still is.
+    const g = harness({ wallet: sendOnly });
+    g.wallet.onSignAndExecute = async () => {
+      throw new Error('timeout');
+    };
+    await startReturn(g.deps, await plan(g), g.emit);
+    const held = only(g);
+    expect(held.digest).toBeUndefined();
+    g.views.release = releaseFor(held, { tx_digest: base58Encode(fill(0x32)) });
+    expect(verdictOf(await reconcileReturn(g.deps, held))).toBe('credited');
+  });
+});
+
+describe('a saved attempt is bound to the EXACT bridge that made it (not only the destination slug)', () => {
+  const OTHER_INSTANCE = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+  const identities: Array<[string, Partial<SuiReturnIntent>]> = [
+    ['another bridge canister', { instance: OTHER_INSTANCE }],
+    ['another Gate', { gateId: KEYS.mintCap }],
+    ['another package', { packageId: KEYS.gas, coinType: `${KEYS.gas}::rumi_icusd_gate::RUMI_ICUSD_GATE` }],
+    ['another coin type', { coinType: `${KEYS.packageId}::other::COIN` }],
+    ['another full chain identifier', { chainIdentifier: '4c78adacf2a2f5ad80f27ed7d54aa69d3a78f1ca67fdef9ecf5754f5b8bb77b0' }],
+  ];
+
+  async function signedAttempt() {
+    const h = harness();
+    h.node.failExecute = new Error('gateway timeout');
+    await startReturn(h.deps, await plan(h), h.emit);
+    h.node.failExecute = null;
+    expect(only(h).status).toBe('signed');
+    return { h, signed: only(h) };
+  }
+
+  it('refuses to re-ask the wallet for a PREPARED attempt of an earlier bridge, and keeps the record', async () => {
+    for (const [name, change] of identities) {
+      const h = harness();
+      const p = await plan(h);
+      const prepared: SuiReturnIntent = { v: 1, kind: 'sui_to_icp', id: '44'.repeat(16), destination: 'sui-mainnet', chainIdentifier: SUI_MAINNET.chainIdentifier, instance: SUI_BRIDGE_ID, packageId: p.config.packageId, gateId: p.config.gateId, coinType: COIN_TYPE, sender: p.sender, coins: p.coins, icpPrincipal: p.icpPrincipal, icpSubaccount: null, amountE8s: p.amountE8s, nonce: p.nonce, transferId: p.transferId, signMode: 'sign', createdAt: 5, status: 'prepared', ...change };
+      h.store.put(prepared);
+      await continuePrepared(h.deps, h.store.get(prepared.id) as SuiReturnIntent, h.emit);
+      expect(last(h), name).toMatchObject({ type: 'blocked', message: expect.stringContaining('earlier Sui bridge') });
+      expect(h.wallet.calls, name).toHaveLength(0);
+      expect(h.store.get(prepared.id), name).toEqual({ ...prepared });
+    }
+  });
+
+  it('refuses to rebroadcast a SIGNED attempt of an earlier bridge: nothing is sent, and the record is untouched', async () => {
+    for (const [name, change] of identities) {
+      const { h, signed } = await signedAttempt();
+      const old: SuiReturnIntent = { ...signed, ...change };
+      h.store.put(old);
+      const executedBefore = h.node.callsTo('executeTransaction').length;
+      await rebroadcastReturn(h.deps, old, h.emit);
+      expect(last(h), name).toMatchObject({ type: 'blocked', message: expect.stringContaining('earlier Sui bridge') });
+      expect(h.node.callsTo('executeTransaction').length, name).toBe(executedBefore);
+      expect(h.wallet.calls, name).toHaveLength(1);
+      expect(h.store.get(old.id), name).toEqual(old);
+    }
+  });
+
+  it('names the original bridge, and never reads the new canister or the node to settle an old claim', async () => {
+    const { h, signed } = await signedAttempt();
+    const old: SuiReturnIntent = { ...signed, instance: OTHER_INSTANCE, gateId: KEYS.mintCap };
+    h.store.put(old);
+    const asked: string[] = [];
+    h.deps.reads.getRelease = async (id) => (asked.push(id), releaseFor(old, { status: { Released: null } }));
+    const statusCalls = h.node.callsTo('getTransactionStatus').length;
+    const evidence = await reconcileReturn(h.deps, old);
+    expect(asked).toEqual([]);
+    expect(h.node.callsTo('getTransactionStatus')).toHaveLength(statusCalls);
+    expect(evidence.chain).toMatchObject({ kind: 'wrong_instance', message: expect.stringContaining(OTHER_INSTANCE) });
+    expect((evidence.chain as { message: string }).message).toContain(KEYS.mintCap);
+    expect(evidence.release).toBeNull();
+    expect(verdictOf(evidence)).toBe('unknown');
+    expect(mayDiscard(old, verdictOf(evidence))).toBe(false);
+    expect(describeReturnProgress(evidence).label).toBe('Belongs to an earlier bridge');
+    expect(await trackReturn(h.deps, old, () => {})).toBe('done');
+    expect(h.store.get(old.id)).toEqual(old);
+  });
+
+  it('refuses to sign a plan that was reviewed against another bridge than the one now in use', async () => {
+    const h = harness();
+    const p = await plan(h);
+    h.deps.config = { ...h.deps.config, gateId: KEYS.mintCap };
+    await startReturn(h.deps, p, h.emit);
+    expect(last(h)).toMatchObject({ type: 'blocked', message: expect.stringContaining('bridge changed') });
+    expect(h.wallet.calls).toHaveLength(0);
+    expect(h.store.list()).toHaveLength(0);
+  });
+
+  it('still continues the same operation when the identity is unchanged', async () => {
+    const { h, signed } = await signedAttempt();
+    await rebroadcastReturn(h.deps, signed, h.emit);
+    expect(last(h)).toMatchObject({ type: 'sent' });
+    expect(h.node.executed).toHaveLength(1);
+    expect(toBase64(h.node.executed[0].bytes)).toBe(signed.signedBytes);
+    expect(only(h)).toMatchObject({ id: signed.id, nonce: signed.nonce, transferId: signed.transferId });
   });
 });
 

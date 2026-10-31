@@ -106,7 +106,8 @@ import { browserLocalStorage } from '$lib/services/baseBridge/intents';
 import { SuiIntentStore, type SuiReturnIntent } from '$lib/services/suiBridge/intents';
 import { SUI_SIGN_AND_EXECUTE_TRANSACTION, SUI_SIGN_TRANSACTION } from '$lib/services/suiBridge/walletStandard';
 import { SUI_MAINNET } from '$lib/services/suiBridge/networks';
-import { digestOf } from '$lib/services/suiBridge/transaction';
+import { buildReturnTransaction, digestOf } from '$lib/services/suiBridge/transaction';
+import { Principal } from '@dfinity/principal';
 import { fromBase64 } from '@mysten/sui/utils';
 import { base58Encode } from '$lib/services/solanaBridge/bytes';
 import {
@@ -124,6 +125,7 @@ import {
   makeSuiDeposit,
   makeSuiDestination,
   makeSuiRelease,
+  releaseFor,
   signLikeAWallet,
   type FakeSui,
 } from '$lib/services/suiBridge/testSupport';
@@ -769,11 +771,11 @@ describe('returning from Sui (injected fixture)', () => {
     anonymous.get_observer.mockResolvedValue({ candidates: [makeCandidate({ client_nonce: BigInt(sent.nonce) })] });
     await step();
     expect(label()).toContain('Seen by the bridge, verifying');
-    anonymous.get_release.mockResolvedValue([makeSuiRelease({ status: { Pending: null } })]);
+    anonymous.get_release.mockResolvedValue([releaseFor(sent, { status: { Pending: null } })]);
     await step();
     expect(label()).toContain('Burn observed, release pending');
     expect(new SuiIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).get(sent.id)).toMatchObject({ status: 'sent' });
-    anonymous.get_release.mockResolvedValue([makeSuiRelease({ status: { Released: null }, release_block_index: [77n], amount_to_receive_e8s: [299_980_000n] })]);
+    anonymous.get_release.mockResolvedValue([releaseFor(sent, { status: { Released: null }, release_block_index: [77n], amount_to_receive_e8s: [299_980_000n] })]);
     await step();
     expect(label()).toContain('Released (ledger block 77)');
     expect(label()).toContain('2.9998 icUSD');
@@ -840,6 +842,7 @@ describe('returning from Sui (injected fixture)', () => {
     const held = host.querySelector('[data-testid="held"]')!;
     expect(held.textContent).toContain('This attempt has no recorded outcome. It is held.');
     expect(held.textContent).toContain('not rebuilt, signed again or given a new nonce');
+    expect(held.textContent).toContain('cannot be told apart from one that another page is still waiting on');
     const stored = journal()[0] as SuiReturnIntent;
     expect(stored).toMatchObject({ status: 'held', signMode: 'sign_and_execute' });
     expect(stored.digest).toBeUndefined();
@@ -864,11 +867,60 @@ describe('returning from Sui (injected fixture)', () => {
     expect(journal()[0]).toMatchObject({ id: stored.id, nonce: stored.nonce, transferId: stored.transferId });
     expect(standard.signs.length).toBe(signsBefore);
     // The bridge's own record settles it.
-    anonymous.get_release.mockResolvedValue([makeSuiRelease({ status: { Pending: null } })]);
+    anonymous.get_release.mockResolvedValue([releaseFor(stored, { status: { Pending: null } })]);
     click(/^Check the evidence$/);
     await settle();
     expect(host.querySelector('[data-testid="tracking"]')!.textContent).toContain('Burn observed, release pending');
     expect(anonymous.get_release).toHaveBeenLastCalledWith(stored.transferId);
+  });
+
+  it('shows a record that is NOT the reviewed attempt as a deviation with its actual facts, never as credited or done, and keeps the held original', async () => {
+    const OTHER = 'rrkah-fqaaa-aaaaa-aaaaq-cai';
+    standard = makeStandardWallet('Exec Only', [makeAccount(KEYS.holder)], {
+      [SUI_SIGN_TRANSACTION]: undefined,
+      [SUI_SIGN_AND_EXECUTE_TRANSACTION]: {
+        version: '2.0.0',
+        // A wallet that changes the ICP destination but keeps the sender and the nonce.
+        signAndExecuteTransaction: async () => {
+          const saved = journal()[0] as SuiReturnIntent;
+          return signLikeAWallet(
+            buildReturnTransaction({
+              packageId: saved.packageId,
+              gateId: saved.gateId,
+              gateInitialSharedVersion: '42',
+              sender: saved.sender,
+              coins: saved.coins,
+              amountE8s: saved.amountE8s,
+              principalBytes: Principal.fromText(OTHER).toUint8Array(),
+              subaccount: new Uint8Array(32),
+              nonce: BigInt(saved.nonce),
+            }),
+          );
+        },
+      },
+    });
+    await openReturnTab();
+    type('#sui-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Sign in your Sui wallet$/);
+    await settle();
+    expect(host.querySelector('[data-testid="held"]')).toBeTruthy();
+    const held = journal()[0] as SuiReturnIntent;
+    expect(held.status).toBe('held');
+    // The canister recorded the changed operation under the same transfer id.
+    anonymous.get_release.mockResolvedValue([releaseFor(held, { destination: { owner: Principal.fromText(OTHER), subaccount: [] }, status: { Released: null } })]);
+    click(/^Check the evidence$/);
+    await settle();
+    const evidenceText = host.querySelector('[data-testid="evidence"]')!.textContent!;
+    expect(evidenceText).toContain('The bridge recorded a different transfer');
+    expect(evidenceText).toContain(OTHER);
+    expect(host.querySelector('[data-testid="tracking"]')).toBeNull();
+    expect(host.textContent).not.toContain('Released (ledger block');
+    expect(button(/discard/i)).toBeUndefined();
+    expect(journal()).toHaveLength(1);
+    expect(journal()[0]).toMatchObject({ id: held.id, status: 'held', icpPrincipal: TEST_OWNER_TEXT, nonce: held.nonce });
+    expect(standard.signs).toHaveLength(0);
   });
 
   it('clears an execute-only attempt only on the explicit rejection code', async () => {
@@ -907,6 +959,64 @@ describe('returning from Sui (injected fixture)', () => {
     expect(host.textContent).toContain('Switch your wallet to Sui.');
     expect(standard.signs).toHaveLength(0);
     expect(node.executed).toHaveLength(0);
+  });
+});
+
+describe('a saved attempt of an EARLIER Sui bridge (redeployed on the same network)', () => {
+  const OTHER_INSTANCE = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+
+  it('is never looked up, continued or settled on the bridge now in use: an old ICP request is named, not retried', async () => {
+    enableSui();
+    new SuiIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).put({
+      v: 1, kind: 'icp_to_sui', id: '66'.repeat(16), destination: 'sui-mainnet', chainIdentifier: SUI_MAINNET.chainIdentifier, instance: OTHER_INSTANCE,
+      packageId: KEYS.packageId, gateId: KEYS.gateId, coinType: COIN_TYPE, recipient: KEYS.holder, amountE8s: 200_000_000n, expectedDepositFee: 10_000_000n,
+      createdAt: 5, status: 'approved',
+    });
+    render();
+    await settle();
+    await selectSui();
+    expect(host.textContent).toContain('Earlier request without a recorded outcome');
+    click(/^Check status$/);
+    await settle();
+    expect(host.textContent).toContain('belongs to an earlier Sui bridge');
+    expect(host.textContent).toContain(OTHER_INSTANCE);
+    // The replacement canister is not asked, and nothing is approved, pulled or submitted.
+    expect(anonymous.get_deposit_by_request).not.toHaveBeenCalled();
+    expect(signers.bridge.bridge_to_sui).not.toHaveBeenCalled();
+    expect(signers.ledger.icrc2_approve).not.toHaveBeenCalled();
+    expect(button(/discard/i)).toBeUndefined();
+    expect(journal()).toHaveLength(1);
+    expect(journal()[0]).toMatchObject({ id: '66'.repeat(16), instance: OTHER_INSTANCE, status: 'approved' });
+  });
+
+  it('shows an old broadcast return as belonging to the earlier bridge, reads nothing from the new canister and signs nothing', async () => {
+    await openReturnTab();
+    type('#sui-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Sign in your Sui wallet$/);
+    await settle();
+    const sent = journal()[0] as SuiReturnIntent;
+    new SuiIntentStore(browserLocalStorage(), TEST_OWNER_TEXT).patch<SuiReturnIntent>(sent.id, { instance: OTHER_INSTANCE, gateId: KEYS.mintCap });
+    unmount(instance as any);
+    host.innerHTML = '';
+    standard.signs.length = 0;
+    anonymous.get_release.mockClear();
+    anonymous.get_release.mockResolvedValue([releaseFor(sent, { status: { Released: null } })]);
+    render();
+    await settle();
+    await selectSui();
+    click(/^Sui to ICP$/);
+    await settle();
+    const card = host.querySelector('[data-testid="tracking"]')!.textContent!;
+    expect(card).toContain('Belongs to an earlier bridge');
+    expect(card).toContain(OTHER_INSTANCE);
+    expect(card).not.toContain('Released');
+    expect(anonymous.get_release).not.toHaveBeenCalled();
+    expect(button(/^Tell the bridge now$/)).toBeUndefined();
+    expect(standard.signs).toHaveLength(0);
+    expect(node.executed).toHaveLength(1);
+    expect(journal()[0]).toMatchObject({ id: sent.id, status: 'sent', instance: OTHER_INSTANCE, nonce: sent.nonce });
   });
 });
 

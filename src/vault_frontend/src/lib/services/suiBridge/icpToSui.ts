@@ -39,7 +39,7 @@ import { intentBindingMessage, signingBlockMessage, type SigningContext } from '
 import { abortableSleep, formatApproveError, pollWithBackoff, type Sleep } from '../baseBridge/status';
 import { bytesEqual } from '../solanaBridge/bytes';
 import { isZeroAddress, normalizeSuiAddress } from './address';
-import type { SuiBridgeConfig } from './config';
+import { savedIdentityMessage, type SuiBridgeConfig } from './config';
 import { SuiIntentStoreError, type SuiIntentStore, type SuiDepositIntent } from './intents';
 import { classifySuiBridgeError, describeSuiDeposit, formatSuiBridgeError } from './status';
 
@@ -372,6 +372,11 @@ export function bridgeAfterApproval(deps: SuiDepositDeps, intent: SuiDepositInte
     emit({ type: 'session_changed' });
     return Promise.resolve();
   }
+  const elsewhere = savedIdentityMessage(deps.config, intent);
+  if (elsewhere) {
+    emit({ type: 'blocked', message: elsewhere });
+    return Promise.resolve();
+  }
   emit({ type: 'bridge_started' });
   return submitToBridge(deps, intent, emit);
 }
@@ -382,12 +387,17 @@ export function retryIcpToSui(deps: SuiDepositDeps, intent: SuiDepositIntent, em
     emit({ type: 'session_changed' });
     return Promise.resolve();
   }
+  const elsewhere = savedIdentityMessage(deps.config, intent);
+  if (elsewhere) {
+    emit({ type: 'blocked', message: elsewhere });
+    return Promise.resolve();
+  }
   emit({ type: 'retry' });
   return submitToBridge(deps, intent, emit);
 }
 
 async function submitToBridge(deps: SuiDepositDeps, intent: SuiDepositIntent, emit: Emit): Promise<void> {
-  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' }) ?? intentBindingMessage(deps.signing, intent);
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' }) ?? intentBindingMessage(deps.signing, intent) ?? savedIdentityMessage(deps.config, intent);
   if (notAllowed) {
     emit({ type: 'blocked', message: notAllowed });
     return;
@@ -453,6 +463,13 @@ export async function findDepositByRequestId(deps: Pick<SuiDepositDeps, 'reads' 
 
 /** Reload path: an intent from an earlier session that never recorded an outcome. */
 export async function resumeIcpToSui(deps: SuiDepositDeps, intent: SuiDepositIntent, emit: Emit): Promise<void> {
+  // A request of an EARLIER bridge is never looked up on the bridge now in use: that canister's absence (or a record that
+  // merely shares an id) must not settle, clear or continue the old claim. It stays saved, untouched.
+  const elsewhere = savedIdentityMessage(deps.config, intent);
+  if (elsewhere) {
+    emit({ type: 'blocked', message: elsewhere });
+    return;
+  }
   emit({ type: 'resume_started', intent });
   await resolveUncertain(deps, intent, emit, '', null, true);
 }

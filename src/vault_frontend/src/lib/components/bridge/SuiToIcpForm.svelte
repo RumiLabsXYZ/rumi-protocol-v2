@@ -9,7 +9,7 @@
   import { withSigning, type SigningContext } from '$lib/services/baseBridge/signingGuard';
   import { shortAddress } from '$lib/services/baseBridge/status';
   import { formatMist } from '$lib/services/suiBridge/units';
-  import type { SuiBridgeConfig } from '$lib/services/suiBridge/config';
+  import { savedIdentityMessage, type SuiBridgeConfig } from '$lib/services/suiBridge/config';
   import { explorerTxUrl } from '$lib/services/suiBridge/networks';
   import type { SuiIntentStore, SuiReturnIntent } from '$lib/services/suiBridge/intents';
   import type { SuiCoin, SuiRpc } from '$lib/services/suiBridge/rpc';
@@ -293,6 +293,9 @@
       verdict = verdictOf(found);
       if (verdict === 'landed' || verdict === 'in_flight' || verdict === 'credited') {
         dispatch({ type: 'evidence', intent, evidence: found });
+      } else if (verdict === 'deviation' || found.chain.kind === 'wrong_instance') {
+        // Shown wherever the attempt is on screen; the attempt itself stays exactly as saved.
+        note = `${describeReturnProgress(found).label}. ${describeReturnProgress(found).detail}`;
       }
     } catch (error) {
       note = `Could not check the evidence: ${error instanceof Error ? error.message : String(error)}`;
@@ -357,6 +360,7 @@
         if (controller.signal.aborted) return;
         await trackReturn(
           {
+            config,
             rpc: node,
             store: intentStore,
             reads: {
@@ -437,7 +441,7 @@
       <strong>Earlier Sui returns on this device</strong>
       {#each deviceAttempts as intent (intent.id)}
         <div class="row">
-          <span>{fmt(intent.amountE8s)} icUSD from <code>{shortAddress(intent.sender)}</code> · {intent.status === 'sent' ? 'sent' : intent.status === 'prepared' ? 'not sent' : 'no recorded outcome'}</span>
+          <span>{fmt(intent.amountE8s)} icUSD from <code>{shortAddress(intent.sender)}</code> · {intent.status === 'sent' ? 'sent' : intent.status === 'prepared' ? 'not sent' : 'no recorded outcome'}{savedIdentityMessage(config, intent) ? ' · earlier bridge' : ''}</span>
           <button type="button" class="btn-secondary small" onclick={() => open(intent)}>Open</button>
         </div>
       {/each}
@@ -559,6 +563,7 @@
     <div class="banner warn" role="alert" data-testid="held">
       <strong>This attempt has no recorded outcome. It is held.</strong>
       <p>{flow.message}</p>
+      <p>An attempt that was interrupted while the wallet was open cannot be told apart from one that another page is still waiting on, so it stays held until the bridge's records or Sui settle it.</p>
       <p>Nothing was rebuilt or signed again, and nothing will be. Check the evidence: it asks the Sui node about the saved digest, if there is one, and the bridge about the transfer id. Not finding it is not proof that it did not run.</p>
       <div class="row">
         <button type="button" class="btn-primary small" onclick={() => checkEvidence(held)} disabled={checking || !rpc}>{checking ? 'Checking...' : 'Check the evidence'}</button>
@@ -581,14 +586,14 @@
       <header><span class="kicker">SUI RETURN</span><strong class="label">{progress.label}</strong></header>
       <p class="detail">{progress.detail}</p>
       <dl class="facts">
-        <div><dt>Sent</dt><dd>{fmt(flow.intent.amountE8s)} icUSD</dd></div>
-        <div><dt>To</dt><dd><code>{flow.intent.icpPrincipal}</code></dd></div>
+        <div><dt>{progress.deviation ? 'You reviewed: sent' : 'Sent'}</dt><dd>{fmt(flow.intent.amountE8s)} icUSD</dd></div>
+        <div><dt>{progress.deviation ? 'You reviewed: to' : 'To'}</dt><dd><code>{flow.intent.icpPrincipal}</code></dd></div>
         <div><dt>Transfer id</dt><dd><code>{flow.intent.transferId}</code></dd></div>
         {#if digest}
           <div><dt>Sui transaction (a hint until the bridge records the burn)</dt><dd><a href={explorerTxUrl(config.network, digest)} target="_blank" rel="noopener noreferrer" title={digest}>{shortAddress(digest)}</a></dd></div>
         {/if}
       </dl>
-      {#if digest && !progress.terminal}
+      {#if digest && !progress.terminal && !progress.deviation && !progress.elsewhere}
         <div class="actions">
           {#if actorsReady}
             <button type="button" class="btn-secondary small" onclick={() => tellBridge(digest)} disabled={!signedIn}>Tell the bridge now</button>

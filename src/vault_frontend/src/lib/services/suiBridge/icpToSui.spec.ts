@@ -344,6 +344,72 @@ describe('the held-mint wording', () => {
   });
 });
 
+describe('a saved ICP request is bound to the EXACT bridge that made it (not only the destination slug)', () => {
+  const OTHER_INSTANCE = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+  const identities: Array<[string, Partial<SuiDepositIntent>]> = [
+    ['another bridge canister', { instance: OTHER_INSTANCE }],
+    ['another Gate', { gateId: KEYS.mintCap }],
+    ['another package', { packageId: KEYS.gas, coinType: `${KEYS.gas}::rumi_icusd_gate::RUMI_ICUSD_GATE` }],
+    ['another coin type', { coinType: `${KEYS.packageId}::other::COIN` }],
+    ['another full chain identifier', { chainIdentifier: '4c78adacf2a2f5ad80f27ed7d54aa69d3a78f1ca67fdef9ecf5754f5b8bb77b0' }],
+  ];
+  const saved = (status: SuiDepositIntent['status'], change: Partial<SuiDepositIntent>): SuiDepositIntent => ({
+    v: 1, kind: 'icp_to_sui', id: '66'.repeat(16), destination: 'sui-mainnet', chainIdentifier: config.network.chainIdentifier, instance: SUI_BRIDGE_ID,
+    packageId: config.packageId, gateId: config.gateId, coinType: config.coinType, recipient: KEYS.holder, amountE8s: 200_000_000n, expectedDepositFee: 10_000_000n,
+    createdAt: 5, status, ...change,
+  });
+
+  it('cannot be looked up, continued or retried on a replacement bridge, even when the request lookup is ABSENT; nothing is pulled and the record stays', async () => {
+    for (const [name, change] of identities) {
+      for (const status of ['approved', 'prepared'] as const) {
+        const h = harness();
+        const old = saved(status, change);
+        h.store.put(old);
+        // The replacement canister has no such request: absence must never clear the old claim.
+        h.lookup.value = null;
+        let lookups = 0;
+        h.deps.reads.getDepositByRequest = async () => (lookups++, null);
+        await resumeIcpToSui(h.deps, old, h.emit);
+        expect(h.events[h.events.length - 1], `${name} ${status} resume`).toMatchObject({ type: 'blocked', message: expect.stringContaining('earlier Sui bridge') });
+        expect(h.events.map((e) => e.type), `${name} ${status}`).not.toContain('resume_approved');
+        expect(h.events.map((e) => e.type), `${name} ${status}`).not.toContain('lookup_not_found');
+        await bridgeAfterApproval(h.deps, old, h.emit);
+        expect(h.events[h.events.length - 1], `${name} ${status} bridge`).toMatchObject({ type: 'blocked', message: expect.stringContaining('earlier Sui bridge') });
+        await retryIcpToSui(h.deps, old, h.emit);
+        expect(h.events[h.events.length - 1], `${name} ${status} retry`).toMatchObject({ type: 'blocked', message: expect.stringContaining('earlier Sui bridge') });
+        expect(lookups, `${name} ${status}`).toBe(0);
+        expect(h.bridge, `${name} ${status}`).not.toHaveBeenCalled();
+        expect(h.approve, `${name} ${status}`).not.toHaveBeenCalled();
+        expect(h.store.get(old.id), `${name} ${status}`).toEqual(old);
+        expect(h.store.list(), `${name} ${status}`).toHaveLength(1);
+      }
+    }
+  });
+
+  it('names the original bridge it belongs to', async () => {
+    const h = harness();
+    const old = saved('approved', { instance: OTHER_INSTANCE, gateId: KEYS.mintCap });
+    h.store.put(old);
+    await bridgeAfterApproval(h.deps, old, h.emit);
+    const message = (h.events[h.events.length - 1] as { message: string }).message;
+    expect(message).toContain(OTHER_INSTANCE);
+    expect(message).toContain(KEYS.mintCap);
+    expect(message).toContain(SUI_BRIDGE_ID);
+  });
+
+  it('still continues the SAME operation, under the same request id, when the identity is unchanged', async () => {
+    const h = harness();
+    const same = saved('approved', {});
+    h.store.put(same);
+    await resumeIcpToSui(h.deps, same, h.emit);
+    expect(h.events.map((e) => e.type)).toContain('resume_approved');
+    await bridgeAfterApproval(h.deps, same, h.emit);
+    expect(h.bridge).toHaveBeenCalledTimes(1);
+    expect((h.bridge.mock.calls[0][0] as BridgeToSuiArgs).client_request_id).toEqual(Uint8Array.from(Array.from({ length: 16 }, () => 0x66)));
+    expect(h.store.get(same.id)).toMatchObject({ id: same.id, status: 'submitted' });
+  });
+});
+
 describe('tracking and refund', () => {
   it('follows the deposit to its final state and marks the intent done', async () => {
     const h = harness();

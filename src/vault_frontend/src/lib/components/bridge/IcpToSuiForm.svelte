@@ -8,7 +8,7 @@
   import { captureSessionGuard, needsSeparateApprovalClick } from '$lib/services/baseBridge/bridgeActor';
   import { withSigning, type SigningContext } from '$lib/services/baseBridge/signingGuard';
   import { APPROVAL_TTL_MS, isQuoteStale } from '$lib/services/baseBridge/icpToBase';
-  import type { SuiBridgeConfig } from '$lib/services/suiBridge/config';
+  import { savedIdentityMessage, type SuiBridgeConfig } from '$lib/services/suiBridge/config';
   import type { SuiIntentStore, SuiDepositIntent } from '$lib/services/suiBridge/intents';
   import type { SuiWalletState } from '$lib/services/suiBridge/walletStandard';
   import { getAnonymousSuiBridge } from '$lib/services/suiBridge/suiActor';
@@ -263,6 +263,12 @@
 
   async function followDeposit(intent: SuiDepositIntent) {
     if (busy || intent.depositId === undefined) return;
+    // A deposit of an EARLIER bridge is not looked up on the bridge now in use (its ids could collide).
+    const elsewhere = savedIdentityMessage(config, intent);
+    if (elsewhere) {
+      formError = elsewhere;
+      return;
+    }
     try {
       const reader = anonymous ?? (await getAnonymousSuiBridge());
       const deposit = (await reader.get_deposit(intent.depositId))[0];

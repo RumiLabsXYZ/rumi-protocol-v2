@@ -39,10 +39,10 @@ import { formatE8s, tryParseE8s } from '../baseBridge/amounts';
 import { defaultRandomBytes, newClientRequestId, type RandomBytes } from '../baseBridge/intents';
 import { intentBindingMessage, signingBlockMessage, type SigningContext } from '../baseBridge/signingGuard';
 import { abortableSleep, pollWithBackoff, type Sleep } from '../baseBridge/status';
-import { fromHex, type Bytes } from '../solanaBridge/bytes';
+import { fromHex, toHex, type Bytes } from '../solanaBridge/bytes';
 import { MemoError, checkDestinationPrincipal } from '../solanaBridge/memo';
 import { parseSuiAddress } from './address';
-import type { SuiBridgeConfig } from './config';
+import { savedIdentityMessage, type SuiBridgeConfig } from './config';
 import { U64_MAX, transferId } from './ids';
 import { SuiIntentStoreError, type SuiIntentStore, type SuiReturnIntent } from './intents';
 import type { SuiCoin, SuiRpc } from './rpc';
@@ -286,14 +286,29 @@ export type ChainEvidence =
   | { kind: 'not_found' }
   /** No digest was ever recorded (a sign-and-execute wallet that did not say). Only the bridge's records can settle it. */
   | { kind: 'no_digest' }
+  /** The attempt belongs to an EARLIER bridge than the one in use: nothing was read, the attempt is untouched. */
+  | { kind: 'wrong_instance'; message: string }
   | { kind: 'unavailable'; message: string };
+
+/**
+ * A release record sits under this attempt's transfer id but is NOT the transfer that was reviewed. The transfer id binds the
+ * chain, Gate, sender and nonce, not the amount, the ICP account or the burn digest, so a wallet that changed those while
+ * keeping sender and nonce produces a record under the same id. It is shown with its actual facts and never as success.
+ */
+export interface ReleaseDeviation {
+  release: ReleaseView;
+  /** Plain text for each way the record differs from the reviewed attempt, naming the record's actual value. */
+  differences: string[];
+}
 
 export interface ReturnEvidence {
   /** The typed transaction digest the evidence is about, when one is saved. */
   digest: string | null;
   chain: ChainEvidence;
-  /** The bridge canister's release record, keyed by the predicted transfer id. */
+  /** The bridge canister's release record, ONLY when it is exactly this attempt (see `matchRelease`). */
   release: ReleaseView | null;
+  /** A record under this attempt's transfer id that is not this attempt. Never success, never done. */
+  deviation: ReleaseDeviation | null;
   /** The observer's candidate for this sender and nonce: a hint about what the bridge has heard. */
   candidate: CandidateView | null;
 }
@@ -307,10 +322,13 @@ export type ReturnVerdict =
   | 'in_flight'
   /** The exact saved attempt FAILED in execution and Sui FINALIZED that failure: nothing was burned. */
   | 'failed_on_chain'
+  /** A record exists under this transfer id but it is not the reviewed attempt. Shown as such; never success. */
+  | 'deviation'
   /** Cannot tell. This includes "not found": absence is never proof. */
   | 'unknown';
 
 export function verdictOf(evidence: ReturnEvidence): ReturnVerdict {
+  if (evidence.deviation) return 'deviation';
   if (evidence.release) return 'credited';
   switch (evidence.chain.kind) {
     case 'finalized':
@@ -333,13 +351,55 @@ export function mayDiscard(intent: SuiReturnIntent, verdict: ReturnVerdict | nul
   return verdict === 'failed_on_chain';
 }
 
+const ZERO_SUBACCOUNT_BYTES = new Uint8Array(32);
+
+/** The ICP subaccount as the ledger's canonical account has it: absent and all zeros are the SAME (default) account. */
+function canonicalSubaccount(subaccount: readonly [] | readonly [Uint8Array | number[]]): string {
+  const raw = subaccount[0] ? Uint8Array.from(subaccount[0]) : ZERO_SUBACCOUNT_BYTES;
+  const padded = new Uint8Array(32);
+  padded.set(raw.length > 32 ? raw.slice(-32) : raw, 32 - Math.min(raw.length, 32));
+  return toHex(padded);
+}
+
 /**
- * Collect the evidence for one attempt. It reads only: no wallet is asked and nothing is sent. The node is asked about
- * the saved digest; the bridge is asked about the predicted transfer id. A node that cannot be reached is `unavailable`,
- * never "not found".
+ * How a release record differs from the attempt it was found for: empty when it is exactly this attempt. The transfer id
+ * is compared too (the canister's answer must be for the id asked), then the sender, the client nonce, the exact amount, the
+ * canonical ICP owner and subaccount, and the saved typed digest when the attempt has one. Each difference names the record's
+ * ACTUAL value.
  */
-export async function reconcileReturn(deps: Pick<ReturnDeps, 'rpc' | 'reads'>, intent: SuiReturnIntent): Promise<ReturnEvidence> {
+export function matchRelease(intent: SuiReturnIntent, release: ReleaseView): string[] {
+  const differences: string[] = [];
+  if (release.return_id.toLowerCase() !== intent.transferId) differences.push(`it carries transfer id ${release.return_id}`);
+  if (release.sui_sender !== intent.sender) differences.push(`it was sent from ${release.sui_sender}`);
+  if (release.client_nonce !== BigInt(intent.nonce)) differences.push(`it has client nonce ${release.client_nonce}`);
+  if (release.amount_e8s !== intent.amountE8s) differences.push(`it burned ${formatE8s(release.amount_e8s)} icUSD`);
+  let wantedOwner: string;
+  try {
+    wantedOwner = Principal.fromText(intent.icpPrincipal).toText();
+  } catch {
+    wantedOwner = intent.icpPrincipal;
+  }
+  const wantedSubaccount = canonicalSubaccount(intent.icpSubaccount ? [fromHex(intent.icpSubaccount)!] : []);
+  const gotSubaccount = canonicalSubaccount(release.destination.subaccount as [] | [Uint8Array]);
+  if (release.destination.owner.toText() !== wantedOwner || gotSubaccount !== wantedSubaccount) {
+    differences.push(`it pays ${release.destination.owner.toText()}${gotSubaccount === ZERO_HEX ? '' : ` / ${gotSubaccount}`}`);
+  }
+  if (intent.digest && release.tx_digest !== intent.digest) differences.push(`it names burn transaction ${release.tx_digest}`);
+  return differences;
+}
+
+const ZERO_HEX = '0'.repeat(64);
+
+/**
+ * Collect the evidence for one attempt. It reads only: no wallet is asked and nothing is sent. An attempt that belongs to an
+ * EARLIER bridge reads nothing at all (the new canister's absence or record must never settle an old claim). Otherwise the
+ * node is asked about the saved digest and the bridge about the predicted transfer id; a record found there counts only if it
+ * is exactly this attempt (`matchRelease`). A node that cannot be reached is `unavailable`, never "not found".
+ */
+export async function reconcileReturn(deps: Pick<ReturnDeps, 'rpc' | 'reads' | 'config'>, intent: SuiReturnIntent): Promise<ReturnEvidence> {
   const digest = intent.digest ?? null;
+  const elsewhere = savedIdentityMessage(deps.config, intent);
+  if (elsewhere) return { digest, chain: { kind: 'wrong_instance', message: elsewhere }, release: null, deviation: null, candidate: null };
   let chain: ChainEvidence;
   if (digest === null) {
     chain = { kind: 'no_digest' };
@@ -353,15 +413,19 @@ export async function reconcileReturn(deps: Pick<ReturnDeps, 'rpc' | 'reads'>, i
       chain = { kind: 'unavailable', message: error instanceof Error ? error.message : String(error) };
     }
   }
-  let release: ReleaseView | null = null;
+  let record: ReleaseView | null = null;
   let candidate: CandidateView | null = null;
   try {
-    release = await deps.reads.getRelease(intent.transferId);
-    if (!release) candidate = await deps.reads.getCandidate(intent.sender, intent.nonce);
+    record = await deps.reads.getRelease(intent.transferId);
+    if (!record) candidate = await deps.reads.getCandidate(intent.sender, intent.nonce);
   } catch {
     // The canister is read again on the next poll.
   }
-  return { digest, chain, release, candidate };
+  // Only a record that IS this attempt counts; the comparison is outside the read's catch so a defect cannot hide a record.
+  const differences = record ? matchRelease(intent, record) : [];
+  const release = record && differences.length === 0 ? record : null;
+  const deviation: ReleaseDeviation | null = record && differences.length > 0 ? { release: record, differences } : null;
+  return { digest, chain, release, deviation, candidate };
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +578,10 @@ export function startReturn(deps: ReturnDeps, plan: ReturnPlan, emit: Emit): Pro
   }
   if (!session.chains.includes(plan.config.network.chain)) {
     emit({ type: 'blocked', message: `Your wallet account is not on ${plan.config.network.name}. Switch the network in your wallet. Nothing was signed.` });
+    return Promise.resolve();
+  }
+  if (savedIdentityMessage(deps.config, { instance: plan.config.instanceCanisterId, chainIdentifier: plan.config.network.chainIdentifier, packageId: plan.config.packageId, gateId: plan.config.gateId, coinType: plan.config.coinType })) {
+    emit({ type: 'blocked', message: 'The Sui bridge changed since you reviewed this transfer (another canister, package or Gate). Review it again. Nothing was signed.' });
     return Promise.resolve();
   }
   if (unresolvedReturns(deps.store).length > 0) {
@@ -674,7 +742,7 @@ export function rebroadcastReturn(deps: ReturnDeps, intent: SuiReturnIntent, emi
     emit({ type: 'session_changed' });
     return Promise.resolve();
   }
-  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'sui' }) ?? intentBindingMessage(deps.signing, intent);
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'sui' }) ?? intentBindingMessage(deps.signing, intent) ?? savedIdentityMessage(deps.config, intent);
   if (notAllowed) {
     emit({ type: 'blocked', message: notAllowed });
     return Promise.resolve();
@@ -721,7 +789,7 @@ export async function continuePrepared(deps: ReturnDeps, intent: SuiReturnIntent
     emit({ type: 'session_changed' });
     return;
   }
-  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'sui' }) ?? intentBindingMessage(deps.signing, intent);
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'sui' }) ?? intentBindingMessage(deps.signing, intent) ?? savedIdentityMessage(deps.config, intent);
   if (notAllowed) {
     emit({ type: 'blocked', message: notAllowed });
     return;
@@ -750,8 +818,21 @@ export async function continuePrepared(deps: ReturnDeps, intent: SuiReturnIntent
 // Progress, tracking and the optional hint
 // ---------------------------------------------------------------------------
 
-export function describeReturnProgress(evidence: ReturnEvidence | null): { label: string; detail: string; terminal: boolean } {
+export function describeReturnProgress(evidence: ReturnEvidence | null): { label: string; detail: string; terminal: boolean; deviation?: true; elsewhere?: true } {
   if (!evidence) return { label: 'Sent to Sui', detail: 'Waiting for the bridge to see the burn.', terminal: false };
+  if (evidence.chain.kind === 'wrong_instance') return { label: 'Belongs to an earlier bridge', detail: evidence.chain.message, terminal: false, elsewhere: true };
+  if (evidence.deviation) {
+    const record = evidence.deviation.release;
+    return {
+      label: 'The bridge recorded a different transfer',
+      detail:
+        `The record under this transfer id is not the transfer you reviewed: ${evidence.deviation.differences.join('; ')}. ` +
+        `The record says ${formatE8s(record.amount_e8s)} icUSD, sent from ${record.sui_sender}, for ${record.destination.owner.toText()}: ${describeSuiRelease(record).label}. ` +
+        'Your attempt stays saved exactly as it was, is not shown as credited and is not marked done. Nothing is signed again, and no new nonce or transfer is made.',
+      terminal: false,
+      deviation: true,
+    };
+  }
   if (evidence.release || evidence.candidate) {
     const d = describeSuiReturn(evidence.release, evidence.candidate);
     return { label: d.label, detail: d.detail, terminal: d.terminal };
@@ -795,14 +876,16 @@ export function describeReturnProgress(evidence: ReturnEvidence | null): { label
  * that record. Read-only.
  */
 export async function trackReturn(
-  deps: Pick<ReturnDeps, 'rpc' | 'reads' | 'store' | 'sleep'>,
+  deps: Pick<ReturnDeps, 'rpc' | 'reads' | 'store' | 'sleep' | 'config'>,
   intent: SuiReturnIntent,
   onEvidence: (evidence: ReturnEvidence) => void,
   signal?: AbortSignal,
 ): Promise<'done' | 'aborted' | 'exhausted'> {
   return pollWithBackoff<ReturnEvidence>({
     fetch: () => reconcileReturn(deps, intent),
-    isDone: (e) => (e.release ? describeSuiRelease(e.release).terminal : false),
+    // Polling stops at a settled release, and also at a deviation or an attempt of an earlier bridge (nothing more to learn);
+    // only a release that IS this attempt marks it done.
+    isDone: (e) => (e.release ? describeSuiRelease(e.release).terminal : e.deviation !== null || e.chain.kind === 'wrong_instance'),
     onUpdate: (e) => {
       onEvidence(e);
       if (e.release && describeSuiRelease(e.release).terminal) {

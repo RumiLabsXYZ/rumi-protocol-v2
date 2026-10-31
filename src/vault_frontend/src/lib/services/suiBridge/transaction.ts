@@ -121,7 +121,8 @@ export type ReturnCheckReason =
   | 'coins_changed'
   | 'amount_changed'
   | 'destination_changed'
-  | 'bad_signature';
+  | 'bad_signature'
+  | 'unsupported_signature';
 
 export type ReturnCheck = { ok: true; digest: string } | { ok: false; reason: ReturnCheckReason; message: string };
 
@@ -136,6 +137,7 @@ const MESSAGES: Record<ReturnCheckReason, string> = {
   amount_changed: 'The wallet changed the amount the transaction burns.',
   destination_changed: 'The wallet changed the Internet Computer destination, subaccount or nonce.',
   bad_signature: 'The wallet\'s signature does not verify for the reviewed Sui address.',
+  unsupported_signature: 'This wallet signs with a scheme this page cannot check offline (zkLogin accounts need a Sui client to verify). The signature was NOT found invalid, but it cannot be accepted here, so nothing is sent on its strength.',
 };
 
 const no = (reason: ReturnCheckReason): ReturnCheck => ({ ok: false, reason, message: MESSAGES[reason] });
@@ -232,8 +234,10 @@ export async function validateSignedReturn(bytes: Bytes, signature: string, expe
 
   try {
     await verifyTransactionSignature(bytes, signature, { address: expected.sender });
-  } catch {
-    return no('bad_signature');
+  } catch (error) {
+    // The SDK cannot verify a zkLogin signature (or a multisig with zkLogin members) without a client. That is a limit of this
+    // page, not evidence of a bad signature, and it is never a reason to skip the check: the attempt is simply not accepted.
+    return no(/zklogin|sui client/i.test(error instanceof Error ? error.message : String(error)) ? 'unsupported_signature' : 'bad_signature');
   }
   return { ok: true, digest: TransactionDataBuilder.getDigestFromBytes(bytes) };
 }
