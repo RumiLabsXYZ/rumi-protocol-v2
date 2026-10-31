@@ -768,6 +768,13 @@ pub struct MintAttempt {
     pub treasury_sig_unknown: bool,
     #[serde(default)]
     pub gas_sig_unknown: bool,
+    /// How many signing calls were begun for each role on this attempt. A call that finds an earlier
+    /// uncertainty already recorded, or that is no longer the latest call, can never clear the flag
+    /// with a definite refusal: only a verified stored signature resolves the uncertainty.
+    #[serde(default)]
+    pub treasury_sign_calls: u32,
+    #[serde(default)]
+    pub gas_sign_calls: u32,
     #[serde(default)]
     pub sends: u32,
     #[serde(default)]
@@ -1666,6 +1673,51 @@ mod tests {
             created_at_ns: 1,
             updated_at_ns: 2,
         }
+    }
+
+    #[test]
+    fn a_stored_attempt_from_before_the_per_role_signing_counters_decodes_with_defaults() {
+        let a = MintAttempt {
+            generation: 1,
+            tx_bcs: vec![1, 2, 3],
+            signing_digest: [1; 32],
+            tx_digest: [2; 32],
+            mint_cap: StoredRef { id: [3; 32], version: 4, digest: [5; 32] },
+            gas_coin: StoredRef { id: [6; 32], version: 7, digest: [8; 32] },
+            gate_initial_shared_version: 9,
+            gas_price: 10,
+            gas_budget: 11,
+            epoch: 12,
+            built_checkpoint: 13,
+            built_at_ns: 14,
+            treasury_sig: None,
+            gas_sig: None,
+            treasury_sig_unknown: true,
+            gas_sig_unknown: false,
+            treasury_sign_calls: 3,
+            gas_sign_calls: 2,
+            sends: 0,
+            last_send_ns: None,
+            last_send_note: None,
+            versions_changed_since_ns: None,
+            last_check_ns: None,
+            disposition: AttemptDisposition::Open,
+        };
+        // Drop the two new fields from the encoded map, as an image written by 1b71eae8 lacks them.
+        let mut value: ciborium::value::Value = ciborium::de::from_reader(cbor_encode(&a).as_slice()).unwrap();
+        if let ciborium::value::Value::Map(entries) = &mut value {
+            entries.retain(|(k, _)| !matches!(k, ciborium::value::Value::Text(t) if t == "treasury_sign_calls" || t == "gas_sign_calls"));
+        } else {
+            panic!("an attempt encodes as a map");
+        }
+        let mut older = Vec::new();
+        ciborium::ser::into_writer(&value, &mut older).unwrap();
+        let decoded: MintAttempt = try_cbor_decode(&older).expect("an older image decodes");
+        assert_eq!((decoded.treasury_sign_calls, decoded.gas_sign_calls), (0, 0));
+        assert!(decoded.treasury_sig_unknown, "the stored uncertainty is kept");
+        assert!(!decoded.may_be_complete(), "the gas role never signed and nothing is unknown for it");
+        // And the current image round-trips exactly.
+        assert_eq!(try_cbor_decode::<MintAttempt>(&cbor_encode(&a)).unwrap(), a);
     }
 
     #[test]

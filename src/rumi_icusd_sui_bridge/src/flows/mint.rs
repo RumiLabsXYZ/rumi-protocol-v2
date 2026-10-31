@@ -386,6 +386,8 @@ fn build_attempt(generation: u32, ask: &MintAsk, facts: &Facts, id: &LaneIdentit
         gas_sig: None,
         treasury_sig_unknown: false,
         gas_sig_unknown: false,
+        treasury_sign_calls: 0,
+        gas_sign_calls: 0,
         sends: 0,
         last_send_ns: None,
         last_send_note: None,
@@ -602,16 +604,21 @@ fn close_attempt(op_id: u64, generation: u32, tx_digest: &Hash32, disposition: A
 // ---------------------------------------------------------------------------
 
 /// The attempt a signing step looked at, and everything the signing call needs.
-struct SignJob {
+pub(crate) struct SignJob {
     generation: u32,
     tx_digest: Hash32,
     signing_digest: Bytes32,
+    /// This call's number among the role's calls on the attempt.
+    call_no: u32,
+    /// Nothing earlier could have signed when this call began (the role's flag was clear). Only such a
+    /// call, while it is still the latest, may clear the flag with a definite refusal.
+    clean_start: bool,
 }
 
 /// Re-check the stored request, amount, recipient and gas limits and decide whether `role` still needs
 /// a signature on the current attempt; and, before any await, mark that a signature for the role may
 /// come to exist. Synchronous.
-fn begin_sign(op_id: u64, role: SuiRole, id: &LaneIdentity) -> Result<Option<SignJob>, String> {
+pub(crate) fn begin_sign(op_id: u64, role: SuiRole, id: &LaneIdentity) -> Result<Option<SignJob>, String> {
     lane_guard()?;
     let mut op = state::get_mint_op(op_id).ok_or("the operation does not exist")?;
     if !matches!(op.state, MintOpState::Active) {
@@ -643,17 +650,21 @@ fn begin_sign(op_id: u64, role: SuiRole, id: &LaneIdentity) -> Result<Option<Sig
     if Some(parsed.gas_payment[0].id) != lane.gas_coin || parsed.gas_budget > lane.gas_budget {
         return Err("the stored gas coin or budget is no longer the configured one".into());
     }
-    let (sig, unknown) = match role {
-        SuiRole::Treasury => (a.treasury_sig.is_some(), &mut a.treasury_sig_unknown),
-        SuiRole::Gas => (a.gas_sig.is_some(), &mut a.gas_sig_unknown),
+    let (sig, unknown, calls) = match role {
+        SuiRole::Treasury => (a.treasury_sig.is_some(), &mut a.treasury_sig_unknown, &mut a.treasury_sign_calls),
+        SuiRole::Gas => (a.gas_sig.is_some(), &mut a.gas_sig_unknown, &mut a.gas_sign_calls),
         SuiRole::UpgradeCustody => return Err("the upgrade-custody role never signs a mint".into()),
     };
     if sig {
         return Ok(None);
     }
-    // A signature for this role may exist from the moment the call is made.
+    // Remember whether an earlier call already left this role uncertain, and number this call, BEFORE
+    // marking: a signature for this role may exist from the moment the call is made.
+    let clean_start = !*unknown;
+    *calls += 1;
+    let call_no = *calls;
     *unknown = true;
-    let job = SignJob { generation: a.generation, tx_digest: a.tx_digest, signing_digest: a.signing_digest };
+    let job = SignJob { generation: a.generation, tx_digest: a.tx_digest, signing_digest: a.signing_digest, call_no, clean_start };
     op.updated_at_ns = env::now_ns();
     state::put_mint_op(&op);
     Ok(Some(job))
@@ -677,9 +688,9 @@ fn finish_sign(op_id: u64, role: SuiRole, job: &SignJob, outcome: SignOutcome, i
         SuiRole::Gas => id.gas_key,
         SuiRole::UpgradeCustody => return,
     };
-    let (slot, unknown) = match role {
-        SuiRole::Treasury => (&mut a.treasury_sig, &mut a.treasury_sig_unknown),
-        SuiRole::Gas => (&mut a.gas_sig, &mut a.gas_sig_unknown),
+    let (slot, unknown, calls) = match role {
+        SuiRole::Treasury => (&mut a.treasury_sig, &mut a.treasury_sig_unknown, a.treasury_sign_calls),
+        SuiRole::Gas => (&mut a.gas_sig, &mut a.gas_sig_unknown, a.gas_sign_calls),
         SuiRole::UpgradeCustody => return,
     };
     let note = match outcome {
@@ -694,9 +705,16 @@ fn finish_sign(op_id: u64, role: SuiRole, job: &SignJob, outcome: SignOutcome, i
             }
         }
         SignOutcome::Failed(why) => {
-            // A definite refusal: nothing was signed.
-            *unknown = false;
-            Some(format!("{role:?} signing refused: {why}"))
+            // A definite refusal proves only that THIS call signed nothing. It resolves the role's
+            // uncertainty only when nothing earlier could have signed (the flag was clear when the call
+            // began) and no later call has begun since; otherwise an older unknown outcome, or a newer
+            // call in flight, still stands and only a verified stored signature will clear it.
+            if job.clean_start && calls == job.call_no {
+                *unknown = false;
+                Some(format!("{role:?} signing refused: {why}"))
+            } else {
+                Some(format!("{role:?} signing refused: {why} (an earlier or overlapping call is still unresolved)"))
+            }
         }
         SignOutcome::Unknown(why) => Some(format!("{role:?} signing outcome unknown: {why}")),
     };
@@ -739,17 +757,26 @@ fn signatures_of(a: &MintAttempt, id: &LaneIdentity) -> Option<[String; 2]> {
     Some([tx::wire_signature_base64(&treasury, &id.treasury_key), tx::wire_signature_base64(&gas, &id.gas_key)])
 }
 
-async fn maybe_send<T: SuiTransport>(mirror: &Mirror<'_, T>, op_id: u64, id: &LaneIdentity) {
+/// Broadcast the current attempt if it is due. Returns false when the lane may no longer act (a pause
+/// or a halt arrived while a signature was in flight): the signed attempt stays as it is, held with its
+/// exact bytes, with no send persisted or made.
+async fn maybe_send<T: SuiTransport>(mirror: &Mirror<'_, T>, op_id: u64, id: &LaneIdentity) -> bool {
+    // The same synchronous guard as every other state-changing lane step, immediately before the send is
+    // persisted: the pass checked it before the signing awaits, and those awaits may have outlived it.
+    if let Err(why) = lane_guard() {
+        set_hold(op_id, Some(format!("not sent: {why}")));
+        return false;
+    }
     let now = env::now_ns();
-    let Some(op) = state::get_mint_op(op_id) else { return };
-    let Some(a) = op.current() else { return };
+    let Some(op) = state::get_mint_op(op_id) else { return true };
+    let Some(a) = op.current() else { return true };
     if !a.is_open() || a.sends >= MAX_SENDS_PER_ATTEMPT {
-        return;
+        return true;
     }
     if a.last_send_ns.is_some_and(|t| now.saturating_sub(t) < RESEND_INTERVAL_NS) {
-        return;
+        return true;
     }
-    let Some(sigs) = signatures_of(a, id) else { return };
+    let Some(sigs) = signatures_of(a, id) else { return true };
     let (bytes, generation, digest) = (a.tx_bcs.clone(), a.generation, a.tx_digest);
     // Persist the send BEFORE the call: a trap or a lost reply must read as "maybe sent".
     {
@@ -771,6 +798,7 @@ async fn maybe_send<T: SuiTransport>(mirror: &Mirror<'_, T>, op_id: u64, id: &La
             }
         }
     }
+    true
 }
 
 fn record_matches(rec: &MintRecord, op: &MintOp) -> bool {
@@ -1028,7 +1056,9 @@ async fn drive_op<T: SuiTransport, S: RoleSigner>(mirror: &Mirror<'_, T>, signer
             return;
         }
     }
-    maybe_send(mirror, op_id, id).await;
+    if !maybe_send(mirror, op_id, id).await {
+        return;
+    }
     let due = state::get_mint_op(op_id).and_then(|o| o.current().map(|a| check_due(a, env::now_ns()))).unwrap_or(false);
     if due {
         mark_checked(op_id);

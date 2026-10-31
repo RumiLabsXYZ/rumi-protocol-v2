@@ -1105,3 +1105,155 @@ fn a_mint_above_the_per_operation_cap_is_held_before_anything_is_built() {
     assert!(matches!(&d.state, DepositState::MintHeld { reason } if reason.contains("per-operation cap")), "{:?}", d.state);
     assert_eq!((state::mint_op_count(), l.signer.calls.borrow().len()), (0, 0));
 }
+
+// ---------------------------------------------------------------------------
+// Review corrections (first 53b review): F1 per-role signing uncertainty, F2 send guard
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_later_definite_refusal_cannot_erase_an_earlier_unknown_signature() {
+    let l = lane();
+    let id = escrowed(&l.fx, 0x21, 5 * E8, 1);
+    l.signer.push_fault(SuiRole::Treasury, SignFault::LoseReply);
+    l.signer.push_fault(SuiRole::Treasury, SignFault::Refuse);
+    l.ticks(2); // build; treasury reply lost (a signature may exist), gas signs
+    let a = l.op(0).current().unwrap().clone();
+    assert!(a.treasury_sig.is_none() && a.treasury_sig_unknown && a.gas_sig.is_some());
+    assert!(a.may_be_complete());
+    // The epoch ends, then the same-attempt treasury retry is DEFINITELY refused.
+    l.sim.next_epoch();
+    test_env::advance_secs(10 * 60);
+    l.tick();
+    let op = l.op(0);
+    let a2 = op.current().unwrap();
+    assert!(a2.treasury_sig_unknown, "a later refusal is not proof that the earlier call never signed");
+    assert!(a2.may_be_complete());
+    assert!(matches!(a2.disposition, AttemptDisposition::Open), "the epoch plus a refusal must not close the attempt: {:?}", a2.disposition);
+    assert_eq!(a2.tx_digest, a.tx_digest);
+    // It cannot be abandoned, refunded or replaced, now or on later passes.
+    for _ in 0..3 {
+        test_env::set_caller(admin());
+        assert!(matches!(crate::admin::abandon_mint_op(0, "refused"), Err(BridgeError::InvalidState(m)) if m.contains("complete signed transaction may exist")));
+        test_env::set_caller(user(0x21));
+        assert!(matches!(block_on(deposit::request_refund(&l.fx.ledger, id)), Err(BridgeError::InvalidState(_))));
+        assert!(mint::prior_ops_provably_dead(&deposit_of(id)).is_err());
+        let op = l.op(0);
+        assert_eq!(op.attempts.len(), 1, "no replacement");
+        assert!(matches!(op.state, MintOpState::Active) && matches!(op.current().unwrap().disposition, AttemptDisposition::Open));
+        test_env::advance_secs(10 * 60);
+        l.tick();
+    }
+    // Only an actually verified stored signature resolves the role's uncertainty.
+    let a3 = l.op(0).current().unwrap().clone();
+    assert!(a3.treasury_sig.is_some() && !a3.treasury_sig_unknown, "the verified signature resolved it");
+    assert_eq!(a3.tx_digest, a.tx_digest);
+}
+
+#[test]
+fn an_overlapping_stale_callback_cannot_clear_a_newer_uncertainty() {
+    let l = lane();
+    escrowed(&l.fx, 0x21, 5 * E8, 1);
+    l.tick();
+    l.signer.push_fault(SuiRole::Treasury, SignFault::Refuse);
+    // While the first treasury call is in flight, a later call for the same attempt begins (a reclaimed
+    // stale pass); the first call's definite refusal then arrives.
+    *l.signer.on_sign.borrow_mut() = Some(Box::new(|role, _| {
+        if role == SuiRole::Treasury {
+            let identity = bind::lane_identity().unwrap();
+            let _ = mint::begin_sign(0, SuiRole::Treasury, &identity);
+        }
+    }));
+    l.tick();
+    let a = l.op(0).current().unwrap().clone();
+    assert!(a.treasury_sig.is_none());
+    assert!(a.treasury_sig_unknown, "the newer call owns the uncertainty; the stale refusal cannot clear it");
+    assert!(a.may_be_complete());
+}
+
+#[test]
+fn a_first_definite_refusal_still_clears_its_own_flag() {
+    // Nothing earlier could have signed, so the ordinary behavior is unchanged.
+    let l = lane();
+    escrowed(&l.fx, 0x21, 5 * E8, 1);
+    l.signer.push_fault(SuiRole::Treasury, SignFault::Refuse);
+    l.signer.push_fault(SuiRole::Treasury, SignFault::Refuse);
+    l.ticks(2);
+    let a = l.op(0).current().unwrap().clone();
+    assert!(a.treasury_sig.is_none() && !a.treasury_sig_unknown);
+    l.tick(); // a second definite refusal after a clean first one: still nothing could have signed
+    let a = l.op(0).current().unwrap().clone();
+    assert!(a.treasury_sig.is_none() && !a.treasury_sig_unknown && !a.may_be_complete());
+}
+
+#[test]
+fn pausing_or_halting_during_the_final_signing_await_stops_the_broadcast_and_keeps_the_exact_attempt() {
+    for halt_bridge in [false, true] {
+        let l = lane();
+        let id = escrowed(&l.fx, 0x21, 5 * E8, 1);
+        l.tick();
+        let built = l.op(0).current().unwrap().clone();
+        *l.signer.on_sign.borrow_mut() = Some(Box::new(move |role, _| {
+            if role == SuiRole::Gas {
+                // The final signature is in flight when the operator pauses mints (or the bridge halts).
+                if halt_bridge {
+                    state::halt("halted during the final signature");
+                } else {
+                    state::mutate_runtime(|r| r.config.pauses.mints = true);
+                }
+            }
+        }));
+        l.tick();
+        let op = l.op(0);
+        let a = op.current().unwrap();
+        assert!(a.treasury_sig.is_some() && a.gas_sig.is_some(), "the verified signatures are kept (halt={halt_bridge})");
+        assert_eq!(a.sends, 0, "nothing was persisted as sent (halt={halt_bridge})");
+        assert_eq!(l.sim.accepted.borrow().len(), 0, "nothing reached the chain (halt={halt_bridge})");
+        assert_eq!((a.generation, a.tx_digest, a.tx_bcs.clone()), (1, built.tx_digest, built.tx_bcs.clone()), "the exact bytes are held");
+        let hold = op.hold_reason.clone().unwrap_or_default();
+        assert!(hold.contains("not sent") && (hold.contains("paused") || hold.contains("halted")), "{hold}");
+        assert_eq!(op.attempts.len(), 1);
+        assert!(matches!(op.state, MintOpState::Active));
+        assert_eq!(deposit_of(id).state, DepositState::MintInFlight);
+        assert!(mint::prior_ops_provably_dead(&deposit_of(id)).is_err(), "no refund");
+        // Recovery: the same attempt is sent once the pause or halt is lifted.
+        *l.signer.on_sign.borrow_mut() = None;
+        if halt_bridge {
+            assert!(state::clear_halt());
+        } else {
+            state::mutate_runtime(|r| r.config.pauses.mints = false);
+        }
+        l.ticks(2);
+        assert_eq!(deposit_of(id).state, DepositState::Delivered, "halt={halt_bridge}");
+        assert_eq!(l.op(0).attempts.len(), 1);
+        assert_eq!(l.op(0).attempts[0].tx_digest, built.tx_digest);
+        assert_eq!(l.sim.executed_count(), 1);
+    }
+}
+
+#[test]
+fn an_already_sent_unknown_attempt_is_preserved_while_the_lane_is_paused() {
+    let l = lane();
+    let id = escrowed(&l.fx, 0x21, 5 * E8, 1);
+    *l.sim.mode.borrow_mut() = ExecMode::Drop;
+    l.ticks(2);
+    let before = l.op(0).current().unwrap().clone();
+    assert_eq!(before.sends, 1);
+    state::mutate_runtime(|r| r.config.pauses.mints = true);
+    l.sim.next_epoch();
+    test_env::advance_secs(10 * 60);
+    l.ticks(4);
+    let op = l.op(0);
+    let a = op.current().unwrap();
+    assert_eq!((a.sends, a.generation, a.tx_digest, a.tx_bcs.clone()), (1, 1, before.tx_digest, before.tx_bcs.clone()), "no resend, no new generation");
+    assert_eq!(op.attempts.len(), 1);
+    assert!(matches!(a.disposition, AttemptDisposition::Open) && matches!(op.state, MintOpState::Active));
+    assert_eq!(deposit_of(id).state, DepositState::MintInFlight);
+    assert!(mint::prior_ops_provably_dead(&deposit_of(id)).is_err());
+    // A certified copy lands while paused; once unpaused the receipt settles the same attempt.
+    l.sim.execute_accepted(&before.tx_bcs);
+    state::mutate_runtime(|r| r.config.pauses.mints = false);
+    test_env::advance_secs(10 * 60);
+    l.ticks(2);
+    assert_eq!(deposit_of(id).state, DepositState::Delivered);
+    assert_eq!(l.sim.executed_count(), 1);
+}
