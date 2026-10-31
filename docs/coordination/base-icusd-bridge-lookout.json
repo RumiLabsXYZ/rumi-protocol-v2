@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b 1b71eae8 in review with a correction (W29): a later signing refusal must not clear an earlier unknown signature; a pause or halt must stop the final send",
+      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b 1b71eae8 in review: correction e2507b16 (F1 signing uncertainty, F2 pause before send) delivered; F3 (head transform keeps GraphQL errors) in progress (W29)",
       "evidenceLinks": []
     },
     {

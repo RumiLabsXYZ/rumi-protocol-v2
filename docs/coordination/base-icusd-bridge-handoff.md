@@ -2501,6 +2501,27 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Same W29, one focused correction with old-red and new-green lane regressions through the actual `mint_pass` and `ChainSim`;
   53c work in progress preserved and resumed after it. One Rust builder; no new reviewer, CLI or public probe.
 
+## Milestone 108 (2026-10-31): BB-53 53b F1 and F2 corrected; F3 queued
+
+- W29 committed `e2507b16e933545923b0ede098e550e624f3c2af` "fix(sui): a later signing refusal cannot erase an earlier unknown
+  signature; no broadcast after a pause (BB-53 53b review F1, F2)", local only, on `99e77b99`; `1b71eae8` not amended.
+  Coordinator scope check: `flows/mint.rs`, `runtime.rs`, `lane_tests.rs` only; no `Cargo.lock` or `.did` change (the candid
+  test passes unregenerated); `git diff --check` exits 0. No 53c code existed yet, so nothing was preserved or conflicted.
+- F1: `MintAttempt` gains per-role sign call counters (`#[serde(default)]`, with a test decoding an older CBOR image to 0 and
+  keeping the stored unknown flag); `begin_sign` records whether the role's flag was already set and the call number;
+  `finish_sign(Failed)` clears the flag only on a clean start whose call is still the latest; only a verified stored signature
+  resolves the role. F2: `maybe_send` repeats `lane_guard()` before persisting a send; a pause or halt holds the attempt with its
+  exact bytes and verified signatures ("not sent: <reason>"), with no new generation or refund.
+- Evidence (saved logs in the coordinator scratchpad): `53b-fix-red.log` 3 failed, 2 passed by design on the old code, quoted
+  "a later refusal is not proof that the earlier call never signed", "the newer call owns the uncertainty; the stale refusal
+  cannot clear it", and "nothing was persisted as sent (halt=false) left: 1 right: 0"; `53b-fix-green.log` 5 passed;
+  `53b-fix-full-tests.log` 300 passed, 0 failed; `53b-fix-clippy.log` exit 0 (the first run failed on a lint in W29's own new
+  test, fixed, and that log was overwritten); `53b-fix-wasm.log` exit 0.
+- F3 (Miles, appended to `review-bb53b-first.md`): `reads.rs` `canonicalize_head` emits a fresh data-only object and never checks
+  or keeps `errors`, so a reply carrying errors that `parse_envelope` would exclude becomes an accepted head after the transform
+  (the class fixed for BB-52 in `9cbbc589`). Same W29: reuse the existing envelope policy before extracting and rounding the
+  head, with a raw-error to transform to parser and tally regression; the send transform is checked for the same gap. Then 53c.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
