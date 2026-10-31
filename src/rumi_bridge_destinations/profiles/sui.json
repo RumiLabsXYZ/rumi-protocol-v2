@@ -64,7 +64,7 @@
       "escrow_label": "rumi-icusd-sui-bridge:escrow:v1"
     },
     "signed_payload": {
-      "value": "BLAKE2b-256 digest of the intent prefix and the BCS transaction data, signed with Ed25519 (signature flag 0x00). A second, different hash, BLAKE2b-256 over the type name TransactionData:: and the BCS bytes, is the typed transaction digest used for lookup; store both. The ICP mapping is still an inference from two docs. Both digests have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison that is in Review at BB-54 (37f9c77c), not accepted. Neither is the official Sui Rust SDK, and no network execution has been run.",
+      "value": "BLAKE2b-256 digest of the intent prefix and the BCS transaction data, signed with Ed25519 (signature flag 0x00). A second, different hash, BLAKE2b-256 over the type name TransactionData:: and the BCS bytes, is the typed transaction digest used for lookup; store both. The ICP mapping is still an inference from two docs. Both digests have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. Neither is the official Sui Rust SDK, and no network execution has been run.",
       "source_url": "https://docs.sui.io/develop/transactions/transaction-auth/intent-signing",
       "verified": "2026-10-30",
       "source_kind": "primary"
@@ -191,9 +191,9 @@
         },
         {
           "id": "sui-signing-vectors-unverified",
-          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison that is in Review at BB-54 (37f9c77c), not accepted. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. Pinning against the official Sui Rust SDK remains open.",
+          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. Pinning against the official Sui Rust SDK remains open.",
           "kind": "code",
-          "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, in Review)"
+          "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2, accepted at source and local injected-flow scope)"
         },
         {
           "id": "sui-wallet-display-unverified",
@@ -209,9 +209,9 @@
         },
         {
           "id": "sui-wallet-connector-missing",
-          "text": "No Sui wallet connector exists in the frontend; Slush is the main wallet named in the docs.",
+          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Slush is the main wallet named in the docs.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2)"
         },
         {
           "id": "controller-model-undecided",
@@ -318,9 +318,9 @@
         },
         {
           "id": "sui-signing-vectors-unverified",
-          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison that is in Review at BB-54 (37f9c77c), not accepted. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. Pinning against the official Sui Rust SDK remains open.",
+          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. Pinning against the official Sui Rust SDK remains open.",
           "kind": "code",
-          "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, in Review)"
+          "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2, accepted at source and local injected-flow scope)"
         },
         {
           "id": "sui-wallet-display-unverified",
@@ -336,9 +336,9 @@
         },
         {
           "id": "sui-wallet-connector-missing",
-          "text": "No Sui wallet connector exists in the frontend; Slush is the main wallet named in the docs.",
+          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Slush is the main wallet named in the docs.",
           "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6"
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2)"
         },
         {
           "id": "controller-model-undecided",
