@@ -1251,8 +1251,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   `[Advance, (Create), Memo, TransferChecked]`; mainnet genesis requires `key_1`, any other cluster `test_key_1`; a reference
   return builder shared by the shape checker and the future connector. Named U items stay blockers in code and the crate
   header (memo program version, unattributed burns, token-program wallet check).
-- BB-48 dispatched to the same W28 (sole Rust build owner). Its history-availability probe tooling is deferred, consistent
-  with Miles' BB-46 decision; executing any probe stays held.
+- BB-48 dispatched to the same W28 (sole Rust build owner). Correction (Miles): the coordinator wrongly deferred BB-48's
+  history-availability probe tooling by analogy with BB-46; it is an accepted BB-48 deliverable (plan line 67). The same W28
+  adds a minimal tool and runbook with an offline mock or fixture check after its core pass; executing a public probe stays
+  held, and BB-48 is not Done without the artifact.
 
 ## Milestone 55 (2026-10-31): BB-55 in Review; BB-56 started
 

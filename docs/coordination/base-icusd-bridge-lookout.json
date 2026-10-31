@@ -442,7 +442,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: SOL RPC mirror and durable-nonce reconciliation",
-      "evidenceText": "proof=none; Claimed 2026-10-31: typed SOL RPC mirror behind a mock transport; durable-nonce pool; persist before sign; same-attempt reconcile where a memo is discovery only; history probe tooling deferred",
+      "evidenceText": "proof=none; In progress (same W28): typed SOL RPC mirror, durable-nonce pool, persist before sign, same-attempt reconcile with memo as discovery only; then the history-availability probe tool and runbook, checked offline only",
       "evidenceLinks": []
     },
     {

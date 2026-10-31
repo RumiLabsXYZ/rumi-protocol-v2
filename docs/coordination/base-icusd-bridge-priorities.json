@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-47 in Review (df53ea32). BB-48 in progress (same W28): SOL RPC mirror, nonce pool, persist before sign, same-attempt reconcile; history probe tooling deferred. Then BB-49 (lanes, strict return verifier, custody audit, holder-burn seam, collector reader).",
+      "nextAction": "BB-47 in Review (components; carried items on BB-49). BB-48 in progress (same W28): core reconcile pass, then the history-availability probe tool and runbook with an offline check (executing a public probe stays held). Then BB-49.",
       "cardIds": [
         "BB-47",
         "BB-48",
