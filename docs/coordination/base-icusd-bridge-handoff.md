@@ -2784,6 +2784,50 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Lanes: W28 continues BB-54; W29 stands by for concrete integration questions or accepted fixes, with no new chain, redundant
   check or optional research.
 
+## Milestone 118 (2026-10-31): BB-54 delivered
+
+- W28 (requested Sonnet; actual `claude-sonnet-5-5`) committed `37f9c77c7cb352dca2492fe119a6c6311034105a` "feat(frontend): Sui branch
+  of the bridge flow (BB-54)", local only, parent `e5c04cef`, 49 files. Coordinator scope check: `src/vault_frontend` plus the
+  generated `src/declarations/rumi_icusd_sui_bridge/` (its `.did` byte-identical to the canonical one, unchanged since `e4ee506a`),
+  one name line and one path line in `scripts/regenerate-declarations.sh`, and the root `package-lock.json` (320 insertions, 0
+  deletions, 25 packages, all dependencies of the SDK; no `@rollup/rollup-darwin-*`); `@mysten/sui` pinned exact at `2.38.0`;
+  `git diff --check` exits 0; working tree clean afterwards.
+- What works at the pin (source plus injected fixtures): the page loads `SuiBridgePanel` lazily so the SDK never loads on the
+  disabled path; `DestinationView.native` is a discriminated union by family; identity availability (initialized, full known
+  genesis, strict package, Gate, mint-cap and admin-cap ids, an 8-decimal coin, the observed deployment agreeing with the binding,
+  three role addresses) is kept apart from direction state (pauses, halt, `get_mint_lane` `ready` and `blocked_by`), and
+  `ConfigView.signing_enabled` is never read; the native-only gap closed (`BRIDGE_ENABLED` true when any supported instance is
+  configured, destination reads start together, an empty Base id makes no Base request or EVM wallet call, an unreachable Base
+  keeps Sui usable, a failing native read stays on its row, Base's own rejection when it is the only instance unchanged); ICP to
+  Sui reuses the accepted flow with the BB-50 F3 and BB-62 rules plus a configured-ledger check and strict Sui recipient
+  validation; Sui to ICP builds the Move `bridge_out` with the SDK from fully resolved references and an exact-amount merge or
+  split, a random u64 nonce, a 32-byte subaccount and the raw principal, binding network, package, Gate, coins, sender, amount,
+  ICP account, nonce and the predicted transfer id (recomputed as `ids.rs` and the Move do); SUI gas shown in MIST apart from
+  icUSD; sign-only validates the returned transaction and saves bytes, signature and typed digest before broadcast, with
+  rebroadcast of the same bytes; sign-and-execute saves the semantic attempt first and only code 4001 clears it; absence and
+  epoch expiry prove nothing; status from `get_release` and observer candidates; `notify_sui_return` only on an explicit click;
+  `SUI_NODE_ENDPOINTS` empty by default and keyed to network id and full chain identifier, resolving to a real `SuiGraphQLClient`
+  adapter that checks the node's genesis; the SDK import lazy and inert.
+- Independent references: the six Move transfer-id vectors from `move/rumi_icusd_gate/reference/transfer_id_reference.py` (sha256
+  `b42eb3d6...`, rerun with matching output) plus two new vectors; `reference/bridge_out_reference.py` (sha256 `a03f3953...`), a
+  standard-library BCS `TransactionData` writer for four coin shapes, whose bytes equal the SDK-built bytes.
+- Checks (saved files in the coordinator scratchpad `bb54/`): focused Vitest 34 files, 789 passed, 1 existing skip
+  (`final_focused_vitest.txt`); `svelte-check` twice on the final tree, 30 errors, 66 warnings, 25 files each, equal to the
+  baseline; `npm run build` exit 0 with the asset check; the generator run once after confirming the on-disk `.did` matched
+  `e4ee506a`, with `git status` before and after differing only by the new Sui declarations folder. No red claimed (new feature);
+  failing development runs listed by W28: 7 expected list and count updates in two existing specs, 11 svelte-check errors and 3
+  CSS warnings in its own new code, and focused-spec failures from expectations, mock shapes, a BigInt serialization and a lazy
+  panel not yet loaded in the page spec (fixed by preloading it in the spec).
+- Coordinator notes for Miles: `@mysten/sui` 2.38.0 is the registry `latest`, published 2026-10-26 (five days before this commit);
+  npm pruned an unrelated optional lock block (`tailwindcss/node_modules/yaml`) during install and W28 restored it by hand so the
+  lock diff is purely additive. Assumptions in the client: `ConfigView.chain_identifier` is full hex while nodes report base58,
+  and the Gate's initial shared version comes from `get_observed_deployment`.
+- Omissions: no live wallet, node or endpoint (the real adapter is exercised only with mocked responses, and an enabled Sui
+  instance cannot prepare a return until activation adds an endpoint); GraphQL only; the legacy `sui:*TransactionBlock` and
+  `reportTransactionEffects` features unsupported; a zkLogin wallet's signature is refused in sign-only mode; the wallet chooses
+  gas; a return merging more than 50 coin objects is refused; the page `<meta description>` still names Base; held attempts have
+  no discard path and an unresolved ICP request blocks new transfers on that device (the trade-off accepted for Solana and Base).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -78,7 +78,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51, BB-52 and BB-53 done at source and local-test scope (not activated). BB-54 in progress (same W28): the Sui page flow on the frontend contract frozen at e4ee506a. Activation, real provider and wallet evidence and D6 stay held.",
+      "nextAction": "BB-51, BB-52 and BB-53 done at source and local-test scope (not activated). BB-54 in Review: the Sui page flow (37f9c77c, same W28) delivered to Miles. Activation, real provider and wallet evidence and D6 stay held.",
       "cardIds": [
         "BB-51",
         "BB-52",
