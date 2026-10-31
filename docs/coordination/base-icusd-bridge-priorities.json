@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-55 in Review (f887fab5, stacked on PR #586's head; PR #586 untouched). BB-56 in progress (same W29): no-vault canonical return internals. Then BB-57 (Candid, declarations, frontend cards, PocketIC, XRPL lane reader).",
+      "nextAction": "BB-55 correction (same W29, separate small commit): reissue and resumed issuance must respect the current caps and the 15-digit ceiling before any attempt or signature. BB-56 in progress (same W29). Then BB-57.",
       "cardIds": [
         "BB-55",
         "BB-56",

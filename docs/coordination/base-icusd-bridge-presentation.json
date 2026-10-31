@@ -1,5 +1,5 @@
 {
-  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: EVM source BB-42 to BB-45, EVM supply reporting BB-58, frontend BB-59 and BB-60. In Review: BB-47 (Solana skeleton and builders) and BB-55 (XRPL 15-digit caps, pending imports, validator, on a branch stacked on PR 586). In progress on Sonnet: BB-48 (SOL RPC mirror, nonce pool, reconcile) and BB-56 (XRPL no-vault return). BB-46 probes held; BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
+  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: EVM source BB-42 to BB-45, EVM supply reporting BB-58, frontend BB-59 and BB-60. In Review: BB-47 (Solana components; ledger saga and refund locator carried to BB-49). In progress on Sonnet: BB-48 (SOL RPC mirror, nonce pool, reconcile), BB-55 correction (reissue must respect caps and the ceiling) and BB-56 (XRPL no-vault return), all on two lanes. BB-46 probes held; BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
   "glossary": [
     {
       "term": "proof=source",

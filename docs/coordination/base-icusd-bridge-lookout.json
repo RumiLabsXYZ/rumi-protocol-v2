@@ -495,10 +495,10 @@
     },
     {
       "id": "BB-55",
-      "state": "Review",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: 15-digit wiring and cap clamps on PR #586's module",
-      "evidenceText": "proof=local-test; f887fab5 on a branch stacked at PR 586's head (PR untouched): 15-digit clamp at config and request, pending imports counted (overshoot reproduced first), snapshot ceiling, validator wired, parser parity; 129 backend, 149 frontend tests",
+      "evidenceText": "proof=local-test; f887fab5 not accepted yet (Miles): a cap-held claim can be reissued while the cap still refuses it, and resumed issuance can cross the ceiling before detection; same W29 makes a separate small fix commit",
       "evidenceLinks": []
     },
     {

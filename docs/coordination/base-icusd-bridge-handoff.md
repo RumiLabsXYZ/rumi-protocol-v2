@@ -1288,6 +1288,20 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Push cadence (Miles): the one batched push now waits until 04:00 UTC; afterwards cohort batching continues rather than
   doc-only pushes. The XRPL follow-up branch stays local until its reviewable source checkpoint.
 
+## Milestone 57 (2026-10-31): BB-55 correction requested
+
+- Miles (`review-bb55.md`): the pending-pull reservation, exact input, cap and frontend work match BB-55; no new stable or
+  Candid shape. Not accepted yet: `plan_resolution` checks only `delivery_halted` and `apply_reissue` clears it without a cap
+  check, so a claim held over a lowered cap (admit 60 under caps of 100, lower either cap to 59, prove the pull) can be
+  reissued at once while the cap still refuses it. Also, neither reissue nor the common issuer attempt preparation checks the
+  absolute 999,999,999,999,999 e8s ceiling, so an inherited held claim could resume and push issuer exposure over it before
+  the coverage check notices.
+- Correction sent to the same W29 as a separate small commit at its next coherent step (BB-56 work preserved; no stash or
+  interactive staging): reissue respects the current caps through the already-counted exposure check; ReceiveCanonical
+  unchanged; authoritative exposure checked against the clamp before any new issuer attempt is prepared or signed, with the
+  same persisted attempt reused for unknown outcomes; historical repayment and refund amounts stay exact. Reproduction first;
+  focused `xrpl_icusd` tests only.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
