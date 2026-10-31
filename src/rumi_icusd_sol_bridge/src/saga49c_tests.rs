@@ -17,23 +17,23 @@ use crate::tx::builders::{build_return_message, ReturnRequest, TxProfile};
 use crate::tx::{assemble_wire_tx, Message, Pubkey, Signature};
 use candid::Principal;
 
-const HOLDER: Pubkey = [0xa0; 32];
-const SRC: Pubkey = [0xa1; 32];
+pub(crate) const HOLDER: Pubkey = [0xa0; 32];
+pub(crate) const SRC: Pubkey = [0xa1; 32];
 
-fn profile() -> TxProfile {
+pub(crate) fn profile() -> TxProfile {
     state::read_core(|c| c.tx_profile()).expect("bound profile")
 }
 
-fn ata() -> Pubkey {
+pub(crate) fn ata() -> Pubkey {
     profile().return_ata().expect("return ata")
 }
 
-fn memo(nonce: u64) -> ReturnMemo {
+pub(crate) fn memo(nonce: u64) -> ReturnMemo {
     ReturnMemo { destination: Principal::from_slice(&[0x41; 10]), subaccount: None, client_nonce: nonce }
 }
 
 /// A holder's return transaction with a made-up signature `[tag; 64]` (the mock never verifies it).
-fn return_wire(holder: &Pubkey, source: &Pubkey, amount: u64, memo: ReturnMemo, tag: u8) -> (Vec<u8>, Message) {
+pub(crate) fn return_wire(holder: &Pubkey, source: &Pubkey, amount: u64, memo: ReturnMemo, tag: u8) -> (Vec<u8>, Message) {
     let unsigned = build_return_message(
         &profile(),
         &ReturnRequest { holder: *holder, source_token_account: *source, amount, memo, recent_blockhash: [tag; 32], compute_budget: vec![] },
@@ -43,13 +43,13 @@ fn return_wire(holder: &Pubkey, source: &Pubkey, amount: u64, memo: ReturnMemo, 
     (wire, unsigned.message)
 }
 
-fn entry(msg: &Message, account: &Pubkey, owner: Option<Pubkey>, amount: u64) -> TokenBalanceEntry {
+pub(crate) fn entry(msg: &Message, account: &Pubkey, owner: Option<Pubkey>, amount: u64) -> TokenBalanceEntry {
     let account_index = msg.account_keys.iter().position(|k| k == account).expect("account in message") as u8;
     TokenBalanceEntry { account_index, mint: MINT, owner, amount, decimals: 8 }
 }
 
 /// What the RPC reports for a clean return: the source down by `amount`, the return account up.
-fn good_meta(msg: &Message, holder: &Pubkey, source: &Pubkey, amount: u64, src_pre: u64, ata_pre: u64) -> TxMeta {
+pub(crate) fn good_meta(msg: &Message, holder: &Pubkey, source: &Pubkey, amount: u64, src_pre: u64, ata_pre: u64) -> TxMeta {
     TxMeta {
         inner_instruction_groups: Some(0),
         pre_token_balances: Some(vec![entry(msg, source, Some(*holder), src_pre), entry(msg, &ata(), Some(RETURN_OWNER), ata_pre)]),
@@ -57,13 +57,13 @@ fn good_meta(msg: &Message, holder: &Pubkey, source: &Pubkey, amount: u64, src_p
     }
 }
 
-fn land_valid_return(fx: &Fixture, tag: u8, amount: u64) -> Signature {
+pub(crate) fn land_valid_return(fx: &Fixture, tag: u8, amount: u64) -> Signature {
     let (wire, msg) = return_wire(&HOLDER, &SRC, amount, memo(tag as u64), tag);
     fx.chain.land_with_meta(&wire, false, good_meta(&msg, &HOLDER, &SRC, amount, 10 * amount, 0), &[ata()])
 }
 
 /// A fixture with a bound mint and outstanding supply for returns to draw on.
-fn observer_world() -> Fixture {
+pub(crate) fn observer_world() -> Fixture {
     let fx = world();
     // Outstanding supply for returns to draw on, with the escrow that backs it.
     state::mutate_core(|c| c.buckets.outstanding = (1_000 * E8) as u128);
@@ -72,15 +72,15 @@ fn observer_world() -> Fixture {
     fx
 }
 
-fn observe(fx: &Fixture) -> Vec<ObserverEvent> {
+pub(crate) fn observe(fx: &Fixture) -> Vec<ObserverEvent> {
     block_on(observer::observe(&fx.chain, env::now_ns()))
 }
 
-fn credited(events: &[ObserverEvent]) -> usize {
+pub(crate) fn credited(events: &[ObserverEvent]) -> usize {
     events.iter().filter(|e| matches!(e, ObserverEvent::Credited { .. })).count()
 }
 
-fn strays(events: &[ObserverEvent]) -> Vec<String> {
+pub(crate) fn strays(events: &[ObserverEvent]) -> Vec<String> {
     events.iter().filter_map(|e| if let ObserverEvent::Stray { reason, .. } = e { Some(reason.clone()) } else { None }).collect()
 }
 
@@ -399,7 +399,7 @@ fn an_idle_observer_lists_the_return_account_only_every_idle_interval() {
 // The mint saga
 // ---------------------------------------------------------------------------
 
-fn tick_mints(fx: &Fixture) {
+pub(crate) fn tick_mints(fx: &Fixture) {
     block_on(mint_saga::process_mints(&fx.chain, &fx.signer, env::now_ns()));
 }
 
@@ -571,9 +571,8 @@ fn a_held_or_abandoned_mint_is_never_built_again() {
 fn a_held_release_is_re_minted_to_its_solana_sender_with_the_remint_id_and_settles_the_claim() {
     let fx = saga_tests::world();
     // A burned return whose destination cannot be paid (the ledger's minting account): held.
-    let mut b = saga_tests::burned(&fx, 5 * E8, 1);
-    b.destination = state::read_core(|c| c.ledger_minting_account.unwrap());
-    b.solana_sender = HOLDER;
+    let minting = state::read_core(|c| c.ledger_minting_account.unwrap());
+    let b = saga_tests::burned_with(&fx, 5 * E8, 1, minting, HOLDER);
     release::open_release(&b).unwrap();
     let r = state::get_release(&b.return_id).unwrap();
     assert!(matches!(r.state, ReleaseState::Held { .. }));
@@ -608,9 +607,8 @@ fn at_most_two_re_mints_are_active_and_an_unmintable_sender_stays_held() {
     let fx = saga_tests::world();
     let mut held = vec![];
     for tag in 1..=4u8 {
-        let mut b = saga_tests::burned(&fx, E8, tag);
-        b.destination = state::read_core(|c| c.ledger_minting_account.unwrap());
-        b.solana_sender = if tag == 1 { MINT } else { [0xc0 + tag; 32] };
+        let minting = state::read_core(|c| c.ledger_minting_account.unwrap());
+        let b = saga_tests::burned_with(&fx, E8, tag, minting, if tag == 1 { MINT } else { [0xc0 + tag; 32] });
         release::open_release(&b).unwrap();
         held.push(b);
     }
@@ -625,11 +623,11 @@ fn at_most_two_re_mints_are_active_and_an_unmintable_sender_stays_held() {
 // The monitors
 // ---------------------------------------------------------------------------
 
-fn run_monitors(fx: &Fixture) -> monitor::MonitorReport {
+pub(crate) fn run_monitors(fx: &Fixture) -> monitor::MonitorReport {
     block_on(monitor::run(&fx.chain, &fx.ledger, env::now_ns()))
 }
 
-fn set_supply(fx: &Fixture, supply: u64) {
+pub(crate) fn set_supply(fx: &Fixture, supply: u64) {
     let tp = state::read_core(|c| c.config.token_program);
     fx.chain.set_account(MINT, tp.id(), crate::mint::fixtures::extended_mint(crate::mint::fixtures::mint_data(Some(&MINT_AUTHORITY), supply, 8, true, None), &[]));
 }
@@ -796,8 +794,9 @@ fn deposit_mint_return_in_one_timer_pass_sequence() {
     // The idle observer looks again after its interval.
     let report = run(now + secs(400));
     assert_eq!(credited(&report.observer), 1, "{:?}", report.observer);
+    // Credited, and the burn lane (the same pass) has already built the burn: RC -> BU.
     let b = buckets();
-    assert_eq!((b.outstanding, b.return_custodied), ((3 * E8) as u128, (2 * E8) as u128));
+    assert_eq!((b.outstanding, b.return_custodied + b.burn_unknown), ((3 * E8) as u128, (2 * E8) as u128));
     let return_id = crate::ids::return_id(&state::read_core(|c| c.config.genesis_hash), &sig);
     assert!(state::get_return(&return_id).is_some());
     // The monitors read in the same pass family and agree.

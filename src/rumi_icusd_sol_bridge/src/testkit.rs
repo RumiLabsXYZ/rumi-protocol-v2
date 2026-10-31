@@ -89,6 +89,8 @@ pub struct MockChain {
     pub auto_land: Cell<bool>,
     pub on_send: RefCell<Option<SendHook>>,
     pub on_account_read: RefCell<Option<AccountReadHook>>,
+    /// One-shot hooks that act on the first read of one specific account (after its reply is taken).
+    pub on_account_read_of: RefCell<Vec<(Pubkey, AccountReadHook)>>,
     pub on_slot_read: RefCell<Option<SlotReadHook>>,
     /// When set, every sent bootstrap transaction (pool account, mint, return ATA) takes effect at once.
     pub auto_apply_creation: Cell<bool>,
@@ -225,6 +227,14 @@ impl MockChain {
         first
     }
 
+    /// Set the metadata the RPC reports for an already landed transaction (the balance effect of the
+    /// bridge's own burn or refund, which landed through [`MockChain::land`]).
+    pub fn set_meta(&self, signature: &Signature, meta: crate::sol_rpc::TxMeta) {
+        if let Some(tx) = self.landed.borrow_mut().get_mut(signature) {
+            tx.meta = meta;
+        }
+    }
+
     /// Apply a creation transaction as the runtime would (no signature or fee checks): the pool
     /// account (`CreateAccountWithSeed` + `InitializeNonceAccount`), the mint (`CreateAccount` +
     /// `InitializeMint2`) or the return ATA (`CreateIdempotent`). Returns whether it applied.
@@ -298,6 +308,15 @@ impl SolRpc for MockChain {
         let reply = self.accounts.borrow().get(address).map(|(owner, data)| AccountSnapshot { owner: *owner, data: data.clone() });
         if let Some(hook) = self.on_account_read.borrow_mut().take() {
             // One shot: the hook acts during the first read only.
+            hook(self, address);
+        }
+        let due: Vec<(Pubkey, AccountReadHook)> = {
+            let mut hooks = self.on_account_read_of.borrow_mut();
+            let (hit, keep) = std::mem::take(&mut *hooks).into_iter().partition(|(a, _)| a == address);
+            *hooks = keep;
+            hit
+        };
+        for (_, hook) in due {
             hook(self, address);
         }
         Ok(reply)

@@ -53,6 +53,7 @@ pub const MEM_RETURN_BY_SEQ: u8 = 19;
 pub const MEM_ACTIVE_RETURNS: u8 = 20;
 pub const MEM_STRAYS: u8 = 21;
 pub const MEM_OBSERVER_QUEUE: u8 = 22;
+pub const MEM_ACTIVE_STRAYS: u8 = 23;
 
 /// Append-only. Never reuse or reorder an id.
 pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
@@ -79,6 +80,7 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_ACTIVE_RETURNS, "active_returns"),
     (MEM_STRAYS, "strays"),
     (MEM_OBSERVER_QUEUE, "observer_queue"),
+    (MEM_ACTIVE_STRAYS, "active_strays"),
 ];
 
 /// 1 = BB-47 (config, buckets, halt). 2 = BB-48 (adds the SOL RPC and lane settings, the role
@@ -87,9 +89,10 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
 /// 4 = BB-49 49b (the ledger saga: limits, windows, id counters, ledger facts, sweeps and hints,
 /// all defaulted; the deposit and release maps are new memories). 5 = BB-49 49c (the return
 /// observer and monitor state and the return sequence, all defaulted; the return, stray and
-/// observer-queue maps are new memories). `migrate_core` moves a stored older version to the
-/// current one at upgrade.
-pub const CORE_SCHEMA_VERSION: u32 = 5;
+/// observer-queue maps are new memories). 6 = BB-49 49d (the custody reading, its strikes and the
+/// credits halt, all defaulted; stray records gain refund claims). `migrate_core` moves a stored
+/// older version to the current one at upgrade.
+pub const CORE_SCHEMA_VERSION: u32 = 6;
 /// Maximum page size for list queries.
 pub const MAX_PAGE: u32 = 100;
 
@@ -450,8 +453,41 @@ cbor_storable!(ReturnRecord);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum StrayState {
-    /// In the return account, counted in `stray`, awaiting a refund decision (49d).
+    /// In the return account, counted in `stray` until each refund claim of it is settled.
     Held,
+}
+
+/// Where one refund claim stands.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ClaimState {
+    /// Observed. A claim with a verified sender at or above the minimum is refunded by the burn
+    /// lane; any other stays here, in `stray`, for manual review.
+    Held,
+    /// A refund operation exists (`op_id`); the tokens may be leaving the return account.
+    Refunding { op_id: u64 },
+    /// The refund is final and its balance effect was verified: `stray` was reduced.
+    Refunded { op_id: u64 },
+    /// A refund was considered and refused (the source account is not a plain account of the
+    /// sender, or the refund cannot be built): kept in `stray` for manual review, never retried.
+    Retained,
+}
+
+/// One incoming transfer of a stray transaction that the observer could attribute (note section
+/// 13.2): bound to its exact observed source account and amount. Two transfers of one transaction are
+/// two claims with distinct refund ids; the refund id carries the position, never the amount or the
+/// recipient.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StrayClaim {
+    pub locator: crate::ids::TransferLocator,
+    /// The token account the tokens left, exactly as the instruction named it.
+    pub source_account: Pubkey,
+    pub amount: u64,
+    /// The pre-balance owner of `source_account`, if the RPC reported it and it is also the signing
+    /// authority of that instruction: the only wallet a refund may go to.
+    pub verified_sender: Option<Pubkey>,
+    /// `ids::refund_id` of the stray signature and this locator; also the memo of the refund.
+    pub refund_id: Hash32,
+    pub state: ClaimState,
 }
 
 /// A transfer into the return account that failed the exact-shape check (note section 2.2 table):
@@ -470,6 +506,31 @@ pub struct StrayRecord {
     pub reason: String,
     pub state: StrayState,
     pub created_at_ns: u64,
+    /// The attributable incoming transfers (49d). Empty for a stray with none, or from before 49d.
+    #[serde(default)]
+    pub claims: Vec<StrayClaim>,
+    /// Position in the refund queue while any claim is open (`put_stray` assigns and clears it).
+    #[serde(default)]
+    pub queue_seq: Option<u64>,
+}
+
+/// A stray transfer smaller than this is retained, never refunded: it blunts dust spam and a refund
+/// would cost the fee payer more than it returns. A profile value in the note (`min_refund_e8s`, R);
+/// 0.001 icUSD until the profile sets it.
+pub const MIN_STRAY_REFUND_E8S: u64 = 100_000;
+
+impl StrayClaim {
+    /// Whether the burn lane may refund this claim: a verified sender and at least the minimum.
+    pub fn refundable(&self) -> bool {
+        self.verified_sender.is_some() && self.amount >= MIN_STRAY_REFUND_E8S
+    }
+}
+
+impl StrayRecord {
+    /// Open work: a refundable claim not yet refunded, or a refund in flight.
+    pub fn has_open_claim(&self) -> bool {
+        self.claims.iter().any(|c| matches!(c.state, ClaimState::Refunding { .. }) || (c.state == ClaimState::Held && c.refundable()))
+    }
 }
 
 cbor_storable!(StrayRecord);
@@ -501,6 +562,10 @@ pub struct ObserverState {
     pub last_progress_ns: Option<u64>,
     #[serde(default)]
     pub last_note: Option<String>,
+    /// Set by the custody check when the return account holds tokens the books cannot explain (49d):
+    /// no return is credited while it is set. Cleared by a later reading that finds no excess.
+    #[serde(default)]
+    pub credits_halted: Option<String>,
 }
 
 /// One C1 reading.
@@ -525,8 +590,32 @@ pub struct SupplySnapshot {
     pub at_ns: u64,
 }
 
-/// The periodic invariant monitors (C1 coverage, C2 supply bound). A violation is confirmed by a
-/// second consecutive reading before it halts anything.
+/// What the custody reading concluded (`custody_measured` against `RC + BU + stray`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CustodyStatus {
+    /// Measured equals expected.
+    Ok,
+    /// Measured is below expected by no more than the bridge's own unresolved burns and refunds can
+    /// explain: held for reconciliation, NOT ok.
+    Reconciling { deficit: u128 },
+    /// Measured is above expected: tokens the books cannot explain. Credits halt.
+    Excess { excess: u128 },
+    /// Measured is below expected and nothing of ours explains it. Never ok.
+    Deficit { deficit: u128 },
+}
+
+/// One custody reading (`supply, custody, supply`, equal supplies, no own mint or burn in flight).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CustodySnapshot {
+    pub custody: u128,
+    pub expected: u128,
+    pub supply: u128,
+    pub status: CustodyStatus,
+    pub at_ns: u64,
+}
+
+/// The periodic invariant monitors (C1 coverage, C2 supply bound, custody). A violation is confirmed
+/// by a second consecutive reading before it halts anything.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct MonitorState {
     #[serde(default)]
@@ -537,6 +626,12 @@ pub struct MonitorState {
     pub c1_strikes: u8,
     #[serde(default)]
     pub c2_strikes: u8,
+    /// 49d: the last custody reading.
+    #[serde(default)]
+    pub custody: Option<CustodySnapshot>,
+    /// 49d: consecutive unexplained-deficit readings.
+    #[serde(default)]
+    pub custody_strikes: u8,
     #[serde(default)]
     pub last_run_ns: Option<u64>,
     #[serde(default)]
@@ -612,6 +707,9 @@ pub struct BridgeCore {
     /// 49c: the C1 and C2 monitors.
     #[serde(default)]
     pub monitor: MonitorState,
+    /// 49d: the next refund-queue position of a stray.
+    #[serde(default)]
+    pub next_stray_seq: u64,
 }
 
 impl Default for BridgeCore {
@@ -641,6 +739,7 @@ impl Default for BridgeCore {
             next_return_seq: 0,
             observer: ObserverState::default(),
             monitor: MonitorState::default(),
+            next_stray_seq: 0,
         }
     }
 }
@@ -1093,6 +1192,10 @@ thread_local! {
     /// oldest first: `[slot BE 8][signature 64]`.
     static OBSERVER_QUEUE: RefCell<StableBTreeMap<[u8; 72], (), Mem>> =
         RefCell::new(StableBTreeMap::init(mem(MEM_OBSERVER_QUEUE)));
+
+    /// Strays with open refund work, by queue position (oldest first).
+    static ACTIVE_STRAYS: RefCell<StableBTreeMap<u64, [u8; 64], Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_ACTIVE_STRAYS)));
 }
 
 fn mem(id: u8) -> Mem {
@@ -1385,6 +1488,10 @@ pub enum Queue {
     Remints,
     /// Custodied returns waiting for a burn (49d).
     Returns,
+    /// Returns whose burn may have delivered (49d).
+    BurnApplies,
+    /// Strays with open refund claims (49d).
+    Strays,
 }
 
 impl Queue {
@@ -1398,6 +1505,8 @@ impl Queue {
             Queue::MintSubmits => 5,
             Queue::Remints => 6,
             Queue::Returns => 7,
+            Queue::BurnApplies => 8,
+            Queue::Strays => 9,
         }
     }
 }
@@ -1410,7 +1519,7 @@ thread_local! {
     /// Where each queue's next window starts (the last id its previous pass examined). Heap only, on
     /// purpose: after an upgrade the walk restarts at the lowest id, and the active indexes it walks
     /// are stable, so there is nothing to rebuild.
-    static QUEUE_CURSORS: RefCell<[Option<u64>; 8]> = const { RefCell::new([None; 8]) };
+    static QUEUE_CURSORS: RefCell<[Option<u64>; 12]> = const { RefCell::new([None; 12]) };
 }
 
 pub fn queue_cursor(q: Queue) -> Option<u64> {
@@ -1659,8 +1768,82 @@ pub fn get_stray(signature: &Sig) -> Option<StrayRecord> {
     STRAYS.with(|m| m.borrow().get(&signature.0))
 }
 
-pub fn put_stray(s: &StrayRecord) {
+/// Insert or update a stray and keep the refund queue in sync: a stray with open work has a position
+/// in the queue (assigned on first need), one without has none.
+pub fn put_stray(s: &mut StrayRecord) {
+    let open = s.has_open_claim();
+    match (open, s.queue_seq) {
+        (true, None) => {
+            let seq = mutate_core(|c| {
+                let n = c.next_stray_seq;
+                c.next_stray_seq += 1;
+                n
+            });
+            s.queue_seq = Some(seq);
+            ACTIVE_STRAYS.with(|m| m.borrow_mut().insert(seq, s.signature.0));
+        }
+        (false, Some(seq)) => {
+            ACTIVE_STRAYS.with(|m| {
+                m.borrow_mut().remove(&seq);
+            });
+            s.queue_seq = None;
+        }
+        _ => {}
+    }
     STRAYS.with(|m| m.borrow_mut().insert(s.signature.0, s.clone()));
+}
+
+pub fn active_stray_count() -> u64 {
+    ACTIVE_STRAYS.with(|m| m.borrow().len())
+}
+
+/// The fair-window walk of the strays with open refund work (see [`next_deposits`]).
+pub fn next_strays(queue: Queue, limit: usize, pred: impl Fn(&StrayRecord) -> bool) -> Vec<StrayRecord> {
+    let window = ACTIVE_STRAYS.with(|m| index_window(&m.borrow(), queue_cursor(queue), QUEUE_SCAN));
+    let mut out = Vec::new();
+    let mut last = None;
+    for (seq, sig) in window {
+        last = Some(seq);
+        if let Some(st) = get_stray(&Sig(sig)) {
+            if pred(&st) {
+                out.push(st);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    set_queue_cursor(queue, last);
+    out
+}
+
+/// Sum of the amounts of refunds in flight (claims in `Refunding`): tokens that may be leaving the
+/// return account without the books having moved yet.
+pub fn refunding_claims_total() -> u128 {
+    let mut total = 0u128;
+    ACTIVE_STRAYS.with(|m| {
+        for (_, sig) in m.borrow().iter() {
+            if let Some(st) = get_stray(&Sig(sig)) {
+                total += st.claims.iter().filter(|c| matches!(c.state, ClaimState::Refunding { .. })).map(|c| c.amount as u128).sum::<u128>();
+            }
+        }
+    });
+    total
+}
+
+/// Sum of the amounts of returns in `Burning` (what `BU` must hold).
+pub fn burning_return_total() -> u128 {
+    let mut total = 0u128;
+    ACTIVE_RETURNS.with(|m| {
+        for (_, rid) in m.borrow().iter() {
+            if let Some(r) = get_return(&rid) {
+                if matches!(r.state, ReturnState::Burning { .. }) {
+                    total += r.amount as u128;
+                }
+            }
+        }
+    });
+    total
 }
 
 pub fn stray_count() -> u64 {
@@ -1871,7 +2054,8 @@ pub fn reset_for_tests() {
     ACTIVE_RETURNS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_ACTIVE_RETURNS)));
     STRAYS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_STRAYS)));
     OBSERVER_QUEUE.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_OBSERVER_QUEUE)));
-    QUEUE_CURSORS.with(|c| *c.borrow_mut() = [None; 8]);
+    ACTIVE_STRAYS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_ACTIVE_STRAYS)));
+    QUEUE_CURSORS.with(|c| *c.borrow_mut() = [None; 12]);
 }
 
 #[cfg(test)]
@@ -1921,7 +2105,8 @@ mod tests {
                 (19, "return_by_seq"),
                 (20, "active_returns"),
                 (21, "strays"),
-                (22, "observer_queue")
+                (22, "observer_queue"),
+                (23, "active_strays")
             ]
         );
         let ids: BTreeSet<u8> = MEMORY_LAYOUT.iter().map(|(i, _)| *i).collect();
@@ -2073,6 +2258,7 @@ mod tests {
             next_return_seq: 0,
             observer: ObserverState::default(),
             monitor: MonitorState::default(),
+            next_stray_seq: 0,
         }
     }
 
@@ -2116,10 +2302,21 @@ mod tests {
         }
     }
 
-    /// The current core (schema version 5): every 49c field set to a distinct value.
+    /// The current core (schema version 6): every 49d field set to a distinct value.
     fn sample_core() -> BridgeCore {
+        let mut c = sample_core_v5();
+        c.schema_version = CORE_SCHEMA_VERSION;
+        c.observer.credits_halted = Some("custody excess".into());
+        c.monitor.custody = Some(CustodySnapshot { custody: 11, expected: 9, supply: 20, status: CustodyStatus::Excess { excess: 2 }, at_ns: 5 });
+        c.monitor.custody_strikes = 1;
+        c.next_stray_seq = 3;
+        c
+    }
+
+    /// The core as 49c wrote it (schema version 5): every 49c field set to a distinct value.
+    fn sample_core_v5() -> BridgeCore {
         BridgeCore {
-            schema_version: CORE_SCHEMA_VERSION,
+            schema_version: 5,
             next_return_seq: 7,
             observer: ObserverState {
                 cursor: Some(Sig([0x41; 64])),
@@ -2131,12 +2328,15 @@ mod tests {
                 last_run_ns: Some(100),
                 last_progress_ns: Some(101),
                 last_note: Some("n".into()),
+                credits_halted: None,
             },
             monitor: MonitorState {
                 escrow: Some(EscrowSnapshot { balance: 9, required: 8, ok: true, at_ns: 3 }),
                 supply: Some(SupplySnapshot { supply: 5, bound: 6, inflight_mint: 1, within_bound: true, quiescent: false, unattributed_gap: Some(2), at_ns: 4 }),
                 c1_strikes: 1,
                 c2_strikes: 2,
+                custody: None,
+                custody_strikes: 0,
                 last_run_ns: Some(200),
                 last_note: Some("m".into()),
             },
@@ -2161,6 +2361,7 @@ mod tests {
         }
     }
 
+    /// The stray as 49c wrote it: no claims.
     pub(crate) fn sample_stray() -> StrayRecord {
         StrayRecord {
             signature: Sig([0x91; 64]),
@@ -2171,7 +2372,22 @@ mod tests {
             reason: "no memo".into(),
             state: StrayState::Held,
             created_at_ns: 8,
+            claims: vec![],
+            queue_seq: None,
         }
+    }
+
+    /// The stray with two refund claims (49d).
+    pub(crate) fn sample_stray_with_claims() -> StrayRecord {
+        let claim = |outer: u16, inner: Option<u16>, state: ClaimState| StrayClaim {
+            locator: crate::ids::TransferLocator { outer, inner },
+            source_account: [0x92; 32],
+            amount: 20,
+            verified_sender: Some([0x93; 32]),
+            refund_id: [outer as u8; 32],
+            state,
+        };
+        StrayRecord { claims: vec![claim(0, None, ClaimState::Held), claim(1, Some(2), ClaimState::Refunding { op_id: 4 })], queue_seq: Some(2), ..sample_stray() }
     }
 
     /// The BB-48 core as BB-48 wrote it (schema version 2): no `mint-account` key, no claim state.
@@ -2228,6 +2444,7 @@ mod tests {
             next_return_seq: 0,
             observer: ObserverState::default(),
             monitor: MonitorState::default(),
+            next_stray_seq: 0,
         }
     }
 
@@ -2244,10 +2461,23 @@ mod tests {
 
     #[test]
     fn core_decodes_from_the_pinned_current_image() {
-        // Field names are the schema. Pinned from `cbor_encode(&sample_core())` at BB-49 49c.
-        let image = hex::decode(PINNED_CORE_V5).expect("hex");
+        // Field names are the schema. Pinned from `cbor_encode(&sample_core())` at BB-49 49d.
+        let image = hex::decode(PINNED_CORE_V6).expect("hex");
         assert_eq!(try_cbor_decode::<BridgeCore>(&image).unwrap(), sample_core());
         assert_eq!(cbor_encode(&sample_core()), image, "the encoding itself is stable");
+    }
+
+    /// The 49c core, byte for byte as 49c wrote it (schema version 5), still decodes after 49d
+    /// appended fields: the custody reading and its strikes start empty and credits are not halted.
+    #[test]
+    fn the_49c_core_image_decodes_with_the_49d_fields_defaulted() {
+        let image = hex::decode(PINNED_CORE_V5).expect("hex");
+        let decoded = try_cbor_decode::<BridgeCore>(&image).unwrap();
+        assert_eq!(decoded.schema_version, 5);
+        assert_eq!(decoded, sample_core_v5());
+        assert_eq!((decoded.observer.credits_halted.clone(), decoded.monitor.custody.clone(), decoded.monitor.custody_strikes), (None, None, 0));
+        assert_eq!(decoded.next_return_seq, 7, "the 49c fields keep their values");
+        assert_eq!(BridgeCore::from_bytes(decoded.to_bytes()), decoded);
     }
 
     /// The 49b core, byte for byte as 49b wrote it (schema version 4), still decodes after 49c
@@ -2272,9 +2502,13 @@ mod tests {
         let image = hex::decode(PINNED_RETURN_V1).expect("hex");
         assert_eq!(try_cbor_decode::<ReturnRecord>(&image).unwrap(), r);
         assert_eq!(cbor_encode(&r), image);
+        // The 49c stray (no claims) still decodes from its image; the current stray with claims is pinned.
         let s = sample_stray();
-        assert_eq!(StrayRecord::from_bytes(s.to_bytes()), s);
         let image = hex::decode(PINNED_STRAY_V1).expect("hex");
+        assert_eq!(try_cbor_decode::<StrayRecord>(&image).unwrap(), s, "a 49c stray decodes with empty claims");
+        let s = sample_stray_with_claims();
+        assert_eq!(StrayRecord::from_bytes(s.to_bytes()), s);
+        let image = hex::decode(PINNED_STRAY_V2).expect("hex");
         assert_eq!(try_cbor_decode::<StrayRecord>(&image).unwrap(), s);
         assert_eq!(cbor_encode(&s), image);
     }
@@ -2304,8 +2538,8 @@ mod tests {
         s1.signature = Sig([1; 64]);
         let mut s2 = sample_stray();
         s2.signature = Sig([2; 64]);
-        put_stray(&s2);
-        put_stray(&s1);
+        put_stray(&mut s2);
+        put_stray(&mut s1);
         assert_eq!(stray_count(), 2);
         assert_eq!(list_strays(None, 10).iter().map(|s| s.signature.0[0]).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(list_strays(Some(Sig([1; 64])), 10).iter().map(|s| s.signature.0[0]).collect::<Vec<_>>(), vec![2]);
@@ -2415,6 +2649,7 @@ mod tests {
                 "next_return_seq",
                 "observer",
                 "monitor",
+                "next_stray_seq",
             ],
         );
         if let Value::Map(entries) = &mut old {
@@ -2703,9 +2938,10 @@ mod tests {
     fn zz_dump_images() {
         let dir = std::env::var("RUMI_DUMP_DIR").unwrap_or_else(|_| "/tmp".into());
         std::fs::write(format!("{dir}/core_v4.hex"), hex::encode(cbor_encode(&sample_core_v4()))).unwrap();
-        std::fs::write(format!("{dir}/core_v5.hex"), hex::encode(cbor_encode(&sample_core()))).unwrap();
+        std::fs::write(format!("{dir}/core_v5.hex"), hex::encode(cbor_encode(&sample_core_v5()))).unwrap();
         std::fs::write(format!("{dir}/return_v1.hex"), hex::encode(cbor_encode(&sample_return()))).unwrap();
-        std::fs::write(format!("{dir}/stray_v1.hex"), hex::encode(cbor_encode(&sample_stray()))).unwrap();
+        std::fs::write(format!("{dir}/core_v6.hex"), hex::encode(cbor_encode(&sample_core()))).unwrap();
+        std::fs::write(format!("{dir}/stray_v2.hex"), hex::encode(cbor_encode(&sample_stray_with_claims()))).unwrap();
         std::fs::write(format!("{dir}/deposit_v1.hex"), hex::encode(cbor_encode(&sample_deposit()))).unwrap();
         std::fs::write(format!("{dir}/release_v1.hex"), hex::encode(cbor_encode(&sample_release()))).unwrap();
     }
@@ -2877,7 +3113,8 @@ mod tests {
         "04",
     );
 
-    /// CBOR image of `sample_core()` at BB-49 49c (schema version 5).
+    /// CBOR image of the 49c core (`sample_core_v5()`), exactly as 49c wrote it (schema version 5).
+    /// NEVER regenerate this constant: it is the snapshot an upgrade from 49c must still read.
     const PINNED_CORE_V5: &str = concat!(
         "b8186e736368656d615f76657273696f6e056b696e697469616c697a6564f566636f6e666967ad6c69637573645f6c6564",
         "6765724a0101010101010101010167736f6c5f7270634a02020202020202020202707363686e6f72725f6b65795f6e616d",
@@ -2950,7 +3187,7 @@ mod tests {
         "0505050505050505050505056c636c69656e745f6e6f6e6365184d657374617465a1674275726e696e67a1676275726e5f",
         "6f70156d637265617465645f61745f6e73066d757064617465645f61745f6e7307",
     );
-    /// CBOR image of `sample_stray()` as first stored (49c).
+    /// CBOR image of `sample_stray()` (no claims) as 49c stored it. Decode-only: a 49c stray must still read.
     const PINNED_STRAY_V1: &str = concat!(
         "a8697369676e61747572655840919191919191919191919191919191919191919191919191919191919191919191919191",
         "9191919191919191919191919191919191919191919191919191919164736c6f7419022c66616d6f756e7418286e736f75",
@@ -2959,5 +3196,88 @@ mod tests {
         "93189318931893189318931893189318931893189318931893189318931893189318931893189318931893189318931893",
         "18931893189318931893189366726561736f6e676e6f206d656d6f6573746174656448656c646d637265617465645f6174",
         "5f6e7308",
+    );
+
+    /// CBOR image of `sample_core()` at BB-49 49d (schema version 6).
+    const PINNED_CORE_V6: &str = concat!(
+        "b8196e736368656d615f76657273696f6e066b696e697469616c697a6564f566636f6e666967ad6c69637573645f6c6564",
+        "6765724a0101010101010101010167736f6c5f7270634a02020202020202020202707363686e6f72725f6b65795f6e616d",
+        "656a746573745f6b65795f316c67656e657369735f68617368982018421842184218421842184218421842184218421842",
+        "1842184218421842184218421842184218421842184218421842184218421842184218421842184218426661646d696e73",
+        "814a030303030303030303036d6665655f726563697069656e74f66d746f6b656e5f70726f6772616d69546f6b656e3230",
+        "32326c6d656d6f5f70726f6772616d982005184a1853185a18991829182106184d182418e81871186018da1838187c187c",
+        "183518b518dd18bc189218bb188118e4181f18a818401841051844188d6466656573a26f6465706f7369745f6665655f65",
+        "3873006f72656c656173655f6665655f6538730066706175736573a4686465706f73697473f5656d696e7473f46872656c",
+        "6561736573f4686f62736572766572f463727063a567636c7573746572664465766e65746676657269667968457175616c",
+        "69747968646973636f766572a1695468726573686f6c64a265746f74616c03636d696e026f6379636c65735f7065725f63",
+        "616c6c1b00000002540be40076726573706f6e73655f73697a655f657374696d617465f6646c616e65a76f6e6f6e63655f",
+        "706f6f6c5f73697a65047163616e63656c5f61667465725f7365637319012c7819726562726f6164636173745f696e7465",
+        "7276616c5f73656373181e747265636f6e63696c655f616c61726d5f7365637319038474686973746f72795f686f72697a",
+        "6f6e5f736563731954606c6d61785f7265697373756573036e646973636f7665725f6c696d69740a666c696d697473a86f",
+        "6d696e5f6465706f7369745f653873026f6d61785f6465706f7369745f653873181e736d61785f6f75747374616e64696e",
+        "675f653873190190756d696e745f77696e646f775f6c696d69745f6538731832781872656c656173655f77696e646f775f",
+        "6c696d69745f653873183c6e77696e646f775f7365636f6e64731846756d61785f6163746976655f7065725f63616c6c65",
+        "7208716d61785f6163746976655f676c6f62616c185a6d696e7374616e63655f73616c749820185a185a185a185a185a18",
+        "5a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a",
+        "185a185a676275636b657473ab6b6f75747374616e64696e67076c70656e64696e675f6d696e74007072657475726e5f63",
+        "7573746f64696564026c6275726e5f756e6b6e6f776e016f70656e64696e675f72656c65617365006e70656e64696e675f",
+        "726566756e64006468656c64006466656573006e72657365727665645f70756c6c73006f756e6b6e6f776e5f6f7574666c",
+        "6f7700657374726179036668616c746564a266726561736f6e61786561745f6e7309646b657973a4696665655f70617965",
+        "72982011111111111111111111111111111111111111111111111111111111111111116e6d696e745f617574686f726974",
+        "79982018221822182218221822182218221822182218221822182218221822182218221822182218221822182218221822",
+        "1822182218221822182218221822182218226c72657475726e5f6f776e6572982018331833183318331833183318331833",
+        "1833183318331833183318331833183318331833183318331833183318331833183318331833183318331833183318336c",
+        "6d696e745f6163636f756e7498201844184418441844184418441844184418441844184418441844184418441844184418",
+        "4418441844184418441844184418441844184418441844184418441844646d696e74982018441844184418441844184418",
+        "44184418441844184418441844184418441844184418441844184418441844184418441844184418441844184418441844",
+        "18446a6c616e655f68616c7473a2646d696e74a266726561736f6e616d6561745f6e7305646275726ef66a6e6578745f6f",
+        "705f69640c6a6d696e745f737461746565426f756e646962696e645f6e6f7465616e6f6e6578745f6465706f7369745f69",
+        "640b6d6e6578745f73776565705f696403706e6578745f72656c656173655f736571046777696e646f7773a36f77696e64",
+        "6f775f73746172745f6e73057261646d69747465645f696e5f77696e646f77067272656c65617365645f696e5f77696e64",
+        "6f77076568696e747381a3697369676e617475726558403131313131313131313131313131313131313131313131313131",
+        "31313131313131313131313131313131313131313131313131313131313131313131313131316c7375626d69747465645f",
+        "62794a040404040404040404046f7375626d69747465645f61745f6e73086e6c65646765725f6665655f65387319271076",
+        "6c65646765725f6d696e74696e675f6163636f756e74a2656f776e65724a4d4d4d4d4d4d4d4d4d4d6a7375626163636f75",
+        "6e74f6766c65646765725f7469705f6c6f7765725f626f756e6418636673776565707381a4626964026a616d6f756e745f",
+        "6538731864626f70af646b696e646553776565706466726f6da2656f776e65724a070707070707070707076a7375626163",
+        "636f756e749820080808080808080808080808080808080808080808080808080808080808080862746fa2656f776e6572",
+        "4a090909090909090909096a7375626163636f756e74f6677370656e646572f66a616d6f756e745f653873185a67666565",
+        "5f6538730a646d656d6f830102036f637265617465645f61745f74696d65184d68617474656d707473026e616d62696775",
+        "6f75735f7365656ef566737461747573a167556e6b6e6f776ea16a6c6173745f6572726f726178717365617263685f6672",
+        "6f6d5f626c6f636b05717365617263685f6e6578745f626c6f636b066f6c6173745f617474656d70745f6e73184e706f75",
+        "74666c6f775f7265736572766564f56d637265617465645f61745f6e730c6f6e6578745f72657475726e5f73657107686f",
+        "62736572766572aa66637572736f7258404141414141414141414141414141414141414141414141414141414141414141",
+        "41414141414141414141414141414141414141414141414141414141414141416b77616c6b5f616374697665f56b77616c",
+        "6b5f6265666f72655840424242424242424242424242424242424242424242424242424242424242424242424242424242",
+        "424242424242424242424242424242424242424242424242426b77616c6b5f6e6577657374584043434343434343434343",
+        "43434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343",
+        "4343434343696361756768745f7570f46970726f6365737365640c6b6c6173745f72756e5f6e731864706c6173745f7072",
+        "6f67726573735f6e731865696c6173745f6e6f7465616e6e637265646974735f68616c7465646e637573746f6479206578",
+        "63657373676d6f6e69746f72a866657363726f77a46762616c616e63650968726571756972656408626f6bf56561745f6e",
+        "730366737570706c79a766737570706c790565626f756e64066d696e666c696768745f6d696e74016c77697468696e5f62",
+        "6f756e64f569717569657363656e74f470756e617474726962757465645f676170026561745f6e73046a63315f73747269",
+        "6b6573016a63325f737472696b65730267637573746f6479a567637573746f64790b686578706563746564096673757070",
+        "6c791466737461747573a166457863657373a166657863657373026561745f6e73056f637573746f64795f737472696b65",
+        "73016b6c6173745f72756e5f6e7318c8696c6173745f6e6f7465616d6e6e6578745f73747261795f73657103",
+    );
+    /// CBOR image of `sample_stray_with_claims()` (49d).
+    const PINNED_STRAY_V2: &str = concat!(
+        "aa697369676e61747572655840919191919191919191919191919191919191919191919191919191919191919191919191",
+        "9191919191919191919191919191919191919191919191919191919164736c6f7419022c66616d6f756e7418286e736f75",
+        "7263655f6163636f756e749820189218921892189218921892189218921892189218921892189218921892189218921892",
+        "189218921892189218921892189218921892189218921892189218926f76657269666965645f73656e6465729820189318",
+        "93189318931893189318931893189318931893189318931893189318931893189318931893189318931893189318931893",
+        "18931893189318931893189366726561736f6e676e6f206d656d6f6573746174656448656c646d637265617465645f6174",
+        "5f6e730866636c61696d7382a6676c6f6361746f72a2656f757465720065696e6e6572f66e736f757263655f6163636f75",
+        "6e749820189218921892189218921892189218921892189218921892189218921892189218921892189218921892189218",
+        "9218921892189218921892189218921892189266616d6f756e74146f76657269666965645f73656e646572982018931893",
+        "18931893189318931893189318931893189318931893189318931893189318931893189318931893189318931893189318",
+        "931893189318931893189369726566756e645f696498200000000000000000000000000000000000000000000000000000",
+        "0000000000006573746174656448656c64a6676c6f6361746f72a2656f757465720165696e6e6572026e736f757263655f",
+        "6163636f756e74982018921892189218921892189218921892189218921892189218921892189218921892189218921892",
+        "18921892189218921892189218921892189218921892189266616d6f756e74146f76657269666965645f73656e64657298",
+        "20189318931893189318931893189318931893189318931893189318931893189318931893189318931893189318931893",
+        "1893189318931893189318931893189369726566756e645f69649820010101010101010101010101010101010101010101",
+        "0101010101010101010101657374617465a169526566756e64696e67a1656f705f6964046971756575655f73657102",
     );
 }

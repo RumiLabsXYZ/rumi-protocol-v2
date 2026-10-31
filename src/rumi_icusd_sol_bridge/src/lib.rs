@@ -110,6 +110,8 @@ pub mod views;
 mod saga_tests;
 #[cfg(test)]
 mod saga49c_tests;
+#[cfg(test)]
+mod saga49d_tests;
 
 use candid::Principal;
 use state::AuditCtx;
@@ -343,6 +345,14 @@ fn get_monitor_status() -> MonitorStatus {
     views::monitor_status()
 }
 
+/// Lift the custody check's credits halt after explaining the excess; the note says how.
+#[ic_cdk::update]
+fn admin_clear_credits_halt(note: String) -> BridgeResult<()> {
+    admin::clear_credits_halt(&note)?;
+    timer::schedule_soon();
+    Ok(())
+}
+
 /// Read the C1 and C2 monitors now instead of waiting for the next interval.
 #[ic_cdk::update]
 async fn admin_run_monitors() -> BridgeResult<MonitorStatus> {
@@ -511,6 +521,7 @@ const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
     ("admin_clear_lane_halt", IngressAccess::Admin),
     ("admin_run_tick", IngressAccess::Admin),
     ("admin_run_monitors", IngressAccess::Admin),
+    ("admin_clear_credits_halt", IngressAccess::Admin),
     // Controller methods.
     ("set_admins", IngressAccess::Controller),
     #[cfg(feature = "history_probe")]
@@ -624,7 +635,7 @@ mod ingress_tests {
     #[test]
     fn every_update_endpoint_has_an_ingress_decision() {
         let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().collect();
-        let expected = if cfg!(feature = "history_probe") { 15 } else { 14 };
+        let expected = if cfg!(feature = "history_probe") { 16 } else { 15 };
         assert_eq!(updates.len(), expected, "the update endpoints are exactly the listed ones: {updates:?}");
         let listed: BTreeSet<String> = INGRESS_METHODS.iter().map(|(n, _)| n.to_string()).collect();
         let missing: Vec<_> = updates.difference(&listed).collect();
@@ -660,6 +671,7 @@ mod ingress_tests {
             "admin_clear_lane_halt",
             "admin_run_tick",
             "admin_run_monitors",
+            "admin_clear_credits_halt",
         ] {
             assert!(decide(m, 100, false, true, false), "{m}: admin");
             assert!(decide(m, 100, false, false, true), "{m}: controller");

@@ -532,6 +532,28 @@ pub struct ReturnView {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ClaimStatus {
+    Held,
+    Refunding { op_id: u64 },
+    Refunded { op_id: u64 },
+    Retained,
+}
+
+/// One attributable incoming transfer of a stray transaction, bound to its observed source account
+/// and amount.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ClaimView {
+    pub outer_instruction: u16,
+    pub inner_instruction: Option<u16>,
+    pub source_account: String,
+    pub amount_e8s: u64,
+    pub verified_sender: Option<String>,
+    /// 64 hex: `ids::refund_id`, also the memo of the refund.
+    pub refund_id: String,
+    pub status: ClaimStatus,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StrayView {
     pub signature: String,
     pub slot: u64,
@@ -539,6 +561,7 @@ pub struct StrayView {
     pub source_account: Option<String>,
     pub verified_sender: Option<String>,
     pub reason: String,
+    pub claims: Vec<ClaimView>,
     pub created_at_ns: u64,
 }
 
@@ -570,6 +593,8 @@ pub struct ObserverStatus {
     pub last_note: Option<String>,
     pub returns_active: u64,
     pub strays: u64,
+    /// Set by the custody check: no return is credited while it is.
+    pub credits_halted: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -587,9 +612,31 @@ pub struct SupplyReading {
     pub inflight_mint: Nat,
     pub within_bound: bool,
     pub quiescent: bool,
-    /// `O - supply` when quiescent and positive: REPORTED, never acted on (blocker
-    /// `solana-unattributed-burn-policy`).
+    /// `O - supply` when quiescent and positive: REPORTED, never acted on.
     pub unattributed_gap: Option<Nat>,
+    /// The blocker id that names the missing unattributed-burn accounting, present with a gap.
+    pub unattributed_gap_blocker: Option<String>,
+    pub at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CustodyStatusView {
+    Ok,
+    /// Below the books by no more than the bridge's own unresolved burns and refunds: held for
+    /// reconciliation, not ok.
+    Reconciling { deficit: Nat },
+    /// Tokens the books cannot explain; credits halt after a confirming reading.
+    Excess { excess: Nat },
+    /// Below the books and nothing of ours explains it; never ok.
+    Deficit { deficit: Nat },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CustodyReading {
+    pub custody: Nat,
+    pub expected: Nat,
+    pub supply: Nat,
+    pub status: CustodyStatusView,
     pub at_ns: u64,
 }
 
@@ -597,8 +644,10 @@ pub struct SupplyReading {
 pub struct MonitorStatus {
     pub c1: Option<EscrowReading>,
     pub c2: Option<SupplyReading>,
+    pub custody: Option<CustodyReading>,
     pub c1_strikes: u8,
     pub c2_strikes: u8,
+    pub custody_strikes: u8,
     pub last_run_ns: Option<u64>,
     pub last_note: Option<String>,
 }

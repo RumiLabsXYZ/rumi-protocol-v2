@@ -1,7 +1,7 @@
 //! The timer (49a, extended in 49b): one self-rescheduling timer runs the whole background pass in
 //! a fixed order: derive keys and bootstrap what is missing (`bootstrap::bootstrap_step`), reconcile
 //! the nonce lanes (`lane::tick`), the mint saga (`mint_saga`: deliveries, re-mints, new mint
-//! operations), the return observer, then the ICP-side sagas (`ledger_pass`: ledger facts, pulls,
+//! operations), the return observer, the burn lane (burns, stray refunds), then the ICP-side sagas (`ledger_pass`: ledger facts, pulls,
 //! preflight holds, refunds, releases, fee sweeps) and the C1 and C2 monitors. Once everything is bound and no operation is
 //! active the pass makes only the three cheap ledger reads, so an idle bridge spends almost nothing.
 //!
@@ -12,7 +12,7 @@
 //! so a trapped pass cannot end the chain of ticks.
 
 use crate::bootstrap::{bootstrap_step, BootstrapEvent};
-use crate::flows::{deposit, mint_saga, release};
+use crate::flows::{burn_saga, deposit, mint_saga, release};
 use crate::monitor::{self, MonitorReport};
 use crate::observer::{self, ObserverEvent};
 use crate::icp::IcpLedger;
@@ -132,6 +132,9 @@ pub async fn run_once<R: SolRpc, S: TxSigner, L: IcpLedger>(rpc: &R, signer: &S,
     // freshly minted tokens needs the books to know they exist), and builds new mint operations.
     mint_saga::process_mints(rpc, signer, now).await;
     let observer = observer::observe(rpc, now).await;
+    // The burn lane: apply the burns that are final (then the release is payable), build burns for
+    // what the observer just custodied, and refund attributable strays.
+    burn_saga::process_burns(rpc, signer, now).await;
     ledger_pass(ledger).await;
     let monitor = monitor::run_if_due(rpc, ledger, now).await;
     RunReport { skipped: false, bootstrap, lane, observer, monitor }

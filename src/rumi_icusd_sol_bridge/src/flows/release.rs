@@ -49,6 +49,22 @@ pub struct BurnedReturn {
     pub amount_e8s: u64,
 }
 
+impl BurnedReturn {
+    /// The hand-over built from the stored verified return, so nothing in it can disagree with the
+    /// record `open_release` checks it against.
+    pub fn from_return(r: &state::ReturnRecord, burn_op_id: u64) -> BurnedReturn {
+        BurnedReturn {
+            return_id: r.return_id,
+            burn_op_id,
+            solana_sender: r.sender,
+            destination: r.destination,
+            return_signature: r.signature,
+            return_slot: r.slot,
+            amount_e8s: r.amount,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpenOutcome {
     Opened(ReleaseState),
@@ -61,6 +77,10 @@ pub enum OpenError {
     NoFinalBurn(String),
     /// The burn amount differs from the return amount.
     AmountMismatch { burn: u64, release: u64 },
+    /// The hand-over does not match the stored verified return it names, or the burn is not the burn
+    /// of that return (`burn_id([return_id])`): an unrelated burn of an equal amount can never authorize
+    /// another return or another recipient.
+    NotBoundToReturn(String),
     /// The pending-release bucket does not cover this release on top of those already owed.
     NotFunded { pending_release: u128, owed: u128, amount: u64 },
     /// The ledger fee or the minting account is not known yet: nothing was changed; retry.
@@ -100,6 +120,27 @@ pub fn open_release(b: &BurnedReturn) -> Result<OpenOutcome, OpenError> {
     };
     if op.amount != b.amount_e8s {
         return Err(OpenError::AmountMismatch { burn: op.amount, release: b.amount_e8s });
+    }
+    // The binding (note section 13): the burn is the burn of THIS return, by its id, and every field of
+    // the hand-over is the stored verified return's, which is in the state that waits for this burn.
+    let (genesis, mint, salt) = state::read_core(|c| (c.config.genesis_hash, c.mint, c.instance_salt));
+    let mint = mint.ok_or_else(|| OpenError::NotBoundToReturn("the escrow mint is not bound".into()))?;
+    let expected_burn_id = ids::burn_id(&genesis, &mint, &salt, &[b.return_id]).map_err(|e| OpenError::NotBoundToReturn(format!("{e:?}")))?;
+    if op.external_id != expected_burn_id {
+        return Err(OpenError::NotBoundToReturn(format!(
+            "burn operation {} is not the burn of return {} (its id is not burn_id([return_id]))",
+            b.burn_op_id,
+            hex::encode(b.return_id)
+        )));
+    }
+    let stored = state::get_return(&b.return_id).ok_or_else(|| OpenError::NotBoundToReturn("no stored verified return has this id".into()))?;
+    if stored.state != (state::ReturnState::Burning { burn_op: b.burn_op_id }) {
+        return Err(OpenError::NotBoundToReturn(format!("the stored return is {:?}, not waiting for burn operation {}", stored.state, b.burn_op_id)));
+    }
+    if (stored.amount, stored.sender, stored.destination, stored.signature, stored.slot)
+        != (b.amount_e8s, b.solana_sender, b.destination, b.return_signature, b.return_slot)
+    {
+        return Err(OpenError::NotBoundToReturn("the amount, sender, recipient or return transaction differ from the stored verified return".into()));
     }
 
     let now = env::now_ns();

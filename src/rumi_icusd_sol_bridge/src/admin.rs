@@ -93,6 +93,22 @@ pub fn clear_lane_halt(lane: crate::records::Lane, note: &str) -> BridgeResult<(
     Ok(())
 }
 
+/// Lift the credits halt the custody check set, after a human explained the excess in the return
+/// account. The note is required and stored; the next custody reading halts credits again if the
+/// excess is still there.
+pub fn clear_credits_halt(note: &str) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    let note = note.trim();
+    if note.is_empty() || note.len() > 512 {
+        return Err(BridgeError::InvalidArgument("a note of 1 to 512 bytes saying how the excess was explained is required".into()));
+    }
+    if state::mutate_core(|c| c.observer.credits_halted.take()).is_none() {
+        return Err(BridgeError::InvalidState("credits are not halted".into()));
+    }
+    state::append_audit(None, AuditCtx::note(format!("credits halt cleared by {caller}: {note}")));
+    Ok(())
+}
+
 pub fn set_admins(admins: Vec<Principal>) -> BridgeResult<()> {
     let caller = require_controller()?;
     if admins.is_empty() || admins.iter().any(|p| *p == Principal::anonymous()) {

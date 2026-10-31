@@ -11,14 +11,19 @@
 //! | re-mint id | `rumi.icusd.sol.remint.v1` | genesis hash, mint key, instance salt, return id of the held claim |
 //! | return id | `rumi.icusd.sol.return.v1` | genesis hash, transaction signature |
 //! | burn id | `rumi.icusd.sol.burn.v1` | genesis hash, mint key, instance salt, count, then each covered return id in order |
-//! | refund id | `rumi.icusd.sol.refund.v1` | genesis hash, mint key, instance salt, signature of the stray transaction |
+//! | refund id | `rumi.icusd.sol.refund.v2` | genesis hash, mint key, instance salt, signature of the stray transaction, transfer locator |
 //!
 //! `rumi.icusd.sol.burn.v1` is the domain the note adds to the profile (section 2.3). The
-//! **refund id domain `rumi.icusd.sol.refund.v1` is newly proposed by BB-47**: the note
-//! names a refund id (`rumi1|f|<refund_id>`, section 2.4) but no domain or preimage. Its
-//! preimage is keyed by the stray transaction's signature only, so there is exactly one
-//! refund per stray; the amount and recipient are properties of that transaction and are
-//! deliberately not hashed (two different amounts for one stray must not yield two ids).
+//! **refund id domain is newly proposed**: the note names a refund id (`rumi1|f|<refund_id>`,
+//! section 2.4) but no domain or preimage. BB-47 keyed the preimage by the stray transaction's
+//! signature alone (`.v1`); the review (note section 13.2) showed that is not a unique transfer
+//! locator, because one malformed transaction can carry several incoming transfers from different
+//! senders. BB-49 49d therefore ships `.v2`, which adds the [`TransferLocator`] (the outer
+//! instruction index and, for a transfer made by a program, the inner instruction index). `.v1` was
+//! never used by any refund. The amount and the recipient are deliberately NOT hashed: they are
+//! properties of the observed transfer, bound to the stored claim, and changing a proposed tuple
+//! must not create a second claim for the same transfer. Return ids of a valid single-transfer
+//! return stay signature-based.
 //!
 //! # Hashing
 //!
@@ -44,7 +49,7 @@ pub const BURN_DOMAIN: &str = "rumi.icusd.sol.burn.v1";
 /// Return id (section 2.2).
 pub const RETURN_DOMAIN: &str = "rumi.icusd.sol.return.v1";
 /// Refund of strays. NEWLY PROPOSED by BB-47 (section 2.4 names no domain).
-pub const REFUND_DOMAIN: &str = "rumi.icusd.sol.refund.v1";
+pub const REFUND_DOMAIN: &str = "rumi.icusd.sol.refund.v2";
 
 /// Every domain, for the prefix-freeness and disjointness tests.
 pub const ALL_DOMAINS: [&str; 5] = [MINT_DOMAIN, REMINT_DOMAIN, BURN_DOMAIN, RETURN_DOMAIN, REFUND_DOMAIN];
@@ -218,10 +223,41 @@ pub fn burn_id(
     Ok(h.finish())
 }
 
-/// Refund id for a stray (section 2.4). NEWLY PROPOSED domain and preimage (see module docs).
-pub fn refund_id(genesis_hash: &Hash32, mint: &[u8; 32], instance_salt: &Hash32, stray_signature: &[u8; 64]) -> Hash32 {
+/// Where one observed incoming transfer sits inside its transaction: the index of the outer
+/// instruction and, when a program made the transfer by CPI, the index inside that instruction's inner
+/// instructions. Stable across retries (the position never changes once the transaction is final),
+/// and distinct for two transfers of one transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct TransferLocator {
+    pub outer: u16,
+    pub inner: Option<u16>,
+}
+
+impl TransferLocator {
+    /// The fixed 5-byte field of the preimage: `outer` big-endian, then `0` and `0000` for no inner
+    /// index or `1` and the inner index big-endian.
+    pub fn to_field(self) -> [u8; 5] {
+        let mut out = [0u8; 5];
+        out[..2].copy_from_slice(&self.outer.to_be_bytes());
+        if let Some(inner) = self.inner {
+            out[2] = 1;
+            out[3..].copy_from_slice(&inner.to_be_bytes());
+        }
+        out
+    }
+}
+
+/// Refund id for one observed incoming transfer of a stray transaction (section 2.4, 13.2). See the
+/// module docs for why the locator is part of the preimage and the amount and recipient are not.
+pub fn refund_id(
+    genesis_hash: &Hash32,
+    mint: &[u8; 32],
+    instance_salt: &Hash32,
+    stray_signature: &[u8; 64],
+    locator: TransferLocator,
+) -> Hash32 {
     let mut h = IdHasher::new(REFUND_DOMAIN);
-    h.field(genesis_hash).field(mint).field(instance_salt).field(stray_signature);
+    h.field(genesis_hash).field(mint).field(instance_salt).field(stray_signature).field(&locator.to_field());
     h.finish()
 }
 
@@ -274,7 +310,11 @@ mod tests {
     const RETURN_ID_TWO: &str = "7fee55fccd1c6d24e2cc7e2b04b467b7beea55942e3425dde8b534eb114cd1e1";
     const BURN_ID_TWO: &str = "293333a3500881d719aa99be80e7c04e00b03501440916bc9f8723caf5d413e4";
     const BURN_ID_TWO_REVERSED: &str = "5720cfe625179fd0a6953231ef6c6599a7ddb4d83c1f78ef5fbe9eb1991b0d20";
-    const REFUND_ID: &str = "96d6cade4f0e24502b56f84c1ec633891f639ed7146de996e180ee0220b8a798";
+    // Refund ids (domain `.v2`) for the transfer at outer instruction 0, outer instruction 1, and the
+    // first inner instruction of outer instruction 0, all of the stray transaction `SIG`.
+    const REFUND_ID: &str = "f8387e1e1f54d89bbe8eae573fc30a7a2e2f43cf9f92886c3713feb9de001f99";
+    const REFUND_ID_OUTER1: &str = "2304cf3928e9d3c8985ae9f24bcae73091caec0720f59c99f03854afda7208ab";
+    const REFUND_ID_INNER0: &str = "23b900541732da2c57dde8ca5aee5a72c3d09d6d2ad9c5c5e440084e334d684f";
     const ESCROW_SUBACCOUNT: &str = "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4";
     const INSTANCE_SALT: &str = "820db831c5eb3b398804f95a7b5bc51f2ef42cf42cf5876e0afb18c4b1133680";
 
@@ -284,7 +324,7 @@ mod tests {
         assert_eq!(REMINT_DOMAIN, "rumi.icusd.sol.remint.v1");
         assert_eq!(BURN_DOMAIN, "rumi.icusd.sol.burn.v1");
         assert_eq!(RETURN_DOMAIN, "rumi.icusd.sol.return.v1");
-        assert_eq!(REFUND_DOMAIN, "rumi.icusd.sol.refund.v1");
+        assert_eq!(REFUND_DOMAIN, "rumi.icusd.sol.refund.v2");
         assert_eq!(ESCROW_LABEL, "rumi-icusd-sol-bridge:escrow:v1");
     }
 
@@ -332,10 +372,37 @@ mod tests {
         assert!(burn_id(&GENESIS, &MINT, &SALT, &many[..MAX_COVERED_RETURNS]).is_ok());
     }
 
+    const LOC0: TransferLocator = TransferLocator { outer: 0, inner: None };
+    const LOC1: TransferLocator = TransferLocator { outer: 1, inner: None };
+    const LOC_INNER: TransferLocator = TransferLocator { outer: 0, inner: Some(0) };
+
     #[test]
-    fn refund_id_is_pinned_and_keyed_by_the_stray_signature_only() {
-        assert_eq!(hex::encode(refund_id(&GENESIS, &MINT, &SALT, &SIG)), REFUND_ID);
-        assert_ne!(refund_id(&GENESIS, &MINT, &SALT, &SIG), refund_id(&GENESIS, &MINT, &SALT, &SIG2));
+    fn refund_id_is_pinned_and_keyed_by_the_transfer_locator() {
+        assert_eq!(hex::encode(refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC0)), REFUND_ID);
+        assert_eq!(hex::encode(refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC1)), REFUND_ID_OUTER1);
+        assert_eq!(hex::encode(refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC_INNER)), REFUND_ID_INNER0);
+        // Another transaction is another id.
+        assert_ne!(refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC0), refund_id(&GENESIS, &MINT, &SALT, &SIG2, LOC0));
+    }
+
+    /// The review's vector (note section 13.2): two incoming transfers inside ONE malformed transaction
+    /// (from different senders) get distinct ids; a retry of the same transfer keeps its id.
+    #[test]
+    fn two_transfers_in_one_transaction_get_distinct_ids_and_a_retry_keeps_its_id() {
+        let first = refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC0);
+        let second = refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC1);
+        let by_cpi = refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC_INNER);
+        assert_ne!(first, second, "outer instruction 0 and 1 of the same transaction");
+        assert_ne!(first, by_cpi, "an inner transfer of outer instruction 0 is not outer instruction 0");
+        assert_ne!(second, by_cpi);
+        // A retry derives the same id: the locator and the signature are all there is to it, so the
+        // amount and the recipient a retry proposes cannot change the id.
+        assert_eq!(first, refund_id(&GENESIS, &MINT, &SALT, &SIG, TransferLocator { outer: 0, inner: None }));
+        // Inner index 0 and "no inner index" are different positions, and the field is unambiguous.
+        assert_eq!(LOC0.to_field(), [0, 0, 0, 0, 0]);
+        assert_eq!(LOC_INNER.to_field(), [0, 0, 1, 0, 0]);
+        assert_eq!(TransferLocator { outer: 0x0102, inner: Some(0x0304) }.to_field(), [1, 2, 1, 3, 4]);
+        assert_ne!(LOC0.to_field(), LOC_INNER.to_field());
     }
 
     #[test]
@@ -357,7 +424,7 @@ mod tests {
             remint_id(&GENESIS, &MINT, &SALT, &r),
             r,
             burn_id(&GENESIS, &MINT, &SALT, &[r]).unwrap(),
-            refund_id(&GENESIS, &MINT, &SALT, &SIG),
+            refund_id(&GENESIS, &MINT, &SALT, &SIG, LOC0),
         ];
         for i in 0..all.len() {
             for j in i + 1..all.len() {

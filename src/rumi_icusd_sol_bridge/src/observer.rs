@@ -31,7 +31,8 @@ use crate::flows::release;
 use crate::ids::{self, Hash32};
 use crate::records::Sig;
 use crate::sol_rpc::{LandedTx, SolRpc, TokenBalanceEntry};
-use crate::state::{self, AuditCtx, ReturnRecord, ReturnState, StrayRecord, StrayState};
+use crate::ids::TransferLocator;
+use crate::state::{self, AuditCtx, ClaimState, ReturnRecord, ReturnState, StrayClaim, StrayRecord, StrayState};
 use crate::tx::builders::TxProfile;
 use crate::tx::shape::{check_return_shape, ReturnShape, ReturnShapeContext};
 use crate::tx::{decode_message, split_wire_transaction, Message, Pubkey};
@@ -83,14 +84,15 @@ struct Ctx {
     ata: Pubkey,
     bridge: Principal,
     genesis: Hash32,
+    salt: Hash32,
     cap: u64,
 }
 
 fn context() -> Result<Ctx, String> {
-    let (profile, genesis, cap) = state::read_core(|c| (c.tx_profile(), c.config.genesis_hash, c.config.limits.max_deposit_e8s));
+    let (profile, genesis, salt, cap) = state::read_core(|c| (c.tx_profile(), c.config.genesis_hash, c.instance_salt, c.config.limits.max_deposit_e8s));
     let profile = profile?;
     let ata = profile.return_ata().map_err(|e| format!("{e}"))?;
-    Ok(Ctx { profile, ata, bridge: env::canister_id(), genesis, cap })
+    Ok(Ctx { profile, ata, bridge: env::canister_id(), genesis, salt, cap })
 }
 
 // ---------------------------------------------------------------------------
@@ -99,12 +101,12 @@ fn context() -> Result<Ctx, String> {
 
 /// A token account's balance of this mint in a transaction's pre and post balances. An account with
 /// no entry on one side holds zero there (it did not exist, or holds none).
-fn balance_at(entries: &[TokenBalanceEntry], mint: &Pubkey, index: u8) -> u64 {
+pub(crate) fn balance_at(entries: &[TokenBalanceEntry], mint: &Pubkey, index: u8) -> u64 {
     entries.iter().find(|e| e.account_index == index && &e.mint == mint).map(|e| e.amount).unwrap_or(0)
 }
 
 /// Every account index that has an entry of `mint` before or after, ascending.
-fn mint_indexes(pre: &[TokenBalanceEntry], post: &[TokenBalanceEntry], mint: &Pubkey) -> Vec<u8> {
+pub(crate) fn mint_indexes(pre: &[TokenBalanceEntry], post: &[TokenBalanceEntry], mint: &Pubkey) -> Vec<u8> {
     let mut v: Vec<u8> = pre.iter().chain(post.iter()).filter(|e| &e.mint == mint).map(|e| e.account_index).collect();
     v.sort_unstable();
     v.dedup();
@@ -186,11 +188,20 @@ fn classify(ctx: &Ctx, tx: &LandedTx) -> (Verdict, Option<StrayFacts>) {
         );
     }
     let delta = after - before;
-    let facts = StrayFacts::from_balances(&msg, pre, post, &mint, delta);
+    let facts = StrayFacts::from_balances(ctx, &msg, pre, post, &mint, delta);
     match verify_return(ctx, &msg, tx, delta) {
         Ok(v) => (Verdict::Return(v), Some(facts)),
         Err(reason) => (Verdict::Stray { reason }, Some(facts.with_amount(delta))),
     }
+}
+
+/// One incoming transfer of a stray transaction, read from its outer instructions (note section 13.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimFact {
+    pub locator: TransferLocator,
+    pub source_account: Pubkey,
+    pub amount: u64,
+    pub verified_sender: Option<Pubkey>,
 }
 
 /// What a stray's record keeps about where the tokens came from.
@@ -199,11 +210,58 @@ pub struct StrayFacts {
     pub amount: u64,
     pub source_account: Option<Pubkey>,
     pub verified_sender: Option<Pubkey>,
+    pub claims: Vec<ClaimFact>,
+}
+
+/// The attributable incoming transfers of a transaction: each OUTER instruction to the token program
+/// that is a `TransferChecked` (12) or `Transfer` (3) into the return account, bound to its exact
+/// source account and amount. A transfer made by CPI (an inner instruction) is not decoded and stays
+/// unattributed in the stray. A claim is kept only if the books of that source account agree: the
+/// source fell by exactly the sum of its claims, and the return account rose by at least the sum of
+/// all claims. Its sender is verified when the source's pre-balance owner is reported, is the
+/// authority named by the instruction, and signed the transaction.
+fn claims_of(ctx: &Ctx, msg: &Message, pre: &[TokenBalanceEntry], post: &[TokenBalanceEntry], delta: u64) -> Vec<ClaimFact> {
+    let mint = ctx.profile.mint;
+    let token_program = ctx.profile.token_program.id();
+    let mut raw: Vec<(TransferLocator, Pubkey, u64, Pubkey)> = vec![];
+    for (i, ix) in msg.instructions.iter().enumerate() {
+        if msg.program_id(ix) != Some(&token_program) {
+            continue;
+        }
+        let Some(keys) = msg.instruction_accounts(ix) else { continue };
+        let (source, destination, authority, amount) = match (ix.data.first().copied(), keys.as_slice()) {
+            (Some(crate::tx::TAG_TRANSFER_CHECKED), [s, m, d, a, ..]) if ix.data.len() == 10 && *m == mint && ix.data[9] == crate::tx::TOKEN_DECIMALS => {
+                (*s, *d, *a, u64::from_le_bytes(ix.data[1..9].try_into().unwrap_or([0; 8])))
+            }
+            (Some(crate::tx::TAG_TRANSFER), [s, d, a, ..]) if ix.data.len() == 9 => (*s, *d, *a, u64::from_le_bytes(ix.data[1..9].try_into().unwrap_or([0; 8]))),
+            _ => continue,
+        };
+        if destination != ctx.ata || amount == 0 || source == ctx.ata {
+            continue;
+        }
+        raw.push((TransferLocator { outer: i as u16, inner: None }, source, amount, authority));
+    }
+    let total: u128 = raw.iter().map(|r| r.2 as u128).sum();
+    if total > delta as u128 {
+        return vec![];
+    }
+    let mut out = vec![];
+    for (locator, source, amount, authority) in &raw {
+        let Some(index) = msg.account_keys.iter().position(|k| k == source).map(|i| i as u8) else { continue };
+        let from_this_source: u128 = raw.iter().filter(|r| r.1 == *source).map(|r| r.2 as u128).sum();
+        if (balance_at(pre, &mint, index) as u128).checked_sub(balance_at(post, &mint, index) as u128) != Some(from_this_source) {
+            continue;
+        }
+        let owner = pre.iter().find(|e| e.account_index == index && e.mint == mint).and_then(|e| e.owner);
+        let verified_sender = owner.filter(|o| o == authority && msg.required_signers().contains(o));
+        out.push(ClaimFact { locator: *locator, source_account: *source, amount: *amount, verified_sender });
+    }
+    out
 }
 
 impl StrayFacts {
     fn unmeasured() -> Self {
-        StrayFacts { amount: 0, source_account: None, verified_sender: None }
+        StrayFacts { amount: 0, source_account: None, verified_sender: None, claims: vec![] }
     }
 
     fn with_amount(mut self, amount: u64) -> Self {
@@ -213,14 +271,15 @@ impl StrayFacts {
 
     /// The single account of this mint that fell by exactly `delta`, and its reported owner if that
     /// owner also signed the transaction.
-    fn from_balances(msg: &Message, pre: &[TokenBalanceEntry], post: &[TokenBalanceEntry], mint: &Pubkey, delta: u64) -> Self {
+    fn from_balances(ctx: &Ctx, msg: &Message, pre: &[TokenBalanceEntry], post: &[TokenBalanceEntry], mint: &Pubkey, delta: u64) -> Self {
+        let claims = claims_of(ctx, msg, pre, post, delta);
         let decreased: Vec<u8> =
             mint_indexes(pre, post, mint).into_iter().filter(|i| balance_at(pre, mint, *i).checked_sub(balance_at(post, mint, *i)) == Some(delta)).collect();
-        let [index] = decreased.as_slice() else { return StrayFacts { amount: delta, source_account: None, verified_sender: None } };
+        let [index] = decreased.as_slice() else { return StrayFacts { amount: delta, source_account: None, verified_sender: None, claims } };
         let source_account = msg.account_keys.get(*index as usize).copied();
         let owner = pre.iter().find(|e| e.account_index == *index && &e.mint == mint).and_then(|e| e.owner);
         let verified_sender = owner.filter(|o| msg.required_signers().contains(o));
-        StrayFacts { amount: delta, source_account, verified_sender }
+        StrayFacts { amount: delta, source_account, verified_sender, claims }
     }
 }
 
@@ -258,6 +317,9 @@ fn apply_verdict(ctx: &Ctx, signature: Sig, slot: u64, verdict: Verdict, facts: 
             if state::is_halted() {
                 return Applied::Wait("the bridge is halted: no return is credited".into());
             }
+            if let Some(why) = state::read_core(|c| c.observer.credits_halted.clone()) {
+                return Applied::Wait(format!("credits are halted by the custody check: {why}"));
+            }
             let t = Transition::ReturnCustodied { amount: v.amount };
             if state::apply_transition(t, AuditCtx::release(return_id, format!("return finalized at slot {slot}"))).is_err() {
                 return cannot_take("return", v.amount);
@@ -290,7 +352,19 @@ fn apply_verdict(ctx: &Ctx, signature: Sig, slot: u64, verdict: Verdict, facts: 
             if facts.amount > 0 && state::apply_transition(Transition::StrayObserved { amount: facts.amount }, AuditCtx::note(format!("stray at slot {slot}: {reason}"))).is_err() {
                 return cannot_take("stray", facts.amount);
             }
-            state::put_stray(&StrayRecord {
+            let claims = facts
+                .claims
+                .iter()
+                .map(|f| StrayClaim {
+                    locator: f.locator,
+                    source_account: f.source_account,
+                    amount: f.amount,
+                    verified_sender: f.verified_sender,
+                    refund_id: ids::refund_id(&ctx.genesis, &ctx.profile.mint, &ctx.salt, &signature.0, f.locator),
+                    state: ClaimState::Held,
+                })
+                .collect();
+            state::put_stray(&mut StrayRecord {
                 signature,
                 slot,
                 amount: facts.amount,
@@ -299,6 +373,8 @@ fn apply_verdict(ctx: &Ctx, signature: Sig, slot: u64, verdict: Verdict, facts: 
                 reason: reason.clone(),
                 state: StrayState::Held,
                 created_at_ns: now,
+                claims,
+                queue_seq: None,
             });
             state::mutate_core(|c| c.hints.retain(|h| h.signature != signature));
             Applied::Event(ObserverEvent::Stray { signature, amount: facts.amount, reason })

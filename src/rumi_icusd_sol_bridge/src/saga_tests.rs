@@ -863,6 +863,13 @@ pub(crate) fn dest() -> Account {
 /// Walk `amount` through the whole lifecycle to `pending_release` (as the burn lane will), with the
 /// escrow funded and a delivered burn operation. Returns the hand-over.
 pub(crate) fn burned(fx: &Fixture, amount: u64, tag: u8) -> BurnedReturn {
+    burned_with(fx, amount, tag, dest(), SENDER)
+}
+
+/// As [`burned`], for a return from `sender` addressed to `destination`. Leaves exactly what the burn
+/// lane leaves just before it opens the release: the stored verified return waiting for its burn, and
+/// the delivered burn operation whose id is `burn_id([return_id])`.
+pub(crate) fn burned_with(fx: &Fixture, amount: u64, tag: u8, destination: Account, sender: crate::tx::Pubkey) -> BurnedReturn {
     fx.ledger.credit(&escrow(), amount as u128);
     state::apply_transitions(
         &[
@@ -876,21 +883,43 @@ pub(crate) fn burned(fx: &Fixture, amount: u64, tag: u8) -> BurnedReturn {
         AuditCtx::note("test lifecycle"),
     )
     .expect("lifecycle");
+    stored_burn(tag, amount, destination, sender)
+}
+
+/// The stored verified return and its delivered burn operation (no books moved).
+pub(crate) fn stored_burn(tag: u8, amount: u64, destination: Account, sender: crate::tx::Pubkey) -> BurnedReturn {
+    let return_id = [tag; 32];
+    let (genesis, mint, salt) = state::read_core(|c| (c.config.genesis_hash, c.mint.expect("a bound mint"), c.instance_salt));
     let mut op = bare_op(100 + tag as u64, OpState::Delivered { signature: Sig([tag; 64]), slot: 900 + tag as u64, adopted: false });
     op.kind = OpKind::Burn;
     op.lane = Lane::Burn;
     op.amount = amount;
-    op.external_id = [0xb0 + tag; 32];
+    op.external_id = ids::burn_id(&genesis, &mint, &salt, &[return_id]).expect("burn id");
     state::put_op(&op);
-    BurnedReturn {
-        return_id: [tag; 32],
+    let b = BurnedReturn {
+        return_id,
         burn_op_id: op.id,
-        solana_sender: SENDER,
-        destination: dest(),
+        solana_sender: sender,
+        destination,
         return_signature: Sig([0x80 + tag; 64]),
         return_slot: 500 + tag as u64,
         amount_e8s: amount,
-    }
+    };
+    state::put_return(&state::ReturnRecord {
+        return_id,
+        seq: tag as u64,
+        signature: b.return_signature,
+        slot: b.return_slot,
+        source_account: [0xa1; 32],
+        sender,
+        amount,
+        destination,
+        client_nonce: tag as u64,
+        state: state::ReturnState::Burning { burn_op: op.id },
+        created_at_ns: 0,
+        updated_at_ns: 0,
+    });
+    b
 }
 
 #[test]
@@ -955,11 +984,8 @@ fn a_release_must_be_funded_by_pending_release_on_top_of_those_already_owed() {
         c.buckets.pending_release = (5 * E8) as u128;
     });
     assert_eq!(release::open_release(&b), Ok(OpenOutcome::Opened(ReleaseState::Pending)));
-    let mut op2 = state::get_op(b.burn_op_id).unwrap();
-    op2.id = 777;
-    op2.external_id = [0xcc; 32];
-    state::put_op(&op2);
-    let second = BurnedReturn { return_id: [9; 32], burn_op_id: 777, ..b.clone() };
+    // A second, properly stored return and burn whose funds were never moved into `PR`.
+    let second = stored_burn(9, 5 * E8, dest(), SENDER);
     assert!(matches!(release::open_release(&second), Err(OpenError::NotFunded { owed, .. }) if owed == (5 * E8) as u128));
 }
 
@@ -987,8 +1013,8 @@ fn opening_is_idempotent_on_the_return_id_and_one_burn_makes_one_release() {
 fn an_unpayable_destination_or_fee_gap_is_held_at_opening() {
     let fx = world();
     // The destination is the ledger's minting account (a transfer there would burn the funds).
-    let mut b = burned(&fx, 5 * E8, 1);
-    b.destination = state::read_core(|c| c.ledger_minting_account.unwrap());
+    let minting = state::read_core(|c| c.ledger_minting_account.unwrap());
+    let b = burned_with(&fx, 5 * E8, 1, minting, SENDER);
     let out = release::open_release(&b).unwrap();
     assert!(matches!(out, OpenOutcome::Opened(ReleaseState::Held { .. })), "{out:?}");
     let bk = buckets();

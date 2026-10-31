@@ -111,6 +111,21 @@ type CallVerdict = variant {
   Inconsistent;
   Absent;
 };
+type ClaimStatus = variant {
+  Refunding : record { op_id : nat64 };
+  Refunded : record { op_id : nat64 };
+  Held;
+  Retained;
+};
+type ClaimView = record {
+  status : ClaimStatus;
+  verified_sender : opt text;
+  inner_instruction : opt nat16;
+  outer_instruction : nat16;
+  refund_id : text;
+  amount_e8s : nat64;
+  source_account : text;
+};
 type ConsensusSetting = variant {
   Equality;
   Threshold : record { min : nat8; total : opt nat8 };
@@ -135,6 +150,19 @@ type ConsentMessageRequest = record {
 type ConsentMessageSpec = record {
   metadata : ConsentMessageMetadata;
   device_spec : opt DeviceSpec;
+};
+type CustodyReading = record {
+  status : CustodyStatusView;
+  at_ns : nat64;
+  expected : nat;
+  custody : nat;
+  supply : nat;
+};
+type CustodyStatusView = variant {
+  Ok;
+  Deficit : record { deficit : nat };
+  Reconciling : record { deficit : nat };
+  Excess : record { excess : nat };
 };
 type DepositKindView = variant {
   UserDeposit;
@@ -253,7 +281,9 @@ type MintState = variant { None; Bound; DeployedUnbound };
 type MonitorStatus = record {
   c1 : opt EscrowReading;
   c2 : opt SupplyReading;
+  custody : opt CustodyReading;
   last_run_ns : opt nat64;
+  custody_strikes : nat8;
   last_note : opt text;
   c2_strikes : nat8;
   c1_strikes : nat8;
@@ -270,6 +300,7 @@ type ObserverStatus = record {
   queued : nat64;
   processed : nat64;
   last_progress_ns : opt nat64;
+  credits_halted : opt text;
 };
 type OpKindView = variant { Burn; Mint; Refund };
 type OpStateView = variant {
@@ -393,6 +424,7 @@ type SolRpcCluster = variant { Mainnet; Testnet; Devnet };
 type SolanaInclusion = record { signature : text; slot : nat64 };
 type StandardRecord = record { url : text; name : text };
 type StrayView = record {
+  claims : vec ClaimView;
   signature : text;
   verified_sender : opt text;
   slot : nat64;
@@ -409,6 +441,7 @@ type SupplyReading = record {
   unattributed_gap : opt nat;
   supply : nat;
   bound : nat;
+  unattributed_gap_blocker : opt text;
 };
 type TokenProgram = variant { Classic; Token2022 };
 type Transition = variant {
@@ -434,6 +467,7 @@ type Transition = variant {
 };
 type UpgradeArgs = record { admins : opt vec principal };
 service : (BridgeArg) -> {
+  admin_clear_credits_halt : (text) -> (Result);
   admin_clear_lane_halt : (Lane, text) -> (Result);
   admin_resolve_held_op : (nat64, HeldOpResolution) -> (Result_1);
   admin_retry_deposit : (nat64) -> (Result_2);

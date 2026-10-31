@@ -153,6 +153,24 @@ pub fn stray_view(s: &state::StrayRecord) -> StrayView {
         source_account: s.source_account.as_ref().map(pubkey_to_base58),
         verified_sender: s.verified_sender.as_ref().map(pubkey_to_base58),
         reason: s.reason.clone(),
+        claims: s
+            .claims
+            .iter()
+            .map(|c| ClaimView {
+                outer_instruction: c.locator.outer,
+                inner_instruction: c.locator.inner,
+                source_account: pubkey_to_base58(&c.source_account),
+                amount_e8s: c.amount,
+                verified_sender: c.verified_sender.as_ref().map(pubkey_to_base58),
+                refund_id: hex32(&c.refund_id),
+                status: match c.state {
+                    state::ClaimState::Held => ClaimStatus::Held,
+                    state::ClaimState::Refunding { op_id } => ClaimStatus::Refunding { op_id },
+                    state::ClaimState::Refunded { op_id } => ClaimStatus::Refunded { op_id },
+                    state::ClaimState::Retained => ClaimStatus::Retained,
+                },
+            })
+            .collect(),
         created_at_ns: s.created_at_ns,
     }
 }
@@ -171,6 +189,7 @@ pub fn observer_status() -> ObserverStatus {
         last_note: o.last_note,
         returns_active: state::active_return_count(),
         strays: state::stray_count(),
+        credits_halted: o.credits_halted,
     }
 }
 
@@ -184,11 +203,25 @@ pub fn monitor_status() -> MonitorStatus {
             inflight_mint: candid::Nat::from(s.inflight_mint),
             within_bound: s.within_bound,
             quiescent: s.quiescent,
+            unattributed_gap_blocker: s.unattributed_gap.map(|_| crate::accounting::UNATTRIBUTED_BURN_BLOCKER.to_string()),
             unattributed_gap: s.unattributed_gap.map(candid::Nat::from),
             at_ns: s.at_ns,
         }),
+        custody: m.custody.map(|c| CustodyReading {
+            custody: candid::Nat::from(c.custody),
+            expected: candid::Nat::from(c.expected),
+            supply: candid::Nat::from(c.supply),
+            status: match c.status {
+                state::CustodyStatus::Ok => CustodyStatusView::Ok,
+                state::CustodyStatus::Reconciling { deficit } => CustodyStatusView::Reconciling { deficit: candid::Nat::from(deficit) },
+                state::CustodyStatus::Excess { excess } => CustodyStatusView::Excess { excess: candid::Nat::from(excess) },
+                state::CustodyStatus::Deficit { deficit } => CustodyStatusView::Deficit { deficit: candid::Nat::from(deficit) },
+            },
+            at_ns: c.at_ns,
+        }),
         c1_strikes: m.c1_strikes,
         c2_strikes: m.c2_strikes,
+        custody_strikes: m.custody_strikes,
         last_run_ns: m.last_run_ns,
         last_note: m.last_note,
     }

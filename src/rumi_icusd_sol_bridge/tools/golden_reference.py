@@ -184,6 +184,11 @@ def idhash(domain, fields):
     return hashlib.sha256(domain.encode() + b"".join(struct.pack(">I", len(f)) + f for f in fields)).digest()
 
 
+def locator(outer, inner):
+    """The 5-byte transfer locator field of the refund id preimage (ids.rs `TransferLocator::to_field`)."""
+    return struct.pack(">H", outer) + (b"\x00\x00\x00" if inner is None else b"\x01" + struct.pack(">H", inner))
+
+
 def u64be(n):
     return struct.pack(">Q", n)
 
@@ -206,7 +211,9 @@ def id_vectors():
         "RETURN_ID_TWO": ret2,
         "BURN_ID_TWO": idhash("rumi.icusd.sol.burn.v1", [g, MINT, salt, u64be(2), ret, ret2]),
         "BURN_ID_TWO_REVERSED": idhash("rumi.icusd.sol.burn.v1", [g, MINT, salt, u64be(2), ret2, ret]),
-        "REFUND_ID": idhash("rumi.icusd.sol.refund.v1", [g, MINT, salt, sig]),
+        "REFUND_ID": idhash("rumi.icusd.sol.refund.v2", [g, MINT, salt, sig, locator(0, None)]),
+        "REFUND_ID_OUTER1": idhash("rumi.icusd.sol.refund.v2", [g, MINT, salt, sig, locator(1, None)]),
+        "REFUND_ID_INNER0": idhash("rumi.icusd.sol.refund.v2", [g, MINT, salt, sig, locator(0, 0)]),
         "ESCROW_SUBACCOUNT": hashlib.sha256(b"rumi-icusd-sol-bridge:escrow:v1").digest(),
         "INSTANCE_SALT": hashlib.sha256(b"rumi-icusd-sol-bridge:instance-salt:v1" + b"\xbb" * 10 + u64be(1_700_000_000_000_000_000)).digest(),
     }
