@@ -1,15 +1,18 @@
-//! The timer (49a): one self-rescheduling timer runs the whole background pass in a fixed order:
-//! derive keys and bootstrap what is missing (`bootstrap::bootstrap_step`), then reconcile the
-//! nonce lanes (`lane::tick`). Once everything is bound and no operation is active the pass makes
-//! no calls, so an idle bridge spends nothing.
+//! The timer (49a, extended in 49b): one self-rescheduling timer runs the whole background pass in
+//! a fixed order: derive keys and bootstrap what is missing (`bootstrap::bootstrap_step`), reconcile
+//! the nonce lanes (`lane::tick`), then the ICP-side sagas (`ledger_pass`: ledger facts, pulls,
+//! preflight holds, refunds, releases, fee sweeps). Once everything is bound and no operation is
+//! active the pass makes only the three cheap ledger reads, so an idle bridge spends almost nothing.
 //!
-//! [`run_once`] is generic over the transport and the signer and is what the tests drive. The wasm
-//! half only builds the real [`CandidRpc`] and [`SchnorrSigner`] from the stored configuration and
-//! spawns [`run_once`]. A guard stops two passes overlapping; a guard left behind by a trap after
+//! [`run_once`] is generic over the transport, the signer and the ledger and is what the tests
+//! drive. The wasm half only builds the real [`CandidRpc`], [`SchnorrSigner`] and
+//! [`CanisterLedger`] from the stored configuration and spawns [`run_once`]. A guard stops two passes overlapping; a guard left behind by a trap after
 //! an await is reclaimed after ten minutes, and the next timer is armed BEFORE the pass is spawned,
 //! so a trapped pass cannot end the chain of ticks.
 
 use crate::bootstrap::{bootstrap_step, BootstrapEvent};
+use crate::flows::{deposit, release};
+use crate::icp::IcpLedger;
 use crate::lane::{tick, TickReport, TxSigner};
 use crate::sol_rpc::SolRpc;
 use crate::state;
@@ -60,8 +63,56 @@ pub struct RunReport {
     pub lane: TickReport,
 }
 
+/// How long the ledger facts are trusted while nothing is waiting on them.
+pub const LEDGER_FACTS_TTL_NS: u64 = 5 * 60 * 1_000_000_000;
+
+thread_local! {
+    /// When the ledger facts were last read. Heap only: after an upgrade the next pass reads them.
+    static FACTS_READ_AT: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+fn ledger_work_pending() -> bool {
+    state::active_deposit_count() > 0
+        || state::active_release_count() > 0
+        || state::read_core(|c| c.sweeps.iter().any(|s| !crate::flows::ledger_ops::is_terminal(&s.op)))
+}
+
+/// Refresh the ledger facts the sagas depend on: the minting account (once), the transfer fee and a
+/// lower bound on the log length (where an ICRC-3 search of an operation created later starts).
+/// An idle bridge reads them every few minutes; with ledger work pending, every pass.
+async fn refresh_ledger_basics<L: IcpLedger>(ledger: &L) {
+    let now = crate::env::now_ns();
+    let known = state::read_core(|c| c.ledger_minting_account.is_some() && c.ledger_fee_e8s.is_some());
+    let fresh = FACTS_READ_AT.with(|t| t.get()).is_some_and(|t| now.saturating_sub(t) < LEDGER_FACTS_TTL_NS);
+    if known && fresh && !ledger_work_pending() {
+        return;
+    }
+    FACTS_READ_AT.with(|t| t.set(Some(now)));
+    if state::read_core(|c| c.ledger_minting_account.is_none()) {
+        if let Ok(Some(acc)) = ledger.minting_account().await {
+            state::mutate_core(|c| c.ledger_minting_account = Some(acc));
+        }
+    }
+    if let Ok(fee) = ledger.fee().await {
+        state::mutate_core(|c| c.ledger_fee_e8s = Some(fee));
+    }
+    if let Ok(len) = ledger.log_length().await {
+        state::mutate_core(|c| c.ledger_tip_lower_bound = c.ledger_tip_lower_bound.max(len));
+    }
+}
+
+/// The ICP-side sagas, in dependency order. Each is bounded per pass.
+pub async fn ledger_pass<L: IcpLedger>(ledger: &L) {
+    refresh_ledger_basics(ledger).await;
+    deposit::reconcile_pulls(ledger).await;
+    deposit::retry_due_holds();
+    deposit::process_refunds(ledger).await;
+    release::process_releases(ledger).await;
+    deposit::process_sweeps(ledger).await;
+}
+
 /// One background pass.
-pub async fn run_once<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, now: u64) -> RunReport {
+pub async fn run_once<R: SolRpc, S: TxSigner, L: IcpLedger>(rpc: &R, signer: &S, ledger: &L, now: u64) -> RunReport {
     if !state::read_core(|c| c.initialized) {
         return RunReport::default();
     }
@@ -70,7 +121,27 @@ pub async fn run_once<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, now: u64) -> 
     };
     let bootstrap = bootstrap_step(rpc, signer, now).await;
     let lane = tick(rpc, signer, now).await;
+    ledger_pass(ledger).await;
     RunReport { skipped: false, bootstrap, lane }
+}
+
+/// Run one pass now (the admin's "run tick"). `false` when another pass holds the guard or the
+/// instance is not configured to build its clients.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_now() -> bool {
+    use crate::icp::CanisterLedger;
+    use crate::schnorr::SchnorrSigner;
+    use crate::sol_rpc::CandidRpc;
+    let (config, now) = (state::read_core(|c| c.config.clone()), crate::env::now_ns());
+    let (Ok(rpc), Ok(signer)) = (CandidRpc::from_config(config.sol_rpc, config.rpc.clone()), SchnorrSigner::from_config(&config)) else {
+        return false;
+    };
+    !run_once(&rpc, &signer, &CanisterLedger::from_config(), now).await.skipped
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn run_now() -> bool {
+    false
 }
 
 /// Seconds between passes: the rebroadcast interval of the lane settings, at least
@@ -89,7 +160,7 @@ async fn pass() {
     let (Ok(rpc), Ok(signer)) = (CandidRpc::from_config(config.sol_rpc, config.rpc.clone()), SchnorrSigner::from_config(&config)) else {
         return;
     };
-    run_once(&rpc, &signer, now).await;
+    run_once(&rpc, &signer, &crate::icp::CanisterLedger::from_config(), now).await;
 }
 
 /// Arm the next pass `secs` from now (replacing any pending one).
@@ -119,12 +190,12 @@ pub fn schedule_soon() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{block_on, MockChain, MockSigner};
+    use crate::testkit::{block_on, MockChain, MockLedger, MockSigner};
 
     #[test]
     fn an_uninitialized_instance_does_nothing() {
         state::reset_for_tests();
-        let r = block_on(run_once(&MockChain::new(), &MockSigner::new(), 5));
+        let r = block_on(run_once(&MockChain::new(), &MockSigner::new(), &MockLedger::new(), 5));
         assert_eq!(r, RunReport::default());
     }
 
@@ -136,11 +207,12 @@ mod tests {
         let signer = MockSigner::new();
         let now = 1_000_000_000_000u64;
         let g = RunGuard::acquire(now).unwrap();
-        assert!(block_on(run_once(&chain, &signer, now + 1)).skipped, "a pass is running");
+        let ledger = MockLedger::new();
+        assert!(block_on(run_once(&chain, &signer, &ledger, now + 1)).skipped, "a pass is running");
         // A guard left behind by a trapped pass is reclaimed after ten minutes.
-        assert!(!block_on(run_once(&chain, &signer, now + STALE_GUARD_NS + 1)).skipped);
+        assert!(!block_on(run_once(&chain, &signer, &ledger, now + STALE_GUARD_NS + 1)).skipped);
         drop(g);
-        assert!(!block_on(run_once(&chain, &signer, now + 2 * STALE_GUARD_NS)).skipped);
+        assert!(!block_on(run_once(&chain, &signer, &ledger, now + 2 * STALE_GUARD_NS)).skipped);
     }
 
     #[test]

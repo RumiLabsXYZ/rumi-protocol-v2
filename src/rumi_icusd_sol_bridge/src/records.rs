@@ -224,6 +224,9 @@ pub enum OpState {
     /// Unverifiable or foreign consumer, re-issue limit, or history horizon: no replacement and
     /// no refund is invented. Resolved by hand.
     Held { reason: String },
+    /// An admin attested, after checking by hand, that this operation will never deliver (49b).
+    /// Terminal. Appended last, so older images still decode.
+    Abandoned { reason: String, at_ns: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,7 +268,7 @@ pub struct SolOp {
 
 impl SolOp {
     pub fn is_terminal(&self) -> bool {
-        matches!(self.state, OpState::Delivered { .. })
+        matches!(self.state, OpState::Delivered { .. } | OpState::Abandoned { .. })
     }
 
     /// Attempts of the current generation.
@@ -463,6 +466,7 @@ mod tests {
             OpState::Delivered { signature: Sig([1; 64]), slot: 9, adopted: true },
             OpState::NeedsReissue { reason: NotDeliveredReason::LandedWithError { signature: Sig([2; 64]) } },
             OpState::Held { reason: "x".into() },
+            OpState::Abandoned { reason: "checked by hand".into(), at_ns: 77 },
         ] {
             let mut o = sample_op();
             o.state = state;

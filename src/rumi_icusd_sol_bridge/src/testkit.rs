@@ -487,6 +487,258 @@ impl TxSigner for MockSigner {
 }
 
 // ---------------------------------------------------------------------------
+// The icUSD ledger
+// ---------------------------------------------------------------------------
+
+use crate::icp::IcpLedger;
+use crate::ledger::{CallOutcome, LedgerRejection, SearchOutcome};
+use crate::state::{LedgerOp, LedgerOpKind};
+use icrc_ledger_types::icrc1::account::Account;
+
+type AccountKey = (candid::Principal, [u8; 32]);
+type Allowance = (u128, Option<u64>);
+
+fn norm(a: &Account) -> AccountKey {
+    (a.owner, a.subaccount.unwrap_or([0u8; 32]))
+}
+
+/// What the ledger stores of a transfer: the tuple its deduplication and an ICRC-3 search match on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MockBlock {
+    pub kind: LedgerOpKind,
+    pub from: Account,
+    pub to: Account,
+    pub spender: Option<Account>,
+    pub amount: u64,
+    pub fee: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+}
+
+/// An injected failure for the next `execute` call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerFault {
+    /// The transfer executes and the reply is lost (an ambiguous outcome).
+    ExecuteThenLoseReply,
+    /// The call fails ambiguously and nothing executes.
+    AmbiguousNoEffect,
+    /// A typed rejection; nothing executes.
+    Reject(LedgerRejection),
+}
+
+type ExecHook = Box<dyn Fn(&LedgerOp)>;
+
+/// A simulated icUSD ledger: balances, ICRC-2 allowances, a block log, the 24 hour deduplication
+/// window of ICRC-1 (a repeated identical tuple returns the original block), fee checking and
+/// ICRC-3 search over the log. `execute` can be made to lose its reply or fail.
+pub struct MockLedger {
+    pub fee: Cell<u64>,
+    balances: RefCell<BTreeMap<AccountKey, u128>>,
+    allowances: RefCell<BTreeMap<(AccountKey, AccountKey), Allowance>>,
+    pub blocks: RefCell<Vec<MockBlock>>,
+    faults: RefCell<VecDeque<LedgerFault>>,
+    /// Every tuple handed to `execute`, in order (before any fault applies).
+    pub sent: RefCell<Vec<LedgerOp>>,
+    pub minting: RefCell<Option<Account>>,
+    /// Called at the top of `execute`, before anything happens: lets a test look at the stored state
+    /// at the moment of the send.
+    pub on_execute: RefCell<Option<ExecHook>>,
+    /// Make `search` fail with this error.
+    pub search_error: RefCell<Option<String>>,
+    pub search_calls: RefCell<Vec<(u64, u64)>>,
+    pub fee_calls: Cell<u32>,
+}
+
+impl Default for MockLedger {
+    fn default() -> Self {
+        MockLedger::new()
+    }
+}
+
+impl MockLedger {
+    pub fn new() -> MockLedger {
+        MockLedger {
+            fee: Cell::new(10_000),
+            balances: RefCell::default(),
+            allowances: RefCell::default(),
+            blocks: RefCell::default(),
+            faults: RefCell::default(),
+            sent: RefCell::default(),
+            minting: RefCell::new(Some(Account { owner: candid::Principal::from_slice(&[0x4d; 10]), subaccount: None })),
+            on_execute: RefCell::new(None),
+            search_error: RefCell::new(None),
+            search_calls: RefCell::default(),
+            fee_calls: Cell::new(0),
+        }
+    }
+
+    pub fn credit(&self, a: &Account, amount: u128) {
+        *self.balances.borrow_mut().entry(norm(a)).or_insert(0) += amount;
+    }
+
+    pub fn balance(&self, a: &Account) -> u128 {
+        self.balances.borrow().get(&norm(a)).copied().unwrap_or(0)
+    }
+
+    pub fn approve(&self, from: &Account, spender: &Account, amount: u128, expires_at: Option<u64>) {
+        self.allowances.borrow_mut().insert((norm(from), norm(spender)), (amount, expires_at));
+    }
+
+    pub fn allowance_of(&self, from: &Account, spender: &Account) -> u128 {
+        self.allowances.borrow().get(&(norm(from), norm(spender))).map(|a| a.0).unwrap_or(0)
+    }
+
+    /// Fill the log with `n` unrelated blocks (so a search window starts above zero).
+    pub fn preload_blocks(&self, n: u64) {
+        for i in 0..n {
+            self.blocks.borrow_mut().push(MockBlock {
+                kind: LedgerOpKind::Sweep,
+                from: Account { owner: candid::Principal::from_slice(&[0xee; 10]), subaccount: None },
+                to: Account { owner: candid::Principal::from_slice(&[0xef; 10]), subaccount: None },
+                spender: None,
+                amount: 1,
+                fee: 0,
+                memo: i.to_be_bytes().to_vec(),
+                created_at_time: 1,
+            });
+        }
+    }
+
+    pub fn push_fault(&self, f: LedgerFault) {
+        self.faults.borrow_mut().push_back(f);
+    }
+
+    pub fn sent_count(&self) -> usize {
+        self.sent.borrow().len()
+    }
+
+    fn block_of(op: &LedgerOp, fee: u64) -> MockBlock {
+        MockBlock {
+            kind: op.kind,
+            from: op.from,
+            to: op.to,
+            spender: op.spender,
+            amount: op.amount_e8s,
+            fee,
+            memo: op.memo.clone(),
+            created_at_time: op.created_at_time,
+        }
+    }
+
+    fn same_tuple(a: &MockBlock, b: &MockBlock) -> bool {
+        a.kind == b.kind
+            && norm(&a.from) == norm(&b.from)
+            && norm(&a.to) == norm(&b.to)
+            && a.spender.map(|x| norm(&x)) == b.spender.map(|x| norm(&x))
+            && a.amount == b.amount
+            && a.memo == b.memo
+            && a.created_at_time == b.created_at_time
+    }
+
+    /// Apply the transfer, or return why it is refused. Mirrors the ledger's checks in its order.
+    fn apply(&self, op: &LedgerOp) -> CallOutcome {
+        let now = crate::env::now_ns();
+        let fee = self.fee.get();
+        // Window.
+        if op.created_at_time.saturating_add(crate::ledger::TX_WINDOW_NS + crate::ledger::PERMITTED_DRIFT_NS) < now {
+            return CallOutcome::Rejected(LedgerRejection::TooOld);
+        }
+        if op.created_at_time > now.saturating_add(crate::ledger::PERMITTED_DRIFT_NS) {
+            return CallOutcome::Rejected(LedgerRejection::CreatedInFuture);
+        }
+        // Deduplication.
+        let candidate = Self::block_of(op, if op.kind == LedgerOpKind::Pull { fee } else { op.fee_e8s.unwrap_or(fee) });
+        if let Some(pos) = self.blocks.borrow().iter().position(|b| Self::same_tuple(b, &candidate)) {
+            return CallOutcome::Accepted { block_index: pos as u64 };
+        }
+        // Fee (explicit on transfers).
+        if op.kind != LedgerOpKind::Pull && op.fee_e8s != Some(fee) {
+            return CallOutcome::Rejected(LedgerRejection::BadFee { expected_fee: fee });
+        }
+        let need = op.amount_e8s as u128 + fee as u128;
+        if op.kind == LedgerOpKind::Pull {
+            let spender = op.spender.expect("a pull has a spender");
+            let allowance = self.allowances.borrow().get(&(norm(&op.from), norm(&spender))).copied();
+            let (allowed, expires) = allowance.unwrap_or((0, None));
+            let live = expires.map(|e| e > now).unwrap_or(true);
+            if !live || allowed < need {
+                return CallOutcome::Rejected(LedgerRejection::InsufficientAllowance { allowance: if live { allowed } else { 0 } });
+            }
+        }
+        let balance = self.balance(&op.from);
+        if balance < need {
+            return CallOutcome::Rejected(LedgerRejection::InsufficientFunds { balance });
+        }
+        *self.balances.borrow_mut().entry(norm(&op.from)).or_insert(0) -= need;
+        *self.balances.borrow_mut().entry(norm(&op.to)).or_insert(0) += op.amount_e8s as u128;
+        if op.kind == LedgerOpKind::Pull {
+            let spender = op.spender.expect("a pull has a spender");
+            if let Some(a) = self.allowances.borrow_mut().get_mut(&(norm(&op.from), norm(&spender))) {
+                a.0 -= need;
+            }
+        }
+        self.blocks.borrow_mut().push(candidate);
+        CallOutcome::Accepted { block_index: self.blocks.borrow().len() as u64 - 1 }
+    }
+}
+
+impl IcpLedger for MockLedger {
+    async fn execute(&self, op: &LedgerOp) -> CallOutcome {
+        if let Some(hook) = self.on_execute.borrow().as_ref() {
+            hook(op);
+        }
+        self.sent.borrow_mut().push(op.clone());
+        match self.faults.borrow_mut().pop_front() {
+            Some(LedgerFault::ExecuteThenLoseReply) => {
+                let _ = self.apply(op);
+                CallOutcome::Ambiguous("the reply was lost".into())
+            }
+            Some(LedgerFault::AmbiguousNoEffect) => CallOutcome::Ambiguous("the call failed".into()),
+            Some(LedgerFault::Reject(r)) => CallOutcome::Rejected(r),
+            None => self.apply(op),
+        }
+    }
+
+    async fn search(&self, op: &LedgerOp, from_block: u64, max_blocks: u64, now_ns: u64) -> SearchOutcome {
+        self.search_calls.borrow_mut().push((from_block, max_blocks));
+        if let Some(e) = self.search_error.borrow().clone() {
+            return SearchOutcome::Error(e);
+        }
+        let blocks = self.blocks.borrow();
+        let tip = blocks.len() as u64;
+        let end = tip.min(from_block.saturating_add(max_blocks));
+        let wanted = Self::block_of(op, op.fee_e8s.unwrap_or(0));
+        for i in from_block..end {
+            if Self::same_tuple(&blocks[i as usize], &wanted) {
+                return SearchOutcome::Found { block_index: i };
+            }
+        }
+        crate::ledger::conclude_scan(op.created_at_time, from_block, end, tip, now_ns)
+    }
+
+    async fn fee(&self) -> Result<u64, String> {
+        self.fee_calls.set(self.fee_calls.get() + 1);
+        Ok(self.fee.get())
+    }
+
+    async fn balance_of(&self, account: Account) -> Result<u128, String> {
+        Ok(self.balance(&account))
+    }
+
+    async fn allowance(&self, account: Account, spender: Account) -> Result<(u128, Option<u64>), String> {
+        Ok(self.allowances.borrow().get(&(norm(&account), norm(&spender))).copied().unwrap_or((0, None)))
+    }
+
+    async fn log_length(&self) -> Result<u64, String> {
+        Ok(self.blocks.borrow().len() as u64)
+    }
+
+    async fn minting_account(&self) -> Result<Option<Account>, String> {
+        Ok(*self.minting.borrow())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The fixture
 // ---------------------------------------------------------------------------
 
@@ -495,6 +747,7 @@ impl TxSigner for MockSigner {
 pub struct Fixture {
     pub chain: MockChain,
     pub signer: MockSigner,
+    pub ledger: MockLedger,
 }
 
 pub fn slot_initial_value(lane: Lane, index: u8) -> Hash32 {
@@ -523,7 +776,7 @@ impl Fixture {
             c.mint = Some(MINT);
             c.mint_state = crate::records::MintState::Bound;
         });
-        let fixture = Fixture { chain: MockChain::new(), signer: MockSigner::new() };
+        let fixture = Fixture { chain: MockChain::new(), signer: MockSigner::new(), ledger: MockLedger::new() };
         for l in Lane::ALL {
             for i in 0..lane.nonce_pool_size {
                 let slot = nonce::register_slot(l, i).expect("register");
@@ -547,7 +800,7 @@ impl Fixture {
             c.config.lane = lane;
             c.config.token_program = crate::tx::TokenProgram::Token2022;
         });
-        let fixture = Fixture { chain: MockChain::new(), signer: MockSigner::new() };
+        let fixture = Fixture { chain: MockChain::new(), signer: MockSigner::new(), ledger: MockLedger::new() };
         fixture.chain.auto_apply_creation.set(true);
         fixture.chain.blocks.borrow_mut().insert(1_999, [0x5b; 32]);
         fixture.chain.tip_slot.set(2_000);

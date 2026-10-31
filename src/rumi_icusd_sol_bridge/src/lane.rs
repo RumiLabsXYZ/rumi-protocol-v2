@@ -914,6 +914,63 @@ async fn process_reissue<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, op_id: u64
     vec![OpEvent::Reissued { op_id, generation }]
 }
 
+/// Admin resolution (49b): put a held operation back under reconcile, against the SAME stored bytes.
+/// Nothing is assumed about what happened: adoption still needs finalized success and exactly the
+/// stored message, and a foreign consumer halts the lane again. The discovery bookkeeping of the
+/// earlier look is cleared so the history-horizon clock starts over for this explicit second look.
+pub fn recheck_held(op_id: u64, now: u64) -> Result<(), String> {
+    let op = state::get_op(op_id).ok_or("no such operation")?;
+    if !matches!(op.state, OpState::Held { .. }) {
+        return Err("the operation is not held".into());
+    }
+    if op.current_attempts().next().is_none() {
+        return Err("the held operation has no attempt of its current generation to look at again".into());
+    }
+    update_op(op_id, |o| {
+        o.state = OpState::Active;
+        o.observed_value = None;
+        o.advance_seen_at_ns = None;
+        o.discovery_cursor = None;
+        o.alarm_raised_at_ns = None;
+        o.updated_at_ns = now;
+    });
+    state::append_audit(None, state::AuditCtx::op(op_id, "held operation put back under reconcile by an admin"));
+    Ok(())
+}
+
+/// Admin resolution (49b): abandon a held MINT after an admin checked by hand that it will never
+/// deliver. The operation becomes terminal. Its nonce slot goes back to `Unverified`, so the next
+/// bootstrap pass reads the account from the chain again and the slot is used only with the value
+/// found there (never with a value the lane inferred). Returns the slot freed, if any. The caller
+/// (`flows::held`) updates the deposit.
+pub fn abandon_held_mint(op_id: u64, reason: &str, now: u64) -> Result<(), String> {
+    let op = state::get_op(op_id).ok_or("no such operation")?;
+    if op.kind != OpKind::Mint {
+        return Err("only a held mint can be abandoned; burns and stray refunds are resolved by the burn lane".into());
+    }
+    if !matches!(op.state, OpState::Held { .. }) {
+        return Err("the operation is not held".into());
+    }
+    if let Some(idx) = op.slot_index {
+        if let Some(mut slot) = state::get_slot(op.lane, idx) {
+            if slot.state == (crate::records::SlotState::Reserved { op_id }) {
+                slot.state = crate::records::SlotState::Unverified;
+                slot.last_value = None;
+                slot.anchor = None;
+                slot.generation += 1;
+                state::put_slot(&slot);
+            }
+        }
+    }
+    update_op(op_id, |o| {
+        o.state = OpState::Abandoned { reason: reason.to_string(), at_ns: now };
+        o.updated_at_ns = now;
+        o.discovery_cursor = None;
+    });
+    state::append_audit(None, state::AuditCtx::op(op_id, format!("held mint abandoned by an admin: {reason}")));
+    Ok(())
+}
+
 /// Process one operation (whatever its state calls for).
 pub async fn process_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, op_id: u64, now: u64) -> Vec<OpEvent> {
     let Some(_guard) = OpGuard::acquire(op_id) else { return vec![] };
@@ -921,7 +978,7 @@ pub async fn process_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, op_id: u64,
     match op.state {
         OpState::Active => process_active(rpc, signer, op_id, now).await,
         OpState::NeedsReissue { .. } => process_reissue(rpc, signer, op_id, now).await,
-        OpState::Delivered { .. } | OpState::Held { .. } => vec![],
+        OpState::Delivered { .. } | OpState::Held { .. } | OpState::Abandoned { .. } => vec![],
     }
 }
 

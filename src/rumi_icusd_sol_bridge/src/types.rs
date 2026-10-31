@@ -69,6 +69,23 @@ pub struct BridgeFees {
     pub release_fee_e8s: u64,
 }
 
+/// Deposit, capacity and rate limits (49b), e8s.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct BridgeLimits {
+    pub min_deposit_e8s: u64,
+    /// Also the per-operation cap of one Solana mint.
+    pub max_deposit_e8s: u64,
+    /// Cap on `O + PM + RC + BU + H + reserved pulls`: everything that is, or may become, supply.
+    pub max_outstanding_e8s: u64,
+    /// Maximum deposits admitted per window.
+    pub mint_window_limit_e8s: u64,
+    /// Maximum releases started per window.
+    pub release_window_limit_e8s: u64,
+    pub window_seconds: u64,
+    pub max_active_per_caller: u32,
+    pub max_active_global: u32,
+}
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pauses {
     pub deposits: bool,
@@ -198,7 +215,7 @@ impl LaneSettings {
 }
 
 // ---------------------------------------------------------------------------
-// Wallet-standard argument shapes (decoded by ICRC-21; the endpoints land in BB-48/BB-49)
+// Argument shapes (decoded by ICRC-21 and by the endpoints)
 // ---------------------------------------------------------------------------
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -228,7 +245,24 @@ pub enum BridgeError {
     Paused(String),
     Halted(String),
     InvalidArgument(String),
+    /// The Solana recipient is not an acceptable wallet.
+    InvalidRecipient(String),
+    AmountBelowMinimum { min_e8s: u64 },
+    AmountAboveMaximum { max_e8s: u64 },
+    CapacityExceeded { available_e8s: u64 },
+    RateLimited { available_e8s: u64, window_resets_at_ns: u64 },
+    FeeChanged { current_fee_e8s: u64 },
+    /// The caller's ICRC-2 allowance to the bridge does not cover amount plus ledger fee.
+    InsufficientAllowance { allowance_e8s: u64, required_e8s: u64 },
+    /// The caller's icUSD balance does not cover amount plus ledger fee.
+    InsufficientFunds { balance_e8s: u64, required_e8s: u64 },
+    TooManyActiveOperations,
+    RequestIdConflict,
+    NotFound,
+    NotOwner,
     InvalidState(String),
+    Ledger(String),
+    Rpc(String),
     Internal(String),
 }
 
@@ -252,6 +286,7 @@ pub struct BridgeInfo {
     pub admins: Vec<Principal>,
     pub pauses: Pauses,
     pub fees: BridgeFees,
+    pub limits: BridgeLimits,
     pub rpc: RpcSettings,
     pub lane: LaneSettings,
     pub halted: Option<String>,
@@ -281,6 +316,198 @@ pub struct BootstrapStatus {
     pub pool_free: u32,
     pub pool_reserved: u32,
     pub pending_bootstrap_txs: u32,
+}
+
+// ---- deposits and releases (49b) ----
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum DepositKindView {
+    /// ICP -> Solana deposit by `owner`.
+    UserDeposit,
+    /// Re-mint of a held return claim to its Solana sender (64 hex).
+    Remint { return_id: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum DepositStatus {
+    PullPending,
+    PullUnknown,
+    PullFailed { reason: String },
+    Escrowed,
+    MintInFlight,
+    Delivered,
+    MintHeld { reason: String },
+    Refunding,
+    Refunded,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SolanaInclusion {
+    /// Base58 first signature of the finalized mint transaction.
+    pub signature: String,
+    pub slot: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DepositView {
+    pub id: u64,
+    pub kind: DepositKindView,
+    pub owner: Principal,
+    pub from: Option<Account>,
+    /// Base58 Solana wallet.
+    pub solana_recipient: String,
+    pub amount_e8s: u64,
+    pub deposit_fee_e8s: u64,
+    pub mint_amount_e8s: u64,
+    /// 64 hex, once the pull is proven.
+    pub mint_id: Option<String>,
+    pub status: DepositStatus,
+    pub client_request_id: serde_bytes::ByteBuf,
+    pub pull_block_index: Option<u64>,
+    pub refund_block_index: Option<u64>,
+    pub refund_amount_e8s: Option<u64>,
+    pub mint_op_id: Option<u64>,
+    pub delivered: Option<SolanaInclusion>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ReleaseStatus {
+    Pending,
+    TransferUnknown,
+    Released,
+    Held { reason: String },
+    Reminting { deposit_id: u64 },
+    Reminted { deposit_id: u64 },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseView {
+    /// 64 hex.
+    pub return_id: String,
+    pub seq: u64,
+    pub burn_op_id: u64,
+    /// Base58 Solana wallet that sent the return.
+    pub solana_sender: String,
+    pub amount_e8s: u64,
+    pub release_fee_e8s: u64,
+    pub ledger_fee_e8s: Option<u64>,
+    pub amount_to_receive_e8s: Option<u64>,
+    pub destination: Account,
+    pub return_signature: String,
+    pub return_slot: u64,
+    pub burn_signature: String,
+    pub burn_slot: u64,
+    pub status: ReleaseStatus,
+    pub release_block_index: Option<u64>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListDepositsArgs {
+    pub start_after: Option<u64>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListDepositsForOwnerArgs {
+    pub owner: Principal,
+    pub start_after: Option<u64>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListReleasesArgs {
+    /// The ICP principal the releases are paid to.
+    pub owner: Principal,
+    pub start_after_seq: Option<u64>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListReleasesForSenderArgs {
+    /// Base58 Solana wallet that sent the returns.
+    pub solana_sender: String,
+    pub start_after_seq: Option<u64>,
+    pub limit: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HintView {
+    /// Base58 transaction signature.
+    pub signature: String,
+    pub submitted_by: Principal,
+    pub submitted_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AuditEntry {
+    pub seq: u64,
+    pub at_ns: u64,
+    pub transition: Option<Transition>,
+    pub deposit_id: Option<u64>,
+    /// 64 hex.
+    pub return_id: Option<String>,
+    pub op_id: Option<u64>,
+    pub note: String,
+}
+
+// ---- lane operations (49b: the admin's view of held operations) ----
+
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpKindView {
+    Mint,
+    Burn,
+    Refund,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum OpStateView {
+    Active,
+    Delivered { signature: String, slot: u64, adopted: bool },
+    NeedsReissue { reason: String },
+    Held { reason: String },
+    /// An admin attested, after checking by hand, that this operation will never deliver.
+    Abandoned { reason: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OpView {
+    pub id: u64,
+    pub kind: OpKindView,
+    pub lane: crate::records::Lane,
+    /// 64 hex: the mint, burn or refund id (also the memo content).
+    pub external_id: String,
+    pub amount: u64,
+    pub state: OpStateView,
+    pub generation: u32,
+    pub slot_index: Option<u8>,
+    /// Base58 transaction ids of every attempt, oldest first.
+    pub tx_ids: Vec<String>,
+    pub note: Option<String>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListOpsArgs {
+    pub start_after: Option<u64>,
+    pub limit: u32,
+}
+
+/// What an admin does with a held operation (note section 4: "resolved by hand").
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum HeldOpResolution {
+    /// Look again at the SAME stored bytes (for example after the history horizon was raised or an
+    /// RPC outage ended). Nothing is assumed: adoption still needs the exact message.
+    Recheck,
+    /// The admin checked by hand that the nonce was consumed by a transaction that did not deliver
+    /// this operation, and that it will never deliver. The operation is abandoned: the nonce slot
+    /// is re-read from the chain before it is used again, the deposit is never minted again, and
+    /// its owner may ask for the ICP refund. The reason is stored in the audit log.
+    Abandon { reason: String },
 }
 
 /// The accounting buckets, e8s (`Nat`: the Rust type is `u128`).

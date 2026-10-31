@@ -24,11 +24,15 @@
 //!   signer trait (mocks in `testkit`, unit tests only);
 //! * `state`, `env`, `admin`, `icrc21`, `types`, `ledger`: the copied instance skeleton.
 //!
-//! Deferred to BB-49: the real `sign_with_schnorr` signer, the timer that calls `lane::tick`,
-//! mint creation and bind checks, the mint saga that applies `OpEvent::Delivered` to the
-//! accounting buckets, the return observer, the burn lane driver and the refund lane, the pool
-//! bootstrap driver (the creation message builder exists), `flows/ledger_ops`, and the deposit,
-//! return and admin endpoints.
+//! BB-49 49a added the real `sign_with_schnorr` signer, the timer, mint creation and bind checks
+//! and the pool bootstrap driver. 49b adds the ICP-side ledger saga (`flows`, `icp`): deposit
+//! admission and the ICRC-2 pull, the ICP refund, releases opened only from a delivered burn, fee
+//! sweeps, the persisted-tuple lifecycle with bounded ICRC-3 proofs, the user, hint and admin
+//! endpoints and the admin resolution of held operations.
+//!
+//! Still deferred (49c and 49d): the mint saga that builds a mint operation for an escrowed
+//! deposit and applies `OpEvent::Delivered` to the accounting buckets (49c), the return observer
+//! (49c), and the burn lane that custodies, burns and calls `flows::release::open_release` (49d).
 //!
 //! # Open (U) items this crate carries, by profile blocker id
 //!
@@ -65,7 +69,9 @@ pub mod accounting;
 pub mod admin;
 pub mod bootstrap;
 pub mod env;
+pub mod flows;
 pub mod history_probe;
+pub mod icp;
 pub mod icrc21;
 pub mod ids;
 pub mod lane;
@@ -87,6 +93,10 @@ mod testkit;
 pub mod timer;
 pub mod tx;
 pub mod types;
+pub mod views;
+
+#[cfg(test)]
+mod saga_tests;
 
 use candid::Principal;
 use state::AuditCtx;
@@ -148,6 +158,155 @@ fn post_upgrade(arg: Option<BridgeArg>) {
 }
 
 // ---------------------------------------------------------------------------
+// User methods
+// ---------------------------------------------------------------------------
+
+#[ic_cdk::update]
+async fn bridge_to_solana(args: BridgeToSolanaArgs) -> BridgeResult<DepositView> {
+    flows::deposit::bridge_to_solana(&icp::CanisterLedger::from_config(), args).await
+}
+
+#[ic_cdk::update]
+async fn request_deposit_refund(id: u64) -> BridgeResult<DepositView> {
+    flows::deposit::request_refund(&icp::CanisterLedger::from_config(), id).await
+}
+
+/// "Look at this Solana transaction sooner" (base58 signature). Stores a bounded hint; never
+/// settles anything.
+#[ic_cdk::update]
+fn notify_solana_return(signature: String) -> BridgeResult<()> {
+    flows::release::record_hint(signature)
+}
+
+#[ic_cdk::query]
+fn get_deposit(id: u64) -> Option<DepositView> {
+    state::get_deposit(id).map(|d| views::deposit_view(&d))
+}
+
+#[ic_cdk::query]
+fn list_my_deposits(args: ListDepositsArgs) -> Vec<DepositView> {
+    let caller = env::caller();
+    state::list_owner_deposits(&caller, args.start_after, args.limit).iter().map(views::deposit_view).collect()
+}
+
+/// Public: deposits are on-chain facts. Lets wallets whose signer upgrades queries to signed calls
+/// read history without a consent prompt.
+#[ic_cdk::query]
+fn list_deposits_for_owner(args: ListDepositsForOwnerArgs) -> Vec<DepositView> {
+    state::list_owner_deposits(&args.owner, args.start_after, args.limit).iter().map(views::deposit_view).collect()
+}
+
+/// Public lookup of a deposit by its owner and client request id (recovery after a lost
+/// `bridge_to_solana` reply).
+#[ic_cdk::query]
+fn get_deposit_by_request(owner: Principal, client_request_id: serde_bytes::ByteBuf) -> Option<DepositView> {
+    let key = state::request_key(&owner, &client_request_id).ok()?;
+    state::lookup_request(&key).and_then(state::get_deposit).map(|d| views::deposit_view(&d))
+}
+
+/// A release by its return id (64 hex).
+#[ic_cdk::query]
+fn get_release(return_id: String) -> Option<ReleaseView> {
+    let id: [u8; 32] = hex::decode(return_id.trim()).ok()?.try_into().ok()?;
+    state::get_release(&id).map(|r| views::release_view(&r))
+}
+
+/// Releases paid to an ICP principal, newest first.
+#[ic_cdk::query]
+fn list_releases_for_owner(args: ListReleasesArgs) -> Vec<ReleaseView> {
+    state::list_owner_releases(&args.owner, args.start_after_seq, args.limit).iter().map(views::release_view).collect()
+}
+
+/// Releases created by returns from a Solana wallet (base58), including held claims.
+#[ic_cdk::query]
+fn list_releases_for_solana_sender(args: ListReleasesForSenderArgs) -> Vec<ReleaseView> {
+    let Ok(sender) = tx::pubkey_from_base58(&args.solana_sender) else { return vec![] };
+    state::list_sender_releases(&sender, args.start_after_seq, args.limit).iter().map(views::release_view).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Admin methods
+// ---------------------------------------------------------------------------
+
+#[ic_cdk::update]
+fn admin_set_pauses(p: Pauses) -> BridgeResult<()> {
+    admin::set_pauses(p)?;
+    timer::schedule_soon();
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn admin_set_limits(l: BridgeLimits) -> BridgeResult<()> {
+    admin::set_limits(l)
+}
+
+#[ic_cdk::update]
+fn admin_set_fees(f: BridgeFees) -> BridgeResult<()> {
+    admin::set_fees(f)
+}
+
+#[ic_cdk::update]
+async fn admin_sweep_fees(amount_e8s: u64) -> BridgeResult<u64> {
+    admin::require_admin()?;
+    flows::deposit::sweep_fees(&icp::CanisterLedger::from_config(), amount_e8s).await
+}
+
+/// Put a held deposit (no mint operation, none abandoned) back in the mint queue.
+#[ic_cdk::update]
+fn admin_retry_deposit(id: u64) -> BridgeResult<DepositView> {
+    admin::require_admin()?;
+    flows::deposit::retry_held(id)
+}
+
+/// Resolve a held lane operation by hand: look again at the same bytes, or abandon a held mint.
+#[ic_cdk::update]
+fn admin_resolve_held_op(op_id: u64, resolution: HeldOpResolution) -> BridgeResult<OpView> {
+    flows::held::resolve_held_op(op_id, resolution)
+}
+
+/// Clear a lane halt after resolving its cause; the note says how.
+#[ic_cdk::update]
+fn admin_clear_lane_halt(lane: records::Lane, note: String) -> BridgeResult<()> {
+    admin::clear_lane_halt(lane, &note)?;
+    timer::schedule_soon();
+    Ok(())
+}
+
+#[ic_cdk::update]
+async fn admin_run_tick() -> BridgeResult<()> {
+    admin::require_admin()?;
+    timer::schedule_soon();
+    if timer::run_now().await {
+        Ok(())
+    } else {
+        Err(BridgeError::InvalidState("a pass is already running, or the instance is not fully configured".into()))
+    }
+}
+
+#[ic_cdk::query]
+fn get_audit_log(start: u64, limit: u32) -> Vec<AuditEntry> {
+    state::audit_page(start, limit).iter().map(views::audit_entry).collect()
+}
+
+/// One lane operation (mint, burn or stray refund) by id.
+#[ic_cdk::query]
+fn get_sol_op(id: u64) -> Option<OpView> {
+    state::get_op(id).map(|o| views::op_view(&o))
+}
+
+/// Operations that are not terminal (including held ones), ascending by id after `start_after`.
+#[ic_cdk::query]
+fn list_unresolved_ops(args: ListOpsArgs) -> Vec<OpView> {
+    views::unresolved_ops(args.start_after, args.limit)
+}
+
+/// Pending return hints (what the observer will fetch early).
+#[ic_cdk::query]
+fn list_return_hints() -> Vec<HintView> {
+    flows::release::live_hints(env::now_ns()).iter().map(views::hint_view).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Controller methods
 // ---------------------------------------------------------------------------
 
@@ -200,6 +359,7 @@ fn get_bridge_info() -> BridgeInfo {
         admins: c.config.admins.clone(),
         pauses: c.config.pauses.clone(),
         fees: c.config.fees.clone(),
+        limits: c.config.limits.clone(),
         rpc: c.config.rpc.clone(),
         lane: c.config.lane.clone(),
         halted: c.halted.as_ref().map(|h| h.reason.clone()),
@@ -265,6 +425,11 @@ async fn probe_history_availability(args: history_probe::ProbeArgs) -> BridgeRes
 enum IngressAccess {
     /// Wallet standards: anyone, anonymous included (a wallet asks before the user signs).
     Anyone,
+    /// Any authenticated principal. The method decides the rest.
+    Authenticated,
+    /// A configured admin. Controllers also pass this filter (the method itself still requires an
+    /// admin).
+    Admin,
     /// A canister controller.
     Controller,
 }
@@ -279,12 +444,28 @@ const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
     ("icrc21_canister_call_consent_message", IngressAccess::Anyone),
     ("icrc28_trusted_origins", IngressAccess::Anyone),
     ("icrc10_supported_standards", IngressAccess::Anyone),
+    // User methods.
+    ("bridge_to_solana", IngressAccess::Authenticated),
+    ("request_deposit_refund", IngressAccess::Authenticated),
+    ("notify_solana_return", IngressAccess::Authenticated),
+    // Admin methods.
+    ("admin_set_pauses", IngressAccess::Admin),
+    ("admin_set_limits", IngressAccess::Admin),
+    ("admin_set_fees", IngressAccess::Admin),
+    ("admin_sweep_fees", IngressAccess::Admin),
+    ("admin_retry_deposit", IngressAccess::Admin),
+    ("admin_resolve_held_op", IngressAccess::Admin),
+    ("admin_clear_lane_halt", IngressAccess::Admin),
+    ("admin_run_tick", IngressAccess::Admin),
+    // Controller methods.
     ("set_admins", IngressAccess::Controller),
     #[cfg(feature = "history_probe")]
     ("probe_history_availability", IngressAccess::Controller),
 ];
 
-/// Largest accepted argument for wallet-standard calls.
+/// Largest accepted argument for open methods (wallet standards and user methods). The biggest
+/// legitimate one, a `bridge_to_solana` consent request, is well under 1 KiB; without a cap any
+/// caller could make the canister pay the ingress fee for about 2 MiB.
 pub const MAX_OPEN_INGRESS_BYTES: usize = 4 * 1024;
 /// Largest accepted argument for admin and controller methods.
 pub const MAX_ADMIN_INGRESS_BYTES: usize = 16 * 1024;
@@ -296,20 +477,24 @@ fn ingress_access(method: &str) -> Option<IngressAccess> {
 /// Whether an ingress update call is worth executing. Pure, so the table above is unit tested.
 /// NOT a security boundary: it runs on one replica without consensus. Every method keeps its
 /// own caller checks, which are what protect state and funds.
-fn decide(method: &str, arg_bytes: usize, caller_is_anonymous: bool, is_controller: bool) -> bool {
+fn decide(method: &str, arg_bytes: usize, caller_is_anonymous: bool, is_admin: bool, is_controller: bool) -> bool {
     let Some(access) = ingress_access(method) else {
+        // Not a known update method (a query name, a typo, a probe): nothing to run.
         return false;
     };
     let max_bytes = match access {
-        IngressAccess::Anyone => MAX_OPEN_INGRESS_BYTES,
-        IngressAccess::Controller => MAX_ADMIN_INGRESS_BYTES,
+        IngressAccess::Anyone | IngressAccess::Authenticated => MAX_OPEN_INGRESS_BYTES,
+        IngressAccess::Admin | IngressAccess::Controller => MAX_ADMIN_INGRESS_BYTES,
     };
     if arg_bytes > max_bytes {
         return false;
     }
     match access {
         IngressAccess::Anyone => true,
-        IngressAccess::Controller => !caller_is_anonymous && is_controller,
+        _ if caller_is_anonymous => false,
+        IngressAccess::Authenticated => true,
+        IngressAccess::Admin => is_admin || is_controller,
+        IngressAccess::Controller => is_controller,
     }
 }
 
@@ -319,8 +504,10 @@ fn inspect_message() {
     let arg_bytes = ic_cdk::api::call::arg_data_raw_size();
     let caller = ic_cdk::api::caller();
     let anonymous = caller == Principal::anonymous();
-    let is_controller = !anonymous && ic_cdk::api::is_controller(&caller);
-    if decide(&method, arg_bytes, anonymous, is_controller) {
+    // Only the role checks the method's table entry might need; skipped for anonymous.
+    let (is_admin, is_controller) =
+        if anonymous { (false, false) } else { (state::read_core(|c| c.is_admin(&caller)), ic_cdk::api::is_controller(&caller)) };
+    if decide(&method, arg_bytes, anonymous, is_admin, is_controller) {
         ic_cdk::api::call::accept_message();
     }
 }
@@ -383,7 +570,7 @@ mod ingress_tests {
     #[test]
     fn every_update_endpoint_has_an_ingress_decision() {
         let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().collect();
-        let expected = if cfg!(feature = "history_probe") { 3 } else { 2 };
+        let expected = if cfg!(feature = "history_probe") { 14 } else { 13 };
         assert_eq!(updates.len(), expected, "the update endpoints are exactly the listed ones: {updates:?}");
         let listed: BTreeSet<String> = INGRESS_METHODS.iter().map(|(n, _)| n.to_string()).collect();
         let missing: Vec<_> = updates.difference(&listed).collect();
@@ -398,16 +585,41 @@ mod ingress_tests {
 
     #[test]
     fn the_ingress_table_admits_the_right_callers() {
+        // decide(method, bytes, anonymous, admin, controller)
         // Wallet standards: anyone, anonymous included, within the size cap.
-        assert!(decide("icrc21_canister_call_consent_message", 100, true, false));
-        assert!(!decide("icrc21_canister_call_consent_message", MAX_OPEN_INGRESS_BYTES + 1, true, false));
-        // Controller methods: a controller only, never anonymous.
-        assert!(decide("set_admins", 100, false, true));
-        assert!(!decide("set_admins", 100, false, false));
-        assert!(!decide("set_admins", 100, true, true));
-        assert!(!decide("set_admins", MAX_ADMIN_INGRESS_BYTES + 1, false, true));
+        assert!(decide("icrc21_canister_call_consent_message", 100, true, false, false));
+        assert!(!decide("icrc21_canister_call_consent_message", MAX_OPEN_INGRESS_BYTES + 1, true, false, false));
+        // User methods: any authenticated principal, never anonymous, within the open cap.
+        for m in ["bridge_to_solana", "request_deposit_refund", "notify_solana_return"] {
+            assert!(decide(m, 100, false, false, false), "{m}");
+            assert!(!decide(m, 100, true, false, false), "{m}: anonymous");
+            assert!(!decide(m, MAX_OPEN_INGRESS_BYTES + 1, false, false, false), "{m}: size");
+        }
+        // Admin methods: an admin or a controller, never anonymous.
+        for m in [
+            "admin_set_pauses",
+            "admin_set_limits",
+            "admin_set_fees",
+            "admin_sweep_fees",
+            "admin_retry_deposit",
+            "admin_resolve_held_op",
+            "admin_clear_lane_halt",
+            "admin_run_tick",
+        ] {
+            assert!(decide(m, 100, false, true, false), "{m}: admin");
+            assert!(decide(m, 100, false, false, true), "{m}: controller");
+            assert!(!decide(m, 100, false, false, false), "{m}: neither");
+            assert!(!decide(m, 100, true, true, true), "{m}: anonymous");
+            assert!(!decide(m, MAX_ADMIN_INGRESS_BYTES + 1, false, true, false), "{m}: size");
+        }
+        // Controller methods: a controller only, never anonymous (an admin is not enough).
+        assert!(decide("set_admins", 100, false, false, true));
+        assert!(!decide("set_admins", 100, false, true, false));
+        assert!(!decide("set_admins", 100, true, false, true));
+        assert!(!decide("set_admins", MAX_ADMIN_INGRESS_BYTES + 1, false, false, true));
         // Unknown methods and query names sent as updates are refused.
-        assert!(!decide("get_bridge_info", 0, false, true));
-        assert!(!decide("bridge_to_solana", 0, false, true), "not an endpoint yet");
+        assert!(!decide("get_bridge_info", 0, false, true, true));
+        assert!(!decide("get_deposit", 0, false, true, true));
+        assert!(!decide("list_unresolved_ops", 0, false, true, true));
     }
 }

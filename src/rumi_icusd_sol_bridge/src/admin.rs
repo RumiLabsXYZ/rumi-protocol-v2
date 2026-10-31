@@ -1,9 +1,8 @@
-//! Authorization guards and the controller-only admin list. Copied from the Base instance's
-//! `admin.rs` (the guards and `set_admins`); the pause, limit, fee, gas, observer and RPC
-//! setters arrive with the endpoints that use them (BB-48, BB-49).
+//! Authorization guards, the controller-only admin list, and (49b) the admin setters for pauses,
+//! limits and fees, ported from the Base instance's `admin.rs`.
 //!
-//! Admins can (later) pause and tune limits within hard bounds. They cannot move escrow (only
-//! the release, refund and fee-sweep paths can) and cannot change the ledger, cluster or key.
+//! Admins can pause and tune limits and fees within hard bounds. They cannot move escrow (only the
+//! release, refund and fee-sweep paths can) and cannot change the ledger, cluster or key.
 //! Controllers manage the admin list.
 
 use crate::env;
@@ -35,6 +34,63 @@ pub fn require_controller() -> BridgeResult<Principal> {
     } else {
         Err(BridgeError::Unauthorized)
     }
+}
+
+/// Pausing is always allowed. Unpausing deposits needs a bound mint and no halt; unpausing anything
+/// needs no halt.
+pub fn set_pauses(p: Pauses) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    let (profile, halted, current) = state::read_core(|c| (c.tx_profile(), c.halted.clone(), c.config.pauses.clone()));
+    if !p.deposits && profile.is_err() {
+        return Err(BridgeError::NotConfigured("the Solana mint must be bound before deposits are enabled".into()));
+    }
+    if let Some(h) = halted {
+        let unpausing = (current.deposits && !p.deposits)
+            || (current.mints && !p.mints)
+            || (current.releases && !p.releases)
+            || (current.observer && !p.observer);
+        if unpausing {
+            return Err(BridgeError::Halted(h.reason));
+        }
+    }
+    state::mutate_core(|c| c.config.pauses = p.clone());
+    state::append_audit(None, AuditCtx::note(format!("pauses set by {caller}: {p:?}")));
+    Ok(())
+}
+
+pub fn set_limits(l: BridgeLimits) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    state::validate_limits(&l).map_err(BridgeError::InvalidArgument)?;
+    let fees = state::read_core(|c| c.config.fees.clone());
+    state::validate_fees(&fees, &l).map_err(BridgeError::InvalidArgument)?;
+    state::mutate_core(|c| c.config.limits = l.clone());
+    state::append_audit(None, AuditCtx::note(format!("limits set by {caller}: {l:?}")));
+    Ok(())
+}
+
+pub fn set_fees(f: BridgeFees) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    let limits = state::read_core(|c| c.config.limits.clone());
+    state::validate_fees(&f, &limits).map_err(BridgeError::InvalidArgument)?;
+    state::mutate_core(|c| c.config.fees = f.clone());
+    state::append_audit(None, AuditCtx::note(format!("fees set by {caller}: {f:?}")));
+    Ok(())
+}
+
+/// Clear a lane halt after a human resolved its cause. The reason is required and stored: the lane
+/// halts only for conditions the engine cannot judge (a foreign or unverifiable consumer of a
+/// nonce, a history horizon, an owner change), so clearing one is a decision, not a retry.
+pub fn clear_lane_halt(lane: crate::records::Lane, note: &str) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    let note = note.trim();
+    if note.is_empty() || note.len() > 512 {
+        return Err(BridgeError::InvalidArgument("a note of 1 to 512 bytes saying how the halt was resolved is required".into()));
+    }
+    if !state::clear_lane_halt(lane) {
+        return Err(BridgeError::InvalidState("the lane is not halted".into()));
+    }
+    state::append_audit(None, AuditCtx::note(format!("lane {lane:?} halt cleared by {caller}: {note}")));
+    Ok(())
 }
 
 pub fn set_admins(admins: Vec<Principal>) -> BridgeResult<()> {

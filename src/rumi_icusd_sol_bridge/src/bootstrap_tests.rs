@@ -18,7 +18,7 @@ fn t(s: u64) -> u64 {
 }
 
 fn run(fx: &Fixture, now: u64) -> RunReport {
-    block_on(run_once(&fx.chain, &fx.signer, now))
+    block_on(run_once(&fx.chain, &fx.signer, &fx.ledger, now))
 }
 
 fn all_targets(pool: u8) -> Vec<BootstrapTarget> {
