@@ -2438,6 +2438,53 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   normally from `@mysten/sui`). Without page wiring it would be the detached library BB-50 ruled out, so W28 waits rather than
   starting it. W29 continues 53b, 53c and 53d as the sole Rust builder.
 
+## Milestone 106 (2026-10-31): BB-53 53b delivered
+
+- W29 (`claude-sonnet-5-5`) committed `1b71eae84a8bfec838edd60c577f1e5992740b95` "feat(sui): HTTPS transport, observed binding,
+  mint lane and held-release re-mint (BB-53 53b)", local only, parent `9d90ac32`; 53a untouched at `7eaef24f`. Coordinator scope
+  check: 23 files, only `src/rumi_icusd_sui_bridge/`, the deferred log (MC-DEF-11 items closed, new MC-DEF-13) and the new
+  `docs/coordination/multichain/sui-publish-bind-runbook.md`; `Cargo.lock` unchanged (`ed25519-dalek` moved from dev to normal,
+  already locked); `git diff --check` exits 0. The `.did` change renumbers result types (`set_gate_binding` kept) and changes
+  `SuiInclusion` (optional `tx_digest`, a sequence), as disclosed.
+- Sourcing: the pinned mainnet-v1.82.3 SDL (checkpoint, object, coin metadata, transaction, reference gas price, execution
+  error, `executeTransaction`) and ownership semantics (`temporary_store.rs`, `transaction.rs`: every owned non-immutable input,
+  including the MintCap and the gas coin, is an exclusive mutable input whose version is bumped even when the Move call takes it
+  by reference) read from official source. Not read: whether an aborted transaction also bumps them; the lane does not depend
+  on it and is tested both ways.
+- What works at the pin (source plus a simulated chain only; nothing queried, signed for real or deployed): a transport trait
+  with a real HTTPS outcall transport (keyless, size-bounded, cycle upper bound, per-call transforms; head rounded down to a
+  multiple of 100) and a strict per-provider quorum; exact-version reads only through one composed helper with a source-scan test;
+  strict readers for head, checkpoint and gas price, owned objects, caps, gas coin, decimals and receipts; observed binding at one
+  finalized checkpoint (Gate type, shared, version, chain id, supply identity, table sizes; MintCap bound and owned by the
+  treasury role; AdminCap bound and owner recorded; decimals 8), first observation on a pristine Gate, refresh only forward,
+  `module_digest_observed` false, deposit admission and the lane requiring a stored observation; the mint lane with one operation
+  in flight, admission and the deposit link in one synchronous step, unsigned BCS, both digests, epoch and owned refs persisted
+  before signing, a possible-signature mark before each sign call, each signature verified against the role key before storing,
+  a re-check before every signature, rebroadcast of the same saved bytes only (bounded to 20), delivery from a finalized success
+  receipt plus a matching consumed record (or the matching record alone), halts on any mismatch, a finalized failed receipt
+  closing the attempt with up to 3 same-id replacements on fresh refs, epoch passing or a missing digest never replacing,
+  refunding or releasing, moved owned inputs with no receipt halting the lane after a 120 s grace; MC-DEF-11 refund guard
+  completed (every operation a deposit ever had must be provably dead from the lane's own records and the back-index, used for
+  refunds and admin retry; abandoned or unknown signed operations never pass); the held-release re-mint driver; `runtime.rs`
+  states fresh install only; a prepared publish and bind runbook marked never executed.
+- Changes to accepted 53a, flagged for review: deposit admission and unpausing deposits now need an observed deployment;
+  `MintDelivery.tx_digest` is optional with a sequence; new error variants; the 53a held-retry rule now uses the proof.
+  `signing_enabled` stays the constant false; lane readiness is reported by `get_mint_lane`.
+- Checks (saved logs in the coordinator scratchpad): crate tests 294 passed, 0 failed (`53b-test11.log`); clippy `-D warnings`
+  exit 0 (`53b-clippy3.log`); wasm32 check exit 0 including the real transport (`53b-wasm2.log`); `.did` regenerated through the
+  canonical path (`53b-did-regen3.log`). No red claimed (new feature). Every failing development run listed by W29:
+  `53b-test1.log` 9 failures (two code fixes: a sign step overwrote another role's hold note, and one test-harness double
+  borrow; the rest test or harness corrections), `53b-test2.log` 2, `53b-test4.log` 2, `53b-test6.log` 4 (tests needing time to
+  pass), `53b-test7.log` 1 (code fix: the gather back-off was not cleared on operation creation), `53b-test9.log` 1 (test), plus
+  compile errors and five clippy lints fixed.
+- Omissions (MC-DEF-13): simulated chain only, schema-derived GraphQL shapes, no real outcall, signature beyond deterministic test
+  seeds, gas or checkpoint cadence measured; head rounding of 100 is a guess; cycles and gas unmeasured (default budget 0.05
+  SUI, no simulation); aborted-transaction version bump unconfirmed; module bytes, UpgradeCap holder and policy and
+  DenyCap or regulated state not observed; duplicate-submission replies unknown; an attempt with an unknown broadcast outcome is
+  held indefinitely and an unexplained MintCap consumer halts the lane for a human, with no admin override that replaces or
+  refunds it; one operation at a time.
+- Next: 53c from `1b71eae8` (verified returns from the durable ReturnRecord, monitors, audit, release).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

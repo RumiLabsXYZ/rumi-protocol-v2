@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a accepted (Miles) at 7eaef24f: ICP runtime component, fresh-install only (a BB-52 image upgrade traps). 53b (transport, observed binding, mint lane) in progress (W29); then 53c and 53d",
+      "evidenceText": "proof=none; 53a accepted (7eaef24f). 53b delivered for review: 1b71eae8 (W29, local), HTTPS transport, observed binding, mint lane, held-release re-mint; 294 tests, clippy and wasm32 clean. 53c in progress",
       "evidenceLinks": []
     },
     {
