@@ -415,10 +415,10 @@
     },
     {
       "id": "BB-45",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "EVM: per-chain defaults and a sibling Foundry deploy script",
-      "evidenceText": "proof=local-test; 3c5029cb: Ethereum, Arbitrum and Monad install in source with per-chain defaults (Base byte-identical); Robinhood, HyperEVM blocked; new deploy script with mainnet flags; 513 unit tests, forge 17 plus 17; catalog disabled",
+      "evidenceText": "proof=local-test; Miles accepted 3c5029cb: Ethereum, Arbitrum and Monad install in source with per-chain defaults (Base whole-config pin); Robinhood, HyperEVM blocked; sibling deploy script; 513 unit tests, forge 17 plus 17; no gas measured",
       "evidenceLinks": []
     },
     {

@@ -217,8 +217,9 @@ const ETH_DEFAULTS: ChainDefaults = ChainDefaults {
 /// - Gas limits 600,000 and 200,000: unsourced, 2x the Base figures. The fee includes a
 ///   poster (L1 data) charge expressed in gas, so `eth_estimateGas` and gas used exceed the
 ///   execution-only anvil measurement (`S` 3 row 5, `chain-evm.md` 2.3). The mint
-///   simulation runs at the configured limit and holds on out-of-gas, so a low limit cannot
-///   cost a paid revert. Re-measure on Arbitrum Sepolia before real use.
+///   simulation runs at the configured limit and holds on out-of-gas, which lowers the risk
+///   that a low limit costs a paid revert; it cannot rule one out, because state or fees can
+///   change between simulation and inclusion. Re-measure on Arbitrum Sepolia before real use.
 /// - Reserve 0.0005 ETH, replace after 90 s, 2,000-block ranges: unsourced, the Base values.
 const ARB_DEFAULTS: ChainDefaults = ChainDefaults {
     max_fee_per_gas_wei: 2_000_000_000,

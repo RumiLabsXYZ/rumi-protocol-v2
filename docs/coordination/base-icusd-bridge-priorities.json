@@ -26,7 +26,7 @@
       "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-45 in Review (3c5029cb). Then BB-46: prepare read-only probe tooling and runbooks for the Robinhood tag, Monad fast-tag consensus and HyperEVM providers; executing any probe stays held for separate authorization.",
+      "nextAction": "BB-46 next when a lane frees: prepare read-only probe tooling and runbooks for the Robinhood finalized tag and keyless providers, Monad fast-tag consensus and HyperEVM providers; executing any probe stays held for separate authorization. A passing Robinhood record later flips its row in BB-46.",
       "cardIds": [
         "BB-42",
         "BB-43",

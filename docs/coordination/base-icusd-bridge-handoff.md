@@ -1121,6 +1121,16 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - BB-58 corrections dispatched to the same W25 (resumed, `claude-sonnet-5-5`): provider chain identity, count-once chain ids,
   per-instance audit collection with independent C1 and supply checks; mocks only. Lanes: W25 and W27.
 
+## Milestone 48 (2026-10-30): BB-45 accepted
+
+- Accepted (Miles): BB-45 `3c5029cb` at source and local-test level (install and default application, Base whole-config
+  CBOR pin, own-chain, key and provider gates, unchanged admin bounds and Base script, sibling chain flags, role separation
+  and runtime-code check, 513 unit tests and forge 17 plus 17). No public deployment and no measured new-chain gas is claimed.
+- Wording note applied by the coordinator (comment only, `chains.rs` Arbitrum defaults): simulation at the configured limit
+  lowers the risk of a paid revert but cannot rule one out after state or fee changes. No behavior change; not rebuilt.
+- EVM family source work through BB-45 is accepted. Next ranked EVM card: BB-46 (probe tooling and runbooks only; execution
+  held). Lanes stay W25 (BB-58 corrections) and W27 (BB-59).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
