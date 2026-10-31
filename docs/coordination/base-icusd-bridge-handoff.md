@@ -2828,6 +2828,19 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   gas; a return merging more than 50 coin objects is refused; the page `<meta description>` still names Base; held attempts have
   no discard path and an unresolved ICP request blocks new transfers on that device (the trade-off accepted for Solana and Base).
 
+## Milestone 119 (2026-10-31): BB-54 split review dispatched
+
+- Miles (`review-bb54-return-brief.md`): a split, non-duplicating source review of frozen `37f9c77c`. Miles reviews ICP-to-Sui,
+  destination loading, the page, forms, history and cross-direction integration; the same W29 (requested Sonnet) reviews the
+  native return and signing boundary (`suiToIcp.ts`, `transaction.ts`, `ids.ts`, `rpc.ts`, `walletStandard.ts`, `intents.ts`,
+  their targeted tests and reference, `config.ts`, `networks.ts` and `endpoints.ts` as needed, against the accepted Move
+  `bridge_out` at `23f75ef1` and `ids.rs` and the decoder at `29295fb4`). W29 makes no production edits, worktree resets, Rust
+  builds or whole-suite reruns; it reads the frozen commit and saved logs and may read the installed SDK source and official
+  docs statically; any focused reproduction is arranged through the coordinator with W28. One handback, then Miles adjudicates.
+  W28 stays the author and owns any accepted fixes. Two workers only.
+- Hosted CI: Miles verified remote `e5c04cef` and run 41189208931 in progress and holds its single watch; the intermediate
+  `97f63935` run is superseded, with no duplicate poll.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

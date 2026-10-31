@@ -490,7 +490,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; 37f9c77c delivered for review (W28, local): Sui branch of /bridge, both directions, Wallet Standard, history, reload recovery, native-only loading; @mysten/sui 2.38.0 pinned; 789 focused tests, build passes",
+      "evidenceText": "proof=local-test; 37f9c77c in Review (W28 author): split source review, Miles on ICP-to-Sui, loading, page and integration; W29 (independent reviewer) on the return transaction, wallet bytes, reconciliation and node seam",
       "evidenceLinks": []
     },
     {
