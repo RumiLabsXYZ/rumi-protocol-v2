@@ -1224,7 +1224,12 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   tests may reuse this worktree's installed node modules by symlink, without installing anything (PR #586 also lists
   `xumm`). Hazard noted: an XRPL-branch backend Wasm built into the shared target would shadow this branch's; none is built.
 - Dispatched: W29 (new run, `claude-sonnet-5-5`) on BB-55. Lanes: W28 (BB-47, sole Rust build owner) and W29.
-- Sui BB-51 needs the Sui CLI, which is not installed; installing it needs its own approval.
+- Sui BB-51 needs the Sui CLI, which is not installed. Miles' scope correction: local implementation authorization already
+  covers necessary development dependencies and CLI tooling, so when BB-51 reaches a free lane its worker installs a pinned
+  official Sui CLI with verification, local to the workspace or a temporary folder; no separate human approval and no
+  speculative install now. Likewise canonical local npm setup for BB-55 parity is in scope if the reused packages are not
+  sufficient. An actual automatic tool-review denial is still reported with its exact action and reason, never retried
+  another way. No wallet, public-probe, deploy or live authority follows from this.
 
 ## Held live actions
 

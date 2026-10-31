@@ -76,7 +76,7 @@
       "id": "sui-implementation",
       "title": "Sui implementation (Move gate)",
       "status": "paused",
-      "blockedReason": "Source-authorized; next in rank after XRPL. BB-51 needs the Sui CLI for `sui move test`, which is not installed; installing it is a separate approval. Its reader for the BB-58 collector rides on BB-53.",
+      "blockedReason": "Source-authorized; next in rank after XRPL. When BB-51 reaches a free lane, its worker installs a pinned official Sui CLI, verified and kept local to the workspace or a temporary folder, as normal implementation tooling. Its reader for the BB-58 collector rides on BB-53.",
       "nextAction": "Start with BB-51 (Move gate package and unit tests); doing BB-58 first is a scheduling preference, not a prerequisite. External Move review is deferred to pre-real-value work.",
       "cardIds": [
         "BB-51",
