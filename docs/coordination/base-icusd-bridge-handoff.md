@@ -1510,6 +1510,37 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - In-mint name, symbol and URI creation logged as MC-DEF-8 in the deferral lane (actual omission; no metadata or
   wallet-display demonstration claimed; no new encoder task now). 49a stays in component review pending the two fixes.
 
+## Milestone 68 (2026-10-31): XRPL lane reader and origin report delivered
+
+- `457e6675` (W29, bridge branch, `src/rumi_bridge_destinations` only, staged by path): `live/xrpl.rs` reads `E_X` as the
+  ICRC-1 balance of the lane escrow (counted once) and the issued outstanding from the XRP Ledger itself: providers bound
+  to the profile network by `server_info`; the quorum-th highest validated ledger index; `gateway_balances` for the issuer at
+  exactly that ledger number (never `validated`, `closed` or `current` as a tag), answers required to say `validated: true`,
+  name the issuer and match the ledger, quorum on identical (hash, amount); exact amounts only (beyond 8 decimals or 15
+  digits, negative, above the clamp or another currency is a failed read). `Readings::xrpl_issued_outstanding` defaults to
+  Unavailable. Worker run: 113 default and 173 feature tests; dry run unchanged; new fixture `collect_base_plus_xrpl`
+  (`escrow_locked` 250.12345679 = 200.12345678 for D plus 50.00000001 for X, each once; `status: ok`). Note for Miles: no
+  flag compares `E_X` with the issued amount; that is expected, since borrowed XRPL icUSD is debt-backed, not escrowed.
+- `8ecab197` (W29, XRPL branch): the adjudicated origin movement report. Additive serde-default fields (exact cumulative
+  `delivered_import`, `delivered_borrow`, `delivered_refund`, `returned_total`, `legacy_outstanding_at_init`, marker
+  `origin_since_ns: Option<u64>`); deliveries counted at the single D to O step in `apply_reconcile` (lease-held attempt only,
+  so a retried verdict is a no-op); every O reduction counted once at the existing consumer behind its dedup;
+  `ensure_origin_initialized` once, in `on_post_upgrade` after restore and before the tick, in a new `on_init`, and as a guard
+  before any O mutation. Query `get_xrpl_icusd_supply_report` (exact strings, since time, aggregate O, `pending_return_credit`
+  separately, `expected_outstanding`, `reconciles`, the agreed wording in `note`). `.did` regenerated through the Candid check
+  (14 added lines), bindings by the script; `didc check` new against old exits 0. Worker run: `xrpl_icusd` 172 passed (167
+  plus 5), Candid check ok. No frontend display (optional). PR #586's branch still at `b02584e4`.
+- Accepted (Miles, `accept-xrpl-reader.md`): the collector reader `457e6675` as a BB-57 component, after source review and an
+  independent replay of the existing `collect_fixture` binary on `collect_base_plus_xrpl.json` (exit 0, `source: fixture`,
+  no network; ICP supply 1000, Base escrow and supply 200.12345678, X escrow and issued 50.00000001 at numbered ledger
+  91000000, `escrow_locked` 250.12345679, `circulating_on_icp` 749.87654321, `circulating_total` 1000, no flags). Fixture
+  arithmetic and collection evidence only, not public transport or settlement proof. W29's focused results are those
+  recorded above (113 default and 173 feature tests, dry run unchanged). Collector write ownership passes to W28 only at
+  49e. The reader can join the next coherent base-branch cohort push; the XRPL follow-up branch stays local.
+- Remaining for BB-57: part B, the release-recipe backend Wasm size against PocketIC 7's 10,485,760-byte code-section cap
+  (and the 12 MiB IC limit with its reserve) and the XRPL PocketIC suite with negatives, run once at the final source pin
+  in the single builder slot, scheduled at W28's next sub-milestone boundary.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -506,7 +506,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "XRPL: no-vault return to an ICP account",
-      "evidenceText": "proof=local-test; e48dc18d plus 0b73ae95 (fee fence accepted: race reproduced, then fixed on all three payout paths; 167 focused tests). Stays in Review only for the carried origin report, whose model awaits Miles",
+      "evidenceText": "proof=local-test; e48dc18d plus 0b73ae95 accepted components; its carried origin report is now delivered in BB-57 (8ecab197, cumulative movement counters, one-time baseline, one query) for Miles' acceptance",
       "evidenceLinks": []
     },
     {
@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; 0a315971 part A and dd817f27 accepted fixes. Now the XRPL lane reader for the collector; then the adjudicated cumulative origin movement report (one query, exact counters, one-time baseline); then Wasm size and PocketIC once",
+      "evidenceText": "proof=none; Accepted components: 0a315971, dd817f27, 457e6675 (XRPL lane reader). Delivered for review: 8ecab197 (origin movement report). Remaining: final integration, Wasm size and XRPL PocketIC once at the final pin",
       "evidenceLinks": []
     },
     {
