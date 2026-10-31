@@ -132,3 +132,10 @@ separate authorization is needed for each real-network probe, deployment, signin
    `685984b9`. Pointer: a narrow search for `BlockTag::Finalized|finalized_head`, and the request-body tests in
    `flows/deposit.rs` and `evm/lane.rs`. Candidate home: the `rust-canister-engineering` review checklist (caller and
    settlement boundaries) or the chain-integration personas.
+
+4. **Both XRPL origins are escrow-backed (Miles, 2026-10-31).** In PR #586's XRPL lane, import pulls existing ICP icUSD into
+   the escrow, and borrow creates vault debt AND mints the exact net ICP icUSD into that same escrow before delivery
+   (`xrpl_icusd/borrow.rs` escrow proof and job tuple; the lane's coverage buckets). Debt provenance is never an exemption
+   from escrow coverage, and borrowed XRPL supply is never added to the backend's debt-backed `chain_supplies`. The
+   coordinator's milestone 68 remark said the opposite and was corrected after Miles reproduced a false OK. Candidate home:
+   the `rumi-native-xrp-integrator` persona or the chain-integration review checklist. Proposal only.

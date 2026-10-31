@@ -1571,6 +1571,32 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - BB-56 done at source and focused-test level (`e48dc18d`, `0b73ae95`, `0a315971`, `8ecab197`). No extra report UI is
   required. BB-57 stays in progress for the collector floor flag and the final serialized Wasm and PocketIC run.
 
+## Milestone 71 (2026-10-31): XRPL floor flag delivered
+
+- `91a27a45` (W29, bridge branch, `src/rumi_bridge_destinations` only; reader `457e6675` unchanged): `aggregate()` raises a
+  Failure flag `XrplEscrowBelowIssued { escrow, issued, gap }` with the network id when `E_X` is below the issued
+  outstanding, labelled in code, docs and the printed report as a MINIMUM issued-supply floor on independent reads (not proof
+  that pending D, R, H or fees are covered, not proof of theft, no automatic action; credits halt and the operator holds and
+  reconciles). Arithmetic, readings and the D/X boundary unchanged. Tests first: 3 of 26 new and existing collector tests
+  failed before the flag. Worker run: 116 default and 176 feature tests; dry run unchanged; fixtures: base-only 0,
+  base-plus-xrpl 0, `collect_xrpl_escrow_below_issued` 3, C1-broken 3, overlap 1, Miles' original repro 3.
+- Coordinator check with the already-built binary (no build): Miles' `xrpl-zero-escrow-repro.json` exits 3 with
+  `flag FAILURE: xrpl-mainnet XrplEscrowBelowIssued { escrow: 0, issued: 5000000001, gap: 5000000001 }`; the equal-escrow
+  `collect_base_plus_xrpl.json` exits 0.
+- W29 waits for the part B builder slot.
+
+## Milestone 72 (2026-10-31): XRPL floor flag accepted
+
+- Accepted (Miles, `accept-xrpl-coverage-floor.md`): `91a27a45` (exact `E_X` below issued comparison, flag contents,
+  Failure severity, unchanged D/X arithmetic and count-once checks, equality, surplus, empty and one-e8s-short regressions,
+  the limits label); diff-check clean; his replay of the original repro exits 3 with the precise flag and the equality
+  fixture exits 0 with no flags (no build, no network). Focused results as recorded in milestone 71.
+- BB-57 now has only part B: the backend Wasm code-section size and artifact binding and the XRPL PocketIC suite with
+  negatives, run once by the same W29 in the single builder slot at W28's next clean boundary (after 49b and the 49a fixes).
+- Proposed durable lesson (handoff and plan section 6 item 4 only; no persona, catalog or memory write): both XRPL origins
+  are escrow-backed; borrow creates debt AND mints the exact net into the escrow, so debt provenance is never an exemption
+  from escrow coverage and never belongs in debt-backed `chain_supplies`.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

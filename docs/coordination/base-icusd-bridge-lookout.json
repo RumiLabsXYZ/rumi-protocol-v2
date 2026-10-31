@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Accepted components: 0a315971, dd817f27, 457e6675 (reader). Origin report 8ecab197 in review. Now: XRPL escrow coverage-floor flag in the collector (false OK reproduced by Miles), then Wasm size and PocketIC once",
+      "evidenceText": "proof=none; Accepted: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45 (escrow floor). Remaining only part B: backend Wasm code-section size and artifact binding, XRPL PocketIC with negatives, in the builder slot",
       "evidenceLinks": []
     },
     {

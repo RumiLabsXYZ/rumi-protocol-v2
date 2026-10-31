@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-55 and BB-56 done. BB-57 in progress (same W29): the XRPL escrow coverage-floor flag in the collector, then part B (Wasm size and the XRPL PocketIC suite) once at the final pin in the single builder slot.",
+      "nextAction": "BB-57: only part B remains (backend Wasm code-section size and artifact binding, the XRPL PocketIC suite with negatives), run once by the same W29 in the single builder slot at W28's next clean boundary.",
       "cardIds": [
         "BB-55",
         "BB-56",
