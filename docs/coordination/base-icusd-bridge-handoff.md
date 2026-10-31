@@ -2841,6 +2841,23 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Hosted CI: Miles verified remote `e5c04cef` and run 41189208931 in progress and holds its single watch; the intermediate
   `97f63935` run is superseded, with no duplicate poll.
 
+## Milestone 120 (2026-10-31): BB-54 first integration review, correction
+
+- Miles (`review-bb54-first.md`) at frozen `37f9c77c`; not accepted; the forms and history review continues, and W29's independent
+  return and signing review continues on the same commit.
+- F1: `services/suiBridge/config.ts` `resolveSuiConfig` rejects an observed deployment with `module_digest_observed` false, but the
+  accepted backend (`bind.rs:183` at `29295fb4`) always stores false (the MC-DEF-13 deferral; no setter), and the fixtures
+  manufactured true. The real canister could never enable either Sui direction. Fix: remove that page gate, keep the real
+  network, binding, observed-deployment, decimals, role, pause and halt and lane-readiness checks, keep an honest disclosure that
+  module bytes are not matched, fixtures default to the real false; regression that the real response enables both directions and
+  that missing or mismatched identity still fails.
+- F2: `services/baseBridge/destinationLoader.ts` awaits all native reads and the Base promise before returning any entry, so a
+  never-settling Base or Solana read strands a healthy Sui row. Fix: the smallest bounded per-family deadline or progressive
+  loading; the stalled family's row explains itself; Base-only behavior, selected-family wallet calls, intents and zero calls when
+  everything is disabled preserved; a fake-clock never-settling-read regression.
+- Nonblocking: MintHeld's "was not sent" wording; "did not complete" is more accurate.
+- Same W28, one focused correction with old-red and new-green evidence; svelte-check and build once. No live action or new worker.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

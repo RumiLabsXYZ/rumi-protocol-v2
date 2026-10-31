@@ -490,7 +490,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; 37f9c77c in Review (W28 author): split source review, Miles on ICP-to-Sui, loading, page and integration; W29 (independent reviewer) on the return transaction, wallet bytes, reconciliation and node seam",
+      "evidenceText": "proof=local-test; 37f9c77c in Review: Miles found two integration defects (a module-digest gate the real canister can never pass; loading still waits on unrelated reads); W28 fixes them. W29's return review continues",
       "evidenceLinks": []
     },
     {
