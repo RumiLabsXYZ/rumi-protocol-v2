@@ -1,5 +1,5 @@
 {
-  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: EVM source BB-42 to BB-45, EVM supply reporting BB-58, frontend BB-59 and BB-60, XRPL BB-55 to BB-57 (local branch, PocketIC passing), Solana BB-48. In Review: BB-47 (Solana components). In progress on Sonnet: BB-49 (Solana lanes; fixes being tested) and BB-51 (Sui Move gate, tested locally with the official Sui CLI). BB-46 held; BB-27 waits on Rob. Nothing merged, deployed, signed or enabled.",
+  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: EVM source BB-42 to BB-45, EVM supply reporting BB-58, frontend BB-59 and BB-60, XRPL BB-55 to BB-57 (local branch, PocketIC passing), Solana BB-48, Sui Move gate BB-51 (offline Move tests). In Review: BB-47 (Solana components). In progress on Sonnet: BB-49 (Solana lanes) and BB-52 (Sui canister foundation). BB-46 held; BB-27 waits on Rob. Nothing merged, deployed, signed or enabled.",
   "glossary": [
     {
       "term": "proof=source",

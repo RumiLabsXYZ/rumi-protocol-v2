@@ -77,7 +77,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 in Review (23f75ef1; 47 Move tests pass offline). Next: BB-52 (Sui instance skeleton, BCS transaction builder with both digests, Ed25519 signer, GraphQL mirror), then BB-53 (with the Sui collector reader) and BB-54.",
+      "nextAction": "BB-51 done. BB-52 in progress (W29): Sui canister foundation, sharing the single Rust builder slot with W28. Then BB-53 (lanes, observer, custody, Sui collector reader) and BB-54 (wallet).",
       "cardIds": [
         "BB-51",
         "BB-52",

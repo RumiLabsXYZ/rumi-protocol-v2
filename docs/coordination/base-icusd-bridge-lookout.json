@@ -463,18 +463,18 @@
     },
     {
       "id": "BB-51",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Sui: Move gate package and Move unit tests",
-      "evidenceText": "proof=local-test; 23f75ef1: Sui Move gate package (move/rumi_icusd_gate), wrapped TreasuryCap, cap-bound mint and admin, consumed mint ids, recipient-bound returns, version guard; 47 sui move tests pass offline; 20 weakenings each caught",
+      "evidenceText": "proof=local-test; Miles accepted 23f75ef1 at source and local-Move-test scope: cap-bound gate, consumed ids, recipient-bound burns, limits, version guard; 47 offline Move tests; six transfer-id vectors matched independently; not publish-ready",
       "evidenceLinks": []
     },
     {
       "id": "BB-52",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: instance skeleton, BCS builder, digests and GraphQL mirror",
-      "evidenceText": "proof=none; Roles, paths and mint-id domain; both Sui digests with golden vectors; Ed25519 signer wrapper; GraphQL mirror with per-provider quorum",
+      "evidenceText": "proof=none; Started 2026-10-31: Sui bridge canister foundation (skeleton, role paths, mint-id domain, BCS builder with both digests, Ed25519 wire signature, GraphQL mirror with provider quorum); builds only in the shared builder slot",
       "evidenceLinks": []
     },
     {

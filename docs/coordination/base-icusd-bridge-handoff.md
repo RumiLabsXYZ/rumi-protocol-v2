@@ -1846,6 +1846,21 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   return or stray claim. Same W28, after its current 49d writes, as one small separate commit. 49d and 49e keep their
   carried requirements; no unchanged suites rerun.
 
+## Milestone 83 (2026-10-31): BB-51 accepted; BB-52 started
+
+- Accepted (Miles, `accept-bb51.md`): BB-51 `23f75ef1` at source and local-Move-test scope after reviewing the full module
+  (TreasuryCap wrapped, caps bound to `gate_id`, zero initial cap, unset network rejected at init, consumed mint ids, exact
+  amount and recipient checks, u128 cap comparison, `bridge_out` burning the actual coin value and recording sender, amount,
+  ICP principal, subaccount and nonce, returns ungated by mint pause or cap, version and migration). He ran the frozen
+  Python reference and matched all six 130-byte BCS and SHA-256 vectors; diff-check clean. Reported (by the worker): build
+  exit 0, 47 Move tests per environment label, 20 caught mutations. Deferrals stay (MC-DEF-9; MC-DEF-1). The all-zero chain
+  identifier intentionally aborts init, so this is not a publish-ready artifact. Sui stays disabled. The exposed bootstrap
+  key stays quarantined and is not approved by this acceptance.
+- BB-52 sent to the same W29 (`next-bb52.md`): one new crate path recorded before editing (proposed
+  `src/rumi_icusd_sui_bridge/`), W29 owns it and its workspace registration; other shared Cargo changes or dependency fetches
+  go through the coordinator; W29 asks the coordinator for the single Rust builder slot before any cargo command, scheduled
+  around W28's sub-milestones; only accepted frozen patterns are copied (Solana through `23dfe841`, or Base).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
