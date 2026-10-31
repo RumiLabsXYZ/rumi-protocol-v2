@@ -212,6 +212,29 @@ pub enum NotDeliveredReason {
     LandedWithError { signature: Sig },
 }
 
+/// A typed proof, recorded when the lane concluded it, that one generation of an operation can never
+/// deliver. Bound to the generation it was reached for (the exact stored bytes of an attempt of THAT
+/// generation landed as our owned cancel, or failed), so it says nothing about any other generation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonDelivery {
+    pub generation: u32,
+    pub reason: NotDeliveredReason,
+}
+
+/// Whether the ICP backing of a mint operation may be released again (refunded), judged only from
+/// what the lane recorded: signatures, transaction ids and typed non-delivery proofs. Never from an
+/// admin's words, a timeout, missing history or a nonce that merely advanced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CandidType)]
+pub enum RefundEligibility {
+    /// No attempt of any generation was ever signed or broadcast: no transaction can exist.
+    Unsigned,
+    /// Every signed generation is proven not delivered by a typed, generation-bound lane proof.
+    ProvenNotDelivered,
+    /// A signed generation is not proven undelivered: its original may still land (or already has,
+    /// behind a history gap), so refunding could leave supply without backing.
+    Unresolved,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpState {
     /// A current-generation attempt exists; reconciled every tick.
@@ -224,8 +247,9 @@ pub enum OpState {
     /// Unverifiable or foreign consumer, re-issue limit, or history horizon: no replacement and
     /// no refund is invented. Resolved by hand.
     Held { reason: String },
-    /// An admin attested, after checking by hand, that this operation will never deliver (49b).
-    /// Terminal. Appended last, so older images still decode.
+    /// Abandoned by an admin (49b), accepted only when `SolOp::refund_eligibility` showed that no
+    /// signed original can land; the reason is a record, not the proof. Terminal. Appended last, so
+    /// older images still decode.
     Abandoned { reason: String, at_ns: u64 },
 }
 
@@ -264,9 +288,52 @@ pub struct SolOp {
     pub alarm_raised_at_ns: Option<u64>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Every generation proven not delivered, with the proof (49b correction). Omitted from the stored
+    /// bytes while empty, so every image written before it existed is unchanged and still decodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_delivery: Vec<NonDelivery>,
 }
 
 impl SolOp {
+    /// Was any attempt of generation `g` given a signature or broadcast? (A transaction id is
+    /// recorded before every send, so an empty list proves nothing was assembled for sending.)
+    pub fn generation_was_signed(&self, g: u32) -> bool {
+        self.attempts.iter().any(|a| a.generation == g && (!a.signatures.is_empty() || !a.tx_ids.is_empty()))
+    }
+
+    /// A recorded proof counts only if it is consistent with the attempts of its own generation: a
+    /// landed cancel needs a cancel attempt of that generation.
+    fn proof_holds(&self, p: &NonDelivery) -> bool {
+        match p.reason {
+            NotDeliveredReason::CancelLanded { .. } => self.attempts.iter().any(|a| a.generation == p.generation && a.kind == AttemptKind::Cancel),
+            NotDeliveredReason::LandedWithError { .. } => self.attempts.iter().any(|a| a.generation == p.generation),
+        }
+    }
+
+    /// Eligibility for a refund of the deposit this operation belongs to. See [`RefundEligibility`].
+    /// A delivered operation is never eligible.
+    pub fn refund_eligibility(&self) -> RefundEligibility {
+        if matches!(self.state, OpState::Delivered { .. }) {
+            return RefundEligibility::Unresolved;
+        }
+        let mut signed: Vec<u32> = self.attempts.iter().map(|a| a.generation).filter(|g| self.generation_was_signed(*g)).collect();
+        signed.sort_unstable();
+        signed.dedup();
+        if signed.is_empty() {
+            return RefundEligibility::Unsigned;
+        }
+        let proven = |g: u32| {
+            self.non_delivery.iter().any(|p| p.generation == g && self.proof_holds(p))
+                // The state itself carries the proof of the current generation while it waits to be re-issued.
+                || (g == self.generation && matches!(self.state, OpState::NeedsReissue { .. }))
+        };
+        if signed.iter().all(|g| proven(*g)) {
+            RefundEligibility::ProvenNotDelivered
+        } else {
+            RefundEligibility::Unresolved
+        }
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(self.state, OpState::Delivered { .. } | OpState::Abandoned { .. })
     }
@@ -440,6 +507,7 @@ mod tests {
             outcome_applied: false,
             alarm_raised_at_ns: Some(70),
             note: Some("n".into()),
+            non_delivery: vec![],
         }
     }
 
@@ -640,4 +708,93 @@ mod tests {
         "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e56a67",
         "656e65726174696f6e04",
     );
+
+    // -----------------------------------------------------------------------
+    // Refund eligibility is read from recorded proofs only (49b correction)
+    // -----------------------------------------------------------------------
+
+    fn unsigned_attempt(kind: AttemptKind, generation: u32) -> Attempt {
+        Attempt { signatures: vec![], tx_ids: vec![], broadcast_count: 0, last_broadcast_ns: None, last_broadcast_note: None, ..sample_attempt(kind, generation, 0x70 + generation as u8) }
+    }
+
+    fn mint_op(state: OpState, generation: u32, attempts: Vec<Attempt>, non_delivery: Vec<NonDelivery>) -> SolOp {
+        SolOp { state, generation, attempts, non_delivery, ..sample_op() }
+    }
+
+    fn failed_proof(generation: u32) -> NonDelivery {
+        NonDelivery { generation, reason: NotDeliveredReason::LandedWithError { signature: Sig([0x91; 64]) } }
+    }
+
+    fn cancel_proof(generation: u32) -> NonDelivery {
+        NonDelivery { generation, reason: NotDeliveredReason::CancelLanded { signature: Sig([0x92; 64]) } }
+    }
+
+    #[test]
+    fn an_operation_that_was_never_signed_or_sent_is_unsigned() {
+        let held = OpState::Held { reason: "x".into() };
+        // No attempt at all, or attempts without a single signature or transaction id.
+        assert_eq!(mint_op(held.clone(), 0, vec![], vec![]).refund_eligibility(), RefundEligibility::Unsigned);
+        assert_eq!(mint_op(held.clone(), 0, vec![unsigned_attempt(AttemptKind::Original, 0)], vec![]).refund_eligibility(), RefundEligibility::Unsigned);
+        // One signature of one signer is already "signed": a complete transaction may be assembled.
+        let mut partly = unsigned_attempt(AttemptKind::Original, 0);
+        partly.signatures.push(SignatureRecord { signer: [0x11; 32], signature: Sig([1; 64]), at_ns: 1 });
+        assert_eq!(mint_op(held.clone(), 0, vec![partly], vec![]).refund_eligibility(), RefundEligibility::Unresolved);
+        // A transaction id is recorded before every send: its presence means a send may have happened.
+        let mut sent = unsigned_attempt(AttemptKind::Original, 0);
+        sent.tx_ids.push(Sig([2; 64]));
+        assert_eq!(mint_op(held, 0, vec![sent], vec![]).refund_eligibility(), RefundEligibility::Unresolved);
+    }
+
+    #[test]
+    fn a_signed_generation_needs_its_own_typed_proof() {
+        let held = || OpState::Held { reason: "x".into() };
+        let signed = |kind, g| sample_attempt(kind, g, 0x60 + g as u8);
+        // Signed, nothing proven: its original may still land.
+        assert_eq!(mint_op(held(), 0, vec![signed(AttemptKind::Original, 0)], vec![]).refund_eligibility(), RefundEligibility::Unresolved);
+        // Proven by a failed original (the fee was lost, the nonce consumed).
+        assert_eq!(
+            mint_op(held(), 0, vec![signed(AttemptKind::Original, 0)], vec![failed_proof(0)]).refund_eligibility(),
+            RefundEligibility::ProvenNotDelivered
+        );
+        // Proven by an owned cancel, which needs a cancel attempt of THAT generation.
+        let both = vec![signed(AttemptKind::Original, 0), signed(AttemptKind::Cancel, 0)];
+        assert_eq!(mint_op(held(), 0, both.clone(), vec![cancel_proof(0)]).refund_eligibility(), RefundEligibility::ProvenNotDelivered);
+        assert_eq!(
+            mint_op(held(), 0, vec![signed(AttemptKind::Original, 0)], vec![cancel_proof(0)]).refund_eligibility(),
+            RefundEligibility::Unresolved,
+            "a cancel proof without a cancel attempt of the generation is inconsistent and does not count"
+        );
+        // A proof is bound to its generation: generation 0's proof says nothing about generation 1.
+        let two = vec![signed(AttemptKind::Original, 0), signed(AttemptKind::Original, 1)];
+        assert_eq!(mint_op(held(), 1, two.clone(), vec![failed_proof(0)]).refund_eligibility(), RefundEligibility::Unresolved);
+        assert_eq!(mint_op(held(), 1, two.clone(), vec![failed_proof(0), failed_proof(1)]).refund_eligibility(), RefundEligibility::ProvenNotDelivered);
+        // The state carries the proof of the current generation while it waits to be re-issued.
+        let waiting = OpState::NeedsReissue { reason: NotDeliveredReason::LandedWithError { signature: Sig([3; 64]) } };
+        assert_eq!(mint_op(waiting.clone(), 1, two.clone(), vec![failed_proof(0)]).refund_eligibility(), RefundEligibility::ProvenNotDelivered);
+        assert_eq!(mint_op(waiting, 1, two, vec![]).refund_eligibility(), RefundEligibility::Unresolved, "generation 0 has no proof");
+        // An unsigned later generation needs none: only signed generations can land.
+        let later = vec![signed(AttemptKind::Original, 0), unsigned_attempt(AttemptKind::Original, 1)];
+        assert_eq!(mint_op(held(), 1, later, vec![failed_proof(0)]).refund_eligibility(), RefundEligibility::ProvenNotDelivered);
+        // A delivered operation is never eligible, whatever else is recorded.
+        let delivered = OpState::Delivered { signature: Sig([4; 64]), slot: 5, adopted: false };
+        assert_eq!(mint_op(delivered, 0, vec![], vec![]).refund_eligibility(), RefundEligibility::Unresolved);
+        // Nothing in the state, the note or the reason text can change the answer.
+        let mut op = mint_op(held(), 0, vec![signed(AttemptKind::Original, 0)], vec![]);
+        op.note = Some("verified on the explorer: never landed".into());
+        op.state = OpState::Held { reason: "abandon me".into() };
+        assert_eq!(op.refund_eligibility(), RefundEligibility::Unresolved);
+    }
+
+    #[test]
+    fn proofs_round_trip_and_an_old_operation_decodes_without_them() {
+        let mut op = sample_op();
+        op.non_delivery = vec![failed_proof(0), cancel_proof(1)];
+        assert_eq!(try_cbor_decode::<SolOp>(&cbor_encode(&op)).unwrap(), op);
+        // Empty proofs are not written at all, so every image that existed before decodes to an empty
+        // list and the pinned image of a sample without proofs is unchanged.
+        let plain = cbor_encode(&sample_op());
+        assert!(!String::from_utf8_lossy(&plain).contains("non_delivery"));
+        assert!(try_cbor_decode::<SolOp>(&plain).unwrap().non_delivery.is_empty());
+        assert!(String::from_utf8_lossy(&cbor_encode(&op)).contains("non_delivery"));
+    }
 }

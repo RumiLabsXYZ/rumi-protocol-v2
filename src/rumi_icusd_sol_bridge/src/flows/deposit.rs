@@ -18,8 +18,12 @@
 //!   depositor on the pull and by the escrow on refunds and sweeps (reserved in `unknown_outflow`
 //!   before the send); the release fee is carved out of a release.
 //! * **a refund needs proof that no mint can exist.** Only a deposit whose mint operation was never
-//!   built, or was abandoned by an admin after a hand check, can be refunded; an operation in
-//!   flight, held or delivered never can. There is no refund invented for an unverifiable mint.
+//!   built, or whose every mint operation the lane's own records show can never deliver (never
+//!   signed or sent, or every signed generation proven not delivered by a finalized owned cancel or
+//!   a failed original) and was then abandoned, can be refunded; an operation in flight, held with
+//!   a signed generation that is not proven, or delivered never can. An admin's reason, a timeout,
+//!   missing history or a nonce that merely advanced is not proof, and there is no refund invented
+//!   for an unverifiable mint: a signed durable-nonce original may still land after a refund.
 
 use super::ledger_ops::{self, OpRef};
 use crate::accounting::Transition;
@@ -311,10 +315,15 @@ pub async fn bridge_to_solana<L: IcpLedger>(ledger: &L, args: BridgeToSolanaArgs
     Ok(views::deposit_view(&d))
 }
 
-/// Timer: drive pulls that are unknown or whose attempt went stale.
+/// Timer: drive pulls that are unknown or whose attempt went stale. A pass takes its pulls from the
+/// next window of the active index (`state::next_deposits`), so a pull whose outcome cannot be proven
+/// yet (an archive that is unavailable) delays the pulls behind it by one rotation at most; it is
+/// neither skipped forever nor reset nor marked settled by being looked at.
 pub async fn reconcile_pulls<L: IcpLedger>(ledger: &L) {
     let now = env::now_ns();
-    let candidates = state::deposits_in_state(
+    let candidates = state::next_deposits(
+        state::Queue::Pulls,
+        MAX_PULL_RECONCILES_PER_TICK,
         |d| match d.state {
             DepositState::PullUnknown => true,
             DepositState::PullPending => d
@@ -325,7 +334,6 @@ pub async fn reconcile_pulls<L: IcpLedger>(ledger: &L) {
                 .unwrap_or(true),
             _ => false,
         },
-        MAX_PULL_RECONCILES_PER_TICK,
     );
     for d in candidates {
         let r = OpRef::Pull(d.id);
@@ -365,15 +373,12 @@ pub fn on_mint_preflight_hold(deposit_id: u64, reason: String) {
 /// abandoned mint operation is never returned (it can only be refunded).
 pub fn retry_due_holds() {
     let now = env::now_ns();
-    for mut d in state::deposits_in_state(
-        |d| {
-            matches!(d.state, DepositState::MintHeld { .. })
-                && d.mint_op.is_none()
-                && d.abandoned_mint_ops.is_empty()
-                && d.hold_retry_at_ns.map(|t| now >= t).unwrap_or(false)
-        },
-        50,
-    ) {
+    for mut d in state::next_deposits(state::Queue::Holds, 50, |d| {
+        matches!(d.state, DepositState::MintHeld { .. })
+            && d.mint_op.is_none()
+            && d.abandoned_mint_ops.is_empty()
+            && d.hold_retry_at_ns.map(|t| now >= t).unwrap_or(false)
+    }) {
         d.state = DepositState::Escrowed;
         d.hold_retry_at_ns = None;
         d.updated_at_ns = now;
@@ -442,10 +447,20 @@ fn refund_preconditions(d: &DepositRecord, caller: Principal) -> BridgeResult<()
     if !matches!(d.state, DepositState::MintHeld { .. }) || d.mint_op.is_some() {
         return Err(BridgeError::InvalidState("only a held deposit with no Solana mint operation in flight can be refunded".into()));
     }
+    // Every mint operation this deposit ever had must be abandoned AND, judged again here from the
+    // lane's own records, provably unable to deliver: never signed or sent, or every signed generation
+    // proven not delivered. An admin's abandon alone, or its reason, is not what allows the refund.
     for op_id in &d.abandoned_mint_ops {
-        let abandoned = state::get_op(*op_id).is_some_and(|o| matches!(o.state, crate::records::OpState::Abandoned { .. }));
-        if !abandoned {
+        let Some(op) = state::get_op(*op_id) else {
+            return Err(BridgeError::InvalidState(format!("Solana mint operation {op_id} of this deposit does not exist")));
+        };
+        if !matches!(op.state, crate::records::OpState::Abandoned { .. }) {
             return Err(BridgeError::InvalidState(format!("Solana mint operation {op_id} of this deposit is not abandoned")));
+        }
+        if op.refund_eligibility() == crate::records::RefundEligibility::Unresolved {
+            return Err(BridgeError::InvalidState(format!(
+                "Solana mint operation {op_id} of this deposit has a signed generation that is not proven undelivered; its original may still land"
+            )));
         }
     }
     // Defense in depth: no operation may exist for this deposit's mint id except the abandoned ones.
@@ -510,12 +525,14 @@ pub async fn request_refund<L: IcpLedger>(ledger: &L, id: u64) -> BridgeResult<D
     Ok(views::deposit_view(&d))
 }
 
-/// Timer: finish refunds that are pending or unknown.
+/// Timer: finish refunds that are pending or unknown. Same fair window as the pulls
+/// (`state::next_deposits`): a refund whose outcome cannot be proven yet delays the ones behind it by
+/// one rotation at most, and its held funds stay exactly as they are (outflow in doubt, tuple intact).
 pub async fn process_refunds<L: IcpLedger>(ledger: &L) {
     if state::is_halted() {
         return;
     }
-    for d in state::deposits_in_state(|d| matches!(d.state, DepositState::Refunding), MAX_REFUNDS_PER_TICK) {
+    for d in state::next_deposits(state::Queue::Refunds, MAX_REFUNDS_PER_TICK, |d| matches!(d.state, DepositState::Refunding)) {
         ledger_ops::reconcile(ledger, &OpRef::Refund(d.id)).await;
     }
 }

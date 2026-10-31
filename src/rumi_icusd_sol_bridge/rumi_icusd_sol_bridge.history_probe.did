@@ -252,6 +252,7 @@ type OpStateView = variant {
 };
 type OpView = record {
   id : nat64;
+  refund_eligibility : opt RefundEligibility;
   kind : OpKindView;
   lane : Lane;
   note : opt text;
@@ -294,6 +295,7 @@ type ProbeSummary = record {
   status_served_old : bool;
   signatures_probed : nat32;
 };
+type RefundEligibility = variant { ProvenNotDelivered; Unresolved; Unsigned };
 type ReleaseStatus = variant {
   Reminted : record { deposit_id : nat64 };
   TransferUnknown;

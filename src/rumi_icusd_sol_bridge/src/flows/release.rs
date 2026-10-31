@@ -208,7 +208,9 @@ pub async fn process_releases<L: IcpLedger>(ledger: &L) {
     if paused {
         return;
     }
-    let pending: Vec<Hash32> = state::releases_in_state(|r| matches!(r.state, ReleaseState::Pending), MAX_RELEASES_PER_TICK)
+    // The next window of the active index (`state::next_releases`): a release whose transfer is still
+    // unresolved, or that waits for the window, delays the ones behind it by one rotation at most.
+    let pending: Vec<Hash32> = state::next_releases(state::Queue::Releases, MAX_RELEASES_PER_TICK, |r| matches!(r.state, ReleaseState::Pending))
         .into_iter()
         .map(|r| r.return_id)
         .collect();

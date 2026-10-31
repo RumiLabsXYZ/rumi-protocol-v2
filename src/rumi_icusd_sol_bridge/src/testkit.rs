@@ -563,6 +563,9 @@ pub struct MockLedger {
     pub search_error: RefCell<Option<String>>,
     pub search_calls: RefCell<Vec<(u64, u64)>>,
     pub fee_calls: Cell<u32>,
+    /// Every call whose memo is listed fails ambiguously and never executes, on every attempt: a
+    /// transfer whose outcome stays unresolved for as long as the test needs.
+    pub ambiguous_memos: RefCell<Vec<Vec<u8>>>,
 }
 
 impl Default for MockLedger {
@@ -585,6 +588,7 @@ impl MockLedger {
             search_error: RefCell::new(None),
             search_calls: RefCell::default(),
             fee_calls: Cell::new(0),
+            ambiguous_memos: RefCell::default(),
         }
     }
 
@@ -704,6 +708,9 @@ impl IcpLedger for MockLedger {
             hook(op);
         }
         self.sent.borrow_mut().push(op.clone());
+        if self.ambiguous_memos.borrow().contains(&op.memo) {
+            return CallOutcome::Ambiguous("the call failed (this memo always does)".into());
+        }
         match self.faults.borrow_mut().pop_front() {
             Some(LedgerFault::ExecuteThenLoseReply) => {
                 let _ = self.apply(op);
@@ -886,5 +893,6 @@ pub fn bare_op(id: u64, state: crate::records::OpState) -> crate::records::SolOp
         outcome_applied: false,
         alarm_raised_at_ns: None,
         note: None,
+        non_delivery: vec![],
     }
 }

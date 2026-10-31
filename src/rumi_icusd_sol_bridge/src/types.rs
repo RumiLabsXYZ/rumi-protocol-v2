@@ -469,7 +469,9 @@ pub enum OpStateView {
     Delivered { signature: String, slot: u64, adopted: bool },
     NeedsReissue { reason: String },
     Held { reason: String },
-    /// An admin attested, after checking by hand, that this operation will never deliver.
+    /// Abandoned by an admin, accepted only because the lane's own records showed that no signed
+    /// original can land (never signed or sent, or every signed generation proven not delivered).
+    /// The reason is a record, not the proof.
     Abandoned { reason: String },
 }
 
@@ -486,6 +488,9 @@ pub struct OpView {
     pub slot_index: Option<u8>,
     /// Base58 transaction ids of every attempt, oldest first.
     pub tx_ids: Vec<String>,
+    /// For a mint: whether its deposit's backing could be released again, judged only from recorded
+    /// signatures, transaction ids and typed non-delivery proofs. `None` for burns and refunds.
+    pub refund_eligibility: Option<crate::records::RefundEligibility>,
     pub note: Option<String>,
     pub created_at_ns: u64,
     pub updated_at_ns: u64,
@@ -503,10 +508,13 @@ pub enum HeldOpResolution {
     /// Look again at the SAME stored bytes (for example after the history horizon was raised or an
     /// RPC outage ended). Nothing is assumed: adoption still needs the exact message.
     Recheck,
-    /// The admin checked by hand that the nonce was consumed by a transaction that did not deliver
-    /// this operation, and that it will never deliver. The operation is abandoned: the nonce slot
-    /// is re-read from the chain before it is used again, the deposit is never minted again, and
-    /// its owner may ask for the ICP refund. The reason is stored in the audit log.
+    /// Abandon a held mint so its deposit can be refunded. Accepted ONLY when the lane's own records
+    /// prove no signed original can land: the operation was never signed or sent, or every signed
+    /// generation is proven not delivered by a typed proof (a finalized owned cancel, or a failed
+    /// original); see `OpView::refund_eligibility`. Otherwise it is refused and nothing changes. The
+    /// reason is stored in the audit log as a record and authorizes nothing: a reason, a timeout,
+    /// missing history or an advanced nonce is not proof. On success the nonce slot is re-read from
+    /// the chain before it is used again and the deposit is never minted again.
     Abandon { reason: String },
 }
 

@@ -12,7 +12,7 @@ use crate::flows::release::{BurnedReturn, OpenError, OpenOutcome};
 use crate::flows::{deposit, held, release};
 use crate::ids;
 use crate::ledger::{CallOutcome, LedgerRejection, SearchOutcome};
-use crate::records::{Lane, OpKind, OpState, Sig, SlotState};
+use crate::records::{Lane, NotDeliveredReason, OpKind, OpState, RefundEligibility, Sig, SlotState};
 use crate::state::{
     self, AuditCtx, DepositKind, DepositRecord, DepositState, LedgerOp, LedgerOpKind, LedgerOpStatus, ReleaseState,
 };
@@ -54,7 +54,16 @@ fn wallet() -> String {
 
 /// A configured instance (bound mint, deposits enabled, ledger facts known) and a funded caller.
 fn world() -> Fixture {
-    let fx = Fixture::new(2);
+    world_with(LaneSettings { nonce_pool_size: 2, ..LaneSettings::default() })
+}
+
+/// The same instance with no re-issue left, so a proven-undelivered mint is held instead of re-signed.
+fn world_without_reissue() -> Fixture {
+    world_with(LaneSettings { nonce_pool_size: 2, max_reissues: 0, ..LaneSettings::default() })
+}
+
+fn world_with(lane: LaneSettings) -> Fixture {
+    let fx = Fixture::with_lane_settings(lane);
     state::mutate_core(|c| {
         c.config.pauses.deposits = false;
         c.ledger_fee_e8s = Some(FEE);
@@ -1229,27 +1238,55 @@ fn opening_a_release_drops_the_hint_for_its_return() {
 // Held operations
 // ---------------------------------------------------------------------------
 
-/// An escrowed deposit whose mint operation (id returned) exists, is held and waits on a nonce slot.
-fn deposit_with_held_mint(fx: &Fixture) -> (u64, u64) {
+/// How far a held mint operation got before it was held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reached {
+    /// The signer never returned a signature: no transaction can exist.
+    Unsigned,
+    /// Signed and sent, then held while unresolved (a foreign or unverifiable consumer, a history
+    /// gap): the saved original may still land.
+    SignedAndSent,
+    /// Signed and sent, and the original landed with an error (the fee is lost, the nonce consumed).
+    /// With no re-issue left the lane holds the operation; every signed generation is proven.
+    FailedOriginal,
+}
+
+/// An escrowed deposit whose mint operation exists, is held and waits on a nonce slot. Returns the
+/// deposit id and the operation id.
+fn deposit_with_held_mint(fx: &Fixture, reached: Reached) -> (u64, u64) {
     let id = escrowed(fx, 0x21, E8, 1);
     let mint_id = deposit_of(id).mint_id.unwrap();
+    if reached == Reached::Unsigned {
+        fx.signer.override_call.replace(Some(Box::new(|_| Some(Scripted::Fail("signer unavailable".into())))));
+    }
     let op_id = fx
         .submit(crate::lane::SubmitRequest { external_id: mint_id, ..Fixture::mint_request(1, E8) }, env::now_ns())
         .expect("submitted");
+    fx.signer.override_call.replace(None);
     let mut d = deposit_of(id);
     d.state = DepositState::MintInFlight;
     d.mint_op = Some(op_id);
     state::put_deposit(&d);
-    let mut op = state::get_op(op_id).unwrap();
-    op.state = OpState::Held { reason: "a foreign transaction consumed the nonce".into() };
-    state::put_op(&op);
+    match reached {
+        Reached::Unsigned | Reached::SignedAndSent => {
+            let mut op = state::get_op(op_id).unwrap();
+            op.state = OpState::Held { reason: "a foreign transaction consumed the nonce".into() };
+            state::put_op(&op);
+        }
+        Reached::FailedOriginal => {
+            assert!(fx.chain.land(&fx.wire_of(op_id, 0), true), "a failed durable-nonce transaction still consumes the nonce");
+            fx.tick(secs(2_000));
+            fx.tick(secs(2_100));
+            assert!(matches!(state::get_op(op_id).unwrap().state, OpState::Held { .. }), "{:?}", state::get_op(op_id).unwrap().state);
+        }
+    }
     (id, op_id)
 }
 
 #[test]
 fn resolving_a_held_operation_needs_an_admin() {
     let fx = world();
-    let (_, op_id) = deposit_with_held_mint(&fx);
+    let (_, op_id) = deposit_with_held_mint(&fx, Reached::SignedAndSent);
     for who in [user(0x21), Principal::anonymous(), user(0x99)] {
         test_env::set_caller(who);
         assert!(held::resolve_held_op(op_id, HeldOpResolution::Recheck).is_err(), "{who}");
@@ -1263,7 +1300,7 @@ fn resolving_a_held_operation_needs_an_admin() {
 #[test]
 fn recheck_puts_the_same_bytes_back_under_reconcile() {
     let fx = world();
-    let (_, op_id) = deposit_with_held_mint(&fx);
+    let (_, op_id) = deposit_with_held_mint(&fx, Reached::SignedAndSent);
     let bytes_before = state::get_op(op_id).unwrap().attempts[0].message.clone();
     test_env::set_caller(admin());
     let v = held::resolve_held_op(op_id, HeldOpResolution::Recheck).unwrap();
@@ -1280,16 +1317,73 @@ fn recheck_puts_the_same_bytes_back_under_reconcile() {
 }
 
 #[test]
-fn abandoning_a_held_mint_frees_nothing_blindly_and_leaves_the_deposit_refund_only() {
+fn a_signed_held_mint_cannot_be_abandoned_and_its_deposit_cannot_be_refunded_while_the_original_can_still_land() {
     let fx = world();
-    let (id, op_id) = deposit_with_held_mint(&fx);
-    let slot_idx = state::get_op(op_id).unwrap().slot_index.unwrap();
+    let (id, op_id) = deposit_with_held_mint(&fx, Reached::SignedAndSent);
+    let saved_original = fx.wire_of(op_id, 0);
+    let me = acct(user(0x21));
+    assert_eq!(state::get_op(op_id).unwrap().refund_eligibility(), RefundEligibility::Unresolved);
+    assert_eq!(crate::views::op_view(&state::get_op(op_id).unwrap()).refund_eligibility, Some(RefundEligibility::Unresolved));
+
+    // The admin cannot abandon it, whatever the reason says: nothing changes.
+    test_env::set_caller(admin());
+    let abandon = held::resolve_held_op(
+        op_id,
+        HeldOpResolution::Abandon { reason: "the explorer shows no transaction; it never landed and never will".into() },
+    );
+    assert!(matches!(&abandon, Err(BridgeError::InvalidState(m)) if m.contains("not proven undelivered")), "{abandon:?}");
+    assert!(matches!(state::get_op(op_id).unwrap().state, OpState::Held { .. }), "still held, not abandoned");
+    let d = deposit_of(id);
+    assert_eq!((d.mint_op, d.abandoned_mint_ops.clone()), (Some(op_id), vec![]));
+    assert!(matches!(d.state, DepositState::MintInFlight), "{:?}", d.state);
+
+    // So the owner's refund is denied, and no ICP moved.
+    test_env::set_caller(user(0x21));
+    let refund = block_on(deposit::request_refund(&fx.ledger, id));
+    assert!(matches!(refund, Err(BridgeError::InvalidState(_))), "{refund:?}");
+    assert_eq!((fx.ledger.balance(&me), buckets().pending_refund, buckets().pending_mint), (0, 0, E8 as u128));
+    assert_eq!(fx.ledger.sent.borrow().iter().filter(|o| o.kind == LedgerOpKind::Refund).count(), 0);
+
+    // The saved original is still a valid transaction on the unchanged durable nonce: it lands now.
+    assert!(fx.chain.land(&saved_original, false), "an unchanged durable nonce never expires");
+    test_env::set_caller(admin());
+    held::resolve_held_op(op_id, HeldOpResolution::Recheck).unwrap();
+    fx.tick(env::now_ns() + secs(60));
+    assert!(matches!(state::get_op(op_id).unwrap().state, OpState::Delivered { adopted: false, .. }), "{:?}", state::get_op(op_id).unwrap().state);
+    // The backing is still in place for the tokens that now exist.
+    assert_eq!(buckets().pending_mint, E8 as u128);
+    assert_covered(&fx);
+}
+
+#[test]
+fn a_held_mint_whose_original_already_landed_unseen_cannot_be_abandoned() {
+    let fx = world();
+    let (id, op_id) = deposit_with_held_mint(&fx, Reached::SignedAndSent);
+    // The original landed, but the lane has not seen it (a history gap, an RPC outage).
+    assert!(fx.chain.land(&fx.wire_of(op_id, 0), false));
+    test_env::set_caller(admin());
+    assert!(held::resolve_held_op(op_id, HeldOpResolution::Abandon { reason: "checked by hand".into() }).is_err());
+    test_env::set_caller(user(0x21));
+    assert!(block_on(deposit::request_refund(&fx.ledger, id)).is_err());
+    assert_eq!(buckets().pending_refund, 0);
+    assert_eq!(deposit_of(id).mint_op, Some(op_id));
+}
+
+#[test]
+fn an_unsigned_held_mint_can_be_abandoned_its_slot_is_re_read_and_the_deposit_is_refund_only() {
+    let fx = world();
+    let (id, op_id) = deposit_with_held_mint(&fx, Reached::Unsigned);
+    let op = state::get_op(op_id).unwrap();
+    assert!(op.attempts.iter().all(|a| a.signatures.is_empty() && a.tx_ids.is_empty()), "nothing was signed or sent");
+    assert_eq!(op.refund_eligibility(), RefundEligibility::Unsigned);
+    assert_eq!(crate::views::op_view(&op).refund_eligibility, Some(RefundEligibility::Unsigned));
+    let slot_idx = op.slot_index.unwrap();
     let gen_before = state::get_slot(Lane::Mint, slot_idx).unwrap().generation;
     test_env::set_caller(admin());
-    // A reason is required.
+    // A reason is required (and is a record only).
     assert!(matches!(held::resolve_held_op(op_id, HeldOpResolution::Abandon { reason: "  ".into() }), Err(BridgeError::InvalidArgument(_))));
     assert!(matches!(held::resolve_held_op(op_id, HeldOpResolution::Abandon { reason: "x".repeat(513) }), Err(BridgeError::InvalidArgument(_))));
-    let v = held::resolve_held_op(op_id, HeldOpResolution::Abandon { reason: "explorer shows the nonce was advanced by an unrelated transfer".into() }).unwrap();
+    let v = held::resolve_held_op(op_id, HeldOpResolution::Abandon { reason: "the signer was down; nothing was ever signed".into() }).unwrap();
     assert!(matches!(v.state, OpStateView::Abandoned { .. }));
     let op = state::get_op(op_id).unwrap();
     assert!(op.is_terminal());
@@ -1319,9 +1413,52 @@ fn abandoning_a_held_mint_frees_nothing_blindly_and_leaves_the_deposit_refund_on
 }
 
 #[test]
+fn a_held_mint_whose_signed_generations_are_all_proven_undelivered_can_be_abandoned_and_refunded() {
+    let fx = world_without_reissue();
+    let (id, op_id) = deposit_with_held_mint(&fx, Reached::FailedOriginal);
+    let op = state::get_op(op_id).unwrap();
+    assert_eq!(op.refund_eligibility(), RefundEligibility::ProvenNotDelivered);
+    assert_eq!(op.non_delivery.len(), 1, "the typed proof outlived the state that first carried it");
+    assert_eq!(op.non_delivery[0].generation, 0);
+    assert!(matches!(op.non_delivery[0].reason, NotDeliveredReason::LandedWithError { .. }));
+    let saved_original = fx.wire_of(op_id, 0);
+    test_env::set_caller(admin());
+    let v = held::resolve_held_op(op_id, HeldOpResolution::Abandon { reason: "no re-issue is left for this mint".into() }).unwrap();
+    assert!(matches!(v.state, OpStateView::Abandoned { .. }));
+    assert_eq!(v.refund_eligibility, Some(RefundEligibility::ProvenNotDelivered));
+    test_env::set_caller(user(0x21));
+    let r = block_on(deposit::request_refund(&fx.ledger, id)).unwrap();
+    assert_eq!(r.status, DepositStatus::Refunded);
+    // The refund is safe: the saved original can never land, its nonce value was consumed by the
+    // failed original.
+    assert!(!fx.chain.land(&saved_original, false), "the original cannot land on the consumed nonce");
+    assert_covered(&fx);
+}
+
+#[test]
+fn a_refund_re_checks_the_proofs_and_does_not_trust_the_abandoned_flag() {
+    let fx = world();
+    let (id, op_id) = deposit_with_held_mint(&fx, Reached::SignedAndSent);
+    // What an unchecked abandon used to leave behind: the operation marked abandoned, the deposit
+    // detached from it. The refund must still refuse, because the signed original is not proven undelivered.
+    let mut op = state::get_op(op_id).unwrap();
+    op.state = OpState::Abandoned { reason: "by hand".into(), at_ns: 1 };
+    state::put_op(&op);
+    let mut d = deposit_of(id);
+    d.mint_op = None;
+    d.abandoned_mint_ops = vec![op_id];
+    d.state = DepositState::MintHeld { reason: "abandoned".into() };
+    state::put_deposit(&d);
+    test_env::set_caller(user(0x21));
+    let r = block_on(deposit::request_refund(&fx.ledger, id));
+    assert!(matches!(&r, Err(BridgeError::InvalidState(m)) if m.contains("not proven undelivered")), "{r:?}");
+    assert_eq!(fx.ledger.sent.borrow().iter().filter(|o| o.kind == LedgerOpKind::Refund).count(), 0);
+}
+
+#[test]
 fn only_a_held_mint_that_a_deposit_waits_on_can_be_abandoned() {
     let fx = world();
-    let (_, op_id) = deposit_with_held_mint(&fx);
+    let (_, op_id) = deposit_with_held_mint(&fx, Reached::Unsigned);
     test_env::set_caller(admin());
     // Not held.
     let mut op = state::get_op(op_id).unwrap();
@@ -1550,9 +1687,196 @@ fn views_carry_the_whole_record_in_text_forms() {
     assert_eq!(r.status, ReleaseStatus::TransferUnknown);
     let ops = crate::views::unresolved_ops(None, 10);
     assert!(ops.is_empty(), "no lane operations were created");
-    let (_, op_id) = deposit_with_held_mint(&world());
+    let (_, op_id) = deposit_with_held_mint(&world(), Reached::SignedAndSent);
     let ops = crate::views::unresolved_ops(None, 10);
     assert_eq!(ops.len(), 1);
     assert_eq!((ops[0].id, ops[0].kind), (op_id, OpKindView::Mint));
     assert!(matches!(ops[0].state, OpStateView::Held { .. }));
+    assert_eq!(ops[0].refund_eligibility, Some(RefundEligibility::Unresolved), "signed and unresolved: not refundable");
+}
+
+// ---------------------------------------------------------------------------
+// Fair paging of the background queues (49b correction)
+//
+// A pass used to take the OLDEST ten pulls, five refunds or ten releases and to collect every active
+// id to find them, so ten old entries whose effect stays unresolved (an unavailable archive, a
+// transfer that keeps failing ambiguously) starved every newer one forever. A pass now walks one
+// bounded window of the active index after a cursor, so a bounded number of passes reaches every
+// entry, and looking at an entry settles, resets or rebuilds nothing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn old_pulls_that_cannot_be_proven_do_not_starve_a_newer_resolvable_pull() {
+    let fx = world();
+    // Twelve pulls (more than one batch of ten) whose reply was lost.
+    let mut older = vec![];
+    for who in 0x40..0x4c {
+        test_env::set_caller(user(who));
+        fund(&fx, &acct(user(who)), E8);
+        fx.ledger.push_fault(LedgerFault::ExecuteThenLoseReply);
+        older.push(bridge(&fx, args(E8, 1)).unwrap().id);
+    }
+    // A day later they can only be searched, and the archive is unavailable: they stay unresolved.
+    *fx.ledger.search_error.borrow_mut() = Some("archive unavailable".into());
+    test_env::set_now_ns(env::now_ns() + DEDUP_SAFE_WINDOW_NS + 1_000_000_000);
+    // A newer pull, inside its window, whose reply was lost: resending the identical tuple resolves it.
+    test_env::set_caller(user(0x60));
+    fund(&fx, &acct(user(0x60)), E8);
+    fx.ledger.push_fault(LedgerFault::ExecuteThenLoseReply);
+    let newer = bridge(&fx, args(E8, 1)).unwrap().id;
+    assert_eq!(deposit_of(newer).state, DepositState::PullUnknown);
+    let before: Vec<_> = older
+        .iter()
+        .map(|id| {
+            let p = deposit_of(*id).pull.unwrap();
+            (p.created_at_time, p.attempts, p.memo)
+        })
+        .collect();
+    let sent_before = fx.ledger.sent_count();
+    // A bounded number of passes reaches it.
+    let mut resolved_after = None;
+    for n in 1..=3 {
+        test_env::advance_secs(5);
+        block_on(deposit::reconcile_pulls(&fx.ledger));
+        if deposit_of(newer).state == DepositState::Escrowed {
+            resolved_after = Some(n);
+            break;
+        }
+    }
+    assert!(resolved_after.is_some(), "the newer resolvable pull was starved by older unresolved ones");
+    // The older ones are exactly as they were: not failed, not settled, the same tuples, never resent.
+    for (id, was) in older.iter().zip(before) {
+        let d = deposit_of(*id);
+        assert_eq!(d.state, DepositState::PullUnknown);
+        let p = d.pull.unwrap();
+        assert_eq!((p.created_at_time, p.attempts, p.memo), was, "deposit {id}");
+    }
+    assert_eq!(fx.ledger.sent_count(), sent_before + 1, "only the newer pull was resent");
+    assert_eq!(buckets().reserved_pulls, (12 * E8) as u128, "the older capacity stays reserved");
+}
+
+#[test]
+fn ten_unresolved_releases_do_not_starve_a_newer_pending_release() {
+    let fx = world();
+    let mut all = vec![];
+    for tag in 1..=11u8 {
+        let b = burned(&fx, 200_000, tag);
+        release::open_release(&b).unwrap();
+        all.push(b);
+    }
+    // The transfers of the first ten can never be resolved: every call about them fails ambiguously.
+    for b in &all[..10] {
+        fx.ledger.ambiguous_memos.borrow_mut().push(ids::release_memo(&b.return_id));
+    }
+    let mut resolved_after = None;
+    for n in 1..=3 {
+        test_env::advance_secs(200);
+        block_on(release::process_releases(&fx.ledger));
+        if state::get_release(&all[10].return_id).unwrap().state == ReleaseState::Released {
+            resolved_after = Some(n);
+            break;
+        }
+    }
+    assert!(resolved_after.is_some(), "the newer pending release was starved by older unresolved ones");
+    // The older ones stay pending with their own tuple and their outflow still in doubt.
+    for b in &all[..10] {
+        let r = state::get_release(&b.return_id).unwrap();
+        assert_eq!(r.state, ReleaseState::Pending);
+        let t = r.transfer.unwrap();
+        assert!(matches!(t.status, LedgerOpStatus::Unknown { .. }));
+        assert_eq!(t.memo, b.return_id.to_vec());
+    }
+    assert_eq!(buckets().unknown_outflow, 10 * 200_000);
+    assert_covered(&fx);
+}
+
+#[test]
+fn five_unresolved_refunds_do_not_starve_a_newer_one() {
+    let fx = world();
+    let deposits: Vec<u64> = (0..6u8).map(|i| held_deposit(&fx, 0x50 + i, E8, 1)).collect();
+    for id in &deposits[..5] {
+        fx.ledger.ambiguous_memos.borrow_mut().push(ids::refund_ledger_memo(*id));
+    }
+    for (i, id) in deposits.iter().enumerate() {
+        test_env::set_caller(user(0x50 + i as u8));
+        if i == 5 {
+            // The newer refund executes and its reply is lost: resending the identical tuple resolves it.
+            fx.ledger.push_fault(LedgerFault::ExecuteThenLoseReply);
+        }
+        let v = block_on(deposit::request_refund(&fx.ledger, *id)).unwrap();
+        assert_eq!(v.status, DepositStatus::Refunding, "refund {i}");
+    }
+    let before: Vec<_> = deposits[..5]
+        .iter()
+        .map(|id| {
+            let r = deposit_of(*id).refund.unwrap();
+            (r.created_at_time, r.memo)
+        })
+        .collect();
+    let mut resolved_after = None;
+    for n in 1..=3 {
+        test_env::advance_secs(200);
+        block_on(deposit::process_refunds(&fx.ledger));
+        if deposit_of(deposits[5]).state == DepositState::Refunded {
+            resolved_after = Some(n);
+            break;
+        }
+    }
+    assert!(resolved_after.is_some(), "the newer refund was starved by older unresolved ones");
+    for (id, was) in deposits[..5].iter().zip(before) {
+        let d = deposit_of(*id);
+        assert_eq!(d.state, DepositState::Refunding);
+        let r = d.refund.unwrap();
+        assert_eq!((r.created_at_time, r.memo), was, "deposit {id}");
+        assert!(r.outflow_reserved, "the held funds stay in doubt, not released");
+    }
+    assert_eq!(buckets().unknown_outflow, 5 * E8 as u128);
+    assert_covered(&fx);
+}
+
+/// An active deposit that no queue has any business with (it waits for its mint).
+fn filler_deposit(id: u64) -> DepositRecord {
+    DepositRecord {
+        id,
+        kind: DepositKind::UserDeposit,
+        owner: user(0x77),
+        from: None,
+        client_request_id: vec![1; 16],
+        solana_recipient: RECIPIENT,
+        amount_e8s: E8,
+        deposit_fee_e8s: 0,
+        mint_amount_e8s: E8,
+        mint_id: None,
+        state: DepositState::Escrowed,
+        pull: None,
+        refund: None,
+        mint_op: None,
+        abandoned_mint_ops: vec![],
+        delivered: None,
+        hold_retry_at_ns: None,
+        created_at_ns: 0,
+        updated_at_ns: 0,
+    }
+}
+
+#[test]
+fn a_pass_examines_a_bounded_window_of_the_active_index_whatever_is_active() {
+    let fx = world();
+    // 200 deposits waiting for their mint, then one real pull whose reply was lost: it is the 201st
+    // active entry, so it is reached exactly when the window has walked the whole index.
+    state::mutate_core(|c| c.next_deposit_id = 200);
+    for id in 0..200 {
+        state::put_deposit(&filler_deposit(id));
+    }
+    test_env::set_caller(user(0x21));
+    fund(&fx, &acct(user(0x21)), E8);
+    fx.ledger.push_fault(LedgerFault::ExecuteThenLoseReply);
+    let id = bridge(&fx, args(E8, 1)).unwrap().id;
+    assert_eq!(id, 200);
+    let needed = 201usize.div_ceil(state::QUEUE_SCAN);
+    for n in 1..=needed {
+        block_on(deposit::reconcile_pulls(&fx.ledger));
+        let done = deposit_of(id).state == DepositState::Escrowed;
+        assert_eq!(done, n == needed, "pass {n} of {needed}");
+    }
 }

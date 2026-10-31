@@ -356,6 +356,7 @@ pub async fn submit_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, req: SubmitR
         created_at_ns: now,
         updated_at_ns: now,
         outcome_applied: false,
+        non_delivery: vec![],
         alarm_raised_at_ns: None,
         note: None,
     };
@@ -685,6 +686,12 @@ fn apply_resolution(op_id: u64, resolution: Resolution, observed: &Hash32, now: 
                 o.discovery_cursor = None;
                 o.observed_value = None;
                 o.advance_seen_at_ns = None;
+                // The typed proof is kept past the re-issue: it is the only thing that can later
+                // show this generation can never deliver (a refund is judged from it alone).
+                let generation = o.generation;
+                if !o.non_delivery.iter().any(|p| p.generation == generation) {
+                    o.non_delivery.push(NonDelivery { generation, reason: reason.clone() });
+                }
             });
             state::append_audit(None, state::AuditCtx::note(format!("op {op_id} proven not delivered: {reason:?}")));
             events.push(OpEvent::NotDelivered { op_id, reason });
@@ -938,18 +945,32 @@ pub fn recheck_held(op_id: u64, now: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Admin resolution (49b): abandon a held MINT after an admin checked by hand that it will never
-/// deliver. The operation becomes terminal. Its nonce slot goes back to `Unverified`, so the next
-/// bootstrap pass reads the account from the chain again and the slot is used only with the value
-/// found there (never with a value the lane inferred). Returns the slot freed, if any. The caller
+/// Admin resolution (49b): abandon a held MINT, but only when the lane's own records show that no
+/// signed original can ever land (`SolOp::refund_eligibility`): the operation was never signed or
+/// sent, or every signed generation is proven not delivered by a typed proof (a finalized owned
+/// cancel, or a failed original). An admin's reason, a timeout, missing history or a nonce that
+/// merely advanced is not proof: a signed durable-nonce original may land AFTER a refund, or have
+/// landed already behind a history gap, and the refund would then leave supply without backing.
+/// Everything else is refused with an actionable message and NOTHING is changed.
+///
+/// On success the operation becomes terminal and its nonce slot (if it still holds one, which only
+/// an unsigned operation does) goes back to `Unverified`, so the next bootstrap pass reads the
+/// account from the chain again and the slot is used only with the value found there. The caller
 /// (`flows::held`) updates the deposit.
-pub fn abandon_held_mint(op_id: u64, reason: &str, now: u64) -> Result<(), String> {
+pub fn abandon_held_mint(op_id: u64, reason: &str, now: u64) -> Result<RefundEligibility, String> {
     let op = state::get_op(op_id).ok_or("no such operation")?;
     if op.kind != OpKind::Mint {
         return Err("only a held mint can be abandoned; burns and stray refunds are resolved by the burn lane".into());
     }
     if !matches!(op.state, OpState::Held { .. }) {
         return Err("the operation is not held".into());
+    }
+    let eligibility = op.refund_eligibility();
+    if eligibility == RefundEligibility::Unresolved {
+        return Err(format!(
+            "operation {op_id} has a signed generation that is not proven undelivered, so its original may still land and a refund could leave supply without backing. \
+             Recheck it (the same stored bytes) or wait for a finalized owned cancel or a failed original; a reason, a timeout, missing history or an advanced nonce is not proof"
+        ));
     }
     if let Some(idx) = op.slot_index {
         if let Some(mut slot) = state::get_slot(op.lane, idx) {
@@ -967,8 +988,11 @@ pub fn abandon_held_mint(op_id: u64, reason: &str, now: u64) -> Result<(), Strin
         o.updated_at_ns = now;
         o.discovery_cursor = None;
     });
-    state::append_audit(None, state::AuditCtx::op(op_id, format!("held mint abandoned by an admin: {reason}")));
-    Ok(())
+    state::append_audit(
+        None,
+        state::AuditCtx::op(op_id, format!("held mint abandoned by an admin ({eligibility:?}; the reason is a record, not a proof): {reason}")),
+    );
+    Ok(eligibility)
 }
 
 /// Process one operation (whatever its state calls for).

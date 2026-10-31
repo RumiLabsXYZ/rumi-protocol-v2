@@ -106,6 +106,7 @@ pub fn op_view(o: &SolOp) -> OpView {
         generation: o.generation,
         slot_index: o.slot_index,
         tx_ids: o.attempts.iter().flat_map(|a| a.tx_ids.iter().map(|s| signature_to_base58(&s.0))).collect(),
+        refund_eligibility: (o.kind == OpKind::Mint).then(|| o.refund_eligibility()),
         note: o.note.clone(),
         created_at_ns: o.created_at_ns,
         updated_at_ns: o.updated_at_ns,

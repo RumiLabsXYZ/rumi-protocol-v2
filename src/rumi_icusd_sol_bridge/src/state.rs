@@ -1147,10 +1147,110 @@ pub fn insert_request(key: RequestKey, deposit_id: u64) {
     REQUEST_IDS.with(|m| m.borrow_mut().insert(key, deposit_id));
 }
 
-/// Active deposits matching `pred`, oldest first.
+/// Active deposits matching `pred`, oldest first, at most `limit`. Walks the index lazily and stops at
+/// `limit`; it is for admin lookups and tests. Background queues use [`next_deposits`], which is
+/// fair across passes.
 pub fn deposits_in_state(pred: impl Fn(&DepositRecord) -> bool, limit: usize) -> Vec<DepositRecord> {
-    let ids: Vec<u64> = ACTIVE_DEPOSITS.with(|m| m.borrow().iter().map(|(k, _)| k).collect());
-    ids.into_iter().filter_map(get_deposit).filter(|d| pred(d)).take(limit).collect()
+    let mut out = Vec::new();
+    ACTIVE_DEPOSITS.with(|m| {
+        for (id, _) in m.borrow().iter() {
+            if let Some(d) = get_deposit(id) {
+                if pred(&d) {
+                    out.push(d);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    out
+}
+
+// Fair paging of the background queues ---------------------------------------
+
+/// The background queues of the ICP-side sagas. Each walks one active index with its own cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Queue {
+    Pulls,
+    Refunds,
+    Holds,
+    Releases,
+}
+
+impl Queue {
+    fn slot(self) -> usize {
+        match self {
+            Queue::Pulls => 0,
+            Queue::Refunds => 1,
+            Queue::Holds => 2,
+            Queue::Releases => 3,
+        }
+    }
+}
+
+/// Active ids examined per pass per queue at most: bounds both the index walk and the records decoded,
+/// so a small pass never allocates or decodes in proportion to everything that is active.
+pub const QUEUE_SCAN: usize = 64;
+
+thread_local! {
+    /// Where each queue's next window starts (the last id its previous pass examined). Heap only, on
+    /// purpose: after an upgrade the walk restarts at the lowest id, and the active indexes it walks
+    /// are stable, so there is nothing to rebuild.
+    static QUEUE_CURSORS: RefCell<[Option<u64>; 4]> = const { RefCell::new([None; 4]) };
+}
+
+pub fn queue_cursor(q: Queue) -> Option<u64> {
+    QUEUE_CURSORS.with(|c| c.borrow()[q.slot()])
+}
+
+pub fn set_queue_cursor(q: Queue, cursor: Option<u64>) {
+    QUEUE_CURSORS.with(|c| c.borrow_mut()[q.slot()] = cursor);
+}
+
+/// The next window of an active index: up to `limit` entries after `after` (exclusive), wrapping to
+/// the lowest keys when the end is reached (the wrapped keys are all `<= after`, so none repeats).
+fn index_window<V: Storable + Clone>(m: &StableBTreeMap<u64, V, Mem>, after: Option<u64>, limit: usize) -> Vec<(u64, V)> {
+    use std::ops::Bound;
+    let mut page: Vec<(u64, V)> = match after {
+        Some(c) => m.range((Bound::Excluded(c), Bound::Unbounded)).take(limit).collect(),
+        None => m.iter().take(limit).collect(),
+    };
+    if let Some(c) = after {
+        if page.len() < limit {
+            let room = limit - page.len();
+            page.extend(m.range(..=c).take(room));
+        }
+    }
+    page
+}
+
+/// Take up to `limit` active deposits matching `pred` from the next [`QUEUE_SCAN`] ids of `queue`'s
+/// window, and advance the queue's cursor to the last id examined (stopping at the last id taken when
+/// `limit` is reached, so no match is skipped). Entries that match but cannot be settled (an archive
+/// that is unavailable, an effect still unresolved) therefore delay the entries behind them by at most
+/// one rotation of the index, never forever. A pass advances over at least
+/// `min(limit, QUEUE_SCAN)` entries (it stops early only after `limit` matches, each of which is an
+/// entry it examined), so with a nonzero `limit` every active deposit is examined within
+/// `ceil(active / min(limit, QUEUE_SCAN))` passes, and nothing is reset or marked settled by looking
+/// at it.
+pub fn next_deposits(queue: Queue, limit: usize, pred: impl Fn(&DepositRecord) -> bool) -> Vec<DepositRecord> {
+    let window = ACTIVE_DEPOSITS.with(|m| index_window(&m.borrow(), queue_cursor(queue), QUEUE_SCAN));
+    let mut out = Vec::new();
+    let mut last = None;
+    for (id, _) in window {
+        last = Some(id);
+        if let Some(d) = get_deposit(id) {
+            if pred(&d) {
+                out.push(d);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    set_queue_cursor(queue, last);
+    out
 }
 
 // Releases ------------------------------------------------------------------
@@ -1215,20 +1315,60 @@ pub fn list_sender_releases(sender: &Pubkey, start_after_seq: Option<u64>, limit
     ids.iter().filter_map(get_release).collect()
 }
 
-/// Active releases matching `pred`, oldest first.
+/// Active releases matching `pred`, oldest first, at most `limit`. Lazy, for admin lookups and tests;
+/// the background queue uses [`next_releases`].
 pub fn releases_in_state(pred: impl Fn(&ReleaseRecord) -> bool, limit: usize) -> Vec<ReleaseRecord> {
-    let ids: Vec<Hash32> = ACTIVE_RELEASES.with(|m| m.borrow().iter().map(|(_, v)| v).collect());
-    ids.iter().filter_map(get_release).filter(|r| pred(r)).take(limit).collect()
+    let mut out = Vec::new();
+    ACTIVE_RELEASES.with(|m| {
+        for (_, rid) in m.borrow().iter() {
+            if let Some(r) = get_release(&rid) {
+                if pred(&r) {
+                    out.push(r);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    out
+}
+
+/// The release counterpart of [`next_deposits`], over the active releases by creation sequence, with
+/// the same bound: one rotation of the index takes at most `ceil(active / min(limit, QUEUE_SCAN))`
+/// passes.
+pub fn next_releases(queue: Queue, limit: usize, pred: impl Fn(&ReleaseRecord) -> bool) -> Vec<ReleaseRecord> {
+    let window = ACTIVE_RELEASES.with(|m| index_window(&m.borrow(), queue_cursor(queue), QUEUE_SCAN));
+    let mut out = Vec::new();
+    let mut last = None;
+    for (seq, rid) in window {
+        last = Some(seq);
+        if let Some(r) = get_release(&rid) {
+            if pred(&r) {
+                out.push(r);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    set_queue_cursor(queue, last);
+    out
 }
 
 /// Sum of the amounts of releases in `Pending` (the part of `pending_release` that is spoken for).
 pub fn pending_release_total() -> u128 {
-    let ids: Vec<Hash32> = ACTIVE_RELEASES.with(|m| m.borrow().iter().map(|(_, v)| v).collect());
-    ids.iter()
-        .filter_map(get_release)
-        .filter(|r| matches!(r.state, ReleaseState::Pending))
-        .map(|r| r.amount_e8s as u128)
-        .sum()
+    let mut total = 0u128;
+    ACTIVE_RELEASES.with(|m| {
+        for (_, rid) in m.borrow().iter() {
+            if let Some(r) = get_release(&rid) {
+                if matches!(r.state, ReleaseState::Pending) {
+                    total += r.amount_e8s as u128;
+                }
+            }
+        }
+    });
+    total
 }
 
 // Bootstrap transactions ----------------------------------------------------
@@ -1382,6 +1522,7 @@ pub fn reset_for_tests() {
     OWNER_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_OWNER_RELEASES)));
     SENDER_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_SENDER_RELEASES)));
     RELEASE_BY_BURN_OP.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_RELEASE_BY_BURN_OP)));
+    QUEUE_CURSORS.with(|c| *c.borrow_mut() = [None; 4]);
 }
 
 #[cfg(test)]
@@ -1925,6 +2066,83 @@ mod tests {
         let d = try_cbor_decode::<DepositRecord>(&bytes).unwrap();
         assert_eq!((d.mint_id, d.pull, d.refund, d.mint_op, d.delivered, d.hold_retry_at_ns), (None, None, None, None, None, None));
         assert!(d.abandoned_mint_ops.is_empty());
+    }
+
+    /// An active deposit with id `id`, owned by nobody in particular.
+    fn active_deposit(id: u64) {
+        let mut d = sample_deposit();
+        d.id = id;
+        d.kind = DepositKind::UserDeposit;
+        d.state = DepositState::PullUnknown;
+        put_deposit(&d);
+    }
+
+    #[test]
+    fn a_queue_window_is_bounded_and_the_walk_visits_everything_within_a_known_number_of_passes() {
+        reset_for_tests();
+        for id in 0..150 {
+            active_deposit(id);
+        }
+        let visited: RefCell<Vec<u64>> = RefCell::new(vec![]);
+        let record = |d: &DepositRecord| {
+            visited.borrow_mut().push(d.id);
+            true
+        };
+        // A pass examines at most QUEUE_SCAN ids, however many are active.
+        assert_eq!(next_deposits(Queue::Pulls, 1_000, record).len(), QUEUE_SCAN);
+        assert_eq!(visited.borrow().len(), QUEUE_SCAN);
+        assert_eq!(queue_cursor(Queue::Pulls), Some(63));
+        // ceil(150 / 64) = 3 passes reach every entry; the third fills its window by wrapping to the
+        // oldest ids, so a few are looked at twice and none is missed.
+        next_deposits(Queue::Pulls, 1_000, record);
+        next_deposits(Queue::Pulls, 1_000, record);
+        assert_eq!(visited.borrow().len(), 3 * QUEUE_SCAN);
+        let mut seen = visited.borrow().clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, (0..150).collect::<Vec<_>>());
+        // The queues keep separate cursors.
+        assert_eq!(queue_cursor(Queue::Refunds), None);
+        assert_eq!(next_deposits(Queue::Refunds, 1_000, |_| false).len(), 0);
+        assert_eq!(queue_cursor(Queue::Refunds), Some(63));
+        // Taking `limit` matches stops AT the last one taken, so none behind it is skipped.
+        reset_for_tests();
+        for id in 0..10 {
+            active_deposit(id);
+        }
+        let mut order = vec![];
+        for _ in 0..4 {
+            order.extend(next_deposits(Queue::Pulls, 3, |_| true).into_iter().map(|d| d.id));
+        }
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1], "three at a time, in order, wrapping");
+        // Non-matching entries still advance the window; an empty index resets the cursor.
+        reset_for_tests();
+        assert!(next_deposits(Queue::Holds, 5, |_| true).is_empty());
+        assert_eq!(queue_cursor(Queue::Holds), None);
+    }
+
+    #[test]
+    fn the_release_queue_walks_by_creation_sequence_the_same_way() {
+        reset_for_tests();
+        for seq in 0..5u64 {
+            let mut r = sample_release();
+            r.return_id = [seq as u8 + 1; 32];
+            r.seq = seq;
+            r.burn_op_id = 100 + seq;
+            r.state = ReleaseState::Pending;
+            put_release(&r);
+        }
+        let ids = |n: usize| next_releases(Queue::Releases, n, |_| true).into_iter().map(|r| r.seq).collect::<Vec<_>>();
+        assert_eq!(ids(2), vec![0, 1]);
+        assert_eq!(ids(2), vec![2, 3]);
+        assert_eq!(ids(2), vec![4, 0], "wraps to the oldest");
+        // A settled release leaves the queue.
+        let mut done = sample_release();
+        done.return_id = [3; 32];
+        done.seq = 2;
+        done.state = ReleaseState::Released;
+        put_release(&done);
+        assert_eq!(releases_in_state(|_| true, 10).len(), 4);
     }
 
     #[test]
