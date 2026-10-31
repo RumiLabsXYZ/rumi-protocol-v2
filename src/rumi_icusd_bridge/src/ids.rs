@@ -3,7 +3,8 @@
 //! Every identifier that crosses a trust boundary carries an explicit domain tag so
 //! a value produced for one purpose can never be accepted for another:
 //!
-//! - Base mint ids for deposits and for held-claim re-mints use different domains.
+//! - Mint ids for deposits and for held-claim re-mints use different domains, each built
+//!   from the chain slug in `chains.rs`.
 //! - Bridge-out transfer ids are computed by the Base contract under its own domain
 //!   (`rumi.icusd.base.bridge-out.v1`), so they cannot collide with mint ids.
 //! - Ledger memos carry a purpose prefix.
@@ -11,25 +12,18 @@
 //!   also bound to this canister's principal by the IC, so they can never equal any
 //!   address derived by `rumi_protocol_backend`.
 
+use crate::chains;
 use sha2::{Digest as _, Sha256};
 use sha3::Keccak256;
 
 /// Contract version tag the canister requires before binding (`VERSION()`).
 pub const CONTRACT_VERSION: &str = "rumi-base-icusd-bridge-v1";
 
-/// Domain string hashed into deposit mint ids.
-pub const MINT_DOMAIN: &str = "rumi.icusd.base.mint.v1";
-/// Domain string hashed into held-claim re-mint ids.
-pub const REMINT_DOMAIN: &str = "rumi.icusd.base.remint.v1";
-/// Domain string the contract hashes into bridge-out transfer ids.
+/// Domain string the contract hashes into bridge-out transfer ids. The token is compiled
+/// with this exact string, so it stays Base-named under every chain slug.
 pub const BRIDGE_OUT_DOMAIN: &str = "rumi.icusd.base.bridge-out.v1";
 
-/// Label hashed (SHA-256) into the escrow subaccount.
-pub const ESCROW_SUBACCOUNT_LABEL: &[u8] = b"rumi-icusd-base-bridge:escrow:v1";
-
-/// Root segment of every threshold-ECDSA derivation path used by this canister.
-pub const KEY_PATH_ROOT: &[u8] = b"rumi-icusd-base-bridge";
-/// Version segment of every derivation path.
+/// Version segment of every threshold-ECDSA derivation path.
 pub const KEY_PATH_VERSION: &[u8] = b"v1";
 
 /// Memo prefixes (8 bytes each) for ledger operations.
@@ -37,9 +31,60 @@ pub const PULL_MEMO_PREFIX: &[u8; 8] = b"RBRG-DEP";
 pub const REFUND_MEMO_PREFIX: &[u8; 8] = b"RBRG-RFD";
 pub const SWEEP_MEMO_PREFIX: &[u8; 8] = b"RBRG-FEE";
 
-/// The 32-byte escrow subaccount of the bridge canister.
-pub fn escrow_subaccount() -> [u8; 32] {
-    Sha256::digest(ESCROW_SUBACCOUNT_LABEL).into()
+// ---------------------------------------------------------------------------
+// Slug templates
+//
+// Four off-chain strings (plus the init-time salt label) carry the chain slug from the
+// static table in `chains.rs`. The Base slug reproduces the strings the live Base instance
+// already signs under, byte for byte (`tests::base_slug_reproduces_live_strings`). The
+// templates take the slug as an argument; the id functions below look it up from the chain
+// id, so no caller can pick a slug that disagrees with the chain it hashes.
+// ---------------------------------------------------------------------------
+
+/// Domain string hashed into deposit mint ids: `rumi.icusd.{slug}.mint.v1`.
+pub fn mint_domain(slug: &str) -> String {
+    format!("rumi.icusd.{slug}.mint.v1")
+}
+
+/// Domain string hashed into held-claim re-mint ids: `rumi.icusd.{slug}.remint.v1`.
+pub fn remint_domain(slug: &str) -> String {
+    format!("rumi.icusd.{slug}.remint.v1")
+}
+
+/// Label hashed (SHA-256) into the escrow subaccount: `rumi-icusd-{slug}-bridge:escrow:v1`.
+pub fn escrow_label(slug: &str) -> String {
+    format!("rumi-icusd-{slug}-bridge:escrow:v1")
+}
+
+/// Root segment of every threshold-ECDSA derivation path: `rumi-icusd-{slug}-bridge`.
+pub fn key_root(slug: &str) -> String {
+    format!("rumi-icusd-{slug}-bridge")
+}
+
+/// Label hashed into the per-instance salt at install: `rumi-icusd-{slug}-bridge:instance-salt:v1`.
+pub fn instance_salt_label(slug: &str) -> String {
+    format!("rumi-icusd-{slug}-bridge:instance-salt:v1")
+}
+
+/// The slug of the chain this bridge instance serves, from the static chain table.
+///
+/// Panics on a chain id with no profile. It must never fall back to a default slug (for
+/// example `base`): that would silently hash another chain's ids, escrow and keys under the
+/// Base strings. The panic is unreachable in a running canister because the chain id comes
+/// only from the stored config, and both entry points guarantee it has a profile: install
+/// admits only validated ids (`state::validate_init`, covered by
+/// `chains::tests::every_chain_install_admits_has_a_profile`), and `post_upgrade` refuses
+/// a stored id that has none (`chains::validate_stored_chain`).
+pub fn chain_slug(chain_id: u64) -> &'static str {
+    match chains::profile(chain_id) {
+        Some(p) => p.slug,
+        None => panic!("no bridge chain profile for chain id {chain_id}"),
+    }
+}
+
+/// The 32-byte escrow subaccount of the bridge canister on `chain_id`.
+pub fn escrow_subaccount(chain_id: u64) -> [u8; 32] {
+    Sha256::digest(escrow_label(chain_slug(chain_id)).as_bytes()).into()
 }
 
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
@@ -75,10 +120,10 @@ fn abi_hash(words: &[[u8; 32]]) -> [u8; 32] {
     keccak256(&buf)
 }
 
-/// `keccak256(abi.encode(keccak256(MINT_DOMAIN), chain_id, contract, instance_salt, deposit_id))`.
+/// `keccak256(abi.encode(keccak256(mint_domain(slug)), chain_id, contract, instance_salt, deposit_id))`.
 pub fn mint_id(chain_id: u64, contract: &[u8; 20], instance_salt: &[u8; 32], deposit_id: u64) -> [u8; 32] {
     abi_hash(&[
-        keccak256(MINT_DOMAIN.as_bytes()),
+        keccak256(mint_domain(chain_slug(chain_id)).as_bytes()),
         word_u64(chain_id),
         word_address(contract),
         *instance_salt,
@@ -86,10 +131,10 @@ pub fn mint_id(chain_id: u64, contract: &[u8; 20], instance_salt: &[u8; 32], dep
     ])
 }
 
-/// `keccak256(abi.encode(keccak256(REMINT_DOMAIN), chain_id, contract, instance_salt, transfer_id))`.
+/// `keccak256(abi.encode(keccak256(remint_domain(slug)), chain_id, contract, instance_salt, transfer_id))`.
 pub fn remint_id(chain_id: u64, contract: &[u8; 20], instance_salt: &[u8; 32], transfer_id: &[u8; 32]) -> [u8; 32] {
     abi_hash(&[
-        keccak256(REMINT_DOMAIN.as_bytes()),
+        keccak256(remint_domain(chain_slug(chain_id)).as_bytes()),
         word_u64(chain_id),
         word_address(contract),
         *instance_salt,
@@ -151,10 +196,10 @@ impl LaneKind {
     }
 }
 
-/// `[KEY_PATH_ROOT, "v1", purpose, chain_id (8 bytes BE)]`.
+/// `[key_root(slug), "v1", purpose, chain_id (8 bytes BE)]`.
 pub fn derivation_path(lane: LaneKind, chain_id: u64) -> Vec<Vec<u8>> {
     vec![
-        KEY_PATH_ROOT.to_vec(),
+        key_root(chain_slug(chain_id)).into_bytes(),
         KEY_PATH_VERSION.to_vec(),
         lane.label().to_vec(),
         chain_id.to_be_bytes().to_vec(),
@@ -288,15 +333,113 @@ mod tests {
         assert_ne!(derivation_path(LaneKind::Minter, 8453), derivation_path(LaneKind::Admin, 8453));
         assert_ne!(derivation_path(LaneKind::Minter, 8453), derivation_path(LaneKind::Minter, 84532));
         let p = derivation_path(LaneKind::Minter, 8453);
-        assert_eq!(p[0], KEY_PATH_ROOT.to_vec());
+        assert_eq!(p[0], b"rumi-icusd-base-bridge".to_vec());
         assert_eq!(p[3], 8453u64.to_be_bytes().to_vec());
     }
 
     #[test]
     fn escrow_subaccount_is_stable() {
         // Changing the label would orphan escrow. Pin it.
-        assert_eq!(escrow_subaccount(), <[u8; 32]>::from(Sha256::digest(b"rumi-icusd-base-bridge:escrow:v1")));
-        assert_ne!(escrow_subaccount(), [0u8; 32]);
+        assert_eq!(escrow_subaccount(8453), <[u8; 32]>::from(Sha256::digest(b"rumi-icusd-base-bridge:escrow:v1")));
+        assert_ne!(escrow_subaccount(8453), [0u8; 32]);
+    }
+
+    /// Golden ids captured from the code at `1701ebf7`, before the slug templates existed
+    /// (old `MINT_DOMAIN` / `REMINT_DOMAIN` constants), for the fixed inputs below, and
+    /// reproduced independently with a separate Keccak-256 implementation.
+    const GOLDEN: [(u64, &str, &str); 3] = [
+        (8453, "0xe832e5b43d7498bf7fd52efb4dcf017a4e0870414fb03447b3b6371283160e02", "0x2dc1718344e885e506ccc7f9591c66a98e58294875982b51161c2757bc10e5f8"),
+        (84532, "0x437ecba535fd69ab9e2409a8d8dd4cd45e3d6a859aa098e5bcfba6cb06a8a71f", "0x7b18bc8905b7aa4e969029b4b75f0e290b337b19e2820ed6803c6593353c3116"),
+        (31337, "0x2f10e7ab851dca2a36bc24fb72c30b49db31df520021de08c2c7d56fe26aa8b0", "0xc86b92345dcf0173ede638eca1765bbe59bf3f50165f2c5282cdd048cbab9c50"),
+    ];
+
+    fn golden_inputs() -> ([u8; 20], [u8; 32], [u8; 32], u64) {
+        let contract: [u8; 20] = core::array::from_fn(|i| 0xb0 + i as u8);
+        let salt: [u8; 32] = core::array::from_fn(|i| 0x01 + i as u8);
+        let transfer_id: [u8; 32] = core::array::from_fn(|i| 0xa0 + i as u8);
+        (contract, salt, transfer_id, 42)
+    }
+
+    #[test]
+    fn base_slug_reproduces_live_strings() {
+        let (contract, salt, transfer_id, deposit_id) = golden_inputs();
+        for (chain, golden_mint, golden_remint) in GOLDEN {
+            let slug = chain_slug(chain);
+            assert_eq!(slug, "base", "chain {chain}");
+
+            // Domains: literals copied from the pre-change constants.
+            assert_eq!(mint_domain(slug), "rumi.icusd.base.mint.v1", "chain {chain}");
+            assert_eq!(remint_domain(slug), "rumi.icusd.base.remint.v1", "chain {chain}");
+            assert_eq!(BRIDGE_OUT_DOMAIN, "rumi.icusd.base.bridge-out.v1");
+            assert_eq!(CONTRACT_VERSION, "rumi-base-icusd-bridge-v1");
+
+            // Escrow subaccount: SHA-256 of the pre-change label.
+            assert_eq!(escrow_label(slug), "rumi-icusd-base-bridge:escrow:v1", "chain {chain}");
+            assert_eq!(escrow_subaccount(chain), <[u8; 32]>::from(Sha256::digest(b"rumi-icusd-base-bridge:escrow:v1")), "chain {chain}");
+
+            // Key paths: the literal vector, byte for byte.
+            let chain_be = chain.to_be_bytes().to_vec();
+            assert_eq!(chain_be.len(), 8);
+            assert_eq!(key_root(slug), "rumi-icusd-base-bridge", "chain {chain}");
+            assert_eq!(
+                derivation_path(LaneKind::Minter, chain),
+                vec![b"rumi-icusd-base-bridge".to_vec(), b"v1".to_vec(), b"minter".to_vec(), chain_be.clone()],
+                "chain {chain}"
+            );
+            assert_eq!(
+                derivation_path(LaneKind::Admin, chain),
+                vec![b"rumi-icusd-base-bridge".to_vec(), b"v1".to_vec(), b"admin".to_vec(), chain_be],
+                "chain {chain}"
+            );
+
+            // Install salt label.
+            assert_eq!(instance_salt_label(slug), "rumi-icusd-base-bridge:instance-salt:v1", "chain {chain}");
+
+            // Mint and re-mint ids equal values captured from the unchanged code.
+            assert_eq!(hex0x(&mint_id(chain, &contract, &salt, deposit_id)), golden_mint, "mint id, chain {chain}");
+            assert_eq!(hex0x(&remint_id(chain, &contract, &salt, &transfer_id)), golden_remint, "re-mint id, chain {chain}");
+        }
+    }
+
+    #[test]
+    fn other_slugs_never_reproduce_a_base_string() {
+        // Slugs of the chains the groundwork plan names. They are NOT in the table; they are
+        // passed straight to the templates to prove a different slug moves every string.
+        let base_strings = [
+            mint_domain("base"),
+            remint_domain("base"),
+            escrow_label("base"),
+            key_root("base"),
+            instance_salt_label("base"),
+            BRIDGE_OUT_DOMAIN.to_string(),
+            CONTRACT_VERSION.to_string(),
+        ];
+        let templates: [fn(&str) -> String; 5] = [mint_domain, remint_domain, escrow_label, key_root, instance_salt_label];
+        for slug in ["eth", "arb", "rhood", "hyper", "monad"] {
+            for t in templates {
+                let s = t(slug);
+                assert!(s.contains(slug), "{s} must carry its slug");
+                for b in &base_strings {
+                    assert_ne!(&s, b, "slug {slug} reproduced a Base string");
+                }
+            }
+            assert_ne!(Sha256::digest(escrow_label(slug).as_bytes())[..], Sha256::digest(escrow_label("base").as_bytes())[..]);
+            assert_ne!(keccak256(mint_domain(slug).as_bytes()), keccak256(mint_domain("base").as_bytes()));
+            assert_ne!(keccak256(remint_domain(slug).as_bytes()), keccak256(remint_domain("base").as_bytes()));
+            assert_ne!(key_root(slug).into_bytes(), b"rumi-icusd-base-bridge".to_vec());
+        }
+    }
+
+    #[test]
+    fn an_unknown_chain_id_panics_instead_of_falling_back_to_base() {
+        for chain in [0u64, 1, 8454, 11155111, u64::MAX] {
+            let msg = std::panic::catch_unwind(|| chain_slug(chain)).expect_err("must panic").downcast::<String>().expect("string panic message");
+            assert_eq!(*msg, format!("no bridge chain profile for chain id {chain}"));
+            assert!(std::panic::catch_unwind(|| escrow_subaccount(chain)).is_err());
+            assert!(std::panic::catch_unwind(|| derivation_path(LaneKind::Minter, chain)).is_err());
+            assert!(std::panic::catch_unwind(|| mint_id(chain, &[0; 20], &[0; 32], 1)).is_err());
+            assert!(std::panic::catch_unwind(|| remint_id(chain, &[0; 20], &[0; 32], &[0; 32])).is_err());
+        }
     }
 
     #[test]

@@ -745,7 +745,7 @@ pub(crate) mod tests {
         assert_eq!(pull.memo, ids::pull_memo(d.id));
         assert_eq!(pull.search_from_block, 77);
         assert_eq!(pull.spender.unwrap().owner, env::canister_id());
-        assert_eq!(pull.to.subaccount, Some(ids::escrow_subaccount()));
+        assert_eq!(pull.to.subaccount, Some(ids::escrow_subaccount(state::CHAIN_BASE_SEPOLIA)));
         assert_eq!(state::read_core(|c| c.buckets.reserved_pulls), (100 * E8) as u128);
         assert_eq!(d.mint_id, ids::mint_id(state::CHAIN_BASE_SEPOLIA, &[0xcc; 20], &[9; 32], d.id));
     }

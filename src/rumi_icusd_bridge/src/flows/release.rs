@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(op.amount_e8s, 100 * E8 - E8 / 100 - 10_000);
         assert_eq!(op.escrow_outflow(), 100 * E8 - E8 / 100);
         assert_eq!(op.memo, e.transfer_id.to_vec());
-        assert_eq!(op.from.subaccount, Some(ids::escrow_subaccount()));
+        assert_eq!(op.from.subaccount, Some(ids::escrow_subaccount(state::CHAIN_BASE_SEPOLIA)));
 
         // Reserve outflow (as attempt() would) then prove success.
         let op_ref = OpRef::Release(e.transfer_id);

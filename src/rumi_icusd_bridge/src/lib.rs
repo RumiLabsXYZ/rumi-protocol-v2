@@ -7,6 +7,7 @@
 
 pub mod accounting;
 pub mod admin;
+pub mod chains;
 pub mod env;
 pub mod evm;
 pub mod flows;
@@ -37,8 +38,9 @@ fn init(arg: BridgeArg) {
     let config = state::validate_init(&args).unwrap_or_else(|e| ic_cdk::trap(&format!("invalid init args: {e}")));
     let now = env::now_ns();
     let salt: [u8; 32] = {
+        // `validate_init` admitted `config.chain_id`, so it has a profile in the chain table.
         let mut h = Sha256::new();
-        h.update(b"rumi-icusd-base-bridge:instance-salt:v1");
+        h.update(ids::instance_salt_label(ids::chain_slug(config.chain_id)).as_bytes());
         h.update(env::canister_id().as_slice());
         h.update(now.to_be_bytes());
         h.finalize().into()
@@ -79,6 +81,13 @@ fn post_upgrade(arg: Option<BridgeArg>) {
     // a provider. A trap in `post_upgrade` rolls the upgrade back: the old module and its
     // state stay in place.
     if let Err(e) = state::read_core(|c| state::validate_stored_rpc_config(&c.config)) {
+        ic_cdk::trap(&format!("upgrade refused, the previous module stays installed: {e}"));
+    }
+    // Identifiers, the escrow subaccount and the signing key paths are derived from the
+    // stored chain id through the chain table, and `ids` panics on an id with no profile
+    // rather than falling back to Base. Refuse the upgrade here so that panic stays
+    // unreachable: the old module and its state stay in place.
+    if let Err(e) = state::read_core(|c| chains::validate_stored_chain(c.config.chain_id)) {
         ic_cdk::trap(&format!("upgrade refused, the previous module stays installed: {e}"));
     }
     state::append_audit(None, AuditCtx::note("upgraded"));

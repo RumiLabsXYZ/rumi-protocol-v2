@@ -598,7 +598,7 @@ impl BridgeCore {
     }
 
     pub fn escrow_account(&self, canister: Principal) -> Account {
-        Account { owner: canister, subaccount: Some(ids::escrow_subaccount()) }
+        Account { owner: canister, subaccount: Some(ids::escrow_subaccount(self.config.chain_id)) }
     }
 
     /// Roll the shared admission/release window forward if it has elapsed.
