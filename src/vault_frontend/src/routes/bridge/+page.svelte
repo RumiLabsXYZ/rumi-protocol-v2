@@ -2,21 +2,31 @@
   import { onDestroy, onMount } from 'svelte';
   import { BRIDGE_ENABLED } from '$lib/config';
   import { principal as principalStore } from '$lib/stores/wallet';
-  import { loadBridgeConfig } from '$lib/services/baseBridge/bridgeActor';
-  import type { BridgeConfigResult } from '$lib/services/baseBridge/chains';
+  import { loadDestinations } from '$lib/services/baseBridge/destinationLoader';
+  import {
+    findDestination,
+    isEnabled,
+    pickSelected,
+    unreachableDestinations,
+    type DestinationView,
+  } from '$lib/services/baseBridge/destinations';
   import { createEvmWalletStore } from '$lib/services/baseBridge/evmWallet';
   import { IntentStore, browserLocalStorage } from '$lib/services/baseBridge/intents';
   import { DEPOSIT_DELIVERY_NOTE, GAS_NOTICE_MESSAGE } from '$lib/services/baseBridge/status';
   import BaseWalletBar from '$lib/components/bridge/BaseWalletBar.svelte';
   import BaseToIcpForm from '$lib/components/bridge/BaseToIcpForm.svelte';
   import BridgeHistory from '$lib/components/bridge/BridgeHistory.svelte';
+  import DestinationSelector from '$lib/components/bridge/DestinationSelector.svelte';
   import IcpToBaseForm from '$lib/components/bridge/IcpToBaseForm.svelte';
 
   type Direction = 'icp_to_base' | 'base_to_icp';
 
   let direction = $state<Direction>('icp_to_base');
-  let configResult = $state.raw<BridgeConfigResult | null>(null);
+  /** The newest list the canister gave us. Kept through a failed refresh, as the single config always was. */
+  let destinations = $state.raw<DestinationView[] | null>(null);
   let configError = $state('');
+  /** What the user picked. Null until they pick; the page then shows the first enabled destination. */
+  let chosenId = $state<string | null>(null);
   let historyVersion = $state(0);
   let store = $state.raw<IntentStore | null>(null);
   let storeNotice = $state('');
@@ -48,7 +58,7 @@
 
   async function refreshConfig() {
     try {
-      configResult = await loadBridgeConfig();
+      destinations = await loadDestinations();
       configError = '';
     } catch (cause) {
       configError = cause instanceof Error ? cause.message : String(cause);
@@ -66,10 +76,17 @@
 
   onDestroy(() => evm.destroy());
 
-  const config = $derived(configResult && configResult.ok ? configResult.config : null);
-  const unavailableReason = $derived(
-    configResult && !configResult.ok ? configResult.message : configError ? `The bridge could not be reached: ${configError}` : '',
-  );
+  // Until the first read succeeds, a failed read makes every destination unavailable.
+  const shownDestinations = $derived(destinations ?? (configError ? unreachableDestinations(configError) : null));
+  const selected = $derived(shownDestinations ? pickSelected(shownDestinations, chosenId) : null);
+  /** Forms, the wallet bar and the review panels exist only for an enabled destination. */
+  const config = $derived(selected && isEnabled(selected) ? selected.config : null);
+  const unavailableReason = $derived(selected && !isEnabled(selected) ? (selected.reason ?? '') : '');
+
+  /** The newest status of one destination, read at the moment a flow asks. */
+  function freshDestination(id: string): DestinationView | null {
+    return findDestination(destinations ?? [], id);
+  }
 
   function bumpHistory() {
     historyVersion += 1;
@@ -106,7 +123,14 @@
       <h2>Bridge is not available yet</h2>
       <p>The icUSD bridge between the Internet Computer and Base has not launched. Nothing here is active and no requests are made.</p>
     </section>
-  {:else if !config}
+  {:else}
+  {#if shownDestinations}
+    <section class="glass-card destinations" aria-labelledby="destinations-title">
+      <h2 id="destinations-title">Destination</h2>
+      <DestinationSelector destinations={shownDestinations} selectedId={selected?.id ?? null} onSelect={(id) => (chosenId = id)} />
+    </section>
+  {/if}
+  {#if !config || !selected}
     <section class="glass-card unavailable" aria-live="polite">
       {#if unavailableReason}
         <h2>Bridge is not available yet</h2>
@@ -117,9 +141,11 @@
       {/if}
     </section>
   {:else}
+    {@const destinationId = selected.id}
     {#if config.minterAwaitingGas && direction === 'icp_to_base'}
       <p class="banner warn" role="status" data-testid="gas-notice">{GAS_NOTICE_MESSAGE}</p>
     {/if}
+    {#key selected.id}
     <div class="layout">
       <section class="glass-card main-card">
         <div class="tabs" role="tablist" aria-label="Bridge direction" tabindex="-1" onkeydown={onTabKeydown}>
@@ -154,11 +180,22 @@
         {#if storeNotice}<p class="notice" role="status">{storeNotice}</p>{/if}
 
         <div id="panel-icp-to-base" role="tabpanel" aria-labelledby="tab-icp-to-base" hidden={direction !== 'icp_to_base'}>
-          <IcpToBaseForm {config} {wallet} {principal} {store} onActivity={bumpHistory} />
+          <IcpToBaseForm
+            {config}
+            destination={selected}
+            readFreshDestination={() => freshDestination(destinationId)}
+            onRecheck={refreshConfig}
+            {wallet}
+            {principal}
+            {store}
+            onActivity={bumpHistory} />
         </div>
         <div id="panel-base-to-icp" role="tabpanel" aria-labelledby="tab-base-to-icp" hidden={direction !== 'base_to_icp'}>
           <BaseToIcpForm
             {config}
+            destination={selected}
+            readFreshDestination={() => freshDestination(destinationId)}
+            onRecheck={refreshConfig}
             {wallet}
             getProvider={() => evm.getProvider()}
             {principal}
@@ -185,6 +222,8 @@
         </section>
       </aside>
     </div>
+    {/key}
+  {/if}
   {/if}
 </main>
 
@@ -196,6 +235,8 @@
   .layout { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:1.25rem; align-items:start; }
   .side { display:flex; flex-direction:column; gap:1.25rem; min-width:0; }
   .main-card { display:flex; flex-direction:column; gap:1rem; min-width:0; }
+  .destinations { margin-bottom:1.25rem; }
+  .destinations h2 { margin:0 0 0.6rem; font-size:0.85rem; font-weight:600; color:var(--rumi-text-secondary); }
   .unavailable { max-width:36rem; }
   .unavailable h2 { margin:0 0 0.4rem; font-size:1.1rem; }
   .unavailable p { margin:0 0 0.8rem; font-size:0.85rem; color:var(--rumi-text-secondary); line-height:1.5; }

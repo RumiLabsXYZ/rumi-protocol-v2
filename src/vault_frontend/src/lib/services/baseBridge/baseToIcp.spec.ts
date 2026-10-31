@@ -27,7 +27,7 @@ import {
 } from './baseToIcp';
 import { BASE_MAINNET } from './chains';
 import { IntentStore, type BaseToIcpIntent } from './intents';
-import { TEST_OWNER, createFakeProvider, createMemoryStorage, makeRelease, walletError, type FakeProvider } from './testSupport';
+import { TEST_OWNER, createFakeProvider, createMemoryStorage, makeRelease, makeSigning, walletError, type FakeProvider } from './testSupport';
 import type { BaseOutTracking } from './status';
 
 const ME = TEST_OWNER.toText();
@@ -193,6 +193,7 @@ function harness(over: { chain?: Chain; storage?: ReturnType<typeof createMemory
     reads: { getRelease: getRelease as any },
     bridge: { notifyBaseBridgeOut: notify as any },
     isCurrent: () => current.value,
+    signing: makeSigning(),
     random: (length) => new Uint8Array(length).fill(NONCE_BYTE),
     now: () => 1_800_000_000_000,
     sleep: async () => {},
@@ -281,7 +282,8 @@ describe('sendBridgeOut', () => {
     const outcome = await sendBridgeOut(h.deps, { amountE8s: AMOUNT }, h.emit);
 
     expect(savedAtSend).toMatchObject({
-      v: 1,
+      v: 2,
+      destination: 'base',
       kind: 'base_to_icp',
       clientNonce: NONCE,
       transferId: TRANSFER_ID,

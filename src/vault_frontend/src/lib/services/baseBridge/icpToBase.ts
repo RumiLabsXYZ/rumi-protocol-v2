@@ -29,6 +29,11 @@
  *    is resolved by looking the request up with `get_deposit_by_request`. A manual
  *    retry reuses the SAME id, so the canister returns the existing deposit
  *    instead of creating a second one. Nothing is ever re-sent automatically.
+ *  - A wallet or signer is asked only after `assertCanSign` (through
+ *    `signingBlockMessage`) agrees: a disabled destination, in either direction,
+ *    gets no signing request at all. The check is synchronous, so it costs a
+ *    popup-signer's click nothing. A paused or halted bridge is NOT a disabled
+ *    destination; that stays the form's `bridgeBlocked` and the canister's own answer.
  *  - The canister is the settlement authority; this module only displays it.
  */
 
@@ -50,7 +55,9 @@ import {
   type Keccak256,
 } from './eip55';
 import {
+  INTENT_VERSION,
   IntentStoreError,
+  intentDestination,
   intentId,
   isResolved,
   newClientRequestId,
@@ -58,6 +65,7 @@ import {
   type IntentStore,
   type RandomBytes,
 } from './intents';
+import { signingBlockMessage, type SigningContext } from './signingGuard';
 import {
   abortableSleep,
   bridgeErrorKind,
@@ -476,6 +484,8 @@ export interface IcpToBaseDeps {
   separateApproval: boolean;
   /** Synchronous liveness check: same wallet session and same principal as when the action began. */
   isCurrent(): boolean;
+  /** The destination this action is for, and its newest known status. */
+  signing: SigningContext;
   random?: RandomBytes;
   now?(): number;
   sleep?: Sleep;
@@ -508,13 +518,19 @@ export function hasUnresolvedIntent(store: IntentStore): boolean {
   return unresolvedIntents(store).length > 0;
 }
 
-/** Requests with no recorded outcome: not yet sent (`prepared`) or approved but not yet bridged (`approved`). */
-export function unresolvedIntents(store: IntentStore): IcpToBaseIntent[] {
+/**
+ * Requests with no recorded outcome: not yet sent (`prepared`) or approved but not yet bridged (`approved`).
+ * Pass a destination id to list only that destination's requests (legacy requests count as Base). The
+ * guard in `startIcpToBase` always looks at all of them.
+ */
+export function unresolvedIntents(store: IntentStore, destinationId?: string): IcpToBaseIntent[] {
   return store
     .list()
     .filter(
       (intent): intent is IcpToBaseIntent =>
-        intent.kind === 'icp_to_base' && (intent.status === 'prepared' || intent.status === 'approved'),
+        intent.kind === 'icp_to_base' &&
+        (intent.status === 'prepared' || intent.status === 'approved') &&
+        (destinationId === undefined || intentDestination(intent) === destinationId),
     );
 }
 
@@ -532,6 +548,12 @@ export function startIcpToBase(deps: IcpToBaseDeps, quote: IcpToBaseQuote, emit:
     emit({ type: 'session_changed' });
     return Promise.resolve();
   }
+  // Before the intent is saved and before any signer call: a disabled destination leaves no trace.
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' });
+  if (notAllowed) {
+    emit({ type: 'blocked', message: notAllowed });
+    return Promise.resolve();
+  }
   if (hasUnresolvedIntent(deps.store)) {
     emit({
       type: 'blocked',
@@ -540,7 +562,8 @@ export function startIcpToBase(deps: IcpToBaseDeps, quote: IcpToBaseQuote, emit:
     return Promise.resolve();
   }
   const intent: IcpToBaseIntent = {
-    v: 1,
+    v: INTENT_VERSION,
+    destination: deps.signing.destination.id,
     kind: 'icp_to_base',
     clientRequestId: newClientRequestId(deps.random),
     amountE8s: quote.amountE8s,
@@ -647,6 +670,13 @@ export function retryIcpToBase(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emi
 }
 
 async function submitToBridge(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit: Emit): Promise<void> {
+  // Every path to `bridge_to_base` (second click, retry, and the step after an approval that may have taken
+  // a while) passes here. Synchronous, so the first signer call of a click still has no await in front of it.
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' });
+  if (notAllowed) {
+    emit({ type: 'blocked', message: notAllowed });
+    return;
+  }
   let result: Result_3;
   try {
     result = await deps.bridge.bridgeToBase(bridgeToBaseArgs(intent));
@@ -827,13 +857,15 @@ export async function trackDeposit(
  * `MintHeld` user deposit. Call directly from the click handler.
  */
 export async function requestDepositRefund(
-  deps: Pick<IcpToBaseDeps, 'bridge' | 'owner' | 'isCurrent'>,
+  deps: Pick<IcpToBaseDeps, 'bridge' | 'owner' | 'isCurrent' | 'signing'>,
   deposit: DepositView,
 ): Promise<{ ok: true; deposit: DepositView } | { ok: false; message: string }> {
   if (!describeDeposit(deposit, { principal: deps.owner.toText() }).canRefund) {
     return { ok: false, message: 'Only the owner of a held deposit can request a refund.' };
   }
   if (!deps.isCurrent()) return { ok: false, message: 'Your wallet session changed. Nothing was submitted.' };
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' });
+  if (notAllowed) return { ok: false, message: notAllowed };
   try {
     const result = await deps.bridge.requestDepositRefund(deposit.id);
     if ('Ok' in result) return { ok: true, deposit: result.Ok };

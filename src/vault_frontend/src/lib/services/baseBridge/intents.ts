@@ -11,12 +11,25 @@
  * one principal, versioned, and never silently destroyed: an unreadable record
  * is copied aside before anything is rewritten, and a record written by a
  * newer version of the app is left untouched (the store becomes read-only).
+ *
+ * Versions. Version 1 records (the original Base-only app) carry no destination.
+ * Version 2 adds a destination key to every NEW intent: the same 0x address is
+ * valid on every EVM chain, so a saved row must say which destination it was
+ * for. A version 1 record is still read in full, and an intent without the key
+ * is bound to Base when it is read (`intentDestination`). The storage key keeps
+ * its `v1` name on purpose, so nothing already on a device is orphaned. An older
+ * build that finds a version 2 record sees a newer version and goes read-only.
  */
 
 import { bytesToHex, isAddress, isBytes32, isHex } from './abi';
 import type { KeyValueStorage } from './evmWallet';
 
-export const INTENT_VERSION = 1;
+export const INTENT_VERSION = 2;
+/** The first record version: no destination key on its intents. Still read, never written for new intents. */
+export const LEGACY_INTENT_VERSION = 1;
+/** Every intent written before destinations existed was a Base intent. */
+export const LEGACY_DESTINATION_ID = 'base';
+export type IntentVersion = typeof LEGACY_INTENT_VERSION | typeof INTENT_VERSION;
 export const INTENT_STORAGE_PREFIX = 'rumi:base-bridge:v1:';
 /** Resolved intents beyond this many are pruned oldest first. Unresolved ones are never pruned. */
 export const MAX_RESOLVED_INTENTS = 40;
@@ -26,7 +39,10 @@ export type IcpToBaseStatus = 'prepared' | 'approved' | 'submitted' | 'done' | '
 export type BaseToIcpStatus = 'prepared' | 'sent' | 'done';
 
 export interface IcpToBaseIntent {
-  v: 1;
+  /** 1: written before destinations existed. 2: carries `destination`. */
+  v: IntentVersion;
+  /** Destination id (for example `base`). Absent only on version 1 intents, which are Base intents. */
+  destination?: string;
   kind: 'icp_to_base';
   /** 0x + 32 hex chars: 16 random bytes. */
   clientRequestId: string;
@@ -42,7 +58,10 @@ export interface IcpToBaseIntent {
 }
 
 export interface BaseToIcpIntent {
-  v: 1;
+  /** 1: written before destinations existed. 2: carries `destination`. */
+  v: IntentVersion;
+  /** Destination id (for example `base`). Absent only on version 1 intents, which are Base intents. */
+  destination?: string;
   kind: 'base_to_icp';
   /** 0x + 64 hex: 32 random bytes. */
   clientNonce: string;
@@ -62,6 +81,13 @@ export interface BaseToIcpIntent {
 }
 
 export type BridgeIntent = IcpToBaseIntent | BaseToIcpIntent;
+
+/** The destination an intent belongs to. An intent without the key is a legacy intent, bound explicitly to Base. */
+export function intentDestination(intent: Pick<BridgeIntent, 'destination'>): string {
+  return intent.destination ?? LEGACY_DESTINATION_ID;
+}
+
+const DESTINATION_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 export function intentId(intent: BridgeIntent): string {
   return intent.kind === 'icp_to_base' ? intent.clientRequestId : intent.transferId;
@@ -115,7 +141,12 @@ function str(value: unknown): value is string {
 function parseIntent(value: unknown): BridgeIntent | null {
   if (!value || typeof value !== 'object') return null;
   const r = value as Json;
-  if (r.v !== INTENT_VERSION) return null;
+  if (r.v !== LEGACY_INTENT_VERSION && r.v !== INTENT_VERSION) return null;
+  const version: IntentVersion = r.v;
+  // Version 2 intents must name their destination. Version 1 intents have none (legacy, bound to Base on read).
+  if (r.destination !== undefined && (!str(r.destination) || !DESTINATION_ID.test(r.destination))) return null;
+  if (version === INTENT_VERSION && r.destination === undefined) return null;
+  const destination = r.destination === undefined ? {} : { destination: r.destination as string };
   if (!str(r.amountE8s) || !DECIMAL.test(r.amountE8s)) return null;
   if (typeof r.createdAt !== 'number' || !Number.isFinite(r.createdAt)) return null;
   if (r.kind === 'icp_to_base') {
@@ -125,7 +156,8 @@ function parseIntent(value: unknown): BridgeIntent | null {
     if (!['prepared', 'approved', 'submitted', 'done', 'failed'].includes(r.status as string)) return null;
     if (r.depositId !== undefined && (!str(r.depositId) || !DECIMAL.test(r.depositId))) return null;
     return {
-      v: 1,
+      v: version,
+      ...destination,
       kind: 'icp_to_base',
       clientRequestId: r.clientRequestId.toLowerCase(),
       amountE8s: BigInt(r.amountE8s),
@@ -147,7 +179,8 @@ function parseIntent(value: unknown): BridgeIntent | null {
     if (!['prepared', 'sent', 'done'].includes(r.status as string)) return null;
     if (r.txHash !== undefined && (!str(r.txHash) || !isBytes32(r.txHash))) return null;
     return {
-      v: 1,
+      v: version,
+      ...destination,
       kind: 'base_to_icp',
       clientNonce: r.clientNonce.toLowerCase(),
       transferId: r.transferId.toLowerCase(),
@@ -232,6 +265,11 @@ export class IntentStore {
     return [...this.intents].sort((a, b) => b.createdAt - a.createdAt);
   }
 
+  /** Newest first, only the intents of one destination (legacy intents count as Base). */
+  listFor(destinationId: string): BridgeIntent[] {
+    return this.list().filter((intent) => intentDestination(intent) === destinationId);
+  }
+
   get(id: string): BridgeIntent | undefined {
     const wanted = id.toLowerCase();
     return this.intents.find((intent) => intentId(intent).toLowerCase() === wanted);
@@ -298,7 +336,11 @@ export class IntentStore {
     if (typeof record.v === 'number' && record.v > INTENT_VERSION) {
       return { status: 'newer_version', intents: [] };
     }
-    if (record.v !== INTENT_VERSION || record.principal !== this.principal || !Array.isArray(record.intents)) {
+    if (
+      (record.v !== INTENT_VERSION && record.v !== LEGACY_INTENT_VERSION) ||
+      record.principal !== this.principal ||
+      !Array.isArray(record.intents)
+    ) {
       return { status: 'recovered', intents: [], corruptRaw: raw };
     }
     const intents: BridgeIntent[] = [];

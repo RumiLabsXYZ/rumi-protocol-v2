@@ -5,9 +5,11 @@
   import { walletSessionGeneration } from '$lib/services/auth';
   import { formatE8s, tryParseE8s } from '$lib/services/baseBridge/amounts';
   import type { BridgeConfig } from '$lib/services/baseBridge/chains';
+  import { isEnabled, type DestinationView } from '$lib/services/baseBridge/destinations';
   import { displayAddress } from '$lib/services/baseBridge/eip55';
   import type { EvmWalletState } from '$lib/services/baseBridge/evmWallet';
-  import type { IcpToBaseIntent, IntentStore } from '$lib/services/baseBridge/intents';
+  import { intentDestination, type IcpToBaseIntent, type IntentStore } from '$lib/services/baseBridge/intents';
+  import { withSigning, type SigningContext } from '$lib/services/baseBridge/signingGuard';
   import {
     buildIcpToBaseDeps,
     buildPrepareDeps,
@@ -40,13 +42,19 @@
 
   interface Props {
     config: BridgeConfig;
+    /** The destination this form is for. It is enabled while this form exists. */
+    destination: DestinationView;
+    /** The newest known state of that destination (the page's latest read), or null if it is no longer reported. */
+    readFreshDestination?: () => DestinationView | null;
+    /** Ask the page to read the destination's status again. */
+    onRecheck?: () => void;
     wallet: EvmWalletState;
     principal: Principal | null;
     store: IntentStore | null;
     onActivity?: () => void;
   }
 
-  let { config, wallet, principal, store, onActivity }: Props = $props();
+  let { config, destination, readFreshDestination, onRecheck, wallet, principal, store, onActivity }: Props = $props();
 
   let amountText = $state('');
   let recipientText = $state('');
@@ -87,7 +95,7 @@
       flow.kind === 'approving' || flow.kind === 'approved' || flow.kind === 'submitting' || flow.kind === 'uncertain' || flow.kind === 'tracking'
         ? flow.intent.clientRequestId
         : null;
-    return store ? unresolvedIntents(store).filter((intent) => intent.clientRequestId !== onScreen) : [];
+    return store ? unresolvedIntents(store, destination.id).filter((intent) => intent.clientRequestId !== onScreen) : [];
   });
   /** Deposits started on this device that are still in progress. */
   const inProgress = $derived.by(() => {
@@ -95,7 +103,10 @@
     return store
       ? store
           .list()
-          .filter((i): i is IcpToBaseIntent => i.kind === 'icp_to_base' && i.status === 'submitted' && i.depositId !== undefined)
+          .filter(
+            (i): i is IcpToBaseIntent =>
+              i.kind === 'icp_to_base' && i.status === 'submitted' && i.depositId !== undefined && intentDestination(i) === destination.id,
+          )
       : [];
   });
 
@@ -183,9 +194,30 @@
     return () => controller.abort();
   });
 
+  /** What every signing flow carries: this destination, and its newest status read at the moment of use. */
+  function signingContext(): SigningContext {
+    const opened = destination;
+    return {
+      destination: opened,
+      freshStatus: () => {
+        const fresh = readFreshDestination ? readFreshDestination() : opened;
+        return fresh ? { status: fresh.status, reason: fresh.reason } : null;
+      },
+    };
+  }
+
+  /**
+   * Before a click that would sign: if the newest read no longer shows the destination as enabled, ask the page
+   * to read again (the way a changed fee asks for a new review). The flow itself refuses to sign meanwhile.
+   */
+  function recheckIfUnavailable() {
+    const fresh = readFreshDestination ? readFreshDestination() : destination;
+    if (!fresh || !isEnabled(fresh)) onRecheck?.();
+  }
+
   function buildDeps() {
     if (!principal || !store || !signers || !anonymous || !sessionGuard) return null;
-    return buildIcpToBaseDeps({ principal, store, signers, anonymous, isCurrent: sessionGuard });
+    return withSigning(buildIcpToBaseDeps({ principal, store, signers, anonymous, isCurrent: sessionGuard }), signingContext());
   }
 
   async function review() {
@@ -229,6 +261,7 @@
    */
   function confirm() {
     if (flow.kind !== 'review' || flow.problem) return;
+    recheckIfUnavailable();
     const quote = flow.quote;
     if (isQuoteStale(quote, Date.now())) {
       void review();
@@ -248,6 +281,7 @@
    */
   function bridgeNow() {
     if (flow.kind !== 'approved') return;
+    recheckIfUnavailable();
     const deps = buildDeps();
     if (!deps) {
       dispatch({ type: 'blocked', message: 'Your wallet is not ready. Wait a moment and try again.' });
@@ -265,6 +299,7 @@
 
   function retry() {
     if (flow.kind !== 'uncertain' || flow.lookup === 'looking') return;
+    recheckIfUnavailable();
     const deps = buildDeps();
     if (!deps) return;
     void retryIcpToBase(deps, flow.intent, dispatch).then(touched);

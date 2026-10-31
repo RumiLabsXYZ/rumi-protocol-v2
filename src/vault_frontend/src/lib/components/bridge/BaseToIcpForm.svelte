@@ -5,9 +5,11 @@
   import { walletSessionGeneration } from '$lib/services/auth';
   import { formatE8s, formatWeiAsEth, tryParseE8s } from '$lib/services/baseBridge/amounts';
   import type { BridgeConfig } from '$lib/services/baseBridge/chains';
+  import { isEnabled, type DestinationView } from '$lib/services/baseBridge/destinations';
   import { displayAddress } from '$lib/services/baseBridge/eip55';
   import type { Eip1193Provider, EvmWalletState } from '$lib/services/baseBridge/evmWallet';
-  import type { BaseToIcpIntent, IntentStore } from '$lib/services/baseBridge/intents';
+  import { intentDestination, type BaseToIcpIntent, type IntentStore } from '$lib/services/baseBridge/intents';
+  import { withSigning, type SigningContext } from '$lib/services/baseBridge/signingGuard';
   import {
     buildBaseToIcpDeps,
     captureSessionGuard,
@@ -36,6 +38,12 @@
 
   interface Props {
     config: BridgeConfig;
+    /** The destination this form is for. It is enabled while this form exists. */
+    destination: DestinationView;
+    /** The newest known state of that destination (the page's latest read), or null if it is no longer reported. */
+    readFreshDestination?: () => DestinationView | null;
+    /** Ask the page to read the destination's status again. */
+    onRecheck?: () => void;
     wallet: EvmWalletState;
     getProvider: () => Eip1193Provider | null;
     principal: Principal | null;
@@ -45,7 +53,8 @@
     onActivity?: () => void;
   }
 
-  let { config, wallet, getProvider, principal, store, onConnect, onSwitch, onActivity }: Props = $props();
+  let { config, destination, readFreshDestination, onRecheck, wallet, getProvider, principal, store, onConnect, onSwitch, onActivity }: Props =
+    $props();
 
   interface RecoveryItem {
     intent: BaseToIcpIntent;
@@ -175,7 +184,10 @@
     const trackedId = flow.kind === 'tracking' || flow.kind === 'awaiting_wallet' ? flow.intent.transferId : null;
     return store
       .list()
-      .filter((i): i is BaseToIcpIntent => i.kind === 'base_to_icp' && i.status !== 'done' && i.transferId !== trackedId);
+      .filter(
+        (i): i is BaseToIcpIntent =>
+          i.kind === 'base_to_icp' && i.status !== 'done' && i.transferId !== trackedId && intentDestination(i) === destination.id,
+      );
   });
 
   // Work out what each saved transfer needs (track, resume, mismatch, wallet) by asking Base.
@@ -251,19 +263,43 @@
     return () => controller.abort();
   });
 
+  /** What every signing flow carries: this destination, and its newest status read at the moment of use. */
+  function signingContext(): SigningContext {
+    const opened = destination;
+    return {
+      destination: opened,
+      freshStatus: () => {
+        const fresh = readFreshDestination ? readFreshDestination() : opened;
+        return fresh ? { status: fresh.status, reason: fresh.reason } : null;
+      },
+    };
+  }
+
+  /**
+   * Before a click that would sign: if the newest read no longer shows the destination as enabled, ask the page
+   * to read again. The flow itself refuses to ask the wallet anything meanwhile.
+   */
+  function recheckIfUnavailable() {
+    const fresh = readFreshDestination ? readFreshDestination() : destination;
+    if (!fresh || !isEnabled(fresh)) onRecheck?.();
+  }
+
   function buildDeps() {
     const activeProvider = getProvider();
     if (!activeProvider || !wallet.account || !principal || !store || !anonymous || !sessionGuard) return null;
-    return buildBaseToIcpDeps({
-      provider: activeProvider,
-      config,
-      account: wallet.account,
-      principal,
-      store,
-      signers,
-      anonymous,
-      isCurrent: sessionGuard,
-    });
+    return withSigning(
+      buildBaseToIcpDeps({
+        provider: activeProvider,
+        config,
+        account: wallet.account,
+        principal,
+        store,
+        signers,
+        anonymous,
+        isCurrent: sessionGuard,
+      }),
+      signingContext(),
+    );
   }
 
   /** Anonymous reader plus (when the ICP wallet allows) the signing actors, bound to the current session. */
@@ -298,6 +334,7 @@
   /** Click handler for the final send. */
   function send() {
     if (flow.kind !== 'confirming') return;
+    recheckIfUnavailable();
     const deps = buildDeps();
     if (!deps) {
       dispatch({ type: 'aborted', reason: 'check_failed', message: 'Your wallets are not ready. Review the transfer again.' });
@@ -308,6 +345,7 @@
 
   async function resume(item: RecoveryItem) {
     if (flow.kind === 'awaiting_wallet') return;
+    recheckIfUnavailable();
     if (!(await prepareReaders())) {
       recoveryMessage = 'Could not reach the bridge canister. Try again in a moment.';
       return;

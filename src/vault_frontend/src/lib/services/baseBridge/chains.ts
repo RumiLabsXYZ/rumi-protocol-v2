@@ -60,6 +60,73 @@ export const BASE_LOCAL: BaseChainConfig = {
 
 export const SUPPORTED_CHAINS: readonly BaseChainConfig[] = [BASE_MAINNET, BASE_SEPOLIA, BASE_LOCAL];
 
+// ---------------------------------------------------------------------------
+// Other EVM destinations (rows only: no bridge exists for them yet)
+// ---------------------------------------------------------------------------
+//
+// These rows let the destination list name the networks the bridge canister knows
+// about. They are deliberately NOT part of SUPPORTED_CHAINS: that list decides which
+// chain id `get_bridge_info` may report for the one live (Base) bridge, and a
+// canister reporting any of these ids to the Base page is still "unsupported".
+// A value that no primary source gave (a public RPC for Ethereum, most explorers)
+// is left empty rather than guessed. `finality` mirrors the wording the bridge
+// canister puts in its own consent text (`consent_wait` in the canister's chain table).
+
+export interface EvmDestinationChain extends BaseChainConfig {
+  /** Stable destination id: the key of the selector entry and of saved records. */
+  destinationId: string;
+  /** Completes "Delivery is expected ...". */
+  finality: string;
+}
+
+const HYPE = { name: 'HYPE', symbol: 'HYPE', decimals: 18 } as const;
+const MON = { name: 'MON', symbol: 'MON', decimals: 18 } as const;
+
+const ETH_FINALITY = 'after Ethereum finalization, about 13 minutes';
+const ARB_FINALITY = 'after the Arbitrum batch is finalized on Ethereum, about 13 minutes';
+const RHOOD_FINALITY = 'after Robinhood Chain finality (timing not yet confirmed)';
+const HYPER_FINALITY = 'after HyperEVM finality (timing not yet confirmed)';
+const MONAD_FINALITY = 'after Monad Verified state (Finalized plus 3 blocks), within seconds';
+
+function evmRow(
+  destinationId: string,
+  row: Omit<BaseChainConfig, 'chainIdHex' | 'local'>,
+  finality: string,
+): EvmDestinationChain {
+  return { ...row, chainIdHex: `0x${row.chainId.toString(16)}`, local: false, destinationId, finality };
+}
+
+export const ETHEREUM_MAINNET = evmRow('ethereum', { chainId: 1, name: 'Ethereum', rpcUrl: '', explorerUrl: '', nativeCurrency: ETH, testnet: false }, ETH_FINALITY);
+export const ETHEREUM_SEPOLIA = evmRow('ethereum', { chainId: 11155111, name: 'Ethereum Sepolia', rpcUrl: '', explorerUrl: '', nativeCurrency: ETH, testnet: true }, ETH_FINALITY);
+export const ARBITRUM_ONE = evmRow('arbitrum', { chainId: 42161, name: 'Arbitrum One', rpcUrl: 'https://arb1.arbitrum.io/rpc', explorerUrl: '', nativeCurrency: ETH, testnet: false }, ARB_FINALITY);
+export const ARBITRUM_SEPOLIA = evmRow('arbitrum', { chainId: 421614, name: 'Arbitrum Sepolia', rpcUrl: 'https://sepolia-rollup.arbitrum.io/rpc', explorerUrl: '', nativeCurrency: ETH, testnet: true }, ARB_FINALITY);
+export const ROBINHOOD_CHAIN = evmRow('robinhood', { chainId: 4663, name: 'Robinhood Chain', rpcUrl: 'https://rpc.mainnet.chain.robinhood.com', explorerUrl: 'https://robinhoodchain.blockscout.com', nativeCurrency: ETH, testnet: false }, RHOOD_FINALITY);
+export const ROBINHOOD_CHAIN_TESTNET = evmRow('robinhood', { chainId: 46630, name: 'Robinhood Chain testnet', rpcUrl: 'https://rpc.testnet.chain.robinhood.com', explorerUrl: 'https://explorer.testnet.chain.robinhood.com', nativeCurrency: ETH, testnet: true }, RHOOD_FINALITY);
+export const HYPEREVM_MAINNET = evmRow('hyperevm', { chainId: 999, name: 'HyperEVM', rpcUrl: 'https://rpc.hyperliquid.xyz/evm', explorerUrl: '', nativeCurrency: HYPE, testnet: false }, HYPER_FINALITY);
+export const HYPEREVM_TESTNET = evmRow('hyperevm', { chainId: 998, name: 'HyperEVM testnet', rpcUrl: 'https://rpc.hyperliquid-testnet.xyz/evm', explorerUrl: '', nativeCurrency: HYPE, testnet: true }, HYPER_FINALITY);
+export const MONAD_MAINNET = evmRow('monad', { chainId: 143, name: 'Monad', rpcUrl: 'https://rpc.monad.xyz', explorerUrl: '', nativeCurrency: MON, testnet: false }, MONAD_FINALITY);
+export const MONAD_TESTNET = evmRow('monad', { chainId: 10143, name: 'Monad testnet', rpcUrl: 'https://testnet-rpc.monad.xyz', explorerUrl: '', nativeCurrency: MON, testnet: true }, MONAD_FINALITY);
+
+/** Every non-Base EVM network the bridge canister knows. Mainnets first, each followed by its testnet. */
+export const EVM_DESTINATION_CHAINS: readonly EvmDestinationChain[] = [
+  ETHEREUM_MAINNET,
+  ETHEREUM_SEPOLIA,
+  ARBITRUM_ONE,
+  ARBITRUM_SEPOLIA,
+  ROBINHOOD_CHAIN,
+  ROBINHOOD_CHAIN_TESTNET,
+  HYPEREVM_MAINNET,
+  HYPEREVM_TESTNET,
+  MONAD_MAINNET,
+  MONAD_TESTNET,
+];
+
+export function getEvmDestinationChain(chainId: number | bigint | null | undefined): EvmDestinationChain | null {
+  if (chainId === null || chainId === undefined) return null;
+  const id = Number(chainId);
+  return EVM_DESTINATION_CHAINS.find((chain) => chain.chainId === id) ?? null;
+}
+
 export function getChainConfig(chainId: number | bigint | null | undefined): BaseChainConfig | null {
   if (chainId === null || chainId === undefined) return null;
   const id = Number(chainId);
@@ -104,7 +171,7 @@ export function addChainParams(chain: BaseChainConfig): {
     chainId: chain.chainIdHex,
     chainName: chain.name,
     nativeCurrency: { ...chain.nativeCurrency },
-    rpcUrls: [chain.rpcUrl],
+    rpcUrls: chain.rpcUrl ? [chain.rpcUrl] : [],
     ...(chain.explorerUrl ? { blockExplorerUrls: [chain.explorerUrl] } : {}),
   };
 }
@@ -151,7 +218,8 @@ export type BridgeConfigFailure = 'unsupported_chain' | 'contract_not_bound' | '
 
 export type BridgeConfigResult =
   | { ok: true; config: BridgeConfig }
-  | { ok: false; reason: BridgeConfigFailure; message: string };
+  /** `chain` is set when the reported chain id is a supported one (the contract is what is wrong). */
+  | { ok: false; reason: BridgeConfigFailure; message: string; chain?: BaseChainConfig };
 
 /** Turn `get_bridge_info()` into the configuration the page uses, or explain why it cannot. */
 export function resolveBridgeConfig(info: BridgeInfo): BridgeConfigResult {
@@ -165,10 +233,10 @@ export function resolveBridgeConfig(info: BridgeInfo): BridgeConfigResult {
   }
   const binding = info.contract[0];
   if (!binding) {
-    return { ok: false, reason: 'contract_not_bound', message: 'The Base contract is not bound yet.' };
+    return { ok: false, reason: 'contract_not_bound', message: 'The Base contract is not bound yet.', chain };
   }
   if (!isAddress(binding.address) || isZeroAddress(binding.address)) {
-    return { ok: false, reason: 'invalid_contract', message: 'The bridge reported an invalid Base contract address.' };
+    return { ok: false, reason: 'invalid_contract', message: 'The bridge reported an invalid Base contract address.', chain };
   }
   return {
     ok: true,

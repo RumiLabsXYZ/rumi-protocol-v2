@@ -14,6 +14,8 @@ import type {
 } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
 import type { Keccak256 } from './keccak';
 import type { Eip1193Provider } from './evmWallet';
+import type { DestinationView } from './destinations';
+import type { FreshDestinationStatus, SigningContext } from './signingGuard';
 
 export type RequestHandler = (params: unknown[] | undefined, call: { method: string }) => unknown | Promise<unknown>;
 
@@ -270,4 +272,50 @@ export function flipCase(address: string, index: number): string {
   const c = body[index];
   body[index] = c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase();
   return `0x${body.join('')}`;
+}
+
+// ---------------------------------------------------------------------------
+// Destination fixtures
+// ---------------------------------------------------------------------------
+
+/** An enabled Base destination (mainnet), built by hand so specs of the flows never load an actor. */
+export function makeDestination(overrides: Partial<DestinationView> = {}): DestinationView {
+  return {
+    id: 'base',
+    family: 'evm',
+    name: 'Base',
+    chainId: '8453',
+    network: 'mainnet',
+    status: 'enabled',
+    reason: null,
+    limits: null,
+    fees: null,
+    actorCanisterId: TEST_BRIDGE_ID,
+    config: null,
+    ...overrides,
+  };
+}
+
+/** A disabled destination, as the static entries look. */
+export function makeDisabledDestination(overrides: Partial<DestinationView> = {}): DestinationView {
+  return makeDestination({
+    id: 'ethereum',
+    name: 'Ethereum',
+    chainId: '1',
+    status: 'disabled',
+    reason: 'Not available yet: there is no icUSD bridge to Ethereum at the moment.',
+    actorCanisterId: null,
+    ...overrides,
+  });
+}
+
+export interface TestSigning extends SigningContext {
+  /** What `freshStatus()` answers. Change it to simulate the page's newest read. */
+  fresh: { value: FreshDestinationStatus };
+}
+
+/** A signing context for the flows: the destination as opened, and a controllable newest status. */
+export function makeSigning(destination: DestinationView = makeDestination()): TestSigning {
+  const fresh = { value: { status: destination.status, reason: destination.reason } as FreshDestinationStatus };
+  return { destination, freshStatus: () => fresh.value, fresh };
 }

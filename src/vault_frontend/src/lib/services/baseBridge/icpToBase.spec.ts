@@ -33,7 +33,7 @@ import {
   type QuoteLimits,
 } from './icpToBase';
 import { IntentStore, type IcpToBaseIntent } from './intents';
-import { EIP55_VECTORS, MIXED_CASE_NO_CHECKSUM, ORACLE, TEST_OWNER, createMemoryStorage, flipCase, makeDeposit } from './testSupport';
+import { EIP55_VECTORS, MIXED_CASE_NO_CHECKSUM, ORACLE, TEST_OWNER, createMemoryStorage, flipCase, makeDeposit, makeSigning } from './testSupport';
 import { CHECKSUM_ERROR_MESSAGE, CHECKSUM_UNVERIFIABLE_MESSAGE } from './eip55';
 import { bytesToHex, hexToBytes } from './abi';
 
@@ -417,6 +417,7 @@ function harness(overrides: { deposit?: DepositView; separateApproval?: boolean;
     reads: { getDeposit: getDeposit as any, getDepositByRequest: getDepositByRequest as any },
     separateApproval: overrides.separateApproval ?? false,
     isCurrent: () => current.value,
+    signing: makeSigning(),
     random: (length) => new Uint8Array(length).fill(0xcd),
     now: () => NOW,
     sleep: async () => {},

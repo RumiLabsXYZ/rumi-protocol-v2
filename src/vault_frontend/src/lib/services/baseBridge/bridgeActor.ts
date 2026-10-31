@@ -143,13 +143,17 @@ export function buildPrepareDeps(owner: Principal): PrepareDeps {
   };
 }
 
+/**
+ * The dependencies of an ICP to Base action, without the destination. The caller attaches the
+ * destination with `withSigning` (see `signingGuard.ts`), so a flow can never be started without one.
+ */
 export function buildIcpToBaseDeps(opts: {
   principal: Principal;
   store: IntentStore;
   signers: Signers;
   anonymous: BridgeService;
   isCurrent: () => boolean;
-}): IcpToBaseDeps {
+}): Omit<IcpToBaseDeps, 'signing'> {
   const { signers, anonymous } = opts;
   return {
     owner: opts.principal,
@@ -173,6 +177,7 @@ export function buildIcpToBaseDeps(opts: {
   };
 }
 
+/** Like `buildIcpToBaseDeps`: the destination is attached by the caller with `withSigning`. */
 export function buildBaseToIcpDeps(opts: {
   provider: Eip1193Provider;
   config: BridgeConfig;
@@ -182,7 +187,7 @@ export function buildBaseToIcpDeps(opts: {
   signers: Signers | null;
   anonymous: BridgeService;
   isCurrent: () => boolean;
-}): BaseToIcpDeps {
+}): Omit<BaseToIcpDeps, 'signing'> {
   const { signers, anonymous } = opts;
   return {
     provider: opts.provider,

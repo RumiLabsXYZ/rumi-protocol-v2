@@ -77,7 +77,7 @@ describe('persist and load', () => {
     const storage = createMemoryStorage();
     new IntentStore(storage, ALICE).put(icpIntent());
     const raw = JSON.parse(storage.map.get(`rumi:base-bridge:v1:${ALICE}`)!);
-    expect(raw).toMatchObject({ v: 1, principal: ALICE });
+    expect(raw).toMatchObject({ v: 2, principal: ALICE });
     expect(raw.intents[0]).toMatchObject({
       v: 1,
       kind: 'icp_to_base',
@@ -223,7 +223,7 @@ describe('corrupt and future records', () => {
   });
 
   it('never overwrites a record written by a newer version, and becomes read-only', () => {
-    const future = JSON.stringify({ v: 2, principal: ALICE, intents: [{ anything: true }] });
+    const future = JSON.stringify({ v: 3, principal: ALICE, intents: [{ anything: true }] });
     const storage = createMemoryStorage({ [intentStorageKey(ALICE)]: future });
     const store = new IntentStore(storage, ALICE);
     expect(store.loadStatus).toBe('newer_version');

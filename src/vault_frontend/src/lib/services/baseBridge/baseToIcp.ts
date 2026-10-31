@@ -22,6 +22,11 @@
  *    account that created it, because the transfer id depends on the sender.
  *  - Wallet receipts are hints. Only the canister's release record can show a
  *    transfer as released.
+ *  - The wallet is asked nothing, not even a read, for a disabled destination:
+ *    `assertCanSign` (through `signingBlockMessage`) runs first, and again just
+ *    before `eth_sendTransaction` with the chain id read a moment earlier, because
+ *    the destination can be disabled while the earlier reads are in flight. A
+ *    paused release is not a disabled destination; the form warns and still sends.
  */
 
 import type { Principal } from '@dfinity/principal';
@@ -56,13 +61,16 @@ import {
   type EvmReceipt,
 } from './evmWallet';
 import {
+  INTENT_VERSION,
   IntentStoreError,
+  intentDestination,
   intentId,
   newClientNonce,
   type BaseToIcpIntent,
   type IntentStore,
   type RandomBytes,
 } from './intents';
+import { signingBlockMessage, type SigningContext } from './signingGuard';
 import {
   FINALITY_NOTE,
   abortableSleep,
@@ -331,6 +339,8 @@ export interface BaseToIcpDeps {
   };
   /** Synchronous liveness check for the ICP wallet session (generation + principal). */
   isCurrent(): boolean;
+  /** The destination this action is for, and its newest known status. */
+  signing: SigningContext;
   random?: RandomBytes;
   now?(): number;
   sleep?: Sleep;
@@ -445,6 +455,13 @@ async function sendBridgeOutOnce(
     return { kind: 'aborted', reason: 'session_changed' };
   }
 
+  // First, before any read through the wallet: a disabled destination gets no wallet call at all.
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'evm' });
+  if (notAllowed) {
+    emit({ type: 'blocked', message: notAllowed });
+    return { kind: 'blocked', message: notAllowed };
+  }
+
   if (deps.icpPrincipal.isAnonymous()) {
     return abort('check_failed', 'Sign in with your ICP wallet first. The anonymous principal cannot receive icUSD.');
   }
@@ -454,6 +471,7 @@ async function sendBridgeOutOnce(
     intent = request.resume;
     if (
       !sameAddress(intent.from, account) ||
+      intentDestination(intent) !== deps.signing.destination.id ||
       intent.chainId !== chain.chainId ||
       !sameAddress(intent.contract, contract) ||
       intent.destinationPrincipal !== deps.icpPrincipal.toText()
@@ -471,7 +489,8 @@ async function sendBridgeOutOnce(
       return { kind: 'blocked', message: 'transfer id unavailable' };
     }
     intent = {
-      v: 1,
+      v: INTENT_VERSION,
+      destination: deps.signing.destination.id,
       kind: 'base_to_icp',
       clientNonce,
       transferId,
@@ -507,8 +526,10 @@ async function sendBridgeOutOnce(
   } catch (error) {
     return abort('check_failed', errorText(error), intent);
   }
+  let liveChainId: number | null = null;
   try {
     const [liveChain, liveAccounts] = await Promise.all([getChainId(provider), getAccounts(provider)]);
+    liveChainId = liveChain;
     if (liveChain !== chain.chainId) {
       return abort('chain_changed', `Your wallet moved to another network. Switch back to ${chain.name} and review the transfer again.`, intent);
     }
@@ -530,7 +551,12 @@ async function sendBridgeOutOnce(
     return abort('check_failed', `Could not verify the transfer before sending: ${describeWalletError(error)}`, intent);
   }
 
-  // 4. The wallet prompt.
+  // 4. A last look at the destination, with the chain just read: it can have been disabled while the reads
+  // above were in flight.
+  const lateBlock = signingBlockMessage(deps.signing, { wallet: 'evm', chainId: liveChainId });
+  if (lateBlock) return abort('check_failed', lateBlock, intent);
+
+  // 5. The wallet prompt.
   let txHash: string;
   try {
     txHash = await sendTransaction(provider, { from: account, to: contract, data: calldata });
@@ -665,12 +691,14 @@ export async function trackBaseToIcp(
  * from the click handler.
  */
 export async function notifyBridge(
-  deps: Pick<BaseToIcpDeps, 'bridge' | 'store' | 'isCurrent'>,
+  deps: Pick<BaseToIcpDeps, 'bridge' | 'store' | 'isCurrent' | 'signing'>,
   intent: BaseToIcpIntent,
 ): Promise<{ ok: true; intent: BaseToIcpIntent } | { ok: false; message: string }> {
   if (!deps.bridge) return { ok: false, message: 'The bridge is not available.' };
   if (!intent.txHash || !isBytes32(intent.txHash)) return { ok: false, message: 'There is no transaction hash to report yet.' };
   if (!deps.isCurrent()) return { ok: false, message: 'Your wallet session changed. Nothing was submitted.' };
+  const notAllowed = signingBlockMessage(deps.signing, { wallet: 'icp_signer' });
+  if (notAllowed) return { ok: false, message: notAllowed };
   try {
     const result = await deps.bridge.notifyBaseBridgeOut(intent.txHash);
     if ('Err' in result) return { ok: false, message: formatBridgeError(result.Err) };
