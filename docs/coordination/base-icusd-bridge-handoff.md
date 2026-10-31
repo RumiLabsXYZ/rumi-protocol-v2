@@ -1133,6 +1133,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   Done from tooling alone. Order: BB-59 review, then BB-60 (next bounded source card), then BB-47 Solana. Lanes stay W25
   (BB-58 corrections) and W27 (BB-59).
 
+## Milestone 49 (2026-10-30): BB-58 corrections in Review; BB-47 started
+
+- BB-58 `10c18502` (W25, same run; source and mocks only, nothing run against a public network): every EVM provider is
+  asked `eth_chainId` after the blocked check and before any head or supply vote, and only providers matching the profile
+  network's chain id vote (quorum from matching providers alone; blocked profiles still send nothing); repeated debt-backed
+  chain ids are refused before any query; each counted EVM destination binds its bridge instance, whose `get_supply_audit`
+  (record pinned to the bridge `.did` text) is reported beside the independent reads, with C1 and the supply bound
+  recomputed from independent reads (`CoverageBroken`, `SupplyBoundBroken` and `AuditEscrowAccountMismatch` are failures;
+  self-report differences are info). Worker run: 107 default and 147 feature tests passed; no Cargo change. Coordinator
+  check: reran the default tests (107 passed) and the three fixtures (base exit 0; C1 break exit 3 with `CoverageBroken`;
+  XRPL-in-D overlap exit 1); liabilities match the bridge's own definition (`accounting.rs` liabilities: outstanding,
+  pending mint, pending release, pending refund, held, fees). For Miles: `AuditEscrowAccountMismatch` as a failure goes
+  beyond the brief (an audit naming another escrow account would make C1 compare the wrong account).
+- BB-47 dispatched on the freed lane to a new Sonnet run (W28, `claude-sonnet-5-5`, the only Rust builder): new crate
+  `rumi_icusd_sol_bridge` (name proposed), ids and roles, memo grammar, accounting with `RC`, `BU` and `stray`, mint, burn and
+  refund builders plus the return shape check with golden vectors, minimal canister skeleton. BB-60 waits for BB-59's review
+  and then takes W27's lane, keeping Miles' order.
+- Push pause (Miles, resource decision): each push starts the heavy Stability Pool PR workflow, so no git push until
+  2026-10-31 03:45 UTC, then one batched push of the reviewed source and docs. Local source, tests, commits and sanitized
+  Lookout updates continue; pins after `10c18502` are local, not yet pushed. Last push confirmed at 03:06 UTC: remote head
+  equals local `10c18502`. No workflow edit, cancellation, new CI or timer.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

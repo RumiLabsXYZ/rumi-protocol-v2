@@ -431,10 +431,10 @@
     },
     {
       "id": "BB-47",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: instance skeleton and message builders",
-      "evidenceText": "proof=none; Copied ledger saga and accounting with RC, BU and stray buckets; mint, return, burn and refund builders with golden vectors; focused unit tests pass",
+      "evidenceText": "proof=none; Claimed 2026-10-30: new Solana bridge crate skeleton; ids, roles and memo grammar; accounting with RC, BU and stray; mint, burn and refund builders and the return shape check with golden vectors; profile stays disabled",
       "evidenceLinks": []
     },
     {
@@ -519,10 +519,10 @@
     },
     {
       "id": "BB-58",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=local-test; Open. 8b88a96f transport is source and mock evidence only; same owner now applies Miles' corrections: provider chain-id binding, count-once chain ids, per-instance audit collection with independent C1 and supply checks",
+      "evidenceText": "proof=local-test; 10c18502: providers bound to the profile chain id before votes; repeated chain ids refused; instance audits read beside independent reads, C1 and supply bound recomputed (fixture C1 break exits 3); source and mocks only",
       "evidenceLinks": []
     },
     {

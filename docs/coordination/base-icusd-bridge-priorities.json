@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-58 corrections in progress (W25, mocks only); BB-59 in progress (W27). After BB-59's review, BB-60 (profile reader and upkeep) is the next bounded source card.",
+      "nextAction": "BB-58 in Review (10c18502, source and mocks only). BB-59 in progress (W27). After BB-59's review, BB-60 takes that lane.",
       "cardIds": [
         "BB-58",
         "BB-59",
@@ -50,9 +50,9 @@
     {
       "id": "solana-implementation",
       "title": "Solana implementation (memo plus durable nonce)",
-      "status": "paused",
-      "blockedReason": "Source-authorized; next in rank after BB-60: BB-47 starts when a lane frees (doing BB-58 first is a scheduling preference only). Its reader for the BB-58 collector rides on BB-49.",
-      "nextAction": "Start with BB-47 (instance skeleton and message builders); doing BB-58 first is a scheduling preference, not a prerequisite.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "BB-47 in progress (Sonnet): skeleton, ids, memo grammar, accounting with RC, BU and stray, builders with golden vectors. Then BB-48 (SOL RPC mirror, nonce pool, same-attempt reconcile) and BB-49 (lanes plus the collector reader).",
       "cardIds": [
         "BB-47",
         "BB-48",

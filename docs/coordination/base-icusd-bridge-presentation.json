@@ -1,5 +1,5 @@
 {
-  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: BB-42 to BB-45 (Base ids pinned; table-driven install and RPC checks; head rules incl. Monad finalized minus 3; native Ethereum and Arbitrum providers; Ethereum, Arbitrum and Monad install in source with per-chain defaults; Robinhood, HyperEVM blocked). In progress on Sonnet: BB-58 corrections (mocks only) and BB-59 (frontend destination selection). BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
+  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: BB-42 to BB-45 (Base ids pinned; table-driven install and RPC checks; head rules incl. Monad finalized minus 3; native providers; Ethereum, Arbitrum and Monad install in source; Robinhood, HyperEVM blocked; BB-46 probes held). In Review: BB-58 (collector corrections, source and mocks only). In progress on Sonnet: BB-59 (frontend destination selection) and BB-47 (Solana skeleton and builders). BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
   "glossary": [
     {
       "term": "proof=source",
