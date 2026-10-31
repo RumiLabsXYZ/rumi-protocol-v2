@@ -151,3 +151,54 @@ The `icp.yaml` conflict kept both sides: main's new `ic-wasm optimize O1` step, 
 | Frontend | 1298 passed |
 
 Both PocketIC suites ran against the optimized production artifact.
+
+## R10: public XRPL testnet rehearsal (2026-10-31)
+
+Rob authorized this run: a local fixture install, testnet faucet funding, and testnet signing and broadcast. The issuer policy was **A** (`allow_clawback=false`, `no_freeze=false`), as decided by Rob.
+
+### Setup
+
+- A local PocketIC (7.0.0) instance in live mode ran the `xrpl-testnet-fixture` backend (`test_key_1`, public XRPL testnet), a real ICRC icUSD ledger with the backend as minter, an XRC mock (XRP at $0.50), and a local Internet Identity dev build.
+- The vault frontend ran at `localhost:5173` with the Xaman PKCE public key.
+- A real Xaman mobile wallet on testnet signed every user transaction.
+- One command reproduces the setup: `scripts/xrpl-rehearsal-up.sh`.
+- Issuer: `rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9`, funded from the faucet. Final flags are DefaultRipple and RequireDest (0x820000), and TransferRate is 1,000,000,000. All AccountSets validated `tesSUCCESS`.
+- User wallet: `rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D`, funded with 100 test XRP from the faucet.
+
+### Lifecycle evidence (all XRPL transactions validated, `tesSUCCESS`)
+
+| Step | Evidence |
+| --- | --- |
+| 1. XRP deposit, signed in Xaman | `CEBD67CC86123C3782D502A04119699DE7461ADD35BFE1315343F0FFC02B9A65`: 30 XRP to the vault custody address; ledger 21968639 |
+| 2. Collateral credit (ICP) | vault 1 shows 29,000,000 drops of collateral (30 XRP minus the 1 XRP reserve) |
+| 3. Trust line, signed in Xaman | `A516309D990836A28DBDC5191142E7E6E82EEBDCD33A7275ADFED1A6DF6A49BE`: TrustSet icUSD/issuer, limit 1000; ledger 21968666 |
+| 4. Borrow to XRPL (ICP) | 5 icUSD of debt and a 0.05 fee recorded through `BorrowFromVault` with escrow mint block 2; fee-remainder mint block 3 |
+| 5. Issuer delivery | `DFEACE1C9DAFF3A507B4E3431F3972749A12A4373267FA3A46AE76AB0D2B4F83`: issuer Payment of 4.95 icUSD to the user; ledger 21968687 |
+| 6. Repayment, signed in Xaman | `5AE743C50D45244BDA29E5D5945099AB7BFE0939A7D1D3076312B5C6AF9D4CDD`: 2 icUSD to the issuer with DestinationTag 1; ledger 21968700 |
+| 7. Escrow burn and debt change (ICP) | escrow burn block 4; op #1 Complete with `debt_applied_e8s = 200_000_000`; vault debt 5.00000126 became 3.00000142 (the difference is ordinary interest) |
+| 8. Reconciliation | escrow balance 595,000,000 e8s = 3.00 funded surplus + 4.95 minted − 2.00 burned; user XRPL balance 2.95 icUSD = XRPL obligations backed by escrow |
+
+No user click was needed to apply the repayment. The backend observer verified the return and applied it on its own.
+
+### Real-world defect found and fixed by this run
+
+The first pass stalled. Delivery stayed "pending" and the repayment was never credited, although both validated on XRPL.
+
+- **Cause:** rippled API v1 `tx` and `account_tx` replies from real servers carry no `ledger_hash`, and the lane fails closed without one. The PocketIC mocks had used unrealistic bodies.
+- **Fix:** commit `6bfa6cf5` requests `api_version: 2` and reads the v2 shape (`tx_json`, `DeliverMax`).
+- **Tests:** unit tests now parse captured real testnet and mainnet responses. The PocketIC mock returns real v1 shapes unless v2 is requested.
+- **Recovery:** the running rehearsal backend was upgraded in place (state preserved). Both stuck operations then completed automatically.
+
+Post-fix checks:
+
+| Check | Result |
+| --- | --- |
+| Backend library | 1508 passed |
+| Bin | 85 passed |
+| Fixture XRP | 310 passed |
+| PocketIC | 17 of 17 XRPL end-to-end, 4 of 4 native |
+| Production artifact gate | OK, code section 9,634,945 bytes |
+
+### Still not covered by R10
+
+Liquidation, Stability Pool and redemption paths with XRPL supply outstanding were exercised only in PocketIC, not on testnet. The same is true of Oisy-login flows. The rehearsal used a local Internet Identity rather than mainnet login.
