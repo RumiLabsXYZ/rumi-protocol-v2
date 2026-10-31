@@ -522,7 +522,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=local-test; 15bb73dc analytics escrow subtraction found sound by Miles; same owner now adds an independent-reading collector (fixture transport) and a typed D/X boundary; live transport stays open (client dependency, read-only query authorization)",
+      "evidenceText": "proof=local-test; 15bb73dc analytics escrow subtraction found sound by Miles; same owner adds an independent-reading collector (fixture transport) and a typed D/X boundary, then the real client transport with mocked tests; public queries stay held",
       "evidenceLinks": []
     },
     {

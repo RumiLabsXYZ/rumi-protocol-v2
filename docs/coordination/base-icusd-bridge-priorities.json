@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-58 follow-up in progress (same owner W25): independent-reading collector with a fixture transport and a typed D/X boundary; the live transport stays open. BB-59 starts when a Sonnet lane frees, then BB-60.",
+      "nextAction": "BB-58 follow-up in progress (same owner W25): independent-reading collector with a fixture transport and a typed D/X boundary; next on the same card, the real IC query and EVM client transport verified with a mocked transport (running public queries stays held). BB-59 starts when a Sonnet lane frees, then BB-60.",
       "cardIds": [
         "BB-58",
         "BB-59",

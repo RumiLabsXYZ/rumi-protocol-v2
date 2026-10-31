@@ -995,9 +995,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   (design 2.4), and D/X disjointness was only documented (a D entry named for XRPL plus the XRPL lane counted one escrow twice).
   Same owner W25 resumed for one bounded follow-up in `rumi_bridge_destinations`: a typed input boundary (catalog-bound
   network ids, XRPL family only as X, unique escrow bindings across D and X) and a `Readings`-driven collector with a fixture
-  transport and a runnable example; Solana, Sui and XRPL adapters report unavailable with their source card. The live
-  transport (IC query and EVM JSON-RPC client) stays an open substep: it needs a client dependency and a separate read-only
-  query authorization.
+  transport and a runnable example; Solana, Sui and XRPL adapters report unavailable with their source card. Miles'
+  clarification: the real transport source (IC query and EVM JSON-RPC client, with a scoped dependency if needed) is already
+  authorized source work, queued next on BB-58 for the same owner and verified with a mocked transport; only executing public
+  queries is held. BB-58 is not Done on fixture-only collection.
 - Staffing (two Sonnet lanes, no Haiku task; W26 briefly made a third and was stopped):
 
   | Handle | Card | Scope | Requested | Actual (run record) | State |
