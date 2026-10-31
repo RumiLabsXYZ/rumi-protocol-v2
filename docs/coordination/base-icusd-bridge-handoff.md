@@ -1473,6 +1473,24 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Queued for the same W29 after its XRPL reader commit; W28 keeps BB-49; collector crate ownership stays disjoint between
   the native reader steps.
 
+## Milestone 66 (2026-10-31): BB-49 49a delivered
+
+- 49a `e6a542be` (W28, local): `schnorr.rs` real `TxSigner` (`sign_with_schnorr` and `schnorr_public_key` with path
+  `[rumi-icusd-sol-bridge, v1, role, genesis_hash_32]`; key rule enforced; a definite rejection is `Failed`, a lost or
+  ambiguous reply is `Unknown` and re-signs the same bytes; cycles per key unmeasured); `mint.rs` bind checks on raw account
+  bytes at finalized (mint owner, authority, freeze none, decimals 8, supply 0 on first bind, extension allow-list; return
+  ATA canonical, owner, no delegate or close authority, only ImmutableOwner); claim none to deployed_unbound to bound, never
+  backward, and no operation message is built before Bound; `bootstrap.rs` (keys, nonce pool, mint and return ATA creation
+  with persist-before-sign, a real blockhash per pass, 150 s replacement, read-before-create, idle when bound); `timer.rs`
+  (self-rescheduling pass with an overlap guard). Core schema 3 with BB-47 and BB-48 images still decoding; new query
+  `get_bootstrap_status`. Worker run: 283 tests (2 ignored image helpers) with and without `history_probe`; clippy clean both
+  ways; Wasm 2,408,059 bytes (code now reachable from the timer). Coordinator check: no collector files touched; golden
+  reference `mismatches: 0`; `git diff --check` clean.
+- Flags for Miles: the mint is created WITHOUT the Token-2022 metadata extensions (no `spl-token-2022` source was available
+  to read their instruction layouts); the bind accepts them when present. Extension ids (7, 18, 19) and the
+  `InitializeMint2` tag (20) come from memory, used as an allow-list that fails closed; re-check against program source at
+  activation. Mint rent is a parameter, not measured; the fee payer must be funded before creations can land.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

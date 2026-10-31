@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; In progress in five sub-milestones: signer, timer, bind and bootstrap; carried ledger saga; mint saga, strict return verifier, refund locator; burn lane, custody (deficit never OK), holder-burn seam; Solana collector reader",
+      "evidenceText": "proof=none; 49a e6a542be: real threshold signer seam, timer, mint creation and bind checks (allow-list), nonce pool bootstrap; 283 tests; golden 0 mismatches. 49b (ledger saga, endpoints) in progress, then 49c to 49e",
       "evidenceLinks": []
     },
     {
