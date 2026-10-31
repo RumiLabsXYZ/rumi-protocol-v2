@@ -463,10 +463,10 @@
     },
     {
       "id": "BB-51",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: Move gate package and Move unit tests",
-      "evidenceText": "proof=none; In progress (W29): Move gate package in move/rumi_icusd_gate; official Sui CLI mainnet-v1.82.3 used locally after checksum verification (normal tooling under the existing grant); sui move test only, no wallet or network",
+      "evidenceText": "proof=local-test; 23f75ef1: Sui Move gate package (move/rumi_icusd_gate), wrapped TreasuryCap, cap-bound mint and admin, consumed mint ids, recipient-bound returns, version guard; 47 sui move tests pass offline; 20 weakenings each caught",
       "evidenceLinks": []
     },
     {

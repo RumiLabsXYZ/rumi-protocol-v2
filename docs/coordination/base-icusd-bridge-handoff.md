@@ -1754,9 +1754,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Sui CLI build context (Miles, `sui-local-build-context.md`): in mainnet-v1.82.3 every `sui move` command loads a wallet
   context; without `--client.config` it uses the default client config, and if that is missing an empty answer (including
   stdin EOF) creates a default keystore and key plus a public-network config and prints a recovery phrase. W29 now uses an
-  explicit disposable local-only `--client.config` with an empty keystore and a loopback-only environment, never the default
-  wallet or a public RPC. Coordinator check: `~/.sui` does not exist, so no default config or key was created there; W29
-  reports any other evidence of created key material by existence and path only (never contents), marked never to be used.
+  explicit disposable local-only `--client.config` with an empty keystore, never the default wallet or a public RPC.
+  CORRECTION (coordinator): my check found `~/.sui` absent, and I wrongly concluded that no default config or key had been
+  created there. W29 later reported (milestone 81) that its first run did create one before the correction arrived and that
+  it had already moved it to quarantine, which is why the directory was absent when I looked.
 - Hosted CI (verified by Miles via GitHub): run 41174255809 on pushed head `932ef8fa` completed SUCCESS at 06:00:26 UTC. This is
   the existing hosted workflow's coverage, not a substitute for the Solana or Sui local tests; no watch or rerun until the next
   source cohort.
@@ -1785,6 +1786,41 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   assertion now catches the `outcome_applied` guard). Coordinator check: Solana crate only, diff-check clean, golden 0.
 - 49d next on the same W28 (burn lane with the carried return_id binding, custody with no unexplained deficit OK, the
   holder-burn seam, stray refunds with the per-transfer locator), then 49e.
+
+## Milestone 81 (2026-10-31): BB-51 delivered; accidental Sui key quarantined
+
+- INCIDENT (reported by W29, recorded by existence and path only): before Miles' build-context correction reached it, W29
+  ran `sui move build` with stdin closed; per the pinned source, EOF counted as yes, so the CLI created a default config and
+  a new ed25519 keypair and printed a recovery phrase into W29's build log and once into W29's own tool output. W29 never
+  read, used, funded or relayed the key, did not read the keystore, and redacted the phrase from the build log. The created
+  files were MOVED (not deleted) to `/private/tmp/claude-501/sui-quarantine/dot-sui/sui_config/` (client.yaml, sui.keystore,
+  sui.aliases, external.keystore, external.aliases), marked NEVER TO BE FUNDED OR USED. The phrase also remains in W29's
+  local session transcript (`~/.claude/projects/-Users-robertripley-coding-rumi-protocol-v2/83056354-82fe-4d09-bd03-59aa138ab7ca/subagents/agent-aa397cdfed8185f35.jsonl`),
+  which the coordinator has not read. No pre-existing wallet or config was touched, no public RPC was called (the only
+  network access was the git fetch of the Move framework sources), and `~/.sui` is absent now. Later runs re-created an
+  empty `~/.sui/sui_config` that W29's wrapper removed when empty. Deleting the quarantine and the transcript copy is a
+  decision for Rob or Miles; the coordinator deleted nothing.
+- BB-51 `23f75ef1` (W29, bridge branch, only `move/rumi_icusd_gate/`, 7 files): one shared Gate wrapping the TreasuryCap;
+  MintCap and AdminCap carrying a `gate_id` checked by every cap-gated function; zero initial supply cap; consumed 32-byte
+  mint ids; recipient-bound `bridge_out` with the saved ICP principal and 32-byte subaccount; a sender, nonce, chain and gate
+  transfer-id domain; durable mint and return tables; cumulative minted and burned totals; limits; version guard and admin
+  migration; returns available while minting is disabled; init refuses the unset or all-zero chain identifier. Corrections to
+  the paper design are in the package README (public fun rather than entry; cap gate ids; richer durable records; the chain
+  identifier as the 32-byte genesis checkpoint digest with mainnet and testnet values documented but not asserted by a test;
+  confirmed framework behavior). Authority limits: the UpgradeCap goes to the publisher and a compatible upgrade can change
+  any body (only a dependency-only or immutable policy closes that, D6); AdminCap can raise the cap; MetadataCap edits
+  metadata only; no DenyCap.
+- Tooling: `sui 1.82.3-bf4073918ed3` from the official asset (sha256 verified before extracting), in a temporary folder.
+  Framework sources pinned in Move.lock at MystenLabs/sui `719fb2960ccfbf9f4d33041f8ea5146d30671696` (the built-in testnet
+  environment pin). Commands, run from the package with a keyless InMem client config:
+  `printf 'n\n' | sui move --client.config <tmp>/client.yaml build -e testnet` (exit 0, no warnings) and the same with
+  `test` (Test result: OK. Total tests: 47; passed: 47; failed: 0), also 47 of 47 with `-e mainnet`. Twenty deliberate
+  weakenings each broke at least one test.
+- Coordinator check: the commit touches only `move/rumi_icusd_gate/`; the only matches for secret words in it are README lines
+  warning against the default bootstrap; the quarantine holds the five named files; `~/.sui` absent; disk 19 GiB free.
+- Not covered (for the deferral lane): publishing and `finalize_registration`; wallet display of a registry-only currency;
+  gas, storage and shared-object latency; event type tags after an upgrade and upgrade-policy behavior; a test asserting the
+  real per-network identifiers; the external Move review (MC-DEF-1).
 
 ## Held live actions
 
