@@ -2931,6 +2931,31 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   - Hygiene note: W29 wrote two temporary comparison files to `/tmp`, outside the scratchpad.
 - Next: Miles adjudicates the four findings; W28 owns any accepted fixes. Two workers only.
 
+## Milestone 123 (2026-10-31): W29 BB-54 findings adjudicated
+
+- Miles (`adjudicate-bb54-w29.md`), after independently checking `reconcileReturn`, `verdictOf` and `trackReturn`, the transaction
+  verification and `intentBindingMessage` at `37f9c77c`. Root F1 to F3 stay resolved at `412f1fda`. W29's pass is finished.
+- F-1 ACCEPTED: validate a returned release against the intent's transfer id, sender, client nonce, exact amount, canonical ICP
+  owner and subaccount (default and explicit-zero subaccounts by the ledger's canonical account rules) and the saved typed digest
+  when present; a mismatch is a visible deviation or held state with the record's actual facts, never the reviewed transfer
+  shown as credited, never a done journal, never authorization for a new signature, nonce or transfer; used consistently in the
+  status, card, track and manual evidence paths; no Gate id, Move or backend change.
+- F-4 ACCEPTED, both Sui directions: a Sui-specific guard comparing the persisted instance, full chain identifier, package, Gate
+  and coin type with the current Sui config before any saved-attempt continuation, signing, rebroadcast or ICP approval,
+  submission or retry, including resume and status paths. Miles found the same slug-only defect in `icpToSui.ts`
+  `submitToBridge`, where an approved or uncertain old-instance request could continue against a new instance after a not-found
+  lookup and risk a second pull. A mismatch keeps the old journal and names its original bridge; no new nonce, request id, pull or
+  signature; no widening of the shared EVM or Solana helper, no migration framework, no new backend or Candid field.
+- F-2 NOT A DEMO BLOCKER: the accepted safe-hold limit. A sign-only `signing` attempt is not made discardable or re-askable
+  because no bytes were saved (another page may still be awaiting the wallet and later broadcast); no acknowledged exit for
+  sign-and-execute; no storage clearing, intent removal or fresh attempt. The UX limit is recorded honestly; keeping a
+  wallet-reported digest as a read-only hint is optional future work and never proof.
+- F-3 DISCLOSED LIMIT: zkLogin verification needs a client the offline verify path does not have; no new verifier, client or
+  multisig work as a gate; a precise unsupported-scheme message may ride along; signature and returned-bytes validation are never
+  skipped. W29's other observations stay deferrals.
+- Same W28: one bounded correction on `412f1fda` with old-red and new-green F-1 and F-4 regressions, affected specs only, one
+  svelte-check and build. Full BB-54 stays in Review; no frontend push.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
