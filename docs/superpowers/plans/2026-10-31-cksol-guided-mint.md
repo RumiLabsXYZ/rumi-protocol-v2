@@ -27,20 +27,20 @@
 
 ## Task 1: Reconcile before funding
 
-- [ ] Add failing Rust tests for terminal, pending, unknown and failed minter status; unsettled receipts, stale sequences and same-sequence replay.
-- [ ] Add a transport status read; under the owner guard verify terminal status and unchanged retained attempt before clearing. Revalidate sequence and payment in prepare before any funding.
-- [ ] Run focused backend tests and compare generated Candid with source and live interface.
+- [x] Add failing Rust tests for terminal, pending, unknown and failed minter status; unsettled receipts, stale sequences and same-sequence replay.
+- [x] Add a transport status read; under the owner guard verify terminal status and unchanged retained attempt before clearing. Revalidate sequence and payment in prepare before any funding.
+- [x] Run focused backend tests and compare generated Candid with source and live interface.
 
 ## Task 2: Guided frontend
 
-- [ ] Add failing service/page tests for sequential OISY consent, terminal legacy records, automatic restoration/polling, message precedence and owner changes.
-- [ ] Retain one signer scope across approval and processing; keep explicit resume for interrupted confirmed approvals.
-- [ ] Show address automatically, advisory finalized SOL balance, one state-dependent primary action, progress and collapsed technical receipt. Refresh reads in background and on focus; stop on teardown.
-- [ ] Run focused tests, production build and desktop/narrow interaction fixtures.
+- [x] Add failing service/page tests for sequential OISY consent, terminal legacy records, automatic restoration/polling, message precedence and owner changes.
+- [x] Retain one signer scope across approval and processing; keep explicit resume for interrupted confirmed approvals.
+- [x] Show address automatically, advisory finalized SOL balance, one state-dependent primary action, progress and collapsed technical receipt. Refresh reads in background and on focus; stop on teardown.
+- [x] Run focused tests, production build and desktop/narrow interaction fixtures.
 
 ## Task 3: Review and publication
 
-- [ ] Run independent adversarial reviews and fix confirmed issues.
-- [ ] Push source and reviewable release evidence; merge after checks pass.
-- [ ] Verify backend source/artifact compatibility and publish the authorized upgrade; publish frontend assets with paginated inventory and atomic entry update.
-- [ ] Read back deployed hashes/interface/assets and inspect the user's page without initiating payment. Record any remaining limitation accurately.
+- [x] Run independent adversarial reviews and fix confirmed issues.
+- [x] Push source and reviewable release evidence; merge after checks pass.
+- [x] Verify backend source/artifact compatibility and publish the authorized upgrade; publish frontend assets with paginated inventory and atomic entry update.
+- [x] Read back deployed hashes/interface/assets and inspect the user's page without initiating payment. Record any remaining limitation accurately.
