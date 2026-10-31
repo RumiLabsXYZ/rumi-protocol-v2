@@ -1379,6 +1379,24 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   preparation awaits, so the reservation commit must recheck slot identity and nonce value (or a generation) for submit
   and reissue. Focused checks only; BB-49 starts after Miles accepts BB-48.
 
+## Milestone 61 (2026-10-31): BB-48 follow-up delivered; BB-48 in Review
+
+- BB-48 `614ced92` (W28, local): reproduction first, 7 of 34 lane tests failed before the fix (saved output). (1) Halt fence:
+  the lane halt is checked before every signer call, before every send with no await in between, after the tick's nonce
+  read and before a cancel is created; a signature or ambiguous reply returning after the halt is still recorded, and after
+  a clear only the missing role is signed on the same stored bytes. (2) Fair paging: each tick processes at most 32
+  non-terminal ids after a heap-only round-robin cursor, so every operation is reached within ceil(n/32) ticks; held and
+  lane-blocked operations stay in rotation and are never marked settled; the stable index is unchanged, so upgrade needs no
+  rebuild. (3) Slot generation: `NonceSlot.generation` (appended, serde default) is bumped on reserve, release and
+  verification, and `reserve_slot_checked` admits only the generation seen when the read began, for submit (up to three
+  re-preparations, then `Busy`) and reissue (`Waiting`, retried next tick); no signing on a stale preparation. The fixture
+  citation in `sol_rpc.rs` and `lib.rs` now names the pinned upstream blob, with a test pinning its length and SHA-256.
+- Worker run: 253 tests passed, 2 ignored (with and without `history_probe`); clippy clean both ways; production Wasm
+  1,272,089 bytes. Coordinator check: the commit stays in the Solana crate; the probe files are unchanged since `d1bc0bca`;
+  the saved before-fix output shows 34 passed and 7 failed.
+- Frozen BB-48 pins for acceptance: `45ecd9fe` (core), `d1bc0bca` (probe tool and runbook), `614ced92` (lane fixes). W28's
+  lane waits for Miles' acceptance, then takes BB-49.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -439,10 +439,10 @@
     },
     {
       "id": "BB-48",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Solana: SOL RPC mirror and durable-nonce reconciliation",
-      "evidenceText": "proof=none; Core 45ecd9fe reviewed (Miles) and probe tool d1bc0bca committed; same W28 now fixes three lane issues found in review: halt fence across awaits, starvation past 32 held ops, free-slot ABA; acceptance before BB-49",
+      "evidenceText": "proof=local-test; 45ecd9fe core, d1bc0bca probe tool (offline only), 614ced92 lane fixes (halt fence, fair paging, slot generation; 7 failing tests reproduced first); 253 tests, clippy clean, Wasm builds; fixture pinned to upstream",
       "evidenceLinks": []
     },
     {

@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-48 follow-up in progress (same W28): halt fence across awaits, fair reconcile paging past held ops, nonce slot generation check; then Miles' acceptance before BB-49 (lanes plus the carried ledger saga, refund locator and custody items).",
+      "nextAction": "BB-48 in Review (45ecd9fe, d1bc0bca, 614ced92). After Miles accepts it, BB-49 goes to the same W28: lanes, strict return verifier, custody audit, holder-burn seam, the collector reader, plus the carried ledger saga, refund locator and custody deficit items.",
       "cardIds": [
         "BB-47",
         "BB-48",
