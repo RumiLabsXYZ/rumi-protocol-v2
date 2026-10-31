@@ -139,7 +139,7 @@ pub async fn submit_burns<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, now: u64)
                 submitted += 1;
             }
             // Conditions that clear on their own: the return simply stays custodied.
-            Err(SubmitError::LaneHalted(_) | SubmitError::NotConfigured(_) | SubmitError::NoFreeSlot | SubmitError::Busy | SubmitError::Rpc(_)) => {}
+            Err(SubmitError::LaneHalted(_) | SubmitError::NotConfigured(_) | SubmitError::NoFreeSlot | SubmitError::Busy | SubmitError::Rpc(_) | SubmitError::NotAdmitted(_)) => {}
             Err(SubmitError::InvalidRequest(why)) => {
                 state::halt(format!("return {}: the burn cannot be built: {why}", hex::encode(r.return_id)));
                 return submitted;

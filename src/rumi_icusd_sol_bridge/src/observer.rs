@@ -389,6 +389,12 @@ async fn process_signature<R: SolRpc>(rpc: &R, ctx: &Ctx, signature: Sig, now: u
         Ok(None) => return Err(format!("{} is listed but not retrievable yet", crate::tx::signature_to_base58(&signature.0))),
         Err(e) => return Err(format!("getTransaction: {e:?}")),
     };
+    // The identity of a return, a stray and its refund claims is built from `signature`: the response
+    // must be that very transaction (its own first signature), before anything is recorded from it. A
+    // wrong answer waits like an unavailable one; it never becomes a credit or a claim.
+    if let Err(why) = crate::sol_rpc::check_bound(&signature.0, &tx) {
+        return Err(format!("{}: {why}", crate::tx::signature_to_base58(&signature.0)));
+    }
     let (verdict, facts) = classify(ctx, &tx);
     match apply_verdict(ctx, signature, tx.slot, verdict, facts, now) {
         Applied::Event(e) => Ok(e),

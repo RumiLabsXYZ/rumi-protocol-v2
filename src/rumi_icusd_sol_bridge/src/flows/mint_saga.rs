@@ -22,7 +22,7 @@ use crate::accounting::Transition;
 use crate::env;
 use crate::flows::deposit;
 use crate::ids;
-use crate::lane::{self, SubmitError, SubmitRequest, TxSigner};
+use crate::lane::{self, Admission, SubmitError, SubmitRequest, TxSigner};
 use crate::records::{OpKind, OpPayload, OpState};
 use crate::sol_rpc::SolRpc;
 use crate::state::{self, AuditCtx, DepositKind, DepositRecord, DepositState, MintDelivery, Queue, ReleaseState};
@@ -101,6 +101,37 @@ fn cap_for(d: &DepositRecord) -> u64 {
     }
 }
 
+/// The mint admission: judged in the lane's synchronous commit, after the nonce read and before the
+/// operation is stored. The deposit must STILL be the escrowed, unlinked deposit this request was built
+/// from (same mint id, amount, recipient and per-operation cap), and mints must still be allowed. A
+/// deposit that was held and refunded while the nonce was being read fails this check, so the refund of
+/// its backing can never be followed by a mint.
+fn admit_mint(deposit_id: u64, req: &SubmitRequest) -> Result<(), String> {
+    if !mints_allowed() {
+        return Err("mints are paused or halted".into());
+    }
+    let d = state::get_deposit(deposit_id).ok_or("the deposit does not exist")?;
+    if !matches!(d.state, DepositState::Escrowed) || d.mint_op.is_some() || !d.abandoned_mint_ops.is_empty() {
+        return Err(format!("the deposit is {:?}, not an escrowed deposit without an operation", d.state));
+    }
+    let expected = OpPayload::Mint { recipient_wallet: d.solana_recipient, per_operation_cap: cap_for(&d) };
+    if d.mint_id != Some(req.external_id) || d.mint_amount_e8s != req.amount || req.payload != expected {
+        return Err("the request was built for other terms than the deposit has now".into());
+    }
+    Ok(())
+}
+
+/// Link the deposit to its operation, in the same synchronous step that stored the operation.
+fn link_mint(deposit_id: u64, op_id: u64) {
+    let Some(mut d) = state::get_deposit(deposit_id) else { return };
+    d.state = DepositState::MintInFlight;
+    d.mint_op = Some(op_id);
+    d.hold_retry_at_ns = None;
+    d.updated_at_ns = env::now_ns();
+    state::put_deposit(&d);
+    state::append_audit(None, AuditCtx { note: "mint operation created".into(), deposit_id: Some(deposit_id), op_id: Some(op_id), ..AuditCtx::default() });
+}
+
 /// Build the mint operation of every escrowed deposit that has none. Idempotent per mint id.
 pub async fn submit_mints<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, now: u64) -> usize {
     if !mints_allowed() {
@@ -117,24 +148,25 @@ pub async fn submit_mints<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, now: u64)
             external_id: mint_id,
             amount: d.mint_amount_e8s,
         };
-        match lane::submit_op(rpc, signer, req, now).await {
+        let admission = Admission { context: d.id, check: admit_mint, link: link_mint };
+        match lane::submit_admitted(rpc, signer, req, now, Some(admission)).await {
             Ok(op_id) => {
-                // Link it. The deposit may have changed during the await; only an escrowed deposit
-                // without an operation takes the link.
-                let Some(mut cur) = state::get_deposit(d.id) else { continue };
-                if !matches!(cur.state, DepositState::Escrowed) || cur.mint_op.is_some() {
-                    continue;
+                // The deposit was linked in the admission step. The only other way to get here is an
+                // operation that already existed for this mint id (idempotency): link it if the deposit
+                // is still escrowed and unlinked, never otherwise.
+                let Some(cur) = state::get_deposit(d.id) else { continue };
+                if cur.mint_op == Some(op_id) {
+                    submitted += 1;
+                } else if matches!(cur.state, DepositState::Escrowed) && cur.mint_op.is_none() && cur.abandoned_mint_ops.is_empty() {
+                    link_mint(d.id, op_id);
+                    submitted += 1;
                 }
-                cur.state = DepositState::MintInFlight;
-                cur.mint_op = Some(op_id);
-                cur.hold_retry_at_ns = None;
-                cur.updated_at_ns = env::now_ns();
-                state::put_deposit(&cur);
-                state::append_audit(None, AuditCtx { note: "mint operation created".into(), deposit_id: Some(d.id), op_id: Some(op_id), ..AuditCtx::default() });
-                submitted += 1;
             }
             // Conditions that clear on their own: the deposit simply stays escrowed.
             Err(SubmitError::LaneHalted(_) | SubmitError::NotConfigured(_) | SubmitError::NoFreeSlot | SubmitError::Busy | SubmitError::Rpc(_)) => {}
+            // The deposit or the terms changed under the request: nothing was stored, and the next
+            // pass judges the deposit as it is now.
+            Err(SubmitError::NotAdmitted(_)) => {}
             // The request itself is unbuildable (for example an amount above the cap): no operation
             // exists, so the deposit is held and may be refunded.
             Err(SubmitError::InvalidRequest(why)) => deposit::on_mint_preflight_hold(d.id, why),

@@ -47,6 +47,35 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
+/// Suspends the awaiting task exactly once.
+#[derive(Default)]
+pub struct YieldOnce(bool);
+
+impl std::future::Future for YieldOnce {
+    type Output = ();
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        if self.0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+/// Poll a future once, to leave it suspended at its first await that does not complete.
+pub fn poll_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+    struct Noop;
+    impl Wake for Noop {
+        fn wake(self: Arc<Self>) {}
+    }
+    let waker = Waker::from(Arc::new(Noop));
+    future.poll(&mut Context::from_waker(&waker))
+}
+
 /// An injected failure for one SOL RPC method.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fault {
@@ -91,6 +120,10 @@ pub struct MockChain {
     pub on_account_read: RefCell<Option<AccountReadHook>>,
     /// One-shot hooks that act on the first read of one specific account (after its reply is taken).
     pub on_account_read_of: RefCell<Vec<(Pubkey, AccountReadHook)>>,
+    /// When set, the next `get_account` reply is computed at once but returned only after the caller is
+    /// suspended once (the read is "in flight"): drive it with [`poll_once`], run other messages, then
+    /// resume. One shot.
+    pub defer_next_account_read: Cell<bool>,
     pub on_slot_read: RefCell<Option<SlotReadHook>>,
     /// When set, every sent bootstrap transaction (pool account, mint, return ATA) takes effect at once.
     pub auto_apply_creation: Cell<bool>,
@@ -227,6 +260,17 @@ impl MockChain {
         first
     }
 
+    /// Make a lookup of `key` return `wire` (a response for the wrong key, as a faulty or hostile RPC
+    /// would give), listed under every address in `mentions`.
+    pub fn land_under(&self, key: Signature, wire: &[u8], failed: bool, meta: crate::sol_rpc::TxMeta, mentions: &[Pubkey]) {
+        let slot = self.next_slot.get();
+        self.next_slot.set(slot + 1);
+        self.landed.borrow_mut().insert(key, MockTx { wire: wire.to_vec(), failed, slot, meta });
+        for address in mentions {
+            self.by_address.borrow_mut().entry(*address).or_default().push(key);
+        }
+    }
+
     /// Set the metadata the RPC reports for an already landed transaction (the balance effect of the
     /// bridge's own burn or refund, which landed through [`MockChain::land`]).
     pub fn set_meta(&self, signature: &Signature, meta: crate::sol_rpc::TxMeta) {
@@ -318,6 +362,9 @@ impl SolRpc for MockChain {
         };
         for (_, hook) in due {
             hook(self, address);
+        }
+        if self.defer_next_account_read.take() {
+            YieldOnce::default().await;
         }
         Ok(reply)
     }

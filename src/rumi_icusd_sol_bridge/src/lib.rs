@@ -112,6 +112,8 @@ mod saga_tests;
 mod saga49c_tests;
 #[cfg(test)]
 mod saga49d_tests;
+#[cfg(test)]
+mod saga49c_fix_tests;
 
 use candid::Principal;
 use state::AuditCtx;

@@ -169,6 +169,9 @@ pub enum SubmitError {
     /// Another submission took the slot while this one was reading it; retry.
     Busy,
     Rpc(String),
+    /// The caller's own record no longer allows this operation (the deposit it was built from was
+    /// refunded, held, linked, paused or its request is stale). Nothing was stored or reserved.
+    NotAdmitted(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -324,6 +327,20 @@ pub struct SubmitRequest {
     pub amount: u64,
 }
 
+/// A condition on the caller's own record, judged in the SAME synchronous step that stores the
+/// operation (after the account read, before the slot is reserved), and the link the caller takes in
+/// that step too. A check made before the await, or a link made after it, leaves a window in which the
+/// record (a deposit, for example) can change while the operation is already stored and signed.
+#[derive(Clone, Copy)]
+pub struct Admission {
+    /// The caller's record (for a mint, the deposit id).
+    pub context: u64,
+    /// `Err` refuses the admission: nothing is stored, reserved or signed.
+    pub check: fn(u64, &SubmitRequest) -> Result<(), String>,
+    /// Runs right after the operation is stored, with no await in between.
+    pub link: fn(u64, u64),
+}
+
 /// Admit an operation: reserve a nonce slot, persist the attempt, then sign and send.
 ///
 /// Idempotent on `external_id`: a repeat returns the existing operation without touching it. The
@@ -331,12 +348,28 @@ pub struct SubmitRequest {
 /// call to the signer; signing and the first broadcast then run best-effort, and whatever they
 /// leave unfinished the next tick completes with the same bytes.
 pub async fn submit_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, req: SubmitRequest, now: u64) -> Result<u64, SubmitError> {
+    submit_admitted(rpc, signer, req, now, None).await
+}
+
+/// [`submit_op`] with an [`Admission`]: the caller's record is checked again in the synchronous commit
+/// and linked to the operation in the same step.
+pub async fn submit_admitted<R: SolRpc, S: TxSigner>(
+    rpc: &R,
+    signer: &S,
+    req: SubmitRequest,
+    now: u64,
+    admission: Option<Admission>,
+) -> Result<u64, SubmitError> {
     if let Some(id) = state::op_by_external(&req.external_id) {
         return Ok(id);
     }
     let lane = req.kind.lane();
     if let Some(h) = state::lane_halt(lane) {
         return Err(SubmitError::LaneHalted(h.reason));
+    }
+    // Early out (no RPC for a request that is already stale); the commit below is the authority.
+    if let Some(a) = &admission {
+        (a.check)(a.context, &req).map_err(SubmitError::NotAdmitted)?;
     }
     let profile = state::read_core(|c| c.tx_profile()).map_err(SubmitError::NotConfigured)?;
     let template = SolOp {
@@ -373,6 +406,10 @@ pub async fn submit_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, req: SubmitR
         if let Some(h) = state::lane_halt(lane) {
             return Err(SubmitError::LaneHalted(h.reason));
         }
+        // The caller's record, judged now: after the await and before anything is stored.
+        if let Some(a) = &admission {
+            (a.check)(a.context, &req).map_err(SubmitError::NotAdmitted)?;
+        }
         let op_id = state::next_op_id();
         if !nonce::reserve_slot_checked(lane, prepared.slot_index, op_id, prepared.slot_generation) {
             continue;
@@ -383,6 +420,9 @@ pub async fn submit_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, req: SubmitR
         op.attempts.push(new_attempt(AttemptKind::Original, 0, prepared.nonce, &prepared.tx, now));
         state::put_op(&op);
         state::append_audit(None, state::AuditCtx::note(format!("op {op_id} admitted ({:?}), slot {} reserved", req.kind, prepared.slot_index)));
+        if let Some(a) = &admission {
+            (a.link)(a.context, op_id);
+        }
         committed = Some((op_id, OpGuard::acquire(op_id)));
         break;
     }

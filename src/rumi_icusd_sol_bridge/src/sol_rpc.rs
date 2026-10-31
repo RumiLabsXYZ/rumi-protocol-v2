@@ -39,7 +39,7 @@
 //! errors, transaction errors, inconsistent per-provider vectors) is `candid::Reserved`, so the
 //! whole-type-table subtype check passes without enumerating large variants.
 
-use crate::tx::{Pubkey, Signature};
+use crate::tx::{decode_wire_transaction, signature_to_base58, split_wire_transaction, Pubkey, Signature, TxError};
 use crate::types::{ConsensusSetting, RpcSettings, SolRpcCluster};
 use base64::Engine as _;
 
@@ -554,6 +554,34 @@ pub fn account_from_wire(info: Option<wire::AccountInfo>) -> RpcResult<Option<Ac
     Ok(Some(AccountSnapshot { owner, data }))
 }
 
+/// A lookup must return the transaction it was asked for. A transaction is identified by its FIRST
+/// signature, so the returned wire's own first signature must equal the requested one, and it must
+/// carry exactly the signature count its header names. Anything else is a wrong answer from the RPC
+/// (the same valid bytes under another key would otherwise become a second identity), never a
+/// transaction to record anything from. A message that does not decode strictly is still bound by the
+/// signature list the wire itself carries.
+pub fn check_bound(requested: &Signature, tx: &LandedTx) -> Result<(), String> {
+    let first = match decode_wire_transaction(&tx.wire) {
+        Ok((signatures, _, _)) => signatures.first().copied(),
+        Err(TxError::SignatureCountMismatch { header, wire }) => {
+            return Err(format!("the returned transaction carries {wire} signatures but its header requires {header}"));
+        }
+        Err(_) => match split_wire_transaction(&tx.wire) {
+            Ok((signatures, _)) => signatures.first().copied(),
+            Err(e) => return Err(format!("the returned transaction bytes do not parse: {e}")),
+        },
+    };
+    match first {
+        None => Err("the returned transaction carries no signature".into()),
+        Some(s) if s == *requested => Ok(()),
+        Some(s) => Err(format!(
+            "the signature of the returned transaction ({}) is not the requested one ({})",
+            signature_to_base58(&s),
+            signature_to_base58(requested)
+        )),
+    }
+}
+
 pub fn transaction_from_wire(tx: Option<wire::EncodedConfirmedTransactionWithStatusMeta>) -> RpcResult<Option<LandedTx>> {
     let Some(tx) = tx else { return Ok(None) };
     let text = match tx.transaction.transaction {
@@ -670,7 +698,11 @@ impl SolRpc for CandidRpc {
         let args = (rpc_sources(&self.settings)?, Some(rpc_config(&self.settings, self.settings.verify)), transaction_params(signature));
         let (reply,): (wire::Multi<Option<wire::EncodedConfirmedTransactionWithStatusMeta>>,) =
             call_sol_rpc(self.canister, "getTransaction", args, self.cycles()).await?;
-        transaction_from_wire(unwrap_multi(reply)?)
+        let landed = transaction_from_wire(unwrap_multi(reply)?)?;
+        if let Some(tx) = &landed {
+            check_bound(signature, tx).map_err(RpcFailure::Error)?;
+        }
+        Ok(landed)
     }
 
     async fn get_signatures_for_address(
