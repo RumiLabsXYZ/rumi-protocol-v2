@@ -161,7 +161,7 @@
       "activation_blockers": [
         {
           "id": "sui-gate-module-missing",
-          "text": "A plain coin transfer carries no ICP account, and a TreasuryCap mint keeps no consumed-id record. A Move gate module (consumed table, counters, BridgeOut event) is needed (D4). The gate package is accepted at local source and offline Move test scope (BB-51, 23f75ef1: 47 offline Move tests), and it is not publish-ready. Still held: publish and bind, the UpgradeCap policy (sui-upgradecap-policy), and the module-bytes match, which has not been done (MC-DEF-13).",
+          "text": "A plain coin transfer carries no ICP account, and a TreasuryCap mint keeps no consumed-id record. A Move gate module (consumed table, counters, BridgeOut event) is needed (D4). The gate package is accepted at local source and offline Move test scope (BB-51, 23f75ef1: 47 offline Move tests), and it is not publish-ready. Still held: publish and bind, and the UpgradeCap policy (sui-upgradecap-policy). Disclosed and deferred, not a source gate: the module-bytes match (MC-DEF-13), which has not been performed.",
           "kind": "code",
           "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3 (D4); docs/coordination/multichain/reuse-inventory.md section 6; move/rumi_icusd_gate (BB-51, 23f75ef1)"
         },
@@ -179,7 +179,7 @@
         },
         {
           "id": "sui-observer-lane-missing",
-          "text": "Source for the owned-version mint lane, the return observer, the C1 to C4 monitors and the independent Sui supply reader is accepted at local source and test scope (BB-53 53a to 53d: 7eaef24f, 1b71eae8, e2507b16, 5da0804e, e4ee506a, 53c21490, 29295fb4). It is tested on a simulated chain and mocks only and is not activated. The observer must read pinned finalized checkpoints through GraphQL, page BridgeOut and Minted events, recompute transfer ids and read the gate at the target checkpoint. Still held: publish and bind on Sui, live checkpoint evidence, and the measured outcall consensus (sui-outcall-consensus-unmeasured).",
+          "text": "Source for the owned-version mint lane, the return observer, the C1 to C4 monitors and the independent Sui supply reader is accepted at local source and test scope (BB-53 53a to 53d: 7eaef24f, 1b71eae8, e2507b16, 5da0804e, e4ee506a, 53c21490, 29295fb4). It is tested on a simulated chain and mocks only and is not activated. As accepted, the observer (src/rumi_icusd_sui_bridge/src/flows/observer.rs) reads finalized checkpoints through GraphQL, lists BridgeOut events in bounded windows and from hints, re-derives each transfer id, and releases only against the Gate's durable ReturnRecord, in Gate sequence order. It detects foreign mints from the Gate's own counters (C2 and C4) and does not name the foreign mint id, because it never scans Minted events (MC-DEF-14, disclosed). Held recovery limit (MC-DEF-14): one checkpoint with more than a page of BridgeOut events, or a pruned or lagging event index, holds later returns until hints account for the Gate's counter; there is no override. Still held: publish and bind on Sui, live checkpoint evidence, and the measured outcall consensus (sui-outcall-consensus-unmeasured).",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-sui.md sections 3, 4 and 7; src/rumi_icusd_sui_bridge/src/flows/mint.rs, flows/observer.rs and monitor.rs (BB-53, 1b71eae8, e4ee506a, 53c21490); src/rumi_bridge_destinations/src/live/sui.rs (BB-53 53d, 29295fb4)"
         },
@@ -191,7 +191,7 @@
         },
         {
           "id": "sui-signing-vectors-unverified",
-          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. Pinning against the official Sui Rust SDK remains open.",
+          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. The official Sui Rust SDK comparison is disclosed and deferred: it has not been performed and is not a source gate.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2, accepted at source and local injected-flow scope)"
         },
@@ -209,7 +209,7 @@
         },
         {
           "id": "sui-wallet-connector-missing",
-          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Slush is the main wallet named in the docs.",
+          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Real wallet display (sui-wallet-display-unverified), endpoint and deployment evidence stay unmeasured and held. Slush is the main wallet named in the docs.",
           "kind": "code",
           "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2)"
         },
@@ -288,7 +288,7 @@
       "activation_blockers": [
         {
           "id": "sui-gate-module-missing",
-          "text": "A plain coin transfer carries no ICP account, and a TreasuryCap mint keeps no consumed-id record. A Move gate module (consumed table, counters, BridgeOut event) is needed (D4). The gate package is accepted at local source and offline Move test scope (BB-51, 23f75ef1: 47 offline Move tests), and it is not publish-ready. Still held: publish and bind, the UpgradeCap policy (sui-upgradecap-policy), and the module-bytes match, which has not been done (MC-DEF-13).",
+          "text": "A plain coin transfer carries no ICP account, and a TreasuryCap mint keeps no consumed-id record. A Move gate module (consumed table, counters, BridgeOut event) is needed (D4). The gate package is accepted at local source and offline Move test scope (BB-51, 23f75ef1: 47 offline Move tests), and it is not publish-ready. Still held: publish and bind, and the UpgradeCap policy (sui-upgradecap-policy). Disclosed and deferred, not a source gate: the module-bytes match (MC-DEF-13), which has not been performed.",
           "kind": "code",
           "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3 (D4); docs/coordination/multichain/reuse-inventory.md section 6; move/rumi_icusd_gate (BB-51, 23f75ef1)"
         },
@@ -306,7 +306,7 @@
         },
         {
           "id": "sui-observer-lane-missing",
-          "text": "Source for the owned-version mint lane, the return observer, the C1 to C4 monitors and the independent Sui supply reader is accepted at local source and test scope (BB-53 53a to 53d: 7eaef24f, 1b71eae8, e2507b16, 5da0804e, e4ee506a, 53c21490, 29295fb4). It is tested on a simulated chain and mocks only and is not activated. The observer must read pinned finalized checkpoints through GraphQL, page BridgeOut and Minted events, recompute transfer ids and read the gate at the target checkpoint. Still held: publish and bind on Sui, live checkpoint evidence, and the measured outcall consensus (sui-outcall-consensus-unmeasured).",
+          "text": "Source for the owned-version mint lane, the return observer, the C1 to C4 monitors and the independent Sui supply reader is accepted at local source and test scope (BB-53 53a to 53d: 7eaef24f, 1b71eae8, e2507b16, 5da0804e, e4ee506a, 53c21490, 29295fb4). It is tested on a simulated chain and mocks only and is not activated. As accepted, the observer (src/rumi_icusd_sui_bridge/src/flows/observer.rs) reads finalized checkpoints through GraphQL, lists BridgeOut events in bounded windows and from hints, re-derives each transfer id, and releases only against the Gate's durable ReturnRecord, in Gate sequence order. It detects foreign mints from the Gate's own counters (C2 and C4) and does not name the foreign mint id, because it never scans Minted events (MC-DEF-14, disclosed). Held recovery limit (MC-DEF-14): one checkpoint with more than a page of BridgeOut events, or a pruned or lagging event index, holds later returns until hints account for the Gate's counter; there is no override. Still held: publish and bind on Sui, live checkpoint evidence, and the measured outcall consensus (sui-outcall-consensus-unmeasured).",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-sui.md sections 3, 4 and 7; src/rumi_icusd_sui_bridge/src/flows/mint.rs, flows/observer.rs and monitor.rs (BB-53, 1b71eae8, e4ee506a, 53c21490); src/rumi_bridge_destinations/src/live/sui.rs (BB-53 53d, 29295fb4)"
         },
@@ -318,7 +318,7 @@
         },
         {
           "id": "sui-signing-vectors-unverified",
-          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. Pinning against the official Sui Rust SDK remains open.",
+          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. The official Sui Rust SDK comparison is disclosed and deferred: it has not been performed and is not a source gate.",
           "kind": "code",
           "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2, accepted at source and local injected-flow scope)"
         },
@@ -336,7 +336,7 @@
         },
         {
           "id": "sui-wallet-connector-missing",
-          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Slush is the main wallet named in the docs.",
+          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Real wallet display (sui-wallet-display-unverified), endpoint and deployment evidence stay unmeasured and held. Slush is the main wallet named in the docs.",
           "kind": "code",
           "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2)"
         },
