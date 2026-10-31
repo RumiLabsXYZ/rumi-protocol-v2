@@ -4,6 +4,7 @@
 //! shapes the ICRC-21 consent messages decode, and two small views. The deposit, return and
 //! admin endpoints that use the remaining argument types arrive with BB-48 and BB-49.
 
+use crate::records::MintState;
 use crate::tx::TokenProgram;
 use candid::{CandidType, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
@@ -258,6 +259,28 @@ pub struct BridgeInfo {
     pub instance_salt: String,
     /// Hex of the escrow subaccount on the icUSD ledger.
     pub escrow_subaccount: String,
+}
+
+/// Where the bootstrap stands (49a): the addresses an operator must fund and check, the claim on the
+/// escrow mint, and the nonce pool.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BootstrapStatus {
+    pub keys_derived: bool,
+    /// Base58. The fee payer needs SOL for fees, account rent and nonce rent (blocker `solana-fee-payer-funding`).
+    pub fee_payer: Option<String>,
+    pub mint_authority: Option<String>,
+    pub return_owner: Option<String>,
+    /// The escrow mint address (the one-time `mint-account` key).
+    pub mint_account: Option<String>,
+    pub return_account: Option<String>,
+    pub mint_state: MintState,
+    /// Why the last bind attempt did not bind.
+    pub bind_note: Option<String>,
+    pub pool_registered: u32,
+    pub pool_unverified: u32,
+    pub pool_free: u32,
+    pub pool_reserved: u32,
+    pub pending_bootstrap_txs: u32,
 }
 
 /// The accounting buckets, e8s (`Nat`: the Rust type is `u128`).

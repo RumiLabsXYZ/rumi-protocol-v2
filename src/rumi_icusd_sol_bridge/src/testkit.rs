@@ -84,6 +84,8 @@ pub struct MockChain {
     pub auto_land: Cell<bool>,
     pub on_send: RefCell<Option<SendHook>>,
     pub on_account_read: RefCell<Option<AccountReadHook>>,
+    /// When set, every sent bootstrap transaction (pool account, mint, return ATA) takes effect at once.
+    pub auto_apply_creation: Cell<bool>,
     pub tip_slot: Cell<u64>,
     pub blocks: RefCell<BTreeMap<u64, [u8; 32]>>,
 }
@@ -202,6 +204,52 @@ impl MockChain {
         self.by_address.borrow_mut().entry(*mentions).or_default().push(first);
     }
 
+    /// Apply a creation transaction as the runtime would (no signature or fee checks): the pool
+    /// account (`CreateAccountWithSeed` + `InitializeNonceAccount`), the mint (`CreateAccount` +
+    /// `InitializeMint2`) or the return ATA (`CreateIdempotent`). Returns whether it applied.
+    pub fn apply_creation(&self, wire: &[u8]) -> bool {
+        let Ok((_, bytes)) = split_wire_transaction(wire) else { return false };
+        let Ok(msg) = decode_message(bytes) else { return false };
+        let keys = |ix: &crate::tx::CompiledInstruction| msg.instruction_accounts(ix).unwrap_or_default();
+        let program = |ix: &crate::tx::CompiledInstruction| msg.program_id(ix).copied().unwrap_or([0xff; 32]);
+        let tag_u32 = |d: &[u8]| d.get(..4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        match msg.instructions.as_slice() {
+            [create, init] if program(create) == SYSTEM_PROGRAM_ID && program(init) == SYSTEM_PROGRAM_ID => {
+                if tag_u32(&create.data) == Some(3) && tag_u32(&init.data) == Some(6) {
+                    let target = keys(create)[1];
+                    let authority: Pubkey = init.data[4..36].try_into().expect("authority");
+                    self.add_nonce_account(target, &authority, &successor(&msg.recent_blockhash));
+                    return true;
+                }
+                false
+            }
+            [create, init] if program(create) == SYSTEM_PROGRAM_ID => {
+                if tag_u32(&create.data) == Some(0) && init.data.first() == Some(&20) {
+                    let target = keys(create)[1];
+                    let owner: Pubkey = create.data[20..52].try_into().expect("owner");
+                    let authority: Pubkey = init.data[2..34].try_into().expect("authority");
+                    let freeze = (init.data[34] == 1).then(|| <Pubkey>::try_from(&init.data[35..67]).expect("freeze"));
+                    self.set_account(target, owner, crate::mint::fixtures::mint_data(Some(&authority), 0, init.data[1], true, freeze.as_ref()));
+                    return true;
+                }
+                false
+            }
+            [ata] if program(ata) == crate::tx::ATA_PROGRAM_ID && ata.data == [1] => {
+                // [funder, ata, wallet, mint, system, token program]
+                let k = keys(ata);
+                let base = crate::mint::fixtures::token_account_data(&k[3], &k[2], 0, None, 1, None);
+                let data = if k[5] == crate::tx::TOKEN_2022_PROGRAM_ID {
+                    crate::mint::fixtures::extended_token_account(base, &[(crate::mint::EXT_IMMUTABLE_OWNER, vec![])])
+                } else {
+                    base
+                };
+                self.set_account(k[1], k[5], data);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_landed(&self, signature: &Signature) -> bool {
         self.landed.borrow().contains_key(signature)
     }
@@ -300,6 +348,9 @@ impl SolRpc for MockChain {
         }
         if self.auto_land.get() {
             self.land(wire, false);
+        }
+        if self.auto_apply_creation.get() {
+            self.apply_creation(wire);
         }
         match fault {
             Some(Fault::Inconsistent) => Err(RpcFailure::Inconsistent),
@@ -468,8 +519,9 @@ impl Fixture {
             c.config.admins = vec![candid::Principal::from_slice(&[3; 10])];
             c.config.lane = lane.clone();
             c.config.token_program = crate::tx::TokenProgram::Token2022;
-            c.keys = Some(RoleKeys { fee_payer: FEE_PAYER, mint_authority: MINT_AUTHORITY, return_owner: RETURN_OWNER });
+            c.keys = Some(RoleKeys { fee_payer: FEE_PAYER, mint_authority: MINT_AUTHORITY, return_owner: RETURN_OWNER, mint_account: Some(MINT) });
             c.mint = Some(MINT);
+            c.mint_state = crate::records::MintState::Bound;
         });
         let fixture = Fixture { chain: MockChain::new(), signer: MockSigner::new() };
         for l in Lane::ALL {
@@ -480,6 +532,25 @@ impl Fixture {
                 assert_eq!(outcome, nonce::VerifyOutcome::Verified(slot_initial_value(l, i)));
             }
         }
+        fixture
+    }
+
+    /// A configured instance with NO keys, no pool and no mint: the state before bootstrap. The
+    /// chain is empty; creation transactions take effect when sent.
+    pub fn unbootstrapped(pool: u8) -> Self {
+        let lane = crate::types::LaneSettings { nonce_pool_size: pool, ..crate::types::LaneSettings::default() };
+        state::reset_for_tests();
+        crate::env::test_env::set_now_ns(secs(1_000));
+        state::mutate_core(|c| {
+            c.initialized = true;
+            c.config.admins = vec![candid::Principal::from_slice(&[3; 10])];
+            c.config.lane = lane;
+            c.config.token_program = crate::tx::TokenProgram::Token2022;
+        });
+        let fixture = Fixture { chain: MockChain::new(), signer: MockSigner::new() };
+        fixture.chain.auto_apply_creation.set(true);
+        fixture.chain.blocks.borrow_mut().insert(1_999, [0x5b; 32]);
+        fixture.chain.tip_slot.set(2_000);
         fixture
     }
 

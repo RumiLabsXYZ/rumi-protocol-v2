@@ -1,4 +1,19 @@
 type Account = record { owner : principal; subaccount : opt blob };
+type BootstrapStatus = record {
+  return_account : opt text;
+  bind_note : opt text;
+  mint_authority : opt text;
+  return_owner : opt text;
+  pool_free : nat32;
+  mint_state : MintState;
+  pool_registered : nat32;
+  pool_reserved : nat32;
+  keys_derived : bool;
+  fee_payer : opt text;
+  pending_bootstrap_txs : nat32;
+  mint_account : opt text;
+  pool_unverified : nat32;
+};
 type BridgeArg = variant { Upgrade : UpgradeArgs; Init : InitArgs };
 type BridgeError = variant {
   Internal : text;
@@ -100,6 +115,7 @@ type LaneSettings = record {
   history_horizon_secs : nat64;
 };
 type LineDisplayPage = record { lines : vec text };
+type MintState = variant { None; Bound; DeployedUnbound };
 type Pauses = record {
   mints : bool;
   observer : bool;
@@ -121,6 +137,7 @@ type TokenProgram = variant { Classic; Token2022 };
 type UpgradeArgs = record { admins : opt vec principal };
 service : (BridgeArg) -> {
   bridge_version : () -> (text) query;
+  get_bootstrap_status : () -> (BootstrapStatus) query;
   get_bridge_info : () -> (BridgeInfo) query;
   get_buckets : () -> (BucketsView) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;

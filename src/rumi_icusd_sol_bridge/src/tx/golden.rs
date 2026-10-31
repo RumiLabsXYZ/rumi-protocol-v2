@@ -106,10 +106,10 @@ type OracleIx<'a> = (&'a Pubkey, Vec<&'a Pubkey>, Vec<u8>);
 
 fn oracle(groups: [usize; 4], keys: &[&Pubkey], blockhash: &[u8; 32], ixs: &[OracleIx<'_>]) -> Vec<u8> {
     assert_eq!(groups.iter().sum::<usize>(), keys.len(), "group sizes cover the key table");
-    assert_eq!(groups[0], 1, "only the fee payer is a writable signer in these vectors");
-    // Each non-payer group is strictly ascending.
+    assert!(groups[0] >= 1, "the fee payer is the first writable signer");
+    // Each group other than the fee payer is strictly ascending (the fee payer leads the first).
     let mut start = 1;
-    for size in [groups[1], groups[2], groups[3]] {
+    for size in [groups[0] - 1, groups[1], groups[2], groups[3]] {
         let g = &keys[start..start + size];
         assert!(g.windows(2).all(|w| w[0] < w[1]), "group at {start} is not strictly ascending: {:?}", g.iter().map(|k| hex::encode(&k[..4])).collect::<Vec<_>>());
         start += size;
@@ -774,4 +774,90 @@ const CREATE_NONCE_ACCOUNT: &str = concat!(
     "2d6d2d3000171600000000005000000000000000000000000000000000000000",
     "0000000000000000000000000000000000000000020301030424060000001111",
     "111111111111111111111111111111111111111111111111111111111111",
+);
+
+// ---------------------------------------------------------------------------
+// Mint creation and the return ATA (49a)
+// ---------------------------------------------------------------------------
+
+fn mint_creation_vector(v: &Variant) -> (UnsignedTx, Vec<u8>) {
+    let tx = build_mint_creation_message(&profile(v), MINT_RENT_LAMPORTS, RETURN_BLOCKHASH).expect("mint creation message");
+    // Writable signers: fee payer 11.., mint 44..; read-only ascending: System 00.., token program 06dd...
+    let keys: Vec<&Pubkey> = vec![&FEE_PAYER, &MINT, &SYSTEM, &v.token];
+    let create_data = [&0u32.to_le_bytes()[..], &MINT_RENT_LAMPORTS.to_le_bytes(), &82u64.to_le_bytes(), &v.token].concat();
+    // InitializeMint2: [20, decimals 8, mint authority, freeze flag 0 (none)].
+    let init_data = [&[20u8, 8][..], &MINT_AUTHORITY, &[0]].concat();
+    let ixs: Vec<OracleIx<'_>> = vec![(&SYSTEM, vec![&FEE_PAYER, &MINT], create_data), (&v.token, vec![&MINT], init_data)];
+    (tx, oracle([2, 0, 0, 2], &keys, &RETURN_BLOCKHASH, &ixs))
+}
+
+fn return_ata_vector(v: &Variant) -> (UnsignedTx, Vec<u8>) {
+    let tx = build_return_ata_message(&profile(v), RETURN_BLOCKHASH).expect("return ATA message");
+    // Writable: the return ATA; read-only ascending: System 00.., token program 06dd.., return owner 33.., mint 44.., ATA program 8c97...
+    let keys: Vec<&Pubkey> = vec![&FEE_PAYER, &v.return_ata, &SYSTEM, &v.token, &RETURN_OWNER, &MINT, &ATA_PROGRAM_ID];
+    let ixs: Vec<OracleIx<'_>> = vec![(&ATA_PROGRAM_ID, vec![&FEE_PAYER, &v.return_ata, &RETURN_OWNER, &MINT, &SYSTEM, &v.token], vec![1])];
+    (tx, oracle([1, 0, 1, 5], &keys, &RETURN_BLOCKHASH, &ixs))
+}
+
+#[test]
+fn mint_creation_and_return_ata_vectors() {
+    for (v, mint_hex, ata_hex) in [(classic(), MINT_CREATE_CLASSIC, RETURN_ATA_CREATE_CLASSIC), (token2022(), MINT_CREATE_T22, RETURN_ATA_CREATE_T22)] {
+        let tx = check_vector(&format!("mint-create/{}", v.name), mint_creation_vector(&v), mint_hex);
+        assert_eq!(tx.required_signers(), &[FEE_PAYER, MINT], "the fee payer and the one-time mint-account key sign");
+        assert_eq!(tx.signer_roles(&profile(&v)), vec![Some(KeyRole::FeePayer), Some(KeyRole::MintAccount)]);
+        assert!(leading_advance_nonce(&tx.message).is_none());
+        // No freeze authority: the last byte of InitializeMint2 is the None flag.
+        assert_eq!(*tx.message.instructions[1].data.last().unwrap(), 0);
+        assert_eq!(tx.message.instructions[1].data[1], 8, "eight decimals");
+        let tx = check_vector(&format!("return-ata/{}", v.name), return_ata_vector(&v), ata_hex);
+        assert_eq!(tx.required_signers(), &[FEE_PAYER], "the return owner does not sign the creation");
+    }
+}
+
+const MINT_CREATE_CLASSIC: &str = concat!(
+    "0200020411111111111111111111111111111111111111111111111111111111",
+    "1111111144444444444444444444444444444444444444444444444444444444",
+    "4444444400000000000000000000000000000000000000000000000000000000",
+    "0000000006ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf585",
+    "7eff00a977777777777777777777777777777777777777777777777777777777",
+    "7777777702020200013400000000604d160000000000520000000000000006dd",
+    "f6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a90301",
+    "0123140822222222222222222222222222222222222222222222222222222222",
+    "2222222200",
+);
+
+const MINT_CREATE_T22: &str = concat!(
+    "0200020411111111111111111111111111111111111111111111111111111111",
+    "1111111144444444444444444444444444444444444444444444444444444444",
+    "4444444400000000000000000000000000000000000000000000000000000000",
+    "0000000006ddf6e1ee758fde18425dbce46ccddab61afc4d83b90d27febdf928",
+    "d8a18bfc77777777777777777777777777777777777777777777777777777777",
+    "7777777702020200013400000000604d160000000000520000000000000006dd",
+    "f6e1ee758fde18425dbce46ccddab61afc4d83b90d27febdf928d8a18bfc0301",
+    "0123140822222222222222222222222222222222222222222222222222222222",
+    "2222222200",
+);
+
+const RETURN_ATA_CREATE_CLASSIC: &str = concat!(
+    "0100050711111111111111111111111111111111111111111111111111111111",
+    "1111111156a28726ac4ed418cf2020ea6c60baf1fae7acfeda8698a7a1332eaf",
+    "ce708f8a00000000000000000000000000000000000000000000000000000000",
+    "0000000006ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf585",
+    "7eff00a933333333333333333333333333333333333333333333333333333333",
+    "3333333344444444444444444444444444444444444444444444444444444444",
+    "444444448c97258f4e2489f1bb3d1029148e0d830b5a1399daff1084048e7bd8",
+    "dbe9f85977777777777777777777777777777777777777777777777777777777",
+    "777777770106060001040502030101",
+);
+
+const RETURN_ATA_CREATE_T22: &str = concat!(
+    "0100050711111111111111111111111111111111111111111111111111111111",
+    "111111119ab6c0bed9e85c4aad77dce93322d976ae6bbac60e6798581a1cc5a3",
+    "bb2f5b3500000000000000000000000000000000000000000000000000000000",
+    "0000000006ddf6e1ee758fde18425dbce46ccddab61afc4d83b90d27febdf928",
+    "d8a18bfc33333333333333333333333333333333333333333333333333333333",
+    "3333333344444444444444444444444444444444444444444444444444444444",
+    "444444448c97258f4e2489f1bb3d1029148e0d830b5a1399daff1084048e7bd8",
+    "dbe9f85977777777777777777777777777777777777777777777777777777777",
+    "777777770106060001040502030101",
 );

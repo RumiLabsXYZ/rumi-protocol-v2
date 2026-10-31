@@ -134,6 +134,15 @@ def initialize_nonce(nonce, authority):
     return (SYSTEM, [(nonce, False, True), (RECENT_BLOCKHASHES, False, False), (RENT_SYSVAR, False, False)], struct.pack("<I", 6) + authority)
 
 
+def create_account(frm, to, lamports, space, owner):
+    return (SYSTEM, [(frm, True, True), (to, True, True)], struct.pack("<I", 0) + struct.pack("<QQ", lamports, space) + owner)
+
+
+def initialize_mint2(tp, mint, decimals, authority, freeze=None):
+    data = bytes([20, decimals]) + authority + (b"\x00" if freeze is None else b"\x01" + freeze)
+    return (tp, [(mint, False, True)], data)
+
+
 def checked(tag, amount):
     return bytes([tag]) + struct.pack("<Q", amount) + bytes([8])
 
@@ -226,6 +235,12 @@ def message_vectors():
         out["ATA_RECIPIENT_" + suffix] = recipient_ata
         out["ATA_RETURN_" + suffix] = return_ata
         out["ATA_SENDER_" + suffix] = sender_ata
+    # Mint creation and the return ATA (49a), per token program.
+    for suffix, tp in (("CLASSIC", TOKEN), ("T22", TOKEN22)):
+        out["MINT_CREATE_" + suffix] = compile_legacy(
+            [create_account(FEE_PAYER, MINT, 1_461_600, 82, tp), initialize_mint2(tp, MINT, 8, MINT_AUTH)], FEE_PAYER, RETURN_BLOCKHASH
+        )
+        out["RETURN_ATA_CREATE_" + suffix] = compile_legacy([create_idempotent(FEE_PAYER, RETURN_OWNER, MINT, tp)], FEE_PAYER, RETURN_BLOCKHASH)
     # Nonce pool: advance-only (cancel) and the create + initialize bootstrap message.
     out["ADVANCE_ONLY"] = compile_legacy([advance_nonce(NONCE_ACCT, FEE_PAYER)], FEE_PAYER, NONCE_VALUE)
     seed = "rumi-nonce-m-0"

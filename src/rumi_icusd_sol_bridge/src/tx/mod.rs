@@ -101,6 +101,19 @@ pub const TAG_BURN_CHECKED: u8 = 15;
 pub const TAG_BATCH: u8 = 255;
 /// ATA program `CreateIdempotent` (Create = 0, CreateIdempotent = 1).
 pub const ATA_CREATE_IDEMPOTENT_TAG: u8 = 1;
+/// `SystemInstruction::CreateAccount`, bincode `u32` little-endian.
+pub const SYSTEM_CREATE_ACCOUNT_TAG: u32 = 0;
+/// `TokenInstruction::InitializeMint2` (both token programs). **U:** the tag value and the
+/// `[tag, decimals, mint_authority 32, freeze COption (1-byte flag + 32)]` layout are read from the
+/// SPL token instruction enum order (0 InitializeMint .. 12 TransferChecked .. 14 MintToChecked ..
+/// 15 BurnChecked .. 20 InitializeMint2), consistent with the checked tags above; there is no
+/// `spl-token` source in this repo or its registry to read it from.
+pub const TAG_INITIALIZE_MINT2: u8 = 20;
+/// Size of a mint account without extensions (both token programs).
+pub const MINT_ACCOUNT_SPACE: u64 = 82;
+/// Rent-exempt lamports for an 82-byte account: `(128 + 82) * 3480 * 2`. A parameter of the
+/// creation builder, not a fact about the cluster (blocker `solana-fee-payer-funding`).
+pub const MINT_RENT_LAMPORTS: u64 = 1_461_600;
 /// `SystemInstruction::CreateAccountWithSeed`, bincode `u32` little-endian (read from
 /// `solana-system-interface` 3.2.0 `instruction.rs`).
 pub const SYSTEM_CREATE_ACCOUNT_WITH_SEED_TAG: u32 = 3;
@@ -480,6 +493,43 @@ pub fn create_account_with_seed_instruction(
     data.extend_from_slice(&space.to_le_bytes());
     data.extend_from_slice(owner);
     Instruction { program_id: SYSTEM_PROGRAM_ID, accounts, data }
+}
+
+/// `System::CreateAccount`. Accounts: funder and new account, both writable signers. Data (bincode):
+/// `[u32 LE 0][lamports u64 LE][space u64 LE][owner 32]`.
+pub fn create_account_instruction(from: &Pubkey, to: &Pubkey, lamports: u64, space: u64, owner: &Pubkey) -> Instruction {
+    let mut data = Vec::with_capacity(52);
+    data.extend_from_slice(&SYSTEM_CREATE_ACCOUNT_TAG.to_le_bytes());
+    data.extend_from_slice(&lamports.to_le_bytes());
+    data.extend_from_slice(&space.to_le_bytes());
+    data.extend_from_slice(owner);
+    Instruction {
+        program_id: SYSTEM_PROGRAM_ID,
+        accounts: vec![AccountMeta::writable(*from, true), AccountMeta::writable(*to, true)],
+        data,
+    }
+}
+
+/// `InitializeMint2`: accounts `[mint (writable)]` (no rent sysvar, no signer); data
+/// `[20, decimals, mint_authority 32, freeze: 0 or 1 + 32]`. Eight decimals and NO freeze authority
+/// in this bridge; `freeze_authority` is a parameter only so the tests can build the negative case.
+pub fn initialize_mint2_instruction(
+    token_program: &Pubkey,
+    mint: &Pubkey,
+    decimals: u8,
+    mint_authority: &Pubkey,
+    freeze_authority: Option<&Pubkey>,
+) -> Instruction {
+    let mut data = vec![TAG_INITIALIZE_MINT2, decimals];
+    data.extend_from_slice(mint_authority);
+    match freeze_authority {
+        Some(f) => {
+            data.push(1);
+            data.extend_from_slice(f);
+        }
+        None => data.push(0),
+    }
+    Instruction { program_id: *token_program, accounts: vec![AccountMeta::writable(*mint, false)], data }
 }
 
 /// `System::InitializeNonceAccount`. Accounts: nonce (writable), RecentBlockhashes sysvar and Rent

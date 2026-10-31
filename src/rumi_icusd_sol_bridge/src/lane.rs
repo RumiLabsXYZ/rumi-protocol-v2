@@ -92,31 +92,45 @@ pub trait TxSigner {
     async fn sign(&self, role: KeyRole, message: &[u8]) -> SignOutcome;
 }
 
-/// Derive and cache the three role public keys (idempotent once cached).
+/// Derive and cache the four role public keys (idempotent once cached). A BB-48 snapshot holds
+/// three; the missing `mint-account` key is derived and added.
 pub async fn ensure_keys<S: TxSigner>(signer: &S) -> Result<state::RoleKeys, String> {
     if let Some(k) = state::read_core(|c| c.keys.clone()) {
-        return Ok(k);
+        if k.mint_account.is_some() {
+            return Ok(k);
+        }
     }
     let keys = state::RoleKeys {
         fee_payer: signer.public_key(KeyRole::FeePayer).await?,
         mint_authority: signer.public_key(KeyRole::MintAuthority).await?,
         return_owner: signer.public_key(KeyRole::ReturnOwner).await?,
+        mint_account: Some(signer.public_key(KeyRole::MintAccount).await?),
     };
     state::mutate_core(|c| {
-        if c.keys.is_none() {
-            c.keys = Some(keys.clone());
+        match &c.keys {
+            // Never replace keys that are already in use by stored attempts: a mismatch is an error
+            // the caller must see, not something to overwrite.
+            Some(existing) if existing.fee_payer != keys.fee_payer || existing.mint_authority != keys.mint_authority || existing.return_owner != keys.return_owner => {}
+            _ => c.keys = Some(keys.clone()),
         }
     });
-    Ok(state::read_core(|c| c.keys.clone()).unwrap_or(keys))
+    let stored = state::read_core(|c| c.keys.clone()).ok_or("keys were not stored")?;
+    if stored != keys {
+        return Err("the derived role keys differ from the stored ones".into());
+    }
+    Ok(stored)
 }
 
-fn role_of(keys: &state::RoleKeys, key: &Pubkey) -> Option<KeyRole> {
+/// The role a key plays, if it is one of the four role keys.
+pub fn role_of(keys: &state::RoleKeys, key: &Pubkey) -> Option<KeyRole> {
     if *key == keys.fee_payer {
         Some(KeyRole::FeePayer)
     } else if *key == keys.mint_authority {
         Some(KeyRole::MintAuthority)
     } else if *key == keys.return_owner {
         Some(KeyRole::ReturnOwner)
+    } else if Some(*key) == keys.mint_account {
+        Some(KeyRole::MintAccount)
     } else {
         None
     }

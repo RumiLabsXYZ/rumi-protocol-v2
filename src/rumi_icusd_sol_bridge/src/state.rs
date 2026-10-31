@@ -13,7 +13,7 @@
 
 use crate::accounting::{AccountingError, Buckets, Transition};
 use crate::ids;
-use crate::records::{slot_key, Lane, LaneHalt, LaneHalts, NonceSlot, SolOp};
+use crate::records::{slot_key, BootstrapTx, Lane, LaneHalt, LaneHalts, MintState, NonceSlot, SolOp};
 use crate::tx::builders::TxProfile;
 use crate::tx::{pubkey_from_base58, pubkey_to_base58, Pubkey, TokenProgram, SYSTEM_PROGRAM_ID};
 use crate::types::{BridgeFees, InitArgs, LaneSettings, Pauses, RpcSettings, SolRpcCluster};
@@ -36,6 +36,7 @@ pub const MEM_NONCE_SLOTS: u8 = 3;
 pub const MEM_OPS: u8 = 4;
 pub const MEM_ACTIVE_OPS: u8 = 5;
 pub const MEM_OP_BY_EXTERNAL: u8 = 6;
+pub const MEM_BOOTSTRAP_TXS: u8 = 7;
 
 /// Append-only. Never reuse or reorder an id.
 pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
@@ -46,12 +47,14 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_OPS, "ops"),
     (MEM_ACTIVE_OPS, "active_ops"),
     (MEM_OP_BY_EXTERNAL, "op_by_external_id"),
+    (MEM_BOOTSTRAP_TXS, "bootstrap_txs"),
 ];
 
 /// 1 = BB-47 (config, buckets, halt). 2 = BB-48 (adds the SOL RPC and lane settings, the role
-/// keys, the mint, lane halts and the operation counter, all defaulted). `migrate_core` moves a
-/// stored 1 to 2 at upgrade.
-pub const CORE_SCHEMA_VERSION: u32 = 2;
+/// keys, the mint, lane halts and the operation counter, all defaulted). 3 = BB-49 49a (the
+/// `mint-account` public key, the mint claim state and the last bind note, all defaulted).
+/// `migrate_core` moves a stored older version to the current one at upgrade.
+pub const CORE_SCHEMA_VERSION: u32 = 3;
 /// Maximum page size for list queries.
 pub const MAX_PAGE: u32 = 100;
 
@@ -149,11 +152,21 @@ impl Default for BridgeConfig {
     }
 }
 
+/// The threshold-Schnorr key name the key rule requires for a cluster (note section 5): `key_1` for
+/// mainnet-beta, `test_key_1` for every other cluster.
+pub fn key_name_for_genesis(genesis_hash: &[u8; 32]) -> &'static str {
+    if pubkey_to_base58(genesis_hash) == MAINNET_GENESIS_HASH_B58 {
+        MAINNET_KEY_NAME
+    } else {
+        TEST_KEY_NAME
+    }
+}
+
 /// Validate install arguments into a config. Pure, unit tested.
 pub fn validate_init(args: &InitArgs) -> Result<BridgeConfig, String> {
     let genesis_hash = pubkey_from_base58(&args.genesis_hash).map_err(|e| format!("genesis_hash: {e}"))?;
     let mainnet = args.genesis_hash == MAINNET_GENESIS_HASH_B58;
-    let expected_key = if mainnet { MAINNET_KEY_NAME } else { TEST_KEY_NAME };
+    let expected_key = key_name_for_genesis(&genesis_hash);
     if args.schnorr_key_name != expected_key {
         return Err(format!(
             "this cluster ({}) requires threshold key {expected_key}, got {}",
@@ -265,6 +278,10 @@ pub struct RoleKeys {
     pub fee_payer: Pubkey,
     pub mint_authority: Pubkey,
     pub return_owner: Pubkey,
+    /// The one-time `mint-account` key: its address IS the escrow mint. `None` in a BB-48 snapshot
+    /// (the keys are then derived again).
+    #[serde(default)]
+    pub mint_account: Option<Pubkey>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -289,6 +306,12 @@ pub struct BridgeCore {
     /// BB-48: the next operation id.
     #[serde(default)]
     pub next_op_id: u64,
+    /// 49a: where the claim on the escrow mint stands.
+    #[serde(default)]
+    pub mint_state: MintState,
+    /// 49a: why the last bind attempt did not bind (for the status query).
+    #[serde(default)]
+    pub bind_note: Option<String>,
 }
 
 impl Default for BridgeCore {
@@ -304,15 +327,31 @@ impl Default for BridgeCore {
             mint: None,
             lane_halts: LaneHalts::default(),
             next_op_id: 0,
+            mint_state: MintState::None,
+            bind_note: None,
         }
     }
 }
 
 impl BridgeCore {
-    /// The builder profile, once the role keys and the mint are known.
+    /// The builder profile for mints, burns and refunds: only once the escrow mint is `Bound`.
     pub fn tx_profile(&self) -> Result<TxProfile, String> {
-        let keys = self.keys.as_ref().ok_or("role keys are not derived yet")?;
+        if self.mint_state != MintState::Bound {
+            return Err(format!("the escrow mint is not bound (state {:?})", self.mint_state));
+        }
         let mint = self.mint.ok_or("the escrow mint is not bound yet")?;
+        self.profile_for(mint)
+    }
+
+    /// The profile used to CREATE the mint, the return account and the pool accounts: the mint is the
+    /// address of the `mint-account` key. No claim state is required.
+    pub fn creation_profile(&self) -> Result<TxProfile, String> {
+        let mint = self.keys.as_ref().and_then(|k| k.mint_account).ok_or("the mint-account key is not derived yet")?;
+        self.profile_for(mint)
+    }
+
+    fn profile_for(&self, mint: Pubkey) -> Result<TxProfile, String> {
+        let keys = self.keys.as_ref().ok_or("role keys are not derived yet")?;
         let profile = TxProfile {
             token_program: self.config.token_program,
             memo_program: self.config.memo_program,
@@ -337,6 +376,7 @@ impl BridgeCore {
 cbor_storable!(BridgeCore);
 cbor_storable!(NonceSlot);
 cbor_storable!(SolOp);
+cbor_storable!(BootstrapTx);
 
 // ---------------------------------------------------------------------------
 // Ledger operations (copied verbatim from the Base instance, `state.rs`)
@@ -465,6 +505,10 @@ thread_local! {
     /// `external_id` (mint, burn or refund id) to operation id: one operation per id, forever.
     static OP_BY_EXTERNAL: RefCell<StableBTreeMap<[u8; 32], u64, Mem>> =
         RefCell::new(StableBTreeMap::init(mem(MEM_OP_BY_EXTERNAL)));
+
+    /// One in-flight bootstrap transaction per target, by `BootstrapTarget::key`.
+    static BOOTSTRAP_TXS: RefCell<StableBTreeMap<u32, BootstrapTx, Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_BOOTSTRAP_TXS)));
 }
 
 fn mem(id: u8) -> Mem {
@@ -606,6 +650,26 @@ pub fn next_op_id() -> u64 {
     })
 }
 
+// Bootstrap transactions ----------------------------------------------------
+
+pub fn get_bootstrap_tx(key: u32) -> Option<BootstrapTx> {
+    BOOTSTRAP_TXS.with(|m| m.borrow().get(&key))
+}
+
+pub fn put_bootstrap_tx(tx: &BootstrapTx) {
+    BOOTSTRAP_TXS.with(|m| m.borrow_mut().insert(tx.target.key(), tx.clone()));
+}
+
+pub fn remove_bootstrap_tx(key: u32) {
+    BOOTSTRAP_TXS.with(|m| {
+        m.borrow_mut().remove(&key);
+    });
+}
+
+pub fn bootstrap_tx_count() -> u64 {
+    BOOTSTRAP_TXS.with(|m| m.borrow().len())
+}
+
 pub fn lane_halt(lane: Lane) -> Option<LaneHalt> {
     read_core(|c| c.lane_halts.get(lane).cloned())
 }
@@ -726,6 +790,7 @@ pub fn reset_for_tests() {
     OPS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_OPS)));
     ACTIVE_OPS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_ACTIVE_OPS)));
     OP_BY_EXTERNAL.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_OP_BY_EXTERNAL)));
+    BOOTSTRAP_TXS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_BOOTSTRAP_TXS)));
 }
 
 #[cfg(test)]
@@ -759,7 +824,8 @@ mod tests {
                 (3, "nonce_slots"),
                 (4, "ops"),
                 (5, "active_ops"),
-                (6, "op_by_external_id")
+                (6, "op_by_external_id"),
+                (7, "bootstrap_txs")
             ]
         );
         let ids: BTreeSet<u8> = MEMORY_LAYOUT.iter().map(|(i, _)| *i).collect();
@@ -892,10 +958,23 @@ mod tests {
             instance_salt: [0x5a; 32],
             buckets: Buckets { outstanding: 7, return_custodied: 2, burn_unknown: 1, stray: 3, ..Buckets::default() },
             halted: Some(HaltRecord { reason: "x".into(), at_ns: 9 }),
-            keys: Some(RoleKeys { fee_payer: [0x11; 32], mint_authority: [0x22; 32], return_owner: [0x33; 32] }),
+            keys: Some(RoleKeys { fee_payer: [0x11; 32], mint_authority: [0x22; 32], return_owner: [0x33; 32], mint_account: Some([0x44; 32]) }),
             mint: Some([0x44; 32]),
             lane_halts: LaneHalts { mint: Some(LaneHalt { reason: "m".into(), at_ns: 5 }), burn: None },
             next_op_id: 12,
+            mint_state: MintState::Bound,
+            bind_note: Some("n".into()),
+        }
+    }
+
+    /// The BB-48 core as BB-48 wrote it (schema version 2): no `mint-account` key, no claim state.
+    fn bb48_core() -> BridgeCore {
+        BridgeCore {
+            schema_version: 2,
+            keys: Some(RoleKeys { fee_payer: [0x11; 32], mint_authority: [0x22; 32], return_owner: [0x33; 32], mint_account: None }),
+            mint_state: MintState::None,
+            bind_note: None,
+            ..sample_core()
         }
     }
 
@@ -926,6 +1005,8 @@ mod tests {
             mint: None,
             lane_halts: LaneHalts::default(),
             next_op_id: 0,
+            mint_state: MintState::None,
+            bind_note: None,
         }
     }
 
@@ -942,10 +1023,23 @@ mod tests {
 
     #[test]
     fn core_decodes_from_the_pinned_current_image() {
-        // Field names are the schema. Pinned from `cbor_encode(&sample_core())` at BB-48.
-        let image = hex::decode(PINNED_CORE_V2).expect("hex");
+        // Field names are the schema. Pinned from `cbor_encode(&sample_core())` at BB-49 49a.
+        let image = hex::decode(PINNED_CORE_V3).expect("hex");
         assert_eq!(try_cbor_decode::<BridgeCore>(&image).unwrap(), sample_core());
         assert_eq!(cbor_encode(&sample_core()), image, "the encoding itself is stable");
+    }
+
+    /// The BB-48 core, byte for byte as BB-48 wrote it, still decodes after 49a appended fields.
+    #[test]
+    fn bb48_core_image_decodes_with_the_new_fields_defaulted() {
+        let image = hex::decode(BB48_CORE_IMAGE).expect("hex");
+        let decoded = try_cbor_decode::<BridgeCore>(&image).unwrap();
+        assert_eq!(decoded, bb48_core());
+        assert_eq!(decoded.schema_version, 2);
+        assert_eq!(decoded.keys.as_ref().unwrap().mint_account, None, "the mint-account key is derived again");
+        assert_eq!(decoded.mint_state, MintState::None, "an old snapshot has no claim on the mint: it must bind again");
+        assert!(decoded.tx_profile().is_err(), "an unbound mint builds no operation messages");
+        assert_eq!(BridgeCore::from_bytes(decoded.to_bytes()), decoded);
     }
 
     /// A snapshot of the BB-47 core, byte for byte as BB-47 wrote it, must still decode after
@@ -985,7 +1079,7 @@ mod tests {
             }
         };
         let mut old = full.clone();
-        strip(&mut old, &["buckets", "halted", "keys", "mint", "lane_halts", "next_op_id"]);
+        strip(&mut old, &["buckets", "halted", "keys", "mint", "lane_halts", "next_op_id", "mint_state", "bind_note"]);
         if let Value::Map(entries) = &mut old {
             for (k, v) in entries.iter_mut() {
                 if matches!(k, Value::Text(t) if t == "config") {
@@ -1071,13 +1165,14 @@ mod tests {
     );
 
     #[test]
-    #[ignore = "writes /tmp/core_v2.hex to regenerate PINNED_CORE_V2"]
+    #[ignore = "writes /tmp/core_v3.hex to regenerate PINNED_CORE_V3"]
     fn zz_dump_core() {
-        std::fs::write("/tmp/core_v2.hex", hex::encode(cbor_encode(&sample_core()))).unwrap();
+        std::fs::write("/tmp/core_v3.hex", hex::encode(cbor_encode(&sample_core()))).unwrap();
     }
 
-    /// CBOR image of `sample_core()` at BB-48 (schema version 2).
-    const PINNED_CORE_V2: &str = concat!(
+    /// CBOR image of the BB-48 core (`bb48_core()`), exactly as BB-48 wrote it (schema version 2).
+    /// NEVER regenerate this constant: it is the snapshot an upgrade from BB-48 must still read.
+    const BB48_CORE_IMAGE: &str = concat!(
         "aa6e736368656d615f76657273696f6e026b696e697469616c697a6564f566636f6e666967ac6c69637573645f6c6564",
         "6765724a0101010101010101010167736f6c5f7270634a02020202020202020202707363686e6f72725f6b65795f6e61",
         "6d656a746573745f6b65795f316c67656e657369735f6861736898201842184218421842184218421842184218421842",
@@ -1106,5 +1201,37 @@ mod tests {
         "18441844184418441844184418446a6c616e655f68616c7473a2646d696e74a266726561736f6e616d6561745f6e7305",
         "646275726ef66a6e6578745f6f705f69640c",
     );
-}
 
+    /// CBOR image of `sample_core()` at BB-49 49a (schema version 3).
+    const PINNED_CORE_V3: &str = concat!(
+        "ac6e736368656d615f76657273696f6e036b696e697469616c697a6564f566636f6e666967ac6c69637573645f6c6564",
+        "6765724a0101010101010101010167736f6c5f7270634a02020202020202020202707363686e6f72725f6b65795f6e61",
+        "6d656a746573745f6b65795f316c67656e657369735f6861736898201842184218421842184218421842184218421842",
+        "18421842184218421842184218421842184218421842184218421842184218421842184218421842184218426661646d",
+        "696e73814a030303030303030303036d6665655f726563697069656e74f66d746f6b656e5f70726f6772616d69546f6b",
+        "656e323032326c6d656d6f5f70726f6772616d982005184a1853185a18991829182106184d182418e81871186018da18",
+        "38187c187c183518b518dd18bc189218bb188118e4181f18a818401841051844188d6466656573a26f6465706f736974",
+        "5f6665655f653873006f72656c656173655f6665655f6538730066706175736573a4686465706f73697473f5656d696e",
+        "7473f46872656c6561736573f4686f62736572766572f463727063a567636c7573746572664465766e65746676657269",
+        "667968457175616c69747968646973636f766572a1695468726573686f6c64a265746f74616c03636d696e026f637963",
+        "6c65735f7065725f63616c6c1b00000002540be40076726573706f6e73655f73697a655f657374696d617465f6646c61",
+        "6e65a76f6e6f6e63655f706f6f6c5f73697a65047163616e63656c5f61667465725f7365637319012c7819726562726f",
+        "6164636173745f696e74657276616c5f73656373181e747265636f6e63696c655f616c61726d5f736563731903847468",
+        "6973746f72795f686f72697a6f6e5f736563731954606c6d61785f7265697373756573036e646973636f7665725f6c69",
+        "6d69740a6d696e7374616e63655f73616c749820185a185a185a185a185a185a185a185a185a185a185a185a185a185a",
+        "185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a185a676275636b657473ab6b6f75",
+        "747374616e64696e67076c70656e64696e675f6d696e74007072657475726e5f637573746f64696564026c6275726e5f",
+        "756e6b6e6f776e016f70656e64696e675f72656c65617365006e70656e64696e675f726566756e64006468656c640064",
+        "66656573006e72657365727665645f70756c6c73006f756e6b6e6f776e5f6f7574666c6f770065737472617903666861",
+        "6c746564a266726561736f6e61786561745f6e7309646b657973a4696665655f70617965729820111111111111111111",
+        "11111111111111111111111111111111111111111111116e6d696e745f617574686f7269747998201822182218221822",
+        "182218221822182218221822182218221822182218221822182218221822182218221822182218221822182218221822",
+        "18221822182218226c72657475726e5f6f776e6572982018331833183318331833183318331833183318331833183318",
+        "3318331833183318331833183318331833183318331833183318331833183318331833183318336c6d696e745f616363",
+        "6f756e749820184418441844184418441844184418441844184418441844184418441844184418441844184418441844",
+        "18441844184418441844184418441844184418441844646d696e74982018441844184418441844184418441844184418",
+        "4418441844184418441844184418441844184418441844184418441844184418441844184418441844184418446a6c61",
+        "6e655f68616c7473a2646d696e74a266726561736f6e616d6561745f6e7305646275726ef66a6e6578745f6f705f6964",
+        "0c6a6d696e745f737461746565426f756e646962696e645f6e6f7465616e",
+    );
+}

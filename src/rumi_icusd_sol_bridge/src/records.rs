@@ -275,6 +275,86 @@ impl SolOp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bootstrap (49a): the mint, the return ATA and the pool accounts
+// ---------------------------------------------------------------------------
+
+/// What a bootstrap transaction creates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BootstrapTarget {
+    /// The escrow mint account (at the address of the `mint-account` key).
+    Mint,
+    /// The return associated token account.
+    ReturnAta,
+    /// One nonce pool account.
+    PoolSlot { lane: Lane, index: u8 },
+}
+
+impl BootstrapTarget {
+    /// Key of the stable map: unique per target.
+    pub fn key(&self) -> u32 {
+        match self {
+            BootstrapTarget::Mint => 1,
+            BootstrapTarget::ReturnAta => 2,
+            BootstrapTarget::PoolSlot { lane, index } => 0x1000 | slot_key(*lane, *index) as u32,
+        }
+    }
+}
+
+/// One bootstrap transaction for one target. Persisted BEFORE it is signed, like a lane attempt:
+/// the exact bytes, then every signature, then the transaction ids. These transactions use a real
+/// recent blockhash (no nonce exists yet) and are idempotent in effect (the target account either
+/// exists or not; the driver reads it before every send), so an expired one is replaced by a fresh
+/// one rather than reconciled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapTx {
+    pub target: BootstrapTarget,
+    pub recent_blockhash: Hash32,
+    #[serde(with = "serde_bytes")]
+    pub message: Vec<u8>,
+    pub signers: Vec<Pubkey>,
+    #[serde(default)]
+    pub signatures: Vec<SignatureRecord>,
+    #[serde(default)]
+    pub tx_ids: Vec<Sig>,
+    pub created_at_ns: u64,
+    #[serde(default)]
+    pub sign_failures: u32,
+    #[serde(default)]
+    pub last_sign_error: Option<String>,
+    #[serde(default)]
+    pub broadcast_count: u32,
+    #[serde(default)]
+    pub last_broadcast_ns: Option<u64>,
+    #[serde(default)]
+    pub last_broadcast_note: Option<String>,
+}
+
+impl BootstrapTx {
+    pub fn fully_signed(&self) -> bool {
+        self.signers.iter().all(|s| self.signatures.iter().any(|r| &r.signer == s))
+    }
+
+    pub fn latest_signatures(&self) -> Option<Vec<Signature>> {
+        self.signers
+            .iter()
+            .map(|s| self.signatures.iter().rev().find(|r| &r.signer == s).map(|r| r.signature.0))
+            .collect()
+    }
+}
+
+/// The claim on the escrow mint (note section 8): `None -> DeployedUnbound -> Bound`. Only `Bound`
+/// lets the lane build mints, burns and refunds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, CandidType)]
+pub enum MintState {
+    #[default]
+    None,
+    /// The mint account exists and passed its checks; the return account is not verified yet.
+    DeployedUnbound,
+    /// Every bind check passed at `finalized`.
+    Bound,
+}
+
 /// Lane-level halt (note section 4: "a lane halts when ...").
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneHalt {

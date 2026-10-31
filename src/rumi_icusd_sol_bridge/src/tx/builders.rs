@@ -351,6 +351,38 @@ pub fn build_nonce_pool_account_message(
 }
 
 // ---------------------------------------------------------------------------
+// Bootstrap of the mint and the return account (49a)
+// ---------------------------------------------------------------------------
+
+/// Create and initialize the escrow mint at the address of the `mint-account` key:
+/// `[CreateAccount(fee-payer -> mint, 82 bytes, owner token program), InitializeMint2(8 decimals,
+/// mint-authority, NO freeze authority)]`. Signers: `fee-payer` and the `mint-account` key (used
+/// once). `profile.mint` must be that key's address. A REAL recent blockhash (no nonce yet).
+/// This creates a mint without extensions; in-mint metadata (MetadataPointer + TokenMetadata) is
+/// not built here (see `mint.rs`: no source for its instruction layouts is available offline).
+pub fn build_mint_creation_message(profile: &TxProfile, lamports: u64, recent_blockhash: [u8; 32]) -> Result<UnsignedTx, TxError> {
+    profile.validate()?;
+    check_amount(lamports)?;
+    let token_program = profile.token_program.id();
+    let instructions = [
+        create_account_instruction(&profile.fee_payer, &profile.mint, lamports, MINT_ACCOUNT_SPACE, &token_program),
+        initialize_mint2_instruction(&token_program, &profile.mint, TOKEN_DECIMALS, &profile.mint_authority, None),
+    ];
+    let message = compile_message(MessageVersion::Legacy, &instructions, &profile.fee_payer, recent_blockhash)?;
+    UnsignedTx::from_message(message)
+}
+
+/// Create the return associated token account (idempotent): `[ATA CreateIdempotent(funder
+/// fee-payer, wallet return-owner, mint, token program)]`, signed by `fee-payer` alone.
+pub fn build_return_ata_message(profile: &TxProfile, recent_blockhash: [u8; 32]) -> Result<UnsignedTx, TxError> {
+    profile.validate()?;
+    let token_program = profile.token_program.id();
+    let instructions = [create_ata_idempotent_instruction(&profile.fee_payer, &profile.return_owner, &profile.mint, &token_program)?];
+    let message = compile_message(MessageVersion::Legacy, &instructions, &profile.fee_payer, recent_blockhash)?;
+    UnsignedTx::from_message(message)
+}
+
+// ---------------------------------------------------------------------------
 // 2.2 Reference user return
 // ---------------------------------------------------------------------------
 

@@ -63,22 +63,28 @@
 
 pub mod accounting;
 pub mod admin;
+pub mod bootstrap;
 pub mod env;
 pub mod history_probe;
 pub mod icrc21;
 pub mod ids;
 pub mod lane;
 #[cfg(test)]
+mod bootstrap_tests;
+#[cfg(test)]
 mod lane_tests;
 pub mod ledger;
 pub mod memo;
+pub mod mint;
 pub mod nonce;
 pub mod records;
+pub mod schnorr;
 pub mod sol_rpc;
 pub mod state;
 #[cfg(test)]
 #[allow(dead_code)]
 mod testkit;
+pub mod timer;
 pub mod tx;
 pub mod types;
 
@@ -108,6 +114,7 @@ fn init(arg: BridgeArg) {
         c.instance_salt = salt;
     });
     state::append_audit(None, AuditCtx::note("initialized"));
+    timer::schedule_soon();
 }
 
 #[ic_cdk::post_upgrade]
@@ -137,6 +144,7 @@ fn post_upgrade(arg: Option<BridgeArg>) {
         state::append_audit(None, AuditCtx::note("core schema migrated"));
     }
     state::append_audit(None, AuditCtx::note("upgraded"));
+    timer::schedule_soon();
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +206,34 @@ fn get_bridge_info() -> BridgeInfo {
         instance_salt: hex::encode(c.instance_salt),
         escrow_subaccount: hex::encode(ids::escrow_subaccount()),
     })
+}
+
+#[ic_cdk::query]
+fn get_bootstrap_status() -> BootstrapStatus {
+    use records::{Lane, SlotState};
+    let (keys, mint_state, bind_note, token_program) =
+        state::read_core(|c| (c.keys.clone(), c.mint_state, c.bind_note.clone(), c.config.token_program));
+    let slots: Vec<_> = Lane::ALL.iter().flat_map(|l| state::slots_in_lane(*l)).collect();
+    let count = |f: &dyn Fn(&SlotState) -> bool| slots.iter().filter(|s| f(&s.state)).count() as u32;
+    let return_account = keys.as_ref().and_then(|k| {
+        let mint = k.mint_account?;
+        tx::derive_ata(&k.return_owner, &token_program.id(), &mint).ok().map(|a| tx::pubkey_to_base58(&a))
+    });
+    BootstrapStatus {
+        keys_derived: keys.as_ref().is_some_and(|k| k.mint_account.is_some()),
+        fee_payer: keys.as_ref().map(|k| tx::pubkey_to_base58(&k.fee_payer)),
+        mint_authority: keys.as_ref().map(|k| tx::pubkey_to_base58(&k.mint_authority)),
+        return_owner: keys.as_ref().map(|k| tx::pubkey_to_base58(&k.return_owner)),
+        mint_account: keys.as_ref().and_then(|k| k.mint_account).map(|m| tx::pubkey_to_base58(&m)),
+        return_account,
+        mint_state,
+        bind_note,
+        pool_registered: slots.len() as u32,
+        pool_unverified: count(&|s| *s == SlotState::Unverified),
+        pool_free: count(&|s| *s == SlotState::Free),
+        pool_reserved: count(&|s| matches!(s, SlotState::Reserved { .. })),
+        pending_bootstrap_txs: state::bootstrap_tx_count() as u32,
+    }
 }
 
 #[ic_cdk::query]
