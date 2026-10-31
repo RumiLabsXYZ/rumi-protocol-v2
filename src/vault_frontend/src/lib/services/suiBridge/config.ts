@@ -11,8 +11,13 @@
  *  - IDENTITY AVAILABILITY (this file's `ok`): is this the exact, bound and observed deployment? The instance is
  *    initialized; its chain identifier is a full digest this app knows; the binding names a package, a Gate, a mint
  *    cap and an admin cap in strict form, with the coin and Gate types derived from that package and 8 decimals; the
- *    canister's own independent observation of the deployment (`get_observed_deployment`) agrees with the binding, has
- *    seen the published module, and reports 8 decimals; all three signing roles have an address.
+ *    canister's own independent observation of the deployment (`get_observed_deployment`) exists, agrees with the
+ *    binding and reports 8 decimals; all three signing roles have an address.
+ *
+ * MODULE BYTES ARE NOT A GATE. The accepted canister always reports `module_digest_observed: false`: it does not compare
+ * the published module's bytes with a build (the accepted deferral MC-DEF-13, with no setter and no observation path). A
+ * page that required `true` could never be enabled by the real canister, so it does not. The value is carried as
+ * `moduleBytesMatched` and the panel discloses it honestly; the checks above are what is enforced.
  *  - DIRECTION STATE (pauses, halt, mint lane): a paused or not-ready direction does not make the identity unavailable.
  *    `get_mint_lane.ready` and `blocked_by` say whether a deposit can be minted right now; `pauses` and `halted` say what
  *    the operator has stopped. `ConfigView.signing_enabled` is legacy and always false: it is NEVER read here and is
@@ -39,6 +44,11 @@ export interface SuiBridgeConfig {
   adminCapId: string;
   /** The three signing roles' addresses: a holder may be none of them, a recipient neither. */
   roleAddresses: string[];
+  /**
+   * Whether the canister matched the published Gate module's bytes (`module_digest_observed`). The accepted canister
+   * always reports false (MC-DEF-13): this is disclosure, never a gate.
+   */
+  moduleBytesMatched: boolean;
   icusdLedger: string;
   minDepositE8s: bigint;
   maxDepositE8s: bigint;
@@ -94,7 +104,6 @@ export function resolveSuiConfig(
 
   if (!observed) return fail('The Sui bridge has not yet observed its deployment on Sui, so it is not offered.');
   if (observed.decimals !== 8) return fail('The observed Sui coin does not have 8 decimals, so the bridge is not offered.');
-  if (!observed.module_digest_observed) return fail('The Sui bridge has not matched the published Gate module, so it is not offered.');
   if (observed.mint_cap_id !== binding.mint_cap_id || observed.admin_cap_id !== binding.admin_cap_id) {
     return fail('The deployment the Sui bridge observed differs from the one it is bound to, so it is not offered.');
   }
@@ -122,6 +131,7 @@ export function resolveSuiConfig(
       mintCapId: binding.mint_cap_id,
       adminCapId: binding.admin_cap_id,
       roleAddresses,
+      moduleBytesMatched: observed.module_digest_observed,
       icusdLedger: config.icusd_ledger.toText(),
       minDepositE8s: config.limits.min_deposit_e8s,
       maxDepositE8s: config.limits.max_deposit_e8s,

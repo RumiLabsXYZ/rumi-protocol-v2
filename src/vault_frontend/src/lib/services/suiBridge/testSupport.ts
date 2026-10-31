@@ -144,7 +144,8 @@ export function makeObserved(overrides: Partial<ObservedDeploymentView> = {}): O
     epoch: 123n,
     mint_cap_id: KEYS.mintCap,
     admin_cap_owner: KEYS.custody,
-    module_digest_observed: true,
+    // What the accepted canister really reports (bind.rs always stores false: the module bytes are not compared, MC-DEF-13).
+    module_digest_observed: false,
     total_supply: 0n,
     minted_total: 0n,
     symbol: 'icUSD',

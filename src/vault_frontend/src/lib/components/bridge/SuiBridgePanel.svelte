@@ -131,6 +131,13 @@
         <li>Gate: <code>{config.gateId}</code>. Coin: <code>{config.coinType}</code> (8 decimals).</li>
         <li>A return burns icUSD through the Gate. The bridge releases on the Internet Computer only after it verifies that burn from the Gate's own record.</li>
         <li>Sui gas is paid in SUI by your wallet and is separate from icUSD.</li>
+        <li data-testid="module-disclosure">
+          {#if config.moduleBytesMatched}
+            The bridge matched the published Gate module against a reviewed build.
+          {:else}
+            The bridge does not yet compare the published Gate module's bytes with a reviewed build, so this page cannot show that they match. It checks the package, Gate, caps, decimals and signing roles against the bridge's own observation of {config.network.name}.
+          {/if}
+        </li>
         <li>The bridge canister is the only authority. Wallet confirmations and transaction digests on this page are hints.</li>
       </ul>
     </section>

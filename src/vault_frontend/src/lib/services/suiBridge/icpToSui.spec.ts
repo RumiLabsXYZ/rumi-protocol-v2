@@ -28,6 +28,7 @@ import {
   type SuiDepositEvent,
   type SuiDepositState,
 } from './icpToSui';
+import { describeSuiDeposit } from './status';
 import { KEYS, SUI_BRIDGE_ID, TEST_OWNER_TEXT, makeSuiDeposit, makeSuiSigning, makeSuiConfig } from './testSupport';
 
 const OWNER = Principal.fromText(TEST_OWNER_TEXT);
@@ -330,6 +331,16 @@ describe('an unanswered bridge request is never forgotten', () => {
     expect(h.approve).not.toHaveBeenCalled();
     expect(h.store.list()).toHaveLength(1);
     expect(h.store.list()[0]).toMatchObject({ id: original.id, status: 'submitted' });
+  });
+});
+
+describe('the held-mint wording', () => {
+  it('says the mint did not complete (it can also follow a finalized failed submission), not that it was never sent', () => {
+    const held = makeSuiDeposit({ status: { MintHeld: { reason: 'finalized failure' } } });
+    const display = describeSuiDeposit(held, { principal: TEST_OWNER_TEXT });
+    expect(display.detail).toContain('The mint did not complete: finalized failure.');
+    expect(display.detail).not.toContain('was not sent');
+    expect(display.canRefund).toBe(true);
   });
 });
 

@@ -73,6 +73,9 @@
   let note = $state('');
   let checking = $state(false);
   let signers = $state.raw<SuiSigners | null>(null);
+  /** The ICP wallet's actors exist for the current session. "Tell the bridge now" is offered only then (see `tellBridge`). */
+  let actorsReady = $state(false);
+  let preparingActors = $state(false);
   let anonymous = $state.raw<SuiService | null>(null);
   let storeVersion = $state(0);
   let sessionGuard: (() => boolean) | null = null;
@@ -149,6 +152,7 @@
         signers = null;
         anonymous = null;
         sessionGuard = null;
+        actorsReady = false;
         if (flow.kind === 'signing' || flow.kind === 'signed') flow = { kind: 'session_changed' };
         else if (flow.kind === 'review' || flow.kind === 'preparing') flow = INITIAL_SUI_RETURN_STATE;
       });
@@ -157,15 +161,33 @@
   });
 
   async function ensureReady(): Promise<boolean> {
-    if (signers && anonymous && sessionGuard && sessionGuard()) return true;
+    if (signers && anonymous && sessionGuard && sessionGuard()) {
+      actorsReady = true;
+      return true;
+    }
     const guard = captureSessionGuard();
-    const [createdSigners, reader] = await Promise.all([createSuiSigners(), getAnonymousSuiBridge()]);
-    if (!guard()) return false;
-    signers = createdSigners;
-    anonymous = reader;
-    sessionGuard = guard;
-    return true;
+    preparingActors = true;
+    try {
+      const [createdSigners, reader] = await Promise.all([createSuiSigners(), getAnonymousSuiBridge()]);
+      if (!guard()) return false;
+      signers = createdSigners;
+      anonymous = reader;
+      sessionGuard = guard;
+      actorsReady = true;
+      return true;
+    } finally {
+      preparingActors = false;
+    }
   }
+
+  // A broadcast attempt on screen: prepare the ICP wallet's actors NOW, so that the explicit "Tell the bridge now" click
+  // can call the signer with no await in front of it. Preparing never notifies anything.
+  $effect(() => {
+    if (flow.kind !== 'tracking' || !signedIn || actorsReady) return;
+    untrack(() => {
+      if (!preparingActors) void ensureReady().catch(() => false);
+    });
+  });
 
   function signingContext(): SigningContext {
     const opened = destination;
@@ -357,18 +379,35 @@
     return () => controller.abort();
   });
 
-  async function tellBridge(digest: string) {
+  /**
+   * A distinct click that only PREPARES the ICP wallet's actors (when they were not ready). It never notifies the bridge, and
+   * nothing from it is queued for later: the user clicks "Tell the bridge now" afterwards.
+   */
+  async function prepareActors() {
     note = '';
     try {
-      if (!(await ensureReady())) return;
+      if (!(await ensureReady())) note = 'Your ICP wallet session changed. Try again.';
     } catch (error) {
       note = `Your ICP wallet is not ready: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  /**
+   * "Tell the bridge now": an explicit click, with the ICP signer call made SYNCHRONOUSLY from it. Everything it needs
+   * (the actors) was prepared before this button was offered, so there is no await between the click and
+   * `notify_sui_return`: a popup signer keeps the user gesture. If the actors are not ready it says so and does nothing;
+   * it never queues a call for later and never runs on its own.
+   */
+  function tellBridge(digest: string) {
+    note = '';
+    const deps = actorsReady ? buildDeps() : null;
+    if (!deps) {
+      note = 'Your ICP wallet is not ready yet. Prepare it first, then click Tell the bridge now.';
       return;
     }
-    const deps = buildDeps();
-    if (!deps) return;
-    const result = await notifyReturn(deps, digest);
-    note = result.ok ? 'The bridge was told. It still decides from its own reads of Sui.' : result.message;
+    void notifyReturn(deps, digest).then((result) => {
+      note = result.ok ? 'The bridge was told. It still decides from its own reads of Sui.' : result.message;
+    });
   }
 
   function startOver() {
@@ -539,7 +578,7 @@
   {#if flow.kind === 'tracking' && progress}
     {@const digest = flow.intent.digest ?? evidence?.digest ?? null}
     <section class="status-card" class:good={progress.terminal} aria-live="polite" aria-label="Return status" data-testid="tracking">
-      <header><span class="kicker">SOLANA RETURN</span><strong class="label">{progress.label}</strong></header>
+      <header><span class="kicker">SUI RETURN</span><strong class="label">{progress.label}</strong></header>
       <p class="detail">{progress.detail}</p>
       <dl class="facts">
         <div><dt>Sent</dt><dd>{fmt(flow.intent.amountE8s)} icUSD</dd></div>
@@ -550,7 +589,15 @@
         {/if}
       </dl>
       {#if digest && !progress.terminal}
-        <div class="actions"><button type="button" class="btn-secondary small" onclick={() => tellBridge(digest)} disabled={!signedIn}>Tell the bridge now</button></div>
+        <div class="actions">
+          {#if actorsReady}
+            <button type="button" class="btn-secondary small" onclick={() => tellBridge(digest)} disabled={!signedIn}>Tell the bridge now</button>
+          {:else}
+            <button type="button" class="btn-secondary small" onclick={prepareActors} disabled={!signedIn || preparingActors}>
+              {preparingActors ? 'Preparing your ICP wallet...' : 'Prepare ICP wallet to tell the bridge'}
+            </button>
+          {/if}
+        </div>
       {/if}
       {#if note}<p class="small-note" role="status">{note}</p>{/if}
     </section>

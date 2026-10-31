@@ -117,6 +117,7 @@ import {
   landOn,
   makeAccount,
   makeCandidate,
+  makeObserved,
   makeRegistry,
   makeStandardWallet,
   makeSuiConfig,
@@ -360,6 +361,25 @@ describe('a native-only deployment (Sui configured, Base absent or unreachable)'
     expect(baseRow?.textContent).toContain('The bridge could not be reached: replica offline');
   });
 
+  it('shows a healthy Sui entry within a bounded time when the configured Base read NEVER settles, and the Base row says why', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    mocks.loadBridgeConfig.mockImplementation(() => new Promise(() => {}));
+    enableSui();
+    render();
+    await settle();
+    // Still waiting for the unfinished read: nothing is shown yet, and nothing is asked of any wallet.
+    expect(host.querySelector('#tab-icp-to-sui')).toBeNull();
+    expect(standard.connects).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await settle();
+    expect(option('sui-mainnet')!.getAttribute('aria-checked')).toBe('true');
+    expect(host.querySelector('#tab-icp-to-sui')).toBeTruthy();
+    const baseRow = host.querySelector<HTMLElement>('#destination-base-unknown');
+    expect(baseRow?.getAttribute('aria-disabled')).toBe('true');
+    expect(baseRow?.textContent).toContain('did not answer');
+    expect(standard.connects).toBe(0);
+  });
+
   it('keeps Base\'s own behavior when Base is unreachable and nothing else is configured', async () => {
     mocks.loadBridgeConfig.mockRejectedValue(new Error('replica offline'));
     render();
@@ -406,6 +426,32 @@ describe('an enabled Sui instance (injected fixture)', () => {
     expect(host.querySelector('#icp-amount')).toBeNull();
     expect(host.textContent).toContain(KEYS.packageId);
     expect(host.textContent).toContain(KEYS.gateId);
+  });
+
+  it('offers BOTH directions from the real accepted canister response, where module_digest_observed is false, and says the module bytes are not matched', async () => {
+    // The accepted backend always stores false (MC-DEF-13). The page must work with exactly that response.
+    expect(makeObserved().module_digest_observed).toBe(false);
+    enableSui();
+    render();
+    await settle();
+    expect(option('sui-mainnet')!.hasAttribute('aria-disabled')).toBe(false);
+    await selectSui();
+    expect(host.querySelector('[data-testid="module-disclosure"]')!.textContent).toContain('does not yet compare the published Gate module');
+    await connectWallet();
+    // ICP to Sui reviews.
+    type('#sui-icp-amount', '2');
+    click(/^Review transfer$/);
+    await settle();
+    expect(host.textContent).toContain('You receive on Sui');
+    // Sui to ICP reviews.
+    click(/^Sui to ICP$/);
+    await settle();
+    type('#sui-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    expect(host.querySelector('#panel-sui-to-icp [aria-label="Transfer summary"]')!.textContent).toContain('Transfer id the bridge will use');
+    expect(standard.signs).toHaveLength(0);
+    expect(signers.ledger.icrc2_approve).not.toHaveBeenCalled();
   });
 
   it('shows a direction pause apart from identity, with the mint lane\'s own reasons', async () => {
@@ -595,6 +641,103 @@ describe('returning from Sui (injected fixture)', () => {
     await settle();
     expect(signers.bridge.notify_sui_return).toHaveBeenCalledTimes(1);
     expect(signers.bridge.notify_sui_return).toHaveBeenCalledWith((journal()[0] as SuiReturnIntent).digest);
+  });
+
+  it('keeps the ICP signer call INSIDE the "Tell the bridge now" click: no await stands between the click and notify_sui_return (popup-signer timing)', async () => {
+    await openReturnTab();
+    type('#sui-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Sign in your Sui wallet$/);
+    await settle();
+    const tell = button(/^Tell the bridge now$/)!;
+    expect(tell).toBeTruthy();
+    expect(signers.bridge.notify_sui_return).not.toHaveBeenCalled();
+    // A popup signer keeps the user gesture only while the call is made synchronously from the click.
+    tell.click();
+    expect(signers.bridge.notify_sui_return, 'notify_sui_return must be called synchronously inside the click').toHaveBeenCalledTimes(1);
+    expect(signers.bridge.notify_sui_return).toHaveBeenCalledWith((journal()[0] as SuiReturnIntent).digest);
+    await settle();
+    expect(host.textContent).toContain('The bridge was told.');
+    expect(signers.bridge.notify_sui_return).toHaveBeenCalledTimes(1);
+  });
+
+  it('prepares the ICP signer BEFORE offering the click: a cold actor gives a readiness state, never a queued or automatic notify, even after a reload', async () => {
+    await openReturnTab();
+    type('#sui-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Sign in your Sui wallet$/);
+    await settle();
+    const sent = journal()[0] as SuiReturnIntent;
+    // Reload with a COLD ICP actor: creating the signers does not finish until the test releases it.
+    unmount(instance as any);
+    host.innerHTML = '';
+    let release!: () => void;
+    mocks.createSuiSigners.mockImplementation(() => new Promise((resolve) => (release = () => resolve(signers))));
+    render();
+    await settle();
+    await selectSui();
+    click(/^Sui to ICP$/);
+    await settle();
+    expect(host.querySelector('[data-testid="tracking"]')).toBeTruthy();
+    // Not ready: there is no enabled "Tell the bridge now" to click, and a click on whatever is offered signs nothing.
+    expect(button(/^Tell the bridge now$/)).toBeUndefined();
+    const waiting = host.querySelector<HTMLButtonElement>('[data-testid="tracking"] .actions button')!;
+    expect(waiting.textContent).toContain('Preparing your ICP wallet');
+    expect(waiting.disabled).toBe(true);
+    waiting.click();
+    flushSync();
+    // Becoming ready queues nothing and notifies nobody.
+    release();
+    await settle();
+    expect(signers.bridge.notify_sui_return).not.toHaveBeenCalled();
+    // Only now is the explicit click offered, and it calls the signer synchronously.
+    const tell = button(/^Tell the bridge now$/)!;
+    expect(tell).toBeTruthy();
+    tell.click();
+    expect(signers.bridge.notify_sui_return).toHaveBeenCalledTimes(1);
+    expect(signers.bridge.notify_sui_return).toHaveBeenCalledWith(sent.digest);
+  });
+
+  it('says so, and offers a distinct prepare click, when the ICP actor could not be made', async () => {
+    await openReturnTab();
+    type('#sui-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Sign in your Sui wallet$/);
+    await settle();
+    unmount(instance as any);
+    host.innerHTML = '';
+    mocks.createSuiSigners.mockRejectedValue(new Error('signer popup blocked'));
+    render();
+    await settle();
+    await selectSui();
+    click(/^Sui to ICP$/);
+    await settle();
+    expect(button(/^Tell the bridge now$/)).toBeUndefined();
+    // The prepare click reports the problem; it signs and notifies nothing.
+    click(/^Prepare ICP wallet to tell the bridge$/);
+    await settle();
+    expect(host.textContent).toContain('Your ICP wallet is not ready: signer popup blocked');
+    expect(signers.bridge.notify_sui_return).not.toHaveBeenCalled();
+    expect(button(/^Tell the bridge now$/)).toBeUndefined();
+    // Once the actor can be made, the next prepare click readies it, and still nothing is queued or sent.
+    mocks.createSuiSigners.mockResolvedValue(signers);
+    click(/^Prepare ICP wallet to tell the bridge$/);
+    await settle();
+    expect(signers.bridge.notify_sui_return).not.toHaveBeenCalled();
+    expect(button(/^Tell the bridge now$/)).toBeTruthy();
+  });
+
+  it('labels the return tracking card for Sui', async () => {
+    await openReturnTab();
+    type('#sui-ret-amount', '3');
+    click(/^Review transfer$/);
+    await settle();
+    click(/^Sign in your Sui wallet$/);
+    await settle();
+    expect(host.querySelector('[data-testid="tracking"] .kicker')!.textContent).toBe('SUI RETURN');
   });
 
   it('follows a return from burn observed to Released from the canister records only, across a reload, with no wallet and no notify', async () => {

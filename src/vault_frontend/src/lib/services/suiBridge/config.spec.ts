@@ -75,6 +75,31 @@ describe('resolving the instance configuration (identity availability)', () => {
     expect(makeSuiConfig({ network: SUI_TESTNET }).network).toBe(SUI_TESTNET);
   });
 
+  it('enables from the REAL accepted canister response, where module_digest_observed is false (MC-DEF-13), and discloses it', () => {
+    // The accepted backend (bind.rs at 29295fb4) ALWAYS stores false: the published module bytes are not compared with a build.
+    // The fixtures use that real value; a page that needed `true` could never be enabled by the real canister.
+    expect(makeObserved().module_digest_observed).toBe(false);
+    const real = resolve();
+    if (!real.ok) throw new Error(real.message);
+    expect(real.config.moduleBytesMatched).toBe(false);
+    expect(real.config).toMatchObject({ packageId: KEYS.packageId, gateId: KEYS.gateId, mintLaneReady: true });
+    // A canister that one day does match the module bytes is reported as such; it is disclosure, not a gate.
+    const matched = resolve(makeSuiConfigView(), makeObserved({ module_digest_observed: true }));
+    if (!matched.ok) throw new Error(matched.message);
+    expect(matched.config.moduleBytesMatched).toBe(true);
+  });
+
+  it('still refuses every real identity gap with the real (false) module flag', () => {
+    const real = (observed: Parameters<typeof makeObserved>[0]) => resolve(makeSuiConfigView(), makeObserved({ module_digest_observed: false, ...observed }));
+    expect(real({ decimals: 9 })).toMatchObject({ ok: false });
+    expect(real({ mint_cap_id: KEYS.adminCap })).toMatchObject({ ok: false });
+    expect(real({ admin_cap_id: KEYS.mintCap })).toMatchObject({ ok: false });
+    expect(real({ initial_shared_version: 0n })).toMatchObject({ ok: false });
+    expect(resolve(makeSuiConfigView(), null)).toMatchObject({ ok: false });
+    expect(resolve(makeSuiConfigView({ chain_identifier: '00'.repeat(32) }), makeObserved())).toMatchObject({ ok: false });
+    expect(resolve(makeSuiConfigView(), makeObserved(), makeRoles({ Treasury: null }))).toMatchObject({ ok: false });
+  });
+
   it('never reads the legacy signing_enabled flag: it is not a readiness signal either way', () => {
     for (const flag of [true, false]) {
       const result = resolve(makeSuiConfigView({ signing_enabled: flag }));
@@ -116,7 +141,6 @@ describe('resolving the instance configuration (identity availability)', () => {
   it('refuses when the independent observation is missing or disagrees with the binding', () => {
     expect(resolve(makeSuiConfigView(), null)).toMatchObject({ ok: false, message: expect.stringContaining('not yet observed') });
     expect(resolve(makeSuiConfigView(), makeObserved({ decimals: 9 }))).toMatchObject({ ok: false });
-    expect(resolve(makeSuiConfigView(), makeObserved({ module_digest_observed: false }))).toMatchObject({ ok: false, message: expect.stringContaining('published Gate module') });
     expect(resolve(makeSuiConfigView(), makeObserved({ mint_cap_id: KEYS.adminCap }))).toMatchObject({ ok: false, message: expect.stringContaining('differs from the one it is bound to') });
     expect(resolve(makeSuiConfigView(), makeObserved({ initial_shared_version: 0n }))).toMatchObject({ ok: false });
   });
@@ -243,5 +267,85 @@ describe('reading the destination list', () => {
     expect(order).toEqual(['base started', 'sui read']);
     releaseBase();
     expect(findDestination(await pending, 'sui-mainnet')?.status).toBe('enabled');
+  });
+});
+
+describe('one unfinished read never gates another family (fake clock, no network)', () => {
+  const base = () => resolveBridgeConfig(makeBridgeInfo());
+  const enabled = () => suiDestination({ ok: true, config: makeSuiConfig() }, SUI_BRIDGE_ID);
+  const never = <T>() => new Promise<T>(() => {});
+  /** Far beyond any sensible bound; the loader must answer well inside it. */
+  const BOUND_MS = 10_000;
+
+  async function race<T>(promise: Promise<T>) {
+    let settled: { value: T } | null = null;
+    void promise.then((value) => (settled = { value }));
+    await vi.advanceTimersByTimeAsync(BOUND_MS);
+    return settled as { value: T } | null;
+  }
+
+  it('shows a healthy Sui entry within a bounded time when a configured Base read NEVER settles, and the Base row says why', async () => {
+    vi.useFakeTimers();
+    try {
+      const done = await race(loadDestinations(() => never(), async () => null, async () => enabled()));
+      expect(done, 'loadDestinations must not wait for a read that never settles').not.toBeNull();
+      const list = done!.value;
+      expect(findDestination(list, 'sui-mainnet')?.status).toBe('enabled');
+      expect(list[0]).toMatchObject({ status: 'disabled' });
+      expect(list[0].reason).toContain('did not answer');
+      expect(pickSelected(list, null)?.id).toBe('sui-mainnet');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows a healthy Sui entry when a configured Solana read NEVER settles, and the Solana row says why', async () => {
+    vi.useFakeTimers();
+    try {
+      const done = await race(loadDestinations(async () => base(), () => never(), async () => enabled()));
+      expect(done, 'loadDestinations must not wait for a read that never settles').not.toBeNull();
+      const list = done!.value;
+      expect(findDestination(list, 'sui-mainnet')?.status).toBe('enabled');
+      expect(findDestination(list, 'base-mainnet')?.status).toBe('enabled');
+      expect(findDestination(list, 'solana-mainnet')).toMatchObject({ status: 'disabled' });
+      expect(findDestination(list, 'solana-mainnet')!.reason).toContain('did not answer');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a stalled Sui read local too: Base stays usable and the Sui row says why', async () => {
+    vi.useFakeTimers();
+    try {
+      const done = await race(loadDestinations(async () => base(), async () => null, () => never()));
+      const list = done!.value;
+      expect(findDestination(list, 'base-mainnet')?.status).toBe('enabled');
+      expect(findDestination(list, 'sui-mainnet')).toMatchObject({ status: 'disabled', native: null });
+      expect(findDestination(list, 'sui-mainnet')!.reason).toContain('did not answer');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not start a timer or wait when every read answers, and Base-only behavior is unchanged (a slow Base is awaited, not timed out)', async () => {
+    vi.useFakeTimers();
+    try {
+      const quick = await loadDestinations(async () => base(), async () => null, async () => enabled());
+      expect(findDestination(quick, 'sui-mainnet')?.status).toBe('enabled');
+      expect(vi.getTimerCount()).toBe(0);
+      // Only Base is configured (both natives answer null): no deadline applies, however slow Base is.
+      let release!: () => void;
+      const slow = new Promise<ReturnType<typeof base>>((resolve) => (release = () => resolve(base())));
+      let settled = false;
+      const pending = loadDestinations(() => slow, async () => null, async () => null).then((list) => ((settled = true), list));
+      await vi.advanceTimersByTimeAsync(BOUND_MS * 6);
+      expect(settled).toBe(false);
+      release();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(findDestination(await pending, 'base-mainnet')?.status).toBe('enabled');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

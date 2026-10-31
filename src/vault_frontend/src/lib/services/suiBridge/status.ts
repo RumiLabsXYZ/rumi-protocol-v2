@@ -87,7 +87,7 @@ export function describeSuiDeposit(view: DepositView, ctx: { principal?: string 
         ...base,
         stage: 'held',
         label: 'Held',
-        detail: `The mint was not sent: ${reason || 'no reason given'}. Your icUSD is safe in escrow${isOwner ? ' and you can request a refund' : ''}.`,
+        detail: `The mint did not complete: ${reason || 'no reason given'}. Your icUSD is safe in escrow${isOwner ? ' and you can request a refund' : ''}.`,
         tone: 'warning',
         canRefund: isOwner && view.kind && 'UserDeposit' in view.kind && view.mint_op_id[0] === undefined,
         holdReason: reason,
