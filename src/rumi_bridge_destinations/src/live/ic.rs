@@ -22,6 +22,13 @@
 //!   the exact records in `rumi_icusd_sol_bridge.did`. It too is only compared with the independent
 //!   reads and is the explanation of the custody (`RC`, `BU`, `stray`), never a measurement.
 //!
+//! * a Sui bridge instance has neither: its self-report is assembled from its `get_buckets` and
+//!   `get_config` ([`sui_instance_audit`]), decoded from the exact records in
+//!   `rumi_icusd_sui_bridge.did`. It too is only compared with the independent reads. A Sui lane has
+//!   no custody (a returned coin is burned in the transaction that records the return), so the audit
+//!   carries no `RC`, `BU` or `stray`, and the instance's own observation of the Gate is not read at
+//!   all: the Gate is read independently by [`super::sui`].
+//!
 //! [`AgentQuery`] is the real implementation over `ic-agent`: anonymous
 //! identity, query calls only, response (query signature) verification left on,
 //! which is the agent's default. This module never runs by itself; nothing in
@@ -119,6 +126,27 @@ pub struct SolanaBucketsSlice {
 /// (hex), the owner being the instance canister itself.
 #[derive(CandidType, Deserialize, Debug, Clone)]
 pub struct SolanaBridgeInfoSlice {
+    pub escrow_subaccount: String,
+}
+
+/// The fields of the Sui instance's `BucketsView` the collector uses. Candid decoding skips the
+/// record's other fields. Pinned to `rumi_icusd_sui_bridge.did` in the tests.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SuiBucketsSlice {
+    pub outstanding: Nat,
+    pub pending_mint: Nat,
+    pub pending_release: Nat,
+    pub pending_refund: Nat,
+    pub held: Nat,
+    pub fees: Nat,
+    pub reserved_pulls: Nat,
+    pub unknown_outflow: Nat,
+}
+
+/// The one field of the Sui instance's `ConfigView` the collector uses: the escrow subaccount (hex),
+/// the owner being the instance canister itself.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SuiConfigSlice {
     pub escrow_subaccount: String,
 }
 
@@ -299,6 +327,75 @@ pub fn solana_instance_audit(
         return_custodied_e8s: Some(rc),
         burn_unknown_e8s: Some(bu),
         stray_e8s: Some(stray),
+    })
+}
+
+/// A Sui bridge instance's self-report, from its `get_buckets` and `get_config`.
+///
+/// The liabilities are the bridge's own (`O + PM + PR + RF + H + F`; reserved pulls and unknown outflow
+/// are not liabilities), and the required escrow is that less `unknown_outflow`, floored at zero. The
+/// escrow account is the instance canister with its escrow subaccount. A Sui lane burns a returned coin
+/// in the transaction that records the return, so there is no `RC`, `BU` or `stray` to report, and the
+/// instance's own observation of the Gate is deliberately NOT read: nothing here is a measurement, it is
+/// shown beside the independent reads and checked against them.
+pub fn sui_instance_audit(q: &dyn IcQuery, instance: &Principal) -> Result<InstanceAudit, ReadError> {
+    let none = candid::encode_args(())
+        .map_err(|e| ReadError::Failed(format!("cannot encode the empty argument: {e}")))?;
+    let buckets_reply = run(q, instance, "get_buckets", none.clone())?;
+    let b = candid::decode_one::<SuiBucketsSlice>(&buckets_reply).map_err(|e| {
+        ReadError::Failed(format!("get_buckets: cannot decode the reply as a BucketsView: {e}"))
+    })?;
+    let config_reply = run(q, instance, "get_config", none)?;
+    let config = candid::decode_one::<SuiConfigSlice>(&config_reply).map_err(|e| {
+        ReadError::Failed(format!("get_config: cannot decode the reply as a ConfigView: {e}"))
+    })?;
+    let subaccount: [u8; 32] = {
+        let text = config.escrow_subaccount.as_str();
+        let valid = text.len() == 64 && text.bytes().all(|c| c.is_ascii_hexdigit());
+        if !valid {
+            return Err(ReadError::Failed(
+                "get_config: the escrow subaccount is not 64 hex characters".into(),
+            ));
+        }
+        let mut out = [0u8; 32];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&text[2 * i..2 * i + 2], 16)
+                .map_err(|e| ReadError::Failed(format!("get_config: {e}")))?;
+        }
+        out
+    };
+    let outstanding = nat_to_u128(b.outstanding, "outstanding")?;
+    let pending_mint = nat_to_u128(b.pending_mint, "pending_mint")?;
+    let pending_release = nat_to_u128(b.pending_release, "pending_release")?;
+    let pending_refund = nat_to_u128(b.pending_refund, "pending_refund")?;
+    let held = nat_to_u128(b.held, "held")?;
+    let fees = nat_to_u128(b.fees, "fees")?;
+    let reserved_pulls = nat_to_u128(b.reserved_pulls, "reserved_pulls")?;
+    let unknown_outflow = nat_to_u128(b.unknown_outflow, "unknown_outflow")?;
+    let liabilities = [outstanding, pending_mint, pending_release, pending_refund, held, fees]
+        .iter()
+        .try_fold(0u128, |acc, v| acc.checked_add(*v))
+        .ok_or_else(|| ReadError::Failed("get_buckets: the liabilities overflow u128".into()))?;
+    Ok(InstanceAudit {
+        escrow_account: EscrowBinding::from_principal_bytes(instance.as_slice(), Some(subaccount)),
+        escrow_balance_e8s: None,
+        outstanding_e8s: outstanding,
+        pending_mint_e8s: pending_mint,
+        inflight_mint_e8s: pending_mint,
+        pending_release_e8s: pending_release,
+        pending_refund_e8s: pending_refund,
+        held_e8s: held,
+        fees_e8s: fees,
+        reserved_pulls_e8s: reserved_pulls,
+        unknown_outflow_e8s: unknown_outflow,
+        liabilities_e8s: liabilities,
+        required_escrow_e8s: liabilities.saturating_sub(unknown_outflow),
+        coverage_ok: None,
+        reported_supply_e8s: None,
+        reported_supply_block: None,
+        return_custodied_e8s: None,
+        burn_unknown_e8s: None,
+        stray_e8s: None,
     })
 }
 
@@ -1014,6 +1111,155 @@ mod tests {
         let i = info_reply(&"ab".repeat(32));
         let q = Canned::new(Box::new(move |_, m, _| Ok(if m == "get_buckets" { reply.clone() } else { i.clone() })));
         assert!(matches!(solana_instance_audit(&q, &instance), Err(ReadError::Failed(m)) if m.contains("overflow")));
+    }
+
+    /// The full `BucketsView` of the Sui instance, field for field as in `rumi_icusd_sui_bridge.did`
+    /// (`sui_buckets_record_matches_the_instance_did` pins that).
+    #[derive(CandidType, Deserialize, Clone)]
+    struct SuiFullBuckets {
+        reserved_pulls: Nat,
+        pending_mint: Nat,
+        unknown_outflow: Nat,
+        pending_refund: Nat,
+        outstanding: Nat,
+        fees: Nat,
+        held: Nat,
+        pending_release: Nat,
+    }
+
+    fn sui_full_buckets() -> SuiFullBuckets {
+        let n = |v: u128| Nat::from(v);
+        SuiFullBuckets {
+            reserved_pulls: n(7),
+            pending_mint: n(100),
+            unknown_outflow: n(2),
+            pending_refund: n(5),
+            outstanding: n(300_000_000),
+            fees: n(3),
+            held: n(11),
+            pending_release: n(13),
+        }
+    }
+
+    /// The fields of a `type <name> = record { ... };` block of the Sui instance's .did.
+    fn sui_did_record_fields(name: &str) -> Vec<(String, String)> {
+        let did = include_str!("../../../rumi_icusd_sui_bridge/rumi_icusd_sui_bridge.did");
+        let header = format!("type {name} = record {{");
+        let start = did.find(&header).unwrap_or_else(|| panic!("{name} in the Sui .did"));
+        let body = &did[start..];
+        let end = body.find("};").expect("end of the record");
+        body[header.len()..end]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let (field, ty) = l.trim_end_matches(';').split_once(" : ").unwrap();
+                (field.to_string(), ty.to_string())
+            })
+            .collect()
+    }
+
+    /// A `ConfigView`-shaped reply (a superset of the one field the collector uses).
+    #[derive(CandidType, Deserialize, Clone)]
+    struct SuiFullConfig {
+        escrow_subaccount: String,
+        chain_identifier: String,
+        initialized: bool,
+    }
+
+    fn sui_config_reply(subaccount_hex: &str) -> Vec<u8> {
+        candid::encode_one(SuiFullConfig {
+            escrow_subaccount: subaccount_hex.into(),
+            chain_identifier: "synthetic".into(),
+            initialized: true,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn sui_buckets_and_config_records_match_the_instance_did() {
+        use candid::types::TypeInner;
+        // The .did is read here, never written: the collector's slices are checked against it.
+        let mut ours: Vec<(String, String)> = match <SuiFullBuckets as CandidType>::ty().as_ref() {
+            TypeInner::Record(fields) => fields.iter().map(|f| (f.id.to_string(), f.ty.to_string())).collect(),
+            other => panic!("not a record: {other:?}"),
+        };
+        let mut theirs = sui_did_record_fields("BucketsView");
+        ours.sort();
+        theirs.sort();
+        assert_eq!(ours, theirs);
+        assert_eq!(ours.len(), 8);
+        let wanted: Vec<String> = match <SuiBucketsSlice as CandidType>::ty().as_ref() {
+            TypeInner::Record(fields) => fields.iter().map(|f| f.id.to_string()).collect(),
+            other => panic!("not a record: {other:?}"),
+        };
+        assert_eq!(wanted.len(), 8, "the slice reads every bucket");
+        for w in wanted {
+            assert!(theirs.iter().any(|(f, ty)| *f == w && ty == "nat"), "BucketsView has no nat field {w}");
+        }
+        let config = sui_did_record_fields("ConfigView");
+        assert!(config.iter().any(|(f, ty)| f == "escrow_subaccount" && ty == "text"));
+    }
+
+    #[test]
+    fn a_sui_instance_audit_is_assembled_from_get_buckets_and_get_config() {
+        let instance = p(9);
+        let sub_hex = "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4";
+        let buckets = candid::encode_one(sui_full_buckets()).unwrap();
+        let config = sui_config_reply(sub_hex);
+        let q = Canned::new(Box::new(move |c, m, arg| {
+            assert_eq!(*c, instance);
+            assert_eq!(arg, candid::encode_args(()).unwrap().as_slice());
+            match m {
+                "get_buckets" => Ok(buckets.clone()),
+                "get_config" => Ok(config.clone()),
+                other => panic!("unexpected {other}"),
+            }
+        }));
+        let a = sui_instance_audit(&q, &instance).unwrap();
+        assert_eq!(a.outstanding_e8s, 300_000_000);
+        // A Sui lane has no custody: nothing is reported, so nothing is invented (and the instance's
+        // own observation of the Gate is not read at all).
+        assert_eq!((a.return_custodied_e8s, a.burn_unknown_e8s, a.stray_e8s), (None, None, None));
+        assert_eq!((a.pending_mint_e8s, a.inflight_mint_e8s), (100, 100));
+        // O + PM + PR + RF + H + F; reserved pulls and unknown outflow are not liabilities; required is
+        // that less unknown_outflow.
+        let liabilities = 300_000_000u128 + 100 + 13 + 5 + 11 + 3;
+        assert_eq!((a.liabilities_e8s, a.required_escrow_e8s), (liabilities, liabilities - 2));
+        assert_eq!((a.reserved_pulls_e8s, a.unknown_outflow_e8s), (7, 2));
+        assert_eq!((a.escrow_balance_e8s, a.coverage_ok, a.reported_supply_e8s, a.reported_supply_block), (None, None, None, None));
+        let (owner, sub) = a.escrow_account.identity().unwrap();
+        assert_eq!(owner, instance.as_slice().to_vec());
+        assert_eq!(hex_of(&sub), sub_hex);
+        assert_eq!(q.calls.borrow().iter().map(|(_, m)| m.clone()).collect::<Vec<_>>(), vec!["get_buckets", "get_config"]);
+    }
+
+    #[test]
+    fn a_sui_instance_audit_fails_closed() {
+        let instance = p(9);
+        let buckets = candid::encode_one(sui_full_buckets()).unwrap();
+        let gone = Canned::new(Box::new(|_, _, _| Err(IcQueryError::MethodNotFound("has no query method".into()))));
+        assert!(matches!(sui_instance_audit(&gone, &instance), Err(ReadError::UnavailableGap(g)) if g.contains("get_buckets")));
+        let junk = Canned::new(Box::new(|_, _, _| Ok(nat(1))));
+        assert!(matches!(sui_instance_audit(&junk, &instance), Err(ReadError::Failed(m)) if m.contains("cannot decode")));
+        // get_buckets answers, get_config is missing: a named gap, not a guess at the escrow account.
+        let b = buckets.clone();
+        let half = Canned::new(Box::new(move |_, m, _| if m == "get_buckets" { Ok(b.clone()) } else { Err(IcQueryError::MethodNotFound("no".into())) }));
+        assert!(matches!(sui_instance_audit(&half, &instance), Err(ReadError::UnavailableGap(g)) if g.contains("get_config")));
+        for bad in ["", "12", &"zz".repeat(32)] {
+            let b = buckets.clone();
+            let c = sui_config_reply(bad);
+            let q = Canned::new(Box::new(move |_, m, _| Ok(if m == "get_buckets" { b.clone() } else { c.clone() })));
+            assert!(matches!(sui_instance_audit(&q, &instance), Err(ReadError::Failed(m)) if m.contains("64 hex")), "{bad:?}");
+        }
+        let mut huge = sui_full_buckets();
+        let max = Nat::parse(b"340282366920938463463374607431768211455").unwrap();
+        huge.outstanding = max.clone();
+        huge.held = max;
+        let reply = candid::encode_one(huge).unwrap();
+        let c = sui_config_reply(&"ab".repeat(32));
+        let q = Canned::new(Box::new(move |_, m, _| Ok(if m == "get_buckets" { reply.clone() } else { c.clone() })));
+        assert!(matches!(sui_instance_audit(&q, &instance), Err(ReadError::Failed(m)) if m.contains("overflow")));
     }
 
     #[test]

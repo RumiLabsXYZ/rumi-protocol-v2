@@ -30,6 +30,14 @@
 //!   self-report (its buckets, which explain the custody) is assembled by
 //!   [`ic::solana_instance_audit`] from `get_buckets` and `get_bridge_info`.
 //!
+//! * [`sui`]: a Sui destination's icUSD supply and the Gate's own counters, read from the configured
+//!   Gate's wrapped `TreasuryCap` at ONE numbered finalized checkpoint (GraphQL, one answer per provider,
+//!   providers bound to the profile's chain identifier, a quorum of identical answers required). The
+//!   package, the Gate and the providers are the operator's explicit config. There is no custody to
+//!   read (a returned coin is burned in the transaction that records the return), and `E_d` is an
+//!   ordinary ICRC-1 balance read through the IC transport above. The Sui instance's own self-report
+//!   (its buckets) is assembled by [`ic::sui_instance_audit`] from `get_buckets` and `get_config`.
+//!
 //! * [`ic::instance_supply_audit`]: each counted EVM destination's bridge
 //!   instance is also asked for its own `get_supply_audit` (query, anonymous).
 //!   That reply is a self-report, shown next to the independent reads and
@@ -47,8 +55,8 @@
 //! transports and one loopback server only. Executing the real clients against
 //! IC mainnet or a public EVM RPC is a separate, held step.
 //!
-//! Unavailable by design: Sui (see [`crate::collect`]); a Solana destination without a configured
-//! mint, return account and providers; a profile
+//! Unavailable by design: a Solana destination without a configured mint, return account and providers;
+//! a Sui destination without a configured package, Gate and providers; a profile
 //! whose head is blocked; a backend without the per-chain query or without
 //! configured chain ids; an XRPL lane without a configured issuer and providers.
 //! Each is a named error, never a zero.
@@ -56,6 +64,7 @@
 pub mod evm;
 pub mod ic;
 pub mod solana;
+pub mod sui;
 pub mod xrpl;
 
 use std::collections::BTreeMap;
@@ -64,7 +73,7 @@ use candid::Principal;
 use serde::Deserialize;
 
 use crate::aggregate::DestinationConfig;
-use crate::collect::{EvmSupply, InstanceAudit, ReadError, Readings, SolanaSupply, XrplIssued};
+use crate::collect::{EvmSupply, InstanceAudit, ReadError, Readings, SolanaSupply, SuiSupply, XrplIssued};
 use crate::escrow::EscrowBinding;
 use crate::types::Network;
 
@@ -86,6 +95,24 @@ pub struct LiveConfig {
     /// Solana destinations by network id (as in the profile catalog).
     #[serde(default)]
     pub solana: BTreeMap<String, SolanaConfig>,
+    /// Sui destinations by network id (as in the profile catalog).
+    #[serde(default)]
+    pub sui: BTreeMap<String, SuiConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuiConfig {
+    /// The published package id (`0x` plus 64 lowercase hex digits). There is no default.
+    pub package: String,
+    /// The shared Gate object id (`0x` plus 64 lowercase hex digits).
+    pub gate: String,
+    /// Read at exactly this finalized checkpoint. Omit it to read at the quorum-th highest finalized
+    /// checkpoint of the providers (the number actually read is always reported).
+    #[serde(default)]
+    pub checkpoint: Option<u64>,
+    /// Sui GraphQL provider URLs (https, or http on loopback). They may carry keys and are never printed.
+    pub providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -180,6 +207,12 @@ pub struct SolanaSource {
     pub transport: Box<dyn evm::JsonRpcTransport>,
 }
 
+/// One Sui destination's target and transport.
+pub struct SuiSource {
+    pub target: sui::Target,
+    pub transport: Box<dyn evm::JsonRpcTransport>,
+}
+
 /// One XRPL lane's issuer and transport.
 pub struct XrplSource {
     pub issuer: String,
@@ -195,6 +228,7 @@ pub struct LiveReadings {
     evm: BTreeMap<String, EvmSource>,
     xrpl: BTreeMap<String, XrplSource>,
     solana: BTreeMap<String, SolanaSource>,
+    sui: BTreeMap<String, SuiSource>,
     read_at_unix: u64,
 }
 
@@ -214,6 +248,7 @@ impl LiveReadings {
             evm,
             xrpl: BTreeMap::new(),
             solana: BTreeMap::new(),
+            sui: BTreeMap::new(),
             read_at_unix,
         }
     }
@@ -235,6 +270,12 @@ impl LiveReadings {
     /// Add the Solana source of `network_id` (as in the profile catalog).
     pub fn with_solana(mut self, network_id: &str, source: SolanaSource) -> LiveReadings {
         self.solana.insert(network_id.to_string(), source);
+        self
+    }
+
+    /// Add the Sui source of `network_id` (as in the profile catalog).
+    pub fn with_sui(mut self, network_id: &str, source: SuiSource) -> LiveReadings {
+        self.sui.insert(network_id.to_string(), source);
         self
     }
 
@@ -293,6 +334,19 @@ impl LiveReadings {
                 },
             );
         }
+        for (id, c) in &config.sui {
+            let target = sui::Target::new(&c.package, &c.gate, c.checkpoint)
+                .map_err(|e| format!("sui.{id}: {e}"))?;
+            let transport = evm::ReqwestJsonRpc::new(c.providers.clone())
+                .map_err(|e| format!("sui.{id}.providers: {e}"))?;
+            live = live.with_sui(
+                id,
+                SuiSource {
+                    target,
+                    transport: Box::new(transport),
+                },
+            );
+        }
         Ok(live)
     }
 }
@@ -309,7 +363,7 @@ impl Readings for LiveReadings {
                 format_utc(self.read_at_unix),
                 self.read_at_unix
             ),
-            "ic reads are anonymous query calls with response verification on; evm reads are totalSupply at the numbered head shown per destination; xrpl reads are the issuer's icUSD obligations at the numbered validated ledger shown for the lane; solana reads are the mint supply and the return account balance from one getMultipleAccounts response per provider at finalized, with the lowest agreeing context slot shown per destination".to_string(),
+            "ic reads are anonymous query calls with response verification on; evm reads are totalSupply at the numbered head shown per destination; xrpl reads are the issuer's icUSD obligations at the numbered validated ledger shown for the lane; solana reads are the mint supply and the return account balance from one getMultipleAccounts response per provider at finalized, with the lowest agreeing context slot shown per destination; sui reads are the Gate's treasury supply and counters from one GraphQL answer per provider at the numbered finalized checkpoint shown per destination, with no custody read (a returned coin is burned atomically)".to_string(),
         ]
     }
 
@@ -343,6 +397,10 @@ impl Readings for LiveReadings {
         if self.solana.contains_key(&destination.network_id) {
             return ic::solana_instance_audit(self.ic.as_ref(), &instance);
         }
+        // A Sui instance has neither: its self-report is its buckets and its config.
+        if self.sui.contains_key(&destination.network_id) {
+            return ic::sui_instance_audit(self.ic.as_ref(), &instance);
+        }
         ic::instance_supply_audit(self.ic.as_ref(), &instance)
     }
 
@@ -361,6 +419,16 @@ impl Readings for LiveReadings {
             Some(src) => solana::read_supply_and_custody(src.transport.as_ref(), &src.target, network),
             None => Err(ReadError::UnavailableGap(format!(
                 "the endpoint config has no mint, return account and providers for {}",
+                network.network_id
+            ))),
+        }
+    }
+
+    fn sui_supply(&self, network: &Network) -> Result<SuiSupply, ReadError> {
+        match self.sui.get(&network.network_id) {
+            Some(src) => sui::read_supply(src.transport.as_ref(), &src.target, network),
+            None => Err(ReadError::UnavailableGap(format!(
+                "the endpoint config has no package, gate and providers for {}",
                 network.network_id
             ))),
         }
@@ -774,7 +842,8 @@ mod tests {
             ),
             "{err:?}"
         );
-        // Sui is still not delivered.
+        // A Sui destination without a configured source is the same named gap (since card BB-53 the
+        // default reader is no longer "not delivered", only "not configured").
         let cfg = CollectConfig {
             destinations: vec![DestinationConfig {
                 network_id: "sui-mainnet".into(),
@@ -785,7 +854,14 @@ mod tests {
             xrpl: None,
         };
         let err = collect(&cfg, &catalog, &readings).unwrap_err();
-        assert!(err.to_string().contains("BB-53"), "{err}");
+        assert!(
+            matches!(
+                &err,
+                crate::collect::CollectError::Read { error: ReadError::UnavailableGap(g), what }
+                    if g.contains("sui-mainnet") && g.contains("package, gate and providers") && what.contains("sui-mainnet")
+            ),
+            "{err:?}"
+        );
     }
 
     /// An IC that answers `icrc1_balance_of` per escrow owner, so the D escrow
@@ -1197,6 +1273,253 @@ mod tests {
             ));
             let c: LiveConfig = serde_json::from_str(&text).unwrap();
             assert!(LiveReadings::from_config(&c, 0).is_err(), "{m} {a} {providers}");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Sui (card BB-53, step 53d)
+    // ------------------------------------------------------------------
+
+    fn sui_instance() -> Principal {
+        Principal::from_slice(b"synthetic-instance-sui")
+    }
+
+    fn sui_escrow() -> EscrowBinding {
+        EscrowBinding::from_principal_bytes(sui_instance().as_slice(), Some([0xAA; 32]))
+    }
+
+    fn base_plus_sui_config() -> CollectConfig {
+        let mut cfg = base_config();
+        cfg.destinations.push(DestinationConfig {
+            network_id: "sui-mainnet".into(),
+            in_d: true,
+            escrow: Some(sui_escrow()),
+            instance: Some(crate::escrow::principal_to_text(sui_instance().as_slice())),
+        });
+        cfg
+    }
+
+    #[derive(CandidType, CandidDeserialize)]
+    struct SuiBucketsReply {
+        reserved_pulls: Nat,
+        pending_mint: Nat,
+        unknown_outflow: Nat,
+        pending_refund: Nat,
+        outstanding: Nat,
+        fees: Nat,
+        held: Nat,
+        pending_release: Nat,
+    }
+
+    #[derive(CandidType, CandidDeserialize)]
+    struct SuiConfigReply {
+        escrow_subaccount: String,
+        chain_identifier: String,
+    }
+
+    /// An IC with a Base instance and a Sui instance: the Base audit, the Sui buckets and config, the
+    /// ledger balances per escrow owner, and the calls recorded where the test can see them.
+    struct SuiIc {
+        total: u128,
+        base_escrow: u128,
+        sui_escrow: u128,
+        sui_outstanding: u128,
+        calls: std::rc::Rc<RefCell<Vec<String>>>,
+    }
+    impl ic::IcQuery for SuiIc {
+        fn query(&self, c: &Principal, method: &str, a: &[u8]) -> Result<Vec<u8>, IcQueryError> {
+            self.calls.borrow_mut().push(format!("{method}@{}", c.to_text()));
+            let n = |v: u128| Nat::from(v);
+            match method {
+                "icrc1_balance_of" => {
+                    let account: ic::Icrc1Account = candid::decode_one(a).unwrap();
+                    let balance = if account.owner == sui_instance() { self.sui_escrow } else { self.base_escrow };
+                    Ok(candid::encode_one(Nat::from(balance)).unwrap())
+                }
+                "icrc1_total_supply" => Ok(candid::encode_one(Nat::from(self.total)).unwrap()),
+                "get_supply_audit" => {
+                    assert_eq!(*c, instance_principal(), "the Sui instance has no get_supply_audit");
+                    Ok(audit_reply(self.base_escrow, self.base_escrow, self.base_escrow, self.base_escrow))
+                }
+                "get_buckets" => {
+                    assert_eq!(*c, sui_instance());
+                    Ok(candid::encode_one(SuiBucketsReply {
+                        reserved_pulls: n(0),
+                        pending_mint: n(0),
+                        unknown_outflow: n(0),
+                        pending_refund: n(0),
+                        outstanding: n(self.sui_outstanding),
+                        fees: n(0),
+                        held: n(0),
+                        pending_release: n(0),
+                    })
+                    .unwrap())
+                }
+                "get_config" => {
+                    assert_eq!(*c, sui_instance());
+                    Ok(candid::encode_one(SuiConfigReply {
+                        escrow_subaccount: "aa".repeat(32),
+                        chain_identifier: "synthetic".into(),
+                    })
+                    .unwrap())
+                }
+                "get_chain_public_launch_status" => Ok(candid::encode_one(Full {
+                    status: Some(St::Registered),
+                    chain_supply_e8s: Nat::from(0u8),
+                    extra: true,
+                })
+                .unwrap()),
+                other => Err(IcQueryError::Failed(format!("unexpected {other}"))),
+            }
+        }
+    }
+
+    /// The observer's round trip: 5 icUSD minted, 2 returned and burned atomically, so 3 outstanding.
+    fn sui_gate_bytes() -> Vec<u8> {
+        let mainnet = crate::live::solana::base58_to_32(sui::tests::MAINNET_CHAIN).unwrap();
+        sui::tests::gate_bcs_on(&mainnet, 300_000_000, 500_000_000, 200_000_000, 1, 1)
+    }
+
+    fn sui_source(bcs: Vec<u8>, heads: [u64; 3]) -> SuiSource {
+        SuiSource {
+            target: sui::tests::target(),
+            transport: Box::new(sui::tests::SuiMock::new(
+                heads.iter().map(|h| sui::tests::provider(sui::tests::MAINNET_CHAIN, *h, 5, bcs.clone())).collect(),
+            )),
+        }
+    }
+
+    fn live_with_sui(bcs: Vec<u8>, sui_escrow: u128) -> (LiveReadings, std::rc::Rc<RefCell<Vec<String>>>) {
+        let calls = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let ic = SuiIc { total: 100_000_000_000, base_escrow: 20_000_000_000, sui_escrow, sui_outstanding: 300_000_000, calls: calls.clone() };
+        let readings = live(ic_ok(), true).with_ic(Box::new(ic)).with_sui("sui-mainnet", sui_source(bcs, [900, 800, 790]));
+        (readings, calls)
+    }
+
+    #[test]
+    fn an_end_to_end_live_collection_reads_the_sui_gate_at_a_numbered_checkpoint_with_zero_custody() {
+        let (readings, calls) = live_with_sui(sui_gate_bytes(), 300_000_000);
+        let catalog = Catalog::embedded().unwrap();
+        let got = collect(&base_plus_sui_config(), &catalog, &readings).unwrap();
+        let r = &got.report;
+        assert_eq!(got.source, "live");
+        // E_base = 200 and E_sui = 3, each counted once; the Sui circulating is the whole supply (no custody).
+        assert_eq!(r.escrow_locked, 20_000_000_000 + 300_000_000);
+        let sui = r.circulating_dest.iter().find(|d| d.network_id == "sui-mainnet").unwrap();
+        assert_eq!(sui.circulating, 300_000_000);
+        assert_eq!(r.circulating_total, 100_000_000_000);
+        assert!(r.flags.is_empty(), "{:?}", r.flags);
+        // The head is the numbered finalized checkpoint actually read (the second highest of 900/800/790
+        // with a quorum of two), under the profile's checkpoint rule.
+        let head = got.heads.iter().find(|h| h.network_id == "sui-mainnet").unwrap();
+        assert_eq!((head.finality, head.block), (crate::types::FinalityRule::SuiCheckpoint, 800));
+        let (_, read) = got.sui_reads.iter().find(|(id, _)| id == "sui-mainnet").unwrap();
+        assert_eq!((read.supply, read.checkpoint, read.epoch), (300_000_000, 800, 9));
+        assert_eq!((read.gate.minted_total, read.gate.burned_total, read.gate.mint_count, read.gate.bridge_out_count), (500_000_000, 200_000_000, 1, 1));
+
+        let text = render(&got);
+        assert!(text.starts_with("source: live\n"), "{text}");
+        assert!(text.contains("head sui-mainnet: SuiCheckpoint block 800"), "{text}");
+        assert!(text.contains("destination sui-mainnet: escrow 3.00000000, supply 3.00000000, custody 0.00000000"), "{text}");
+        assert!(text.contains("sui gate sui-mainnet read at finalized checkpoint 800"), "{text}");
+        assert!(text.contains("custody is zero by the atomic-burn design"), "{text}");
+        assert!(!text.contains("source: fixture"), "{text}");
+
+        // The Sui instance was asked for its buckets and config only: never a get_supply_audit it does
+        // not have, and never its own observation of the Gate (its audit report) for the supply.
+        let calls = calls.borrow();
+        let sui_calls: Vec<&String> = calls.iter().filter(|c| c.ends_with(&sui_instance().to_text())).collect();
+        assert_eq!(sui_calls.len(), 2, "{calls:?}");
+        assert!(sui_calls.iter().any(|c| c.starts_with("get_buckets@")));
+        assert!(sui_calls.iter().any(|c| c.starts_with("get_config@")));
+        assert!(!calls.iter().any(|c| c.starts_with("get_audit_report@")));
+    }
+
+    #[test]
+    fn a_sui_escrow_that_does_not_cover_its_liabilities_is_a_failure_and_a_gate_over_the_books_is_flagged() {
+        let catalog = Catalog::embedded().unwrap();
+        // The escrow holds 2 against 3 outstanding.
+        let (readings, _) = live_with_sui(sui_gate_bytes(), 200_000_000);
+        let got = collect(&base_plus_sui_config(), &catalog, &readings).unwrap();
+        assert!(got.report.has_failure(), "{:?}", got.report.flags);
+        // A Gate with more supply than the instance's outstanding (a foreign mint) breaks the bound.
+        let mainnet = crate::live::solana::base58_to_32(sui::tests::MAINNET_CHAIN).unwrap();
+        let over = sui::tests::gate_bcs_on(&mainnet, 400_000_000, 600_000_000, 200_000_000, 2, 1);
+        let (readings, _) = live_with_sui(over, 300_000_000);
+        let got = collect(&base_plus_sui_config(), &catalog, &readings).unwrap();
+        assert!(
+            got.report.flags.iter().any(|f| matches!(f.kind, crate::aggregate::FlagKind::SupplyBoundBroken { .. })),
+            "{:?}",
+            got.report.flags
+        );
+        assert!(got.report.has_failure());
+    }
+
+    #[test]
+    fn a_failed_sui_read_stops_the_collection_before_any_ic_query() {
+        // Two of three providers serve a Gate whose chain identifier is testnet's: refused, so one
+        // usable provider is below the quorum.
+        let calls = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let ic = SuiIc { total: 100_000_000_000, base_escrow: 20_000_000_000, sui_escrow: 300_000_000, sui_outstanding: 300_000_000, calls: calls.clone() };
+        let foreign = sui::tests::gate_bcs(300_000_000, 500_000_000, 200_000_000, 1, 1);
+        let source = SuiSource {
+            target: sui::tests::target(),
+            transport: Box::new(sui::tests::SuiMock::new(vec![
+                sui::tests::provider(sui::tests::MAINNET_CHAIN, 900, 5, sui_gate_bytes()),
+                sui::tests::provider(sui::tests::MAINNET_CHAIN, 900, 5, foreign.clone()),
+                sui::tests::provider(sui::tests::MAINNET_CHAIN, 900, 5, foreign),
+            ])),
+        };
+        let readings = live(ic_ok(), true).with_ic(Box::new(ic)).with_sui("sui-mainnet", source);
+        let catalog = Catalog::embedded().unwrap();
+        let err = collect(&base_plus_sui_config(), &catalog, &readings).unwrap_err();
+        assert!(err.to_string().contains("another chain identifier"), "{err}");
+        assert!(calls.borrow().is_empty(), "no IC query may precede the Sui read: {:?}", calls.borrow());
+    }
+
+    #[test]
+    fn sui_endpoint_config_is_strict_and_builds_without_sending_anything() {
+        let package = sui::tests::address(&sui::tests::PACKAGE);
+        let gate = sui::tests::address(&sui::tests::GATE);
+        let config = |inner: &str| {
+            format!(
+                r#"{{"ic": {{"url": "https://ic.example.invalid", "ledger": "ryjl3-tyaaa-aaaaa-aaaba-cai"}},
+                    "sui": {{"sui-mainnet": {inner}}}}}"#
+            )
+        };
+        let good = config(&format!(
+            r#"{{"package": "{package}", "gate": "{gate}", "checkpoint": 123456,
+                 "providers": ["https://a.example.invalid", "https://b.example.invalid"]}}"#
+        ));
+        let c: LiveConfig = serde_json::from_str(&good).unwrap();
+        assert_eq!(c.sui.len(), 1);
+        assert_eq!(c.sui["sui-mainnet"].checkpoint, Some(123456));
+        let built = LiveReadings::from_config(&c, 0).unwrap();
+        assert_eq!(built.source(), "live");
+        // The checkpoint is optional; unknown fields and missing package or gate are refused.
+        let no_cp = config(&format!(r#"{{"package": "{package}", "gate": "{gate}", "providers": ["https://a.example.invalid"]}}"#));
+        assert_eq!(serde_json::from_str::<LiveConfig>(&no_cp).unwrap().sui["sui-mainnet"].checkpoint, None);
+        for bad in [
+            format!(r#"{{"package":"{package}","gate":"{gate}","providers":[],"x":1}}"#),
+            format!(r#"{{"gate":"{gate}","providers":[]}}"#),
+            format!(r#"{{"package":"{package}","providers":[]}}"#),
+        ] {
+            assert!(serde_json::from_str::<LiveConfig>(&config(&bad)).is_err(), "{bad}");
+        }
+        // A malformed address, the same address twice, a zero checkpoint, a plain-http provider and no
+        // provider fail to build.
+        let upper = gate.to_uppercase().replace("0X", "0x");
+        for (pk, g, cp, providers) in [
+            ("0x70", gate.as_str(), "null", r#"["https://a.example.invalid"]"#),
+            (package.as_str(), upper.as_str(), "null", r#"["https://a.example.invalid"]"#),
+            (package.as_str(), package.as_str(), "null", r#"["https://a.example.invalid"]"#),
+            (package.as_str(), gate.as_str(), "0", r#"["https://a.example.invalid"]"#),
+            (package.as_str(), gate.as_str(), "null", r#"["http://example.invalid"]"#),
+            (package.as_str(), gate.as_str(), "null", "[]"),
+        ] {
+            let text = config(&format!(r#"{{"package": "{pk}", "gate": "{g}", "checkpoint": {cp}, "providers": {providers}}}"#));
+            let c: LiveConfig = serde_json::from_str(&text).unwrap();
+            assert!(LiveReadings::from_config(&c, 0).is_err(), "{pk} {g} {cp} {providers}");
         }
     }
 

@@ -33,7 +33,7 @@
 //! | --- | --- | --- |
 //! | EVM (Base and the other EVM rows) | token `totalSupply` at the profile's settlement head, custody zero (the return burns atomically) | wired through [`Readings::evm_total_supply`] |
 //! | Solana | mint supply and the measured return-account balance, read together at `finalized` | wired through [`Readings::solana_supply_and_custody`] (card BB-49); a source without it fails with `Unavailable` |
-//! | Sui | wrapped-currency supply | `Unavailable`, delivered by card BB-53 |
+//! | Sui | the Gate's wrapped `TreasuryCap` supply and counters at a numbered finalized checkpoint, custody zero (the return burns atomically) | wired through [`Readings::sui_supply`] (card BB-53); a source without it fails with `Unavailable` |
 //! | XRPL lane | `E_X` (ICRC-1 balance of the lane escrow, the same IC transport) and the issuer's obligations for the icUSD currency at a VALIDATED ledger | wired through [`Readings::xrpl_issued_outstanding`] (card BB-57); a source without it fails with `Unavailable` |
 //!
 //! An unavailable source fails the whole collection with an explicit error
@@ -53,6 +53,20 @@
 //! query. Equal reads of a supply and a balance are a limited consistency check, not proof that no
 //! mint, burn or transfer happened around them: a change between reads can cause disagreement, and
 //! the read fails when no pair reaches quorum rather than guessing.
+//!
+//! # Sui (`d` in `D`)
+//!
+//! The Gate's wrapped `TreasuryCap` supply is read from the chain by providers that are independent of
+//! the bridge instance, at ONE numbered finalized checkpoint that a quorum of providers agrees on and
+//! serves (the report prints the checkpoint number, its digest and its epoch), with the Gate's own
+//! counters beside it. The Gate object is decoded here with the accepted layout and checked: the
+//! configured id and package type, a shared object, the supported code version, the chain identifier the
+//! Gate stored equal to the profile's network identity, `minted_total - burned_total == supply`, and the
+//! table sizes equal to the counters. Custody is ZERO because the Gate's `bridge_out` burns the coin in
+//! the same transaction that records the return (there is no custody state and no `RC`/`BU`/stray), not
+//! because nothing was measured. The instance's own buckets (a self-report) are displayed next to the
+//! independent reads and checked against them, never used as `E_d` or `supply_d`. A missing reader,
+//! config or observation is a named failure, never a zero.
 //!
 //! # The XRPL lane (`X`)
 //!
@@ -132,6 +146,38 @@ pub struct SolanaSupply {
     pub finality: FinalityRule,
     /// The lowest context slot among the providers that agreed.
     pub slot: u64,
+}
+
+/// The Gate counters read with a Sui supply, at the same checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuiGate {
+    /// The Gate's code version (the supported one is 1).
+    pub version: u64,
+    pub supply_cap: u64,
+    /// Cumulative minted and burned (e8s). `minted_total - burned_total` equals the supply.
+    pub minted_total: u128,
+    pub burned_total: u128,
+    pub mint_count: u64,
+    pub bridge_out_count: u64,
+}
+
+/// A Sui destination's Gate supply and the finalized checkpoint it was read at.
+///
+/// There is no custody field: the Gate's `bridge_out` burns the returned coin atomically, so custody is
+/// zero by design (the collector says so; it is not a measurement).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuiSupply {
+    /// The wrapped `TreasuryCap`'s `Supply.value`, in e8s (8 decimals, checked).
+    pub supply: u128,
+    /// The finality rule the read was pinned to. The collector refuses a reading whose rule differs
+    /// from the profile's.
+    pub finality: FinalityRule,
+    /// The numbered finalized checkpoint the Gate was read at.
+    pub checkpoint: u64,
+    /// That checkpoint's digest (base58), agreed by the provider quorum.
+    pub checkpoint_digest: String,
+    pub epoch: u64,
+    pub gate: SuiGate,
 }
 
 /// The XRPL lane's issued outstanding and the validated ledger it was read at.
@@ -246,6 +292,14 @@ pub trait Readings {
             card: SOLANA_SOURCE_CARD,
         })
     }
+    /// A Sui destination's Gate supply and counters at a numbered finalized checkpoint, read by
+    /// providers independent of the bridge instance. A source with no Sui reader answers
+    /// `Unavailable`, which fails the collection before any ICP-side read.
+    fn sui_supply(&self, _network: &Network) -> Result<SuiSupply, ReadError> {
+        Err(ReadError::Unavailable {
+            card: SUI_SOURCE_CARD,
+        })
+    }
     /// The XRPL lane's issued outstanding: the issuer's obligations for the icUSD
     /// currency at a validated ledger. A source with no XRPL reader answers
     /// `Unavailable`, which fails the collection before any other read.
@@ -317,6 +371,8 @@ pub struct Collected {
     /// The XRPL lane's reading (validated ledger and hash), when a lane was
     /// collected.
     pub xrpl_read: Option<XrplIssued>,
+    /// Per counted Sui destination: the Gate reading (checkpoint, digest, epoch, counters).
+    pub sui_reads: Vec<(String, SuiSupply)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +430,12 @@ enum Plan<'a> {
         network: &'a Network,
         instance: &'a str,
     },
+    Sui {
+        config: &'a DestinationConfig,
+        binding: &'a EscrowBinding,
+        network: &'a Network,
+        instance: &'a str,
+    },
 }
 
 /// Collect independent readings and aggregate them.
@@ -404,31 +466,35 @@ pub fn collect(
             )));
         };
         let card = match profile.family {
-            Family::Evm | Family::Solana => {
-                // A counted EVM or Solana destination needs its instance, before any read.
+            Family::Evm | Family::Solana | Family::Sui => {
+                // A counted EVM, Solana or Sui destination needs its instance, before any read.
                 let Some(instance) = d.instance.as_deref() else {
                     return Err(CollectError::Rejected(
                         AggregateError::MissingInstanceBinding(d.network_id.clone()),
                     ));
                 };
-                plan.push(if profile.family == Family::Evm {
-                    Plan::Evm {
+                plan.push(match profile.family {
+                    Family::Evm => Plan::Evm {
                         config: d,
                         binding,
                         network,
                         instance,
-                    }
-                } else {
-                    Plan::Solana {
+                    },
+                    Family::Solana => Plan::Solana {
                         config: d,
                         binding,
                         network,
                         instance,
-                    }
+                    },
+                    _ => Plan::Sui {
+                        config: d,
+                        binding,
+                        network,
+                        instance,
+                    },
                 });
                 continue;
             }
-            Family::Sui => SUI_SOURCE_CARD,
             Family::Xrpl => XRPL_SOURCE_CARDS,
         };
         return Err(CollectError::Read {
@@ -489,6 +555,40 @@ pub fn collect(
                 });
             }
             solana_reads.insert(id.clone(), sol);
+        }
+    }
+
+    // Sui: the Gate's supply and counters at a numbered finalized checkpoint, also before the ICP-side
+    // numbers. A source without a Sui reader, or a Gate that cannot be read or fails its checks, stops
+    // the collection here.
+    let mut sui_reads: BTreeMap<String, SuiSupply> = BTreeMap::new();
+    for step in &plan {
+        if let Plan::Sui {
+            config: d, network, ..
+        } = step
+        {
+            let id = &d.network_id;
+            let sui = read(format!("supply of {id}"), readings.sui_supply(network))?;
+            if sui.finality != network.finality.rule {
+                return Err(CollectError::WrongHead {
+                    network_id: id.clone(),
+                    expected: network.finality.rule,
+                    got: sui.finality,
+                });
+            }
+            // The Gate's own identity: what was minted less what was burned is the supply, and the
+            // supply is never above what was minted.
+            let outstanding = sui.gate.minted_total.checked_sub(sui.gate.burned_total);
+            if outstanding != Some(sui.supply) {
+                return Err(CollectError::Read {
+                    what: format!("supply of {id}"),
+                    error: ReadError::Failed(format!(
+                        "the Gate's minted_total {} less burned_total {} is not the supply {}",
+                        sui.gate.minted_total, sui.gate.burned_total, sui.supply
+                    )),
+                });
+            }
+            sui_reads.insert(id.clone(), sui);
         }
     }
 
@@ -621,6 +721,64 @@ pub fn collect(
                     stray,
                 });
             }
+            Plan::Sui {
+                config: d,
+                binding,
+                network: _,
+                instance,
+            } => {
+                let id = &d.network_id;
+                let Some(sui) = sui_reads.get(id) else {
+                    return Err(CollectError::Rejected(AggregateError::UnknownNetworkId(
+                        id.clone(),
+                    )));
+                };
+                let escrow_balance = read(
+                    format!("escrow balance of {id}"),
+                    readings.icrc1_balance_of(binding),
+                )?;
+                let audit = read(
+                    format!("instance audit of {id}"),
+                    readings.instance_audit(d),
+                )?;
+                // A Sui lane has no custody state, so its self-report has no RC, BU or stray. One that
+                // reports them is not a Sui audit (and would widen the supply bound), so it is refused.
+                if audit.return_custodied_e8s.is_some()
+                    || audit.burn_unknown_e8s.is_some()
+                    || audit.stray_e8s.is_some()
+                {
+                    return Err(CollectError::Read {
+                        what: format!("custody buckets of {id}"),
+                        error: ReadError::Failed(
+                            "a Sui instance has no custody (a returned coin is burned in the transaction that records the return), but the audit reports custody buckets".into(),
+                        ),
+                    });
+                }
+                audits.push(DestinationAudit {
+                    network_id: id.clone(),
+                    instance: instance.to_string(),
+                    audit,
+                    escrow_independent: escrow_balance,
+                    supply_independent: sui.supply,
+                });
+                heads.push(HeadNote {
+                    network_id: id.clone(),
+                    finality: sui.finality,
+                    block: sui.checkpoint,
+                });
+                // The Gate's `bridge_out` burns the returned coin in the same transaction that records
+                // the return: custody is zero BY DESIGN (no custody state, no RC, BU or stray), not a
+                // measurement that happened to read zero.
+                destinations.push(DestinationReading {
+                    config: d.clone(),
+                    escrow_balance,
+                    supply: sui.supply,
+                    custody: 0,
+                    rc: 0,
+                    bu: 0,
+                    stray: 0,
+                });
+            }
         }
     }
 
@@ -687,6 +845,7 @@ pub fn collect(
         report,
         heads,
         xrpl_read,
+        sui_reads: sui_reads.into_iter().collect(),
     })
 }
 
@@ -833,6 +992,21 @@ pub fn render(c: &Collected) -> String {
         out.push_str(&format!(
             "xrpl issued outstanding read at validated ledger {} (hash {})\n",
             r.ledger_index, r.ledger_hash
+        ));
+    }
+    for (id, r) in &c.sui_reads {
+        out.push_str(&format!(
+            "sui gate {id} read at finalized checkpoint {} (digest {}, epoch {}): supply {}, supply_cap {}, minted_total {}, burned_total {}, mint_count {}, bridge_out_count {}, gate version {}; custody is zero by the atomic-burn design\n",
+            r.checkpoint,
+            r.checkpoint_digest,
+            r.epoch,
+            format_e8s(r.supply),
+            format_e8s(u128::from(r.gate.supply_cap)),
+            format_e8s(r.gate.minted_total),
+            format_e8s(r.gate.burned_total),
+            r.gate.mint_count,
+            r.gate.bridge_out_count,
+            r.gate.version
         ));
     }
     for a in &c.audits {
@@ -995,6 +1169,26 @@ struct FixtureSolanaSupply {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FixtureSuiSupply {
+    network_id: String,
+    #[serde(with = "u128_string")]
+    supply: u128,
+    finality: FinalityRule,
+    checkpoint: u64,
+    checkpoint_digest: String,
+    epoch: u64,
+    gate_version: u64,
+    supply_cap: u64,
+    #[serde(with = "u128_string")]
+    minted_total: u128,
+    #[serde(with = "u128_string")]
+    burned_total: u128,
+    mint_count: u64,
+    bridge_out_count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FixtureXrplIssued {
     network_id: String,
     #[serde(with = "u128_string")]
@@ -1017,6 +1211,8 @@ struct FixtureData {
     evm_supplies: Vec<FixtureEvmSupply>,
     #[serde(default)]
     solana_supplies: Vec<FixtureSolanaSupply>,
+    #[serde(default)]
+    sui_supplies: Vec<FixtureSuiSupply>,
     #[serde(default)]
     xrpl_issued: Vec<FixtureXrplIssued>,
     #[serde(default)]
@@ -1049,6 +1245,7 @@ pub struct FixtureReadings {
     balances: BTreeMap<AccountIdentity, u128>,
     evm: BTreeMap<String, EvmSupply>,
     solana: BTreeMap<String, SolanaSupply>,
+    sui: BTreeMap<String, SuiSupply>,
     xrpl: BTreeMap<String, XrplIssued>,
     audits: BTreeMap<Vec<u8>, InstanceAudit>,
 }
@@ -1104,6 +1301,28 @@ impl FixtureReadings {
                 return Err(format!("fixture lists the Solana supply of {id} twice"));
             }
         }
+        let mut sui = BTreeMap::new();
+        for x in file.readings.sui_supplies {
+            let id = x.network_id;
+            let reading = SuiSupply {
+                supply: x.supply,
+                finality: x.finality,
+                checkpoint: x.checkpoint,
+                checkpoint_digest: x.checkpoint_digest,
+                epoch: x.epoch,
+                gate: SuiGate {
+                    version: x.gate_version,
+                    supply_cap: x.supply_cap,
+                    minted_total: x.minted_total,
+                    burned_total: x.burned_total,
+                    mint_count: x.mint_count,
+                    bridge_out_count: x.bridge_out_count,
+                },
+            };
+            if sui.insert(id.clone(), reading).is_some() {
+                return Err(format!("fixture lists the Sui supply of {id} twice"));
+            }
+        }
         let mut xrpl = BTreeMap::new();
         for x in file.readings.xrpl_issued {
             let id = x.network_id;
@@ -1137,6 +1356,7 @@ impl FixtureReadings {
                 balances,
                 evm,
                 solana,
+                sui,
                 xrpl,
                 audits,
             },
@@ -1194,6 +1414,15 @@ impl Readings for FixtureReadings {
         })
     }
 
+    fn sui_supply(&self, network: &Network) -> Result<SuiSupply, ReadError> {
+        self.sui.get(&network.network_id).cloned().ok_or_else(|| {
+            ReadError::Failed(format!(
+                "fixture has no Sui supply for {}",
+                network.network_id
+            ))
+        })
+    }
+
     fn xrpl_issued_outstanding(&self, network: &Network) -> Result<XrplIssued, ReadError> {
         self.xrpl.get(&network.network_id).cloned().ok_or_else(|| {
             ReadError::Failed(format!(
@@ -1215,6 +1444,8 @@ mod tests {
     const BASE_PLUS_XRPL: &str = include_str!("../fixtures/collect_base_plus_xrpl.json");
     const XRPL_BELOW_ISSUED: &str = include_str!("../fixtures/collect_xrpl_escrow_below_issued.json");
     const BASE_PLUS_SOLANA: &str = include_str!("../fixtures/collect_base_plus_solana.json");
+    const BASE_PLUS_SUI: &str = include_str!("../fixtures/collect_base_plus_sui.json");
+    const SUI_OVER_BOOKS: &str = include_str!("../fixtures/collect_sui_supply_over_books.json");
 
     fn catalog() -> Catalog {
         Catalog::embedded().expect("embedded catalog")
@@ -1823,6 +2054,10 @@ mod tests {
             self.order.borrow_mut().push("solana");
             self.inner.solana_supply_and_custody(n)
         }
+        fn sui_supply(&self, n: &Network) -> Result<SuiSupply, ReadError> {
+            self.order.borrow_mut().push("sui");
+            self.inner.sui_supply(n)
+        }
     }
 
     #[test]
@@ -1900,6 +2135,285 @@ mod tests {
             ),
             "{err:?}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Sui (card BB-53, step 53d)
+    // ------------------------------------------------------------------
+
+    fn sui_fixture() -> LoadedFixture {
+        FixtureReadings::parse(BASE_PLUS_SUI).unwrap()
+    }
+
+    #[test]
+    fn the_base_plus_sui_fixture_collects_with_zero_custody_and_reports_the_checkpoint_it_was_read_at() {
+        let fx = sui_fixture();
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert_eq!(got.source, "fixture");
+        let r = &got.report;
+        // E_base 200.12345678 + E_sui 3, each counted once.
+        assert_eq!(r.escrow_locked, 20_012_345_678 + 300_000_000);
+        assert_eq!(r.circulating_on_icp, 100_000_000_000 - r.escrow_locked);
+        // Nothing is held in custody on Sui: the whole supply circulates.
+        let sui = r.circulating_dest.iter().find(|d| d.network_id == "sui-mainnet").unwrap();
+        assert_eq!(sui.circulating, 300_000_000);
+        assert_eq!(r.circulating_total, 100_000_000_000);
+        assert!(!r.has_failure(), "{:?}", r.flags);
+        assert!(r.flags.is_empty(), "{:?}", r.flags);
+        // The head is the numbered finalized checkpoint, under the profile's rule.
+        let head = got.heads.iter().find(|h| h.network_id == "sui-mainnet").unwrap();
+        assert_eq!((head.finality, head.block), (FinalityRule::SuiCheckpoint, 123_456_789));
+        let (_, read) = got.sui_reads.iter().find(|(id, _)| id == "sui-mainnet").unwrap();
+        assert_eq!((read.epoch, read.gate.version, read.gate.mint_count, read.gate.bridge_out_count), (900, 1, 1, 1));
+        let text = render(&got);
+        assert!(text.starts_with("source: fixture\n"), "{text}");
+        assert!(text.contains("destination sui-mainnet: escrow 3.00000000, supply 3.00000000, custody 0.00000000"), "{text}");
+        assert!(text.contains("head sui-mainnet: SuiCheckpoint block 123456789"), "{text}");
+        assert!(text.contains("sui gate sui-mainnet read at finalized checkpoint 123456789 (digest 93MB2qRDNVLxbmmPuYpLdAqn3u2x9ZhaVZK5wELHueP8, epoch 900)"), "{text}");
+        assert!(text.contains("minted_total 5.00000000, burned_total 2.00000000"), "{text}");
+        assert!(text.contains("custody is zero by the atomic-burn design"), "{text}");
+        assert!(text.contains("status: ok"), "{text}");
+    }
+
+    #[test]
+    fn a_sui_destination_without_a_reading_is_a_failed_read_not_zero() {
+        let mut fx = sui_fixture();
+        fx.readings.sui.clear();
+        let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CollectError::Read { error: ReadError::Failed(m), what }
+                    if m.contains("no Sui supply") && what.contains("sui-mainnet")
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_sui_supply_above_the_instances_books_is_a_failure_and_the_gate_identity_must_hold() {
+        // One e8s more minted on Sui than the instance accounts for breaks the supply bound.
+        let mut fx = sui_fixture();
+        {
+            let s = fx.readings.sui.get_mut("sui-mainnet").unwrap();
+            s.supply += 1;
+            s.gate.minted_total += 1;
+        }
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert!(
+            flags_of(&got).iter().any(|k| matches!(k, FlagKind::SupplyBoundBroken { supply_independent: 300_000_001, .. })),
+            "{:?}",
+            got.report.flags
+        );
+        assert!(got.report.has_failure());
+        // The bound has no custody term for Sui.
+        assert!(!render(&got).contains("RC + BU"));
+
+        // The Gate's own identity: minted less burned must be the supply. One e8s off is a failed read.
+        for tweak in 0..3 {
+            let mut fx = sui_fixture();
+            let s = fx.readings.sui.get_mut("sui-mainnet").unwrap();
+            match tweak {
+                0 => s.supply += 1,
+                1 => s.gate.burned_total += 1,
+                _ => s.gate.burned_total = s.gate.minted_total + 1,
+            }
+            let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+            assert!(
+                matches!(&err, CollectError::Read { error: ReadError::Failed(m), what }
+                    if m.contains("minted_total") && what.contains("sui-mainnet")),
+                "{tweak}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_recorded_sui_supply_over_the_books_fixture_is_a_failure_and_names_the_bound() {
+        let fx = FixtureReadings::parse(SUI_OVER_BOOKS).unwrap();
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert_eq!(
+            flags_of(&got),
+            vec![FlagKind::SupplyBoundBroken { supply_independent: 300_000_001, outstanding: 300_000_000, inflight_mint: 0 }]
+        );
+        assert!(got.report.has_failure());
+        assert!(render(&got).contains("status: FAILURE flags present, credits must halt"));
+    }
+
+    #[test]
+    fn a_sui_escrow_that_does_not_cover_the_liabilities_is_a_failure() {
+        let mut fx = sui_fixture();
+        for b in fx.readings.balances.values_mut() {
+            if *b == 300_000_000 {
+                *b = 299_999_999;
+            }
+        }
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert!(got.report.has_failure(), "{:?}", got.report.flags);
+    }
+
+    #[test]
+    fn a_sui_supply_read_under_the_wrong_finality_rule_is_refused() {
+        let mut fx = sui_fixture();
+        fx.readings.sui.get_mut("sui-mainnet").unwrap().finality = FinalityRule::EvmTag;
+        let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CollectError::WrongHead { network_id, expected: FinalityRule::SuiCheckpoint, got: FinalityRule::EvmTag }
+                    if network_id == "sui-mainnet"
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_sui_audit_that_reports_custody_buckets_is_refused_not_added_to_the_bound() {
+        for which in 0..3 {
+            let mut fx = sui_fixture();
+            let a = fx
+                .readings
+                .audits
+                .values_mut()
+                .find(|a| a.outstanding_e8s == 300_000_000)
+                .expect("the Sui audit");
+            match which {
+                0 => a.return_custodied_e8s = Some(0),
+                1 => a.burn_unknown_e8s = Some(0),
+                _ => a.stray_e8s = Some(0),
+            }
+            let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+            assert!(
+                matches!(&err, CollectError::Read { error: ReadError::Failed(m), what }
+                    if m.contains("has no custody") && what.contains("custody buckets of sui-mainnet")),
+                "{which}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sui_is_read_before_the_icp_side_numbers_and_a_source_without_a_reader_names_the_card() {
+        let fx = sui_fixture();
+        let ordered = Ordered { order: Default::default(), inner: fx.readings.clone() };
+        collect(&fx.config, &catalog(), &ordered).unwrap();
+        let order = ordered.order.borrow();
+        assert_eq!(order[0], "sui", "{order:?}");
+        let first_icp = order.iter().position(|o| *o == "icp_total").unwrap();
+        assert!(first_icp > 0);
+
+        // A source with no Sui reader (the trait default) fails with the card before any other read.
+        struct NoSui;
+        impl Readings for NoSui {
+            fn source(&self) -> &'static str {
+                "fixture"
+            }
+            fn icp_ledger_total_supply(&self) -> Result<u128, ReadError> {
+                panic!("read before the Sui reader failed")
+            }
+            fn icrc1_balance_of(&self, _: &EscrowBinding) -> Result<u128, ReadError> {
+                panic!("read before the Sui reader failed")
+            }
+            fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError> {
+                panic!("read before the Sui reader failed")
+            }
+            fn instance_audit(&self, _: &DestinationConfig) -> Result<InstanceAudit, ReadError> {
+                panic!("read before the Sui reader failed")
+            }
+            fn evm_total_supply(&self, _: &Network) -> Result<EvmSupply, ReadError> {
+                panic!("read before the Sui reader failed")
+            }
+        }
+        let cfg = CollectConfig { destinations: vec![dest("sui-mainnet")], xrpl: None };
+        let err = collect(&cfg, &catalog(), &NoSui).unwrap_err();
+        assert!(
+            matches!(&err, CollectError::Read { error: ReadError::Unavailable { card: "BB-53" }, what } if what.contains("sui-mainnet")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_counted_sui_destination_needs_its_instance_before_any_read() {
+        let mut fx = sui_fixture();
+        for d in fx.config.destinations.iter_mut().filter(|d| d.network_id == "sui-mainnet") {
+            d.instance = None;
+        }
+        let err = collect(&fx.config, &catalog(), &Untouchable).unwrap_err();
+        assert!(
+            matches!(&err, CollectError::Rejected(AggregateError::MissingInstanceBinding(id)) if id == "sui-mainnet"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_d_uniqueness_rules_still_hold_with_a_sui_destination() {
+        // The Sui escrow may not also be another destination's escrow, nor its instance another's.
+        let fx = sui_fixture();
+        let mut same_escrow = fx.config.clone();
+        same_escrow.destinations[1].escrow = same_escrow.destinations[0].escrow.clone();
+        let err = collect(&same_escrow, &catalog(), &Untouchable).unwrap_err();
+        assert!(matches!(err, CollectError::Rejected(AggregateError::DuplicateEscrowBinding { .. })), "{err:?}");
+
+        let mut same_instance = fx.config.clone();
+        same_instance.destinations[1].instance = same_instance.destinations[0].instance.clone();
+        let err = collect(&same_instance, &catalog(), &Untouchable).unwrap_err();
+        assert!(matches!(err, CollectError::Rejected(AggregateError::DuplicateInstanceBinding { .. })), "{err:?}");
+
+        // The same destination twice is also refused.
+        let mut twice = fx.config.clone();
+        twice.destinations.push(twice.destinations[1].clone());
+        assert!(matches!(collect(&twice, &catalog(), &Untouchable).unwrap_err(), CollectError::Rejected(_)));
+    }
+
+    #[test]
+    fn an_excluded_sui_instance_reads_nothing() {
+        // A test-network Sui instance outside D needs no reader, no escrow and no instance.
+        let mut sui = dest("sui-testnet");
+        sui.in_d = false;
+        let cfg = CollectConfig { destinations: vec![dest("base-mainnet"), sui], xrpl: None };
+        let flat = Flat {
+            icp: 1_000 * E8,
+            escrow: 100 * E8,
+            supply: 100 * E8,
+            finality: FinalityRule::EvmTag,
+            audit: None,
+        };
+        let got = collect(&cfg, &catalog(), &flat).unwrap();
+        assert!(got.sui_reads.is_empty());
+        assert!(render(&got).contains("destination sui-testnet: excluded from D (test ledger), nothing read"));
+    }
+
+    #[test]
+    fn the_xrpl_coverage_floor_and_the_other_families_are_unchanged_by_a_sui_destination() {
+        // A Sui destination beside an XRPL lane: the lane escrow still must cover the issued amount.
+        let mut fx = FixtureReadings::parse(BASE_PLUS_XRPL).unwrap();
+        let sui = sui_fixture();
+        fx.config.destinations.push(sui.config.destinations[1].clone());
+        fx.readings.sui = sui.readings.sui.clone();
+        fx.readings.audits.extend(sui.readings.audits.clone());
+        fx.readings.balances.extend(sui.readings.balances.clone());
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert!(got.sui_reads.iter().any(|(id, _)| id == "sui-mainnet"));
+        let issued = got.xrpl_read.as_ref().expect("the XRPL lane is still read").issued_outstanding;
+        assert!(!got.report.has_failure(), "{:?}", got.report.flags);
+        // Take the lane escrow one e8s below the issued amount: the floor still fires with Sui in the mix.
+        let key = fx.config.xrpl.as_ref().unwrap().escrow.identity().unwrap();
+        let mut low = fx.readings.clone();
+        low.balances.insert(key, issued - 1);
+        let got = collect(&fx.config, &catalog(), &low).unwrap();
+        assert!(
+            got.report.failures().any(|f| matches!(f.kind, FlagKind::XrplEscrowBelowIssued { gap: 1, .. })),
+            "{:?}",
+            got.report.flags
+        );
+        assert!(got.sui_reads.iter().any(|(id, _)| id == "sui-mainnet"));
+    }
+
+    #[test]
+    fn fixture_parse_refuses_a_duplicate_sui_reading() {
+        let mut v: serde_json::Value = serde_json::from_str(BASE_PLUS_SUI).unwrap();
+        let one = v["readings"]["sui_supplies"][0].clone();
+        v["readings"]["sui_supplies"].as_array_mut().unwrap().push(one);
+        let err = FixtureReadings::parse(&v.to_string()).unwrap_err();
+        assert!(err.contains("Sui supply of sui-mainnet twice"), "{err}");
     }
 
     #[test]
