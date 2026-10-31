@@ -132,8 +132,13 @@ Every row is per network. No row means "all wallets" or "all networks". Do not f
 | Test wallets, per role per network: EVM deployer, EVM test user, Solana funding, Solana test user, Sui publisher, Sui test user, XRPL funding, XRPL test user. Each is EITHER a specifically identified EXISTING dedicated test wallet, used only under its own unchanged scope, OR a NEW dedicated wallet. Never a production, shared or quarantined key by default. | `<address>` and `<existing: scope reference / new>` |
 | Controller principal(s) per new test canister | `<principal>` |
 | Canister admin principal(s) | `<principal>` |
+| Sui: AdminCap, UpgradeCap, MetadataCap holders; upgrade policy | `<holder>`; `<compatible / additive / dependency-only / immutable>` |
+| EVM: admin delay, guardian, caps | `<seconds>`; `<none / address>`; `<e8s>` |
+| XRPL: allow_clawback, no_freeze | `<true/false>`, `<true/false>` |
 | Per-network limits: test gas, ICP cycles, synthetic supply cap | `<amount>` each |
 | Executor and end date | `<name>`, `<date>` |
+
+The Sui, EVM and XRPL value rows above record the proposed choice only. A value there takes effect only if the matching class C scope below is approved, and recording a value is not an approval.
 
 **A. Ordinary test-wallet operations** (covered by a test-wallet grant for the named wallets, per network): fund a named address within the limits; deploy or publish from the named wallet; synthetic user transactions (deposit, return, round trip); read-only readbacks. Each: `<yes / no>`.
 
