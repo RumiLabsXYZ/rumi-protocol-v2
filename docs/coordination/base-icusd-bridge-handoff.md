@@ -2275,6 +2275,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   committed declarations match the repo's own generator and nothing drifted (`bb50/regenerate_declarations_repo_script.txt`).
   No vitest or Rust rerun (whitespace and a didc script only).
 
+## Milestone 100 (2026-10-31): BB-50 first source review, recovery correction
+
+- Miles (`review-bb50-recovery.md`) on `adcbf1a9` plus `25b9d4d9`, local only; BB-50 stays in Review while the rest is read.
+- F1: `solanaToIcp.ts` `verdictOf` maps `not_found` plus an expired blockhash to `not_landed` and `mayDiscard` allows removal,
+  but `reconcileReturn` searches only the latest 25 wallet signatures and `getSignatureStatuses` returns null for missing,
+  pruned or unknown transactions, so absence does not prove non-execution. A sent transaction whose reply was lost could be
+  forgotten after expiry and a new payment allowed. Also `status.failed` becomes `failed_on_chain` at processed or confirmed.
+  Fix: absence or expiry stays held with the original identity; only a finalized failure of the exact saved attempt is
+  definitive; never-asked prepared discard and same-bytes rebroadcast stay; copy, types, comments and the wrong fixture change.
+- F2: `walletStandard.ts` treats substrings such as "closed", "denied" or "cancel" anywhere in an error as a clean rejection,
+  so a sign-and-send wallet that broadcasts and then throws "connection closed" loses the attempt. Fix: only a reliable
+  user-rejection signal that the wallet refused before broadcasting may clear a sign-and-send attempt; unknown and transport
+  errors stay held; Base flows unchanged.
+- Crypto: keep the tested `bytes.ts`; switching to the already-locked noble primitives is optional cleanup before client money,
+  not a gate, recorded in the deferred log with the correction.
+- Same W28, one focused commit with red-then-green regressions (sent but unindexed then expired; processed and confirmed
+  failures that later finalize successfully; finalized failure; broadcast then "connection closed"; explicit user rejection).
+  No Rust rebuild, broad suite or live action; W29 stays the sole Rust builder.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

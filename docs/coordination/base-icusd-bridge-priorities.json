@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-47, BB-48 and BB-49 done. BB-50 in Review: the Solana branch of /bridge (adcbf1a9 with hygiene 25b9d4d9, same W28) delivered to Miles. Solana stays disabled; activation needs its own authorization.",
+      "nextAction": "BB-47, BB-48 and BB-49 done. BB-50 in Review (adcbf1a9 with hygiene 25b9d4d9): same W28 writes one focused recovery correction; Miles continues the source review. Solana stays disabled.",
       "cardIds": [
         "BB-47",
         "BB-48",
