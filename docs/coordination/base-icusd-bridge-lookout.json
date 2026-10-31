@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Accepted: 12dfee35, 8198fb28, bc96f166, 23dfe841. 49c fixes e3516aea passed source review. 49d custody correction 4394b472 delivered for review (W28). Builder with W29 for BB-52, then 49e",
+      "evidenceText": "proof=none; Accepted: 49a, 49b, 49c (dba814d6, e3516aea), 49d (ea5be6ba, 4394b472) at source and local-test scope; pushed in head f91bf92d. 49e (Solana collector reader) in progress (W28, builder slot)",
       "evidenceLinks": []
     },
     {
@@ -471,10 +471,10 @@
     },
     {
       "id": "BB-52",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: instance skeleton, BCS builder, digests and GraphQL mirror",
-      "evidenceText": "proof=none; In progress (W29): Sui canister foundation written in src/rumi_icusd_sui_bridge (ids, BCS builder with both digests, wire signature, Gate decoders, GraphQL quorum); not yet built; waits for the single Rust builder slot",
+      "evidenceText": "proof=local-test; 34e68d9e delivered (W29, local, not pushed): ids, BCS builder with both digests, wire signature, Gate decoders, GraphQL quorum; 62 tests, clippy and wasm32 clean; vectors not checked against the official SDK or CLI",
       "evidenceLinks": []
     },
     {

@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-49 in progress (same W28): 49a to 49d delivered; 49c fixes e3516aea passed source review and the 49d custody correction 4394b472 is with Miles. Next 49e (the Solana collector reader) when W29 returns the builder slot. BB-47 stays in Review until its carried items are accepted here. Then BB-50 (wallet connector).",
+      "nextAction": "BB-49 in progress (same W28): 49a to 49d accepted and pushed; 49e (the Solana collector reader) in progress with the builder slot. BB-47 stays in Review until Miles moves it (its carried items are in accepted 49b and 49d). Then BB-50 (wallet connector).",
       "cardIds": [
         "BB-47",
         "BB-48",
@@ -77,7 +77,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 done. BB-52 in progress (W29): Sui canister foundation, sharing the single Rust builder slot with W28. Then BB-53 (lanes, observer, custody, Sui collector reader) and BB-54 (wallet).",
+      "nextAction": "BB-51 done. BB-52 delivered for review (W29, local commit 34e68d9e, not pushed). Then BB-53 (lanes, observer, custody, Sui collector reader) and BB-54 (wallet).",
       "cardIds": [
         "BB-51",
         "BB-52",
