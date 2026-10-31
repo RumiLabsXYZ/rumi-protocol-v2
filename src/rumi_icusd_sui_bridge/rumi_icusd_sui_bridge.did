@@ -1,0 +1,76 @@
+type BridgeArg = variant { Upgrade : UpgradeArgs; Init : InitArgs };
+type ConfigView = record {
+  signing_enabled : bool;
+  bridge_version : text;
+  initialized : bool;
+  mirror : MirrorSettings;
+  network : SuiNetwork;
+  schema_version : nat32;
+  binding : opt GateBindingView;
+  schnorr_key_name : text;
+  short_chain_id : text;
+  chain_identifier : text;
+  instance_salt : text;
+};
+type GateBindingArg = record {
+  admin_cap_id : text;
+  mint_cap_id : text;
+  gate_id : text;
+  package_id : text;
+};
+type GateBindingView = record {
+  decimals : nat8;
+  admin_cap_id : text;
+  coin_type : text;
+  mint_cap_id : text;
+  gate_id : text;
+  gate_type : text;
+  package_id : text;
+};
+type HttpHeader = record { value : text; name : text };
+type HttpResponse = record {
+  status : nat;
+  body : blob;
+  headers : vec HttpHeader;
+};
+type InitArgs = record {
+  mirror : opt MirrorSettings;
+  network : SuiNetwork;
+  chain_identifier : text;
+};
+type MirrorSettings = record {
+  max_response_bytes : nat32;
+  min_quorum : nat8;
+  enabled : bool;
+  min_independent_providers : nat8;
+  providers : vec ProviderConfig;
+};
+type ProviderConfig = record { id : text; url : text };
+type Result = variant { Ok : vec RoleView; Err : SuiBridgeError };
+type Result_1 = variant { Ok : ConfigView; Err : SuiBridgeError };
+type RoleView = record {
+  public_key : opt text;
+  role : SuiRole;
+  derivation_path : vec text;
+  address : opt text;
+};
+type SuiBridgeError = variant {
+  Anonymous;
+  SignerFailed : text;
+  Unauthorized;
+  NotConfigured : text;
+  InvalidArgument : text;
+  Conflict : text;
+};
+type SuiNetwork = variant { Mainnet; Testnet };
+type SuiRole = variant { UpgradeCustody; Gas; Treasury };
+type TransformArgs = record { context : blob; response : HttpResponse };
+type UpgradeArgs = record { mirror : opt MirrorSettings };
+service : (BridgeArg) -> {
+  bridge_version : () -> (text) query;
+  derive_role_keys : () -> (Result);
+  get_config : () -> (ConfigView) query;
+  get_roles : () -> (vec RoleView) query;
+  set_gate_binding : (GateBindingArg) -> (Result_1);
+  transform_sui_graphql : (TransformArgs) -> (HttpResponse) query;
+}

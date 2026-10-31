@@ -1,0 +1,30 @@
+[package]
+name = "rumi_icusd_sui_bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Escrow-backed ICP icUSD <-> Sui icUSD bridge canister instance (BB-52 foundation: ids, role paths, BCS TransactionData builder with both digests, wire signatures, Gate decoders, GraphQL mirror)"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candid = "0.10.6"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0"
+ic-cdk = "0.12.0"
+ic-stable-structures = "0.6.5"
+ciborium = "0.2.1"
+# Already in Cargo.lock (used by the other bridge crates and the backend); no new crate.
+sha2 = "0.10.2"
+# The one new lock entry (BB-52): RustCrypto BLAKE2 on the digest 0.10 already in the lock.
+blake2 = "=0.10.6"
+hex = "0.4"
+bs58 = "0.5"
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+candid_parser = "0.1"
+# Tests only: deterministic test seeds sign the golden digests. Already in Cargo.lock
+# (transitive); default features off so nothing new is pulled in.
+ed25519-dalek = { version = "2.1.1", default-features = false }
