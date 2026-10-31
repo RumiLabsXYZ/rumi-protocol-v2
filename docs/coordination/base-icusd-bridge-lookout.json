@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Accepted at source and local-test level: 12dfee35, 8198fb28, bc96f166, 23dfe841 (ledger saga, bootstrap fences, metadata authorities, proof-only refunds, fair paging). In progress: 49c to 49e with the carried requirements",
+      "evidenceText": "proof=none; Accepted: 12dfee35, 8198fb28, bc96f166, 23dfe841. 49c dba814d6 (mint saga, strict finalized return observer, C1 and C2 monitors) in review; 49d (burn lane, custody, holder burns, stray refunds) in progress, then 49e",
       "evidenceLinks": []
     },
     {

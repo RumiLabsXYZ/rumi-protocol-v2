@@ -1766,6 +1766,26 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   offline (`sui_flavor.rs` 59-74), and `-e testnet` resolves from the built-in manifest environments before any chain-id
   cache or public query (`find_env.rs` 46-48). W29 uses that route directly.
 
+## Milestone 80 (2026-10-31): BB-49 49c delivered
+
+- 49c `dba814d6` (W28, local, Solana crate only): `flows/mint_saga.rs` (one mint operation per escrowed deposit keyed by its
+  mint id, idempotent submit; books move PM to O only when the lane reports Delivered with the exact stored message,
+  applied once under `outcome_applied`; held releases re-minted to the verified sender, at most two active; transient slot
+  shortage waits, an unbuildable request holds the deposit with no operation; pauses and halts stop building);
+  `observer.rs` (bounded discovery from a persisted cursor into a stable (slot, signature) queue processed oldest first;
+  credit O to RC only with null error, the exact return shape, no inner instructions, reported balances with exactly the
+  source and the return account changed by the amount, and the source's pre-balance owner equal to the signer; otherwise a
+  stray kept in O with its source account and verified sender; dedup by return id and signature; a return larger than O
+  waits if in-flight mints explain it); `monitor.rs` (C1 coverage and C2 supply bound judged against books before and after
+  the read, confirmed by a second reading before a halt; a supply decrease below O reported as unattributed, never acted
+  on). `sol_rpc` `getTransaction` carries inner-instruction counts and token balances (mirror test against the pinned .did).
+  Core schema 5, MemoryIds 18 to 22, pinned record images, both `.did` files regenerated.
+- Worker run: 391 tests (both feature modes), clippy clean (including wasm32), Wasm 4,440,922 bytes, golden 0 mismatches,
+  diff-check clean; mutation checks caught the owner, inner-instruction, two-reading and queue-removal guards (an added
+  assertion now catches the `outcome_applied` guard). Coordinator check: Solana crate only, diff-check clean, golden 0.
+- 49d next on the same W28 (burn lane with the carried return_id binding, custody with no unexplained deficit OK, the
+  holder-burn seam, stray refunds with the per-transfer locator), then 49e.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
