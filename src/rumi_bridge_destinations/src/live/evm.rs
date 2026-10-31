@@ -211,7 +211,7 @@ fn providers_label(idx: &[usize]) -> String {
 
 /// A value wins when exactly one distinct value was returned by at least
 /// `quorum` providers. Providers are named by position only.
-fn tally<T: PartialEq + Clone + std::fmt::Debug>(
+pub(super) fn tally<T: PartialEq + Clone + std::fmt::Debug>(
     parsed: Vec<Result<T, String>>,
     quorum: usize,
     what: &str,

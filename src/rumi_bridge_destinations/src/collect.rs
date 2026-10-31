@@ -34,10 +34,21 @@
 //! | EVM (Base and the other EVM rows) | token `totalSupply` at the profile's settlement head, custody zero (the return burns atomically) | wired through [`Readings::evm_total_supply`] |
 //! | Solana | supply plus the measured return-account balance | `Unavailable`, delivered by card BB-49 |
 //! | Sui | wrapped-currency supply | `Unavailable`, delivered by card BB-53 |
-//! | XRPL lane | issued outstanding | `Unavailable`, delivered by cards BB-56 and BB-57 |
+//! | XRPL lane | `E_X` (ICRC-1 balance of the lane escrow, the same IC transport) and the issuer's obligations for the icUSD currency at a VALIDATED ledger | wired through [`Readings::xrpl_issued_outstanding`] (card BB-57); a source without it fails with `Unavailable` |
 //!
 //! An unavailable source fails the whole collection with an explicit error
 //! naming the card. No value is ever invented, defaulted or carried over.
+//!
+//! # The XRPL lane (`X`)
+//!
+//! `E_X` is read exactly like a destination escrow (ICRC-1 balance on the
+//! production icUSD ledger) and the issued outstanding is read from the XRP
+//! Ledger itself, never from the backend's own report: the issuer's
+//! obligations for the icUSD currency, at a numbered validated ledger agreed by
+//! a provider quorum. The lane is read BEFORE the ICP-side numbers, so a
+//! source that has no XRPL reader fails before any other query is made. The
+//! lane escrow is counted once, in `escrow_locked`, and the boundary check has
+//! already refused a lane whose escrow or network id is also in `D`.
 //!
 //! # Sources
 //!
@@ -63,6 +74,7 @@ use serde::Deserialize;
 use crate::aggregate::{
     aggregate, check_boundary, AggregateError, AggregateInput, AggregateReport, Catalog,
     DestinationConfig, DestinationReading, Flag, FlagKind, Severity, XrplLaneConfig,
+    XrplLaneReading,
 };
 use crate::escrow::{account_label, AccountIdentity, EscrowBinding};
 use crate::types::{Family, FinalityRule, Network};
@@ -90,6 +102,21 @@ pub struct EvmSupply {
     pub finality: FinalityRule,
     /// Block number of that head.
     pub block: u64,
+}
+
+/// The XRPL lane's issued outstanding and the validated ledger it was read at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrplIssued {
+    /// The issuer's obligations for the icUSD currency, in e8s (exact: an
+    /// amount beyond 8 decimals or 15 significant digits is a failed read).
+    pub issued_outstanding: u128,
+    /// The finality rule of the ledger the read was pinned to. The collector
+    /// refuses a reading whose rule differs from the profile's.
+    pub finality: FinalityRule,
+    /// Index of that validated ledger.
+    pub ledger_index: u64,
+    /// Its hash (hex), agreed by the provider quorum.
+    pub ledger_hash: String,
 }
 
 /// The parts of a bridge instance's `get_supply_audit` the collector uses, in
@@ -172,6 +199,14 @@ pub trait Readings {
     fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError>;
     /// Token `totalSupply` of an EVM destination at its settlement head.
     fn evm_total_supply(&self, network: &Network) -> Result<EvmSupply, ReadError>;
+    /// The XRPL lane's issued outstanding: the issuer's obligations for the icUSD
+    /// currency at a validated ledger. A source with no XRPL reader answers
+    /// `Unavailable`, which fails the collection before any other read.
+    fn xrpl_issued_outstanding(&self, _network: &Network) -> Result<XrplIssued, ReadError> {
+        Err(ReadError::Unavailable {
+            card: XRPL_SOURCE_CARDS,
+        })
+    }
     /// The bridge instance's own `get_supply_audit` for a counted EVM
     /// destination (its `instance` is a canonical principal). A query call; the
     /// reply is a self-report and is only compared with the independent reads.
@@ -232,6 +267,9 @@ pub struct Collected {
     pub liabilities_total: u128,
     pub report: AggregateReport,
     pub heads: Vec<HeadNote>,
+    /// The XRPL lane's reading (validated ledger and hash), when a lane was
+    /// collected.
+    pub xrpl_read: Option<XrplIssued>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,13 +375,27 @@ pub fn collect(
             error: ReadError::Unavailable { card },
         });
     }
+    // The lane's issued outstanding is read first: a source without an XRPL
+    // reader (or a lane that cannot be read) fails before any other query.
+    let mut xrpl_read = None;
     if let Some(x) = &config.xrpl {
-        return Err(CollectError::Read {
-            what: format!("issued outstanding of the XRPL lane {}", x.network_id),
-            error: ReadError::Unavailable {
-                card: XRPL_SOURCE_CARDS,
-            },
-        });
+        let Some((_, network)) = catalog.lookup(&x.network_id) else {
+            return Err(CollectError::Rejected(AggregateError::UnknownNetworkId(
+                x.network_id.clone(),
+            )));
+        };
+        let issued = read(
+            format!("issued outstanding of the XRPL lane {}", x.network_id),
+            readings.xrpl_issued_outstanding(network),
+        )?;
+        if issued.finality != network.finality.rule {
+            return Err(CollectError::WrongHead {
+                network_id: x.network_id.clone(),
+                expected: network.finality.rule,
+                got: issued.finality,
+            });
+        }
+        xrpl_read = Some(issued);
     }
 
     let icp_ledger_total_supply = read(
@@ -421,12 +473,33 @@ pub fn collect(
         }
     }
 
+    // E_X: the lane escrow's ICRC-1 balance, read through the same transport as
+    // every destination escrow. Counted once, in `escrow_locked`.
+    let xrpl = match (&config.xrpl, &xrpl_read) {
+        (Some(x), Some(issued)) => {
+            let escrow_balance = read(
+                format!("escrow balance of the XRPL lane {}", x.network_id),
+                readings.icrc1_balance_of(&x.escrow),
+            )?;
+            heads.push(HeadNote {
+                network_id: x.network_id.clone(),
+                finality: issued.finality,
+                block: issued.ledger_index,
+            });
+            Some(XrplLaneReading {
+                config: x.clone(),
+                escrow_balance,
+                issued_outstanding: issued.issued_outstanding,
+            })
+        }
+        _ => None,
+    };
+
     let input = AggregateInput {
         icp_ledger_total_supply,
         debt_backed_chain_supplies,
         destinations,
-        // Unreachable until the XRPL source exists: a configured lane failed above.
-        xrpl: None,
+        xrpl,
     };
     let mut report = aggregate(&input, catalog).map_err(CollectError::Rejected)?;
 
@@ -462,6 +535,7 @@ pub fn collect(
         liabilities_total,
         report,
         heads,
+        xrpl_read,
     })
 }
 
@@ -584,10 +658,24 @@ pub fn render(c: &Collected) -> String {
             format_e8s(d.custody)
         ));
     }
+    if let Some(x) = &c.input.xrpl {
+        out.push_str(&format!(
+            "xrpl lane {}: escrow {}, issued outstanding {}\n",
+            x.config.network_id,
+            format_e8s(x.escrow_balance),
+            format_e8s(x.issued_outstanding)
+        ));
+    }
     for h in &c.heads {
         out.push_str(&format!(
             "head {}: {:?} block {}\n",
             h.network_id, h.finality, h.block
+        ));
+    }
+    if let Some(r) = &c.xrpl_read {
+        out.push_str(&format!(
+            "xrpl issued outstanding read at validated ledger {} (hash {})\n",
+            r.ledger_index, r.ledger_hash
         ));
     }
     for a in &c.audits {
@@ -712,6 +800,17 @@ struct FixtureEvmSupply {
     block: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FixtureXrplIssued {
+    network_id: String,
+    #[serde(with = "u128_string")]
+    issued_outstanding: u128,
+    finality: FinalityRule,
+    ledger_index: u64,
+    ledger_hash: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FixtureData {
@@ -723,6 +822,8 @@ struct FixtureData {
     icrc1_balances: Vec<FixtureBalance>,
     #[serde(default)]
     evm_supplies: Vec<FixtureEvmSupply>,
+    #[serde(default)]
+    xrpl_issued: Vec<FixtureXrplIssued>,
     #[serde(default)]
     instance_audits: Vec<FixtureInstanceAudit>,
 }
@@ -752,6 +853,7 @@ pub struct FixtureReadings {
     debt_backed_chain_supplies: Option<u128>,
     balances: BTreeMap<AccountIdentity, u128>,
     evm: BTreeMap<String, EvmSupply>,
+    xrpl: BTreeMap<String, XrplIssued>,
     audits: BTreeMap<Vec<u8>, InstanceAudit>,
 }
 
@@ -793,6 +895,19 @@ impl FixtureReadings {
                 return Err(format!("fixture lists the supply of {id} twice"));
             }
         }
+        let mut xrpl = BTreeMap::new();
+        for x in file.readings.xrpl_issued {
+            let id = x.network_id;
+            let issued = XrplIssued {
+                issued_outstanding: x.issued_outstanding,
+                finality: x.finality,
+                ledger_index: x.ledger_index,
+                ledger_hash: x.ledger_hash,
+            };
+            if xrpl.insert(id.clone(), issued).is_some() {
+                return Err(format!("fixture lists the issued outstanding of {id} twice"));
+            }
+        }
         let mut audits = BTreeMap::new();
         for a in file.readings.instance_audits {
             let key = crate::escrow::usable_principal(&a.instance)
@@ -812,6 +927,7 @@ impl FixtureReadings {
                 debt_backed_chain_supplies: file.readings.debt_backed_chain_supplies,
                 balances,
                 evm,
+                xrpl,
                 audits,
             },
         })
@@ -858,6 +974,15 @@ impl Readings for FixtureReadings {
             ReadError::Failed(format!("fixture has no supply for {}", network.network_id))
         })
     }
+
+    fn xrpl_issued_outstanding(&self, network: &Network) -> Result<XrplIssued, ReadError> {
+        self.xrpl.get(&network.network_id).cloned().ok_or_else(|| {
+            ReadError::Failed(format!(
+                "fixture has no XRPL issued outstanding for {}",
+                network.network_id
+            ))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -868,6 +993,7 @@ mod tests {
     const BASE_ONLY: &str = include_str!("../fixtures/collect_base_only.json");
     const OVERLAP: &str = include_str!("../fixtures/collect_rejected_xrpl_overlap.json");
     const C1_BROKEN: &str = include_str!("../fixtures/collect_c1_broken.json");
+    const BASE_PLUS_XRPL: &str = include_str!("../fixtures/collect_base_plus_xrpl.json");
 
     fn catalog() -> Catalog {
         Catalog::embedded().expect("embedded catalog")
@@ -1027,7 +1153,7 @@ mod tests {
 
     #[test]
     fn fixture_principals_are_obviously_synthetic() {
-        for json in [BASE_ONLY, OVERLAP, C1_BROKEN] {
+        for json in [BASE_ONLY, OVERLAP, C1_BROKEN, BASE_PLUS_XRPL] {
             let fx = FixtureReadings::parse(json).unwrap();
             assert!(
                 fx.description.to_lowercase().contains("synthetic"),
@@ -1062,6 +1188,165 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A source that answers the lane with a fixed reading and counts its calls.
+    struct LaneFlat {
+        e_d: u128,
+        e_x: u128,
+        issued: XrplIssued,
+        order: std::cell::RefCell<Vec<&'static str>>,
+    }
+    impl Readings for LaneFlat {
+        fn source(&self) -> &'static str {
+            "fixture"
+        }
+        fn icp_ledger_total_supply(&self) -> Result<u128, ReadError> {
+            self.order.borrow_mut().push("icp_total");
+            Ok(1_000 * E8)
+        }
+        fn icrc1_balance_of(&self, b: &EscrowBinding) -> Result<u128, ReadError> {
+            self.order.borrow_mut().push("escrow");
+            Ok(if b.owner == binding_for("xrpl-mainnet").owner {
+                self.e_x
+            } else {
+                self.e_d
+            })
+        }
+        fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError> {
+            Ok(0)
+        }
+        fn instance_audit(&self, d: &DestinationConfig) -> Result<InstanceAudit, ReadError> {
+            Ok(consistent_audit(&d.network_id, self.e_d, self.e_d))
+        }
+        fn evm_total_supply(&self, _: &Network) -> Result<EvmSupply, ReadError> {
+            Ok(EvmSupply {
+                supply: self.e_d,
+                finality: FinalityRule::EvmTag,
+                block: 7,
+            })
+        }
+        fn xrpl_issued_outstanding(&self, _: &Network) -> Result<XrplIssued, ReadError> {
+            self.order.borrow_mut().push("xrpl_issued");
+            Ok(self.issued.clone())
+        }
+    }
+
+    fn lane_flat(e_d: u128, e_x: u128, issued: u128) -> LaneFlat {
+        LaneFlat {
+            e_d,
+            e_x,
+            issued: XrplIssued {
+                issued_outstanding: issued,
+                finality: FinalityRule::XrplValidated,
+                ledger_index: 91_000_000,
+                ledger_hash: "AB".repeat(32),
+            },
+            order: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn d_plus_x() -> CollectConfig {
+        CollectConfig {
+            destinations: vec![dest("base-mainnet")],
+            xrpl: Some(XrplLaneConfig {
+                network_id: "xrpl-mainnet".into(),
+                escrow: binding_for("xrpl-mainnet"),
+            }),
+        }
+    }
+
+    #[test]
+    fn d_plus_x_counts_each_escrow_once_and_x_stays_outside_d() {
+        let readings = lane_flat(200 * E8, 50 * E8, 50 * E8);
+        let got = collect(&d_plus_x(), &catalog(), &readings).unwrap();
+        let r = &got.report;
+        // E_d (200) + E_X (50), each once.
+        assert_eq!(r.escrow_locked, 250 * E8);
+        assert_eq!(r.circulating_on_icp, 750 * E8);
+        assert_eq!(r.circulating_dest.len(), 1);
+        assert_eq!(r.circulating_dest[0].circulating, 200 * E8);
+        assert_eq!(r.circulating_xrpl, 50 * E8);
+        assert_eq!(r.circulating_total, 1_000 * E8);
+        assert!(!r.has_failure());
+        // The lane head is reported with the validated ledger.
+        assert!(got.heads.iter().any(|h| h.network_id == "xrpl-mainnet"
+            && h.finality == FinalityRule::XrplValidated
+            && h.block == 91_000_000));
+        assert_eq!(got.xrpl_read.as_ref().unwrap().issued_outstanding, 50 * E8);
+        let text = render(&got);
+        assert!(text.contains("xrpl lane xrpl-mainnet: escrow 50.00000000, issued outstanding 50.00000000"), "{text}");
+        assert!(text.contains("head xrpl-mainnet: XrplValidated block 91000000"), "{text}");
+        assert!(text.contains("xrpl issued outstanding read at validated ledger 91000000"), "{text}");
+        // The lane is read BEFORE the ICP-side numbers.
+        assert_eq!(readings.order.borrow()[0], "xrpl_issued");
+    }
+
+    #[test]
+    fn a_lane_issued_amount_above_its_escrow_is_reported_not_corrected() {
+        // The collector reports what was read: 60 issued against 50 escrowed
+        // makes circulating_total exceed total_icusd by exactly 10.
+        let got = collect(&d_plus_x(), &catalog(), &lane_flat(200 * E8, 50 * E8, 60 * E8)).unwrap();
+        assert_eq!(got.report.circulating_xrpl, 60 * E8);
+        assert_eq!(got.report.circulating_total, 1_010 * E8);
+    }
+
+    #[test]
+    fn the_lane_ledger_must_be_read_under_the_profiles_finality_rule() {
+        let mut readings = lane_flat(200 * E8, 50 * E8, 50 * E8);
+        readings.issued.finality = FinalityRule::EvmTag;
+        let err = collect(&d_plus_x(), &catalog(), &readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CollectError::WrongHead { network_id, expected: FinalityRule::XrplValidated, got: FinalityRule::EvmTag }
+                    if network_id == "xrpl-mainnet"
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_lane_escrow_cannot_also_be_a_d_escrow() {
+        // Counting the same account in D and X would double count it: refused
+        // before any read.
+        let mut cfg = d_plus_x();
+        cfg.xrpl.as_mut().unwrap().escrow = binding_for("base-mainnet");
+        let err = collect(&cfg, &catalog(), &Untouchable).unwrap_err();
+        assert!(matches!(
+            err,
+            CollectError::Rejected(AggregateError::DuplicateEscrowBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn the_base_plus_xrpl_fixture_collects_with_a_fixture_label() {
+        let fx = FixtureReadings::parse(BASE_PLUS_XRPL).unwrap();
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert_eq!(got.source, "fixture");
+        let r = &got.report;
+        assert_eq!(r.escrow_locked, 20_012_345_678 + 5_000_000_001);
+        assert_eq!(r.circulating_xrpl, 5_000_000_001);
+        assert_eq!(r.circulating_total, 100_000_000_000);
+        assert!(!r.has_failure());
+        let text = render(&got);
+        assert!(text.starts_with("source: fixture\n"), "{text}");
+        assert!(text.contains("xrpl lane xrpl-mainnet"), "{text}");
+    }
+
+    #[test]
+    fn a_fixture_without_the_xrpl_reading_is_a_failed_read_not_zero() {
+        let mut fx = FixtureReadings::parse(BASE_PLUS_XRPL).unwrap();
+        fx.readings.xrpl.clear();
+        let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CollectError::Read { error: ReadError::Failed(m), what }
+                    if m.contains("no XRPL issued outstanding") && what.contains("XRPL lane")
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

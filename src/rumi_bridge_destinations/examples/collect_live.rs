@@ -5,8 +5,10 @@
 //!       <endpoints.json> <collect.json> --live
 //!
 //! * `<endpoints.json>` is the explicit endpoint config (`LiveConfig`): the IC
-//!   replica URL, the ledger and backend canister ids, and per EVM network the
-//!   token address and provider URLs. There are no built-in endpoints or ids.
+//!   replica URL, the ledger and backend canister ids, per EVM network the
+//!   token address and provider URLs, and per XRPL network the icUSD issuer
+//!   account and rippled JSON-RPC provider URLs. There are no built-in
+//!   endpoints, issuers or ids.
 //! * `<collect.json>` is a `CollectConfig`: the destinations (with their escrow
 //!   bindings) and the optional XRPL lane to collect.
 //! * `--live` is required. Running this example sends real queries to the

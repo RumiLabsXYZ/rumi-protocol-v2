@@ -16,6 +16,12 @@
 //!   asked `eth_chainId` and bound to the profile's chain id; a provider on
 //!   another chain is excluded from every vote.
 //!
+//! * [`xrpl`]: the XRPL lane's issued outstanding, read from the XRP Ledger
+//!   itself (the issuer's icUSD `obligations` at a numbered VALIDATED ledger
+//!   agreed by the profile's provider quorum, providers on another network or
+//!   with an unvalidated answer excluded, amounts converted exactly). `E_X` is
+//!   an ordinary ICRC-1 balance read through the IC transport above.
+//!
 //! * [`ic::instance_supply_audit`]: each counted EVM destination's bridge
 //!   instance is also asked for its own `get_supply_audit` (query, anonymous).
 //!   That reply is a self-report, shown next to the independent reads and
@@ -33,13 +39,14 @@
 //! transports and one loopback server only. Executing the real clients against
 //! IC mainnet or a public EVM RPC is a separate, held step.
 //!
-//! Unavailable by design: Solana, Sui and the XRPL lane (see
-//! [`crate::collect`]); a profile whose head is blocked; a backend without the
-//! per-chain query or without configured chain ids. Each is a named error, never
-//! a zero.
+//! Unavailable by design: Solana and Sui (see [`crate::collect`]); a profile
+//! whose head is blocked; a backend without the per-chain query or without
+//! configured chain ids; an XRPL lane without a configured issuer and providers.
+//! Each is a named error, never a zero.
 
 pub mod evm;
 pub mod ic;
+pub mod xrpl;
 
 use std::collections::BTreeMap;
 
@@ -47,7 +54,7 @@ use candid::Principal;
 use serde::Deserialize;
 
 use crate::aggregate::DestinationConfig;
-use crate::collect::{EvmSupply, InstanceAudit, ReadError, Readings};
+use crate::collect::{EvmSupply, InstanceAudit, ReadError, Readings, XrplIssued};
 use crate::escrow::EscrowBinding;
 use crate::types::Network;
 
@@ -63,6 +70,19 @@ pub struct LiveConfig {
     /// EVM destinations by network id (as in the profile catalog).
     #[serde(default)]
     pub evm: BTreeMap<String, EvmConfig>,
+    /// The XRPL lane by network id (as in the profile catalog).
+    #[serde(default)]
+    pub xrpl: BTreeMap<String, XrplConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XrplConfig {
+    /// The icUSD issuer account (an XRPL classic address). There is no default.
+    pub issuer: String,
+    /// rippled JSON-RPC provider URLs (https, or http on loopback). They may
+    /// carry keys and are never printed.
+    pub providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,12 +146,20 @@ pub struct EvmSource {
     pub transport: Box<dyn evm::JsonRpcTransport>,
 }
 
-/// [`Readings`] over the IC query client and the EVM JSON-RPC clients.
+/// One XRPL lane's issuer and transport.
+pub struct XrplSource {
+    pub issuer: String,
+    pub transport: Box<dyn evm::JsonRpcTransport>,
+}
+
+/// [`Readings`] over the IC query client, the EVM JSON-RPC clients and the XRPL
+/// JSON-RPC clients.
 pub struct LiveReadings {
     ic: Box<dyn ic::IcQuery>,
     ledger: Principal,
     backend: Option<(Principal, Vec<u32>)>,
     evm: BTreeMap<String, EvmSource>,
+    xrpl: BTreeMap<String, XrplSource>,
     read_at_unix: u64,
 }
 
@@ -149,8 +177,23 @@ impl LiveReadings {
             ledger,
             backend,
             evm,
+            xrpl: BTreeMap::new(),
             read_at_unix,
         }
+    }
+
+    /// Replace the IC transport (the tests give the lane a ledger that answers
+    /// per escrow account).
+    #[cfg(test)]
+    pub(crate) fn with_ic(mut self, ic: Box<dyn ic::IcQuery>) -> LiveReadings {
+        self.ic = ic;
+        self
+    }
+
+    /// Add the XRPL lane source of `network_id` (as in the profile catalog).
+    pub fn with_xrpl(mut self, network_id: &str, source: XrplSource) -> LiveReadings {
+        self.xrpl.insert(network_id.to_string(), source);
+        self
     }
 
     /// Build the real clients from an endpoint config. This constructs HTTP
@@ -182,13 +225,20 @@ impl LiveReadings {
                 },
             );
         }
-        Ok(LiveReadings::new(
-            Box::new(ic),
-            ledger,
-            backend,
-            evm_sources,
-            read_at_unix,
-        ))
+        let mut live = LiveReadings::new(Box::new(ic), ledger, backend, evm_sources, read_at_unix);
+        for (id, c) in &config.xrpl {
+            xrpl::check_issuer(&c.issuer).map_err(|e| format!("xrpl.{id}.issuer: {e}"))?;
+            let transport = evm::ReqwestJsonRpc::new(c.providers.clone())
+                .map_err(|e| format!("xrpl.{id}.providers: {e}"))?;
+            live = live.with_xrpl(
+                id,
+                XrplSource {
+                    issuer: c.issuer.clone(),
+                    transport: Box::new(transport),
+                },
+            );
+        }
+        Ok(live)
     }
 }
 
@@ -204,7 +254,7 @@ impl Readings for LiveReadings {
                 format_utc(self.read_at_unix),
                 self.read_at_unix
             ),
-            "ic reads are anonymous query calls with response verification on; evm reads are totalSupply at the numbered head shown per destination".to_string(),
+            "ic reads are anonymous query calls with response verification on; evm reads are totalSupply at the numbered head shown per destination; xrpl reads are the issuer's icUSD obligations at the numbered validated ledger shown for the lane".to_string(),
         ]
     }
 
@@ -242,6 +292,16 @@ impl Readings for LiveReadings {
             Some(src) => evm::read_total_supply(src.transport.as_ref(), &src.token, network),
             None => Err(ReadError::UnavailableGap(format!(
                 "the endpoint config has no token and providers for {}",
+                network.network_id
+            ))),
+        }
+    }
+
+    fn xrpl_issued_outstanding(&self, network: &Network) -> Result<XrplIssued, ReadError> {
+        match self.xrpl.get(&network.network_id) {
+            Some(src) => xrpl::read_issued_outstanding(src.transport.as_ref(), &src.issuer, network),
+            None => Err(ReadError::UnavailableGap(format!(
+                "the endpoint config has no issuer and providers for {}",
                 network.network_id
             ))),
         }
@@ -639,6 +699,185 @@ mod tests {
         let err = collect(&cfg, &catalog, &readings).unwrap_err();
         assert!(err.to_string().contains("BB-49"), "{err}");
         // Nothing was read on the IC side before the refusal.
+    }
+
+    /// An IC that answers `icrc1_balance_of` per escrow owner, so the D escrow
+    /// and the XRPL lane escrow can differ.
+    struct TwoEscrowIc {
+        total: u128,
+        d_balance: u128,
+        x_balance: u128,
+        calls: RefCell<Vec<String>>,
+    }
+    impl ic::IcQuery for TwoEscrowIc {
+        fn query(&self, c: &Principal, method: &str, a: &[u8]) -> Result<Vec<u8>, IcQueryError> {
+            self.calls.borrow_mut().push(format!("{method}@{}", c.to_text()));
+            match method {
+                "icrc1_balance_of" => {
+                    let account: ic::Icrc1Account = candid::decode_one(a).unwrap();
+                    let balance = if account.owner.as_slice() == b"syn-xrpl-mainnet" {
+                        self.x_balance
+                    } else {
+                        self.d_balance
+                    };
+                    Ok(candid::encode_one(Nat::from(balance)).unwrap())
+                }
+                "icrc1_total_supply" => Ok(candid::encode_one(Nat::from(self.total)).unwrap()),
+                "get_supply_audit" => Ok(audit_reply(
+                    self.d_balance,
+                    self.d_balance,
+                    self.d_balance,
+                    self.d_balance,
+                )),
+                "get_chain_public_launch_status" => Ok(candid::encode_one(Full {
+                    status: Some(St::Registered),
+                    chain_supply_e8s: Nat::from(0u8),
+                    extra: true,
+                })
+                .unwrap()),
+                other => Err(IcQueryError::Failed(format!("unexpected {other}"))),
+            }
+        }
+    }
+
+    fn xrpl_source(providers: Vec<xrpl::tests::P>) -> XrplSource {
+        XrplSource {
+            issuer: xrpl::tests::ISSUER.to_string(),
+            transport: Box::new(xrpl::tests::Mock::new(
+                providers.into_iter().map(xrpl::tests::P::script).collect(),
+            )),
+        }
+    }
+
+    fn lane_config() -> CollectConfig {
+        let mut cfg = base_config();
+        cfg.xrpl = Some(crate::aggregate::XrplLaneConfig {
+            network_id: "xrpl-mainnet".into(),
+            escrow: binding_for("xrpl-mainnet"),
+        });
+        cfg
+    }
+
+    fn live_with_lane(ic: TwoEscrowIc, providers: Vec<xrpl::tests::P>) -> LiveReadings {
+        live(
+            FakeIc {
+                total: ic.total,
+                balance: ic.d_balance,
+                chain_supply: 0,
+                backend_has_query: true,
+                liabilities: ic.d_balance,
+                calls: RefCell::new(Vec::new()),
+            },
+            true,
+        )
+        .with_ic(Box::new(ic))
+        .with_xrpl("xrpl-mainnet", xrpl_source(providers))
+    }
+
+    #[test]
+    fn an_end_to_end_live_collection_counts_d_and_x_escrow_once_each() {
+        let ic = TwoEscrowIc {
+            total: 100_000_000_000,
+            d_balance: 20_000_000_000,
+            x_balance: 5_000_000_000,
+            calls: RefCell::new(Vec::new()),
+        };
+        let readings = live_with_lane(
+            ic,
+            vec![
+                xrpl::tests::P::mainnet(91_000_000, "50"),
+                xrpl::tests::P::mainnet(91_000_000, "50"),
+                xrpl::tests::P::mainnet(91_000_005, "50"),
+            ],
+        );
+        let catalog = Catalog::embedded().unwrap();
+        let got = collect(&lane_config(), &catalog, &readings).unwrap();
+        let r = &got.report;
+        assert_eq!(got.source, "live");
+        // E_d = 200 and E_X = 50, each counted once.
+        assert_eq!(r.escrow_locked, 25_000_000_000);
+        assert_eq!(r.circulating_on_icp, 75_000_000_000);
+        assert_eq!(r.circulating_dest[0].circulating, 20_000_000_000);
+        assert_eq!(r.circulating_xrpl, 5_000_000_000);
+        assert_eq!(r.circulating_total, 100_000_000_000);
+        assert!(!r.has_failure(), "{:?}", r.flags);
+        // The lane was read at the quorum-agreed validated ledger.
+        let lane = got.xrpl_read.as_ref().unwrap();
+        assert_eq!((lane.ledger_index, lane.finality), (91_000_000, crate::types::FinalityRule::XrplValidated));
+
+        let text = render(&got);
+        assert!(text.starts_with("source: live\n"), "{text}");
+        assert!(text.contains("head xrpl-mainnet: XrplValidated block 91000000"), "{text}");
+        assert!(text.contains("xrpl lane xrpl-mainnet: escrow 50.00000000, issued outstanding 50.00000000"), "{text}");
+        assert!(!text.contains("source: fixture"), "{text}");
+    }
+
+    #[test]
+    fn a_lane_without_a_configured_xrpl_source_is_unavailable_not_zero() {
+        let readings = live(ic_ok(), true);
+        let catalog = Catalog::embedded().unwrap();
+        let err = collect(&lane_config(), &catalog, &readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                crate::collect::CollectError::Read { error: ReadError::UnavailableGap(g), .. }
+                    if g.contains("xrpl-mainnet")
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_xrpl_read_stops_the_collection_before_any_ic_query() {
+        let ic = TwoEscrowIc {
+            total: 1,
+            d_balance: 1,
+            x_balance: 1,
+            calls: RefCell::new(Vec::new()),
+        };
+        // Two providers disagree: no quorum.
+        let readings = live_with_lane(
+            ic,
+            vec![
+                xrpl::tests::P::mainnet(500, "1"),
+                xrpl::tests::P::mainnet(500, "2"),
+            ],
+        );
+        let catalog = Catalog::embedded().unwrap();
+        let err = collect(&lane_config(), &catalog, &readings).unwrap_err();
+        assert!(err.to_string().contains("no quorum"), "{err}");
+    }
+
+    #[test]
+    fn xrpl_endpoint_config_is_strict_and_builds_without_sending_anything() {
+        let good = r#"{"ic": {"url": "https://ic.example.invalid", "ledger": "ryjl3-tyaaa-aaaaa-aaaba-cai"},
+                      "xrpl": {"xrpl-mainnet": {"issuer": "rFixtureTestAccountzzzzzzzzzzzzz",
+                                                "providers": ["https://a.example.invalid",
+                                                              "https://b.example.invalid"]}}}"#;
+        let c: LiveConfig = serde_json::from_str(good).unwrap();
+        assert_eq!(c.xrpl.len(), 1);
+        let built = LiveReadings::from_config(&c, 0).unwrap();
+        assert_eq!(built.source(), "live");
+        // Unknown fields and a missing issuer are refused; nothing defaults.
+        for bad in [
+            r#"{"ic":{"url":"u","ledger":"l"},"xrpl":{"xrpl-mainnet":{"issuer":"r","providers":[],"x":1}}}"#,
+            r#"{"ic":{"url":"u","ledger":"l"},"xrpl":{"xrpl-mainnet":{"providers":[]}}}"#,
+        ] {
+            assert!(serde_json::from_str::<LiveConfig>(bad).is_err(), "{bad}");
+        }
+        // A malformed issuer, a plain-http provider and no provider all fail to build.
+        for (issuer, providers) in [
+            ("not-an-address", r#"["https://a.example.invalid"]"#),
+            ("rFixtureTestAccountzzzzzzzzzzzzz", r#"["http://example.invalid"]"#),
+            ("rFixtureTestAccountzzzzzzzzzzzzz", "[]"),
+        ] {
+            let text = format!(
+                r#"{{"ic": {{"url": "https://ic.example.invalid", "ledger": "ryjl3-tyaaa-aaaaa-aaaba-cai"}},
+                    "xrpl": {{"xrpl-mainnet": {{"issuer": "{issuer}", "providers": {providers}}}}}}}"#
+            );
+            let c: LiveConfig = serde_json::from_str(&text).unwrap();
+            assert!(LiveReadings::from_config(&c, 0).is_err(), "{issuer} {providers}");
+        }
     }
 
     #[test]
