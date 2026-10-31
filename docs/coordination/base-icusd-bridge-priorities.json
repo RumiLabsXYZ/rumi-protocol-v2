@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-58 in Review (10c18502, source and mocks only). BB-59 in progress (W27). After BB-59's review, BB-60 takes that lane.",
+      "nextAction": "BB-59 in progress (W27, frontend). After BB-59's review, BB-60 (profile reader and upkeep) takes that lane. Native reporting stays deliverable on BB-49, BB-53 and BB-57.",
       "cardIds": [
         "BB-58",
         "BB-59",

@@ -1155,6 +1155,18 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   Lookout updates continue; pins after `10c18502` are local, not yet pushed. Last push confirmed at 03:06 UTC: remote head
   equals local `10c18502`. No workflow edit, cancellation, new CI or timer.
 
+## Milestone 50 (2026-10-31): BB-58 accepted for EVM reporting
+
+- Accepted (Miles): BB-58 at `10c18502` together with `15bb73dc`, `78e8ae3d` and `8b88a96f`, at source, fixture and mock-test
+  level (chain identity filtering before votes with unchanged quorum and zero-call blocked paths; duplicate backend chain ids
+  refused before queries; the actual `SupplyAudit` Candid mapping; instance uniqueness and account binding; independent
+  escrow and supply comparisons; 107 default and 147 feature tests and the fixtures). `AuditEscrowAccountMismatch` as a
+  failure confirmed: C1 must compare the configured escrow, so it implements the accepted binding requirement.
+- Not claimed: any live query, replica-verified query signature or deployed analytics configuration. Native reporting stays a
+  deliverable of BB-49 (Solana), BB-53 (Sui) and BB-57 (XRPL), not complete.
+- Lanes: W28 (BB-47, sole Rust builder) and W27 (BB-59, then BB-60). Push pause in force until 03:45 UTC; evidence after
+  `10c18502` is local and not yet pushed.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

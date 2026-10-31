@@ -519,10 +519,10 @@
     },
     {
       "id": "BB-58",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=local-test; 10c18502: providers bound to the profile chain id before votes; repeated chain ids refused; instance audits read beside independent reads, C1 and supply bound recomputed (fixture C1 break exits 3); source and mocks only",
+      "evidenceText": "proof=local-test; Miles accepted EVM reporting at 10c18502 (with 15bb73dc, 78e8ae3d, 8b88a96f): analytics escrow subtraction; collector with chain-id filtering, count-once ids, instance audits; source, fixture and mock only; native readers on BB-49, 53, 57",
       "evidenceLinks": []
     },
     {
