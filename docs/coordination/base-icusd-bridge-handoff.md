@@ -3216,6 +3216,21 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Sequencing: W23's readability pass finishes if it had started editing, otherwise stands down; then the same W29 makes the factual
   corrections; W23 may tighten wording only after the facts stabilize. Miles reviews the final frozen diff before any push.
 
+## Milestone 135 (2026-10-31): D6 readability draft swept into a coordinator commit
+
+- W23 (Haiku 5.5) completed its readability pass on the D6 packet but did not commit it: its `git add` staged the file and the commit
+  step did not run. The coordinator's next commit, `92631f9d` ("docs(multichain): D6 packet first review; corrections queued"), ran a
+  plain `git commit` after `git add -u -- <handoff> <board>`, which committed the whole shared index, so W23's staged D6 draft went
+  into `92631f9d` (139 lines changed in the D6 file, byte-identical to W23's saved draft). `92631f9d` is local only; history is kept
+  as is, with this record. Attribution: the D6 changes in `92631f9d` are W23's (Haiku) wording-only pass, not the coordinator's.
+- W23's pass (wording only; label and placeholder counts unchanged, 16 placeholders, 0 em dashes): the local checkout path replaced
+  by "the existing local checkout of branch `codex/xrpl-icusd-followups` at `46cf6b34`, read only"; a legend for PARTLY VERIFIED,
+  UNAVAILABLE and "body vs comment"; role names standardized to source identifiers; plain sentences; 150 to 133 lines. Unclear points
+  it listed went to W29 with the factual corrections.
+- Lesson (coordinator and workers): in a shared worktree, commit with an explicit pathspec (`git commit -- <paths>`), so another
+  worker's staged changes are never swept in.
+- Next: the same W29 applies Miles' six factual corrections on top of W23's draft, committing with an explicit pathspec.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
