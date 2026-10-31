@@ -1887,6 +1887,10 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   CPI transfers never create claims and stay an unattributed part of the stray; (5) a new one-shot test hook
   `MockChain.on_account_read_of`.
 - Next: W28 does the two 49c fixes, then pauses so W29 can use the single Rust builder slot for BB-52, then 49e.
+- PR #591 description refreshed in place (draft, open, unmerged at `932ef8fa`): the BB-49 row now names the pushed accepted
+  commits (`e6a542be`, `8198fb28`, `bc96f166`; `12dfee35`, `23dfe841`); the Solana check row is at `23dfe841` (357 tests,
+  Wasm 4,010,100 bytes); a proof row records CI run 41174255809 on `932ef8fa` (success; existing hosted workflow only);
+  49c, 49d, BB-51 and BB-52 are named as local working milestones not in the head; the XRPL exclusion stays.
 
 ## Held live actions
 
