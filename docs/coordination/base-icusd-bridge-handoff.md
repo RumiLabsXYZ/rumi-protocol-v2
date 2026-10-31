@@ -2111,6 +2111,31 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   or new gate. This narrows the wrapper limit stated in milestone 90.
 - Builder slot: released by W28, now with W29 for the BB-52 F1 to F3 correction.
 
+## Milestone 94 (2026-10-31): BB-52 GraphQL correction delivered
+
+- W29 (`claude-sonnet-5-5`) committed `9cbbc5891a0f5b4df17e0883677b0bdfa25f6b2e` "fix(sui): bind GraphQL chain identity,
+  requested object versions and transformed errors (BB-52)", local only. Coordinator scope check: 6 files, only
+  `src/rumi_icusd_sui_bridge/` (`graphql.rs`, the new `graphql_identity_tests.rs`, one test-module line in `lib.rs`, comment-only
+  edits in `sui.rs`, `ids.rs` and `types.rs`); no Cargo, lock or `.did` change; `git diff --check` exits 0; `~/.sui` absent.
+- F1: `chainIdentifier` is decoded as Base58, must be 32 bytes and equal the configured genesis, per provider before quorum;
+  another genesis is WrongNetwork; short hex, invalid characters and 31 or 33 bytes are Malformed; all are excluded. The short
+  form stays only for display and JSON-RPC notes. F2: `parse_object_at_version` binds the requested version (another version
+  is an Identity exclusion; a null object stays Missing); `parse_object` is unchanged for checkpoint reads. F3:
+  `canonicalize_response` refuses a non-array `errors`; valid arrays keep bounded messages; empty still succeeds, nonempty fails.
+- Red (saved logs `bb52-red.log`, `bb52-red-f2probe.log` in the coordinator scratchpad; quotes copied from them): the literal
+  `34e68d9e` crate source plus only the new tests plus a four-line pass-through shim for the new F2 entry point (old behavior,
+  version ignored), so the F2 tests fail on assertions rather than a compile error. 9 of 12 new tests failed; 3 pass on the old
+  source too and are regression pins, not red proofs (malformed Base58, wrong-length Base58, valid errors arrays). F2 was
+  isolated with one temporary, uncommitted probe under the old short-hex identity ("a response for version 104 to a request
+  for version 105 must be rejected"). F1: the full genesis was refused as "not 8 lowercase hex digits", and the old code accepted
+  short hex against short hex. F3: "transformed {"message":"failed"} became {"data":{"x":1}}".
+- Green (saved logs): the 12 focused tests pass; on the committed tree the crate tests show 74 passed, 0 failed (62 plus 12),
+  the candid test passes with no regeneration, clippy `-D warnings` exit 0 and the wasm32 check exit 0.
+- Limits unchanged: vectors rest on the independent reference and pinned sources (no SDK or CLI cross-check); GraphQL fixtures
+  are schema-derived; the unwrapped dynamic-field decoders match the pinned source (milestone 93) with provider behavior
+  unmeasured; no transport or lane; not a working bridge.
+- Builder slot free. BB-49 (49e) and BB-52 (with this correction) both wait on Miles; BB-50 follows BB-49 and BB-53 follows BB-52.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -474,7 +474,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: instance skeleton, BCS builder, digests and GraphQL mirror",
-      "evidenceText": "proof=local-test; 34e68d9e in Review (W29, local). Miles' full source pass: three bounded GraphQL fixes (Base58 genesis identity, exact-version binding, transform keeps malformed errors rejected); built after 49e",
+      "evidenceText": "proof=local-test; 34e68d9e plus correction 9cbbc589 (W29, local) in Review: Base58 genesis identity before quorum, exact-version binding, transform keeps malformed errors rejected; 74 tests, clippy and wasm32 clean",
       "evidenceLinks": []
     },
     {
