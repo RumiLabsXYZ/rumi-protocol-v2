@@ -487,10 +487,10 @@
     },
     {
       "id": "BB-54",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: Wallet Standard connector and return flow",
-      "evidenceText": "proof=none; Waits for frozen Sui interfaces (53c return views). When it starts: real /bridge page flow and recovery, readiness from get_mint_lane; the pinned official @mysten/sui npm SDK is allowed; no CLI, keys or network",
+      "evidenceText": "proof=none; In progress (W28): actual Sui branch of /bridge (Wallet Standard, both directions, history, reload recovery) against the frontend contract frozen at e4ee506a; native-only loading when Base is absent",
       "evidenceLinks": []
     },
     {

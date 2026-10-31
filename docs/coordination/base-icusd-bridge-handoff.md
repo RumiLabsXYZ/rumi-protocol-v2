@@ -2652,6 +2652,26 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   a fixed 15-minute stale threshold; D6 a disclosed root of trust; module bytes unobserved.
 - Next: 53d from `e4ee506a` (host collector Sui reader in `src/rumi_bridge_destinations` and the focused integration evidence).
 
+## Milestone 113 (2026-10-31): BB-54 started on a frozen frontend contract
+
+- Miles froze the return-facing frontend contract at `e4ee506a02d3c9db2e971cee534d9b2132b7e424` (the canonical
+  `rumi_icusd_sui_bridge.did`: `bridge_to_sui`, `get_config`, `get_roles`, `get_mint_lane`, `get_observed_deployment`, the
+  deposit, release and history queries, and `notify_sui_return(text)`). This freezes the contract, not acceptance of 53c's
+  internals; the review continues.
+- BB-54 dispatched to the same W28 (Sonnet) from `next-bb54-sui-wallet.md`: the whole Sui branch of `/bridge` (Wallet Standard
+  connection on the enabled selected family only, both direction forms, explicit review, persistent history and pending or held
+  states, reload recovery), a Sui variant of the native destination seam, readiness from `get_mint_lane` (never
+  `ConfigView.signing_enabled`), and the native-only gap: `config.ts` `BRIDGE_ENABLED` considers only `ICUSD_BRIDGE` and
+  `destinationLoader` awaits Base first, so a usable Sui instance cannot load when Base is absent or unreachable. Return direction
+  on the accepted Move `bridge_out` at `23f75ef1` with `transfer_id` recomputed as `ids.rs` and the Move do; sign-only preferred
+  with exact bytes persisted before broadcast; no auto rebuild, re-sign or new nonce from a timeout or expiry; callbacks are
+  hints; `notify_sui_return` only on an explicit click; an empty-by-default node seam keyed to network and genesis.
+- Dependency: the minimal official `@mysten/sui` SDK (and Wallet Standard types if needed) pinned exact, already allowed.
+- Generator slot (coordinator-serialized): W28 may run `scripts/regenerate-declarations.sh` once after adding the Sui entry, only
+  if the on-disk Sui `.did` equals `e4ee506a`'s, recording `git status` before and after; only the Sui declarations may change.
+  W29 was told not to change the Sui `.did` or its exported types without coordinating first; 53d should not need it.
+- Two lanes: W28 on BB-54 (frontend), W29 on 53d and any 53c review fixes (Rust, sole builder).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
