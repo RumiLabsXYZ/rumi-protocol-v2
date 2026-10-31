@@ -8,6 +8,11 @@ description = "Escrow-backed ICP icUSD <-> Solana icUSD bridge canister instance
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# A throwaway probe build only (see HISTORY_PROBE.md): adds the controller-only update
+# `probe_history_availability`. Never enabled in the production wasm.
+history_probe = []
+
 [dependencies]
 candid = "0.10.6"
 serde = { version = "1.0.210", features = ["derive"] }

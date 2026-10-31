@@ -1,0 +1,184 @@
+type Account = record { owner : principal; subaccount : opt blob };
+type BridgeArg = variant { Upgrade : UpgradeArgs; Init : InitArgs };
+type BridgeError = variant {
+  Internal : text;
+  Anonymous;
+  Paused : text;
+  Unauthorized;
+  NotConfigured : text;
+  InvalidArgument : text;
+  Halted : text;
+  InvalidState : text;
+};
+type BridgeFees = record { release_fee_e8s : nat64; deposit_fee_e8s : nat64 };
+type BridgeInfo = record {
+  rpc : RpcSettings;
+  initialized : bool;
+  fees : BridgeFees;
+  lane : LaneSettings;
+  memo_program : text;
+  escrow_subaccount : text;
+  sol_rpc : principal;
+  schema_version : nat32;
+  schnorr_key_name : text;
+  admins : vec principal;
+  token_program : TokenProgram;
+  halted : opt text;
+  icusd_ledger : principal;
+  genesis_hash : text;
+  instance_salt : text;
+  pauses : Pauses;
+};
+type BucketsView = record {
+  reserved_pulls : nat;
+  pending_mint : nat;
+  unknown_outflow : nat;
+  pending_refund : nat;
+  outstanding : nat;
+  fees : nat;
+  held : nat;
+  burn_unknown : nat;
+  stray : nat;
+  return_custodied : nat;
+  pending_release : nat;
+};
+type CallVerdict = variant {
+  Error : text;
+  Present : record {
+    slot : nat64;
+    older_than_horizon : opt bool;
+    age_slots : opt nat64;
+  };
+  Inconsistent;
+  Absent;
+};
+type ConsensusSetting = variant {
+  Equality;
+  Threshold : record { min : nat8; total : opt nat8 };
+};
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+type ConsentMessage = variant {
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+  GenericDisplayMessage : text;
+};
+type ConsentMessageMetadata = record {
+  utc_offset_minutes : opt int16;
+  language : text;
+};
+type ConsentMessageRequest = record {
+  arg : blob;
+  method : text;
+  user_preferences : ConsentMessageSpec;
+};
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type ErrorInfo = record { description : text };
+type Icrc21Error = variant {
+  GenericError : record { description : text; error_code : nat64 };
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
+type Icrc28TrustedOriginsResponse = record { trusted_origins : vec text };
+type InitArgs = record {
+  rpc : opt RpcSettings;
+  fee_recipient : opt Account;
+  lane : opt LaneSettings;
+  memo_program : text;
+  sol_rpc : principal;
+  schnorr_key_name : text;
+  admins : vec principal;
+  token_program : TokenProgram;
+  icusd_ledger : principal;
+  genesis_hash : text;
+};
+type LaneSettings = record {
+  rebroadcast_interval_secs : nat64;
+  discover_limit : nat16;
+  cancel_after_secs : nat64;
+  nonce_pool_size : nat8;
+  reconcile_alarm_secs : nat64;
+  max_reissues : nat8;
+  history_horizon_secs : nat64;
+};
+type LineDisplayPage = record { lines : vec text };
+type ListingVerdict = variant {
+  Error : text;
+  Present : record {
+    oldest_slot : nat64;
+    contains : vec text;
+    count : nat32;
+    older_than_horizon : opt bool;
+    oldest_age_slots : opt nat64;
+    newest_slot : nat64;
+  };
+  Inconsistent;
+  Absent;
+};
+type Pauses = record {
+  mints : bool;
+  observer : bool;
+  releases : bool;
+  deposits : bool;
+};
+type ProbeArgs = record {
+  rpc : RpcSettings;
+  nonce_account : text;
+  sol_rpc : principal;
+  list_limit : opt nat32;
+  signatures : vec text;
+  horizon_slots : nat64;
+};
+type ProbeReport = record {
+  listing : ListingVerdict;
+  results : vec SignatureProbe;
+  summary : ProbeSummary;
+  tip_error : opt text;
+  tip_slot : opt nat64;
+  horizon_slots : nat64;
+  calls_made : nat32;
+};
+type ProbeSummary = record {
+  listing_served_old : bool;
+  transaction_served_old : bool;
+  note : text;
+  status_served_old : bool;
+  signatures_probed : nat32;
+};
+type Result = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type Result_1 = variant { Ok : ProbeReport; Err : BridgeError };
+type Result_2 = variant { Ok; Err : BridgeError };
+type RpcSettings = record {
+  response_size_estimate : opt nat64;
+  verify : ConsensusSetting;
+  discover : ConsensusSetting;
+  cycles_per_call : nat64;
+  cluster : opt SolRpcCluster;
+};
+type SignatureProbe = record {
+  status : CallVerdict;
+  signature : text;
+  transaction : CallVerdict;
+};
+type SolRpcCluster = variant { Mainnet; Testnet; Devnet };
+type StandardRecord = record { url : text; name : text };
+type TokenProgram = variant { Classic; Token2022 };
+type UpgradeArgs = record { admins : opt vec principal };
+service : (BridgeArg) -> {
+  bridge_version : () -> (text) query;
+  get_bridge_info : () -> (BridgeInfo) query;
+  get_buckets : () -> (BucketsView) query;
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result);
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  probe_history_availability : (ProbeArgs) -> (Result_1);
+  set_admins : (vec principal) -> (Result_2);
+}

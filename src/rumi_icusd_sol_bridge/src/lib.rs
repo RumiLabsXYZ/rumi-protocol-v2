@@ -62,6 +62,7 @@
 pub mod accounting;
 pub mod admin;
 pub mod env;
+pub mod history_probe;
 pub mod icrc21;
 pub mod ids;
 pub mod lane;
@@ -203,6 +204,21 @@ fn get_buckets() -> BucketsView {
 }
 
 // ---------------------------------------------------------------------------
+// History-availability probe (feature `history_probe` only; never in the production wasm)
+// ---------------------------------------------------------------------------
+
+/// Run the P5 probe (`history_probe.rs`, `HISTORY_PROBE.md`) with an explicit configuration. Reads
+/// and reports; changes no bridge state. Controller only. It spends cycles on the SOL RPC canister
+/// named in the arguments, so it exists only in a throwaway build of this crate.
+#[cfg(feature = "history_probe")]
+#[ic_cdk::update]
+async fn probe_history_availability(args: history_probe::ProbeArgs) -> BridgeResult<history_probe::ProbeReport> {
+    admin::require_controller()?;
+    let rpc = sol_rpc::CandidRpc::from_config(args.sol_rpc, args.rpc.clone()).map_err(|e| BridgeError::InvalidArgument(format!("{e:?}")))?;
+    history_probe::run(&rpc, &args).await.map_err(BridgeError::InvalidArgument)
+}
+
+// ---------------------------------------------------------------------------
 // Ingress pre-filter (cycle-drain protection)
 // ---------------------------------------------------------------------------
 
@@ -226,6 +242,8 @@ const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
     ("icrc28_trusted_origins", IngressAccess::Anyone),
     ("icrc10_supported_standards", IngressAccess::Anyone),
     ("set_admins", IngressAccess::Controller),
+    #[cfg(feature = "history_probe")]
+    ("probe_history_availability", IngressAccess::Controller),
 ];
 
 /// Largest accepted argument for wallet-standard calls.
@@ -280,13 +298,15 @@ mod candid_tests {
     #[test]
     fn candid_interface_matches_checked_in_did() {
         let generated = super::__export_service();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("rumi_icusd_sol_bridge.did");
+        // The probe build has one more endpoint and its own checked-in interface.
+        let file = if cfg!(feature = "history_probe") { "rumi_icusd_sol_bridge.history_probe.did" } else { "rumi_icusd_sol_bridge.did" };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
         if std::env::var("RUMI_SOL_BRIDGE_REGEN_DID").is_ok() {
             std::fs::write(&path, &generated).expect("write did");
         }
-        let checked_in = std::fs::read_to_string(&path).expect("read rumi_icusd_sol_bridge.did");
+        let checked_in = std::fs::read_to_string(&path).expect("read the checked-in .did");
         service_equal(CandidSource::Text(&generated), CandidSource::Text(&checked_in))
-            .expect("rumi_icusd_sol_bridge.did is out of date; regenerate it");
+            .unwrap_or_else(|e| panic!("{file} is out of date; regenerate it: {e:?}"));
     }
 }
 
@@ -303,6 +323,11 @@ mod ingress_tests {
         let mut out = vec![];
         for (i, line) in lines.iter().enumerate() {
             if line.trim() == attr {
+                // A feature-gated endpoint exists only when its feature is on.
+                let gated = i > 0 && lines[i - 1].trim() == r#"#[cfg(feature = "history_probe")]"#;
+                if gated && !cfg!(feature = "history_probe") {
+                    continue;
+                }
                 let mut j = i + 1;
                 while lines[j].trim().starts_with("#[") {
                     j += 1;
@@ -320,7 +345,8 @@ mod ingress_tests {
     #[test]
     fn every_update_endpoint_has_an_ingress_decision() {
         let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().collect();
-        assert_eq!(updates.len(), 2, "the skeleton has exactly two update endpoints: {updates:?}");
+        let expected = if cfg!(feature = "history_probe") { 3 } else { 2 };
+        assert_eq!(updates.len(), expected, "the update endpoints are exactly the listed ones: {updates:?}");
         let listed: BTreeSet<String> = INGRESS_METHODS.iter().map(|(n, _)| n.to_string()).collect();
         let missing: Vec<_> = updates.difference(&listed).collect();
         assert!(missing.is_empty(), "update endpoints without an ingress decision: {missing:?}");
