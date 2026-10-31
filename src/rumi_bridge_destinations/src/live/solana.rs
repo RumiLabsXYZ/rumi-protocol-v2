@@ -28,8 +28,9 @@
 //! Solana serves account state only at the node's own current commitment, so unlike the EVM and XRPL
 //! readers this reader cannot pin the read to one numbered historical height. Providers answer at
 //! their own finalized slots (all at or above `n`), and what the quorum shares is the pair of values.
-//! A burn, mint or transfer that lands between two providers' reads therefore shows up as a
-//! DISAGREEMENT and the collection fails rather than guessing; agreement of a quorum on identical
+//! A burn, mint or transfer that lands between two providers' reads can therefore cause a
+//! DISAGREEMENT; the read fails when no pair of answers reaches quorum (with three providers, two
+//! equal pairs outvote one changed pair), rather than guessing. Agreement of a quorum on identical
 //! values is a limited consistency check, not proof that nothing moved around the reads.
 //!
 //! # Account layouts

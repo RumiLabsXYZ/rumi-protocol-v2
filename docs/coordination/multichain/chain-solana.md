@@ -249,8 +249,8 @@ wrong answer is not judged and not applied; the lookup is repeated on a later pa
   mint, the return account and the token program are the operator's explicit config; there is no default.
 - **What it does not prove.** Solana serves account state only at a node's own current commitment, so the read cannot be pinned to one numbered
   historical slot as the EVM and XRPL reads are. Providers answer at their own finalized slots (all at or above the agreed one); a quorum on
-  identical values is a limited consistency check, a change between two providers' reads shows as a disagreement and fails the collection, and the
-  reported slot is the lowest context slot among the agreeing providers.
+  identical values is a limited consistency check, a change between reads can cause disagreement and the read fails when no pair reaches quorum
+  (with three providers, two equal pairs outvote one changed pair), and the reported slot is the lowest context slot among the agreeing providers.
 - **Custody is explained by the instance's buckets, compared, never used as a read.** The Solana instance has no `get_supply_audit`; its
   self-report is assembled from `get_buckets` and `get_bridge_info` (`RC`, `BU`, `stray`, and the escrow account = the instance with its escrow
   subaccount). The aggregate raises a Failure flag for a custody that differs from `RC + BU + stray` in either direction. The instance's own

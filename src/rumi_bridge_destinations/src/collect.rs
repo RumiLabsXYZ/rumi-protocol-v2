@@ -51,8 +51,8 @@
 //! for Solana is `supply <= O + inflight + RC + BU` (returned tokens stay supply until the burn). The
 //! reader runs BEFORE the ICP-side numbers, so a source with no Solana reader fails before any other
 //! query. Equal reads of a supply and a balance are a limited consistency check, not proof that no
-//! mint, burn or transfer happened around them: a change between two providers' reads shows as a
-//! disagreement and the collection fails rather than guessing.
+//! mint, burn or transfer happened around them: a change between reads can cause disagreement, and
+//! the read fails when no pair reaches quorum rather than guessing.
 //!
 //! # The XRPL lane (`X`)
 //!
