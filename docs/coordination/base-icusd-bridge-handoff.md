@@ -2522,6 +2522,33 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   (the class fixed for BB-52 in `9cbbc589`). Same W29: reuse the existing envelope policy before extracting and rounding the
   head, with a raw-error to transform to parser and tally regression; the send transform is checked for the same gap. Then 53c.
 
+## Milestone 109 (2026-10-31): BB-53 53b source pass finished; F4 added; CI success on ff3dfec8
+
+- Miles finished the remaining 53b source pass (`review-bb53b-first.md`). F4: `flows/mint.rs` gather snapshots
+  `last_final_checkpoint` before its first await, but `create_op` and `append_attempt` do not recheck `facts.checkpoint` against
+  the CURRENT floor; with the reclaimable timer guard, an older slow gather can finish after a newer pass completed a mint and
+  advanced the floor, and then admit spent MintCap or gas-coin versions, which can leave a paid deposit in an unknown signed
+  attempt. Fix: re-read the current floor in synchronous create and append admission and refuse or re-gather if behind;
+  validate mutable gas settings there; one focused transport-await interleaving regression. F3 and F4 go in one W29 correction.
+- F3 scope: only head and read observations keep the error-integrity policy. The send transform's constant "maybe sent"
+  acknowledgement is intentional and never settles anything, so it gets no response parser or duplicate-submission research;
+  its wording may say HTTP-acknowledged or maybe sent. (The coordinator had asked W29 to check the send transform; that request
+  is withdrawn.)
+- Nonblocking: `config_view` always returns `signing_enabled = false` although the lane can sign once its prerequisites hold;
+  it is not an enforcement mechanism or live-state proof. At the next coherent view edit it should reflect its documented
+  readiness meaning (`get_mint_lane` exposes it) or be documented as a legacy, non-authoritative field; BB-54 uses the real
+  readiness seam; no activation switch.
+- Source verification by Miles (official mainnet-v1.82.3 schema, `api/query.rs`, `api/types/coin_metadata.rs`): the checkpoint,
+  epoch, status and execute query shapes match the SDL, and `CoinMetadata::by_coin_type` checks the CurrencyRegistry first and
+  then the legacy singleton, so the Move registry currency is supported by this API. Source only, not a provider response.
+- Otherwise the pass found observed binding kept separate from configured identity, cap and gas ownership and layout checks
+  matching the frozen Move and builder, the typed digest used for lookup and the intent digest for signatures, the operation and
+  deposit link synchronous, the all-operation back-index refund proof closing 53a's placeholder (subject to F1), the re-mint in
+  its own id domain moving H to PM to O with no debt or extra fee, and runtime maps 14 and 15 with serde defaults preserving 53a
+  data. No other essential blocker beyond F1 to F4. The 53c and 53d carries stay exactly as the brief.
+- Hosted CI: run 41184115864 on exact `ff3dfec8` completed SUCCESS (Miles, GitHub connector). Watch closed; no rerun. The existing
+  Stability Pool workflow, not Sui, Solana, Move or frontend coverage.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
