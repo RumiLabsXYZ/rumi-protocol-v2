@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; In progress (W29, read-in): Sui lanes, return observer, bind checks, audit, collector reader, plus the canonical ICP saga and disjoint fee and backing accounting; sub-milestones follow the brief",
+      "evidenceText": "proof=none; In progress (W29, sole Rust builder): 53a ICP ledger saga, accounting and runtime core, then 53b transport, binding and mint lane, 53c verified returns, monitors and release, 53d host collector and integration evidence",
       "evidenceLinks": []
     },
     {

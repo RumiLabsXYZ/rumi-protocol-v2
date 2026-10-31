@@ -89,6 +89,18 @@ Source: `docs/coordination/multichain/chain-sui.md` (sections 2 to 4 and 8).
 | BB-53 | Publish and bind checks; mint lane (persist-before-sign; epoch expiry plus a missing digest never authorizes replacement or refund; delivery reconciled from the consumed mint-id record); return observer; audit query; also the Sui supply reader for the BB-58 collector (moved from BB-58) | the new canister | BB-52 (D6, BB-61, only for live authority steps; local lane and observer source does not wait) | the new crate's lane tests | L |
 | BB-54 | Sui Wallet Standard connector and return flow | `src/vault_frontend/` | BB-53, BB-59 | the frontend's focused vitest | L |
 
+**BB-53 sub-milestones (implementation, 2026-10-31; same owner W29, one Rust builder).** From Miles' brief. The actual Move
+at `23f75ef1` and the accepted BB-52 decoders override stale groundwork prose (for example the original return table value
+and cap layout). The demo is canonical ICP escrow, Sui mint, recipient-bound Sui `bridge_out` burn, exact ICP release; no
+debt, no backend lending or `chain_supplies` change. Each sub-milestone ends at a frozen commit with compact evidence.
+
+| Sub | Scope | Focused acceptance |
+| --- | --- | --- |
+| 53a | Canonical ICP ledger saga, accounting and stable runtime core: copied accepted Base and Solana ledger, proof, auth and fee patterns where they fit; disjoint PM, O, pending release, pending refund or held, fees and unknown-outflow buckets (no RC, BU or stray: `bridge_out` burns atomically); real caller, explicit ICRC-2 allowance, exact pull identity with bounded archive search; exact tuples saved before effects; release only from a finalized verified return, once; request lookup and history, upgrades, fair queues, held states and admin recovery; `bridge_to_sui` | adapted saga suite, bucket properties, upgrade persistence; crate tests, clippy, wasm32 |
+| 53b | Bounded HTTP transport (source, mocks and loopback only); observed binding of network, package, Gate, coin type, decimals 8, version, shared ownership, supply and counters and cap identities (publish, registration and bind commands prepared for a future packet, never run); mint lane persisting unsigned BCS, both digests, epoch, owned input refs and signer roles before signing; admission and deposit link in one synchronous step; same-attempt rebroadcast only; exact-version reads through `parse_object_at_version` before tally | bind matrix, transport mocks, lane adversarial cases (lost sign or send reply, foreign version use, expiry plus missing digest held) |
+| 53c | Verified returns from the durable ReturnRecord (recomputed `transfer_id`, sender, amount, sequence, exact ICP principal and subaccount; events discover only), dedup through retries and upgrades, release; C1, C2 and supported C3 and C4 monitors with holds on gaps or foreign mint ids; audit separating observations, self-report, pending or held liabilities and last checkpoint; `notify_sui_return` hint | verifier matrix, lookalike and wrong-package rejection, sequence gap, restart, monitor fence |
+| 53d | Host collector Sui reader (Gate's wrapped TreasuryCap supply at a specified checkpoint through independent providers, zero custody by the atomic-burn design, ICP escrow read independently, D/X uniqueness and the XRPL floor kept) and focused integration evidence: mocked round trip, eight-decimal fees, lost responses, wrong ids, duplicate return, delayed callback, sequence gap, foreign mint, upgrade and recovery | collector fixture with existing destinations; the crate checks once |
+
 ### 3.6 Authority decision (rank 8)
 
 | Card | Scope | Owner | Depends on |

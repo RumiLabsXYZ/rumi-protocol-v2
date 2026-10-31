@@ -77,7 +77,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 and BB-52 done. BB-53 in progress (same W29, sole Rust builder): Sui lanes, observer, bind checks, audit and collector reader plus the canonical ICP saga and accounting, in bounded sub-milestones after Miles' brief. Then BB-54 (wallet).",
+      "nextAction": "BB-51 and BB-52 done. BB-53 in progress (same W29, sole Rust builder): 53a canonical ICP ledger saga, accounting and runtime core; then 53b transport, observed binding and mint lane; 53c verified returns, monitors and release; 53d host collector and integration evidence. Then BB-54 (wallet).",
       "cardIds": [
         "BB-51",
         "BB-52",

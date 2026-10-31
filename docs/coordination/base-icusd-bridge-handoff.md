@@ -2161,6 +2161,22 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   checks, audit, collector reader, plus the canonical ICP pull, refund and release saga and disjoint fee and backing
   accounting) and holds the single Rust builder; it reads in and proposes bounded sub-milestones until Miles' BB-53 brief.
 
+## Milestone 96 (2026-10-31): cohort pushed; BB-53 sub-milestones set
+
+- Push: `4d3db00f1fa4a2b5ff3e4d52f4b540cadd963829` pushed by exact commit to `codex/base-icusd-bridge` (fast-forward from
+  `f91bf92d`, 2026-10-31 07:23 UTC): BB-49 49e (`5885e248` and the quorum wording commit `f341285e`), BB-52 (`34e68d9e`,
+  `9cbbc589`) and their records; no XRPL file. PR #591 description refreshed: BB-49 done row through 49e, BB-52 accepted row,
+  BB-50 and BB-53 in-progress rows, collector checks at `5885e248` (125 and 205; clippy with the one baseline lint allowed),
+  Sui crate checks at `9cbbc589` (74), and hosted CI on the new head pending. Miles alone monitors hosted CI.
+- BB-53 (`next-bb53-sui-lanes.md`): W29's read-in proposed five steps; folded into Miles' four, recorded in the plan section
+  3.5: 53a ICP ledger saga, accounting and runtime core; 53b transport, observed binding and mint lane; 53c verified returns,
+  monitors, audit and release; 53d host collector reader and integration evidence. Coordinator answers to W29: RC, BU and stray
+  are dropped from the Sui accounting (atomic burn); no module-bytes digest through `sui move build` (no Sui CLI for publish or
+  bind work; recorded as an omission instead); 53d may extend `rumi_bridge_destinations`; endpoints `bridge_to_sui` and
+  `notify_sui_return`; each pinned SDL and ownership or version semantic is sourced inside its own step, including owned
+  capability versions under an immutable reference input and after a failed execution. W29 continues through 53a to 53d with
+  a frozen commit and compact evidence at each handback.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
