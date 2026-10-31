@@ -2091,7 +2091,8 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   pinned to the Solana `.did`; never assumed zero), and the Solana supply bound counts RC and BU. This is the host collector
   calling providers directly, not the canister's SOL RPC path.
 - Stated limits: Solana serves account state only at a node's own commitment, so the read cannot be pinned to one historical
-  slot; a change between providers shows as disagreement and fails the collection. The aggregate treats a landed but unapplied
+  slot; a change between providers' reads can cause disagreement, and the read fails when no pair of equal values reaches the
+  configured quorum (a lone dissenter is outvoted). The aggregate treats a landed but unapplied
   burn as a custody Failure, stricter than the instance's Reconciling tolerance; the remedy is to collect again after the
   instance applies it. No public RPC, no live transport run.
 - Evidence (saved files in the coordinator scratchpad `49e/`, not copied output): before the change, the pre-49e
@@ -2135,6 +2136,30 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   are schema-derived; the unwrapped dynamic-field decoders match the pinned source (milestone 93) with provider behavior
   unmeasured; no transport or lane; not a working bridge.
 - Builder slot free. BB-49 (49e) and BB-52 (with this correction) both wait on Miles; BB-50 follows BB-49 and BB-53 follows BB-52.
+
+## Milestone 95 (2026-10-31): BB-49 and BB-52 accepted; BB-50 and BB-53 started
+
+- Miles (`accept-bb49e-and-bb52.md`) accepted BB-49 49e at `5885e248f8df3f572938d43ad0f2bcb69d2667f9`; with 49a to 49d, BB-49
+  is Done at source and local-test scope. BB-52 foundation `34e68d9eccd468750c94cac74ff78e7137e113d5` with correction
+  `9cbbc5891a0f5b4df17e0883677b0bdfa25f6b2e` is Done at foundation, source and local-test scope. Neither proves a live Solana
+  or Sui bridge or wallet round trip. Miles read the frozen source, the regressions and the saved logs directly; nothing was
+  rerun.
+- Evidence as Miles recorded it (do not restate as wholly clean clippy): 49e clippy default and live succeed with the single
+  named baseline lint (`manual_is_multiple_of`) allowed; the literal baseline fails on the same three hits in `validate.rs`
+  under Rust 1.92. BB-52 red: 9 semantic failures and 3 passes on the original code plus the new tests and the disclosed
+  four-line F2 pass-through shim; `bb52-red-f2probe.log` shows the old-version acceptance failing under the old short-hex
+  identity. Green: 12 focused, 74 full; clippy and wasm32 succeed; Candid unchanged.
+- Carries: BB-53 must use `parse_object_at_version` for every exact-version object request. The 49e source review
+  (`review-bb49e-source-and-next.md`) passed with one nonblocking wording correction: changes between provider reads can cause
+  disagreement and a read fails when no pair reaches quorum (a lone dissenter is outvoted); the accepted quorum policy is not
+  changed into Sui's strict all-usable rule. Corrected in milestone 93 here; W28 corrects the same wording in `live/solana.rs`,
+  `collect.rs` and `chain-solana.md` section 13.2 as a comment and doc-only commit. Configured mint and return-account
+  identities stay operator input, not an independent proof of the deployed instance's objects.
+- Lanes (both `claude-sonnet-5-5`, requested Sonnet): W28 takes BB-50 (the actual Solana branch of `/bridge`: Wallet Standard,
+  both directions, history and reload recovery; profiles disabled, injected fixtures only; brief `next-bb50-solana-wallet.md`);
+  it uses the Rust builder only by request for any generator or Wasm step. W29 takes BB-53 (Sui lanes, return observer, bind
+  checks, audit, collector reader, plus the canonical ICP pull, refund and release saga and disjoint fee and backing
+  accounting) and holds the single Rust builder; it reads in and proposes bounded sub-milestones until Miles' BB-53 brief.
 
 ## Held live actions
 

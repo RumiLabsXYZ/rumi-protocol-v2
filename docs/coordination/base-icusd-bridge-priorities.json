@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-47 done. BB-49 in Review: 49a to 49d accepted and pushed; 49e (Solana collector reader, 5885e248) delivered to Miles. Then BB-50 (Wallet Standard connector and the return flow).",
+      "nextAction": "BB-47, BB-48 and BB-49 done. BB-50 in progress (same W28): the Solana branch of the /bridge page with Wallet Standard, both directions, history and reload recovery, on injected fixtures with every profile disabled.",
       "cardIds": [
         "BB-47",
         "BB-48",
@@ -77,7 +77,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 done. BB-52 in Review: 34e68d9e with the GraphQL correction 9cbbc589 delivered to Miles. Then BB-53 (lanes, observer, custody, Sui collector reader) and BB-54 (wallet).",
+      "nextAction": "BB-51 and BB-52 done. BB-53 in progress (same W29, sole Rust builder): Sui lanes, observer, bind checks, audit and collector reader plus the canonical ICP saga and accounting, in bounded sub-milestones after Miles' brief. Then BB-54 (wallet).",
       "cardIds": [
         "BB-51",
         "BB-52",
