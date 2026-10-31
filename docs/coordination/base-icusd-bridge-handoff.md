@@ -1932,6 +1932,23 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   from the SDL, not captured from a provider; no provider, HTTP transport or signature verification in production; the
   IC `sign_with_schnorr` mapping for Sui is unrun.
 
+## Milestone 87 (2026-10-31): BB-49 49c fixes pass source review
+
+- W28 committed `e3516aea` ("fix(solana): bind mint admission to its deposit and returns to their signature (BB-49 49c)"),
+  touching only the Solana bridge crate. Miles reviewed the frozen source (`review-bb49c-fix-source.md`): lane admission,
+  the mint link, the observer binding, `sol_rpc::check_bound`, the decoder, the mock suspension support and
+  `saga49c_fix_tests.rs`. Both corrections match the accepted findings: mint eligibility is rechecked and the deposit linked
+  in the same synchronous step that stores the operation (after nonce preparation, before the first signing effect), and a
+  returned transaction's identity is checked before any observer return, stray or claim and at the CandidRpc transport.
+  Same-id reuse stays idempotent.
+- Wording limit: `check_bound` keeps a fallback for malformed or unsupported messages; that fallback is not strict decoding
+  of unsupported messages. Strict return classification still decodes the message, and the first signature always has to
+  match the request.
+- Final scoped local acceptance waits for W28's combined handback: exact pins, the quoted original failure assertions
+  (especially refund plus mint), focused passing test names and final test, clippy, wasm and golden exits, naming an existing
+  saved output file where one exists rather than rerunning healthy checks. The 49d custody and secondary-lookup correction
+  comes in the same handback. Then the builder slot goes to W29 for BB-52; full BB-49 stays open for 49e.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
