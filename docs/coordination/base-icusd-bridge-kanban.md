@@ -292,3 +292,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-31: W28 committed 49b 12dfee35 and the 49a correction 8198fb28 and yielded the builder; W29 runs BB-57 part B now.
 - 2026-10-31: Miles reviewed 49a correction 8198fb28: authorities and sign/send fences aligned; one remaining preparation-continuation case (ensure_tx overwriting a newer attempt, plus a None-to-verified ABA) goes to the same W28 with the 49b fixes, written now and tested when the builder returns.
 - 2026-10-31: hosted CI run 41169908635 on 667d8bbc succeeded (04:57:09 UTC, verified by Miles); later local commits are outside that pin.
+- 2026-10-31: Miles independently checked the BB-57 part B artifact at 8ecab197 (Code section 9,707,926 bytes, under 12 MiB and under the old 10 MiB minus 256 KiB); the suite result is pending. Next: slot back to W28, then BB-51 to W29 after part B acceptance.

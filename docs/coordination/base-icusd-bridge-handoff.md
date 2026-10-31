@@ -1652,6 +1652,23 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Builder: W28 stopped cargo; W29 now runs BB-57 part B once (backend Wasm size, artifact binding and the XRPL PocketIC suite
   with the named return-flow cases) in the shared target. Disk about 21 GiB free.
 
+## Milestone 76 (2026-10-31): BB-57 artifact checked; next steps set
+
+- Miles (`bb57-artifact-check.md`, read-only, no competing build or run) at backend source `8ecab197`: stored gzip 2,621,444
+  bytes (sha256 `16504db94108edfce4a63361c1ed9b2e0dcb54b6ef6ad8621bacb63f43e2695a`); decompressed module 10,697,560 bytes
+  (sha256 `c0901b9f9a9d574cc817fbc1448de4ab01ebf5e92e484c5712610069f62aa7f1`); executable Code section payload 9,707,926 bytes,
+  below the current network's 12 MiB section limit and below the old 10 MiB less 256 KiB reserve (10,223,616). These are
+  measurements, not install, deploy or live evidence. The suite runs against this artifact (`RUMI_E2E_BACKEND_WASM`).
+- He inspected the seven added no-vault Return PocketIC tests for scope (endpoint, auth, freeze and fee prerequisites;
+  exactly-once account payout and origin conservation; wrong tag, payer and consumed tag; partial, Paths, SendMax and
+  expired returns; duplicate reconciliation; TooOld proof; upgrade persistence) against the real backend with local
+  signing and ledger seams and a modeled XRPL surface. Acceptance waits for the terminal suite result.
+- Routine comment correction for W29's part B commit: the `backend_wasm()` doc comment must distinguish the suite's historical
+  PocketIC 7 limit from the current 12 MiB network Code-section limit.
+- Lookout revision 79 read back correctly by Miles.
+- Order after part B: the Rust build slot returns to W28 first (its BB-49 reproductions and corrections); after part B is
+  accepted, W29's next card is BB-51 (Sui Move gate, `next-bb51.md`); no third lane.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
