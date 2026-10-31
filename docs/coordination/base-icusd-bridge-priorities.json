@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-49 in progress (same W28): 49a to 49d accepted and pushed; 49e (the Solana collector reader) in progress with the builder slot. BB-47 stays in Review until Miles moves it (its carried items are in accepted 49b and 49d). Then BB-50 (wallet connector).",
+      "nextAction": "BB-47 done. BB-49 in progress (same W28): 49a to 49d accepted and pushed; 49e (the Solana collector reader) in progress with the builder slot. Then BB-50 (wallet connector).",
       "cardIds": [
         "BB-47",
         "BB-48",
@@ -77,7 +77,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 done. BB-52 in Review at 34e68d9e: same W29 writes a bounded correction (Base58 genesis chain identity before quorum; exact-version object binding before tally), built after W28's 49e turn. Then BB-53 (lanes, observer, custody, Sui collector reader) and BB-54 (wallet).",
+      "nextAction": "BB-51 done. BB-52 in Review at 34e68d9e: Miles finished the source pass; same W29 writes three bounded GraphQL fixes (Base58 genesis identity, exact-version binding, transform keeps malformed errors rejected), built after W28's 49e turn. Then BB-53 and BB-54.",
       "cardIds": [
         "BB-51",
         "BB-52",

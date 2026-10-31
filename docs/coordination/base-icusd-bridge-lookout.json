@@ -431,10 +431,10 @@
     },
     {
       "id": "BB-47",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Solana: instance skeleton and message builders",
-      "evidenceText": "proof=local-test; df53ea32 components accepted (Miles): ids, framing, roles, memo, accounting, builders, shape check. Stays in Review: ledger saga wiring and a per-transfer refund locator are carried to BB-49 with the same owner",
+      "evidenceText": "proof=local-test; Done (Miles) at source and local-test scope: df53ea32 components, with its carried ledger saga (49b) and per-transfer refund and custody items (49d) delivered in accepted BB-49 components",
       "evidenceLinks": []
     },
     {
@@ -474,7 +474,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Sui: instance skeleton, BCS builder, digests and GraphQL mirror",
-      "evidenceText": "proof=local-test; 34e68d9e in Review (W29, local, not pushed). Miles' first pass: GraphQL chain identity must be the Base58 genesis, and exact-version object reads must be bound before tally; fix being written, built after 49e",
+      "evidenceText": "proof=local-test; 34e68d9e in Review (W29, local). Miles' full source pass: three bounded GraphQL fixes (Base58 genesis identity, exact-version binding, transform keeps malformed errors rejected); built after 49e",
       "evidenceLinks": []
     },
     {

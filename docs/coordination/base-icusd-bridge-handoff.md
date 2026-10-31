@@ -2053,6 +2053,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   green, after W28's 49e builder turn. No public probe, CLI, wallet or config access, new dependency or SDK cross-check gate;
   the independent-reference and unmeasured-provider limits stay. W28 keeps 49e and the builder; no new lane.
 
+## Milestone 92 (2026-10-31): BB-52 source pass finished; BB-47 done
+
+- BB-47 done (Miles) at its source and local-test scope: the `df53ea32` components, with the carried ledger saga and the
+  per-transfer refund and custody items delivered in accepted 49b and 49d. BB-49 stays open for 49e; BB-50 follows it.
+- Miles finished the BB-52 source pass at `34e68d9e` (`review-bb52-foundation-remaining.md`): stable core and schema, set-once
+  roles and binding, ingress and controller checks, BCS reader and writer, address and digest primitives and domains, mirror
+  settings and the deterministic transform. One more bounded fix, F3, in the same `graphql.rs` ownership: `parse_envelope`
+  refuses an `errors` member that is not an array, but `canonicalize_response` copies `errors` only when it is an array, so
+  `{"data": <valid fact>, "errors": {"message": "failed"}}` is excluded raw but usable after the transform. Fix: refuse it, or
+  keep a deterministic rejecting form; add the focused raw, transform and parser composition test; empty array still succeeds,
+  nonempty array still fails. No other blocker. The checker and builder gas-bound asymmetry and provider-operator independence
+  beyond named settings are not mandatory gates for this non-signing foundation; BB-53 owns persisted attempts, observed object
+  ownership and versions and runtime limits before any signing.
+- Miles' independent check, no Rust build: Python stdlib hashlib BLAKE2b-256 over the frozen `vectors.rs` and `ids.rs` at
+  `34e68d9e` matched seven values (the 435-byte transaction's intent signing digest and typed digest, three Ed25519 key
+  addresses, both network Base58 genesis constants), exit 0. This corroborates those values only; it is not an official SDK or
+  CLI cross-check or a live signing proof. No key was read or used.
+- F1 to F3 go to the same W29 as one correction commit after W28's 49e builder turn; BB-52 acceptance waits for that frozen pin
+  and focused checks. BB-53 does not start early.
+- Hosted CI: Miles observed run 41178738885 on pushed `f91bf92d`, in progress. It is the existing Stability Pool deposit-intent
+  workflow, not proof that the Solana or Sui requirements ran in hosted CI. Miles alone watches; no second watch or rerun.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
