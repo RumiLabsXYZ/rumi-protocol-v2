@@ -77,7 +77,7 @@
       "title": "Sui implementation (Move gate)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-51 in progress (W29): the Move gate package and tests; running them needs the official Sui CLI download (pinned release asset), which awaits explicit approval. Then BB-52, BB-53 (with the Sui collector reader) and BB-54.",
+      "nextAction": "BB-51 in progress (W29): the Move gate package and tests with the official Sui CLI mainnet-v1.82.3 used locally after checksum verification. Then BB-52, BB-53 (with the Sui collector reader) and BB-54.",
       "cardIds": [
         "BB-51",
         "BB-52",

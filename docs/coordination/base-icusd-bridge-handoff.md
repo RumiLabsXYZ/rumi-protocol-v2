@@ -1703,8 +1703,12 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - BB-51 started by the same W29 in a new directory `move/rumi_icusd_gate/` on the bridge branch. The Sui CLI is not on this
   machine; the exact official asset proposed is MystenLabs/sui release `mainnet-v1.82.3`,
   `sui-mainnet-v1.82.3-macos-arm64.tgz`, 366,870,778 bytes, sha256
-  `861f8833c5c7008c86aca50e925043baa8e04332dcbd846cc6c31ea0eee16be9`; downloading it awaits explicit approval. W29 writes
-  source and tests meanwhile and runs no `sui` command.
+  `861f8833c5c7008c86aca50e925043baa8e04332dcbd846cc6c31ea0eee16be9`. Correction (Miles): the coordinator's approval
+  question for this download was an invented gate; the official Sui CLI is the normal dependency already authorized in
+  `next-bb51.md` under Rob's local-tooling and implementation authority, and it was not an automatic-review denial. Miles
+  independently verified the host (arm64) and the asset's size and sha256 through the GitHub API. W29 verifies the checksum,
+  extracts locally and uses it only for `sui move test` (no wallet, network initialization or public execution). Miles also
+  verified the clean XRPL pin `46cf6b34` and its diff-check; BB-57 acceptance confirmed, no more reruns.
 
 ## Held live actions
 

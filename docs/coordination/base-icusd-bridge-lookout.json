@@ -466,7 +466,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: Move gate package and Move unit tests",
-      "evidenceText": "proof=none; Started 2026-10-31: Move gate package in its own new directory; source and tests being written; running sui move test waits for approval to download the pinned official Sui CLI (367 MB)",
+      "evidenceText": "proof=none; In progress (W29): Move gate package in move/rumi_icusd_gate; official Sui CLI mainnet-v1.82.3 used locally after checksum verification (normal tooling under the existing grant); sui move test only, no wallet or network",
       "evidenceLinks": []
     },
     {
