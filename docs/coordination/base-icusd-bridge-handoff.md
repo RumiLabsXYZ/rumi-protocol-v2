@@ -1519,8 +1519,12 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   name the issuer and match the ledger, quorum on identical (hash, amount); exact amounts only (beyond 8 decimals or 15
   digits, negative, above the clamp or another currency is a failed read). `Readings::xrpl_issued_outstanding` defaults to
   Unavailable. Worker run: 113 default and 173 feature tests; dry run unchanged; new fixture `collect_base_plus_xrpl`
-  (`escrow_locked` 250.12345679 = 200.12345678 for D plus 50.00000001 for X, each once; `status: ok`). Note for Miles: no
-  flag compares `E_X` with the issued amount; that is expected, since borrowed XRPL icUSD is debt-backed, not escrowed.
+  (`escrow_locked` 250.12345679 = 200.12345678 for D plus 50.00000001 for X, each once; `status: ok`). No flag compared `E_X`
+  with the issued amount. Correction (Miles, `review-xrpl-coverage-floor.md`): the coordinator's earlier remark here that
+  this was expected because borrowed XRPL icUSD is not escrowed was WRONG. PR #586's borrow path proves a mint of the exact
+  reserved net into the escrow account (`xrpl_icusd/borrow.rs` around 766-816, EscrowMint to `escrow_account`), and the
+  lane's coverage requires backing for both origins; borrow debt and escrow backing coexist. Borrowed XRPL supply is not
+  added to the backend's debt-backed `chain_supplies`.
 - `8ecab197` (W29, XRPL branch): the adjudicated origin movement report. Additive serde-default fields (exact cumulative
   `delivered_import`, `delivered_borrow`, `delivered_refund`, `returned_total`, `legacy_outstanding_at_init`, marker
   `origin_since_ns: Option<u64>`); deliveries counted at the single D to O step in `apply_reconcile` (lease-held attempt only,
@@ -1540,6 +1544,32 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Remaining for BB-57: part B, the release-recipe backend Wasm size against PocketIC 7's 10,485,760-byte code-section cap
   (and the 12 MiB IC limit with its reserve) and the XRPL PocketIC suite with negatives, run once at the final source pin
   in the single builder slot, scheduled at W28's next sub-milestone boundary.
+
+## Milestone 69 (2026-10-31): XRPL collector false OK; floor flag
+
+- Miles reproduced, with the existing `collect_fixture` binary and no network, a false OK in the newly enabled XRPL path: the
+  Base plus XRPL fixture with only the X escrow set to 0 (issued 50.00000001) exits 0 with `flags: none`, `status: ok` and
+  `circulating_total` 1050.00000001 against `total_icusd` 1000. The reader `457e6675` stays accepted as a transport
+  component; reporting completion needs a narrow coverage-floor flag.
+- The milestone 68 remark that borrowed XRPL icUSD is not escrowed is corrected above: PR #586's borrow path mints the exact
+  net into the escrow too, so both origins need backing.
+- Same W29, before part B, in `src/rumi_bridge_destinations` on the bridge branch (W28 reaches that crate only at 49e): an
+  independent floor flag when `E_X` is below the issued outstanding, with network id, amounts and gap, Failure severity
+  (hold and reconcile, not proof of theft, no automatic action), labelled a minimum issued-supply floor and not a full
+  coverage proof; arithmetic and the D/X boundary unchanged. Reproduction fixture first (exit 3), equality and surplus still
+  pass.
+
+## Milestone 70 (2026-10-31): origin report accepted; BB-56 done
+
+- Accepted (Miles, `accept-xrpl-origin.md`): the origin movement component `8ecab197` after inspecting the state and query,
+  the initialization hooks, every production issued-outstanding mutation, the lease-guarded delivery transition, the
+  deduplicated return, quarantine and unattributed paths and the regression tests; scoped diff-check clean; 172 focused tests
+  and the Candid check as recorded in milestone 68. It matches the adjudicated model (refunds distinct, exact sub-e8s
+  precision, returned total is not ICP payout total, persisted Option baseline including Some(0), initialization before
+  scheduling, a guard before either direction of O change, no silent rebase, aggregate O and R separate, no per-token or
+  debt-free claim, vault debt untouched).
+- BB-56 done at source and focused-test level (`e48dc18d`, `0b73ae95`, `0a315971`, `8ecab197`). No extra report UI is
+  required. BB-57 stays in progress for the collector floor flag and the final serialized Wasm and PocketIC run.
 
 ## Held live actions
 

@@ -503,10 +503,10 @@
     },
     {
       "id": "BB-56",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "XRPL: no-vault return to an ICP account",
-      "evidenceText": "proof=local-test; e48dc18d plus 0b73ae95 accepted components; its carried origin report is now delivered in BB-57 (8ecab197, cumulative movement counters, one-time baseline, one query) for Miles' acceptance",
+      "evidenceText": "proof=local-test; Miles accepted at source and focused-test level: e48dc18d, fee fence 0b73ae95, distinct interface 0a315971 and the origin movement report 8ecab197 (172 focused tests, Candid check); no live or public proof",
       "evidenceLinks": []
     },
     {
@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Accepted components: 0a315971, dd817f27, 457e6675 (XRPL lane reader). Delivered for review: 8ecab197 (origin movement report). Remaining: final integration, Wasm size and XRPL PocketIC once at the final pin",
+      "evidenceText": "proof=none; Accepted components: 0a315971, dd817f27, 457e6675 (reader). Origin report 8ecab197 in review. Now: XRPL escrow coverage-floor flag in the collector (false OK reproduced by Miles), then Wasm size and PocketIC once",
       "evidenceLinks": []
     },
     {

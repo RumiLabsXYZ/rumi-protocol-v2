@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-56 and BB-57 source delivered for review (origin report 8ecab197, lane reader 457e6675). Remaining BB-57 part B: the backend Wasm size check and the XRPL PocketIC suite once at the final pin, in the single builder slot at W28's next sub-milestone boundary.",
+      "nextAction": "BB-55 and BB-56 done. BB-57 in progress (same W29): the XRPL escrow coverage-floor flag in the collector, then part B (Wasm size and the XRPL PocketIC suite) once at the final pin in the single builder slot.",
       "cardIds": [
         "BB-55",
         "BB-56",
