@@ -3030,6 +3030,27 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - W23's BB-60 profile upkeep continues independently and is excluded from pushes until its own acceptance. W28 and W29 have no new
   protocol work. The whole goal is not complete: live activation, BB-46, BB-27, D6 and the held items remain.
 
+## Milestone 127 (2026-10-31): BB-54 pushed at f8b4cae1; an unreviewed profile commit went with it
+
+- Push: `f8b4cae1df1d26522aec95020d180d4867536091` pushed by exact commit at 2026-10-31 10:11 UTC (fast-forward from `e5c04cef`):
+  BB-54 (`37f9c77c`, `412f1fda`, `25852bb2`), the generated Sui declarations, the SDK lock and generator changes, and records. CI run
+  41191717045 in progress when listed once; Miles monitors (the `e5c04cef` run 41189208931 completed successfully earlier).
+- Coordinator error: W23 committed its BB-60 profile text upkeep as `875a1428` ("docs(profiles): refresh destination profile text to
+  accepted source (BB-60 upkeep)", Co-Authored-By Claude Haiku 5.5) between the coordinator's status check, which showed the three
+  profile files still uncommitted, and the coordinator's docs commit. The pre-push check printed the three profile paths but did
+  not stop the push, and the commit-subject filter hid the commit because its subject starts with `docs(`. So the unreviewed
+  profile commit is in the pushed head, contrary to Miles' instruction to exclude it until its own acceptance. No force-push or
+  revert was made; the decision is Miles'.
+- Coordinator checks on `875a1428` after the push: three files (`solana.json`, `sui.json`, `xrpl.json`); a structural comparison
+  against its parent shows no key, type or list-length change and only prose fields changed (`text`, `source`, the Sui topology
+  `rationale` and the `signing.signed_payload.value` description, whose `verified` date is unchanged); the existing profile dry run
+  passes (`OK: 9 profiles, 19 networks, 0 violations (date 2026-10-30)`), every network still disabled and every blocker id kept
+  (saved in the coordinator scratchpad `bb60/`). Content not yet reviewed by Miles; one `sui.json` sentence calls the frontend SDK
+  byte comparison "in Review at BB-54, not accepted", which BB-54's acceptance has since made stale. PR #591 discloses the commit
+  as unreviewed.
+- Lesson for the coordinator: a pre-push scope check must fail the push on any unexpected path, not only print it, and must not
+  filter commits by subject prefix.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
