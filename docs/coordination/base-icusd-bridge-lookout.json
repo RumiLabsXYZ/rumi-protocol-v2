@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; 49a e6a542be plus fixes 8198fb28 and bc96f166; 49b 12dfee35 plus fix 23dfe841 (proof-only refunds, fair queue paging); reproductions failed first; 357 tests; in review. 49c to 49e in progress",
+      "evidenceText": "proof=none; Accepted at source and local-test level: 12dfee35, 8198fb28, bc96f166, 23dfe841 (ledger saga, bootstrap fences, metadata authorities, proof-only refunds, fair paging). In progress: 49c to 49e with the carried requirements",
       "evidenceLinks": []
     },
     {

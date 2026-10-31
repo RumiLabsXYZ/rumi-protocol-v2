@@ -1731,6 +1731,20 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   golden reference `mismatches: 0`; the saved red logs show the failing-before runs.
 - W28 continues 49c, 49d (with the carried return_id binding) and 49e; W29 continues BB-51 with `sui move test` only.
 
+## Milestone 79 (2026-10-31): BB-49 49a and 49b accepted; cohort push
+
+- Accepted (Miles, `accept-bb49ab-corrections.md`): `bc96f166` and `23dfe841`, with the reviewed `8198fb28` and `12dfee35`,
+  at source and local-test scope. He inspected the correction source, the generation-bound non-delivery proofs and refund
+  re-check, the rotating queues and the corrected bound, the three preparation regressions, and read the saved red logs
+  directly; no duplicate build. BB-49 stays in progress for 49c to 49e with the original carried requirements (per-transfer
+  stray-refund locator with sender and amount bound in the saved claim, exact finalized return proof and one consumer per
+  transfer, RC to BU to PR with no ICP payout before the finalized burn, 49d's burn_id from return_id with the saved
+  recipient, account and amount, custody and holder-burn handling, the independent collector reader). No full Solana
+  completion is claimed; BB-47's carried items stay open until delivered there.
+- Cohort: Miles checked that the 14 commits after `667d8bbc` touch only the Solana crate and coordination docs (no XRPL
+  backend payload). This checkpoint is committed and the base-branch cohort is pushed normally at this boundary, with the
+  untracked `move/` package and W28's active 49c writes left unstaged. Miles alone monitors hosted CI at the new head.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
