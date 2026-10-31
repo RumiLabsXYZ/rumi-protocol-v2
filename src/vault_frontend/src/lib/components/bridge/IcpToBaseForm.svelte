@@ -22,7 +22,6 @@
   import {
     INITIAL_ICP_TO_BASE_STATE,
     bridgeAfterApproval,
-    discardIntent,
     isQuoteStale,
     prepareIcpToBase,
     reduceIcpToBase,
@@ -290,26 +289,12 @@
     void bridgeAfterApproval(deps, flow.intent, dispatch).then(touched);
   }
 
-  function discardApproved() {
-    if (flow.kind !== 'approved' || !store) return;
-    discardIntent({ store }, flow.intent);
-    flow = INITIAL_ICP_TO_BASE_STATE;
-    touched();
-  }
-
   function retry() {
     if (flow.kind !== 'uncertain' || flow.lookup === 'looking') return;
     recheckIfUnavailable();
     const deps = buildDeps();
     if (!deps) return;
     void retryIcpToBase(deps, flow.intent, dispatch).then(touched);
-  }
-
-  function discard() {
-    if (flow.kind !== 'uncertain' || flow.lookup !== 'not_found' || !store) return;
-    discardIntent({ store }, flow.intent);
-    flow = INITIAL_ICP_TO_BASE_STATE;
-    touched();
   }
 
   async function resume(intent: IcpToBaseIntent) {
@@ -542,7 +527,7 @@
   {#if flow.kind === 'approved'}
     <div class="review" aria-label="Approved transfer">
       <h3>Approval confirmed</h3>
-      <p class="banner" role="status">Approval confirmed. Click Bridge to Base to continue. Nothing has been sent to the bridge yet.</p>
+      <p class="banner" role="status">Approval confirmed. Click Bridge to Base to continue. This request keeps its own request id, so continuing it cannot create a second transfer.</p>
       <dl>
         <div><dt>Amount to bridge</dt><dd>{fmt(flow.intent.amountE8s)} icUSD</dd></div>
         <div><dt>Bridge deposit fee, deducted from the mint</dt><dd>{fmt(flow.intent.expectedDepositFee)} icUSD</dd></div>
@@ -552,7 +537,6 @@
       <p class="small-note">The icUSD ledger fee is charged on top. The approval expires about {approvalMinutes} minutes after it was granted; if it has expired the bridge will ask you to approve again.</p>
     </div>
     <button type="button" class="btn-primary wide" onclick={bridgeNow} disabled={bridgeBlocked}>Bridge to Base</button>
-    <button type="button" class="btn-secondary wide" onclick={discardApproved}>Discard this request</button>
   {/if}
 
   {#if flow.kind === 'uncertain'}
@@ -562,15 +546,12 @@
       {#if flow.lookup === 'looking'}
         <p>Looking for the request on the bridge...</p>
       {:else if flow.lookup === 'not_found'}
-        <p>The bridge has no record of this request yet. If you retry, the same request id is used, so it cannot be created twice.</p>
+        <p>The bridge has no record of this request yet. That does not prove it was never sent: it may still be waiting to run. If you retry, the same request id is used, so it cannot be created twice. The request stays saved on this device until the bridge answers it.</p>
       {:else}
         <p>The bridge could not be asked about this request right now. Retrying is safe: the same request id is used, so the bridge returns the existing deposit instead of creating a second one.</p>
       {/if}
       <div class="row">
         <button type="button" class="btn-primary small" onclick={retry} disabled={flow.lookup === 'looking'}>Retry with the same request</button>
-        {#if flow.lookup === 'not_found'}
-          <button type="button" class="btn-secondary small" onclick={discard}>Discard this request</button>
-        {/if}
       </div>
     </div>
   {/if}

@@ -325,7 +325,7 @@ export function reduceIcpToBase(state: IcpToBaseState, event: IcpToBaseEvent): I
   switch (event.type) {
     case 'reset':
     case 'edit':
-      // Editing is only possible while nothing is in flight. An approved request must be bridged or discarded.
+      // Editing is only possible while nothing is in flight. An approved request can only be continued (bridged under its own id).
       if (state.kind === 'approving' || state.kind === 'submitting' || state.kind === 'approved') return state;
       if (state.kind === 'uncertain' && event.type === 'edit') return state;
       return { kind: 'draft' };
@@ -520,7 +520,9 @@ export function hasUnresolvedIntent(store: IntentStore): boolean {
 }
 
 /**
- * Requests with no recorded outcome: not yet sent (`prepared`) or approved but not yet bridged (`approved`).
+ * Requests with no recorded outcome: `prepared` or `approved`. Either may already have been submitted (the stage is not
+ * durably distinguished before the bridge call), so each is potentially submitted: it can only be continued under its
+ * own request id, never discarded or replaced.
  * Pass a destination to list only that network's requests (legacy requests belong to the Base network). The
  * guard in `startIcpToBase` always looks at all of them.
  */
@@ -558,7 +560,7 @@ export function startIcpToBase(deps: IcpToBaseDeps, quote: IcpToBaseQuote, emit:
   if (hasUnresolvedIntent(deps.store)) {
     emit({
       type: 'blocked',
-      message: 'An earlier bridge request on this device has no recorded outcome yet. Resolve or discard it first.',
+      message: 'An earlier bridge request on this device has no recorded outcome yet. Check its status and continue it with the same request first.',
     });
     return Promise.resolve();
   }
@@ -736,7 +738,9 @@ async function resolveUncertain(
     return;
   }
   if (outcome === null) {
-    // After a reload, an approved request the bridge has never seen is simply ready to bridge.
+    // An absent query is NOT proof that the original update never ran: a pending ingress can still execute. After a
+    // reload, an approved request is resumed under its OWN request id (the idempotent same-id continuation); it is
+    // never forgotten and never replaced by a fresh id.
     emit(fromReload && intent.status === 'approved' ? { type: 'resume_approved', intent } : { type: 'lookup_not_found' });
     return;
   }
@@ -772,11 +776,6 @@ export async function findDepositByRequestId(
 export async function resumeIcpToBase(deps: IcpToBaseDeps, intent: IcpToBaseIntent, emit: Emit): Promise<void> {
   emit({ type: 'resume_started', intent });
   await resolveUncertain(deps, intent, emit, '', null, true);
-}
-
-/** Forget an unsent intent. Only safe once a lookup showed the request never reached the bridge. */
-export function discardIntent(deps: Pick<IcpToBaseDeps, 'store'>, intent: IcpToBaseIntent): void {
-  deps.store.remove(intentId(intent));
 }
 
 function abandonIntent(deps: IcpToBaseDeps, intent: IcpToBaseIntent): void {

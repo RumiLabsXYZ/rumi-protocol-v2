@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Principal } from '@dfinity/principal';
+import * as flows from './icpToBase';
 import type { BridgeError, DepositView } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
 import { formatE8s } from './amounts';
 import {
@@ -12,7 +13,6 @@ import {
   buildQuote,
   checkQuote,
   chooseLedgerFee,
-  discardIntent,
   findDepositByRequestId,
   hasUnresolvedIntent,
   isQuoteStale,
@@ -943,15 +943,58 @@ describe('resumeIcpToBase (reload recovery)', () => {
     expect(h.bridgeToBase).not.toHaveBeenCalled();
   });
 
-  it('offers retry or discard when the earlier request never reached the bridge', async () => {
+  it('offers only the same-id retry when the bridge has no record of the earlier request, and keeps it saved', async () => {
     const h = harness();
     const earlier = intent({ clientRequestId: REQUEST_ID });
     h.store.put(earlier);
     await resumeIcpToBase(h.deps, earlier, h.emit);
     expect(h.state()).toMatchObject({ kind: 'uncertain', lookup: 'not_found' });
     expect(h.bridgeToBase).not.toHaveBeenCalled();
-    discardIntent(h.deps, earlier);
-    expect(h.store.list()).toEqual([]);
+    // An absent query is not proof that the original update never ran: the request stays in the journal.
+    expect(h.store.list()).toHaveLength(1);
+    expect(h.store.get(REQUEST_ID)).toMatchObject({ clientRequestId: REQUEST_ID, status: 'prepared' });
+  });
+});
+
+describe('an unanswered bridge request is never forgotten', () => {
+  const hex = (bytes: ArrayLike<number>) => `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+  const ALLOWED = () => quote({ allowanceE8s: 10_000_000_000n, allowanceExpiresAtNs: null });
+
+  it('offers no way to forget a request that may have been submitted', () => {
+    expect(flows).not.toHaveProperty('discardIntent');
+  });
+
+  it('keeps the original under its own id: delayed old update, absent query, blocked fresh start, same-id retry, no second request', async () => {
+    const h = harness();
+    let seed = 0;
+    h.deps.random = (length) => new Uint8Array(length).fill(0x10 + seed++); // every fresh request would get a DIFFERENT id
+    // The bridge call is lost: the ingress is still pending when the page asks.
+    h.bridgeToBase.mockRejectedValueOnce(new Error('ingress timed out'));
+    await startIcpToBase(h.deps, ALLOWED(), h.emit);
+    expect(h.state()).toMatchObject({ kind: 'uncertain', lookup: 'not_found' });
+    const original = h.store.list()[0] as IcpToBaseIntent;
+    expect(original.clientRequestId).toBe(`0x${'10'.repeat(16)}`);
+
+    // A fresh start would use a new id: refused. Nothing is sent and nothing is forgotten.
+    await startIcpToBase(h.deps, ALLOWED(), h.emit);
+    expect(h.events[h.events.length - 1]).toMatchObject({ type: 'blocked' });
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
+    expect(h.store.list()).toHaveLength(1);
+
+    // A reload finds the same state: still absent, still the same request.
+    await resumeIcpToBase(h.deps, original, h.emit);
+    expect(h.state()).toMatchObject({ kind: 'uncertain', lookup: 'not_found' });
+    expect(h.store.list()).toHaveLength(1);
+
+    // The old update runs late. The same-id retry returns the existing deposit.
+    h.bridgeToBase.mockImplementationOnce((async (args: { client_request_id: Uint8Array }) => ({ Ok: makeDeposit({ client_request_id: args.client_request_id }) })) as never);
+    await retryIcpToBase(h.deps, original, h.emit);
+    expect(h.state()).toMatchObject({ kind: 'tracking' });
+    const ids = h.bridgeToBase.mock.calls.map((call) => hex((call as unknown as [{ client_request_id: Uint8Array }])[0].client_request_id));
+    expect(ids).toEqual([original.clientRequestId, original.clientRequestId]);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(h.store.list()).toHaveLength(1);
+    expect(h.store.get(original.clientRequestId)).toMatchObject({ status: 'submitted' });
   });
 });
 

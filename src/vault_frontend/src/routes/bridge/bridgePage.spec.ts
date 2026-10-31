@@ -697,18 +697,19 @@ describe('ICP to Base through the page', () => {
       expect(host.textContent).toContain('DEPOSIT #1');
     });
 
-    it('cannot be edited while waiting for the second click; the request can be discarded', async () => {
+    it('cannot be edited while waiting for the second click, and the approved request has no discard: it can only be continued', async () => {
       await reviewTransfer();
       click(/Approve \(step 1 of 2\)/);
       await settle(24);
       expect(host.querySelector<HTMLInputElement>('#icp-amount')!.disabled).toBe(true);
       expect(button(/^Review transfer$/)).toBeUndefined();
-      click(/Discard this request/);
-      await settle(24);
-      expect(host.textContent).not.toContain('Approval confirmed');
-      expect(host.querySelector<HTMLInputElement>('#icp-amount')!.disabled).toBe(false);
+      // The request is approved and may be bridged by the next click; nothing can erase it and free a new request id.
+      expect(button(/discard/i)).toBeUndefined();
+      expect(host.textContent).toContain('Approval confirmed');
+      expect(button(/^Bridge to Base$/)).toBeTruthy();
       const record = JSON.parse(localStorage.getItem(`rumi:base-bridge:v1:${TEST_OWNER.toText()}`)!);
-      expect(record.intents).toEqual([]);
+      expect(record.intents).toHaveLength(1);
+      expect(record.intents[0]).toMatchObject({ status: 'approved' });
     });
 
     it('survives a reload between the clicks and sends with the same request id', async () => {
@@ -840,6 +841,66 @@ describe('ICP to Base through the page', () => {
     const ids = signers.bridge.bridge_to_base.mock.calls.map((call) => Array.from(call[0].client_request_id as Uint8Array).join(','));
     expect(new Set(ids).size).toBe(1);
     expect(host.textContent).toContain('DEPOSIT #1');
+  });
+
+  it('never offers to forget a request that may have been submitted: a delayed old update, an absent query and a reload end in the same request id', async () => {
+    // The bridge call is lost (the ingress is still pending) and the query by request id finds nothing yet.
+    signers.bridge.bridge_to_base.mockRejectedValueOnce(new Error('ingress timed out'));
+    await reviewTransfer();
+    click(/Approve and bridge/);
+    await settle(24);
+    expect(host.textContent).toContain('The result of this transfer is not confirmed yet');
+    expect(anonymous.get_deposit_by_request).toHaveBeenCalledTimes(1);
+    expect(button(/discard/i)).toBeUndefined();
+    const key = `rumi:base-bridge:v1:${TEST_OWNER.toText()}`;
+    const journal = () => JSON.parse(localStorage.getItem(key)!).intents;
+    expect(journal()).toHaveLength(1);
+    const originalId = journal()[0].clientRequestId;
+    expect(journal()[0].status).toBe('approved');
+
+    // Reload. The earlier request is listed; a fresh start with a new request id is refused.
+    unmount(instance as any);
+    host.innerHTML = '';
+    render();
+    await settle(24);
+    expect(host.textContent).toContain('Earlier request without a recorded outcome');
+    type('#icp-amount', '30');
+    type('#icp-recipient', '0x1111111111111111111111111111111111111111');
+    click(/^Review transfer$/);
+    await settle();
+    click(/Approve and bridge/);
+    await settle(24);
+    expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(signers.bridge.bridge_to_base).toHaveBeenCalledTimes(1);
+    expect(journal()).toHaveLength(1);
+
+    // The earlier request resumes: still absent, and the only way forward is the same id.
+    click(/Check status/);
+    await settle(24);
+    expect(host.textContent).toContain('Approval confirmed. Click Bridge to Base to continue.');
+    expect(button(/discard/i)).toBeUndefined();
+    // The old update has run by now: the same-id request returns the existing deposit.
+    signers.bridge.bridge_to_base.mockImplementationOnce(async (args: { client_request_id: Uint8Array }) => ({
+      Ok: makeDeposit({ status: { Escrowed: null }, client_request_id: args.client_request_id }),
+    }));
+    click(/^Bridge to Base$/);
+    await settle(24);
+    const ids = signers.bridge.bridge_to_base.mock.calls.map((call) => `0x${Array.from(call[0].client_request_id as Uint8Array, (b) => b.toString(16).padStart(2, '0')).join('')}`);
+    expect(ids).toEqual([originalId, originalId]);
+    expect(signers.ledger.icrc2_approve).toHaveBeenCalledTimes(1);
+    expect(journal()).toHaveLength(1);
+    expect(journal()[0]).toMatchObject({ clientRequestId: originalId, status: 'submitted' });
+  });
+
+  it('shows no discard in the uncertain panel after an absent query, only the same-request retry', async () => {
+    signers.bridge.bridge_to_base.mockRejectedValueOnce(new Error('network error'));
+    await reviewTransfer();
+    click(/Approve and bridge/);
+    await settle();
+    expect(host.textContent).toContain('The bridge has no record of this request yet.');
+    expect(host.textContent).toContain('That does not prove it was never sent');
+    expect(button(/Retry with the same request/)).toBeTruthy();
+    expect(button(/discard/i)).toBeUndefined();
   });
 
   it('refuses to review an invalid amount or recipient without calling anything', async () => {
