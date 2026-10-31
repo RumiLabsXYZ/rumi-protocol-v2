@@ -3095,6 +3095,31 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   unchanged (the stronger seam is not implemented at `4394b472`). Then one structural comparison and one coordinator dry run.
 - The live PR #591 CI row already names exact head `f8b4cae1` and run 41191717045 in progress; Miles owns its visibility.
 
+## Milestone 130 (2026-10-31): BB-60 final profile text frozen for review
+
+- W23 (requested Haiku; actual Haiku 5.5, `claude-haiku-5-5`) committed `6b545dd9da1eb8a71719dcf559aef393542702ce` "docs(profiles): Sui
+  observer and gate prose match accepted source; XRPL baseline marked (BB-60 upkeep)", local only, parent `42a799ae`; 16 text leaves
+  in `sui.json` and `xrpl.json` (networks 0 and 1): `sui-gate-module-missing` (module bytes disclosed and deferred as MC-DEF-13, not a
+  source gate; publish, bind and UpgradeCap policy held), `sui-observer-lane-missing` (the legacy BridgeOut-and-Minted paging
+  requirement removed; the accepted observer's bounded BridgeOut windows and hints, durable ReturnRecord, Gate sequence order and
+  counter-based foreign-mint detection, no Minted scan per MC-DEF-14, with the dense-checkpoint and pruned-index held-recovery limit),
+  `sui-signing-vectors-unverified` (the official Sui Rust SDK comparison disclosed and deferred, not performed, not a source gate),
+  `sui-wallet-connector-missing` (the accepted `suiBridge/walletStandard.ts` with BB-54 pins; real wallet display, endpoints and
+  deployment unmeasured and held); `xrpl-return-intent-missing` ("merge or a stacked branch" replaced by the denied-push publication
+  hold, the PR #586 merge, deployment and live evidence; the branch separate, unpublished, not in PR #591) and the three baseline
+  sentences in `xrpl-15-digit-validator-not-wired`, `xrpl-caps-not-hard-bounded` and `xrpl-pending-import-cap-race` marked as about
+  the PR #586 baseline. `solana.json` unchanged (the unattributed-burn limitation kept).
+- Checks: W23's structural comparison `4eb43dce` to `6b545dd9` PASS (52 changed leaves, all approved text and source fields) and its
+  hygiene mirror of V7 and V10 clean; coordinator structural comparison of `6b545dd9` against its parent: text fields only; the existing
+  profile dry run on the frozen tree: `OK: 9 profiles, 19 networks, 0 violations (date 2026-10-30)`; `git diff --check` clean. Diffs for
+  review in the coordinator scratchpad `bb60/`: cumulative `4eb43dce..6b545dd9` and unpushed `f8b4cae1..6b545dd9`.
+- Left unchanged by W23 (stated): the Sui topology rationale lists no frontend path; the `signed_payload` description already states
+  BB-54's scope; several holds without contradicting evidence; `xrpl-no-origin-split`, the XRPL D2 rationale and
+  `xrpl-wallet-xaman-only` outside the review's items.
+- Complete origin-to-HEAD inventory before any push (origin `f8b4cae1`): `a73731a8` and `6b545dd9` (profiles), `acddb10f`, `b1b4eedd`,
+  `42a799ae` and this record (coordinator docs); files: the handoff, the board, `sui.json`, `xrpl.json`; nothing uncommitted. The push
+  waits for Miles' review of the final profile diff.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
