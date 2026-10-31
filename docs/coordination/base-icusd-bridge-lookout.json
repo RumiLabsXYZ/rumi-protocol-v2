@@ -495,10 +495,10 @@
     },
     {
       "id": "BB-55",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "XRPL: 15-digit wiring and cap clamps on PR #586's module",
-      "evidenceText": "proof=local-test; f887fab5 plus 868ebca8: reissue of a cap-held claim respects current caps (counted once); exposure checked against the ceiling before any new issuer attempt or signature; reproduced first; 161 focused tests; local branch",
+      "evidenceText": "proof=local-test; Miles accepted f887fab5 plus 868ebca8: 15-digit clamp, pending imports counted, validator wired, parser parity; reissue respects current caps; ceiling checked before any new attempt; 161 focused tests; local branch, push denied",
       "evidenceLinks": []
     },
     {
@@ -506,7 +506,7 @@
       "state": "Review",
       "owner": "worker-sonnet",
       "scope": "XRPL: no-vault return to an ICP account",
-      "evidenceText": "proof=local-test; e48dc18d: no-vault return internals: lifetime-bound destination, tag from the repayment counter, credit on delivered amount from the bound payer only, persisted payout job, refunds, no vault effects; 155 focused tests; no Candid",
+      "evidenceText": "proof=local-test; e48dc18d components reviewed, not accepted: a fee-backing interleaving case (two payouts against one saved balance) is being reproduced by the same W29; origin reporting is carried to BB-57; stays in Review",
       "evidenceLinks": []
     },
     {
@@ -514,7 +514,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end",
-      "evidenceText": "proof=none; Part A in progress (same W29, local branch stacked on PR 586): return endpoints, OperationKindTag::Return, .did and bindings by script, Candid check reviewed not bypassed, Return and opt-in cards; Wasm and PocketIC wait for the builder",
+      "evidenceText": "proof=none; Part A in progress (same W29): return endpoints, distinct Return tag, .did and bindings by script, Return and opt-in cards; also carried from BB-56: imported versus borrowed delivered totals (model first); Wasm and PocketIC wait",
       "evidenceLinks": []
     },
     {

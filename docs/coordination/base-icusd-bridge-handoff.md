@@ -1333,6 +1333,22 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   dangerous (it gave no explanation)." Not retried by any other route. Read-only check afterwards: no remote follow-ups
   branch exists; PR #586's branch unchanged at `b02584e4`; the work is local at `868ebca8`.
 
+## Milestone 59 (2026-10-31): BB-55 accepted; BB-56 review items
+
+- Accepted (Miles): BB-55 (`f887fab5` plus `868ebca8`) at source and focused-test level (reissue checks current caps without
+  counting D twice; the authoritative ceiling check runs before new attempt persistence; unknown attempts still reconcile).
+  Coordinator and worker evidence only, not public runtime proof. The XRPL follow-up branch stays local; the push denial is
+  binding and is not retried by any identity, tool or executor.
+- BB-56 `e48dc18d` stays in Review (`review-bb56.md`): (1) a fee-backing interleaving candidate: `drive_return` saves the
+  escrow balance across awaits and `begin_return_payout` uses it against current liabilities, so with a zero rounding buffer
+  three 100-e8s liabilities, escrow 310 and fee 10 could end with ledger 90 backing a 100 claim; the same W29 reproduces it
+  first through the real helpers, then makes the smallest reservation or freshness fix covering the shared CanonicalReturn
+  paths, or names the exact guard that disproves it. (2) Origin reporting was BB-56 plan scope and is carried to BB-57 (card
+  and plan row updated): exact imported versus borrowed delivered totals with explicit legacy treatment, no per-token
+  provenance, no debt-free label for all outstanding supply; a concrete model comes back for adjudication before source.
+- The interim Return-as-Repayment view label and the unsupported rollback after the first Return are acceptable only before
+  the endpoint is exposed; BB-57 publishes a distinct Return tag and regenerates bindings canonically.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

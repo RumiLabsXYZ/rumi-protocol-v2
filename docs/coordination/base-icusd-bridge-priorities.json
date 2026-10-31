@@ -65,7 +65,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-55 correction and BB-56 in Review (local branch). BB-57 part A in progress (same W29): endpoints, Candid and declarations, frontend Return and opt-in cards. Part B (Wasm size under 10 MiB, XRPL PocketIC suite) runs on the single builder lane when it frees.",
+      "nextAction": "BB-55 done. BB-56 in Review: the same W29 reproduces a fee-backing interleaving case first and fixes it if real. BB-57 part A in progress (endpoints, Candid, cards) with the carried origin report (model first); part B (Wasm size, PocketIC) on the builder lane when free.",
       "cardIds": [
         "BB-55",
         "BB-56",
