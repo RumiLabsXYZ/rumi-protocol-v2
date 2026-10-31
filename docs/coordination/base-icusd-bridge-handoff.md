@@ -1491,6 +1491,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   `InitializeMint2` tag (20) come from memory, used as an allow-list that fails closed; re-check against program source at
   activation. Mint rent is a parameter, not measured; the fee payer must be funded before creations can land.
 
+## Milestone 67 (2026-10-31): BB-49 49a reviewed
+
+- Miles (`review-bb49a.md`): signer derivation and key rules, mint and return-account base checks, persist-before-sign
+  bootstrap, schema migration and timer rearming align (source only). Two corrections for the same W28 as one separate
+  commit after 49b: (1) a reclaimed timer pass can let an old bootstrap sign reply or continuation attach to a newer
+  message at the same target; every async bootstrap callback must be fenced to its exact persisted attempt identity, shown
+  by a reproduction with a deferred signer and a newer generation; (2) `check_mint` ignores the MetadataPointer and
+  TokenMetadata authority fields; they must be None or the canister's `mint-authority` key (design authority matrix), with a
+  foreign-authority rejection test.
+- Source pins (verified read-only by Miles, replacing "from memory"): token-2022 `b5b7511e`
+  `interface/src/extension/mod.rs` lines 1074-1121 (ImmutableOwner 7, MetadataPointer 18, TokenMetadata 19); token
+  `f62a0b05` `interface/src/instruction.rs` lines 635-644 (tag 20 InitializeMint2); framing byte 165 per the Token-2022
+  docs. Source and layout reading only, not installed-program or wallet proof. The false claim that a wrong allow-list id
+  can only cause a refusal is removed.
+- The 150 s bootstrap replacement is a retry cadence justified by fixed-address idempotent creation and account
+  verification, not proof of non-execution, and must not be reused in value-transfer or mint lanes.
+- In-mint name, symbol and URI creation logged as MC-DEF-8 in the deferral lane (actual omission; no metadata or
+  wallet-display demonstration claimed; no new encoder task now). 49a stays in component review pending the two fixes.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

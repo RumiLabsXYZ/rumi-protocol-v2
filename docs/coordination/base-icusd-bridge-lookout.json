@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; 49a e6a542be: real threshold signer seam, timer, mint creation and bind checks (allow-list), nonce pool bootstrap; 283 tests; golden 0 mismatches. 49b (ledger saga, endpoints) in progress, then 49c to 49e",
+      "evidenceText": "proof=none; 49a e6a542be component-reviewed: two fixes queued for the same W28 after 49b (bootstrap replies fenced to their exact attempt; metadata authorities none or canister); extension ids now source-pinned. 49b in progress",
       "evidenceLinks": []
     },
     {
