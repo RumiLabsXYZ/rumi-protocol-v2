@@ -51,10 +51,11 @@
 //!   reinstall of this instance, which is a decision for the controllers, not an endpoint.
 //! * An upgrade can only replace the provider set (`UpgradeArgs.mirror`); it re-validates the
 //!   stored network, so a bad upgrade traps and the old module stays.
-//! * `signing_enabled` in the config view is false: nothing is activated. The mint lane signs
-//!   and broadcasts only when the controllers have configured the gas coin, an admin has enabled a
-//!   provider mirror and observed the deployment, and mints are not paused; `get_mint_lane` says
-//!   which of those is missing.
+//! * `signing_enabled` in the config view is a legacy, non-authoritative placeholder (always false); it
+//!   enforces nothing and does not say whether the lane can sign. The mint lane signs and broadcasts
+//!   only when the controllers have configured the gas coin, an admin has enabled a provider mirror and
+//!   observed the deployment, and mints are not paused; `get_mint_lane` (`ready`, `blocked_by`) is the
+//!   readiness seam.
 //!
 //! # Open items this crate carries (honest list)
 //!

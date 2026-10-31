@@ -106,12 +106,37 @@ pub fn round_head(n: u64) -> u64 {
 }
 
 /// The head response, reduced to `{chainIdentifier, checkpoint:{sequenceNumber: <rounded>}}`.
-/// Anything else a head response carries depends on the exact head and is dropped.
+/// Anything else a head response carries depends on the exact head and is dropped, EXCEPT `errors`:
+/// the shared canonicalization policy (`graphql::canonicalize_response`: the size cap, a JSON object,
+/// an `errors` member that is an array, at most four truncated messages) runs first, and its `errors`
+/// are kept, so a reply that `parse_envelope` would exclude stays excluded after rounding. A malformed
+/// `errors` member is refused by that policy and cannot be laundered into a usable head.
 pub fn canonicalize_head(body: &[u8], max_bytes: usize) -> Result<Vec<u8>, String> {
-    if body.len() > max_bytes {
-        return Err("the response is larger than the configured cap".into());
+    let canonical = crate::graphql::canonicalize_response(body, max_bytes)?;
+    let v: Value = serde_json::from_slice(&canonical).map_err(|e| format!("not JSON: {e}"))?;
+    let mut keep = serde_json::Map::new();
+    let has_errors = match v.get("errors") {
+        Some(errors) => {
+            keep.insert("errors".into(), errors.clone());
+            errors.as_array().is_some_and(|a| !a.is_empty())
+        }
+        None => false,
+    };
+    match head_data(&v) {
+        Ok(data) => {
+            keep.insert("data".into(), data);
+        }
+        // Errors with no usable data stay visible as errors (the envelope parser reports them).
+        Err(_) if has_errors => {}
+        Err(e) => return Err(e),
     }
-    let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
+    let mut bytes = Vec::new();
+    crate::graphql::canonical_json(&Value::Object(keep), &mut bytes);
+    Ok(bytes)
+}
+
+/// `data` reduced to the chain identifier and the rounded checkpoint number.
+fn head_data(v: &Value) -> Result<Value, String> {
     let data = v.get("data").and_then(Value::as_object).ok_or("the head response has no data object")?;
     let chain = data.get("chainIdentifier").and_then(Value::as_str).ok_or("no chainIdentifier")?;
     let checkpoint = data.get("checkpoint").ok_or("no checkpoint")?;
@@ -121,12 +146,11 @@ pub fn canonicalize_head(body: &[u8], max_bytes: usize) -> Result<Vec<u8>, Strin
         _ => None,
     }
     .ok_or("no sequenceNumber")?;
-    let out = json!({ "data": { "chainIdentifier": chain, "checkpoint": { "sequenceNumber": round_head(seq) } } });
-    let mut bytes = Vec::new();
-    crate::graphql::canonical_json(&out, &mut bytes);
-    Ok(bytes)
+    Ok(json!({ "chainIdentifier": chain, "checkpoint": { "sequenceNumber": round_head(seq) } }))
 }
 
+/// (This is deliberately NOT subject to the errors policy of the read transforms: the body is never
+/// parsed as an envelope and never evidence of anything, see the lane's `maybe_send`.)
 /// The body every successful `executeTransaction` POST is reduced to: whether the provider
 /// accepted the request is the only thing a replica contributes, because a duplicate submission
 /// of the same signed bytes may answer differently from the first. The canister confirms by
@@ -467,6 +491,35 @@ mod tests {
         assert_eq!(parse_head(&null, TESTNET_B58), Ok(None));
         let wrong = data(json!({ "chainIdentifier": "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S", "checkpoint": { "sequenceNumber": 100 } }));
         assert!(matches!(parse_head(&wrong, TESTNET_B58), Err(Exclusion::WrongNetwork(_))));
+    }
+
+    #[test]
+    fn the_head_transform_keeps_the_graphql_errors_policy_of_the_shared_canonicalization() {
+        let head = |extra: serde_json::Value| {
+            let mut v = json!({ "data": { "chainIdentifier": TESTNET_B58, "checkpoint": { "sequenceNumber": 12_345 } } });
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            serde_json::to_vec(&v).unwrap()
+        };
+        // A nonempty errors array survives, so the envelope parser excludes it.
+        let out = canonicalize_head(&head(json!({ "errors": [{ "message": "boom", "extra": 1 }] })), 4_096).unwrap();
+        let kept: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(kept["errors"], json!([{ "message": "boom" }]));
+        assert!(matches!(crate::graphql::parse_envelope(&out), Err(Exclusion::Transport(m)) if m == "boom"));
+        // A malformed errors member cannot be laundered: the transform refuses it.
+        for bad in [json!({ "message": "x" }), json!("x"), serde_json::Value::Null, json!(5)] {
+            assert!(canonicalize_head(&head(json!({ "errors": bad })), 4_096).is_err(), "{bad}");
+        }
+        // An empty errors array is harmless and the successful path is unchanged: rounded, data-only.
+        let ok = canonicalize_head(&head(json!({ "errors": [], "extensions": { "x": 1 } })), 4_096).unwrap();
+        let v: Value = serde_json::from_slice(&ok).unwrap();
+        assert_eq!(v["data"]["checkpoint"]["sequenceNumber"], 12_300);
+        assert!(v.get("extensions").is_none());
+        assert!(parse_head(&crate::graphql::parse_envelope(&ok).unwrap(), TESTNET_B58) == Ok(Some(12_300)));
+        // Errors with an unusable data member stay visible as errors rather than an opaque failure.
+        let only = canonicalize_head(br#"{"errors":[{"message":"no data"}]}"#, 4_096).unwrap();
+        assert!(matches!(crate::graphql::parse_envelope(&only), Err(Exclusion::Transport(_))));
     }
 
     #[test]

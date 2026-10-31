@@ -438,7 +438,7 @@ fn a_transaction_that_ran_but_whose_send_reply_was_lost_is_found_by_its_receipt(
     assert_eq!(deposit_of(id).state, DepositState::Delivered);
     let a = l.op(0).current().unwrap().clone();
     assert_eq!(a.sends, 1, "sent once; every reply was lost");
-    assert!(a.last_send_note.unwrap().contains("0 provider(s) accepted, 3 failed"));
+    assert!(a.last_send_note.unwrap().contains("0 provider(s) HTTP-acknowledged (maybe sent), 3 failed"));
     assert_eq!(l.sim.executed_count(), 1);
 }
 
@@ -1256,4 +1256,139 @@ fn an_already_sent_unknown_attempt_is_preserved_while_the_lane_is_paused() {
     l.ticks(2);
     assert_eq!(deposit_of(id).state, DepositState::Delivered);
     assert_eq!(l.sim.executed_count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Review correction F3: the head transform keeps GraphQL errors unusable (BB-52 F3 class)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn graphql_errors_on_a_head_reply_survive_the_transform_and_exclude_the_provider() {
+    let l = lane();
+    // Two providers, both required: one reply carrying `errors` must leave only one usable provider.
+    state::mutate_core(|c| c.mirror = providers(&["alpha", "beta"]));
+    let net = l.net();
+    let m = Mirror::from_state(&net).unwrap();
+    assert!(matches!(block_on(m.head()), Verdict::Agreed(_)), "both clean providers agree");
+    let cases = [
+        ("a nonempty errors array", serde_json::json!([{ "message": "rate limited" }])),
+        ("a malformed errors object", serde_json::json!({ "message": "not an array" })),
+        ("a string errors member", serde_json::json!("oops")),
+        ("a null errors member", serde_json::Value::Null),
+    ];
+    for (what, errors) in cases {
+        l.sim.set_provider("beta", Provider { head_errors: Some(errors), ..Provider::default() });
+        match block_on(m.head()) {
+            Verdict::Unavailable(why) => assert!(why.contains("1 usable providers, 2 required") && why.contains("beta"), "{what}: {why}"),
+            other => panic!("{what}: a reply with errors became a usable head: {other:?}"),
+        }
+    }
+    // A valid empty errors array is not an error: the provider still counts, and the head is still rounded.
+    l.sim.set_provider("beta", Provider { head_errors: Some(serde_json::json!([])), ..Provider::default() });
+    assert!(matches!(block_on(m.head()), Verdict::Agreed(h) if h % 100 == 0));
+    // The network identity check still excludes a provider on another network.
+    l.sim.set_provider("beta", Provider { wrong_network: true, ..Provider::default() });
+    assert!(matches!(block_on(m.head()), Verdict::Unavailable(why) if why.contains("wrong network")));
+}
+
+#[test]
+fn a_send_reply_carrying_errors_is_never_evidence_so_its_transform_has_no_such_gap() {
+    // `transform_sui_send` replaces every 200 reply, errors included, with a constant: that is by design
+    // (a duplicate submission may answer differently) and nothing reads the body as evidence. The lane
+    // settles an attempt only by receipt or consumed record, so a rejection that arrives as GraphQL errors
+    // and is counted as "answered" changes nothing.
+    let l = lane();
+    let id = escrowed(&l.fx, 0x21, 5 * E8, 1);
+    *l.sim.mode.borrow_mut() = ExecMode::Drop;
+    l.ticks(2);
+    l.sim.next_epoch(); // validators now refuse the resend (an `errors` reply) because its epoch passed
+    test_env::advance_secs(10 * 60);
+    l.ticks(2);
+    assert!(!l.sim.rejections.borrow().is_empty(), "the simulated validators rejected the resend with errors");
+    let op = l.op(0);
+    let a = op.current().unwrap();
+    assert!(a.last_send_note.clone().unwrap().contains("HTTP-acknowledged (maybe sent)"), "the reply still counts as answered");
+    assert!(matches!(a.disposition, AttemptDisposition::Open) && matches!(op.state, MintOpState::Active));
+    assert_eq!((op.attempts.len(), deposit_of(id).state), (1, DepositState::MintInFlight), "no delivery, no failure, no replacement");
+}
+
+// ---------------------------------------------------------------------------
+// Review correction F4: facts read before an await are re-checked against the CURRENT state at admission
+// ---------------------------------------------------------------------------
+
+/// While the first owned-object read of a gather is in flight, run `f` once (a newer pass finishing).
+fn during_the_owned_object_read(l: &Lane, f: impl Fn() + 'static) {
+    let fired = std::cell::Cell::new(false);
+    *l.sim.on_serve.borrow_mut() = Some(Box::new(move |q| {
+        if q == crate::reads::QUERY_OWNED_OBJECT && !fired.replace(true) {
+            f();
+        }
+    }));
+}
+
+#[test]
+fn facts_older_than_the_current_final_checkpoint_admit_no_operation() {
+    let l = lane();
+    let id = escrowed(&l.fx, 0x21, 5 * E8, 1);
+    let head = l.sim.head.get() + 100; // what the next pass will see (tick advances by 100)
+    during_the_owned_object_read(&l, move || {
+        // A newer pass completes another mint and advances our final checkpoint beyond these facts.
+        state::mutate_runtime(|r| r.last_final_checkpoint = head + 1);
+    });
+    l.tick();
+    assert_eq!(state::mint_op_count(), 0, "no operation was admitted from refs older than the current floor");
+    assert_eq!((deposit_of(id).state, deposit_of(id).mint_op), (DepositState::Escrowed, None));
+    assert_eq!((l.signer.calls.borrow().len(), l.sim.accepted.borrow().len()), (0, 0));
+    assert_eq!(state::read_runtime(|r| r.active_mint_op), None);
+    assert!(state::read_runtime(|r| r.lane_wait.clone()).unwrap_or_default().contains("behind our last finalized transaction"));
+    // Re-gathered after the chain moves on: admitted with fresh references.
+    *l.sim.on_serve.borrow_mut() = None;
+    l.sim.advance(300);
+    l.tick();
+    assert_eq!(state::mint_op_count(), 1);
+    let a = l.op(0).attempts[0].clone();
+    assert!(a.built_checkpoint > head);
+    assert_eq!(a.mint_cap.version, l.sim.current_ref(&SIM_MINT_CAP).version);
+    l.tick();
+    assert_eq!(deposit_of(id).state, DepositState::Delivered);
+}
+
+#[test]
+fn facts_older_than_the_current_final_checkpoint_append_no_replacement_attempt() {
+    // A replacement attempt after a finalized failure.
+    let l = lane();
+    let id = escrowed(&l.fx, 0x21, 5 * E8, 1);
+    *l.sim.mode.borrow_mut() = ExecMode::Abort("MoveAbort test".into());
+    l.ticks(2);
+    assert!(matches!(l.op(0).attempts[0].disposition, AttemptDisposition::FailedFinal { .. }));
+    let head = l.sim.head.get() + 100;
+    during_the_owned_object_read(&l, move || state::mutate_runtime(|r| r.last_final_checkpoint = head + 1));
+    *l.sim.mode.borrow_mut() = ExecMode::Execute;
+    l.tick();
+    assert_eq!(l.op(0).attempts.len(), 1, "no attempt was appended from stale refs");
+    assert_eq!((l.signer.calls.borrow().len(), l.sim.executed_count()), (2, 0), "only the first attempt's two signatures exist");
+    *l.sim.on_serve.borrow_mut() = None;
+    l.sim.advance(300);
+    l.ticks(2);
+    assert_eq!(l.op(0).attempts.len(), 2);
+    assert_eq!(deposit_of(id).state, DepositState::Delivered);
+}
+
+#[test]
+fn a_gas_coin_or_budget_changed_while_the_facts_were_read_admits_nothing() {
+    for what in ["gas coin reconfigured", "gas budget raised"] {
+        let l = lane();
+        let id = escrowed(&l.fx, 0x21, 5 * E8, 1);
+        let change: Box<dyn Fn()> = if what == "gas coin reconfigured" {
+            Box::new(|| state::mutate_runtime(|r| r.config.lane.gas_coin = Some([0x43; 32])))
+        } else {
+            Box::new(|| state::mutate_runtime(|r| r.config.lane.gas_budget = 900_000_000))
+        };
+        during_the_owned_object_read(&l, change);
+        l.tick();
+        assert_eq!(state::mint_op_count(), 0, "{what}: nothing admitted from a pre-await snapshot");
+        assert_eq!(deposit_of(id).state, DepositState::Escrowed, "{what}");
+        assert_eq!(l.signer.calls.borrow().len(), 0, "{what}");
+        assert!(state::read_runtime(|r| r.lane_wait.clone()).is_some(), "{what}: the lane says why it waited");
+    }
 }

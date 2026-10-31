@@ -45,7 +45,7 @@ pub enum CallKind {
     Read,
     /// The head query: rounded down (`transform_sui_graphql_head`).
     Head,
-    /// `executeTransaction`: reduced to whether the provider accepted it (`transform_sui_send`).
+    /// `executeTransaction`: reduced to whether the provider HTTP-acknowledged it (`transform_sui_send`).
     Send,
 }
 
@@ -142,6 +142,8 @@ impl SuiTransport for CanisterTransport {
 /// What a broadcast did, per provider. Never evidence of execution or of non-execution.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SendReport {
+    /// Providers that HTTP-acknowledged the post (a 200 after the transform): "maybe sent", NOT "executed"
+    /// and not "the network accepted it". The body is never evidence either way.
     pub accepted: u32,
     pub failed: u32,
     pub last_error: Option<String>,

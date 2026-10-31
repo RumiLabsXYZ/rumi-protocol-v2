@@ -99,7 +99,9 @@ pub struct ConfigView {
     pub mirror: MirrorSettings,
     pub bridge_version: String,
     pub schema_version: u32,
-    /// Always false until the mint lane is enabled: no endpoint signs or broadcasts anything.
+    /// LEGACY and NON-AUTHORITATIVE: a placeholder from the BB-52 foundation that is always false. It does
+    /// not reflect whether the mint lane can sign and it enforces nothing. The readiness seam is
+    /// `get_mint_lane` (`ready` and `blocked_by`); use that, not this field.
     pub signing_enabled: bool,
     pub icusd_ledger: Principal,
     pub admins: Vec<Principal>,

@@ -121,7 +121,12 @@ pub struct Provider {
     pub no_transactions: bool,
     /// Forward `executeTransaction` to the network but fail the reply (the transaction may have run).
     pub lose_send_reply: bool,
+    /// Add this `errors` member (any JSON, valid or malformed) to the head reply, next to its data.
+    pub head_errors: Option<Value>,
 }
+
+/// A callback run with the query text of every request a simulated provider serves.
+pub type ServeHook = Box<dyn Fn(&str)>;
 
 pub struct ChainSim {
     pub genesis: Bytes32,
@@ -144,6 +149,9 @@ pub struct ChainSim {
     pub served: RefCell<Vec<String>>,
     next_lamport: Cell<u64>,
     pub rejections: RefCell<Vec<String>>,
+    /// Called with the query text of every request a provider serves, before it answers: lets a test
+    /// change local state while a read is in flight (an await interleaving).
+    pub on_serve: RefCell<Option<ServeHook>>,
 }
 
 fn digest_of(tag: &str, id: &Bytes32, version: u64) -> Bytes32 {
@@ -186,6 +194,7 @@ impl ChainSim {
             served: RefCell::new(vec![]),
             next_lamport: Cell::new(100),
             rejections: RefCell::new(vec![]),
+            on_serve: RefCell::new(None),
         };
         let cfg = sim_cfg();
         let treasury = address_from_ed25519(&treasury_key);
@@ -594,7 +603,13 @@ impl ChainSim {
             }
             other => return Err(format!("the simulated provider does not know the query {other:?}")),
         }
-        Ok(json!({ "data": Value::Object(data) }))
+        let mut response = json!({ "data": Value::Object(data) });
+        if query == reads::QUERY_HEAD {
+            if let Some(errors) = &p.head_errors {
+                response["errors"] = errors.clone();
+            }
+        }
+        Ok(response)
     }
 }
 
@@ -632,6 +647,9 @@ impl SuiTransport for SimTransport<'_> {
         let req: Value = serde_json::from_slice(&body).map_err(|e| format!("bad request: {e}"))?;
         let query = req["query"].as_str().ok_or("no query")?.to_string();
         self.sim.served.borrow_mut().push(query.chars().take(24).collect());
+        if let Some(hook) = self.sim.on_serve.borrow().as_ref() {
+            hook(&query);
+        }
         let response = self.sim.handle(&provider.id, &p, &query, &req["variables"])?;
         if kind == CallKind::Send && p.lose_send_reply {
             return Err(format!("{}: timeout waiting for the response", provider.id));

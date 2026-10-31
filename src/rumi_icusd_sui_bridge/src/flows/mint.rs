@@ -292,6 +292,8 @@ struct Facts {
     gate: GateFact,
     mint_cap: ObservedRef,
     gas: ObservedRef,
+    /// The gas budget the coin's balance was checked against when the facts were read.
+    gas_budget: u64,
 }
 
 enum Gather {
@@ -331,7 +333,7 @@ async fn gather<T: SuiTransport>(mirror: &Mirror<'_, T>, id: &LaneIdentity, mint
         .map_err(Gather::Wait)?
         .ok_or_else(|| Gather::Wait("the configured gas coin does not exist".into()))?;
     let (gas, _balance) = interpret_gas_coin(&gas_obj, &gas_coin, &id.roles.gas, gas_budget).map_err(|e| Gather::Wait(exclusion_text(&e)))?;
-    Ok(Facts { checkpoint: head, epoch: cp.epoch, gas_price: cp.reference_gas_price, gate, mint_cap, gas })
+    Ok(Facts { checkpoint: head, epoch: cp.epoch, gas_price: cp.reference_gas_price, gate, mint_cap, gas, gas_budget })
 }
 
 // ---------------------------------------------------------------------------
@@ -409,9 +411,32 @@ fn preflight(d: &DepositRecord, ask: &MintAsk, facts: &Facts) -> Result<(), Refu
     Ok(())
 }
 
+/// The facts were read across awaits, and a slower older pass can finish after a newer one advanced our
+/// state. Everything they were read against is re-checked against the CURRENT state, synchronously, at
+/// admission: they must not be behind our last finalized transaction (their owned references could be
+/// spent), and the gas coin and budget must still be the ones they were validated for. Otherwise the
+/// lane waits and re-gathers; nothing is admitted from a pre-await snapshot.
+fn facts_current(facts: &Facts) -> Result<(), Refused> {
+    let (floor, coin, budget) = state::read_runtime(|c| (c.last_final_checkpoint, c.config.lane.gas_coin, c.config.lane.gas_budget));
+    if facts.checkpoint < floor {
+        return stop(format!(
+            "the facts were read at checkpoint {} behind our last finalized transaction (checkpoint {floor}); they will be read again",
+            facts.checkpoint
+        ));
+    }
+    if coin != Some(facts.gas.id) {
+        return stop("the gas coin was reconfigured while the facts were being read; they will be read again");
+    }
+    if budget > facts.gas_budget {
+        return stop("the gas budget was raised after the coin's balance was checked; the facts will be read again");
+    }
+    Ok(())
+}
+
 /// Create the operation for `deposit_id` AND link the deposit to it, in one synchronous step.
 fn create_op(deposit_id: u64, facts: &Facts, id: &LaneIdentity) -> Result<u64, Refused> {
     lane_guard().map_err(Refused::Stop)?;
+    facts_current(facts)?;
     if state::read_runtime(|c| c.active_mint_op).is_some() {
         return stop("another mint operation is in flight");
     }
@@ -460,6 +485,7 @@ fn create_op(deposit_id: u64, facts: &Facts, id: &LaneIdentity) -> Result<u64, R
 /// Append the next attempt to an operation whose last attempt is proven dead. Synchronous.
 fn append_attempt(op_id: u64, facts: &Facts, id: &LaneIdentity) -> Result<(), Refused> {
     lane_guard().map_err(Refused::Stop)?;
+    facts_current(facts)?;
     let mut op = state::get_mint_op(op_id).ok_or_else(|| Refused::Stop("the operation does not exist".into()))?;
     if !matches!(op.state, MintOpState::Active) || state::read_runtime(|c| c.active_mint_op) != Some(op_id) {
         return stop("the operation is not the active one");
@@ -793,7 +819,7 @@ async fn maybe_send<T: SuiTransport>(mirror: &Mirror<'_, T>, op_id: u64, id: &La
     if let Some(mut op) = state::get_mint_op(op_id) {
         if let Some(a) = op.attempts.last_mut() {
             if a.generation == generation && a.tx_digest == digest {
-                a.last_send_note = Some(format!("{} provider(s) accepted, {} failed{}", report.accepted, report.failed, report.last_error.map(|e| format!(" ({e})")).unwrap_or_default()));
+                a.last_send_note = Some(format!("{} provider(s) HTTP-acknowledged (maybe sent), {} failed{}", report.accepted, report.failed, report.last_error.map(|e| format!(" ({e})")).unwrap_or_default()));
                 state::put_mint_op(&op);
             }
         }
