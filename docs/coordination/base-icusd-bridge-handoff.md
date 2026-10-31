@@ -1757,6 +1757,9 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   explicit disposable local-only `--client.config` with an empty keystore and a loopback-only environment, never the default
   wallet or a public RPC. Coordinator check: `~/.sui` does not exist, so no default config or key was created there; W29
   reports any other evidence of created key material by existence and path only (never contents), marked never to be used.
+- Hosted CI (verified by Miles via GitHub): run 41174255809 on pushed head `932ef8fa` completed SUCCESS at 06:00:26 UTC. This is
+  the existing hosted workflow's coverage, not a substitute for the Solana or Sui local tests; no watch or rerun until the next
+  source cohort.
 - Confirmed offline route (Miles, pinned source): an explicit disposable `--client.config` with an EMPTY keystore (`InMem`
   with no aliases or keys, or a `File` keystore containing `[]`), `external_keys: null`, `envs: []`, `active_env: null`,
   `active_address: null` and no endpoint; with no active env the gRPC client fails locally and `SuiFlavor::new` is chosen

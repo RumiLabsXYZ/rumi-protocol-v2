@@ -299,3 +299,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-31: correction (Miles): the Sui CLI download was normal authorized tooling, not a gate; the coordinator's approval question was an invented hold and is removed. W29 verifies the checksum and uses the CLI locally.
 - 2026-10-31: BB-49 corrections delivered (bc96f166 49a preparation fence; 23dfe841 49b proof-only refunds and fair paging) by W28 after the builder slot returned; 49c in progress.
 - 2026-10-31: Miles accepted the BB-49 49a and 49b corrections (bc96f166, 23dfe841, with 8198fb28 and 12dfee35) at source and local-test level; BB-49 stays in progress for 49c to 49e; BB-47's carried items stay open until delivered there.
+- 2026-10-31: hosted CI run 41174255809 on 932ef8fa succeeded (06:00:26 UTC, verified by Miles); it does not replace the Solana or Sui local tests.
