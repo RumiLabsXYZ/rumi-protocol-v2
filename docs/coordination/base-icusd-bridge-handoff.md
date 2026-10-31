@@ -2691,6 +2691,36 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   additive state only; the frozen frontend `.did` unchanged unless coordinated. The MC-DEF-14 dense single-checkpoint degraded
   mode stays disclosed, not a pagination gate. 53d work in progress preserved and resumed after.
 
+## Milestone 115 (2026-10-31): BB-53 53c accepted
+
+- Miles (`accept-bb53c.md`) accepted 53c at source and local component scope: feature `e4ee506a02d3c9db2e971cee534d9b2132b7e424`
+  with correction `53c2149095973e68bba4a534c01ec717f7fd74c5` (W29; seven files in `src/rumi_icusd_sui_bridge/`). Not full BB-53 or
+  BB-54, a released Wasm, a deployment or real Sui, provider or wallet evidence.
+- F1 resolved: a heap generation token fences stale observer continuations after awaits, so older passes cannot overwrite
+  cursors, waits, reports or schedules; head and scan writes are monotone; the ledger balance is requested against a saved
+  books snapshot, and changed books make C1 explicitly not evaluated (the incomparable balance left out of the report, a busy
+  follow-up scheduled), while stable books evaluate a real shortfall normally; C2 to C4 keep their checkpoint and quiescence
+  rules. Bounded fix for the reproduced failures, not a claim that every controller or provider change is safe.
+- F2 resolved: a capped rotating hint window replaces the oldest-three prefix; pending or duplicate hints do not bypass
+  `next_run_ns` or erase a provider wait; a genuinely new hint pulls an idle run only to the bounded busy interval; hint reads stay
+  capped; the saved return id and record-only payout proof unchanged.
+- Interface: the frontend-facing `.did` and exported types unchanged; `last_run_ns` additive with `serde(default)` and an
+  older-image decode regression; heap generation and cursors reset across an upgrade by design.
+- Evidence read by Miles (saved logs in the coordinator scratchpad, no duplicate build): `53c-fix-red.log` 7 behavioral regressions
+  failing on unchanged production (a covered-escrow false C1 halt, 500000000 observed versus 800000000 current liabilities; an
+  overtaken-pass false C2 halt with head rollback 1800 to 1500; scan rollback 1800 to 1500; three-hint starvation across 16
+  passes; cooldown and call-count failures); `53c-fix-green.log` 19 focused passed; `53c-fix-full-tests.log` 351 passed, 0 failed;
+  `53c-fix-clippy2.log` clean with `-D warnings`; `53c-fix-wasm.log` a wasm32 check (not a release build); root `git diff --check`
+  over `e4ee506a^..53c21490` passes.
+- Remainder of the review (`review-bb53c-remainder.md`): the four observer-paused 53b lane tests isolate fabricated returns, a
+  deliberate foreign mint or lane-only cost, and the real-observer counterparts remain; the original 53c logs (340 passed, clippy,
+  wasm32 check) inspected; Miles read the official mainnet-v1.82.3 SDL fields (`EventFilter` checkpoint bounds and type,
+  `EventConnection` nodes and `pageInfo`, `PageInfo.hasNextPage: Boolean!`, `Event` fields, `TransactionEffects.events`),
+  closing only the static-schema omission in MC-DEF-14; not provider availability. Settlement stays record-based.
+- Limits kept (MC-DEF-14): the dense single-checkpoint and pruned-index held mode with hint dependency, unmeasured real cycles
+  and provider cadence, foreign mints identified only by counters, frequent not-evaluated C3, D6 and controller trust, module
+  bytes unobserved. Same W29 continues 53d; same W28 continues BB-54 on the frozen interface.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
