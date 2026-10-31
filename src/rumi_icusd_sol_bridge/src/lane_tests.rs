@@ -815,3 +815,352 @@ fn classify_landing_table() {
     assert_eq!(classify_landing(&op, &slot.address, &bound, &FEE_PAYER, &landed(vec![9], false)), Landing::UnverifiableSigned);
     let _: Pubkey = slot.address;
 }
+
+// ---------------------------------------------------------------------------
+// BB-48 follow-up 1: a halted lane signs and sends nothing, across awaits
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_halt_during_signing_keeps_the_evidence_but_stops_the_next_sign_and_the_send() {
+    let fx = Fixture::new(4);
+    // The first sign reply arrives while another operation halts this lane.
+    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = fired.clone();
+    fx.signer.on_call.replace(Some(Box::new(move |_| {
+        if !flag.replace(true) {
+            state::halt_lane(Lane::Mint, "another operation halted the lane");
+        }
+    })));
+    let id = fx.submit(Fixture::mint_request(90, 9_000), T0).unwrap();
+    let op = the_op(id);
+    let a = &op.attempts[0];
+    // The returned signature is evidence and is kept; the attempt and its bytes are preserved.
+    assert_eq!(a.signatures.len(), 1, "the signature that came back is recorded");
+    assert_eq!(a.signatures[0].signer, FEE_PAYER);
+    assert_eq!(fx.signer.call_count(), 1, "a halted lane does not sign the next role");
+    assert_eq!(fx.chain.sent().len(), 0, "a halted lane sends nothing");
+    assert_eq!(a.broadcast_count, 0);
+    let stored = a.message.clone();
+    // Ticks while halted change nothing.
+    fx.tick(t(100));
+    assert_eq!((fx.signer.call_count(), fx.chain.sent().len()), (1, 0));
+    // After a legitimate clear the SAME bytes are completed and sent.
+    assert!(state::clear_lane_halt(Lane::Mint));
+    fx.signer.on_call.replace(None);
+    fx.tick(t(110));
+    let op = the_op(id);
+    assert_eq!(op.attempts.len(), 1, "no new attempt");
+    assert_eq!(op.attempts[0].message, stored, "the same bytes");
+    assert_eq!(op.attempts[0].signatures.len(), 2, "the kept signature is reused, only the missing role is signed");
+    assert_eq!(fx.signer.call_count(), 2);
+    assert_eq!(fx.signer.calls.borrow()[1].role, KeyRole::MintAuthority);
+    assert_eq!(fx.chain.sent().len(), 1);
+}
+
+#[test]
+fn a_halt_while_the_account_read_is_pending_stops_signing_and_sending() {
+    let fx = Fixture::new(4);
+    // The signer is down at admission: the attempt is stored, nothing is signed.
+    fx.signer.script(Scripted::Unknown("down".into()));
+    let id = fx.submit(Fixture::mint_request(91, 9_100), T0).unwrap();
+    assert_eq!((fx.signer.call_count(), fx.chain.sent().len()), (1, 0));
+    // The tick's nonce read is pending when another operation halts the lane.
+    fx.chain.on_account_read.replace(Some(Box::new(|_, _| state::halt_lane(Lane::Mint, "halted while the read was in flight"))));
+    let report = fx.tick(t(40));
+    assert!(state::lane_halt(Lane::Mint).is_some());
+    assert_eq!(fx.signer.call_count(), 1, "no sign call after the halt: {:?}", report.events);
+    assert_eq!(fx.chain.sent().len(), 0, "no send after the halt");
+    assert_eq!(the_op(id).attempts.len(), 1);
+    assert!(!events_contain(&report.events, |e| matches!(e, OpEvent::CancelIssued { .. })));
+    // Resumes with the same bytes after a clear.
+    let stored = the_op(id).attempts[0].message.clone();
+    state::clear_lane_halt(Lane::Mint);
+    fx.tick(t(80));
+    assert_eq!(the_op(id).attempts[0].message, stored);
+    assert!(the_op(id).attempts[0].fully_signed());
+    assert_eq!(fx.chain.sent().len(), 1);
+}
+
+#[test]
+fn a_halt_while_the_account_read_is_pending_before_the_cancel_issues_no_cancel() {
+    let fx = Fixture::new(4);
+    let id = fx.submit(Fixture::mint_request(92, 9_200), T0).unwrap();
+    fx.chain.on_account_read.replace(Some(Box::new(|_, _| state::halt_lane(Lane::Mint, "halted while the read was in flight"))));
+    let calls = fx.signer.call_count();
+    let sent = fx.chain.sent().len();
+    fx.tick(t(300)); // cancel_after has elapsed
+    assert_eq!(the_op(id).attempts.len(), 1, "no cancel is created or signed on a halted lane");
+    assert_eq!((fx.signer.call_count(), fx.chain.sent().len()), (calls, sent));
+}
+
+#[test]
+fn a_halt_while_submit_reads_the_account_admits_nothing() {
+    let fx = Fixture::new(4);
+    fx.chain.on_account_read.replace(Some(Box::new(|_, _| state::halt_lane(Lane::Mint, "halted while the read was in flight"))));
+    let r = fx.submit(Fixture::mint_request(93, 9_300), T0);
+    assert!(matches!(r, Err(SubmitError::LaneHalted(_))), "{r:?}");
+    assert_eq!((fx.signer.call_count(), fx.chain.sent().len(), state::active_op_count()), (0, 0, 0));
+    assert_eq!(state::get_slot(Lane::Mint, 0).unwrap().state, SlotState::Free);
+}
+
+// ---------------------------------------------------------------------------
+// BB-48 follow-up 2: fair reconcile paging
+// ---------------------------------------------------------------------------
+
+/// Stand up `n` operations that need no further work (held by the re-issue limit, which keeps
+/// no slot), driving them with `process_op` so setup does not depend on the tick under test.
+fn make_held_ops(fx: &Fixture, n: u8) {
+    for i in 0..n {
+        let now = t(10 + i as u64 * 10);
+        let id = fx.submit(Fixture::mint_request(100 + i, 1_000), now).unwrap();
+        assert!(fx.chain.land(&fx.wire_of(id, 0), true));
+        let ev = block_on(process_op(&fx.chain, &fx.signer, id, now + secs(1)));
+        assert!(matches!(&ev[..], [OpEvent::NotDelivered { .. }]), "{ev:?}");
+        let ev = block_on(process_op(&fx.chain, &fx.signer, id, now + secs(2)));
+        assert!(matches!(&ev[..], [OpEvent::Held { .. }]), "{ev:?}");
+    }
+}
+
+#[test]
+fn thirty_two_held_operations_do_not_starve_a_newer_active_operation() {
+    let lane = LaneSettings { max_reissues: 0, nonce_pool_size: 2, ..LaneSettings::default() };
+    let fx = Fixture::with_lane_settings(lane);
+    make_held_ops(&fx, 34);
+    assert_eq!(state::active_op_count(), 34, "held operations stay non-terminal");
+    assert!(state::lane_halt(Lane::Mint).is_none(), "the lane is healthy");
+    // A newer operation whose exact original landed.
+    let now = t(1_000);
+    let id = fx.submit(Fixture::mint_request(250, 5_000), now).unwrap();
+    assert!(id >= 34);
+    assert!(fx.chain.land(&fx.wire_of(id, 0), false));
+    // A bounded number of ticks must reach it.
+    let mut delivered_after = None;
+    for n in 1..=4 {
+        let report = fx.tick(now + secs(10 * n));
+        assert!(report.processed <= MAX_OPS_PER_TICK);
+        if matches!(the_op(id).state, OpState::Delivered { .. }) {
+            delivered_after = Some(n);
+            break;
+        }
+    }
+    assert!(delivered_after.is_some(), "the newer operation was starved behind {} held operations", 34);
+    assert!(delivered_after.unwrap() <= 2, "reached within ceil(35/32) ticks");
+    // Held money is not settled by being skipped or visited.
+    for hid in 0..34u64 {
+        assert!(matches!(the_op(hid).state, OpState::Held { .. }));
+        assert!(!the_op(hid).outcome_applied);
+    }
+}
+
+#[test]
+fn operations_blocked_in_a_halted_lane_do_not_starve_the_other_lane() {
+    let fx = Fixture::new(2);
+    // 34 operations waiting for a re-issue (no slot held), then the mint lane halts.
+    for i in 0..34u8 {
+        let now = t(10 + i as u64 * 10);
+        let id = fx.submit(Fixture::mint_request(100 + i, 1_000), now).unwrap();
+        assert!(fx.chain.land(&fx.wire_of(id, 0), true));
+        let ev = block_on(process_op(&fx.chain, &fx.signer, id, now + secs(1)));
+        assert!(matches!(&ev[..], [OpEvent::NotDelivered { .. }]), "{ev:?}");
+    }
+    state::halt_lane(Lane::Mint, "a halt that blocks every mint operation");
+    // The burn lane is healthy: a newer burn whose exact original landed.
+    let now = t(2_000);
+    let id = fx.submit(Fixture::burn_request(251, 700), now).unwrap();
+    assert!(fx.chain.land(&fx.wire_of(id, 0), false));
+    let mut reached = false;
+    for n in 1..=4 {
+        fx.tick(now + secs(10 * n));
+        if matches!(the_op(id).state, OpState::Delivered { .. }) {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "the healthy lane's operation was starved by 34 blocked operations");
+}
+
+// ---------------------------------------------------------------------------
+// BB-48 follow-up 3: free-slot ABA
+// ---------------------------------------------------------------------------
+
+/// What another submission does to slot 0 while this one's account read is in flight: it reserves
+/// the slot, its transaction lands (the nonce advances), and the slot is released Free again with
+/// the NEW value. Returns the consumed (old) value.
+fn another_submission_cycles_slot_zero(chain: &MockChain, address: &Pubkey) -> crate::ids::Hash32 {
+    let old = chain.nonce_value(address).unwrap();
+    assert!(nonce::reserve_slot(Lane::Mint, 0, 999));
+    let new = chain.advance_without_transaction(address);
+    nonce::release_slot(Lane::Mint, 0, 999, new, Sig([0xcc; 64]));
+    old
+}
+
+#[test]
+fn a_stale_free_slot_preparation_is_never_admitted_on_the_consumed_value() {
+    let fx = Fixture::new(2);
+    let address = state::get_slot(Lane::Mint, 0).unwrap().address;
+    let consumed = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = consumed.clone();
+    fx.chain.on_account_read.replace(Some(Box::new(move |chain, addr| seen.set(Some(another_submission_cycles_slot_zero(chain, addr))))));
+    let r = fx.submit(Fixture::mint_request(110, 1_100), T0);
+    let consumed = consumed.get().expect("the other submission ran during the read");
+    assert_eq!(consumed, slot_initial_value(Lane::Mint, 0));
+    // Whatever the outcome (a refusal, or a retry on the fresh value), no operation may be
+    // bound to the consumed value, and nothing may have been signed over it.
+    for id in state::active_op_ids(10) {
+        for a in &the_op(id).attempts {
+            assert_ne!(a.nonce_value, consumed, "op {id} was admitted on the already-consumed nonce value");
+        }
+    }
+    for call in fx.signer.calls.borrow().iter() {
+        assert!(!call.message.windows(32).any(|w| w == consumed), "a stale message was signed");
+    }
+    match r {
+        Ok(id) => {
+            let a = &the_op(id).attempts[0];
+            assert_eq!(Some(a.nonce_value), fx.chain.nonce_value(&address), "a retry binds the CURRENT value");
+            assert_eq!(a.nonce_account, address);
+        }
+        Err(e) => assert!(matches!(e, SubmitError::Busy | SubmitError::NoFreeSlot), "{e:?}"),
+    }
+    // And it can never become a "foreign consumer" hold: the lane stays healthy.
+    fx.tick(t(60));
+    assert!(state::lane_halt(Lane::Mint).is_none(), "{:?}", state::lane_halt(Lane::Mint));
+}
+
+#[test]
+fn a_stale_free_slot_preparation_is_never_reissued_on_the_consumed_value() {
+    let fx = Fixture::new(2);
+    let id = fx.submit(Fixture::mint_request(111, 1_110), T0).unwrap();
+    assert!(fx.chain.land(&fx.wire_of(id, 0), true));
+    let r = fx.tick(t(60));
+    assert!(matches!(&r.events[..], [OpEvent::NotDelivered { .. }]), "{:?}", r.events);
+    // The re-issue reads the freed slot; meanwhile another submission cycles it.
+    let address = state::get_slot(Lane::Mint, 0).unwrap().address;
+    let consumed = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = consumed.clone();
+    fx.chain.on_account_read.replace(Some(Box::new(move |chain, addr| seen.set(Some(another_submission_cycles_slot_zero(chain, addr))))));
+    let calls_before = fx.signer.call_count();
+    fx.tick(t(70));
+    let consumed = consumed.get().expect("the other submission ran during the read");
+    for a in &the_op(id).attempts[1..] {
+        assert_ne!(a.nonce_value, consumed, "re-issued on the already-consumed nonce value");
+    }
+    if the_op(id).attempts.len() == 1 {
+        assert_eq!(fx.signer.call_count(), calls_before, "a stale preparation signs nothing");
+        assert!(matches!(the_op(id).state, OpState::NeedsReissue { .. }));
+        // A later tick prepares afresh on the current value.
+        fx.tick(t(80));
+    }
+    let op = the_op(id);
+    assert_eq!(op.attempts.len(), 2);
+    assert_eq!(Some(op.attempts[1].nonce_value), fx.chain.nonce_value(&address));
+    assert!(state::lane_halt(Lane::Mint).is_none());
+}
+
+#[test]
+fn the_round_robin_walk_reaches_every_operation_within_the_bound_and_survives_a_cursor_reset() {
+    use std::collections::BTreeSet;
+    for n in [1u64, 2, 31, 32, 33, 40, 64, 70, 97] {
+        state::reset_for_tests();
+        state::set_tick_cursor(None);
+        for i in 0..n {
+            // Sparse, ascending ids; a mix of states that stay non-terminal.
+            let st = if i % 3 == 0 { OpState::Held { reason: "x".into() } } else { OpState::Active };
+            state::put_op(&bare_op(i * 3 + 1, st));
+        }
+        // A terminal operation leaves the walk.
+        state::put_op(&bare_op(1_000_000, OpState::Delivered { signature: Sig([1; 64]), slot: 1, adopted: false }));
+        assert_eq!(state::active_op_count(), n);
+        let bound = n.div_ceil(MAX_OPS_PER_TICK as u64);
+        let mut seen = BTreeSet::new();
+        for _ in 0..bound {
+            let page = state::next_tick_page(MAX_OPS_PER_TICK);
+            assert!(page.len() <= MAX_OPS_PER_TICK);
+            assert_eq!(page.iter().collect::<BTreeSet<_>>().len(), page.len(), "no operation twice in one page");
+            assert!(!page.contains(&1_000_000));
+            seen.extend(page);
+        }
+        assert_eq!(seen.len() as u64, n, "n = {n}: every operation within ceil(n / 32) = {bound} ticks");
+        // An upgrade resets the heap cursor mid-rotation; the walk restarts and still covers all.
+        state::next_tick_page(MAX_OPS_PER_TICK);
+        state::set_tick_cursor(None);
+        let mut seen = BTreeSet::new();
+        for _ in 0..bound {
+            seen.extend(state::next_tick_page(MAX_OPS_PER_TICK));
+        }
+        assert_eq!(seen.len() as u64, n, "n = {n}: after a cursor reset");
+    }
+    // An empty set yields an empty page and a cleared cursor.
+    state::reset_for_tests();
+    state::set_tick_cursor(Some(5));
+    assert!(state::next_tick_page(MAX_OPS_PER_TICK).is_empty());
+    assert_eq!(state::tick_cursor(), None);
+}
+
+#[test]
+fn a_page_wraps_to_the_lowest_ids_to_fill_itself() {
+    state::reset_for_tests();
+    state::set_tick_cursor(None);
+    for i in 0..40u64 {
+        state::put_op(&bare_op(i, OpState::Active));
+    }
+    let first = state::next_tick_page(32);
+    assert_eq!(first, (0..32).collect::<Vec<_>>());
+    let second = state::next_tick_page(32);
+    // 32..40 first, then it wraps to 0..24.
+    assert_eq!(second, (32..40).chain(0..24).collect::<Vec<_>>());
+    let third = state::next_tick_page(32);
+    assert_eq!(third[0], 24, "continues after the last id of the previous page");
+}
+
+#[test]
+fn a_slot_generation_changes_on_every_reservation_release_and_verification() {
+    let _fx = Fixture::new(2);
+    let g0 = state::get_slot(Lane::Mint, 0).unwrap().generation;
+    assert!(g0 >= 1, "verification of an unverified slot is a state change");
+    // A reservation at the generation seen succeeds and bumps it.
+    assert!(nonce::reserve_slot_checked(Lane::Mint, 0, 1, g0));
+    let g1 = state::get_slot(Lane::Mint, 0).unwrap().generation;
+    assert!(g1 > g0);
+    // Release bumps it again: Free once more, but never at the generation a stale preparation saw.
+    nonce::release_slot(Lane::Mint, 0, 1, [9; 32], Sig([9; 64]));
+    let slot = state::get_slot(Lane::Mint, 0).unwrap();
+    assert_eq!(slot.state, SlotState::Free);
+    assert!(slot.generation > g1);
+    assert!(!nonce::reserve_slot_checked(Lane::Mint, 0, 2, g0), "the stale generation is refused");
+    assert!(!nonce::reserve_slot_checked(Lane::Mint, 0, 2, g1), "also the generation of the reserved interval");
+    assert_eq!(state::get_slot(Lane::Mint, 0).unwrap().state, SlotState::Free, "a refusal changes nothing");
+    assert!(nonce::reserve_slot_checked(Lane::Mint, 0, 2, slot.generation));
+}
+
+#[test]
+fn legitimate_rebroadcast_and_exact_byte_adoption_still_work_after_a_slot_cycle() {
+    // A slot that cycles (delivery, release, reuse) keeps working, and the new operation's own
+    // unchanged-nonce rebroadcast and adoption are unaffected by generations.
+    let fx = Fixture::new(2);
+    let a = fx.submit(Fixture::mint_request(120, 100), T0).unwrap();
+    assert!(fx.chain.land(&fx.wire_of(a, 0), false));
+    fx.tick(t(40));
+    let b = fx.submit(Fixture::mint_request(121, 100), t(50)).unwrap();
+    assert_eq!(the_op(b).slot_index, Some(0), "the released slot is reused on its new value");
+    let first = fx.chain.sent().last().unwrap().clone();
+    fx.tick(t(100));
+    assert_eq!(fx.chain.sent().last().unwrap(), &first, "same-attempt rebroadcast is byte-identical");
+    assert!(fx.chain.land(&first, false));
+    let r = fx.tick(t(150));
+    assert!(matches!(&r.events[..], [OpEvent::Delivered { adopted: false, .. }]), "{:?}", r.events);
+}
+
+#[test]
+fn ambiguous_sign_evidence_is_kept_when_the_lane_halts_at_the_same_time() {
+    let fx = Fixture::new(4);
+    // The first sign reply is lost (Unknown) and the lane halts while it is in flight.
+    fx.signer.script(Scripted::Unknown("SYS_UNKNOWN".into()));
+    fx.signer.on_call.replace(Some(Box::new(|_| state::halt_lane(Lane::Mint, "halted during the sign call"))));
+    let id = fx.submit(Fixture::mint_request(94, 9_400), T0).unwrap();
+    let a = the_op(id).attempts[0].clone();
+    assert_eq!(a.sign_failures, 1, "the ambiguous reply is recorded, not discarded");
+    assert_eq!(a.last_sign_error.as_deref(), Some("SYS_UNKNOWN"));
+    assert_eq!(fx.signer.call_count(), 1, "and nothing else is signed on the halted lane");
+    assert_eq!(fx.chain.sent().len(), 0);
+}

@@ -17,7 +17,7 @@
 //!   coverage, supply and custody checks;
 //! * `tx`: legacy message builders (mint, burn, refund, the advance-only cancel, the pool
 //!   bootstrap, the reference return), the return-shape checker and golden vectors; no Solana SDK;
-//! * `sol_rpc` (BB-48): the typed SOL RPC mirror, checked offline against a pinned copy of the
+//! * `sol_rpc` (BB-48): the typed SOL RPC mirror, checked offline against the pinned upstream
 //!   canister interface, the [`sol_rpc::SolRpc`] transport trait and the wasm transport;
 //! * `nonce`, `records`, `lane` (BB-48): the durable-nonce pool, the stable records, and the
 //!   persist-before-sign, same-attempt reconcile engine run against a transport trait and a
@@ -52,7 +52,9 @@
 //!   requested without `before` (the interface requires it only for an idempotent reply), which
 //!   is workable because a nonce account is quiet.
 //! * `sol-rpc-canister-id-conflict`: the id is an install argument. The mirror was checked against
-//!   a pinned copy of the interface of unrecorded upstream version, not the deployed canister.
+//!   `tests/fixtures/sol_rpc_canister.did`, the exact upstream file (git blob `cd456a3b`) of
+//!   `dfinity/sol-rpc-canister` at commit `5ac94de2` (see `sol_rpc.rs`). That proves
+//!   source-fixture equality only, not the deployed canister's interface or provider behavior.
 //! * Ed25519 signing determinism: the lane records every signature and every transaction id and
 //!   does not assume either way.
 //! * `CreateAccountWithSeed` for the nonce accounts is now read from `solana-system-interface`

@@ -541,9 +541,56 @@ pub fn op_by_external(external_id: &[u8; 32]) -> Option<u64> {
     OP_BY_EXTERNAL.with(|m| m.borrow().get(external_id))
 }
 
-/// Ids of the non-terminal operations, ascending, at most `limit`.
+/// Ids of the non-terminal operations, ascending, at most `limit` (the lowest ids; use
+/// [`active_op_page`] to walk the set fairly).
 pub fn active_op_ids(limit: usize) -> Vec<u64> {
     ACTIVE_OPS.with(|m| m.borrow().iter().map(|(k, _)| k).take(limit).collect())
+}
+
+/// One page of the non-terminal operations after `after` (exclusive), at most `limit`, wrapping to
+/// the lowest ids when the end of the set is reached. A walk that always passes the last id of the
+/// previous page visits every operation within `ceil(n / limit)` pages, however many early
+/// operations are held or blocked: no operation can starve another. Touches at most `limit`
+/// index entries.
+pub fn active_op_page(after: Option<u64>, limit: usize) -> Vec<u64> {
+    use std::ops::Bound;
+    ACTIVE_OPS.with(|m| {
+        let m = m.borrow();
+        let mut page: Vec<u64> = match after {
+            Some(c) => m.range((Bound::Excluded(c), Bound::Unbounded)).map(|(k, _)| k).take(limit).collect(),
+            None => m.iter().map(|(k, _)| k).take(limit).collect(),
+        };
+        if let Some(c) = after {
+            if page.len() < limit {
+                // Wrap around. These ids are all `<= c`, so none repeats a page entry.
+                let room = limit - page.len();
+                page.extend(m.range(..=c).map(|(k, _)| k).take(room));
+            }
+        }
+        page
+    })
+}
+
+thread_local! {
+    /// Where the next tick's page starts. Heap only, on purpose: after an upgrade the walk simply
+    /// restarts at the lowest id, and since the non-terminal index itself is stable there is
+    /// nothing to rebuild.
+    static TICK_CURSOR: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn tick_cursor() -> Option<u64> {
+    TICK_CURSOR.with(|c| c.get())
+}
+
+pub fn set_tick_cursor(cursor: Option<u64>) {
+    TICK_CURSOR.with(|c| c.set(cursor));
+}
+
+/// The ids the next tick processes (at most `limit`), advancing the cursor past them.
+pub fn next_tick_page(limit: usize) -> Vec<u64> {
+    let page = active_op_page(tick_cursor(), limit);
+    set_tick_cursor(page.last().copied());
+    page
 }
 
 pub fn active_op_count() -> u64 {

@@ -124,7 +124,7 @@ pub fn register_slot(lane: Lane, index: u8) -> Result<NonceSlot, PoolError> {
         return Err(PoolError::AlreadyRegistered);
     }
     let (seed, address) = slot_address(&fee_payer, lane, index).map_err(PoolError::Tx)?;
-    let slot = NonceSlot { lane, index, seed, address, state: SlotState::Unverified, last_value: None, anchor: None };
+    let slot = NonceSlot { lane, index, seed, address, state: SlotState::Unverified, last_value: None, anchor: None, generation: 0 };
     state::put_slot(&slot);
     Ok(slot)
 }
@@ -159,6 +159,9 @@ pub async fn verify_slot<R: SolRpc>(rpc: &R, lane: Lane, index: u8) -> Result<Ve
     // Re-read the slot: it may have been reserved while the read was in flight.
     if let Some(mut current) = state::get_slot(lane, index) {
         if matches!(current.state, SlotState::Unverified | SlotState::Free) {
+            if current.state == SlotState::Unverified {
+                current.generation += 1;
+            }
             current.state = SlotState::Free;
             current.last_value = Some(nonce.value);
             state::put_slot(&current);
@@ -168,14 +171,28 @@ pub async fn verify_slot<R: SolRpc>(rpc: &R, lane: Lane, index: u8) -> Result<Ve
 }
 
 /// Reserve slot `index` for `op_id`, only if it is `Free` right now. Atomic (one synchronous
-/// block), which is what lets two concurrent submissions never share a slot.
+/// block), which is what lets two concurrent submissions never share a slot. Bumps the slot's
+/// generation. Use [`reserve_slot_checked`] after an await.
 pub fn reserve_slot(lane: Lane, index: u8, op_id: u64) -> bool {
     match state::get_slot(lane, index) {
         Some(mut s) if s.state == SlotState::Free => {
             s.state = SlotState::Reserved { op_id };
+            s.generation += 1;
             state::put_slot(&s);
             true
         }
+        _ => false,
+    }
+}
+
+/// Reserve slot `index` only if it is `Free` AND still at `expected_generation`, the generation
+/// seen when the preparation (the account read) began. A slot that another submission reserved,
+/// consumed and released while this one awaited is `Free` again but at a later generation: the
+/// preparation is stale and is refused, so a message bound to an already-consumed nonce value is
+/// never admitted.
+pub fn reserve_slot_checked(lane: Lane, index: u8, op_id: u64, expected_generation: u64) -> bool {
+    match state::get_slot(lane, index) {
+        Some(s) if s.state == SlotState::Free && s.generation == expected_generation => reserve_slot(lane, index, op_id),
         _ => false,
     }
 }
@@ -189,6 +206,7 @@ pub fn release_slot(lane: Lane, index: u8, op_id: u64, new_value: Hash32, anchor
             s.state = SlotState::Free;
             s.last_value = Some(new_value);
             s.anchor = Some(anchor);
+            s.generation += 1;
             state::put_slot(&s);
         }
     }

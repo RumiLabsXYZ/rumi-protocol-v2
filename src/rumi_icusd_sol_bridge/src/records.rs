@@ -94,6 +94,12 @@ pub struct NonceSlot {
     /// of the previous value). Discovery lists only newer signatures (`until`).
     #[serde(default)]
     pub anchor: Option<Sig>,
+    /// Bumped on every reservation, release and verification. A preparation read while the slot
+    /// was `Free` is committed only if the slot is still `Free` AT THE SAME generation: a slot that
+    /// was reserved, consumed and released in between is `Free` again but holds a new value, and
+    /// a message prepared on the old value must not be admitted on it (free-slot ABA).
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// `lane << 8 | index`, the key of the slot map.
@@ -360,6 +366,7 @@ mod tests {
             state: SlotState::Reserved { op_id: 7 },
             last_value: Some([0x66; 32]),
             anchor: Some(Sig([0xe5; 64])),
+            generation: 4,
         }
     }
 
@@ -396,9 +403,13 @@ mod tests {
         let op_image = hex::decode(PINNED_OP_V1).expect("hex");
         assert_eq!(try_cbor_decode::<SolOp>(&op_image).unwrap(), sample_op());
         assert_eq!(cbor_encode(&sample_op()), op_image);
-        let slot_image = hex::decode(PINNED_SLOT_V1).expect("hex");
+        let slot_image = hex::decode(PINNED_SLOT_V2).expect("hex");
         assert_eq!(try_cbor_decode::<NonceSlot>(&slot_image).unwrap(), sample_slot());
         assert_eq!(cbor_encode(&sample_slot()), slot_image);
+        // The slot as first written by BB-48 (before `generation` existed) still decodes, at
+        // generation 0.
+        let old_slot = hex::decode(PINNED_SLOT_V1).expect("hex");
+        assert_eq!(try_cbor_decode::<NonceSlot>(&old_slot).unwrap(), NonceSlot { generation: 0, ..sample_slot() });
     }
 
     #[test]
@@ -425,11 +436,11 @@ mod tests {
         assert_eq!((attempt.sign_failures, attempt.broadcast_count, attempt.last_broadcast_ns), (0, 0, None));
         // A slot written before the value and the anchor were tracked.
         let mut sl: Value = ciborium::de::from_reader(cbor_encode(&sample_slot()).as_slice()).unwrap();
-        strip(&mut sl, &["last_value", "anchor"]);
+        strip(&mut sl, &["last_value", "anchor", "generation"]);
         let mut bytes = vec![];
         ciborium::ser::into_writer(&sl, &mut bytes).unwrap();
         let slot = try_cbor_decode::<NonceSlot>(&bytes).unwrap();
-        assert_eq!((slot.last_value, slot.anchor), (None, None));
+        assert_eq!((slot.last_value, slot.anchor, slot.generation), (None, None, 0));
     }
 
     #[test]
@@ -522,6 +533,7 @@ mod tests {
         "6d637265617465645f61745f6e73056d757064617465645f61745f6e73183c6f6f7574636f6d655f6170706c696564f4",
         "72616c61726d5f7261697365645f61745f6e731846646e6f7465616e",
     );
+    /// The slot image as the first BB-48 commit wrote it (no `generation`). NEVER regenerate.
     const PINNED_SLOT_V1: &str = concat!(
         "a7646c616e65644275726e65696e6465780364736565646e72756d692d6e6f6e63652d622d3367616464726573739820",
         "18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac",
@@ -529,5 +541,16 @@ mod tests {
         "6c7565982018661866186618661866186618661866186618661866186618661866186618661866186618661866186618",
         "66186618661866186618661866186618661866186666616e63686f725840e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
         "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+    );
+
+    /// The current slot image (schema with `generation`).
+    const PINNED_SLOT_V2: &str = concat!(
+        "a8646c616e65644275726e65696e6465780364736565646e72756d692d6e6f6e63652d622d3367616464726573739820",
+        "18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac18ac",
+        "18ac18ac18ac18ac18ac18ac18ac18ac657374617465a1685265736572766564a1656f705f6964076a6c6173745f7661",
+        "6c7565982018661866186618661866186618661866186618661866186618661866186618661866186618661866186618",
+        "66186618661866186618661866186618661866186666616e63686f725840e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e56a67",
+        "656e65726174696f6e04",
     );
 }

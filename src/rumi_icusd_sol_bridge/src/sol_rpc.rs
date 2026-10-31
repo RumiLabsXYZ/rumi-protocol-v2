@@ -20,13 +20,20 @@
 //!
 //! # Provenance and what is NOT verified
 //!
-//! The types below follow `tests/fixtures/sol_rpc_canister.did`, a pinned copy of the SOL RPC
-//! canister interface found on this machine in another project's tree (its commit message says
-//! "pinned SOL RPC canister candid"). The upstream version of that copy is not recorded, and the
-//! deployed canister's interface has not been compared with it. `tests::mirror_*` check this
-//! mirror against the fixture offline (arguments encode into the fixture's argument types, and
-//! replies built in the fixture's reply types decode into this mirror). Activation must repeat
-//! the comparison against the deployed canister (blocker `solana-rpc-consensus-unmeasured`).
+//! The types below follow `tests/fixtures/sol_rpc_canister.did`. That file is the exact git blob
+//! `cd456a3b397e2296fd00ca764faa6ababfb7cd49` (39,673 bytes) of `canister/sol_rpc_canister.did` in
+//! the official `dfinity/sol-rpc-canister` repository at commit
+//! `5ac94de29be388eeff758bbed953705e341a90da`:
+//! <https://github.com/dfinity/sol-rpc-canister/blob/5ac94de29be388eeff758bbed953705e341a90da/canister/sol_rpc_canister.did>
+//! (verified read-only by the coordinator and Miles; `tests::the_fixture_is_the_pinned_upstream_file`
+//! pins its length and SHA-256 here). It was first found as a copy in another project's tree.
+//!
+//! That proves source-to-fixture equality ONLY. It does not prove the interface of the deployed
+//! SOL RPC canister, nor how its providers behave (consensus, history depth, rounding). The
+//! `tests::mirror_*` tests check this mirror against the fixture offline (arguments encode into
+//! the fixture's argument types, and replies built in the fixture's reply types decode into this
+//! mirror). Activation must repeat the comparison against the deployed canister's own interface
+//! (blocker `solana-rpc-consensus-unmeasured`).
 //!
 //! Decode safety: reply types keep only the fields the lane reads. Everything else (provider
 //! errors, transaction errors, inconsistent per-provider vectors) is `candid::Reserved`, so the
@@ -671,6 +678,15 @@ mod tests {
     use candid_parser::utils::CandidSource;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/sol_rpc_canister.did");
+
+    /// The fixture is the pinned upstream file (git blob cd456a3b..., 39,673 bytes, see the module
+    /// docs); an edit to it, even a comment, must be a deliberate re-pin.
+    #[test]
+    fn the_fixture_is_the_pinned_upstream_file() {
+        use sha2::{Digest as _, Sha256};
+        assert_eq!(FIXTURE.len(), 39_673);
+        assert_eq!(hex::encode(Sha256::digest(FIXTURE.as_bytes())), "7c8698882a6cc6f99fdc32329883b058cb5758889892fd845e18fc79b9fcc104");
+    }
 
     fn settings() -> RpcSettings {
         RpcSettings { cluster: Some(SolRpcCluster::Devnet), ..RpcSettings::default() }

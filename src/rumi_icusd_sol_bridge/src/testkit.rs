@@ -64,6 +64,10 @@ struct MockTx {
 }
 
 type SendHook = Box<dyn Fn(&[u8])>;
+/// Called from `get_account` AFTER the reply was computed and BEFORE it is returned: whatever the
+/// hook changes is invisible to this read (the read "happened before"), as for an RPC reply that
+/// is still in flight while other messages run.
+type AccountReadHook = Box<dyn Fn(&MockChain, &Pubkey)>;
 
 #[derive(Default)]
 pub struct MockChain {
@@ -79,6 +83,7 @@ pub struct MockChain {
     /// When set, every sent transaction that is valid against the current nonce lands at once.
     pub auto_land: Cell<bool>,
     pub on_send: RefCell<Option<SendHook>>,
+    pub on_account_read: RefCell<Option<AccountReadHook>>,
     pub tip_slot: Cell<u64>,
     pub blocks: RefCell<BTreeMap<u64, [u8; 32]>>,
 }
@@ -221,7 +226,12 @@ impl SolRpc for MockChain {
             Some(Fault::Null) => return Ok(None),
             None => {}
         }
-        Ok(self.accounts.borrow().get(address).map(|(owner, data)| AccountSnapshot { owner: *owner, data: data.clone() }))
+        let reply = self.accounts.borrow().get(address).map(|(owner, data)| AccountSnapshot { owner: *owner, data: data.clone() });
+        if let Some(hook) = self.on_account_read.borrow_mut().take() {
+            // One shot: the hook acts during the first read only.
+            hook(self, address);
+        }
+        Ok(reply)
     }
 
     async fn get_transaction(&self, signature: &Signature) -> RpcResult<Option<LandedTx>> {
@@ -510,5 +520,31 @@ impl Fixture {
         let op = state::get_op(id).expect("op");
         let a = &op.attempts[idx];
         assemble_wire_tx(&a.latest_signatures().expect("fully signed"), &a.message).expect("wire")
+    }
+}
+
+/// A minimal non-terminal (or chosen-state) operation record, for tests of the index and paging.
+pub fn bare_op(id: u64, state: crate::records::OpState) -> crate::records::SolOp {
+    let mut external = [0u8; 32];
+    external[..8].copy_from_slice(&id.to_be_bytes());
+    crate::records::SolOp {
+        id,
+        kind: crate::records::OpKind::Mint,
+        payload: crate::records::OpPayload::Burn,
+        external_id: external,
+        amount: 1,
+        state,
+        lane: Lane::Mint,
+        slot_index: None,
+        generation: 0,
+        attempts: vec![],
+        observed_value: None,
+        advance_seen_at_ns: None,
+        discovery_cursor: None,
+        created_at_ns: 0,
+        updated_at_ns: 0,
+        outcome_applied: false,
+        alarm_raised_at_ns: None,
+        note: None,
     }
 }

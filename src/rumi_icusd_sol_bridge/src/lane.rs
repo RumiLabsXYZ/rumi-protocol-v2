@@ -34,7 +34,16 @@
 //! 5. **Halts**: a foreign or unverifiable consumer, the nonce advanced with no consumer found
 //!    within `history_horizon` (UNMEASURED, blocker `solana-history-availability-unmeasured`), a
 //!    changed nonce owner or authority. A halted lane signs, sends and re-issues nothing; every
-//!    signed attempt stays recorded.
+//!    signed attempt stays recorded. The halt is a fence checked AFTER every await that can lag
+//!    behind another operation's halt: before each signer call, before each send, after the nonce
+//!    read of a tick, and before a cancel. A signature that comes back after a halt is still
+//!    recorded (it is evidence); it is just not followed by another sign or a send.
+//! 6. **Slot identity.** A preparation reads a `Free` slot's account across an await. Reservation
+//!    is committed only if the slot is still `Free` at the generation seen when the preparation
+//!    began (`nonce::reserve_slot_checked`), so a slot another operation reserved, consumed and
+//!    released in between is never reused on the value that was just consumed.
+//! 7. **Fair ticks.** A tick processes one bounded page of the non-terminal operations after a
+//!    round-robin cursor, so held or blocked operations cannot starve newer ones.
 //!
 //! The lane produces [`OpEvent`]s; applying a delivery to the accounting buckets is the mint
 //! saga's job (BB-49), keyed on `SolOp::outcome_applied`.
@@ -52,7 +61,9 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
-/// Operations one tick processes at most (both lanes, 16 slots each).
+/// Times one admission prepares on a free slot before giving up with `Busy`.
+const MAX_PREPARE_ATTEMPTS: usize = 3;
+/// Operations one tick processes at most (one page of the round-robin walk).
 pub const MAX_OPS_PER_TICK: usize = 32;
 
 // ---------------------------------------------------------------------------
@@ -255,6 +266,9 @@ fn update_op<R>(id: u64, f: impl FnOnce(&mut SolOp) -> R) -> Option<R> {
 /// A free slot of `lane`, read from the chain, checked, with an unsigned message built for it.
 struct Prepared {
     slot_index: u8,
+    /// The slot's generation when the preparation began (the slot was `Free` then). The commit
+    /// reserves only at this generation, so a slot cycled during the await is refused.
+    slot_generation: u64,
     nonce: NonceRef,
     tx: UnsignedTx,
 }
@@ -284,7 +298,7 @@ async fn prepare_on_free_slot<R: SolRpc>(
     };
     let nonce_ref = NonceRef { account: slot.address, value: nonce_state.value };
     let tx = build(nonce_ref).map_err(SubmitError::InvalidRequest)?;
-    Ok(Prepared { slot_index: slot.index, nonce: nonce_ref, tx })
+    Ok(Prepared { slot_index: slot.index, slot_generation: slot.generation, nonce: nonce_ref, tx })
 }
 
 #[derive(Clone, Debug)]
@@ -331,26 +345,33 @@ pub async fn submit_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, req: SubmitR
         alarm_raised_at_ns: None,
         note: None,
     };
-    let prepared = prepare_on_free_slot(rpc, lane, &profile, |n| build_original(&profile, &template, n)).await?;
+    // A preparation that finds its slot cycled while the account read was in flight is refused by
+    // the synchronous commit (stale generation) and prepared again on the fresh value.
+    let mut committed = None;
+    for _ in 0..MAX_PREPARE_ATTEMPTS {
+        let prepared = prepare_on_free_slot(rpc, lane, &profile, |n| build_original(&profile, &template, n)).await?;
 
-    // ---- synchronous commit: nothing below awaits until the attempt is stored ----
-    if let Some(id) = state::op_by_external(&req.external_id) {
-        return Ok(id);
+        // ---- synchronous commit: nothing below awaits until the attempt is stored ----
+        if let Some(id) = state::op_by_external(&req.external_id) {
+            return Ok(id);
+        }
+        if let Some(h) = state::lane_halt(lane) {
+            return Err(SubmitError::LaneHalted(h.reason));
+        }
+        let op_id = state::next_op_id();
+        if !nonce::reserve_slot_checked(lane, prepared.slot_index, op_id, prepared.slot_generation) {
+            continue;
+        }
+        let mut op = template.clone();
+        op.id = op_id;
+        op.slot_index = Some(prepared.slot_index);
+        op.attempts.push(new_attempt(AttemptKind::Original, 0, prepared.nonce, &prepared.tx, now));
+        state::put_op(&op);
+        state::append_audit(None, state::AuditCtx::note(format!("op {op_id} admitted ({:?}), slot {} reserved", req.kind, prepared.slot_index)));
+        committed = Some((op_id, OpGuard::acquire(op_id)));
+        break;
     }
-    if let Some(h) = state::lane_halt(lane) {
-        return Err(SubmitError::LaneHalted(h.reason));
-    }
-    let op_id = state::next_op_id();
-    if !nonce::reserve_slot(lane, prepared.slot_index, op_id) {
-        return Err(SubmitError::Busy);
-    }
-    let mut op = template;
-    op.id = op_id;
-    op.slot_index = Some(prepared.slot_index);
-    op.attempts.push(new_attempt(AttemptKind::Original, 0, prepared.nonce, &prepared.tx, now));
-    state::put_op(&op);
-    let _guard = OpGuard::acquire(op_id);
-    state::append_audit(None, state::AuditCtx::note(format!("op {op_id} admitted ({:?}), slot {} reserved", req.kind, prepared.slot_index)));
+    let Some((op_id, _guard)) = committed else { return Err(SubmitError::Busy) };
 
     // ---- the first call to the signer happens only after the commit above ----
     drive_attempt(rpc, signer, op_id, 0, now).await;
@@ -370,6 +391,12 @@ async fn sign_missing<S: TxSigner>(signer: &S, op_id: u64, idx: usize, now: u64)
         let Some(next) = attempt.signers.iter().find(|s| !attempt.has_signature_from(s)).copied() else {
             return true;
         };
+        // Halt fence: a halted lane signs nothing. Checked before EVERY signer call, because a
+        // sign reply (or an RPC reply earlier in the tick) may have come back after another
+        // operation halted this lane. Signatures already received stay recorded.
+        if state::lane_halt(op.lane).is_some() {
+            return false;
+        }
         let message = attempt.message.clone();
         let role = state::read_core(|c| c.keys.as_ref().and_then(|k| role_of(k, &next)));
         let Some(role) = role else {
@@ -408,6 +435,10 @@ async fn sign_missing<S: TxSigner>(signer: &S, op_id: u64, idx: usize, now: u64)
 async fn broadcast<R: SolRpc>(rpc: &R, op_id: u64, idx: usize, now: u64) {
     let wire = {
         let Some(op) = state::get_op(op_id) else { return };
+        // Halt fence: a halted lane sends nothing. There is no await between this check and the send.
+        if state::lane_halt(op.lane).is_some() {
+            return;
+        }
         let Some(attempt) = op.attempts.get(idx) else { return };
         let Some(sigs) = attempt.latest_signatures() else { return };
         let Ok(wire) = assemble_wire_tx(&sigs, &attempt.message) else { return };
@@ -710,6 +741,11 @@ async fn process_active<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, op_id: u64,
         }
     };
 
+    // Halt fence across the await above: another operation may have halted this lane while the
+    // read was in flight. Nothing below may sign, send or issue a cancel on a halted lane.
+    if state::lane_halt(op.lane).is_some() {
+        return events;
+    }
     if nonce_state.value == bound {
         events.extend(reconcile_unchanged(rpc, signer, op_id, &cfg, now).await);
     } else {
@@ -740,6 +776,9 @@ async fn reconcile_unchanged<R: SolRpc, S: TxSigner>(
     }
     // Cancel after `cancel_after`, once the original has been sent at least once.
     let Some(op) = state::get_op(op_id) else { return events };
+    if state::lane_halt(op.lane).is_some() {
+        return events;
+    }
     let original = op.current_attempts().find(|(_, a)| a.kind == AttemptKind::Original).map(|(_, a)| a.clone());
     let has_cancel = op.current_attempts().any(|(_, a)| a.kind == AttemptKind::Cancel);
     if let Some(original) = original {
@@ -844,8 +883,8 @@ async fn process_reissue<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, op_id: u64
     if !matches!(op.state, OpState::NeedsReissue { .. }) || state::lane_halt(op.lane).is_some() {
         return vec![];
     }
-    if !nonce::reserve_slot(op.lane, prepared.slot_index, op_id) {
-        return vec![OpEvent::Waiting { op_id, why: "re-issue: the slot was taken; retry".into() }];
+    if !nonce::reserve_slot_checked(op.lane, prepared.slot_index, op_id, prepared.slot_generation) {
+        return vec![OpEvent::Waiting { op_id, why: "re-issue: the slot changed while it was read; prepare again next tick".into() }];
     }
     let generation = op.generation + 1;
     update_op(op_id, |o| {
@@ -872,14 +911,18 @@ pub async fn process_op<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, op_id: u64,
     }
 }
 
-/// One lane tick: walk the (bounded) set of non-terminal operations. A tick that finds another
-/// tick running does nothing.
+/// One lane tick: process one bounded page of the non-terminal operations, advancing a round-robin
+/// cursor so every operation is reached within `ceil(n / MAX_OPS_PER_TICK)` ticks. A tick that
+/// finds another tick running does nothing.
 pub async fn tick<R: SolRpc, S: TxSigner>(rpc: &R, signer: &S, now: u64) -> TickReport {
     let Some(_guard) = TickGuard::acquire() else {
         return TickReport { skipped: true, ..TickReport::default() };
     };
     let mut report = TickReport::default();
-    for id in state::active_op_ids(MAX_OPS_PER_TICK) {
+    // Fair paging: a page after the previous page's last id, wrapping. Held operations and
+    // operations blocked behind a halted lane stay in the rotation (they cost no calls), so they
+    // can delay others by at most ceil(n / MAX_OPS_PER_TICK) ticks and never starve them.
+    for id in state::next_tick_page(MAX_OPS_PER_TICK) {
         report.processed += 1;
         report.events.extend(process_op(rpc, signer, id, now).await);
     }
