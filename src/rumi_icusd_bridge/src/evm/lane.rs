@@ -547,6 +547,13 @@ pub(crate) trait LaneIo {
     async fn fee_estimate(&self) -> Result<FeeEstimate, RpcError>;
     async fn get_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<Receipt>, RpcError>;
     async fn finalized_head(&self) -> Result<BlockRef, RpcError>;
+    /// The block tag that addresses the chain's settlement head in a state read (see
+    /// `rpc::settlement_block_tag`): the `finalized` tag where that is the head rule, the
+    /// numbered Verified block where it is not, an error where the head is blocked. Proofs
+    /// that a transaction count is final (`fetch_nonces`, `clear_lane_halt_with`) read at
+    /// this tag and never at the raw `finalized` tag, which for some chains is ordering-only
+    /// evidence. Allocation and rebroadcast keep reading `latest` and `pending`.
+    async fn settlement_tag(&self) -> Result<BlockTag, RpcError>;
     async fn block_by_number(&self, number: u64) -> Result<BlockRef, RpcError>;
     async fn send_raw(&self, raw: &[u8]) -> Vec<Result<String, String>>;
     async fn eth_call(&self, to: &[u8; 20], data: &[u8], tag: BlockTag) -> Result<Vec<u8>, RpcError>;
@@ -581,6 +588,9 @@ impl LaneIo for ChainIo {
     }
     async fn finalized_head(&self) -> Result<BlockRef, RpcError> {
         rpc::finalized_head().await
+    }
+    async fn settlement_tag(&self) -> Result<BlockTag, RpcError> {
+        rpc::settlement_block_tag().await
     }
     async fn block_by_number(&self, number: u64) -> Result<BlockRef, RpcError> {
         rpc::block_by_number(number).await
@@ -974,11 +984,20 @@ async fn gather_receipts<I: LaneIo>(io: &I, tx: &EvmTxRecord, st: &mut RunState)
     out
 }
 
+/// `(latest, settled)`: the lane's transaction count at `latest`, and at the chain's
+/// settlement head. The second value is what the pending-outcome and replacement
+/// reconciliation call "finalized"; it is read at [`LaneIo::settlement_tag`], so it is the
+/// raw `finalized` tag only where that is the chain's head rule.
+///
+/// The head is resolved first. A blocked chain therefore sends no request at all, and on a
+/// chain whose head is numbered the `latest` count is read after the head, so it can never
+/// trail the settled count. For a tag-rule chain resolving the tag asks no provider, so the
+/// requests are exactly `latest` then `finalized`, as before.
 async fn fetch_nonces<I: LaneIo>(io: &I, lane: LaneKind) -> Result<(u64, u64), String> {
     let addr = io.lane_address(lane).await?;
+    let settled_at = io.settlement_tag().await.map_err(|e| format!("settlement head unavailable: {e}"))?;
     let latest = io.transaction_count(&addr, BlockTag::Latest).await.map_err(|e| format!("latest nonce unavailable: {e}"))?;
-    let finalized =
-        io.transaction_count(&addr, BlockTag::Finalized).await.map_err(|e| format!("finalized nonce unavailable: {e}"))?;
+    let finalized = io.transaction_count(&addr, settled_at).await.map_err(|e| format!("finalized nonce unavailable: {e}"))?;
     Ok((latest, finalized))
 }
 
@@ -1555,8 +1574,12 @@ pub(crate) async fn clear_lane_halt_with<I: LaneIo>(io: &I, lane: LaneKind) -> B
         return Err(BridgeError::InvalidState("the lane nonce has never been synced".into()));
     };
     let addr = io.lane_address(lane).await.map_err(BridgeError::Internal)?;
+    // The settled count is read at the chain's settlement head, not the raw `finalized`
+    // tag. The head is resolved first, so a blocked chain sends nothing and the `latest`
+    // count below is never older than the settled one.
+    let settled_at = io.settlement_tag().await.map_err(|e| BridgeError::Rpc(format!("settlement head: {e}")))?;
     let finalized = io
-        .transaction_count(&addr, BlockTag::Finalized)
+        .transaction_count(&addr, settled_at)
         .await
         .map_err(|e| BridgeError::Rpc(format!("finalized transaction count: {e}")))?;
     let latest = io
@@ -2309,6 +2332,10 @@ mod tests {
             }
             Ok(BlockRef { number: c.finalized_number, hash: c.canonical.get(&c.finalized_number).copied().unwrap_or([0; 32]) })
         }
+        /// The mock chain is a tag-rule chain: its settlement head is the `finalized` tag.
+        async fn settlement_tag(&self) -> Result<BlockTag, RpcError> {
+            Ok(BlockTag::Finalized)
+        }
         async fn block_by_number(&self, number: u64) -> Result<BlockRef, RpcError> {
             let c = self.0.borrow();
             if c.rpc_down {
@@ -2429,6 +2456,9 @@ mod tests {
         }
         async fn finalized_head(&self) -> Result<BlockRef, RpcError> {
             self.inner.finalized_head().await
+        }
+        async fn settlement_tag(&self) -> Result<BlockTag, RpcError> {
+            self.inner.settlement_tag().await
         }
         async fn block_by_number(&self, n: u64) -> Result<BlockRef, RpcError> {
             self.inner.block_by_number(n).await
@@ -3583,6 +3613,173 @@ mod tests {
         let io = MockIo::new();
         io.chain().rpc_down = true;
         assert!(matches!(block_on(clear_lane_halt_with(&io, LaneKind::Minter)), Err(BridgeError::Rpc(_))));
+        assert!(minter().halted.is_some());
+    }
+
+    // ----- final-nonce proofs read at the settlement head ---------------------------------------
+    //
+    // These run the production `ChainIo` against the EVM RPC mock transport, so the request
+    // bodies are the real ones. The lane's address and key are cached in state.
+
+    type Bodies = std::rc::Rc<RefCell<Vec<String>>>;
+
+    /// Providers agree on everything. A transaction count is `latest_count` at `latest`,
+    /// `tag_count` at the raw `finalized` tag and `numbered_count` at any block number, so a
+    /// proof that read the wrong block gives a recognisably wrong number. Block reads answer
+    /// `finalized_height` for the `finalized` tag. Every request body is kept.
+    fn counting_transport(finalized_height: u64, latest_count: u64, tag_count: u64, numbered_count: u64) -> Bodies {
+        use crate::evm::rpc::testutil;
+        let bodies: Bodies = Default::default();
+        let sink = bodies.clone();
+        crate::evm::rpc::set_mock_transport(move |_, body| {
+            sink.borrow_mut().push(body.to_string());
+            let (method, params) = testutil::request_of(body);
+            match method.as_str() {
+                "eth_getBlockByNumber" => {
+                    let n = match params[0].as_str().unwrap() {
+                        "finalized" => finalized_height,
+                        hex => u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap(),
+                    };
+                    Ok(testutil::ok_body(testutil::block_json(n, testutil::h32(n, 0))))
+                }
+                "eth_getTransactionCount" => {
+                    let n = match params[1].as_str().unwrap() {
+                        "latest" => latest_count,
+                        "finalized" => tag_count,
+                        "pending" => panic!("a final-nonce proof must not read pending"),
+                        hex => {
+                            assert!(hex.starts_with("0x"), "unexpected block parameter {hex}");
+                            numbered_count
+                        }
+                    };
+                    Ok(testutil::ok_body(serde_json::json!(format!("0x{n:x}"))))
+                }
+                other => Err(format!("unexpected method {other}")),
+            }
+        });
+        bodies
+    }
+
+    /// `(method, block parameter or tag)` of every request, in order. For block reads the
+    /// parameter is the first one, for transaction counts the second.
+    fn request_log(bodies: &Bodies) -> Vec<(String, String)> {
+        bodies
+            .borrow()
+            .iter()
+            .map(|b| {
+                let (m, p) = crate::evm::rpc::testutil::request_of(b);
+                let at = if m == "eth_getTransactionCount" { &p[1] } else { &p[0] };
+                (m, at.as_str().unwrap().to_string())
+            })
+            .collect()
+    }
+
+    /// Repeat `(method, at)` once per provider (three providers answer each round).
+    fn round(method: &str, at: &str) -> Vec<(String, String)> {
+        vec![(method.to_string(), at.to_string()); 3]
+    }
+
+    /// A halted minter lane with local nonce `next`, on `chain`, ready for `ChainIo`.
+    fn halted_lane_on_chain(chain: u64, next: u64) {
+        halted_clean_lane(next);
+        state::mutate_core(|c| {
+            c.config.chain_id = chain;
+            c.minter_lane.address = Some(MINTER);
+            c.minter_lane.public_key = Some(vec![2; 33]);
+            c.config.rpc_services = crate::evm::rpc::testutil::services(3);
+            c.config.min_quorum = 2;
+            c.config.evm_rpc = Principal::from_slice(&[7; 10]);
+        });
+    }
+
+    #[test]
+    fn base_final_nonce_proofs_keep_their_requests_and_read_the_finalized_tag() {
+        // fetch_nonces: latest, then the raw finalized tag. Nothing else, no block read.
+        halted_lane_on_chain(state::CHAIN_BASE_SEPOLIA, 3);
+        let bodies = counting_transport(1_000, 5, 4, 77);
+        assert_eq!(block_on(fetch_nonces(&ChainIo, LaneKind::Minter)), Ok((5, 4)));
+        let want: Vec<(String, String)> = [round("eth_getTransactionCount", "latest"), round("eth_getTransactionCount", "finalized")].concat();
+        assert_eq!(request_log(&bodies), want);
+
+        // clear_lane_halt_with: the finalized tag first, then latest, as it always did.
+        halted_lane_on_chain(state::CHAIN_BASE_SEPOLIA, 3);
+        let bodies = counting_transport(1_000, 3, 3, 77);
+        assert_eq!(block_on(clear_lane_halt_with(&ChainIo, LaneKind::Minter)), Ok(()));
+        let want: Vec<(String, String)> = [round("eth_getTransactionCount", "finalized"), round("eth_getTransactionCount", "latest")].concat();
+        assert_eq!(request_log(&bodies), want);
+        assert!(minter().halted.is_none());
+    }
+
+    #[test]
+    fn monad_final_nonce_proofs_read_at_the_numbered_verified_head() {
+        // finalized 1000, so the Verified head is 997 = 0x3e5. The raw finalized tag would
+        // answer 99 and the numbered block answers the real count.
+        halted_lane_on_chain(10_143, 3);
+        let bodies = counting_transport(1_000, 5, 99, 4);
+        assert_eq!(block_on(fetch_nonces(&ChainIo, LaneKind::Minter)), Ok((5, 4)));
+        let want: Vec<(String, String)> = [
+            round("eth_getBlockByNumber", "finalized"),
+            round("eth_getBlockByNumber", "0x3e5"),
+            round("eth_getTransactionCount", "latest"),
+            round("eth_getTransactionCount", "0x3e5"),
+        ]
+        .concat();
+        assert_eq!(request_log(&bodies), want, "head first, then latest, then the count at the head");
+        assert!(bodies.borrow().iter().all(|b| !b.contains("\"latest\"") || b.contains("eth_getTransactionCount")), "latest only as a nonce observation");
+
+        // The lane clears on the count at the Verified head, not on the finalized tag.
+        halted_lane_on_chain(10_143, 3);
+        let bodies = counting_transport(1_000, 3, 99, 3);
+        assert_eq!(block_on(clear_lane_halt_with(&ChainIo, LaneKind::Minter)), Ok(()));
+        let log = request_log(&bodies);
+        assert!(log.iter().all(|(m, at)| m != "eth_getTransactionCount" || at != "finalized"), "{log:?}");
+        assert!(log.contains(&("eth_getTransactionCount".to_string(), "0x3e5".to_string())), "{log:?}");
+        assert!(minter().halted.is_none());
+
+        // A count at the Verified head that differs from the local nonce keeps the halt, even
+        // though the finalized tag would have agreed.
+        halted_lane_on_chain(10_143, 3);
+        counting_transport(1_000, 3, 3, 2);
+        match block_on(clear_lane_halt_with(&ChainIo, LaneKind::Minter)) {
+            Err(BridgeError::InvalidState(m)) => assert!(m.contains("finalized count 2"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(minter().halted.is_some());
+    }
+
+    #[test]
+    fn a_blocked_chain_sends_no_request_on_either_final_nonce_path() {
+        for chain in [4_663u64, 46_630, 999, 998] {
+            halted_lane_on_chain(chain, 3);
+            crate::evm::rpc::set_mock_transport(|_, _| panic!("a blocked chain sent a request"));
+            match block_on(fetch_nonces(&ChainIo, LaneKind::Minter)) {
+                Err(e) => assert!(e.contains("settlement head unavailable") && e.contains("blocked"), "chain {chain}: {e}"),
+                other => panic!("chain {chain}: {other:?}"),
+            }
+            match block_on(clear_lane_halt_with(&ChainIo, LaneKind::Minter)) {
+                Err(BridgeError::Rpc(m)) => assert!(m.contains("settlement head") && m.contains("blocked"), "chain {chain}: {m}"),
+                other => panic!("chain {chain}: {other:?}"),
+            }
+            assert!(crate::evm::rpc::mock_calls().is_empty(), "chain {chain}");
+            assert!(minter().halted.is_some(), "chain {chain}: the halt stays");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_verified_head_fails_both_paths_before_any_nonce_is_read() {
+        halted_lane_on_chain(10_143, 3);
+        let bodies: Bodies = Default::default();
+        let sink = bodies.clone();
+        crate::evm::rpc::set_mock_transport(move |_, body| {
+            sink.borrow_mut().push(body.to_string());
+            Err("down".into())
+        });
+        match block_on(fetch_nonces(&ChainIo, LaneKind::Minter)) {
+            Err(e) => assert!(e.contains("settlement head unavailable"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(block_on(clear_lane_halt_with(&ChainIo, LaneKind::Minter)), Err(BridgeError::Rpc(_))));
+        assert!(request_log(&bodies).iter().all(|(m, _)| m == "eth_getBlockByNumber"), "no nonce was read: {:?}", request_log(&bodies));
         assert!(minter().halted.is_some());
     }
 

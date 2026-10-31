@@ -5,7 +5,7 @@ use crate::accounting::Transition;
 use crate::admin;
 use crate::env;
 use crate::evm::abi::{self, ViewCall};
-use crate::evm::rpc::{self, BlockTag, Receipt};
+use crate::evm::rpc::{self, Receipt};
 use crate::ids;
 use crate::ledger;
 use crate::state::{
@@ -542,8 +542,12 @@ pub async fn request_refund(id: u64) -> BridgeResult<DepositView> {
     let contract = state::read_core(|c| c.config.contract.as_ref().map(|b| b.address))
         .ok_or_else(|| BridgeError::NotConfigured("contract not bound".into()))?;
 
-    // Destination truth: the mint id must be unconsumed at the finalized head.
-    let ret = rpc::eth_call(&contract, &abi::encode_view(&ViewCall::MintConsumed(d.mint_id)), BlockTag::Finalized)
+    // Destination truth: the mint id must be unconsumed at the settlement head. The chain's
+    // head rule decides what that is: the `finalized` tag where that is the rule, the
+    // numbered Verified block where it is not, and a blocked chain fails here before any
+    // request, so an ordering-only observation never starts a refund.
+    let settled_at = rpc::settlement_block_tag().await.map_err(|e| BridgeError::Rpc(e.to_string()))?;
+    let ret = rpc::eth_call(&contract, &abi::encode_view(&ViewCall::MintConsumed(d.mint_id)), settled_at)
         .await
         .map_err(|e| BridgeError::Rpc(e.to_string()))?;
     let consumed = abi::decode_bool(&ret).map_err(|e| BridgeError::Rpc(format!("{e:?}")))?;
@@ -1173,6 +1177,90 @@ pub(crate) mod tests {
         match r {
             OpRef::Refund(id) | OpRef::Pull(id) => Some(*id),
             _ => None,
+        }
+    }
+
+    // ----- the refund proof is read at the chain's settlement head -------------------------
+
+    type Bodies = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    /// Every provider agrees: `finalized` is `finalized`, any block number serves, and
+    /// `mintConsumed` is false. Every request body is kept.
+    fn recording_refund_transport(finalized: u64) -> Bodies {
+        let bodies: Bodies = Default::default();
+        let sink = bodies.clone();
+        let not_consumed = format!("0x{}", "00".repeat(32));
+        crate::evm::rpc::set_mock_transport(move |_, body| {
+            sink.borrow_mut().push(body.to_string());
+            let (method, params) = testutil::request_of(body);
+            match method.as_str() {
+                "eth_getBlockByNumber" => {
+                    let n = match params[0].as_str().unwrap() {
+                        "finalized" => finalized,
+                        hex => u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap(),
+                    };
+                    Ok(testutil::ok_body(testutil::block_json(n, testutil::h32(n, 0))))
+                }
+                "eth_call" => Ok(testutil::ok_body(serde_json::json!(not_consumed))),
+                other => Err(format!("unexpected method {other}")),
+            }
+        });
+        bodies
+    }
+
+    fn requests_of(bodies: &Bodies, method: &str) -> Vec<serde_json::Value> {
+        bodies.borrow().iter().map(|b| testutil::request_of(b)).filter(|(m, _)| m == method).map(|(_, p)| p).collect()
+    }
+
+    #[test]
+    fn a_base_refund_reads_mint_consumed_at_the_finalized_tag() {
+        let id = held_refundable_deposit();
+        let bodies = recording_refund_transport(500);
+        testutil::block_on(request_refund(id)).unwrap();
+        let calls = requests_of(&bodies, "eth_call");
+        assert_eq!(calls.len(), 3, "one eth_call per provider");
+        for p in &calls {
+            assert_eq!(p[1], serde_json::json!("finalized"), "Base keeps the finalized tag");
+        }
+        // Nothing else is asked: no block read, no other tag.
+        assert_eq!(bodies.borrow().len(), 3);
+    }
+
+    #[test]
+    fn a_monad_refund_reads_mint_consumed_at_the_numbered_verified_block() {
+        let id = held_refundable_deposit();
+        state::mutate_core(|c| c.config.chain_id = 10_143);
+        let bodies = recording_refund_transport(1_000);
+        testutil::block_on(request_refund(id)).unwrap();
+        let calls = requests_of(&bodies, "eth_call");
+        assert_eq!(calls.len(), 3);
+        for p in &calls {
+            // Verified head = finalized 1000 - 3 = 997 = 0x3e5, never the `finalized` tag.
+            assert_eq!(p[1], serde_json::json!("0x3e5"), "pinned to the Verified block");
+        }
+        // The head was read through the dispatcher: the finalized round, then block 997.
+        let blocks: Vec<String> = requests_of(&bodies, "eth_getBlockByNumber").iter().map(|p| p[0].as_str().unwrap().to_string()).collect();
+        assert_eq!(blocks, vec!["finalized", "finalized", "finalized", "0x3e5", "0x3e5", "0x3e5"]);
+        for b in bodies.borrow().iter() {
+            for moving in ["latest", "pending", "safe"] {
+                assert!(!b.contains(&format!("\"{moving}\"")), "{b}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_blocked_chain_refund_sends_no_request_and_leaves_the_deposit_held() {
+        for chain in [4_663u64, 46_630, 999, 998] {
+            let id = held_refundable_deposit();
+            state::mutate_core(|c| c.config.chain_id = chain);
+            crate::evm::rpc::set_mock_transport(|_, _| panic!("a blocked chain sent a settlement request"));
+            match testutil::block_on(request_refund(id)) {
+                Err(BridgeError::Rpc(m)) => assert!(m.contains("blocked"), "chain {chain}: {m}"),
+                other => panic!("chain {chain}: {other:?}"),
+            }
+            assert!(crate::evm::rpc::mock_calls().is_empty(), "chain {chain}");
+            assert!(matches!(state::get_deposit(id).unwrap().state, DepositState::MintHeld { .. }), "chain {chain}");
+            assert!(!state::is_halted(), "chain {chain}: a blocked read is not evidence of a mint");
         }
     }
 
