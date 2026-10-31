@@ -60,10 +60,10 @@ D6 decision; items 9 and 10 wait on the browser test and a production authorizat
 
 Card membership: the Cards column (each item's `cardIds`) decides which cards Lookout badges with
 that item's rank. Links are set from each card's scope, files, dependencies and evidence, never its
-title alone (operating rules, "Priority selection", clause 7). 67 of the 68 cards are linked.
+title alone (operating rules, "Priority selection", clause 7). 68 of the 69 cards are linked.
 BB-00 (baseline and inventory) stays unlinked because it serves every item. BB-22 and BB-27 each
 belong to two items: BB-22 finishes the implementation reviews and is review evidence for the PR
-handoff, and BB-27 is the browser test that item 11 also waits on.
+handoff, and BB-27 is the browser test that item 9 (`acceptance-handoff`) also waits on.
 
 ## Proof levels
 
