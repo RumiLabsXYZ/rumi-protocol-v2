@@ -487,10 +487,10 @@
     },
     {
       "id": "BB-54",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "Sui: Wallet Standard connector and return flow",
-      "evidenceText": "proof=local-test; In Review: 37f9c77c, accepted root fixes 412f1fda, and correction 25852bb2 for W29's F-1 and F-4 (release bound to the exact attempt; saved-bridge binding in both directions); 178 green",
+      "evidenceText": "proof=local-test; Done (Miles) at source and local injected-flow scope: 37f9c77c, 412f1fda, 25852bb2. Not real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof",
       "evidenceLinks": []
     },
     {

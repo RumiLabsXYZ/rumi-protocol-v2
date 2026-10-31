@@ -3001,6 +3001,35 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   page specs for Base and Solana not rerun (no shared source changed).
 - Omissions: no zkLogin or multisig verifier; a wallet-reported digest not kept as a hint; W29's other observations deferred.
 
+## Milestone 126 (2026-10-31): BB-54 accepted; Sui done at source scope
+
+- Miles (`accept-bb54.md`) accepted BB-54 at source and local injected-flow scope: feature `37f9c77c7cb352dca2492fe119a6c6311034105a`,
+  root correction `412f1fda54bb270863518477f81d906d7a172fb2`, independent-review correction
+  `25852bb246635dc7916b6307b7ed2227888bcde9`. BB-54 and the Sui item are done at source scope. Not real browser-wallet, node or
+  genesis probe, deployment, served-byte, signing or settlement acceptance, nor production readiness.
+- Review structure: Miles reviewed the ICP service, forms and history, actor and dependency construction, destination and page
+  integration and the first correction; the same W29 (`claude-sonnet-5-5`) independently reviewed the native return, signing, SDK
+  and node boundary at `37f9c77c`; Miles adjudicated its four proposals; W28 (`claude-sonnet-5-5`) was the sole author and fix owner.
+- Dispositions: root F1 to F3 resolved at `412f1fda`; W29 F-1 resolved (a release accepted only after comparing transfer id, sender,
+  nonce, amount, canonical ICP owner and subaccount and the saved digest; a mismatch is a deviation carrying the actual record,
+  never credited or done; manual evidence and tracking share the validation); W29 F-4 resolved in both directions (the persisted
+  canister, full chain identifier, package, Gate and coin type compared with the current config before return continuation and
+  rebroadcast and before ICP resume, retry, submission and follow-deposit; original journals kept; shared helpers, backend and
+  Candid not widened); W29 F-2 the intended safe hold, unchanged (an explicit recovery limit, not an open correctness finding); W29
+  F-3 zkLogin named as unsupported, validation enforced, full support deferred.
+- Evidence read by Miles (no duplicate build): the initial 789 passed with 1 existing skip; the first correction's 202; the final
+  correction's `red_f1_f4_old_code.txt` 12 failed, 52 passed (old-instance ICP resume approved instead of blocked, a changed release
+  accepted, a wrong-instance return sent, a new-canister status query; some assertions reflect only the added evidence field or a
+  missing message, not 12 independent bugs) and `red_all_old_code.txt` 18 failed, 85 passed (including a Released record for
+  another amount marking the journal done); `final_focused_vitest.txt` 178 passed in 10 specs; `final_check.txt` the unchanged 30
+  errors, 66 warnings, 25 files (baseline, not unqualified typecheck green); `final_build.txt` exit 0 with the Internet Identity and
+  custom-domain asset check; root diff-check clean; the generated Sui `.did` byte-identical to the canonical one.
+- Limits kept visible: interrupted unknown prompts may stay held indefinitely; the unresolved guard is per tab; real wallet and
+  provider behavior unmeasured; supported signature schemes only; the wallet chooses gas; a 50-coin merge bound; fee-small returns
+  held and re-minted; no claimed live code or controller policy. Pre-real-value work stays deferred.
+- W23's BB-60 profile upkeep continues independently and is excluded from pushes until its own acceptance. W28 and W29 have no new
+  protocol work. The whole goal is not complete: live activation, BB-46, BB-27, D6 and the held items remain.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
