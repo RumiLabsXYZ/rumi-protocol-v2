@@ -3141,6 +3141,23 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   acceptance awaits Rob's sign-in and wallet gestures; BB-46 public probes, D6, native activation and live proof and the denied
   XRPL publication stay held.
 
+## Milestone 132 (2026-10-31): BB-61 decision preparation started
+
+- Miles (`bb61-decision-prep.md`): prepare, but do not make, the D6 custody decision; operating rules allow source and runbook
+  preparation while BB-61 stays held. Optional preparation, not a source gate, not D6 completion, no live action.
+- The same W29 (requested Sonnet) writes one document, `docs/coordination/multichain/authority-decision-d6.md`, read-only on all
+  source: a compact authority table separating the test deployer and user wallets, canister-controlled threshold issuance keys,
+  ledger escrow and minting authority, IC controllers and upgrades, and destination admin, upgrade, freeze and issuer powers, each
+  material claim cited by file and function or line with an immutable commit; per family (EVM, Solana, Sui, XRPL) who can create
+  supply, change authority or limits, pause, upgrade or move custody and what constrains them, with honest unknowns; a recommended
+  disposable testnet demo arrangement and unadopted production options (named owner, multisig or governance only where source
+  supports them), explaining that a canister controller can change signer code and threshold-key use; a decision form with
+  placeholders only (no invented identities, addresses or budgets); and the post-authorization execution order. XRPL observations
+  come only from reading the existing local follow-up checkout (`46cf6b34`), with no source copied or relayed and unverifiable
+  points marked unverified. No keys, queries, CLI, builds, tests or role actions.
+- Then the same W23 (requested Haiku) checks readability and consistency only. Miles reviews the frozen document before any push.
+  One substantive lane at a time; W28 on standby. CI run 41193536473 on `db24716f` is Miles' single watch.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
