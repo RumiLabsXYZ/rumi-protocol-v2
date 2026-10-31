@@ -273,3 +273,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-31: BB-55 done (Miles accepted the correction 868ebca8). BB-56 stays in Review: fee-backing interleaving candidate to reproduce first; origin reporting carried to BB-57 (card and plan row updated).
 - 2026-10-31: Miles reviewed BB-48 core 45ecd9fe: three lane corrections (halt fence across awaits, first-32 starvation, free-slot ABA) go to the same W28 as one follow-up after its probe commit d1bc0bca.
 - 2026-10-31: W28's BB-48 report recorded (core 45ecd9fe, probe d1bc0bca); the SOL RPC interface fixture was copied from another local project checkout, upstream version unrecorded, to be verified before activation.
+- 2026-10-31: SOL RPC fixture provenance resolved (Miles): exact blob cd456a3b of dfinity/sol-rpc-canister canister/sol_rpc_canister.did at 5ac94de2; source equality only, not deployed behavior.

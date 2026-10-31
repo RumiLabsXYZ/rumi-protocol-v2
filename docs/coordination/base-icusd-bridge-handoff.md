@@ -1360,10 +1360,13 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   `probe_history_availability` behind the cargo feature `history_probe` (production Wasm byte-identical with it off),
   explicit `ProbeArgs` with no defaults, at most 18 mirror calls, per-call Consistent present or absent, Inconsistent or
   Error with age against the horizon; runbook `HISTORY_PROBE.md`; 239 tests with and without the feature. Not run against any
-  network. Provenance flag: the repo has no copy of the SOL RPC canister interface, so W28 copied a pinned
-  `sol_rpc_canister.did` verbatim from another local project checkout into `tests/fixtures/` (upstream version unrecorded,
-  not compared with the deployed canister); the mirror is verified only against that fixture. It must be checked against the
-  upstream release and the deployed canister before activation. `history_horizon` is an UNMEASURED 6-hour placeholder.
+  network. Provenance (resolved by Miles, read-only): the fixture
+  `src/rumi_icusd_sol_bridge/tests/fixtures/sol_rpc_canister.did` is the exact git blob
+  `cd456a3b397e2296fd00ca764faa6ababfb7cd49` (39,673 bytes) of `canister/sol_rpc_canister.did` in the official
+  `dfinity/sol-rpc-canister` repository at commit `5ac94de29be388eeff758bbed953705e341a90da` (the last change to that file
+  GitHub returned): https://github.com/dfinity/sol-rpc-canister/blob/5ac94de29be388eeff758bbed953705e341a90da/canister/sol_rpc_canister.did.
+  The coordinator confirmed the blob hash and size locally. This proves source-fixture equality only, not the deployed
+  canister's interface or provider behavior, which stay activation checks. `history_horizon` is an UNMEASURED 6-hour placeholder.
   Miles' review of
   the core (`review-bb48.md`): typed transport, exact-message adoption, persisted signatures and ids, advance-only cancel,
   null and Inconsistent holds and old-state defaults aligned; no public runtime acceptance; the probe stays a required
