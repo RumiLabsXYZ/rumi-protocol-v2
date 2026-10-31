@@ -4,7 +4,7 @@
       "id": "xlm-demo-open-address",
       "title": "Demo: open XLM custody address",
       "status": "in_progress",
-      "blockedReason": "Test-build-only source exists, but writable disk headroom is about 20.2 GiB, below the shared 22 GiB build-start threshold, and no local build slot is allocated to XLM. Test-build Candid and real derive are unverified.",
+      "blockedReason": "Test-build-only source exists, but writable disk headroom is below the shared 22 GiB build-start threshold, and no local build slot is allocated to XLM. Test-build Candid and real derive are unverified.",
       "nextAction": "When disk headroom is above the shared build-start threshold and Cody allocates an XLM heavy slot, compile the test feature, verify its Candid interface and focused open-flow test, then smoke the real threshold derive on an isolated test canister. Keep production interface generation and key admission separate.",
       "cardIds": [
         "D1"
