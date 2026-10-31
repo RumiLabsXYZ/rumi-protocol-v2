@@ -13,7 +13,7 @@
 - [x] ckERC20: reconcile known Ethereum hashes and accepted withdrawal burn receipts, persist pending settlement, automate quote/balance reads, remove user-clear retry controls. Ethereum confirmation or a balance increase alone must not be described as proof of mint finality.
 - [x] Extract the existing isolated signer into shared minter infrastructure, preserving ckSOL imports and its ownership/cleanup behavior.
 - [x] Verify known/pending/uncertain/failed outcomes, returning sessions, owner/token switches, late responses, concurrent tabs and teardown. Run focused suites, production build, desktop/narrow browser fixtures, and independent adversarial reviews.
-- [ ] Publish source and frontend assets only after validation; verify paginated inventory, all served route hashes and unchanged canister Wasm/controllers. No real-wallet transaction is part of software verification.
+- [x] Publish source and frontend assets only after validation; verify paginated inventory, all served route hashes and unchanged canister Wasm/controllers. No real-wallet transaction is part of software verification.
 
 ## Boundary
 
