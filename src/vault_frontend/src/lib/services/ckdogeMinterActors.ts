@@ -41,7 +41,8 @@ import { CONFIG, CANISTER_IDS } from '../config';
 import { walletStore } from '../stores/wallet';
 import { idlFactory as ckdogeMinterIdl } from '../idls/ckdoge_minter.idl.js';
 import { isOisyWallet } from './protocol/walletOperations';
-import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import { createOisyActor } from './oisySigner';
+import { getMinterOisySignerAgent } from './minterOisySigner';
 import {
   summarizeApproveError,
   summarizeRetrieveError,
@@ -150,7 +151,7 @@ export async function updateDogeBalanceForOwner(
 export type RedeemOutcome =
   | { kind: 'stale' }
   | { kind: 'approve-error'; message: string }
-  | { kind: 'retrieve-error'; approveBlockIndex: bigint; message: string }
+  | { kind: 'retrieve-error'; approveBlockIndex: bigint; message: string; definite: boolean }
   | { kind: 'success'; approveBlockIndex: bigint; burnBlockIndex: bigint };
 
 export interface RedeemWithApprovalParams {
@@ -162,13 +163,18 @@ export interface RedeemWithApprovalParams {
   retrieveArgs: RetrieveWithApprovalArgs;
   /** Re-checked after every await — a wallet switch or component teardown mid-flight stops the flow before the next call. */
   isLive: () => boolean;
+  onApproved?: (block: bigint) => void;
+  beforeRetrieve?: () => void;
 }
+
+/** No approval/retrieval call has dispatched when this typed error is raised. */
+export class DogeWithdrawalPreflightError extends Error {}
 
 /**
  * Approve then retrieve_doge_with_approval, routed by wallet type.
  *
- * Oisy: both actors are built from ONE getOisySignerAgent() call (cached/pre-warmed
- * on connect, see oisySigner.ts) and used for two sequential awaits — icrc2_approve
+ * Oisy: both actors are built from ONE getMinterOisySignerAgent() call (opened synchronously by the
+ * page click, see minterOisySigner.ts) and used for two sequential awaits — icrc2_approve
  * then retrieve_doge_with_approval. That is one Oisy popup with two consent screens
  * (icrc2_approve is a Tier-1 native method; retrieve_doge_with_approval needs the
  * minter's own ICRC-21 consent message), never two separate popups, and no live
@@ -189,22 +195,26 @@ export async function redeemDogeWithApproval(params: RedeemWithApprovalParams): 
   let ledgerActor: any;
   let minterActor: any;
 
-  if (isOisyWallet()) {
-    const signerAgent = await getOisySignerAgent(ownerPrincipal);
-    if (!isLive()) return { kind: 'stale' };
-    ledgerActor = createOisyActor(ledgerCanisterId, ledgerIdl, signerAgent);
-    minterActor = createOisyActor(minterCanisterId, ckdogeMinterIdl, signerAgent);
-  } else {
-    ledgerActor = await walletStore.getActor(ledgerCanisterId, ledgerIdl);
-    if (!isLive()) return { kind: 'stale' };
+  try {
+    if (isOisyWallet()) {
+      const signerAgent = await getMinterOisySignerAgent(ownerPrincipal);
+      if (!isLive()) return { kind: 'stale' };
+      ledgerActor = createOisyActor(ledgerCanisterId, ledgerIdl, signerAgent);
+      minterActor = createOisyActor(minterCanisterId, ckdogeMinterIdl, signerAgent);
+    } else {
+      ledgerActor = await walletStore.getActor(ledgerCanisterId, ledgerIdl);
+      if (!isLive()) return { kind: 'stale' };
+    }
+  } catch (error) {
+    throw new DogeWithdrawalPreflightError(error instanceof Error ? error.message : 'Could not prepare your wallet.');
   }
-
-  const approveResult = await ledgerActor.icrc2_approve(approveArgs);
   if (!isLive()) return { kind: 'stale' };
+  const approveResult = await ledgerActor.icrc2_approve(approveArgs);
   if ('Err' in approveResult) {
     return { kind: 'approve-error', message: summarizeApproveError(approveResult.Err) };
   }
   const approveBlockIndex = BigInt(approveResult.Ok);
+  params.onApproved?.(approveBlockIndex);
   if (!isLive()) return { kind: 'stale' };
 
   if (!minterActor) {
@@ -212,10 +222,15 @@ export async function redeemDogeWithApproval(params: RedeemWithApprovalParams): 
     if (!isLive()) return { kind: 'stale' };
   }
 
-  const retrieveResult = await minterActor.retrieve_doge_with_approval(retrieveArgs);
   if (!isLive()) return { kind: 'stale' };
+  params.beforeRetrieve?.();
+  const retrieveResult = await minterActor.retrieve_doge_with_approval(retrieveArgs);
   if ('Err' in retrieveResult) {
-    return { kind: 'retrieve-error', approveBlockIndex, message: summarizeRetrieveError(retrieveResult.Err) };
+    // TemporarilyUnavailable also wraps an inter-canister burn-call failure
+    // upstream (retrieve_btc.rs:468-471 at 65f0638), so it is NOT a
+    // definitive no-burn response. Unknown variants must also stay held.
+    return { kind: 'retrieve-error', approveBlockIndex, message: summarizeRetrieveError(retrieveResult.Err),
+      definite: ['MalformedAddress', 'AmountTooLow', 'InsufficientFunds', 'InsufficientAllowance'].some(key => key in retrieveResult.Err) };
   }
   return { kind: 'success', approveBlockIndex, burnBlockIndex: BigInt(retrieveResult.Ok.block_index) };
 }
