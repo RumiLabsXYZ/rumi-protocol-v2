@@ -7519,6 +7519,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rumi_icusd_sol_bridge"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "candid",
+ "candid_parser",
+ "ciborium",
+ "curve25519-dalek",
+ "hex",
+ "ic-cdk 0.12.2",
+ "ic-stable-structures",
+ "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "num-traits",
+ "serde",
+ "serde_bytes",
+ "sha2 0.10.8",
+]
+
+[[package]]
 name = "rumi_points"
 version = "0.1.0"
 dependencies = [
