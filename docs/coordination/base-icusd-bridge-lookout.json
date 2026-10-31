@@ -407,10 +407,10 @@
     },
     {
       "id": "BB-44",
-      "state": "Review",
+      "state": "done",
       "owner": "worker-sonnet",
       "scope": "EVM: additive native RPC variants with regenerated declarations",
-      "evidenceText": "proof=local-test; 0bf16f9f: additive EthMainnet, EthSepolia, ArbitrumOne provider variants, each valid only on its own row; input-only Candid widened (didc check passes), bindings by script; legacy config bytes pinned; 503 unit tests",
+      "evidenceText": "proof=local-test; Miles accepted 0bf16f9f: additive EthMainnet, EthSepolia, ArbitrumOne provider variants, each valid only on its own row; input-only Candid widened, bindings by script; legacy config bytes pinned; 503 unit tests",
       "evidenceLinks": []
     },
     {
@@ -519,18 +519,18 @@
     },
     {
       "id": "BB-58",
-      "state": "In progress",
+      "state": "Review",
       "owner": "worker-sonnet",
       "scope": "Shared: aggregate reporting and analytics escrow subtraction",
-      "evidenceText": "proof=local-test; Miles accepted components 15bb73dc (analytics escrow subtraction) and 78e8ae3d (collector, typed D/X boundary); card open: same owner now writes the real IC query and EVM client transport, mocked tests only",
+      "evidenceText": "proof=local-test; Components accepted (15bb73dc, 78e8ae3d); 8b88a96f adds the real IC query and EVM client transport behind a feature, quorum reads at the settlement head, mocked tests only (127 pass), never run live; native adapters go with family cards",
       "evidenceLinks": []
     },
     {
       "id": "BB-59",
-      "state": "Queue",
+      "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Shared: frontend destination selection and safe signing gate",
-      "evidenceText": "proof=none; Destination view, one assertCanSign before any wallet call, disabled destinations unselectable, destination key on new intents, legacy Base records bound to Base",
+      "evidenceText": "proof=none; Claimed 2026-10-30: destination view (Base from get_bridge_info as today, other EVM chains shown disabled), one signing guard before any wallet call, destination key on new intents with legacy records bound to Base",
       "evidenceLinks": []
     },
     {

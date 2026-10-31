@@ -125,3 +125,10 @@ separate authorization is needed for each real-network probe, deployment, signin
    in JavaScript `JSON.parse`. Pointer: `src/rumi_bridge_destinations/src/types.rs` (amount bounds as strings) and the
    `amount_u64_max_round_trips_exactly` test. Candidate home: `rust-canister-engineering` (Candid and generated artifacts) or
    the frontend release personas.
+3. **A head-rule dispatcher must cover every raw finality-tag state proof (Miles, 2026-10-30).** When settlement finality
+   becomes a per-chain rule, audit every state read that proves something final, not only the obvious head callers: refund
+   checks and nonce recovery read the raw `finalized` tag too. BB-43's first pass routed the observer and lane head but missed
+   `request_refund`'s mint-consumed check and the two final-nonce proofs (`fetch_nonces`, `clear_lane_halt_with`), fixed in
+   `685984b9`. Pointer: a narrow search for `BlockTag::Finalized|finalized_head`, and the request-body tests in
+   `flows/deposit.rs` and `evm/lane.rs`. Candidate home: the `rust-canister-engineering` review checklist (caller and
+   settlement boundaries) or the chain-integration personas.

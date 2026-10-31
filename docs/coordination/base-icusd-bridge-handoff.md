@@ -1066,6 +1066,29 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   per-chain defaults and local tests, Robinhood and HyperEVM still blocked, a sibling Foundry deploy script; W25 continues the
   BB-58 transport.
 
+## Milestone 46 (2026-10-30): BB-44 accepted; proposed lesson
+
+- Accepted (Miles): BB-44 `0bf16f9f` at source and local-test level (provider mappings, per-chain family validation, the
+  five-provider cap, legacy CBOR pins and decoding, additive input-only Candid and generated diff); no repeat run.
+- Proposed durable lesson (proposal only; no memory, persona or catalog write): when introducing a head-rule dispatcher, audit
+  every raw finality-tag state proof, including refund and nonce recovery. Recorded as plan section 6 item 3 with pointers.
+- BB-58 transport `8b88a96f` (W25, same run): feature `live-transport` (off by default; the default build still depends only
+  on `serde` and `serde_json`) adds `JsonRpcTransport` with a `reqwest` client (https only, no redirects, timeout and body
+  cap) and `IcQuery` with an `ic-agent` 0.37.1 client (anonymous, query calls only, response verification at its default,
+  mainnet root key only). EVM supply is read at the profile's settlement head with quorum agreement on height, hash and
+  `totalSupply` (Monad finalized minus 3; Robinhood and HyperEVM blocked with zero requests; only `finalized` is ever sent
+  as a tag). IC reads: ledger `icrc1_total_supply` and `icrc1_balance_of`, and the backend's per-chain debt-backed supply
+  through `get_chain_public_launch_status` (an unregistered chain is an error, not zero). `LiveReadings` labels
+  `source: live` with a read time; example `collect_live` needs an explicit endpoint file and `--live`, and was not run.
+  Worker run: default tests 97 passed, `--features live-transport` 127 passed, dry run and both fixtures unchanged, canister
+  crates still check. Coordinator check: Cargo.lock adds 16 packages and removes or changes none (versions and checksums
+  compared). Not exercised: `ic-agent` query-signature verification against a replica. crates.io was reached once to fetch
+  the new crates.
+- Proposal for Miles: close BB-58 on this transport and track the Solana, Sui and XRPL readers on BB-49, BB-53 and BB-57.
+- Running (two Sonnet lanes): BB-45 (W26, only Rust and Wasm release builder) and BB-59 (W27, new run, `claude-sonnet-5-5`,
+  frontend only: `baseBridge` services, bridge components and route; focused vitest, `npm run check` against its baseline,
+  one `npm run build`).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
