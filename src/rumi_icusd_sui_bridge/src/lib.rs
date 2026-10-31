@@ -1,7 +1,9 @@
-//! Rumi icUSD bridge, Sui instance: canister FOUNDATION (card BB-52). Source and local
-//! capability only: nothing is deployed, signed, funded, broadcast or read from a network, and
-//! the Sui profile stays `disabled`. This is NOT a Sui bridge: there is no mint lane, no
-//! observer, no custody, no accounting and no wallet surface (BB-53 and BB-54).
+//! Rumi icUSD bridge, Sui instance (card BB-53; the foundation is BB-52). Source and local
+//! capability only: nothing is deployed, signed, funded, broadcast or read from a network, and the
+//! Sui profile stays `disabled`. 53a is the ICP-side saga and accounting (escrow pull, refund,
+//! release, fee sweep); 53b adds the observed binding, the HTTPS-outcall transport (disabled by
+//! default, exercised only against a simulated chain) and the mint lane; the return observer and
+//! the monitors (53c) and the wallet surface (BB-54) do not exist yet.
 //!
 //! One canister instance serves one network (settled topology D1). The design is
 //! `docs/coordination/multichain/chain-sui.md`; the Move package it talks to is
@@ -21,7 +23,11 @@
 //!   `mints` and `returns` table entries;
 //! * `graphql`: bounded queries, parsers with per-provider network and identity checks, the
 //!   strict quorum and the deterministic response transform. Pure; nothing is sent;
-//! * `schnorr`: the threshold-Ed25519 signer seam; `state`, `types`, `env`: the skeleton.
+//! * `schnorr`: the threshold-Ed25519 signer seam; `state`, `types`, `env`: the skeleton;
+//! * 53b: `reads` (the head, checkpoint-with-gas, owned-object, coin-metadata, transaction and
+//!   `executeTransaction` shapes), `mirror` (the transport trait, the real outcall transport and the
+//!   per-provider quorum), `bind` (the observed deployment), `flows::mint` (the lane) and
+//!   `flows::remint` (held releases back to their Sui sender).
 //!
 //! # Sources (pinned, official; read 2026-10-31)
 //!
@@ -45,7 +51,10 @@
 //!   reinstall of this instance, which is a decision for the controllers, not an endpoint.
 //! * An upgrade can only replace the provider set (`UpgradeArgs.mirror`); it re-validates the
 //!   stored network, so a bad upgrade traps and the old module stays.
-//! * No endpoint signs or broadcasts: `signing_enabled` is false by construction.
+//! * `signing_enabled` in the config view is false: nothing is activated. The mint lane signs
+//!   and broadcasts only when the controllers have configured the gas coin, an admin has enabled a
+//!   provider mirror and observed the deployment, and mints are not paused; `get_mint_lane` says
+//!   which of those is missing.
 //!
 //! # Open items this crate carries (honest list)
 //!
@@ -55,17 +64,20 @@
 //!   is not a dependency). The IC `sign_with_schnorr` mapping for Sui is unrun.
 //! * `sui-graphql-schema-unmeasured`: fixtures are schema-derived, not captured from a provider;
 //!   `UInt53` number versus string and the `repr` address form are tolerated both ways.
-//! * `sui-rpc-provider-contract`: no provider is contracted; the mirror is disabled by default
-//!   and the foundation has no HTTP transport.
+//! * `sui-rpc-provider-contract`: no provider is contracted; the mirror is disabled by default. The
+//!   HTTPS-outcall transport exists (53b) but has only ever answered a simulated chain: cycles per
+//!   call, keyless availability, retention and real response shapes are unmeasured.
 //! * `sui-epoch-expiry-nonexecution-proof`: the builder binds `Epoch(e)` to bound signing; it
 //!   never infers expiry or non-execution from an epoch passing or a missing digest.
-//! * Ed25519 signature verification is not in the production build (tests verify with
-//!   `ed25519-dalek`); `assemble_signed_mint` checks that each key matches its role address.
+//! * Ed25519 signatures are verified against the role key before the mint lane stores one
+//!   (`ed25519-dalek`, a normal dependency since 53b); the transaction itself is only ever checked
+//!   against a simulated chain.
 //! * BLAKE2b-256 is the RustCrypto `blake2` crate, the one dependency added to `Cargo.lock` for this card.
 
 pub mod accounting;
 pub mod admin;
 pub mod bcs;
+pub mod bind;
 pub mod env;
 pub mod flows;
 pub mod gate;
@@ -75,6 +87,8 @@ pub mod icp;
 pub mod icrc21;
 pub mod ids;
 pub mod ledger;
+pub mod mirror;
+pub mod reads;
 pub mod runtime;
 pub mod schnorr;
 pub mod state;
@@ -93,6 +107,11 @@ mod graphql_identity_tests;
 mod testkit;
 #[cfg(test)]
 mod saga_tests;
+#[cfg(test)]
+#[allow(dead_code)]
+mod chain_sim;
+#[cfg(test)]
+mod lane_tests;
 
 use candid::Principal;
 use ids::SuiRole;
@@ -322,6 +341,28 @@ fn get_buckets() -> BucketsView {
     views::buckets_view()
 }
 
+/// What the providers last agreed the configured deployment is (`observe_deployment`).
+#[ic_cdk::query]
+fn get_observed_deployment() -> Option<ObservedDeploymentView> {
+    state::read_runtime(|c| c.observed.as_ref().map(views::observed_view))
+}
+
+/// Whether the mint lane would run now, and what it is waiting for.
+#[ic_cdk::query]
+fn get_mint_lane() -> MintLaneView {
+    views::mint_lane_view()
+}
+
+#[ic_cdk::query]
+fn get_mint_op(id: u64) -> Option<MintOpView> {
+    state::get_mint_op(id).map(|o| views::mint_op_view(&o))
+}
+
+#[ic_cdk::query]
+fn list_mint_ops(args: ListDepositsArgs) -> Vec<MintOpView> {
+    state::list_mint_ops(args.start_after, args.limit).iter().map(views::mint_op_view).collect()
+}
+
 #[ic_cdk::query]
 fn get_audit_log(start: u64, limit: u32) -> Vec<AuditEntry> {
     state::audit_page(start, limit).iter().map(views::audit_entry).collect()
@@ -369,6 +410,42 @@ fn admin_clear_halt(note: String) -> BridgeResult<()> {
     Ok(())
 }
 
+/// Read the configured deployment through the provider quorum and store what they agree on. Needs the
+/// gate binding, the role keys and an enabled mirror; stores nothing unless the observation is agreed
+/// and acceptable.
+#[ic_cdk::update]
+async fn observe_deployment() -> SuiResult<ObservedDeploymentView> {
+    admin::require_admin()?;
+    match bind::observe_deployment(&mirror::CanisterTransport).await {
+        Ok(o) => Ok(views::observed_view(&o)),
+        Err(bind::BindError::NotReady(m)) => Err(SuiBridgeError::NotConfigured(m)),
+        Err(bind::BindError::Unavailable(m)) => Err(SuiBridgeError::Unavailable(m)),
+        Err(bind::BindError::Mismatch(m)) => Err(SuiBridgeError::DeploymentMismatch(m)),
+    }
+}
+
+#[ic_cdk::update]
+fn admin_set_lane_settings(a: LaneSettingsArg) -> BridgeResult<()> {
+    admin::set_lane_settings(a)
+}
+
+/// Abandon a mint operation whose current attempt is proven never signed. Refused for any attempt that
+/// may be a complete signed transaction.
+#[ic_cdk::update]
+fn admin_abandon_mint_op(op_id: u64, note: String) -> BridgeResult<()> {
+    admin::abandon_mint_op(op_id, &note)?;
+    timer::schedule_soon();
+    Ok(())
+}
+
+/// Clear the mint lane's halt after resolving its cause; the note says how.
+#[ic_cdk::update]
+fn admin_clear_mint_lane_halt(note: String) -> BridgeResult<()> {
+    admin::clear_mint_lane_halt(&note)?;
+    timer::schedule_soon();
+    Ok(())
+}
+
 #[ic_cdk::update]
 async fn admin_run_tick() -> BridgeResult<()> {
     admin::require_admin()?;
@@ -387,6 +464,12 @@ async fn admin_run_tick() -> BridgeResult<()> {
 #[ic_cdk::update]
 fn set_admins(admins: Vec<Principal>) -> BridgeResult<()> {
     admin::set_admins(admins)
+}
+
+/// The one SUI coin object (owned by the gas role address) that pays for mints.
+#[ic_cdk::update]
+fn set_gas_coin(id: String) -> BridgeResult<()> {
+    admin::set_gas_coin(&id)
 }
 
 /// Record the exact identities of the deployed gate. Set once; the same ids again are a no-op
@@ -459,6 +542,32 @@ fn transform_sui_graphql(args: TransformArgs) -> HttpResponse {
     }
 }
 
+/// The head query's transform: the checkpoint number rounded down to a multiple of
+/// `reads::HEAD_ROUNDING`, everything else about the head dropped. A non-200 status keeps its code.
+#[ic_cdk::query]
+fn transform_sui_graphql_head(args: TransformArgs) -> HttpResponse {
+    let status = args.response.status.clone();
+    if status != 200u64 {
+        return HttpResponse { status, headers: vec![], body: vec![] };
+    }
+    match reads::canonicalize_head(&args.response.body, graphql::MAX_RESPONSE_BYTES as usize) {
+        Ok(body) => HttpResponse { status, headers: vec![], body },
+        Err(_) => HttpResponse { status: candid::Nat::from(502u64), headers: vec![], body: vec![] },
+    }
+}
+
+/// The `executeTransaction` transform: whether the provider answered 200 is all a replica
+/// contributes (a duplicate submission of the same signed bytes may answer differently), and the body
+/// is replaced by a constant. The canister confirms by transaction lookup, never from this reply.
+#[ic_cdk::query]
+fn transform_sui_send(args: TransformArgs) -> HttpResponse {
+    let status = args.response.status.clone();
+    if status != 200u64 {
+        return HttpResponse { status, headers: vec![], body: vec![] };
+    }
+    HttpResponse { status, headers: vec![], body: reads::SEND_ACCEPTED_BODY.to_vec() }
+}
+
 // ---------------------------------------------------------------------------
 // Ingress filtering
 // ---------------------------------------------------------------------------
@@ -492,10 +601,15 @@ const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
     ("admin_retry_deposit", IngressAccess::Admin),
     ("admin_clear_halt", IngressAccess::Admin),
     ("admin_run_tick", IngressAccess::Admin),
+    ("observe_deployment", IngressAccess::Admin),
+    ("admin_set_lane_settings", IngressAccess::Admin),
+    ("admin_abandon_mint_op", IngressAccess::Admin),
+    ("admin_clear_mint_lane_halt", IngressAccess::Admin),
     // Controller methods.
     ("set_admins", IngressAccess::Controller),
     ("set_gate_binding", IngressAccess::Controller),
     ("derive_role_keys", IngressAccess::Controller),
+    ("set_gas_coin", IngressAccess::Controller),
 ];
 
 /// Largest accepted argument for open methods (wallet standards and user methods). The biggest
@@ -602,7 +716,7 @@ mod endpoint_tests {
     #[test]
     fn every_update_endpoint_has_an_ingress_decision() {
         let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().collect();
-        assert_eq!(updates.len(), 14, "the update endpoints are exactly the listed ones: {updates:?}");
+        assert_eq!(updates.len(), 19, "the update endpoints are exactly the listed ones: {updates:?}");
         let listed: BTreeSet<String> = INGRESS_METHODS.iter().map(|(n, _)| n.to_string()).collect();
         assert_eq!(updates, listed, "every update endpoint is listed and nothing else is");
         assert_eq!(listed.len(), INGRESS_METHODS.len(), "no duplicates");
@@ -614,6 +728,10 @@ mod endpoint_tests {
             "get_roles",
             "get_buckets",
             "get_audit_log",
+            "get_observed_deployment",
+            "get_mint_lane",
+            "get_mint_op",
+            "list_mint_ops",
             "get_deposit",
             "list_my_deposits",
             "list_deposits_for_owner",
@@ -624,6 +742,8 @@ mod endpoint_tests {
             "icrc28_trusted_origins",
             "icrc10_supported_standards",
             "transform_sui_graphql",
+            "transform_sui_graphql_head",
+            "transform_sui_send",
         ]
         .iter()
         .map(|s| s.to_string())

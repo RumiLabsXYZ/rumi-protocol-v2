@@ -86,7 +86,7 @@ pub fn network_of(chain_identifier: &Bytes32) -> Option<SuiNetwork> {
 
 /// Mint id domain (profile `signing.domains.mint_id`).
 pub const MINT_DOMAIN: &str = "rumi.icusd.sui.mint.v1";
-/// Re-mint of a held claim (profile `signing.domains.remint_id`). Reserved for BB-53.
+/// Re-mint of a held claim (profile `signing.domains.remint_id`).
 pub const REMINT_DOMAIN: &str = "rumi.icusd.sui.remint.v1";
 /// Return id domain (profile `signing.domains.return_id`); the Move gate's `DOMAIN_RETURN`.
 pub const RETURN_DOMAIN: &str = "rumi.icusd.sui.return.v1";
@@ -190,6 +190,21 @@ pub fn mint_id(
             &amount.to_be_bytes(),
         ],
     )
+}
+
+/// The 32-byte mint id of the re-mint of a held release claim: bound to the network and gate
+/// identity, the instance, the return it re-mints, the Sui address that sent it and the amount, in
+/// its own domain so it can never equal a user deposit's mint id.
+pub fn remint_id(
+    chain_identifier: &Bytes32,
+    package: &Bytes32,
+    gate: &Bytes32,
+    instance_salt: &Bytes32,
+    return_id: &Bytes32,
+    recipient: &Bytes32,
+    amount: u64,
+) -> Bytes32 {
+    domain_hash(REMINT_DOMAIN, &[chain_identifier, package, gate, instance_salt, return_id, recipient, &amount.to_be_bytes()])
 }
 
 /// The return `transfer_id` exactly as the Move gate computes it

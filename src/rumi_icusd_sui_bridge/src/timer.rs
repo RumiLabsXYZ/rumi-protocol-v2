@@ -108,7 +108,8 @@ pub async fn ledger_pass<L: IcpLedger>(ledger: &L) {
     deposit::process_sweeps(ledger).await;
 }
 
-/// One background pass.
+/// One background pass over the ICP side only (the ledger sagas and the re-mint driver). The mint
+/// lane is not run: see [`run_full`].
 pub async fn run_once<L: IcpLedger>(ledger: &L, now: u64) -> RunReport {
     if !state::read_runtime(|c| c.initialized) {
         return RunReport::default();
@@ -117,13 +118,30 @@ pub async fn run_once<L: IcpLedger>(ledger: &L, now: u64) -> RunReport {
         return RunReport { skipped: true };
     };
     ledger_pass(ledger).await;
+    crate::flows::remint::process_remints();
+    RunReport { skipped: false }
+}
+
+/// One full background pass: the ICP side, the re-mint driver, then one step of the mint lane. The
+/// lane only runs when its own conditions hold (`flows::mint::blocked_by` is empty), so an
+/// unconfigured instance, a disabled mirror or a halt makes this equal to [`run_once`].
+pub async fn run_full<L: IcpLedger, T: crate::mirror::SuiTransport, S: crate::schnorr::RoleSigner>(ledger: &L, transport: &T, signer: &S, now: u64) -> RunReport {
+    if !state::read_runtime(|c| c.initialized) {
+        return RunReport::default();
+    }
+    let Some(_guard) = RunGuard::acquire(now) else {
+        return RunReport { skipped: true };
+    };
+    ledger_pass(ledger).await;
+    crate::flows::remint::process_remints();
+    crate::flows::mint::mint_pass(transport, signer).await;
     RunReport { skipped: false }
 }
 
 /// Run one pass now (the admin's "run tick"). `false` when another pass holds the guard.
 #[cfg(target_arch = "wasm32")]
 pub async fn run_now() -> bool {
-    !run_once(&crate::icp::CanisterLedger::from_config(), crate::env::now_ns()).await.skipped
+    !run_wasm(crate::env::now_ns()).await.skipped
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -131,9 +149,21 @@ pub async fn run_now() -> bool {
     false
 }
 
+/// The real pass: the real ledger, the HTTPS-outcall transport and the threshold signer. An instance
+/// whose network cannot build a signer runs the ICP side only.
+#[cfg(target_arch = "wasm32")]
+async fn run_wasm(now: u64) -> RunReport {
+    let ledger = crate::icp::CanisterLedger::from_config();
+    let (network, chain) = state::read_core(|c| (c.network, c.chain_identifier));
+    match crate::schnorr::SuiSigner::new(network, chain) {
+        Ok(signer) => run_full(&ledger, &crate::mirror::CanisterTransport, &signer, now).await,
+        Err(_) => run_once(&ledger, now).await,
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 async fn pass() {
-    run_once(&crate::icp::CanisterLedger::from_config(), crate::env::now_ns()).await;
+    run_wasm(crate::env::now_ns()).await;
 }
 
 /// Arm the next pass `secs` from now (replacing any pending one).

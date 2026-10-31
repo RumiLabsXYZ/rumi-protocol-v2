@@ -1,4 +1,10 @@
 type Account = record { owner : principal; subaccount : opt blob };
+type AttemptStatusView = variant {
+  LandedFinal : record { checkpoint : nat64 };
+  Open;
+  NeverSigned : record { reason : text };
+  FailedFinal : record { checkpoint : nat64; error : text };
+};
 type AuditEntry = record {
   seq : nat64;
   return_id : opt text;
@@ -79,6 +85,7 @@ type ConsentMessageSpec = record {
   metadata : ConsentMessageMetadata;
   device_spec : opt DeviceSpec;
 };
+type DeliveryViaView = variant { ConsumedRecord; Receipt };
 type DepositKindView = variant {
   UserDeposit;
   Remint : record { return_id : text };
@@ -156,6 +163,7 @@ type InitArgs = record {
   icusd_ledger : principal;
   limits : opt BridgeLimits;
 };
+type LaneSettingsArg = record { gas_budget : nat64; max_attempts : nat32 };
 type LineDisplayPage = record { lines : vec text };
 type ListDepositsArgs = record { start_after : opt nat64; limit : nat32 };
 type ListDepositsForOwnerArgs = record {
@@ -173,12 +181,86 @@ type ListReleasesForSenderArgs = record {
   start_after_seq : opt nat64;
   limit : nat32;
 };
+type MintAttemptView = record {
+  status : AttemptStatusView;
+  gas_signed : bool;
+  gas_sig_unknown : bool;
+  gas_budget : nat64;
+  mint_cap_version : nat64;
+  generation : nat32;
+  epoch : nat64;
+  gas_coin_version : nat64;
+  sends : nat32;
+  treasury_signed : bool;
+  tx_digest : text;
+  signing_digest : text;
+  treasury_sig_unknown : bool;
+  gas_price : nat64;
+};
+type MintLaneView = record {
+  active_op : opt nat64;
+  observed : opt ObservedDeploymentView;
+  gas_budget : nat64;
+  last_final_checkpoint : nat64;
+  max_attempts : nat32;
+  blocked_by : vec text;
+  gas_coin : opt text;
+  last_wait : opt text;
+  lane_halt : opt text;
+  ready : bool;
+};
+type MintOpStatusView = variant {
+  Failed : record { reason : text };
+  Active;
+  Delivered : record {
+    via : DeliveryViaView;
+    checkpoint : nat64;
+    tx_digest : opt text;
+    sequence : nat64;
+  };
+};
+type MintOpView = record {
+  id : nat64;
+  status : MintOpStatusView;
+  deposit_id : nat64;
+  mint_id : text;
+  attempts : vec MintAttemptView;
+  updated_at_ns : nat64;
+  hold_reason : opt text;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  sui_recipient : text;
+};
 type MirrorSettings = record {
   max_response_bytes : nat32;
   min_quorum : nat8;
   enabled : bool;
   min_independent_providers : nat8;
   providers : vec ProviderConfig;
+};
+type ObservedDeploymentView = record {
+  bridge_out_count : nat64;
+  decimals : nat8;
+  mint_count : nat64;
+  supply_cap : nat64;
+  mint_cap_owner : text;
+  initial_shared_version : nat64;
+  burned_total : nat;
+  checkpoint : nat64;
+  mint_cap_version : nat64;
+  observed_at_ns : nat64;
+  gate_version : nat64;
+  admin_cap_id : text;
+  min_bridge_out : nat64;
+  admin_cap_role : opt SuiRole;
+  epoch : nat64;
+  mint_cap_id : text;
+  admin_cap_owner : text;
+  module_digest_observed : bool;
+  total_supply : nat64;
+  minted_total : nat;
+  symbol : text;
+  checkpoint_digest : text;
 };
 type Pauses = record {
   mints : bool;
@@ -218,7 +300,8 @@ type Result_1 = variant { Ok : DepositView; Err : SuiBridgeError };
 type Result_2 = variant { Ok : nat64; Err : SuiBridgeError };
 type Result_3 = variant { Ok : vec RoleView; Err : SuiBridgeError };
 type Result_4 = variant { Ok : ConsentInfo; Err : Icrc21Error };
-type Result_5 = variant { Ok : ConfigView; Err : SuiBridgeError };
+type Result_5 = variant { Ok : ObservedDeploymentView; Err : SuiBridgeError };
+type Result_6 = variant { Ok : ConfigView; Err : SuiBridgeError };
 type RoleView = record {
   public_key : opt text;
   role : SuiRole;
@@ -236,6 +319,7 @@ type SuiBridgeError = variant {
   };
   AmountBelowMinimum : record { min_e8s : nat64 };
   CapacityExceeded : record { available_e8s : nat64 };
+  DeploymentMismatch : text;
   SignerFailed : text;
   NotFound;
   TooManyActiveOperations;
@@ -246,6 +330,7 @@ type SuiBridgeError = variant {
   NotConfigured : text;
   InvalidArgument : text;
   Ledger : text;
+  Unavailable : text;
   Halted : text;
   RequestIdConflict;
   InvalidState : text;
@@ -254,7 +339,11 @@ type SuiBridgeError = variant {
   Conflict : text;
   AmountAboveMaximum : record { max_e8s : nat64 };
 };
-type SuiInclusion = record { checkpoint : nat64; tx_digest : text };
+type SuiInclusion = record {
+  checkpoint : nat64;
+  tx_digest : opt text;
+  sequence : nat64;
+};
 type SuiNetwork = variant { Mainnet; Testnet };
 type SuiRole = variant { UpgradeCustody; Gas; Treasury };
 type TransformArgs = record { context : blob; response : HttpResponse };
@@ -279,10 +368,13 @@ type UpgradeArgs = record {
   admins : opt vec principal;
 };
 service : (BridgeArg) -> {
+  admin_abandon_mint_op : (nat64, text) -> (Result);
   admin_clear_halt : (text) -> (Result);
+  admin_clear_mint_lane_halt : (text) -> (Result);
   admin_retry_deposit : (nat64) -> (Result_1);
   admin_run_tick : () -> (Result);
   admin_set_fees : (BridgeFees) -> (Result);
+  admin_set_lane_settings : (LaneSettingsArg) -> (Result);
   admin_set_limits : (BridgeLimits) -> (Result);
   admin_set_pauses : (Pauses) -> (Result);
   admin_sweep_fees : (nat64) -> (Result_2);
@@ -294,6 +386,9 @@ service : (BridgeArg) -> {
   get_config : () -> (ConfigView) query;
   get_deposit : (nat64) -> (opt DepositView) query;
   get_deposit_by_request : (principal, blob) -> (opt DepositView) query;
+  get_mint_lane : () -> (MintLaneView) query;
+  get_mint_op : (nat64) -> (opt MintOpView) query;
+  get_observed_deployment : () -> (opt ObservedDeploymentView) query;
   get_release : (text) -> (opt ReleaseView) query;
   get_roles : () -> (vec RoleView) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
@@ -302,14 +397,19 @@ service : (BridgeArg) -> {
   list_deposits_for_owner : (ListDepositsForOwnerArgs) -> (
       vec DepositView,
     ) query;
+  list_mint_ops : (ListDepositsArgs) -> (vec MintOpView) query;
   list_my_deposits : (ListDepositsArgs) -> (vec DepositView) query;
   list_releases_for_owner : (ListReleasesArgs) -> (vec ReleaseView) query;
   list_releases_for_sui_sender : (ListReleasesForSenderArgs) -> (
       vec ReleaseView,
     ) query;
   notify_sui_return : (text) -> (Result);
+  observe_deployment : () -> (Result_5);
   request_deposit_refund : (nat64) -> (Result_1);
   set_admins : (vec principal) -> (Result);
-  set_gate_binding : (GateBindingArg) -> (Result_5);
+  set_gas_coin : (text) -> (Result);
+  set_gate_binding : (GateBindingArg) -> (Result_6);
   transform_sui_graphql : (TransformArgs) -> (HttpResponse) query;
+  transform_sui_graphql_head : (TransformArgs) -> (HttpResponse) query;
+  transform_sui_send : (TransformArgs) -> (HttpResponse) query;
 }

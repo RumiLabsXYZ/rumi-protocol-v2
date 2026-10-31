@@ -95,6 +95,65 @@ pub fn clear_halt(note: &str) -> BridgeResult<()> {
     Ok(())
 }
 
+/// Admin: the gas budget and the attempt limit of the mint lane, within hard bounds.
+pub fn set_lane_settings(a: LaneSettingsArg) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    let mut lane = state::read_runtime(|c| c.config.lane.clone());
+    lane.gas_budget = a.gas_budget;
+    lane.max_attempts = a.max_attempts;
+    state::validate_lane(&lane).map_err(BridgeError::InvalidArgument)?;
+    state::mutate_runtime(|c| c.config.lane = lane.clone());
+    state::append_audit(None, AuditCtx::note(format!("mint lane settings set by {caller}: gas budget {} MIST, {} attempts", lane.gas_budget, lane.max_attempts)));
+    Ok(())
+}
+
+/// Clear the mint lane's own halt after a human resolved its cause; the note says how. This neither
+/// replaces nor refunds anything: an operation whose evidence is still missing stays as it is.
+pub fn clear_mint_lane_halt(note: &str) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    let note = note.trim();
+    if note.is_empty() || note.len() > 512 {
+        return Err(BridgeError::InvalidArgument("a note of 1 to 512 bytes saying how the halt was resolved is required".into()));
+    }
+    let cleared = state::mutate_runtime(|c| c.mint_lane_halted.take().is_some());
+    if !cleared {
+        return Err(BridgeError::InvalidState("the mint lane is not halted".into()));
+    }
+    state::append_audit(None, AuditCtx::note(format!("mint lane halt cleared by {caller}: {note}")));
+    Ok(())
+}
+
+/// Admin: abandon a mint operation whose current attempt is proven never signed. Refused for anything
+/// that may be a complete signed transaction.
+pub fn abandon_mint_op(op_id: u64, note: &str) -> BridgeResult<()> {
+    let caller = require_admin()?;
+    crate::flows::mint::abandon_never_signed(op_id, note).map_err(BridgeError::InvalidState)?;
+    state::append_audit(None, AuditCtx::op(op_id, format!("mint operation abandoned by {caller}: {}", note.trim())));
+    Ok(())
+}
+
+/// Controller: the one SUI coin object (owned by the gas role address) that pays for mints. It is an
+/// identity like the gate binding: it cannot be one of the gate's own objects, and it cannot change
+/// while a mint operation is in flight (that operation's transaction names the old coin).
+pub fn set_gas_coin(id: &str) -> BridgeResult<()> {
+    let caller = require_controller()?;
+    let coin = crate::sui::parse_address_strict(id).map_err(|_| BridgeError::InvalidArgument("the gas coin id must be 0x followed by 64 lowercase hex digits".into()))?;
+    if coin == [0u8; 32] {
+        return Err(BridgeError::InvalidArgument("the gas coin id is zero".into()));
+    }
+    if let Some(b) = state::read_core(|c| c.binding.clone()) {
+        if [b.package, b.gate, b.mint_cap, b.admin_cap].contains(&coin) {
+            return Err(BridgeError::InvalidArgument("the gas coin cannot be one of the gate's own objects".into()));
+        }
+    }
+    if state::read_runtime(|c| c.active_mint_op).is_some() {
+        return Err(BridgeError::InvalidState("a mint operation is in flight".into()));
+    }
+    state::mutate_runtime(|c| c.config.lane.gas_coin = Some(coin));
+    state::append_audit(None, AuditCtx::note(format!("gas coin set by controller {caller}: {}", crate::sui::format_address(&coin))));
+    Ok(())
+}
+
 pub fn set_admins(admins: Vec<Principal>) -> BridgeResult<()> {
     let caller = require_controller()?;
     if admins.is_empty() || admins.iter().any(|p| *p == Principal::anonymous()) {

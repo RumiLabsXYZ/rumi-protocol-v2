@@ -1,12 +1,17 @@
 //! The stable runtime core of the ICP-side sagas (BB-53, 53a): configuration, the escrow buckets,
 //! the persisted ledger operations, deposits, releases, the audit log and the bounded work queues.
 //!
+//! **Fresh install only.** There is no supported upgrade from a BB-52 image to this runtime:
+//! `post_upgrade` of an image without the runtime record traps ("the saga runtime is not
+//! initialized; reinstall") and the previous module stays. No migration endpoint exists and none is
+//! planned: nothing is deployed, so the BB-53 instance is installed fresh with the saga install
+//! arguments. Do not read the "preserved byte for byte" below as an upgrade promise.
+//!
 //! `state.rs` keeps the frozen identity of the instance (`SuiCore`: network, gate binding, role
 //! keys, provider set, memory 0, schema 1) untouched. This module adds a SECOND record
-//! ([`BridgeCore`], memory 1) plus the per-record maps, so the BB-52 stable fields are preserved
-//! byte for byte and an upgrade from a BB-52 image starts the runtime from its defaults. `state`
-//! re-exports everything here, so the saga modules (copied from the frozen Solana instance at
-//! 4394b472) keep their `state::...` paths; only the accessors are renamed
+//! ([`BridgeCore`], memory 1) plus the per-record maps, so the BB-52 identity fields stay byte for
+//! byte what BB-52 wrote. `state` re-exports everything here, so the saga modules (copied from the
+//! frozen Solana instance at 4394b472) keep their `state::...` paths; only the accessors are renamed
 //! (`read_runtime`, `mutate_runtime`).
 //!
 //! Records are CBOR (`ciborium`); CBOR maps fields by name, so a field added later with
@@ -41,6 +46,8 @@ pub const MEM_ACTIVE_RELEASES: u8 = 10;
 pub const MEM_OWNER_RELEASES: u8 = 11;
 pub const MEM_SENDER_RELEASES: u8 = 12;
 pub const MEM_RELEASE_BY_SEQUENCE: u8 = 13;
+pub const MEM_MINT_OPS: u8 = 14;
+pub const MEM_MINT_OPS_BY_DEPOSIT: u8 = 15;
 
 /// Every memory id this crate uses, for the duplicate check and as documentation of the layout.
 pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
@@ -58,6 +65,8 @@ pub const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_OWNER_RELEASES, "releases by ICP destination owner"),
     (MEM_SENDER_RELEASES, "releases by Sui sender"),
     (MEM_RELEASE_BY_SEQUENCE, "releases by Gate bridge_out sequence"),
+    (MEM_MINT_OPS, "mint operations by id [53b]"),
+    (MEM_MINT_OPS_BY_DEPOSIT, "mint operations by (deposit id, operation id) [53b]"),
 ];
 
 /// Version of the runtime record. 1 = BB-53 53a.
@@ -100,6 +109,56 @@ pub struct BridgeConfig {
     /// Deposit, capacity and rate limits.
     #[serde(default = "default_limits")]
     pub limits: BridgeLimits,
+    /// The mint lane's gas settings (53b).
+    #[serde(default)]
+    pub lane: LaneConfig,
+}
+
+/// The mint lane's settings. The gas coin is an identity (controller-set, like the gate binding); the
+/// budget and the attempt limit are admin-tunable within hard bounds.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LaneConfig {
+    /// The one SUI coin object, owned by the `gas` role address, that pays for every mint. A mint
+    /// reserves it for the life of its attempt; nothing funds it automatically.
+    #[serde(default)]
+    pub gas_coin: Option<Hash32>,
+    /// `GasData.budget` in MIST. Unused gas is refunded; the coin must hold at least this much.
+    #[serde(default = "default_gas_budget")]
+    pub gas_budget: u64,
+    /// How many signed attempts one operation may use (each after the previous one's finalized
+    /// failure receipt) before the operation fails to a held deposit.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+}
+
+pub const DEFAULT_GAS_BUDGET: u64 = 50_000_000;
+pub const MAX_ATTEMPTS_LIMIT: u32 = 5;
+
+fn default_gas_budget() -> u64 {
+    DEFAULT_GAS_BUDGET
+}
+
+fn default_max_attempts() -> u32 {
+    3
+}
+
+impl Default for LaneConfig {
+    fn default() -> Self {
+        LaneConfig { gas_coin: None, gas_budget: DEFAULT_GAS_BUDGET, max_attempts: 3 }
+    }
+}
+
+pub fn validate_lane(l: &LaneConfig) -> Result<(), String> {
+    if !(crate::tx::MIN_GAS_BUDGET..=crate::tx::MAX_GAS_BUDGET).contains(&l.gas_budget) {
+        return Err("gas_budget must be between 2,000 MIST and 50 SUI".into());
+    }
+    if l.max_attempts == 0 || l.max_attempts > MAX_ATTEMPTS_LIMIT {
+        return Err(format!("max_attempts must be 1 to {MAX_ATTEMPTS_LIMIT}"));
+    }
+    if l.gas_coin == Some([0u8; 32]) {
+        return Err("the gas coin id is zero".into());
+    }
+    Ok(())
 }
 
 /// Starting limits, the Base instance's numbers: 1 to 1,000 icUSD per deposit, 10,000 outstanding,
@@ -163,6 +222,7 @@ impl Default for BridgeConfig {
             // are set and an admin explicitly unpauses.
             pauses: Pauses { deposits: true, mints: false, releases: false, observer: false },
             limits: default_limits(),
+            lane: LaneConfig::default(),
         }
     }
 }
@@ -211,6 +271,7 @@ pub fn validate_stored_runtime(c: &BridgeConfig) -> Result<(), String> {
         return Err("the stored admin list is empty or contains the anonymous principal".into());
     }
     validate_limits(&c.limits)?;
+    validate_lane(&c.lane)?;
     validate_fees(&c.fees, &c.limits)
 }
 
@@ -291,6 +352,34 @@ pub struct BridgeCore {
     /// The most recent fee sweeps (bounded; terminal ones are dropped first).
     #[serde(default)]
     pub sweeps: Vec<SweepRecord>,
+    /// What the last successful bind observation saw (53b). `None` until `observe_deployment` agrees.
+    #[serde(default)]
+    pub observed: Option<ObservedDeployment>,
+    /// The next mint operation id.
+    #[serde(default)]
+    pub next_mint_op_id: u64,
+    /// The one mint operation in flight. One at a time: the `MintCap` and the gas coin are owned
+    /// objects whose version a transaction consumes, so a second transaction built while the first is
+    /// unresolved could only equivocate.
+    #[serde(default)]
+    pub active_mint_op: Option<u64>,
+    /// The mint lane's own halt (a foreign consumer of the `MintCap`, a mismatched consumed mint
+    /// record). It stops minting only; releases and refunds continue.
+    #[serde(default)]
+    pub mint_lane_halted: Option<HaltRecord>,
+    /// The highest checkpoint at which one of this canister's own transactions finalized. A new
+    /// attempt reads its owned inputs at a checkpoint at or after it, so it never builds on a
+    /// reference its own earlier transaction already spent.
+    #[serde(default)]
+    pub last_final_checkpoint: u64,
+    /// Why the lane last waited without changing anything (providers unavailable or disagreeing, a
+    /// stale head); shown to operators, never an authorization.
+    #[serde(default)]
+    pub lane_wait: Option<String>,
+    /// The lane does not ask the providers for fresh facts before this time (set after an unavailable
+    /// or disagreeing answer, so a persistent outage does not burn cycles every pass).
+    #[serde(default)]
+    pub gather_retry_at_ns: u64,
 }
 
 impl Default for BridgeCore {
@@ -310,6 +399,13 @@ impl Default for BridgeCore {
             ledger_minting_account: None,
             ledger_tip_lower_bound: 0,
             sweeps: vec![],
+            observed: None,
+            next_mint_op_id: 0,
+            active_mint_op: None,
+            mint_lane_halted: None,
+            last_final_checkpoint: 0,
+            lane_wait: None,
+            gather_retry_at_ns: 0,
         }
     }
 }
@@ -450,9 +546,13 @@ impl DepositState {
 /// The finalized mint transaction that delivered a deposit.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MintDelivery {
-    /// The typed transaction digest (the one `transaction(digest:)` looks up).
-    pub tx_digest: Hash32,
+    /// The typed transaction digest (the one `transaction(digest:)` looks up). `None` when delivery
+    /// was proven by the consumed mint-id record alone, which does not name the transaction.
+    pub tx_digest: Option<Hash32>,
     pub checkpoint: u64,
+    /// The Gate's `MintRecord.sequence` of this mint.
+    #[serde(default)]
+    pub sequence: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -560,6 +660,191 @@ pub struct ReleaseRecord {
 }
 
 cbor_storable!(ReleaseRecord);
+
+// ---------------------------------------------------------------------------
+// Observed deployment (53b)
+// ---------------------------------------------------------------------------
+
+/// An object reference as observed from a provider quorum: the exact id, version and digest.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoredRef {
+    pub id: Hash32,
+    pub version: u64,
+    pub digest: Hash32,
+}
+
+impl From<crate::reads::ObservedRef> for StoredRef {
+    fn from(r: crate::reads::ObservedRef) -> Self {
+        StoredRef { id: r.id, version: r.version, digest: r.digest }
+    }
+}
+
+impl From<StoredRef> for crate::sui::ObjectRef {
+    fn from(r: StoredRef) -> Self {
+        crate::sui::ObjectRef { id: r.id, version: r.version, digest: r.digest }
+    }
+}
+
+/// What a quorum of providers reported about the configured deployment at one finalized checkpoint,
+/// kept distinct from the configured identities (`SuiCore.binding`). Nothing here is a claim about
+/// who controls the package or its `UpgradeCap`; the package module bytes were NOT observed (no
+/// `sui move build` digest exists), so `module_digest_observed` is false and says so.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ObservedDeployment {
+    pub checkpoint: u64,
+    pub checkpoint_digest: Hash32,
+    pub epoch: u64,
+    pub observed_at_ns: u64,
+    pub gate_version: u64,
+    pub gate_object_version: u64,
+    pub initial_shared_version: u64,
+    pub supply_cap: u64,
+    pub min_bridge_out: u64,
+    pub total_supply: u64,
+    pub minted_total: u128,
+    pub burned_total: u128,
+    pub mint_count: u64,
+    pub bridge_out_count: u64,
+    pub mints_table_size: u64,
+    pub returns_table_size: u64,
+    pub decimals: u8,
+    pub symbol: String,
+    pub mint_cap: StoredRef,
+    pub mint_cap_owner: Hash32,
+    pub admin_cap: StoredRef,
+    pub admin_cap_owner: Hash32,
+    /// The role whose address owns the `AdminCap`, if it is one of ours (disclosed, not required).
+    pub admin_cap_role: Option<ids::SuiRole>,
+    /// Always false in 53b: the published module bytes were not compared with a build.
+    pub module_digest_observed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Mint operations (53b)
+// ---------------------------------------------------------------------------
+
+/// How one signed-or-not attempt ended, as far as the lane's own records can prove.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum AttemptDisposition {
+    /// Built; its outcome is not established (signed or not, sent or not). It owns the operation.
+    Open,
+    /// Proven unable to execute: a role's signature was never produced and none may exist (every
+    /// signing call for that role was a definite refusal), so no complete signed transaction exists.
+    NeverSigned { reason: String, at_ns: u64 },
+    /// The transaction executed in a finalized checkpoint and FAILED (the receipt). The mint did not happen.
+    FailedFinal { checkpoint: u64, error: String },
+    /// The transaction executed in a finalized checkpoint and succeeded.
+    LandedFinal { checkpoint: u64 },
+}
+
+/// One transaction built for a mint operation, persisted before the first signature. Every field the
+/// transaction was built from is kept, so the same bytes are re-signed and rebroadcast, never rebuilt.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MintAttempt {
+    pub generation: u32,
+    /// The exact unsigned `TransactionData` BCS.
+    pub tx_bcs: Vec<u8>,
+    pub signing_digest: Hash32,
+    /// The typed transaction digest (what `transaction(digest:)` takes).
+    pub tx_digest: Hash32,
+    /// The owned inputs this attempt consumes (their versions are its sequencing token).
+    pub mint_cap: StoredRef,
+    pub gas_coin: StoredRef,
+    pub gate_initial_shared_version: u64,
+    pub gas_price: u64,
+    pub gas_budget: u64,
+    /// `TransactionExpiration::Epoch(epoch)`: bounds when validators sign it, not proof of death.
+    pub epoch: u64,
+    pub built_checkpoint: u64,
+    pub built_at_ns: u64,
+    /// Raw 64-byte Ed25519 signatures (treasury as sender, gas as gas owner), verified against the
+    /// role keys before they were stored.
+    #[serde(default)]
+    pub treasury_sig: Option<Vec<u8>>,
+    #[serde(default)]
+    pub gas_sig: Option<Vec<u8>>,
+    /// A signing reply for that role was lost or unusable: a signature may exist that we never saw.
+    #[serde(default)]
+    pub treasury_sig_unknown: bool,
+    #[serde(default)]
+    pub gas_sig_unknown: bool,
+    #[serde(default)]
+    pub sends: u32,
+    #[serde(default)]
+    pub last_send_ns: Option<u64>,
+    #[serde(default)]
+    pub last_send_note: Option<String>,
+    /// When the `MintCap` or gas coin version was first seen changed with no receipt for this attempt
+    /// (the foreign-consumer suspicion starts its grace period here).
+    #[serde(default)]
+    pub versions_changed_since_ns: Option<u64>,
+    /// When the lane last asked the providers about this attempt (outcalls are paid in cycles, so an
+    /// unresolved attempt is checked on a decaying schedule, see `flows::mint::check_due`).
+    #[serde(default)]
+    pub last_check_ns: Option<u64>,
+    pub disposition: AttemptDisposition,
+}
+
+impl MintAttempt {
+    /// Whether a complete signed transaction may exist outside this record.
+    pub fn may_be_complete(&self) -> bool {
+        (self.treasury_sig.is_some() || self.treasury_sig_unknown) && (self.gas_sig.is_some() || self.gas_sig_unknown)
+    }
+
+    pub fn is_open(&self) -> bool {
+        matches!(self.disposition, AttemptDisposition::Open)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryVia {
+    /// The transaction's own finalized receipt (and the consumed record agreed with it).
+    Receipt,
+    /// The consumed mint-id record alone, matching the id, recipient and amount.
+    ConsumedRecord,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum MintOpState {
+    /// Being driven: a current attempt is open, or the next one is due.
+    Active,
+    /// The mint landed. `sequence` is the Gate's `MintRecord.sequence` for this mint id.
+    Delivered { tx_digest: Option<Hash32>, checkpoint: u64, sequence: u64, via: DeliveryVia },
+    /// Every attempt is a finalized failure or proven never signed and attempts are exhausted: the
+    /// deposit returns to `MintHeld`, refundable.
+    Failed { reason: String, at_ns: u64 },
+}
+
+/// One mint of one deposit. Created in the same synchronous step that links the deposit to it
+/// (`deposit.mint_op`), before any signing.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MintOp {
+    pub id: u64,
+    pub deposit_id: u64,
+    /// Copied from the deposit at creation; checked against it at every step.
+    pub mint_id: Hash32,
+    pub recipient: Hash32,
+    pub amount_e8s: u64,
+    pub attempts: Vec<MintAttempt>,
+    pub state: MintOpState,
+    /// Why an active operation is waiting (shown to operators; never an authorization).
+    #[serde(default)]
+    pub hold_reason: Option<String>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+impl MintOp {
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self.state, MintOpState::Active)
+    }
+
+    pub fn current(&self) -> Option<&MintAttempt> {
+        self.attempts.last()
+    }
+}
+
+cbor_storable!(MintOp);
 
 // ---------------------------------------------------------------------------
 // Audit log
@@ -696,6 +981,14 @@ thread_local! {
     /// Gate `bridge_out` sequence to the release it opened: one release per sequence, forever.
     static RELEASE_BY_SEQUENCE: RefCell<StableBTreeMap<u64, Hash32, Mem>> =
         RefCell::new(StableBTreeMap::init(mem(MEM_RELEASE_BY_SEQUENCE)));
+
+    static MINT_OPS: RefCell<StableBTreeMap<u64, MintOp, Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_MINT_OPS)));
+
+    /// `[deposit id BE, operation id BE]`: every operation a deposit ever had, the back-index the
+    /// refund guard checks against the deposit's own lists.
+    static MINT_OPS_BY_DEPOSIT: RefCell<StableBTreeMap<[u8; 16], (), Mem>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_MINT_OPS_BY_DEPOSIT)));
 }
 
 pub fn read_runtime<R>(f: impl FnOnce(&BridgeCore) -> R) -> R {
@@ -1068,6 +1361,75 @@ pub fn pending_release_total() -> u128 {
     total
 }
 
+// Mint operations -----------------------------------------------------------
+
+pub fn get_mint_op(id: u64) -> Option<MintOp> {
+    MINT_OPS.with(|m| m.borrow().get(&id))
+}
+
+fn deposit_op_key(deposit_id: u64, op_id: u64) -> [u8; 16] {
+    let mut k = [0u8; 16];
+    k[..8].copy_from_slice(&deposit_id.to_be_bytes());
+    k[8..].copy_from_slice(&op_id.to_be_bytes());
+    k
+}
+
+/// Insert or update a mint operation and keep the by-deposit back-index exact.
+pub fn put_mint_op(op: &MintOp) {
+    MINT_OPS.with(|m| m.borrow_mut().insert(op.id, op.clone()));
+    MINT_OPS_BY_DEPOSIT.with(|m| m.borrow_mut().insert(deposit_op_key(op.deposit_id, op.id), ()));
+}
+
+/// The ids of every mint operation `deposit_id` ever had, from the back-index (oldest first).
+pub fn mint_op_ids_for_deposit(deposit_id: u64) -> Vec<u64> {
+    let lower = deposit_op_key(deposit_id, 0);
+    let upper = deposit_op_key(deposit_id, u64::MAX);
+    MINT_OPS_BY_DEPOSIT.with(|m| m.borrow().range(lower..=upper).map(|(k, _)| u64::from_be_bytes(k[8..].try_into().unwrap_or([0; 8]))).collect())
+}
+
+/// Mint operations after `start_after`, oldest first.
+pub fn list_mint_ops(start_after: Option<u64>, limit: u32) -> Vec<MintOp> {
+    use std::ops::Bound;
+    let limit = limit.clamp(1, MAX_PAGE) as usize;
+    MINT_OPS.with(|m| {
+        let m = m.borrow();
+        match start_after {
+            Some(c) => m.range((Bound::Excluded(c), Bound::Unbounded)).take(limit).map(|(_, v)| v).collect(),
+            None => m.iter().take(limit).map(|(_, v)| v).collect(),
+        }
+    })
+}
+
+pub fn mint_op_count() -> u64 {
+    MINT_OPS.with(|m| m.borrow().len())
+}
+
+/// The mint operation in flight, if any.
+pub fn active_mint_op() -> Option<MintOp> {
+    read_runtime(|c| c.active_mint_op).and_then(get_mint_op)
+}
+
+/// Halt only the mint lane (first reason wins) and log it.
+pub fn halt_mint_lane(reason: impl Into<String>) {
+    let reason = reason.into();
+    let now = crate::env::now_ns();
+    let newly = mutate_runtime(|c| {
+        if c.mint_lane_halted.is_none() {
+            c.mint_lane_halted = Some(HaltRecord { reason: reason.clone(), at_ns: now });
+            true
+        } else {
+            false
+        }
+    });
+    if newly {
+        append_audit(None, AuditCtx::note(format!("MINT LANE HALT: {reason}")));
+    }
+}
+
+pub fn is_mint_lane_halted() -> bool {
+    read_runtime(|c| c.mint_lane_halted.is_some())
+}
+
 // Accounting and audit --------------------------------------------------------
 
 /// Apply an accounting transition and append an audit record. On error nothing changes.
@@ -1168,6 +1530,8 @@ pub fn reset_runtime_for_tests() {
     ACTIVE_DEPOSITS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_ACTIVE_DEPOSITS)));
     ACTIVE_REMINTS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_ACTIVE_REMINTS)));
     ACTIVE_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_ACTIVE_RELEASES)));
+    MINT_OPS.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_MINT_OPS)));
+    MINT_OPS_BY_DEPOSIT.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_MINT_OPS_BY_DEPOSIT)));
     OWNER_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_OWNER_RELEASES)));
     SENDER_RELEASES.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_SENDER_RELEASES)));
     RELEASE_BY_SEQUENCE.with(|m| *m.borrow_mut() = StableBTreeMap::new(mem(MEM_RELEASE_BY_SEQUENCE)));

@@ -141,6 +141,10 @@ pub enum SuiBridgeError {
     NotOwner,
     InvalidState(String),
     Ledger(String),
+    /// The Sui providers could not give an agreed answer (too few usable, or they disagree).
+    Unavailable(String),
+    /// What the providers agree on is not the configured deployment.
+    DeploymentMismatch(String),
     Internal(String),
 }
 
@@ -231,9 +235,12 @@ pub enum DepositStatus {
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SuiInclusion {
-    /// Base58 typed transaction digest of the finalized mint transaction.
-    pub tx_digest: String,
+    /// Base58 typed transaction digest of the finalized mint transaction; `None` when delivery was
+    /// proven by the consumed mint-id record alone.
+    pub tx_digest: Option<String>,
     pub checkpoint: u64,
+    /// The Gate's mint sequence number.
+    pub sequence: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -362,4 +369,116 @@ impl From<&crate::accounting::Buckets> for BucketsView {
             unknown_outflow: Nat::from(b.unknown_outflow),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Observed deployment and mint lane views (53b)
+// ---------------------------------------------------------------------------
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ObservedDeploymentView {
+    pub checkpoint: u64,
+    /// Base58 digest of the checkpoint the observation was made at.
+    pub checkpoint_digest: String,
+    pub epoch: u64,
+    pub observed_at_ns: u64,
+    pub gate_version: u64,
+    pub initial_shared_version: u64,
+    pub supply_cap: u64,
+    pub min_bridge_out: u64,
+    pub total_supply: u64,
+    pub minted_total: u128,
+    pub burned_total: u128,
+    pub mint_count: u64,
+    pub bridge_out_count: u64,
+    pub decimals: u8,
+    pub symbol: String,
+    pub mint_cap_id: String,
+    pub mint_cap_version: u64,
+    /// `0x` and 64 hex: who owns the `MintCap` (it must be the treasury role).
+    pub mint_cap_owner: String,
+    pub admin_cap_id: String,
+    pub admin_cap_owner: String,
+    /// The role whose address owns the `AdminCap`, if it is one of this canister's.
+    pub admin_cap_role: Option<SuiRole>,
+    /// False: the published module bytes were not compared with a build.
+    pub module_digest_observed: bool,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum AttemptStatusView {
+    Open,
+    NeverSigned { reason: String },
+    FailedFinal { checkpoint: u64, error: String },
+    LandedFinal { checkpoint: u64 },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MintAttemptView {
+    pub generation: u32,
+    /// Base58 typed transaction digest (what `transaction(digest:)` takes).
+    pub tx_digest: String,
+    /// Hex of the 32-byte signing digest.
+    pub signing_digest: String,
+    pub epoch: u64,
+    pub gas_price: u64,
+    pub gas_budget: u64,
+    pub mint_cap_version: u64,
+    pub gas_coin_version: u64,
+    pub treasury_signed: bool,
+    pub gas_signed: bool,
+    /// A signing reply was lost: a signature for that role may exist that we never saw.
+    pub treasury_sig_unknown: bool,
+    pub gas_sig_unknown: bool,
+    pub sends: u32,
+    pub status: AttemptStatusView,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum DeliveryViaView {
+    Receipt,
+    ConsumedRecord,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum MintOpStatusView {
+    Active,
+    Delivered { tx_digest: Option<String>, checkpoint: u64, sequence: u64, via: DeliveryViaView },
+    Failed { reason: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MintOpView {
+    pub id: u64,
+    pub deposit_id: u64,
+    pub mint_id: String,
+    pub sui_recipient: String,
+    pub amount_e8s: u64,
+    pub status: MintOpStatusView,
+    pub hold_reason: Option<String>,
+    pub attempts: Vec<MintAttemptView>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MintLaneView {
+    /// Whether a pass would run the lane now. Empty `blocked_by` means yes.
+    pub ready: bool,
+    pub blocked_by: Vec<String>,
+    pub active_op: Option<u64>,
+    pub lane_halt: Option<String>,
+    /// `0x` and 64 hex.
+    pub gas_coin: Option<String>,
+    pub gas_budget: u64,
+    pub max_attempts: u32,
+    pub last_wait: Option<String>,
+    pub last_final_checkpoint: u64,
+    pub observed: Option<ObservedDeploymentView>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LaneSettingsArg {
+    pub gas_budget: u64,
+    pub max_attempts: u32,
 }

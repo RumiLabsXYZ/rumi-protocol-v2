@@ -269,11 +269,11 @@ impl<T> Outcome<T> {
 // Parsing
 // ---------------------------------------------------------------------------
 
-fn malformed<T>(m: impl Into<String>) -> Result<T, Exclusion> {
+pub(crate) fn malformed<T>(m: impl Into<String>) -> Result<T, Exclusion> {
     Err(Exclusion::Malformed(m.into()))
 }
 
-fn identity<T>(m: impl Into<String>) -> Result<T, Exclusion> {
+pub(crate) fn identity<T>(m: impl Into<String>) -> Result<T, Exclusion> {
     Err(Exclusion::Identity(m.into()))
 }
 
@@ -302,7 +302,7 @@ pub fn parse_envelope(body: &[u8]) -> Result<Value, Exclusion> {
 }
 
 /// A `UInt53` as a JSON number or a decimal string.
-fn uint53(v: &Value, what: &str) -> Result<u64, Exclusion> {
+pub(crate) fn uint53(v: &Value, what: &str) -> Result<u64, Exclusion> {
     let n = match v {
         Value::Number(n) => n.as_u64(),
         Value::String(s) => s.parse::<u64>().ok(),
@@ -314,7 +314,7 @@ fn uint53(v: &Value, what: &str) -> Result<u64, Exclusion> {
     }
 }
 
-fn str_field<'a>(v: &'a Value, key: &str) -> Result<&'a str, Exclusion> {
+pub(crate) fn str_field<'a>(v: &'a Value, key: &str) -> Result<&'a str, Exclusion> {
     v.get(key).and_then(Value::as_str).ok_or_else(|| Exclusion::Malformed(format!("missing string field {key}")))
 }
 
@@ -370,6 +370,9 @@ pub fn parse_checkpoint(data: &Value, requested: u64, expected_genesis_b58: &str
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnerFact {
     Shared { initial_shared_version: u64 },
+    /// Owned by this address. Produced only when the query asked for `AddressOwner { address { address } }`
+    /// (the 53b owned-object queries); the gate queries do not, so an owned object there stays `Other`.
+    Address(Bytes32),
     Other(String),
 }
 
@@ -400,6 +403,10 @@ pub fn parse_object(data: &Value, requested: &Bytes32, expected_genesis_b58: &st
     let owner_v = o.get("owner").filter(|v| v.is_object()).ok_or_else(|| Exclusion::Malformed("owner is missing".into()))?;
     let owner = match str_field(owner_v, "__typename")? {
         "Shared" => OwnerFact::Shared { initial_shared_version: uint53(owner_v.get("initialSharedVersion").unwrap_or(&Value::Null), "initialSharedVersion")? },
+        "AddressOwner" => match owner_v.get("address").and_then(|a| a.get("address")).and_then(Value::as_str) {
+            Some(text) => OwnerFact::Address(parse_address_padded(text).map_err(|e| Exclusion::Malformed(format!("owner address: {e}")))?),
+            None => OwnerFact::Other("AddressOwner".to_string()),
+        },
         other => OwnerFact::Other(other.to_string()),
     };
     let contents = o

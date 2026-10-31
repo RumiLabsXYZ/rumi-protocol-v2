@@ -27,9 +27,9 @@ blake2 = "=0.10.6"
 hex = "0.4"
 bs58 = "0.5"
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# 53b: verifies each threshold signature against the role key before it is stored or broadcast
+# (BB-52 used it in tests only). Already in Cargo.lock; default features off.
+ed25519-dalek = { version = "2.1.1", default-features = false }
 
 [dev-dependencies]
 candid_parser = "0.1"
-# Tests only: deterministic test seeds sign the golden digests. Already in Cargo.lock
-# (transitive); default features off so nothing new is pulled in.
-ed25519-dalek = { version = "2.1.1", default-features = false }

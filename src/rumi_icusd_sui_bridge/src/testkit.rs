@@ -364,6 +364,8 @@ impl Fixture {
             c.config.icusd_ledger = candid::Principal::from_slice(&[0x1c; 10]);
             c.config.admins = vec![candid::Principal::from_slice(&[3; 10])];
             c.config.pauses.deposits = false;
+            // The ICP-side saga tests do not exercise the bind; a deployment is simply taken as observed.
+            c.observed = Some(sample_observed());
         });
         Fixture { ledger: MockLedger::new() }
     }
@@ -372,5 +374,130 @@ impl Fixture {
 impl Default for Fixture {
     fn default() -> Self {
         Fixture::new()
+    }
+}
+
+/// A pristine, observed deployment for the configured ids (the saga tests' stand-in for a bind).
+pub fn sample_observed() -> state::ObservedDeployment {
+    state::ObservedDeployment {
+        checkpoint: 1_000,
+        checkpoint_digest: [1; 32],
+        epoch: 5,
+        observed_at_ns: 1,
+        gate_version: 1,
+        gate_object_version: 10,
+        initial_shared_version: 42,
+        supply_cap: 0,
+        min_bridge_out: 1,
+        total_supply: 0,
+        minted_total: 0,
+        burned_total: 0,
+        mint_count: 0,
+        bridge_out_count: 0,
+        mints_table_size: 0,
+        returns_table_size: 0,
+        decimals: 8,
+        symbol: "icUSD".into(),
+        mint_cap: state::StoredRef { id: [0x6d; 32], version: 2, digest: [2; 32] },
+        mint_cap_owner: [0x11; 32],
+        admin_cap: state::StoredRef { id: [0x6e; 32], version: 2, digest: [3; 32] },
+        admin_cap_owner: [0x33; 32],
+        admin_cap_role: None,
+        module_digest_observed: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A deterministic test signer for the mint lane
+// ---------------------------------------------------------------------------
+
+use crate::ids::SuiRole;
+use crate::schnorr::{RoleSigner, SignOutcome};
+use crate::sui::Bytes32;
+use ed25519_dalek::{Signer as _, SigningKey};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignFault {
+    /// The signature is produced but the reply is lost: the caller sees `Unknown`.
+    LoseReply,
+    /// A definite refusal: nothing was signed.
+    Refuse,
+    /// A 64-byte reply that is not a valid signature.
+    Garbage,
+}
+
+pub type SignHook = Box<dyn Fn(SuiRole, &Bytes32)>;
+
+/// Signs with the public TEST seeds (never a key of any account). Faults are consumed in order for the role they name.
+pub struct TestSigner {
+    treasury: SigningKey,
+    gas: SigningKey,
+    pub faults: RefCell<VecDeque<(SuiRole, SignFault)>>,
+    /// Every call: the role and the signing digest it was asked to sign.
+    pub calls: RefCell<Vec<(SuiRole, Bytes32)>>,
+    /// Called at the start of every sign call, before it answers (to inspect or change state mid-flight).
+    pub on_sign: RefCell<Option<SignHook>>,
+}
+
+impl TestSigner {
+    pub fn new() -> Self {
+        TestSigner {
+            treasury: SigningKey::from_bytes(&crate::vectors::SEED_TREASURY),
+            gas: SigningKey::from_bytes(&crate::vectors::SEED_GAS),
+            faults: RefCell::new(VecDeque::new()),
+            calls: RefCell::new(vec![]),
+            on_sign: RefCell::new(None),
+        }
+    }
+
+    pub fn push_fault(&self, role: SuiRole, f: SignFault) {
+        self.faults.borrow_mut().push_back((role, f));
+    }
+
+    pub fn calls_for(&self, role: SuiRole) -> usize {
+        self.calls.borrow().iter().filter(|(r, _)| *r == role).count()
+    }
+
+    pub fn treasury_public_key() -> Bytes32 {
+        SigningKey::from_bytes(&crate::vectors::SEED_TREASURY).verifying_key().to_bytes()
+    }
+
+    pub fn gas_public_key() -> Bytes32 {
+        SigningKey::from_bytes(&crate::vectors::SEED_GAS).verifying_key().to_bytes()
+    }
+
+    pub fn custody_public_key() -> Bytes32 {
+        SigningKey::from_bytes(&crate::vectors::SEED_CUSTODY).verifying_key().to_bytes()
+    }
+}
+
+impl Default for TestSigner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RoleSigner for TestSigner {
+    async fn sign(&self, role: SuiRole, signing_digest: &Bytes32) -> SignOutcome {
+        self.calls.borrow_mut().push((role, *signing_digest));
+        if let Some(hook) = self.on_sign.borrow().as_ref() {
+            hook(role, signing_digest);
+        }
+        let fault = {
+            let mut q = self.faults.borrow_mut();
+            let pos = q.iter().position(|(r, _)| *r == role);
+            pos.and_then(|i| q.remove(i)).map(|(_, f)| f)
+        };
+        let key = match role {
+            SuiRole::Treasury => &self.treasury,
+            SuiRole::Gas => &self.gas,
+            SuiRole::UpgradeCustody => return SignOutcome::Failed("the custody role never signs a mint".into()),
+        };
+        match fault {
+            Some(SignFault::Refuse) => SignOutcome::Failed("the signer refused".into()),
+            Some(SignFault::Garbage) => SignOutcome::Signed([9u8; 64]),
+            Some(SignFault::LoseReply) => SignOutcome::Unknown("the reply was lost".into()),
+            None => SignOutcome::Signed(key.sign(signing_digest).to_bytes()),
+        }
     }
 }

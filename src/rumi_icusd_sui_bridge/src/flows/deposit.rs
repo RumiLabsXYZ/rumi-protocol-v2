@@ -108,15 +108,19 @@ pub fn mint_id_for(d: &DepositRecord, pull_block: u64) -> Option<Hash32> {
 }
 
 /// Why new deposits cannot be admitted yet, if they cannot: the exact gate identities and the three
-/// role keys must be configured so the mint id and the mint transaction can be built. (53b adds the
-/// observed bind.)
+/// role keys must be configured so the mint id and the mint transaction can be built, and the
+/// providers must have agreed (`observe_deployment`) that the configured deployment is what it
+/// claims to be. A deposit is never pulled into escrow for a deployment nobody has observed.
 pub fn deployment_not_ready() -> Option<String> {
-    let (binding, roles) = state::read_core(|c| (c.binding.is_some(), c.roles.len()));
+    let (binding, roles, observed) = state::read_core(|c| (c.binding.is_some(), c.roles.len(), state::read_runtime(|r| r.observed.is_some())));
     if !binding {
         return Some("the gate binding is not configured".into());
     }
     if roles < crate::ids::SuiRole::ALL.len() {
         return Some("the role keys are not derived".into());
+    }
+    if !observed {
+        return Some("the deployment has not been observed by the providers".into());
     }
     None
 }
@@ -425,11 +429,9 @@ pub fn retry_held(id: u64) -> BridgeResult<DepositView> {
     if !matches!(d.state, DepositState::MintHeld { .. }) || d.mint_op.is_some() {
         return Err(BridgeError::InvalidState("deposit is not held without a mint operation".into()));
     }
-    if !d.abandoned_mint_ops.is_empty() {
-        return Err(BridgeError::InvalidState(
-            "a mint operation of this deposit was abandoned; it can be refunded but never minted again".into(),
-        ));
-    }
+    // A deposit whose earlier operations are all proven dead (finalized failures or never signed) may be
+    // minted again with the SAME mint id; anything less is refused.
+    crate::flows::mint::prior_ops_provably_dead(&d).map_err(|why| BridgeError::InvalidState(format!("not retryable: {why}")))?;
     d.state = DepositState::Escrowed;
     d.hold_retry_at_ns = None;
     d.updated_at_ns = env::now_ns();
@@ -484,18 +486,12 @@ fn refund_preconditions(d: &DepositRecord, caller: Principal) -> BridgeResult<()
     mint_operations_allow_refund(d)
 }
 
-/// The refund proof. A deposit that never had a mint operation passes. Any operation it ever had
-/// must be one the mint lane's own records prove can never land (never signed or sent, or every
-/// signed attempt proven undelivered by a finalized failed receipt); an admin's abandon, its reason,
-/// a passing epoch or a missing digest is not that proof. The mint lane lands with 53b; until then a
-/// deposit with any abandoned operation is not refundable, which fails closed.
+/// The refund proof over EVERY mint operation the deposit ever had: [`crate::flows::mint::prior_ops_provably_dead`].
+/// A deposit that never had an operation passes. An abandoned, unknown or merely expired signed
+/// operation never does: only a finalized failed receipt for every signed attempt (with the mint id
+/// still unconsumed) or a proof that no complete signature can exist.
 fn mint_operations_allow_refund(d: &DepositRecord) -> BridgeResult<()> {
-    if let Some(op_id) = d.abandoned_mint_ops.first() {
-        return Err(BridgeError::InvalidState(format!(
-            "Sui mint operation {op_id} of this deposit cannot be judged without the mint lane's records; it is not refundable"
-        )));
-    }
-    Ok(())
+    crate::flows::mint::prior_ops_provably_dead(d).map_err(|why| BridgeError::InvalidState(format!("not refundable: {why}")))
 }
 
 pub async fn request_refund<L: IcpLedger>(ledger: &L, id: u64) -> BridgeResult<DepositView> {

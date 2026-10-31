@@ -189,6 +189,28 @@ impl SuiSigner {
     }
 }
 
+/// What the mint lane needs from the signer: one signing digest, one role. A trait so the lane's
+/// same-attempt rules are exercised with deterministic test keys and injected faults (a lost reply, a
+/// definite refusal) without any management canister.
+#[allow(async_fn_in_trait)]
+pub trait RoleSigner {
+    async fn sign(&self, role: SuiRole, signing_digest: &Bytes32) -> SignOutcome;
+}
+
+impl RoleSigner for SuiSigner {
+    async fn sign(&self, role: SuiRole, signing_digest: &Bytes32) -> SignOutcome {
+        self.sign_digest(role, signing_digest).await
+    }
+}
+
+/// Whether `signature` is a valid Ed25519 signature by `public_key` over the 32-byte signing digest.
+/// The lane stores a signature only after this holds.
+pub fn verify_signature(public_key: &Bytes32, signing_digest: &Bytes32, signature: &[u8; 64]) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(key) = VerifyingKey::from_bytes(public_key) else { return false };
+    key.verify(signing_digest, &Signature::from_bytes(signature)).is_ok()
+}
+
 #[cfg(test)]
 pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
     use std::sync::Arc;
