@@ -1949,6 +1949,47 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   saved output file where one exists rather than rerunning healthy checks. The 49d custody and secondary-lookup correction
   comes in the same handback. Then the builder slot goes to W29 for BB-52; full BB-49 stays open for 49e.
 
+## Milestone 88 (2026-10-31): BB-49 49c and 49d corrections handed back
+
+- Pins (W28, `claude-sonnet-5-5`, branch `codex/base-icusd-bridge`, not pushed): 49c fix `e3516aea` (frozen; source review
+  passed, milestone 87) and 49d correction `4394b472` "fix(solana): fence custody reads to unchanged books and bind effect
+  lookups (BB-49 49d)". Coordinator scope check: `4394b472` touches only `src/rumi_icusd_sol_bridge/` (`monitor.rs`,
+  `flows/burn_saga.rs`, `saga49d_tests.rs`, plus comment-only edits in `sol_rpc.rs` and `saga49c_fix_tests.rs`) and
+  `docs/coordination/multichain/chain-solana.md`; no Cargo, lock, `.did` or Sui file; `git diff --check` exits 0.
+- Correction: custody-relevant books (RC, BU, stray, refunds in flight) and observer progress (processed count, cursor, walk,
+  queue) are captured before the `supply, custody, supply` reads and compared after; any change defers the reading (not
+  judged, no strike added or reset, no credits hold lifted). Reconciling tolerance unchanged and never OK. The secondary
+  `getTransaction` in `apply_burns` and `apply_claim` now requires `check_bound` and a message byte-equal to one the operation
+  stored; a wrong answer is not applied and is looked up again later. `check_bound`'s doc now says it is an identity check
+  only and that strict message classification is a separate step (the wording rule from milestone 87).
+- Failing before (literal pre-fix source: `ea5be6ba` for 49c, `e3516aea` for 49d; real helpers `admin::set_limits`,
+  `deposit::request_refund`, `process_refunds`, `observer::observe`, `monitor::run`; only test support added). Quoted:
+  - 49c admission: "REFUND PLUS MINT: deposit 0 is Refunded (ICP refunded) while mint operation 0 was admitted and is now
+    Delivered"; "the stale request is not admitted left: 1 right: 0"; same-step link "left: Escrowed right: MintInFlight".
+  - 49c identity: "a response for the wrong key was credited ... left: 2 right: 0"; "zero signatures ... left: 1 right: 0";
+    "more signatures than the header ... left: 1 right: 0"; a truncated wire and a wrong-key answer were recorded as strays.
+  - 49d custody: "a reading whose books changed under it must not be judged: ... Deficit { deficit: 500000000 } ... (1 of 2)";
+    an uncommitted two-interleaving run ended "HALTED true" and failed with "false halt of a fully backed bridge"; the credits
+    hold case read a Deficit where none was expected.
+  - 49d lookups: "the stored message under another first signature: applied from a wrong answer" (burn) and "... settled
+    from a wrong answer" (refund).
+  No stdout file was saved; the quotes are copied from the run output in W28's report.
+- Passing (focused): `saga49c_fix_tests`, 8 tests (coordinator count; W28's report said 7 but named 8), from
+  `a_suspended_mint_preparation_cannot_create_a_mint_for_a_deposit_that_was_refunded` to `the_binding_check_itself`;
+  `saga49d_tests` adds `a_return_booked_during_the_custody_read_defers_the_reading_instead_of_judging_a_deficit`,
+  `a_deferred_custody_reading_does_not_clear_a_credits_halt`,
+  `a_burn_is_applied_only_from_the_transaction_that_was_asked_for_and_stored` and
+  `a_refund_is_settled_only_from_the_transaction_that_was_asked_for_and_stored`. Single-line mutations of each new guard
+  (F1 to F7 for 49c, G1 to G6 for 49d) each fail a named test (mutation script kept in the coordinator scratchpad, not
+  committed).
+- Final exits, run once at the end: crate tests 424 passed, 0 failed, 2 ignored; clippy `-D warnings` exit 0 for all
+  targets, all targets with `history_probe`, and wasm32 release; wasm32 release build succeeds; golden check 0 mismatches;
+  `.did` unchanged and the crate's candid test passes. Not re-run: the `history_probe` test run (412 passed at 49d).
+- Open question for Miles (W28's flag): `submit_burns` and `submit_claim` still link their record after the lane await, the
+  pattern the mint path had before 49c. W28 left them because no user action can race those records; W28 can apply the same
+  synchronous admission there if Miles wants it.
+- Next: W28 paused before 49e; the builder slot is with W29 for BB-52 and returns to W28 for 49e. Full BB-49 stays open.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

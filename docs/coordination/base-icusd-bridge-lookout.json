@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Accepted: 12dfee35, 8198fb28, bc96f166, 23dfe841. 49c fixes e3516aea pass source review (Miles). 49d ea5be6ba: custody-read fix in progress (same W28); then the builder slot goes to W29, then 49e",
+      "evidenceText": "proof=none; Accepted: 12dfee35, 8198fb28, bc96f166, 23dfe841. 49c fixes e3516aea passed source review. 49d custody correction 4394b472 delivered for review (W28). Builder with W29 for BB-52, then 49e",
       "evidenceLinks": []
     },
     {

@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-49 in progress (same W28) in sub-milestones 49a to 49e: signing and bind, the carried ledger saga, the strict return observer with the per-transfer refund locator, the burn lane with custody and the holder-burn seam, and the Solana collector reader. BB-47 stays in Review until its carried items are accepted here. Then BB-50 (wallet connector).",
+      "nextAction": "BB-49 in progress (same W28): 49a to 49d delivered; 49c fixes e3516aea passed source review and the 49d custody correction 4394b472 is with Miles. Next 49e (the Solana collector reader) when W29 returns the builder slot. BB-47 stays in Review until its carried items are accepted here. Then BB-50 (wallet connector).",
       "cardIds": [
         "BB-47",
         "BB-48",
