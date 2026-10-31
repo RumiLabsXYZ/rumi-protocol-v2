@@ -6,16 +6,18 @@
 //!
 //! * `<endpoints.json>` is the explicit endpoint config (`LiveConfig`): the IC
 //!   replica URL, the ledger and backend canister ids, per EVM network the
-//!   token address and provider URLs, and per XRPL network the icUSD issuer
-//!   account and rippled JSON-RPC provider URLs. There are no built-in
-//!   endpoints, issuers or ids.
+//!   token address and provider URLs, per XRPL network the icUSD issuer
+//!   account and rippled JSON-RPC provider URLs, and per Solana network the
+//!   icUSD mint, the canister-owned return account, the token program
+//!   (`spl_token` or `spl_token_2022`) and Solana JSON-RPC provider URLs. There
+//!   are no built-in endpoints, issuers, mints or ids.
 //! * `<collect.json>` is a `CollectConfig`: the destinations (with their escrow
 //!   bindings) and the optional XRPL lane to collect.
 //! * `--live` is required. Running this example sends real queries to the
 //!   endpoints in the config, so it refuses to start without it.
 //!
 //! The report starts with `source: live` and carries the read time and each EVM
-//! head height. Exit codes: 0 report with no failure flag; 1 input rejected or a
+//! head height (and each Solana slot). Exit codes: 0 report with no failure flag; 1 input rejected or a
 //! reading missing or unavailable; 2 usage or an unreadable file; 3 a report
 //! with a failure flag (credits must halt).
 

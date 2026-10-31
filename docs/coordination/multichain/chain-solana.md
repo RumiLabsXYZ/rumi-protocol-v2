@@ -236,3 +236,29 @@ Proof binding of the secondary lookups (49d correction). The `getTransaction` th
 finalized operation's balance effect must return that operation's transaction: `sol_rpc::check_bound` (the signature count
 against the header, and the first signature equal to the queried one) and a message byte-equal to one this operation stored. A
 wrong answer is not judged and not applied; the lookup is repeated on a later pass.
+
+### 13.2 The Solana collector reader (BB-49 step 49e)
+
+`src/rumi_bridge_destinations` reads a Solana destination for the shared aggregate without trusting the instance:
+
+- **Supply and custody** (`live/solana.rs`, feature `live-transport`, mocks only so far): one `getMultipleAccounts` response per provider for
+  `[mint, return account]` at `finalized`, base64, `minContextSlot` set to the agreed slot, so the two numbers share one context slot. Providers
+  are bound to the profile's genesis hash (`getGenesisHash`), the agreed slot is the quorum-th highest finalized `getSlot`, and a quorum of
+  identical `(supply, custody)` answers wins (the profile quorum is 2). Both accounts must be owned by the configured token program and parse in
+  the SPL layouts (an initialized 8-decimal mint; an initialized token account of that mint), not through a provider's `jsonParsed` view. The
+  mint, the return account and the token program are the operator's explicit config; there is no default.
+- **What it does not prove.** Solana serves account state only at a node's own current commitment, so the read cannot be pinned to one numbered
+  historical slot as the EVM and XRPL reads are. Providers answer at their own finalized slots (all at or above the agreed one); a quorum on
+  identical values is a limited consistency check, a change between two providers' reads shows as a disagreement and fails the collection, and the
+  reported slot is the lowest context slot among the agreeing providers.
+- **Custody is explained by the instance's buckets, compared, never used as a read.** The Solana instance has no `get_supply_audit`; its
+  self-report is assembled from `get_buckets` and `get_bridge_info` (`RC`, `BU`, `stray`, and the escrow account = the instance with its escrow
+  subaccount). The aggregate raises a Failure flag for a custody that differs from `RC + BU + stray` in either direction. The instance's own
+  `Reconciling` tolerance (a landed burn not yet applied) is NOT mirrored: until the instance applies it, that shortfall reads as a Failure in
+  the collector, which is the conservative direction; repeat the collection after the instance applies it. The supply bound for Solana is
+  `supply <= O + inflight + RC + BU`; the instance has no query for the in-flight part, so `pending_mint` (its upper bound) is used and the
+  bound can only be looser than the instance's own.
+- **Order and failure.** Solana supply and custody are read before any ICP-side number; a source without a reader fails with the card, a missing
+  config entry is an unavailable gap, and a Solana audit that lacks the three buckets fails the read (zero is never assumed).
+- **Not done here:** no public RPC, no live execution (the held step), no Sui reader (BB-53), and the optional collector alert on a custody
+  shortfall that the instance itself is reconciling.

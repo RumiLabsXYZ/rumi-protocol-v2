@@ -181,7 +181,7 @@ fn check_no_forbidden_tag(params: &Value) -> Result<(), String> {
 }
 
 /// One request to one provider; returns the `result` value.
-fn call(t: &dyn JsonRpcTransport, i: usize, method: &str, params: Value) -> Result<Value, String> {
+pub(super) fn call(t: &dyn JsonRpcTransport, i: usize, method: &str, params: Value) -> Result<Value, String> {
     check_no_forbidden_tag(&params)?;
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
     let text = t.post(i, &body)?;

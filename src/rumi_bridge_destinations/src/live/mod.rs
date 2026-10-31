@@ -22,6 +22,14 @@
 //!   with an unvalidated answer excluded, amounts converted exactly). `E_X` is
 //!   an ordinary ICRC-1 balance read through the IC transport above.
 //!
+//! * [`solana`]: a Solana destination's mint supply and the balance of the canister-owned return
+//!   account, read TOGETHER from one `getMultipleAccounts` response per provider at `finalized`, with
+//!   providers bound to the profile's genesis hash and a quorum of identical answers required. The
+//!   mint, the return account and the token program are the operator's explicit config. `E_d` is an
+//!   ordinary ICRC-1 balance read through the IC transport above. The Solana instance's own
+//!   self-report (its buckets, which explain the custody) is assembled by
+//!   [`ic::solana_instance_audit`] from `get_buckets` and `get_bridge_info`.
+//!
 //! * [`ic::instance_supply_audit`]: each counted EVM destination's bridge
 //!   instance is also asked for its own `get_supply_audit` (query, anonymous).
 //!   That reply is a self-report, shown next to the independent reads and
@@ -39,13 +47,15 @@
 //! transports and one loopback server only. Executing the real clients against
 //! IC mainnet or a public EVM RPC is a separate, held step.
 //!
-//! Unavailable by design: Solana and Sui (see [`crate::collect`]); a profile
+//! Unavailable by design: Sui (see [`crate::collect`]); a Solana destination without a configured
+//! mint, return account and providers; a profile
 //! whose head is blocked; a backend without the per-chain query or without
 //! configured chain ids; an XRPL lane without a configured issuer and providers.
 //! Each is a named error, never a zero.
 
 pub mod evm;
 pub mod ic;
+pub mod solana;
 pub mod xrpl;
 
 use std::collections::BTreeMap;
@@ -54,7 +64,7 @@ use candid::Principal;
 use serde::Deserialize;
 
 use crate::aggregate::DestinationConfig;
-use crate::collect::{EvmSupply, InstanceAudit, ReadError, Readings, XrplIssued};
+use crate::collect::{EvmSupply, InstanceAudit, ReadError, Readings, SolanaSupply, XrplIssued};
 use crate::escrow::EscrowBinding;
 use crate::types::Network;
 
@@ -73,6 +83,24 @@ pub struct LiveConfig {
     /// The XRPL lane by network id (as in the profile catalog).
     #[serde(default)]
     pub xrpl: BTreeMap<String, XrplConfig>,
+    /// Solana destinations by network id (as in the profile catalog).
+    #[serde(default)]
+    pub solana: BTreeMap<String, SolanaConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SolanaConfig {
+    /// The bridged icUSD mint (base58, a 32-byte key). There is no default.
+    pub mint: String,
+    /// The canister-owned return account, a token account of that mint (base58). The instance's own
+    /// `get_observer_status.return_account` shows the one it uses.
+    pub return_account: String,
+    /// Which token program the mint belongs to (`spl_token` or `spl_token_2022`).
+    pub token_program: solana::TokenProgram,
+    /// Solana JSON-RPC provider URLs (https, or http on loopback). They may carry keys and are
+    /// never printed.
+    pub providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,6 +174,12 @@ pub struct EvmSource {
     pub transport: Box<dyn evm::JsonRpcTransport>,
 }
 
+/// One Solana destination's target and transport.
+pub struct SolanaSource {
+    pub target: solana::Target,
+    pub transport: Box<dyn evm::JsonRpcTransport>,
+}
+
 /// One XRPL lane's issuer and transport.
 pub struct XrplSource {
     pub issuer: String,
@@ -160,6 +194,7 @@ pub struct LiveReadings {
     backend: Option<(Principal, Vec<u32>)>,
     evm: BTreeMap<String, EvmSource>,
     xrpl: BTreeMap<String, XrplSource>,
+    solana: BTreeMap<String, SolanaSource>,
     read_at_unix: u64,
 }
 
@@ -178,6 +213,7 @@ impl LiveReadings {
             backend,
             evm,
             xrpl: BTreeMap::new(),
+            solana: BTreeMap::new(),
             read_at_unix,
         }
     }
@@ -193,6 +229,12 @@ impl LiveReadings {
     /// Add the XRPL lane source of `network_id` (as in the profile catalog).
     pub fn with_xrpl(mut self, network_id: &str, source: XrplSource) -> LiveReadings {
         self.xrpl.insert(network_id.to_string(), source);
+        self
+    }
+
+    /// Add the Solana source of `network_id` (as in the profile catalog).
+    pub fn with_solana(mut self, network_id: &str, source: SolanaSource) -> LiveReadings {
+        self.solana.insert(network_id.to_string(), source);
         self
     }
 
@@ -238,6 +280,19 @@ impl LiveReadings {
                 },
             );
         }
+        for (id, c) in &config.solana {
+            let target = solana::Target::new(&c.mint, &c.return_account, c.token_program)
+                .map_err(|e| format!("solana.{id}: {e}"))?;
+            let transport = evm::ReqwestJsonRpc::new(c.providers.clone())
+                .map_err(|e| format!("solana.{id}.providers: {e}"))?;
+            live = live.with_solana(
+                id,
+                SolanaSource {
+                    target,
+                    transport: Box::new(transport),
+                },
+            );
+        }
         Ok(live)
     }
 }
@@ -254,7 +309,7 @@ impl Readings for LiveReadings {
                 format_utc(self.read_at_unix),
                 self.read_at_unix
             ),
-            "ic reads are anonymous query calls with response verification on; evm reads are totalSupply at the numbered head shown per destination; xrpl reads are the issuer's icUSD obligations at the numbered validated ledger shown for the lane".to_string(),
+            "ic reads are anonymous query calls with response verification on; evm reads are totalSupply at the numbered head shown per destination; xrpl reads are the issuer's icUSD obligations at the numbered validated ledger shown for the lane; solana reads are the mint supply and the return account balance from one getMultipleAccounts response per provider at finalized, with the lowest agreeing context slot shown per destination".to_string(),
         ]
     }
 
@@ -284,6 +339,10 @@ impl Readings for LiveReadings {
         })?;
         let instance =
             parse_principal(text, "the bridge instance canister").map_err(ReadError::Failed)?;
+        // A Solana instance has no `get_supply_audit`: its self-report is its buckets.
+        if self.solana.contains_key(&destination.network_id) {
+            return ic::solana_instance_audit(self.ic.as_ref(), &instance);
+        }
         ic::instance_supply_audit(self.ic.as_ref(), &instance)
     }
 
@@ -292,6 +351,16 @@ impl Readings for LiveReadings {
             Some(src) => evm::read_total_supply(src.transport.as_ref(), &src.token, network),
             None => Err(ReadError::UnavailableGap(format!(
                 "the endpoint config has no token and providers for {}",
+                network.network_id
+            ))),
+        }
+    }
+
+    fn solana_supply_and_custody(&self, network: &Network) -> Result<SolanaSupply, ReadError> {
+        match self.solana.get(&network.network_id) {
+            Some(src) => solana::read_supply_and_custody(src.transport.as_ref(), &src.target, network),
+            None => Err(ReadError::UnavailableGap(format!(
+                "the endpoint config has no mint, return account and providers for {}",
                 network.network_id
             ))),
         }
@@ -684,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_still_refuses_solana_and_the_lane_under_live_readings() {
+    fn a_solana_destination_without_a_configured_source_is_unavailable_not_zero() {
         let readings = live(ic_ok(), true);
         let catalog = Catalog::embedded().unwrap();
         let cfg = CollectConfig {
@@ -697,8 +766,26 @@ mod tests {
             xrpl: None,
         };
         let err = collect(&cfg, &catalog, &readings).unwrap_err();
-        assert!(err.to_string().contains("BB-49"), "{err}");
-        // Nothing was read on the IC side before the refusal.
+        assert!(
+            matches!(
+                &err,
+                crate::collect::CollectError::Read { error: ReadError::UnavailableGap(g), what }
+                    if g.contains("solana-mainnet") && what.contains("solana-mainnet")
+            ),
+            "{err:?}"
+        );
+        // Sui is still not delivered.
+        let cfg = CollectConfig {
+            destinations: vec![DestinationConfig {
+                network_id: "sui-mainnet".into(),
+                in_d: true,
+                escrow: Some(binding_for("sui-mainnet")),
+                instance: Some(instance_text()),
+            }],
+            xrpl: None,
+        };
+        let err = collect(&cfg, &catalog, &readings).unwrap_err();
+        assert!(err.to_string().contains("BB-53"), "{err}");
     }
 
     /// An IC that answers `icrc1_balance_of` per escrow owner, so the D escrow
@@ -877,6 +964,239 @@ mod tests {
             );
             let c: LiveConfig = serde_json::from_str(&text).unwrap();
             assert!(LiveReadings::from_config(&c, 0).is_err(), "{issuer} {providers}");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Solana (card BB-49, step 49e)
+    // ------------------------------------------------------------------
+
+    fn solana_instance() -> Principal {
+        Principal::from_slice(b"synthetic-instance-solana")
+    }
+
+    fn solana_escrow() -> EscrowBinding {
+        EscrowBinding::from_principal_bytes(solana_instance().as_slice(), Some([0xAA; 32]))
+    }
+
+    fn base_plus_solana_config() -> CollectConfig {
+        let mut cfg = base_config();
+        cfg.destinations.push(DestinationConfig {
+            network_id: "solana-mainnet".into(),
+            in_d: true,
+            escrow: Some(solana_escrow()),
+            instance: Some(crate::escrow::principal_to_text(solana_instance().as_slice())),
+        });
+        cfg
+    }
+
+    #[derive(CandidType, CandidDeserialize)]
+    struct BucketsReply {
+        reserved_pulls: Nat,
+        pending_mint: Nat,
+        unknown_outflow: Nat,
+        pending_refund: Nat,
+        outstanding: Nat,
+        fees: Nat,
+        held: Nat,
+        burn_unknown: Nat,
+        stray: Nat,
+        return_custodied: Nat,
+        pending_release: Nat,
+    }
+
+    #[derive(CandidType, CandidDeserialize)]
+    struct InfoReply {
+        escrow_subaccount: String,
+        genesis_hash: String,
+    }
+
+    /// An IC with a Base instance and a Solana instance: the Base audit, the Solana buckets, the
+    /// ledger balances per escrow owner, and the calls recorded where the test can see them.
+    struct SolanaIc {
+        total: u128,
+        base_escrow: u128,
+        solana_escrow: u128,
+        calls: std::rc::Rc<RefCell<Vec<String>>>,
+    }
+    impl ic::IcQuery for SolanaIc {
+        fn query(&self, c: &Principal, method: &str, a: &[u8]) -> Result<Vec<u8>, IcQueryError> {
+            self.calls.borrow_mut().push(format!("{method}@{}", c.to_text()));
+            let n = |v: u128| Nat::from(v);
+            match method {
+                "icrc1_balance_of" => {
+                    let account: ic::Icrc1Account = candid::decode_one(a).unwrap();
+                    let balance =
+                        if account.owner == solana_instance() { self.solana_escrow } else { self.base_escrow };
+                    Ok(candid::encode_one(Nat::from(balance)).unwrap())
+                }
+                "icrc1_total_supply" => Ok(candid::encode_one(Nat::from(self.total)).unwrap()),
+                "get_supply_audit" => {
+                    assert_eq!(*c, instance_principal(), "the Solana instance has no get_supply_audit");
+                    Ok(audit_reply(self.base_escrow, self.base_escrow, self.base_escrow, self.base_escrow))
+                }
+                "get_buckets" => {
+                    assert_eq!(*c, solana_instance());
+                    Ok(candid::encode_one(BucketsReply {
+                        reserved_pulls: n(0),
+                        pending_mint: n(0),
+                        unknown_outflow: n(0),
+                        pending_refund: n(0),
+                        outstanding: n(9_000_000_000),
+                        fees: n(0),
+                        held: n(0),
+                        burn_unknown: n(200_000_000),
+                        stray: n(50_000_000),
+                        return_custodied: n(1_000_000_000),
+                        pending_release: n(0),
+                    })
+                    .unwrap())
+                }
+                "get_bridge_info" => {
+                    assert_eq!(*c, solana_instance());
+                    Ok(candid::encode_one(InfoReply {
+                        escrow_subaccount: "aa".repeat(32),
+                        genesis_hash: "synthetic".into(),
+                    })
+                    .unwrap())
+                }
+                "get_chain_public_launch_status" => Ok(candid::encode_one(Full {
+                    status: Some(St::Registered),
+                    chain_supply_e8s: Nat::from(0u8),
+                    extra: true,
+                })
+                .unwrap()),
+                other => Err(IcQueryError::Failed(format!("unexpected {other}"))),
+            }
+        }
+    }
+
+    fn solana_source(providers: Vec<solana::tests::P>) -> SolanaSource {
+        SolanaSource {
+            target: solana::tests::target(solana::TokenProgram::SplToken2022),
+            transport: Box::new(Mock::new(providers.into_iter().map(solana::tests::P::script).collect())),
+        }
+    }
+
+    fn solana_providers(supply: u64, custody: u64) -> Vec<solana::tests::P> {
+        (0..3)
+            .map(|i| solana::tests::P::mainnet(solana::TokenProgram::SplToken2022, 280_000_000 + i, supply, custody))
+            .collect()
+    }
+
+    fn live_with_solana(providers: Vec<solana::tests::P>) -> (LiveReadings, std::rc::Rc<RefCell<Vec<String>>>) {
+        let calls = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let ic = SolanaIc { total: 100_000_000_000, base_escrow: 20_000_000_000, solana_escrow: 10_200_000_000, calls: calls.clone() };
+        let readings = live(ic_ok(), true).with_ic(Box::new(ic)).with_solana("solana-mainnet", solana_source(providers));
+        (readings, calls)
+    }
+
+    #[test]
+    fn an_end_to_end_live_collection_reads_solana_supply_and_custody_and_explains_the_custody_by_the_buckets() {
+        let (readings, calls) = live_with_solana(solana_providers(10_200_000_000, 1_250_000_000));
+        let catalog = Catalog::embedded().unwrap();
+        let got = collect(&base_plus_solana_config(), &catalog, &readings).unwrap();
+        let r = &got.report;
+        assert_eq!(got.source, "live");
+        // E_base = 200 and E_solana = 102, each counted once.
+        assert_eq!(r.escrow_locked, 30_200_000_000);
+        assert_eq!(r.circulating_on_icp, 69_800_000_000);
+        let sol = r.circulating_dest.iter().find(|d| d.network_id == "solana-mainnet").unwrap();
+        // circulating = supply - custody: 102 - 12.5 (RC 10 + BU 2 + stray 0.5, per the instance's buckets).
+        assert_eq!(sol.circulating, 8_950_000_000);
+        assert_eq!(r.circulating_total, 100_000_000_000 - 1_250_000_000);
+        assert!(!r.has_failure(), "{:?}", r.flags);
+        assert!(r.flags.is_empty(), "{:?}", r.flags);
+        // The head is the lowest context slot among the agreeing providers, under the profile's rule.
+        let head = got.heads.iter().find(|h| h.network_id == "solana-mainnet").unwrap();
+        assert_eq!((head.finality, head.block), (crate::types::FinalityRule::SolanaCommitment, 280_000_001));
+
+        let text = render(&got);
+        assert!(text.starts_with("source: live\n"), "{text}");
+        assert!(text.contains("head solana-mainnet: SolanaCommitment block 280000001"), "{text}");
+        assert!(text.contains("destination solana-mainnet: escrow 102.00000000, supply 102.00000000, custody 12.50000000"), "{text}");
+        assert!(text.contains("custody buckets (self-report): return_custodied 10.00000000, burn_unknown 2.00000000, stray 0.50000000"), "{text}");
+        assert!(!text.contains("source: fixture"), "{text}");
+
+        // The Solana instance was asked for its buckets and info, never for a get_supply_audit it does not have.
+        let calls = calls.borrow();
+        let solana_calls: Vec<&String> = calls.iter().filter(|c| c.ends_with(&solana_instance().to_text())).collect();
+        assert_eq!(solana_calls.len(), 2, "{calls:?}");
+        assert!(solana_calls.iter().any(|c| c.starts_with("get_buckets@")));
+        assert!(solana_calls.iter().any(|c| c.starts_with("get_bridge_info@")));
+        assert!(!solana_calls.iter().any(|c| c.starts_with("get_supply_audit@")));
+    }
+
+    #[test]
+    fn a_live_custody_the_instance_does_not_explain_is_a_failure_whichever_way_it_differs() {
+        let catalog = Catalog::embedded().unwrap();
+        for (custody, want_excess) in [(1_250_000_001u64, true), (1_249_999_999u64, false)] {
+            let (readings, _) = live_with_solana(solana_providers(10_200_000_000, custody));
+            let got = collect(&base_plus_solana_config(), &catalog, &readings).unwrap();
+            let kinds: Vec<_> = got.report.flags.iter().map(|f| f.kind.clone()).collect();
+            let hit = kinds.iter().any(|k| match k {
+                crate::aggregate::FlagKind::CustodyUnexplainedExcess { .. } => want_excess,
+                crate::aggregate::FlagKind::CustodyShortfall { .. } => !want_excess,
+                _ => false,
+            });
+            assert!(hit, "{custody}: {kinds:?}");
+            assert!(got.report.has_failure());
+        }
+    }
+
+    #[test]
+    fn a_failed_solana_read_stops_the_collection_before_any_ic_query() {
+        let mut providers = solana_providers(10_200_000_000, 1_250_000_000);
+        // The two providers that vote (the one at the lowest slot sits below the agreed slot) disagree.
+        providers[1].mint = Some(solana::tests::mint_data(10_300_000_000, 8, true, true));
+        providers[2].mint = Some(solana::tests::mint_data(10_400_000_000, 8, true, true));
+        let (readings, calls) = live_with_solana(providers);
+        let catalog = Catalog::embedded().unwrap();
+        let err = collect(&base_plus_solana_config(), &catalog, &readings).unwrap_err();
+        assert!(err.to_string().contains("no quorum"), "{err}");
+        assert!(calls.borrow().is_empty(), "no IC query may precede the Solana read: {:?}", calls.borrow());
+    }
+
+    #[test]
+    fn solana_endpoint_config_is_strict_and_builds_without_sending_anything() {
+        let mint = solana::tests::mint_text();
+        let account = solana::tests::account_text();
+        let config = |inner: &str| {
+            format!(
+                r#"{{"ic": {{"url": "https://ic.example.invalid", "ledger": "ryjl3-tyaaa-aaaaa-aaaba-cai"}},
+                    "solana": {{"solana-mainnet": {inner}}}}}"#
+            )
+        };
+        let good = config(&format!(
+            r#"{{"mint": "{mint}", "return_account": "{account}", "token_program": "spl_token_2022",
+                 "providers": ["https://a.example.invalid", "https://b.example.invalid"]}}"#
+        ));
+        let c: LiveConfig = serde_json::from_str(&good).unwrap();
+        assert_eq!(c.solana.len(), 1);
+        let built = LiveReadings::from_config(&c, 0).unwrap();
+        assert_eq!(built.source(), "live");
+        // Unknown fields, a missing token program and an unknown program are refused; nothing defaults.
+        for bad in [
+            format!(r#"{{"mint":"{mint}","return_account":"{account}","token_program":"spl_token","providers":[],"x":1}}"#),
+            format!(r#"{{"mint":"{mint}","return_account":"{account}","providers":[]}}"#),
+            format!(r#"{{"mint":"{mint}","return_account":"{account}","token_program":"token_3000","providers":[]}}"#),
+            format!(r#"{{"return_account":"{account}","token_program":"spl_token","providers":[]}}"#),
+        ] {
+            assert!(serde_json::from_str::<LiveConfig>(&config(&bad)).is_err(), "{bad}");
+        }
+        // A malformed key, the same key twice, a plain-http provider and no provider fail to build.
+        for (m, a, providers) in [
+            ("not base58 !", account.as_str(), r#"["https://a.example.invalid"]"#),
+            (mint.as_str(), "abc", r#"["https://a.example.invalid"]"#),
+            (mint.as_str(), mint.as_str(), r#"["https://a.example.invalid"]"#),
+            (mint.as_str(), account.as_str(), r#"["http://example.invalid"]"#),
+            (mint.as_str(), account.as_str(), "[]"),
+        ] {
+            let text = config(&format!(
+                r#"{{"mint": "{m}", "return_account": "{a}", "token_program": "spl_token", "providers": {providers}}}"#
+            ));
+            let c: LiveConfig = serde_json::from_str(&text).unwrap();
+            assert!(LiveReadings::from_config(&c, 0).is_err(), "{m} {a} {providers}");
         }
     }
 

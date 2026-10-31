@@ -32,12 +32,27 @@
 //! | Family | Source | Status |
 //! | --- | --- | --- |
 //! | EVM (Base and the other EVM rows) | token `totalSupply` at the profile's settlement head, custody zero (the return burns atomically) | wired through [`Readings::evm_total_supply`] |
-//! | Solana | supply plus the measured return-account balance | `Unavailable`, delivered by card BB-49 |
+//! | Solana | mint supply and the measured return-account balance, read together at `finalized` | wired through [`Readings::solana_supply_and_custody`] (card BB-49); a source without it fails with `Unavailable` |
 //! | Sui | wrapped-currency supply | `Unavailable`, delivered by card BB-53 |
 //! | XRPL lane | `E_X` (ICRC-1 balance of the lane escrow, the same IC transport) and the issuer's obligations for the icUSD currency at a VALIDATED ledger | wired through [`Readings::xrpl_issued_outstanding`] (card BB-57); a source without it fails with `Unavailable` |
 //!
 //! An unavailable source fails the whole collection with an explicit error
 //! naming the card. No value is ever invented, defaulted or carried over.
+//!
+//! # Solana (`d` in `D`)
+//!
+//! The mint supply and the balance of the canister-owned return account are read TOGETHER, from one
+//! `getMultipleAccounts` response per provider at `finalized` (one context slot, so the pair is
+//! atomic), and a quorum of providers must agree on both numbers. Nothing is taken from the
+//! instance's own report. The instance's `get_buckets` (its self-report, like every audit) supplies
+//! the explanation of the custody, `RC`, `BU` and `stray`; the aggregate compares the INDEPENDENT
+//! custody with `RC + BU + stray` and raises a Failure flag for an unexplained excess or a shortfall.
+//! A Solana destination without those three buckets in its audit fails the read. The supply bound
+//! for Solana is `supply <= O + inflight + RC + BU` (returned tokens stay supply until the burn). The
+//! reader runs BEFORE the ICP-side numbers, so a source with no Solana reader fails before any other
+//! query. Equal reads of a supply and a balance are a limited consistency check, not proof that no
+//! mint, burn or transfer happened around them: a change between two providers' reads shows as a
+//! disagreement and the collection fails rather than guessing.
 //!
 //! # The XRPL lane (`X`)
 //!
@@ -104,6 +119,21 @@ pub struct EvmSupply {
     pub block: u64,
 }
 
+/// A Solana destination's mint supply and its return-account balance, read together, and the slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolanaSupply {
+    /// The mint's `supply`, in e8s (8 decimals).
+    pub supply: u128,
+    /// The token balance of the canister-owned return account, in e8s, from the SAME response
+    /// (so the same context slot) as `supply`.
+    pub custody: u128,
+    /// The finality rule the read was pinned to. The collector refuses a reading whose rule
+    /// differs from the profile's.
+    pub finality: FinalityRule,
+    /// The lowest context slot among the providers that agreed.
+    pub slot: u64,
+}
+
 /// The XRPL lane's issued outstanding and the validated ledger it was read at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XrplIssued {
@@ -161,6 +191,15 @@ pub struct InstanceAudit {
     pub reported_supply_e8s: Option<u128>,
     #[serde(default)]
     pub reported_supply_block: Option<u64>,
+    /// `RC`: returns credited and held in custody (a Solana instance only; `None` for EVM).
+    #[serde(default, with = "opt_u128_string")]
+    pub return_custodied_e8s: Option<u128>,
+    /// `BU`: custodied returns whose burn is signed but not yet proven (Solana only).
+    #[serde(default, with = "opt_u128_string")]
+    pub burn_unknown_e8s: Option<u128>,
+    /// `stray`: tokens sent to the return account that are not a return, still in `O` (Solana only).
+    #[serde(default, with = "opt_u128_string")]
+    pub stray_e8s: Option<u128>,
 }
 
 /// Why a reading is missing.
@@ -199,6 +238,14 @@ pub trait Readings {
     fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError>;
     /// Token `totalSupply` of an EVM destination at its settlement head.
     fn evm_total_supply(&self, network: &Network) -> Result<EvmSupply, ReadError>;
+    /// A Solana destination's mint supply and return-account balance, read together at the
+    /// profile's commitment. A source with no Solana reader answers `Unavailable`, which fails the
+    /// collection before any other read.
+    fn solana_supply_and_custody(&self, _network: &Network) -> Result<SolanaSupply, ReadError> {
+        Err(ReadError::Unavailable {
+            card: SOLANA_SOURCE_CARD,
+        })
+    }
     /// The XRPL lane's issued outstanding: the issuer's obligations for the icUSD
     /// currency at a validated ledger. A source with no XRPL reader answers
     /// `Unavailable`, which fails the collection before any other read.
@@ -321,6 +368,12 @@ enum Plan<'a> {
         network: &'a Network,
         instance: &'a str,
     },
+    Solana {
+        config: &'a DestinationConfig,
+        binding: &'a EscrowBinding,
+        network: &'a Network,
+        instance: &'a str,
+    },
 }
 
 /// Collect independent readings and aggregate them.
@@ -351,22 +404,30 @@ pub fn collect(
             )));
         };
         let card = match profile.family {
-            Family::Evm => {
-                // A counted EVM destination needs its instance, before any read.
+            Family::Evm | Family::Solana => {
+                // A counted EVM or Solana destination needs its instance, before any read.
                 let Some(instance) = d.instance.as_deref() else {
                     return Err(CollectError::Rejected(
                         AggregateError::MissingInstanceBinding(d.network_id.clone()),
                     ));
                 };
-                plan.push(Plan::Evm {
-                    config: d,
-                    binding,
-                    network,
-                    instance,
+                plan.push(if profile.family == Family::Evm {
+                    Plan::Evm {
+                        config: d,
+                        binding,
+                        network,
+                        instance,
+                    }
+                } else {
+                    Plan::Solana {
+                        config: d,
+                        binding,
+                        network,
+                        instance,
+                    }
                 });
                 continue;
             }
-            Family::Solana => SOLANA_SOURCE_CARD,
             Family::Sui => SUI_SOURCE_CARD,
             Family::Xrpl => XRPL_SOURCE_CARDS,
         };
@@ -396,6 +457,39 @@ pub fn collect(
             });
         }
         xrpl_read = Some(issued);
+    }
+
+    // Solana supply and custody are read before the ICP-side numbers too: a source without a
+    // Solana reader (or a destination that cannot be read) fails before any other query.
+    let mut solana_reads: BTreeMap<String, SolanaSupply> = BTreeMap::new();
+    for step in &plan {
+        if let Plan::Solana {
+            config: d, network, ..
+        } = step
+        {
+            let id = &d.network_id;
+            let sol = read(
+                format!("supply and custody of {id}"),
+                readings.solana_supply_and_custody(network),
+            )?;
+            if sol.finality != network.finality.rule {
+                return Err(CollectError::WrongHead {
+                    network_id: id.clone(),
+                    expected: network.finality.rule,
+                    got: sol.finality,
+                });
+            }
+            if sol.custody > sol.supply {
+                return Err(CollectError::Read {
+                    what: format!("supply and custody of {id}"),
+                    error: ReadError::Failed(format!(
+                        "the return account holds {} e8s, more than the whole mint supply {}",
+                        sol.custody, sol.supply
+                    )),
+                });
+            }
+            solana_reads.insert(id.clone(), sol);
+        }
     }
 
     let icp_ledger_total_supply = read(
@@ -468,6 +562,63 @@ pub fn collect(
                     rc: 0,
                     bu: 0,
                     stray: 0,
+                });
+            }
+            Plan::Solana {
+                config: d,
+                binding,
+                network: _,
+                instance,
+            } => {
+                let id = &d.network_id;
+                let Some(sol) = solana_reads.remove(id) else {
+                    return Err(CollectError::Rejected(AggregateError::UnknownNetworkId(
+                        id.clone(),
+                    )));
+                };
+                let escrow_balance = read(
+                    format!("escrow balance of {id}"),
+                    readings.icrc1_balance_of(binding),
+                )?;
+                let audit = read(
+                    format!("instance audit of {id}"),
+                    readings.instance_audit(d),
+                )?;
+                // The custody is explained by the instance's own buckets (a self-report that the
+                // aggregate compares with the INDEPENDENT custody). Without them there is nothing to
+                // compare, and a zero must never be assumed.
+                let (Some(rc), Some(bu), Some(stray)) = (
+                    audit.return_custodied_e8s,
+                    audit.burn_unknown_e8s,
+                    audit.stray_e8s,
+                ) else {
+                    return Err(CollectError::Read {
+                        what: format!("custody buckets of {id}"),
+                        error: ReadError::Failed(
+                            "the instance audit of a Solana destination must report return_custodied, burn_unknown and stray".into(),
+                        ),
+                    });
+                };
+                audits.push(DestinationAudit {
+                    network_id: id.clone(),
+                    instance: instance.to_string(),
+                    audit,
+                    escrow_independent: escrow_balance,
+                    supply_independent: sol.supply,
+                });
+                heads.push(HeadNote {
+                    network_id: id.clone(),
+                    finality: sol.finality,
+                    block: sol.slot,
+                });
+                destinations.push(DestinationReading {
+                    config: d.clone(),
+                    escrow_balance,
+                    supply: sol.supply,
+                    custody: sol.custody,
+                    rc,
+                    bu,
+                    stray,
                 });
             }
         }
@@ -582,11 +733,17 @@ fn audit_flags(
         }));
     }
 
-    // Supply bound: supply_d(independent) <= outstanding_d + inflight_mint_d.
+    // Supply bound: supply_d(independent) <= outstanding_d + inflight_mint_d. A Solana instance also
+    // reports RC and BU: returned tokens stay in the mint's supply until the burn is final, so they
+    // are part of the bound (an EVM audit reports neither, and adds nothing).
     let bound = audit
         .outstanding_e8s
         .checked_add(audit.inflight_mint_e8s)
-        .ok_or_else(|| AggregateError::Overflow(format!("outstanding + inflight mint at {id}")))?;
+        .and_then(|b| b.checked_add(audit.return_custodied_e8s.unwrap_or(0)))
+        .and_then(|b| b.checked_add(audit.burn_unknown_e8s.unwrap_or(0)))
+        .ok_or_else(|| {
+            AggregateError::Overflow(format!("outstanding + inflight mint + RC + BU at {id}"))
+        })?;
     if a.supply_independent > bound {
         flags.push(flag(FlagKind::SupplyBoundBroken {
             supply_independent: a.supply_independent,
@@ -704,6 +861,14 @@ pub fn render(c: &Collected) -> String {
             format_e8s(a.escrow_independent),
             format_e8s(a.supply_independent),
         ));
+        if au.return_custodied_e8s.is_some() || au.burn_unknown_e8s.is_some() || au.stray_e8s.is_some() {
+            out.push_str(&format!(
+                "  custody buckets (self-report): return_custodied {}, burn_unknown {}, stray {}\n",
+                opt(au.return_custodied_e8s),
+                opt(au.burn_unknown_e8s),
+                opt(au.stray_e8s),
+            ));
+        }
     }
     if !c.audits.is_empty() {
         out.push_str(&line(
@@ -732,6 +897,17 @@ pub fn render(c: &Collected) -> String {
             Severity::Failure => "FAILURE",
         };
         out.push_str(&format!("flag {sev}: {} {:?}\n", f.network_id, f.kind));
+        if matches!(f.kind, FlagKind::SupplyBoundBroken { .. }) {
+            if let Some(a) = c.audits.iter().find(|a| a.network_id == f.network_id) {
+                if a.audit.return_custodied_e8s.is_some() {
+                    out.push_str(&format!(
+                        "  note: for a Solana instance the bound is outstanding + inflight_mint + RC + BU (RC {}, BU {}): returned tokens stay supply until the burn is final\n",
+                        format_e8s(a.audit.return_custodied_e8s.unwrap_or(0)),
+                        format_e8s(a.audit.burn_unknown_e8s.unwrap_or(0)),
+                    ));
+                }
+            }
+        }
         if matches!(f.kind, FlagKind::XrplEscrowBelowIssued { .. }) {
             out.push_str(
                 "  note: a MINIMUM issued-supply floor only (E_X must be at least the issued outstanding); it is not proof that the lane's pending D, R, H or fees are covered (the backend's own coverage report is the full check), not proof of theft, and triggers no automatic recovery or funds action: hold credits and reconcile\n",
@@ -807,6 +983,18 @@ struct FixtureEvmSupply {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FixtureSolanaSupply {
+    network_id: String,
+    #[serde(with = "u128_string")]
+    supply: u128,
+    #[serde(with = "u128_string")]
+    custody: u128,
+    finality: FinalityRule,
+    slot: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FixtureXrplIssued {
     network_id: String,
     #[serde(with = "u128_string")]
@@ -827,6 +1015,8 @@ struct FixtureData {
     icrc1_balances: Vec<FixtureBalance>,
     #[serde(default)]
     evm_supplies: Vec<FixtureEvmSupply>,
+    #[serde(default)]
+    solana_supplies: Vec<FixtureSolanaSupply>,
     #[serde(default)]
     xrpl_issued: Vec<FixtureXrplIssued>,
     #[serde(default)]
@@ -858,6 +1048,7 @@ pub struct FixtureReadings {
     debt_backed_chain_supplies: Option<u128>,
     balances: BTreeMap<AccountIdentity, u128>,
     evm: BTreeMap<String, EvmSupply>,
+    solana: BTreeMap<String, SolanaSupply>,
     xrpl: BTreeMap<String, XrplIssued>,
     audits: BTreeMap<Vec<u8>, InstanceAudit>,
 }
@@ -900,6 +1091,19 @@ impl FixtureReadings {
                 return Err(format!("fixture lists the supply of {id} twice"));
             }
         }
+        let mut solana = BTreeMap::new();
+        for x in file.readings.solana_supplies {
+            let id = x.network_id;
+            let reading = SolanaSupply {
+                supply: x.supply,
+                custody: x.custody,
+                finality: x.finality,
+                slot: x.slot,
+            };
+            if solana.insert(id.clone(), reading).is_some() {
+                return Err(format!("fixture lists the Solana supply of {id} twice"));
+            }
+        }
         let mut xrpl = BTreeMap::new();
         for x in file.readings.xrpl_issued {
             let id = x.network_id;
@@ -932,6 +1136,7 @@ impl FixtureReadings {
                 debt_backed_chain_supplies: file.readings.debt_backed_chain_supplies,
                 balances,
                 evm,
+                solana,
                 xrpl,
                 audits,
             },
@@ -980,6 +1185,15 @@ impl Readings for FixtureReadings {
         })
     }
 
+    fn solana_supply_and_custody(&self, network: &Network) -> Result<SolanaSupply, ReadError> {
+        self.solana.get(&network.network_id).cloned().ok_or_else(|| {
+            ReadError::Failed(format!(
+                "fixture has no Solana supply and custody for {}",
+                network.network_id
+            ))
+        })
+    }
+
     fn xrpl_issued_outstanding(&self, network: &Network) -> Result<XrplIssued, ReadError> {
         self.xrpl.get(&network.network_id).cloned().ok_or_else(|| {
             ReadError::Failed(format!(
@@ -1000,6 +1214,7 @@ mod tests {
     const C1_BROKEN: &str = include_str!("../fixtures/collect_c1_broken.json");
     const BASE_PLUS_XRPL: &str = include_str!("../fixtures/collect_base_plus_xrpl.json");
     const XRPL_BELOW_ISSUED: &str = include_str!("../fixtures/collect_xrpl_escrow_below_issued.json");
+    const BASE_PLUS_SOLANA: &str = include_str!("../fixtures/collect_base_plus_solana.json");
 
     fn catalog() -> Catalog {
         Catalog::embedded().expect("embedded catalog")
@@ -1041,6 +1256,9 @@ mod tests {
             coverage_ok: Some(true),
             reported_supply_e8s: Some(supply),
             reported_supply_block: Some(7),
+            return_custodied_e8s: None,
+            burn_unknown_e8s: None,
+            stray_e8s: None,
         }
     }
 
@@ -1159,7 +1377,14 @@ mod tests {
 
     #[test]
     fn fixture_principals_are_obviously_synthetic() {
-        for json in [BASE_ONLY, OVERLAP, C1_BROKEN, BASE_PLUS_XRPL, XRPL_BELOW_ISSUED] {
+        for json in [
+            BASE_ONLY,
+            OVERLAP,
+            C1_BROKEN,
+            BASE_PLUS_XRPL,
+            XRPL_BELOW_ISSUED,
+            BASE_PLUS_SOLANA,
+        ] {
             let fx = FixtureReadings::parse(json).unwrap();
             assert!(
                 fx.description.to_lowercase().contains("synthetic"),
@@ -1406,6 +1631,260 @@ mod tests {
         let text = render(&got);
         assert!(text.starts_with("source: fixture\n"), "{text}");
         assert!(text.contains("xrpl lane xrpl-mainnet"), "{text}");
+    }
+
+    // ------------------------------------------------------------------
+    // Solana (card BB-49, step 49e)
+    // ------------------------------------------------------------------
+
+    fn solana_fixture() -> LoadedFixture {
+        FixtureReadings::parse(BASE_PLUS_SOLANA).unwrap()
+    }
+
+    fn solana_audit_mut(fx: &mut LoadedFixture) -> &mut InstanceAudit {
+        fx.readings
+            .audits
+            .values_mut()
+            .find(|a| a.return_custodied_e8s.is_some())
+            .expect("the Solana audit")
+    }
+
+    #[test]
+    fn the_base_plus_solana_fixture_collects_and_excludes_the_custody_exactly_once() {
+        let fx = solana_fixture();
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert_eq!(got.source, "fixture");
+        let r = &got.report;
+        // E_base 200.12345678 + E_solana 102, each counted once.
+        assert_eq!(r.escrow_locked, 20_012_345_678 + 10_200_000_000);
+        assert_eq!(r.circulating_on_icp, 100_000_000_000 - r.escrow_locked);
+        // circulating_dest = supply - custody: 102 - 12.5.
+        let sol = r.circulating_dest.iter().find(|d| d.network_id == "solana-mainnet").unwrap();
+        assert_eq!(sol.circulating, 10_200_000_000 - 1_250_000_000);
+        // The 12.5 held in custody is circulating nowhere: total minus custody.
+        assert_eq!(r.circulating_total, 100_000_000_000 - 1_250_000_000);
+        assert!(!r.has_failure(), "{:?}", r.flags);
+        assert!(r.flags.is_empty(), "{:?}", r.flags);
+        // The head is the numbered slot, under the profile's rule.
+        let head = got.heads.iter().find(|h| h.network_id == "solana-mainnet").unwrap();
+        assert_eq!((head.finality, head.block), (FinalityRule::SolanaCommitment, 280_000_000));
+        // The instance audit is shown beside the independent reads, with the custody buckets labelled.
+        let text = render(&got);
+        assert!(text.starts_with("source: fixture\n"), "{text}");
+        assert!(text.contains("destination solana-mainnet: escrow 102.00000000, supply 102.00000000, custody 12.50000000"), "{text}");
+        assert!(text.contains("head solana-mainnet: SolanaCommitment block 280000000"), "{text}");
+        assert!(text.contains("custody buckets (self-report): return_custodied 10.00000000, burn_unknown 2.00000000, stray 0.50000000"), "{text}");
+        assert!(text.contains("circulating_dest solana-mainnet: 89.50000000"), "{text}");
+        assert!(text.contains("status: ok"), "{text}");
+    }
+
+    #[test]
+    fn a_solana_destination_without_a_reading_is_a_failed_read_not_zero() {
+        let mut fx = solana_fixture();
+        fx.readings.solana.clear();
+        let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CollectError::Read { error: ReadError::Failed(m), what }
+                    if m.contains("no Solana supply and custody") && what.contains("solana-mainnet")
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn custody_above_what_the_instance_explains_is_a_failure_and_below_it_is_a_failure() {
+        // One e8s of unexplained excess is enough.
+        let mut fx = solana_fixture();
+        fx.readings.solana.get_mut("solana-mainnet").unwrap().custody += 1;
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert!(
+            flags_of(&got).contains(&FlagKind::CustodyUnexplainedExcess {
+                custody: 1_250_000_001,
+                explained: 1_250_000_000
+            }),
+            "{:?}",
+            got.report.flags
+        );
+        assert!(got.report.has_failure());
+        assert!(render(&got).contains("status: FAILURE flags present, credits must halt"));
+
+        // A shortfall (claimed custodied returns are missing) is a failure as well, never an OK.
+        let mut fx = solana_fixture();
+        fx.readings.solana.get_mut("solana-mainnet").unwrap().custody -= 1;
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert!(
+            flags_of(&got).contains(&FlagKind::CustodyShortfall {
+                custody: 1_249_999_999,
+                explained: 1_250_000_000
+            }),
+            "{:?}",
+            got.report.flags
+        );
+        assert!(got.report.has_failure());
+    }
+
+    #[test]
+    fn a_solana_audit_without_the_custody_buckets_fails_the_read_instead_of_assuming_zero() {
+        for missing in 0..3 {
+            let mut fx = solana_fixture();
+            let a = solana_audit_mut(&mut fx);
+            match missing {
+                0 => a.return_custodied_e8s = None,
+                1 => a.burn_unknown_e8s = None,
+                _ => a.stray_e8s = None,
+            }
+            // With one bucket gone the audit is no longer found by `return_custodied`; look it up anew.
+            let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CollectError::Read { error: ReadError::Failed(m), what }
+                        if m.contains("return_custodied, burn_unknown and stray") && what.contains("custody buckets of solana-mainnet")
+                ),
+                "{missing}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_solana_supply_bound_counts_returned_tokens_until_the_burn_is_final() {
+        // supply = O + RC + BU = 90 + 10 + 2 = 102 holds exactly (the fixture); one e8s more breaks it.
+        let mut fx = solana_fixture();
+        fx.readings.solana.get_mut("solana-mainnet").unwrap().supply += 1;
+        let got = collect(&fx.config, &catalog(), &fx.readings).unwrap();
+        assert!(
+            flags_of(&got).iter().any(|k| matches!(k, FlagKind::SupplyBoundBroken { supply_independent: 10_200_000_001, .. })),
+            "{:?}",
+            got.report.flags
+        );
+        let text = render(&got);
+        assert!(text.contains("the bound is outstanding + inflight_mint + RC + BU (RC 10.00000000, BU 2.00000000)"), "{text}");
+        // An EVM audit reports neither bucket, so its bound is unchanged (outstanding + inflight only).
+        let base = FixtureReadings::parse(BASE_PLUS_XRPL).unwrap();
+        let got = collect(&base.config, &catalog(), &base.readings).unwrap();
+        assert!(!render(&got).contains("RC + BU"));
+    }
+
+    #[test]
+    fn a_solana_supply_read_at_the_wrong_head_or_with_custody_above_supply_is_refused() {
+        let mut fx = solana_fixture();
+        fx.readings.solana.get_mut("solana-mainnet").unwrap().finality = FinalityRule::EvmTag;
+        let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CollectError::WrongHead { network_id, expected: FinalityRule::SolanaCommitment, got: FinalityRule::EvmTag }
+                    if network_id == "solana-mainnet"
+            ),
+            "{err:?}"
+        );
+
+        let mut fx = solana_fixture();
+        fx.readings.solana.get_mut("solana-mainnet").unwrap().custody = 10_200_000_001;
+        let err = collect(&fx.config, &catalog(), &fx.readings).unwrap_err();
+        assert!(
+            matches!(&err, CollectError::Read { error: ReadError::Failed(m), .. } if m.contains("more than the whole mint supply")),
+            "{err:?}"
+        );
+    }
+
+    /// Records the order of reads, so the test can show Solana is read before any ICP-side number.
+    struct Ordered {
+        order: std::cell::RefCell<Vec<&'static str>>,
+        inner: FixtureReadings,
+    }
+    impl Readings for Ordered {
+        fn source(&self) -> &'static str {
+            "fixture"
+        }
+        fn icp_ledger_total_supply(&self) -> Result<u128, ReadError> {
+            self.order.borrow_mut().push("icp_total");
+            self.inner.icp_ledger_total_supply()
+        }
+        fn icrc1_balance_of(&self, b: &EscrowBinding) -> Result<u128, ReadError> {
+            self.order.borrow_mut().push("escrow");
+            self.inner.icrc1_balance_of(b)
+        }
+        fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError> {
+            self.order.borrow_mut().push("debt_backed");
+            self.inner.debt_backed_chain_supplies()
+        }
+        fn instance_audit(&self, d: &DestinationConfig) -> Result<InstanceAudit, ReadError> {
+            self.order.borrow_mut().push("audit");
+            self.inner.instance_audit(d)
+        }
+        fn evm_total_supply(&self, n: &Network) -> Result<EvmSupply, ReadError> {
+            self.order.borrow_mut().push("evm");
+            self.inner.evm_total_supply(n)
+        }
+        fn solana_supply_and_custody(&self, n: &Network) -> Result<SolanaSupply, ReadError> {
+            self.order.borrow_mut().push("solana");
+            self.inner.solana_supply_and_custody(n)
+        }
+    }
+
+    #[test]
+    fn solana_is_read_before_the_icp_side_numbers_and_a_source_without_a_reader_names_the_card() {
+        let fx = solana_fixture();
+        let ordered = Ordered { order: Default::default(), inner: fx.readings.clone() };
+        collect(&fx.config, &catalog(), &ordered).unwrap();
+        let order = ordered.order.borrow();
+        assert_eq!(order[0], "solana", "{order:?}");
+        let first_icp = order.iter().position(|o| *o == "icp_total").unwrap();
+        assert!(first_icp > 0);
+
+        // A source with no Solana reader (the trait default) fails with the card before any other read.
+        struct NoSolana;
+        impl Readings for NoSolana {
+            fn source(&self) -> &'static str {
+                "fixture"
+            }
+            fn icp_ledger_total_supply(&self) -> Result<u128, ReadError> {
+                panic!("read before the Solana reader failed")
+            }
+            fn icrc1_balance_of(&self, _: &EscrowBinding) -> Result<u128, ReadError> {
+                panic!("read before the Solana reader failed")
+            }
+            fn debt_backed_chain_supplies(&self) -> Result<u128, ReadError> {
+                panic!("read before the Solana reader failed")
+            }
+            fn instance_audit(&self, _: &DestinationConfig) -> Result<InstanceAudit, ReadError> {
+                panic!("read before the Solana reader failed")
+            }
+            fn evm_total_supply(&self, _: &Network) -> Result<EvmSupply, ReadError> {
+                panic!("read before the Solana reader failed")
+            }
+        }
+        let cfg = CollectConfig { destinations: vec![dest("solana-mainnet")], xrpl: None };
+        let err = collect(&cfg, &catalog(), &NoSolana).unwrap_err();
+        assert!(
+            matches!(&err, CollectError::Read { error: ReadError::Unavailable { card: "BB-49" }, what } if what.contains("solana-mainnet")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_counted_solana_destination_needs_its_instance_before_any_read() {
+        let mut fx = solana_fixture();
+        for d in fx.config.destinations.iter_mut().filter(|d| d.network_id == "solana-mainnet") {
+            d.instance = None;
+        }
+        let err = collect(&fx.config, &catalog(), &Untouchable).unwrap_err();
+        assert!(
+            matches!(&err, CollectError::Rejected(AggregateError::MissingInstanceBinding(id)) if id == "solana-mainnet"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn fixture_parse_refuses_a_duplicate_solana_reading() {
+        let mut v: serde_json::Value = serde_json::from_str(BASE_PLUS_SOLANA).unwrap();
+        let one = v["readings"]["solana_supplies"][0].clone();
+        v["readings"]["solana_supplies"].as_array_mut().unwrap().push(one);
+        let err = FixtureReadings::parse(&v.to_string()).unwrap_err();
+        assert!(err.contains("Solana supply of solana-mainnet twice"), "{err}");
     }
 
     #[test]

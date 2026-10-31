@@ -17,6 +17,11 @@
 //!   `rumi_icusd_bridge.did`; it is a self-report that is only compared with
 //!   the independent reads.
 //!
+//! * a Solana bridge instance has no `get_supply_audit`; its self-report is assembled from its two
+//!   existing queries `get_buckets` and `get_bridge_info` ([`solana_instance_audit`]), decoded from
+//!   the exact records in `rumi_icusd_sol_bridge.did`. It too is only compared with the independent
+//!   reads and is the explanation of the custody (`RC`, `BU`, `stray`), never a measurement.
+//!
 //! [`AgentQuery`] is the real implementation over `ic-agent`: anonymous
 //! identity, query calls only, response (query signature) verification left on,
 //! which is the agent's default. This module never runs by itself; nothing in
@@ -91,6 +96,30 @@ pub struct SupplyAuditSlice {
     pub coverage_ok: Option<bool>,
     pub base_total_supply_e8s: Option<Nat>,
     pub base_supply_block: Option<u64>,
+}
+
+/// The fields of the Solana instance's `BucketsView` the collector uses. Candid decoding skips the
+/// record's other fields. Pinned to `rumi_icusd_sol_bridge.did` in the tests.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SolanaBucketsSlice {
+    pub outstanding: Nat,
+    pub pending_mint: Nat,
+    pub return_custodied: Nat,
+    pub burn_unknown: Nat,
+    pub pending_release: Nat,
+    pub pending_refund: Nat,
+    pub held: Nat,
+    pub fees: Nat,
+    pub reserved_pulls: Nat,
+    pub unknown_outflow: Nat,
+    pub stray: Nat,
+}
+
+/// The one field of the Solana instance's `BridgeInfo` the collector uses: the escrow subaccount
+/// (hex), the owner being the instance canister itself.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct SolanaBridgeInfoSlice {
+    pub escrow_subaccount: String,
 }
 
 fn nat_to_u128(n: Nat, what: &str) -> Result<u128, ReadError> {
@@ -193,6 +222,83 @@ pub fn instance_supply_audit(
         coverage_ok: a.coverage_ok,
         reported_supply_e8s: opt(a.base_total_supply_e8s, "base_total_supply_e8s")?,
         reported_supply_block: a.base_supply_block,
+        return_custodied_e8s: None,
+        burn_unknown_e8s: None,
+        stray_e8s: None,
+    })
+}
+
+/// A Solana bridge instance's self-report, assembled from `get_buckets` and `get_bridge_info`. The
+/// instance has no query for its in-flight mint, so `inflight_mint_e8s` is `pending_mint` (its upper
+/// bound): the supply bound can only be looser than the instance's own, never tighter. `liabilities`
+/// and `required_escrow` are the instance's own formulas applied to its reported buckets
+/// (`O + PM + RC + BU + PR + pending refund + held + fees`, and that less `unknown_outflow`, floored
+/// at zero). The escrow account is the instance canister with its escrow subaccount. Nothing here is
+/// a measurement: it is shown beside the independent reads and checked against them.
+pub fn solana_instance_audit(
+    q: &dyn IcQuery,
+    instance: &Principal,
+) -> Result<InstanceAudit, ReadError> {
+    let none = candid::encode_args(())
+        .map_err(|e| ReadError::Failed(format!("cannot encode the empty argument: {e}")))?;
+    let buckets_reply = run(q, instance, "get_buckets", none.clone())?;
+    let b = candid::decode_one::<SolanaBucketsSlice>(&buckets_reply).map_err(|e| {
+        ReadError::Failed(format!("get_buckets: cannot decode the reply as a BucketsView: {e}"))
+    })?;
+    let info_reply = run(q, instance, "get_bridge_info", none)?;
+    let info = candid::decode_one::<SolanaBridgeInfoSlice>(&info_reply).map_err(|e| {
+        ReadError::Failed(format!("get_bridge_info: cannot decode the reply as a BridgeInfo: {e}"))
+    })?;
+    let subaccount: [u8; 32] = {
+        let text = info.escrow_subaccount.as_str();
+        let valid = text.len() == 64 && text.bytes().all(|c| c.is_ascii_hexdigit());
+        if !valid {
+            return Err(ReadError::Failed(
+                "get_bridge_info: the escrow subaccount is not 64 hex characters".into(),
+            ));
+        }
+        let mut out = [0u8; 32];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&text[2 * i..2 * i + 2], 16)
+                .map_err(|e| ReadError::Failed(format!("get_bridge_info: {e}")))?;
+        }
+        out
+    };
+    let outstanding = nat_to_u128(b.outstanding, "outstanding")?;
+    let pending_mint = nat_to_u128(b.pending_mint, "pending_mint")?;
+    let rc = nat_to_u128(b.return_custodied, "return_custodied")?;
+    let bu = nat_to_u128(b.burn_unknown, "burn_unknown")?;
+    let pending_release = nat_to_u128(b.pending_release, "pending_release")?;
+    let pending_refund = nat_to_u128(b.pending_refund, "pending_refund")?;
+    let held = nat_to_u128(b.held, "held")?;
+    let fees = nat_to_u128(b.fees, "fees")?;
+    let reserved_pulls = nat_to_u128(b.reserved_pulls, "reserved_pulls")?;
+    let unknown_outflow = nat_to_u128(b.unknown_outflow, "unknown_outflow")?;
+    let stray = nat_to_u128(b.stray, "stray")?;
+    let liabilities = [outstanding, pending_mint, rc, bu, pending_release, pending_refund, held, fees]
+        .iter()
+        .try_fold(0u128, |acc, v| acc.checked_add(*v))
+        .ok_or_else(|| ReadError::Failed("get_buckets: the liabilities overflow u128".into()))?;
+    Ok(InstanceAudit {
+        escrow_account: EscrowBinding::from_principal_bytes(instance.as_slice(), Some(subaccount)),
+        escrow_balance_e8s: None,
+        outstanding_e8s: outstanding,
+        pending_mint_e8s: pending_mint,
+        inflight_mint_e8s: pending_mint,
+        pending_release_e8s: pending_release,
+        pending_refund_e8s: pending_refund,
+        held_e8s: held,
+        fees_e8s: fees,
+        reserved_pulls_e8s: reserved_pulls,
+        unknown_outflow_e8s: unknown_outflow,
+        liabilities_e8s: liabilities,
+        required_escrow_e8s: liabilities.saturating_sub(unknown_outflow),
+        coverage_ok: None,
+        reported_supply_e8s: None,
+        reported_supply_block: None,
+        return_custodied_e8s: Some(rc),
+        burn_unknown_e8s: Some(bu),
+        stray_e8s: Some(stray),
     })
 }
 
@@ -748,6 +854,166 @@ mod tests {
             instance_supply_audit(&q, &instance),
             Err(ReadError::Failed(m)) if m.contains("32 bytes")
         ));
+    }
+
+    /// The full `BucketsView` of the Solana instance, field for field as in
+    /// `rumi_icusd_sol_bridge.did` (`solana_buckets_record_matches_the_instance_did` pins that).
+    #[derive(CandidType, Deserialize, Clone)]
+    struct FullBuckets {
+        reserved_pulls: Nat,
+        pending_mint: Nat,
+        unknown_outflow: Nat,
+        pending_refund: Nat,
+        outstanding: Nat,
+        fees: Nat,
+        held: Nat,
+        burn_unknown: Nat,
+        stray: Nat,
+        return_custodied: Nat,
+        pending_release: Nat,
+    }
+
+    fn full_buckets() -> FullBuckets {
+        let n = |v: u128| Nat::from(v);
+        FullBuckets {
+            reserved_pulls: n(7),
+            pending_mint: n(100),
+            unknown_outflow: n(2),
+            pending_refund: n(5),
+            outstanding: n(9_000_000_000),
+            fees: n(3),
+            held: n(11),
+            burn_unknown: n(200_000_000),
+            stray: n(50_000_000),
+            return_custodied: n(1_000_000_000),
+            pending_release: n(13),
+        }
+    }
+
+    /// The fields of a `type <name> = record { ... };` block of the Solana instance's .did.
+    fn sol_did_record_fields(name: &str) -> Vec<(String, String)> {
+        let did = include_str!("../../../rumi_icusd_sol_bridge/rumi_icusd_sol_bridge.did");
+        let header = format!("type {name} = record {{");
+        let start = did.find(&header).unwrap_or_else(|| panic!("{name} in the Solana .did"));
+        let body = &did[start..];
+        let end = body.find("};").expect("end of the record");
+        body[header.len()..end]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let (field, ty) = l.trim_end_matches(';').split_once(" : ").unwrap();
+                (field.to_string(), ty.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn solana_buckets_record_matches_the_instance_did() {
+        use candid::types::TypeInner;
+        let mut ours: Vec<(String, String)> = match <FullBuckets as CandidType>::ty().as_ref() {
+            TypeInner::Record(fields) => fields.iter().map(|f| (f.id.to_string(), f.ty.to_string())).collect(),
+            other => panic!("not a record: {other:?}"),
+        };
+        let mut theirs = sol_did_record_fields("BucketsView");
+        ours.sort();
+        theirs.sort();
+        assert_eq!(ours, theirs);
+        assert_eq!(ours.len(), 11);
+        // The fields the collector reads are all there, with the names it uses.
+        let wanted: Vec<String> = match <SolanaBucketsSlice as CandidType>::ty().as_ref() {
+            TypeInner::Record(fields) => fields.iter().map(|f| f.id.to_string()).collect(),
+            other => panic!("not a record: {other:?}"),
+        };
+        for w in wanted {
+            assert!(theirs.iter().any(|(f, ty)| *f == w && ty == "nat"), "BucketsView has no nat field {w}");
+        }
+        let info = sol_did_record_fields("BridgeInfo");
+        assert!(info.iter().any(|(f, ty)| f == "escrow_subaccount" && ty == "text"));
+    }
+
+    /// A `BridgeInfo`-shaped reply (a superset of the one field the collector uses).
+    #[derive(CandidType, Deserialize, Clone)]
+    struct FullInfo {
+        escrow_subaccount: String,
+        genesis_hash: String,
+        initialized: bool,
+    }
+
+    fn info_reply(subaccount_hex: &str) -> Vec<u8> {
+        candid::encode_one(FullInfo {
+            escrow_subaccount: subaccount_hex.into(),
+            genesis_hash: "synthetic".into(),
+            initialized: true,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_solana_instance_audit_is_assembled_from_get_buckets_and_get_bridge_info() {
+        let instance = p(8);
+        let sub_hex = "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4";
+        let buckets = candid::encode_one(full_buckets()).unwrap();
+        let info = info_reply(sub_hex);
+        let q = Canned::new(Box::new(move |c, m, arg| {
+            assert_eq!(*c, instance);
+            assert_eq!(arg, candid::encode_args(()).unwrap().as_slice());
+            match m {
+                "get_buckets" => Ok(buckets.clone()),
+                "get_bridge_info" => Ok(info.clone()),
+                other => panic!("unexpected {other}"),
+            }
+        }));
+        let a = solana_instance_audit(&q, &instance).unwrap();
+        assert_eq!(a.outstanding_e8s, 9_000_000_000);
+        assert_eq!(
+            (a.return_custodied_e8s, a.burn_unknown_e8s, a.stray_e8s),
+            (Some(1_000_000_000), Some(200_000_000), Some(50_000_000))
+        );
+        // pending_mint is the upper bound of the in-flight mint (there is no query for the in-flight part).
+        assert_eq!((a.pending_mint_e8s, a.inflight_mint_e8s), (100, 100));
+        // O + PM + RC + BU + PR + pending refund + held + fees, and that less unknown_outflow.
+        let liabilities = 9_000_000_000u128 + 100 + 1_000_000_000 + 200_000_000 + 13 + 5 + 11 + 3;
+        assert_eq!((a.liabilities_e8s, a.required_escrow_e8s), (liabilities, liabilities - 2));
+        // Nothing is invented for what the instance cannot report.
+        assert_eq!((a.escrow_balance_e8s, a.coverage_ok, a.reported_supply_e8s, a.reported_supply_block), (None, None, None, None));
+        // The escrow is the instance canister with its escrow subaccount.
+        let (owner, sub) = a.escrow_account.identity().unwrap();
+        assert_eq!(owner, instance.as_slice().to_vec());
+        assert_eq!(hex_of(&sub), sub_hex);
+        assert_eq!(q.calls.borrow().iter().map(|(_, m)| m.clone()).collect::<Vec<_>>(), vec!["get_buckets", "get_bridge_info"]);
+    }
+
+    fn hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn a_solana_instance_audit_fails_closed() {
+        let instance = p(8);
+        let buckets = candid::encode_one(full_buckets()).unwrap();
+        // A missing method is an unavailable gap naming it.
+        let gone = Canned::new(Box::new(|_, _, _| Err(IcQueryError::MethodNotFound("has no query method".into()))));
+        assert!(matches!(solana_instance_audit(&gone, &instance), Err(ReadError::UnavailableGap(g)) if g.contains("get_buckets")));
+        // A reply that is not a BucketsView fails.
+        let junk = Canned::new(Box::new(|_, _, _| Ok(nat(1))));
+        assert!(matches!(solana_instance_audit(&junk, &instance), Err(ReadError::Failed(m)) if m.contains("cannot decode")));
+        // A bad escrow subaccount fails (not 64 hex characters, or not hex).
+        for bad in ["", "12", &"zz".repeat(32)] {
+            let b = buckets.clone();
+            let i = info_reply(bad);
+            let q = Canned::new(Box::new(move |_, m, _| Ok(if m == "get_buckets" { b.clone() } else { i.clone() })));
+            assert!(matches!(solana_instance_audit(&q, &instance), Err(ReadError::Failed(m)) if m.contains("64 hex")), "{bad:?}");
+        }
+        // An overflowing sum is a failed read, never a wrapped number.
+        let mut huge = full_buckets();
+        let max = Nat::parse(b"340282366920938463463374607431768211455").unwrap();
+        huge.outstanding = max.clone();
+        huge.held = max;
+        let reply = candid::encode_one(huge).unwrap();
+        let i = info_reply(&"ab".repeat(32));
+        let q = Canned::new(Box::new(move |_, m, _| Ok(if m == "get_buckets" { reply.clone() } else { i.clone() })));
+        assert!(matches!(solana_instance_audit(&q, &instance), Err(ReadError::Failed(m)) if m.contains("overflow")));
     }
 
     #[test]
