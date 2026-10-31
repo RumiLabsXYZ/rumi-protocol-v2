@@ -2199,8 +2199,11 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Checks (saved logs `53a-*.log` in the coordinator scratchpad): crate tests 240 passed, 0 failed; clippy `-D warnings` exit 0
   after three lint fixes (one `large_enum_variant` allow with a comment); wasm32 check exit 0; `.did` regenerated through the
   crate's canonical test path, with existing methods kept, Result types renumbered and `UpgradeArgs` gaining admins. No red
-  record: 53a corrects no known defect; the Solana 49b corrections are carried as ported tests that pass. One test expectation
-  (listing order) was corrected in the test, not the code. `cargo fmt` not applied (no lane rustfmt config).
+  record: 53a corrects no known defect; the Solana 49b corrections are carried as ported tests that pass. Development runs failed before
+  the final green: `53a-test1.log` an audit-count expectation (2 versus 3) in
+  `admin::tests::limits_and_fees_are_bounded_and_audited`, then `53a-test2.log` a listing-order expectation; both were
+  resolved by the final green run (`53a-test3.log`, `53a-test4.log`: 240 passed, 0 failed). These are new-feature development
+  failures, not red proofs of a pre-existing defect. `cargo fmt` not applied (no lane rustfmt config).
 - Omissions (MC-DEF-11): simulated ledger only, not a real ICRC ledger or PocketIC; the refund proof fails closed for any
   deposit with an abandoned mint operation until 53b's lane records can prove non-landing; an upgrade from a BB-52 image traps
   with a clear message because the runtime cell was never initialized (nothing deployed); the held-release re-mint has records
@@ -2210,6 +2213,27 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   Stability Pool deposit-intent workflow, not native Solana, Sui, collector or Move test coverage. Watch closed; no rerun.
   Miles also checked the canonical projection: BB-49 and BB-52 local Done and BB-50 and BB-53 In progress are accurate.
 - Next: W29 continues to 53b from `7eaef24f`; W28 continues BB-50.
+
+## Milestone 98 (2026-10-31): BB-53 53a accepted
+
+- Miles (`accept-bb53a.md`) accepted the ICP runtime component at `7eaef24fe2712302b673627be23f25fb9e9b31dd` after a frozen
+  source and differential review (the 2,248-line ledger client differs from the accepted Solana `4394b472` only in its header;
+  all 480 lines of `ledger_ops` match after the state accessor rename) and a direct read of the saved logs (final 240 passed, 0
+  failed; clippy, wasm32 and the canonical Candid regeneration good). Not a working Sui bridge, observed binding, mint or burn
+  execution, PocketIC upgrade or live settlement proof. Full BB-53 stays in progress.
+- Accepted as fresh-install only: BB-52 identity bytes stay decodable, but `post_upgrade` intentionally traps on an
+  uninitialized saga runtime and asks for a reinstall; install arguments require ledger and admin configuration. There is no
+  supported BB-52 to 53a upgrade, and none is inferred from pinned CBOR image tests. No migration endpoint or PocketIC campaign
+  for an undeployed foundation; `runtime.rs`'s introduction says so at the next coherent edit.
+- Evidence correction recorded in milestone 97: `53a-test1.log` failed an audit-count expectation (2 versus 3) before
+  `53a-test2.log`'s listing-order failure; both resolved by the final green run.
+- Carries (required parts of BB-53, not optional gates): 53b completes the MC-DEF-11 fail-closed refund guard when mint
+  operation records arrive (reconcile all attempts and the back-index identity, synchronous admission and link before the first
+  signing, no refund from an abandoned or unknown signed operation), plus the held re-mint driver; 53c obtains the configured
+  Gate's finalized durable record and recomputes `transfer_id` from the actual network, Gate, sender and nonce, verifying every
+  immutable field before `open_release`; events and hints alone cannot pay. Copied guard and queue patterns do not prove Sui
+  signing or provider behavior; profiles disabled and `signing_enabled` false at this pin.
+- Push: 53a joins the next batched source checkpoint (no push for one component or for docs alone).
 
 ## Held live actions
 

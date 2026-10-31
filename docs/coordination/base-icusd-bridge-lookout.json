@@ -482,7 +482,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: publish and bind checks, mint lane and return observer",
-      "evidenceText": "proof=none; 53a delivered for review: 7eaef24f (W29, local), ICP ledger saga, disjoint accounting, release from a verified return only, runtime core; 240 tests, clippy and wasm32 clean. 53b in progress",
+      "evidenceText": "proof=none; 53a accepted (Miles) at 7eaef24f: ICP runtime component, fresh-install only (a BB-52 image upgrade traps). 53b (transport, observed binding, mint lane) in progress (W29); then 53c and 53d",
       "evidenceLinks": []
     },
     {
