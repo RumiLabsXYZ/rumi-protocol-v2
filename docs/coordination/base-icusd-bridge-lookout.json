@@ -450,7 +450,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Solana: mint, return, burn and refund lanes",
-      "evidenceText": "proof=none; Accepted: 12dfee35, 8198fb28, bc96f166, 23dfe841. 49c dba814d6 (mint saga, strict finalized return observer, C1 and C2 monitors) in review; 49d (burn lane, custody, holder burns, stray refunds) in progress, then 49e",
+      "evidenceText": "proof=none; Accepted: 12dfee35, 8198fb28, bc96f166, 23dfe841. 49c dba814d6 in review with two fixes queued for the same W28 (mint admission bound to its deposit; returns bound to their exact signature). 49d in progress, then 49e",
       "evidenceLinks": []
     },
     {

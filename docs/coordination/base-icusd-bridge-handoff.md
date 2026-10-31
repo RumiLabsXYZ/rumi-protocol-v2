@@ -1822,6 +1822,19 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   gas, storage and shared-object latency; event type tags after an upgrade and upgrade-policy behavior; a test asserting the
   real per-network identifiers; the external Move review (MC-DEF-1).
 
+## Milestone 82 (2026-10-31): BB-49 49c reviewed
+
+- Miles (`review-bb49c.md`): finalized shape, owner and balance checks, PM to O dedup, bounded discovery and before/after
+  monitor reads align. Two bounded gaps, reproduce first on the pre-fix code: (1) `submit_mints` awaits `lane::submit_op`,
+  whose commit rechecks the external id and lane but not the originating deposit, and links the deposit only after the
+  send; an old delayed pass can sign and send after a later pass held the deposit under a lowered cap and the owner was
+  refunded, so the original can land without backing; fix by binding the deposit's identity, state and backing into the
+  synchronous admission commit (or an exclusive preparing claim). (2) `process_signature` builds the return id and dedup
+  key from the queried signature without checking the returned wire's first signature, so one valid wire could be
+  credited under several identities; fix by reusing `decode_wire_transaction` and binding its first signature before any
+  return or stray claim. Same W28, after its current 49d writes, as one small separate commit. 49d and 49e keep their
+  carried requirements; no unchanged suites rerun.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
