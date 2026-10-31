@@ -474,7 +474,7 @@
       "state": "In progress",
       "owner": "worker-sonnet",
       "scope": "Sui: instance skeleton, BCS builder, digests and GraphQL mirror",
-      "evidenceText": "proof=none; Started 2026-10-31: Sui bridge canister foundation (skeleton, role paths, mint-id domain, BCS builder with both digests, Ed25519 wire signature, GraphQL mirror with provider quorum); builds only in the shared builder slot",
+      "evidenceText": "proof=none; In progress (W29): Sui canister foundation written in src/rumi_icusd_sui_bridge (ids, BCS builder with both digests, wire signature, Gate decoders, GraphQL quorum); not yet built; waits for the single Rust builder slot",
       "evidenceLinks": []
     },
     {

@@ -1906,6 +1906,28 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Same W28: the 49c fix commit, then this 49d correction as its own commit, each with red and green evidence; then the
   builder slot goes to W29 for BB-52; then 49e. The rest of 49d can be accepted with these corrections.
 
+## Milestone 86 (2026-10-31): BB-52 source written, waiting for the builder
+
+- W29 (`claude-sonnet-5-5`) wrote BB-52 in the untracked crate `src/rumi_icusd_sui_bridge/` (bridge worktree), not built or
+  committed: `ids` (mainnet and testnet only from the sourced genesis digests; key rule; role paths
+  `[rumi-icusd-sui-bridge, v1, treasury|gas|upgrade-custody, chain_id_32]`; mint-id domain; the Move gate's transfer id with
+  six copied vectors), `tx` (strict BCS TransactionData for the sponsored `rumi_icusd_gate::mint` call; signing digest
+  `blake2b(0,0,0 ++ bcs)` and typed digest `blake2b("TransactionData::" ++ bcs)`; wire signature `0x00 || sig || pk`; a strict
+  decoder as the shape guard), `gate` (configured identities and decoders for the Gate object and its tables), `graphql`
+  (bounded queries that always ask for `chainIdentifier` and never "latest"; per-provider network and identity checks before
+  a strict quorum; null fields are Missing, never zero), the signer seam, stable core, set-once controller bindings,
+  `signing_enabled` false by construction, no timer, transport or signing endpoint; plus an independent standard-library
+  Python reference that produces every pinned vector. Sources: MystenLabs/sui mainnet-v1.82.3 (`transaction.rs`,
+  `crypto.rs`, `digests.rs`, the GraphQL schema), sui-rust-sdk `sui-sdk-types` 0.3.2, ts-sdks `bcs.ts`.
+- Decisions by the coordinator: the workspace members line and Cargo.lock wait for the builder slot (handed over after
+  W28's two fix commits); the hand-written BLAKE2b is replaced by the vetted RustCrypto `blake2` 0.10 crate (one lock
+  addition only, fetched within scope; hashlib boundary vectors kept as tests); an offline `sui keytool decode-or-verify-tx`
+  cross-check is allowed only after the pinned source shows it cannot bootstrap a wallet or read the default config, with an
+  empty temporary keystore, `printf 'n\n'` input, no network and `~/.sui` confirmed still absent afterwards.
+- Stated limits: the vectors come from W29's reference, not yet from the official SDK or CLI; GraphQL fixtures are built
+  from the SDL, not captured from a provider; no provider, HTTP transport or signature verification in production; the
+  IC `sign_with_schnorr` mapping for Sui is unrun.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
