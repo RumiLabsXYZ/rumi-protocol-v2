@@ -21,6 +21,8 @@ num-traits = "0.2"
 hex = "0.4"
 # Base58 for Solana addresses and signatures. Already in Cargo.lock (backend uses it).
 bs58 = "0.5"
+# Base64 for account data and wire transactions in the SOL RPC mirror. Already in Cargo.lock.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 # Used for exactly one thing: the ed25519 point decompression that decides whether a
 # derived associated-token address is off-curve (the same call Solana's
 # `bytes_are_curve_point` makes). Already in Cargo.lock; not a Solana SDK crate.

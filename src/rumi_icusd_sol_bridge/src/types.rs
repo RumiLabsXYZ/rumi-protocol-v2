@@ -15,6 +15,8 @@ pub use crate::accounting::Transition;
 // Install arguments
 // ---------------------------------------------------------------------------
 
+// The install argument is decoded once per install or upgrade; boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum BridgeArg {
     Init(InitArgs),
@@ -39,6 +41,12 @@ pub struct InitArgs {
     pub token_program: TokenProgram,
     /// Profile `memo_program`, base58 (U: which Memo version is deployed).
     pub memo_program: String,
+    /// SOL RPC settings (cluster, consensus, cycles). Absent: defaults, with the cluster taken
+    /// from the genesis hash on mainnet-beta and REQUIRED otherwise. (BB-48; optional so a
+    /// BB-47 style install argument still decodes.)
+    pub rpc: Option<RpcSettings>,
+    /// Nonce lane settings. Absent: the defaults in [`LaneSettings`].
+    pub lane: Option<LaneSettings>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, Default)]
@@ -66,6 +74,126 @@ pub struct Pauses {
     pub mints: bool,
     pub releases: bool,
     pub observer: bool,
+}
+
+// ---------------------------------------------------------------------------
+// SOL RPC and nonce lane settings (BB-48)
+// ---------------------------------------------------------------------------
+
+/// Which cluster the SOL RPC canister's default providers are asked for.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolRpcCluster {
+    Mainnet,
+    Devnet,
+    Testnet,
+}
+
+/// Response consensus for one class of SOL RPC call (mirrors the SOL RPC canister's
+/// `ConsensusStrategy`).
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsensusSetting {
+    /// Every queried provider must return the same response.
+    Equality,
+    /// At least `min` of `total` providers must agree (`total` absent: all configured).
+    Threshold { total: Option<u8>, min: u8 },
+}
+
+/// SOL RPC canister call settings. The canister id itself is `BridgeConfig::sol_rpc`, an install
+/// argument and never a default.
+///
+/// Discovery is lenient and verification is strict (note section 4, P4): candidate lists
+/// (`getSignaturesForAddress`) may use a threshold, but every candidate that can change a
+/// decision is then fetched singly with `getTransaction` under `verify`.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct RpcSettings {
+    /// `None` until configured; every call is refused while it is `None`.
+    pub cluster: Option<SolRpcCluster>,
+    /// `getAccountInfo`, `getTransaction`, `getSignatureStatuses`, `sendTransaction`,
+    /// `getSlot`, `getBlock`.
+    pub verify: ConsensusSetting,
+    /// `getSignaturesForAddress`.
+    pub discover: ConsensusSetting,
+    /// Cycles attached to each call (unused cycles are refunded).
+    pub cycles_per_call: u64,
+    pub response_size_estimate: Option<u64>,
+}
+
+impl Default for RpcSettings {
+    fn default() -> Self {
+        RpcSettings {
+            cluster: None,
+            verify: ConsensusSetting::Equality,
+            // 2 of 3, as the note suggests for candidate lists.
+            discover: ConsensusSetting::Threshold { total: Some(3), min: 2 },
+            // About 1 to 5B per small request (source S10); 10B leaves headroom.
+            cycles_per_call: 10_000_000_000,
+            response_size_estimate: None,
+        }
+    }
+}
+
+/// Default of [`LaneSettings::history_horizon_secs`]. **UNMEASURED PLACEHOLDER.** The note sets
+/// the real value after the retention probe, "strictly below the retention measured for the
+/// providers that form the quorum" (blocker `solana-history-availability-unmeasured`). Six hours
+/// is deliberately far below the roughly two days a secondary guide mentions for standard nodes;
+/// it is not a fact about any provider.
+pub const DEFAULT_HISTORY_HORIZON_SECS: u64 = 6 * 3600;
+/// Blocker carried by `history_horizon_secs`.
+pub const HISTORY_HORIZON_BLOCKER: &str = "solana-history-availability-unmeasured";
+
+/// Durable-nonce lane settings (note sections 4 and 9).
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct LaneSettings {
+    /// Nonce accounts per lane (the mint lane and the burn lane each get this many). Start 4.
+    pub nonce_pool_size: u8,
+    /// After this long without the attempt landing, persist and sign the advance-only cancel.
+    pub cancel_after_secs: u64,
+    /// Minimum time between two broadcasts of the same signed bytes.
+    pub rebroadcast_interval_secs: u64,
+    /// Raise a reconcile alarm for an operation unresolved this long (R: 15 minutes).
+    pub reconcile_alarm_secs: u64,
+    /// Halt the lane when the nonce advanced and no consumer was found within this time.
+    /// UNMEASURED, see [`DEFAULT_HISTORY_HORIZON_SECS`].
+    pub history_horizon_secs: u64,
+    /// Fresh-nonce re-issues of one operation before it is held for review.
+    pub max_reissues: u8,
+    /// Most candidates one reconcile tick fetches from a nonce account's signature list.
+    pub discover_limit: u16,
+}
+
+impl Default for LaneSettings {
+    fn default() -> Self {
+        LaneSettings {
+            nonce_pool_size: 4,
+            cancel_after_secs: 300,
+            rebroadcast_interval_secs: 30,
+            reconcile_alarm_secs: 15 * 60,
+            history_horizon_secs: DEFAULT_HISTORY_HORIZON_SECS,
+            max_reissues: 3,
+            discover_limit: 10,
+        }
+    }
+}
+
+impl LaneSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.nonce_pool_size == 0 || self.nonce_pool_size > 16 {
+            return Err("nonce_pool_size must be in 1..=16".into());
+        }
+        if self.rebroadcast_interval_secs == 0 || self.cancel_after_secs < self.rebroadcast_interval_secs {
+            return Err("cancel_after_secs must be at least rebroadcast_interval_secs, which must be > 0".into());
+        }
+        if self.reconcile_alarm_secs == 0 || self.history_horizon_secs == 0 {
+            return Err("reconcile_alarm_secs and history_horizon_secs must be > 0".into());
+        }
+        if self.max_reissues > 10 {
+            return Err("max_reissues must be at most 10".into());
+        }
+        if self.discover_limit == 0 || self.discover_limit > 100 {
+            return Err("discover_limit must be in 1..=100".into());
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +251,8 @@ pub struct BridgeInfo {
     pub admins: Vec<Principal>,
     pub pauses: Pauses,
     pub fees: BridgeFees,
+    pub rpc: RpcSettings,
+    pub lane: LaneSettings,
     pub halted: Option<String>,
     /// Hex instance salt (identity of this instance in every mint id).
     pub instance_salt: String,

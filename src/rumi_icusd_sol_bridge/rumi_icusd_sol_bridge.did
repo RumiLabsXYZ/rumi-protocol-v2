@@ -12,8 +12,10 @@ type BridgeError = variant {
 };
 type BridgeFees = record { release_fee_e8s : nat64; deposit_fee_e8s : nat64 };
 type BridgeInfo = record {
+  rpc : RpcSettings;
   initialized : bool;
   fees : BridgeFees;
+  lane : LaneSettings;
   memo_program : text;
   escrow_subaccount : text;
   sol_rpc : principal;
@@ -39,6 +41,10 @@ type BucketsView = record {
   stray : nat;
   return_custodied : nat;
   pending_release : nat;
+};
+type ConsensusSetting = variant {
+  Equality;
+  Threshold : record { min : nat8; total : opt nat8 };
 };
 type ConsentInfo = record {
   metadata : ConsentMessageMetadata;
@@ -73,7 +79,9 @@ type Icrc21Error = variant {
 };
 type Icrc28TrustedOriginsResponse = record { trusted_origins : vec text };
 type InitArgs = record {
+  rpc : opt RpcSettings;
   fee_recipient : opt Account;
+  lane : opt LaneSettings;
   memo_program : text;
   sol_rpc : principal;
   schnorr_key_name : text;
@@ -81,6 +89,15 @@ type InitArgs = record {
   token_program : TokenProgram;
   icusd_ledger : principal;
   genesis_hash : text;
+};
+type LaneSettings = record {
+  rebroadcast_interval_secs : nat64;
+  discover_limit : nat16;
+  cancel_after_secs : nat64;
+  nonce_pool_size : nat8;
+  reconcile_alarm_secs : nat64;
+  max_reissues : nat8;
+  history_horizon_secs : nat64;
 };
 type LineDisplayPage = record { lines : vec text };
 type Pauses = record {
@@ -91,6 +108,14 @@ type Pauses = record {
 };
 type Result = variant { Ok : ConsentInfo; Err : Icrc21Error };
 type Result_1 = variant { Ok; Err : BridgeError };
+type RpcSettings = record {
+  response_size_estimate : opt nat64;
+  verify : ConsensusSetting;
+  discover : ConsensusSetting;
+  cycles_per_call : nat64;
+  cluster : opt SolRpcCluster;
+};
+type SolRpcCluster = variant { Mainnet; Testnet; Devnet };
 type StandardRecord = record { url : text; name : text };
 type TokenProgram = variant { Classic; Token2022 };
 type UpgradeArgs = record { admins : opt vec principal };

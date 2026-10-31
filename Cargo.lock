@@ -7522,6 +7522,7 @@ dependencies = [
 name = "rumi_icusd_sol_bridge"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bs58",
  "candid",
  "candid_parser",

@@ -6,6 +6,9 @@
 //! * [`build_mint_message`], 2.1: `[AdvanceNonce, ATA CreateIdempotent, MintToChecked, Memo]`;
 //! * [`build_burn_message`], 2.3: `[AdvanceNonce, BurnChecked, Memo]`;
 //! * [`build_refund_message`], 2.4: `[AdvanceNonce, (CreateIdempotent), Memo, TransferChecked]`;
+//! * [`build_advance_only_message`], section 4 step 2: the cancel, `[AdvanceNonce]` alone;
+//! * [`build_nonce_pool_account_message`], section 4: creates and initializes one pool nonce
+//!   account (`CreateAccountWithSeed` + `InitializeNonceAccount`), signed by `fee-payer` only;
 //! * [`build_return_message`], 2.2: the **reference** shape a holder's wallet must produce
 //!   (`[TransferChecked, Memo]`, user-built, normal blockhash). The bridge never builds or
 //!   signs it; it exists so the shape checker and the future wallet connector (BB-39) share one
@@ -248,7 +251,7 @@ pub fn build_burn_message(profile: &TxProfile, req: &BurnRequest) -> Result<Unsi
 
 /// Where a stray refund goes: the original source token account if it still exists, else the
 /// verified sender's ATA, created idempotently first.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefundDestination {
     ExistingAccount { token_account: Pubkey },
     CreateAta { owner: Pubkey },
@@ -306,6 +309,45 @@ pub fn build_refund_message(profile: &TxProfile, req: &RefundRequest) -> Result<
     ));
     let message = compile_message(MessageVersion::Legacy, &instructions, &profile.fee_payer, req.nonce.value)?;
     UnsignedTx::from_message(message)
+}
+
+// ---------------------------------------------------------------------------
+// Section 4: the cancel and the pool bootstrap
+// ---------------------------------------------------------------------------
+
+/// The cancel: an advance-only message on the same nonce (note section 4, reconcile step 2).
+/// `[AdvanceNonce]` alone, `fee-payer` the only signer (it is the nonce authority and the fee
+/// payer). Landing it consumes the nonce value, which excludes every other transaction bound to
+/// that value.
+pub fn build_advance_only_message(profile: &TxProfile, nonce: &NonceRef) -> Result<UnsignedTx, TxError> {
+    profile.validate()?;
+    check_nonce(profile, nonce)?;
+    let instructions = [advance_nonce_instruction(&nonce.account, &profile.fee_payer)];
+    let message = compile_message(MessageVersion::Legacy, &instructions, &profile.fee_payer, nonce.value)?;
+    UnsignedTx::from_message(message)
+}
+
+/// Create and initialize one pool nonce account at `create_with_seed(fee-payer, seed, System)`:
+/// `[CreateAccountWithSeed(base = fee-payer), InitializeNonceAccount(authority = fee-payer)]`,
+/// signed by `fee-payer` alone (one signature, because the base is the funder). The message uses
+/// a REAL recent blockhash (the nonce does not exist yet); later creations can be nonce-led.
+/// `lamports` is the rent-exempt balance for 80 bytes ([`NONCE_ACCOUNT_RENT_LAMPORTS`]).
+/// Returns the unsigned transaction and the new account's address.
+pub fn build_nonce_pool_account_message(
+    profile: &TxProfile,
+    seed: &str,
+    lamports: u64,
+    recent_blockhash: [u8; 32],
+) -> Result<(UnsignedTx, Pubkey), TxError> {
+    profile.validate()?;
+    check_amount(lamports)?;
+    let address = create_with_seed(&profile.fee_payer, seed, &SYSTEM_PROGRAM_ID)?;
+    let instructions = [
+        create_account_with_seed_instruction(&profile.fee_payer, &address, &profile.fee_payer, seed, lamports, NONCE_ACCOUNT_SPACE, &SYSTEM_PROGRAM_ID),
+        initialize_nonce_instruction(&address, &profile.fee_payer),
+    ];
+    let message = compile_message(MessageVersion::Legacy, &instructions, &profile.fee_payer, recent_blockhash)?;
+    Ok((UnsignedTx::from_message(message)?, address))
 }
 
 // ---------------------------------------------------------------------------

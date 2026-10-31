@@ -80,6 +80,13 @@ pub const RECENT_BLOCKHASHES_SYSVAR_ID: Pubkey = [
     0xcf, 0x03, 0x5c, 0x31, 0x45, 0xb2, 0x1a, 0xb3, 0x44, 0xd8, 0x06, 0x2e, 0xa9, 0x40, 0x00, 0x00,
 ];
 
+/// Rent sysvar, read-only account of `InitializeNonceAccount`.
+pub const RENT_SYSVAR_B58: &str = "SysvarRent111111111111111111111111111111111";
+pub const RENT_SYSVAR_ID: Pubkey = [
+    0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x5c, 0x51, 0x21, 0x8c, 0xc9, 0x4c, 0x3d, 0x4a, 0xf1, 0x7f,
+    0x58, 0xda, 0xee, 0x08, 0x9b, 0xa1, 0xfd, 0x44, 0xe3, 0xdb, 0xd9, 0x8a, 0x00, 0x00, 0x00, 0x00,
+];
+
 /// Decimals of the escrow mint: fixed at `InitializeMint2`, 1 base unit = 1 e8s.
 pub const TOKEN_DECIMALS: u8 = 8;
 
@@ -94,8 +101,21 @@ pub const TAG_BURN_CHECKED: u8 = 15;
 pub const TAG_BATCH: u8 = 255;
 /// ATA program `CreateIdempotent` (Create = 0, CreateIdempotent = 1).
 pub const ATA_CREATE_IDEMPOTENT_TAG: u8 = 1;
+/// `SystemInstruction::CreateAccountWithSeed`, bincode `u32` little-endian (read from
+/// `solana-system-interface` 3.2.0 `instruction.rs`).
+pub const SYSTEM_CREATE_ACCOUNT_WITH_SEED_TAG: u32 = 3;
 /// `SystemInstruction::AdvanceNonceAccount`, bincode `u32` little-endian.
 pub const SYSTEM_ADVANCE_NONCE_TAG: u32 = 4;
+/// `SystemInstruction::InitializeNonceAccount`, bincode `u32` little-endian.
+pub const SYSTEM_INITIALIZE_NONCE_TAG: u32 = 6;
+/// Serialized size of a System nonce account (`Versions::Current(State::Initialized(Data))`).
+pub const NONCE_ACCOUNT_SPACE: u64 = 80;
+/// Rent-exempt lamports for an 80-byte account, from the backend's
+/// `NONCE_ACCOUNT_RENT_LAMPORTS` (consistent with the note's rent constants). A parameter of
+/// the pool bootstrap builder, not a fact about the cluster.
+pub const NONCE_ACCOUNT_RENT_LAMPORTS: u64 = 1_447_680;
+/// Longest seed `create_with_seed` accepts.
+pub const MAX_SEED_LEN: usize = 32;
 
 /// Largest legal Solana transaction (packet) in bytes.
 pub const MAX_TRANSACTION_BYTES: usize = 1232;
@@ -421,6 +441,64 @@ pub fn memo_instruction(memo_program: &Pubkey, text: &[u8]) -> Instruction {
     Instruction { program_id: *memo_program, accounts: vec![], data: text.to_vec() }
 }
 
+/// `Pubkey::create_with_seed`: `sha256(base || seed || owner)`, seed at most 32 bytes. The address
+/// `CreateAccountWithSeed` must be given for the same `(base, seed, owner)`.
+pub fn create_with_seed(base: &Pubkey, seed: &str, owner: &Pubkey) -> Result<Pubkey, TxError> {
+    use sha2::{Digest as _, Sha256};
+    if seed.len() > MAX_SEED_LEN {
+        return Err(TxError::InvalidProfile("seed longer than 32 bytes"));
+    }
+    let mut h = Sha256::new();
+    h.update(base);
+    h.update(seed.as_bytes());
+    h.update(owner);
+    Ok(h.finalize().into())
+}
+
+/// `System::CreateAccountWithSeed`. Accounts: funder (writable signer), new account (writable)
+/// and, only when `base != from`, the base account as a read-only signer. Data (bincode):
+/// `[u32 LE 3][base 32][seed: u64 LE length + bytes][lamports u64 LE][space u64 LE][owner 32]`.
+pub fn create_account_with_seed_instruction(
+    from: &Pubkey,
+    to: &Pubkey,
+    base: &Pubkey,
+    seed: &str,
+    lamports: u64,
+    space: u64,
+    owner: &Pubkey,
+) -> Instruction {
+    let mut accounts = vec![AccountMeta::writable(*from, true), AccountMeta::writable(*to, false)];
+    if base != from {
+        accounts.push(AccountMeta::readonly(*base, true));
+    }
+    let mut data = Vec::with_capacity(4 + 32 + 8 + seed.len() + 8 + 8 + 32);
+    data.extend_from_slice(&SYSTEM_CREATE_ACCOUNT_WITH_SEED_TAG.to_le_bytes());
+    data.extend_from_slice(base);
+    data.extend_from_slice(&(seed.len() as u64).to_le_bytes());
+    data.extend_from_slice(seed.as_bytes());
+    data.extend_from_slice(&lamports.to_le_bytes());
+    data.extend_from_slice(&space.to_le_bytes());
+    data.extend_from_slice(owner);
+    Instruction { program_id: SYSTEM_PROGRAM_ID, accounts, data }
+}
+
+/// `System::InitializeNonceAccount`. Accounts: nonce (writable), RecentBlockhashes sysvar and Rent
+/// sysvar (read-only); no signer (the authority is a data field). Data: `[u32 LE 6][authority 32]`.
+pub fn initialize_nonce_instruction(nonce: &Pubkey, authority: &Pubkey) -> Instruction {
+    let mut data = Vec::with_capacity(36);
+    data.extend_from_slice(&SYSTEM_INITIALIZE_NONCE_TAG.to_le_bytes());
+    data.extend_from_slice(authority);
+    Instruction {
+        program_id: SYSTEM_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::writable(*nonce, false),
+            AccountMeta::readonly(RECENT_BLOCKHASHES_SYSVAR_ID, false),
+            AccountMeta::readonly(RENT_SYSVAR_ID, false),
+        ],
+        data,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
@@ -675,6 +753,30 @@ pub fn decode_message(bytes: &[u8]) -> Result<Message, TxError> {
     Ok(Message { version, header, account_keys, recent_blockhash, instructions })
 }
 
+/// Best-effort read of the required signers of a message that may not decode strictly (for
+/// example a v0 message with address-table lookups): the version byte, header and static account
+/// keys only, ignoring everything after them. A nonce authority must sign, and signers are always
+/// static keys, so this is enough to tell whether our fee payer key signed such a transaction.
+pub fn peek_required_signers(bytes: &[u8]) -> Option<Vec<Pubkey>> {
+    let mut r = Reader { bytes, pos: 0 };
+    let first = r.u8().ok()?;
+    let required = if first & 0x80 != 0 {
+        if first & 0x7f != 0 {
+            return None;
+        }
+        r.u8().ok()?
+    } else {
+        first
+    };
+    r.u8().ok()?;
+    r.u8().ok()?;
+    let count = r.compact().ok()?;
+    if count > 256 || required as usize > count {
+        return None;
+    }
+    (0..required).map(|_| r.array32().ok()).collect()
+}
+
 /// The first instruction as `AdvanceNonceAccount`, if it is one: `(nonce account, authority)`.
 /// A durable-nonce transaction is recognized by this leading instruction, and its
 /// `recent_blockhash` must equal the stored nonce value (note section 4).
@@ -775,6 +877,7 @@ mod tests {
             (MEMO_PROGRAM_V3_B58, MEMO_PROGRAM_V3_ID),
             (COMPUTE_BUDGET_PROGRAM_B58, COMPUTE_BUDGET_PROGRAM_ID),
             (RECENT_BLOCKHASHES_SYSVAR_B58, RECENT_BLOCKHASHES_SYSVAR_ID),
+            (RENT_SYSVAR_B58, RENT_SYSVAR_ID),
         ] {
             assert_eq!(pubkey_from_base58(b58).unwrap(), id, "{b58}");
             assert_eq!(pubkey_to_base58(&id), b58);
@@ -1035,6 +1138,25 @@ mod tests {
         assert_eq!(decode_wire_transaction(&one), Err(TxError::SignatureCountMismatch { header: 2, wire: 1 }));
         assert_eq!(first_signature_base58(&[0]), Err(TxError::ZeroSignatures));
         assert!(first_signature_base58(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn peek_reads_the_required_signers_even_when_the_message_does_not_decode() {
+        let ixs = vec![
+            advance_nonce_instruction(&[0x55; 32], &[0x11; 32]),
+            burn_checked_instruction(&TOKEN_PROGRAM_ID, &[0x99; 32], &[0x44; 32], &[0x22; 32], 5),
+        ];
+        let msg = compile_message(MessageVersion::Legacy, &ixs, &[0x11; 32], [0x66; 32]).unwrap();
+        let bytes = serialize_message(&msg).unwrap();
+        assert_eq!(peek_required_signers(&bytes), Some(vec![[0x11; 32], [0x22; 32]]));
+        // v0 with a lookup table list that a strict decode refuses still yields its signers.
+        let mut v0 = serialize_message(&compile_message(MessageVersion::V0, &ixs, &[0x11; 32], [0x66; 32]).unwrap()).unwrap();
+        *v0.last_mut().unwrap() = 1;
+        assert!(decode_message(&v0).is_err());
+        assert_eq!(peek_required_signers(&v0), Some(vec![[0x11; 32], [0x22; 32]]));
+        assert_eq!(peek_required_signers(&bytes[..10]), None, "truncated");
+        assert_eq!(peek_required_signers(&[0x81, 1, 0, 0, 1]), None, "unknown version");
+        assert_eq!(peek_required_signers(&[]), None);
     }
 
     #[test]

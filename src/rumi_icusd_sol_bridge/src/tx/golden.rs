@@ -692,3 +692,86 @@ const RETURN_COMPUTE_BUDGET_T22: &str = concat!(
     "0c15cd5b07000000000804002872756d69317c727c6a746736722d6969686134",
     "2d64716f62792d68613464712d6f62797c2d7c3432",
 );
+
+// ---------------------------------------------------------------------------
+// Section 4 messages (BB-48): the cancel and the pool bootstrap
+// ---------------------------------------------------------------------------
+
+const POOL_SEED: &str = "rumi-nonce-m-0";
+
+fn advance_only_vector(v: &Variant) -> (UnsignedTx, Vec<u8>) {
+    let tx = build_advance_only_message(&profile(v), &nonce()).expect("advance-only message");
+    // Keys: payer (writable signer), nonce (writable), then read-only ascending: System 00.., RecentBlockhashes 06a7..
+    let keys: Vec<&Pubkey> = vec![&FEE_PAYER, &NONCE_ACCOUNT, &SYSTEM, &RECENT_BH];
+    let ixs: Vec<OracleIx<'_>> = vec![(&SYSTEM, vec![&NONCE_ACCOUNT, &RECENT_BH, &FEE_PAYER], ADVANCE_NONCE_DATA.to_vec())];
+    (tx, oracle([1, 0, 1, 2], &keys, &NONCE_VALUE, &ixs))
+}
+
+#[test]
+fn advance_only_golden() {
+    // The cancel does not depend on the token program: both profiles give identical bytes.
+    let tx = check_vector("advance-only", advance_only_vector(&classic()), ADVANCE_ONLY);
+    assert_eq!(tx.required_signers(), &[FEE_PAYER], "the fee payer is the only signer");
+    assert_eq!(leading_advance_nonce(&tx.message), Some((NONCE_ACCOUNT, FEE_PAYER)));
+    assert_eq!(tx.message.instructions.len(), 1, "advance-only");
+    assert_eq!(tx.message_bytes, advance_only_vector(&token2022()).0.message_bytes);
+}
+
+#[test]
+fn nonce_pool_account_vector() {
+    let v = classic();
+    let address = h32("acc33e2fea7982c0de6338462543f70247cea703f63acf23e31afebcb72645a2");
+    assert_eq!(create_with_seed(&FEE_PAYER, POOL_SEED, &SYSTEM_PROGRAM_ID).unwrap(), address);
+    let (tx, built_address) = build_nonce_pool_account_message(&profile(&v), POOL_SEED, NONCE_ACCOUNT_RENT_LAMPORTS, RETURN_BLOCKHASH).expect("pool account message");
+    assert_eq!(built_address, address);
+    // Keys: payer (writable signer); writable others: the new account acc3.. only; read-only ascending:
+    // System 00.., RecentBlockhashes 06a7.., Rent 06a7 d517 192c 5c51...
+    let keys: Vec<&Pubkey> = vec![&FEE_PAYER, &address, &SYSTEM, &RECENT_BH, &RENT_SYSVAR_ID];
+    // CreateAccountWithSeed (tag 3): base == funder, so only two account metas.
+    let create_data = [
+        &3u32.to_le_bytes()[..],
+        &FEE_PAYER,
+        &(POOL_SEED.len() as u64).to_le_bytes(),
+        POOL_SEED.as_bytes(),
+        &NONCE_ACCOUNT_RENT_LAMPORTS.to_le_bytes(),
+        &80u64.to_le_bytes(),
+        &SYSTEM,
+    ]
+    .concat();
+    // InitializeNonceAccount (tag 6): [nonce, RecentBlockhashes, Rent], data = tag + authority.
+    let init_data = [&6u32.to_le_bytes()[..], &FEE_PAYER].concat();
+    let ixs: Vec<OracleIx<'_>> = vec![
+        (&SYSTEM, vec![&FEE_PAYER, &address], create_data),
+        (&SYSTEM, vec![&address, &RECENT_BH, &RENT_SYSVAR_ID], init_data),
+    ];
+    let oracle_bytes = oracle([1, 0, 1, 3], &keys, &RETURN_BLOCKHASH, &ixs);
+    let tx = check_vector("create-nonce-account", (tx, oracle_bytes), CREATE_NONCE_ACCOUNT);
+    assert_eq!(tx.required_signers(), &[FEE_PAYER], "one signature: the base is the funder");
+    assert!(leading_advance_nonce(&tx.message).is_none(), "bootstrap uses a real blockhash, not a nonce");
+    // Seeds longer than 32 bytes and zero lamports are refused.
+    assert!(create_with_seed(&FEE_PAYER, &"x".repeat(33), &SYSTEM_PROGRAM_ID).is_err());
+    assert!(build_nonce_pool_account_message(&profile(&v), POOL_SEED, 0, RETURN_BLOCKHASH).is_err());
+}
+
+const ADVANCE_ONLY: &str = concat!(
+    "0100020411111111111111111111111111111111111111111111111111111111",
+    "1111111155555555555555555555555555555555555555555555555555555555",
+    "5555555500000000000000000000000000000000000000000000000000000000",
+    "0000000006a7d517192c568ee08a845f73d29788cf035c3145b21ab344d8062e",
+    "a940000066666666666666666666666666666666666666666666666666666666",
+    "666666660102030103000404000000",
+);
+
+const CREATE_NONCE_ACCOUNT: &str = concat!(
+    "0100030511111111111111111111111111111111111111111111111111111111",
+    "11111111acc33e2fea7982c0de6338462543f70247cea703f63acf23e31afebc",
+    "b72645a200000000000000000000000000000000000000000000000000000000",
+    "0000000006a7d517192c568ee08a845f73d29788cf035c3145b21ab344d8062e",
+    "a940000006a7d517192c5c51218cc94c3d4af17f58daee089ba1fd44e3dbd98a",
+    "0000000077777777777777777777777777777777777777777777777777777777",
+    "7777777702020200016a03000000111111111111111111111111111111111111",
+    "11111111111111111111111111110e0000000000000072756d692d6e6f6e6365",
+    "2d6d2d3000171600000000005000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000020301030424060000001111",
+    "111111111111111111111111111111111111111111111111111111111111",
+);

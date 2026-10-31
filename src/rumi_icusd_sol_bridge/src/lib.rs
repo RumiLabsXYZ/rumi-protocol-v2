@@ -1,6 +1,6 @@
 //! Rumi icUSD bridge, Solana instance: canonical ICP icUSD escrow <-> escrow-backed icUSD on
-//! Solana. SKELETON (card BB-47): nothing is deployed, signed, funded or run against any
-//! network, and the Solana profile stays `disabled`.
+//! Solana. Source only (cards BB-47 and BB-48): nothing is deployed, signed, funded or run
+//! against any network, and the Solana profile stays `disabled`.
 //!
 //! One canister instance serves one destination cluster (settled topology D1). The guard is
 //! memo plus durable nonce (D3): there is no Solana program, so returns are custodied in a
@@ -15,14 +15,20 @@
 //! * `memo`: the return memo grammar and the canister memos;
 //! * `accounting`: the escrow buckets with the `RC`, `BU` and `stray` additions, and the
 //!   coverage, supply and custody checks;
-//! * `tx`: legacy message builders (mint, burn, refund, reference return), the return-shape
-//!   checker and golden vectors; no Solana SDK;
+//! * `tx`: legacy message builders (mint, burn, refund, the advance-only cancel, the pool
+//!   bootstrap, the reference return), the return-shape checker and golden vectors; no Solana SDK;
+//! * `sol_rpc` (BB-48): the typed SOL RPC mirror, checked offline against a pinned copy of the
+//!   canister interface, the [`sol_rpc::SolRpc`] transport trait and the wasm transport;
+//! * `nonce`, `records`, `lane` (BB-48): the durable-nonce pool, the stable records, and the
+//!   persist-before-sign, same-attempt reconcile engine run against a transport trait and a
+//!   signer trait (mocks in `testkit`, unit tests only);
 //! * `state`, `env`, `admin`, `icrc21`, `types`, `ledger`: the copied instance skeleton.
 //!
-//! Deferred to BB-48 (nonce pool, mint saga) and BB-49 (return observer, burn lane): SOL RPC
-//! client, durable-nonce pool and reconcile, mint saga, mint creation and bind checks, return
-//! observer, burn lane, refund lane, timers, the deposit/return/admin endpoints and the
-//! deposit and release flows built on `ledger.rs`.
+//! Deferred to BB-49: the real `sign_with_schnorr` signer, the timer that calls `lane::tick`,
+//! mint creation and bind checks, the mint saga that applies `OpEvent::Delivered` to the
+//! accounting buckets, the return observer, the burn lane driver and the refund lane, the pool
+//! bootstrap driver (the creation message builder exists), `flows/ledger_ops`, and the deposit,
+//! return and admin endpoints.
 //!
 //! # Open (U) items this crate carries, by profile blocker id
 //!
@@ -38,19 +44,38 @@
 //! * Token tag 255 (`Batch`) deployed or not: `tx::TAG_BATCH` is rejected either way.
 //! * Wallet-added guard instructions in a return are refused (default deny in
 //!   `tx::shape`), to be probed per wallet at activation.
-//! * Not touched here (BB-48 and later): `sol-rpc-canister-id-conflict` (the id is an install
-//!   argument), `solana-rpc-consensus-unmeasured`, `solana-history-availability-unmeasured`,
-//!   Ed25519 signing determinism, `CreateAccountWithSeed` for nonce accounts, and whether the
-//!   Token-2022 metadata authorities can be set to `None`.
+//! * `solana-history-availability-unmeasured`: `LaneSettings::history_horizon_secs` is an
+//!   UNMEASURED placeholder (`types::DEFAULT_HISTORY_HORIZON_SECS`); the lane halts when the nonce
+//!   advanced and no consumer was found within it.
+//! * `solana-rpc-consensus-unmeasured`: the consensus settings (`RpcSettings`, strict `verify`,
+//!   lenient `discover`) are configuration, not measurements; the first discovery page is
+//!   requested without `before` (the interface requires it only for an idempotent reply), which
+//!   is workable because a nonce account is quiet.
+//! * `sol-rpc-canister-id-conflict`: the id is an install argument. The mirror was checked against
+//!   a pinned copy of the interface of unrecorded upstream version, not the deployed canister.
+//! * Ed25519 signing determinism: the lane records every signature and every transaction id and
+//!   does not assume either way.
+//! * `CreateAccountWithSeed` for the nonce accounts is now read from `solana-system-interface`
+//!   3.2.0 (U resolved on paper); the resulting message is golden-vectored like the others.
+//! * Not touched here: whether the Token-2022 metadata authorities can be set to `None`.
 
 pub mod accounting;
 pub mod admin;
 pub mod env;
 pub mod icrc21;
 pub mod ids;
+pub mod lane;
+#[cfg(test)]
+mod lane_tests;
 pub mod ledger;
 pub mod memo;
+pub mod nonce;
+pub mod records;
+pub mod sol_rpc;
 pub mod state;
+#[cfg(test)]
+#[allow(dead_code)]
+mod testkit;
 pub mod tx;
 pub mod types;
 
@@ -104,6 +129,9 @@ fn post_upgrade(arg: Option<BridgeArg>) {
     // `post_upgrade` rolls the upgrade back: the old module and its state stay in place.
     if let Err(e) = state::read_core(|c| state::validate_stored_config(&c.config)) {
         ic_cdk::trap(&format!("upgrade refused, the previous module stays installed: {e}"));
+    }
+    if state::migrate_core() {
+        state::append_audit(None, AuditCtx::note("core schema migrated"));
     }
     state::append_audit(None, AuditCtx::note("upgraded"));
 }
@@ -161,6 +189,8 @@ fn get_bridge_info() -> BridgeInfo {
         admins: c.config.admins.clone(),
         pauses: c.config.pauses.clone(),
         fees: c.config.fees.clone(),
+        rpc: c.config.rpc.clone(),
+        lane: c.config.lane.clone(),
         halted: c.halted.as_ref().map(|h| h.reason.clone()),
         instance_salt: hex::encode(c.instance_salt),
         escrow_subaccount: hex::encode(ids::escrow_subaccount()),

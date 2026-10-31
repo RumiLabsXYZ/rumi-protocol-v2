@@ -48,7 +48,8 @@ MEMO_V3 = b58decode("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
 COMPUTE_BUDGET = b58decode("ComputeBudget111111111111111111111111111111")
 SYSTEM = b"\x00" * 32
 RECENT_BLOCKHASHES = b58decode("SysvarRecentB1ockHashes11111111111111111111")
-assert all(len(k) == 32 for k in (TOKEN, TOKEN22, ATA_PROGRAM, MEMO_V3, COMPUTE_BUDGET, RECENT_BLOCKHASHES))
+RENT_SYSVAR = b58decode("SysvarRent111111111111111111111111111111111")
+assert all(len(k) == 32 for k in (TOKEN, TOKEN22, ATA_PROGRAM, MEMO_V3, COMPUTE_BUDGET, RECENT_BLOCKHASHES, RENT_SYSVAR))
 
 P = 2**255 - 19
 D = (-121665 * pow(121666, P - 2, P)) % P
@@ -113,6 +114,24 @@ def advance_nonce(nonce, authority):
 
 def create_idempotent(funder, wallet, mint, tp):
     return (ATA_PROGRAM, [(funder, True, True), (ata(wallet, tp, mint), False, True), (wallet, False, False), (mint, False, False), (SYSTEM, False, False), (tp, False, False)], b"\x01")
+
+
+def create_with_seed(base, seed, owner):
+    assert len(seed.encode()) <= 32
+    return hashlib.sha256(base + seed.encode() + owner).digest()
+
+
+def create_account_with_seed(frm, to, base, seed, lamports, space, owner):
+    """System tag 3 (bincode): u32 tag, base 32, seed as u64 length + bytes, lamports, space, owner."""
+    data = struct.pack("<I", 3) + base + struct.pack("<Q", len(seed.encode())) + seed.encode() + struct.pack("<QQ", lamports, space) + owner
+    accts = [(frm, True, True), (to, False, True)]
+    if base != frm:
+        accts.append((base, True, False))
+    return (SYSTEM, accts, data)
+
+
+def initialize_nonce(nonce, authority):
+    return (SYSTEM, [(nonce, False, True), (RECENT_BLOCKHASHES, False, False), (RENT_SYSVAR, False, False)], struct.pack("<I", 6) + authority)
 
 
 def checked(tag, amount):
@@ -207,6 +226,16 @@ def message_vectors():
         out["ATA_RECIPIENT_" + suffix] = recipient_ata
         out["ATA_RETURN_" + suffix] = return_ata
         out["ATA_SENDER_" + suffix] = sender_ata
+    # Nonce pool: advance-only (cancel) and the create + initialize bootstrap message.
+    out["ADVANCE_ONLY"] = compile_legacy([advance_nonce(NONCE_ACCT, FEE_PAYER)], FEE_PAYER, NONCE_VALUE)
+    seed = "rumi-nonce-m-0"
+    address = create_with_seed(FEE_PAYER, seed, SYSTEM)
+    out["NONCE_POOL_ADDRESS"] = address
+    out["CREATE_NONCE_ACCOUNT"] = compile_legacy(
+        [create_account_with_seed(FEE_PAYER, address, FEE_PAYER, seed, 1_447_680, 80, SYSTEM), initialize_nonce(address, FEE_PAYER)],
+        FEE_PAYER,
+        RETURN_BLOCKHASH,
+    )
     return out
 
 
@@ -239,15 +268,15 @@ def main():
     golden = parse_rust_consts(root / "src/tx/golden.rs")
     idsrc = parse_rust_consts(root / "src/ids.rs")
     for name, v in msgs.items():
-        if name.startswith("ATA_"):
-            # The ATAs are pinned in golden.rs as `h32("...")` literals.
+        if name.startswith("ATA_") or name == "NONCE_POOL_ADDRESS":
+            # Pinned in golden.rs as `h32("...")` literals.
             continue
         ok = golden.get(name) == v.hex()
         bad += not ok
         print("OK  " if ok else "FAIL", "golden.rs", name)
     rust = open(root / "src/tx/golden.rs").read()
     for name, v in msgs.items():
-        if name.startswith("ATA_"):
+        if name.startswith("ATA_") or name == "NONCE_POOL_ADDRESS":
             ok = v.hex() in rust
             bad += not ok
             print("OK  " if ok else "FAIL", "golden.rs", name)
