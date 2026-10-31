@@ -3027,7 +3027,9 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Limits kept visible: interrupted unknown prompts may stay held indefinitely; the unresolved guard is per tab; real wallet and
   provider behavior unmeasured; supported signature schemes only; the wallet chooses gas; a 50-coin merge bound; fee-small returns
   held and re-minted; no claimed live code or controller policy. Pre-real-value work stays deferred.
-- W23's BB-60 profile upkeep continues independently and is excluded from pushes until its own acceptance. W28 and W29 have no new
+- W23's BB-60 profile upkeep continues independently and was meant to be excluded from pushes until its own acceptance. That is
+  false for the actual push: `f8b4cae1` carried W23's first profile commit `875a1428`, unaccepted, by coordinator error (milestone
+  127; repaired forward, no history rewrite). W28 and W29 have no new
   protocol work. The whole goal is not complete: live activation, BB-46, BB-27, D6 and the held items remain.
 
 ## Milestone 127 (2026-10-31): BB-54 pushed at f8b4cae1; an unreviewed profile commit went with it
@@ -3073,6 +3075,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   saying they are on a separate unpublished branch and not in PR #586, this branch or PR #591 (W23 offers to reword); statements
   left unchanged as uncertain include `xrpl-no-origin-split`, `xrpl-wallet-xaman-only` and several Sui and Solana holds.
 - Awaiting Miles' factual and structural review of both commits; `a73731a8` is held back from any push until then.
+
+## Milestone 129 (2026-10-31): BB-60 upkeep review; forward repair
+
+- Miles (`review-bb60-upkeep.md`) verified `875a1428` mechanically: the three files parse, exactly 48 allowed free-text and
+  source-reference leaves changed, and every other field, list size, key, numeric or config value, date, external URL, historical
+  blocker id and kind, disabled status and null instance reference is unchanged; no code or activation change.
+- Push discrepancy, recorded plainly: GitHub and local refs show `f8b4cae1` as the PR #591 head with `875a1428` in its ancestry, and
+  the `e5c04cef..f8b4cae1` inventory includes all three profile files. Milestone 126's statement that the upkeep was excluded was
+  false for that push (now corrected in place). BB-54's source acceptance stands; the profile metadata was not accepted when
+  pushed. Repair is forward only: no reset, force-push or undo. Before the next push the coordinator inspects the complete
+  origin-to-target commit and file inventory, including already committed worker changes, not only the dirty status.
+- Same W23 (Haiku) makes one more prose-only commit: the Sui BB-54 timing references and `sui-wallet-connector-missing` text where
+  still stale after `a73731a8`; the Sui observer prose describing the accepted BridgeOut and hint discovery, durable ReturnRecord
+  reconciliation and counter-based foreign-mint detection with the MC-DEF-14 held-recovery limit (no new Minted-event gate); the
+  module-byte and official Rust SDK comparisons described as disclosed deferrals (MC-DEF-13), not new source gates; the XRPL
+  validator, cap and pending-import sentences marked as facts about the PR #586 baseline, with the outstanding holds named as the
+  denied publication push, the PR #586 merge, deployment and live evidence. The Solana unattributed-burn limitation stays
+  unchanged (the stronger seam is not implemented at `4394b472`). Then one structural comparison and one coordinator dry run.
+- The live PR #591 CI row already names exact head `f8b4cae1` and run 41191717045 in progress; Miles owns its visibility.
 
 ## Held live actions
 
