@@ -3158,6 +3158,36 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - Then the same W23 (requested Haiku) checks readability and consistency only. Miles reviews the frozen document before any push.
   One substantive lane at a time; W28 on standby. CI run 41193536473 on `db24716f` is Miles' single watch.
 
+## Milestone 133 (2026-10-31): BB-61 decision packet drafted
+
+- W29 (requested Sonnet; actual `claude-sonnet-5-5`) committed `73a035753e8a59c6af61b29779126d8b0a526c9f` "docs(multichain): D6 authority
+  inventory and decision packet (BB-61 prep)", local only: one file, `docs/coordination/multichain/authority-decision-d6.md` (150
+  lines), tracked like the neighbouring multichain docs. Read-only on all source (frozen bridge branch `db24716f`; Move unchanged since
+  `23f75ef1`; XRPL read only at `46cf6b34` in its existing local checkout, no code copied). No network, query, CLI, key, wallet, build
+  or test. Coordinator check: the committed file is the current text, no em dashes, no address-, principal- or key-like strings; one
+  local checkout directory name on line 8 to be neutralised in the readability pass. W29's mention of uncommitted frontend files was
+  stale (the tree was clean).
+- Contents: a five-class authority table with file and line citations; per-family supply, authority, pause, upgrade and custody
+  powers with constraints, bypass paths and unknowns; what threshold signing does and does not remove; a recommended disposable
+  testnet demo arrangement and production options, none implemented; a placeholder-only decision form with the standing test-wallet
+  boundary; the five-step post-authorization order.
+- Source limitations stated (proposal context, not blockers): the EVM contract admin cannot move to a named owner or multisig (the
+  bind requires `defaultAdmin()` to equal the canister's derived admin, and the admin lane has no role grant or transfer); the
+  Solana mint authority cannot move (no SetAuthority encoder); the Sui canister never signs with the upgrade-custody role, so caps
+  sent there are unusable without a canister upgrade, making the runbook's plan A.4 inconsistent with its step B.4 (the proposed
+  demo keeps AdminCap, UpgradeCap and MetadataCap in the dedicated disposable publisher wallet as a named exception); XRPL has no
+  regular-key, signer-list, disable-master or Clawback transaction in the backend source, so XRPL lane custody equals custody of the
+  whole backend.
+- Body-versus-comment findings for Miles: the Sui Move header says returns are never gated, but `bridge_out` checks `min_bridge_out`
+  and `set_limits` has only a lower bound, so an AdminCap holder can make returns impossible, and after an upgrade the version guard
+  blocks returns until `migrate`; on EVM a raised `minBridgeOut` blocks small returns without a pause flag.
+- Unverified or partly verified (marked): OpenZeppelin v5.0.2 role logic (read only through the contract header); additive-upgrade
+  access to private Move fields (inference); Sui multisig and governance- or timelock-controlled controllers (not implemented or
+  tested); several XRPL points (wallet behavior, flag irreversibility, pause semantics partly verified, a fixture canister, live
+  controllers and minting account). Every live controller, canister id, cap holder, contract admin, token-program choice, key name and
+  module hash is unknown and never inferred.
+- Next: W23 (Haiku) readability and consistency pass only; then Miles reviews the frozen packet before any push. BB-61 stays queued.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
