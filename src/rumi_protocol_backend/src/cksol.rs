@@ -106,6 +106,15 @@ enum DepositSolStatus {
     },
 }
 
+/// Consensus inter-canister read used before retiring a retained deposit.
+/// NotFound and Quarantined are deliberately not terminal.
+pub async fn deposit_terminal(id: u64) -> Result<bool, String> {
+    let result: Result<(DepositSolStatus,), _> =
+        ic_cdk::call(minter_principal(), "deposit_sol_status", (id,)).await;
+    result.map(|(status,)| is_terminal(&status))
+        .map_err(|e| format!("Could not verify previous SOL deposit: {e:?}"))
+}
+
 fn minter_error_message(error: &DepositSolError) -> String {
     match error {
         DepositSolError::InsufficientCycles(e) => {

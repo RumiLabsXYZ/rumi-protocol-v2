@@ -8,7 +8,7 @@ import { walletStore } from '../stores/wallet';
 import { auth, walletSessionGeneration } from './auth';
 import { createOisyActor } from './oisySigner';
 import { getCksolOisySignerAgent } from './cksolOisySigner';
-import { getCksolRelay, type IntentStore } from './cksolMinter';
+import { getCksolRelay, getCksolMinter, type IntentStore } from './cksolMinter';
 
 export type PaymentPhase =
 	| 'FundingPending'
@@ -261,8 +261,13 @@ export async function recoverCksolPayment(owner: Principal, storage: IntentStore
 		if (!invalidRaw) throw error;
 	}
 	const originalRaw = storage.getItem(cksolPaymentKey(owner.toText()));
-	const generation = get(walletSessionGeneration);
-	const receipt = await readCksolPayment(owner);
+    const generation = get(walletSessionGeneration), walletType = get(auth).walletType ?? 'unknown';
+    const receipt = await readCksolPayment(owner);
+    if (!isLive(owner,generation,walletType,()=>true)) throw new Error('Wallet session changed.');
+    // The caller holds the paid-request Web Lock. Also reject changed storage
+    // before every synchronous write, including storage altered outside this tab.
+    if (storage.getItem(cksolPaymentKey(owner.toText())) !== originalRaw)
+        return loadCksolPayment(storage,owner.toText());
 	if (!receipt) {
 		// Recover only this known pre-send UI failure. Lost replies and all other
 		// unknown outcomes remain held. Keep the original journal for support.
@@ -281,9 +286,11 @@ export async function recoverCksolPayment(owner: Principal, storage: IntentStore
 				}
 			} catch { /* Preserve the held journal if any reconciliation check fails. */ }
 		}
-		return saved;
-	}
-	if (saved && BigInt(receipt.sequence) === BigInt(saved.sequence)) {
+        if (storage.getItem(cksolPaymentKey(owner.toText())) !== originalRaw)
+            return loadCksolPayment(storage,owner.toText());
+        return saved;
+    }
+    if (saved && BigInt(receipt.sequence) === BigInt(saved.sequence)) {
 		saved.phase = 'Receipt';
 		saved.receipt = receipt;
 		saveCksolPayment(storage, saved);
@@ -321,14 +328,13 @@ async function requireNoLegacyDeposit(
 	const attempt = result?.[0];
 	if (!attempt) return;
 	const status = attempt.status ?? {};
-	if ('Rejected' in status)
-		throw new Error(
-			'A rejected legacy deposit attempt must be acknowledged before a paid deposit can start.'
-		);
-	if ('Queued' in status)
-		throw new Error(
-			`Legacy deposit ${status.Queued} is still retained. Resolve and acknowledge it before paid processing.`
-		);
+    if ('Rejected' in status) return; // Backend retires known rejections before funding.
+    if ('Queued' in status) {
+        const current = await getCksolMinter().deposit_sol_status(BigInt(status.Queued));
+        if (!isLive(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
+        if ('Minted' in current || 'Dropped' in current) return;
+        throw new Error('The previous legacy deposit is still processing or needs reconciliation. Status checks run automatically.');
+    }
 	if ('SubmittedOrUnknown' in status)
 		throw new Error(
 			'A legacy deposit has an unknown outcome. Keep it for reconciliation; paid processing is blocked.'
@@ -389,7 +395,6 @@ export async function submitCksolPayment(
 	if (!isLive(owner, q.sessionGeneration, walletType, live))
 		throw new Error('Wallet session changed.');
 	for (const f of [
-		'next_sequence',
 		'funding_cycles',
 		'processing_fee',
 		'ledger_fee',
@@ -452,13 +457,8 @@ export async function submitCksolPayment(
 	intent.approvalBlock = BigInt(approval.Ok).toString();
 	saveCksolPayment(storage, intent);
 	if (!isLive(owner, g, wt, live)) return intent;
-	if (wt === 'oisy') {
-		// The SDK closes its channel 200 ms after a signed response. A fresh
-		// click must open the next channel before the network quote and start.
-		intent.message = 'Cycles approved. SOL processing has not started. Click Process my deposit to authorize processing.';
-		saveCksolPayment(storage, intent);
-		return intent;
-	}
+    // The page owns a scoped signer with autoCloseTransportChannel=false.
+    // Keep the confirmed approval journal before continuing in the same action.
 	// Refresh all backend terms immediately before the irreversible dispatch.
 	const before = await quoteCksolPayment(owner, wt);
 	if (before.next_sequence !== seq) {
