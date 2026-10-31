@@ -52,7 +52,7 @@
       "title": "Solana implementation (memo plus durable nonce)",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-47 in Review (components; carried items on BB-49). BB-48 in progress (same W28): core reconcile pass, then the history-availability probe tool and runbook with an offline check (executing a public probe stays held). Then BB-49.",
+      "nextAction": "BB-48 follow-up in progress (same W28): halt fence across awaits, fair reconcile paging past held ops, nonce slot generation check; then Miles' acceptance before BB-49 (lanes plus the carried ledger saga, refund locator and custody items).",
       "cardIds": [
         "BB-47",
         "BB-48",

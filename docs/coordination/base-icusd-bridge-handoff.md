@@ -1349,6 +1349,33 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - The interim Return-as-Repayment view label and the unsupported rollback after the first Return are acceptable only before
   the endpoint is exposed; BB-57 publishes a distinct Return tag and regenerates bindings canonically.
 
+## Milestone 60 (2026-10-31): BB-48 core reviewed; lane follow-up
+
+- BB-48 worker report (W28, received after the review): core `45ecd9fe` adds `sol_rpc.rs` (typed mirror and `SolRpc` trait
+  for getAccountInfo, getTransaction, getSignaturesForAddress, getSignatureStatuses, sendTransaction, getSlot, getBlock),
+  `nonce.rs`, `records.rs`, `lane.rs` (persist before sign in one synchronous block, every signature and tx id recorded
+  before send, same bytes rebroadcast, advance-only cancel, exact-byte adoption with memo as ordering only, holds and per-lane
+  halts), state schema 2 with `migrate_core` (MemoryIds 3 to 6) and pinned images; 228 tests (2 ignored image helpers),
+  clippy clean, Wasm 1,270,307 bytes, bridge crate 513, golden reference 0 mismatches. Probe `d1bc0bca`: controller-only
+  `probe_history_availability` behind the cargo feature `history_probe` (production Wasm byte-identical with it off),
+  explicit `ProbeArgs` with no defaults, at most 18 mirror calls, per-call Consistent present or absent, Inconsistent or
+  Error with age against the horizon; runbook `HISTORY_PROBE.md`; 239 tests with and without the feature. Not run against any
+  network. Provenance flag: the repo has no copy of the SOL RPC canister interface, so W28 copied a pinned
+  `sol_rpc_canister.did` verbatim from another local project checkout into `tests/fixtures/` (upstream version unrecorded,
+  not compared with the deployed canister); the mirror is verified only against that fixture. It must be checked against the
+  upstream release and the deployed canister before activation. `history_horizon` is an UNMEASURED 6-hour placeholder.
+  Miles' review of
+  the core (`review-bb48.md`): typed transport, exact-message adoption, persisted signatures and ids, advance-only cancel,
+  null and Inconsistent holds and old-state defaults aligned; no public runtime acceptance; the probe stays a required
+  source and offline deliverable.
+- One follow-up for the same W28, reproduce first through the existing Fixture, TxSigner and SolRpc seams: (1) a halt that
+  lands while an operation awaits a signer or RPC reply must stop any further sign or send, keeping the recorded signature
+  and resuming the same bytes after a legitimate clear; (2) `active_op_ids` takes the lowest 32 non-terminal ids and Held is
+  not terminal, so 32 old held operations can starve a newer one; bounded fair paging must reach it without scanning the
+  whole table or marking held money settled; (3) a free nonce slot can be reserved, consumed and freed again while an older
+  preparation awaits, so the reservation commit must recheck slot identity and nonce value (or a generation) for submit
+  and reissue. Focused checks only; BB-49 starts after Miles accepts BB-48.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
