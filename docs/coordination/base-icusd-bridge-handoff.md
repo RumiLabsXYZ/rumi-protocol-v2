@@ -2887,7 +2887,8 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   fixture-enabled tests failing for the same single F1 cause, not independent defects; quoted "The Sui bridge has not matched the
   published Gate module, so it is not offered."); `red_f2_isolated_old_code.txt` 4 failed, 1 passed by design (the old fixture value
   set temporarily so F1 did not mask F2, then restored); `red_f3_old_form.txt` 4 failed ("notify_sui_return must be called
-  synchronously inside the click: expected "spy" to be called 1 times, but got 0 times", the Discard-style button present twice, and
+  synchronously inside the click: expected "spy" to be called 1 times, but got 0 times", the old notify button still offered
+  with a cold or missing ICP actor in two tests, and
   "expected 'SOLANA RETURN' to be 'SUI RETURN'"); the held-mint wording has no separate red. `final_focused_vitest.txt` 9 files, 202
   passed; `final_check.txt` 30 errors, 66 warnings, 25 files, equal to the baseline; `final_build.txt` exit 0. Two failing
   development runs, both test fixes (a selector scoped to the right panel; a one-shot mock made persistent).
