@@ -2304,6 +2304,25 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   configured and unconfigured paths), with `svelte-check` and the build rerun once.
   No Rust rebuild, broad suite or live action; W29 stays the sole Rust builder.
 
+## Milestone 101 (2026-10-31): BB-62 queued (EVM uncertain-request repair)
+
+- Miles source-confirmed the BB-50 F3 pattern in the existing EVM flow (`next-evm-uncertain-journal.md`):
+  `IcpToBaseForm.svelte` `discard()` removes an uncertain request after a `not_found` query and its uncertain panel shows
+  Discard; `baseBridge/icpToBase.ts` `resolveUncertain()` returns `resume_approved` after a reload when the intent is
+  `approved` and the query is absent, although the original bridge update may already have been invoked. A pending old ingress
+  can be absent from a query and execute after the journal was erased and a new request id created; bridge request-id dedup
+  cannot catch the new id. This is source evidence of a duplicate-attempt escape, not an observed live duplicate.
+- New card BB-62 (next unused id) under the `evm-implementation` priority item, queued for the same W28 only after BB-50 is
+  accepted, ahead of native UI groundwork. Scope: `icpToBase.ts`, `intents.ts` if a durable submitted marker is needed,
+  `IcpToBaseForm.svelte`, the nearest specs; no contract, backend or deployed configuration change. Reuse the accepted minimal
+  F3 repair; preserve Base and EVM APIs, Oisy two-click consent, existing saved intents and same-id retry. Legacy approved
+  snapshots count as potentially submitted; absence alone never clears a fresh id; a never-submitted cancel only if durably
+  distinguished before effects; no new cancellation protocol or approval flow.
+- Checks: a focused delayed-old-update plus `not_found` query plus reload fixture (red before, then no fresh id or pull and
+  same-id continuation), the existing Base happy path and Oisy consent, localStorage unavailable or newer-version behavior if
+  the journal changes; reuse unchanged broad evidence. No wallet, signing, probe, broadcast, deploy or merge. Only W28 and W29
+  stay active.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

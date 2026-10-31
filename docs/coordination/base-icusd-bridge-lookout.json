@@ -548,6 +548,14 @@
       "scope": "Decision D6: controllers, production custody and authority activation",
       "evidenceText": "proof=none; Rob decides controllers and custody per network (EVM admin, Solana mint authority, Sui UpgradeCap, XRPL issuer policy); gates live activation, not source work",
       "evidenceLinks": []
+    },
+    {
+      "id": "BB-62",
+      "state": "Queue",
+      "owner": "worker-sonnet",
+      "scope": "EVM: uncertain ICP-to-Base request stays bound to its id",
+      "evidenceText": "proof=none; Queued for W28 after BB-50 acceptance: the EVM flow lets an uncertain ICP-to-Base request be discarded or resumed after an absent query (source finding, no live duplicate); reuse the BB-50 F3 repair",
+      "evidenceLinks": []
     }
   ]
 }

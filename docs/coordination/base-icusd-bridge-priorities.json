@@ -26,13 +26,14 @@
       "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
       "status": "blocked",
       "blockedReason": "EVM source cards BB-42 to BB-45 are accepted. BB-46 needs public activation evidence: a separate authorization to run read-only probes (Robinhood finalized tag and keyless providers, Monad fast-tag consensus, HyperEVM archive providers). Optional probe tooling is deferred.",
-      "nextAction": "When probes are authorized: run them read-only and record the evidence; a passing Robinhood record flips its row's head rule and install gate.",
+      "nextAction": "When probes are authorized: run them read-only and record the evidence; a passing Robinhood record flips its row's head rule and install gate. BB-62 (the EVM uncertain-request repair, same W28) is queued after BB-50 acceptance.",
       "cardIds": [
         "BB-42",
         "BB-43",
         "BB-44",
         "BB-45",
-        "BB-46"
+        "BB-46",
+        "BB-62"
       ]
     },
     {
