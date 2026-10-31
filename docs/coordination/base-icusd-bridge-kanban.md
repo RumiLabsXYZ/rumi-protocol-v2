@@ -303,3 +303,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-31: BB-49 49c committed (dba814d6, W28): mint saga, strict finalized return observer, C1 and C2 monitors; 49d in progress.
 - 2026-10-31: BB-51 in Review (23f75ef1, W29): Sui Move gate package, 47 offline sui move tests. Incident: an earlier sui run created a throwaway key before the local-only config was used; quarantined, never to be funded or used (handoff milestone 81).
 - 2026-10-31: Miles reviewed BB-49 49c dba814d6: two bounded fixes for the same W28 after its 49d writes (a delayed mint preparation can outlive a refunded deposit; a returned wire is not bound to the queried signature).
+- 2026-10-31: disposition of the accidental Sui key (Miles): EXPOSED, never to be funded, registered, used or reused; quarantine and transcript retained, nothing deleted or read; public-RPC claim for the initial attempts qualified as unverified automatic metadata queries.

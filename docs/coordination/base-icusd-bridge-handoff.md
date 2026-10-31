@@ -1796,10 +1796,21 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   files were MOVED (not deleted) to `/private/tmp/claude-501/sui-quarantine/dot-sui/sui_config/` (client.yaml, sui.keystore,
   sui.aliases, external.keystore, external.aliases), marked NEVER TO BE FUNDED OR USED. The phrase also remains in W29's
   local session transcript (`~/.claude/projects/-Users-robertripley-coding-rumi-protocol-v2/83056354-82fe-4d09-bd03-59aa138ab7ca/subagents/agent-aa397cdfed8185f35.jsonl`),
-  which the coordinator has not read. No pre-existing wallet or config was touched, no public RPC was called (the only
-  network access was the git fetch of the Move framework sources), and `~/.sui` is absent now. Later runs re-created an
+  which the coordinator has not read. No pre-existing wallet or config was touched, and `~/.sui` is absent now. Later runs re-created an
   empty `~/.sui/sui_config` that W29's wrapper removed when empty. Deleting the quarantine and the transcript copy is a
   decision for Rob or Miles; the coordinator deleted nothing.
+- Disposition (Miles, `sui-bootstrap-disposition.md`): the tool-created key is EXPOSED, because its phrase entered tool
+  output and a transcript; it must NEVER be funded, registered as a test wallet, used for signing or reused. The supported
+  statement is that no manual keystore read or use was reported and the phrase was emitted to tool output; it is not claimed
+  that nobody read it, and the local nature of the transcript does not prove the phrase stayed on the device. The five files
+  stay quarantined and the transcript is preserved: no deletion, no read and no overwrite of any pre-existing configuration;
+  cleanup and retention are for Rob later and are not a gate on source or local-test work with an empty config. No secrets
+  or local paths go to Lookout. Public RPC, qualified: no deliberate public RPC, signing, funding or broadcast command was
+  run; for the initial default-config attempts, automatic metadata queries are UNVERIFIED (at the pinned release
+  `sui_flavor.rs` 65-105 can connect through WalletContext and call `get_protocol_config`, and `find_env.rs` 80-103 can
+  cache or fetch a chain id even for a build); the later empty-environment configuration is source-confirmed offline. No new
+  public RPC and no read of secret-bearing output will be done to prove absence. Chronology: the coordinator's earlier check
+  saw no default directory only because the worker had already moved the created files to quarantine.
 - BB-51 `23f75ef1` (W29, bridge branch, only `move/rumi_icusd_gate/`, 7 files): one shared Gate wrapping the TreasuryCap;
   MintCap and AdminCap carrying a `gate_id` checked by every cap-gated function; zero initial supply cap; consumed 32-byte
   mint ids; recipient-bound `bridge_out` with the saved ICP principal and 32-byte subaccount; a sender, nonce, chain and gate
