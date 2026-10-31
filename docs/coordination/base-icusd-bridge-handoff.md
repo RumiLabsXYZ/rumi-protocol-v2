@@ -2269,6 +2269,11 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   match Solana's curve25519-dalek decompression (ZIP-215, non-canonical y accepted).
 - Omissions: no Solana node endpoint is configured (`getSolanaRpc()` returns null until activation supplies one); the keyless
   node adapter is unit-mocked only; no live browser wallet, signing, broadcast, deploy or push.
+- Hygiene follow-up `25b9d4d948f127c9a78084e5949748c17608b5bc` (W28): the five trailing blank lines removed (`git diff --check`
+  over `adcbf1a9~1..25b9d4d9` exits 0) and the Solana entry added to `scripts/regenerate-declarations.sh` (relative `repo_root`
+  kept). One run of the repo script regenerated all 17 entries with `git status -- src/declarations` empty afterwards, so the
+  committed declarations match the repo's own generator and nothing drifted (`bb50/regenerate_declarations_repo_script.txt`).
+  No vitest or Rust rerun (whitespace and a didc script only).
 
 ## Held live actions
 
