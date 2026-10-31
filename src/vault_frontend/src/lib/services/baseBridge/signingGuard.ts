@@ -18,7 +18,7 @@
  */
 
 import type { DestinationView } from './destinations';
-import { intentDestination, type BridgeIntent } from './intents';
+import { intentBelongsTo, type BridgeIntent } from './intents';
 
 export type SigningBlockCode = 'destination_disabled' | 'destination_unknown' | 'wrong_network';
 
@@ -107,14 +107,14 @@ export function signingBlockMessage(signing: SigningContext, walletState: Signin
 }
 
 /**
- * A saved request is bound to the destination it was made for. Handing it to the flow of another
- * destination must send nothing: the text says why, or null when the request belongs here. A keyless
- * (legacy) request belongs to Base. Synchronous, and the request itself is left exactly as it was.
+ * A saved request is bound to the network it was made for. Handing it to the flow of another network
+ * must send nothing: the text says why, or null when the request belongs here. A keyless (legacy) request
+ * belongs to the Base network of the configured Base bridge and to no other. Synchronous, and the request
+ * itself is left exactly as it was.
  */
 export function intentBindingMessage(signing: SigningContext, intent: Pick<BridgeIntent, 'destination'>): string | null {
-  const owner = intentDestination(intent);
-  if (owner === signing.destination.id) return null;
-  return `This saved request is for another destination (${owner}), so it cannot be sent to ${signing.destination.name}. ${NOT_SIGNED_NOTE}`;
+  if (intentBelongsTo(intent, signing.destination)) return null;
+  return `This saved request is for another destination (${intent.destination ?? 'Base'}), so it cannot be sent to ${signing.destination.name}. ${NOT_SIGNED_NOTE}`;
 }
 
 /** Attach the signing context to the dependencies a builder produced. */

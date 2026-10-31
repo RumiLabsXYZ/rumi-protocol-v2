@@ -281,7 +281,8 @@ export function flipCase(address: string, index: number): string {
 /** An enabled Base destination (mainnet), built by hand so specs of the flows never load an actor. */
 export function makeDestination(overrides: Partial<DestinationView> = {}): DestinationView {
   return {
-    id: 'base',
+    id: 'base-mainnet',
+    profileId: 'base',
     family: 'evm',
     name: 'Base',
     chainId: '8453',
@@ -299,7 +300,8 @@ export function makeDestination(overrides: Partial<DestinationView> = {}): Desti
 /** A disabled destination, as the static entries look. */
 export function makeDisabledDestination(overrides: Partial<DestinationView> = {}): DestinationView {
   return makeDestination({
-    id: 'ethereum',
+    id: 'ethereum-mainnet',
+    profileId: 'ethereum',
     name: 'Ethereum',
     chainId: '1',
     status: 'disabled',

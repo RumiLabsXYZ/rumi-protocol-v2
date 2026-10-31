@@ -8,7 +8,7 @@
   import { isEnabled, type DestinationView } from '$lib/services/baseBridge/destinations';
   import { displayAddress } from '$lib/services/baseBridge/eip55';
   import type { Eip1193Provider, EvmWalletState } from '$lib/services/baseBridge/evmWallet';
-  import { intentDestination, type BaseToIcpIntent, type IntentStore } from '$lib/services/baseBridge/intents';
+  import { intentBelongsTo, type BaseToIcpIntent, type IntentStore } from '$lib/services/baseBridge/intents';
   import { withSigning, type SigningContext } from '$lib/services/baseBridge/signingGuard';
   import {
     buildBaseToIcpDeps,
@@ -186,7 +186,7 @@
       .list()
       .filter(
         (i): i is BaseToIcpIntent =>
-          i.kind === 'base_to_icp' && i.status !== 'done' && i.transferId !== trackedId && intentDestination(i) === destination.id,
+          i.kind === 'base_to_icp' && i.status !== 'done' && i.transferId !== trackedId && intentBelongsTo(i, destination),
       );
   });
 

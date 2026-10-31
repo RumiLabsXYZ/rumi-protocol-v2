@@ -63,7 +63,7 @@ import {
 import {
   INTENT_VERSION,
   IntentStoreError,
-  intentDestination,
+  intentBelongsTo,
   intentId,
   newClientNonce,
   type BaseToIcpIntent,
@@ -471,7 +471,7 @@ async function sendBridgeOutOnce(
     intent = request.resume;
     if (
       !sameAddress(intent.from, account) ||
-      intentDestination(intent) !== deps.signing.destination.id ||
+      !intentBelongsTo(intent, deps.signing.destination) ||
       intent.chainId !== chain.chainId ||
       !sameAddress(intent.contract, contract) ||
       intent.destinationPrincipal !== deps.icpPrincipal.toText()

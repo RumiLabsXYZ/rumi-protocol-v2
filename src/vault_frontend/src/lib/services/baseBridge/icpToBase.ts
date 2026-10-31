@@ -57,11 +57,12 @@ import {
 import {
   INTENT_VERSION,
   IntentStoreError,
-  intentDestination,
+  intentBelongsTo,
   intentId,
   isResolved,
   newClientRequestId,
   type IcpToBaseIntent,
+  type IntentOwner,
   type IntentStore,
   type RandomBytes,
 } from './intents';
@@ -520,17 +521,17 @@ export function hasUnresolvedIntent(store: IntentStore): boolean {
 
 /**
  * Requests with no recorded outcome: not yet sent (`prepared`) or approved but not yet bridged (`approved`).
- * Pass a destination id to list only that destination's requests (legacy requests count as Base). The
+ * Pass a destination to list only that network's requests (legacy requests belong to the Base network). The
  * guard in `startIcpToBase` always looks at all of them.
  */
-export function unresolvedIntents(store: IntentStore, destinationId?: string): IcpToBaseIntent[] {
+export function unresolvedIntents(store: IntentStore, owner?: IntentOwner): IcpToBaseIntent[] {
   return store
     .list()
     .filter(
       (intent): intent is IcpToBaseIntent =>
         intent.kind === 'icp_to_base' &&
         (intent.status === 'prepared' || intent.status === 'approved') &&
-        (destinationId === undefined || intentDestination(intent) === destinationId),
+        (owner === undefined || intentBelongsTo(intent, owner)),
     );
 }
 

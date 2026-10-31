@@ -19,6 +19,7 @@
 
 import {
   EVM_DESTINATION_CHAINS,
+  baseNetworkId,
   type BridgeConfig,
   type BridgeConfigResult,
   type EvmDestinationChain,
@@ -43,8 +44,13 @@ export interface DestinationFees {
 }
 
 export interface DestinationView {
-  /** Stable key: the selector entry, and the destination key of saved records. */
+  /**
+   * The per-network key: the profile's network id (`base-mainnet`, `ethereum-mainnet`). It is the selector entry
+   * and the destination key of saved records, and a mainnet and a testnet never share one.
+   */
   id: string;
+  /** The profile this network belongs to, a family label (`base`, `ethereum`). The list holds at most one `base` entry. */
+  profileId: string;
   family: DestinationFamily;
   name: string;
   /** The chain identifier as text. Not every family has a number (and an unreadable one is the empty string). */
@@ -62,7 +68,11 @@ export interface DestinationView {
   config: BridgeConfig | null;
 }
 
-export const BASE_DESTINATION_ID = 'base';
+/** The profile label of the Base bridge. */
+export const BASE_PROFILE_ID = 'base';
+
+/** The key of a Base entry whose chain is not known (the canister could not be read, or reports an unsupported chain). */
+export const BASE_UNKNOWN_ID = 'base-unknown';
 
 function networkOf(testnet: boolean): DestinationNetwork {
   return testnet ? 'testnet' : 'mainnet';
@@ -73,7 +83,9 @@ export function baseDestination(result: BridgeConfigResult, actorCanisterId: str
   if (result.ok) {
     const { config } = result;
     return {
-      id: BASE_DESTINATION_ID,
+      // `config.chain` is a supported Base chain, so it has a key.
+      id: baseNetworkId(config.chain.chainId) ?? BASE_UNKNOWN_ID,
+      profileId: BASE_PROFILE_ID,
       family: 'evm',
       name: config.chain.name,
       chainId: String(config.chain.chainId),
@@ -96,7 +108,8 @@ export function baseDestination(result: BridgeConfigResult, actorCanisterId: str
   }
   const chain = result.chain;
   return {
-    id: BASE_DESTINATION_ID,
+    id: (chain && baseNetworkId(chain.chainId)) || BASE_UNKNOWN_ID,
+    profileId: BASE_PROFILE_ID,
     family: 'evm',
     name: chain?.name ?? 'Base',
     chainId: chain ? String(chain.chainId) : '',
@@ -112,7 +125,8 @@ export function baseDestination(result: BridgeConfigResult, actorCanisterId: str
 
 function staticDestination(chain: EvmDestinationChain): DestinationView {
   return {
-    id: chain.destinationId,
+    id: chain.networkId,
+    profileId: chain.profileId,
     family: 'evm',
     name: chain.name,
     chainId: String(chain.chainId),
@@ -140,7 +154,8 @@ export function buildDestinations(base: BridgeConfigResult, baseActorCanisterId:
 export function unreachableDestinations(message: string, baseActorCanisterId: string | null = null): DestinationView[] {
   return [
     {
-      id: BASE_DESTINATION_ID,
+      id: BASE_UNKNOWN_ID,
+      profileId: BASE_PROFILE_ID,
       family: 'evm',
       name: 'Base',
       chainId: '',

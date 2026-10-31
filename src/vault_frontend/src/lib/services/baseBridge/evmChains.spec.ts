@@ -16,6 +16,7 @@ import {
   ROBINHOOD_CHAIN_TESTNET,
   SUPPORTED_CHAINS,
   addChainParams,
+  baseNetworkId,
   chainIdToHex,
   explorerTxUrl,
   getChainConfig,
@@ -31,18 +32,18 @@ const DASHES = new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}]`);
 describe('EVM destination chain rows', () => {
   it('has the five chains with their mainnet and testnet ids, names and gas symbols', () => {
     expect(
-      EVM_DESTINATION_CHAINS.map((chain) => [chain.destinationId, chain.chainId, chain.name, chain.nativeCurrency.symbol, chain.testnet]),
+      EVM_DESTINATION_CHAINS.map((chain) => [chain.profileId, chain.networkId, chain.chainId, chain.name, chain.nativeCurrency.symbol, chain.testnet]),
     ).toEqual([
-      ['ethereum', 1, 'Ethereum', 'ETH', false],
-      ['ethereum', 11155111, 'Ethereum Sepolia', 'ETH', true],
-      ['arbitrum', 42161, 'Arbitrum One', 'ETH', false],
-      ['arbitrum', 421614, 'Arbitrum Sepolia', 'ETH', true],
-      ['robinhood', 4663, 'Robinhood Chain', 'ETH', false],
-      ['robinhood', 46630, 'Robinhood Chain testnet', 'ETH', true],
-      ['hyperevm', 999, 'HyperEVM', 'HYPE', false],
-      ['hyperevm', 998, 'HyperEVM testnet', 'HYPE', true],
-      ['monad', 143, 'Monad', 'MON', false],
-      ['monad', 10143, 'Monad testnet', 'MON', true],
+      ['ethereum', 'ethereum-mainnet', 1, 'Ethereum', 'ETH', false],
+      ['ethereum', 'ethereum-sepolia', 11155111, 'Ethereum Sepolia', 'ETH', true],
+      ['arbitrum', 'arbitrum-mainnet', 42161, 'Arbitrum One', 'ETH', false],
+      ['arbitrum', 'arbitrum-sepolia', 421614, 'Arbitrum Sepolia', 'ETH', true],
+      ['robinhood', 'robinhood-mainnet', 4663, 'Robinhood Chain', 'ETH', false],
+      ['robinhood', 'robinhood-testnet', 46630, 'Robinhood Chain testnet', 'ETH', true],
+      ['hyperevm', 'hyperevm-mainnet', 999, 'HyperEVM', 'HYPE', false],
+      ['hyperevm', 'hyperevm-testnet', 998, 'HyperEVM testnet', 'HYPE', true],
+      ['monad', 'monad-mainnet', 143, 'Monad', 'MON', false],
+      ['monad', 'monad-testnet', 10143, 'Monad testnet', 'MON', true],
     ]);
     expect(EVM_DESTINATION_CHAINS).toEqual([
       ETHEREUM_MAINNET,
@@ -56,6 +57,17 @@ describe('EVM destination chain rows', () => {
       MONAD_MAINNET,
       MONAD_TESTNET,
     ]);
+  });
+
+  it('gives every network its own key, so a mainnet and a testnet never share one', () => {
+    const keys = EVM_DESTINATION_CHAINS.map((chain) => chain.networkId);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(baseNetworkId(8453)).toBe('base-mainnet');
+    expect(baseNetworkId(84532n)).toBe('base-sepolia');
+    expect(baseNetworkId(31337)).toBe('base-local');
+    expect(baseNetworkId(1)).toBeNull();
+    expect(baseNetworkId(null)).toBeNull();
+    expect(keys).not.toContain('base-mainnet');
   });
 
   it('keeps the hex form consistent with the numeric id, and 18 decimals everywhere', () => {

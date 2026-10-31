@@ -195,34 +195,34 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source support is not activation. The Wasm can now install this network (chain table row, slug-based identifiers, the Verified head rule of finalized minus 3 blocks, per-chain defaults and a sibling deploy script), but this record names no instance (instance_ref is null, deployment is none). The token contract is not deployed, the minter and admin gas addresses are unfunded, and mint gas and fee caps are unmeasured on this network (the chain table's defaults are starting points, not findings). A testnet round trip and an approved launch come first, and the record stays disabled until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 6 row 7"
         },
         {
           "id": "monad-verified-head",
-          "text": "Receipts, logs and the supply audit depend on execution outputs, so the bridge must read from a Verified block (head = finalized minus 3 blocks, per the Monad developer summary). Reading at the finalized head is ordering-level evidence only. The observer head-selection change is not built. Not config-only.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md coordinator addendum and reconciliation (Monad)"
+          "text": "Receipts, logs and the supply audit depend on execution outputs, so the bridge reads from a Verified block (head = finalized minus 3 blocks, per the Monad developer summary); reading at the finalized head is ordering-level evidence only. The chain table now implements this head rule. What is not established is whether independent providers agree on the fast-moving finalized tag often enough for a 2 of 3 quorum through the EVM RPC canister (Monad finalizes in about 600 ms). That consensus evidence needs an authorized read-only probe, and the head rule stays unproven on the live network until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad head rule); docs/coordination/multichain/sources-evm.md coordinator addendum and reconciliation (Monad); docs/coordination/multichain/chain-evm.md section 0 item 6"
         },
         {
           "id": "monad-explicit-gas-limits",
-          "text": "The sender pays gas_limit times price, not gas used, so transactions need explicit gas limits instead of estimate-derived ones.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 6 row 5"
+          "text": "The sender pays gas_limit times price, not gas used, so the lane uses explicit limits. The chain table now starts Monad instances with explicit mint and admin gas limits, but they are unmeasured on Monad (Monad reprices some opcodes, so the Base measurement does not transfer). Mint gas must be measured on Monad testnet before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
         },
         {
           "id": "monad-reserve-aware-funding",
-          "text": "Each EOA keeps a 10 MON reserve; a transaction that dips below it can revert while still paying gas, so funding checks must be reserve-aware.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 6 row 5"
+          "text": "Each EOA keeps a 10 MON reserve; a transaction that dips below it can revert while still paying gas. The chain table now starts Monad instances with a gas reserve above that floor, and the lane requires it on top of gas_limit times max fee. The gas addresses must still be funded well above the reserve before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
         },
         {
           "id": "monad-log-range-chunking",
-          "text": "eth_getLogs block-range limits are provider-specific (100 to 1,000 blocks), so the observer must chunk log scans.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 6 row 4"
+          "text": "eth_getLogs block-range limits are provider-specific (100 to 1,000 blocks). The chain table now starts Monad instances with 100-block log ranges, the low end of the provider caps. That value must still be confirmed against the providers actually used before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 4"
         },
         {
           "id": "monad-token-naming-d8",
@@ -308,34 +308,34 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source support is not activation. The Wasm can now install this network (chain table row, slug-based identifiers, the Verified head rule of finalized minus 3 blocks, per-chain defaults and a sibling deploy script), but this record names no instance (instance_ref is null, deployment is none). The token contract is not deployed, the minter and admin gas addresses are unfunded, and mint gas and fee caps are unmeasured on this network (the chain table's defaults are starting points, not findings). A testnet round trip and an approved launch come first, and the record stays disabled until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 6 row 7"
         },
         {
           "id": "monad-verified-head",
-          "text": "Receipts, logs and the supply audit depend on execution outputs, so the bridge must read from a Verified block (head = finalized minus 3 blocks, per the Monad developer summary). Reading at the finalized head is ordering-level evidence only. The observer head-selection change is not built. Not config-only.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md coordinator addendum and reconciliation (Monad)"
+          "text": "Receipts, logs and the supply audit depend on execution outputs, so the bridge reads from a Verified block (head = finalized minus 3 blocks, per the Monad developer summary); reading at the finalized head is ordering-level evidence only. The chain table now implements this head rule. What is not established is whether independent providers agree on the fast-moving finalized tag often enough for a 2 of 3 quorum through the EVM RPC canister (Monad finalizes in about 600 ms). That consensus evidence needs an authorized read-only probe, and the head rule stays unproven on the live network until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad head rule); docs/coordination/multichain/sources-evm.md coordinator addendum and reconciliation (Monad); docs/coordination/multichain/chain-evm.md section 0 item 6"
         },
         {
           "id": "monad-explicit-gas-limits",
-          "text": "The sender pays gas_limit times price, not gas used, so transactions need explicit gas limits instead of estimate-derived ones.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 6 row 5"
+          "text": "The sender pays gas_limit times price, not gas used, so the lane uses explicit limits. The chain table now starts Monad instances with explicit mint and admin gas limits, but they are unmeasured on Monad (Monad reprices some opcodes, so the Base measurement does not transfer). Mint gas must be measured on Monad testnet before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
         },
         {
           "id": "monad-reserve-aware-funding",
-          "text": "Each EOA keeps a 10 MON reserve; a transaction that dips below it can revert while still paying gas, so funding checks must be reserve-aware.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 6 row 5"
+          "text": "Each EOA keeps a 10 MON reserve; a transaction that dips below it can revert while still paying gas. The chain table now starts Monad instances with a gas reserve above that floor, and the lane requires it on top of gas_limit times max fee. The gas addresses must still be funded well above the reserve before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
         },
         {
           "id": "monad-log-range-chunking",
-          "text": "eth_getLogs block-range limits are provider-specific (100 to 1,000 blocks), so the observer must chunk log scans.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 6 row 4"
+          "text": "eth_getLogs block-range limits are provider-specific (100 to 1,000 blocks). The chain table now starts Monad instances with 100-block log ranges, the low end of the provider caps. That value must still be confirmed against the providers actually used before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 4"
         },
         {
           "id": "monad-token-naming-d8",

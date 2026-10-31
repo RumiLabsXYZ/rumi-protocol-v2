@@ -175,14 +175,14 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source describes this chain (chain table row, slug-based identifiers, per-chain defaults) but keeps the row closed: its head rule is blocked and install refuses it until the historical-state blocker is resolved. This record names no instance (instance_ref is null, deployment is none); the token contract is not deployed, the gas addresses are unfunded, and mint gas and fee caps are unmeasured (the defaults are Base values with 50-block log ranges). The record stays disabled.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 5 row 7"
         },
         {
           "id": "hyperevm-historical-state",
-          "text": "The official default JSON-RPC serves eth_call against the latest block only, not a numbered finalized block, but the observer needs numbered finalized contract state. Needs archive-capable independent providers, or a reviewed observer redesign that does not need historical state. Not config-only.",
+          "text": "The official default JSON-RPC serves eth_call against the latest block only, not a numbered finalized block, but the observer needs numbered finalized contract state. Needs archive-capable independent providers, or a reviewed observer redesign that does not need historical state. Not config-only. The chain table keeps this row closed (head rule blocked, install refused) until then.",
           "kind": "code",
           "source": "docs/coordination/multichain/sources-evm.md coordinator addendum (HyperEVM)"
         },
@@ -284,14 +284,14 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source describes this chain (chain table row, slug-based identifiers, per-chain defaults) but keeps the row closed: its head rule is blocked and install refuses it until the historical-state blocker is resolved. This record names no instance (instance_ref is null, deployment is none); the token contract is not deployed, the gas addresses are unfunded, and mint gas and fee caps are unmeasured (the defaults are Base values with 50-block log ranges). The record stays disabled.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 5 row 7"
         },
         {
           "id": "hyperevm-historical-state",
-          "text": "The official default JSON-RPC serves eth_call against the latest block only, not a numbered finalized block, but the observer needs numbered finalized contract state. Needs archive-capable independent providers, or a reviewed observer redesign that does not need historical state. Not config-only.",
+          "text": "The official default JSON-RPC serves eth_call against the latest block only, not a numbered finalized block, but the observer needs numbered finalized contract state. Needs archive-capable independent providers, or a reviewed observer redesign that does not need historical state. Not config-only. The chain table keeps this row closed (head rule blocked, install refused) until then.",
           "kind": "code",
           "source": "docs/coordination/multichain/sources-evm.md coordinator addendum (HyperEVM)"
         },

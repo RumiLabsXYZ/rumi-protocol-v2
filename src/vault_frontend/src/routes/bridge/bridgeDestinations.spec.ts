@@ -3,7 +3,7 @@ import { flushSync, mount, tick, unmount } from 'svelte';
 import { Principal } from '@dfinity/principal';
 
 const ACCOUNT = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const OTHER_IDS = ['ethereum', 'arbitrum', 'robinhood', 'hyperevm', 'monad'];
+const OTHER_IDS = ['ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet'];
 
 const mocks = vi.hoisted(() => {
   function writable<T>(initial: T) {
@@ -219,13 +219,13 @@ describe('the destination selector on the page', () => {
     const group = host.querySelector('[role="radiogroup"]')!;
     expect(group.getAttribute('aria-label')).toBe('Destination network');
     expect(Array.from(group.querySelectorAll('[role="radio"]')).map((entry) => entry.id)).toEqual(
-      ['base', ...OTHER_IDS].map((id) => `destination-${id}`),
+      ['base-mainnet', ...OTHER_IDS].map((id) => `destination-${id}`),
     );
 
-    expect(option('base')!.getAttribute('aria-checked')).toBe('true');
-    expect(option('base')!.hasAttribute('aria-disabled')).toBe(false);
-    expect(option('base')!.tagName).toBe('BUTTON');
-    expect(option('base')!.textContent).toContain('Chain 8453');
+    expect(option('base-mainnet')!.getAttribute('aria-checked')).toBe('true');
+    expect(option('base-mainnet')!.hasAttribute('aria-disabled')).toBe(false);
+    expect(option('base-mainnet')!.tagName).toBe('BUTTON');
+    expect(option('base-mainnet')!.textContent).toContain('Chain 8453');
     for (const id of OTHER_IDS) {
       const entry = option(id)!;
       expect(entry.getAttribute('aria-disabled'), id).toBe('true');
@@ -251,7 +251,7 @@ describe('the destination selector on the page', () => {
       expect(document.activeElement, id).not.toBe(entry);
     }
     await settle();
-    expect(option('base')!.getAttribute('aria-checked')).toBe('true');
+    expect(option('base-mainnet')!.getAttribute('aria-checked')).toBe('true');
     for (const id of OTHER_IDS) expect(option(id)!.getAttribute('aria-checked'), id).toBe('false');
     expect(host.querySelector('#icp-amount')).toBeTruthy();
     expect(host.textContent).toContain('Bridge icUSD');
@@ -265,8 +265,8 @@ describe('the destination selector on the page', () => {
     for (const name of ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'End', 'Home']) {
       group.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
       flushSync();
-      expect(option('base')!.getAttribute('aria-checked'), name).toBe('true');
-      expect(document.activeElement, name).toBe(option('base'));
+      expect(option('base-mainnet')!.getAttribute('aria-checked'), name).toBe('true');
+      expect(document.activeElement, name).toBe(option('base-mainnet'));
     }
   });
 
@@ -305,8 +305,8 @@ describe('a destination that is disabled', () => {
 
     expect(host.textContent).toContain('Bridge is not available yet');
     expect(host.textContent).toContain('The Base contract is not bound yet.');
-    expect(option('base')!.getAttribute('aria-disabled')).toBe('true');
-    expect(option('base')!.tagName).toBe('DIV');
+    expect(option('base-mainnet')!.getAttribute('aria-disabled')).toBe('true');
+    expect(option('base-mainnet')!.tagName).toBe('DIV');
     expect(host.querySelector('[role="tablist"]')).toBeNull();
     expect(host.querySelector('#icp-amount')).toBeNull();
     expect(host.querySelector('#base-amount')).toBeNull();
@@ -363,7 +363,7 @@ describe('the 60 second refresh turns the selected destination off', () => {
     expect(button(/Approve and bridge/)).toBeUndefined();
     expect(host.querySelector('#icp-amount')).toBeNull();
     expect(host.querySelector('[role="tablist"]')).toBeNull();
-    expect(option('base')!.getAttribute('aria-disabled')).toBe('true');
+    expect(option('base-mainnet')!.getAttribute('aria-disabled')).toBe('true');
     expect(signers.ledger.icrc2_approve).not.toHaveBeenCalled();
     expect(signers.bridge.bridge_to_base).not.toHaveBeenCalled();
   });
@@ -388,7 +388,7 @@ describe('the 60 second refresh turns the selected destination off', () => {
     expect(host.querySelector('#icp-amount')).toBeTruthy();
     expect(host.querySelector('[aria-label="Transfer summary"]')).toBeNull();
     expect(host.querySelector<HTMLInputElement>('#icp-amount')!.value).toBe('');
-    expect(option('base')!.getAttribute('aria-disabled')).toBeNull();
+    expect(option('base-mainnet')!.getAttribute('aria-disabled')).toBeNull();
     expectNoSignature();
   });
 
@@ -398,7 +398,7 @@ describe('the 60 second refresh turns the selected destination off', () => {
     await fire();
     await settle();
     expect(host.querySelector('[aria-label="Transfer summary"]')).toBeTruthy();
-    expect(option('base')!.getAttribute('aria-disabled')).toBeNull();
+    expect(option('base-mainnet')!.getAttribute('aria-disabled')).toBeNull();
   });
 });
 
@@ -444,7 +444,7 @@ describe('a PAUSED Base keeps the behavior it always had', () => {
     await settle(24);
 
     const panel = host.querySelector<HTMLElement>('#panel-base-to-icp')!;
-    expect(option('base')!.hasAttribute('aria-disabled')).toBe(false);
+    expect(option('base-mainnet')!.hasAttribute('aria-disabled')).toBe(false);
     expect(panel.textContent).toContain('Releases to the Internet Computer are paused right now. A transfer sent now would wait until releases resume.');
     type('#base-amount', '2.5');
     await new Promise((resolve) => setTimeout(resolve, 320));
@@ -465,7 +465,7 @@ describe('a PAUSED Base keeps the behavior it always had', () => {
     mocks.loadBridgeConfig.mockResolvedValue(baseConfig(makeBridgeInfo({ pauses: { mints: false, observer: false, releases: false, deposits: true } })));
     render();
     await settle();
-    expect(option('base')!.hasAttribute('aria-disabled')).toBe(false);
+    expect(option('base-mainnet')!.hasAttribute('aria-disabled')).toBe(false);
     expect(host.textContent).toContain('Deposits to Base are paused right now. Your icUSD has not moved.');
     type('#icp-amount', '25');
     type('#icp-recipient', '0x1111111111111111111111111111111111111111');

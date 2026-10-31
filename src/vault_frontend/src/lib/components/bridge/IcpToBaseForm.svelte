@@ -8,7 +8,7 @@
   import { isEnabled, type DestinationView } from '$lib/services/baseBridge/destinations';
   import { displayAddress } from '$lib/services/baseBridge/eip55';
   import type { EvmWalletState } from '$lib/services/baseBridge/evmWallet';
-  import { intentDestination, type IcpToBaseIntent, type IntentStore } from '$lib/services/baseBridge/intents';
+  import { intentBelongsTo, type IcpToBaseIntent, type IntentStore } from '$lib/services/baseBridge/intents';
   import { withSigning, type SigningContext } from '$lib/services/baseBridge/signingGuard';
   import {
     buildIcpToBaseDeps,
@@ -95,7 +95,7 @@
       flow.kind === 'approving' || flow.kind === 'approved' || flow.kind === 'submitting' || flow.kind === 'uncertain' || flow.kind === 'tracking'
         ? flow.intent.clientRequestId
         : null;
-    return store ? unresolvedIntents(store, destination.id).filter((intent) => intent.clientRequestId !== onScreen) : [];
+    return store ? unresolvedIntents(store, destination).filter((intent) => intent.clientRequestId !== onScreen) : [];
   });
   /** Deposits started on this device that are still in progress. */
   const inProgress = $derived.by(() => {
@@ -105,7 +105,7 @@
           .list()
           .filter(
             (i): i is IcpToBaseIntent =>
-              i.kind === 'icp_to_base' && i.status === 'submitted' && i.depositId !== undefined && intentDestination(i) === destination.id,
+              i.kind === 'icp_to_base' && i.status === 'submitted' && i.depositId !== undefined && intentBelongsTo(i, destination),
           )
       : [];
   });

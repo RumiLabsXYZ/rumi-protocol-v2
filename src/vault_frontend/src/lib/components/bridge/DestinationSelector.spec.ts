@@ -31,7 +31,7 @@ function twoEnabled(): DestinationView[] {
   return [makeDestination(), ethereum, { ...arbitrum, status: 'enabled', reason: null }, ...rest];
 }
 
-function render(destinations: DestinationView[], selectedId: string | null = 'base') {
+function render(destinations: DestinationView[], selectedId: string | null = 'base-mainnet') {
   instance = mount(DestinationSelector, { target: host, props: { destinations, selectedId, onSelect } });
   flushSync();
 }
@@ -48,17 +48,17 @@ describe('DestinationSelector', () => {
     const radios = Array.from(host.querySelectorAll('[role="radio"]'));
     expect(radios).toHaveLength(6);
     expect(host.querySelector('[role="radiogroup"]')!.getAttribute('aria-label')).toBe('Destination network');
-    expect(option('base').getAttribute('aria-checked')).toBe('true');
-    for (const id of ['ethereum', 'arbitrum', 'robinhood', 'hyperevm', 'monad']) {
+    expect(option('base-mainnet').getAttribute('aria-checked')).toBe('true');
+    for (const id of ['ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet']) {
       expect(option(id).getAttribute('aria-checked'), id).toBe('false');
     }
-    expect(option('base').textContent).toContain('Mainnet');
-    expect(option('base').textContent).toContain('Chain 8453');
+    expect(option('base-mainnet').textContent).toContain('Mainnet');
+    expect(option('base-mainnet').textContent).toContain('Chain 8453');
   });
 
   it('marks a disabled entry with its reason, aria-disabled, and no way to focus or activate it', () => {
     render(oneEnabled());
-    for (const id of ['ethereum', 'arbitrum', 'robinhood', 'hyperevm', 'monad']) {
+    for (const id of ['ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet']) {
       const entry = option(id);
       expect(entry.getAttribute('aria-disabled'), id).toBe('true');
       expect(entry.tagName).toBe('DIV'); // not a button
@@ -66,26 +66,26 @@ describe('DestinationSelector', () => {
       expect(entry.textContent).toContain('Unavailable');
       expect(entry.textContent).toContain('Not available yet: there is no icUSD bridge to');
     }
-    expect(option('base').hasAttribute('aria-disabled')).toBe(false);
-    expect(option('base').tagName).toBe('BUTTON');
+    expect(option('base-mainnet').hasAttribute('aria-disabled')).toBe(false);
+    expect(option('base-mainnet').tagName).toBe('BUTTON');
   });
 
   it('has exactly one tab stop: the selected enabled entry', () => {
     render(oneEnabled());
     const stops = Array.from(host.querySelectorAll('[role="radio"]')).filter((entry) => (entry as HTMLElement).tabIndex === 0);
-    expect(stops.map((entry) => entry.id)).toEqual(['destination-base']);
+    expect(stops.map((entry) => entry.id)).toEqual(['destination-base-mainnet']);
   });
 
   it('does nothing when a disabled entry is clicked, pressed or focused', () => {
     render(oneEnabled());
-    const entry = option('ethereum');
+    const entry = option('ethereum-mainnet');
     entry.click();
     entry.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     entry.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     entry.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
     flushSync();
     expect(onSelect).not.toHaveBeenCalled();
-    expect(option('base').getAttribute('aria-checked')).toBe('true');
+    expect(option('base-mainnet').getAttribute('aria-checked')).toBe('true');
     expect(entry.getAttribute('aria-checked')).toBe('false');
 
     entry.focus();
@@ -94,28 +94,28 @@ describe('DestinationSelector', () => {
 
   it('selects an enabled entry on click', () => {
     render(twoEnabled());
-    option('arbitrum').click();
+    option('arbitrum-mainnet').click();
     expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith('arbitrum');
+    expect(onSelect).toHaveBeenCalledWith('arbitrum-mainnet');
   });
 
   it('moves between enabled entries with the arrow keys, skipping disabled ones, and focuses the one it selects', () => {
-    render(twoEnabled(), 'base');
+    render(twoEnabled(), 'base-mainnet');
     key('ArrowRight');
-    expect(onSelect).toHaveBeenLastCalledWith('arbitrum'); // skipped Ethereum
-    expect(document.activeElement).toBe(option('arbitrum'));
+    expect(onSelect).toHaveBeenLastCalledWith('arbitrum-mainnet'); // skipped Ethereum
+    expect(document.activeElement).toBe(option('arbitrum-mainnet'));
     key('ArrowLeft');
-    expect(onSelect).toHaveBeenLastCalledWith('arbitrum'); // from Base (selectedId is a prop) back to the last enabled
+    expect(onSelect).toHaveBeenLastCalledWith('arbitrum-mainnet'); // from Base (selectedId is a prop) back to the last enabled
     key('End');
-    expect(onSelect).toHaveBeenLastCalledWith('arbitrum');
+    expect(onSelect).toHaveBeenLastCalledWith('arbitrum-mainnet');
     key('Home');
-    expect(onSelect).toHaveBeenLastCalledWith('base');
-    expect(document.activeElement).toBe(option('base'));
+    expect(onSelect).toHaveBeenLastCalledWith('base-mainnet');
+    expect(document.activeElement).toBe(option('base-mainnet'));
   });
 
   it('never selects or focuses a disabled entry from the keyboard, however many keys are pressed', () => {
-    render(twoEnabled(), 'base');
-    const disabled = new Set(['ethereum', 'robinhood', 'hyperevm', 'monad']);
+    render(twoEnabled(), 'base-mainnet');
+    const disabled = new Set(['ethereum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet']);
     for (const name of ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End', 'ArrowRight', 'ArrowRight', 'ArrowLeft']) {
       key(name);
       for (const call of onSelect.mock.calls) expect(disabled.has(call[0] as string), `${name} selected ${call[0]}`).toBe(false);
@@ -128,8 +128,8 @@ describe('DestinationSelector', () => {
     render(oneEnabled());
     key('ArrowRight');
     key('ArrowLeft');
-    expect(onSelect.mock.calls.map((call) => call[0])).toEqual(['base', 'base']);
-    expect(document.activeElement).toBe(option('base'));
+    expect(onSelect.mock.calls.map((call) => call[0])).toEqual(['base-mainnet', 'base-mainnet']);
+    expect(document.activeElement).toBe(option('base-mainnet'));
   });
 
   it('ignores other keys', () => {
@@ -143,18 +143,18 @@ describe('DestinationSelector', () => {
     const entries = oneEnabled();
     entries[0] = makeDestination({ status: 'disabled', reason: 'The Base contract is not bound yet.' });
     entries[2] = { ...entries[2], status: 'enabled', reason: null };
-    render(entries, 'base');
-    expect(option('base').getAttribute('aria-checked')).toBe('true');
-    expect(option('base').getAttribute('aria-disabled')).toBe('true');
-    expect(option('base').textContent).toContain('The Base contract is not bound yet.');
+    render(entries, 'base-mainnet');
+    expect(option('base-mainnet').getAttribute('aria-checked')).toBe('true');
+    expect(option('base-mainnet').getAttribute('aria-disabled')).toBe('true');
+    expect(option('base-mainnet').textContent).toContain('The Base contract is not bound yet.');
     const stops = Array.from(host.querySelectorAll('[role="radio"]')).filter((entry) => (entry as HTMLElement).tabIndex === 0);
-    expect(stops.map((entry) => entry.id)).toEqual(['destination-arbitrum']);
+    expect(stops.map((entry) => entry.id)).toEqual(['destination-arbitrum-mainnet']);
   });
 
   it('shows a testnet loudly and an unknown chain without a network badge', () => {
     render([makeDestination({ name: 'Base Sepolia', chainId: '84532', network: 'testnet' }), makeDestination({ id: 'x', name: 'Base', chainId: '', status: 'disabled', reason: 'r' })]);
-    expect(option('base').textContent).toContain('Testnet');
-    expect(option('base').querySelector('.net.testnet')).toBeTruthy();
+    expect(option('base-mainnet').textContent).toContain('Testnet');
+    expect(option('base-mainnet').querySelector('.net.testnet')).toBeTruthy();
     expect(option('x').textContent).not.toMatch(/Mainnet|Testnet|Chain/);
   });
 });

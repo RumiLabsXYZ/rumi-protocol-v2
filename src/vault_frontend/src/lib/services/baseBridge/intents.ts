@@ -15,10 +15,14 @@
  * Versions. Version 1 records (the original Base-only app) carry no destination.
  * Version 2 adds a destination key to every NEW intent: the same 0x address is
  * valid on every EVM chain, so a saved row must say which destination it was
- * for. A version 1 record is still read in full, and an intent without the key
- * is bound to Base when it is read (`intentDestination`). The storage key keeps
- * its `v1` name on purpose, so nothing already on a device is orphaned. An older
- * build that finds a version 2 record sees a newer version and goes read-only.
+ * for. The key is PER NETWORK, the profile's network id (`base-mainnet`,
+ * `base-sepolia`, `ethereum-mainnet`), never a family label such as `base`: a
+ * mainnet and a testnet instance never share one key. A version 1 record is
+ * still read in full. An intent without the key belongs to the Base network of
+ * the page's configured Base bridge (`intentBelongsTo`), never to any other
+ * network. The storage key keeps its `v1` name on purpose, so nothing already on
+ * a device is orphaned. An older build that finds a version 2 record sees a
+ * newer version and goes read-only.
  */
 
 import { bytesToHex, isAddress, isBytes32, isHex } from './abi';
@@ -27,8 +31,8 @@ import type { KeyValueStorage } from './evmWallet';
 export const INTENT_VERSION = 2;
 /** The first record version: no destination key on its intents. Still read, never written for new intents. */
 export const LEGACY_INTENT_VERSION = 1;
-/** Every intent written before destinations existed was a Base intent. */
-export const LEGACY_DESTINATION_ID = 'base';
+/** Every intent written before destinations existed was a Base intent: it belongs to the Base profile. */
+export const LEGACY_PROFILE_ID = 'base';
 export type IntentVersion = typeof LEGACY_INTENT_VERSION | typeof INTENT_VERSION;
 export const INTENT_STORAGE_PREFIX = 'rumi:base-bridge:v1:';
 /** Resolved intents beyond this many are pruned oldest first. Unresolved ones are never pruned. */
@@ -41,7 +45,7 @@ export type BaseToIcpStatus = 'prepared' | 'sent' | 'done';
 export interface IcpToBaseIntent {
   /** 1: written before destinations existed. 2: carries `destination`. */
   v: IntentVersion;
-  /** Destination id (for example `base`). Absent only on version 1 intents, which are Base intents. */
+  /** Per-network destination key (for example `base-mainnet`). Absent only on version 1 intents, which are Base intents. */
   destination?: string;
   kind: 'icp_to_base';
   /** 0x + 32 hex chars: 16 random bytes. */
@@ -60,7 +64,7 @@ export interface IcpToBaseIntent {
 export interface BaseToIcpIntent {
   /** 1: written before destinations existed. 2: carries `destination`. */
   v: IntentVersion;
-  /** Destination id (for example `base`). Absent only on version 1 intents, which are Base intents. */
+  /** Per-network destination key (for example `base-mainnet`). Absent only on version 1 intents, which are Base intents. */
   destination?: string;
   kind: 'base_to_icp';
   /** 0x + 64 hex: 32 random bytes. */
@@ -82,12 +86,32 @@ export interface BaseToIcpIntent {
 
 export type BridgeIntent = IcpToBaseIntent | BaseToIcpIntent;
 
-/** The destination an intent belongs to. An intent without the key is a legacy intent, bound explicitly to Base. */
-export function intentDestination(intent: Pick<BridgeIntent, 'destination'>): string {
-  return intent.destination ?? LEGACY_DESTINATION_ID;
+/** The part of a destination that decides whether an intent belongs to it. */
+export interface IntentOwner {
+  /** Per-network key (the profile's network id). */
+  id: string;
+  /** The profile this network belongs to (a family label). */
+  profileId: string;
 }
 
-const DESTINATION_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+/**
+ * Whether an intent belongs to a destination. A keyed intent belongs to exactly the network it names.
+ * A keyless (legacy) intent belongs only to a Base destination, which is the Base network of the page's
+ * configured Base bridge, found by the chain id that bridge reports. It never belongs to a non-Base network.
+ */
+export function intentBelongsTo(intent: Pick<BridgeIntent, 'destination'>, owner: IntentOwner): boolean {
+  return intent.destination === undefined ? owner.profileId === LEGACY_PROFILE_ID : intent.destination === owner.id;
+}
+
+/**
+ * A per-network key: a profile label and a role joined by a hyphen (`base-mainnet`, `ethereum-sepolia`).
+ * A bare family label (`base`) is not one, so a version 2 intent keyed that way is unreadable by design.
+ */
+const NETWORK_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
+const NETWORK_KEY_MAX = 48;
+export function isNetworkKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= NETWORK_KEY_MAX && NETWORK_KEY.test(value);
+}
 
 export function intentId(intent: BridgeIntent): string {
   return intent.kind === 'icp_to_base' ? intent.clientRequestId : intent.transferId;
@@ -144,7 +168,7 @@ function parseIntent(value: unknown): BridgeIntent | null {
   if (r.v !== LEGACY_INTENT_VERSION && r.v !== INTENT_VERSION) return null;
   const version: IntentVersion = r.v;
   // Version 2 intents must name their destination. Version 1 intents have none (legacy, bound to Base on read).
-  if (r.destination !== undefined && (!str(r.destination) || !DESTINATION_ID.test(r.destination))) return null;
+  if (r.destination !== undefined && !isNetworkKey(r.destination)) return null;
   if (version === INTENT_VERSION && r.destination === undefined) return null;
   const destination = r.destination === undefined ? {} : { destination: r.destination as string };
   if (!str(r.amountE8s) || !DECIMAL.test(r.amountE8s)) return null;
@@ -265,9 +289,9 @@ export class IntentStore {
     return [...this.intents].sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  /** Newest first, only the intents of one destination (legacy intents count as Base). */
-  listFor(destinationId: string): BridgeIntent[] {
-    return this.list().filter((intent) => intentDestination(intent) === destinationId);
+  /** Newest first, only the intents of one destination (legacy intents belong to the Base destination). */
+  listFor(owner: IntentOwner): BridgeIntent[] {
+    return this.list().filter((intent) => intentBelongsTo(intent, owner));
   }
 
   get(id: string): BridgeIntent | undefined {

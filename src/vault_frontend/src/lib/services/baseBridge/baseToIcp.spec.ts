@@ -283,7 +283,7 @@ describe('sendBridgeOut', () => {
 
     expect(savedAtSend).toMatchObject({
       v: 2,
-      destination: 'base',
+      destination: 'base-mainnet',
       kind: 'base_to_icp',
       clientNonce: NONCE,
       transferId: TRANSFER_ID,

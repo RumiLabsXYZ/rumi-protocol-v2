@@ -151,7 +151,7 @@ const quote = (needsApproval: boolean) =>
     nowMs: NOW,
   });
 
-function approvedIntent(destination = 'base'): IcpToBaseIntent {
+function approvedIntent(destination = 'base-mainnet'): IcpToBaseIntent {
   return {
     v: 2,
     destination,
@@ -227,13 +227,13 @@ describe('ICP to Base: a DISABLED destination gets no signing request', () => {
     expect(h.bridgeToBase).not.toHaveBeenCalled();
     expect(h.events.map((event) => event.type)).toEqual(['confirmed', 'approval_ok', 'blocked']);
     // The approval stands; the request waits, recoverable, until the destination is back.
-    expect(h.store.list()).toMatchObject([{ status: 'approved', destination: 'base' }]);
+    expect(h.store.list()).toMatchObject([{ status: 'approved', destination: 'base-mainnet' }]);
   });
 });
 
 describe('ICP to Base: a saved request is sent only to its own destination', () => {
   /** A request made for another destination, as a later build could have saved it. */
-  const foreign = (status: IcpToBaseIntent['status'] = 'approved'): IcpToBaseIntent => ({ ...approvedIntent('arbitrum'), status });
+  const foreign = (status: IcpToBaseIntent['status'] = 'approved'): IcpToBaseIntent => ({ ...approvedIntent('arbitrum-mainnet'), status });
 
   /** The same request as the Base-only app saved it: version 1, no destination key. */
   const legacy = (status: IcpToBaseIntent['status'] = 'approved'): IcpToBaseIntent => {
@@ -248,7 +248,7 @@ describe('ICP to Base: a saved request is sent only to its own destination', () 
       await bridgeAfterApproval(h.deps, foreign(), h.emit);
       expect(h.bridgeToBase).not.toHaveBeenCalled();
       expect(h.approve).not.toHaveBeenCalled();
-      expect(h.events.at(-1)).toMatchObject({ type: 'blocked', message: expect.stringContaining('arbitrum') });
+      expect(h.events.at(-1)).toMatchObject({ type: 'blocked', message: expect.stringContaining('arbitrum-mainnet') });
       expect(h.events.at(-1)).toMatchObject({ message: expect.stringContaining(NOT_SIGNED_NOTE) });
       // The same durable request, untouched: its recovery stays with its own destination.
       expect(h.store.list()).toEqual([foreign()]);
@@ -297,10 +297,38 @@ describe('ICP to Base: a saved request is sent only to its own destination', () 
     expect(h.events.map((event) => event.type)).toEqual(['retry', 'submit_ok']);
   });
 
+  it('a request keyed to another NETWORK of the same profile is not sent: base-sepolia never goes to base-mainnet', async () => {
+    const h = icpHarness(makeSigning());
+    h.store.put(approvedIntent('base-sepolia'));
+    await bridgeAfterApproval(h.deps, approvedIntent('base-sepolia'), h.emit);
+    await retryIcpToBase(h.deps, approvedIntent('base-sepolia'), h.emit);
+    expect(h.bridgeToBase).not.toHaveBeenCalled();
+    expect(h.store.list()).toEqual([approvedIntent('base-sepolia')]);
+  });
+
+  it('a legacy keyless request is never sent by a non-Base network', async () => {
+    const arbitrum = makeDestination({ id: 'arbitrum-mainnet', profileId: 'arbitrum', name: 'Arbitrum One', chainId: '42161' });
+    const h = icpHarness(makeSigning(arbitrum));
+    h.store.put(legacy());
+    await bridgeAfterApproval(h.deps, legacy(), h.emit);
+    await retryIcpToBase(h.deps, legacy('submitted'), h.emit);
+    expect(h.bridgeToBase).not.toHaveBeenCalled();
+    expect(h.events.at(-1)).toMatchObject({ type: 'blocked', message: expect.stringContaining('Base') });
+    expect(h.store.list()).toEqual([legacy()]);
+  });
+
+  it('a legacy keyless request binds to the Base network the page is configured for, testnet included', async () => {
+    const sepolia = makeDestination({ id: 'base-sepolia', name: 'Base Sepolia', chainId: '84532', network: 'testnet' });
+    const h = icpHarness(makeSigning(sepolia));
+    h.store.put(legacy());
+    await bridgeAfterApproval(h.deps, legacy(), h.emit);
+    expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
+  });
+
   it('a request that names Base is sent too', async () => {
     const h = icpHarness(makeSigning());
-    h.store.put(approvedIntent('base'));
-    await bridgeAfterApproval(h.deps, approvedIntent('base'), h.emit);
+    h.store.put(approvedIntent('base-mainnet'));
+    await bridgeAfterApproval(h.deps, approvedIntent('base-mainnet'), h.emit);
     expect(h.bridgeToBase).toHaveBeenCalledTimes(1);
   });
 });
@@ -363,7 +391,7 @@ function evmHarness(signing = makeSigning()) {
 function unsentIntent(): BaseToIcpIntent {
   return {
     v: 2,
-    destination: 'base',
+    destination: 'base-mainnet',
     kind: 'base_to_icp',
     clientNonce: `0x${'07'.repeat(32)}`,
     transferId: TRANSFER_ID,
@@ -379,7 +407,7 @@ function unsentIntent(): BaseToIcpIntent {
 
 describe('Base to ICP: a DISABLED destination gets no wallet call at all', () => {
   it('sendBridgeOut makes no call to the wallet (not even a read), saves nothing and sends nothing', async () => {
-    const h = evmHarness(makeSigning(makeDisabledDestination({ id: 'base', name: 'Base', chainId: '8453' })));
+    const h = evmHarness(makeSigning(makeDisabledDestination({ id: 'base-mainnet', profileId: 'base', name: 'Base', chainId: '8453' })));
     const outcome = await sendBridgeOut(h.deps, { amountE8s: AMOUNT }, h.emit);
     expect(outcome.kind).toBe('blocked');
     expect(h.provider.calls).toEqual([]);
@@ -389,7 +417,7 @@ describe('Base to ICP: a DISABLED destination gets no wallet call at all', () =>
   });
 
   it('a saved unsent transfer cannot be resumed either', async () => {
-    const h = evmHarness(makeSigning(makeDisabledDestination({ id: 'base', name: 'Base', chainId: '8453' })));
+    const h = evmHarness(makeSigning(makeDisabledDestination({ id: 'base-mainnet', profileId: 'base', name: 'Base', chainId: '8453' })));
     h.store.put(unsentIntent());
     const outcome = await sendBridgeOut(h.deps, { amountE8s: AMOUNT, resume: unsentIntent() }, h.emit);
     expect(outcome.kind).toBe('blocked');

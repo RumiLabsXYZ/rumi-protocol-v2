@@ -5,19 +5,25 @@ import {
   INTENT_STORAGE_PREFIX,
   INTENT_VERSION,
   IntentStore,
-  LEGACY_DESTINATION_ID,
   LEGACY_INTENT_VERSION,
-  intentDestination,
+  LEGACY_PROFILE_ID,
+  intentBelongsTo,
   intentStorageKey,
+  isNetworkKey,
   type BaseToIcpIntent,
   type IcpToBaseIntent,
 } from './intents';
-import { TEST_BRIDGE_ID, TEST_OWNER, createMemoryStorage, makeDeposit, makeDestination, makeSigning } from './testSupport';
+import { TEST_BRIDGE_ID, TEST_OWNER, createMemoryStorage, makeDeposit, makeDestination, makeDisabledDestination, makeSigning } from './testSupport';
 
 const ALICE = 'zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae';
 const RECIPIENT = '0x1111111111111111111111111111111111111111';
 const CONTRACT = '0x2222222222222222222222222222222222222222';
 const NOW = 1_800_000_000_000;
+
+/** The destinations a page can hold. Base is the configured Base bridge, here on mainnet. */
+const BASE_MAINNET_OWNER = makeDestination();
+const BASE_SEPOLIA_OWNER = makeDestination({ id: 'base-sepolia', name: 'Base Sepolia', chainId: '84532', network: 'testnet' });
+const ARBITRUM_OWNER = makeDestination({ id: 'arbitrum-mainnet', profileId: 'arbitrum', name: 'Arbitrum One', chainId: '42161' });
 
 /** A record exactly as the Base-only app (version 1) wrote it: no destination anywhere. */
 function legacyRecord(extra: unknown[] = []) {
@@ -86,7 +92,7 @@ describe('versions and keys', () => {
   it('bumps the version, keeps the v1 storage key, and binds legacy records to Base', () => {
     expect(INTENT_VERSION).toBe(2);
     expect(LEGACY_INTENT_VERSION).toBe(1);
-    expect(LEGACY_DESTINATION_ID).toBe('base');
+    expect(LEGACY_PROFILE_ID).toBe('base');
     expect(INTENT_STORAGE_PREFIX).toBe('rumi:base-bridge:v1:');
     expect(intentStorageKey(ALICE)).toBe(`rumi:base-bridge:v1:${ALICE}`);
   });
@@ -99,16 +105,16 @@ describe('new records carry the destination key', () => {
     await startIcpToBase(icpDeps(store), quote(), () => {});
 
     const [saved] = store.list() as IcpToBaseIntent[];
-    expect(saved).toMatchObject({ v: 2, destination: 'base', kind: 'icp_to_base' });
+    expect(saved).toMatchObject({ v: 2, destination: 'base-mainnet', kind: 'icp_to_base' });
     const raw = JSON.parse(storage.map.get(`rumi:base-bridge:v1:${ALICE}`)!);
     expect(raw.v).toBe(2);
-    expect(raw.intents[0]).toMatchObject({ v: 2, destination: 'base' });
+    expect(raw.intents[0]).toMatchObject({ v: 2, destination: 'base-mainnet' });
   });
 
   it('the key follows the destination the flow was started for', async () => {
     const store = new IntentStore(createMemoryStorage(), ALICE);
-    await startIcpToBase(icpDeps(store, makeSigning(makeDestination({ id: 'arbitrum', name: 'Arbitrum One', chainId: '42161' }))), quote(), () => {});
-    expect((store.list()[0] as IcpToBaseIntent).destination).toBe('arbitrum');
+    await startIcpToBase(icpDeps(store, makeSigning(ARBITRUM_OWNER)), quote(), () => {});
+    expect((store.list()[0] as IcpToBaseIntent).destination).toBe('arbitrum-mainnet');
   });
 
   it('round-trips through storage and refuses a version 2 intent that names no destination', () => {
@@ -116,7 +122,7 @@ describe('new records carry the destination key', () => {
     const store = new IntentStore(storage, ALICE);
     const intent: IcpToBaseIntent = {
       v: 2,
-      destination: 'base',
+      destination: 'base-mainnet',
       kind: 'icp_to_base',
       clientRequestId: `0x${'ab'.repeat(16)}`,
       amountE8s: 5n,
@@ -128,7 +134,7 @@ describe('new records carry the destination key', () => {
     store.put(intent);
     expect(new IntentStore(storage, ALICE).get(intent.clientRequestId)).toEqual(intent);
 
-    for (const bad of [{ destination: undefined }, { destination: '' }, { destination: 'Base Chain!' }, { destination: 8453 }]) {
+    for (const bad of [{ destination: undefined }, { destination: '' }, { destination: 'Base Chain!' }, { destination: 8453 }, { destination: 'base' }, { destination: 'BASE-MAINNET' }]) {
       const raw = JSON.stringify({ v: 2, principal: ALICE, intents: [{ ...JSON.parse(JSON.stringify({ ...intent, amountE8s: '5', expectedDepositFee: '1' })), ...bad }] });
       const reopened = new IntentStore(createMemoryStorage({ [intentStorageKey(ALICE)]: raw }), ALICE);
       expect(reopened.list(), JSON.stringify(bad)).toEqual([]);
@@ -138,28 +144,76 @@ describe('new records carry the destination key', () => {
 });
 
 describe('a legacy record is read as Base', () => {
-  it('reads every keyless intent and binds it explicitly to Base', () => {
+  it('reads every keyless intent, and it belongs to the configured Base network and to no other', () => {
     const store = new IntentStore(createMemoryStorage({ [intentStorageKey(ALICE)]: legacyRecord() }), ALICE);
     expect(store.loadStatus).toBe('ok');
     expect(store.readOnly).toBe(false);
     const all = store.list();
     expect(all).toHaveLength(2);
-    expect(all.map(intentDestination)).toEqual(['base', 'base']);
     expect(all.every((intent) => intent.v === 1 && intent.destination === undefined)).toBe(true);
-    expect(store.listFor('base')).toHaveLength(2);
-    expect(store.listFor('ethereum')).toEqual([]);
+    // Bound to Base by the Base network of the page's configured bridge: mainnet or Sepolia, as that bridge reports.
+    expect(store.listFor(BASE_MAINNET_OWNER)).toHaveLength(2);
+    expect(store.listFor(BASE_SEPOLIA_OWNER)).toHaveLength(2);
+    // Never to a non-Base network.
+    expect(store.listFor(ARBITRUM_OWNER)).toEqual([]);
+    expect(store.listFor(makeDisabledDestination())).toEqual([]);
+    for (const intent of all) {
+      expect(intentBelongsTo(intent, BASE_MAINNET_OWNER)).toBe(true);
+      expect(intentBelongsTo(intent, ARBITRUM_OWNER)).toBe(false);
+    }
+  });
+
+  it('a keyed intent belongs to exactly its own network: base-sepolia is not base-mainnet', () => {
+    const sepolia = { destination: 'base-sepolia' };
+    expect(intentBelongsTo(sepolia, BASE_SEPOLIA_OWNER)).toBe(true);
+    expect(intentBelongsTo(sepolia, BASE_MAINNET_OWNER)).toBe(false);
+    expect(intentBelongsTo({ destination: 'base-mainnet' }, BASE_SEPOLIA_OWNER)).toBe(false);
+    expect(intentBelongsTo({ destination: 'arbitrum-mainnet' }, BASE_MAINNET_OWNER)).toBe(false);
+  });
+
+  it('per-network keys are a profile label and a role, never a bare family label', () => {
+    for (const ok of ['base-mainnet', 'base-sepolia', 'base-local', 'ethereum-mainnet', 'robinhood-testnet']) expect(isNetworkKey(ok), ok).toBe(true);
+    for (const bad of ['base', 'ethereum', '', 'Base-Mainnet', 'base mainnet', 'base-', '-mainnet', 8453, null, `${'x'.repeat(60)}-mainnet`]) {
+      expect(isNetworkKey(bad), String(bad)).toBe(false);
+    }
+  });
+
+  it('a version 2 intent keyed with the old family label base is unreadable by design: copied aside, never bound anywhere', () => {
+    // No released build wrote a version 2 intent, so this only covers records from local builds of this branch.
+    const raw = JSON.stringify({
+      v: 2,
+      principal: ALICE,
+      intents: [
+        {
+          v: 2,
+          destination: 'base',
+          kind: 'icp_to_base',
+          clientRequestId: `0x${'ab'.repeat(16)}`,
+          amountE8s: '1',
+          recipient: RECIPIENT,
+          expectedDepositFee: '1',
+          createdAt: 1,
+          status: 'prepared',
+        },
+      ],
+    });
+    const storage = createMemoryStorage({ [intentStorageKey(ALICE)]: raw });
+    const store = new IntentStore(storage, ALICE, { now: () => 7 });
+    expect(store.loadStatus).toBe('recovered');
+    expect(store.list()).toEqual([]);
+    expect(storage.map.get(`${intentStorageKey(ALICE)}:unreadable:7`)).toBe(raw);
   });
 
   it('hides a Base request from another destination, and the other way round', () => {
     const storage = createMemoryStorage({ [intentStorageKey(ALICE)]: legacyRecord() });
     const store = new IntentStore(storage, ALICE);
-    expect(unresolvedIntents(store, 'base')).toHaveLength(1);
-    expect(unresolvedIntents(store, 'arbitrum')).toEqual([]);
+    expect(unresolvedIntents(store, BASE_MAINNET_OWNER)).toHaveLength(1);
+    expect(unresolvedIntents(store, ARBITRUM_OWNER)).toEqual([]);
     // The guard in startIcpToBase still sees every destination's unresolved request.
     expect(unresolvedIntents(store)).toHaveLength(1);
     store.put({
       v: 2,
-      destination: 'arbitrum',
+      destination: 'arbitrum-mainnet',
       kind: 'icp_to_base',
       clientRequestId: `0x${'11'.repeat(16)}`,
       amountE8s: 1n,
@@ -168,8 +222,8 @@ describe('a legacy record is read as Base', () => {
       createdAt: 3_000,
       status: 'approved',
     });
-    expect(unresolvedIntents(store, 'arbitrum')).toHaveLength(1);
-    expect(unresolvedIntents(store, 'base')).toHaveLength(1);
+    expect(unresolvedIntents(store, ARBITRUM_OWNER)).toHaveLength(1);
+    expect(unresolvedIntents(store, BASE_MAINNET_OWNER)).toHaveLength(1);
   });
 
   it('keeps legacy intents untouched when a new one is written, and upgrades only the record version', () => {
@@ -177,7 +231,7 @@ describe('a legacy record is read as Base', () => {
     const store = new IntentStore(storage, ALICE);
     store.put({
       v: 2,
-      destination: 'base',
+      destination: 'base-mainnet',
       kind: 'icp_to_base',
       clientRequestId: `0x${'22'.repeat(16)}`,
       amountE8s: 1n,
@@ -195,14 +249,14 @@ describe('a legacy record is read as Base', () => {
 
     const reopened = new IntentStore(storage, ALICE);
     expect(reopened.loadStatus).toBe('ok');
-    expect(reopened.list().map(intentDestination)).toEqual(['base', 'base', 'base']);
+    expect(reopened.listFor(BASE_MAINNET_OWNER)).toHaveLength(3);
     expect(reopened.list().filter((intent) => intent.v === 1)).toHaveLength(2);
   });
 
   it('a legacy Base to ICP transfer can still be resumed from Base', () => {
     const store = new IntentStore(createMemoryStorage({ [intentStorageKey(ALICE)]: legacyRecord() }), ALICE);
     const unsent = store.list().find((intent): intent is BaseToIcpIntent => intent.kind === 'base_to_icp')!;
-    expect(intentDestination(unsent)).toBe('base');
+    expect(intentBelongsTo(unsent, BASE_MAINNET_OWNER)).toBe(true);
     expect(unsent.chainId).toBe(8453);
   });
 });
@@ -219,7 +273,7 @@ describe('a newer record stays read-only', () => {
       expect(() =>
         store.put({
           v: 2,
-          destination: 'base',
+          destination: 'base-mainnet',
           kind: 'icp_to_base',
           clientRequestId: `0x${'33'.repeat(16)}`,
           amountE8s: 1n,
@@ -237,7 +291,7 @@ describe('a newer record stays read-only', () => {
     const storage = createMemoryStorage();
     new IntentStore(storage, ALICE).put({
       v: 2,
-      destination: 'base',
+      destination: 'base-mainnet',
       kind: 'icp_to_base',
       clientRequestId: `0x${'44'.repeat(16)}`,
       amountE8s: 1n,

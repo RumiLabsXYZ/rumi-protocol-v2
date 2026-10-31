@@ -73,8 +73,13 @@ export const SUPPORTED_CHAINS: readonly BaseChainConfig[] = [BASE_MAINNET, BASE_
 // canister puts in its own consent text (`consent_wait` in the canister's chain table).
 
 export interface EvmDestinationChain extends BaseChainConfig {
-  /** Stable destination id: the key of the selector entry and of saved records. */
-  destinationId: string;
+  /** The destination profile this network belongs to (a family label such as `ethereum`). */
+  profileId: string;
+  /**
+   * The per-network destination key: the profile's `network_id` (`ethereum-mainnet`, `ethereum-sepolia`).
+   * A mainnet and a testnet never share one. This is the key of the selector entry and of saved records.
+   */
+  networkId: string;
   /** Completes "Delivery is expected ...". */
   finality: string;
 }
@@ -89,23 +94,24 @@ const HYPER_FINALITY = 'after HyperEVM finality (timing not yet confirmed)';
 const MONAD_FINALITY = 'after Monad Verified state (Finalized plus 3 blocks), within seconds';
 
 function evmRow(
-  destinationId: string,
+  profileId: string,
+  networkId: string,
   row: Omit<BaseChainConfig, 'chainIdHex' | 'local'>,
   finality: string,
 ): EvmDestinationChain {
-  return { ...row, chainIdHex: `0x${row.chainId.toString(16)}`, local: false, destinationId, finality };
+  return { ...row, chainIdHex: `0x${row.chainId.toString(16)}`, local: false, profileId, networkId, finality };
 }
 
-export const ETHEREUM_MAINNET = evmRow('ethereum', { chainId: 1, name: 'Ethereum', rpcUrl: '', explorerUrl: '', nativeCurrency: ETH, testnet: false }, ETH_FINALITY);
-export const ETHEREUM_SEPOLIA = evmRow('ethereum', { chainId: 11155111, name: 'Ethereum Sepolia', rpcUrl: '', explorerUrl: '', nativeCurrency: ETH, testnet: true }, ETH_FINALITY);
-export const ARBITRUM_ONE = evmRow('arbitrum', { chainId: 42161, name: 'Arbitrum One', rpcUrl: 'https://arb1.arbitrum.io/rpc', explorerUrl: '', nativeCurrency: ETH, testnet: false }, ARB_FINALITY);
-export const ARBITRUM_SEPOLIA = evmRow('arbitrum', { chainId: 421614, name: 'Arbitrum Sepolia', rpcUrl: 'https://sepolia-rollup.arbitrum.io/rpc', explorerUrl: '', nativeCurrency: ETH, testnet: true }, ARB_FINALITY);
-export const ROBINHOOD_CHAIN = evmRow('robinhood', { chainId: 4663, name: 'Robinhood Chain', rpcUrl: 'https://rpc.mainnet.chain.robinhood.com', explorerUrl: 'https://robinhoodchain.blockscout.com', nativeCurrency: ETH, testnet: false }, RHOOD_FINALITY);
-export const ROBINHOOD_CHAIN_TESTNET = evmRow('robinhood', { chainId: 46630, name: 'Robinhood Chain testnet', rpcUrl: 'https://rpc.testnet.chain.robinhood.com', explorerUrl: 'https://explorer.testnet.chain.robinhood.com', nativeCurrency: ETH, testnet: true }, RHOOD_FINALITY);
-export const HYPEREVM_MAINNET = evmRow('hyperevm', { chainId: 999, name: 'HyperEVM', rpcUrl: 'https://rpc.hyperliquid.xyz/evm', explorerUrl: '', nativeCurrency: HYPE, testnet: false }, HYPER_FINALITY);
-export const HYPEREVM_TESTNET = evmRow('hyperevm', { chainId: 998, name: 'HyperEVM testnet', rpcUrl: 'https://rpc.hyperliquid-testnet.xyz/evm', explorerUrl: '', nativeCurrency: HYPE, testnet: true }, HYPER_FINALITY);
-export const MONAD_MAINNET = evmRow('monad', { chainId: 143, name: 'Monad', rpcUrl: 'https://rpc.monad.xyz', explorerUrl: '', nativeCurrency: MON, testnet: false }, MONAD_FINALITY);
-export const MONAD_TESTNET = evmRow('monad', { chainId: 10143, name: 'Monad testnet', rpcUrl: 'https://testnet-rpc.monad.xyz', explorerUrl: '', nativeCurrency: MON, testnet: true }, MONAD_FINALITY);
+export const ETHEREUM_MAINNET = evmRow('ethereum', 'ethereum-mainnet', { chainId: 1, name: 'Ethereum', rpcUrl: '', explorerUrl: '', nativeCurrency: ETH, testnet: false }, ETH_FINALITY);
+export const ETHEREUM_SEPOLIA = evmRow('ethereum', 'ethereum-sepolia', { chainId: 11155111, name: 'Ethereum Sepolia', rpcUrl: '', explorerUrl: '', nativeCurrency: ETH, testnet: true }, ETH_FINALITY);
+export const ARBITRUM_ONE = evmRow('arbitrum', 'arbitrum-mainnet', { chainId: 42161, name: 'Arbitrum One', rpcUrl: 'https://arb1.arbitrum.io/rpc', explorerUrl: '', nativeCurrency: ETH, testnet: false }, ARB_FINALITY);
+export const ARBITRUM_SEPOLIA = evmRow('arbitrum', 'arbitrum-sepolia', { chainId: 421614, name: 'Arbitrum Sepolia', rpcUrl: 'https://sepolia-rollup.arbitrum.io/rpc', explorerUrl: '', nativeCurrency: ETH, testnet: true }, ARB_FINALITY);
+export const ROBINHOOD_CHAIN = evmRow('robinhood', 'robinhood-mainnet', { chainId: 4663, name: 'Robinhood Chain', rpcUrl: 'https://rpc.mainnet.chain.robinhood.com', explorerUrl: 'https://robinhoodchain.blockscout.com', nativeCurrency: ETH, testnet: false }, RHOOD_FINALITY);
+export const ROBINHOOD_CHAIN_TESTNET = evmRow('robinhood', 'robinhood-testnet', { chainId: 46630, name: 'Robinhood Chain testnet', rpcUrl: 'https://rpc.testnet.chain.robinhood.com', explorerUrl: 'https://explorer.testnet.chain.robinhood.com', nativeCurrency: ETH, testnet: true }, RHOOD_FINALITY);
+export const HYPEREVM_MAINNET = evmRow('hyperevm', 'hyperevm-mainnet', { chainId: 999, name: 'HyperEVM', rpcUrl: 'https://rpc.hyperliquid.xyz/evm', explorerUrl: '', nativeCurrency: HYPE, testnet: false }, HYPER_FINALITY);
+export const HYPEREVM_TESTNET = evmRow('hyperevm', 'hyperevm-testnet', { chainId: 998, name: 'HyperEVM testnet', rpcUrl: 'https://rpc.hyperliquid-testnet.xyz/evm', explorerUrl: '', nativeCurrency: HYPE, testnet: true }, HYPER_FINALITY);
+export const MONAD_MAINNET = evmRow('monad', 'monad-mainnet', { chainId: 143, name: 'Monad', rpcUrl: 'https://rpc.monad.xyz', explorerUrl: '', nativeCurrency: MON, testnet: false }, MONAD_FINALITY);
+export const MONAD_TESTNET = evmRow('monad', 'monad-testnet', { chainId: 10143, name: 'Monad testnet', rpcUrl: 'https://testnet-rpc.monad.xyz', explorerUrl: '', nativeCurrency: MON, testnet: true }, MONAD_FINALITY);
 
 /** Every non-Base EVM network the bridge canister knows. Mainnets first, each followed by its testnet. */
 export const EVM_DESTINATION_CHAINS: readonly EvmDestinationChain[] = [
@@ -125,6 +131,20 @@ export function getEvmDestinationChain(chainId: number | bigint | null | undefin
   if (chainId === null || chainId === undefined) return null;
   const id = Number(chainId);
   return EVM_DESTINATION_CHAINS.find((chain) => chain.chainId === id) ?? null;
+}
+
+/**
+ * The per-network destination key of a Base chain, from the chain id the bridge canister reports.
+ * These are the Base profile's `network_id` values; the local dev chain has no profile, so its key is
+ * `base-local`. A key for a chain this app does not know is never made up: the caller gets null.
+ */
+export function baseNetworkId(chainId: number | bigint | null | undefined): string | null {
+  if (chainId === null || chainId === undefined) return null;
+  const id = Number(chainId);
+  if (id === BASE_MAINNET.chainId) return 'base-mainnet';
+  if (id === BASE_SEPOLIA.chainId) return 'base-sepolia';
+  if (id === BASE_LOCAL.chainId) return 'base-local';
+  return null;
 }
 
 export function getChainConfig(chainId: number | bigint | null | undefined): BaseChainConfig | null {

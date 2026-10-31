@@ -27,7 +27,7 @@ vi.mock('$lib/services/ledgerFeeService', () => ({ fetchLedgerFeeStrict: vi.fn()
 import type { BridgeInfo } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
 import { resolveBridgeConfig } from './chains';
 import {
-  BASE_DESTINATION_ID,
+  BASE_UNKNOWN_ID,
   baseDestination,
   buildDestinations,
   findDestination,
@@ -44,7 +44,7 @@ import { makeBridgeInfo } from './testSupport';
 const DASHES = new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}]`);
 
 const BRIDGE_ID = 'tfesu-vyaaa-aaaap-qrd7a-cai';
-const OTHER_IDS = ['ethereum', 'arbitrum', 'robinhood', 'hyperevm', 'monad'];
+const OTHER_IDS = ['ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet'];
 
 function byId(list: DestinationView[], id: string): DestinationView {
   const found = list.find((destination) => destination.id === id);
@@ -61,13 +61,14 @@ describe('loadDestinations: the Base entry', () => {
     const info = makeBridgeInfo();
     mocks.getBridgeInfo.mockResolvedValue(info);
     const list = await loadDestinations();
-    const base = byId(list, BASE_DESTINATION_ID);
+    const base = byId(list, 'base-mainnet');
     const resolved = resolveBridgeConfig(info);
     if (!resolved.ok) throw new Error('unreachable');
 
     expect(mocks.getBridgeInfo).toHaveBeenCalledTimes(1);
     expect(base).toMatchObject({
-      id: 'base',
+      id: 'base-mainnet',
+      profileId: 'base',
       family: 'evm',
       name: 'Base',
       chainId: '8453',
@@ -88,13 +89,13 @@ describe('loadDestinations: the Base entry', () => {
 
   it('labels a Base Sepolia canister as a testnet', async () => {
     mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 84532n }));
-    const base = byId(await loadDestinations(), 'base');
-    expect(base).toMatchObject({ name: 'Base Sepolia', chainId: '84532', network: 'testnet', status: 'enabled' });
+    const base = byId(await loadDestinations(), 'base-sepolia');
+    expect(base).toMatchObject({ id: 'base-sepolia', profileId: 'base', name: 'Base Sepolia', chainId: '84532', network: 'testnet', status: 'enabled' });
   });
 
   it('is disabled with the same message when the contract is not bound, and still names the chain', async () => {
     mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ contract: [] }));
-    const base = byId(await loadDestinations(), 'base');
+    const base = byId(await loadDestinations(), 'base-mainnet');
     expect(base).toMatchObject({
       status: 'disabled',
       reason: 'The Base contract is not bound yet.',
@@ -109,7 +110,7 @@ describe('loadDestinations: the Base entry', () => {
 
   it('is disabled with the same message for an unsupported chain or an invalid contract', async () => {
     mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 1n }));
-    const unsupported = byId(await loadDestinations(), 'base');
+    const unsupported = byId(await loadDestinations(), BASE_UNKNOWN_ID);
     expect(unsupported.status).toBe('disabled');
     expect(unsupported.reason).toBe('The bridge is configured for chain 1, which this app does not support.');
     expect(unsupported.chainId).toBe('');
@@ -117,7 +118,7 @@ describe('loadDestinations: the Base entry', () => {
     const bad = makeBridgeInfo();
     bad.contract = [{ ...bad.contract[0]!, address: '0x1234' }];
     mocks.getBridgeInfo.mockResolvedValue(bad);
-    const invalid = byId(await loadDestinations(), 'base');
+    const invalid = byId(await loadDestinations(), 'base-mainnet');
     expect(invalid).toMatchObject({ status: 'disabled', reason: 'The bridge reported an invalid Base contract address.' });
   });
 
@@ -125,7 +126,7 @@ describe('loadDestinations: the Base entry', () => {
     mocks.getBridgeInfo.mockResolvedValue(
       makeBridgeInfo({ pauses: { mints: true, observer: false, releases: true, deposits: true }, halted: ['coverage mismatch'] }),
     );
-    const base = byId(await loadDestinations(), 'base');
+    const base = byId(await loadDestinations(), 'base-mainnet');
     expect(base.status).toBe('enabled');
     expect(base.reason).toBeNull();
     expect(base.config).toMatchObject({ depositsPaused: true, releasesPaused: true, mintsPaused: true, halted: 'coverage mismatch' });
@@ -139,7 +140,7 @@ describe('loadDestinations: the Base entry', () => {
   it('takes the Base read from a seam when one is given', async () => {
     const info = makeBridgeInfo({ contract: [] });
     const list = await loadDestinations(async () => resolveBridgeConfig(info));
-    expect(byId(list, 'base').status).toBe('disabled');
+    expect(byId(list, 'base-mainnet').status).toBe('disabled');
     expect(mocks.getBridgeInfo).not.toHaveBeenCalled();
   });
 });
@@ -147,7 +148,7 @@ describe('loadDestinations: the Base entry', () => {
 describe('the other EVM destinations', () => {
   it('lists Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad, all DISABLED, after Base', async () => {
     const list = await loadDestinations();
-    expect(list.map((destination) => destination.id)).toEqual(['base', ...OTHER_IDS]);
+    expect(list.map((destination) => destination.id)).toEqual(['base-mainnet', ...OTHER_IDS]);
     for (const id of OTHER_IDS) {
       const entry = byId(list, id);
       expect(entry).toMatchObject({
@@ -177,10 +178,43 @@ describe('the other EVM destinations', () => {
 
   it('never enables an entry other than Base', () => {
     const enabled = (list: DestinationView[]) => list.filter((destination) => destination.status === 'enabled').map((destination) => destination.id);
-    expect(enabled(buildDestinations(resolveBridgeConfig(makeBridgeInfo()), BRIDGE_ID))).toEqual(['base']);
+    expect(enabled(buildDestinations(resolveBridgeConfig(makeBridgeInfo()), BRIDGE_ID))).toEqual(['base-mainnet']);
     expect(enabled(unreachableDestinations('x'))).toEqual([]);
     // A canister that reports another chain id to the Base page does not enable that chain's entry either.
     expect(enabled(buildDestinations(resolveBridgeConfig(makeBridgeInfo({ chain_id: 143n })), BRIDGE_ID))).toEqual([]);
+  });
+});
+
+describe('destination keys are per network', () => {
+  it('keys each entry by its network and keeps the profile label apart', async () => {
+    const list = await loadDestinations();
+    expect(list.map((destination) => [destination.id, destination.profileId])).toEqual([
+      ['base-mainnet', 'base'],
+      ['ethereum-mainnet', 'ethereum'],
+      ['arbitrum-mainnet', 'arbitrum'],
+      ['robinhood-mainnet', 'robinhood'],
+      ['hyperevm-mainnet', 'hyperevm'],
+      ['monad-mainnet', 'monad'],
+    ]);
+    expect(new Set(list.map((destination) => destination.id)).size).toBe(list.length);
+  });
+
+  it('gives a Base mainnet and a Base Sepolia canister different keys, from the chain id the canister reports', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 8453n }));
+    const mainnet = byId(await loadDestinations(), 'base-mainnet');
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 84532n }));
+    const sepolia = byId(await loadDestinations(), 'base-sepolia');
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 31337n }));
+    const local = byId(await loadDestinations(), 'base-local');
+    expect([mainnet.id, sepolia.id, local.id]).toEqual(['base-mainnet', 'base-sepolia', 'base-local']);
+    expect([mainnet.network, sepolia.network, local.network]).toEqual(['mainnet', 'testnet', 'testnet']);
+  });
+
+  it('keeps the same key when a bound Base turns off, and uses an unknown key only when no chain is known', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ contract: [], chain_id: 84532n }));
+    expect((await loadDestinations())[0]).toMatchObject({ id: 'base-sepolia', status: 'disabled' });
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 1n }));
+    expect((await loadDestinations())[0]).toMatchObject({ id: BASE_UNKNOWN_ID, status: 'disabled' });
   });
 });
 
@@ -188,7 +222,8 @@ describe('when the bridge cannot be reached at all', () => {
   it('shows every destination unavailable, with the reason on Base', () => {
     const list = unreachableDestinations('replica offline');
     expect(list.map((destination) => destination.status)).toEqual(Array(6).fill('disabled'));
-    expect(byId(list, 'base').reason).toBe('The bridge could not be reached: replica offline');
+    expect(byId(list, BASE_UNKNOWN_ID).reason).toBe('The bridge could not be reached: replica offline');
+    expect(list.map((destination) => destination.id)).toEqual([BASE_UNKNOWN_ID, ...OTHER_IDS]);
   });
 });
 
@@ -198,41 +233,41 @@ describe('selection', () => {
   function twoEnabled(): DestinationView[] {
     // A future state: a second instance exists. The helpers must already skip the disabled entries between.
     const all = list();
-    const second: DestinationView = { ...byId(all, 'arbitrum'), status: 'enabled', reason: null };
-    return [all[0], all[1], second, ...all.slice(3).filter((destination) => destination.id !== 'arbitrum')];
+    const second: DestinationView = { ...byId(all, 'arbitrum-mainnet'), status: 'enabled', reason: null };
+    return [all[0], all[1], second, ...all.slice(3).filter((destination) => destination.id !== 'arbitrum-mainnet')];
   }
 
   it('picks the chosen destination, even once it is disabled, else the first enabled one, else the first', () => {
     const all = list();
-    expect(pickSelected(all, null)?.id).toBe('base');
-    expect(pickSelected(all, 'monad')?.id).toBe('monad'); // chosen earlier, now disabled: the page says so
-    expect(pickSelected(all, 'nope')?.id).toBe('base');
+    expect(pickSelected(all, null)?.id).toBe('base-mainnet');
+    expect(pickSelected(all, 'monad-mainnet')?.id).toBe('monad-mainnet'); // chosen earlier, now disabled: the page says so
+    expect(pickSelected(all, 'nope')?.id).toBe('base-mainnet');
     const none = unreachableDestinations('x');
-    expect(pickSelected(none, null)?.id).toBe('base'); // nothing enabled: the first entry explains why
+    expect(pickSelected(none, null)?.id).toBe(BASE_UNKNOWN_ID); // nothing enabled: the first entry explains why
     expect(pickSelected([], null)).toBeNull();
-    expect(findDestination(all, 'monad')?.name).toBe('Monad');
+    expect(findDestination(all, 'monad-mainnet')?.name).toBe('Monad');
     expect(findDestination(all, null)).toBeNull();
   });
 
   it('moves between ENABLED entries only, so a disabled one is never reached by a key', () => {
     const entries = twoEnabled();
-    expect(entries.map((destination) => destination.id)).toEqual(['base', 'ethereum', 'arbitrum', 'robinhood', 'hyperevm', 'monad']);
-    expect(nextEnabledDestination(entries, 'base', 'ArrowRight')?.id).toBe('arbitrum');
-    expect(nextEnabledDestination(entries, 'base', 'ArrowDown')?.id).toBe('arbitrum');
-    expect(nextEnabledDestination(entries, 'arbitrum', 'ArrowRight')?.id).toBe('base');
-    expect(nextEnabledDestination(entries, 'base', 'ArrowLeft')?.id).toBe('arbitrum');
-    expect(nextEnabledDestination(entries, 'arbitrum', 'ArrowUp')?.id).toBe('base');
-    expect(nextEnabledDestination(entries, 'arbitrum', 'Home')?.id).toBe('base');
-    expect(nextEnabledDestination(entries, 'base', 'End')?.id).toBe('arbitrum');
+    expect(entries.map((destination) => destination.id)).toEqual(['base-mainnet', 'ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet']);
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowRight')?.id).toBe('arbitrum-mainnet');
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowDown')?.id).toBe('arbitrum-mainnet');
+    expect(nextEnabledDestination(entries, 'arbitrum-mainnet', 'ArrowRight')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowLeft')?.id).toBe('arbitrum-mainnet');
+    expect(nextEnabledDestination(entries, 'arbitrum-mainnet', 'ArrowUp')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(entries, 'arbitrum-mainnet', 'Home')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'End')?.id).toBe('arbitrum-mainnet');
   });
 
   it('stays put with one enabled entry, and returns nothing when none is enabled', () => {
-    expect(nextEnabledDestination(list(), 'base', 'ArrowRight')?.id).toBe('base');
-    expect(nextEnabledDestination(list(), 'base', 'End')?.id).toBe('base');
+    expect(nextEnabledDestination(list(), 'base-mainnet', 'ArrowRight')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(list(), 'base-mainnet', 'End')?.id).toBe('base-mainnet');
     expect(nextEnabledDestination(unreachableDestinations('x'), null, 'ArrowRight')).toBeNull();
     // From a disabled current entry the keys land on the first or last enabled one.
-    expect(nextEnabledDestination(list(), 'monad', 'ArrowRight')?.id).toBe('base');
-    expect(nextEnabledDestination(list(), 'monad', 'ArrowLeft')?.id).toBe('base');
+    expect(nextEnabledDestination(list(), 'monad-mainnet', 'ArrowRight')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(list(), 'monad-mainnet', 'ArrowLeft')?.id).toBe('base-mainnet');
   });
 });
 

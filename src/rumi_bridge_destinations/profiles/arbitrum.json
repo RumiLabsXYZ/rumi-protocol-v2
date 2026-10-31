@@ -156,16 +156,16 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source support is not activation. The Wasm can now install this network (chain table row, slug-based identifiers, provider validation, the finalized-head rule, per-chain defaults and a sibling deploy script), but this record names no instance (instance_ref is null, deployment is none). The token contract is not deployed, the minter and admin gas addresses are unfunded, and mint gas and fee caps are unmeasured on this network (the chain table's defaults are starting points, not findings). A testnet round trip and an approved launch come first, and the record stays disabled until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 3 row 7"
         },
         {
           "id": "arbitrum-l1-poster-fee-buffers",
-          "text": "The total fee includes an L1 poster fee that moves with the L1 data price, so gas buffers must cover it and estimates should be taken close to send time.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 3 row 5; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "text": "The total fee includes an L1 poster fee that moves with the L1 data price. The chain table starts Arbitrum instances with doubled gas limits as headroom for it, but those limits are unmeasured, so mint gas must be measured on Arbitrum Sepolia and the limits and fee caps checked against the poster fee before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Arbitrum defaults); docs/coordination/multichain/sources-evm.md section 3 row 5; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
         },
         {
           "id": "controller-model-undecided",
@@ -246,16 +246,16 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source support is not activation. The Wasm can now install this network (chain table row, slug-based identifiers, provider validation, the finalized-head rule, per-chain defaults and a sibling deploy script), but this record names no instance (instance_ref is null, deployment is none). The token contract is not deployed, the minter and admin gas addresses are unfunded, and mint gas and fee caps are unmeasured on this network (the chain table's defaults are starting points, not findings). A testnet round trip and an approved launch come first, and the record stays disabled until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 3 row 7"
         },
         {
           "id": "arbitrum-l1-poster-fee-buffers",
-          "text": "The total fee includes an L1 poster fee that moves with the L1 data price, so gas buffers must cover it and estimates should be taken close to send time.",
-          "kind": "code",
-          "source": "docs/coordination/multichain/sources-evm.md section 3 row 5; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "text": "The total fee includes an L1 poster fee that moves with the L1 data price. The chain table starts Arbitrum instances with doubled gas limits as headroom for it, but those limits are unmeasured, so mint gas must be measured on Arbitrum Sepolia and the limits and fee caps checked against the poster fee before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Arbitrum defaults); docs/coordination/multichain/sources-evm.md section 3 row 5; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
         },
         {
           "id": "controller-model-undecided",

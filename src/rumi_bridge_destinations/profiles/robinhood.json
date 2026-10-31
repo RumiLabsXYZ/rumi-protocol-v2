@@ -166,14 +166,14 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source describes this chain (chain table row, slug-based identifiers, per-chain defaults) but keeps the row closed: its head rule is blocked and install refuses it until the probe evidence named in the other blockers is recorded. This record names no instance (instance_ref is null, deployment is none); the token contract is not deployed, the gas addresses are unfunded, and mint gas and fee caps are unmeasured (the defaults are the Arbitrum starting points). The record stays disabled.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 4 row 7"
         },
         {
           "id": "robinhood-finalized-tag-unverified",
-          "text": "Neither the safe nor the finalized tag is documented for this chain. Probe the public RPCs for a real finalized block before relying on the tag.",
+          "text": "Neither the safe nor the finalized tag is documented for this chain. Probe the public RPCs for a real finalized block before relying on the tag. The chain table keeps this row closed (head rule blocked, install refused) until a passing probe is recorded.",
           "kind": "external",
           "source": "docs/coordination/multichain/sources-evm.md section 4 row 3 and section 8 question 1"
         },
@@ -263,14 +263,14 @@
       "instance_ref": null,
       "activation_blockers": [
         {
-          "id": "evm-wasm-generalization",
-          "text": "The Base Wasm accepts only the Base chain ids and the BaseMainnet provider variant. The chain allow-list, provider mapping, domain slug and deploy-script allow-list need a reviewed change before this destination can be installed (D1, settled for planning as in-place generalization).",
-          "kind": "code",
-          "source": "docs/coordination/multichain/reuse-inventory.md section 2b; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+          "id": "evm-instance-not-activated",
+          "text": "Source describes this chain (chain table row, slug-based identifiers, per-chain defaults) but keeps the row closed: its head rule is blocked and install refuses it until the probe evidence named in the other blockers is recorded. This record names no instance (instance_ref is null, deployment is none); the token contract is not deployed, the gas addresses are unfunded, and mint gas and fee caps are unmeasured (the defaults are the Arbitrum starting points). The record stays disabled.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 4 row 7"
         },
         {
           "id": "robinhood-finalized-tag-unverified",
-          "text": "Neither the safe nor the finalized tag is documented for this chain. Probe the public RPCs for a real finalized block before relying on the tag.",
+          "text": "Neither the safe nor the finalized tag is documented for this chain. Probe the public RPCs for a real finalized block before relying on the tag. The chain table keeps this row closed (head rule blocked, install refused) until a passing probe is recorded.",
           "kind": "external",
           "source": "docs/coordination/multichain/sources-evm.md section 4 row 3 and section 8 question 1"
         },
