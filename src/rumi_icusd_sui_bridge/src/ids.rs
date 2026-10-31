@@ -104,6 +104,14 @@ pub const INSTANCE_SALT_LABEL: &str = "rumi-icusd-sui-bridge:instance-salt:v1";
 /// Version string `bridge_version` reports.
 pub const BRIDGE_VERSION: &str = "rumi-sui-icusd-bridge-v1";
 
+/// ICP ledger memo prefixes (8 bytes each) for escrow operations (`RSUI-*`, design 5.1).
+pub const PULL_MEMO_PREFIX: &[u8; 8] = b"RSUI-DEP";
+pub const REFUND_MEMO_PREFIX: &[u8; 8] = b"RSUI-RFD";
+pub const SWEEP_MEMO_PREFIX: &[u8; 8] = b"RSUI-FEE";
+
+/// 32-byte hash (ids, transfer ids, instance salt).
+pub type Hash32 = Bytes32;
+
 /// The three signing roles. Distinct keys by construction (least privilege): a mint is a
 /// sponsored transaction signed by `Treasury` (sender, holds the `MintCap`) and `Gas` (gas owner),
 /// and `UpgradeCustody` holds the `UpgradeCap`, `AdminCap` and `MetadataCap`. The canister never
@@ -191,6 +199,33 @@ pub fn transfer_id(chain_identifier: &Bytes32, gate: &Bytes32, sender: &Bytes32,
     let mut w = crate::bcs::Writer::new();
     w.string(RETURN_DOMAIN).bytes(chain_identifier).raw(gate).raw(sender).u64(client_nonce);
     Sha256::digest(w.into_bytes()).into()
+}
+
+fn prefixed_memo(prefix: &[u8; 8], id: u64) -> Vec<u8> {
+    let mut m = Vec::with_capacity(16);
+    m.extend_from_slice(prefix);
+    m.extend_from_slice(&id.to_be_bytes());
+    m
+}
+
+/// ICP ledger memo of a deposit pull: `RSUI-DEP` and the deposit id (8 bytes big-endian).
+pub fn pull_memo(deposit_id: u64) -> Vec<u8> {
+    prefixed_memo(PULL_MEMO_PREFIX, deposit_id)
+}
+
+/// ICP ledger memo of a deposit refund.
+pub fn refund_ledger_memo(deposit_id: u64) -> Vec<u8> {
+    prefixed_memo(REFUND_MEMO_PREFIX, deposit_id)
+}
+
+/// ICP ledger memo of a fee sweep.
+pub fn sweep_memo(sweep_id: u64) -> Vec<u8> {
+    prefixed_memo(SWEEP_MEMO_PREFIX, sweep_id)
+}
+
+/// Release memo is the 32-byte return `transfer_id` itself.
+pub fn release_memo(transfer_id: &Hash32) -> Vec<u8> {
+    transfer_id.to_vec()
 }
 
 #[cfg(test)]
@@ -302,6 +337,18 @@ mod tests {
         assert_eq!(hex::encode(transfer_id(&CHAIN_A, &gate, &[0xcc; 32], 1)), "c394fd448284bbaa385a723bdb5152b4a887370c706f15357d03bdbb122ec325");
         assert_eq!(hex::encode(transfer_id(&[0x11; 32], &gate, &sender, 1)), "b5a581713bfc17dda3a799b9620a4d648ebcff60d4adf974b27e6c985d2176e6");
         assert_eq!(hex::encode(transfer_id(&CHAIN_A, &[0xab; 32], &sender, 1)), "d8b7c2b90ebf5c379e16543f373045e5db63ca4afcf020a1aa483a45657c6c49");
+    }
+
+    #[test]
+    fn ledger_memos_use_rsui_prefixes() {
+        assert_eq!(pull_memo(5), [b"RSUI-DEP".as_slice(), &5u64.to_be_bytes()].concat());
+        assert_eq!(refund_ledger_memo(5), [b"RSUI-RFD".as_slice(), &5u64.to_be_bytes()].concat());
+        assert_eq!(sweep_memo(5), [b"RSUI-FEE".as_slice(), &5u64.to_be_bytes()].concat());
+        assert_eq!(release_memo(&[9; 32]), vec![9u8; 32]);
+        // Distinct from the Solana instance's prefixes: a memo never crosses instances.
+        for m in [pull_memo(1), refund_ledger_memo(1), sweep_memo(1)] {
+            assert!(!m.starts_with(b"RSOL"));
+        }
     }
 
     #[test]

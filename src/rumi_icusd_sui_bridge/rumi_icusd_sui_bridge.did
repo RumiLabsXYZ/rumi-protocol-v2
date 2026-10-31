@@ -1,17 +1,124 @@
+type Account = record { owner : principal; subaccount : opt blob };
+type AuditEntry = record {
+  seq : nat64;
+  return_id : opt text;
+  deposit_id : opt nat64;
+  at_ns : nat64;
+  op_id : opt nat64;
+  note : text;
+  transition : opt Transition;
+};
 type BridgeArg = variant { Upgrade : UpgradeArgs; Init : InitArgs };
+type BridgeFees = record { release_fee_e8s : nat64; deposit_fee_e8s : nat64 };
+type BridgeLimits = record {
+  max_active_per_caller : nat32;
+  release_window_limit_e8s : nat64;
+  max_deposit_e8s : nat64;
+  max_active_global : nat32;
+  min_deposit_e8s : nat64;
+  window_seconds : nat64;
+  mint_window_limit_e8s : nat64;
+  max_outstanding_e8s : nat64;
+};
+type BridgeToSuiArgs = record {
+  client_request_id : blob;
+  from_subaccount : opt blob;
+  amount_e8s : nat64;
+  expected_deposit_fee_e8s : nat64;
+  sui_recipient : text;
+};
+type BucketsView = record {
+  reserved_pulls : nat;
+  pending_mint : nat;
+  unknown_outflow : nat;
+  pending_refund : nat;
+  outstanding : nat;
+  fees : nat;
+  held : nat;
+  pending_release : nat;
+};
 type ConfigView = record {
   signing_enabled : bool;
   bridge_version : text;
   initialized : bool;
+  fee_recipient : opt Account;
+  fees : BridgeFees;
   mirror : MirrorSettings;
   network : SuiNetwork;
+  escrow_subaccount : text;
   schema_version : nat32;
   binding : opt GateBindingView;
   schnorr_key_name : text;
   short_chain_id : text;
+  admins : vec principal;
+  halted : opt text;
   chain_identifier : text;
+  icusd_ledger : principal;
   instance_salt : text;
+  limits : BridgeLimits;
+  pauses : Pauses;
 };
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+type ConsentMessage = variant {
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+  GenericDisplayMessage : text;
+};
+type ConsentMessageMetadata = record {
+  utc_offset_minutes : opt int16;
+  language : text;
+};
+type ConsentMessageRequest = record {
+  arg : blob;
+  method : text;
+  user_preferences : ConsentMessageSpec;
+};
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+type DepositKindView = variant {
+  UserDeposit;
+  Remint : record { return_id : text };
+};
+type DepositStatus = variant {
+  Refunding;
+  Refunded;
+  MintHeld : record { reason : text };
+  PullPending;
+  PullFailed : record { reason : text };
+  Delivered;
+  MintInFlight;
+  Escrowed;
+  PullUnknown;
+};
+type DepositView = record {
+  id : nat64;
+  status : DepositStatus;
+  client_request_id : blob;
+  refund_amount_e8s : opt nat64;
+  owner : principal;
+  from : opt Account;
+  kind : DepositKindView;
+  mint_id : opt text;
+  pull_block_index : opt nat64;
+  mint_amount_e8s : nat64;
+  updated_at_ns : nat64;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  delivered : opt SuiInclusion;
+  refund_block_index : opt nat64;
+  sui_recipient : text;
+  deposit_fee_e8s : nat64;
+  mint_op_id : opt nat64;
+};
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type ErrorInfo = record { description : text };
 type GateBindingArg = record {
   admin_cap_id : text;
   mint_cap_id : text;
@@ -33,10 +140,38 @@ type HttpResponse = record {
   body : blob;
   headers : vec HttpHeader;
 };
+type Icrc21Error = variant {
+  GenericError : record { description : text; error_code : nat64 };
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
+type Icrc28TrustedOriginsResponse = record { trusted_origins : vec text };
 type InitArgs = record {
+  fee_recipient : opt Account;
+  fees : opt BridgeFees;
   mirror : opt MirrorSettings;
   network : SuiNetwork;
+  admins : vec principal;
   chain_identifier : text;
+  icusd_ledger : principal;
+  limits : opt BridgeLimits;
+};
+type LineDisplayPage = record { lines : vec text };
+type ListDepositsArgs = record { start_after : opt nat64; limit : nat32 };
+type ListDepositsForOwnerArgs = record {
+  owner : principal;
+  start_after : opt nat64;
+  limit : nat32;
+};
+type ListReleasesArgs = record {
+  owner : principal;
+  start_after_seq : opt nat64;
+  limit : nat32;
+};
+type ListReleasesForSenderArgs = record {
+  sui_sender : text;
+  start_after_seq : opt nat64;
+  limit : nat32;
 };
 type MirrorSettings = record {
   max_response_bytes : nat32;
@@ -45,32 +180,136 @@ type MirrorSettings = record {
   min_independent_providers : nat8;
   providers : vec ProviderConfig;
 };
+type Pauses = record {
+  mints : bool;
+  observer : bool;
+  releases : bool;
+  deposits : bool;
+};
 type ProviderConfig = record { id : text; url : text };
-type Result = variant { Ok : vec RoleView; Err : SuiBridgeError };
-type Result_1 = variant { Ok : ConfigView; Err : SuiBridgeError };
+type ReleaseStatus = variant {
+  Reminted : record { deposit_id : nat64 };
+  TransferUnknown;
+  Held : record { reason : text };
+  Released;
+  Reminting : record { deposit_id : nat64 };
+  Pending;
+};
+type ReleaseView = record {
+  seq : nat64;
+  status : ReleaseStatus;
+  return_id : text;
+  destination : Account;
+  sui_sender : text;
+  checkpoint : nat64;
+  release_block_index : opt nat64;
+  updated_at_ns : nat64;
+  gate_sequence : nat64;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  release_fee_e8s : nat64;
+  tx_digest : text;
+  ledger_fee_e8s : opt nat64;
+  amount_to_receive_e8s : opt nat64;
+  client_nonce : nat64;
+};
+type Result = variant { Ok; Err : SuiBridgeError };
+type Result_1 = variant { Ok : DepositView; Err : SuiBridgeError };
+type Result_2 = variant { Ok : nat64; Err : SuiBridgeError };
+type Result_3 = variant { Ok : vec RoleView; Err : SuiBridgeError };
+type Result_4 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type Result_5 = variant { Ok : ConfigView; Err : SuiBridgeError };
 type RoleView = record {
   public_key : opt text;
   role : SuiRole;
   derivation_path : vec text;
   address : opt text;
 };
+type StandardRecord = record { url : text; name : text };
 type SuiBridgeError = variant {
+  Internal : text;
   Anonymous;
+  Paused : text;
+  InsufficientAllowance : record {
+    allowance_e8s : nat64;
+    required_e8s : nat64;
+  };
+  AmountBelowMinimum : record { min_e8s : nat64 };
+  CapacityExceeded : record { available_e8s : nat64 };
   SignerFailed : text;
+  NotFound;
+  TooManyActiveOperations;
   Unauthorized;
+  NotOwner;
+  InvalidRecipient : text;
+  RateLimited : record { window_resets_at_ns : nat64; available_e8s : nat64 };
   NotConfigured : text;
   InvalidArgument : text;
+  Ledger : text;
+  Halted : text;
+  RequestIdConflict;
+  InvalidState : text;
+  FeeChanged : record { current_fee_e8s : nat64 };
+  InsufficientFunds : record { required_e8s : nat64; balance_e8s : nat64 };
   Conflict : text;
+  AmountAboveMaximum : record { max_e8s : nat64 };
 };
+type SuiInclusion = record { checkpoint : nat64; tx_digest : text };
 type SuiNetwork = variant { Mainnet; Testnet };
 type SuiRole = variant { UpgradeCustody; Gas; Treasury };
 type TransformArgs = record { context : blob; response : HttpResponse };
-type UpgradeArgs = record { mirror : opt MirrorSettings };
+type Transition = variant {
+  RemintDelivered : record { amount : nat64 };
+  PullFailed : record { amount : nat64 };
+  SweepCompleted : record { amount : nat64 };
+  ReturnFinalized : record { amount : nat64 };
+  OutflowResolved : record { amount : nat64 };
+  RefundStarted : record { amount : nat64 };
+  AdmitDeposit : record { amount : nat64 };
+  RemintStarted : record { amount : nat64 };
+  ReleaseHeld : record { amount : nat64 };
+  MintDelivered : record { fee : nat64; amount : nat64 };
+  RefundCompleted : record { amount : nat64 };
+  ReleaseCompleted : record { amount : nat64; release_fee : nat64 };
+  PullSucceeded : record { amount : nat64 };
+  OutflowUnknown : record { amount : nat64 };
+};
+type UpgradeArgs = record {
+  mirror : opt MirrorSettings;
+  admins : opt vec principal;
+};
 service : (BridgeArg) -> {
+  admin_clear_halt : (text) -> (Result);
+  admin_retry_deposit : (nat64) -> (Result_1);
+  admin_run_tick : () -> (Result);
+  admin_set_fees : (BridgeFees) -> (Result);
+  admin_set_limits : (BridgeLimits) -> (Result);
+  admin_set_pauses : (Pauses) -> (Result);
+  admin_sweep_fees : (nat64) -> (Result_2);
+  bridge_to_sui : (BridgeToSuiArgs) -> (Result_1);
   bridge_version : () -> (text) query;
-  derive_role_keys : () -> (Result);
+  derive_role_keys : () -> (Result_3);
+  get_audit_log : (nat64, nat32) -> (vec AuditEntry) query;
+  get_buckets : () -> (BucketsView) query;
   get_config : () -> (ConfigView) query;
+  get_deposit : (nat64) -> (opt DepositView) query;
+  get_deposit_by_request : (principal, blob) -> (opt DepositView) query;
+  get_release : (text) -> (opt ReleaseView) query;
   get_roles : () -> (vec RoleView) query;
-  set_gate_binding : (GateBindingArg) -> (Result_1);
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_4);
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  list_deposits_for_owner : (ListDepositsForOwnerArgs) -> (
+      vec DepositView,
+    ) query;
+  list_my_deposits : (ListDepositsArgs) -> (vec DepositView) query;
+  list_releases_for_owner : (ListReleasesArgs) -> (vec ReleaseView) query;
+  list_releases_for_sui_sender : (ListReleasesForSenderArgs) -> (
+      vec ReleaseView,
+    ) query;
+  notify_sui_return : (text) -> (Result);
+  request_deposit_refund : (nat64) -> (Result_1);
+  set_admins : (vec principal) -> (Result);
+  set_gate_binding : (GateBindingArg) -> (Result_5);
   transform_sui_graphql : (TransformArgs) -> (HttpResponse) query;
 }

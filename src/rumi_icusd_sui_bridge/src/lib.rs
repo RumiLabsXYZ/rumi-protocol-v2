@@ -63,42 +63,40 @@
 //!   `ed25519-dalek`); `assemble_signed_mint` checks that each key matches its role address.
 //! * BLAKE2b-256 is the RustCrypto `blake2` crate, the one dependency added to `Cargo.lock` for this card.
 
+pub mod accounting;
+pub mod admin;
 pub mod bcs;
 pub mod env;
+pub mod flows;
 pub mod gate;
 pub mod graphql;
 pub mod hash;
+pub mod icp;
+pub mod icrc21;
 pub mod ids;
+pub mod ledger;
+pub mod runtime;
 pub mod schnorr;
 pub mod state;
 pub mod sui;
+pub mod timer;
 pub mod tx;
 pub mod types;
+pub mod views;
 #[cfg(test)]
 #[allow(dead_code)]
 mod vectors;
 #[cfg(test)]
 mod graphql_identity_tests;
+#[cfg(test)]
+#[allow(dead_code)]
+mod testkit;
+#[cfg(test)]
+mod saga_tests;
 
 use candid::Principal;
 use ids::SuiRole;
 use types::*;
-
-// ---------------------------------------------------------------------------
-// Guards
-// ---------------------------------------------------------------------------
-
-fn require_controller() -> SuiResult<Principal> {
-    let caller = env::caller();
-    if caller == Principal::anonymous() {
-        return Err(SuiBridgeError::Anonymous);
-    }
-    if env::is_controller(&caller) {
-        Ok(caller)
-    } else {
-        Err(SuiBridgeError::Unauthorized)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Views
@@ -118,6 +116,7 @@ fn binding_view(b: &state::StoredBinding) -> GateBindingView {
 }
 
 fn config_view(c: &state::SuiCore) -> ConfigView {
+    let r = state::read_runtime(|r| r.clone());
     ConfigView {
         initialized: c.initialized,
         network: c.network,
@@ -130,6 +129,14 @@ fn config_view(c: &state::SuiCore) -> ConfigView {
         bridge_version: ids::BRIDGE_VERSION.to_string(),
         schema_version: c.schema_version,
         signing_enabled: false,
+        icusd_ledger: r.config.icusd_ledger,
+        admins: r.config.admins,
+        fee_recipient: r.config.fee_recipient,
+        fees: r.config.fees,
+        limits: r.config.limits,
+        pauses: r.config.pauses,
+        halted: r.halted.map(|h| h.reason),
+        escrow_subaccount: hex::encode(ids::escrow_subaccount()),
     }
 }
 
@@ -159,6 +166,7 @@ fn init(arg: BridgeArg) {
         BridgeArg::Upgrade(_) => ic_cdk::trap("install requires BridgeArg::Init"),
     };
     let (chain, mirror) = state::validate_init(&args).unwrap_or_else(|e| ic_cdk::trap(&format!("invalid init args: {e}")));
+    let runtime = state::validate_runtime_init(&args).unwrap_or_else(|e| ic_cdk::trap(&format!("invalid init args: {e}")));
     let salt = ids::instance_salt(env::canister_id().as_slice(), env::now_ns());
     state::mutate_core(|c| {
         if c.initialized {
@@ -170,6 +178,12 @@ fn init(arg: BridgeArg) {
         c.instance_salt = salt;
         c.mirror = mirror;
     });
+    state::mutate_runtime(|c| {
+        c.initialized = true;
+        c.config = runtime;
+    });
+    state::append_audit(None, state::AuditCtx::note("initialized"));
+    timer::schedule_soon();
 }
 
 #[ic_cdk::post_upgrade]
@@ -183,6 +197,13 @@ fn post_upgrade(arg: Option<BridgeArg>) {
                 }
                 state::mutate_core(|c| c.mirror = mirror);
             }
+            if let Some(admins) = u.admins {
+                if admins.is_empty() || admins.iter().any(|p| *p == Principal::anonymous()) {
+                    ic_cdk::trap("upgrade admins must be non-empty and non-anonymous");
+                }
+                state::mutate_runtime(|c| c.config.admins = admins.clone());
+                state::append_audit(None, state::AuditCtx::note(format!("admins replaced at upgrade: {admins:?}")));
+            }
         }
         Some(BridgeArg::Init(_)) => ic_cdk::trap("upgrade requires BridgeArg::Upgrade or no argument"),
     }
@@ -193,7 +214,88 @@ fn post_upgrade(arg: Option<BridgeArg>) {
     if let Err(e) = state::read_core(state::validate_stored_config) {
         ic_cdk::trap(&format!("upgrade refused, the previous module stays installed: {e}"));
     }
+    // An image written by the BB-52 foundation has no runtime record: the runtime starts from its
+    // defaults and must then be initialized from the identity that is already stored. A refused
+    // runtime config traps here, so the previous module stays.
+    if !state::read_runtime(|c| c.initialized) {
+        ic_cdk::trap("upgrade refused: the saga runtime is not initialized; reinstall with the saga install arguments");
+    }
+    if let Err(e) = state::read_runtime(|c| state::validate_stored_runtime(&c.config)) {
+        ic_cdk::trap(&format!("upgrade refused, the previous module stays installed: {e}"));
+    }
     state::migrate_core();
+    if state::migrate_runtime() {
+        state::append_audit(None, state::AuditCtx::note("runtime schema migrated"));
+    }
+    state::append_audit(None, state::AuditCtx::note("upgraded"));
+    timer::schedule_soon();
+}
+
+// ---------------------------------------------------------------------------
+// User methods
+// ---------------------------------------------------------------------------
+
+#[ic_cdk::update]
+async fn bridge_to_sui(args: BridgeToSuiArgs) -> BridgeResult<DepositView> {
+    flows::deposit::bridge_to_sui(&icp::CanisterLedger::from_config(), args).await
+}
+
+#[ic_cdk::update]
+async fn request_deposit_refund(id: u64) -> BridgeResult<DepositView> {
+    flows::deposit::request_refund(&icp::CanisterLedger::from_config(), id).await
+}
+
+/// "Look at this Sui transaction sooner" (base58 typed transaction digest). Stores a bounded hint;
+/// never settles anything.
+#[ic_cdk::update]
+fn notify_sui_return(digest: String) -> BridgeResult<()> {
+    flows::release::record_hint(digest)
+}
+
+#[ic_cdk::query]
+fn get_deposit(id: u64) -> Option<DepositView> {
+    state::get_deposit(id).map(|d| views::deposit_view(&d))
+}
+
+#[ic_cdk::query]
+fn list_my_deposits(args: ListDepositsArgs) -> Vec<DepositView> {
+    let caller = env::caller();
+    state::list_owner_deposits(&caller, args.start_after, args.limit).iter().map(views::deposit_view).collect()
+}
+
+/// Public: deposits are on-chain facts. Lets wallets whose signer upgrades queries to signed calls
+/// read history without a consent prompt.
+#[ic_cdk::query]
+fn list_deposits_for_owner(args: ListDepositsForOwnerArgs) -> Vec<DepositView> {
+    state::list_owner_deposits(&args.owner, args.start_after, args.limit).iter().map(views::deposit_view).collect()
+}
+
+/// Public lookup of a deposit by its owner and client request id (recovery after a lost
+/// `bridge_to_sui` reply).
+#[ic_cdk::query]
+fn get_deposit_by_request(owner: Principal, client_request_id: serde_bytes::ByteBuf) -> Option<DepositView> {
+    let key = state::request_key(&owner, &client_request_id).ok()?;
+    state::lookup_request(&key).and_then(state::get_deposit).map(|d| views::deposit_view(&d))
+}
+
+/// A release by the Gate's `transfer_id` (64 hex).
+#[ic_cdk::query]
+fn get_release(return_id: String) -> Option<ReleaseView> {
+    let id: [u8; 32] = hex::decode(return_id.trim()).ok()?.try_into().ok()?;
+    state::get_release(&id).map(|r| views::release_view(&r))
+}
+
+/// Releases paid to an ICP principal, newest first.
+#[ic_cdk::query]
+fn list_releases_for_owner(args: ListReleasesArgs) -> Vec<ReleaseView> {
+    state::list_owner_releases(&args.owner, args.start_after_seq, args.limit).iter().map(views::release_view).collect()
+}
+
+/// Releases created by returns from a Sui address (`0x` and 64 hex), including held claims.
+#[ic_cdk::query]
+fn list_releases_for_sui_sender(args: ListReleasesForSenderArgs) -> Vec<ReleaseView> {
+    let Ok(sender) = sui::parse_address_strict(&args.sui_sender) else { return vec![] };
+    state::list_sender_releases(&sender, args.start_after_seq, args.limit).iter().map(views::release_view).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -215,15 +317,83 @@ fn get_roles() -> Vec<RoleView> {
     state::read_core(role_views)
 }
 
+#[ic_cdk::query]
+fn get_buckets() -> BucketsView {
+    views::buckets_view()
+}
+
+#[ic_cdk::query]
+fn get_audit_log(start: u64, limit: u32) -> Vec<AuditEntry> {
+    state::audit_page(start, limit).iter().map(views::audit_entry).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Admin methods
+// ---------------------------------------------------------------------------
+
+#[ic_cdk::update]
+fn admin_set_pauses(p: Pauses) -> BridgeResult<()> {
+    admin::set_pauses(p)?;
+    timer::schedule_soon();
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn admin_set_limits(l: BridgeLimits) -> BridgeResult<()> {
+    admin::set_limits(l)
+}
+
+#[ic_cdk::update]
+fn admin_set_fees(f: BridgeFees) -> BridgeResult<()> {
+    admin::set_fees(f)
+}
+
+#[ic_cdk::update]
+async fn admin_sweep_fees(amount_e8s: u64) -> BridgeResult<u64> {
+    admin::require_admin()?;
+    flows::deposit::sweep_fees(&icp::CanisterLedger::from_config(), amount_e8s).await
+}
+
+/// Put a held deposit (no mint operation, none abandoned) back in the mint queue.
+#[ic_cdk::update]
+fn admin_retry_deposit(id: u64) -> BridgeResult<DepositView> {
+    admin::require_admin()?;
+    flows::deposit::retry_held(id)
+}
+
+/// Clear the bridge halt after resolving its cause; the note says how.
+#[ic_cdk::update]
+fn admin_clear_halt(note: String) -> BridgeResult<()> {
+    admin::clear_halt(&note)?;
+    timer::schedule_soon();
+    Ok(())
+}
+
+#[ic_cdk::update]
+async fn admin_run_tick() -> BridgeResult<()> {
+    admin::require_admin()?;
+    timer::schedule_soon();
+    if timer::run_now().await {
+        Ok(())
+    } else {
+        Err(BridgeError::InvalidState("a pass is already running, or the instance is not fully configured".into()))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Controller methods
 // ---------------------------------------------------------------------------
+
+#[ic_cdk::update]
+fn set_admins(admins: Vec<Principal>) -> BridgeResult<()> {
+    admin::set_admins(admins)
+}
 
 /// Record the exact identities of the deployed gate. Set once; the same ids again are a no-op
 /// and different ids are a conflict.
 #[ic_cdk::update]
 fn set_gate_binding(arg: GateBindingArg) -> SuiResult<ConfigView> {
-    require_controller()?;
+    admin::require_controller()?;
     let binding = state::validate_binding(&arg).map_err(SuiBridgeError::InvalidArgument)?;
     state::set_binding(binding)?;
     Ok(state::read_core(config_view))
@@ -234,7 +404,7 @@ fn set_gate_binding(arg: GateBindingArg) -> SuiResult<ConfigView> {
 /// distinct keys is refused and nothing is stored.
 #[ic_cdk::update]
 async fn derive_role_keys() -> SuiResult<Vec<RoleView>> {
-    require_controller()?;
+    admin::require_controller()?;
     let (network, chain, initialized) = state::read_core(|c| (c.network, c.chain_identifier, c.initialized));
     if !initialized {
         return Err(SuiBridgeError::NotConfigured("the instance is not initialized".into()));
@@ -250,7 +420,26 @@ async fn derive_role_keys() -> SuiResult<Vec<RoleView>> {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP outcall transform (the transport itself is BB-53)
+// Wallet standards
+// ---------------------------------------------------------------------------
+
+#[ic_cdk::update]
+fn icrc21_canister_call_consent_message(request: icrc21::ConsentMessageRequest) -> Result<icrc21::ConsentInfo, icrc21::Icrc21Error> {
+    icrc21::consent_message(request)
+}
+
+#[ic_cdk::query]
+fn icrc28_trusted_origins() -> icrc21::Icrc28TrustedOriginsResponse {
+    icrc21::trusted_origins()
+}
+
+#[ic_cdk::query]
+fn icrc10_supported_standards() -> Vec<icrc21::StandardRecord> {
+    icrc21::supported_standards()
+}
+
+// ---------------------------------------------------------------------------
+// HTTP outcall transform (the transport itself is 53b)
 // ---------------------------------------------------------------------------
 
 use ic_cdk::api::management_canister::http_request::{HttpResponse, TransformArgs};
@@ -276,34 +465,70 @@ fn transform_sui_graphql(args: TransformArgs) -> HttpResponse {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IngressAccess {
-    /// Authenticated controllers only.
+    /// Anyone, including anonymous callers (wallet standards only).
+    Anyone,
+    /// Any authenticated principal.
+    Authenticated,
+    /// An admin or a controller.
+    Admin,
+    /// A controller.
     Controller,
 }
 
-/// Every method that may legitimately arrive as an ingress UPDATE call. Anything not listed is
-/// refused before execution. A new update endpoint must be added here; the test
-/// `every_update_endpoint_has_an_ingress_decision` fails until it is.
-const INGRESS_METHODS: &[(&str, IngressAccess)] =
-    &[("set_gate_binding", IngressAccess::Controller), ("derive_role_keys", IngressAccess::Controller)];
+/// Every method that may legitimately arrive as an ingress UPDATE call, with the callers it is worth
+/// running for. Anything not listed is refused before execution. A new update endpoint must be added
+/// here; `every_update_endpoint_has_an_ingress_decision` fails until it is.
+const INGRESS_METHODS: &[(&str, IngressAccess)] = &[
+    ("icrc21_canister_call_consent_message", IngressAccess::Anyone),
+    // User methods.
+    ("bridge_to_sui", IngressAccess::Authenticated),
+    ("request_deposit_refund", IngressAccess::Authenticated),
+    ("notify_sui_return", IngressAccess::Authenticated),
+    // Admin methods.
+    ("admin_set_pauses", IngressAccess::Admin),
+    ("admin_set_limits", IngressAccess::Admin),
+    ("admin_set_fees", IngressAccess::Admin),
+    ("admin_sweep_fees", IngressAccess::Admin),
+    ("admin_retry_deposit", IngressAccess::Admin),
+    ("admin_clear_halt", IngressAccess::Admin),
+    ("admin_run_tick", IngressAccess::Admin),
+    // Controller methods.
+    ("set_admins", IngressAccess::Controller),
+    ("set_gate_binding", IngressAccess::Controller),
+    ("derive_role_keys", IngressAccess::Controller),
+];
 
-/// Largest accepted argument.
-pub const MAX_INGRESS_BYTES: usize = 8 * 1024;
+/// Largest accepted argument for open methods (wallet standards and user methods). The biggest
+/// legitimate one, a `bridge_to_sui` consent request, is well under 1 KiB; without a cap any caller
+/// could make the canister pay the ingress fee for about 2 MiB.
+pub const MAX_OPEN_INGRESS_BYTES: usize = 4 * 1024;
+/// Largest accepted argument for admin and controller methods.
+pub const MAX_ADMIN_INGRESS_BYTES: usize = 16 * 1024;
 
 fn ingress_access(method: &str) -> Option<IngressAccess> {
     INGRESS_METHODS.iter().find(|(name, _)| *name == method).map(|(_, access)| *access)
 }
 
-/// Whether an ingress update call is worth executing. Pure, so the table is unit tested. NOT a
-/// security boundary: it runs on one replica without consensus. Every method keeps its own
-/// caller check, which is what protects state.
-fn decide(method: &str, arg_bytes: usize, caller_is_anonymous: bool, is_controller: bool) -> bool {
+/// Whether an ingress update call is worth executing. Pure, so the table above is unit tested. NOT a
+/// security boundary: it runs on one replica without consensus. Every method keeps its own caller
+/// checks, which are what protect state and funds.
+fn decide(method: &str, arg_bytes: usize, caller_is_anonymous: bool, is_admin: bool, is_controller: bool) -> bool {
     let Some(access) = ingress_access(method) else {
+        // Not a known update method (a query name, a typo, a probe): nothing to run.
         return false;
     };
-    if arg_bytes > MAX_INGRESS_BYTES || caller_is_anonymous {
+    let max_bytes = match access {
+        IngressAccess::Anyone | IngressAccess::Authenticated => MAX_OPEN_INGRESS_BYTES,
+        IngressAccess::Admin | IngressAccess::Controller => MAX_ADMIN_INGRESS_BYTES,
+    };
+    if arg_bytes > max_bytes {
         return false;
     }
     match access {
+        IngressAccess::Anyone => true,
+        _ if caller_is_anonymous => false,
+        IngressAccess::Authenticated => true,
+        IngressAccess::Admin => is_admin || is_controller,
         IngressAccess::Controller => is_controller,
     }
 }
@@ -314,8 +539,10 @@ fn inspect_message() {
     let arg_bytes = ic_cdk::api::call::arg_data_raw_size();
     let caller = ic_cdk::api::caller();
     let anonymous = caller == Principal::anonymous();
-    let is_controller = !anonymous && ic_cdk::api::is_controller(&caller);
-    if decide(&method, arg_bytes, anonymous, is_controller) {
+    // Only the role checks the method's table entry might need; skipped for anonymous.
+    let (is_admin, is_controller) =
+        if anonymous { (false, false) } else { (state::read_runtime(|c| c.is_admin(&caller)), ic_cdk::api::is_controller(&caller)) };
+    if decide(&method, arg_bytes, anonymous, is_admin, is_controller) {
         ic_cdk::api::call::accept_message();
     }
 }
@@ -340,6 +567,7 @@ mod candid_tests {
             .unwrap_or_else(|e| panic!("rumi_icusd_sui_bridge.did is out of date; regenerate it: {e:?}"));
     }
 }
+
 
 #[cfg(test)]
 mod endpoint_tests {
@@ -374,25 +602,51 @@ mod endpoint_tests {
     #[test]
     fn every_update_endpoint_has_an_ingress_decision() {
         let updates: BTreeSet<String> = endpoints("#[ic_cdk::update]").into_iter().collect();
-        assert_eq!(updates.len(), 2, "the update endpoints are exactly the listed ones: {updates:?}");
+        assert_eq!(updates.len(), 14, "the update endpoints are exactly the listed ones: {updates:?}");
         let listed: BTreeSet<String> = INGRESS_METHODS.iter().map(|(n, _)| n.to_string()).collect();
-        assert_eq!(updates, listed);
+        assert_eq!(updates, listed, "every update endpoint is listed and nothing else is");
         assert_eq!(listed.len(), INGRESS_METHODS.len(), "no duplicates");
-        // The queries expose no signing or broadcast capability.
+        // The queries expose no signing or broadcast capability and no mutation.
         let queries: BTreeSet<String> = endpoints("#[ic_cdk::query]").into_iter().collect();
-        let expected: BTreeSet<String> = ["bridge_version", "get_config", "get_roles", "transform_sui_graphql"].iter().map(|s| s.to_string()).collect();
+        let expected: BTreeSet<String> = [
+            "bridge_version",
+            "get_config",
+            "get_roles",
+            "get_buckets",
+            "get_audit_log",
+            "get_deposit",
+            "list_my_deposits",
+            "list_deposits_for_owner",
+            "get_deposit_by_request",
+            "get_release",
+            "list_releases_for_owner",
+            "list_releases_for_sui_sender",
+            "icrc28_trusted_origins",
+            "icrc10_supported_standards",
+            "transform_sui_graphql",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert_eq!(queries, expected);
     }
 
     #[test]
     fn ingress_decisions() {
-        assert!(decide("set_gate_binding", 100, false, true));
-        assert!(decide("derive_role_keys", 0, false, true));
-        assert!(!decide("set_gate_binding", 100, true, true), "anonymous");
-        assert!(!decide("set_gate_binding", 100, false, false), "not a controller");
-        assert!(!decide("set_gate_binding", MAX_INGRESS_BYTES + 1, false, true), "oversized");
-        assert!(!decide("get_config", 0, false, true), "a query name is not an update");
-        assert!(!decide("anything_else", 0, false, true));
+        // (method, anonymous, admin, controller) -> accepted
+        assert!(decide("icrc21_canister_call_consent_message", 100, true, false, false), "wallet standards stay open");
+        assert!(decide("bridge_to_sui", 100, false, false, false));
+        assert!(!decide("bridge_to_sui", 100, true, false, false), "anonymous");
+        assert!(!decide("bridge_to_sui", MAX_OPEN_INGRESS_BYTES + 1, false, false, false), "oversized open call");
+        assert!(decide("admin_set_fees", 100, false, true, false));
+        assert!(decide("admin_set_fees", 100, false, false, true), "a controller may run admin methods");
+        assert!(!decide("admin_set_fees", 100, false, false, false), "not an admin");
+        assert!(!decide("admin_set_fees", MAX_ADMIN_INGRESS_BYTES + 1, false, true, false));
+        assert!(decide("set_gate_binding", 100, false, false, true));
+        assert!(!decide("set_gate_binding", 100, false, true, false), "an admin is not a controller");
+        assert!(!decide("derive_role_keys", 100, true, false, true), "anonymous");
+        assert!(!decide("get_config", 0, false, true, true), "a query name is not an update");
+        assert!(!decide("bridge_to_solana", 0, false, true, true), "another chain's method");
     }
 
     fn controller() -> Principal {
@@ -401,13 +655,28 @@ mod endpoint_tests {
 
     fn start(network: SuiNetwork, chain: &sui::Bytes32) {
         state::reset_for_tests();
-        let (chain, mirror) = state::validate_init(&InitArgs { network, chain_identifier: hex::encode(chain), mirror: None }).unwrap();
+        let args = InitArgs {
+            network,
+            chain_identifier: hex::encode(chain),
+            mirror: None,
+            icusd_ledger: Principal::from_slice(&[0x1c; 10]),
+            admins: vec![Principal::from_slice(&[3; 10])],
+            fee_recipient: None,
+            fees: None,
+            limits: None,
+        };
+        let (chain, mirror) = state::validate_init(&args).unwrap();
+        let runtime = state::validate_runtime_init(&args).unwrap();
         state::mutate_core(|c| {
             c.initialized = true;
             c.network = network;
             c.chain_identifier = chain;
             c.instance_salt = ids::instance_salt(env::canister_id().as_slice(), env::now_ns());
             c.mirror = mirror;
+        });
+        state::mutate_runtime(|c| {
+            c.initialized = true;
+            c.config = runtime;
         });
     }
 
@@ -467,6 +736,9 @@ mod endpoint_tests {
         assert_eq!(c.chain_identifier, hex::encode(MAINNET_CHAIN_IDENTIFIER));
         assert_eq!(c.bridge_version, "rumi-sui-icusd-bridge-v1");
         assert!(!c.signing_enabled && c.binding.is_none() && !c.mirror.enabled);
+        assert!(c.pauses.deposits, "deposits start paused");
+        assert_eq!(c.icusd_ledger, Principal::from_slice(&[0x1c; 10]));
+        assert_eq!(c.escrow_subaccount, hex::encode(ids::escrow_subaccount()));
         let roles = get_roles();
         assert_eq!(roles.len(), 3);
         assert!(roles.iter().all(|r| r.public_key.is_none() && r.address.is_none()));

@@ -63,6 +63,12 @@ pub mod test_env {
     use super::host;
     use candid::Principal;
 
+    pub fn set_now_ns(t: u64) {
+        host::NOW.with(|n| n.set(t));
+    }
+    pub fn advance_secs(s: u64) {
+        host::NOW.with(|n| n.set(n.get() + s * 1_000_000_000));
+    }
     pub fn set_caller(p: Principal) {
         host::CALLER.with(|c| *c.borrow_mut() = p);
     }

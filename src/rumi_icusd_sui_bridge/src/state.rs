@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
 
-type Mem = VirtualMemory<DefaultMemoryImpl>;
+pub use crate::runtime::*;
+
+pub(crate) type Mem = VirtualMemory<DefaultMemoryImpl>;
 
 /// Version of the stored core record. 1 = BB-52 foundation.
 pub const CORE_SCHEMA_VERSION: u32 = 1;
@@ -108,7 +110,7 @@ thread_local! {
         StableCell::init(mem(MEM_CORE), SuiCore::default()).expect("init core cell"));
 }
 
-fn mem(id: u8) -> Mem {
+pub(crate) fn mem(id: u8) -> Mem {
     MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(id)))
 }
 
@@ -251,6 +253,7 @@ pub fn set_binding(b: StoredBinding) -> Result<(), SuiBridgeError> {
 #[cfg(test)]
 pub fn reset_for_tests() {
     mutate_core(|c| *c = SuiCore::default());
+    crate::runtime::reset_runtime_for_tests();
 }
 
 #[cfg(test)]
@@ -258,9 +261,19 @@ mod tests {
     use super::*;
     use crate::ids::{MAINNET_CHAIN_IDENTIFIER, TESTNET_CHAIN_IDENTIFIER};
     use crate::vectors::*;
+    use candid::Principal;
 
     fn init_args(network: SuiNetwork, chain: &Bytes32) -> InitArgs {
-        InitArgs { network, chain_identifier: hex::encode(chain), mirror: None }
+        InitArgs {
+            network,
+            chain_identifier: hex::encode(chain),
+            mirror: None,
+            icusd_ledger: Principal::from_slice(&[0x1c; 10]),
+            admins: vec![Principal::from_slice(&[3; 10])],
+            fee_recipient: None,
+            fees: None,
+            limits: None,
+        }
     }
 
     fn sample_core() -> SuiCore {
