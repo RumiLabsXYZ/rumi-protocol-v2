@@ -2,7 +2,8 @@
 
 Lane file for `DEMO_DEFERRED_WORK.md` (demo-first policy, 2026-10-29). Owner: the Multichain icUSD coordinator, supervised by
 Miles. It records only the shortcuts this groundwork actually took (2026-10-30). Every destination profile is disabled, so no
-entry affects existing client assets; each must be revisited before that destination is offered for client money.
+entry affects existing client assets; each must be revisited before that destination is offered for client money. From the
+implementation phase (BB-42 onward, 2026-10-30) it also records actual implementation shortcuts.
 
 | ID | Feature | Owner | Concern or skipped work | Why not essential now | Limitation and containment | Before client money | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -12,3 +13,4 @@ entry affects existing client assets; each must be revisited before that destina
 | MC-DEF-4 | Cycle cost (all new instances) | future family owners | Outcall and signing cycle costs not measured | No instance is built | No instance runs | Measure per instance before funding | open |
 | MC-DEF-5 | Destination profiles | BB-60 owner | Fields left empty or not added: no Sui devnet record (no stable identifier), Ethereum endpoint list empty, Solana named wallets empty, Solana refund-id domain undefined, Solana token-program, memo-program, nonce-pool, history-horizon and minimum-refund fields not added | Values not sourced or not yet designed | Validator passes with these gaps; all disabled | Source or design each value, update the profile, rerun the validator | open |
 | MC-DEF-6 | Groundwork design and notes | Miles | No independent adversarial review rounds of the design or chain notes; evidence is coordinator source checks plus Miles' scoped reviews | Demo-first: no extra review committee for paper groundwork | Nothing executable was produced except the host-only profile crate | Focused security review of each family's implementation before activation | open |
+| MC-DEF-7 | Analytics escrow subtraction (BB-58) | BB-58 owner | The on-chain path (`icrc1_balance_of` against a real ICRC-1 ledger, the admin setter end to end) is not exercised: no PocketIC test was added and the analytics PocketIC suite needs a prebuilt Wasm | Unit tests cover the arithmetic, list validation, stale-result discard and legacy state decode; nothing is deployed | Production behavior is unchanged until an admin configures escrow accounts | A PocketIC test in `pocket_ic_analytics.rs` with a real ledger and a configured escrow account, before production accounts are configured | open |

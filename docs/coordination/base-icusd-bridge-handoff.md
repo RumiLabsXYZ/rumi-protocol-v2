@@ -952,6 +952,61 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   One builder: W24 alone runs release Wasm builds; W25 runs unit tests only, and both share this worktree's `target/`, where
   cargo's lock serializes the runs.
 
+## Milestone 41 (2026-10-30): BB-58 in Review
+
+- `15bb73dc` (W25, `claude-sonnet-5-5`), on top of `628adba2`. Analytics: new optional `SlimState.bridge_escrow_accounts`
+  (Candid `opt`, so a pre-change snapshot decodes it as null; tests `decodes_legacy_slim_state_without_new_schedule_fields`
+  extended and `decodes_pre_bridge_escrow_slim_state_with_none_escrow_list` added); admin update
+  `admin_set_bridge_escrow_accounts` (at most 32, no duplicate including the zero-subaccount alias, no anonymous owner, empty
+  restores today's behavior); `refresh_supply_cache` stores `total - sum(escrow balances)`; a failed read or a sum above the
+  total keeps the previous value and bumps the error counter; a changed list clears the cached figure and a result computed
+  under a stale list is discarded, so the raw total is never published once accounts are configured. With no accounts the
+  refresh is unchanged. `ProtocolSummary`, HTTP shapes and metric names unchanged. Additive Candid (`didc check` new against
+  old exit 0); bindings regenerated only by `scripts/regenerate-declarations.sh rumi_analytics` (its `.did` copy also picked
+  up drift that predates this card).
+- Host-only aggregate `rumi_bridge_destinations::aggregate` (design 2.4): only `in_d` destinations count, the XRPL lane is
+  separate, custody is excluded once, `custody != rc + bu + stray` is a failure flag, checked u128 arithmetic, duplicate ids
+  refused; ten golden tests.
+- Worker checks: `cargo test --offline -p rumi_analytics --lib` 146 passed (baseline 129); `--test audit_pocs_dos_010_stagger`
+  21 passed; `cargo test --offline -p rumi_bridge_destinations` 73 passed (63 plus 10); dry run exit 0, 9 profiles, 19
+  networks, 0 violations. Clippy with `-D warnings` is not clean at baseline in either crate (pre-existing, outside these files);
+  the new files are clean. No Cargo change. No Wasm build in this lane (one release builder, W24).
+- Coordinator review: read the state field, setter, refresh path, stale-result guard and aggregate formulas against design
+  2.4; no defect found. Omission logged: MC-DEF-7 (no PocketIC test of the on-chain read path).
+
+## Milestone 42 (2026-10-30): BB-43 and BB-58 follow-ups
+
+- BB-43 `fecaf9d5` (W24, `claude-sonnet-5-5`): `chains.rs` rows gain display name, allowed keys, native provider family,
+  head rule, install gate and consent wording; 13 rows (Base three enabled; Ethereum, Arbitrum, Robinhood, HyperEVM, Monad
+  mainnet and testnet described but install-disabled as an interim state). `validate_init` and both RPC validators follow the
+  row; every Base error string unchanged (new tests pin them). `rpc::finalized_head` is now the dispatcher:
+  `tag_finalized_quorum` is the old body unchanged; `MonadVerified { delay_blocks: 3 }` takes the quorum finalized height
+  minus 3 and the quorum hash there; `Blocked` errors before any provider call; no rule sends `latest`. The idle probe keeps
+  Base's finalized-tag call and pins Monad to the numbered head. ICRC-21 and the finality text come from the row with Base
+  byte-identical. Worker run: 483 unit tests passed (was 453), clippy clean, release Wasm 3,865,565 bytes; no `.did`,
+  declaration, stable-state or Cargo change. Coordinator review: read the validation, dispatcher and Monad head code; the
+  test helper now sets a Base Sepolia chain id because a head rule needs a profiled id.
+- BB-43 not yet accepted (Miles, `review-bb43.md`): three settlement proofs still read the raw `finalized` tag, the sites W24
+  had flagged: `request_refund`'s mint-consumed check (`flows/deposit.rs:546`), `fetch_nonces` (`evm/lane.rs:975-982`) and
+  `clear_lane_halt_with` (`evm/lane.rs:1559`). Monad needs its Verified head there; Base stays unchanged. Same W24 resumed with
+  `flows/deposit.rs` and `evm/lane.rs` added to its files, and it is again the only release builder.
+- BB-58 review (Miles): the analytics subtraction, stable field, legacy decode, stale-result discard and declarations are sound.
+  Not accepted as complete reporting: `aggregate` is a pure function with no consumer that reads balances and supply itself
+  (design 2.4), and D/X disjointness was only documented (a D entry named for XRPL plus the XRPL lane counted one escrow twice).
+  Same owner W25 resumed for one bounded follow-up in `rumi_bridge_destinations`: a typed input boundary (catalog-bound
+  network ids, XRPL family only as X, unique escrow bindings across D and X) and a `Readings`-driven collector with a fixture
+  transport and a runnable example; Solana, Sui and XRPL adapters report unavailable with their source card. The live
+  transport (IC query and EVM JSON-RPC client) stays an open substep: it needs a client dependency and a separate read-only
+  query authorization.
+- Staffing (two Sonnet lanes, no Haiku task; W26 briefly made a third and was stopped):
+
+  | Handle | Card | Scope | Requested | Actual (run record) | State |
+  | --- | --- | --- | --- | --- | --- |
+  | W24 | BB-43 | as above | Sonnet | `claude-sonnet-5-5` | first pass finished; reopened below |
+  | W25 | BB-58 follow-up | `src/rumi_bridge_destinations` only; unit tests only | Sonnet | `claude-sonnet-5-5` (same run, resumed) | running |
+  | W24 | BB-43 correction | adds `flows/deposit.rs`, `evm/lane.rs`; only release builder (also builds the analytics Wasm once) | Sonnet | `claude-sonnet-5-5` (same run, resumed) | running |
+  | W26 | BB-44 | `types.rs`, `evm/rpc.rs`, `chains.rs`, `state.rs`, the bridge `.did` and bindings | Sonnet | `claude-sonnet-5-5` | stopped by the coordinator minutes after start to keep two Sonnet lanes when BB-43 reopened; partial edits saved privately, files restored to `fecaf9d5`; BB-44 back to Queue |
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
