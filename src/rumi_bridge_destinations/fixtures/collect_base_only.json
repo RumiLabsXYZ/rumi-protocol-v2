@@ -1,11 +1,15 @@
 {
-  "description": "SYNTHETIC FIXTURE, not live data. Base only, with one excluded test-ledger instance. Every number is invented and the principal below is a synthetic test principal (its bytes spell synthetic-escrow-base), not a real account. A run of this file prints source: fixture.",
+  "description": "SYNTHETIC FIXTURE, not live data. Base only, with one excluded test-ledger instance and a bridge instance audit. Every number is invented and the principals are synthetic test principals (their bytes spell synthetic-escrow-base and synthetic-instance-base), not real accounts. The instance audit is a self-report: the collector prints it next to the independent reads and checks it against them. A run of this file prints source: fixture.",
   "config": {
     "destinations": [
       {
         "network_id": "base-mainnet",
         "in_d": true,
-        "escrow": { "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f", "subaccount": null }
+        "escrow": {
+          "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+          "subaccount": null
+        },
+        "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq"
       },
       {
         "network_id": "base-sepolia",
@@ -19,7 +23,10 @@
     "debt_backed_chain_supplies": "0",
     "icrc1_balances": [
       {
-        "escrow": { "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f", "subaccount": null },
+        "escrow": {
+          "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+          "subaccount": null
+        },
         "balance": "20012345678"
       }
     ],
@@ -29,6 +36,32 @@
         "supply": "20012345678",
         "finality": "evm_tag",
         "block": 1000
+      }
+    ],
+    "instance_audits": [
+      {
+        "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq",
+        "audit": {
+          "escrow_account": {
+            "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+            "subaccount": null
+          },
+          "escrow_balance_e8s": "20012345678",
+          "outstanding_e8s": "20000000000",
+          "pending_mint_e8s": "12345678",
+          "inflight_mint_e8s": "12345678",
+          "pending_release_e8s": "0",
+          "pending_refund_e8s": "0",
+          "held_e8s": "0",
+          "fees_e8s": "0",
+          "reserved_pulls_e8s": "0",
+          "unknown_outflow_e8s": "0",
+          "liabilities_e8s": "20012345678",
+          "required_escrow_e8s": "20012345678",
+          "coverage_ok": true,
+          "reported_supply_e8s": "20012345678",
+          "reported_supply_block": 1000
+        }
       }
     ]
   }

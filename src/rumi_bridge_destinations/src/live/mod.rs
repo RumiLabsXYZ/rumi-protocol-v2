@@ -12,7 +12,14 @@
 //! * [`evm`]: a [`evm::JsonRpcTransport`] per destination, with the bridge
 //!   canister's head rule driven by the profile (finalized quorum, Monad
 //!   verified = finalized minus 3, blocked rows ask nothing) and `totalSupply`
-//!   read at a NUMBERED block. `latest` is never sent.
+//!   read at a NUMBERED block. `latest` is never sent. Each provider is first
+//!   asked `eth_chainId` and bound to the profile's chain id; a provider on
+//!   another chain is excluded from every vote.
+//!
+//! * [`ic::instance_supply_audit`]: each counted EVM destination's bridge
+//!   instance is also asked for its own `get_supply_audit` (query, anonymous).
+//!   That reply is a self-report, shown next to the independent reads and
+//!   checked against them, never used as a balance or a supply.
 //!
 //! Every report from here is labelled `source: live` and carries the read time
 //! and the head height of each EVM reading, so it cannot be mistaken for a
@@ -39,7 +46,8 @@ use std::collections::BTreeMap;
 use candid::Principal;
 use serde::Deserialize;
 
-use crate::collect::{EvmSupply, ReadError, Readings};
+use crate::aggregate::DestinationConfig;
+use crate::collect::{EvmSupply, InstanceAudit, ReadError, Readings};
 use crate::escrow::EscrowBinding;
 use crate::types::Network;
 
@@ -150,10 +158,14 @@ impl LiveReadings {
     pub fn from_config(config: &LiveConfig, read_at_unix: u64) -> Result<LiveReadings, String> {
         let ledger = parse_principal(&config.ic.ledger, "ic.ledger")?;
         let backend = match &config.ic.backend {
-            Some(b) => Some((
-                parse_principal(&b.canister, "ic.backend.canister")?,
-                b.debt_backed_chain_ids.clone(),
-            )),
+            Some(b) => {
+                ic::check_unique_chain_ids(&b.debt_backed_chain_ids)
+                    .map_err(|e| format!("ic.backend.debt_backed_chain_ids: {e}"))?;
+                Some((
+                    parse_principal(&b.canister, "ic.backend.canister")?,
+                    b.debt_backed_chain_ids.clone(),
+                ))
+            }
             None => None,
         };
         let ic = ic::AgentQuery::new(&config.ic.url)?;
@@ -213,6 +225,18 @@ impl Readings for LiveReadings {
         }
     }
 
+    fn instance_audit(&self, destination: &DestinationConfig) -> Result<InstanceAudit, ReadError> {
+        let text = destination.instance.as_deref().ok_or_else(|| {
+            ReadError::Failed(format!(
+                "{} names no bridge instance canister",
+                destination.network_id
+            ))
+        })?;
+        let instance =
+            parse_principal(text, "the bridge instance canister").map_err(ReadError::Failed)?;
+        ic::instance_supply_audit(self.ic.as_ref(), &instance)
+    }
+
     fn evm_total_supply(&self, network: &Network) -> Result<EvmSupply, ReadError> {
         match self.evm.get(&network.network_id) {
             Some(src) => evm::read_total_supply(src.transport.as_ref(), &src.token, network),
@@ -270,6 +294,15 @@ mod tests {
         EscrowBinding::from_principal_bytes(format!("syn-{id}").as_bytes(), None)
     }
 
+    /// The synthetic bridge instance canister of the Base destination.
+    fn instance_text() -> String {
+        crate::escrow::principal_to_text(instance_principal().as_slice())
+    }
+
+    fn instance_principal() -> Principal {
+        Principal::from_slice(b"synthetic-instance-base")
+    }
+
     #[derive(CandidType, CandidDeserialize)]
     enum St {
         Registered,
@@ -281,18 +314,84 @@ mod tests {
         extra: bool,
     }
 
+    /// A SupplyAudit-shaped reply (a superset of the fields the collector uses).
+    #[derive(CandidType, CandidDeserialize)]
+    struct AuditReply {
+        escrow_account: ic::Icrc1Account,
+        escrow_balance_e8s: Option<Nat>,
+        outstanding_base_e8s: Nat,
+        pending_mint_e8s: Nat,
+        inflight_mint_e8s: Nat,
+        pending_release_e8s: Nat,
+        pending_refund_e8s: Nat,
+        held_e8s: Nat,
+        fees_e8s: Nat,
+        reserved_pulls_e8s: Nat,
+        unknown_outflow_e8s: Nat,
+        liabilities_e8s: Nat,
+        required_escrow_e8s: Nat,
+        coverage_ok: Option<bool>,
+        base_total_supply_e8s: Option<Nat>,
+        base_supply_block: Option<u64>,
+        reporting_note: String,
+    }
+
+    fn audit_reply(escrow: u128, supply: u128, outstanding: u128, liabilities: u128) -> Vec<u8> {
+        let n = |v: u128| Nat::from(v);
+        candid::encode_one(AuditReply {
+            escrow_account: ic::Icrc1Account {
+                owner: Principal::from_slice(b"syn-base-mainnet"),
+                subaccount: None,
+            },
+            escrow_balance_e8s: Some(n(escrow)),
+            outstanding_base_e8s: n(outstanding),
+            pending_mint_e8s: n(0),
+            inflight_mint_e8s: n(0),
+            pending_release_e8s: n(0),
+            pending_refund_e8s: n(0),
+            held_e8s: n(0),
+            fees_e8s: n(0),
+            reserved_pulls_e8s: n(0),
+            unknown_outflow_e8s: n(0),
+            liabilities_e8s: n(liabilities),
+            required_escrow_e8s: n(liabilities),
+            coverage_ok: Some(true),
+            base_total_supply_e8s: Some(n(supply)),
+            base_supply_block: Some(999),
+            reporting_note: "synthetic".into(),
+        })
+        .unwrap()
+    }
+
     /// An IC that answers like a small ledger and backend.
     struct FakeIc {
         total: u128,
         balance: u128,
         chain_supply: u128,
         backend_has_query: bool,
+        /// Liabilities the instance's audit reports.
+        liabilities: u128,
         calls: RefCell<Vec<String>>,
     }
     impl ic::IcQuery for FakeIc {
-        fn query(&self, _c: &Principal, method: &str, _a: &[u8]) -> Result<Vec<u8>, IcQueryError> {
-            self.calls.borrow_mut().push(method.to_string());
+        fn query(&self, c: &Principal, method: &str, _a: &[u8]) -> Result<Vec<u8>, IcQueryError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("{method}@{}", c.to_text()));
             match method {
+                "get_supply_audit" => {
+                    assert_eq!(
+                        *c,
+                        instance_principal(),
+                        "audit asked of the wrong canister"
+                    );
+                    Ok(audit_reply(
+                        self.balance,
+                        self.balance,
+                        self.balance,
+                        self.liabilities,
+                    ))
+                }
                 "icrc1_total_supply" => Ok(candid::encode_one(Nat::from(self.total)).unwrap()),
                 "icrc1_balance_of" => Ok(candid::encode_one(Nat::from(self.balance)).unwrap()),
                 "get_chain_public_launch_status" if self.backend_has_query => {
@@ -315,6 +414,7 @@ mod tests {
         Box::new(move |method, params: &Value| {
             let hash = |n: u64| format!("0x{:064x}", n);
             match method {
+                "eth_chainId" => Ok(json!("0x2105")),
                 "eth_getBlockByNumber" => {
                     let tag = params[0].as_str().unwrap();
                     let n = if tag == "finalized" {
@@ -353,6 +453,7 @@ mod tests {
                 network_id: "base-mainnet".into(),
                 in_d: true,
                 escrow: Some(binding_for("base-mainnet")),
+                instance: Some(instance_text()),
             }],
             xrpl: None,
         }
@@ -364,6 +465,7 @@ mod tests {
             balance: 20_000_000_000,
             chain_supply: 500_000_000,
             backend_has_query: true,
+            liabilities: 20_000_000_000,
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -395,6 +497,58 @@ mod tests {
         );
         assert!(!text.contains("source: fixture"), "{text}");
         assert!(!text.contains("not live data"), "{text}");
+    }
+
+    #[test]
+    fn live_collection_reads_the_instance_audit_and_checks_c1_on_the_independent_read() {
+        let readings = live(ic_ok(), true);
+        let catalog = Catalog::embedded().unwrap();
+        let got = collect(&base_config(), &catalog, &readings).unwrap();
+        assert_eq!(got.audits.len(), 1);
+        assert_eq!(got.audits[0].audit.liabilities_e8s, 20_000_000_000);
+        assert_eq!(got.liabilities_total, 20_000_000_000);
+        // The independent escrow read (200) covers liabilities (200).
+        assert!(!got.report.has_failure());
+        let text = render(&got);
+        assert!(
+            text.contains("instance audit base-mainnet (instance "),
+            "{text}"
+        );
+
+        // Liabilities above the independent escrow break C1, whatever the
+        // instance says about its own balance.
+        let mut broken = ic_ok();
+        broken.liabilities = 20_000_000_001;
+        let readings = live(broken, true);
+        let got = collect(&base_config(), &catalog, &readings).unwrap();
+        assert!(got
+            .report
+            .failures()
+            .any(|f| matches!(f.kind, crate::aggregate::FlagKind::CoverageBroken { .. })));
+    }
+
+    #[test]
+    fn a_missing_instance_binding_makes_no_query_at_all() {
+        let ic = ic_ok();
+        let mut cfg = base_config();
+        cfg.destinations[0].instance = None;
+        let mut evm_map = BTreeMap::new();
+        evm_map.insert(
+            "base-mainnet".to_string(),
+            EvmSource {
+                token: [0x22; 20],
+                transport: Box::new(Mock::new(vec![provider(1000, 1), provider(1000, 1)])),
+            },
+        );
+        let readings = LiveReadings::new(Box::new(ic), p(1), None, evm_map, 0);
+        let catalog = Catalog::embedded().unwrap();
+        let err = collect(&cfg, &catalog, &readings).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::collect::CollectError::Rejected(
+                crate::aggregate::AggregateError::MissingInstanceBinding(_)
+            )
+        ));
     }
 
     #[test]
@@ -478,6 +632,7 @@ mod tests {
                 network_id: "solana-mainnet".into(),
                 in_d: true,
                 escrow: Some(binding_for("solana-mainnet")),
+                instance: Some(instance_text()),
             }],
             xrpl: None,
         };

@@ -16,6 +16,13 @@
 //! * `Blocked`: a profile whose head cannot be read safely returns
 //!   [`ReadError::UnavailableGap`] before any request is sent.
 //!
+//! Chain identity comes first: after the blocked check and before any head or
+//! supply vote, every configured provider is asked `eth_chainId` and the answer
+//! is bound to the profile network's EVM chain id (`network.identity`). A
+//! provider whose answer is missing, malformed or a different chain is excluded
+//! from every later vote, and the profile's quorum must be met from the matching
+//! providers alone, otherwise the reading fails with a named error.
+//!
 //! `totalSupply()` is then called at the NUMBERED head on every provider and a
 //! quorum of identical answers is required. No request ever uses `latest`,
 //! `pending`, `safe` or `earliest`: the only tag sent is `finalized`, for head
@@ -28,7 +35,7 @@
 use serde_json::{json, Value};
 
 use crate::collect::{EvmSupply, ReadError};
-use crate::types::{FinalityRule, Network};
+use crate::types::{FinalityRule, IdentityKind, Network};
 
 /// `totalSupply()` selector.
 const TOTAL_SUPPLY_SELECTOR: &str = "0x18160ddd";
@@ -364,6 +371,51 @@ fn total_supply_at(
     Ok(u128::from_be_bytes(low))
 }
 
+/// The EVM chain id the profile names for this network.
+fn expected_chain_id(network: &Network) -> Result<u64, String> {
+    let id = &network.identity.value;
+    if id.kind != IdentityKind::EvmChainId {
+        return Err("the profile identity is not an EVM chain id".into());
+    }
+    crate::types::parse_u64_decimal(&id.value)
+        .map_err(|e| format!("the profile's EVM chain id is unusable: {e}"))
+}
+
+/// Providers that answer `eth_chainId` with the expected chain, by original
+/// index, and a note per excluded provider (by position, never by URL).
+fn matching_providers(t: &dyn JsonRpcTransport, expected: u64) -> (Vec<usize>, Vec<String>) {
+    let mut matching = Vec::new();
+    let mut excluded = Vec::new();
+    for i in 0..t.provider_count() {
+        match call(t, i, "eth_chainId", json!([])).and_then(|v| parse_quantity(&v, "chain id")) {
+            Ok(id) if id == expected => matching.push(i),
+            Ok(id) => excluded.push(format!("p{} reports chain {id}", i + 1)),
+            Err(e) => excluded.push(format!("p{} gave no usable chain id: {e}", i + 1)),
+        }
+    }
+    (matching, excluded)
+}
+
+/// A view of a transport restricted to a subset of its providers, so the
+/// existing quorum logic runs on the chain-matching providers only.
+struct Subset<'a> {
+    inner: &'a dyn JsonRpcTransport,
+    map: Vec<usize>,
+}
+
+impl JsonRpcTransport for Subset<'_> {
+    fn provider_count(&self) -> usize {
+        self.map.len()
+    }
+    fn post(&self, index: usize, body: &str) -> Result<String, String> {
+        let original = *self
+            .map
+            .get(index)
+            .ok_or_else(|| "provider index out of range".to_string())?;
+        self.inner.post(original, body)
+    }
+}
+
 /// Read a destination token's `totalSupply` at the profile's settlement head.
 ///
 /// `quorum` and the head rule come from the profile. A blocked rule returns
@@ -390,8 +442,26 @@ pub fn read_total_supply(
         )));
     }
     let fail = |e: String| ReadError::Failed(format!("{}: {e}", network.network_id));
-    let head = head_height(t, quorum, &rule).map_err(fail)?;
-    let supply = total_supply_at(t, quorum, token, head).map_err(fail)?;
+    // Chain identity before any head or supply vote.
+    let expected = expected_chain_id(network).map_err(fail)?;
+    let (matching, excluded) = matching_providers(t, expected);
+    if matching.len() < quorum {
+        return Err(fail(format!(
+            "only {} of {count} providers report chain {expected}, quorum is {quorum}; excluded: {}",
+            matching.len(),
+            if excluded.is_empty() {
+                "none".to_string()
+            } else {
+                excluded.join("; ")
+            }
+        )));
+    }
+    let bound = Subset {
+        inner: t,
+        map: matching,
+    };
+    let head = head_height(&bound, quorum, &rule).map_err(fail)?;
+    let supply = total_supply_at(&bound, quorum, token, head).map_err(fail)?;
     Ok(EvmSupply {
         supply,
         finality: network.finality.rule,
@@ -528,11 +598,16 @@ pub(crate) mod tests {
         json!(format!("0x{:064x}", v))
     }
 
-    /// A provider whose chain is at finalized height `finalized`, with block
-    /// hashes salted by `salt`, and `supply` as the token's total supply at any
-    /// block it has.
-    fn provider(finalized: u64, salt: u8, supply: u128) -> Script {
+    /// Chain ids of the networks the tests read.
+    const BASE: u64 = 8453;
+    const MONAD_TESTNET: u64 = 10143;
+
+    /// A provider on chain `chain` whose chain is at finalized height
+    /// `finalized`, with block hashes salted by `salt`, and `supply` as the
+    /// token's total supply at any block it has.
+    fn provider(chain: u64, finalized: u64, salt: u8, supply: u128) -> Script {
         Box::new(move |method, params| match method {
+            "eth_chainId" => Ok(json!(quantity(chain))),
             "eth_getBlockByNumber" => {
                 let tag = params[0].as_str().unwrap();
                 if tag == "finalized" {
@@ -577,6 +652,10 @@ pub(crate) mod tests {
             for forbidden in ["latest", "pending", "safe", "earliest"] {
                 assert!(!text.contains(forbidden), "sent {forbidden}: {text}");
             }
+            if req["method"] == "eth_chainId" {
+                assert_eq!(req["params"], json!([]));
+                continue;
+            }
             let tag = match req["method"].as_str().unwrap() {
                 "eth_getBlockByNumber" => req["params"][0].as_str().unwrap(),
                 "eth_call" => req["params"][1].as_str().unwrap(),
@@ -607,9 +686,9 @@ pub(crate) mod tests {
     #[test]
     fn tag_rule_reads_supply_at_the_agreed_numbered_head() {
         let mock = Mock::new(vec![
-            provider(100, 1, 2_000),
-            provider(100, 1, 2_000),
-            provider(100, 1, 2_000),
+            provider(BASE, 100, 1, 2_000),
+            provider(BASE, 100, 1, 2_000),
+            provider(BASE, 100, 1, 2_000),
         ]);
         let got = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap();
         assert_eq!(got.supply, 2_000);
@@ -624,9 +703,9 @@ pub(crate) mod tests {
     fn tag_rule_takes_the_quorum_th_highest_height_and_ignores_an_outlier() {
         // Heights 500 (far-ahead outlier), 103, 100 with quorum 2: n = 103.
         let mock = Mock::new(vec![
-            provider(500, 1, 7_000),
-            provider(103, 1, 7_000),
-            provider(100, 1, 7_000),
+            provider(BASE, 500, 1, 7_000),
+            provider(BASE, 103, 1, 7_000),
+            provider(BASE, 100, 1, 7_000),
         ]);
         let got = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap();
         assert_eq!(got.block, 103);
@@ -649,9 +728,9 @@ pub(crate) mod tests {
     fn tag_rule_fails_when_the_block_hash_has_no_quorum() {
         // Same height, three different hashes.
         let mock = Mock::new(vec![
-            provider(100, 1, 5),
-            provider(100, 2, 5),
-            provider(100, 3, 5),
+            provider(BASE, 100, 1, 5),
+            provider(BASE, 100, 2, 5),
+            provider(BASE, 100, 3, 5),
         ]);
         let err = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap_err();
         assert!(
@@ -665,9 +744,9 @@ pub(crate) mod tests {
     #[test]
     fn tag_rule_fails_when_supply_answers_have_no_quorum_and_wins_with_one() {
         let split = Mock::new(vec![
-            provider(100, 1, 5),
-            provider(100, 1, 6),
-            provider(100, 1, 7),
+            provider(BASE, 100, 1, 5),
+            provider(BASE, 100, 1, 6),
+            provider(BASE, 100, 1, 7),
         ]);
         let err = read_total_supply(&split, &TOKEN, &network("base-mainnet")).unwrap_err();
         assert!(
@@ -677,9 +756,9 @@ pub(crate) mod tests {
 
         // Two agree, one dissents: the quorum wins.
         let majority = Mock::new(vec![
-            provider(100, 1, 5),
-            provider(100, 1, 6),
-            provider(100, 1, 6),
+            provider(BASE, 100, 1, 5),
+            provider(BASE, 100, 1, 6),
+            provider(BASE, 100, 1, 6),
         ]);
         assert_eq!(
             read_total_supply(&majority, &TOKEN, &network("base-mainnet"))
@@ -691,23 +770,24 @@ pub(crate) mod tests {
 
     #[test]
     fn a_provider_that_fails_does_not_block_a_quorum_of_the_rest() {
-        let down: Script = Box::new(|_, _| Err("TRANSPORT".into()));
-        let mock = Mock::new(vec![down, provider(100, 1, 9), provider(100, 1, 9)]);
+        let mock = Mock::new(vec![
+            dead(),
+            provider(BASE, 100, 1, 9),
+            provider(BASE, 100, 1, 9),
+        ]);
         let got = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap();
         assert_eq!((got.supply, got.block), (9, 100));
         // Too few answers: only one provider up with quorum 2.
-        let down2: Script = Box::new(|_, _| Err("TRANSPORT".into()));
-        let down3: Script = Box::new(|_, _| Err("TRANSPORT".into()));
-        let mock = Mock::new(vec![provider(100, 1, 9), down2, down3]);
+        let mock = Mock::new(vec![provider(BASE, 100, 1, 9), dead(), dead()]);
         assert!(read_total_supply(&mock, &TOKEN, &network("base-mainnet")).is_err());
     }
 
     #[test]
     fn monad_reads_at_the_finalized_height_minus_three() {
         let mock = Mock::new(vec![
-            provider(200, 4, 31_337),
-            provider(200, 4, 31_337),
-            provider(200, 4, 31_337),
+            provider(MONAD_TESTNET, 200, 4, 31_337),
+            provider(MONAD_TESTNET, 200, 4, 31_337),
+            provider(MONAD_TESTNET, 200, 4, 31_337),
         ]);
         let got = read_total_supply(&mock, &TOKEN, &network("monad-testnet")).unwrap();
         assert_eq!(got.block, 197);
@@ -726,9 +806,9 @@ pub(crate) mod tests {
     #[test]
     fn monad_younger_than_its_delay_has_no_verified_head() {
         let mock = Mock::new(vec![
-            provider(2, 4, 1),
-            provider(2, 4, 1),
-            provider(2, 4, 1),
+            provider(MONAD_TESTNET, 2, 4, 1),
+            provider(MONAD_TESTNET, 2, 4, 1),
+            provider(MONAD_TESTNET, 2, 4, 1),
         ]);
         let err = read_total_supply(&mock, &TOKEN, &network("monad-testnet")).unwrap_err();
         assert!(
@@ -745,7 +825,7 @@ pub(crate) mod tests {
             "hyperevm-mainnet",
             "hyperevm-testnet",
         ] {
-            let mock = Mock::new(vec![provider(1, 1, 1), provider(1, 1, 1)]);
+            let mock = Mock::new(vec![provider(BASE, 1, 1, 1), provider(BASE, 1, 1, 1)]);
             let err = read_total_supply(&mock, &TOKEN, &network(id)).unwrap_err();
             assert!(
                 matches!(&err, ReadError::UnavailableGap(m) if m.contains("blocked") && m.contains("no request was sent")),
@@ -784,14 +864,14 @@ pub(crate) mod tests {
             check_no_forbidden_tag(&json!([{"to": "0x01", "data": "0x18160ddd"}, "0x64"])).is_ok()
         );
         // And the guard sits in `call`, so a transport never even sees it.
-        let mock = Mock::new(vec![provider(1, 1, 1)]);
+        let mock = Mock::new(vec![provider(BASE, 1, 1, 1)]);
         assert!(call(&mock, 0, "eth_call", json!([{"to": "0x01"}, "latest"])).is_err());
         assert!(mock.log.borrow().is_empty());
     }
 
     #[test]
     fn quorum_larger_than_the_configured_providers_is_refused_up_front() {
-        let mock = Mock::new(vec![provider(100, 1, 5)]);
+        let mock = Mock::new(vec![provider(BASE, 100, 1, 5)]);
         let err = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap_err();
         assert!(
             matches!(&err, ReadError::Failed(m) if m.contains("quorum 2")),
@@ -815,6 +895,7 @@ pub(crate) mod tests {
         // A supply wider than u128 is refused.
         let wide = || -> Script {
             Box::new(|m, _| match m {
+                "eth_chainId" => Ok(json!(quantity(BASE))),
                 "eth_getBlockByNumber" => Ok(block(5, 1)),
                 _ => Ok(json!(format!("0x{}", "ff".repeat(32)))),
             })
@@ -825,6 +906,129 @@ pub(crate) mod tests {
             matches!(&err, ReadError::Failed(m) if m.contains("u128")),
             "{err:?}"
         );
+    }
+
+    /// A provider whose transport always fails.
+    fn dead() -> Script {
+        Box::new(|_, _| Err("TRANSPORT".into()))
+    }
+
+    /// Requests, by provider index, for a given method.
+    fn methods_sent_to(mock: &Mock, provider_index: usize) -> Vec<String> {
+        mock.log
+            .borrow()
+            .iter()
+            .filter(|(i, _)| *i == provider_index)
+            .map(|(_, r)| r["method"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn providers_on_the_wrong_network_fail_the_reading_before_any_vote() {
+        // Every provider answers for Ethereum mainnet (chain 1), not Base.
+        let mock = Mock::new(vec![
+            provider(1, 100, 1, 5),
+            provider(1, 100, 1, 5),
+            provider(1, 100, 1, 5),
+        ]);
+        let err = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap_err();
+        assert!(
+            matches!(&err, ReadError::Failed(m)
+                if m.contains("only 0 of 3 providers report chain 8453") && m.contains("reports chain 1")),
+            "{err:?}"
+        );
+        // Only eth_chainId was ever sent: no head, no supply.
+        for i in 0..3 {
+            assert_eq!(methods_sent_to(&mock, i), vec!["eth_chainId"], "p{}", i + 1);
+        }
+        assert_numbered_or_finalized(&mock);
+    }
+
+    #[test]
+    fn wrong_network_providers_are_excluded_and_the_quorum_comes_from_the_rest() {
+        // p1 serves another chain; p2 and p3 are Base: quorum 2 is still met.
+        let mock = Mock::new(vec![
+            provider(1, 999_999, 9, 999),
+            provider(BASE, 100, 1, 5),
+            provider(BASE, 100, 1, 5),
+        ]);
+        let got = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap();
+        assert_eq!((got.supply, got.block), (5, 100));
+        // The wrong-chain provider was asked its chain and nothing else: its
+        // huge finalized height and its different supply never reached a vote.
+        assert_eq!(methods_sent_to(&mock, 0), vec!["eth_chainId"]);
+        assert!(methods_sent_to(&mock, 1).contains(&"eth_call".to_string()));
+        assert_numbered_or_finalized(&mock);
+
+        // Quorum NOT met from the matching providers alone: two of three are
+        // on the wrong network, so one matching provider cannot carry quorum 2.
+        let mock = Mock::new(vec![
+            provider(1, 100, 1, 5),
+            provider(BASE, 100, 1, 5),
+            provider(10, 100, 1, 5),
+        ]);
+        let err = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap_err();
+        assert!(
+            matches!(&err, ReadError::Failed(m)
+                if m.contains("only 1 of 3 providers report chain 8453") && m.contains("quorum is 2")),
+            "{err:?}"
+        );
+        assert!(!methods_sent_to(&mock, 1).contains(&"eth_call".to_string()));
+    }
+
+    #[test]
+    fn a_chain_id_failure_or_malformed_answer_excludes_that_provider() {
+        // A provider whose eth_chainId answer is `answer` (and nothing else works).
+        let only_chain_id = |answer: Result<Value, String>| -> Script {
+            Box::new(move |m, _| match m {
+                "eth_chainId" => answer.clone(),
+                _ => Err("unexpected".into()),
+            })
+        };
+        let garbage: Vec<Script> = vec![
+            dead(),
+            only_chain_id(Ok(json!("0x2105x"))),
+            only_chain_id(Ok(json!(8453))),
+            only_chain_id(Err("method not found".into())),
+        ];
+        for (i, bad) in garbage.into_iter().enumerate() {
+            // The bad provider plus two good ones: excluded, quorum still met.
+            let mock = Mock::new(vec![
+                bad,
+                provider(BASE, 100, 1, 5),
+                provider(BASE, 100, 1, 5),
+            ]);
+            let got = read_total_supply(&mock, &TOKEN, &network("base-mainnet"))
+                .unwrap_or_else(|e| panic!("case {i}: {e:?}"));
+            assert_eq!((got.supply, got.block), (5, 100), "case {i}");
+            assert_eq!(methods_sent_to(&mock, 0), vec!["eth_chainId"], "case {i}");
+        }
+        // Every chain-id call failing is a named failure.
+        let mock = Mock::new(vec![dead(), dead(), dead()]);
+        let err = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap_err();
+        assert!(
+            matches!(&err, ReadError::Failed(m) if m.contains("only 0 of 3") && m.contains("no usable chain id")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn matching_chain_ids_read_normally_and_blocked_profiles_skip_the_identity_call() {
+        let mock = Mock::new(vec![
+            provider(BASE, 100, 1, 2_000),
+            provider(BASE, 100, 1, 2_000),
+            provider(BASE, 100, 1, 2_000),
+        ]);
+        let got = read_total_supply(&mock, &TOKEN, &network("base-mainnet")).unwrap();
+        assert_eq!(got.supply, 2_000);
+        // eth_chainId came first on every provider.
+        for i in 0..3 {
+            assert_eq!(methods_sent_to(&mock, i)[0], "eth_chainId");
+        }
+        // A blocked profile makes zero requests, not even the identity call.
+        let blocked = Mock::new(vec![provider(4663, 1, 1, 1), provider(4663, 1, 1, 1)]);
+        assert!(read_total_supply(&blocked, &TOKEN, &network("robinhood-mainnet")).is_err());
+        assert!(blocked.log.borrow().is_empty());
     }
 
     #[test]

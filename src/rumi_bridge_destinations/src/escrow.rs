@@ -41,6 +41,32 @@ pub struct EscrowBinding {
 /// (zero-filled) subaccount.
 pub type AccountIdentity = (Vec<u8>, [u8; 32]);
 
+/// Principal bytes of a canister or account owner given as canonical text.
+/// Rejects the empty (management canister) and the anonymous principal, which
+/// can never be a bridge instance or an escrow owner.
+pub fn usable_principal(text: &str) -> Result<Vec<u8>, String> {
+    let bytes = principal_text_to_bytes(text)?;
+    if bytes.is_empty() {
+        return Err("the empty (management canister) principal is not usable here".into());
+    }
+    if bytes == ANONYMOUS {
+        return Err("the anonymous principal is not usable here".into());
+    }
+    Ok(bytes)
+}
+
+/// A readable label for an account identity: the owner text, plus `.` and the
+/// subaccount in hex when it is not the default.
+pub fn account_label(identity: &AccountIdentity) -> String {
+    let owner = principal_to_text(&identity.0);
+    if identity.1 == [0u8; 32] {
+        owner
+    } else {
+        let hex: String = identity.1.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{owner}.{hex}")
+    }
+}
+
 impl EscrowBinding {
     /// A binding from raw principal bytes (used by tests and fixtures).
     pub fn from_principal_bytes(owner: &[u8], subaccount: Option<[u8; 32]>) -> Self {
@@ -54,13 +80,8 @@ impl EscrowBinding {
     /// that is not a canonical principal, the anonymous principal and the
     /// empty (management) principal.
     pub fn identity(&self) -> Result<AccountIdentity, String> {
-        let bytes = principal_text_to_bytes(&self.owner)?;
-        if bytes.is_empty() {
-            return Err("the empty (management canister) principal cannot own an escrow".into());
-        }
-        if bytes == ANONYMOUS {
-            return Err("the anonymous principal cannot own an escrow".into());
-        }
+        let bytes = usable_principal(&self.owner)
+            .map_err(|e| e.replace("is not usable here", "cannot own an escrow"))?;
         Ok((bytes, self.subaccount.unwrap_or([0u8; 32])))
     }
 }
@@ -238,6 +259,29 @@ mod tests {
             subaccount: None,
         };
         assert!(management.identity().unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn usable_principal_and_account_label() {
+        let text = principal_to_text(b"synthetic-instance");
+        assert_eq!(
+            usable_principal(&text).unwrap(),
+            b"synthetic-instance".to_vec()
+        );
+        assert!(usable_principal("2vxsx-fae").is_err());
+        assert!(usable_principal("aaaaa-aa").is_err());
+        assert!(usable_principal("garbage").is_err());
+
+        let owner = b"synthetic-a".to_vec();
+        assert_eq!(
+            account_label(&(owner.clone(), [0; 32])),
+            principal_to_text(&owner)
+        );
+        let mut sub = [0u8; 32];
+        sub[31] = 0xab;
+        let label = account_label(&(owner.clone(), sub));
+        assert!(label.starts_with(&principal_to_text(&owner)));
+        assert!(label.ends_with("ab"), "{label}");
     }
 
     #[test]

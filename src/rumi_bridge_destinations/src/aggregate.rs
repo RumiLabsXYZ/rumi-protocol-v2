@@ -50,7 +50,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-use crate::escrow::{AccountIdentity, EscrowBinding};
+use crate::escrow::{usable_principal, AccountIdentity, EscrowBinding};
 use crate::types::{Family, Network, Profile};
 
 // ---------------------------------------------------------------------------
@@ -111,6 +111,11 @@ pub struct DestinationConfig {
     /// is on another ledger.
     #[serde(default)]
     pub escrow: Option<EscrowBinding>,
+    /// The bridge instance canister (canonical principal text) whose audit
+    /// query the collector reads next to the independent reads. Required by the
+    /// collector for a counted EVM destination; unique across all entries.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 /// The XRPL lane (`X`): a network id (an XRPL-family network) and its escrow.
@@ -182,6 +187,12 @@ pub enum AggregateError {
     InvalidEscrowBinding { network_id: String, reason: String },
     /// Two entries of `D` union `X` name the same escrow account.
     DuplicateEscrowBinding { first: String, second: String },
+    /// A counted EVM destination names no bridge instance canister.
+    MissingInstanceBinding(String),
+    /// An instance canister id is not a usable canonical principal.
+    InvalidInstanceBinding { network_id: String, reason: String },
+    /// Two destinations name the same bridge instance canister.
+    DuplicateInstanceBinding { first: String, second: String },
     /// A checked addition overflowed `u128`. The text names the term.
     Overflow(String),
     /// A checked subtraction would go below zero. The text names the term.
@@ -213,6 +224,17 @@ impl fmt::Display for AggregateError {
                 f,
                 "{first} and {second} name the same escrow account; it would be counted twice"
             ),
+            AggregateError::MissingInstanceBinding(id) => write!(
+                f,
+                "destination {id} is in D but names no bridge instance canister"
+            ),
+            AggregateError::InvalidInstanceBinding { network_id, reason } => {
+                write!(f, "instance canister of {network_id}: {reason}")
+            }
+            AggregateError::DuplicateInstanceBinding { first, second } => write!(
+                f,
+                "{first} and {second} name the same bridge instance canister"
+            ),
             AggregateError::Overflow(what) => write!(f, "overflow computing {what}"),
             AggregateError::Underflow(what) => write!(f, "underflow computing {what}"),
         }
@@ -238,6 +260,7 @@ pub fn check_boundary<'a>(
 ) -> Result<(), AggregateError> {
     let mut ids: BTreeSet<&str> = BTreeSet::new();
     let mut owners: BTreeMap<AccountIdentity, &str> = BTreeMap::new();
+    let mut instances: BTreeMap<Vec<u8>, &str> = BTreeMap::new();
 
     let bind = |network_id: &str, binding: &EscrowBinding| {
         binding
@@ -260,6 +283,20 @@ pub fn check_boundary<'a>(
         };
         if profile.family == Family::Xrpl {
             return Err(AggregateError::DestinationIsXrpl(d.network_id.clone()));
+        }
+        if let Some(text) = &d.instance {
+            let bytes = usable_principal(text).map_err(|reason| {
+                AggregateError::InvalidInstanceBinding {
+                    network_id: d.network_id.clone(),
+                    reason,
+                }
+            })?;
+            if let Some(first) = instances.insert(bytes, d.network_id.as_str()) {
+                return Err(AggregateError::DuplicateInstanceBinding {
+                    first: first.to_string(),
+                    second: d.network_id.clone(),
+                });
+            }
         }
         match (&d.escrow, d.in_d) {
             (None, true) => {
@@ -327,6 +364,29 @@ pub enum FlagKind {
     CustodyUnexplainedExcess { custody: u128, explained: u128 },
     /// `custody < rc + bu + stray`: claimed custodied returns are missing.
     CustodyShortfall { custody: u128, explained: u128 },
+    /// The instance's audit names a different escrow account than the one the
+    /// independent balance was read from, so the coverage check would compare
+    /// the wrong account. Labels are owner text plus subaccount when not default.
+    AuditEscrowAccountMismatch { audit: String, configured: String },
+    /// C1 fails on independent reads: `E_d < liabilities_d - unknown_outflow_d`.
+    CoverageBroken {
+        escrow_independent: u128,
+        liabilities: u128,
+        unknown_outflow: u128,
+    },
+    /// The destination supply bound fails on independent reads:
+    /// `supply_d > outstanding_d + inflight_mint_d`.
+    SupplyBoundBroken {
+        supply_independent: u128,
+        outstanding: u128,
+        inflight_mint: u128,
+    },
+    /// The instance's self-reported escrow balance differs from the
+    /// independent read (both named). Info on its own: the checks above decide.
+    SelfReportedEscrowDiffers { reported: u128, independent: u128 },
+    /// The instance's self-reported destination supply differs from the
+    /// independent read (both named). Info on its own.
+    SelfReportedSupplyDiffers { reported: u128, independent: u128 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,10 +398,14 @@ pub struct Flag {
 impl Flag {
     pub fn severity(&self) -> Severity {
         match self.kind {
-            FlagKind::ExcludedFromD => Severity::Info,
-            FlagKind::CustodyUnexplainedExcess { .. } | FlagKind::CustodyShortfall { .. } => {
-                Severity::Failure
-            }
+            FlagKind::ExcludedFromD
+            | FlagKind::SelfReportedEscrowDiffers { .. }
+            | FlagKind::SelfReportedSupplyDiffers { .. } => Severity::Info,
+            FlagKind::CustodyUnexplainedExcess { .. }
+            | FlagKind::CustodyShortfall { .. }
+            | FlagKind::AuditEscrowAccountMismatch { .. }
+            | FlagKind::CoverageBroken { .. }
+            | FlagKind::SupplyBoundBroken { .. } => Severity::Failure,
         }
     }
 }
@@ -528,6 +592,7 @@ mod tests {
             network_id: id.to_string(),
             in_d,
             escrow: Some(binding_for(id)),
+            instance: None,
         }
     }
 
@@ -681,6 +746,7 @@ mod tests {
                 network_id: "base-sepolia".into(),
                 in_d: false,
                 escrow: None,
+                instance: None,
             },
             escrow_balance: u128::MAX,
             supply: u128::MAX,
@@ -886,6 +952,50 @@ mod tests {
                     AggregateError::InvalidEscrowBinding { .. }
                 ),
                 "{owner}"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_bindings_must_be_usable_and_unique() {
+        let text = crate::escrow::principal_to_text(b"synthetic-instance-a");
+        let other = crate::escrow::principal_to_text(b"synthetic-instance-b");
+        let with = |id: &str, instance: &str| {
+            let mut d = burn_on_return(id, 1);
+            d.config.instance = Some(instance.to_string());
+            d
+        };
+        // Distinct, well-formed instances pass the boundary.
+        run(&input(
+            1_000 * E8,
+            0,
+            vec![
+                with("base-mainnet", &text),
+                with("arbitrum-mainnet", &other),
+            ],
+        ))
+        .unwrap();
+        // The same instance on two destinations is refused.
+        assert_eq!(
+            run(&input(
+                1_000 * E8,
+                0,
+                vec![with("base-mainnet", &text), with("arbitrum-mainnet", &text)]
+            ))
+            .unwrap_err(),
+            AggregateError::DuplicateInstanceBinding {
+                first: "base-mainnet".into(),
+                second: "arbitrum-mainnet".into(),
+            }
+        );
+        // Anonymous, management and garbage ids are refused.
+        for bad in ["2vxsx-fae", "aaaaa-aa", "not-a-principal"] {
+            assert!(
+                matches!(
+                    run(&input(1_000 * E8, 0, vec![with("base-mainnet", bad)])).unwrap_err(),
+                    AggregateError::InvalidInstanceBinding { .. }
+                ),
+                "{bad}"
             );
         }
     }
