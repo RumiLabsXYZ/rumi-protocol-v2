@@ -1008,6 +1008,29 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
   | W24 | BB-43 correction | adds `flows/deposit.rs`, `evm/lane.rs`; only release builder (also builds the analytics Wasm once) | Sonnet | `claude-sonnet-5-5` (same run, resumed) | running |
   | W26 | BB-44 | `types.rs`, `evm/rpc.rs`, `chains.rs`, `state.rs`, the bridge `.did` and bindings | Sonnet | `claude-sonnet-5-5` | stopped by the coordinator minutes after start to keep two Sonnet lanes when BB-43 reopened; partial edits saved privately, files restored to `fecaf9d5`; BB-44 back to Queue |
 
+## Milestone 43 (2026-10-30): both follow-ups delivered
+
+- BB-43 `685984b9` (W24, same run): `request_refund` reads `MintConsumed` at `rpc::settlement_block_tag()`; new required
+  `LaneIo::settlement_tag()` used by `fetch_nonces` and `clear_lane_halt_with` (the head is resolved first, so a blocked
+  chain sends nothing; Base request order and error strings unchanged; latest and pending reads for allocation and
+  rebroadcast untouched). Seven new tests drive the production `ChainIo` and refund path against the mock transport (Monad
+  reads at `0x3e5` when finalized is 1000). Worker run: 490 unit tests passed (was 483), clippy clean, bridge release Wasm
+  3,867,458 bytes, analytics release Wasm builds (3,671,657 bytes). Coordinator check: the raw `BlockTag::Finalized` now
+  appears in production code only at `evm/rpc.rs:635` (tag-to-string mapping) and `:776` (the dispatcher's tag-rule arm);
+  every other hit is inside test modules.
+- BB-58 `78e8ae3d` (W25, same run): `escrow.rs` (`EscrowBinding`: canonical principal text decoded and compared as bytes,
+  missing and all-zero subaccount equal, anonymous refused); `aggregate.rs` `check_boundary` (catalog-bound network ids,
+  unique across D, excluded entries and X; an XRPL-family network never in D; the lane must be XRPL; every counted D entry
+  needs a binding; no escrow repeated across D and X); `collect.rs` (`Readings` trait with no self-report method; EVM reads
+  supply and escrow at the profile's head rule; Solana, Sui and the XRPL lane report unavailable with BB-49, BB-53 and
+  BB-56/57 before any read; `FixtureReadings` prints `source: fixture`); example `collect_fixture` and two synthetic
+  fixtures. Worker run: 97 tests passed (was 73); dry run unchanged. Coordinator check: reran the crate tests (97 passed), ran
+  both fixtures (base-only exit 0 with `source: fixture` and `circulating_total` 1000; overlap exit 1, "destination
+  xrpl-mainnet is an XRPL network: XRPL is the lane X and never a member of D"), and re-encoded the synthetic fixture
+  principal independently (matches).
+- Still open on BB-58 (not Done): the real client transport (IC query and EVM JSON-RPC), queued next for the same owner with
+  mocked-transport tests; running it against public networks stays held.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

@@ -26,7 +26,7 @@
       "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-43 correction in progress (same W24): refund mint check and final-nonce proofs through the settlement head. Then BB-44 (restart from its saved partial edits) and BB-45, which opens the install gate for Ethereum, Arbitrum and Monad in source. Robinhood waits on its BB-46 probe, HyperEVM on archive providers or an observer redesign.",
+      "nextAction": "BB-43 in Review with Miles (fecaf9d5 plus 685984b9). Next: BB-44 restarts from its saved partial edits once BB-43 is accepted, then BB-45 opens the install gate for Ethereum, Arbitrum and Monad in source. Robinhood waits on its BB-46 probe, HyperEVM on archive providers or an observer redesign.",
       "cardIds": [
         "BB-42",
         "BB-43",
@@ -40,7 +40,7 @@
       "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "BB-58 follow-up in progress (same owner W25): independent-reading collector with a fixture transport and a typed D/X boundary; next on the same card, the real IC query and EVM client transport verified with a mocked transport (running public queries stays held). BB-59 starts when a Sonnet lane frees, then BB-60.",
+      "nextAction": "BB-58 collector and D/X boundary in Review (78e8ae3d); next on the same card and owner, the real IC query and EVM client transport with mocked-transport tests (running public queries stays held). Then BB-59, then BB-60.",
       "cardIds": [
         "BB-58",
         "BB-59",

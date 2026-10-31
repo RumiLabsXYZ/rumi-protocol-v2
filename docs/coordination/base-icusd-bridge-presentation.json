@@ -1,5 +1,5 @@
 {
-  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: BB-42 (c57c6009, Base ids pinned). Follow-ups on Sonnet by the same owners: BB-43 (fecaf9d5 table-driven install and RPC checks and head rules; now routing the refund mint check and final-nonce proofs through the settlement head) and BB-58 (analytics escrow subtraction sound; adding an independent-reading collector and a typed D/X boundary). BB-44 queued behind BB-43. BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
+  "summary": "Implementation phase (Rob via Miles, 2026-10-30). Done: BB-42 (c57c6009, Base ids pinned). In Review: BB-43 (fecaf9d5 plus 685984b9: table-driven install and RPC checks; head rules incl. Monad finalized minus 3, now also for refunds and final nonces; 490 unit tests) and BB-58 (analytics escrow subtraction; collector reading every number itself with a typed D/X boundary; real client transport still open). BB-44 restarts after BB-43 is accepted. BB-27 waits on Rob's sign-in and wallet. Nothing merged, deployed, signed or enabled.",
   "glossary": [
     {
       "term": "proof=source",
