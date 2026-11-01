@@ -73,7 +73,14 @@ export interface FeesDTO {
 }
 
 // Vault as returned to the frontend
+export interface NicpRedemptionClaimDTO {
+  stage: string;
+  icpAmount: number;
+  withdrawalId?: string;
+}
+
 export interface VaultDTO {
+  nicpRedemptionClaim?: NicpRedemptionClaimDTO;
   vaultId: number;
   owner: string;
   icpMargin: number;              // Kept for backward compat (same as collateralAmount for ICP)
@@ -200,6 +207,7 @@ export interface EnhancedVault {
 
 // Per-collateral configuration from backend CollateralConfig
 export interface CollateralInfo {
+  lstHaircut?: number;
   principal: string;            // Ledger canister principal (text)
   symbol: string;               // "ICP", "ckETH", "ckBTC"
   decimals: number;             // 8 for ICP, 18 for ckETH, etc.

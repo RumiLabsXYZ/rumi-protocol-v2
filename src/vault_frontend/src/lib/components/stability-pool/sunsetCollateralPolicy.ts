@@ -20,7 +20,7 @@ export function isSunsetCollateralPrincipal(principalText: string): boolean {
 }
 
 export function isSunsetCollateral(collateral: CollateralInfo): boolean {
-	return isSunsetCollateralPrincipal(collateral.ledger_id.toText());
+	return 'Sunset' in collateral.status || isSunsetCollateralPrincipal(collateral.ledger_id.toText());
 }
 
 export function gainCollaterals(collaterals: CollateralInfo[]): CollateralInfo[] {
@@ -32,7 +32,6 @@ export function liquidationPreferenceCollaterals(
 	optedOut: Set<string>
 ): CollateralInfo[] {
 	return gainCollaterals(collaterals).filter(
-		(collateral) =>
-			!isSunsetCollateral(collateral) || !optedOut.has(collateral.ledger_id.toText())
+		(collateral) => !isSunsetCollateral(collateral) || !optedOut.has(collateral.ledger_id.toText())
 	);
 }

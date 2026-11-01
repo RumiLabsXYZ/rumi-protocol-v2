@@ -3884,6 +3884,10 @@ pub struct State {
     pub price_pusher_allowed: std::collections::BTreeSet<(u32, String)>,
     pub next_available_vault_id: u64,
     pub total_collateral_ratio: Ratio,
+    /// Dedicated, protocol-controlled nICP redemption. Its nICP vault amount
+    /// is historical only; claim valuation and payout fences take precedence.
+    #[serde(default)]
+    pub nicp_redemption_claim: Option<crate::nicp_redemption::NicpRedemptionClaim>,
     pub current_base_rate: Ratio,
     pub last_redemption_time: u64,
     pub liquidity_pool: BTreeMap<Principal, ICUSD>,
@@ -4718,6 +4722,7 @@ impl Default for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             next_available_vault_id: 1,
             total_collateral_ratio: Ratio::from(Decimal::MAX),
+            nicp_redemption_claim: None,
             current_base_rate: Ratio::from(Decimal::ZERO),
             last_redemption_time: 0,
             liquidity_pool: BTreeMap::new(),
@@ -4922,6 +4927,7 @@ impl From<InitArg> for State {
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
+            nicp_redemption_claim: None,
             last_icp_timestamp: None,
             last_icp_rate: None,
             next_available_vault_id: 1,
@@ -6317,6 +6323,36 @@ impl State {
             .sum()
     }
 
+    /// A claim remains fenced after settlement while its ICP is held in the
+    /// dedicated claim account. It is never spendable as ordinary nICP.
+    pub fn has_pending_nicp_claim(&self, vault_id: u64) -> bool {
+        self.nicp_redemption_claim.as_ref().is_some_and(|claim| {
+            claim.vault_id == vault_id && claim.blocks_vault()
+        })
+    }
+
+    /// Fixed ICP receivable, priced in USD with the existing nICP haircut.
+    /// Some(0) is deliberately fail-closed when a retained claim lacks usable
+    /// terms or a price: do not fall back to the burned nICP's live value.
+    pub fn nicp_claim_collateral_value(&self, vault: &Vault) -> Option<ICUSD> {
+        let claim = self.nicp_redemption_claim.as_ref()
+            .filter(|claim| claim.vault_id == vault.vault_id && claim.blocks_vault())?;
+        let value = (|| {
+            let config = self.get_collateral_config(&vault.collateral_type)?;
+            let haircut = match &config.price_source {
+                PriceSource::LstWrapped { haircut, .. } if haircut.is_finite()
+                    && (0.0..=1.0).contains(haircut) => Decimal::from_f64(*haircut)?,
+                _ => return None,
+            };
+            let price = self.get_collateral_price_decimal(&self.icp_ledger_principal)?;
+            if price <= Decimal::ZERO { return None; }
+            Some(crate::numeric::collateral_usd_value(
+                claim.fixed_icp_amount_e8s(), price * (Decimal::ONE - haircut), 8,
+            ))
+        })();
+        Some(value.unwrap_or(ICUSD::new(0)))
+    }
+
     /// Deprecated: use `total_collateral_for(&icp_ledger)` for ICP specifically,
     /// or sum across all collateral types for cross-collateral totals.
     /// Kept for backward compat with dashboard and metrics endpoints.
@@ -6334,6 +6370,11 @@ impl State {
         // against legacy vaults with Principal::anonymous() collateral_type.
         let mut total_value = ICUSD::new(0);
         for vault in self.vault_id_to_vaults.values() {
+            if let Some(value) = self.nicp_claim_collateral_value(vault) {
+                total_value = crate::numeric::checked_icusd_add(total_value, value)
+                    .unwrap_or(ICUSD::new(u64::MAX));
+                continue;
+            }
             if let Some(config) = self.get_collateral_config(&vault.collateral_type) {
                 if let Some(price) = config.last_price {
                     let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
@@ -6533,7 +6574,7 @@ impl State {
 
         for vault in self.vault_id_to_vaults.values() {
             if vault.borrowed_icusd_amount == 0
-                || vault.bot_processing
+                || self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
@@ -7377,6 +7418,7 @@ impl State {
             Some(vault_ids) => vault_ids
                 .iter()
                 .filter_map(|id| self.vault_id_to_vaults.get(id))
+                .filter(|vault| !self.has_pending_nicp_claim(vault.vault_id))
                 .map(|v| v.collateral_amount)
                 .sum(),
             None => 0,
@@ -7387,7 +7429,7 @@ impl State {
     /// Returns ICUSD value in e8s.
     pub fn total_collateral_value_for(&self, ct: &CollateralType) -> ICUSD {
         let raw_amount = self.total_collateral_for(ct);
-        if let Some(config) = self.collateral_configs.get(ct) {
+        let liquid_value = if let Some(config) = self.collateral_configs.get(ct) {
             if let Some(price) = config.last_price {
                 let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
                 crate::numeric::collateral_usd_value(raw_amount, price_dec, config.decimals)
@@ -7396,7 +7438,14 @@ impl State {
             }
         } else {
             ICUSD::new(0)
-        }
+        };
+        let claim_value = self.nicp_redemption_claim.as_ref()
+            .and_then(|claim| self.vault_id_to_vaults.get(&claim.vault_id))
+            .filter(|vault| &vault.collateral_type == ct)
+            .and_then(|vault| self.nicp_claim_collateral_value(vault))
+            .unwrap_or(ICUSD::new(0));
+        crate::numeric::checked_icusd_add(liquid_value, claim_value)
+            .unwrap_or(ICUSD::new(u64::MAX))
     }
 
     /// Whether a wind-down collateral has fully settled and must no longer be
@@ -7882,7 +7931,7 @@ impl State {
                     None => continue, // index drift — ignore
                 };
                 visited += 1;
-                if vault.bot_processing {
+                if self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing {
                     continue;
                 }
                 if compute_collateral_ratio(vault, rate, self)
@@ -8808,7 +8857,7 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing
+            if self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
@@ -9051,7 +9100,7 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing
+            if self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
@@ -9243,7 +9292,7 @@ impl State {
                 continue;
             };
             if vault.borrowed_icusd_amount == 0
-                || vault.bot_processing
+                || self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
@@ -9384,7 +9433,7 @@ impl State {
             if vault.borrowed_icusd_amount == 0 {
                 continue;
             }
-            if vault.bot_processing
+            if self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
                 || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
@@ -15985,5 +16034,131 @@ mod add_margin_checked_transition_tests {
             Err(ProtocolError::GenericError(_))
         ));
         assert_eq!(state.vault_id_to_vaults.get(&41).unwrap().collateral_amount, u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod nicp_claim_integration_tests {
+    use super::*;
+    use crate::guard::VaultLiquidationGuard;
+    use crate::nicp_redemption::{tests::fixture, ClaimStage};
+    use crate::vault::CandidVault;
+
+    fn setup() -> State {
+        let icp = Principal::from_slice(&[2]);
+        let nicp = Principal::from_slice(&[3]);
+        let mut s = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(), icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: icp, fee_e8s: 0, developer_principal: Principal::anonymous(),
+            treasury_principal: None, stability_pool_principal: None,
+            ckusdt_ledger_principal: None, ckusdc_ledger_principal: None,
+        });
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(2.0);
+        let mut config = s.collateral_configs[&icp].clone();
+        config.ledger_canister_id = nicp;
+        config.last_price = Some(2.6);
+        config.interest_rate_apr = Ratio::from_f64(0.08);
+        config.price_source = PriceSource::LstWrapped {
+            base_asset: "ICP".into(), base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".into(), quote_asset_class: XrcAssetClass::FiatCurrency,
+            rate_canister_id: Principal::from_slice(&[4]), rate_method: "get_info".into(), haircut: 0.1,
+        };
+        s.collateral_configs.insert(nicp, config);
+        s.vault_id_to_vaults.insert(51, Vault {
+            vault_id: 51, owner: Principal::from_slice(&[1]), collateral_type: nicp,
+            collateral_amount: 150_000_000_000, borrowed_icusd_amount: ICUSD::new(290_000_000_000),
+            last_accrual_time: 1, accrued_interest: ICUSD::new(0), bot_processing: false,
+        });
+        let mut claim = fixture();
+        claim.icp_due_e8s = 190_000_000_000;
+        s.nicp_redemption_claim = Some(claim);
+        s
+    }
+
+    #[test]
+    fn fixed_claim_value_tracks_icp_and_haircut_without_phantom_nicp() {
+        let mut s = setup();
+        let nicp = s.vault_id_to_vaults[&51].collateral_type;
+        let rate = UsdIcp::from(dec!(2));
+        let expected = ICUSD::new(342_000_000_000);
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(expected));
+        assert_eq!(s.total_collateral_for(&nicp), 0);
+        assert_eq!(s.total_collateral_value_for(&nicp), expected);
+        assert_eq!(s.total_collateral_value_for(&s.icp_ledger_principal), ICUSD::new(0));
+        assert_eq!(s.total_borrowed_icusd_amount(), ICUSD::new(290_000_000_000));
+        assert_eq!(s.compute_total_collateral_ratio(rate), expected / ICUSD::new(290_000_000_000));
+        s.collateral_configs.get_mut(&nicp).unwrap().last_price = Some(100.0);
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(expected));
+        s.collateral_configs.get_mut(&s.icp_ledger_principal).unwrap().last_price = Some(1.0);
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(ICUSD::new(171_000_000_000)));
+        s.collateral_configs.get_mut(&s.icp_ledger_principal).unwrap().last_price = None;
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(ICUSD::new(0)));
+    }
+
+    #[test]
+    fn claim_retains_nicp_interest_and_debt_even_after_full_repayment() {
+        let mut s = setup();
+        let original = s.vault_id_to_vaults[&51].clone();
+        let config = s.collateral_configs[&original.collateral_type].clone();
+        let cr = crate::compute_collateral_ratio(&original, UsdIcp::from(dec!(2)), &s);
+        let rate = s.get_dynamic_interest_rate_for(&original.collateral_type, cr);
+        let expected = (Decimal::from(original.borrowed_icusd_amount.to_u64()) * (Decimal::ONE + rate.0)).ceil().to_u64().unwrap();
+        s.accrue_single_vault(51, 1 + crate::numeric::NANOS_PER_YEAR);
+        assert_eq!(s.vault_id_to_vaults[&51].borrowed_icusd_amount.to_u64(), expected);
+        assert_eq!(s.vault_id_to_vaults[&51].collateral_type, original.collateral_type);
+        assert_eq!(s.collateral_configs[&original.collateral_type], config);
+        s.repay_to_vault(51, ICUSD::new(expected));
+        assert_eq!(s.total_borrowed_icusd_amount(), ICUSD::new(0));
+        assert!(s.has_pending_nicp_claim(51));
+        assert!(s.vault_id_to_vaults.contains_key(&51));
+    }
+
+    #[test]
+    fn claim_is_not_redemption_or_liquidation_inventory_and_public_projection_is_explicit() {
+        let mut s = setup();
+        let vault = s.vault_id_to_vaults[&51].clone();
+        assert!(crate::stability_pool_liquidation_candidate(&s, 51).is_none());
+        assert_eq!(s.total_redeemable_debt_for(&vault.collateral_type), ICUSD::new(0));
+        assert!(s.redemption_runs().is_empty());
+        let public = CandidVault::from_state(vault.clone(), &s);
+        assert_eq!(public.collateral_amount, 0);
+        assert_eq!(public.icp_margin_amount, 0);
+        assert!(public.nicp_redemption_claim.is_some());
+        let claim = s.nicp_redemption_claim.as_mut().unwrap();
+        claim.stage = ClaimStage::Settled;
+        claim.received_icp_e8s = Some(180_000_000_000);
+        assert!(s.has_pending_nicp_claim(51));
+        assert_eq!(s.nicp_claim_collateral_value(&vault), Some(ICUSD::new(324_000_000_000)));
+    }
+
+    #[test]
+    fn claim_guard_allows_only_specialized_paths_and_still_serializes() {
+        replace_state(setup());
+        assert!(VaultLiquidationGuard::new(51).is_err());
+        assert!(VaultLiquidationGuard::new_for_borrow_retry(51).is_err());
+        let repay = VaultLiquidationGuard::new_for_nicp_repayment(51).unwrap();
+        assert!(VaultLiquidationGuard::new_for_nicp_claim(51).is_err());
+        drop(repay);
+        let migrate = VaultLiquidationGuard::new_for_nicp_claim(51).unwrap();
+        assert!(VaultLiquidationGuard::new_for_nicp_repayment(51).is_err());
+        drop(migrate);
+        assert!(VaultLiquidationGuard::new(52).is_ok());
+    }
+
+    #[test]
+    fn claim_survives_snapshot_and_pre_claim_snapshot_defaults_to_none() {
+        let state = setup();
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.nicp_redemption_claim, state.nicp_redemption_claim);
+        let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut map = match value { ciborium::value::Value::Map(map) => map, _ => panic!("state must be a map") };
+        map.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "nicp_redemption_claim"));
+        let mut legacy = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy).unwrap();
+        let restored: State = ciborium::de::from_reader(legacy.as_slice()).unwrap();
+        assert!(restored.nicp_redemption_claim.is_none());
+        assert_eq!(restored.vault_id_to_vaults[&51].borrowed_icusd_amount, state.vault_id_to_vaults[&51].borrowed_icusd_amount);
     }
 }

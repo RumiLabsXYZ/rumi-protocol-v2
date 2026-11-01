@@ -1530,6 +1530,7 @@ pub mod logs;
 pub mod management;
 pub mod native_icp_proof;
 pub mod numeric;
+pub mod nicp_redemption;
 pub mod payout_history;
 pub mod state;
 pub mod three_usd_inventory;
@@ -2529,6 +2530,9 @@ pub fn stability_pool_liquidation_candidate(
     state: &state::State,
     vault_id: u64,
 ) -> Option<LiquidatableVaultInfo> {
+    if state.has_pending_nicp_claim(vault_id) {
+        return None;
+    }
     let vault = state.vault_id_to_vaults.get(&vault_id)?;
     let config = state.get_collateral_config(&vault.collateral_type)?;
     if !config.status.allows_liquidation() || vault.borrowed_icusd_amount.to_u64() == 0 {
@@ -3015,6 +3019,12 @@ pub async fn check_vaults() {
         let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
 
         for vault_info in &vault_notifications {
+            // Sunset positions remain visible to manual liquidators, but are
+            // not offered to either automated liquidation route.
+            if read_state(|s| s.get_collateral_config(&vault_info.collateral_type)
+                .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset)) {
+                continue;
+            }
             // `vault_routable_to_bot` enforces both the operator allowlist and
             // the custody fence (native-XRP is claim-based and must never go
             // to the bot; it falls through to the SP's absorb path).
@@ -3153,6 +3163,9 @@ pub async fn check_vaults() {
 pub fn compute_collateral_ratio(vault: &Vault, _rate: UsdIcp, state: &state::State) -> Ratio {
     if vault.borrowed_icusd_amount == 0 {
         return Ratio::from(Decimal::MAX);
+    }
+    if let Some(value) = state.nicp_claim_collateral_value(vault) {
+        return value / vault.borrowed_icusd_amount;
     }
     let margin_value: ICUSD =
         if let Some(config) = state.get_collateral_config(&vault.collateral_type) {
