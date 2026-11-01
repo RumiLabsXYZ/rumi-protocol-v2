@@ -60,8 +60,8 @@
       ? (amountA * priceA) / a.borrowedIcusd : Infinity;
     const crB = b.borrowedIcusd > 0 && priceB > 0
       ? (amountB * priceB) / b.borrowedIcusd : Infinity;
-    const healthA = crA === Infinity ? Infinity : (liqA > 0 ? crA / liqA : Infinity);
-    const healthB = crB === Infinity ? Infinity : (liqB > 0 ? crB / liqB : Infinity);
+    const healthA = a.nicpRedemptionClaim ? Infinity : crA === Infinity ? Infinity : (liqA > 0 ? crA / liqA : Infinity);
+    const healthB = b.nicpRedemptionClaim ? Infinity : crB === Infinity ? Infinity : (liqB > 0 ? crB / liqB : Infinity);
     if (healthA !== healthB) return healthA - healthB;
     return a.vaultId - b.vaultId;
   });

@@ -6385,7 +6385,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
                 .iter()
                 .map(|id| {
                     let vault = s.vault_id_to_vaults.get(id).cloned().unwrap();
-                    CandidVault::from(vault)
+                    CandidVault::from_state(vault, s)
                 })
                 .collect(),
             None => vec![],
@@ -6395,7 +6395,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
                 .values()
                 .take(MAX_VAULTS_LEGACY_PAGE)
                 .cloned()
-                .map(CandidVault::from)
+                .map(|vault| CandidVault::from_state(vault, s))
                 .collect::<Vec<CandidVault>>()
         }),
     }
@@ -6612,7 +6612,7 @@ fn get_vaults_page(start_id: u64, limit: u64) -> VaultsPageResponse {
         let mut iter = s.vault_id_to_vaults.range(start_id..);
         let mut vaults = Vec::with_capacity(limit);
         for (_, vault) in iter.by_ref().take(limit) {
-            vaults.push(CandidVault::from(vault.clone()));
+            vaults.push(CandidVault::from_state(vault.clone(), s));
         }
         let next_start_id = iter.next().map(|(id, _)| *id);
         VaultsPageResponse {
@@ -8314,6 +8314,21 @@ async fn stability_pool_liquidate_with_reserves_v2(
         Phase::AdmissionPending => {
             let ledger_fee_e8s = rumi_protocol_backend::management::get_or_refresh_fee(three_usd_ledger)
                 .await.map_err(ProtocolError::GenericError)?;
+            let is_sunset = read_state(|s| s.vault_id_to_vaults.get(&vault_id)
+                .and_then(|vault| s.get_collateral_config(&vault.collateral_type))
+                .is_some_and(|config| config.status == rumi_protocol_backend::state::CollateralStatus::Sunset));
+            if is_sunset {
+                let reason = "Sunset collateral requires manual liquidation".to_string();
+                mutate_state(|s| {
+                    if let Some(row) = s.three_usd_reserve_ingress_journals.get_mut(&key) {
+                        if matches!(row.phase, Phase::AdmissionPending) {
+                            row.phase = Phase::PreTransferRejected { reason: reason.clone() };
+                            row.protocol_refund_fee_reserve_e8s = 0;
+                        }
+                    }
+                });
+                return Err(ProtocolError::GenericError(reason));
+            }
             if ledger_fee_e8s != 0 {
                 let reason = "3USD ledger fee changed from zero before pinned ingress dispatch".to_string();
                 mutate_state(|s| {
@@ -9519,6 +9534,7 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
         s.vault_id_to_vaults
             .values()
             .filter(|vault| {
+                if s.has_pending_nicp_claim(vault.vault_id) { return false; }
                 let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, dummy_rate, s);
                 // Zero ratio means no price available — don't mark as liquidatable
                 if ratio == Ratio::from(Decimal::ZERO) {
@@ -9528,7 +9544,7 @@ fn get_liquidatable_vaults() -> Vec<CandidVault> {
             })
             .take(MAX_VAULTS_LEGACY_PAGE)
             .cloned()
-            .map(CandidVault::from)
+            .map(|vault| CandidVault::from_state(vault, s))
             .collect::<Vec<CandidVault>>()
     })
 }
@@ -9562,6 +9578,7 @@ fn get_liquidatable_vaults_page(start_id: u64, limit: u64) -> VaultsPageResponse
         let mut vaults = Vec::with_capacity(limit);
         let mut next_start_id: Option<u64> = None;
         for (id, vault) in s.vault_id_to_vaults.range(start_id..) {
+            if s.has_pending_nicp_claim(*id) { continue; }
             let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, dummy_rate, s);
             if ratio == Ratio::from(Decimal::ZERO) {
                 continue;
@@ -9571,7 +9588,7 @@ fn get_liquidatable_vaults_page(start_id: u64, limit: u64) -> VaultsPageResponse
                     next_start_id = Some(*id);
                     break;
                 }
-                vaults.push(CandidVault::from(vault.clone()));
+                vaults.push(CandidVault::from_state(vault.clone(), s));
             }
         }
         VaultsPageResponse {
@@ -9596,7 +9613,7 @@ fn get_all_vaults() -> Vec<CandidVault> {
             .values()
             .take(MAX_VAULTS_LEGACY_PAGE)
             .cloned()
-            .map(CandidVault::from)
+            .map(|vault| CandidVault::from_state(vault, s))
             .collect::<Vec<CandidVault>>()
     })
 }
@@ -12243,7 +12260,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
             ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
         })?;
-        if vault.bot_processing
+        if s.has_pending_nicp_claim(vault_id) || vault.bot_processing
             || s.has_unresolved_push_sweep_for_vault(vault_id)
             || s.bot_claims.contains_key(&vault_id)
             || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
@@ -12252,6 +12269,13 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 "Vault #{} is already being processed",
                 vault_id
             )));
+        }
+        if s.get_collateral_config(&vault.collateral_type).is_some_and(|config| {
+            config.status == rumi_protocol_backend::state::CollateralStatus::Sunset
+        }) {
+            return Err(ProtocolError::GenericError(
+                "Sunset collateral requires manual liquidation".into(),
+            ));
         }
         if !s
             .bot_allowed_collateral_types
@@ -12287,7 +12311,8 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing
+            if s.has_pending_nicp_claim(vault_id)
+                || vault.bot_processing
                 || s.has_unresolved_push_sweep_for_vault(vault_id)
                 || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
             {
@@ -12295,6 +12320,14 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                     "Vault #{} is already being processed",
                     vault_id
                 )));
+            }
+
+            if s.get_collateral_config(&vault.collateral_type).is_some_and(|config| {
+                config.status == rumi_protocol_backend::state::CollateralStatus::Sunset
+            }) {
+                return Err(ProtocolError::GenericError(
+                    "Sunset collateral requires manual liquidation".into(),
+                ));
             }
 
             // Guard: reject collateral types the bot isn't configured to handle
@@ -12445,7 +12478,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
             ProtocolError::GenericError(format!("Vault #{} disappeared before admission", vault_id))
         })?;
-        if vault.bot_processing
+        if s.has_pending_nicp_claim(vault_id) || vault.bot_processing
             || s.has_unresolved_push_sweep_for_vault(vault_id)
             || s.bot_claims.contains_key(&vault_id)
             || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
@@ -13252,7 +13285,8 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing
+            if s.has_pending_nicp_claim(vault_id)
+                || vault.bot_processing
                 || s.has_unresolved_push_sweep_for_vault(vault_id)
                 || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
             {
@@ -13420,7 +13454,8 @@ async fn dev_force_partial_bot_liquidate(
                 ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
             })?;
 
-            if vault.bot_processing
+            if s.has_pending_nicp_claim(vault_id)
+                || vault.bot_processing
                 || s.has_unresolved_push_sweep_for_vault(vault_id)
                 || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
             {
@@ -13578,10 +13613,11 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
             .get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 
-        if vault.bot_processing
-                || s.has_unresolved_push_sweep_for_vault(vault_id)
-                || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
-            {
+        if s.has_pending_nicp_claim(vault_id)
+            || vault.bot_processing
+            || s.has_unresolved_push_sweep_for_vault(vault_id)
+            || rumi_protocol_backend::xrpl_icusd::xrpl_vault_excluded(&*s, vault_id)
+        {
             return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is locked by bot_processing",
                 vault_id
@@ -17065,16 +17101,17 @@ fn get_vault_interest_rate(vault_id: u64) -> Result<f64, ProtocolError> {
         let config = s
             .get_collateral_config(&vault.collateral_type)
             .ok_or_else(|| ProtocolError::GenericError("Unknown collateral type".to_string()))?;
-        // Compute vault CR
+        // Use the same claim valuation as debt accrual. Ordinary vaults retain
+        // their existing price availability error and ratio computation.
         let price = config.last_price.ok_or_else(|| {
             ProtocolError::GenericError("No price available for collateral".to_string())
         })?;
         let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
-        let vault_value = rumi_protocol_backend::numeric::collateral_usd_value(
+        let vault_value = s.nicp_claim_collateral_value(vault).unwrap_or_else(|| rumi_protocol_backend::numeric::collateral_usd_value(
             vault.collateral_amount,
             price_dec,
             config.decimals,
-        );
+        ));
         let vault_cr = if vault.borrowed_icusd_amount == ICUSD::new(0) {
             Ratio::from(Decimal::MAX)
         } else {
@@ -18523,6 +18560,17 @@ async fn admin_correct_vault_collateral(
         ));
     }
 
+    if read_state(|s| s.has_pending_nicp_claim(vault_id)) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Vault collateral is reserved by a protocol-controlled nICP redemption claim".into(),
+        ));
+    }
+    if read_state(|s| s.xrpl_icusd.vault_has_open_operation(vault_id)) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Vault has an open XRPL icUSD operation; collateral corrections are refused until it settles".into(),
+        ));
+    }
+
     let old_amount = read_state(|s| {
         s.vault_id_to_vaults
             .get(&vault_id)
@@ -18613,6 +18661,12 @@ fn admin_correct_vault_debts(
     if !is_developer {
         return Err(ProtocolError::GenericError(
             "Only developer can correct vault debts".to_string(),
+        ));
+    }
+
+    if read_state(|s| corrections.iter().any(|c| s.has_pending_nicp_claim(c.vault_id))) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Debt corrections are disabled for protocol-controlled nICP redemption claims".into(),
         ));
     }
 
@@ -20472,6 +20526,27 @@ async fn stability_pool_reconcile_liquidation_payout(
     candidate_block_index: u64,
 ) -> Result<rumi_protocol_backend::sp_liquidation::SpLiquidationReceipt, ProtocolError> {
     rumi_protocol_backend::sp_liquidation::reconcile_payout(request_id, candidate_block_index).await
+}
+
+#[candid_method(query)]
+#[query]
+fn get_nicp_redemption_claim() -> Option<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim> {
+    rumi_protocol_backend::nicp_redemption::current()
+}
+
+#[candid_method(update)]
+#[update]
+async fn prepare_vault51_nicp_redemption(
+    arg: rumi_protocol_backend::nicp_redemption::PrepareNicpRedemption,
+) -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
+    rumi_protocol_backend::nicp_redemption::prepare(arg).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn advance_vault51_nicp_redemption(
+) -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
+    rumi_protocol_backend::nicp_redemption::advance().await
 }
 
 // Keep last: export_service! only collects #[candid_method]s declared above it.

@@ -4,6 +4,9 @@ import { computeVaultCrPct, median } from './vaultCr';
 const ICP = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
 
 describe('computeVaultCrPct', () => {
+  it('does not misreport a reserved redemption claim as zero-backed collateral', () => {
+    expect(computeVaultCrPct({ borrowed_icusd_amount: 290_000_000_000n, collateral_amount: 0n, collateral_type: ICP, nicp_redemption_claim: [{ icp_due_e8s: 190_000_000_000n }] }, new Map([[ICP, 2]]), new Map([[ICP, 8]]))).toBeNull();
+  });
   it('returns CR as a percent for a typical ICP vault', () => {
     // 100 ICP @ $5 = $500 collateral, 200 icUSD debt → 250%
     const vault = {
