@@ -1,10 +1,26 @@
 {
-  "summary": "Stability Pool and Points source changes are merged, but user obligations and current production need review. ckSOL source and Candid checks pass (37 focused tests); frontend passes 116 focused tests, build/auth-asset checks, and simulated desktop/mobile checks. Two targeted reviews PASS; svelte-check retains 30 errors and 66 warnings in 25 unrelated files, none in changed files. Full mocked lifecycle and live canary are deferred before client money; reserve stays zero. ckSOL remote CI/PR pending. XRP guidance is in draft PR #607; merge/deployment pending.",
-  "plainSummary": "The ckSOL and XRP changes passed focused checks and are under review. An XRP code review is open; ckSOL still needs its code review and remote checks. Neither change is installed, and the ckSOL reserve stays off with no customer-money trial.",
+  "summary": "Season 1 Points finalization is verified on mainnet: final-period compensation applied, prior entries and receipts preserved, replay added zero, and both timers are off. Stability Pool recovery and broader finding reconciliation remain open. ckSOL PR #610 has 116 frontend and 37 backend focused tests, generated Candid checks, and both scoped review rechecks passing on the merged tree; hosted Stability Pool run 41330323415 is still building Wasms, and a new run follows the PR head change. XRP PR #607 remains in review. Neither new flow is deployed; the ckSOL reserve remains zero.",
+  "plainSummary": "Season 1 rewards are finalized, including missed days, and repeating the operation added no extra points. The wider security review and Stability Pool checks remain open; ckSOL PR #610 and XRP PR #607 are under review while a required ckSOL check runs. Neither change is installed, and the ckSOL reserve remains off.",
   "glossary": [
-    {"term": "Stability Pool", "definition": "The pool that absorbs certain liquidations and receives protocol interest.", "cardId": "SEC-01"},
-    {"term": "Wasm", "definition": "The compiled canister program installed on the Internet Computer. A merged source change may differ from the installed program.", "cardId": "SEC-01"},
-    {"term": "held epoch", "definition": "A points period paused for operator review before its rewards are finalized.", "cardId": "SEC-03"},
-    {"term": "archive", "definition": "An older ledger block range served from a ledger archive canister.", "cardId": "SEC-04"}
+    {
+      "term": "Stability Pool",
+      "definition": "The pool that absorbs certain liquidations and receives protocol interest.",
+      "cardId": "SEC-01"
+    },
+    {
+      "term": "Wasm",
+      "definition": "The compiled canister program installed on the Internet Computer. A merged source change may differ from the installed program.",
+      "cardId": "SEC-01"
+    },
+    {
+      "term": "held epoch",
+      "definition": "A points period paused for operator review before its rewards are finalized.",
+      "cardId": "SEC-03"
+    },
+    {
+      "term": "archive",
+      "definition": "An older ledger block range served from a ledger archive canister.",
+      "cardId": "SEC-04"
+    }
   ]
 }

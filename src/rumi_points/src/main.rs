@@ -129,7 +129,7 @@ fn get_principal_point_entries(principal: Principal, offset: u64, limit: u32) ->
 /// Separate compensation audit; ordinary PointEntry rows remain unchanged.
 #[ic_cdk::query]
 fn get_outage_credit_len() -> u64 {
-    rumi_points::outage_reconciliation::credit_count()
+    rumi_points::final_supplement::public_count()
 }
 
 #[ic_cdk::query]
@@ -137,7 +137,7 @@ fn get_outage_credit_entries(
     offset: u64,
     limit: u32,
 ) -> rumi_points::outage_reconciliation::OutageCreditPage {
-    rumi_points::outage_reconciliation::credit_entries(offset, limit)
+    rumi_points::final_supplement::public_page(offset, limit)
 }
 
 #[ic_cdk::query]
@@ -146,7 +146,7 @@ fn get_principal_outage_credit_entries(
     offset: u64,
     limit: u32,
 ) -> rumi_points::outage_reconciliation::OutageCreditPage {
-    rumi_points::outage_reconciliation::principal_credit_entries(principal, offset, limit)
+    rumi_points::final_supplement::public_principal_page(principal, offset, limit)
 }
 
 #[ic_cdk::query]
@@ -535,6 +535,12 @@ fn get_revealed_seed(epoch_index: u64) -> Option<RevealedSeed> {
 fn get_pending_commit() -> Vec<u8> {
     state::get_pending_commit().to_vec()
 }
+
+
+#[ic_cdk::query]
+fn get_season1_final_supplement() -> rumi_points::final_supplement::Status { rumi_points::final_supplement::status() }
+#[ic_cdk::update]
+fn apply_season1_final_supplement() -> Result<rumi_points::final_supplement::Status,String> { let result = rumi_points::final_supplement::apply(ic_cdk::caller(),ic_cdk::api::time()); if result.is_ok() { epoch::setup_epoch_timer(); poll::setup_poll_timer(); } result }
 
 ic_cdk::export_candid!();
 

@@ -18,6 +18,7 @@
 //! 3USD verification, epoch math, and the entire claim / lock-tier surface.
 
 pub mod accrual;
+pub mod final_supplement;
 pub mod epoch;
 pub mod events;
 pub mod outage_reconciliation;
