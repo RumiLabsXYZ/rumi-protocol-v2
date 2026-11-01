@@ -4357,6 +4357,15 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
         )));
     }
 
+    let prior = state.sp_xrp_absorb_preflights.get(&vault_id).is_some_and(|row| {
+        row.caller == caller && row.icusd_burn_e8s == expected_icusd_burn_e8s
+            && row.expires_at_ns > now_ns
+    });
+    if !prior && state.vault_id_to_vaults.get(&vault_id)
+        .and_then(|vault| state.get_collateral_config(&vault.collateral_type))
+        .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset) {
+        return Err(ProtocolError::GenericError("Sunset collateral requires manual liquidation".into()));
+    }
     let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
     let mut preflight = sizing.preflight;
     preflight.expires_at_ns = now_ns.saturating_add(XRP_SP_ABSORB_PREFLIGHT_TTL_NS);
@@ -14130,6 +14139,20 @@ mod xrp_sp_absorb_contract_tests {
             preflight.icusd_burn_e8s,
             vault.borrowed_icusd_amount.to_u64()
         );
+    }
+
+    #[test]
+    fn sunset_xrp_rejects_fresh_preflight_but_preserves_existing_reservation() {
+        let mut fresh = test_state_with_xrp_vault();
+        fresh.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
+        let err = stability_pool_preflight_xrp_absorb_in_state(&mut fresh, sp(), VAULT_ID, 100 * E8, 10).unwrap_err();
+        assert!(format!("{err:?}").contains("manual liquidation"));
+        assert!(fresh.sp_xrp_absorb_preflights.is_empty());
+
+        let mut reserved = test_state_with_xrp_vault();
+        stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 10).unwrap();
+        reserved.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
+        assert!(stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 11).is_ok());
     }
 
     #[test]

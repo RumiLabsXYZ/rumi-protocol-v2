@@ -6103,8 +6103,45 @@ pub async fn recover_pending_ordinary_liquidations() {
     }
 }
 
+async fn verify_fresh_collateral_status(vault_info: &LiquidatableVaultInfo) -> Result<(), String> {
+    let registered = read_state(|s| s.collateral_registry.get(&vault_info.collateral_type).cloned());
+    if registered.is_none() {
+        return Err("Collateral is not registered in the pool".into());
+    }
+    if registered.is_some_and(|config| config.status == CollateralStatus::Sunset) {
+        return Err("Sunset collateral requires manual liquidation".into());
+    }
+    let protocol = read_state(|s| s.protocol_canister_id);
+    let config: Result<(Option<rumi_protocol_backend::state::CollateralConfig>,), _> =
+        call(protocol, "get_collateral_config", (vault_info.collateral_type,)).await;
+    match config {
+        Ok((Some(config),)) if config.status != rumi_protocol_backend::state::CollateralStatus::Sunset => Ok(()),
+        Ok((Some(_),)) => Err("Sunset collateral requires manual liquidation".into()),
+        _ => Err("Could not verify collateral status for pool liquidation".into()),
+    }
+}
+
 async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
+    // Existing intents may already have moved funds. Preserve their exact
+    // recovery path, but do not start another pool liquidation for a sunset
+    // collateral. The backend is authoritative; the local list also covers
+    // a pool registry that has not yet caught up with wind-down policy.
+    let pending = read_state(|s| {
+        s.get_pending_ordinary_liquidation_for_vault(vault_info.vault_id).is_some()
+            || s.get_pending_three_usd_absorb(vault_info.vault_id).is_some()
+            || s.get_pending_native_xrp_absorb(vault_info.vault_id).is_some()
+    });
+    if !pending {
+        if sunset_collaterals().contains(&vault_info.collateral_type) {
+            return ordinary_failure(vault_info, "Sunset collateral requires manual liquidation");
+        }
+    }
     if read_state(|s| s.collateral_requires_payout_address(&vault_info.collateral_type)) {
+        if !pending {
+            if let Err(error) = verify_fresh_collateral_status(vault_info).await {
+                return ordinary_failure(vault_info, &error);
+            }
+        }
         return execute_native_xrp_absorb_with_io(vault_info, &mut CdkNativeXrpAbsorbIo).await;
     }
 
@@ -6137,6 +6174,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         ) else {
             break;
         };
+        if !pending {
+            if let Err(error) = verify_fresh_collateral_status(vault_info).await {
+                return ordinary_failure(vault_info, &error);
+            }
+        }
         let failed_ledger = selection.ledger;
         let result = start_ordinary_liquidation(
             vault_info,
@@ -6223,6 +6265,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 error_message: Some("Pool paused before new 3USD absorb admission".into()),
                 admitted: Some(false),
             };
+        }
+        if let Err(error) = verify_fresh_collateral_status(vault_info).await {
+            return ordinary_failure(vault_info, &error);
         }
         BTreeMap::from([(ledger, amount)])
     };
@@ -7823,6 +7868,25 @@ mod tests {
             123,
         ).is_err(),
             "a timer/notification replay must not settle the same identity twice");
+    }
+
+    #[test]
+    fn fresh_sunset_vault_is_not_admitted_to_pool() {
+        replace_state(test_state());
+        for collateral_type in sunset_collaterals() {
+            let vault = LiquidatableVaultInfo {
+                vault_id: 4242,
+                collateral_type,
+                debt_amount: 20_000_000,
+                collateral_amount: 1_000_000,
+                recommended_liquidation_amount: 0,
+                collateral_price_e8s: 100_000_000,
+            };
+            let result = futures::executor::block_on(execute_single_liquidation(&vault));
+            assert!(!result.success);
+            assert_eq!(result.admitted, Some(false));
+            assert!(result.error_message.unwrap().contains("manual liquidation"));
+        }
     }
 
     #[test]
