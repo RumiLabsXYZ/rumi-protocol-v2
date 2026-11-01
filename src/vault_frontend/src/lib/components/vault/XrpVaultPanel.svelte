@@ -25,6 +25,7 @@
   import { walletStore } from '$lib/stores/wallet';
   import { toastStore } from '$lib/stores/toast';
   import { formatAddress } from '$lib/utils/format';
+  import XrpDepositTagNotice from '$lib/components/vault/XrpDepositTagNotice.svelte';
 
   // Notifies the vaults page to reload the main vault list once a deposit confirms
   // (the confirmed vault becomes a normal VaultCard, which this panel doesn't own).
@@ -263,6 +264,7 @@
               <button class="xrp-addr" title={p.custodyAddress} on:click={() => copy(p.custodyAddress)}>
                 {formatAddress(p.custodyAddress, 8, 6)} ⧉
               </button>
+              <XrpDepositTagNotice />
               <span class="xrp-hint">Send XRP from any XRPL wallet (e.g. Xaman) to this address, then confirm.</span>
             </div>
             <div class="xrp-row-actions">
@@ -297,6 +299,7 @@
               <button class="xrp-addr" title={p.custodyAddress} on:click={() => copy(p.custodyAddress)}>
                 {formatAddress(p.custodyAddress, 8, 6)} ⧉
               </button>
+              <XrpDepositTagNotice />
               <span class="xrp-hint">Hidden only in this browser. Restore it before confirming a deposit.</span>
             </div>
             <button class="xrp-action" on:click={() => restorePendingDeposit(p.vaultId)}>Restore</button>
@@ -328,7 +331,8 @@
                   />
                   <input
                     class="xrp-input xrp-tag-input"
-                    placeholder="Destination tag"
+                    placeholder="Recipient destination tag (optional)"
+                    aria-label="Recipient destination tag (optional)"
                     bind:value={claimTag[c.claimId]}
                     spellcheck="false"
                     autocomplete="off"
