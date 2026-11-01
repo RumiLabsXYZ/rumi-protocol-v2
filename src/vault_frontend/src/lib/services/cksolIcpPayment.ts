@@ -9,7 +9,11 @@ import { auth, walletSessionGeneration } from './auth';
 import { getCksolRelay, type IntentStore } from './cksolMinter';
 import { createOisyActor } from './oisySigner';
 import { getCksolOisySignerAgent } from './cksolOisySigner';
-import { assertOtherCksolLocalSettled, requireOtherCksolPaymentSettled } from './cksolPaymentJournal';
+import {
+	assertOtherCksolLocalSettled,
+	requireOtherCksolPaymentSettled,
+	cksolIcpNeedsReconciliation
+} from './cksolPaymentJournal';
 
 export const CKSOL_CMC = 'rkp4c-7iaaa-aaaaa-aaaca-cai';
 const MAX_U64 = (1n << 64n) - 1n;
@@ -162,7 +166,9 @@ export function icpPaymentSettled(p: CksolIcpIntent | null) {
 	return (
 		!p ||
 		p.phase === 'NotStarted' ||
-		(p.phase === 'Receipt' && ['Complete', 'FundingRejected'].includes(p.receipt?.phase))
+		(p.phase === 'Receipt' &&
+			!cksolIcpNeedsReconciliation(p.receipt) &&
+			['Complete', 'FundingRejected'].includes(p.receipt?.phase))
 	);
 }
 export async function recoverCksolIcpPayment(owner: Principal, storage: IntentStore) {
@@ -328,7 +334,11 @@ export async function submitCksolIcpPayment(
 	if (!icpPaymentSettled(loadCksolIcpPayment(storage, q.owner)))
 		throw new Error('Resolve the saved ICP payment before approving another.');
 	const previous = await readCksolIcpPayment(owner);
-	if (previous && !['Complete', 'FundingRejected'].includes(previous.phase))
+	if (
+		previous &&
+		(cksolIcpNeedsReconciliation(previous) ||
+			!['Complete', 'FundingRejected'].includes(previous.phase))
+	)
 		throw new Error('Resolve the previous ICP payment before approving another.');
 	const fresh = await quoteCksolIcpPayment(owner, q.walletType);
 	if (!session(owner, q.generation, q.walletType, live)) throw new Error('Wallet session changed.');

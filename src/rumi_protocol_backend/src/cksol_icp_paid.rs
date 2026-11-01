@@ -2,6 +2,8 @@
 pub const ATTACHED_CYCLES: u64 = 1_000_000_000_000;
 pub const OPERATING_CYCLES: u64 = 1_000_000_000;
 pub const SERVICE_BPS: u64 = 500;
+const INTERRUPTED_MESSAGE: &str =
+    "Processing was interrupted by an upgrade; SOL status remains unknown";
 fn ceil_div(n: u128, d: u128) -> Option<u64> {
     if d == 0 {
         return None;
@@ -111,6 +113,9 @@ pub struct Journal {
     pub refund_time: u64,
     #[serde(default)]
     pub refund_blocked: bool,
+    /// A minter call was outstanding across a successful canister upgrade.
+    #[serde(default)]
+    pub orphaned_minter_call: bool,
 }
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct CkSolIcpTerms {
@@ -136,15 +141,57 @@ pub fn terms() -> CkSolIcpTerms {
             && s.cksol_relay_attempts.len() < CKSOL_RELAY_OWNER_CAP
             && (s.cksol_icp_payments.len() < CKSOL_RELAY_OWNER_CAP
                 || s.cksol_icp_payments.values().any(|j| {
-                    matches!(
-                        j.payment.phase,
-                        CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected
-                    )
+                    !j.orphaned_minter_call
+                        && matches!(
+                            j.payment.phase,
+                            CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected
+                        )
                 })),
         icp_ledger: icp(),
         cmc: cmc(),
     })
 }
+
+/// Called exclusively while restoring state in post_upgrade. Calls marked here
+/// may have executed at the minter; never redispatch or credit their cycles.
+pub fn mark_interrupted_minter_calls(s: &mut State, now: u64) {
+    s.cksol_icp_upgrade_epoch = s
+        .cksol_icp_upgrade_epoch
+        .checked_add(1)
+        .expect("ckSOL upgrade epoch exhausted");
+    for journal in s.cksol_icp_payments.values_mut() {
+        if journal.payment.phase == CkSolPaymentPhase::DepositPending {
+            journal.orphaned_minter_call = true;
+            if journal.payment.funding_block.is_none() {
+                continue;
+            }
+            if let Some(refund) = journal
+                .payment
+                .deposit_e8s
+                .checked_sub(journal.payment.ledger_fee_e8s)
+            {
+                journal.payment.net_cycles = 0;
+                journal.payment.service_fee_cycles = 0;
+                journal.payment.operating_fee_cycles = 0;
+                journal.payment.charged_e8s = 0;
+                journal.payment.refundable_e8s = refund;
+                journal.payment.actual_refund_fee_e8s = journal.payment.ledger_fee_e8s;
+                journal.payment.message = Some(INTERRUPTED_MESSAGE.into());
+                journal.refund_time = now;
+                journal.payment.phase = CkSolPaymentPhase::RefundReady;
+            }
+        }
+    }
+}
+
+pub(crate) fn blocks_cycles_payment(j: &Journal) -> bool {
+    j.orphaned_minter_call
+        || !matches!(
+            j.payment.phase,
+            CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected
+        )
+}
+
 pub fn payment(owner: Principal) -> Option<CkSolIcpPayment> {
     read_state(|s| s.cksol_icp_payments.get(&owner).map(|j| j.payment.clone()))
 }
@@ -158,7 +205,7 @@ pub fn reserved(s: &State) -> u128 {
                     | CkSolPaymentPhase::FundingUnknown
                     | CkSolPaymentPhase::Funded
                     | CkSolPaymentPhase::DepositPending
-            )
+            ) || j.orphaned_minter_call
         })
         .count() as u128
         * ATTACHED_CYCLES as u128
@@ -222,7 +269,7 @@ fn hash(domain: &[u8], owner: Principal, seq: u64) -> [u8; 32] {
 fn message(s: String) -> String {
     s.chars().take(512).collect()
 }
-struct Guard(Principal);
+struct Guard(Principal, u64);
 impl Guard {
     fn acquire(p: Principal) -> Result<Self, String> {
         if p == Principal::anonymous() {
@@ -235,14 +282,16 @@ impl Guard {
                 return Err("ckSOL account processing or capacity reached".into());
             }
             s.cksol_relay_in_flight.insert(p);
-            Ok(Self(p))
+            Ok(Self(p, s.cksol_icp_upgrade_epoch))
         })
     }
 }
 impl Drop for Guard {
     fn drop(&mut self) {
         mutate_state(|s| {
-            s.cksol_relay_in_flight.remove(&self.0);
+            if s.cksol_icp_upgrade_epoch == self.1 {
+                s.cksol_relay_in_flight.remove(&self.0);
+            }
         });
     }
 }
@@ -314,6 +363,13 @@ pub async fn start(
         if p.sequence == seq {
             return Ok(p);
         }
+        if read_state(|s| {
+            s.cksol_icp_payments
+                .get(&owner)
+                .is_some_and(|j| j.orphaned_minter_call)
+        }) {
+            return Err("Previous interrupted minter call is held for reconciliation".into());
+        }
         if !matches!(
             p.phase,
             CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected
@@ -350,10 +406,11 @@ pub async fn start(
                 .cksol_icp_payments
                 .iter()
                 .filter(|(_, j)| {
-                    matches!(
-                        j.payment.phase,
-                        CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected
-                    )
+                    !j.orphaned_minter_call
+                        && matches!(
+                            j.payment.phase,
+                            CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected
+                        )
                 })
                 .min_by_key(|(_, j)| j.payment.sequence)
                 .map(|(o, _)| *o)
@@ -375,6 +432,7 @@ pub async fn start(
                 subaccount: sub,
                 refund_time: 0,
                 refund_blocked: false,
+                orphaned_minter_call: false,
                 payment: CkSolIcpPayment {
                     sequence: seq,
                     phase: CkSolPaymentPhase::FundingPending,
@@ -494,13 +552,21 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
             Ok(())
         })?;
         let (outcome, returned) = transport::mint(owner).await;
-        mutate_state(|s| {
-            let j = s.cksol_icp_payments.get_mut(&owner).unwrap();
+        let applied = mutate_state(|s| {
+            let Some(j) = s.cksol_icp_payments.get_mut(&owner) else {
+                return false;
+            };
+            if j.payment.sequence != seq
+                || j.orphaned_minter_call
+                || j.payment.phase != CkSolPaymentPhase::DepositPending
+            {
+                return false;
+            }
             let net = match (ATTACHED_CYCLES as u128).checked_sub(returned) {
                 Some(n) => n as u64,
                 None => {
                     j.payment.message = Some("Invalid minter refund".into());
-                    return;
+                    return false;
                 }
             };
             let Some((service, charge, refund)) = settlement(
@@ -510,7 +576,7 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
                 j.payment.ledger_fee_e8s,
             ) else {
                 j.payment.message = Some("Escrow settlement held".into());
-                return;
+                return false;
             };
             j.payment.net_cycles = net;
             j.payment.service_fee_cycles = service;
@@ -536,7 +602,11 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
                 }
             };
             s.cksol_relay_attempts.get_mut(&owner).unwrap().status = status;
+            true
         });
+        if !applied {
+            return payment(owner).ok_or("No ICP payment".into());
+        }
     }
     let j = read_state(|s| s.cksol_icp_payments.get(&owner).cloned()).unwrap();
     if matches!(
@@ -552,7 +622,14 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
         });
         let args = refund_args(owner, &j);
         let result = transport::refund(args).await;
-        mutate_state(|s| refund_result(s, owner, result));
+        mutate_state(|s| {
+            if s.cksol_icp_payments
+                .get(&owner)
+                .is_some_and(|j| j.payment.sequence == seq)
+            {
+                refund_result(s, owner, result);
+            }
+        });
     }
     payment(owner).ok_or("No ICP payment".into())
 }
@@ -578,8 +655,13 @@ fn refund_result(
     owner: Principal,
     result: Result<Result<Nat, TransferError>, String>,
 ) {
-    let journal = s.cksol_icp_payments.get_mut(&owner).unwrap();
+    let Some(journal) = s.cksol_icp_payments.get_mut(&owner) else {
+        return;
+    };
     let p = &mut journal.payment;
+    if p.phase != CkSolPaymentPhase::RefundPending {
+        return;
+    }
     match result {
         Ok(Ok(b)) | Ok(Err(TransferError::Duplicate { duplicate_of: b })) => {
             p.refund_block = Some(b);
@@ -592,11 +674,23 @@ fn refund_result(
             } else {
                 CkSolPaymentPhase::RefundUnknown
             };
-            p.message = Some(message(format!("Refund held: {e:?}")));
+            let prefix = if journal.orphaned_minter_call {
+                format!("{INTERRUPTED_MESSAGE}; ")
+            } else {
+                String::new()
+            };
+            p.message = Some(message(format!("{prefix}Refund held: {e:?}")));
         }
         Err(e) => {
             p.phase = CkSolPaymentPhase::RefundUnknown;
-            p.message = Some(message(format!("Refund response unavailable: {e:?}")));
+            let prefix = if journal.orphaned_minter_call {
+                format!("{INTERRUPTED_MESSAGE}; ")
+            } else {
+                String::new()
+            };
+            p.message = Some(message(format!(
+                "{prefix}Refund response unavailable: {e:?}"
+            )));
         }
     }
 }
@@ -613,6 +707,7 @@ mod state_tests {
             subaccount: [42; 32],
             refund_time: 123,
             refund_blocked: false,
+            orphaned_minter_call: false,
             payment: CkSolIcpPayment {
                 sequence: 1,
                 phase,
@@ -633,6 +728,65 @@ mod state_tests {
                 actual_refund_fee_e8s: 0,
             },
         }
+    }
+    #[test]
+    fn late_refund_failure_cannot_overwrite_complete_receipt() {
+        let owner = Principal::from_slice(&[7]);
+        let mut s = State::default();
+        let mut j = journal(CkSolPaymentPhase::Complete);
+        j.payment.refund_block = Some(Nat::from(9u8));
+        s.cksol_icp_payments.insert(owner, j.clone());
+        refund_result(&mut s, owner, Err("late error".into()));
+        assert_eq!(s.cksol_icp_payments[&owner], j);
+    }
+    #[test]
+    fn legacy_journal_defaults_orphan_flag_to_false() {
+        let j = journal(CkSolPaymentPhase::DepositPending);
+        let mut value = serde_json::to_value(&j).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("orphaned_minter_call");
+        let decoded: Journal = serde_json::from_value(value).unwrap();
+        assert!(!decoded.orphaned_minter_call);
+        assert_eq!(decoded.payment.phase, CkSolPaymentPhase::DepositPending);
+    }
+    #[test]
+    fn orphan_refund_errors_preserve_interruption_message() {
+        let owner = Principal::from_slice(&[7]);
+        let mut s = State::default();
+        let mut j = journal(CkSolPaymentPhase::RefundPending);
+        j.orphaned_minter_call = true;
+        s.cksol_icp_payments.insert(owner, j);
+        refund_result(&mut s, owner, Err("lost reply".into()));
+        assert!(s.cksol_icp_payments[&owner]
+            .payment
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with(INTERRUPTED_MESSAGE));
+        s.cksol_icp_payments.get_mut(&owner).unwrap().payment.phase =
+            CkSolPaymentPhase::RefundPending;
+        refund_result(
+            &mut s,
+            owner,
+            Ok(Err(TransferError::BadFee {
+                expected_fee: Nat::from(20_000u64),
+            })),
+        );
+        assert!(s.cksol_icp_payments[&owner]
+            .payment
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with(INTERRUPTED_MESSAGE));
+    }
+    #[test]
+    fn completed_orphan_blocks_cycles_payment() {
+        let mut j = journal(CkSolPaymentPhase::Complete);
+        assert!(!blocks_cycles_payment(&j));
+        j.orphaned_minter_call = true;
+        assert!(blocks_cycles_payment(&j));
     }
     #[test]
     fn protected_balance_counts_free_reserve_and_unresolved_reservations() {
@@ -756,6 +910,8 @@ mod state_tests {
             CkSolPaymentPhase::RefundUnknown
         );
         assert_eq!(refund_args(owner, &s.cksol_icp_payments[&owner]), before);
+        s.cksol_icp_payments.get_mut(&owner).unwrap().payment.phase =
+            CkSolPaymentPhase::RefundPending;
         refund_result(
             &mut s,
             owner,

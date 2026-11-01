@@ -57,6 +57,7 @@ import {
 	recoverCksolIcpPayment,
 	loadCksolIcpPayment,
 	cksolIcpPaymentKey,
+	icpPaymentSettled,
 	continueCksolIcpApproval
 } from './cksolIcpPayment';
 const owner = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');
@@ -123,6 +124,37 @@ beforeEach(() => {
 	};
 });
 describe('ICP processing deposit', () => {
+	it('keeps an interrupted mint held after its ICP refund completes', async () => {
+		const s = storage(),
+			q = await quoteCksolIcpPayment(owner, 'plug');
+		const p = {
+			owner: owner.toText(),
+			sequence: '1',
+			createdAt: 1,
+			phase: 'Receipt' as const,
+			receipt: {
+				sequence: 1n,
+				phase: 'Complete',
+				message: ['Processing was interrupted by an upgrade; SOL status remains unknown']
+			}
+		};
+		s.setItem(
+			cksolIcpPaymentKey(owner.toText()),
+			JSON.stringify(p, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+		);
+		expect(icpPaymentSettled(p)).toBe(false);
+		await expect(submitCksolIcpPayment(q, owner, s, () => true)).rejects.toThrow(
+			'saved ICP payment'
+		);
+		s.removeItem(cksolIcpPaymentKey(owner.toText()));
+		fx.backend.get_cksol_icp_payment.mockResolvedValue([
+			{ ...p.receipt, phase: { Complete: null } }
+		]);
+		await expect(submitCksolIcpPayment(q, owner, s, () => true)).rejects.toThrow(
+			'previous ICP payment'
+		);
+		expect(fx.ledger.icrc2_approve).not.toHaveBeenCalled();
+	});
 	it('caps the 5% service fee and reserves enough ICP for a positive refund after its fee', () => {
 		expect(icpEscrowAmounts(1_000_000_000_000n, 1_000_000_000n, 500n, rate, fee)).toEqual({
 			maxCharge: 26_275_000n,
@@ -264,14 +296,28 @@ describe('ICP processing deposit', () => {
 		expect((await submitCksolIcpPayment(q, owner, s, () => true)).phase).toBe('NotStarted');
 		expect(fx.ledger.icrc2_approve).toHaveBeenCalledOnce();
 	});
-	it.each(['ApprovalUnknown', 'StartUnknown', 'damaged'])('does not bypass a cycles-paid %s journal in another tab', async phase => {
-		const s=storage(), q=await quoteCksolIcpPayment(owner,'plug');
-		s.setItem(`rumi:cksol:paid:v1:${owner.toText()}`,phase==='damaged'?'broken':JSON.stringify({owner:owner.toText(),sequence:'4',phase,createdAt:1}));
-		await expect(submitCksolIcpPayment(q,owner,s,()=>true)).rejects.toThrow('cycles');
-		expect(fx.ledger.icrc2_approve).not.toHaveBeenCalled();expect(fx.updates.start_cksol_deposit_with_icp).not.toHaveBeenCalled();
-	});
-	it('stops before approval on an unresolved cycles-paid backend receipt',async()=>{
-		fx.backend.get_cksol_payment=vi.fn(async()=>[{sequence:4n,phase:{FundingUnknown:null}}]);
-		const q=await quoteCksolIcpPayment(owner,'plug');await expect(submitCksolIcpPayment(q,owner,storage(),()=>true)).rejects.toThrow('cycles');expect(fx.ledger.icrc2_approve).not.toHaveBeenCalled();
+	it.each(['ApprovalUnknown', 'StartUnknown', 'damaged'])(
+		'does not bypass a cycles-paid %s journal in another tab',
+		async (phase) => {
+			const s = storage(),
+				q = await quoteCksolIcpPayment(owner, 'plug');
+			s.setItem(
+				`rumi:cksol:paid:v1:${owner.toText()}`,
+				phase === 'damaged'
+					? 'broken'
+					: JSON.stringify({ owner: owner.toText(), sequence: '4', phase, createdAt: 1 })
+			);
+			await expect(submitCksolIcpPayment(q, owner, s, () => true)).rejects.toThrow('cycles');
+			expect(fx.ledger.icrc2_approve).not.toHaveBeenCalled();
+			expect(fx.updates.start_cksol_deposit_with_icp).not.toHaveBeenCalled();
+		}
+	);
+	it('stops before approval on an unresolved cycles-paid backend receipt', async () => {
+		fx.backend.get_cksol_payment = vi.fn(async () => [
+			{ sequence: 4n, phase: { FundingUnknown: null } }
+		]);
+		const q = await quoteCksolIcpPayment(owner, 'plug');
+		await expect(submitCksolIcpPayment(q, owner, storage(), () => true)).rejects.toThrow('cycles');
+		expect(fx.ledger.icrc2_approve).not.toHaveBeenCalled();
 	});
 });

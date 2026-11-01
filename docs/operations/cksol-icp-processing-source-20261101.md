@@ -12,6 +12,10 @@ This change lets users pay processing in ICP rather than sourcing cycles. Rumi c
 
 No backend installation, reserve enablement/funding, new wallet financial action or client recovery occurred. New reserve allocation defaults to zero. Existing cycles-funded requests and unknown-outcome holds are preserved. BadFee/aged ICP refunds remain recorded for reconciliation rather than silently changing the approved fee. Earned ICP is not yet extracted or converted automatically.
 
+## Lifecycle follow-up
+
+Local follow-up passed 62 focused backend tests and 99 frontend tests. Two opt-in PocketIC tests passed with a source-built backend: a real local ledger and mocked minter exercise escrow conservation, upgrade during a pending minter call, refund and late reply; a scripted ledger exercises upgrade during an outstanding refund and exact duplicate retry. An interrupted confirmed-funded minter call now offers an ICP refund less the ledger fee, while the unknown SOL outcome and unattributed cycle allocation remain held for reconciliation. An upgrade during unconfirmed ICP collection can still leave funding unknown; it must remain held until supported by authoritative ledger evidence. These tests do not prove production installation or live financial behavior.
+
 Actual omissions and before-client-money conditions are recorded in `docs/coordination/demo-deferred/cksol-processing-ui-20261030.md`, CKSOL-ICP-DEF-1 through DEF-3. The full mocked asynchronous lifecycle and a real authorized operator-owned financial canary have not been performed. Source review is not client-money readiness.
 
 ## Independent XRP subproject

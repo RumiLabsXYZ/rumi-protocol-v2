@@ -4023,6 +4023,9 @@ pub struct State {
     pub cksol_paid_sequence: u64,
     #[serde(default)]
     pub cksol_icp_sequence: u64,
+    /// Epoch increments on upgrade to prevent stale guards clearing new locks.
+    #[serde(default)]
+    pub cksol_icp_upgrade_epoch: u64,
     #[serde(default)]
     pub cksol_icp_reserve: u64,
     #[serde(default)]
@@ -4768,6 +4771,7 @@ impl Default for State {
             cksol_relay_budget: 0,
             cksol_paid_sequence: 0,
             cksol_icp_sequence: 0,
+            cksol_icp_upgrade_epoch: 0,
             cksol_icp_reserve: 0,
             cksol_icp_payments: BTreeMap::new(),
             cksol_paid_payments: BTreeMap::new(),
@@ -5021,6 +5025,7 @@ impl From<InitArg> for State {
             cksol_relay_budget: 0,
             cksol_paid_sequence: 0,
             cksol_icp_sequence: 0,
+            cksol_icp_upgrade_epoch: 0,
             cksol_icp_reserve: 0,
             cksol_icp_payments: BTreeMap::new(),
             cksol_paid_payments: BTreeMap::new(),

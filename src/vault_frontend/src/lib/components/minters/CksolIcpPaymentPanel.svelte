@@ -5,6 +5,7 @@
 	import { auth } from '$lib/services/auth';
 	import { beginCksolOisyAction } from '$lib/services/cksolOisySigner';
 	import { cksolPaymentKey } from '$lib/services/cksolPayment';
+	import { cksolIcpNeedsReconciliation } from '$lib/services/cksolPaymentJournal';
 	import {
 		quoteCksolIcpPayment,
 		recoverCksolIcpPayment,
@@ -35,7 +36,8 @@
 	const icp = (amount: bigint) =>
 		`${amount / 100_000_000n}.${(amount % 100_000_000n).toString().padStart(8, '0')} ICP`;
 	$: phase = payment?.receipt?.phase ?? payment?.phase;
-	$: pending = !icpPaymentSettled(payment);
+	$: interrupted = cksolIcpNeedsReconciliation(payment?.receipt);
+	$: pending = interrupted || !icpPaymentSettled(payment);
 	$: onActive(pending || damaged);
 	$: enough = !!quote && quote.balance >= quote.total;
 	$: reserve =
@@ -51,10 +53,14 @@
 			: phase === 'Funded'
 				? 'Continue funded mint'
 				: phase === 'RefundReady'
-					? 'Return unused ICP'
+						? interrupted
+							? 'Return processing ICP'
+							: 'Return unused ICP'
 					: checkingRefund
 						? 'Check ICP refund'
-						: 'Mint with ICP';
+							: interrupted
+								? 'New mint held for review'
+								: 'Mint with ICP';
 	$: enabled =
 		!busy &&
 		!loading &&
@@ -62,7 +68,9 @@
 		(checkingRefund || (!blocked && (actionable || (!pending && enough && reserve && canMint))));
 	$: message =
 		phase === 'Complete'
-			? 'Processing payment settled. Mint progress is shown separately below.'
+			? interrupted
+				? 'ICP payment settled. SOL outcome remains unknown; the minting hold stays in place.'
+				: 'Processing payment settled. Mint progress is shown separately below.'
 			: phase === 'FundingRejected'
 				? 'No ICP deposit was collected. Review the cost before trying again.'
 				: phase === 'Approved'
@@ -178,16 +186,34 @@
 	class="mt-5 space-y-3 rounded-xl border border-emerald-900 bg-emerald-950/20 p-4"
 	aria-label="ICP processing payment"
 >
-	<h3 class="font-semibold">Pay processing costs with ICP</h3>
-	<p class="text-sm text-gray-300">
-		Rumi supplies the cycles needed to process your SOL. You approve a maximum ICP deposit, and
-		unused ICP is returned automatically when the processing charge is known.
-	</p>
-	<p class="text-sm text-gray-300">
-		<strong>Service fee: 5% of the minter’s net cycles charge.</strong> The operating fee and ICP ledger
-		fees are additional. A failed processing attempt can still incur these costs.
-	</p>
-	{#if quote}
+		<h3 class="font-semibold">{interrupted ? 'ICP processing recovery' : 'Pay processing costs with ICP'}</h3>
+	{#if interrupted}
+		<div role="status" class="space-y-2 text-sm text-amber-300">
+			<h4 class="font-semibold">Processing interrupted; SOL outcome unknown</h4>
+				<p>
+					The mint request may have reached the official minter. An ICP refund does not return SOL
+					or confirm whether ckSOL was minted.
+				</p>
+				<p>
+					No minter, service or operating charge is retained for this interrupted attempt. ICP ledger
+					fees still apply.
+				</p>
+				<p>
+					New minting with this account remains blocked, including after this ICP refund. Do not send
+					more SOL. Keep payment #{payment?.sequence} and contact support to reconcile the original deposit.
+				</p>
+		</div>
+	{:else}
+			<p class="text-sm text-gray-300">
+				Rumi supplies the cycles needed to process your SOL. You approve a maximum ICP deposit, and
+				unused ICP is returned automatically when the processing charge is known.
+			</p>
+			<p class="text-sm text-gray-300">
+				<strong>Service fee: 5% of the minter’s net cycles charge.</strong> The operating fee and ICP ledger
+				fees are additional. A failed processing attempt can still incur these costs.
+			</p>
+	{/if}
+	{#if quote && !interrupted}
 		<dl class="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
 			<div>
 				<dt class="text-gray-400">Maximum ICP deposit</dt>
@@ -232,8 +258,8 @@
 				Your ICP balance covers the maximum. Send SOL using the address below, then select Mint with
 				ICP.
 			</p>{/if}
-	{:else if loading}<p class="text-sm text-gray-400">Checking ICP balance and processing costs…</p>
-	{:else}<p role="status" class="text-sm text-amber-300">
+	{:else if loading && !interrupted}<p class="text-sm text-gray-400">Checking ICP balance and processing costs…</p>
+	{:else if !interrupted}<p role="status" class="text-sm text-amber-300">
 			ICP-paid processing is unavailable. Do not send SOL for a new mint. {unavailable}
 		</p>{/if}
 	{#if message}<p role="status" class="text-sm text-gray-300">{message}</p>{/if}
@@ -253,8 +279,14 @@
 		onclick={mint}>{busy ? 'Checking payment…' : label}</button
 	>
 	<p class="text-xs text-gray-400">
-		Wallet confirmations approve the ICP allowance and authorize this mint. Payment settlement does
-		not mean ckSOL has finished minting.
+			{#if checkingRefund}
+				This action requests only the existing ICP refund. No new ICP payment or mint request is submitted.
+			{:else if interrupted}
+				This receipt records the ICP payment only. The original SOL deposit still needs reconciliation.
+			{:else}
+				Wallet confirmations approve the ICP allowance and authorize this mint. Payment settlement does
+				not mean ckSOL has finished minting.
+			{/if}
 	</p>
 	{#if payment}<details class="text-xs text-gray-400">
 			<summary class="cursor-pointer">ICP payment receipt</summary>

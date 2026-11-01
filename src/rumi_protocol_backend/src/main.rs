@@ -994,6 +994,7 @@ fn post_upgrade(arg: ProtocolArg) {
             )
         }
     };
+    rumi_protocol_backend::cksol_icp_paid::mark_interrupted_minter_calls(&mut state, ic_cdk::api::time());
     let held_amm1_donations = state.migrate_legacy_amm1_donations();
     if held_amm1_donations > 0 {
         log!(

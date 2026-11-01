@@ -335,3 +335,136 @@ fn two_owners_progress_with_first_attachment_in_flight() {
         assert_eq!((e.funds.len(), e.mints.len(), e.refunds.len()), (2, 2, 2));
     });
 }
+
+#[test]
+fn upgrade_interrupted_mint_refunds_once_and_ignores_late_callback() {
+    use futures::{task::noop_waker, Future};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    let mut env = mock::Env::default();
+    env.pending = Some("mint");
+    env.funding_results.push_back(Ok(Ok(Nat::from(12u64))));
+    env.mint_results
+        .push_back((DepositOutcome::Queued(42), 950_000_000_000));
+    env.refund_results.push_back(Ok(Ok(Nat::from(13u64))));
+    let owner = setup(env);
+    let deposit = deposit_cap(50_000, 10_000).unwrap();
+    let mut first = Box::pin(start(owner, 1, deposit, 50_000, 1000, 10_000));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::as_mut(&mut first).poll(&mut cx),
+        Poll::Pending
+    ));
+    assert_eq!(
+        again(owner).unwrap_err(),
+        "ckSOL account processing or capacity reached"
+    );
+    mutate_state(|s| {
+        mark_interrupted_minter_calls(s, transport::time());
+        s.cksol_relay_in_flight.clear();
+    });
+    let recovered = again(owner).unwrap();
+    assert_eq!(recovered.phase, CkSolPaymentPhase::Complete);
+    assert_eq!(recovered.refundable_e8s, deposit - 10_000);
+    assert_eq!(
+        (
+            recovered.charged_e8s,
+            recovered.service_fee_cycles,
+            recovered.operating_fee_cycles
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!(read_state(|s| s.cksol_icp_reserve), 0);
+    assert_eq!(read_state(reserved), ATTACHED_CYCLES as u128);
+    mock::ENV.with(|e| e.borrow_mut().as_mut().unwrap().pending = None);
+    assert!(matches!(
+        Pin::as_mut(&mut first).poll(&mut cx),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(payment(owner).unwrap(), recovered);
+    assert!(
+        futures::executor::block_on(start(owner, 2, deposit, 50_000, 1000, 10_000))
+            .unwrap_err()
+            .contains("held for reconciliation")
+    );
+    mutate_state(|s| {
+        let orphan = s.cksol_icp_payments[&owner].clone();
+        s.cksol_icp_payments.clear();
+        for index in 0..CKSOL_RELAY_OWNER_CAP {
+            let principal = Principal::self_authenticating(&(index as u64).to_be_bytes());
+            s.cksol_icp_payments.insert(principal, orphan.clone());
+        }
+        s.cksol_icp_reserve = ATTACHED_CYCLES;
+    });
+    assert!(
+        !terms().available,
+        "orphaned completed journals are not evictable capacity"
+    );
+    assert_eq!(
+        crate::cksol::attempt(owner).unwrap().status,
+        CkSolRelayStatus::SubmittedOrUnknown
+    );
+    mock::ENV.with(|e| {
+        let e = e.borrow();
+        let e = e.as_ref().unwrap();
+        assert_eq!((e.funds.len(), e.mints.len(), e.refunds.len()), (1, 1, 1));
+    });
+}
+
+#[test]
+fn stale_minter_continuation_cannot_launch_a_second_pending_refund() {
+    use futures::{task::noop_waker, Future};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    let mut env = mock::Env::default();
+    env.pending = Some("mint");
+    env.funding_results.push_back(Ok(Ok(Nat::from(12u64))));
+    env.mint_results
+        .push_back((DepositOutcome::Queued(42), 950_000_000_000));
+    env.refund_results.push_back(Ok(Ok(Nat::from(13u64))));
+    let owner = setup(env);
+    let mut original = Box::pin(start(
+        owner,
+        1,
+        deposit_cap(50_000, 10_000).unwrap(),
+        50_000,
+        1000,
+        10_000,
+    ));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::as_mut(&mut original).poll(&mut cx),
+        Poll::Pending
+    ));
+    mutate_state(|s| {
+        mark_interrupted_minter_calls(s, transport::time());
+        s.cksol_relay_in_flight.clear();
+    });
+    mock::ENV.with(|e| e.borrow_mut().as_mut().unwrap().pending = Some("refund"));
+    let mut recovery = Box::pin(resume(owner, 1));
+    assert!(matches!(
+        Pin::as_mut(&mut recovery).poll(&mut cx),
+        Poll::Pending
+    ));
+    mock::ENV.with(|e| e.borrow_mut().as_mut().unwrap().pending = None);
+    assert!(matches!(
+        Pin::as_mut(&mut original).poll(&mut cx),
+        Poll::Ready(Ok(_))
+    ));
+    mock::ENV.with(|e| assert_eq!(e.borrow().as_ref().unwrap().refunds.len(), 1));
+    assert!(
+        again(owner).unwrap_err().contains("processing or capacity"),
+        "stale guard must not clear the recovery lock"
+    );
+    assert!(matches!(
+        Pin::as_mut(&mut recovery).poll(&mut cx),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(payment(owner).unwrap().phase, CkSolPaymentPhase::Complete);
+}

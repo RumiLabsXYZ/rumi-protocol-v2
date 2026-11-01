@@ -3,6 +3,14 @@ import { CONFIG } from '../config';
 import type { IntentStore } from './cksolMinter';
 
 type Mode = 'icp' | 'cycles';
+// Existing public receipt contract: the backend preserves this prefix through
+// refund errors and completion while its interrupted minter call remains held.
+const INTERRUPTED_MESSAGE = 'Processing was interrupted by an upgrade; SOL status remains unknown';
+export function cksolIcpNeedsReconciliation(receipt: any): boolean {
+	return (
+		typeof receipt?.message?.[0] === 'string' && receipt.message[0].startsWith(INTERRUPTED_MESSAGE)
+	);
+}
 const terminal = (phase: unknown) => phase === 'Complete' || phase === 'FundingRejected';
 function other(mode: Mode, owner: string) {
 	return mode === 'icp'
@@ -25,6 +33,7 @@ export function assertOtherCksolLocalSettled(storage: IntentStore, owner: string
 		if (p.phase === 'NotStarted') return;
 		if (
 			p.phase === 'Receipt' &&
+			!cksolIcpNeedsReconciliation(p.receipt) &&
 			terminal(p.receipt?.phase) &&
 			String(p.receipt.sequence) === p.sequence
 		)
@@ -47,7 +56,7 @@ export async function requireOtherCksolPaymentSettled(
 	if (typeof backend[method] === 'function') {
 		const p = (await backend[method](owner))?.[0];
 		const phase = typeof p?.phase === 'string' ? p.phase : Object.keys(p?.phase ?? {})[0];
-		if (p && !terminal(phase))
+		if (p && (!terminal(phase) || cksolIcpNeedsReconciliation(p)))
 			throw new Error(
 				`Resolve the existing ${label} payment receipt before using another payment method.`
 			);

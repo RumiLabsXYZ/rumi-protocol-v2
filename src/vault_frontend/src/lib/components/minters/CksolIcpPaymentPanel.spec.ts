@@ -100,6 +100,44 @@ afterEach(() => {
 	host.remove();
 });
 describe('ICP-paid mint controls', () => {
+	it('offers only the interrupted ICP refund, then preserves the visible SOL hold after completion', async () => {
+		const interrupted = (phase: string) => ({
+			...payment(phase),
+			receipt: {
+				...payment(phase).receipt,
+				deposit_id: [],
+				charged_e8s: 0n,
+				message: ['Processing was interrupted by an upgrade; SOL status remains unknown']
+			}
+		});
+		fx.q.mockResolvedValue({
+			...q(),
+			balance: 0n,
+			terms: { ...q().terms, available: false, reserve_available_cycles: 0n }
+		});
+		fx.recover.mockResolvedValue(interrupted('RefundReady'));
+		fx.resume.mockImplementation(async () => {
+			const p = interrupted('Complete');
+			fx.recover.mockResolvedValue(p);
+			return p;
+		});
+		const active = vi.fn();
+		render({ blocked: true, canMint: false, onActive: active });
+		await settle();
+		expect(button('Return processing ICP').disabled).toBe(false);
+		expect(host.textContent?.replace(/\s+/g, ' ')).toContain('SOL outcome unknown');
+		expect(host.textContent?.replace(/\s+/g, ' ')).toContain('ICP ledger fees still apply');
+		button('Return processing ICP').click();
+		await settle();
+		expect(fx.resume).toHaveBeenCalledOnce();
+		expect(fx.submit).not.toHaveBeenCalled();
+		expect(host.textContent?.replace(/\s+/g, ' ')).toContain('ICP refund confirmed');
+		expect(host.textContent?.replace(/\s+/g, ' ')).toContain(
+			'New minting with this account remains blocked'
+		);
+		expect(button('New mint held for review').disabled).toBe(true);
+		expect(active).toHaveBeenLastCalledWith(true);
+	});
 	it('shows the fee and maximum before enabling the mint, with no automatic spending', async () => {
 		render();
 		await settle();
