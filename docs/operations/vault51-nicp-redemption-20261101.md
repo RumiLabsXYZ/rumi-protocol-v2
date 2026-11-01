@@ -43,3 +43,5 @@ Frontend immutable batches 657–662 and final atomic batch 663 published index 
 Post-upgrade `get_nicp_redemption_claim` returned `null`. The narrowly scoped vault 51 query still showed 1,500 nICP and approximately 2,871.0917 icUSD debt (continuing interest). **No preparation, funding, approval or WaterNeuron withdrawal was dispatched.** The financial initiation is a manual user action, separate from this software installation. The prepared local runner stops on a call failure, typed rejection or unexpected phase and refuses to resume an existing claim.
 
 Hosted frontend CI passed; the broader Stability Pool receipt job was still running at software publication. Main has no enforced branch status checks. Its pending result is not reported as a pass; local scoped tests and the reviewed exact artifact are the release evidence above.
+
+The remaining Stability Pool receipt workflow subsequently completed successfully: [run 41339002142](https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41339002142), on the unchanged implementation commit. Later commits only record publication evidence.
