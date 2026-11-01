@@ -109,7 +109,7 @@
             amount: Number(t.total_collateral) / Math.pow(10, decimals),
             color: info?.color ?? '#94A3B8',
             price: Number(t.price || 0),
-            isSunset: isSunsetCollateralPrincipal(info?.ledgerCanisterId ?? ct),
+            isSunset: info?.status === 'Sunset' || isSunsetCollateralPrincipal(info?.ledgerCanisterId ?? ct),
           };
         })
         .filter((t: any) => t.amount > 0)
@@ -129,8 +129,10 @@
       refreshInterval = setInterval(fetchStatus, 15000);
     } else {
       // Even when protocolStatus is provided as a prop, fetch per-collateral totals
-      collateralStore.fetchSupportedCollateral().catch(() => {});
-      fetchCollateralTotals();
+      collateralStore.fetchSupportedCollateral().catch(() => {}).then(fetchCollateralTotals);
+      refreshInterval = setInterval(() => {
+        collateralStore.fetchSupportedCollateral().catch(() => {}).then(fetchCollateralTotals);
+      }, 15000);
       fetchCkStableReserves();
     }
     return () => { if (refreshInterval) clearInterval(refreshInterval); };
@@ -138,6 +140,7 @@
   onDestroy(() => { if (refreshInterval) clearInterval(refreshInterval); });
 
   $: status = protocolStatus || selfFetchedStatus;
+  $: visibleCollateralTotals = collateralTotals.filter(ct => !ct.isSunset);
   $: icpPrice = status?.lastIcpRate || 0;
   $: collateralValueUsd = collateralTotals.length > 0
     ? collateralTotals.reduce((sum, ct) => sum + ct.amount * ct.price, 0)
@@ -210,17 +213,16 @@
       <span class="stat-value">{formatStableDisplay(status?.totalIcusdBorrowed || 0)} icUSD</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Total Collateral</span>
+      <span class="stat-label" title="Sunset collateral is excluded from this breakdown but remains included in system value and collateral ratio">Collateral (excl. sunset)</span>
       <span class="stat-value-stack">
         {#if collateralTotals.length > 0}
-          {#each collateralTotals as ct}
-            <span
-              class:sunset={ct.isSunset}
-              title={ct.isSunset ? `${ct.symbol} is being sunset (winding down, no new vaults)` : undefined}
-            ><span class="collateral-dot" style="background:{ct.color}"></span> {formatTokenBalance(ct.amount)} {ct.symbol}</span>
+          {#each visibleCollateralTotals as ct}
+            <span><span class="collateral-dot" style="background:{ct.color}"></span> {formatTokenBalance(ct.amount)} {ct.symbol}</span>
+          {:else}
+            <span>—</span>
           {/each}
         {:else}
-          <span>{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
+          <span>—</span>
         {/if}
       </span>
     </div>
@@ -350,10 +352,6 @@
     height: 0.375rem;
     border-radius: 9999px;
     vertical-align: middle;
-  }
-  .stat-value-stack .sunset {
-    opacity: 0.45;
-    font-weight: 500;
   }
   .mode-badge {
     display: inline-block;

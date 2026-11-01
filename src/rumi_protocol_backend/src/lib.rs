@@ -3014,6 +3014,12 @@ pub async fn check_vaults() {
         let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
 
         for vault_info in &vault_notifications {
+            // Sunset positions remain visible to manual liquidators, but are
+            // not offered to either automated liquidation route.
+            if read_state(|s| s.get_collateral_config(&vault_info.collateral_type)
+                .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset)) {
+                continue;
+            }
             // `vault_routable_to_bot` enforces both the operator allowlist and
             // the custody fence (native-XRP is claim-based and must never go
             // to the bot; it falls through to the SP's absorb path).

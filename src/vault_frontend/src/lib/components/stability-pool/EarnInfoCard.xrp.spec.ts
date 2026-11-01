@@ -53,7 +53,7 @@ describe('EarnInfoCard sunset collateral policy', () => {
 		]);
 	});
 
-	it('offers sunset collateral only as an exit for an existing receiving position', () => {
+	it('offers legacy sunset positions an exit from interest eligibility', () => {
 		const activeRegistryBob = { ...bob, status: { Active: null } } as CollateralInfo;
 		expect(liquidationPreferenceCollaterals([icp, bob], new Set()).map((c) => c.symbol)).toEqual([
 			'ICP',

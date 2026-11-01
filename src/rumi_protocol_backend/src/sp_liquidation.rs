@@ -973,6 +973,12 @@ pub async fn prepare(request: SpLiquidationRequest) -> Result<SpLiquidationRecei
             "Liquidations were frozen while preparing the SP liquidation".into(),
         ));
     }
+    if read_state(|state| state.get_collateral_config(&quote.collateral_type)
+        .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset)) {
+        return Err(ProtocolError::GenericError(
+            "Sunset collateral requires manual liquidation".into(),
+        ));
+    }
     // Only the incoming payment is dispatched from the prepared quote. The
     // protocol-fee leg is created later, immediately before its first ledger
     // await, so a long-held payment/recovery journal cannot age that later
@@ -1162,6 +1168,9 @@ fn validate_predispatch_quote(journal: &SpLiquidationJournal) -> Result<(), Stri
         let config = state
             .get_collateral_config(&journal.collateral_type)
             .ok_or_else(|| "reserved collateral configuration is missing".to_string())?;
+        if config.status == crate::state::CollateralStatus::Sunset {
+            return Err("Sunset collateral requires manual liquidation".into());
+        }
         let timestamp = config
             .last_price_timestamp
             .ok_or_else(|| "reserved collateral price has no freshness timestamp".to_string())?;

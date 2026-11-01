@@ -8303,6 +8303,21 @@ async fn stability_pool_liquidate_with_reserves_v2(
         Phase::AdmissionPending => {
             let ledger_fee_e8s = rumi_protocol_backend::management::get_or_refresh_fee(three_usd_ledger)
                 .await.map_err(ProtocolError::GenericError)?;
+            let is_sunset = read_state(|s| s.vault_id_to_vaults.get(&vault_id)
+                .and_then(|vault| s.get_collateral_config(&vault.collateral_type))
+                .is_some_and(|config| config.status == rumi_protocol_backend::state::CollateralStatus::Sunset));
+            if is_sunset {
+                let reason = "Sunset collateral requires manual liquidation".to_string();
+                mutate_state(|s| {
+                    if let Some(row) = s.three_usd_reserve_ingress_journals.get_mut(&key) {
+                        if matches!(row.phase, Phase::AdmissionPending) {
+                            row.phase = Phase::PreTransferRejected { reason: reason.clone() };
+                            row.protocol_refund_fee_reserve_e8s = 0;
+                        }
+                    }
+                });
+                return Err(ProtocolError::GenericError(reason));
+            }
             if ledger_fee_e8s != 0 {
                 let reason = "3USD ledger fee changed from zero before pinned ingress dispatch".to_string();
                 mutate_state(|s| {
@@ -11916,6 +11931,13 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 vault_id
             )));
         }
+        if s.get_collateral_config(&vault.collateral_type).is_some_and(|config| {
+            config.status == rumi_protocol_backend::state::CollateralStatus::Sunset
+        }) {
+            return Err(ProtocolError::GenericError(
+                "Sunset collateral requires manual liquidation".into(),
+            ));
+        }
         if !s
             .bot_allowed_collateral_types
             .contains(&vault.collateral_type)
@@ -11955,6 +11977,14 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                     "Vault #{} is already being processed",
                     vault_id
                 )));
+            }
+
+            if s.get_collateral_config(&vault.collateral_type).is_some_and(|config| {
+                config.status == rumi_protocol_backend::state::CollateralStatus::Sunset
+            }) {
+                return Err(ProtocolError::GenericError(
+                    "Sunset collateral requires manual liquidation".into(),
+                ));
             }
 
             // Guard: reject collateral types the bot isn't configured to handle
