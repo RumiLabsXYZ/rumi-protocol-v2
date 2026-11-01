@@ -360,5 +360,5 @@ User authorizes protocol-controlled nICP redemption, retained debt, a public tra
 | --- | --- | --- | --- | --- |
 | V51-01 | Source verified | root | New durable redemption module and operator methods | 12 backend tests; live Candid compatibility; no migration dispatched; branch `codex/vault51-redemption-claim-20261101` |
 | V51-02 | Source verified | claim_accounting_review | Integrate claim accounting and spending exclusions | fixed ICP valuation, retained nICP terms, repayment-only, 33 frontend regressions; current deployed sunset/3USD fixes preserved |
-| V51-03 | In progress | root | Transparency notice and release evidence | states planned/pending/settled truthfully, public personal guarantee and liquidation suspension, build and scoped review |
+| V51-03 | Software published | root | Transparency notice and release evidence | exact backend/asset readbacks verified; claim=null, vault51 still1500 nICP; financial initiation remains manual user action; PR612 |
 | V51-04 | Passed | claim_custody_review | Independent custody review | exact dispatch, unknown outcomes, settlement attribution, no extra mint; final scoped compatibility/replay review passed |
