@@ -32,7 +32,7 @@ These values combine the source constructor in `src/rumi_protocol_backend/src/st
 
 The older XRP design spec records a 150% / 133% / 155% / 12% risk shape and a $200 ceiling. Current source supersedes that historical note, and current live XRP config supersedes the source constructor for Rob's parity request. The read-only query also returned XRC XRP/USD, `min_xrc_sources = null`, zero ledger fee, and an explicit rate curve. It does not by itself prove every runtime policy that may affect borrowing.
 
-Demo-first slice selected on 2026-10-29: an authorized developer on an isolated test canister opens a unique XLM pending address, without collateral credit or icUSD mint. Compile the test build, verify its Candid interface, and run a real threshold-derive smoke before calling this a working demo. Production Candid/declarations remain a separate release check. The [XLM demo deferred-work log](../coordination/demo-deferred/xlm-junior.md) records only work omitted from this address-only slice; it does not waive client-money requirements.
+Demo-first slice selected on 2026-10-29: an authorized developer on an isolated test canister opens a unique XLM pending address, without collateral credit or icUSD mint. A source-only PocketIC smoke now exercises the test-gated endpoint, but has not compiled or run. Compile the test build, verify its Candid interface, and run the real threshold-derive smoke before calling this a working demo. Production Candid/declarations remain a separate release check. The [XLM demo deferred-work log](../coordination/demo-deferred/xlm-junior.md) records only work omitted from this address-only slice; it does not waive client-money requirements.
 
 ## Stellar-specific design requirements
 
