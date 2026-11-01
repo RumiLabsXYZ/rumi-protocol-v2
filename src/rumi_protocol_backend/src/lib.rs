@@ -1517,6 +1517,7 @@ fn redemption_transfer_meets_minimum(
 pub mod chains;
 pub mod cksol;
 pub mod cksol_paid;
+pub mod cksol_icp_paid;
 pub mod dashboard;
 pub mod event;
 pub mod guard;

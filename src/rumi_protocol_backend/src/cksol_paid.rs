@@ -239,7 +239,7 @@ fn liabilities(s: &State) -> u128 {
         .sum()
 }
 fn has_backing(s: &State, balance: u128) -> bool {
-    balance >= CKSOL_RELAY_CANISTER_RESERVE.saturating_add(liabilities(s))
+    balance >= CKSOL_RELAY_CANISTER_RESERVE.saturating_add(liabilities(s)).saturating_add(crate::cksol_icp_paid::icp_protected(s))
 }
 fn prepare(s: &mut State, owner: Principal, sequence: u64, now: u64) -> Result<bool, String> {
     if let Some(existing) = s.cksol_paid_payments.get(&owner) {
@@ -397,7 +397,7 @@ async fn refund_with<T: Transport>(owner: Principal, t: &T) -> Result<CkSolPayme
     if before.phase != CkSolPaymentPhase::RefundReady {
         return Ok(before);
     }
-    if !read_state(|s| t.balance() >= liabilities(s)) {
+    if !read_state(|s| t.balance() >= liabilities(s).saturating_add(crate::cksol_icp_paid::icp_protected(s))) {
         return Err(
             "Refund retained: backend cannot currently cover all user cycle credits".into(),
         );
@@ -480,6 +480,7 @@ pub async fn start_with<T: Transport>(
     t: &T,
 ) -> Result<CkSolPayment, String> {
     let _guard = Guard::acquire(owner)?;
+    if read_state(|s| s.cksol_icp_payments.get(&owner).is_some_and(|j| !matches!(j.payment.phase, CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected))) { return Err("Resolve previous ICP payment first".into()); }
     if max_payment != FUNDING {
         return Err("Payment terms changed; refresh the quote".into());
     }

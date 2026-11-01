@@ -418,6 +418,15 @@ fn generate_consent_message_for_caller(
             "## Vault Operation Status\n\nThis authenticated query shows your operation watermark and the safe status of your active operation. It does not expose the ledger transfer tuple or move funds.".into()
         ),
 
+        "start_cksol_deposit_with_icp" => {
+            let (sequence, deposit, rate, rate_time, fee) = candid::decode_args::<(u64,u64,u64,u64,u64)>(arg).map_err(|_| "Invalid ckSOL ICP payment arguments".to_string())?;
+            if crate::cksol_icp_paid::deposit_cap(rate, fee) != Some(deposit) { return Err("Invalid ckSOL ICP quote".into()); }
+            Ok(format!("## Pay for SOL processing with ICP\n\nPayment #{} deposits at most {} e8s from your connected ICP account, plus a transfer fee of {} e8s. The approved rate is {} permyriad at timestamp {}. Rumi charges the measured minter cycles, a 5% service fee on those cycles, 1 billion operating cycles, and the refund ledger fee. Unused ICP is returned to your connected account; an uncertain refund is held for recovery. Failed processing may still incur a charge. This does not establish that minting completed.", sequence, deposit, fee, rate, rate_time))
+        }
+        "resume_cksol_icp_payment" => {
+            let (sequence,) = candid::decode_args::<(u64,)>(arg).map_err(|_| "Invalid ckSOL payment sequence".to_string())?;
+            Ok(format!("## Resume SOL processing payment #{}\n\nResume an existing payment or return unused ICP to your connected account. This does not debit new ICP. Uncertain outcomes remain held.",sequence))
+        }
         "start_cksol_deposit_paid" => {
             let (sequence, max_payment) = candid::decode_args::<(u64, u64)>(arg)
                 .map_err(|_| "Invalid ckSOL payment arguments".to_string())?;
@@ -1147,6 +1156,18 @@ mod tests {
         assert!(unauthorized.contains("payout amount for claim #44 is unavailable"));
         assert!(!unauthorized.contains("rPriorDestination"));
         assert!(!unauthorized.contains("tag 77"));
+    }
+
+    #[test]
+    fn cksol_icp_consent_binds_cap_and_discloses_service_fee() {
+        let (seq,rate,rate_time,fee)=(37u64,31_337u64,123u64,10_000u64);
+        let deposit=crate::cksol_icp_paid::deposit_cap(rate,fee).unwrap();
+        let text=generate_consent_message("start_cksol_deposit_with_icp",&Encode!(&seq,&deposit,&rate,&rate_time,&fee).unwrap()).unwrap();
+        assert!(text.contains(&deposit.to_string())); assert!(text.contains("5% service fee"));
+        assert!(text.contains("Unused ICP")); assert!(text.contains("Failed processing"));
+        assert!(generate_consent_message("start_cksol_deposit_with_icp",&Encode!(&seq,&(deposit+1),&rate,&rate_time,&fee).unwrap()).is_err());
+        let resume=generate_consent_message("resume_cksol_icp_payment",&Encode!(&seq).unwrap()).unwrap();
+        assert!(resume.contains("does not debit new ICP"));
     }
 
     #[test]

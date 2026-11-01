@@ -4022,6 +4022,12 @@ pub struct State {
     #[serde(default)]
     pub cksol_paid_sequence: u64,
     #[serde(default)]
+    pub cksol_icp_sequence: u64,
+    #[serde(default)]
+    pub cksol_icp_reserve: u64,
+    #[serde(default)]
+    pub cksol_icp_payments: BTreeMap<Principal, crate::cksol_icp_paid::Journal>,
+    #[serde(default)]
     pub cksol_paid_payments: BTreeMap<Principal, crate::cksol_paid::CkSolPayment>,
     /// One bounded attempt per owner. Rows are retained until the upstream
     /// minter reports Minted or Dropped, or until explicit operator recovery.
@@ -4761,6 +4767,9 @@ impl Default for State {
             collateral_to_vault_ids: BTreeMap::new(),
             cksol_relay_budget: 0,
             cksol_paid_sequence: 0,
+            cksol_icp_sequence: 0,
+            cksol_icp_reserve: 0,
+            cksol_icp_payments: BTreeMap::new(),
             cksol_paid_payments: BTreeMap::new(),
             cksol_relay_attempts: BTreeMap::new(),
             cksol_relay_in_flight: BTreeSet::new(),
@@ -5011,6 +5020,9 @@ impl From<InitArg> for State {
 
             cksol_relay_budget: 0,
             cksol_paid_sequence: 0,
+            cksol_icp_sequence: 0,
+            cksol_icp_reserve: 0,
+            cksol_icp_payments: BTreeMap::new(),
             cksol_paid_payments: BTreeMap::new(),
             cksol_relay_attempts: BTreeMap::new(),
             cksol_relay_in_flight: BTreeSet::new(),

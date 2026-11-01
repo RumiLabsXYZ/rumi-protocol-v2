@@ -17298,11 +17298,27 @@ fn get_cksol_relay_budget() -> u64 {
 }
 
 #[candid_method(query)]
+#[candid_method(query)]
 #[query]
 fn get_cksol_payment_quote() -> rumi_protocol_backend::cksol_paid::CkSolPaymentQuote {
     rumi_protocol_backend::cksol_paid::quote()
 }
 #[candid_method(query)]
+#[query]
+fn get_cksol_icp_terms() -> rumi_protocol_backend::cksol_icp_paid::CkSolIcpTerms { rumi_protocol_backend::cksol_icp_paid::terms() }
+#[candid_method(query)]
+#[query]
+fn get_cksol_icp_payment(owner: Principal) -> Option<rumi_protocol_backend::cksol_icp_paid::CkSolIcpPayment> { rumi_protocol_backend::cksol_icp_paid::payment(owner) }
+#[candid_method(update)]
+#[update]
+async fn start_cksol_deposit_with_icp(sequence:u64, max_deposit_e8s:u64, rate_permyriad:u64, rate_timestamp_seconds:u64, ledger_fee_e8s:u64) -> Result<rumi_protocol_backend::cksol_icp_paid::CkSolIcpPayment,String> { rumi_protocol_backend::cksol_icp_paid::start(ic_cdk::caller(),sequence,max_deposit_e8s,rate_permyriad,rate_timestamp_seconds,ledger_fee_e8s).await }
+#[candid_method(update)]
+#[update]
+async fn resume_cksol_icp_payment(sequence:u64) -> Result<rumi_protocol_backend::cksol_icp_paid::CkSolIcpPayment,String> { rumi_protocol_backend::cksol_icp_paid::resume(ic_cdk::caller(),sequence).await }
+#[candid_method(update)]
+#[update]
+fn set_cksol_icp_reserve(cycles:u64) -> Result<(),String> { rumi_protocol_backend::cksol_icp_paid::set_reserve(ic_cdk::caller(),cycles) }
+
 #[query]
 fn get_cksol_payment(owner: Principal) -> Option<rumi_protocol_backend::cksol_paid::CkSolPayment> {
     rumi_protocol_backend::cksol_paid::payment(owner)

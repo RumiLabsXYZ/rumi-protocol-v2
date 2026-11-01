@@ -31,6 +31,22 @@
       "blockedReason": "Current live readback and accepted-finding closure evidence are not yet recorded in this board.",
       "nextAction": "Once verified, update the release record and public page with the observed state.",
       "cardIds": ["SEC-05"]
+    },
+    {
+      "id": "cksol-icp-processing",
+      "title": "ckSOL processing with ICP escrow",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Run remote CI and attach the assigned source PR when available; preserve the zero, disabled reserve and deferred pre-client-money lifecycle/canary work.",
+      "cardIds": ["CKICP-01", "CKICP-02", "CKICP-03"]
+    },
+    {
+      "id": "xrp-deposit-tag-guidance",
+      "title": "Incoming XRP deposit-tag guidance",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Track draft PR #607 through review, merge, and deployment evidence; no live-wallet action is authorized.",
+      "cardIds": ["XRPTAG-01", "XRPTAG-02"]
     }
   ]
 }

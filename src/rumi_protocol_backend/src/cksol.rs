@@ -308,6 +308,9 @@ pub fn bind_observed_id(
     if owner == Principal::anonymous() {
         return Err("Cannot recover an anonymous ckSOL owner".into());
     }
+    if read_state(|state| state.cksol_icp_payments.get(&owner).is_some_and(|j| matches!(j.payment.phase, crate::cksol_paid::CkSolPaymentPhase::FundingPending | crate::cksol_paid::CkSolPaymentPhase::FundingUnknown | crate::cksol_paid::CkSolPaymentPhase::Funded))) {
+        return Err("ICP funding has not reached minter dispatch; no deposit ID can be bound".into());
+    }
     mutate_state(|state| match state.cksol_relay_attempts.get_mut(&owner) {
         Some(row) if row.status == CkSolRelayStatus::SubmittedOrUnknown => {
             row.status = CkSolRelayStatus::Queued(deposit_id);

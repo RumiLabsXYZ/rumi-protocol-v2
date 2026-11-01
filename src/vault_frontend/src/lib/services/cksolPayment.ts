@@ -9,6 +9,7 @@ import { auth, walletSessionGeneration } from './auth';
 import { createOisyActor } from './oisySigner';
 import { getCksolOisySignerAgent } from './cksolOisySigner';
 import { getCksolRelay, getCksolMinter, type IntentStore } from './cksolMinter';
+import { assertOtherCksolLocalSettled, requireOtherCksolPaymentSettled } from './cksolPaymentJournal';
 
 export type PaymentPhase =
 	| 'FundingPending'
@@ -356,6 +357,7 @@ export async function submitCksolPayment(
 	)
 		throw new Error('Wallet session changed. Refresh before approving.');
 	const key = cksolPaymentKey(q.owner);
+	await requireOtherCksolPaymentSettled(storage, owner, 'cycles', getCksolRelay());
 	let intent = loadCksolPayment(storage, q.owner);
 	const backend: any = backendActor();
 	// Resolve the backend-owned sequence before deciding whether another payment can start.
@@ -419,6 +421,9 @@ export async function submitCksolPayment(
 	await verifySigner(ledgerActor, owner);
 	if (!isLive(owner, g, wt, live)) throw new Error('Wallet session changed.');
 	await requireNoLegacyDeposit(owner, g, wt, live);
+	await requireOtherCksolPaymentSettled(storage, owner, 'cycles', getCksolRelay());
+	if (!isLive(owner, g, wt, live)) throw new Error('Wallet session changed.');
+	assertOtherCksolLocalSettled(storage, owner.toText(), 'cycles');
 	const createdAt = Date.now();
 	intent = {
 		owner: q.owner,
@@ -600,6 +605,7 @@ export async function continueApprovedCksolPayment(
 	)
 		throw new Error('Only a confirmed approval that has not started can continue.');
 	if (!isLive(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
+	await requireOtherCksolPaymentSettled(storage, owner, 'cycles', getCksolRelay());
 	const previous = await readCksolPayment(owner);
 	if (!isLive(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
 	if (previous && BigInt(previous.sequence) >= BigInt(intent.sequence)) {
@@ -640,6 +646,7 @@ export async function continueApprovedCksolPayment(
 		if (!isLive(owner, generation, walletType, live)) return intent;
 		await verifySigner(actor, owner);
 		if (!isLive(owner, generation, walletType, live)) return intent;
+		assertOtherCksolLocalSettled(storage, owner.toText(), 'cycles');
 		const result = await actor.start_cksol_deposit_paid(
 			BigInt(intent.sequence),
 			BigInt(intent.maxPayment)

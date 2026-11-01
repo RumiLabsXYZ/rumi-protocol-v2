@@ -39,6 +39,46 @@
       "scope": "Refresh release and public security status",
       "evidenceText": "Waiting for current live readback and finding closure evidence. Any public update must state verified production status without private exploit detail.",
       "evidenceLinks": [{"title": "Public security status", "url": "https://rumiprotocol.com/security/october-2026"}]
+    },
+    {
+      "id": "CKICP-01",
+      "state": "Review",
+      "owner": "agent:icp_conversion_relay",
+      "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
+      "evidenceText": "Acceptance: caller confirms a maximum ICP deposit; attempt freezes quote rate and maximum; 1T cycles may be fronted only from a dedicated finite reserve, currently zero and not enabled; net minter charge is attached ICP minus refunded ICP; the user explicitly accepted the 5% service fee, measured as minter cycles only, with the separate 1B-cycle operating fee disclosed apart; automatically return unused ICP, never cycles. Preserve prior cycle-payment receipts, client funds, unknown outcomes, and safe retry. Backend source is implemented; 37 focused backend tests and source-generated Candid compatibility/regeneration checks pass. Two targeted reviews PASS after fixes: liquid backing excludes already-dispatched attachments, and both local/backend counterpart journals are checked before cross-mode approval or continuation. Branch codex/solana-icp-processing; remote CI/PR pending. Full mocked async lifecycle and authorized live canary are recorded as deferred before client money; reserve remains zero, with no production install, funding, or financial canary authorized.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "CKICP-02",
+      "state": "Review",
+      "owner": "root",
+      "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
+      "evidenceText": "Acceptance: show price, maximum ICP, 5% service charge on measured minter cycles, and separate 1B-cycle operating fee before SOL is sent; return unused ICP; provide an actionable path for people who already sent SOL. 116 focused frontend tests across six suites pass; build and auth-asset checks pass. Browser testing with simulated data and spending disabled covered desktop quote/mint/refund and 390px zero-ICP, refund, and unknown-funding states, with no horizontal overflow or relevant console errors. svelte-check still reports 30 errors and 66 warnings in 25 unrelated files, with no changed-file diagnostics. Branch codex/solana-icp-processing; remote CI/PR pending. No production install, live canary, or release is claimed; the customer's SOL location remains unverified pending identifying evidence.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "CKICP-03",
+      "state": "Review",
+      "owner": "root",
+      "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
+      "evidenceText": "Depends on CKICP-01 and CKICP-02. Source/test/review packet is ready: 37 focused backend tests, source-generated Candid compatibility/regeneration, 116 focused frontend tests, build/auth-asset checks, simulated desktop/mobile browser checks, and two targeted reviews PASS after fixes. Remote CI and source PR are pending; no merge, production install, reserve funding, or financial canary is claimed. Full mocked async lifecycle and authorized live canary are explicitly deferred before client money; no general optional test gate is added. Branch codex/solana-icp-processing. Next: attach the assigned PR when available, run remote CI, and keep deployment/financial authorization as separate decisions.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "XRPTAG-01",
+      "state": "Review",
+      "owner": "agent:xrp_tag_guidance",
+      "scope": "Clarify incoming XRP deposit-tag guidance across vault deposit surfaces",
+      "evidenceText": "Acceptance: beside the borrow modal, pending banner, and vault panel, explain that Rumi's per-vault incoming address needs no deposit tag; if an exchange requires one, choose its No tag option or contact exchange support. Never invent a tag. Exchange/account-specific flags remain unverified because no exchange was identified. UI-only scope: no backend, authentication, signing, or funds changes. Source commit cf9db01f is pushed on branch codex/xrp-deposit-tag-guidance from worktree xrp-deposit-tag-guidance/rumi-protocol-v2; root inspected and accepted the source. Two focused tests, frontend build, and auth-asset checks pass. Draft PR #607 was created via authenticated CLI after the app connector lacked permission. Pending merge/deployment; no live-wallet action or behavior is verified. Next: continue review on PR #607 and keep merge/deployment separate.",
+      "evidenceLinks": [{"title": "XRP deposit-tag guidance PR #607", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/607"}]
+    },
+    {
+      "id": "XRPTAG-02",
+      "state": "Review",
+      "owner": "root",
+      "scope": "Check incoming-tag guidance and preserve outgoing XRP destination tags",
+      "evidenceText": "Depends on XRPTAG-01. Acceptance: verify all incoming surfaces give consistent no-tag/exchange guidance and regression-check that outgoing Rumi claims retain their numeric Destination tag field wired to the backend; prepare focused validation and release evidence. Source commit cf9db01f is pushed on branch codex/xrp-deposit-tag-guidance from worktree xrp-deposit-tag-guidance/rumi-protocol-v2; root inspected and accepted the source. Two focused tests, frontend build, and auth-asset checks pass. Draft PR #607 was created via authenticated CLI after the app connector lacked permission. Review continues; do not mark complete. No merge, deployment, or live-wallet action/verification is claimed. Next: track PR #607 through review and keep deployment evidence separate.",
+      "evidenceLinks": [{"title": "XRP deposit-tag guidance PR #607", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/607"}]
     }
   ]
 }
