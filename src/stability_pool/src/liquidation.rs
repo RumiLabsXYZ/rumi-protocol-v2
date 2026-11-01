@@ -6103,6 +6103,24 @@ pub async fn recover_pending_ordinary_liquidations() {
     }
 }
 
+async fn verify_fresh_collateral_status(vault_info: &LiquidatableVaultInfo) -> Result<(), String> {
+    let registered = read_state(|s| s.collateral_registry.get(&vault_info.collateral_type).cloned());
+    if registered.is_none() {
+        return Err("Collateral is not registered in the pool".into());
+    }
+    if registered.is_some_and(|config| config.status == CollateralStatus::Sunset) {
+        return Err("Sunset collateral requires manual liquidation".into());
+    }
+    let protocol = read_state(|s| s.protocol_canister_id);
+    let config: Result<(Option<rumi_protocol_backend::state::CollateralConfig>,), _> =
+        call(protocol, "get_collateral_config", (vault_info.collateral_type,)).await;
+    match config {
+        Ok((Some(config),)) if config.status != rumi_protocol_backend::state::CollateralStatus::Sunset => Ok(()),
+        Ok((Some(_),)) => Err("Sunset collateral requires manual liquidation".into()),
+        _ => Err("Could not verify collateral status for pool liquidation".into()),
+    }
+}
+
 async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
     // Existing intents may already have moved funds. Preserve their exact
     // recovery path, but do not start another pool liquidation for a sunset
@@ -6117,23 +6135,13 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         if sunset_collaterals().contains(&vault_info.collateral_type) {
             return ordinary_failure(vault_info, "Sunset collateral requires manual liquidation");
         }
-        let registered = read_state(|s| s.collateral_registry.get(&vault_info.collateral_type).cloned());
-        if registered.is_none() {
-            return ordinary_failure(vault_info, "Collateral is not registered in the pool");
-        }
-        if registered.is_some_and(|config| config.status == CollateralStatus::Sunset) {
-            return ordinary_failure(vault_info, "Sunset collateral requires manual liquidation");
-        }
-        let protocol = read_state(|s| s.protocol_canister_id);
-        let config: Result<(Option<rumi_protocol_backend::state::CollateralConfig>,), _> =
-            call(protocol, "get_collateral_config", (vault_info.collateral_type,)).await;
-        match config {
-            Ok((Some(config),)) if config.status != rumi_protocol_backend::state::CollateralStatus::Sunset => {}
-            Ok((Some(_),)) => return ordinary_failure(vault_info, "Sunset collateral requires manual liquidation"),
-            _ => return ordinary_failure(vault_info, "Could not verify collateral status for pool liquidation"),
-        }
     }
     if read_state(|s| s.collateral_requires_payout_address(&vault_info.collateral_type)) {
+        if !pending {
+            if let Err(error) = verify_fresh_collateral_status(vault_info).await {
+                return ordinary_failure(vault_info, &error);
+            }
+        }
         return execute_native_xrp_absorb_with_io(vault_info, &mut CdkNativeXrpAbsorbIo).await;
     }
 
@@ -6166,6 +6174,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         ) else {
             break;
         };
+        if !pending {
+            if let Err(error) = verify_fresh_collateral_status(vault_info).await {
+                return ordinary_failure(vault_info, &error);
+            }
+        }
         let failed_ledger = selection.ledger;
         let result = start_ordinary_liquidation(
             vault_info,
@@ -6252,6 +6265,9 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 error_message: Some("Pool paused before new 3USD absorb admission".into()),
                 admitted: Some(false),
             };
+        }
+        if let Err(error) = verify_fresh_collateral_status(vault_info).await {
+            return ordinary_failure(vault_info, &error);
         }
         BTreeMap::from([(ledger, amount)])
     };
@@ -7895,7 +7911,7 @@ mod tests {
         let result = futures::executor::block_on(execute_single_liquidation(&vault));
 
         assert!(!result.success);
-        assert!(result.error_message.as_deref().unwrap().contains("not registered"));
+        assert!(result.error_message.as_deref().unwrap().contains("No eligible stablecoin balance"));
         assert_eq!(result.admitted, Some(false));
         read_state(|state| {
             assert!(state.get_pending_three_usd_absorb(vault.vault_id).is_none());
