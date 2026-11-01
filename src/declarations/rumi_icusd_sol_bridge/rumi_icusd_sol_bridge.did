@@ -1,0 +1,458 @@
+type Account = record { owner : principal; subaccount : opt blob };
+type AuditEntry = record {
+  seq : nat64;
+  return_id : opt text;
+  deposit_id : opt nat64;
+  at_ns : nat64;
+  op_id : opt nat64;
+  note : text;
+  transition : opt Transition;
+};
+type BootstrapStatus = record {
+  return_account : opt text;
+  bind_note : opt text;
+  mint_authority : opt text;
+  return_owner : opt text;
+  pool_free : nat32;
+  mint_state : MintState;
+  pool_registered : nat32;
+  pool_reserved : nat32;
+  keys_derived : bool;
+  fee_payer : opt text;
+  pending_bootstrap_txs : nat32;
+  mint_account : opt text;
+  pool_unverified : nat32;
+};
+type BridgeArg = variant { Upgrade : UpgradeArgs; Init : InitArgs };
+type BridgeError = variant {
+  Rpc : text;
+  Internal : text;
+  Anonymous;
+  Paused : text;
+  InsufficientAllowance : record {
+    allowance_e8s : nat64;
+    required_e8s : nat64;
+  };
+  AmountBelowMinimum : record { min_e8s : nat64 };
+  CapacityExceeded : record { available_e8s : nat64 };
+  NotFound;
+  TooManyActiveOperations;
+  Unauthorized;
+  NotOwner;
+  InvalidRecipient : text;
+  RateLimited : record { window_resets_at_ns : nat64; available_e8s : nat64 };
+  NotConfigured : text;
+  InvalidArgument : text;
+  Ledger : text;
+  Halted : text;
+  RequestIdConflict;
+  InvalidState : text;
+  FeeChanged : record { current_fee_e8s : nat64 };
+  InsufficientFunds : record { required_e8s : nat64; balance_e8s : nat64 };
+  AmountAboveMaximum : record { max_e8s : nat64 };
+};
+type BridgeFees = record { release_fee_e8s : nat64; deposit_fee_e8s : nat64 };
+type BridgeInfo = record {
+  rpc : RpcSettings;
+  initialized : bool;
+  fees : BridgeFees;
+  lane : LaneSettings;
+  memo_program : text;
+  escrow_subaccount : text;
+  sol_rpc : principal;
+  schema_version : nat32;
+  schnorr_key_name : text;
+  admins : vec principal;
+  token_program : TokenProgram;
+  halted : opt text;
+  icusd_ledger : principal;
+  genesis_hash : text;
+  instance_salt : text;
+  limits : BridgeLimits;
+  pauses : Pauses;
+};
+type BridgeLimits = record {
+  max_active_per_caller : nat32;
+  release_window_limit_e8s : nat64;
+  max_deposit_e8s : nat64;
+  max_active_global : nat32;
+  min_deposit_e8s : nat64;
+  window_seconds : nat64;
+  mint_window_limit_e8s : nat64;
+  max_outstanding_e8s : nat64;
+};
+type BridgeToSolanaArgs = record {
+  client_request_id : blob;
+  solana_recipient : text;
+  from_subaccount : opt blob;
+  amount_e8s : nat64;
+  expected_deposit_fee_e8s : nat64;
+};
+type BucketsView = record {
+  reserved_pulls : nat;
+  pending_mint : nat;
+  unknown_outflow : nat;
+  pending_refund : nat;
+  outstanding : nat;
+  fees : nat;
+  held : nat;
+  burn_unknown : nat;
+  stray : nat;
+  return_custodied : nat;
+  pending_release : nat;
+};
+type ClaimStatus = variant {
+  Refunding : record { op_id : nat64 };
+  Refunded : record { op_id : nat64 };
+  Held;
+  Retained;
+};
+type ClaimView = record {
+  status : ClaimStatus;
+  verified_sender : opt text;
+  inner_instruction : opt nat16;
+  outer_instruction : nat16;
+  refund_id : text;
+  amount_e8s : nat64;
+  source_account : text;
+};
+type ConsensusSetting = variant {
+  Equality;
+  Threshold : record { min : nat8; total : opt nat8 };
+};
+type ConsentInfo = record {
+  metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
+};
+type ConsentMessage = variant {
+  LineDisplayMessage : record { pages : vec LineDisplayPage };
+  GenericDisplayMessage : text;
+};
+type ConsentMessageMetadata = record {
+  utc_offset_minutes : opt int16;
+  language : text;
+};
+type ConsentMessageRequest = record {
+  arg : blob;
+  method : text;
+  user_preferences : ConsentMessageSpec;
+};
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
+type CustodyReading = record {
+  status : CustodyStatusView;
+  at_ns : nat64;
+  expected : nat;
+  custody : nat;
+  supply : nat;
+};
+type CustodyStatusView = variant {
+  Ok;
+  Deficit : record { deficit : nat };
+  Reconciling : record { deficit : nat };
+  Excess : record { excess : nat };
+};
+type DepositKindView = variant {
+  UserDeposit;
+  Remint : record { return_id : text };
+};
+type DepositStatus = variant {
+  Refunding;
+  Refunded;
+  MintHeld : record { reason : text };
+  PullPending;
+  PullFailed : record { reason : text };
+  Delivered;
+  MintInFlight;
+  Escrowed;
+  PullUnknown;
+};
+type DepositView = record {
+  id : nat64;
+  status : DepositStatus;
+  client_request_id : blob;
+  refund_amount_e8s : opt nat64;
+  owner : principal;
+  from : opt Account;
+  kind : DepositKindView;
+  mint_id : opt text;
+  pull_block_index : opt nat64;
+  mint_amount_e8s : nat64;
+  updated_at_ns : nat64;
+  solana_recipient : text;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  delivered : opt SolanaInclusion;
+  refund_block_index : opt nat64;
+  deposit_fee_e8s : nat64;
+  mint_op_id : opt nat64;
+};
+type DeviceSpec = variant {
+  GenericDisplay;
+  LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
+};
+type ErrorInfo = record { description : text };
+type EscrowReading = record {
+  ok : bool;
+  balance : nat;
+  at_ns : nat64;
+  required : nat;
+};
+type HeldOpResolution = variant { Abandon : record { reason : text }; Recheck };
+type HintView = record {
+  signature : text;
+  submitted_at_ns : nat64;
+  submitted_by : principal;
+};
+type Icrc21Error = variant {
+  GenericError : record { description : text; error_code : nat64 };
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
+type Icrc28TrustedOriginsResponse = record { trusted_origins : vec text };
+type InitArgs = record {
+  rpc : opt RpcSettings;
+  fee_recipient : opt Account;
+  lane : opt LaneSettings;
+  memo_program : text;
+  sol_rpc : principal;
+  schnorr_key_name : text;
+  admins : vec principal;
+  token_program : TokenProgram;
+  icusd_ledger : principal;
+  genesis_hash : text;
+};
+type Lane = variant { Burn; Mint };
+type LaneSettings = record {
+  rebroadcast_interval_secs : nat64;
+  discover_limit : nat16;
+  cancel_after_secs : nat64;
+  nonce_pool_size : nat8;
+  reconcile_alarm_secs : nat64;
+  max_reissues : nat8;
+  history_horizon_secs : nat64;
+};
+type LineDisplayPage = record { lines : vec text };
+type ListDepositsArgs = record { start_after : opt nat64; limit : nat32 };
+type ListDepositsForOwnerArgs = record {
+  owner : principal;
+  start_after : opt nat64;
+  limit : nat32;
+};
+type ListOpsArgs = record { start_after : opt nat64; limit : nat32 };
+type ListReleasesArgs = record {
+  owner : principal;
+  start_after_seq : opt nat64;
+  limit : nat32;
+};
+type ListReleasesForSenderArgs = record {
+  solana_sender : text;
+  start_after_seq : opt nat64;
+  limit : nat32;
+};
+type ListReturnsArgs = record { start_after_seq : opt nat64; limit : nat32 };
+type ListStraysArgs = record { after : opt text; limit : nat32 };
+type MintState = variant { None; Bound; DeployedUnbound };
+type MonitorStatus = record {
+  c1 : opt EscrowReading;
+  c2 : opt SupplyReading;
+  custody : opt CustodyReading;
+  last_run_ns : opt nat64;
+  custody_strikes : nat8;
+  last_note : opt text;
+  c2_strikes : nat8;
+  c1_strikes : nat8;
+};
+type ObserverStatus = record {
+  return_account : opt text;
+  strays : nat64;
+  walk_active : bool;
+  cursor : opt text;
+  returns_active : nat64;
+  last_run_ns : opt nat64;
+  caught_up : bool;
+  last_note : opt text;
+  queued : nat64;
+  processed : nat64;
+  last_progress_ns : opt nat64;
+  credits_halted : opt text;
+};
+type OpKindView = variant { Burn; Mint; Refund };
+type OpStateView = variant {
+  Abandoned : record { reason : text };
+  Held : record { reason : text };
+  NeedsReissue : record { reason : text };
+  Active;
+  Delivered : record { signature : text; slot : nat64; adopted : bool };
+};
+type OpView = record {
+  id : nat64;
+  refund_eligibility : opt RefundEligibility;
+  kind : OpKindView;
+  lane : Lane;
+  note : opt text;
+  generation : nat32;
+  updated_at_ns : nat64;
+  created_at_ns : nat64;
+  state : OpStateView;
+  tx_ids : vec text;
+  slot_index : opt nat8;
+  external_id : text;
+  amount : nat64;
+};
+type Pauses = record {
+  mints : bool;
+  observer : bool;
+  releases : bool;
+  deposits : bool;
+};
+type RefundEligibility = variant { ProvenNotDelivered; Unresolved; Unsigned };
+type ReleaseStatus = variant {
+  Reminted : record { deposit_id : nat64 };
+  TransferUnknown;
+  Held : record { reason : text };
+  Released;
+  Reminting : record { deposit_id : nat64 };
+  Pending;
+};
+type ReleaseView = record {
+  seq : nat64;
+  status : ReleaseStatus;
+  return_id : text;
+  destination : Account;
+  solana_sender : text;
+  release_block_index : opt nat64;
+  updated_at_ns : nat64;
+  burn_slot : nat64;
+  return_slot : nat64;
+  created_at_ns : nat64;
+  burn_signature : text;
+  amount_e8s : nat64;
+  release_fee_e8s : nat64;
+  burn_op_id : nat64;
+  ledger_fee_e8s : opt nat64;
+  return_signature : text;
+  amount_to_receive_e8s : opt nat64;
+};
+type Result = variant { Ok; Err : BridgeError };
+type Result_1 = variant { Ok : OpView; Err : BridgeError };
+type Result_2 = variant { Ok : DepositView; Err : BridgeError };
+type Result_3 = variant { Ok : MonitorStatus; Err : BridgeError };
+type Result_4 = variant { Ok : nat64; Err : BridgeError };
+type Result_5 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type ReturnStatus = variant {
+  Burned : record { burn_op_id : nat64 };
+  Burning : record { burn_op_id : nat64 };
+  Custodied;
+};
+type ReturnView = record {
+  seq : nat64;
+  status : ReturnStatus;
+  return_id : text;
+  destination : Account;
+  signature : text;
+  slot : nat64;
+  sender : text;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  source_account : text;
+  client_nonce : nat64;
+};
+type RpcSettings = record {
+  response_size_estimate : opt nat64;
+  verify : ConsensusSetting;
+  discover : ConsensusSetting;
+  cycles_per_call : nat64;
+  cluster : opt SolRpcCluster;
+};
+type SolRpcCluster = variant { Mainnet; Testnet; Devnet };
+type SolanaInclusion = record { signature : text; slot : nat64 };
+type StandardRecord = record { url : text; name : text };
+type StrayView = record {
+  claims : vec ClaimView;
+  signature : text;
+  verified_sender : opt text;
+  slot : nat64;
+  created_at_ns : nat64;
+  amount_e8s : nat64;
+  source_account : opt text;
+  reason : text;
+};
+type SupplyReading = record {
+  inflight_mint : nat;
+  at_ns : nat64;
+  quiescent : bool;
+  within_bound : bool;
+  unattributed_gap : opt nat;
+  supply : nat;
+  bound : nat;
+  unattributed_gap_blocker : opt text;
+};
+type TokenProgram = variant { Classic; Token2022 };
+type Transition = variant {
+  RemintDelivered : record { amount : nat64 };
+  BurnSigned : record { amount : nat64 };
+  PullFailed : record { amount : nat64 };
+  BurnFinalized : record { amount : nat64 };
+  StrayObserved : record { amount : nat64 };
+  SweepCompleted : record { amount : nat64 };
+  OutflowResolved : record { amount : nat64 };
+  BurnNotLanded : record { amount : nat64 };
+  RefundStarted : record { amount : nat64 };
+  StrayRefunded : record { amount : nat64 };
+  AdmitDeposit : record { amount : nat64 };
+  RemintStarted : record { amount : nat64 };
+  ReturnCustodied : record { amount : nat64 };
+  ReleaseHeld : record { amount : nat64 };
+  MintDelivered : record { fee : nat64; amount : nat64 };
+  RefundCompleted : record { amount : nat64 };
+  ReleaseCompleted : record { amount : nat64; release_fee : nat64 };
+  PullSucceeded : record { amount : nat64 };
+  OutflowUnknown : record { amount : nat64 };
+};
+type UpgradeArgs = record { admins : opt vec principal };
+service : (BridgeArg) -> {
+  admin_clear_credits_halt : (text) -> (Result);
+  admin_clear_lane_halt : (Lane, text) -> (Result);
+  admin_resolve_held_op : (nat64, HeldOpResolution) -> (Result_1);
+  admin_retry_deposit : (nat64) -> (Result_2);
+  admin_run_monitors : () -> (Result_3);
+  admin_run_tick : () -> (Result);
+  admin_set_fees : (BridgeFees) -> (Result);
+  admin_set_limits : (BridgeLimits) -> (Result);
+  admin_set_pauses : (Pauses) -> (Result);
+  admin_sweep_fees : (nat64) -> (Result_4);
+  bridge_to_solana : (BridgeToSolanaArgs) -> (Result_2);
+  bridge_version : () -> (text) query;
+  get_audit_log : (nat64, nat32) -> (vec AuditEntry) query;
+  get_bootstrap_status : () -> (BootstrapStatus) query;
+  get_bridge_info : () -> (BridgeInfo) query;
+  get_buckets : () -> (BucketsView) query;
+  get_deposit : (nat64) -> (opt DepositView) query;
+  get_deposit_by_request : (principal, blob) -> (opt DepositView) query;
+  get_monitor_status : () -> (MonitorStatus) query;
+  get_observer_status : () -> (ObserverStatus) query;
+  get_release : (text) -> (opt ReleaseView) query;
+  get_return : (text) -> (opt ReturnView) query;
+  get_sol_op : (nat64) -> (opt OpView) query;
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_5);
+  icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  list_deposits_for_owner : (ListDepositsForOwnerArgs) -> (
+      vec DepositView,
+    ) query;
+  list_my_deposits : (ListDepositsArgs) -> (vec DepositView) query;
+  list_releases_for_owner : (ListReleasesArgs) -> (vec ReleaseView) query;
+  list_releases_for_solana_sender : (ListReleasesForSenderArgs) -> (
+      vec ReleaseView,
+    ) query;
+  list_return_hints : () -> (vec HintView) query;
+  list_returns : (ListReturnsArgs) -> (vec ReturnView) query;
+  list_strays : (ListStraysArgs) -> (vec StrayView) query;
+  list_unresolved_ops : (ListOpsArgs) -> (vec OpView) query;
+  notify_solana_return : (text) -> (Result);
+  request_deposit_refund : (nat64) -> (Result_2);
+  set_admins : (vec principal) -> (Result);
+}

@@ -1,0 +1,262 @@
+{
+  "items": [
+    {
+      "id": "browser-round-trip",
+      "title": "Finish real-wallet browser acceptance",
+      "status": "blocked",
+      "blockedReason": "The renewed staging identity sign-in awaits Rob's Touch ID, and Rabby unlock and connection are still pending. Cleared when Rob completes sign-in, unlocks Rabby and approves the staging connection.",
+      "nextAction": "After sign-in and wallet approval: connect the Base wallet, then test transaction consent and rejection, the synthetic browser round trip and reload recovery. Earlier real Internet Identity sign-in remains scoped proof.",
+      "cardIds": [
+        "BB-26",
+        "BB-27"
+      ]
+    },
+    {
+      "id": "integrated-plan",
+      "title": "Integrated implementation plan and local smoke",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-40"
+      ]
+    },
+    {
+      "id": "evm-implementation",
+      "title": "EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad",
+      "status": "blocked",
+      "blockedReason": "EVM source cards BB-42 to BB-45 are accepted. BB-46 needs public activation evidence: a separate authorization to run read-only probes (Robinhood finalized tag and keyless providers, Monad fast-tag consensus, HyperEVM archive providers). Optional probe tooling is deferred.",
+      "nextAction": "BB-62 done (the EVM uncertain-request repair, f4ae611c, pushed in 2bb8e816). When BB-46 probes are authorized: run them read-only and record the evidence; a passing Robinhood record flips its row's head rule and install gate.",
+      "cardIds": [
+        "BB-42",
+        "BB-43",
+        "BB-44",
+        "BB-45",
+        "BB-46",
+        "BB-62"
+      ]
+    },
+    {
+      "id": "shared-reporting-frontend",
+      "title": "Shared aggregate reporting, frontend destination selection and profile upkeep",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-58",
+        "BB-59",
+        "BB-60"
+      ]
+    },
+    {
+      "id": "solana-implementation",
+      "title": "Solana implementation (memo plus durable nonce)",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "BB-47 to BB-50 done at source and local-test scope. Activation, a real wallet round trip, provider and history evidence and Rob's D6 custody decision stay separately held; Solana stays disabled.",
+      "cardIds": [
+        "BB-47",
+        "BB-48",
+        "BB-49",
+        "BB-50"
+      ]
+    },
+    {
+      "id": "xrpl-follow-ups",
+      "title": "XRPL follow-ups to PR #586",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-55",
+        "BB-56",
+        "BB-57"
+      ]
+    },
+    {
+      "id": "sui-implementation",
+      "title": "Sui implementation (Move gate)",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "BB-51 to BB-54 done at source and local-test scope (gate, canister, lanes, collector reader, bridge page; not activated). Activation, real provider, node and wallet evidence and Rob's D6 custody decision stay separately held; Sui stays disabled.",
+      "cardIds": [
+        "BB-51",
+        "BB-52",
+        "BB-53",
+        "BB-54"
+      ]
+    },
+    {
+      "id": "authority-decision-d6",
+      "title": "Decide controllers, custody and authority activation (D6)",
+      "status": "paused",
+      "blockedReason": "Rob's decision, not yet made; it gates live activation of any network, not source work.",
+      "nextAction": "Rob decides with Miles. A source-grounded decision packet (docs/coordination/multichain/authority-decision-d6.md at 266a7f9c) is accepted as preparation only: an authority inventory, unadopted demo and production options and an empty decision form. D6 itself is not decided.",
+      "cardIds": [
+        "BB-61"
+      ]
+    },
+    {
+      "id": "acceptance-handoff",
+      "title": "Close browser evidence and PR handoff",
+      "status": "blocked",
+      "blockedReason": "Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work.",
+      "nextAction": "Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge.",
+      "cardIds": [
+        "BB-14",
+        "BB-22",
+        "BB-27"
+      ]
+    },
+    {
+      "id": "production-launch",
+      "title": "Production launch",
+      "status": "paused",
+      "blockedReason": "Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test.",
+      "nextAction": "",
+      "cardIds": []
+    },
+    {
+      "id": "multichain-recon",
+      "title": "Research what each of the nine chains needs",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-30",
+        "BB-31",
+        "BB-32",
+        "BB-41"
+      ]
+    },
+    {
+      "id": "shared-escrow-contract",
+      "title": "Shared escrow accounting and destination-profile contract",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-33"
+      ]
+    },
+    {
+      "id": "evm-expansion",
+      "title": "Reuse the Base design for Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-34"
+      ]
+    },
+    {
+      "id": "solana-groundwork",
+      "title": "Solana groundwork",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-35"
+      ]
+    },
+    {
+      "id": "xrpl-groundwork",
+      "title": "XRPL groundwork",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-37"
+      ]
+    },
+    {
+      "id": "sui-groundwork",
+      "title": "Sui groundwork",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-36"
+      ]
+    },
+    {
+      "id": "destination-profiles",
+      "title": "Disabled destination profiles for all nine chains and a validator",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-38"
+      ]
+    },
+    {
+      "id": "frontend-chain-wallets",
+      "title": "Frontend chain selection and wallet requirements",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-39"
+      ]
+    },
+    {
+      "id": "priorities-and-handoff",
+      "title": "Keep priorities and test handoff current",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "None for this checkpoint. Ongoing upkeep follows the priority selection rule at each later checkpoint.",
+      "cardIds": [
+        "BB-28",
+        "BB-29"
+      ]
+    },
+    {
+      "id": "implementation-local-verification",
+      "title": "Implementation and local verification",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-R1",
+        "BB-R2",
+        "BB-R3",
+        "BB-R4",
+        "BB-01",
+        "BB-02",
+        "BB-03",
+        "BB-04",
+        "BB-05",
+        "BB-06",
+        "BB-07",
+        "BB-08",
+        "BB-09a",
+        "BB-09b",
+        "BB-10",
+        "BB-12",
+        "BB-13",
+        "BB-05b",
+        "BB-15",
+        "BB-16",
+        "BB-17",
+        "BB-18",
+        "BB-19",
+        "BB-20",
+        "BB-22"
+      ]
+    },
+    {
+      "id": "cli-public-test",
+      "title": "Public synthetic CLI round trip",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "",
+      "cardIds": [
+        "BB-11",
+        "BB-21",
+        "BB-23",
+        "BB-24",
+        "BB-25"
+      ]
+    }
+  ]
+}

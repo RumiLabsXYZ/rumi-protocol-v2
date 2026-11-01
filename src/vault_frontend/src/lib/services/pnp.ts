@@ -75,7 +75,8 @@ export const getAllDelegationTargets = (): string[] => {
     CANISTER_IDS.CKBTC_LEDGER,              // DFINITY ckBTC Ledger
     CANISTER_IDS.CKERC20_MINTER,            // ckERC20 minter (shared with ckETH)
     CANISTER_IDS.CKETH_LEDGER,              // ckETH ledger (withdrawal fees)
-  ].filter(Boolean); // Filter out any undefined values
+    CANISTER_IDS.ICUSD_BRIDGE,              // icUSD <-> Base bridge (empty until deployed, then filtered out)
+  ].filter(Boolean); // Filter out any undefined or empty values
 };
 
 export async function silentPlugReconnect(): Promise<{owner: Principal} | null> {

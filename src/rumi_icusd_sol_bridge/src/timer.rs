@@ -1,0 +1,260 @@
+//! The timer (49a, extended in 49b): one self-rescheduling timer runs the whole background pass in
+//! a fixed order: derive keys and bootstrap what is missing (`bootstrap::bootstrap_step`), reconcile
+//! the nonce lanes (`lane::tick`), the mint saga (`mint_saga`: deliveries, re-mints, new mint
+//! operations), the return observer, the burn lane (burns, stray refunds), then the ICP-side sagas (`ledger_pass`: ledger facts, pulls,
+//! preflight holds, refunds, releases, fee sweeps) and the C1 and C2 monitors. Once everything is bound and no operation is
+//! active the pass makes only the three cheap ledger reads, so an idle bridge spends almost nothing.
+//!
+//! [`run_once`] is generic over the transport, the signer and the ledger and is what the tests
+//! drive. The wasm half only builds the real [`CandidRpc`], [`SchnorrSigner`] and
+//! [`CanisterLedger`] from the stored configuration and spawns [`run_once`]. A guard stops two passes overlapping; a guard left behind by a trap after
+//! an await is reclaimed after ten minutes, and the next timer is armed BEFORE the pass is spawned,
+//! so a trapped pass cannot end the chain of ticks.
+
+use crate::bootstrap::{bootstrap_step, BootstrapEvent};
+use crate::flows::{burn_saga, deposit, mint_saga, release};
+use crate::monitor::{self, MonitorReport};
+use crate::observer::{self, ObserverEvent};
+use crate::icp::IcpLedger;
+use crate::lane::{tick, TickReport, TxSigner};
+use crate::sol_rpc::SolRpc;
+use crate::state;
+use std::cell::Cell;
+
+const STALE_GUARD_NS: u64 = 10 * 60 * 1_000_000_000;
+/// Smallest interval between passes, whatever the configuration says.
+pub const MIN_INTERVAL_SECS: u64 = 5;
+
+thread_local! {
+    static RUNNING_SINCE: Cell<Option<u64>> = const { Cell::new(None) };
+    #[cfg(target_arch = "wasm32")]
+    static NEXT_TIMER: std::cell::RefCell<Option<ic_cdk_timers::TimerId>> = const { std::cell::RefCell::new(None) };
+}
+
+struct RunGuard {
+    token: u64,
+}
+
+impl RunGuard {
+    fn acquire(now: u64) -> Option<RunGuard> {
+        RUNNING_SINCE.with(|r| match r.get() {
+            Some(t) if now.saturating_sub(t) < STALE_GUARD_NS => None,
+            _ => {
+                r.set(Some(now));
+                Some(RunGuard { token: now })
+            }
+        })
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        // Clear only our own claim: a stale guard may have been reclaimed by a newer pass.
+        RUNNING_SINCE.with(|r| {
+            if r.get() == Some(self.token) {
+                r.set(None);
+            }
+        });
+    }
+}
+
+/// What one pass did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunReport {
+    pub skipped: bool,
+    pub bootstrap: Vec<BootstrapEvent>,
+    pub lane: TickReport,
+    /// What the return observer did (49c).
+    pub observer: Vec<ObserverEvent>,
+    /// What the C1 and C2 monitors read (49c).
+    pub monitor: MonitorReport,
+}
+
+/// How long the ledger facts are trusted while nothing is waiting on them.
+pub const LEDGER_FACTS_TTL_NS: u64 = 5 * 60 * 1_000_000_000;
+
+thread_local! {
+    /// When the ledger facts were last read. Heap only: after an upgrade the next pass reads them.
+    static FACTS_READ_AT: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+fn ledger_work_pending() -> bool {
+    state::active_deposit_count() > 0
+        || state::active_release_count() > 0
+        || state::read_core(|c| c.sweeps.iter().any(|s| !crate::flows::ledger_ops::is_terminal(&s.op)))
+}
+
+/// Refresh the ledger facts the sagas depend on: the minting account (once), the transfer fee and a
+/// lower bound on the log length (where an ICRC-3 search of an operation created later starts).
+/// An idle bridge reads them every few minutes; with ledger work pending, every pass.
+async fn refresh_ledger_basics<L: IcpLedger>(ledger: &L) {
+    let now = crate::env::now_ns();
+    let known = state::read_core(|c| c.ledger_minting_account.is_some() && c.ledger_fee_e8s.is_some());
+    let fresh = FACTS_READ_AT.with(|t| t.get()).is_some_and(|t| now.saturating_sub(t) < LEDGER_FACTS_TTL_NS);
+    if known && fresh && !ledger_work_pending() {
+        return;
+    }
+    FACTS_READ_AT.with(|t| t.set(Some(now)));
+    if state::read_core(|c| c.ledger_minting_account.is_none()) {
+        if let Ok(Some(acc)) = ledger.minting_account().await {
+            state::mutate_core(|c| c.ledger_minting_account = Some(acc));
+        }
+    }
+    if let Ok(fee) = ledger.fee().await {
+        state::mutate_core(|c| c.ledger_fee_e8s = Some(fee));
+    }
+    if let Ok(len) = ledger.log_length().await {
+        state::mutate_core(|c| c.ledger_tip_lower_bound = c.ledger_tip_lower_bound.max(len));
+    }
+}
+
+/// The ICP-side sagas, in dependency order. Each is bounded per pass.
+pub async fn ledger_pass<L: IcpLedger>(ledger: &L) {
+    refresh_ledger_basics(ledger).await;
+    deposit::reconcile_pulls(ledger).await;
+    deposit::retry_due_holds();
+    deposit::process_refunds(ledger).await;
+    release::process_releases(ledger).await;
+    deposit::process_sweeps(ledger).await;
+}
+
+/// One background pass.
+pub async fn run_once<R: SolRpc, S: TxSigner, L: IcpLedger>(rpc: &R, signer: &S, ledger: &L, now: u64) -> RunReport {
+    if !state::read_core(|c| c.initialized) {
+        return RunReport::default();
+    }
+    let Some(_guard) = RunGuard::acquire(now) else {
+        return RunReport { skipped: true, ..RunReport::default() };
+    };
+    let bootstrap = bootstrap_step(rpc, signer, now).await;
+    let lane = tick(rpc, signer, now).await;
+    // The mint saga applies what the lane delivered BEFORE the observer looks at returns (a return of
+    // freshly minted tokens needs the books to know they exist), and builds new mint operations.
+    mint_saga::process_mints(rpc, signer, now).await;
+    let observer = observer::observe(rpc, now).await;
+    // The burn lane: apply the burns that are final (then the release is payable), build burns for
+    // what the observer just custodied, and refund attributable strays.
+    burn_saga::process_burns(rpc, signer, now).await;
+    ledger_pass(ledger).await;
+    let monitor = monitor::run_if_due(rpc, ledger, now).await;
+    RunReport { skipped: false, bootstrap, lane, observer, monitor }
+}
+
+/// Run one pass now (the admin's "run tick"). `false` when another pass holds the guard or the
+/// instance is not configured to build its clients.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_now() -> bool {
+    use crate::icp::CanisterLedger;
+    use crate::schnorr::SchnorrSigner;
+    use crate::sol_rpc::CandidRpc;
+    let (config, now) = (state::read_core(|c| c.config.clone()), crate::env::now_ns());
+    let (Ok(rpc), Ok(signer)) = (CandidRpc::from_config(config.sol_rpc, config.rpc.clone()), SchnorrSigner::from_config(&config)) else {
+        return false;
+    };
+    !run_once(&rpc, &signer, &CanisterLedger::from_config(), now).await.skipped
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn run_now() -> bool {
+    false
+}
+
+/// Read the monitors now (the admin's "run monitors"). `false` when the instance cannot build its
+/// clients or has no bound mint.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_monitors_now() -> bool {
+    use crate::icp::CanisterLedger;
+    use crate::sol_rpc::CandidRpc;
+    let (config, now) = (state::read_core(|c| c.config.clone()), crate::env::now_ns());
+    let Ok(rpc) = CandidRpc::from_config(config.sol_rpc, config.rpc.clone()) else { return false };
+    if state::read_core(|c| c.tx_profile()).is_err() {
+        return false;
+    }
+    monitor::run(&rpc, &CanisterLedger::from_config(), now).await;
+    true
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn run_monitors_now() -> bool {
+    false
+}
+
+/// Seconds between passes: the rebroadcast interval of the lane settings, at least
+/// [`MIN_INTERVAL_SECS`].
+pub fn interval_secs() -> u64 {
+    state::read_core(|c| c.config.lane.rebroadcast_interval_secs).max(MIN_INTERVAL_SECS)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn pass() {
+    use crate::schnorr::SchnorrSigner;
+    use crate::sol_rpc::CandidRpc;
+    let (config, now) = (state::read_core(|c| c.config.clone()), crate::env::now_ns());
+    // An instance that is not fully configured (no cluster, an anonymous SOL RPC id, a key name that
+    // breaks the rule) does nothing; it never falls back to a default.
+    let (Ok(rpc), Ok(signer)) = (CandidRpc::from_config(config.sol_rpc, config.rpc.clone()), SchnorrSigner::from_config(&config)) else {
+        return;
+    };
+    run_once(&rpc, &signer, &crate::icp::CanisterLedger::from_config(), now).await;
+}
+
+/// Arm the next pass `secs` from now (replacing any pending one).
+#[cfg(target_arch = "wasm32")]
+pub fn schedule_in(secs: u64) {
+    NEXT_TIMER.with(|slot| {
+        if let Some(old) = slot.borrow_mut().take() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let id = ic_cdk_timers::set_timer(std::time::Duration::from_secs(secs), || {
+            // Re-arm first: the chain survives even if the spawned pass traps after one of its awaits.
+            schedule_in(interval_secs());
+            ic_cdk::spawn(pass());
+        });
+        *slot.borrow_mut() = Some(id);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn schedule_in(_secs: u64) {}
+
+/// Arm the first pass shortly after install or upgrade.
+pub fn schedule_soon() {
+    schedule_in(MIN_INTERVAL_SECS);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::{block_on, MockChain, MockLedger, MockSigner};
+
+    #[test]
+    fn an_uninitialized_instance_does_nothing() {
+        state::reset_for_tests();
+        let r = block_on(run_once(&MockChain::new(), &MockSigner::new(), &MockLedger::new(), 5));
+        assert_eq!(r, RunReport::default());
+    }
+
+    #[test]
+    fn overlapping_passes_are_refused_and_a_stale_guard_is_reclaimed() {
+        state::reset_for_tests();
+        state::mutate_core(|c| c.initialized = true);
+        let chain = MockChain::new();
+        let signer = MockSigner::new();
+        let now = 1_000_000_000_000u64;
+        let g = RunGuard::acquire(now).unwrap();
+        let ledger = MockLedger::new();
+        assert!(block_on(run_once(&chain, &signer, &ledger, now + 1)).skipped, "a pass is running");
+        // A guard left behind by a trapped pass is reclaimed after ten minutes.
+        assert!(!block_on(run_once(&chain, &signer, &ledger, now + STALE_GUARD_NS + 1)).skipped);
+        drop(g);
+        assert!(!block_on(run_once(&chain, &signer, &ledger, now + 2 * STALE_GUARD_NS)).skipped);
+    }
+
+    #[test]
+    fn the_interval_follows_the_lane_settings_with_a_floor() {
+        state::reset_for_tests();
+        assert_eq!(interval_secs(), 30);
+        state::mutate_core(|c| c.config.lane.rebroadcast_interval_secs = 1);
+        assert_eq!(interval_secs(), MIN_INTERVAL_SECS);
+    }
+}
