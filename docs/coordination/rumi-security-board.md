@@ -1,12 +1,12 @@
 # Rumi security and recovery board
 
-Updated: 2026-10-27. Coordinator: Bram. This board tracks the security review; the separate incident and release records remain evidence, not a second task queue. A merged PR, installed module, active feature, and settled obligation are different outcomes.
+Updated: 2026-11-01. Coordinator: Bram. This board tracks the security review; the separate incident and release records remain evidence, not a second task queue. A merged PR, installed module, active feature, and settled obligation are different outcomes.
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
 | SEC-01 | In progress | Bram | Verify Stability Pool recovery and current rails | PR #590 merged. Check current canister state, interest receipts, remaining holds, and source-to-Wasm binding before declaring live closure. |
 | SEC-02 | In progress | Bram | Reconcile all accepted audit findings | Compare the September audit, independent October review, and later fixes against current main and live modules. Record each finding's source, deployment, and liability status separately. |
-| SEC-03 | Ready | Bram | Verify Points held-epoch resolution | PR #583 merged. Recheck the installed module, held epoch decision, and reward receipts before claiming recovery complete. |
+| SEC-03 | Done | Bram | Verify Points held-epoch resolution | PR #608 merged and installed. Season 1 scoring finalized, earlier ledger preserved, final-period compensation verified and replay added zero. Both season timers are off. |
 | SEC-04 | Review | Bram | Check 3pool payout and archive recovery | Review exact ledger/archive proof and pending payout identities. Keep ambiguous outcomes held until positive evidence or a safe recovery route exists. |
 | SEC-05 | Blocked | Bram | Refresh release and public security status | Needs current live readback and finding closure evidence. Publication must describe the verified production state without private exploit detail. |
 
