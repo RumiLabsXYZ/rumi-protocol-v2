@@ -74,6 +74,13 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : FiatStableTopupProgress,
     'Err' : IDL.Text,
   });
+  const Status = IDL.Record({
+    'rows' : IDL.Nat32,
+    'credited_points' : IDL.Nat,
+    'complete' : IDL.Bool,
+    'evidence_digest' : IDL.Vec(IDL.Nat8),
+  });
+  const Result_6 = IDL.Variant({ 'Ok' : Status, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -295,7 +302,7 @@ export const idlFactory = ({ IDL }) => {
     'snapshot_time_a_ns' : IDL.Nat64,
     'snapshot_time_b_ns' : IDL.Nat64,
   });
-  const Result_6 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
+  const Result_7 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
   return IDL.Service({
     'activate_fiat_stable_4x' : IDL.Func([], [Result], []),
     'add_excluded_principal' : IDL.Func([IDL.Principal], [Result_1], []),
@@ -310,6 +317,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'apply_fiat_stable_topups' : IDL.Func([IDL.Nat32], [Result_5], []),
+    'apply_season1_final_supplement' : IDL.Func([], [Result_6], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -399,6 +407,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(RevealedSeed)],
         ['query'],
       ),
+    'get_season1_final_supplement' : IDL.Func([], [Status], ['query']),
     'is_excluded' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
     'is_registered' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
     'register_test_principal' : IDL.Func([IDL.Principal], [Result_1], []),
@@ -416,7 +425,7 @@ export const idlFactory = ({ IDL }) => {
     'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_4], []),
     'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result_1], []),
     'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_4], []),
-    'trigger_poll' : IDL.Func([], [Result_6], []),
+    'trigger_poll' : IDL.Func([], [Result_7], []),
   });
 };
 export const init = ({ IDL }) => {

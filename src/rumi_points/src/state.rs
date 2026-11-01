@@ -3875,3 +3875,9 @@ mod tests {
         assert_eq!(fiat_stable_points_policy().inline_legacy_topup_rows, 0);
     }
 }
+
+// Memory 19 belongs to recovery_v2; 20 is the new final-supplement receipt.
+pub(crate) fn final_supplement_memory() -> VMem { MEMORY_MANAGER.with(|m|m.borrow().get(MemoryId::new(20))) }
+
+#[cfg(test)]
+pub(crate) fn test_put_final_participant(ps:PrincipalState){put_principal_state(ps);}
