@@ -32,6 +32,7 @@
     type XrpDepositController,
     type XrpDepositState,
   } from './xrpDepositFlow';
+  import XrpDepositTagNotice from '$lib/components/vault/XrpDepositTagNotice.svelte';
 
   export let collateralAmount: number;
   export let icusdAmount: number;
@@ -341,6 +342,7 @@
             <span>{formatAddress(opened.custodyAddress, 12, 8)}</span>
             <small>{copied ? 'Copied' : 'Copy'}</small>
           </button>
+          <XrpDepositTagNotice />
           <p class="detail-line">Vault #{opened.vaultId} will credit {copy.collateralAmountLabel} as collateral and mint {copy.borrowAmountLabel} after the deposit is confirmed.</p>
         </div>
       </div>

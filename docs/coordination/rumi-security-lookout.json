@@ -6,7 +6,12 @@
       "owner": "Bram",
       "scope": "Verify Stability Pool recovery and current rails",
       "evidenceText": "PR #590 is merged. Current installed state, interest receipts, remaining holds, and source-to-Wasm binding still require a fresh review.",
-      "evidenceLinks": [{"title": "Stability Pool rails PR", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/590"}]
+      "evidenceLinks": [
+        {
+          "title": "Stability Pool rails PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/590"
+        }
+      ]
     },
     {
       "id": "SEC-02",
@@ -18,11 +23,16 @@
     },
     {
       "id": "SEC-03",
-      "state": "Ready",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Verify Points held-epoch resolution",
-      "evidenceText": "PR #583 is merged. Current installed module, operator decision, and reward receipts need a fresh check before recovery is called complete.",
-      "evidenceLinks": [{"title": "Points recovery PR", "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/583"}]
+      "evidenceText": "Season 1 scoring finalized on mainnet. The open period closed and final-period compensation was applied. Earlier entries and receipts were preserved, replay added zero, and both season timers are off.",
+      "evidenceLinks": [
+        {
+          "title": "Points finalization PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/608"
+        }
+      ]
     },
     {
       "id": "SEC-04",
@@ -38,7 +48,12 @@
       "owner": "Bram",
       "scope": "Refresh release and public security status",
       "evidenceText": "Waiting for current live readback and finding closure evidence. Any public update must state verified production status without private exploit detail.",
-      "evidenceLinks": [{"title": "Public security status", "url": "https://rumiprotocol.com/security/october-2026"}]
+      "evidenceLinks": [
+        {
+          "title": "Public security status",
+          "url": "https://rumiprotocol.com/security/october-2026"
+        }
+      ]
     }
   ]
 }

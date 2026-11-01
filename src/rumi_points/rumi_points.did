@@ -257,7 +257,8 @@ type Result_2 = variant { Ok : OutageReconciliationStatus; Err : text };
 type Result_3 = variant { Ok : nat64; Err : text };
 type Result_4 = variant { Ok; Err : text };
 type Result_5 = variant { Ok : FiatStableTopupProgress; Err : text };
-type Result_6 = variant { Ok : nat64; Err : PointsError };
+type Result_6 = variant { Ok : Status; Err : text };
+type Result_7 = variant { Ok : nat64; Err : PointsError };
 type RevealedSeed = record {
   revealed_at_ns : nat64;
   epoch_index : nat64;
@@ -267,6 +268,12 @@ type RevealedSeed = record {
   snapshot_time_b_ns : nat64;
 };
 type SourceStatus = record { tag : nat8; cursor : nat64; canister : principal };
+type Status = record {
+  rows : nat32;
+  credited_points : nat;
+  complete : bool;
+  evidence_digest : blob;
+};
 type Venue = variant { Amm; ThreePool; Vault; StabilityPool };
 service : (opt InitArgs) -> {
   activate_fiat_stable_4x : () -> (Result);
@@ -278,6 +285,7 @@ service : (opt InitArgs) -> {
   admin_resume_points_recovery_v2 : () -> (Result_4);
   admin_stage_outage_allocation : (OutageAllocation) -> (Result_2);
   apply_fiat_stable_topups : (nat32) -> (Result_5);
+  apply_season1_final_supplement : () -> (Result_6);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   force_epoch_tick : () -> (Result_1);
@@ -307,6 +315,7 @@ service : (opt InitArgs) -> {
   get_principal_state : (principal) -> (opt PrincipalState) query;
   get_registration_info : (principal) -> (opt RegistrationInfo) query;
   get_revealed_seed : (nat64) -> (opt RevealedSeed) query;
+  get_season1_final_supplement : () -> (Status) query;
   is_excluded : (principal) -> (bool) query;
   is_registered : (principal) -> (bool) query;
   register_test_principal : (principal) -> (Result_1);
@@ -320,5 +329,5 @@ service : (opt InitArgs) -> {
   set_season_end_ns : (nat64) -> (Result_4);
   set_source_canister : (nat8, principal) -> (Result_1);
   start_season : (blob) -> (Result_4);
-  trigger_poll : () -> (Result_6);
+  trigger_poll : () -> (Result_7);
 }
