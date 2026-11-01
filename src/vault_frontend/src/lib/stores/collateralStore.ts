@@ -118,6 +118,7 @@ function createCollateralStore() {
 
           collaterals.push({
             principal: principalText,
+            lstHaircut: 'LstWrapped' in config.price_source ? config.price_source.LstWrapped.haircut : undefined,
             symbol,
             decimals: Number(config.decimals),
             ledgerCanisterId: ledgerId,

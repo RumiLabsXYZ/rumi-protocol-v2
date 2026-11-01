@@ -35,7 +35,11 @@ function principalText(p: any): string {
  * out of it, and the UI hides the re-opt-in control. Only grandfathered
  * positions still earn from BOB-backed debt.
  */
-const SUNSET_COLLATERAL = '7pail-xaaaa-aaaas-aabmq-cai';
+const SUNSET_COLLATERAL = new Set([
+  '7pail-xaaaa-aaaas-aabmq-cai',
+  'rh2pm-ryaaa-aaaan-qeniq-cai',
+  'efmc5-wyaaa-aaaar-qb3wa-cai',
+]);
 
 /**
  * Collateral gated behind a configured native payout address. `position_opted_in_for`
@@ -56,7 +60,7 @@ const PAYOUT_GATED_COLLATERAL = new Set(['5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i'
  */
 export function isDefaultInterestEligible(collateralType: string): boolean {
   return (
-    collateralType !== SUNSET_COLLATERAL &&
+    !SUNSET_COLLATERAL.has(collateralType) &&
     !PAYOUT_GATED_COLLATERAL.has(collateralType)
   );
 }
