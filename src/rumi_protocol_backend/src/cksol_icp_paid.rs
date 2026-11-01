@@ -131,7 +131,7 @@ pub fn terms() -> CkSolIcpTerms {
         service_fee_bps: SERVICE_BPS,
         reserve_available_cycles: s.cksol_icp_reserve,
         available: s.cksol_icp_reserve >= ATTACHED_CYCLES
-            && ic_cdk::api::canister_balance128() >= total_protected(s)
+            && transport::balance() >= total_protected(s)
             && s.cksol_icp_sequence < u64::MAX
             && s.cksol_relay_attempts.len() < CKSOL_RELAY_OWNER_CAP
             && (s.cksol_icp_payments.len() < CKSOL_RELAY_OWNER_CAP
@@ -205,7 +205,7 @@ pub fn set_reserve(caller: Principal, amount: u64) -> Result<(), String> {
             .saturating_add(legacy_liabilities(s))
             .saturating_add(liquid_reserved(s))
             .saturating_add(amount as u128);
-        if ic_cdk::api::canister_balance128() < need {
+        if transport::balance() < need {
             return Err("Insufficient reserve backing".into());
         }
         s.cksol_icp_reserve = amount;
@@ -322,8 +322,8 @@ pub async fn start(
         }
     }
     reconcile(owner).await?;
-    let current = current_terms().await?;
-    let now = ic_cdk::api::time();
+    let current = transport::terms().await?;
+    let now = transport::time();
     let secs = now / 1_000_000_000;
     if current != (rate, rate_time, fee)
         || rate_time > secs
@@ -340,9 +340,7 @@ pub async fn start(
         if s.cksol_relay_attempts.len() >= CKSOL_RELAY_OWNER_CAP {
             return Err("Deposit capacity reached".into());
         }
-        if s.cksol_icp_reserve < ATTACHED_CYCLES
-            || ic_cdk::api::canister_balance128() < total_protected(s)
-        {
+        if s.cksol_icp_reserve < ATTACHED_CYCLES || transport::balance() < total_protected(s) {
             return Err("Processing reserve unavailable".into());
         }
         if !s.cksol_icp_payments.contains_key(&owner)
@@ -407,7 +405,7 @@ pub async fn start(
             subaccount: None,
         },
         to: Account {
-            owner: ic_cdk::id(),
+            owner: transport::canister(),
             subaccount: Some(sub),
         },
         amount: Nat::from(deposit),
@@ -415,9 +413,7 @@ pub async fn start(
         memo: Some(hash(b"rumi-cksol-icp-funding", owner, seq).to_vec().into()),
         created_at_time: Some(now),
     };
-    let result: Result<(Result<Nat, TransferFromError>,), _> =
-        ic_cdk::call(icp(), "icrc2_transfer_from", (args,)).await;
-    let result = result.map(|(r,)| r).map_err(|e| format!("{e:?}"));
+    let result = transport::fund(args).await;
     mutate_state(|s| funding_result(s, owner, result));
     advance(owner, seq).await
 }
@@ -463,7 +459,7 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
         return Err("Payment sequence mismatch".into());
     }
     if p.phase == CkSolPaymentPhase::Funded
-        && read_state(|s| ic_cdk::api::canister_balance128() < total_protected(s))
+        && read_state(|s| transport::balance() < total_protected(s))
     {
         mutate_state(|s| {
             let j = s.cksol_icp_payments.get_mut(&owner).unwrap();
@@ -472,7 +468,7 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
             j.payment.refundable_e8s = j.payment.deposit_e8s - j.payment.ledger_fee_e8s;
             j.payment.message =
                 Some("Processing reserve unavailable; returning the unused deposit".into());
-            j.refund_time = ic_cdk::api::time();
+            j.refund_time = transport::time();
             j.payment.phase = CkSolPaymentPhase::RefundReady;
             s.cksol_icp_reserve = s.cksol_icp_reserve.saturating_add(ATTACHED_CYCLES);
             s.cksol_relay_attempts.remove(&owner);
@@ -483,7 +479,7 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
             if !s.cksol_relay_attempts.contains_key(&owner) {
                 return Err("Reserved deposit slot missing; payment held".into());
             }
-            if ic_cdk::api::canister_balance128() < total_protected(s) {
+            if transport::balance() < total_protected(s) {
                 return Err("Protected cycle backing unavailable".into());
             }
             s.cksol_icp_payments.get_mut(&owner).unwrap().payment.phase =
@@ -491,13 +487,13 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
             s.cksol_relay_attempts.insert(
                 owner,
                 CkSolRelayAttempt {
-                    started_at_ns: ic_cdk::api::time(),
+                    started_at_ns: transport::time(),
                     status: CkSolRelayStatus::SubmittedOrUnknown,
                 },
             );
             Ok(())
         })?;
-        let (outcome, returned) = crate::cksol::call_paid_minter(owner).await;
+        let (outcome, returned) = transport::mint(owner).await;
         mutate_state(|s| {
             let j = s.cksol_icp_payments.get_mut(&owner).unwrap();
             let net = match (ATTACHED_CYCLES as u128).checked_sub(returned) {
@@ -522,7 +518,7 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
             j.payment.charged_e8s = charge;
             j.payment.refundable_e8s = refund;
             j.payment.actual_refund_fee_e8s = j.payment.ledger_fee_e8s;
-            j.refund_time = ic_cdk::api::time();
+            j.refund_time = transport::time();
             j.payment.phase = CkSolPaymentPhase::RefundReady;
             s.cksol_icp_reserve = s.cksol_icp_reserve.saturating_add(returned as u64);
             let status = match outcome {
@@ -555,9 +551,7 @@ async fn advance(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> 
                 CkSolPaymentPhase::RefundPending
         });
         let args = refund_args(owner, &j);
-        let result: Result<(Result<Nat, TransferError>,), _> =
-            ic_cdk::call(icp(), "icrc1_transfer", (args,)).await;
-        let result = result.map(|(r,)| r).map_err(|e| format!("{e:?}"));
+        let result = transport::refund(args).await;
         mutate_state(|s| refund_result(s, owner, result));
     }
     payment(owner).ok_or("No ICP payment".into())
@@ -820,5 +814,101 @@ mod state_tests {
     #[test]
     fn anonymous_owner_cannot_acquire_guard() {
         assert!(Guard::acquire(Principal::anonymous()).is_err());
+    }
+}
+
+#[cfg(test)]
+#[path = "cksol_icp_lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+mod transport {
+    #[cfg(test)]
+    pub(super) use super::lifecycle_tests::mock;
+    use super::*;
+    pub fn time() -> u64 {
+        #[cfg(test)]
+        if let Some(v) = mock::time() {
+            return v;
+        }
+        ic_cdk::api::time()
+    }
+    pub fn balance() -> u128 {
+        #[cfg(test)]
+        if let Some(v) = mock::balance() {
+            return v;
+        }
+        ic_cdk::api::canister_balance128()
+    }
+    pub fn canister() -> Principal {
+        #[cfg(test)]
+        if mock::enabled() {
+            return Principal::from_slice(&[42]);
+        }
+        ic_cdk::id()
+    }
+    pub async fn terms() -> Result<(u64, u64, u64), String> {
+        #[cfg(test)]
+        if mock::enabled() {
+            return Ok((50_000, 1000, 10_000));
+        }
+        current_terms().await
+    }
+    pub async fn fund(args: TransferFromArgs) -> Result<Result<Nat, TransferFromError>, String> {
+        #[cfg(test)]
+        if mock::enabled() {
+            let r = mock::fund(args);
+            if mock::pending("fund") {
+                futures::future::poll_fn(|_| {
+                    if mock::pending("fund") {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(())
+                    }
+                })
+                .await;
+            }
+            return r;
+        }
+        let r: Result<(Result<Nat, TransferFromError>,), _> =
+            ic_cdk::call(icp(), "icrc2_transfer_from", (args,)).await;
+        r.map(|(r,)| r).map_err(|e| format!("{e:?}"))
+    }
+    pub async fn mint(owner: Principal) -> (DepositOutcome, u128) {
+        #[cfg(test)]
+        if mock::enabled() {
+            let r = mock::mint(owner);
+            if mock::pending("mint") {
+                futures::future::poll_fn(|_| {
+                    if mock::pending("mint") {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(())
+                    }
+                })
+                .await;
+            }
+            return r;
+        }
+        crate::cksol::call_paid_minter(owner).await
+    }
+    pub async fn refund(args: TransferArg) -> Result<Result<Nat, TransferError>, String> {
+        #[cfg(test)]
+        if mock::enabled() {
+            let r = mock::refund(args);
+            if mock::pending("refund") {
+                futures::future::poll_fn(|_| {
+                    if mock::pending("refund") {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(())
+                    }
+                })
+                .await;
+            }
+            return r;
+        }
+        let r: Result<(Result<Nat, TransferError>,), _> =
+            ic_cdk::call(icp(), "icrc1_transfer", (args,)).await;
+        r.map(|(r,)| r).map_err(|e| format!("{e:?}"))
     }
 }
