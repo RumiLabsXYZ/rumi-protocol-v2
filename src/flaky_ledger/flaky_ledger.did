@@ -107,6 +107,8 @@ service : () -> {
   // ICRC-1
   icrc1_balance_of : (Account) -> (nat) query;
   icrc1_fee : () -> (nat) query;
+  icrc1_minting_account : () -> (opt Account) query;
+  set_trap_icrc1_after_commit : (nat32) -> ();
   icrc1_total_supply : () -> (nat) query;
   icrc1_transfer : (TransferArg) -> (variant { Ok : nat; Err : TransferError });
 

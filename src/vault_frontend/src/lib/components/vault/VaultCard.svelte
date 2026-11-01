@@ -67,7 +67,7 @@
   $: vaultLiqCR = getLiquidationCR(vaultCollateralType);
   $: vaultCollateralAmount = redemptionClaim?.icpAmount ?? vault.collateralAmount ?? vault.icpMargin;
 
-  const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number } }>();
+  const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number }; xrplrepay: { vaultId: number } }>();
 
   $: expanded = expandedVaultId === vault.vaultId;
 
@@ -1156,6 +1156,12 @@
                 {#if !bitcoinOnly && !hasChangedToken}
                   <span class="token-hint">Click token name to pay with ckUSDT or ckUSDC</span>
                 {/if}
+                {#if isNativeXrp}
+                  <button type="button" class="btn-xrpl-repay" data-testid="repay-from-xrpl"
+                    on:click={() => dispatch('xrplrepay', { vaultId: vault.vaultId })} disabled={isProcessing}>
+                    Repay from XRPL wallet
+                  </button>
+                {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}
                   disabled={isProcessing || !repayAmount || repayOverMax}>
                   {#if isProcessing}
@@ -1179,6 +1185,8 @@
 </div>
 
 <style>
+  .btn-xrpl-repay { background: none; border: 1px solid var(--rumi-border); color: var(--rumi-text-secondary, inherit); border-radius: 0.5rem; padding: 0.375rem 0.75rem; font-size: 0.75rem; cursor: pointer; font-family: inherit; }
+  .btn-xrpl-repay:hover:not(:disabled) { border-color: rgba(209,118,232,0.35); }
   .vault-card {
     background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);

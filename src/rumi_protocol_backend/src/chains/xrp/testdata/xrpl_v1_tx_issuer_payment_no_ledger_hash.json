@@ -1,0 +1,95 @@
+{
+    "result": {
+        "Account": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+        "Amount": {
+            "currency": "6963555344000000000000000000000000000000",
+            "issuer": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+            "value": "4.95"
+        },
+        "DeliverMax": {
+            "currency": "6963555344000000000000000000000000000000",
+            "issuer": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+            "value": "4.95"
+        },
+        "Destination": "rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D",
+        "Fee": "10",
+        "Flags": 2147483648,
+        "LastLedgerSequence": 21968725,
+        "Sequence": 21642765,
+        "SigningPubKey": "EDE563A96E8C6C053E64445DC6D93B5D205D44E93C6FC392CC8E4DBD8500704123",
+        "TransactionType": "Payment",
+        "TxnSignature": "0AD1A0FA8D2E993EA57410044BF328E133C12EFD3E58D92DBED999C55BAAF10F965D10083732EFFC92445F5B4EB6F24B6670174CCF8F7F7CD484D2DAFBBE440A",
+        "ctid": "C14F372F00100001",
+        "date": 846786700,
+        "hash": "DFEACE1C9DAFF3A507B4E3431F3972749A12A4373267FA3A46AE76AB0D2B4F83",
+        "inLedger": 21968687,
+        "ledger_index": 21968687,
+        "meta": {
+            "AffectedNodes": [
+                {
+                    "ModifiedNode": {
+                        "FinalFields": {
+                            "Balance": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji",
+                                "value": "4.95"
+                            },
+                            "Flags": 65536,
+                            "HighLimit": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+                                "value": "0"
+                            },
+                            "HighNode": "0",
+                            "LowLimit": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D",
+                                "value": "1000"
+                            },
+                            "LowNode": "0"
+                        },
+                        "LedgerEntryType": "RippleState",
+                        "LedgerIndex": "380E0122DE216ED9A02B28957FAE10FDAC74F45953ACA24AD910EFF75C1014E9",
+                        "PreviousFields": {
+                            "Balance": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji",
+                                "value": "0"
+                            }
+                        },
+                        "PreviousTxnID": "A516309D990836A28DBDC5191142E7E6E82EEBDCD33A7275ADFED1A6DF6A49BE",
+                        "PreviousTxnLgrSeq": 21968666
+                    }
+                },
+                {
+                    "ModifiedNode": {
+                        "FinalFields": {
+                            "Account": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+                            "Balance": "99999900",
+                            "Flags": 8519680,
+                            "OwnerCount": 0,
+                            "Sequence": 21642766
+                        },
+                        "LedgerEntryType": "AccountRoot",
+                        "LedgerIndex": "B3CD974B3BFD619318200AA153C71CBDD55CF0E01AD65A621EDD929CBBCFDA4A",
+                        "PreviousFields": {
+                            "Balance": "99999910",
+                            "Sequence": 21642765
+                        },
+                        "PreviousTxnID": "A516309D990836A28DBDC5191142E7E6E82EEBDCD33A7275ADFED1A6DF6A49BE",
+                        "PreviousTxnLgrSeq": 21968666
+                    }
+                }
+            ],
+            "TransactionIndex": 16,
+            "TransactionResult": "tesSUCCESS",
+            "delivered_amount": {
+                "currency": "6963555344000000000000000000000000000000",
+                "issuer": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+                "value": "4.95"
+            }
+        },
+        "status": "success",
+        "validated": true
+    }
+}
