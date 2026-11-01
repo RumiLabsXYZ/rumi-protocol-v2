@@ -11,6 +11,7 @@
   } from '$lib/services/xrpVaultService';
   import { toastStore } from '$lib/stores/toast';
   import { formatAddress } from '$lib/utils/format';
+  import XrpDepositTagNotice from '$lib/components/vault/XrpDepositTagNotice.svelte';
 
   let pending: XrpPendingDepositView[] = [];
   let loading = false;
@@ -100,6 +101,7 @@
         </div>
 
         <div class="xrp-recovery-list">
+          <XrpDepositTagNotice />
           {#each pending as p (p.vaultId)}
             <div class="xrp-recovery-item">
               <span class="xrp-vault-id">Vault #{p.vaultId}</span>
