@@ -75,6 +75,7 @@ export interface CksolIcpIntent {
 	rateTimestamp?: string;
 	fee?: string;
 	approvalBlock?: string;
+	fundingCandidateBlock?: string;
 	receipt?: any;
 	message?: string;
 }
@@ -444,5 +445,54 @@ export async function resumeCksolIcpPayment(
 	const current = loadCksolIcpPayment(storage, owner.toText());
 	const result: CksolIcpIntent = { ...p, phase: 'Receipt', receipt: normalize(reply.Ok) };
 	if (current?.sequence === p.sequence) save(storage, result);
+	return result;
+}
+
+/** Verify the original collection only. The caller holds the shared owner Web Lock. */
+export async function reconcileCksolIcpFunding(
+	p: CksolIcpIntent,
+	candidateBlock: string,
+	owner: Principal,
+	storage: IntentStore,
+	live: () => boolean
+) {
+	if (!/^(0|[1-9][0-9]{0,19})$/.test(candidateBlock) || BigInt(candidateBlock) > MAX_U64)
+		throw new Error('Enter a valid ICP collection block number.');
+	const key = cksolIcpPaymentKey(owner.toText()),
+		original = storage.getItem(key);
+	const saved = loadCksolIcpPayment(storage, owner.toText());
+	if (p.owner !== owner.toText() || saved?.sequence !== p.sequence)
+		throw new Error('Saved ICP payment does not match this account.');
+	const generation = get(walletSessionGeneration),
+		walletType = get(auth).walletType ?? 'unknown';
+	if (!session(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
+	const receipt = await readCksolIcpPayment(owner);
+	if (!session(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
+	if (
+		!receipt ||
+		String(receipt.sequence) !== p.sequence ||
+		!['FundingPending', 'FundingUnknown'].includes(receipt.phase) ||
+		receipt.funding_block?.length
+	)
+		throw new Error(
+			'Only an unresolved ICP collection can use this block check. Refresh its receipt.'
+		);
+	const actor = await walletActor(CONFIG.currentCanisterId, backendIdl, owner, walletType);
+	await signer(actor, owner);
+	if (!session(owner, generation, walletType, live)) throw new Error('Wallet session changed.');
+	if (storage.getItem(key) !== original)
+		throw new Error('Saved ICP request changed. Refresh its receipt.');
+	if (typeof actor.reconcile_cksol_icp_funding_from_block !== 'function')
+		throw new Error('ICP collection verification is not available on this backend yet.');
+	const submitted = { ...saved, fundingCandidateBlock: candidateBlock };
+	save(storage, submitted);
+	const submittedRaw = storage.getItem(key);
+	const reply = await actor.reconcile_cksol_icp_funding_from_block(
+		BigInt(p.sequence),
+		BigInt(candidateBlock)
+	);
+	if ('Err' in reply) throw new Error(String(reply.Err));
+	const result: CksolIcpIntent = { ...submitted, phase: 'Receipt', receipt: normalize(reply.Ok) };
+	if (storage.getItem(key) === submittedRaw) save(storage, result);
 	return result;
 }

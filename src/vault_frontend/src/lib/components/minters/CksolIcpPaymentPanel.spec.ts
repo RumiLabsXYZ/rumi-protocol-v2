@@ -6,6 +6,7 @@ const fx = vi.hoisted(() => ({
 	recover: vi.fn(),
 	submit: vi.fn(),
 	resume: vi.fn(),
+	verify: vi.fn(),
 	continue: vi.fn(),
 	load: vi.fn(),
 	open: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock('$lib/services/cksolIcpPayment', () => ({
 	recoverCksolIcpPayment: fx.recover,
 	submitCksolIcpPayment: fx.submit,
 	resumeCksolIcpPayment: fx.resume,
+	reconcileCksolIcpFunding: fx.verify,
 	continueCksolIcpApproval: fx.continue,
 	loadCksolIcpPayment: fx.load,
 	icpPaymentSettled: (p: any) =>
@@ -100,6 +102,40 @@ afterEach(() => {
 	host.remove();
 });
 describe('ICP-paid mint controls', () => {
+	it('verifies a collection block separately from requesting its ICP refund', async () => {
+		fx.wallet = 'oisy';
+		const held = {
+			...payment('FundingUnknown'),
+			receipt: { ...payment('FundingUnknown').receipt, funding_block: [], deposit_id: [] }
+		};
+		fx.recover.mockResolvedValue(held);
+		fx.verify.mockImplementation(async () => {
+			const p = payment('RefundReady');
+			fx.recover.mockResolvedValue(p);
+			return p;
+		});
+		render({ blocked: true, canMint: false });
+		await settle();
+		const input = host.querySelector<HTMLInputElement>(
+			'input[aria-label="ICP collection block number"]'
+		)!;
+		expect(button('Verify collection block').disabled).toBe(true);
+		expect(host.textContent?.replace(/\s+/g, ' ')).toContain('not the approval block');
+		expect(host.textContent?.replace(/\s+/g, ' ')).toContain(
+			'Archived or nonmatching blocks leave this payment held'
+		);
+		input.value = '42';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		button('Verify collection block').click();
+		expect(fx.open).toHaveBeenCalledOnce();
+		await settle();
+		expect(fx.verify).toHaveBeenCalledWith(held, '42', owner, localStorage, expect.any(Function));
+		expect(fx.submit).not.toHaveBeenCalled();
+		expect(fx.resume).not.toHaveBeenCalled();
+		expect(button('Return unused ICP').disabled).toBe(false);
+		expect(host.textContent?.replace(/\s+/g, ' ')).toContain('Collection verified');
+	});
 	it('offers only the interrupted ICP refund, then preserves the visible SOL hold after completion', async () => {
 		const interrupted = (phase: string) => ({
 			...payment(phase),

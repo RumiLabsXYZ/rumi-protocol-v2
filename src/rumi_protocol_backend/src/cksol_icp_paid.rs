@@ -472,7 +472,20 @@ pub async fn start(
         created_at_time: Some(now),
     };
     let result = transport::fund(args).await;
-    mutate_state(|s| funding_result(s, owner, result));
+    let applied = mutate_state(|s| {
+        if s.cksol_icp_upgrade_epoch != _guard.1
+            || !s.cksol_icp_payments.get(&owner).is_some_and(|j| {
+                j.payment.sequence == seq && j.payment.phase == CkSolPaymentPhase::FundingPending
+            })
+        {
+            return false;
+        }
+        funding_result(s, owner, result);
+        true
+    });
+    if !applied {
+        return payment(owner).ok_or("No ICP payment".into());
+    }
     advance(owner, seq).await
 }
 fn funding_result(
@@ -694,6 +707,85 @@ fn refund_result(
         }
     }
 }
+/// Recover only a proven original funding debit. The supplied index is a hint;
+/// the canonical ledger is queried directly and every transfer field is checked.
+/// This prepares a refund and never submits a new debit or minter request.
+pub async fn reconcile_funding_from_block(
+    owner: Principal,
+    seq: u64,
+    block_index: u64,
+) -> Result<CkSolIcpPayment, String> {
+    let guard = Guard::acquire(owner)?;
+    let (journal, relay) = read_state(|s| {
+        (
+            s.cksol_icp_payments.get(&owner).cloned(),
+            s.cksol_relay_attempts.get(&owner).cloned(),
+        )
+    });
+    let journal = journal.ok_or("No ICP payment")?;
+    if journal.payment.sequence != seq
+        || !matches!(
+            journal.payment.phase,
+            CkSolPaymentPhase::FundingPending | CkSolPaymentPhase::FundingUnknown
+        )
+        || journal.payment.funding_block.is_some()
+        || journal.orphaned_minter_call
+    {
+        return Err("Payment is not awaiting funding reconciliation".into());
+    }
+    let expected_relay = relay.ok_or("Reserved deposit slot missing; payment held")?;
+    if expected_relay.status != CkSolRelayStatus::SubmittedOrUnknown {
+        return Err("Reserved deposit slot changed; payment held".into());
+    }
+    let block = crate::native_icp_proof::query_direct_block(icp(), block_index).await?;
+    crate::native_icp_proof::verify_transfer_from_block_to_subaccount(
+        &block,
+        owner,
+        transport::canister(),
+        transport::canister(),
+        journal.subaccount,
+        journal.payment.deposit_e8s,
+        journal.payment.ledger_fee_e8s,
+        &hash(b"rumi-cksol-icp-funding", owner, seq),
+        journal.payment.created_at_time,
+    )?;
+    mutate_state(|s| -> Result<(), String> {
+        if s.cksol_icp_upgrade_epoch != guard.1
+            || s.cksol_icp_payments.get(&owner) != Some(&journal)
+            || s.cksol_relay_attempts.get(&owner) != Some(&expected_relay)
+        {
+            return Err("Payment changed during proof verification; payment held".into());
+        }
+        let refund = journal
+            .payment
+            .deposit_e8s
+            .checked_sub(journal.payment.ledger_fee_e8s)
+            .filter(|n| *n > 0)
+            .ok_or("Deposit too small to refund")?;
+        let reserve = s
+            .cksol_icp_reserve
+            .checked_add(ATTACHED_CYCLES)
+            .ok_or("Reserve overflow; payment held")?;
+        let j = s.cksol_icp_payments.get_mut(&owner).unwrap();
+        j.payment.funding_block = Some(Nat::from(block_index));
+        j.payment.charged_e8s = 0;
+        j.payment.operating_fee_cycles = 0;
+        j.payment.service_fee_cycles = 0;
+        j.payment.refundable_e8s = refund;
+        j.payment.actual_refund_fee_e8s = j.payment.ledger_fee_e8s;
+        j.payment.message = Some(
+            "Original ICP deposit verified; return available. No SOL processing was submitted."
+                .into(),
+        );
+        j.refund_time = transport::time();
+        j.payment.phase = CkSolPaymentPhase::RefundReady;
+        s.cksol_icp_reserve = reserve;
+        s.cksol_relay_attempts.remove(&owner);
+        Ok(())
+    })?;
+    payment(owner).ok_or("No ICP payment".into())
+}
+
 pub async fn resume(owner: Principal, seq: u64) -> Result<CkSolIcpPayment, String> {
     let _guard = Guard::acquire(owner)?;
     advance(owner, seq).await

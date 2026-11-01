@@ -58,6 +58,7 @@ import {
 	loadCksolIcpPayment,
 	cksolIcpPaymentKey,
 	icpPaymentSettled,
+	reconcileCksolIcpFunding,
 	continueCksolIcpApproval
 } from './cksolIcpPayment';
 const owner = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');
@@ -124,6 +125,75 @@ beforeEach(() => {
 	};
 });
 describe('ICP processing deposit', () => {
+	it('verifies an existing funding block without another approval, debit, or mint', async () => {
+		const s = storage();
+		const p = {
+			owner: owner.toText(),
+			sequence: '1',
+			createdAt: 1,
+			phase: 'Receipt' as const,
+			receipt: { sequence: 1n, phase: 'FundingUnknown', funding_block: [] }
+		};
+		s.setItem(
+			cksolIcpPaymentKey(owner.toText()),
+			JSON.stringify(p, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+		);
+		fx.backend.get_cksol_icp_payment.mockResolvedValue([
+			{ ...p.receipt, phase: { FundingUnknown: null } }
+		]);
+		fx.updates.reconcile_cksol_icp_funding_from_block = vi.fn(async () => ({
+			Ok: { sequence: 1n, phase: { RefundReady: null }, funding_block: [42n] }
+		}));
+		const result = await reconcileCksolIcpFunding(p, '42', owner, s, () => true);
+		expect(fx.updates.reconcile_cksol_icp_funding_from_block).toHaveBeenCalledWith(1n, 42n);
+		expect(result.receipt.phase).toBe('RefundReady');
+		expect(loadCksolIcpPayment(s, owner.toText())?.fundingCandidateBlock).toBe('42');
+		expect(fx.ledger.icrc2_approve).not.toHaveBeenCalled();
+		expect(fx.updates.start_cksol_deposit_with_icp).not.toHaveBeenCalled();
+	});
+	it('preserves held funding and rejects invalid block input, wrong signers, and archive proof errors', async () => {
+		const s = storage();
+		const p = {
+			owner: owner.toText(),
+			sequence: '1',
+			createdAt: 1,
+			phase: 'Receipt' as const,
+			receipt: { sequence: 1n, phase: 'FundingUnknown', funding_block: [] }
+		};
+		s.setItem(
+			cksolIcpPaymentKey(owner.toText()),
+			JSON.stringify(p, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+		);
+		fx.backend.get_cksol_icp_payment.mockResolvedValue([
+			{ ...p.receipt, phase: { FundingUnknown: null } }
+		]);
+		fx.updates.reconcile_cksol_icp_funding_from_block = vi.fn(async () => ({
+			Err: 'archive evidence remains held'
+		}));
+		for (const value of ['', '-1', '1.2', '0x2a', '18446744073709551616'])
+			await expect(reconcileCksolIcpFunding(p, value, owner, s, () => true)).rejects.toThrow(
+				'block number'
+			);
+		fx.updates.agent = { getPrincipal: async () => other };
+		await expect(reconcileCksolIcpFunding(p, '42', owner, s, () => true)).rejects.toThrow('signer');
+		expect(fx.updates.reconcile_cksol_icp_funding_from_block).not.toHaveBeenCalled();
+		fx.updates.agent = { getPrincipal: async () => owner };
+		await expect(reconcileCksolIcpFunding(p, '42', owner, s, () => true)).rejects.toThrow(
+			'archive evidence remains held'
+		);
+		expect(loadCksolIcpPayment(s, owner.toText())?.receipt.phase).toBe('FundingUnknown');
+		fx.updates.reconcile_cksol_icp_funding_from_block.mockClear();
+		fx.backend.get_cksol_icp_payment.mockImplementation(async () => {
+			fx.generation.set(1);
+			return [{ ...p.receipt, phase: { FundingUnknown: null } }];
+		});
+		await expect(reconcileCksolIcpFunding(p, '42', owner, s, () => true)).rejects.toThrow(
+			'Wallet session changed'
+		);
+		expect(fx.updates.reconcile_cksol_icp_funding_from_block).not.toHaveBeenCalled();
+		expect(fx.ledger.icrc2_approve).not.toHaveBeenCalled();
+		expect(fx.updates.start_cksol_deposit_with_icp).not.toHaveBeenCalled();
+	});
 	it('keeps an interrupted mint held after its ICP refund completes', async () => {
 		const s = storage(),
 			q = await quoteCksolIcpPayment(owner, 'plug');

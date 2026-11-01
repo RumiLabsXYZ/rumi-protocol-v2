@@ -5,7 +5,9 @@
 //! wasm32-unknown-unknown --locked`. Set CKSOL_PIC_BACKEND_WASM,
 //! CKSOL_PIC_MOCK_WASM, and POCKET_IC_BIN (server 7.0.0), then run
 //! `cargo test -p rumi_protocol_backend --test cksol_icp_lifecycle_pic -- --ignored`.
-//! All canisters run locally, including an upgrade while a minter call is pending.
+//! Set RUMI_TEST_NNS_LEDGER_WASM_GZ to the pinned official native ICP ledger
+//! gzip for the native-wire test. All canisters run locally, including an
+//! upgrade while a minter call is pending.
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
@@ -100,6 +102,20 @@ fn query<T: for<'de> Deserialize<'de> + CandidType>(
         p.query_call(id, Principal::anonymous(), method, arg)
             .unwrap(),
     )
+}
+fn funding_stats(p: &PocketIc, ledger: Principal) -> (u64, u64, u64, u64) {
+    match p
+        .query_call(
+            ledger,
+            Principal::anonymous(),
+            "funding_stats",
+            encode_args(()).unwrap(),
+        )
+        .unwrap()
+    {
+        WasmResult::Reply(bytes) => candid::decode_args(&bytes).unwrap(),
+        WasmResult::Reject(e) => panic!("funding_stats rejected: {e}"),
+    }
 }
 fn wasm(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -657,4 +673,457 @@ fn refund_reply_lost_on_upgrade_retries_same_ledger_tuple() {
     assert_eq!(later.unwrap(), payment);
     let count: u64 = query(&p, ledger, "refund_calls", encode_args(()).unwrap());
     assert_eq!(count, 2);
+}
+
+/// A scripted ledger commits the funding debit but delays its reply. The
+/// assertions first demonstrate a safe hold: escrow remains funded and no
+/// second debit or minter call is made. Scripted direct-block evidence then
+/// permits reconciliation and refund. On
+/// PocketIC 7.0.0 the late backend callback also logged `Arc counter overflow`;
+/// that observed trap is not asserted here, and its underlying cause is unknown.
+/// Mock balance bookkeeping is not proof of official-ledger behavior.
+#[test]
+#[ignore = "requires freshly built canister Wasms and PocketIC 7.0.0"]
+fn funding_committed_reply_lost_on_upgrade_is_not_recharged() {
+    let p = PocketIcBuilder::new()
+        .with_nns_subnet()
+        .with_application_subnet()
+        .build();
+    let now = 1_700_000_000u64;
+    p.set_time(SystemTime::UNIX_EPOCH + Duration::from_secs(now));
+    let owner = Principal::self_authenticating(b"cksol-pic-funding-owner");
+    let dev = Principal::self_authenticating(b"cksol-pic-funding-developer");
+    let backend = p.create_canister();
+    p.add_cycles(backend, 100_000_000_000_000);
+    let ledger = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let minter = Principal::from_text("lh22c-kyaaa-aaaar-qb5nq-cai").unwrap();
+    let mock = wasm("CKSOL_PIC_MOCK_WASM");
+    for id in [ledger, cmc, minter] {
+        p.create_canister_with_id(None, None, id).unwrap();
+        p.add_cycles(id, 5_000_000_000_000);
+        p.install_canister(id, mock.clone(), encode_args(()).unwrap(), None);
+    }
+    let _: () = update(
+        &p,
+        ledger,
+        dev,
+        "set_funding_hold",
+        encode_one(true).unwrap(),
+    );
+    let backend_wasm = wasm("CKSOL_PIC_BACKEND_WASM");
+    p.install_canister(
+        backend,
+        backend_wasm.clone(),
+        encode_one(ProtocolArg::Init(InitArg {
+            xrc_principal: Principal::management_canister(),
+            icusd_ledger_principal: ledger,
+            icp_ledger_principal: ledger,
+            fee_e8s: 10_000,
+            developer_principal: dev,
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        }))
+        .unwrap(),
+        None,
+    );
+    let reserve: Result<(), String> = update(
+        &p,
+        backend,
+        dev,
+        "set_cksol_icp_reserve",
+        encode_one(1_000_000_000_000u64).unwrap(),
+    );
+    reserve.unwrap();
+    let cap = deposit_cap(40_000, 10_000).unwrap();
+    let _message = p
+        .submit_call(
+            backend,
+            owner,
+            "start_cksol_deposit_with_icp",
+            encode_args((1u64, cap, 40_000u64, now, 10_000u64)).unwrap(),
+        )
+        .unwrap();
+    let mut seen = false;
+    for _ in 0..80 {
+        p.tick();
+        let (calls, _, _, _): (u64, u64, u64, u64) = funding_stats(&p, ledger);
+        if calls == 1 {
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "ledger funding debit was not dispatched");
+    let stats: (u64, u64, u64, u64) = funding_stats(&p, ledger);
+    assert_eq!(stats, (1, 0, 100_000_000 - cap - 10_000, cap));
+    let pending: Option<CkSolIcpPayment> = query(
+        &p,
+        backend,
+        "get_cksol_icp_payment",
+        encode_one(owner).unwrap(),
+    );
+    let pending = pending.unwrap();
+    assert_eq!(pending.phase, CkSolPaymentPhase::FundingPending);
+    assert!(pending.funding_block.is_none());
+    p.upgrade_canister(
+        backend,
+        backend_wasm,
+        encode_one(ProtocolArg::Upgrade(UpgradeArg {
+            mode: None,
+            description: None,
+        }))
+        .unwrap(),
+        None,
+    )
+    .unwrap();
+    let restored: Option<CkSolIcpPayment> = query(
+        &p,
+        backend,
+        "get_cksol_icp_payment",
+        encode_one(owner).unwrap(),
+    );
+    assert_eq!(restored.unwrap(), pending);
+    let resumed: Result<CkSolIcpPayment, String> = update(
+        &p,
+        backend,
+        owner,
+        "resume_cksol_icp_payment",
+        encode_one(1u64).unwrap(),
+    );
+    assert_eq!(resumed.unwrap(), pending);
+    for _ in 0..70 {
+        p.tick();
+    }
+    let late: (u64, u64, u64, u64) = funding_stats(&p, ledger);
+    assert_eq!(late, (1, 1, 100_000_000 - cap - 10_000, cap));
+    let after: Option<CkSolIcpPayment> = query(
+        &p,
+        backend,
+        "get_cksol_icp_payment",
+        encode_one(owner).unwrap(),
+    );
+    assert_eq!(after.unwrap(), pending);
+    let calls: u64 = query(&p, minter, "calls", encode_args(()).unwrap());
+    assert_eq!(calls, 0);
+    let replay: Result<CkSolIcpPayment, String> = update(
+        &p,
+        backend,
+        owner,
+        "start_cksol_deposit_with_icp",
+        encode_args((1u64, cap, 40_000u64, now, 10_000u64)).unwrap(),
+    );
+    assert_eq!(replay.unwrap(), pending);
+    let final_stats: (u64, u64, u64, u64) = funding_stats(&p, ledger);
+    assert_eq!(final_stats, late);
+
+    // Scripted legacy query_blocks evidence: caller input is only a block
+    // index. Reject a wrong owner, wrong transfer, and an archived locator;
+    // accept an exact direct tuple without another transfer_from or mint.
+    use rumi_protocol_backend::native_icp_proof::{
+        account_identifier, account_identifier_with_subaccount, Block, Operation, Timestamp,
+        Tokens, Transaction,
+    };
+    let mut h = Sha256::new();
+    h.update(b"rumi-cksol-icp-escrow-v1");
+    h.update(owner.as_slice());
+    h.update(1u64.to_be_bytes());
+    let subaccount: [u8; 32] = h.finalize().into();
+    let mut m = Sha256::new();
+    m.update(b"rumi-cksol-icp-funding");
+    m.update(owner.as_slice());
+    m.update(1u64.to_be_bytes());
+    let memo: Vec<u8> = m.finalize().to_vec();
+    let block = Block {
+        parent_hash: None,
+        timestamp: Timestamp {
+            timestamp_nanos: pending.created_at_time,
+        },
+        transaction: Transaction {
+            memo: 0,
+            icrc1_memo: Some(memo),
+            created_at_time: Timestamp {
+                timestamp_nanos: pending.created_at_time,
+            },
+            operation: Some(Operation::Transfer {
+                from: account_identifier(owner).to_vec(),
+                to: account_identifier_with_subaccount(backend, subaccount).to_vec(),
+                spender: Some(account_identifier(backend).to_vec()),
+                amount: Tokens { e8s: cap },
+                fee: Tokens { e8s: 10_000 },
+            }),
+        },
+    };
+    let mut wrong = block.clone();
+    if let Some(Operation::Transfer { amount, .. }) = &mut wrong.transaction.operation {
+        amount.e8s += 1;
+    } else {
+        unreachable!()
+    }
+    let _: () = update(
+        &p,
+        ledger,
+        dev,
+        "set_proof_block",
+        encode_one(wrong).unwrap(),
+    );
+    let bad: Result<CkSolIcpPayment, String> = update(
+        &p,
+        backend,
+        owner,
+        "reconcile_cksol_icp_funding_from_block",
+        encode_args((1u64, 1u64)).unwrap(),
+    );
+    assert!(bad.is_err());
+    let attacker = Principal::self_authenticating(b"wrong-owner");
+    let unauthorized: Result<CkSolIcpPayment, String> = update(
+        &p,
+        backend,
+        attacker,
+        "reconcile_cksol_icp_funding_from_block",
+        encode_args((1u64, 1u64)).unwrap(),
+    );
+    assert!(unauthorized.is_err());
+    let _: () = update(
+        &p,
+        ledger,
+        dev,
+        "set_proof_block",
+        encode_one(block).unwrap(),
+    );
+    let _: () = update(
+        &p,
+        ledger,
+        dev,
+        "set_proof_archived",
+        encode_one(true).unwrap(),
+    );
+    let archived: Result<CkSolIcpPayment, String> = update(
+        &p,
+        backend,
+        owner,
+        "reconcile_cksol_icp_funding_from_block",
+        encode_args((1u64, 1u64)).unwrap(),
+    );
+    assert!(archived.is_err());
+    let still_pending: Option<CkSolIcpPayment> = query(
+        &p,
+        backend,
+        "get_cksol_icp_payment",
+        encode_one(owner).unwrap(),
+    );
+    assert_eq!(still_pending.unwrap(), pending);
+    let _: () = update(
+        &p,
+        ledger,
+        dev,
+        "set_proof_archived",
+        encode_one(false).unwrap(),
+    );
+    let proof: Result<CkSolIcpPayment, String> = update(
+        &p,
+        backend,
+        owner,
+        "reconcile_cksol_icp_funding_from_block",
+        encode_args((1u64, 1u64)).unwrap(),
+    );
+    let ready = proof.unwrap();
+    assert_eq!(ready.phase, CkSolPaymentPhase::RefundReady);
+    assert_eq!(ready.funding_block, Some(Nat::from(1u8)));
+    assert_eq!(ready.refundable_e8s, cap - 10_000);
+    assert_eq!(ready.charged_e8s, 0);
+    let refunded: Result<CkSolIcpPayment, String> = update(
+        &p,
+        backend,
+        owner,
+        "resume_cksol_icp_payment",
+        encode_one(1u64).unwrap(),
+    );
+    assert_eq!(refunded.unwrap().phase, CkSolPaymentPhase::Complete);
+    let final_stats = funding_stats(&p, ledger);
+    assert_eq!(final_stats, (1, 1, 100_000_000 - 20_000, 0));
+    let calls: u64 = query(&p, minter, "calls", encode_args(()).unwrap());
+    assert_eq!(calls, 0);
+}
+
+// The pinned official NNS ledger independently verifies the native block wire
+// shape. This is separate from the scripted interrupted-callback fixture.
+#[derive(CandidType, Deserialize)]
+struct NativeTokens {
+    e8s: u64,
+}
+#[derive(CandidType, Deserialize)]
+struct NativeDuration {
+    secs: u64,
+    nanos: u32,
+}
+#[derive(CandidType, Deserialize)]
+struct NativeArchiveOptions {
+    num_blocks_to_archive: u64,
+    max_transactions_per_response: Option<u64>,
+    trigger_threshold: u64,
+    max_message_size_bytes: Option<u64>,
+    cycles_for_archive_creation: Option<u64>,
+    node_max_memory_size_bytes: Option<u64>,
+    controller_id: Principal,
+    more_controller_ids: Option<Vec<Principal>>,
+}
+#[derive(CandidType, Deserialize)]
+struct NativeInit {
+    minting_account: String,
+    icrc1_minting_account: Option<Account>,
+    initial_values: Vec<(String, NativeTokens)>,
+    max_message_size_bytes: Option<u64>,
+    transaction_window: Option<NativeDuration>,
+    archive_options: Option<NativeArchiveOptions>,
+    send_whitelist: Vec<Principal>,
+    transfer_fee: Option<NativeTokens>,
+    token_symbol: Option<String>,
+    token_name: Option<String>,
+    feature_flags: Option<FeatureFlags>,
+}
+#[derive(CandidType, Deserialize)]
+enum NativeArg {
+    Init(NativeInit),
+}
+
+#[test]
+#[ignore = "requires pinned official native ledger gzip and PocketIC 7.0.0"]
+fn official_native_ledger_transfer_from_block_matches_pinned_tuple() {
+    use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+    use rumi_protocol_backend::native_icp_proof::{
+        account_identifier, verify_transfer_from_block_to_subaccount, GetBlocksArgs,
+        QueryBlocksResponse,
+    };
+    let path =
+        std::env::var("RUMI_TEST_NNS_LEDGER_WASM_GZ").expect("set pinned native ledger gzip path");
+    let gzip = std::fs::read(&path).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&gzip)),
+        "51f4be010f23064137defacd627ffbec024c5133210c68ca3b80ab8f257101d6"
+    );
+    let output = std::process::Command::new("gzip")
+        .args(["-dc", &path])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let p = PocketIcBuilder::new().with_nns_subnet().build();
+    let now = 1_700_000_000u64;
+    p.set_time(SystemTime::UNIX_EPOCH + Duration::from_secs(now));
+    let owner = Principal::self_authenticating(b"cksol-native-owner");
+    let backend = Principal::self_authenticating(b"cksol-native-backend");
+    let dev = Principal::self_authenticating(b"cksol-native-developer");
+    let ledger = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+    p.create_canister_with_id(None, None, ledger).unwrap();
+    p.add_cycles(ledger, 5_000_000_000_000_000);
+    let hex = |v: [u8; 32]| v.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    p.install_canister(
+        ledger,
+        output.stdout,
+        encode_one(NativeArg::Init(NativeInit {
+            minting_account: hex(account_identifier(Principal::management_canister())),
+            icrc1_minting_account: Some(account(Principal::management_canister())),
+            initial_values: vec![(
+                hex(account_identifier(owner)),
+                NativeTokens { e8s: 100_000_000 },
+            )],
+            max_message_size_bytes: Some(1_048_576),
+            transaction_window: None,
+            archive_options: Some(NativeArchiveOptions {
+                num_blocks_to_archive: 2_000,
+                max_transactions_per_response: Some(100),
+                trigger_threshold: 1000,
+                max_message_size_bytes: Some(1_048_576),
+                cycles_for_archive_creation: Some(1_000_000_000_000),
+                node_max_memory_size_bytes: Some(1_073_741_824),
+                controller_id: dev,
+                more_controller_ids: None,
+            }),
+            send_whitelist: vec![],
+            transfer_fee: Some(NativeTokens { e8s: 10_000 }),
+            token_symbol: Some("ICP".into()),
+            token_name: Some("Internet Computer".into()),
+            feature_flags: Some(FeatureFlags { icrc2: true }),
+        }))
+        .unwrap(),
+        None,
+    );
+    let amount = 26_295_000u64;
+    let fee = 10_000u64;
+    let subaccount = [31u8; 32];
+    let memo = vec![42u8; 32];
+    let created_at = now * 1_000_000_000;
+    let approval: Result<Nat, candid::types::reserved::Reserved> = update(
+        &p,
+        ledger,
+        owner,
+        "icrc2_approve",
+        encode_one(ApproveArgs {
+            from_subaccount: None,
+            spender: account(backend),
+            amount: Nat::from(amount + fee),
+            expected_allowance: None,
+            expires_at: None,
+            fee: Some(Nat::from(fee)),
+            memo: None,
+            created_at_time: None,
+        })
+        .unwrap(),
+    );
+    assert!(approval.is_ok());
+    let transfer: Result<Nat, TransferFromError> = update(
+        &p,
+        ledger,
+        backend,
+        "icrc2_transfer_from",
+        encode_one(TransferFromArgs {
+            spender_subaccount: None,
+            from: account(owner),
+            to: Account {
+                owner: backend,
+                subaccount: Some(subaccount),
+            },
+            amount: Nat::from(amount),
+            fee: Some(Nat::from(fee)),
+            memo: Some(memo.clone().into()),
+            created_at_time: Some(created_at),
+        })
+        .unwrap(),
+    );
+    let block_index: u64 = transfer.unwrap().0.try_into().unwrap();
+    let response: QueryBlocksResponse = query(
+        &p,
+        ledger,
+        "query_blocks",
+        encode_one(GetBlocksArgs {
+            start: block_index,
+            length: 1,
+        })
+        .unwrap(),
+    );
+    assert_eq!(response.first_block_index, block_index);
+    assert_eq!(response.blocks.len(), 1);
+    assert!(response.archived_blocks.is_empty());
+    let block = &response.blocks[0];
+    verify_transfer_from_block_to_subaccount(
+        block, owner, backend, backend, subaccount, amount, fee, &memo, created_at,
+    )
+    .unwrap();
+    assert!(verify_transfer_from_block_to_subaccount(
+        block,
+        owner,
+        backend,
+        backend,
+        subaccount,
+        amount + 1,
+        fee,
+        &memo,
+        created_at
+    )
+    .is_err());
+    assert!(verify_transfer_from_block_to_subaccount(
+        block, owner, backend, backend, subaccount, amount, fee, b"wrong", created_at
+    )
+    .is_err());
 }

@@ -96,7 +96,7 @@ struct TransferArg {
     memo: Option<Vec<u8>>,
     amount: Nat,
 }
-#[derive(CandidType, Deserialize)]
+#[derive(Clone, Debug, CandidType, Deserialize, PartialEq, Eq)]
 struct TransferFromArg {
     spender_subaccount: Option<[u8; 32]>,
     from: Account,
@@ -134,8 +134,52 @@ thread_local! { static REFUND: std::cell::RefCell<Option<TransferArg>> = const {
 fn icrc1_fee() -> Nat {
     Nat::from(10_000u64)
 }
+thread_local! {
+    static FUNDING: std::cell::RefCell<Option<TransferFromArg>> = const { std::cell::RefCell::new(None) };
+    static FUNDING_CALLS: Cell<u64> = const { Cell::new(0) };
+    static FUNDING_COMPLETED: Cell<u64> = const { Cell::new(0) };
+    static FUNDING_BALANCE: Cell<u64> = const { Cell::new(100_000_000) };
+    static FUNDING_ESCROW: Cell<u64> = const { Cell::new(0) };
+    static FUNDING_HOLD: Cell<bool> = const { Cell::new(false) };
+}
 #[ic_cdk::update]
-fn icrc2_transfer_from(_args: TransferFromArg) -> Result<Nat, TransferFromError> {
+fn set_funding_hold(v: bool) {
+    FUNDING_HOLD.with(|h| h.set(v));
+}
+#[ic_cdk::query]
+fn funding_stats() -> (u64, u64, u64, u64) {
+    (
+        FUNDING_CALLS.with(Cell::get),
+        FUNDING_COMPLETED.with(Cell::get),
+        FUNDING_BALANCE.with(Cell::get),
+        FUNDING_ESCROW.with(Cell::get),
+    )
+}
+#[ic_cdk::update]
+async fn icrc2_transfer_from(args: TransferFromArg) -> Result<Nat, TransferFromError> {
+    FUNDING_CALLS.with(|c| c.set(c.get() + 1));
+    if let Some(previous) = FUNDING.with(|s| s.borrow().clone()) {
+        return if previous == args {
+            Err(TransferFromError::Duplicate {
+                duplicate_of: Nat::from(1u8),
+            })
+        } else {
+            Err(TransferFromError::GenericError {
+                error_code: Nat::from(9u8),
+                message: "funding tuple changed".into(),
+            })
+        };
+    }
+    let amount: u64 = args.amount.0.clone().try_into().unwrap();
+    let fee: u64 = args.fee.clone().unwrap().0.try_into().unwrap();
+    FUNDING_BALANCE.with(|v| v.set(v.get().checked_sub(amount + fee).unwrap()));
+    FUNDING_ESCROW.with(|v| v.set(v.get() + amount));
+    FUNDING.with(|v| *v.borrow_mut() = Some(args));
+    if FUNDING_HOLD.with(Cell::get) {
+        let minter = Principal::from_text("lh22c-kyaaa-aaaar-qb5nq-cai").unwrap();
+        let _: ((),) = ic_cdk::call(minter, "hold_reply", (20u32,)).await.unwrap();
+    }
+    FUNDING_COMPLETED.with(|v| v.set(v.get() + 1));
     Ok(Nat::from(1u8))
 }
 #[ic_cdk::query]
@@ -162,6 +206,10 @@ async fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             })
         };
     }
+    let amount: u64 = args.amount.0.clone().try_into().unwrap();
+    let fee: u64 = args.fee.clone().unwrap().0.try_into().unwrap();
+    FUNDING_ESCROW.with(|v| v.set(v.get().checked_sub(amount + fee).unwrap()));
+    FUNDING_BALANCE.with(|v| v.set(v.get() + amount));
     REFUND.with(|r| *r.borrow_mut() = Some(args));
     if HOLD.with(Cell::get) {
         let minter = Principal::from_text("lh22c-kyaaa-aaaar-qb5nq-cai").unwrap();
@@ -169,4 +217,127 @@ async fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
     }
     REFUND_COMPLETED.with(|c| c.set(c.get() + 1));
     Ok(Nat::from(2u8))
+}
+
+// Scripted native ICP query_blocks response. This is not an official ledger.
+#[derive(CandidType, Deserialize, Clone)]
+struct BlockTime {
+    timestamp_nanos: u64,
+}
+#[derive(CandidType, Deserialize, Clone)]
+struct BlockTokens {
+    e8s: u64,
+}
+#[derive(CandidType, Deserialize, Clone)]
+enum BlockOperation {
+    Burn {
+        from: Vec<u8>,
+        spender: Option<Vec<u8>>,
+        amount: BlockTokens,
+    },
+    Mint {
+        to: Vec<u8>,
+        amount: BlockTokens,
+    },
+    Approve {
+        from: Vec<u8>,
+        spender: Vec<u8>,
+        allowance_e8s: i128,
+        allowance: BlockTokens,
+        fee: BlockTokens,
+        expires_at: Option<BlockTime>,
+        expected_allowance: Option<BlockTokens>,
+    },
+    Transfer {
+        from: Vec<u8>,
+        to: Vec<u8>,
+        spender: Option<Vec<u8>>,
+        amount: BlockTokens,
+        fee: BlockTokens,
+    },
+}
+#[derive(CandidType, Deserialize, Clone)]
+struct BlockTransaction {
+    memo: u64,
+    icrc1_memo: Option<Vec<u8>>,
+    operation: Option<BlockOperation>,
+    created_at_time: BlockTime,
+}
+#[derive(CandidType, Deserialize, Clone)]
+struct Block {
+    parent_hash: Option<Vec<u8>>,
+    transaction: BlockTransaction,
+    timestamp: BlockTime,
+}
+#[derive(CandidType, Deserialize)]
+struct GetBlocksArgs {
+    start: u64,
+    length: u64,
+}
+#[derive(CandidType, Deserialize)]
+struct BlockRange {
+    blocks: Vec<Block>,
+}
+#[derive(CandidType, Deserialize)]
+enum QueryArchiveError {
+    BadFirstBlockIndex {
+        requested_index: u64,
+        first_valid_index: u64,
+    },
+    Other {
+        error_code: u64,
+        error_message: String,
+    },
+}
+candid::define_function!(ArchiveFn : (GetBlocksArgs) -> (Result<BlockRange, QueryArchiveError>) query);
+#[derive(CandidType)]
+struct ArchivedRange {
+    start: u64,
+    length: u64,
+    callback: ArchiveFn,
+}
+#[derive(CandidType)]
+struct QueryBlocksResponse {
+    chain_length: u64,
+    certificate: Option<Vec<u8>>,
+    blocks: Vec<Block>,
+    first_block_index: u64,
+    archived_blocks: Vec<ArchivedRange>,
+}
+thread_local! { static PROOF_BLOCK: std::cell::RefCell<Option<Block>> = const { std::cell::RefCell::new(None) }; static PROOF_ARCHIVED: Cell<bool> = const { Cell::new(false) }; }
+#[ic_cdk::update]
+fn set_proof_block(b: Block) {
+    PROOF_BLOCK.with(|v| *v.borrow_mut() = Some(b));
+}
+#[ic_cdk::update]
+fn set_proof_archived(v: bool) {
+    PROOF_ARCHIVED.with(|x| x.set(v));
+}
+#[ic_cdk::update]
+fn query_blocks(arg: GetBlocksArgs) -> QueryBlocksResponse {
+    let archived = PROOF_ARCHIVED.with(Cell::get);
+    let blocks = if arg.start == 1 && !archived {
+        PROOF_BLOCK.with(|v| v.borrow().clone().into_iter().collect())
+    } else {
+        Vec::new()
+    };
+    let archived_blocks = if arg.start == 1 && archived {
+        vec![ArchivedRange {
+            start: 1,
+            length: 1,
+            callback: ArchiveFn(candid::Func {
+                principal: ic_cdk::id(),
+                method: "archive".into(),
+            }),
+        }]
+    } else {
+        Vec::new()
+    };
+    QueryBlocksResponse {
+        chain_length: 2,
+        certificate: None,
+        blocks,
+        first_block_index: arg.start,
+        archived_blocks,
+    }
 }

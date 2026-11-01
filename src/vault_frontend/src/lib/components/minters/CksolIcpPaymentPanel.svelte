@@ -12,6 +12,7 @@
 		submitCksolIcpPayment,
 		continueCksolIcpApproval,
 		resumeCksolIcpPayment,
+		reconcileCksolIcpFunding,
 		loadCksolIcpPayment,
 		icpPaymentSettled,
 		type CksolIcpQuote,
@@ -32,6 +33,7 @@
 		error = '',
 		unavailable = '',
 		damaged = false;
+	let candidateBlock = '', recoveryNotice = '';
 	let timer: ReturnType<typeof setInterval>;
 	const icp = (amount: bigint) =>
 		`${amount / 100_000_000n}.${(amount % 100_000_000n).toString().padStart(8, '0')} ICP`;
@@ -46,6 +48,8 @@
 		BigInt(quote.terms.reserve_available_cycles) >= BigInt(quote.terms.attached_cycles);
 	$: onReady(!blocked && !damaged && !pending && enough && reserve && !unavailable);
 	$: checkingRefund = ['RefundReady', 'RefundPending', 'RefundUnknown'].includes(phase ?? '');
+	$: fundingHeld = ['FundingPending', 'FundingUnknown'].includes(phase ?? '') && !payment?.receipt?.funding_block?.length;
+	$: validCandidate = /^(0|[1-9][0-9]{0,19})$/.test(candidateBlock) && BigInt(candidateBlock) <= (1n << 64n) - 1n;
 	$: actionable = phase === 'Approved' || phase === 'Funded' || checkingRefund;
 	$: label =
 		phase === 'Approved'
@@ -101,6 +105,7 @@
 			);
 			if (!alive) return;
 			payment = recovered;
+			if (!candidateBlock && payment?.fundingCandidateBlock) candidateBlock = payment.fundingCandidateBlock;
 			if (payment?.receipt) onReceipt(payment.receipt);
 			const q = await quoteCksolIcpPayment(owner, get(auth).walletType ?? 'unknown');
 			if (alive) {
@@ -166,6 +171,31 @@
 				onBusy(false);
 				void refresh();
 			}
+		}
+	}
+	async function verifyFunding() {
+		if (busy || loading || damaged || !fundingHeld || !validCandidate || !payment) return;
+		const held = payment, block = candidateBlock;
+		busy = true; onBusy(true); error = ''; recoveryNotice = '';
+		let action: ReturnType<typeof beginCksolOisyAction> | null = null;
+		try {
+			if (get(auth).walletType === 'oisy') { action = beginCksolOisyAction(owner); await action.ready; }
+			if (!alive) return;
+			if (!navigator.locks) throw new Error('Web Locks support is required to verify this payment safely.');
+			await navigator.locks.request(cksolPaymentKey(owner.toText()), { ifAvailable: true }, async lock => {
+				if (!lock) throw new Error('A ckSOL payment is active in another tab.');
+				if (!alive) return;
+				const result = await reconcileCksolIcpFunding(held, block, owner, localStorage, () => alive);
+				if (alive) {
+					payment = result;
+					if (result.receipt) onReceipt(result.receipt);
+					recoveryNotice = 'Collection verified. Select Return unused ICP to request the refund. No new ICP payment or mint request was submitted.';
+				}
+			});
+		} catch (e) { if (alive) error = String(e); }
+		finally {
+			await action?.close().catch(() => {});
+			if (alive) { busy = false; onBusy(false); void refresh(); }
 		}
 	}
 	onMount(() => {
@@ -263,6 +293,18 @@
 			ICP-paid processing is unavailable. Do not send SOL for a new mint. {unavailable}
 		</p>{/if}
 	{#if message}<p role="status" class="text-sm text-gray-300">{message}</p>{/if}
+		{#if recoveryNotice}<p role="status" class="text-sm text-emerald-300">{recoveryNotice}</p>{/if}
+		{#if fundingHeld}
+			<details class="space-y-3 rounded-lg border border-amber-800 p-3 text-sm text-gray-300">
+				<summary class="cursor-pointer">Recover an ICP collection with its ledger block</summary>
+				<p class="mt-3">If your wallet shows an ICP collection for this payment, enter its ICP ledger block number, not the approval block. Rumi verifies it against this saved payment.</p>
+				<p>This check cannot collect ICP or submit a mint. A matching block makes the original ICP deposit available to return, less the refund transaction fee. You request the refund separately.</p>
+				<p>Only blocks still served directly by the ICP ledger can be checked here. Archived or nonmatching blocks leave this payment held. Keep the receipt and contact support if verification cannot complete.</p>
+				<label class="block" for="cksol-icp-collection-block">ICP collection block number</label>
+				<input id="cksol-icp-collection-block" aria-label="ICP collection block number" class="w-full rounded-lg border border-gray-600 bg-gray-900 p-2" type="text" inputmode="numeric" maxlength="20" bind:value={candidateBlock} disabled={busy} />
+				<button class="rounded-lg border border-emerald-600 px-3 py-2 disabled:opacity-40" disabled={busy || loading || damaged || !validCandidate} onclick={verifyFunding}>Verify collection block</button>
+			</details>
+		{/if}
 	{#if payment?.receipt?.phase === 'Complete' && payment.receipt.refund_block?.[0] !== undefined}
 		<p class="text-sm text-emerald-300">
 			ICP refund confirmed. Processing charge: {icp(BigInt(payment.receipt.charged_e8s))}. Returned: {icp(
@@ -279,7 +321,10 @@
 		onclick={mint}>{busy ? 'Checking payment…' : label}</button
 	>
 	<p class="text-xs text-gray-400">
-			{#if checkingRefund}
+			{#if fundingHeld}
+				The collection block check only verifies an existing debit. It does not approve an allowance,
+				collect ICP or submit a mint.
+			{:else if checkingRefund}
 				This action requests only the existing ICP refund. No new ICP payment or mint request is submitted.
 			{:else if interrupted}
 				This receipt records the ICP payment only. The original SOL deposit still needs reconciliation.

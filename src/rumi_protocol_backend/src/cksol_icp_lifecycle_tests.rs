@@ -468,3 +468,50 @@ fn stale_minter_continuation_cannot_launch_a_second_pending_refund() {
     ));
     assert_eq!(payment(owner).unwrap().phase, CkSolPaymentPhase::Complete);
 }
+
+#[test]
+fn stale_funding_callback_after_recovery_cannot_mint_or_overwrite_receipt() {
+    use futures::{task::noop_waker, Future};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    let mut env = mock::Env::default();
+    env.pending = Some("fund");
+    env.funding_results.push_back(Ok(Ok(Nat::from(12u64))));
+    let owner = setup(env);
+    let mut original = Box::pin(start(
+        owner,
+        1,
+        deposit_cap(50_000, 10_000).unwrap(),
+        50_000,
+        1000,
+        10_000,
+    ));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::as_mut(&mut original).poll(&mut cx),
+        Poll::Pending
+    ));
+    mutate_state(|s| {
+        mark_interrupted_minter_calls(s, transport::time());
+        s.cksol_relay_in_flight.clear();
+        let j = s.cksol_icp_payments.get_mut(&owner).unwrap();
+        j.payment.phase = CkSolPaymentPhase::RefundReady;
+        j.payment.funding_block = Some(Nat::from(12u64));
+        j.payment.refundable_e8s = j.payment.deposit_e8s - j.payment.ledger_fee_e8s;
+    });
+    let recovered = payment(owner).unwrap();
+    mock::ENV.with(|e| e.borrow_mut().as_mut().unwrap().pending = None);
+    assert!(matches!(
+        Pin::as_mut(&mut original).poll(&mut cx),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(payment(owner).unwrap(), recovered);
+    mock::ENV.with(|e| {
+        let e = e.borrow();
+        let e = e.as_ref().unwrap();
+        assert_eq!((e.funds.len(), e.mints.len(), e.refunds.len()), (1, 0, 0));
+    });
+}

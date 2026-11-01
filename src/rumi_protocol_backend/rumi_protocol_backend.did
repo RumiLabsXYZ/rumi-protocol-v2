@@ -1569,16 +1569,16 @@ type Result_3 = variant {
   Ok : ReserveRedemptionAdminStatus;
   Err : ProtocolError;
 };
-type Result_30 = variant { Ok : bool; Err : ProtocolError };
-type Result_31 = variant { Ok : RedemptionResult; Err : RedemptionError };
-type Result_32 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
-type Result_33 = variant {
+type Result_30 = variant { Ok : CkSolIcpPayment; Err : text };
+type Result_31 = variant { Ok : bool; Err : ProtocolError };
+type Result_32 = variant { Ok : RedemptionResult; Err : RedemptionError };
+type Result_33 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
+type Result_34 = variant {
   Ok : ChainHotWalletBalanceRefresh;
   Err : ProtocolError;
 };
-type Result_34 = variant { Ok : SpBurnRefundReceipt; Err : ProtocolError };
-type Result_35 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
-type Result_36 = variant { Ok : CkSolIcpPayment; Err : text };
+type Result_35 = variant { Ok : SpBurnRefundReceipt; Err : ProtocolError };
+type Result_36 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
 type Result_37 = variant {
   Ok : ThreeUsdReserveIngressV2StatusView;
   Err : ProtocolError;
@@ -2460,10 +2460,11 @@ service : (ProtocolArg) -> {
   rearm_unsent_v2_default_account_refund : (nat) -> (Result_1);
   reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_29);
+  reconcile_cksol_icp_funding_from_block : (nat64, nat64) -> (Result_30);
   reconcile_held_sp_interest_receipt : (
       PendingStabilityPoolInterestNotification,
       blob,
-    ) -> (Result_30);
+    ) -> (Result_31);
   reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (
       Result_1,
     );
@@ -2488,26 +2489,26 @@ service : (ProtocolArg) -> {
       Result_1,
     );
   recover_cksol_deposit_id : (principal, nat64) -> (Result_9);
-  recover_pending_payout : (nat) -> (Result_30);
-  recover_pending_transfer : (nat64) -> (Result_30);
+  recover_pending_payout : (nat) -> (Result_31);
+  recover_pending_transfer : (nat64) -> (Result_31);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result_1);
   redeem_collateral : (principal, nat64) -> (Result_6);
   redeem_icp : (nat64) -> (Result_6);
-  redeem_quoted : (RedeemQuotedRequest) -> (Result_31);
-  redeem_reserves : (nat64, opt principal) -> (Result_32);
-  refresh_chain_hot_wallet_balance : (nat32) -> (Result_33);
-  refund_stability_pool_burn : (nat64, nat64, SpWritedownProof) -> (Result_34);
+  redeem_quoted : (RedeemQuotedRequest) -> (Result_32);
+  redeem_reserves : (nat64, opt principal) -> (Result_33);
+  refresh_chain_hot_wallet_balance : (nat32) -> (Result_34);
+  refund_stability_pool_burn : (nat64, nat64, SpWritedownProof) -> (Result_35);
   register_chain : (RegisterChainArg) -> (Result_1);
   register_ckdoge_collateral : () -> (Result_1);
   register_cksol_collateral : () -> (Result_1);
   register_xrp_collateral : () -> (Result_1);
-  repay_and_close_vault : (VaultArg) -> (Result_35);
+  repay_and_close_vault : (VaultArg) -> (Result_36);
   repay_to_vault : (VaultArg) -> (Result);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result);
   reset_bot_budget : (nat64) -> (Result_1);
   resolve_pending_treasury_stable_transfer : (nat) -> (Result_1);
   resolve_stuck_settlement_op : (nat32, nat64) -> (Result_1);
-  resume_cksol_icp_payment : (nat64) -> (Result_36);
+  resume_cksol_icp_payment : (nat64) -> (Result_30);
   retire_stability_pool_liquidate_with_reserves_v2 : (
       nat64,
       nat64,
@@ -2657,16 +2658,16 @@ service : (ProtocolArg) -> {
   stability_pool_reconcile_liquidation_protocol_fee : (blob, nat64) -> (
       Result_39,
     );
-  stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_30);
+  stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_31);
   stability_pool_settle_xrp_claim : (nat64, principal, text, opt nat32) -> (
       Result_2,
     );
   stability_pool_xrp_absorb_status : (XrpSpAbsorbRequest) -> (Result_44);
-  stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_30);
+  stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_31);
   start_cksol_deposit : () -> (Result_45);
   start_cksol_deposit_paid : (nat64, nat64) -> (Result_8);
   start_cksol_deposit_with_icp : (nat64, nat64, nat64, nat64, nat64) -> (
-      Result_36,
+      Result_30,
     );
   submit_burn_proof : (nat32, text) -> (Result_46);
   sweep_xrp_pending_open : (nat64) -> (Result_1);

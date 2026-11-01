@@ -17348,6 +17348,12 @@ fn get_cksol_icp_payment(owner: Principal) -> Option<rumi_protocol_backend::ckso
 async fn start_cksol_deposit_with_icp(sequence:u64, max_deposit_e8s:u64, rate_permyriad:u64, rate_timestamp_seconds:u64, ledger_fee_e8s:u64) -> Result<rumi_protocol_backend::cksol_icp_paid::CkSolIcpPayment,String> { rumi_protocol_backend::cksol_icp_paid::start(ic_cdk::caller(),sequence,max_deposit_e8s,rate_permyriad,rate_timestamp_seconds,ledger_fee_e8s).await }
 #[candid_method(update)]
 #[update]
+async fn reconcile_cksol_icp_funding_from_block(sequence: u64, candidate_block_index: u64) -> Result<rumi_protocol_backend::cksol_icp_paid::CkSolIcpPayment, String> {
+    rumi_protocol_backend::cksol_icp_paid::reconcile_funding_from_block(ic_cdk::caller(), sequence, candidate_block_index).await
+}
+
+#[candid_method(update)]
+#[update]
 async fn resume_cksol_icp_payment(sequence:u64) -> Result<rumi_protocol_backend::cksol_icp_paid::CkSolIcpPayment,String> { rumi_protocol_backend::cksol_icp_paid::resume(ic_cdk::caller(),sequence).await }
 #[candid_method(update)]
 #[update]
