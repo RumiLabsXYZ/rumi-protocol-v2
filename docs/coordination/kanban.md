@@ -351,3 +351,9 @@ DON-06c claimed by fresh agent:donation_final_review_c; DON-06d claimed by fresh
 | SOLPAY-3 | Passed | Yara and Zane | Final integrated patch | 101 focused tests; production builds; interface/state compatibility; both fresh round-5 reviewers PASS after capacity/recovery fixes. No live funds or deployment proof. |
 
 Worktree: `/private/tmp/rumi-cksol-user-funded-20261020`; branch `codex/cksol-user-funded`, base `ed99a4d7`. Existing dirty primary preserved. Shared generated backend declarations owned by Root only. Backend/source integration owned by Root. Native frontend worker uses available GPT-6 Luna; external provider route previously rejected for private-source envelope and is not retried. No live funds test or deployment is part of this implementation pass.
+
+## Oisy vault approval UX — November 1, 2026
+
+| Card | State | Owner | Scope | Evidence |
+| --- | --- | --- | --- | --- |
+| OVUX-01 | Review | Oisy vault approval UX agent | Reduce redundant Oisy signer requests for new-vault creation while preserving the operation journal and ambiguous-transfer recovery. Separate from paused existing-vault top-ups. | 81 focused tests, production build/auth assets and two bounded source reviews pass. Expected signer requests: deposit-only 6→4; compound 6→5, with background Oisy status checks deferred to a user click. Live wallet screen count and publication unverified. See `oisy-vault-approval-ux-20261101.md`. |

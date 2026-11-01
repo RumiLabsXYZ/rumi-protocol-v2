@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '$lib/services/auth';
+  import { openOisySignerChannel } from '$lib/services/oisySigner';
   import { ApiClient } from '$lib/services/protocol/apiClient';
   import { VAULT_PULL_STATUS_EVENT, type VaultPullRequest } from '$lib/services/protocol/vaultOperationJournal';
   import { walletStore } from '$lib/stores/wallet';
@@ -12,20 +14,50 @@
   let busy = false;
   let statusReadError = '';
   let checkedOwner = '';
+  let checkedWalletType: string | null = null;
+  let manualCheckPending = false;
+  $: requiresUserCheck = $currentWalletType === WALLET_TYPES.OISY;
   let generation = 0;
   $: owner = $walletStore.isConnected && !$walletStore.loading ? ($walletStore.principal?.toString() ?? '') : '';
-  $: if (owner && owner !== checkedOwner) {
+  $: if (owner && (owner !== checkedOwner || $currentWalletType !== checkedWalletType)) {
     generation++;
     checkedOwner = owner;
+    checkedWalletType = $currentWalletType;
     submitted = null;
     statusReadError = '';
-    refresh();
+    manualCheckPending = requiresUserCheck;
+    if (!requiresUserCheck) refresh();
   }
   $: if (!owner) {
     if (checkedOwner) generation++;
     checkedOwner = '';
+    checkedWalletType = null;
+    manualCheckPending = false;
     submitted = null;
     statusReadError = '';
+  }
+
+  async function requestRefresh() {
+    if (busy) return;
+    const ownerAtClick = owner;
+    const walletTypeAtClick = $currentWalletType;
+    const generationAtClick = generation;
+    const sessionAtClick = $walletSessionGeneration;
+    busy = true;
+    try {
+      // Open directly from this click. Oisy signs authenticated queries too.
+      if (requiresUserCheck && $walletStore.principal) {
+        await openOisySignerChannel($walletStore.principal);
+      }
+      if (owner !== ownerAtClick || $currentWalletType !== walletTypeAtClick || generation !== generationAtClick || $walletSessionGeneration !== sessionAtClick) return;
+      await refresh();
+    } catch (error) {
+      if (owner === ownerAtClick && $currentWalletType === walletTypeAtClick && generation === generationAtClick && $walletSessionGeneration === sessionAtClick) {
+        statusReadError = error instanceof Error ? error.message : 'Could not open the wallet status check.';
+      }
+    } finally {
+      busy = false;
+    }
   }
 
   async function refresh() {
@@ -35,6 +67,7 @@
       const result = await ApiClient.getSubmittedVaultCollateralPull();
       if (isCurrentVaultPullStatusRead(current, generation, ownerAtStart, owner)) {
         submitted = result;
+        manualCheckPending = false;
         statusReadError = '';
       }
     } catch (error) {
@@ -53,7 +86,10 @@
       : event instanceof MessageEvent
         ? event.data?.owner
         : undefined;
-    if (!signalOwner || signalOwner === owner) refresh();
+    if (!signalOwner || signalOwner === owner) {
+      if (requiresUserCheck) manualCheckPending = true;
+      else refresh();
+    }
   }
 
   function requestDetails(request: VaultPullRequest): string {
@@ -120,7 +156,7 @@
     </p>
     <p class="operation-details">{requestDetails(submitted.request)}</p>
     {#if statusReadError}<p class="status-error" role="status">Status refresh failed: {statusReadError} The last confirmed receipt shown above may be stale.</p>{/if}
-    <button on:click={refresh} disabled={busy}>Refresh status</button>
+    <button on:click={requestRefresh} disabled={busy}>Refresh status</button>
     {:else}
     <p>
       Vault operation {submitted.operationId.toString()} has an unknown collateral transfer result.
@@ -142,13 +178,18 @@
     <button on:click={recover} disabled={busy || !/^\d+$/.test(blockIndex.trim())}>
       {busy ? 'Checking exact block…' : 'Verify block and resume'}
     </button>
-    <button on:click={refresh} disabled={busy}>Refresh status</button>
+    <button on:click={requestRefresh} disabled={busy}>Refresh status</button>
     {/if}
+  </section>
+{:else if owner && manualCheckPending && !statusReadError}
+  <section class="recovery" aria-label="Check pending vault action">
+    <p>Need to resume a vault action? Checking its status will ask for confirmation in Oisy.</p>
+    <button on:click={requestRefresh} disabled={busy}>Check pending vault action</button>
   </section>
 {:else if owner && statusReadError}
   <section class="recovery recovery-error" role="status">
     <p>Could not check for a submitted vault collateral pull: {statusReadError}</p>
-    <button on:click={refresh} disabled={busy}>Retry status check</button>
+    <button on:click={requestRefresh} disabled={busy}>Retry status check</button>
   </section>
 {/if}
 

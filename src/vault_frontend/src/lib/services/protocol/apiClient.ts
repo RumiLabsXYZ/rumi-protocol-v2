@@ -498,6 +498,19 @@ private static async refreshVaultData(): Promise<void> {
             if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
             return response.Ok;
           },
+          // A successful V2 reply is the certified result of this exact request.
+          // Typed errors and lost replies still reconcile through the backend journal.
+          resultFromDispatch: (reply, exact) => {
+            // The compound endpoint also returns Ok when only vault creation succeeded.
+            // Its journal is still needed to distinguish a deferred/failed borrow.
+            if (!('OpenVault' in exact)) return undefined;
+            const opened = reply as { vault_id?: unknown; block_index?: unknown };
+            if (typeof opened?.vault_id !== 'bigint' || typeof opened?.block_index !== 'bigint' ||
+                opened.vault_id < 0n || opened.block_index < 0n ||
+                opened.vault_id > BigInt(Number.MAX_SAFE_INTEGER) ||
+                opened.block_index > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
+            return { success: true, vaultId: Number(opened.vault_id), blockIndex: Number(opened.block_index) };
+          },
           beforeDispatch: () => lifecycle?.onDispatch?.(),
           completed,
           acknowledge: async (operationId) => {
@@ -505,6 +518,7 @@ private static async refreshVaultData(): Promise<void> {
             const response = await actor.ack_vault_operation({ operation_id: operationId });
             assertVaultOwner();
             if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+            return response.Ok;
           },
           reconcileFromBlock: async (operationId: bigint, blockIndex: bigint) => {
             assertVaultOwner();
