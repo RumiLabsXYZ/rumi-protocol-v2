@@ -1,15 +1,19 @@
 {
   "projectId": "rumi-security",
-  "title": "Rumi Protocol · Security & Recovery",
+  "title": "Rumi Protocol \u00b7 Security & Recovery",
   "lead": "Bram",
   "canister": "uhpzm-qaaaa-aaaah-qvcfa-cai",
   "network": "ic",
   "identity": "lookout-rumi-security-publisher",
-  "allowedLinkHosts": ["github.com", "rumiprotocol.com"],
+  "allowedLinkHosts": [
+    "github.com",
+    "rumiprotocol.com"
+  ],
   "source": {
     "kind": "curated-json",
     "path": "docs/coordination/rumi-security-lookout.json"
   },
   "presentationPath": "./rumi-security-lookout-presentation.json",
-  "priorityPath": "./rumi-security-lookout-priorities.json"
+  "priorityPath": "./rumi-security-lookout-priorities.json",
+  "completionPath": "./rumi-security-lookout-completions.json"
 }
