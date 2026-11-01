@@ -1222,6 +1222,7 @@ pub enum BotProofAuditEvent {
 /// adding public Event variants would break older clients of `get_events`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
+    NicpRedemptionClaimUpdated { claim: crate::nicp_redemption::NicpRedemptionClaim },
     /// Internal bot claim proof transitions share the ordered private journal
     /// so they remain replayable without expanding the public Event variant set.
     BotProofAudit { event: BotProofAuditEvent },
@@ -1918,6 +1919,17 @@ fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
 
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
+        PendingPayoutEvent::NicpRedemptionClaimUpdated { claim } => {
+            for nonce in [claim.funding_nonce, claim.approval_nonce] {
+                state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            }
+            let vault_id = claim.vault_id;
+            state.nicp_redemption_claim = Some(claim);
+            state.reindex_vault_cr(vault_id);
+            state.update_total_collateral_ratio_and_mode(
+                state.last_icp_rate.unwrap_or(UsdIcp::from(Decimal::ZERO)),
+            );
+        }
         PendingPayoutEvent::BotProofAudit { event } => apply_bot_proof_audit_event(state, event),
         PendingPayoutEvent::Amm1DonationStarted { operation } => {
             state.amm1_donation_nonce = state.amm1_donation_nonce.max(operation.notify_nonce);
@@ -7308,5 +7320,40 @@ mod add_margin_recording_tests {
         ));
         assert_eq!(crate::storage::count_events(), events_before);
         assert_eq!(state.vault_id_to_vaults.get(&73).unwrap().collateral_amount, u64::MAX);
+    }
+}
+
+/// Persist the complete claim transition before any external continuation.
+/// The vault debt, accrued interest, owner and nICP source reference do not
+/// change. Only the separate claim now supplies collateral value and custody.
+pub fn record_nicp_redemption_claim(
+    state: &mut State,
+    claim: crate::nicp_redemption::NicpRedemptionClaim,
+) {
+    let event = PendingPayoutEvent::NicpRedemptionClaimUpdated { claim };
+    crate::storage::record_pending_payout_event(&event);
+    apply_pending_payout_event(state, event);
+}
+
+#[cfg(test)]
+mod nicp_private_claim_journal_tests {
+    use super::*;
+
+    #[test]
+    fn claim_replay_restores_custody_and_advances_nonce_without_minting() {
+        let mut state = State::default();
+        state.frozen = true;
+        let mut claim = crate::nicp_redemption::tests::fixture();
+        claim.funding_nonce = (100u128 << 64) | 7;
+        claim.approval_nonce = (100u128 << 64) | 8;
+        let event = PendingPayoutEvent::NicpRedemptionClaimUpdated { claim: claim.clone() };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&event, &mut bytes).unwrap();
+        let restored: PendingPayoutEvent = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        apply_pending_payout_event(&mut state, restored);
+        assert_eq!(state.nicp_redemption_claim, Some(claim));
+        assert_eq!(state.op_nonce_counter, 9);
+        assert_eq!(state.total_borrowed_icusd_amount(), ICUSD::new(0));
+        assert!(state.has_pending_nicp_claim(51));
     }
 }

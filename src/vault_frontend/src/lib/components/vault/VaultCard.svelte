@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { nicpClaimValueUsd } from '../../utils/nicpClaim';
   import { formatNumber, formatTokenBalance, formatStableDisplay, formatStableTx } from '../../utils/format';
   import type { Vault } from '../../services/types';
   import { protocolService } from '../../services/protocol';
@@ -29,6 +30,9 @@
   // The backend keeps AddMargin V2 as an explicit rejecting method until its
   // journal can safely compensate a pull if liquidation removes the vault.
   const ADD_MARGIN_V2_ENABLED: boolean = false;
+
+  $: redemptionClaim = vault.nicpRedemptionClaim;
+  $: isRedemptionClaim = !!redemptionClaim;
 
   // ── Per-collateral derived values ──
   $: vaultCollateralType = vault.collateralType || CANISTER_IDS.ICP_LEDGER;
@@ -61,7 +65,7 @@
   $: vaultCollateralPrice = vaultCollateralInfo?.price || (vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
   $: vaultMinCR = getMinimumCR(vaultCollateralType);
   $: vaultLiqCR = getLiquidationCR(vaultCollateralType);
-  $: vaultCollateralAmount = vault.collateralAmount ?? vault.icpMargin;
+  $: vaultCollateralAmount = redemptionClaim?.icpAmount ?? vault.collateralAmount ?? vault.icpMargin;
 
   const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number } }>();
 
@@ -81,7 +85,9 @@
   }
 
   // ── Derived display ──
-  $: collateralValueUsd = vaultCollateralAmount * vaultCollateralPrice;
+  $: collateralValueUsd = redemptionClaim
+    ? nicpClaimValueUsd(redemptionClaim, icpPrice, vaultCollateralInfo?.lstHaircut)
+    : vaultCollateralAmount * vaultCollateralPrice;
   $: collateralRatio = tickingDebt > 0
     ? collateralValueUsd / tickingDebt : Infinity;
   $: borrowedValueUsd = tickingDebt;
@@ -313,7 +319,7 @@
     ? computeProjectedRate(rateCurveBaseRate, rateCurveMarkers, collateralRatio, recoveryMultiplier)
     : baseInterestRate;
   $: fmtRatio = collateralRatio === Infinity ? '—' : `${(collateralRatio * 100).toFixed(1)}%`;
-  $: riskTooltip = riskLevel === 'warning'
+  $: riskTooltip = isRedemptionClaim ? 'Liquidation suspended during protocol-controlled redemption' : riskLevel === 'warning'
     ? 'Approaching minimum collateral ratio'
     : riskLevel === 'danger' ? 'At risk of liquidation. Add collateral or repay.' : '';
 
@@ -392,6 +398,7 @@
 
   // ── Action state ──
   let activeAction: 'add' | 'withdraw' | 'borrow' | 'repay' | null = null;
+  $: if (isRedemptionClaim && activeAction && activeAction !== 'repay') activeAction = 'repay';
   let addCollateralAmount = '';
   let withdrawAmount = '';
   let borrowAmount = '';
@@ -406,7 +413,7 @@
   let closeOnFullRepay = true;
 
   function selectAction(action: 'add' | 'withdraw' | 'borrow' | 'repay') {
-    if (isProcessing) return;
+    if (isProcessing || (isRedemptionClaim && action !== 'repay')) return;
     if (activeAction === action) return; // already selected — do nothing
     clearMessages();
     addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
@@ -524,8 +531,8 @@
     return v > 0 && maxRepayable > 0 && v > maxRepayable;
   })();
 
-  $: canWithdraw = tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
-  $: canClose = tickingDebt < DUST_THRESHOLD;
+  $: canWithdraw = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
+  $: canClose = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD;
 
   // Detect if withdraw amount is the full collateral (max)
   $: isMaxWithdraw = (() => {
@@ -551,7 +558,7 @@
   // instead of three). `isMaxRepay` guarantees `repayAmount == maxRepayable`
   // (the live debt), so the compound method always receives a full-debt amount.
   $: fullIcusdRepayWithCollateral =
-      repayTokenType === 'icUSD'
+      !isRedemptionClaim && repayTokenType === 'icUSD'
       && isMaxRepay
       && vaultCollateralAmount > 0;
   // The "keep vault open" alternative routes through plain repay_to_vault, which
@@ -807,8 +814,8 @@
     {/if}
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
-      <span class="cell-label">Collateral</span>
-      <span class="cell-value">{fmtMargin} {collateralSymbol}</span>
+      <span class="cell-label">{isRedemptionClaim ? 'ICP redemption claim' : 'Collateral'}</span>
+      <span class="cell-value">{fmtMargin} {isRedemptionClaim ? 'ICP' : collateralSymbol}</span>
       <span class="cell-sub">${fmtCollateralUsd}</span>
     </span>
     <span class="vault-cell">
@@ -817,6 +824,9 @@
       <span class="cell-sub" style="color:{interestColor}">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
     </span>
     <span class="vault-cell vault-cell-bar">
+      {#if isRedemptionClaim}
+        <span class="cell-sub">Liquidation suspended</span>
+      {:else}
       <span class="gauge-track">
         <span class="gauge-zone gauge-zone-pink" style="width:{liqZonePct}%"></span>
         <span class="gauge-zone gauge-zone-pink-purple" style="width:{fadeEndPct - liqZonePct}%; left:{liqZonePct}%"></span>
@@ -830,6 +840,7 @@
         <span class="gauge-label-abs" style="left:{liqZonePct}%">liq</span>
         <span class="gauge-label-abs gauge-label-end">300%+</span>
       </span>
+      {/if}
     </span>
     <span class="vault-cell vault-cell-ratio">
       <span class="cell-label">CR</span>
@@ -843,7 +854,7 @@
         </span>
       {:else}
         <span class="cell-value ratio-text" style="color:{crColor}" title={riskTooltip}>
-          {#if riskLevel === 'warning' || riskLevel === 'danger'}
+          {#if !isRedemptionClaim && (riskLevel === 'warning' || riskLevel === 'danger')}
             <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
           {/if}
           {fmtRatio}
@@ -864,10 +875,14 @@
   <!-- ── Expanded: pill groups + two-column layout ── -->
   {#if expanded}
     <div class="vault-actions">
+      {#if redemptionClaim}
+        <p class="cell-sub">Protocol-controlled ICP redemption claim · {redemptionClaim.stage}. Collateral cannot be withdrawn or borrowed against. Liquidation is suspended. Debt continues under the existing nICP interest rules, including after settlement; repayment remains available.</p>
+      {/if}
       <!-- Action layout: pills top-right, stats left, input right -->
       <div class="action-layout">
         <!-- Pill groups: right column -->
         <div class="pill-groups">
+          {#if !isRedemptionClaim}
           <div class="pill-group pill-group-collateral">
             {#if !isNativeXrp}
               <!-- Native-XRP has no IC-side top-up: add_margin is backend-rejected
@@ -880,9 +895,10 @@
               class:pill-disabled={maxWithdrawable <= 0 && tickingDebt > 0}
               on:click={() => selectAction('withdraw')} disabled={isProcessing || (maxWithdrawable <= 0 && tickingDebt > 0)}>Withdraw</button>
           </div>
+          {/if}
           <div class="pill-group pill-group-debt">
-            <button class="pill pill-debt" class:pill-active-debt={activeAction === 'borrow'}
-              on:click={() => selectAction('borrow')} disabled={isProcessing}>Borrow</button>
+            {#if !isRedemptionClaim}<button class="pill pill-debt" class:pill-active-debt={activeAction === 'borrow'}
+              on:click={() => selectAction('borrow')} disabled={isProcessing}>Borrow</button>{/if}
             <button class="pill pill-debt" class:pill-active-debt={activeAction === 'repay'}
               on:click={() => selectAction('repay')} disabled={isProcessing}>Repay</button>
           </div>
@@ -944,7 +960,7 @@
               </span>
             </div>
             <!-- Liq price row -->
-            {#if tickingDebt > 0 || activeAction === 'borrow'}
+            {#if !isRedemptionClaim && (tickingDebt > 0 || activeAction === 'borrow')}
               <div class="stat-row">
                 <span class="stat-label">Liq. price</span>
                 <span class="stat-value">

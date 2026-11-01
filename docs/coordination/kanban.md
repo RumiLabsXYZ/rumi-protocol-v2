@@ -351,3 +351,14 @@ DON-06c claimed by fresh agent:donation_final_review_c; DON-06d claimed by fresh
 | SOLPAY-3 | Passed | Yara and Zane | Final integrated patch | 101 focused tests; production builds; interface/state compatibility; both fresh round-5 reviewers PASS after capacity/recovery fixes. No live funds or deployment proof. |
 
 Worktree: `/private/tmp/rumi-cksol-user-funded-20261020`; branch `codex/cksol-user-funded`, base `ed99a4d7`. Existing dirty primary preserved. Shared generated backend declarations owned by Root only. Backend/source integration owned by Root. Native frontend worker uses available GPT-6 Luna; external provider route previously rejected for private-source envelope and is not retried. No live funds test or deployment is part of this implementation pass.
+
+## Vault 51 redemption migration — November 1, 2026
+
+User authorizes protocol-controlled nICP redemption, retained debt, a public transparency entry, and temporary liquidation suspension for this vault backed by his personal guarantee. No other vault's collateral may fund this migration. Main coordinator applies team-agent-orchestration; existing reviewers are reused for integration/review without a new team. Sol-class agents remain integration/review roles; primary agent owns new implementation. No private-source export to another provider.
+
+| ID | State | Owner | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- |
+| V51-01 | Source verified | root | New durable redemption module and operator methods | 12 backend tests; live Candid compatibility; no migration dispatched; branch `codex/vault51-redemption-claim-20261101` |
+| V51-02 | Source verified | claim_accounting_review | Integrate claim accounting and spending exclusions | fixed ICP valuation, retained nICP terms, repayment-only, 33 frontend regressions; current deployed sunset/3USD fixes preserved |
+| V51-03 | Software published | root | Transparency notice and release evidence | exact backend/asset readbacks verified; claim=null, vault51 still1500 nICP; financial initiation remains manual user action; PR612 |
+| V51-04 | Passed | claim_custody_review | Independent custody review | exact dispatch, unknown outcomes, settlement attribution, no extra mint; final scoped compatibility/replay review passed |

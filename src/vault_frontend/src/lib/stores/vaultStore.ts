@@ -1,3 +1,4 @@
+import { nicpClaimValueUsd } from '../utils/nicpClaim';
 import { writable, get } from 'svelte/store';
 import { protocolService } from '../services/protocol';
 import { walletStore } from './wallet';
@@ -8,6 +9,7 @@ import type { VaultDTO } from '../services/types';
 
 // Define enhanced vault type with additional calculated properties
 export interface EnhancedVault {
+  nicpRedemptionClaim?: VaultDTO['nicpRedemptionClaim'];
   vaultId: number;
   owner: string;
   icpMargin: number;
@@ -156,7 +158,7 @@ function createVaultStore() {
             // Double-check the vault is not effectively closed
             const hasCollateral = Number(vault.collateralAmount ?? vault.icpMargin) > 0;
             const hasDebt = Number(vault.borrowedIcusd) > 0;
-            return hasCollateral || hasDebt;
+            return hasCollateral || hasDebt || !!vault.nicpRedemptionClaim;
           })
           .map(vault => this.enhanceVault(vault, icpPrice));
         
@@ -224,7 +226,9 @@ function createVaultStore() {
       // Log the values for debugging
       console.log(`Enhancing vault #${vault.vaultId} - ${collateralSymbol}=${numCollateralAmount}, icUSD=${borrowedIcusd}, price=${collateralPrice}`);
 
-      const collateralValueUsd = numCollateralAmount * collateralPrice;
+      const collateralValueUsd = vault.nicpRedemptionClaim
+        ? nicpClaimValueUsd(vault.nicpRedemptionClaim, currentIcpPrice, ctInfo?.lstHaircut)
+        : numCollateralAmount * collateralPrice;
 
       // Calculate collateral ratio (prevent division by zero)
       const collateralRatio = borrowedIcusd > 0

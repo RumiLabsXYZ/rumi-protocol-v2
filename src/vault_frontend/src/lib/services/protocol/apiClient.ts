@@ -1,3 +1,4 @@
+import { decodeNicpClaim } from '../../utils/nicpClaim';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
 import { BigIntUtils } from '../../utils/bigintUtils';
@@ -1837,6 +1838,7 @@ static async repayToVaultWithStable(
           console.log(`Processing vault #${vaultId}: ${ctSymbol}=${collateralAmount}, icUSD=${borrowedIcusd}`);
 
           vaults.push({
+            nicpRedemptionClaim: decodeNicpClaim((v as any).nicp_redemption_claim),
             vaultId,
             owner: v.owner.toString(),
             icpMargin,

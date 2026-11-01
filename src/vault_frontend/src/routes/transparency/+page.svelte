@@ -2,6 +2,33 @@
   import { onMount } from 'svelte';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { CANISTER_IDS } from '$lib/config';
+  import type { NicpRedemptionClaim } from '../../../../declarations/rumi_protocol_backend/rumi_protocol_backend.did';
+
+  let redemptionClaim: NicpRedemptionClaim | null = null;
+  let claimStatus = 'Checking on-chain migration status';
+  let claimReadError = '';
+  const claimStages: Record<string, string> = {
+    Prepared: 'Prepared — withdrawal not submitted',
+    FundingSubmitted: 'Custody transfer submitted — awaiting receipt',
+    Funded: 'nICP in dedicated protocol custody — withdrawal not submitted',
+    ApprovalSubmitted: 'Redemption allowance submitted — awaiting receipt',
+    Approved: 'Allowance confirmed — withdrawal not submitted',
+    WithdrawalSubmitted: 'Withdrawal submitted — verifying outcome',
+    ClaimConfirmed: 'Redemption claim confirmed — awaiting ICP',
+    Settled: 'ICP received in dedicated protocol custody',
+  };
+  onMount(async () => {
+    try {
+      const result = await publicActor.get_nicp_redemption_claim();
+      redemptionClaim = result[0] ?? null;
+      claimStatus = redemptionClaim
+        ? (claimStages[Object.keys(redemptionClaim.stage)[0]] ?? 'Unknown migration status')
+        : 'Planned — no migration recorded';
+    } catch {
+      claimStatus = 'Live migration status unavailable';
+      claimReadError = 'The notice below describes the plan. A failed status lookup does not establish whether a transaction occurred.';
+    }
+  });
 
   interface AdminMintEvent {
     amount: number;
@@ -75,8 +102,28 @@
 <article class="doc-page">
   <h1 class="doc-title">Transparency</h1>
 
+  <section class="doc-section" aria-labelledby="vault51-migration" id="vault-51-redemption">
+    <h2 class="doc-heading" id="vault51-migration">Vault #51: nICP redemption migration</h2>
+    <p><strong>November 1, 2026 · {claimStatus}</strong></p>
+    {#if claimReadError}<p>{claimReadError}</p>{/if}
+    <p>Rumi's founder has authorized migration of vault #51 from nICP collateral to a WaterNeuron redemption claim controlled by the protocol, followed by ICP held in the same dedicated protocol account when redemption settles. The verified status above distinguishes preparation, a submitted request, a confirmed claim, and receipt of ICP.</p>
+    <p>The connected vault view on November 1 showed <strong>1,500 nICP</strong> and approximately <strong>2,871.08 icUSD of debt</strong>. Debt changes with repayments and interest. WaterNeuron's observed exchange rate implies approximately <strong>1,942.86 ICP</strong> before applicable deductions; the actual claim amount must come from the confirmed withdrawal.</p>
+    <p>The migration preserves the vault's outstanding debt and accrued interest, with <strong>the existing nICP collateral parameters and dynamic interest-rate rules retained</strong>, including after ICP arrives. The fixed ICP amount is valued at the ICP price with the nICP haircut; it does not accrue further nICP staking rewards. This migration does not mint icUSD, forgive debt, or pay collateral to the founder.</p>
+    <p><strong>Timing and risk:</strong> WaterNeuron's interface advertises a two-week delayed withdrawal with a transition warning. The short-term backing neuron queried on November 1 reported approximately <strong>151 days of dissolve delay</strong>. Two-week settlement is not confirmed. During a pending redemption, the claim would not be immediately available for ordinary liquidation or redemption by icUSD holders. ICP price declines, continuing interest, or a delayed or failed payout could create a shortfall. Protocol custody alone does not eliminate that risk.</p>
+    <p><strong>Exception for vault #51:</strong> ordinary borrowing, collateral withdrawal, liquidation, and icUSD redemption against this vault are suspended while the claim or received ICP remains in dedicated custody. Repayment remains available and interest continues. The founder has personally committed to covering any shortfall and keeping the protocol whole. That commitment is not additional on-chain collateral or an independently funded guarantee.</p>
+    {#if redemptionClaim}
+      <p>Original collateral: <strong>{fmtIcusd(Number(redemptionClaim.original_nicp_e8s))} nICP</strong>. Recorded ICP amount: <strong>{fmtIcusd(Number(redemptionClaim.received_icp_e8s[0] ?? redemptionClaim.icp_due_e8s))} ICP</strong>{#if !('ClaimConfirmed' in redemptionClaim.stage) && !('Settled' in redemptionClaim.stage)} (provisional until the withdrawal is verified){/if}.</p>
+      <p class="meta-text">Custodian: <code>{CANISTER_IDS.PROTOCOL}</code> · Dedicated subaccount: <code>{Array.from(redemptionClaim.escrow_subaccount).map(b => b.toString(16).padStart(2, '0')).join('')}</code></p>
+      {#if redemptionClaim.withdrawal_id.length}<p>WaterNeuron withdrawal #{redemptionClaim.withdrawal_id[0]?.toString()}.</p>{/if}
+      {#if redemptionClaim.burn_block.length}<p>nICP burn block #{redemptionClaim.burn_block[0]?.toString()} on ledger <a href="https://dashboard.internetcomputer.org/canister/buwm7-7yaaa-aaaar-qagva-cai" target="_blank" rel="noopener noreferrer">buwm7-7yaaa-aaaar-qagva-cai</a>.</p>{/if}
+      {#if redemptionClaim.settlement_block.length}<p>ICP settlement block <a href={`https://dashboard.internetcomputer.org/transaction/${redemptionClaim.settlement_block[0]}`} target="_blank" rel="noopener noreferrer">#{redemptionClaim.settlement_block[0]?.toString()}</a>.</p>{/if}
+      {#if redemptionClaim.last_error.length}<p>Operator reconciliation required: {redemptionClaim.last_error[0]}</p>{/if}
+    {/if}
+    <p class="meta-text">References: <a href="https://forum.dfinity.org/t/motion-wind-down-waterneuron/76274" target="_blank" rel="noopener noreferrer">WaterNeuron wind-down proposal</a> · <a href="https://waterneuron.fi/" target="_blank" rel="noopener noreferrer">WaterNeuron redemption interface</a> · <a href="https://dashboard.internetcomputer.org/neuron/13680855657433416220" target="_blank" rel="noopener noreferrer">Backing neuron</a></p>
+  </section>
+
   <section class="doc-section">
-    <p>Every administrative action on Rumi Protocol is recorded as an on-chain event in the protocol's immutable event log. This page displays all admin icUSD mints with their stated reasons and linked ledger blocks for independent verification.</p>
+    <p>The section below displays admin icUSD mint events with their stated reasons and linked ledger blocks for independent verification.</p>
   </section>
 
   <section class="doc-section">
@@ -163,7 +210,7 @@
   <section class="doc-section">
     <h2 class="doc-heading">Verification</h2>
     <p>Each admin mint creates an <code>icrc1_transfer</code> transaction on the icUSD ledger (<code>{CANISTER_IDS.ICUSD_LEDGER}</code>). Click any block link above to verify the transaction independently on the IC Dashboard. The protocol's event log is stored in stable memory and persists across canister upgrades.</p>
-    <p>The protocol canister is the icUSD minter. When the minter calls <code>icrc1_transfer</code>, the ledger mints new tokens to the recipient. This is the same mechanism used for normal borrowing — admin mints are not a separate code path.</p>
+    <p>The protocol canister is the icUSD minter. Admin minting and ordinary borrowing use the ledger's mint mechanism, but have different authorization and accounting paths. The vault #51 migration described above does not use either minting path.</p>
   </section>
 </article>
 
