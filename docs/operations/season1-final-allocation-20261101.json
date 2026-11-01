@@ -1,0 +1,220 @@
+{
+  "status": "PROPOSED compensation; not exact counterfactual snapshots or an approved allocation",
+  "method": "Recorded debt changes timed exactly; current debt interest allowed across whole interval; full recorded 3pool composition cap if continuous positive 3USD holdings; current Stability Pool balance ceiling; unchanged 3USD balance and no AMM liquidity events. Historical source/valuation assumptions remain explicit.",
+  "start_ns": 1792972800000000000,
+  "end_ns": 1793491199000000000,
+  "before_total_e8": 429409727203403,
+  "additional_total_e8": 55971020305749,
+  "rows": [
+    {
+      "principal": "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae",
+      "epoch20_snapshot_points_e8": 3772047108463,
+      "comparison_only_scaled_points_e8": 3686010565803,
+      "components_e8": {
+        "debt": 3509767711837,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 3509767711837,
+      "before_points_e8": 124054833934753,
+      "proposed_final_points_e8": 127564601646590
+    },
+    {
+      "principal": "khkrd-hwwv7-2m5k4-n6tyi-qqasb-yay5e-dpbtf-2abbf-bzji2-zrvey-dae",
+      "epoch20_snapshot_points_e8": 25208640480101,
+      "comparison_only_scaled_points_e8": 24633657132947,
+      "components_e8": {
+        "debt": 3967791467168,
+        "recorded_pool_cap": 10977529624168,
+        "icusd_sp_current_ceiling": 1385308799907,
+        "threeusd_sp": 8311755604885
+      },
+      "additional_points_e8": 24642385496128,
+      "before_points_e8": 121279349988563,
+      "proposed_final_points_e8": 145921735484691
+    },
+    {
+      "principal": "6ixwn-zfdck-dvelg-ng2um-zaoqj-frt7r-ojyox-4hhb2-cexnt-3wsf5-pqe",
+      "epoch20_snapshot_points_e8": 4981732361716,
+      "comparison_only_scaled_points_e8": 4868104133719,
+      "components_e8": {
+        "debt": 1568565351816,
+        "recorded_pool_cap": 952782083712,
+        "icusd_sp_current_ceiling": 611028891111,
+        "threeusd_sp": 1739385217829
+      },
+      "additional_points_e8": 4871761544468,
+      "before_points_e8": 62648695432628,
+      "proposed_final_points_e8": 67520456977096
+    },
+    {
+      "principal": "cgsme-y5yno-hrlam-ws6he-aryy7-s5m43-6sm4a-4uqds-avudn-tyubn-7qe",
+      "epoch20_snapshot_points_e8": 15541818177008,
+      "comparison_only_scaled_points_e8": 15187325175161,
+      "components_e8": {
+        "debt": 661495338458,
+        "recorded_pool_cap": 9498724740807,
+        "icusd_sp_current_ceiling": 304564380322,
+        "threeusd_sp": 4724162949953
+      },
+      "additional_points_e8": 15188947409540,
+      "before_points_e8": 60373558647598,
+      "proposed_final_points_e8": 75562506057138
+    },
+    {
+      "principal": "tjsut-lqpan-5xkiw-dq3j4-xpp53-uhhy2-dyam5-vtrcx-aadcg-bvxsx-6ae",
+      "epoch20_snapshot_points_e8": 5382337672202,
+      "comparison_only_scaled_points_e8": 5259572046157,
+      "components_e8": {
+        "debt": 1684667365391,
+        "recorded_pool_cap": 1073997928240,
+        "icusd_sp_current_ceiling": 603303729283,
+        "threeusd_sp": 1901189255799
+      },
+      "additional_points_e8": 5263158278713,
+      "before_points_e8": 32707880912399,
+      "proposed_final_points_e8": 37971039191112
+    },
+    {
+      "principal": "akzqy-74twk-ctls2-jufen-kygii-cev4l-w5w62-foeml-rmgye-xtwme-uae",
+      "epoch20_snapshot_points_e8": 2490755519957,
+      "comparison_only_scaled_points_e8": 2433943930020,
+      "components_e8": {
+        "debt": 677828603143,
+        "recorded_pool_cap": 774537608400,
+        "icusd_sp_current_ceiling": 122445880837,
+        "threeusd_sp": 860157507414
+      },
+      "additional_points_e8": 2434969599794,
+      "before_points_e8": 24102899476821,
+      "proposed_final_points_e8": 26537869076615
+    },
+    {
+      "principal": "2bcfz-dnfki-nq7q2-v4gmo-4kvkg-3dabg-yn5it-ivcs5-ikpss-kk77p-lae",
+      "epoch20_snapshot_points_e8": 97986776383,
+      "comparison_only_scaled_points_e8": 95751798074,
+      "components_e8": {
+        "debt": 48434245255,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 48434245255,
+      "before_points_e8": 2055780112255,
+      "proposed_final_points_e8": 2104214357510
+    },
+    {
+      "principal": "nqh27-eplay-bkspf-s4aho-uhvlu-mvwgx-gepgb-6jb3h-tm5qg-egucg-7qe",
+      "epoch20_snapshot_points_e8": 836409289,
+      "comparison_only_scaled_points_e8": 817331647,
+      "components_e8": {
+        "debt": 818099369,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 818099369,
+      "before_points_e8": 1430783986591,
+      "proposed_final_points_e8": 1431602085960
+    },
+    {
+      "principal": "ivhvf-a2nxr-t436u-6t3g3-eckj2-gd6ky-q575b-37ciq-7r43a-62nav-wqe",
+      "epoch20_snapshot_points_e8": 42980280708,
+      "comparison_only_scaled_points_e8": 41999944395,
+      "components_e8": {
+        "debt": 5599601074,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 5599601074,
+      "before_points_e8": 488991782682,
+      "proposed_final_points_e8": 494591383756
+    },
+    {
+      "principal": "aja7b-6aown-ucyjz-a6ddu-w67th-fuok4-vxqmi-24d76-74igd-rkgrp-5ae",
+      "epoch20_snapshot_points_e8": 7512896312,
+      "comparison_only_scaled_points_e8": 7341534819,
+      "components_e8": {
+        "debt": 876213499,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 876213499,
+      "before_points_e8": 147473714593,
+      "proposed_final_points_e8": 148349928092
+    },
+    {
+      "principal": "hwnsp-qozsc-pmxto-c3m27-noe32-v45gq-lbo3z-ztkd3-l4e4x-st4bp-wqe",
+      "epoch20_snapshot_points_e8": 4344832066,
+      "comparison_only_scaled_points_e8": 4245730883,
+      "components_e8": {
+        "debt": 4249998633,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 4249998633,
+      "before_points_e8": 96499078571,
+      "proposed_final_points_e8": 100749077204
+    },
+    {
+      "principal": "ulapy-ysfkn-fobdy-nif4d-s5y22-s4wlq-bqkxm-4iznv-4r5qo-begk2-hae",
+      "epoch20_snapshot_points_e8": 53273675,
+      "comparison_only_scaled_points_e8": 52058556,
+      "components_e8": {
+        "debt": 52107439,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 52107439,
+      "before_points_e8": 6481630490,
+      "proposed_final_points_e8": 6533737929
+    },
+    {
+      "principal": "4alqm-afk6k-bybok-qvdyo-cnv7y-klel6-xm2pz-7h7jk-utmys-kttf3-vqe",
+      "epoch20_snapshot_points_e8": 0,
+      "comparison_only_scaled_points_e8": 0,
+      "components_e8": {
+        "debt": 0,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 0,
+      "before_points_e8": 5592932842,
+      "proposed_final_points_e8": 5592932842
+    },
+    {
+      "principal": "stzp3-bnvwm-zqzjh-o6mv6-ci53m-wj5k6-xyhe7-fnyp2-c64o3-7vokj-bqe",
+      "epoch20_snapshot_points_e8": 6,
+      "comparison_only_scaled_points_e8": 5,
+      "components_e8": {
+        "debt": 0,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 0,
+      "before_points_e8": 5452786362,
+      "proposed_final_points_e8": 5452786362
+    },
+    {
+      "principal": "sorbk-tm3y3-uzhwj-d45hv-2qquh-tdlln-s3qna-etnov-sgx32-qsvci-kae",
+      "epoch20_snapshot_points_e8": 0,
+      "comparison_only_scaled_points_e8": 0,
+      "components_e8": {
+        "debt": 0,
+        "recorded_pool_cap": 0,
+        "icusd_sp_current_ceiling": 0,
+        "threeusd_sp": 0
+      },
+      "additional_points_e8": 0,
+      "before_points_e8": 5452786255,
+      "proposed_final_points_e8": 5452786255
+    }
+  ]
+}

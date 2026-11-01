@@ -268,7 +268,9 @@ export type Result_4 = { 'Ok' : null } |
   { 'Err' : string };
 export type Result_5 = { 'Ok' : FiatStableTopupProgress } |
   { 'Err' : string };
-export type Result_6 = { 'Ok' : bigint } |
+export type Result_6 = { 'Ok' : Status } |
+  { 'Err' : string };
+export type Result_7 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
@@ -282,6 +284,12 @@ export interface SourceStatus {
   'tag' : number,
   'cursor' : bigint,
   'canister' : Principal,
+}
+export interface Status {
+  'rows' : number,
+  'credited_points' : bigint,
+  'complete' : boolean,
+  'evidence_digest' : Uint8Array | number[],
 }
 export type Venue = { 'Amm' : null } |
   { 'ThreePool' : null } |
@@ -297,6 +305,7 @@ export interface _SERVICE {
   'admin_resume_points_recovery_v2' : ActorMethod<[], Result_4>,
   'admin_stage_outage_allocation' : ActorMethod<[OutageAllocation], Result_2>,
   'apply_fiat_stable_topups' : ActorMethod<[number], Result_5>,
+  'apply_season1_final_supplement' : ActorMethod<[], Result_6>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result_1>,
@@ -334,6 +343,7 @@ export interface _SERVICE {
   'get_principal_state' : ActorMethod<[Principal], [] | [PrincipalState]>,
   'get_registration_info' : ActorMethod<[Principal], [] | [RegistrationInfo]>,
   'get_revealed_seed' : ActorMethod<[bigint], [] | [RevealedSeed]>,
+  'get_season1_final_supplement' : ActorMethod<[], Status>,
   'is_excluded' : ActorMethod<[Principal], boolean>,
   'is_registered' : ActorMethod<[Principal], boolean>,
   'register_test_principal' : ActorMethod<[Principal], Result_1>,
@@ -347,7 +357,7 @@ export interface _SERVICE {
   'set_season_end_ns' : ActorMethod<[bigint], Result_4>,
   'set_source_canister' : ActorMethod<[number, Principal], Result_1>,
   'start_season' : ActorMethod<[Uint8Array | number[]], Result_4>,
-  'trigger_poll' : ActorMethod<[], Result_6>,
+  'trigger_poll' : ActorMethod<[], Result_7>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];
