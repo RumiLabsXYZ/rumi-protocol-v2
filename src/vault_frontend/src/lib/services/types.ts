@@ -77,6 +77,8 @@ export interface NicpRedemptionClaimDTO {
   stage: string;
   icpAmount: number;
   withdrawalId?: string;
+  releasePending?: boolean;
+  releaseBlock?: string;
 }
 
 export interface VaultDTO {

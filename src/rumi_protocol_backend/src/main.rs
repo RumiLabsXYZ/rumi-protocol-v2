@@ -20180,6 +20180,24 @@ async fn advance_vault51_nicp_redemption(
     rumi_protocol_backend::nicp_redemption::advance().await
 }
 
+#[candid_method(update)]
+#[update]
+async fn refresh_vault51_redemption_claim() -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
+    rumi_protocol_backend::nicp_redemption::refresh_owner().await
+}
+
+#[candid_method(update)]
+#[update]
+async fn withdraw_vault51_settled_icp() -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
+    rumi_protocol_backend::nicp_redemption::withdraw_owner().await
+}
+
+#[candid_method(update)]
+#[update]
+async fn reconcile_vault51_icp_payout(block_index: u64) -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
+    rumi_protocol_backend::nicp_redemption::reconcile_owner_payout(block_index).await
+}
+
 // Keep last: export_service! only collects #[candid_method]s declared above it.
 #[cfg(test)]
 candid::export_service!();

@@ -349,6 +349,23 @@ fn generate_consent_message_for_caller(
     caller: Principal,
 ) -> Result<String, String> {
     match method {
+        "refresh_vault51_redemption_claim" => {
+            candid::decode_args::<()>(arg).map_err(|_| "Invalid refresh arguments".to_string())?;
+            Ok("## Refresh Vault 51 Redemption\n\nCheck the WaterNeuron withdrawal and record a verified settlement if ICP has arrived. This action does not send funds.".into())
+        }
+        "reconcile_vault51_icp_payout" => {
+            let block = Decode!(arg, u64).map_err(|_| "Invalid payout block".to_string())?;
+            let claim = crate::nicp_redemption::current().ok_or("No vault 51 claim")?;
+            if caller != claim.owner || caller == Principal::anonymous() { return Err("Only the vault owner may reconcile".into()); }
+            Ok(format!("## Reconcile Vault 51 ICP Payout\n\nCheck ICP ledger block **{}** against the exact recorded payout from Rumi custody to your account. This action does not send funds.", block))
+        }
+        "withdraw_vault51_settled_icp" => {
+            candid::decode_args::<()>(arg).map_err(|_| "Invalid withdrawal arguments".to_string())?;
+            let claim = crate::nicp_redemption::current().ok_or("No vault 51 claim")?;
+            if caller != claim.owner || caller == Principal::anonymous() { return Err("Only the vault owner may withdraw".into()); }
+            let amount = claim.received_icp_e8s.ok_or("ICP settlement is not verified")?;
+            Ok(format!("## Withdraw Vault 51 ICP\n\nSend the verified settled balance of **{:.8} ICP**, less the ICP ledger fee, from Rumi's dedicated custody account to your default account **{}**. All vault debt must first be repaid. An interrupted payout remains bound to its original transfer.", amount as f64 / 100_000_000.0, caller))
+        }
         "open_vault_v2" => {
             match Decode!(arg, OpenVaultV2Args) {
                 Ok(request) => {
@@ -469,8 +486,21 @@ fn generate_consent_message_for_caller(
             }
         }
         
+        "repay_to_vault_with_stable" => {
+            let arg = Decode!(arg, crate::VaultArgWithToken).map_err(|_| "Invalid stable repayment arguments".to_string())?;
+            if crate::state::read_state(|s| s.has_pending_nicp_claim(arg.vault_id)) {
+                let token = match arg.token_type { crate::StableTokenType::CKUSDT => "ckUSDT", crate::StableTokenType::CKUSDC => "ckUSDC" };
+                Ok(format!("## Repay Vault 51 with {}\n\nRepay up to **{}** of accrued icUSD debt using {}. The protocol fee and token ledger fee are additional; the total token debit depends on the actual debt and current fee. Check the amount and allowance in Rumi before approving. If accrued debt exceeds your authorized debt maximum, refresh and authorize a higher amount to repay in full.", token, format_icusd_amount(arg.amount), token))
+            } else {
+                Ok("## Repay Vault with Stablecoin\n\nRepay debt using the selected stablecoin. A protocol fee and ledger fee may apply; check the amount and allowance in Rumi.".into())
+            }
+        }
         "repay_to_vault" => {
             match try_decode_vault_arg(arg, "repay_to_vault")? {
+                Some(vault_arg) if crate::state::read_state(|s| s.has_pending_nicp_claim(vault_arg.vault_id)) => Ok(format!(
+                    "## Repay Vault 51 icUSD\n\nYou authorize repayment of **up to {}** from your balance. The actual debit is capped at the freshly accrued debt. If interest causes the debt to exceed this maximum, refresh and authorize a higher amount to repay in full.",
+                    format_icusd_amount(vault_arg.amount)
+                )),
                 Some(vault_arg) => Ok(format!(
                     "## Repay icUSD\n\n\
                     You are repaying **{}** to vault #{}.\n\n\

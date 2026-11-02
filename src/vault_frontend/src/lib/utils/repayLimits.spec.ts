@@ -32,3 +32,14 @@ describe('computeSafeIcusdRepayMax', () => {
     expect(200_000_259n - max).toBe(10_000_000n);
   });
 });
+
+
+describe('claim repayment maximum', () => {
+  it('includes a bounded cushion without exceeding spendable funds', async () => {
+    const { claimRepayMaximum } = await import('./repayLimits');
+    expect(claimRepayMaximum(0.05, 0.1, 0.05)).toBeCloseTo(0.06);
+    expect(claimRepayMaximum(0.05, 0.055, 0.05)).toBe(0.055);
+    expect(claimRepayMaximum(0.05, 0.03, 0.02)).toBe(0.02);
+    expect(claimRepayMaximum(0, 1, 0)).toBe(0);
+  });
+});

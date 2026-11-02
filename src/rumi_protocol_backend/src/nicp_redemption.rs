@@ -51,6 +51,16 @@ pub struct NicpRedemptionClaim {
     pub created_at_ns: u64,
     pub updated_at_ns: u64,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub release: Option<ClaimRelease>,
+}
+
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ClaimRelease {
+    pub nonce: u128,
+    pub fee_e8s: u64,
+    pub amount_e8s: u64,
+    pub block: Option<u64>,
 }
 
 impl NicpRedemptionClaim {
@@ -245,6 +255,7 @@ pub async fn prepare(arg: PrepareNicpRedemption) -> Result<NicpRedemptionClaim, 
         created_at_ns: now,
         updated_at_ns: now,
         last_error: None,
+        release: None,
     };
     if balance(principal(NICP), claim.account(ic_cdk::id())).await? != 0
         || balance(principal(ICP), claim.account(ic_cdk::id())).await? != 0
@@ -254,10 +265,15 @@ pub async fn prepare(arg: PrepareNicpRedemption) -> Result<NicpRedemptionClaim, 
     ensure_no_prior_obligation()?;
     // Operator corrections are synchronous and can run during the balance
     // reads above; recheck the complete approved snapshot at the commit point.
-    let unchanged = read_state(|s| s.vault_id_to_vaults.get(&VAULT_ID).is_some_and(|v|
-        v.owner == vault.owner && v.collateral_amount == vault.collateral_amount
-        && v.collateral_type == vault.collateral_type && !v.bot_processing
-        && v.borrowed_icusd_amount.to_u64() <= arg.max_debt_e8s));
+    let unchanged = read_state(|s| {
+        s.vault_id_to_vaults.get(&VAULT_ID).is_some_and(|v| {
+            v.owner == vault.owner
+                && v.collateral_amount == vault.collateral_amount
+                && v.collateral_type == vault.collateral_type
+                && !v.bot_processing
+                && v.borrowed_icusd_amount.to_u64() <= arg.max_debt_e8s
+        })
+    });
     if !unchanged || current().is_some() {
         return Err("Vault changed before preparation commit".into());
     }
@@ -440,6 +456,145 @@ async fn reconcile_claim(mut claim: NicpRedemptionClaim) -> Result<NicpRedemptio
     Ok(claim)
 }
 
+fn authorize_claim_owner(claim: &NicpRedemptionClaim, caller: Principal) -> Result<(), String> {
+    if caller == Principal::anonymous() || caller != claim.owner {
+        return Err("Only the vault owner may operate this claim".into());
+    }
+    Ok(())
+}
+
+/// Owner-only status reconciliation. This path cannot send or approve tokens.
+pub async fn refresh_owner() -> Result<NicpRedemptionClaim, String> {
+    let _guard =
+        VaultLiquidationGuard::new_for_nicp_claim(VAULT_ID).map_err(|e| format!("{e:?}"))?;
+    let claim = current().ok_or("No redemption claim")?;
+    authorize_claim_owner(&claim, ic_cdk::caller())?;
+    match claim.stage {
+        ClaimStage::WithdrawalSubmitted | ClaimStage::ClaimConfirmed => {
+            reconcile_claim(claim).await
+        }
+        ClaimStage::Settled => Ok(claim),
+        _ => Err("Withdrawal request is not ready for reconciliation".into()),
+    }
+}
+
+/// Owner-authorized exact ICP payout after settlement and full debt repayment.
+/// Journal before dispatch; retries use precisely the original ledger tuple.
+pub async fn withdraw_owner() -> Result<NicpRedemptionClaim, String> {
+    let _guard =
+        VaultLiquidationGuard::new_for_nicp_claim(VAULT_ID).map_err(|e| format!("{e:?}"))?;
+    let mut claim = current().ok_or("No redemption claim")?;
+    let caller = ic_cdk::caller();
+    authorize_claim_owner(&claim, caller)?;
+    if claim.stage != ClaimStage::Settled {
+        return Err("ICP settlement has not been verified".into());
+    }
+    if claim.release.as_ref().is_some_and(|r| r.block.is_some()) {
+        return Ok(claim);
+    }
+    if claim.release.is_none() {
+        let fee = crate::management::get_ledger_fee(principal(ICP)).await?;
+        let valid = read_state(|s| {
+            s.vault_id_to_vaults.get(&VAULT_ID).is_some_and(|v| {
+                v.owner == caller && v.borrowed_icusd_amount.to_u64() == 0 && !v.bot_processing
+            })
+        });
+        if !valid {
+            return Err("Repay all vault debt before withdrawing settled ICP".into());
+        }
+        let amount = claim
+            .received_icp_e8s
+            .ok_or("Missing settlement amount")?
+            .checked_sub(fee)
+            .filter(|n| *n > 0)
+            .ok_or("Settlement does not cover ledger fee")?;
+        let nonce = mutate_state(|s| s.next_op_nonce());
+        claim.release = Some(ClaimRelease {
+            nonce,
+            fee_e8s: fee,
+            amount_e8s: amount,
+            block: None,
+        });
+        claim.last_error = None;
+        claim = save(claim);
+    }
+    let release = claim.release.clone().ok_or("Missing payout journal")?;
+    match transfer_idempotent_pinned_fee(
+        principal(ICP),
+        Some(claim.escrow_subaccount),
+        Account {
+            owner: claim.owner,
+            subaccount: None,
+        },
+        u128::from(release.amount_e8s),
+        release.nonce,
+        release.fee_e8s,
+    )
+    .await
+    {
+        Ok(block) => {
+            claim.release.as_mut().unwrap().block = Some(block);
+            claim.last_error = None;
+            Ok(save(claim))
+        }
+        Err(e) => hold(
+            claim,
+            format!("ICP payout held; reconcile the original tuple before any replacement: {e:?}"),
+        ),
+    }
+}
+
+/// Reconcile a possibly successful payout against its exact canonical ledger block.
+pub async fn reconcile_owner_payout(block_index: u64) -> Result<NicpRedemptionClaim, String> {
+    let _guard =
+        VaultLiquidationGuard::new_for_nicp_claim(VAULT_ID).map_err(|e| format!("{e:?}"))?;
+    let mut claim = current().ok_or("No redemption claim")?;
+    authorize_claim_owner(&claim, ic_cdk::caller())?;
+    let release = claim.release.clone().ok_or("No payout is pending")?;
+    if let Some(existing) = release.block {
+        if existing == block_index {
+            return Ok(claim);
+        }
+        return Err("Payout already completed with a different block".into());
+    }
+    let block = crate::native_icp_proof::query_block(principal(ICP), block_index).await?;
+    verify_payout(&claim, &release, &block, ic_cdk::id())?;
+    claim.release.as_mut().unwrap().block = Some(block_index);
+    claim.last_error = None;
+    Ok(save(claim))
+}
+
+fn verify_payout(
+    claim: &NicpRedemptionClaim,
+    release: &ClaimRelease,
+    block: &crate::native_icp_proof::Block,
+    protocol: Principal,
+) -> Result<(), String> {
+    use crate::native_icp_proof::Operation;
+    let Some(Operation::Transfer {
+        from,
+        to,
+        spender,
+        amount,
+        fee,
+    }) = &block.transaction.operation
+    else {
+        return Err("Payout block is not a transfer".into());
+    };
+    if from.as_slice() != account_identifier(protocol, claim.escrow_subaccount)
+        || to.as_slice() != account_identifier(claim.owner, [0; 32])
+        || spender.is_some()
+        || amount.e8s != release.amount_e8s
+        || fee.e8s != release.fee_e8s
+        || block.transaction.icrc1_memo.as_deref() != Some(release.nonce.to_be_bytes().as_slice())
+        || block.transaction.created_at_time.timestamp_nanos
+            != nonce_to_created_at_time(release.nonce)
+    {
+        return Err("Payout block does not match the immutable ledger tuple".into());
+    }
+    Ok(())
+}
+
 fn validate_request(
     claim: &NicpRedemptionClaim,
     request: &WithdrawalRequest,
@@ -526,7 +681,64 @@ pub(crate) mod tests {
             created_at_ns: 100,
             updated_at_ns: 100,
             last_error: None,
+            release: None,
         }
+    }
+    #[test]
+    fn only_non_anonymous_owner_can_operate_claim() {
+        let c = fixture();
+        assert!(authorize_claim_owner(&c, c.owner).is_ok());
+        assert!(authorize_claim_owner(&c, Principal::anonymous()).is_err());
+        assert!(authorize_claim_owner(&c, Principal::from_slice(&[42])).is_err());
+    }
+
+    #[test]
+    fn payout_proof_requires_full_pinned_tuple() {
+        use crate::native_icp_proof::{Block, Operation, Timestamp, Tokens, Transaction};
+        let c = fixture();
+        let protocol = Principal::from_slice(&[2]);
+        let r = ClaimRelease {
+            nonce: (100u128 << 64) | 8,
+            fee_e8s: 10_000,
+            amount_e8s: 100_000,
+            block: None,
+        };
+        let mut b = Block {
+            parent_hash: None,
+            timestamp: Timestamp {
+                timestamp_nanos: 100,
+            },
+            transaction: Transaction {
+                memo: 0,
+                icrc1_memo: Some(r.nonce.to_be_bytes().to_vec()),
+                created_at_time: Timestamp {
+                    timestamp_nanos: 100,
+                },
+                operation: Some(Operation::Transfer {
+                    from: account_identifier(protocol, c.escrow_subaccount).to_vec(),
+                    to: account_identifier(c.owner, [0; 32]).to_vec(),
+                    spender: None,
+                    amount: Tokens { e8s: r.amount_e8s },
+                    fee: Tokens { e8s: r.fee_e8s },
+                }),
+            },
+        };
+        assert!(verify_payout(&c, &r, &b, protocol).is_ok());
+        b.transaction.icrc1_memo = Some(vec![0]);
+        assert!(verify_payout(&c, &r, &b, protocol).is_err());
+        b.transaction.icrc1_memo = Some(r.nonce.to_be_bytes().to_vec());
+        if let Some(Operation::Transfer { to, .. }) = &mut b.transaction.operation {
+            to[0] ^= 1;
+        }
+        assert!(verify_payout(&c, &r, &b, protocol).is_err());
+    }
+    #[test]
+    fn old_claim_deserializes_without_release() {
+        let c = fixture();
+        let mut value = serde_json::to_value(&c).unwrap();
+        value.as_object_mut().unwrap().remove("release");
+        let restored: NicpRedemptionClaim = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.release, None);
     }
     #[test]
     fn quote_is_fixed_integer_icp_not_round_2000() {

@@ -33,3 +33,10 @@ export function computeSafeIcusdRepayMax(
   const largestSafePartialE8s = debtE8s - requiredResidualE8s;
   return spendableE8s < largestSafePartialE8s ? spendableE8s : largestSafePartialE8s;
 }
+
+/** Maximum signed amount for a full claim repayment, bounded by spendable balance. */
+export function claimRepayMaximum(debt: number, spendable: number, safePartial: number): number {
+  if (!Number.isFinite(debt) || !Number.isFinite(spendable) || debt <= 0 || spendable <= 0) return 0;
+  if (spendable < debt) return Math.min(safePartial, spendable);
+  return Math.min(spendable, debt + Math.max(0.01, debt * 0.001));
+}
