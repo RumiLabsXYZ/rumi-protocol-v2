@@ -937,7 +937,7 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
         };
       }
       
-      if (vaultId !== 51 && icusdAmount * E8S < MIN_ICUSD_AMOUNT) { // Updated minimum validation
+      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) { // Updated minimum validation
         return {
           success: false,
           error: `Amount too low. Minimum borrowing amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
@@ -1278,7 +1278,7 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         };
       }
 
-      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
+      if (vaultId !== 51 && icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
         return {
           success: false,
           error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`

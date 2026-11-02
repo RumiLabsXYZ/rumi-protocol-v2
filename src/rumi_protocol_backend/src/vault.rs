@@ -9248,17 +9248,27 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
 /// guarantee — an explicit flag (rather than `amount == debt` equality) avoids
 /// brittleness from interest accruing between the caller's debt fetch and
 /// this helper's read.
+fn cap_claim_repay(amount: ICUSD, debt: ICUSD) -> ICUSD {
+    std::cmp::min(amount, debt)
+}
+
 fn claim_repay_near_full(amount: u64, debt: u64) -> bool {
-    amount > 0 && debt > 0 && debt.saturating_sub(amount) <= std::cmp::max(debt / 100, 1_000_000)
+    amount > 0 && debt > 0 && amount >= debt
 }
 
 #[cfg(test)]
 mod claim_repay_admission_tests {
     #[test]
     fn near_full_allows_accrual_but_not_zero_or_substantial_partial() {
-        assert!(super::claim_repay_near_full(2_000_000, 2_000_001));
+        assert!(!super::claim_repay_near_full(2_000_000, 2_000_001));
+        assert!(super::claim_repay_near_full(2_000_001, 2_000_001));
+        assert!(super::claim_repay_near_full(2_000_002, 2_000_001));
         assert!(!super::claim_repay_near_full(100_000, 5_000_000));
         assert!(!super::claim_repay_near_full(0, 500_000));
+        let offered = crate::numeric::ICUSD::new(2_000_000);
+        let accrued_debt = crate::numeric::ICUSD::new(2_000_001);
+        assert_eq!(super::cap_claim_repay(offered, accrued_debt), offered);
+        assert_eq!(super::cap_claim_repay(accrued_debt, offered), offered);
     }
 }
 
@@ -9293,7 +9303,8 @@ async fn repay_to_vault_internal(
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    let claim_full_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id))
+    let is_claim_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id));
+    let claim_full_repayment = is_claim_repayment
         && claim_repay_near_full(amount.to_u64(), vault.borrowed_icusd_amount.to_u64());
     if !is_full_close && !claim_full_repayment && amount < read_state(|s| s.min_icusd_amount) {
         return Err(ProtocolError::AmountTooLow {
@@ -9308,7 +9319,9 @@ async fn repay_to_vault_internal(
     // treat it as a full repayment to avoid leaving un-repayable dust.
     let debt = vault.borrowed_icusd_amount;
     let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
-    let amount = if amount > debt {
+    let amount = if is_claim_repayment {
+        cap_claim_repay(amount, debt)
+    } else if amount > debt {
         debt
     } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
         debt
@@ -9442,7 +9455,8 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    let claim_full_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id))
+    let is_claim_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id));
+    let claim_full_repayment = is_claim_repayment
         && claim_repay_near_full(amount.to_u64(), vault.borrowed_icusd_amount.to_u64());
     if !claim_full_repayment && amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
@@ -9458,7 +9472,9 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     // treat it as a full repayment to avoid leaving un-repayable dust.
     let debt = vault.borrowed_icusd_amount;
     let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
-    let amount = if amount > debt {
+    let amount = if is_claim_repayment {
+        cap_claim_repay(amount, debt)
+    } else if amount > debt {
         debt
     } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
         debt

@@ -486,8 +486,21 @@ fn generate_consent_message_for_caller(
             }
         }
         
+        "repay_to_vault_with_stable" => {
+            let arg = Decode!(arg, crate::VaultArgWithToken).map_err(|_| "Invalid stable repayment arguments".to_string())?;
+            if crate::state::read_state(|s| s.has_pending_nicp_claim(arg.vault_id)) {
+                let token = match arg.token_type { crate::StableTokenType::CKUSDT => "ckUSDT", crate::StableTokenType::CKUSDC => "ckUSDC" };
+                Ok(format!("## Repay Vault 51 with {}\n\nRepay up to **{}** of accrued icUSD debt using {}. The protocol fee and token ledger fee are additional; the total token debit depends on the actual debt and current fee. Check the amount and allowance in Rumi before approving. If accrued debt exceeds your authorized debt maximum, refresh and authorize a higher amount to repay in full.", token, format_icusd_amount(arg.amount), token))
+            } else {
+                Ok("## Repay Vault with Stablecoin\n\nRepay debt using the selected stablecoin. A protocol fee and ledger fee may apply; check the amount and allowance in Rumi.".into())
+            }
+        }
         "repay_to_vault" => {
             match try_decode_vault_arg(arg, "repay_to_vault")? {
+                Some(vault_arg) if crate::state::read_state(|s| s.has_pending_nicp_claim(vault_arg.vault_id)) => Ok(format!(
+                    "## Repay Vault 51 icUSD\n\nYou authorize repayment of **up to {}** from your balance. The actual debit is capped at the freshly accrued debt. If interest causes the debt to exceed this maximum, refresh and authorize a higher amount to repay in full.",
+                    format_icusd_amount(vault_arg.amount)
+                )),
                 Some(vault_arg) => Ok(format!(
                     "## Repay icUSD\n\n\
                     You are repaying **{}** to vault #{}.\n\n\
