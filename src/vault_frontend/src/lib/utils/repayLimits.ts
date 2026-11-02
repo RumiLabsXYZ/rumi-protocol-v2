@@ -33,3 +33,9 @@ export function computeSafeIcusdRepayMax(
   const largestSafePartialE8s = debtE8s - requiredResidualE8s;
   return spendableE8s < largestSafePartialE8s ? spendableE8s : largestSafePartialE8s;
 }
+
+/** Match the backend's bounded near-full snap for claim repayment. */
+export function isClaimNearFullRepayment(amount: number, debt: number): boolean {
+  return Number.isFinite(amount) && Number.isFinite(debt) && amount > 0 && debt > 0
+    && Math.max(0, debt - amount) <= Math.max(debt / 100, 0.01);
+}
