@@ -34,11 +34,12 @@ describe('computeSafeIcusdRepayMax', () => {
 });
 
 
-describe('claim near-full repayment', () => {
-  it('accepts a stale 8-decimal max when small interest accrues, but not a genuinely partial amount or zero', async () => {
-    const { isClaimNearFullRepayment } = await import('./repayLimits');
-    expect(isClaimNearFullRepayment(0.04999999, 0.05000001)).toBe(true);
-    expect(isClaimNearFullRepayment(0.02, 0.05)).toBe(false);
-    expect(isClaimNearFullRepayment(0, 0.005)).toBe(false);
+describe('claim repayment maximum', () => {
+  it('includes a bounded cushion without exceeding spendable funds', async () => {
+    const { claimRepayMaximum } = await import('./repayLimits');
+    expect(claimRepayMaximum(0.05, 0.1, 0.05)).toBeCloseTo(0.06);
+    expect(claimRepayMaximum(0.05, 0.055, 0.05)).toBe(0.055);
+    expect(claimRepayMaximum(0.05, 0.03, 0.02)).toBe(0.02);
+    expect(claimRepayMaximum(0, 1, 0)).toBe(0);
   });
 });

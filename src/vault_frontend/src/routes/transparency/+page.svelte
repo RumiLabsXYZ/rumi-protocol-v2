@@ -118,7 +118,7 @@
       {#if redemptionClaim.burn_block.length}<p>nICP burn block #{redemptionClaim.burn_block[0]?.toString()} on ledger <a href="https://dashboard.internetcomputer.org/canister/buwm7-7yaaa-aaaar-qagva-cai" target="_blank" rel="noopener noreferrer">buwm7-7yaaa-aaaar-qagva-cai</a>.</p>{/if}
       {#if redemptionClaim.settlement_block.length}<p>ICP settlement block <a href={`https://dashboard.internetcomputer.org/transaction/${redemptionClaim.settlement_block[0]}`} target="_blank" rel="noopener noreferrer">#{redemptionClaim.settlement_block[0]?.toString()}</a>.</p>{/if}
       {#if redemptionClaim.release?.[0]}
-        {#if redemptionClaim.release[0].block.length}<p>Owner withdrawal confirmed in ICP ledger block #{redemptionClaim.release[0].block[0]?.toString()}.</p>{:else}<p>Owner withdrawal submitted; its outcome requires confirmation. The claim is no longer counted as collateral.</p>{/if}
+        {#if redemptionClaim.release[0].block.length}<p>Owner withdrawal confirmed in ICP ledger block #{redemptionClaim.release[0].block[0]?.toString()}.</p>{:else}<p>Owner withdrawal initiated; its outcome is unconfirmed. The claim is no longer counted as collateral.</p>{/if}
       {/if}
       {#if redemptionClaim.last_error.length}<p>Operator reconciliation required: {redemptionClaim.last_error[0]}</p>{/if}
     {/if}
