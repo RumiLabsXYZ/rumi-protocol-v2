@@ -1,0 +1,29 @@
+# Rumi backend: drain before an upgrade
+
+This is a reviewable procedure, not an execution authorization. It applies to a future backend upgrade using the repository's `icp canister install` path and `scripts/rumi-backend-upgrade-args.sh`. The currently installed backend does not enforce this procedure in `pre_upgrade`.
+
+The backend uses `ic-cdk` 0.12 asynchronous callbacks. A local PocketIC upgrade while a call was outstanding produced late callback traps; journal recovery and retry tests do not prove callbacks can safely cross a running upgrade. The IC management specification advises stopping canisters that cannot interpret callbacks across an upgrade. Stop rejects new requests and lets outstanding responses execute; `stopped` means open call contexts have drained. Unbounded calls can prevent a clean stop indefinitely. See [management canister specification](https://docs.internetcomputer.org/references/ic-interface-spec/management-canister/) and [inter-canister call security](https://docs.internetcomputer.org/guides/security/inter-canister-calls/).
+
+## Prepare without changing production
+
+1. Identify the exact network, backend canister principal, controller identity and approved upgrade artifact. Check the current controller-authenticated canister status and module hash, the upgrade arguments, fresh artifact hashes, and rollback/snapshot constraints against the release packet. A public status fallback is not evidence of the running/stopping/stopped state.
+2. Inspect protocol activity and unresolved financial actions. Do not infer that a low ckSOL in-flight count covers other backend calls. Record any ongoing operation and uncertainty in the release packet. Build and review the artifact before a maintenance window.
+3. Confirm the stop, snapshot policy, upgrade, and restart are explicitly within the release's authorization. Announce expected downtime through the established release process only if messaging is authorized.
+
+## Authorized drain and upgrade
+
+1. Submit **one** management `stop_canister` request for the identified backend. Save the original request ID/result and time; never automatically replay an uncertain stop request.
+2. Read controller-authenticated management status for that exact canister. Continue only after status is explicitly **stopped**. A successful submission, elapsed timeout, a public-only status, an empty application lock, or an application query are not proof of drain. While stopping, no new calls are accepted and outstanding responses can finish.
+3. If stop times out or status remains stopping/unknown, hold the upgrade. A controller may explicitly issue `start_canister` to cancel a stop and return to running, after reconciling any in-flight management request and with authority for that action. Verify running through controller status. This avoids indefinite downtime but does not make a later running upgrade safe. Do not uninstall or reinstall to force drain; those destroy state.
+4. Once stopped, follow the approved release's snapshot procedure; preserve existing snapshot evidence and never automatically restore an old snapshot over newer state. Check the stopped canister identity, artifact and exact upgrade arguments again. Submit the approved `upgrade` once, recording its request and result. Do not retry an uncertain install; reconcile management status and the module hash first.
+5. Start the canister when the approved upgrade outcome is known; verify status, installed module hash, Candid, controllers/settings, retained receipts and relevant financial holds. Record source, artifact hashes, management receipts and observed results separately. Never enable an ICP cycles reserve or run a financial canary unless separately authorized.
+
+The manual procedure issues management calls only when an operator executes its approved steps. The optional helper below also issues management calls when explicitly executed. Neither procedure itself proves deployment or a financial outcome.
+
+## Optional source-only wrapper
+
+`scripts/rumi_drained_upgrade.py` is an opt-in helper for a release whose approved snapshot policy does not require a fresh snapshot after stopping. It does not create or verify snapshots and uses a target-principal lock on the local host and still requires controller coordination across hosts and tools. Use the manual procedure above whenever a stopped-state snapshot is required. The helper pins the target, environment, identity, previous module hash, uploaded gzip hash, and argument hash; it keeps an exclusive local evidence journal and sends each stop, upgrade and start at most once. Its timeout is bounded, but an uncertain stop or install is held for manual management-request reconciliation; it never automatically retries or restarts after an unknown outcome. It checks controller-authenticated stopped status before installing, and confirms the new hash before restarting.
+
+Mock-runner unit tests exercise its refusal and single-dispatch behavior; they do not establish production management behavior. The wrapper is not installed and does not alter other deployment paths or prevent a callback trap if some other process upgrades a running canister. See `python3 scripts/rumi_drained_upgrade.py --help` for its explicit parameters. Its journal is local evidence; its same-host lock cannot serialize operators on other hosts or outside this helper.
+
+The helper selects the CLI identity by the configured identity name; it does not independently resolve or pin that identity’s principal. Confirm the principal and controller authority in the release preflight. A timed-out CLI subprocess may have emitted a management request ID in partial output that the helper does not retain. Its journal records dispatch and an unknown outcome, but is not guaranteed to contain that request ID; reconcile with authoritative management and operator evidence before taking another action.
