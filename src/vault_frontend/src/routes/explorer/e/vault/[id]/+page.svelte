@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { decodeNicpClaim, nicpClaimValueUsd } from '$lib/utils/nicpClaim';
+  import { CANISTER_IDS } from '$lib/config';
   import { page } from '$app/stores';
   import { Principal } from '@dfinity/principal';
   import EntityShell from '$components/explorer/entity/EntityShell.svelte';
@@ -58,13 +60,16 @@
 
   const ownerStr = $derived(vault?.owner?.toString?.() ?? vault?.owner?.toText?.() ?? '');
 
+  const redemptionClaim = $derived(decodeNicpClaim(vault?.nicp_redemption_claim));
   const collateralAmount = $derived(vault ? BigInt(vault.collateral_amount ?? 0) : 0n);
   const collateralHuman = $derived(Number(collateralAmount) / 10 ** decimals);
-  const collateralValueUsd = $derived(collateralHuman * price);
+  const collateralValueUsd = $derived(redemptionClaim
+    ? nicpClaimValueUsd(redemptionClaim, collateralPrices.get(CANISTER_IDS.ICP_LEDGER) ?? 0, config?.price_source?.LstWrapped?.haircut)
+    : collateralHuman * price);
 
   const borrowedAmount = $derived(vault ? BigInt(vault.borrowed_icusd_amount ?? 0) : 0n);
   const accruedInterest = $derived(vault ? BigInt(vault.accrued_interest ?? 0) : 0n);
-  const totalDebt = $derived(borrowedAmount + accruedInterest);
+  const totalDebt = $derived(redemptionClaim ? borrowedAmount : borrowedAmount + accruedInterest);
   const totalDebtHuman = $derived(Number(totalDebt) / 1e8);
 
   const cr = $derived(totalDebtHuman > 0 ? collateralValueUsd / totalDebtHuman : Infinity);
@@ -90,7 +95,7 @@
   });
 
   const isClosed = $derived(
-    vault != null && collateralAmount === 0n && totalDebt === 0n && history.length > 0,
+    !redemptionClaim && vault != null && collateralAmount === 0n && totalDebt === 0n && history.length > 0,
   );
 
   const vaultCollateralMap = $derived(
@@ -474,7 +479,7 @@
     loadVault();
   });
 
-  const statusLabel = $derived(isClosed ? 'Closed' : 'Active');
+  const statusLabel = $derived(redemptionClaim ? 'Redemption claim' : isClosed ? 'Closed' : 'Active');
 </script>
 
 <svelte:head>
@@ -510,14 +515,15 @@
       {/if}
     </div>
 
+    {#if redemptionClaim}<p class="text-sm text-amber-200">Protocol-controlled claim · {redemptionClaim.stage}. Debt continues under nICP interest rules. Collateral is reserved; liquidation, borrowing and withdrawals are suspended.</p>{/if}
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-xl p-6 flex flex-wrap items-center gap-8">
       <div class="flex-shrink-0">
-        <CRDial {cr} liquidationCR={liquidationRatio} size="lg" />
+        {#if redemptionClaim}<span class="text-sm text-amber-300">Liquidation suspended</span>{:else}<CRDial {cr} liquidationCR={liquidationRatio} size="lg" />{/if}
       </div>
       <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-3 flex-1 min-w-[280px]">
         <div>
-          <div class="text-[10px] uppercase tracking-wider text-gray-500">Collateral</div>
-          <div class="text-lg font-mono text-white">{formatE8s(collateralAmount, decimals)} <span class="text-sm text-gray-400">{tokenSymbol}</span></div>
+          <div class="text-[10px] uppercase tracking-wider text-gray-500">{redemptionClaim ? 'ICP redemption claim' : 'Collateral'}</div>
+          <div class="text-lg font-mono text-white">{redemptionClaim ? redemptionClaim.icpAmount.toLocaleString(undefined, { maximumFractionDigits: 8 }) : formatE8s(collateralAmount, decimals)} <span class="text-sm text-gray-400">{redemptionClaim ? 'ICP' : tokenSymbol}</span></div>
           {#if price > 0}<div class="text-xs text-gray-500">{formatUsdRaw(collateralValueUsd)}</div>{/if}
         </div>
         <div>
@@ -527,16 +533,16 @@
         </div>
         <div>
           <div class="text-[10px] uppercase tracking-wider text-gray-500">Liq. Price</div>
-          <div class="text-lg font-mono text-white">{liquidationPrice > 0 ? formatUsdRaw(liquidationPrice) : '--'}</div>
+          <div class="text-lg font-mono text-white">{redemptionClaim ? 'Suspended' : liquidationPrice > 0 ? formatUsdRaw(liquidationPrice) : '--'}</div>
           {#if price > 0 && liquidationPrice > 0}<div class="text-xs text-gray-500">now {formatUsdRaw(price)}</div>{/if}
         </div>
         <div>
           <div class="text-[10px] uppercase tracking-wider text-gray-500">Headroom</div>
-          <div class="text-lg font-mono text-white">{headroomUsd > 0 ? formatUsdRaw(headroomUsd) : '--'}</div>
+          <div class="text-lg font-mono text-white">{redemptionClaim ? 'Unavailable' : headroomUsd > 0 ? formatUsdRaw(headroomUsd) : '--'}</div>
         </div>
         <div>
           <div class="text-[10px] uppercase tracking-wider text-gray-500">Redeem Tier</div>
-          <div class="text-lg font-mono text-white">{redemptionTier != null ? String(redemptionTier) : '--'}</div>
+          <div class="text-lg font-mono text-white">{redemptionClaim ? 'Excluded' : redemptionTier != null ? String(redemptionTier) : '--'}</div>
         </div>
         <div>
           <div class="text-[10px] uppercase tracking-wider text-gray-500">Status</div>

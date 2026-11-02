@@ -215,7 +215,7 @@ impl VaultLiquidationGuard {
     /// flight; the caller should back off (the stability pool, per project
     /// rule, must NOT retry — it falls through to manual, which is correct).
     pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None, false, None)
+        Self::acquire(vault_id, None, false, None, false)
     }
 
     /// Acquire the lock only for the exact caller/vault add-margin retry whose
@@ -225,7 +225,7 @@ impl VaultLiquidationGuard {
         vault_id: u64,
         owner: Principal,
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, Some(owner), false, None)
+        Self::acquire(vault_id, Some(owner), false, None, false)
     }
 
     /// Only the already-authorized exact borrow retry may pass its own
@@ -242,7 +242,7 @@ impl VaultLiquidationGuard {
                 "Vault #{vault_id} has an unresolved bot liquidation; retry after it settles"
             )));
         }
-        Self::acquire(vault_id, None, true, None)
+        Self::acquire(vault_id, None, true, None, false)
     }
 
     /// Acquire a vault for the exact caller-owned ordinary SP journal. A
@@ -253,7 +253,17 @@ impl VaultLiquidationGuard {
         caller: Principal,
         request_id: [u8; 32],
     ) -> Result<Self, crate::ProtocolError> {
-        Self::acquire(vault_id, None, false, Some((caller, request_id)))
+        Self::acquire(vault_id, None, false, Some((caller, request_id)), false)
+    }
+
+    /// Only the debt-repayment entry points may bypass the collateral-claim fence.
+    pub(crate) fn new_for_nicp_repayment(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None, false, None, true)
+    }
+
+    /// Dedicated migration/reconciliation module, never an ordinary payout path.
+    pub(crate) fn new_for_nicp_claim(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        Self::acquire(vault_id, None, false, None, true)
     }
 
     fn acquire(
@@ -263,7 +273,13 @@ impl VaultLiquidationGuard {
         // The ordinary stability-pool journal is the only durable owner that
         // may retry a reserved vault. `None` is used by every legacy path.
         sp_retry: Option<(Principal, [u8; 32])>,
+        allow_nicp_claim: bool,
     ) -> Result<Self, crate::ProtocolError> {
+        if !allow_nicp_claim && read_state(|s| s.has_pending_nicp_claim(vault_id)) {
+            return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} collateral is reserved for protocol-controlled nICP redemption; only debt repayment is available"
+            )));
+        }
         let pending = read_state(|s| {
             s.push_sweep_journals
                 .iter()

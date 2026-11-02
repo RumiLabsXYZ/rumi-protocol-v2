@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => {
   };
   return {
     walletStore: {
+      setBalances(balances: typeof walletState.tokenBalances) {
+        walletState.tokenBalances = balances;
+        subscribers.forEach((run) => run({ ...walletState }));
+      },
       subscribe(run: (value: any) => void) {
         subscribers.add(run);
         run(walletState);
@@ -84,6 +88,7 @@ describe('LiquidityInterface deposit concentration UX', () => {
     host = document.createElement('div');
     document.body.appendChild(host);
     vi.clearAllMocks();
+    mocks.walletStore.setBalances({ ICUSD: { raw: 100_000_000_000n }, CKUSDT: { raw: 100_000_000_000n }, CKUSDC: { raw: 100_000_000_000n } });
     mocks.threePoolService.calcAddLiquidity.mockImplementation(async () => 100_000_000n);
     mocks.threePoolService.addLiquidity.mockImplementation(async () => {
       throw new Error('Deposit quote is stale. Refresh the quote before opening wallet approvals.');
@@ -100,6 +105,23 @@ describe('LiquidityInterface deposit concentration UX', () => {
     await tick();
     flushSync();
   }
+
+  it('updates balances and deposit eligibility when wallet balances arrive after mount', async () => {
+    mocks.walletStore.setBalances({ ICUSD: { raw: 0n }, CKUSDT: { raw: 0n }, CKUSDC: { raw: 0n } });
+    instance = mount(LiquidityInterface, { target: host });
+    const inputs = host.querySelectorAll<HTMLInputElement>('.amount-input');
+    inputs[1].value = '1';
+    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await settleQuote();
+    expect(host.querySelector<HTMLButtonElement>('.submit-btn')?.disabled).toBe(true);
+
+    mocks.walletStore.setBalances({ ICUSD: { raw: 200_000_000n }, CKUSDT: { raw: 3_000_000n }, CKUSDC: { raw: 4_000_000n } });
+    await tick();
+    flushSync();
+    expect(Array.from(host.querySelectorAll('.balance-value')).slice(0, 3).map((el) => el.textContent?.trim())).toEqual(['2.00', '3.00', '4.00']);
+    expect(host.querySelector<HTMLButtonElement>('.submit-btn')?.disabled).toBe(false);
+  });
 
   it('explains the missing stable amount and disables an invalid icUSD-only deposit', async () => {
     instance = mount(LiquidityInterface, { target: host });

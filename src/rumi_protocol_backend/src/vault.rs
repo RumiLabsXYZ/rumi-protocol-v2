@@ -197,6 +197,7 @@ pub(crate) fn redemption_candidate_types(state: &crate::state::State) -> Vec<Pri
     for vault in state.vault_id_to_vaults.values() {
         if vault.borrowed_icusd_amount == 0
             || vault.bot_processing
+            || state.has_pending_nicp_claim(vault.vault_id)
             || state.has_unresolved_push_sweep_for_vault(vault.vault_id)
             || state.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
             || crate::guard::is_vault_liquidating(vault.vault_id)
@@ -2039,6 +2040,16 @@ impl Vault {
 
 /// Returns an error if the vault is locked for bot processing.
 pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> {
+    if read_state(|s| s.has_pending_nicp_claim(vault.vault_id)) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{} collateral is a protocol-controlled redemption claim", vault.vault_id
+        )));
+    }
+    require_vault_repayment_allowed(vault)
+}
+
+/// Repayment changes debt only; it cannot release claim collateral.
+fn require_vault_repayment_allowed(vault: &Vault) -> Result<(), ProtocolError> {
     if vault.bot_processing {
         Err(ProtocolError::GenericError(format!(
             "Vault #{} is locked — bot liquidation in progress",
@@ -2081,6 +2092,9 @@ pub struct CandidVault {
     pub collateral_type: Principal,
     /// Accumulated interest portion of the vault's debt (in e8s)
     pub accrued_interest: u64,
+    /// Source nICP has been reserved/burned. This claim, not the source token
+    /// balance, backs the debt; ordinary collateral payouts are suspended.
+    pub nicp_redemption_claim: Option<crate::nicp_redemption::NicpRedemptionClaim>,
 }
 
 impl From<Vault> for CandidVault {
@@ -2093,7 +2107,22 @@ impl From<Vault> for CandidVault {
             collateral_amount: vault.collateral_amount,
             collateral_type: vault.collateral_type,
             accrued_interest: vault.accrued_interest.to_u64(),
+            nicp_redemption_claim: None,
         }
+    }
+}
+
+impl CandidVault {
+    pub fn from_state(vault: Vault, state: &crate::state::State) -> Self {
+        let mut public = Self::from(vault);
+        if let Some(claim) = state.nicp_redemption_claim.as_ref()
+            .filter(|claim| claim.vault_id == public.vault_id && claim.blocks_vault())
+        {
+            public.collateral_amount = 0;
+            public.icp_margin_amount = 0;
+            public.nicp_redemption_claim = Some(claim.clone());
+        }
+        public
     }
 }
 
@@ -3934,7 +3963,7 @@ pub(crate) fn quote_sp_liquidation(
         .vault_id_to_vaults
         .get(&vault_id)
         .ok_or_else(|| format!("Vault #{vault_id} not found"))?;
-    if vault.bot_processing {
+    if state.has_pending_nicp_claim(vault_id) || vault.bot_processing {
         return Err(format!("Vault #{vault_id} is locked — bot liquidation in progress"));
     }
     let config = state
@@ -4357,6 +4386,15 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
         )));
     }
 
+    let prior = state.sp_xrp_absorb_preflights.get(&vault_id).is_some_and(|row| {
+        row.caller == caller && row.icusd_burn_e8s == expected_icusd_burn_e8s
+            && row.expires_at_ns > now_ns
+    });
+    if !prior && state.vault_id_to_vaults.get(&vault_id)
+        .and_then(|vault| state.get_collateral_config(&vault.collateral_type))
+        .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset) {
+        return Err(ProtocolError::GenericError("Sunset collateral requires manual liquidation".into()));
+    }
     let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
     let mut preflight = sizing.preflight;
     preflight.expires_at_ns = now_ns.saturating_add(XRP_SP_ABSORB_PREFLIGHT_TTL_NS);
@@ -9225,7 +9263,7 @@ async fn repay_to_vault_internal(
     let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
         .ok_or_else(|| ProtocolError::GenericError("Vault not found".to_string()))?;
 
-    require_vault_not_processing(&vault)?;
+    require_vault_repayment_allowed(&vault)?;
 
     // Check collateral status allows repayment
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
@@ -9293,7 +9331,7 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_{}", arg.vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
-    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+    let _vault_op_guard = match VaultLiquidationGuard::new_for_nicp_repayment(arg.vault_id) {
         Ok(g) => g,
         Err(e) => {
             guard_principal.fail();
@@ -9319,7 +9357,7 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     let guard_principal =
         GuardPrincipal::new(caller, &format!("repay_vault_stable_{}", arg.vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
-    let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
+    let _vault_op_guard = match VaultLiquidationGuard::new_for_nicp_repayment(arg.vault_id) {
         Ok(g) => g,
         Err(e) => {
             guard_principal.fail();
@@ -9367,7 +9405,7 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         }
     };
 
-    if let Err(e) = require_vault_not_processing(&vault) {
+    if let Err(e) = require_vault_repayment_allowed(&vault) {
         guard_principal.fail();
         return Err(e);
     }
@@ -14130,6 +14168,20 @@ mod xrp_sp_absorb_contract_tests {
             preflight.icusd_burn_e8s,
             vault.borrowed_icusd_amount.to_u64()
         );
+    }
+
+    #[test]
+    fn sunset_xrp_rejects_fresh_preflight_but_preserves_existing_reservation() {
+        let mut fresh = test_state_with_xrp_vault();
+        fresh.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
+        let err = stability_pool_preflight_xrp_absorb_in_state(&mut fresh, sp(), VAULT_ID, 100 * E8, 10).unwrap_err();
+        assert!(format!("{err:?}").contains("manual liquidation"));
+        assert!(fresh.sp_xrp_absorb_preflights.is_empty());
+
+        let mut reserved = test_state_with_xrp_vault();
+        stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 10).unwrap();
+        reserved.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
+        assert!(stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 11).is_ok());
     }
 
     #[test]

@@ -357,3 +357,14 @@ Worktree: `/private/tmp/rumi-cksol-user-funded-20261020`; branch `codex/cksol-us
 | Card | State | Owner | Scope | Evidence |
 | --- | --- | --- | --- | --- |
 | OVUX-01 | Review | Oisy vault approval UX agent | Reduce redundant Oisy signer requests for new-vault creation while preserving the operation journal and ambiguous-transfer recovery. Separate from paused existing-vault top-ups. | 81 focused tests, production build/auth assets and two bounded source reviews pass. Expected signer requests: deposit-only 6→4; compound 6→5, with background Oisy status checks deferred to a user click. Live wallet screen count and publication unverified. See `oisy-vault-approval-ux-20261101.md`. |
+
+## Vault 51 redemption migration — November 1, 2026
+
+User authorizes protocol-controlled nICP redemption, retained debt, a public transparency entry, and temporary liquidation suspension for this vault backed by his personal guarantee. No other vault's collateral may fund this migration. Main coordinator applies team-agent-orchestration; existing reviewers are reused for integration/review without a new team. Sol-class agents remain integration/review roles; primary agent owns new implementation. No private-source export to another provider.
+
+| ID | State | Owner | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- |
+| V51-01 | Source verified | root | New durable redemption module and operator methods | 12 backend tests; live Candid compatibility; no migration dispatched; branch `codex/vault51-redemption-claim-20261101` |
+| V51-02 | Source verified | claim_accounting_review | Integrate claim accounting and spending exclusions | fixed ICP valuation, retained nICP terms, repayment-only, 33 frontend regressions; current deployed sunset/3USD fixes preserved |
+| V51-03 | Software published | root | Transparency notice and release evidence | exact backend/asset readbacks verified; claim=null, vault51 still1500 nICP; financial initiation remains manual user action; PR612 |
+| V51-04 | Passed | claim_custody_review | Independent custody review | exact dispatch, unknown outcomes, settlement attribution, no extra mint; final scoped compatibility/replay review passed |

@@ -973,6 +973,12 @@ pub async fn prepare(request: SpLiquidationRequest) -> Result<SpLiquidationRecei
             "Liquidations were frozen while preparing the SP liquidation".into(),
         ));
     }
+    if read_state(|state| state.get_collateral_config(&quote.collateral_type)
+        .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset)) {
+        return Err(ProtocolError::GenericError(
+            "Sunset collateral requires manual liquidation".into(),
+        ));
+    }
     // Only the incoming payment is dispatched from the prepared quote. The
     // protocol-fee leg is created later, immediately before its first ledger
     // await, so a long-held payment/recovery journal cannot age that later
@@ -1150,48 +1156,53 @@ fn mark_payment_attempted(
 /// payment outcome always resumes with the exact frozen tuple.
 fn validate_predispatch_quote(journal: &SpLiquidationJournal) -> Result<(), String> {
     let now = ic_cdk::api::time();
+    read_state(|state| validate_predispatch_quote_at(state, journal, now))
+}
+
+fn validate_predispatch_quote_at(state: &crate::state::State, journal: &SpLiquidationJournal, now: u64) -> Result<(), String> {
     if now < journal.created_at_ns
         || now.saturating_sub(journal.created_at_ns) > SP_LIQUIDATION_QUOTE_TTL_NS
     {
         return Err("SP liquidation quote expired before payment dispatch".into());
     }
-    read_state(|state| {
-        if state.frozen || state.liquidation_frozen {
-            return Err("liquidations are frozen before payment dispatch".into());
-        }
-        let config = state
-            .get_collateral_config(&journal.collateral_type)
-            .ok_or_else(|| "reserved collateral configuration is missing".to_string())?;
-        let timestamp = config
-            .last_price_timestamp
-            .ok_or_else(|| "reserved collateral price has no freshness timestamp".to_string())?;
-        if timestamp > now || now.saturating_sub(timestamp) > SP_LIQUIDATION_PRICE_MAX_AGE_NS {
-            return Err("reserved collateral price is stale before payment dispatch".into());
-        }
-        let current = crate::vault::quote_sp_liquidation(
-            state,
-            journal.vault_id,
-            ICUSD::new(journal.quote_debt_e8s),
-        )?;
-        if current.collateral_type != journal.collateral_type
-            || current.collateral_ledger != journal.collateral_ledger
-            || current.collateral_price != {
-                if journal.quote_price_decimal != [0; 16] {
-                    rust_decimal::Decimal::deserialize(journal.quote_price_decimal)
-                } else {
-                    rust_decimal::Decimal::from_f64_retain(f64::from_bits(journal.quote_price_usd_bits))
-                        .ok_or_else(|| "frozen collateral price cannot be reconstructed".to_string())?
-                }
+    if state.frozen || state.liquidation_frozen {
+        return Err("liquidations are frozen before payment dispatch".into());
+    }
+    let config = state
+        .get_collateral_config(&journal.collateral_type)
+        .ok_or_else(|| "reserved collateral configuration is missing".to_string())?;
+    if config.status == crate::state::CollateralStatus::Sunset {
+        return Err("Sunset collateral requires manual liquidation".into());
+    }
+    let timestamp = config
+        .last_price_timestamp
+        .ok_or_else(|| "reserved collateral price has no freshness timestamp".to_string())?;
+    if timestamp > now || now.saturating_sub(timestamp) > SP_LIQUIDATION_PRICE_MAX_AGE_NS {
+        return Err("reserved collateral price is stale before payment dispatch".into());
+    }
+    let current = crate::vault::quote_sp_liquidation(
+        state,
+        journal.vault_id,
+        ICUSD::new(journal.quote_debt_e8s),
+    )?;
+    if current.collateral_type != journal.collateral_type
+        || current.collateral_ledger != journal.collateral_ledger
+        || current.collateral_price != {
+            if journal.quote_price_decimal != [0; 16] {
+                rust_decimal::Decimal::deserialize(journal.quote_price_decimal)
+            } else {
+                rust_decimal::Decimal::from_f64_retain(f64::from_bits(journal.quote_price_usd_bits))
+                    .ok_or_else(|| "frozen collateral price cannot be reconstructed".to_string())?
             }
-            || current.debt_e8s != journal.quote_debt_e8s
-            || current.collateral_gross_raw != journal.quote_collateral_gross_raw
-            || current.collateral_net_raw != journal.quote_collateral_net_raw
-            || current.protocol_cut_raw != journal.quote_protocol_cut_raw
-        {
-            return Err("SP liquidation quote changed before payment dispatch".into());
         }
-        Ok(())
-    })
+        || current.debt_e8s != journal.quote_debt_e8s
+        || current.collateral_gross_raw != journal.quote_collateral_gross_raw
+        || current.collateral_net_raw != journal.quote_collateral_net_raw
+        || current.protocol_cut_raw != journal.quote_protocol_cut_raw
+    {
+        return Err("SP liquidation quote changed before payment dispatch".into());
+    }
+    Ok(())
 }
 
 fn cancel_predispatch_quote(key: [u8; 32], caller: Principal, reason: String) -> bool {
@@ -2533,6 +2544,31 @@ mod tests {
             &block, from, to, 900, 10, &memo, 702
         )
         .is_err());
+    }
+
+    #[test]
+    fn prepared_quote_rejects_collateral_sunset_before_first_payment() {
+        let mut state = crate::state::State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::from_slice(&[10]),
+            icp_ledger_principal: Principal::from_slice(&[11]),
+            fee_e8s: 0,
+            developer_principal: Principal::from_slice(&[12]),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let collateral = state.icp_collateral_type();
+        let config = state.collateral_configs.get_mut(&collateral).unwrap();
+        config.status = crate::state::CollateralStatus::Sunset;
+        let mut journal = cancellation_tombstone([7; REQUEST_ID_LEN], Principal::from_slice(&[1]), &request(SpLiquidationPayment::Icusd), Principal::from_slice(&[10]), 10);
+        journal.collateral_type = collateral;
+        let err = validate_predispatch_quote_at(&state, &journal, 11).unwrap_err();
+        assert!(err.contains("manual liquidation"));
+        state.collateral_configs.get_mut(&collateral).unwrap().status = crate::state::CollateralStatus::Active;
+        let err = validate_predispatch_quote_at(&state, &journal, 11).unwrap_err();
+        assert!(!err.contains("manual liquidation"));
     }
 
     #[test]

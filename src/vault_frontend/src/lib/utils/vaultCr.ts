@@ -22,6 +22,9 @@ export function computeVaultCrPct(
   priceMap: Map<string, number>,
   decimalsMap: Map<string, number>,
 ): number | null {
+  // Claim collateral has separate fixed-ICP accounting; this generic token
+  // helper has no haircut input. Do not mislabel it as a zero-backed vault.
+  if (vault.nicp_redemption_claim?.length) return null;
   const debtE8s = Number(vault.borrowed_icusd_amount ?? 0n);
   if (debtE8s <= 0) return null;
 

@@ -17,6 +17,7 @@ const BOB = '7pail-xaaaa-aaaas-aabmq-cai';
 const XRP = '5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i';
 const ICP = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
 const EXE = 'rh2pm-ryaaa-aaaan-qeniq-cai';
+const CKDOGE = 'efmc5-wyaaa-aaaar-qb3wa-cai';
 const NICP = 'buwm7-7yaaa-aaaar-qagva-cai';
 const CKXAUT = 'nza5v-qaaaa-aaaar-qahzq-cai';
 
@@ -52,6 +53,8 @@ const poolStatus = {
 describe('isDefaultInterestEligible', () => {
   it('excludes sunset BOB, which every new position is opted out of', () => {
     expect(isDefaultInterestEligible(BOB)).toBe(false);
+    expect(isDefaultInterestEligible(EXE)).toBe(false);
+    expect(isDefaultInterestEligible(CKDOGE)).toBe(false);
   });
 
   it('excludes native XRP, which is gated behind a configured payout address', () => {
@@ -59,7 +62,7 @@ describe('isDefaultInterestEligible', () => {
   });
 
   it('includes ordinary ICRC collateral', () => {
-    for (const ct of [ICP, EXE, NICP, CKXAUT]) {
+    for (const ct of [ICP, NICP, CKXAUT]) {
       expect(isDefaultInterestEligible(ct)).toBe(true);
     }
   });
