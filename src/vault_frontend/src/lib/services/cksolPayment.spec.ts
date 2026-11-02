@@ -498,4 +498,9 @@ describe('user-funded ckSOL payment', () => {
 			expect.objectContaining({ amount: approvalAmount, expected_allowance: [123n] })
 		);
 	});
+	it.each(['ApprovalUnknown','StartUnknown','damaged','interrupted-refunded'])('does not bypass an ICP-paid %s journal from another tab',async phase=>{
+		const {ledger,storage}=setup();const q=await quoteCksolPayment(owner,'plug');
+		storage.setItem(`rumi:cksol:icp:v1:rrkah-fqaaa-aaaaa-aaaaq-cai:${owner.toText()}`,phase==='damaged'?'broken':JSON.stringify({owner:owner.toText(),sequence:'4',phase:phase==='interrupted-refunded'?'Receipt':phase,createdAt:1,...(phase==='interrupted-refunded'?{receipt:{sequence:'4',phase:'Complete',message:['Processing was interrupted by an upgrade; SOL status remains unknown']}}:{})}));
+		await expect(submitCksolPayment(q,owner,storage,live)).rejects.toThrow('ICP');expect(ledger.icrc2_approve).not.toHaveBeenCalled();
+	});
 });

@@ -5,7 +5,7 @@ const fx = vi.hoisted(() => {
   function store<T>(v: T) { const listeners = new Set<(v:T)=>void>(); return { subscribe(fn:(v:T)=>void) { listeners.add(fn); fn(v); return () => { listeners.delete(fn); }; }, set(n:T) { v=n; listeners.forEach(fn=>fn(v)); } }; }
   return { wallet: store<any>({ isConnected: false, principal: null }), generation: store(0), auth: store<any>({walletType:'plug'}), collaterals: store<any>({ collaterals: [] }),
     solBalance: vi.fn(), info: vi.fn(), attempt: vi.fn(), address: vi.fn(), quote: vi.fn(), submit: vi.fn(), depositStatus: vi.fn(), withdrawalStatus: vi.fn(), balance: vi.fn(), acknowledge: vi.fn(), oisy: false, saved: null as any,
-    paidQuote: vi.fn(), submitPaid: vi.fn(), loadPaid: vi.fn(), recoverPaid: vi.fn(), claimRefund: vi.fn(), resumePaid: vi.fn(), continuePaid: vi.fn(), openSigner: vi.fn(), closeSigner: vi.fn() };
+    icpQuote: vi.fn(), icpRecover: vi.fn(), icpSubmit: vi.fn(), icpResume: vi.fn(), icpLoad: vi.fn(), paidQuote: vi.fn(), submitPaid: vi.fn(), loadPaid: vi.fn(), recoverPaid: vi.fn(), claimRefund: vi.fn(), resumePaid: vi.fn(), continuePaid: vi.fn(), openSigner: vi.fn(), closeSigner: vi.fn() };
 });
 vi.mock('$lib/services/cksolOisySigner', () => ({ beginCksolOisyAction: (owner:any) => ({ready:fx.openSigner(owner),close:fx.closeSigner}) }));
 vi.mock('$lib/services/cksolDepositBalance', () => ({ readSolDepositBalance: fx.solBalance }));
@@ -24,12 +24,19 @@ vi.mock('$lib/services/cksolPayment', () => ({
   quoteCksolPayment: fx.paidQuote, submitCksolPayment: fx.submitPaid, loadCksolPayment: fx.loadPaid, saveCksolPayment: vi.fn(),
   recoverCksolPayment: fx.recoverPaid, claimCksolRefund: fx.claimRefund, resumeFundedCksolPayment: fx.resumePaid, continueApprovedCksolPayment: fx.continuePaid, cksolPaymentKey: (s:string)=>`paid:${s}`,
 }));
+vi.mock('$lib/services/cksolIcpPayment',()=>({
+  quoteCksolIcpPayment:fx.icpQuote,recoverCksolIcpPayment:fx.icpRecover,submitCksolIcpPayment:fx.icpSubmit,resumeCksolIcpPayment:fx.icpResume,
+  continueCksolIcpApproval:vi.fn(),loadCksolIcpPayment:fx.icpLoad,
+  icpPaymentSettled:(p:any)=>!p||p.phase==='NotStarted'||p.phase==='Receipt'&&['Complete','FundingRejected'].includes(p.receipt?.phase)
+}));
 import Page from '../../routes/solana/+page.svelte';
 const ownerA = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai'), ownerB = Principal.fromText('ryjl3-tyaaa-aaaaa-aaaba-cai');
 let host: HTMLDivElement, instance: any;
-async function settle() { for(let i=0;i<60;i++) { await Promise.resolve(); flushSync(); } }
+// This suite exercises the retained cycles-paid flow; choose it explicitly
+// after mounting or a wallet-session reset. ICP-first behavior has its own fixture.
+async function settle() { for(let i=0;i<60;i++) { await Promise.resolve(); flushSync(); } button('Use existing cycles')?.click(); flushSync(); }
 function button(text:string) { return [...host.querySelectorAll('button')].find(b=>b.textContent?.includes(text) && !(text==='Mint ckSOL' && b.getAttribute('role')==='tab'))!; }
-function render() { instance=mount(Page,{target:host}); flushSync(); }
+function render() { instance=mount(Page,{target:host}); flushSync(); button('Use existing cycles')?.click(); flushSync(); }
 beforeEach(() => {
   Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_k:any,_o:any,fn:any)=>fn({})}});
   vi.resetAllMocks(); fx.openSigner.mockReset(); fx.openSigner.mockResolvedValue(undefined); fx.closeSigner.mockResolvedValue(undefined); fx.acknowledge.mockReset(); fx.oisy=false; fx.saved=null;
@@ -38,6 +45,8 @@ beforeEach(() => {
   fx.solBalance.mockResolvedValue(1_920_000_000n);
   fx.attempt.mockResolvedValue([]); fx.balance.mockResolvedValue(1_000_000_000n);
   fx.paidQuote.mockResolvedValue({next_sequence:1n,funding_cycles:1_001_000_000_000n,processing_fee:1_000_000_000n,ledger_fee:100_000_000n,approval_amount:1_001_100_000_000n,refund_fee_reserve:100_000_000n,balance:5_000_000_000_000n});
+  fx.icpQuote.mockResolvedValue({deposit:26_295_000n,total:26_315_000n,fee:10_000n,balance:100_000_000n,rate:40_000n,terms:{available:true,attached_cycles:1_000_000_000_000n,reserve_available_cycles:2_000_000_000_000n}});
+  fx.icpRecover.mockResolvedValue(null);fx.icpLoad.mockReturnValue(null);
   fx.loadPaid.mockReturnValue(null); fx.recoverPaid.mockResolvedValue(null); fx.auth.set({walletType:'plug'});
   fx.address.mockResolvedValue('GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax'); fx.depositStatus.mockResolvedValue({Queued:{sweepable_amount:100n}});
   host=document.createElement('div'); document.body.appendChild(host);
@@ -266,5 +275,25 @@ describe('ckSOL failed acknowledgement recovery', () => {
     expect(host.textContent).toContain('Burn block: 9');
     expect(host.textContent).not.toContain('finalized successfully');
     expect(button('Acknowledge completed')).toBeUndefined();
+  });
+});
+
+
+describe('ICP-first page integration',()=>{
+  async function renderIcp() { instance=mount(Page,{target:host});for(let i=0;i<100;i++){await Promise.resolve();flushSync();} }
+  it('defaults to ICP and withholds a new SOL address when the ICP balance is insufficient',async()=>{
+    fx.wallet.set({isConnected:true,principal:ownerA});fx.solBalance.mockResolvedValue(0n);
+    fx.icpQuote.mockResolvedValue({deposit:26_295_000n,total:26_315_000n,fee:10_000n,balance:0n,rate:40_000n,terms:{available:true,attached_cycles:1_000_000_000_000n,reserve_available_cycles:2_000_000_000_000n}});
+    await renderIcp();expect(host.textContent).toContain('Add at least 0.26315000 ICP');expect(host.textContent).not.toContain('GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax');
+    expect(button('Mint with ICP').disabled).toBe(true);expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+  it('shows the existing SOL deposit and offers ICP processing without requiring cycles',async()=>{
+    fx.wallet.set({isConnected:true,principal:ownerA});fx.paidQuote.mockResolvedValue({...await fx.paidQuote(),balance:0n});
+    await renderIcp();expect(host.textContent).toContain('1.92 SOL received');expect(host.textContent).toContain('GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax');expect(button('Mint with ICP').disabled).toBe(false);
+  });
+  it('recognizes an ICP funding reservation without mislabeling it as an unknown minter submission',async()=>{
+    fx.wallet.set({isConnected:true,principal:ownerA});fx.attempt.mockResolvedValue([{status:{SubmittedOrUnknown:null}}]);
+    fx.icpRecover.mockResolvedValue({owner:ownerA.toText(),sequence:'4',createdAt:1,phase:'Receipt',receipt:{sequence:4n,phase:'Funded',deposit_id:[]}});
+    await renderIcp();expect(button('Continue funded mint').disabled).toBe(false);expect(button('Use existing cycles').disabled).toBe(true);
   });
 });

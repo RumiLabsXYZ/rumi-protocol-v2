@@ -40,6 +40,29 @@
       "cardIds": [
         "SEC-05"
       ]
+    },
+    {
+      "id": "cksol-icp-processing",
+      "title": "ckSOL processing with ICP escrow",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Check required hosted Stability Pool workflow run 41330323415 and the follow-up run after the PR head changes; record exact results and do not claim CI green before evidence. Keep reserve zero and lifecycle/canary deferred before client money.",
+      "cardIds": [
+        "CKICP-01",
+        "CKICP-02",
+        "CKICP-03"
+      ]
+    },
+    {
+      "id": "xrp-deposit-tag-guidance",
+      "title": "Incoming XRP deposit-tag guidance",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Track draft PR #607 through review, merge, and deployment evidence; no live-wallet action is authorized.",
+      "cardIds": [
+        "XRPTAG-01",
+        "XRPTAG-02"
+      ]
     }
   ]
 }

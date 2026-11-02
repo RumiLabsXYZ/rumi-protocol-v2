@@ -293,13 +293,28 @@ pub fn verify_transfer_from_block(
     memo: &[u8],
     created_at_time_ns: u64,
 ) -> Result<(), String> {
+    verify_transfer_from_block_to_subaccount(block, owner, spender, destination, [0; 32], amount_e8s, fee_e8s, memo, created_at_time_ns)
+}
+
+/// Verify a transfer_from to an exact, non-default destination subaccount.
+pub fn verify_transfer_from_block_to_subaccount(
+    block: &Block,
+    owner: Principal,
+    spender: Principal,
+    destination: Principal,
+    destination_subaccount: [u8; 32],
+    amount_e8s: u64,
+    fee_e8s: u64,
+    memo: &[u8],
+    created_at_time_ns: u64,
+) -> Result<(), String> {
     let Some(Operation::Transfer { from, to, spender: actual_spender, amount, fee }) =
         block.transaction.operation.as_ref()
     else {
         return Err("native ICP block is not an ICRC-2 transfer_from transfer".into());
     };
     if from.as_slice() != account_identifier(owner).as_slice()
-        || to.as_slice() != account_identifier(destination).as_slice()
+        || to.as_slice() != account_identifier_with_subaccount(destination, destination_subaccount).as_slice()
         || actual_spender.as_deref() != Some(account_identifier(spender).as_slice())
         || amount.e8s != amount_e8s
         || fee.e8s != fee_e8s
@@ -314,10 +329,14 @@ pub fn verify_transfer_from_block(
 /// Derives the legacy ICP Ledger AccountIdentifier for an owner's default
 /// account: CRC32(SHA-224("\x0Aaccount-id" || principal || zero subaccount)).
 pub fn account_identifier(owner: Principal) -> [u8; 32] {
+    account_identifier_with_subaccount(owner, [0; 32])
+}
+
+pub fn account_identifier_with_subaccount(owner: Principal, subaccount: [u8; 32]) -> [u8; 32] {
     let mut hasher = Sha224::new();
     hasher.update(b"\x0Aaccount-id");
     hasher.update(owner.as_slice());
-    hasher.update([0; 32]);
+    hasher.update(subaccount);
     let hash = hasher.finalize();
     let checksum = crc32_ieee(&hash).to_be_bytes();
     let mut identifier = [0; 32];
@@ -349,6 +368,41 @@ mod tests {
         verify_transfer_from_block, Block, Operation, Timestamp, Tokens, Transaction,
     };
     use candid::Principal;
+
+    #[test]
+    fn nondefault_escrow_transfer_requires_every_exact_field() {
+        let owner = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let sub = [42; 32];
+        let memo = b"distinct payment memo";
+        let mut block = Block {
+            parent_hash: None,
+            timestamp: Timestamp { timestamp_nanos: 99 },
+            transaction: Transaction {
+                memo: 0,
+                icrc1_memo: Some(memo.to_vec()),
+                created_at_time: Timestamp { timestamp_nanos: 98 },
+                operation: Some(Operation::Transfer {
+                    from: account_identifier(owner).to_vec(),
+                    to: super::account_identifier_with_subaccount(backend, sub).to_vec(),
+                    spender: Some(account_identifier(backend).to_vec()),
+                    amount: Tokens { e8s: 123 }, fee: Tokens { e8s: 10 },
+                }),
+            },
+        };
+        let check = |b: &Block, owner, spender, destination, sub, amount, fee, m: &[u8], time| super::verify_transfer_from_block_to_subaccount(b, owner, spender, destination, sub, amount, fee, m, time);
+        assert!(check(&block,owner,backend,backend,sub,123,10,memo,98).is_ok());
+        assert!(check(&block,Principal::from_slice(&[3]),backend,backend,sub,123,10,memo,98).is_err());
+        assert!(check(&block,owner,Principal::from_slice(&[3]),backend,sub,123,10,memo,98).is_err());
+        assert!(check(&block,owner,backend,Principal::from_slice(&[3]),sub,123,10,memo,98).is_err());
+        assert!(check(&block,owner,backend,backend,[43;32],123,10,memo,98).is_err());
+        assert!(check(&block,owner,backend,backend,sub,124,10,memo,98).is_err());
+        assert!(check(&block,owner,backend,backend,sub,123,11,memo,98).is_err());
+        assert!(check(&block,owner,backend,backend,sub,123,10,b"wrong",98).is_err());
+        assert!(check(&block,owner,backend,backend,sub,123,10,memo,99).is_err());
+        block.transaction.operation = Some(Operation::Mint { to: vec![], amount: Tokens { e8s: 123 } });
+        assert!(check(&block,owner,backend,backend,sub,123,10,memo,98).is_err());
+    }
 
     #[test]
     fn native_archive_reader_checks_global_bounds_and_callback() {
