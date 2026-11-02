@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { formatStabilityPoolEvent } from './explorerFormatters';
-import { XRP_NATIVE_PRINCIPAL } from './explorerHelpers';
+import { XLM_NATIVE_PRINCIPAL, XRP_NATIVE_PRINCIPAL } from './explorerHelpers';
+import { Principal } from '@dfinity/principal';
 
 /**
  * `LiquidationExecuted.collateral_gained` is denominated in the collateral's
@@ -24,6 +25,13 @@ const liquidationExecuted = (collateralType: string, collateralGained: bigint) =
 });
 
 describe('formatStabilityPoolEvent — LiquidationExecuted', () => {
+  it('formats native XLM in stroops using the backend synthetic principal', () => {
+    const principal = Principal.fromUint8Array(new TextEncoder().encode('rumi-xlm-native')).toText();
+    expect(principal).toBe(XLM_NATIVE_PRINCIPAL);
+    const out = formatStabilityPoolEvent(liquidationExecuted(principal, 12_345_678n));
+    expect(out.summary).toContain('1.2345678 XLM');
+  });
+
   it('formats native-XRP collateral with 6 decimals (drops), not 8', () => {
     const out = formatStabilityPoolEvent(liquidationExecuted(XRP_NATIVE_PRINCIPAL, 1_796_552n));
 

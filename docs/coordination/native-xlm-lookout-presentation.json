@@ -1,6 +1,6 @@
 {
-  "summary": "Native XLM remains Frozen, unregistered, undeployed, and not admitted. The developer-only pending-address endpoint and an isolated PocketIC smoke now exist in source; neither has compiled or run. The smoke checks a threshold-derived classic address, testnet binding, expiry, and no Vault or icUSD mint. Test-build Candid, focused checks, and the actual threshold derive remain unverified. Production interface generation, deposit/borrow, payout, oracle, and provider work remain. Disk is ample, but no XLM local build slot is allocated.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Draft address code and an isolated test are ready in source, but they have not been built or run and do not count funds as collateral. Next we will run the test when the shared build slot is allocated; Rob does not need to act now.",
+  "summary": "XLM remains Frozen, unregistered and undeployed. The test-only pending-address endpoint and PocketIC smoke are source-only; compilation, Candid and threshold derivation remain unverified. Explorer metadata now identifies XLM and formats stroops with seven decimals; its regression test is unrun. Deposit, payout, oracle, provider, frontend and release work remain. Disk is ample, but no XLM build slot is allocated.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. The address demo and an explorer display fix are written but have not been tested. The next step is to run the checks when build capacity is available; Rob does not need to act now.",
   "glossary": [
     {
       "term": "Stellar",

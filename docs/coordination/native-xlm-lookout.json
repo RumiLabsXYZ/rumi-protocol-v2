@@ -53,7 +53,7 @@
       "state": "In progress",
       "owner": "Rumi implementation team",
       "scope": "Integrate Candid, user flows, and operator monitoring",
-      "evidenceText": "Earlier Candid regeneration and compatibility checks passed. Source-only key setter/getter changes the Candid interface; generated `.did` and frontend declarations remain stale pending canonical regeneration. Multi-operation receipt/status and frontend guard changes have not been compiled. Full XLM frontend integration and supported deposit/withdrawal/claim flows remain open. The new open_xlm_vault source API is compiled only in test builds; its test-build Candid remains unverified. Production Candid/declarations still require canonical regeneration for the separate key setter/getter changes; no hand-edited interface was retained.",
+      "evidenceText": "Earlier Candid regeneration and compatibility checks passed. Source-only key setter/getter changes the Candid interface; generated `.did` and frontend declarations remain stale pending canonical regeneration. Multi-operation receipt/status and frontend guard changes have not been compiled. Full XLM frontend integration and supported deposit/withdrawal/claim flows remain open. The new open_xlm_vault source API is compiled only in test builds; its test-build Candid remains unverified. Production Candid/declarations still require canonical regeneration for the separate key setter/getter changes; no hand-edited interface was retained. Explorer metadata now identifies native XLM and uses seven decimal places; a focused formatting regression is added in source. The test has not run.",
       "evidenceLinks": []
     },
     {

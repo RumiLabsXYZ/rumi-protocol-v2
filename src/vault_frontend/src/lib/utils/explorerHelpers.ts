@@ -108,6 +108,9 @@ export interface TokenInfo {
  */
 export const XRP_NATIVE_PRINCIPAL = '5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i';
 
+/** Synthetic principal for native XLM, derived from the backend's `rumi-xlm-native` bytes. */
+export const XLM_NATIVE_PRINCIPAL = 'nxxh2-zlsov-wwsll-ynrws-23tbo-ruxmz-i';
+
 export const KNOWN_TOKENS: Record<string, TokenInfo> = {
   // Core protocol tokens
   [CANISTER_IDS.ICP_LEDGER]: { symbol: 'ICP', name: 'Internet Computer', decimals: 8 },
@@ -120,6 +123,8 @@ export const KNOWN_TOKENS: Record<string, TokenInfo> = {
   // collateral_amount in drops, so the explorer must format with 6 decimals or amounts
   // read 100x too small.
   [XRP_NATIVE_PRINCIPAL]: { symbol: 'XRP', name: 'XRP (XRP Ledger)', decimals: 6 },
+  // Native Stellar amounts are stored in stroops (7 decimal places).
+  [XLM_NATIVE_PRINCIPAL]: { symbol: 'XLM', name: 'Stellar Lumens', decimals: 7 },
   // Collateral tokens
   'mxzaz-hqaaa-aaaar-qaada-cai': { symbol: 'ckBTC', name: 'Chain-Key Bitcoin', decimals: 8 },
   'ss2fx-dyaaa-aaaar-qacoq-cai': { symbol: 'ckETH', name: 'Chain-Key Ethereum', decimals: 18 },
