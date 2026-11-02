@@ -9248,6 +9248,20 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
 /// guarantee — an explicit flag (rather than `amount == debt` equality) avoids
 /// brittleness from interest accruing between the caller's debt fetch and
 /// this helper's read.
+fn claim_repay_near_full(amount: u64, debt: u64) -> bool {
+    amount > 0 && debt > 0 && debt.saturating_sub(amount) <= std::cmp::max(debt / 100, 1_000_000)
+}
+
+#[cfg(test)]
+mod claim_repay_admission_tests {
+    #[test]
+    fn near_full_allows_accrual_but_not_zero_or_substantial_partial() {
+        assert!(super::claim_repay_near_full(2_000_000, 2_000_001));
+        assert!(!super::claim_repay_near_full(100_000, 5_000_000));
+        assert!(!super::claim_repay_near_full(0, 500_000));
+    }
+}
+
 async fn repay_to_vault_internal(
     caller: Principal,
     arg: VaultArg,
@@ -9279,7 +9293,9 @@ async fn repay_to_vault_internal(
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if !is_full_close && amount < read_state(|s| s.min_icusd_amount) {
+    let claim_full_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id))
+        && claim_repay_near_full(amount.to_u64(), vault.borrowed_icusd_amount.to_u64());
+    if !is_full_close && !claim_full_repayment && amount < read_state(|s| s.min_icusd_amount) {
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
@@ -9426,7 +9442,9 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if amount < read_state(|s| s.min_icusd_amount) {
+    let claim_full_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id))
+        && claim_repay_near_full(amount.to_u64(), vault.borrowed_icusd_amount.to_u64());
+    if !claim_full_repayment && amount < read_state(|s| s.min_icusd_amount) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),

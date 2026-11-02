@@ -349,6 +349,23 @@ fn generate_consent_message_for_caller(
     caller: Principal,
 ) -> Result<String, String> {
     match method {
+        "refresh_vault51_redemption_claim" => {
+            candid::decode_args::<()>(arg).map_err(|_| "Invalid refresh arguments".to_string())?;
+            Ok("## Refresh Vault 51 Redemption\n\nCheck the WaterNeuron withdrawal and record a verified settlement if ICP has arrived. This action does not send funds.".into())
+        }
+        "reconcile_vault51_icp_payout" => {
+            let block = Decode!(arg, u64).map_err(|_| "Invalid payout block".to_string())?;
+            let claim = crate::nicp_redemption::current().ok_or("No vault 51 claim")?;
+            if caller != claim.owner || caller == Principal::anonymous() { return Err("Only the vault owner may reconcile".into()); }
+            Ok(format!("## Reconcile Vault 51 ICP Payout\n\nCheck ICP ledger block **{}** against the exact recorded payout from Rumi custody to your account. This action does not send funds.", block))
+        }
+        "withdraw_vault51_settled_icp" => {
+            candid::decode_args::<()>(arg).map_err(|_| "Invalid withdrawal arguments".to_string())?;
+            let claim = crate::nicp_redemption::current().ok_or("No vault 51 claim")?;
+            if caller != claim.owner || caller == Principal::anonymous() { return Err("Only the vault owner may withdraw".into()); }
+            let amount = claim.received_icp_e8s.ok_or("ICP settlement is not verified")?;
+            Ok(format!("## Withdraw Vault 51 ICP\n\nSend the verified settled balance of **{:.8} ICP**, less the ICP ledger fee, from Rumi's dedicated custody account to your default account **{}**. All vault debt must first be repaid. An interrupted payout remains bound to its original transfer.", amount as f64 / 100_000_000.0, caller))
+        }
         "open_vault_v2" => {
             match Decode!(arg, OpenVaultV2Args) {
                 Ok(request) => {

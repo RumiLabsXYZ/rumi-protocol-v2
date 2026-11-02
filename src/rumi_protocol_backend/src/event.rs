@@ -1923,6 +1923,9 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
             for nonce in [claim.funding_nonce, claim.approval_nonce] {
                 state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
             }
+            if let Some(release) = &claim.release {
+                state.op_nonce_counter = state.op_nonce_counter.max((release.nonce as u64).wrapping_add(1));
+            }
             let vault_id = claim.vault_id;
             state.nicp_redemption_claim = Some(claim);
             state.reindex_vault_cr(vault_id);

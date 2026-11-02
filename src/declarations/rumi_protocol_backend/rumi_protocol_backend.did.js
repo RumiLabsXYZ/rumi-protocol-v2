@@ -145,6 +145,12 @@ export const idlFactory = ({ IDL }) => {
     'ReleaseForRetry' : IDL.Null,
     'ConfirmPaid' : IDL.Null,
   });
+  const ClaimRelease = IDL.Record({
+    'fee_e8s' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'nonce' : IDL.Nat,
+    'block' : IDL.Opt(IDL.Nat64),
+  });
   const ClaimStage = IDL.Variant({
     'WithdrawalSubmitted' : IDL.Null,
     'Approved' : IDL.Null,
@@ -162,6 +168,7 @@ export const idlFactory = ({ IDL }) => {
     'owner' : IDL.Principal,
     'withdrawal_id' : IDL.Opt(IDL.Nat64),
     'redeem_nicp_e8s' : IDL.Nat64,
+    'release' : IDL.Opt(ClaimRelease),
     'fee_e8s' : IDL.Nat64,
     'updated_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
@@ -3077,6 +3084,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'reconcile_vault51_icp_payout' : IDL.Func([IDL.Nat64], [Result_4], []),
     'reconcile_vault_collateral_pull_from_block' : IDL.Func(
         [VaultOperationIdArg, IDL.Nat64],
         [Result_1],
@@ -3103,6 +3111,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'refresh_chain_hot_wallet_balance' : IDL.Func([IDL.Nat32], [Result_33], []),
+    'refresh_vault51_redemption_claim' : IDL.Func([], [Result_4], []),
     'refund_stability_pool_burn' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, SpWritedownProof],
         [Result_34],
@@ -3547,6 +3556,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'withdraw_vault51_settled_icp' : IDL.Func([], [Result_4], []),
     'xrp_balance' : IDL.Func([IDL.Text], [Result], []),
     'xrp_custody_address' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
