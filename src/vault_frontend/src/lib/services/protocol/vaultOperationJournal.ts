@@ -96,7 +96,10 @@ export interface VaultPullAdapter<T> {
 	dispatch(operationId: bigint, request: VaultPullRequest): Promise<unknown>;
 	beforeDispatch?(): void;
 	completed(view: VaultPullView): T;
-	acknowledge(operationId: bigint): Promise<void>;
+	/** A certified update reply may confirm the ACK directly. Older adapters fall back to status. */
+	acknowledge(operationId: bigint): Promise<bigint | void>;
+	/** Map only a definitive successful dispatch reply; undefined preserves journal reconciliation. */
+	resultFromDispatch?(reply: unknown, request: VaultPullRequest): T | undefined;
 	reconcileFromBlock?(operationId: bigint, blockIndex: bigint): Promise<void>;
 }
 
@@ -273,6 +276,19 @@ async function runVaultPullOperationLocked<T>(
 		};
 		assertOwner();
 
+		const acknowledgeAndClear = async (operationId: bigint) => {
+			const acknowledgedThrough = await adapter.acknowledge(operationId);
+			assertOwner();
+			if (typeof acknowledgedThrough === 'bigint') {
+				if (acknowledgedThrough < operationId) throw new Error(`Vault operation ${operationId} ACK did not confirm completion. Its exact intent remains saved.`);
+			} else {
+				const acknowledged = await adapter.getStatus();
+				assertOwner();
+				if (acknowledged.acknowledged_through < operationId) throw new Error(`Vault operation ${operationId} completed, but ACK is not yet confirmed. Its exact intent remains saved.`);
+			}
+			clearIntent(owner, operationId);
+		};
+
 		let intent = readIntent(owner);
 		const status = await adapter.getStatus();
 		assertOwner();
@@ -351,16 +367,7 @@ async function runVaultPullOperationLocked<T>(
 		if (currentView && terminal(currentView)) {
 			if ('Completed' in currentView.phase) {
 				const result = adapter.completed(currentView);
-				await adapter.acknowledge(operationId);
-				assertOwner();
-				const acknowledged = await adapter.getStatus();
-				assertOwner();
-				if (acknowledged.acknowledged_through < operationId) {
-					throw new Error(
-						`Vault operation ${operationId} completed, but ACK is not yet confirmed. Its exact intent remains saved.`
-					);
-				}
-				clearIntent(owner, operationId);
+				await acknowledgeAndClear(operationId);
 				return result;
 			}
 			// SafeNoEffect can be retried with the same ID and exact request. Do not
@@ -390,14 +397,25 @@ async function runVaultPullOperationLocked<T>(
 					);
 				}
 			}
+			let dispatchReply: unknown;
+			let dispatchSucceeded = false;
 			try {
 				assertOwner();
 				adapter.beforeDispatch?.();
-				await adapter.dispatch(operationId, intent.request);
+				dispatchReply = await adapter.dispatch(operationId, intent.request);
+				assertOwner();
+				dispatchSucceeded = true;
 			} catch {
 				// Always read the wallet-authenticated backend journal after a lost or
 				// typed reply. Its phase, rather than transport behavior, controls the
 				// next step and whether this intent can be retired.
+			}
+			if (dispatchSucceeded && adapter.resultFromDispatch) {
+				const result = adapter.resultFromDispatch(dispatchReply, intent.request);
+				if (result !== undefined) {
+					await acknowledgeAndClear(operationId);
+					return result;
+				}
 			}
 		}
 
@@ -422,30 +440,12 @@ async function runVaultPullOperationLocked<T>(
 		if (!terminal(currentView)) throw new Error(heldMessage(currentView));
 		if ('SafeNoEffect' in currentView.phase) {
 			const message = currentView.phase.SafeNoEffect.message;
-			await adapter.acknowledge(operationId);
-			assertOwner();
-			const acknowledged = await adapter.getStatus();
-			assertOwner();
-			if (acknowledged.acknowledged_through < operationId) {
-				throw new Error(
-					`Vault operation ${operationId} had no effect, but ACK is not confirmed. Its exact intent remains saved.`
-				);
-			}
-			clearIntent(owner, operationId);
+			await acknowledgeAndClear(operationId);
 			throw new Error(message || `Vault operation ${operationId} completed with no effect.`);
 		}
 
 		const result = adapter.completed(currentView);
-		await adapter.acknowledge(operationId);
-		assertOwner();
-		const acknowledged = await adapter.getStatus();
-		assertOwner();
-		if (acknowledged.acknowledged_through < operationId) {
-			throw new Error(
-				`Vault operation ${operationId} completed, but ACK is not yet confirmed. Its exact intent remains saved.`
-			);
-		}
-		clearIntent(owner, operationId);
+		await acknowledgeAndClear(operationId);
 		return result;
 	}
 

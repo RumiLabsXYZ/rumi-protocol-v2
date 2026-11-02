@@ -105,6 +105,43 @@ describe('runVaultPullOperation', () => {
 		expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toBeNull();
 	});
 
+	it('uses definitive dispatch and ACK replies without two extra signed status checks', async () => {
+		const setup = adapter({ acknowledged_through: 4n, active: [] });
+		setup.adapter.dispatch = vi.fn(async () => ({ vault_id: 42n, block_index: 7n }));
+		setup.adapter.resultFromDispatch = vi.fn(() => ({ vaultId: 42 }));
+		setup.adapter.acknowledge = vi.fn(async () => 5n);
+		expect(await runVaultPullOperation({ owner, request: openRequest, adapter: setup.adapter })).toEqual({ vaultId: 42 });
+		expect(setup.adapter.getStatus).toHaveBeenCalledTimes(1);
+		expect(setup.adapter.approve).toHaveBeenCalledTimes(1);
+		expect(setup.adapter.dispatch).toHaveBeenCalledTimes(1);
+		expect(setup.adapter.acknowledge).toHaveBeenCalledWith(5n);
+		expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toBeNull();
+	});
+
+	it('keeps an ambiguous dispatch on authoritative journal recovery and never accepts a guessed result', async () => {
+		const submitted = view(5n, openRequest, { Submitted: null });
+		const setup = adapter({ acknowledged_through: 4n, active: [] });
+		setup.adapter.dispatch = vi.fn(async () => {
+			setup.setStatus({ acknowledged_through: 4n, active: [submitted] });
+			throw new Error('lost reply');
+		});
+		setup.adapter.resultFromDispatch = vi.fn(() => ({ vaultId: 42 }));
+		await expect(runVaultPullOperation({ owner, request: openRequest, adapter: setup.adapter })).rejects.toThrow('unknown transfer outcome');
+		expect(setup.adapter.getStatus).toHaveBeenCalledTimes(2);
+		expect(setup.adapter.resultFromDispatch).not.toHaveBeenCalled();
+		expect(setup.adapter.acknowledge).not.toHaveBeenCalled();
+		expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toBeTruthy();
+	});
+
+	it('retains the exact intent when a certified ACK does not cover this operation', async () => {
+		const setup = adapter({ acknowledged_through: 4n, active: [] });
+		setup.adapter.dispatch = vi.fn(async () => ({ vault_id: 42n, block_index: 7n }));
+		setup.adapter.resultFromDispatch = vi.fn(() => ({ vaultId: 42 }));
+		setup.adapter.acknowledge = vi.fn(async () => 4n);
+		await expect(runVaultPullOperation({ owner, request: openRequest, adapter: setup.adapter })).rejects.toThrow('ACK did not confirm');
+		expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toBeTruthy();
+	});
+
 	it('reconstructs the exact active request and ID from authenticated status after localStorage loss', async () => {
 		const recoveredRequest: VaultPullRequest = {
 			OpenVaultAndBorrow: {
