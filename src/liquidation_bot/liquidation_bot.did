@@ -112,6 +112,7 @@ type BotPaymentJournal = record {
   collateral_received_amount_e8s : opt nat64;
   collateral_price_e8s : nat64;
   icp_swapped_e8s : nat64;
+  swap_input_fee_e8s : nat64;
   ckusdc_received_e6 : nat64;
   held_surplus_e6 : nat64;
   gross_amount_e6 : nat64;
@@ -181,6 +182,33 @@ type BotTreasuryIntentView = record {
   status : BotTreasuryStatus;
   receipt : opt TransferReceipt;
 };
+type Vault158RecoveryStatus = variant { EvidencePrepared; PaymentPrepared; PaymentConfirmed; TreasurySettled };
+type Vault158RecoveryEvidence = record {
+  record_id : nat64;
+  vault_id : nat64;
+  claim_generation : nat64;
+  backend_principal : principal;
+  pool_principal : principal;
+  icp_ledger_principal : principal;
+  ckusdc_ledger_principal : principal;
+  collateral_amount_e8s : nat64;
+  collateral_received_e8s : nat64;
+  debt_covered_e8s : nat64;
+  swap_input_amount_e8s : nat64;
+  swap_input_fee_e8s : nat64;
+  swap_output_amount_e6 : nat64;
+  swap_input_receipt : TransferReceipt;
+  swap_output_receipt : TransferReceipt;
+  pre_swap_ckusdc_balance_e6 : nat64;
+  held_surplus_e6 : nat64;
+  payment_gross_e6 : nat64;
+  payment_amount_e6 : nat64;
+  payment_fee_e6 : nat64;
+  payment_created_at_time : opt nat64;
+  payment_memo : blob;
+  payment_receipt : opt TransferReceipt;
+  status : Vault158RecoveryStatus;
+};
 
 type TestSwapResult = variant { Ok : SwapResult; Err : text };
 
@@ -225,6 +253,7 @@ service : (BotInitArgs) -> {
   get_pending_payment_journals : () -> (vec BotPaymentJournal) query;
   get_pending_claim_journals : () -> (vec BotClaimJournal) query;
   get_pending_treasury_intent : (nat64) -> (opt BotTreasuryIntentView) query;
+  get_vault158_recovery : () -> (opt Vault158RecoveryEvidence) query;
 
   // Admin actions
   admin_resolve_pool_ordering : () -> ();
@@ -236,6 +265,11 @@ service : (BotInitArgs) -> {
   admin_reconcile_shortfall_topup_block : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_treasury_block : (nat64, nat64) -> (variant { Ok; Err : text });
   admin_reconcile_return_block : (nat64, nat64) -> (variant { Ok; Err : text });
+  // Read-only receipt verification and durable preparation; no payment is authorized.
+  admin_prepare_vault158_recovery : () -> (variant { Ok; Err : text });
+  // Explicitly authorizes the pinned backend payment and record-229 treasury continuation.
+  // Keep processing paused until the durable recovery status is TreasurySettled.
+  admin_execute_vault158_recovery : () -> (variant { Ok; Err : text });
   // Returns (icp_fee_e8s, ckusdc_fee_e6) freshly read from each ledger and
   // also writes them back into BotConfig so future swaps use the live values.
   admin_refresh_fees : () -> (nat64, nat64);

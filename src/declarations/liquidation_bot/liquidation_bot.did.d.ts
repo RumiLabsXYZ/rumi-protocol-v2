@@ -56,6 +56,7 @@ export interface BotPaymentJournal {
   'shortfall_topup' : [] | [BotPaymentTopUpJournal],
   'ckusdc_received_e6' : bigint,
   'memo' : Uint8Array | number[],
+  'swap_input_fee_e8s' : bigint,
   'collateral_amount_e8s' : bigint,
   'claim_generation' : bigint,
   'vault_id' : bigint,
@@ -201,10 +202,50 @@ export interface TransferReceipt {
   'created_at_time' : bigint,
   'amount' : bigint,
 }
+export interface Vault158RecoveryEvidence {
+  'status' : Vault158RecoveryStatus,
+  'payment_memo' : Uint8Array | number[],
+  'backend_principal' : Principal,
+  'swap_input_receipt' : TransferReceipt,
+  'swap_output_amount_e6' : bigint,
+  'ckusdc_ledger_principal' : Principal,
+  'swap_output_receipt' : TransferReceipt,
+  'icp_ledger_principal' : Principal,
+  'swap_input_fee_e8s' : bigint,
+  'payment_amount_e6' : bigint,
+  'collateral_amount_e8s' : bigint,
+  'swap_input_amount_e8s' : bigint,
+  'payment_receipt' : [] | [TransferReceipt],
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'payment_gross_e6' : bigint,
+  'held_surplus_e6' : bigint,
+  'pre_swap_ckusdc_balance_e6' : bigint,
+  'payment_fee_e6' : bigint,
+  'pool_principal' : Principal,
+  'debt_covered_e8s' : bigint,
+  'record_id' : bigint,
+  'payment_created_at_time' : [] | [bigint],
+  'collateral_received_e8s' : bigint,
+}
+export type Vault158RecoveryStatus = { 'PaymentConfirmed' : null } |
+  { 'TreasurySettled' : null } |
+  { 'PaymentPrepared' : null } |
+  { 'EvidencePrepared' : null };
 export interface _SERVICE {
   'admin_approve_pool' : ActorMethod<[], undefined>,
   'admin_authorize_shortfall_topup' : ActorMethod<
     [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
+  'admin_execute_vault158_recovery' : ActorMethod<
+    [],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
+  'admin_prepare_vault158_recovery' : ActorMethod<
+    [],
     { 'Ok' : null } |
       { 'Err' : string }
   >,
@@ -256,6 +297,7 @@ export interface _SERVICE {
   >,
   'get_processing_paused' : ActorMethod<[], boolean>,
   'get_stuck_liquidations' : ActorMethod<[], Array<LiquidationRecordVersioned>>,
+  'get_vault158_recovery' : ActorMethod<[], [] | [Vault158RecoveryEvidence]>,
   'notify_liquidatable_vaults' : ActorMethod<
     [Array<LiquidatableVaultInfo>],
     undefined

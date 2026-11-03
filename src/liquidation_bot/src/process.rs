@@ -278,6 +278,594 @@ fn write_short_payment_recovery(
     });
 }
 
+const VAULT158_ID: u64 = 158;
+const VAULT158_RECORD_ID: u64 = 229;
+const VAULT158_GENERATION: u64 = 1;
+const VAULT158_CLAIM_GROSS_E8S: u64 = 236_783_835;
+const VAULT158_CLAIM_NET_E8S: u64 = 236_773_835;
+const VAULT158_DEBT_E8S: u64 = 513_841_815;
+const VAULT158_SWAP_INPUT_BLOCK: u64 = 39_835_236;
+const VAULT158_SWAP_INPUT_E8S: u64 = 226_020_933;
+const VAULT158_SWAP_INPUT_FEE_E8S: u64 = 10_000;
+const VAULT158_SWAP_INPUT_TIME: u64 = 1_793_306_981_079_625_901;
+const VAULT158_SWAP_OUTPUT_BLOCK: u64 = 806_697;
+const VAULT158_SWAP_OUTPUT_E6: u64 = 5_545_309;
+const VAULT158_CKUSDC_BEFORE_SWAP_E6: u64 = 26_190_995;
+const VAULT158_CKUSDC_FEE_E6: u64 = 10_000;
+const VAULT158_POOL_MEMO_BYTES: &[u8] = &[0, 0, 0, 0, 0, 0x11, 0xbe, 0x56];
+
+fn vault158_principal(text: &str) -> candid::Principal {
+    candid::Principal::from_text(text).expect("pinned vault-158 principal is valid")
+}
+
+fn vault158_identity_matches(
+    config: &BotConfig,
+    claim: &state::BotClaimJournal,
+    record: &LiquidationRecordV1,
+) -> Result<(), String> {
+    vault158_identity_matches_for_bot(config, claim, record, ic_cdk::id())
+}
+
+fn vault158_identity_matches_for_bot(
+    config: &BotConfig,
+    claim: &state::BotClaimJournal,
+    record: &LiquidationRecordV1,
+    bot_id: candid::Principal,
+) -> Result<(), String> {
+    if bot_id != vault158_principal("nygob-3qaaa-aaaap-qttcq-cai")
+        || config.backend_principal != vault158_principal("tfesu-vyaaa-aaaap-qrd7a-cai")
+        || config.icpswap_pool != vault158_principal("mohjv-bqaaa-aaaag-qjyia-cai")
+        || config.icp_ledger != vault158_principal("ryjl3-tyaaa-aaaaa-aaaba-cai")
+        || config.ckusdc_ledger != vault158_principal("xevnm-gaaaa-aaaar-qafnq-cai")
+    {
+        return Err("configured canister identities do not match the pinned vault-158 recovery".into());
+    }
+    if claim.vault_id != VAULT158_ID
+        || claim.claim_generation != VAULT158_GENERATION
+        || claim.status != state::BotClaimJournalStatus::PaymentShortfall
+        || claim.collateral_amount_e8s != VAULT158_CLAIM_GROSS_E8S
+        || claim.collateral_received_amount_e8s != Some(VAULT158_CLAIM_NET_E8S)
+        || claim.collateral_outbound_fee_e8s != Some(10_000)
+        || claim.debt_covered_e8s != VAULT158_DEBT_E8S
+        || claim.collateral_return.is_some()
+        || !claim.failed_return_attempts.is_empty()
+        || claim.payment_memo != payment_memo(VAULT158_ID, VAULT158_GENERATION)
+        || claim.swap_intents.len() != 1
+    {
+        return Err("active claim is not the pinned vault-158 generation-1 PaymentShortfall".into());
+    }
+    let intent = &claim.swap_intents[0];
+    if intent.pool_principal != config.icpswap_pool
+        || intent.input_ledger_principal != config.icp_ledger
+        || intent.output_ledger_principal != config.ckusdc_ledger
+        || intent.amount_in_e8s != VAULT158_SWAP_INPUT_E8S
+        || intent.input_fee_e8s != VAULT158_SWAP_INPUT_FEE_E8S
+        || intent.pre_swap_ckusdc_balance_e6 != VAULT158_CKUSDC_BEFORE_SWAP_E6
+        || intent.attempt_ordinal != 1
+    {
+        return Err("saved swap intent does not match the single pinned vault-158 swap".into());
+    }
+    if record.id != VAULT158_RECORD_ID
+        || record.vault_id != VAULT158_ID
+        || record.status != LiquidationStatus::TransferFailed
+        || record.collateral_claimed_e8s != VAULT158_CLAIM_GROSS_E8S
+        || record.debt_to_cover_e8s != VAULT158_DEBT_E8S
+        || record.icp_swapped_e8s != VAULT158_SWAP_INPUT_E8S
+        || record.ckusdc_received_e6 != 0
+        || record.ckusdc_transferred_e6 != 0
+    {
+        return Err("history record 229 does not match the pinned unrecovered shortfall".into());
+    }
+    Ok(())
+}
+
+fn vault158_exact_evidence(
+    evidence: &state::Vault158RecoveryEvidence,
+) -> bool {
+    evidence.record_id == VAULT158_RECORD_ID
+        && evidence.vault_id == VAULT158_ID
+        && evidence.claim_generation == VAULT158_GENERATION
+        && evidence.backend_principal == vault158_principal("tfesu-vyaaa-aaaap-qrd7a-cai")
+        && evidence.pool_principal == vault158_principal("mohjv-bqaaa-aaaag-qjyia-cai")
+        && evidence.icp_ledger_principal == vault158_principal("ryjl3-tyaaa-aaaaa-aaaba-cai")
+        && evidence.ckusdc_ledger_principal == vault158_principal("xevnm-gaaaa-aaaar-qafnq-cai")
+        && evidence.collateral_amount_e8s == VAULT158_CLAIM_GROSS_E8S
+        && evidence.collateral_received_e8s == VAULT158_CLAIM_NET_E8S
+        && evidence.debt_covered_e8s == VAULT158_DEBT_E8S
+        && evidence.swap_input_amount_e8s == VAULT158_SWAP_INPUT_E8S
+        && evidence.swap_input_fee_e8s == VAULT158_SWAP_INPUT_FEE_E8S
+        && evidence.swap_output_amount_e6 == VAULT158_SWAP_OUTPUT_E6
+        && evidence.swap_input_receipt.block_index == VAULT158_SWAP_INPUT_BLOCK
+        && evidence.swap_input_receipt.amount == VAULT158_SWAP_INPUT_E8S
+        && evidence.swap_input_receipt.created_at_time == VAULT158_SWAP_INPUT_TIME
+        && evidence.swap_output_receipt.block_index == VAULT158_SWAP_OUTPUT_BLOCK
+        && evidence.swap_output_receipt.amount == VAULT158_SWAP_OUTPUT_E6
+        && evidence.swap_output_receipt.created_at_time == 0
+        && evidence.pre_swap_ckusdc_balance_e6 == VAULT158_CKUSDC_BEFORE_SWAP_E6
+        && evidence.held_surplus_e6 == 396_890
+        && evidence.payment_gross_e6 == 5_148_419
+        && evidence.payment_amount_e6 == 5_138_419
+        && evidence.payment_fee_e6 == VAULT158_CKUSDC_FEE_E6
+        && evidence.payment_memo == payment_memo(VAULT158_ID, VAULT158_GENERATION)
+}
+
+fn payment_memo(vault_id: u64, generation: u64) -> Vec<u8> {
+    let mut memo = b"RUMI-BPAY-V2:".to_vec();
+    memo.extend_from_slice(&vault_id.to_be_bytes());
+    memo.extend_from_slice(&generation.to_be_bytes());
+    memo
+}
+
+fn claim_icp_residual_after_swap(
+    collateral_received_e8s: u64,
+    swapped_e8s: u64,
+    swap_input_fee_e8s: u64,
+) -> u64 {
+    collateral_received_e8s
+        .saturating_sub(swapped_e8s)
+        .saturating_sub(swap_input_fee_e8s)
+}
+
+fn vault158_payment_journal_matches_evidence(
+    journal: &state::BotPaymentJournal,
+    evidence: &state::Vault158RecoveryEvidence,
+) -> bool {
+    journal.record_id == Some(evidence.record_id)
+        && journal.vault_id == evidence.vault_id
+        && journal.claim_generation == evidence.claim_generation
+        && journal.ledger_principal == evidence.ckusdc_ledger_principal
+        && journal.backend_principal == evidence.backend_principal
+        && journal.amount_e6 == evidence.payment_amount_e6
+        && journal.gross_amount_e6 == evidence.payment_gross_e6
+        && journal.fee_e6 == evidence.payment_fee_e6
+        && Some(journal.created_at_time) == evidence.payment_created_at_time
+        && journal.memo == evidence.payment_memo
+        && journal.swap_input_fee_e8s == evidence.swap_input_fee_e8s
+        && match (&journal.receipt, &evidence.payment_receipt) {
+            (None, None) => true,
+            (Some(journal_receipt), Some(evidence_receipt)) => {
+                journal_receipt == evidence_receipt
+                    && journal_receipt.amount == journal.amount_e6
+                    && journal_receipt.created_at_time == journal.created_at_time
+            }
+            _ => false,
+        }
+}
+
+fn vault158_balance_matches_exact_allocation(
+    balance_e6: u64,
+    evidence: &state::Vault158RecoveryEvidence,
+) -> bool {
+    evidence.pre_swap_ckusdc_balance_e6
+        .checked_add(evidence.swap_output_amount_e6)
+        == Some(balance_e6)
+}
+
+fn select_pending_payment(
+    bot_state: &state::BotState,
+    only_vault_id: Option<u64>,
+) -> Option<state::BotPaymentJournal> {
+    bot_state.pending_payments.iter()
+        .find(|(vault_id, _)| only_vault_id.map_or(true, |expected| **vault_id == expected))
+        .map(|(_, journal)| journal.clone())
+}
+
+fn vault158_claim_matches_evidence(
+    claim: &state::BotClaimJournal,
+    evidence: &state::Vault158RecoveryEvidence,
+) -> bool {
+    claim.vault_id == evidence.vault_id
+        && claim.claim_generation == evidence.claim_generation
+        && claim.status == state::BotClaimJournalStatus::PaymentShortfall
+        && claim.collateral_amount_e8s == evidence.collateral_amount_e8s
+        && claim.collateral_received_amount_e8s == Some(evidence.collateral_received_e8s)
+        && claim.debt_covered_e8s == evidence.debt_covered_e8s
+        && claim.payment_memo == evidence.payment_memo
+        && claim.collateral_return.is_none()
+        && claim.failed_return_attempts.is_empty()
+}
+
+/// Promote the exact held claim into its payment journal in one durable state
+/// mutation. The claim is removed only after its generation and no-return
+/// evidence still match the retained receipt record.
+fn commit_vault158_payment_preparation_once(
+    bot_state: &mut state::BotState,
+    evidence: &state::Vault158RecoveryEvidence,
+    journal: state::BotPaymentJournal,
+) -> bool {
+    if !vault158_exact_evidence(evidence)
+        || evidence.status != state::Vault158RecoveryStatus::PaymentPrepared
+        || !vault158_payment_journal_matches_evidence(&journal, evidence)
+        || !bot_state.processing_paused
+        || !bot_state.pending_payments.is_empty()
+        || !bot_state.pending_treasury.is_empty()
+        || bot_state.vault158_recovery.as_ref().is_some_and(|saved| {
+            saved.status != state::Vault158RecoveryStatus::EvidencePrepared
+                || !vault158_exact_evidence(saved)
+        })
+        || !bot_state.vault158_recovery.as_ref().is_some_and(vault158_exact_evidence)
+    {
+        return false;
+    }
+    let Some(claim) = bot_state.pending_claims.get(&evidence.vault_id) else {
+        return false;
+    };
+    if !vault158_claim_matches_evidence(claim, evidence) {
+        return false;
+    }
+    bot_state.pending_claims.remove(&evidence.vault_id);
+    bot_state.vault158_recovery = Some(evidence.clone());
+    bot_state.pending_payments.insert(evidence.vault_id, journal);
+    true
+}
+
+/// Verify and persist the two already-completed swap receipts for this one
+/// historical claim. This endpoint is preparation-only: it creates no payment
+/// tuple, does not call the backend, and never dispatches a transfer.
+pub async fn admin_prepare_vault158_recovery(config: &BotConfig) -> Result<(), String> {
+    if let Some(existing) = state::read_state(|s| s.vault158_recovery.clone()) {
+        return if vault158_exact_evidence(&existing) {
+            Err("vault-158 swap receipts were already consumed by a durable recovery record".into())
+        } else {
+            Err("a different vault-158 recovery tombstone already exists".into())
+        };
+    }
+    let claim = state::read_state(|s| s.pending_claims.get(&VAULT158_ID).cloned())
+        .ok_or_else(|| "no active vault-158 claim journal".to_string())?;
+    let record = match history::get_record(VAULT158_RECORD_ID) {
+        Some(crate::history::LiquidationRecordVersioned::V1(record)) => record,
+        None => return Err("history record 229 is absent".into()),
+    };
+    vault158_identity_matches(config, &claim, &record)?;
+    let has_conflicting_work = state::read_state(|s| {
+        !s.pending_payments.is_empty()
+            || s.pending_claims.keys().any(|id| *id != VAULT158_ID)
+            || s.pending_treasury.values().any(|j| j.vault_id == VAULT158_ID)
+    });
+    if has_conflicting_work {
+        return Err("another payment or claim recovery would make vault-158 allocation ambiguous".into());
+    }
+
+    swap::verify_vault158_swap_input_receipt(
+        config.icp_ledger,
+        ic_cdk::id(),
+        config.icpswap_pool,
+        VAULT158_SWAP_INPUT_BLOCK,
+        VAULT158_SWAP_INPUT_E8S,
+        VAULT158_SWAP_INPUT_FEE_E8S,
+        VAULT158_POOL_MEMO_BYTES,
+        VAULT158_SWAP_INPUT_TIME,
+    ).await.map_err(|error| format!("pinned ICP swap-input receipt failed verification: {error}"))?;
+    verify_vault158_swap_output_receipt(config, ic_cdk::id()).await?;
+
+    let balance = swap::balance_of_self_ckusdc(config).await
+        .map_err(|error| format!("ckUSDC balance read failed: {error}"))?;
+    let required_balance = VAULT158_CKUSDC_BEFORE_SWAP_E6
+        .checked_add(VAULT158_SWAP_OUTPUT_E6)
+        .ok_or_else(|| "pinned ckUSDC allocation overflowed".to_string())?;
+    if balance != required_balance {
+        return Err("current ckUSDC balance differs from the exact pre-swap balance plus verified output; aggregate balance cannot authorize recovery".into());
+    }
+    let current_claim = state::read_state(|s| s.pending_claims.get(&VAULT158_ID).cloned());
+    let current_config = state::read_state(|s| s.config.clone());
+    let current_record = match history::get_record(VAULT158_RECORD_ID) {
+        Some(crate::history::LiquidationRecordVersioned::V1(record)) => record,
+        None => return Err("history record 229 disappeared during receipt verification".into()),
+    };
+    let current_claim = current_claim.ok_or_else(|| "active vault-158 claim disappeared during receipt verification".to_string())?;
+    let current_config = current_config.ok_or_else(|| "bot configuration disappeared during receipt verification".to_string())?;
+    vault158_identity_matches(&current_config, &current_claim, &current_record)?;
+    if state::read_state(|s| s.vault158_recovery.is_some() || !s.pending_payments.is_empty()) {
+        return Err("vault-158 receipt evidence was consumed by another recovery call".into());
+    }
+    let minimum_net = required_ckusdc_net(VAULT158_DEBT_E8S);
+    let gross = minimum_net.checked_add(VAULT158_CKUSDC_FEE_E6)
+        .ok_or_else(|| "ckUSDC payment amount overflowed".to_string())?;
+    let held_surplus = VAULT158_SWAP_OUTPUT_E6.checked_sub(gross)
+        .ok_or_else(|| "verified swap output cannot cover exact debt payment".to_string())?;
+    let evidence = state::Vault158RecoveryEvidence {
+        record_id: VAULT158_RECORD_ID,
+        vault_id: VAULT158_ID,
+        claim_generation: VAULT158_GENERATION,
+        backend_principal: config.backend_principal,
+        pool_principal: config.icpswap_pool,
+        icp_ledger_principal: config.icp_ledger,
+        ckusdc_ledger_principal: config.ckusdc_ledger,
+        collateral_amount_e8s: VAULT158_CLAIM_GROSS_E8S,
+        collateral_received_e8s: VAULT158_CLAIM_NET_E8S,
+        debt_covered_e8s: VAULT158_DEBT_E8S,
+        swap_input_amount_e8s: VAULT158_SWAP_INPUT_E8S,
+        swap_input_fee_e8s: VAULT158_SWAP_INPUT_FEE_E8S,
+        swap_output_amount_e6: VAULT158_SWAP_OUTPUT_E6,
+        swap_input_receipt: swap::TransferReceipt {
+            block_index: VAULT158_SWAP_INPUT_BLOCK,
+            amount: VAULT158_SWAP_INPUT_E8S,
+            created_at_time: VAULT158_SWAP_INPUT_TIME,
+        },
+        swap_output_receipt: swap::TransferReceipt {
+            block_index: VAULT158_SWAP_OUTPUT_BLOCK,
+            amount: VAULT158_SWAP_OUTPUT_E6,
+            created_at_time: 0,
+        },
+        pre_swap_ckusdc_balance_e6: VAULT158_CKUSDC_BEFORE_SWAP_E6,
+        held_surplus_e6: held_surplus,
+        payment_gross_e6: gross,
+        payment_amount_e6: minimum_net,
+        payment_fee_e6: VAULT158_CKUSDC_FEE_E6,
+        payment_created_at_time: None,
+        payment_memo: claim.payment_memo,
+        payment_receipt: None,
+        status: state::Vault158RecoveryStatus::EvidencePrepared,
+    };
+    if !vault158_exact_evidence(&evidence) {
+        return Err("prepared evidence did not satisfy the exact vault-158 recovery tuple".into());
+    }
+    state::mutate_state(|s| {
+        if s.vault158_recovery.is_none() {
+            s.vault158_recovery = Some(evidence);
+        }
+    });
+    state::save_config_to_stable();
+    Ok(())
+}
+
+/// Execute the explicitly prepared recovery. The first outgoing tuple is
+/// created only here, after re-verifying both swap blocks and checking the
+/// current ckUSDC fee and claim-attributable balance floor.
+pub async fn admin_execute_vault158_recovery(config: &BotConfig) -> Result<(), String> {
+    if !state::read_state(|s| s.processing_paused) {
+        return Err("pause bot processing before explicitly executing vault-158 recovery".into());
+    }
+    let Some(mut evidence) = state::read_state(|s| s.vault158_recovery.clone()) else {
+        return Err("vault-158 receipt recovery has not been prepared".into());
+    };
+    if !vault158_exact_evidence(&evidence) {
+        return Err("durable vault-158 evidence does not match its pinned receipt tuple".into());
+    }
+    if evidence.status == state::Vault158RecoveryStatus::PaymentConfirmed {
+        return continue_vault158_treasury(config, &evidence).await;
+    }
+    if evidence.status == state::Vault158RecoveryStatus::TreasurySettled {
+        return continue_vault158_treasury(config, &evidence).await;
+    }
+    if evidence.status == state::Vault158RecoveryStatus::PaymentPrepared {
+        let (journal, pending_count) = state::read_state(|s| (
+            s.pending_payments.get(&VAULT158_ID).cloned(),
+            s.pending_payments.len(),
+        ));
+        if pending_count != 1 {
+            return Err("vault-158 execution is held because another payment journal exists".into());
+        }
+        let journal = journal
+            .ok_or_else(|| "executed vault-158 tuple is missing its pending payment journal".to_string())?;
+        if !vault158_payment_journal_matches_evidence(&journal, &evidence) {
+            return Err("pending vault-158 payment journal differs from its retained exact tuple".into());
+        }
+        let _ = resume_pending_payment_for_vault(config, Some(VAULT158_ID)).await;
+        let Some(updated) = state::read_state(|s| s.vault158_recovery.clone()) else {
+            return Err("vault-158 recovery tombstone disappeared during payment reconciliation".into());
+        };
+        return if updated.status == state::Vault158RecoveryStatus::PaymentConfirmed {
+            continue_vault158_treasury(config, &updated).await
+        } else {
+            Err("vault-158 exact payment tuple remains pending; inspect the durable payment journal".into())
+        };
+    }
+    if evidence.status != state::Vault158RecoveryStatus::EvidencePrepared {
+        return Err("vault-158 recovery evidence has an unsupported lifecycle status".into());
+    }
+    let claim = state::read_state(|s| s.pending_claims.get(&VAULT158_ID).cloned())
+        .ok_or_else(|| "active vault-158 claim journal is absent".to_string())?;
+    let record = match history::get_record(VAULT158_RECORD_ID) {
+        Some(crate::history::LiquidationRecordVersioned::V1(record)) => record,
+        None => return Err("history record 229 is absent".into()),
+    };
+    vault158_identity_matches(config, &claim, &record)?;
+    if !state::read_state(|s| s.pending_payments.is_empty() && s.pending_treasury.is_empty()) {
+        return Err("another payment or treasury journal exists; recovery will not allocate or continue a tuple".into());
+    }
+    swap::verify_vault158_swap_input_receipt(
+        evidence.icp_ledger_principal,
+        ic_cdk::id(),
+        evidence.pool_principal,
+        evidence.swap_input_receipt.block_index,
+        evidence.swap_input_amount_e8s,
+        evidence.swap_input_fee_e8s,
+        VAULT158_POOL_MEMO_BYTES,
+        evidence.swap_input_receipt.created_at_time,
+    ).await?;
+    verify_vault158_swap_output_receipt(config, ic_cdk::id()).await?;
+    let fee = swap::fetch_ledger_fee(evidence.ckusdc_ledger_principal).await?;
+    if fee != evidence.payment_fee_e6 || config.ckusdc_fee_e6.unwrap_or(VAULT158_CKUSDC_FEE_E6) != fee {
+        return Err("current ckUSDC transfer fee does not match the pinned 10,000 e6 payment fee".into());
+    }
+    let balance = swap::balance_of_self_ckusdc(config).await
+        .map_err(|error| format!("ckUSDC balance read failed: {error}"))?;
+    if !vault158_balance_matches_exact_allocation(balance, &evidence) {
+        return Err("current ckUSDC balance differs from the exact pre-swap balance plus verified output; aggregate balance cannot authorize recovery".into());
+    }
+    let current_claim = state::read_state(|s| s.pending_claims.get(&VAULT158_ID).cloned());
+    let current_config = state::read_state(|s| s.config.clone());
+    let current_record = match history::get_record(VAULT158_RECORD_ID) {
+        Some(crate::history::LiquidationRecordVersioned::V1(record)) => record,
+        None => return Err("history record 229 disappeared during receipt verification".into()),
+    };
+    let current_claim = current_claim.ok_or_else(|| "active vault-158 claim disappeared during receipt verification".to_string())?;
+    let current_config = current_config.ok_or_else(|| "bot configuration disappeared during receipt verification".to_string())?;
+    vault158_identity_matches(&current_config, &current_claim, &current_record)?;
+    if current_claim.collateral_return.is_some()
+        || !current_claim.failed_return_attempts.is_empty()
+        || current_claim.payment_memo != evidence.payment_memo
+        || !state::read_state(|s| s.processing_paused)
+        || !state::read_state(|s| s.pending_payments.is_empty() && s.pending_treasury.is_empty())
+    {
+        return Err("claim or payment state changed while receipts were being reverified".into());
+    }
+    let created_at_time = ic_cdk::api::time();
+    if created_at_time == 0 {
+        return Err("current time is unavailable for a unique ckUSDC transfer tuple".into());
+    }
+    evidence.payment_created_at_time = Some(created_at_time);
+    evidence.status = state::Vault158RecoveryStatus::PaymentPrepared;
+    let journal = state::BotPaymentJournal {
+        record_id: Some(VAULT158_RECORD_ID),
+        vault_id: VAULT158_ID,
+        backend_principal: evidence.backend_principal,
+        ledger_principal: evidence.ckusdc_ledger_principal,
+        claim_generation: VAULT158_GENERATION,
+        debt_covered_e8s: evidence.debt_covered_e8s,
+        collateral_amount_e8s: evidence.collateral_amount_e8s,
+        collateral_received_amount_e8s: Some(evidence.collateral_received_e8s),
+        collateral_price_e8s: claim.collateral_price_e8s,
+        icp_swapped_e8s: evidence.swap_input_amount_e8s,
+        swap_input_fee_e8s: evidence.swap_input_fee_e8s,
+        ckusdc_received_e6: evidence.swap_output_amount_e6,
+        held_surplus_e6: evidence.held_surplus_e6,
+        gross_amount_e6: evidence.payment_gross_e6,
+        amount_e6: evidence.payment_amount_e6,
+        fee_e6: evidence.payment_fee_e6,
+        created_at_time,
+        memo: evidence.payment_memo.clone(),
+        status: state::BotPaymentStatus::Prepared,
+        receipt: None,
+        shortfall_receipt_observed: false,
+        shortfall_topup: None,
+    };
+    let committed = state::mutate_state(|s| {
+        commit_vault158_payment_preparation_once(s, &evidence, journal)
+    });
+    if !committed {
+        return Err("vault-158 recovery state changed while the verified receipts were being rechecked".into());
+    }
+    state::save_config_to_stable();
+    let _ = resume_pending_payment_for_vault(config, Some(VAULT158_ID)).await;
+    let Some(updated) = state::read_state(|s| s.vault158_recovery.clone()) else {
+        return Err("vault-158 recovery tombstone disappeared during payment reconciliation".into());
+    };
+    if updated.status != state::Vault158RecoveryStatus::PaymentConfirmed {
+        return Err("vault-158 payment or backend proof remains pending; inspect the durable payment journal".into());
+    }
+    continue_vault158_treasury(config, &updated).await
+}
+
+/// Continue only history record 229's already authorized treasury tuple. The
+/// pause stays in force, so resolving this tuple cannot resume unrelated work.
+async fn continue_vault158_treasury(
+    config: &BotConfig,
+    evidence: &state::Vault158RecoveryEvidence,
+) -> Result<(), String> {
+    if !state::read_state(|s| s.processing_paused) || !vault158_exact_evidence(evidence)
+        || (evidence.status != state::Vault158RecoveryStatus::PaymentConfirmed
+            && evidence.status != state::Vault158RecoveryStatus::TreasurySettled)
+    {
+        return Err("vault-158 treasury continuation requires the confirmed pinned recovery while processing remains paused".into());
+    }
+    if evidence.status == state::Vault158RecoveryStatus::TreasurySettled {
+        return match history::get_record(VAULT158_RECORD_ID) {
+            Some(crate::history::LiquidationRecordVersioned::V1(record))
+                if record.vault_id == VAULT158_ID
+                    && record.status == LiquidationStatus::Completed
+                    && record.icp_to_treasury_e8s == 10_742_902 => Ok(()),
+            _ => Err("vault-158 treasury tombstone does not match completed record 229".into()),
+        };
+    }
+    let pending = state::read_state(|s| {
+        s.pending_treasury.get(&VAULT158_RECORD_ID).cloned()
+            .map(|journal| (journal, s.pending_treasury.len()))
+    });
+    let Some((journal, pending_count)) = pending else {
+        return match history::get_record(VAULT158_RECORD_ID) {
+            Some(crate::history::LiquidationRecordVersioned::V1(record))
+                if record.vault_id == VAULT158_ID
+                    && record.status == LiquidationStatus::Completed
+                    && record.icp_to_treasury_e8s == 10_742_902 => {
+                        state::mutate_state(|s| {
+                            if let Some(evidence) = s.vault158_recovery.as_mut() {
+                                if evidence.status == state::Vault158RecoveryStatus::PaymentConfirmed {
+                                    evidence.status = state::Vault158RecoveryStatus::TreasurySettled;
+                                }
+                            }
+                        });
+                        state::save_config_to_stable();
+                        Ok(())
+                    }
+            _ => Err("vault-158 payment is confirmed; pinned treasury record 229 remains pending reconciliation".into()),
+        };
+    };
+    if pending_count != 1
+        || journal.record_id != VAULT158_RECORD_ID
+        || journal.vault_id != VAULT158_ID
+        || journal.claim_generation != VAULT158_GENERATION
+        || journal.sender_principal != ic_cdk::id()
+        || journal.ledger_principal != config.icp_ledger
+        || journal.treasury_principal != config.treasury_principal
+        || journal.gross_amount_e8s != 10_742_902
+        || journal.fee_e8s != config.icp_fee_e8s.unwrap_or(10_000)
+        || journal.amount_e8s.checked_add(journal.fee_e8s) != Some(journal.gross_amount_e8s)
+        || journal.memo != swap::icp_treasury_memo(VAULT158_RECORD_ID, VAULT158_GENERATION)
+        || journal.created_at_time == 0
+        || journal.record.id != VAULT158_RECORD_ID
+        || journal.record.vault_id != VAULT158_ID
+        || journal.record.collateral_claimed_e8s != VAULT158_CLAIM_GROSS_E8S
+        || journal.record.debt_to_cover_e8s != VAULT158_DEBT_E8S
+        || journal.record.icp_swapped_e8s != VAULT158_SWAP_INPUT_E8S
+        || journal.record.ckusdc_transferred_e6 != evidence.payment_amount_e6
+    {
+        return Err("pinned treasury obligation differs from vault-158 history record 229".into());
+    }
+    let _ = resume_pending_treasury_for_record(config, Some(VAULT158_RECORD_ID)).await;
+    if state::read_state(|s| s.pending_treasury.contains_key(&VAULT158_RECORD_ID)) {
+        return Err("pinned treasury tuple remains pending; inspect record 229 and its durable journal".into());
+    }
+    match history::get_record(VAULT158_RECORD_ID) {
+        Some(crate::history::LiquidationRecordVersioned::V1(record))
+            if record.vault_id == VAULT158_ID
+                && record.status == LiquidationStatus::Completed
+                && record.icp_to_treasury_e8s == 10_742_902 => {
+                    state::mutate_state(|s| {
+                        if let Some(evidence) = s.vault158_recovery.as_mut() {
+                            if evidence.status == state::Vault158RecoveryStatus::PaymentConfirmed {
+                                evidence.status = state::Vault158RecoveryStatus::TreasurySettled;
+                            }
+                        }
+                    });
+                    state::save_config_to_stable();
+                    Ok(())
+                }
+        _ => Err("treasury journal was consumed without a completed record-229 settlement".into()),
+    }
+}
+
+async fn verify_vault158_swap_output_receipt(
+    config: &BotConfig,
+    bot: candid::Principal,
+) -> Result<(), String> {
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(
+        config.ckusdc_ledger, VAULT158_SWAP_OUTPUT_BLOCK,
+    ).await.map_err(|error| format!("ckUSDC output block fetch failed: {error}"))?;
+    validate_vault158_swap_output_block(&block, config.icpswap_pool, bot)
+}
+
+fn validate_vault158_swap_output_block(
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+    pool: candid::Principal,
+    bot: candid::Principal,
+) -> Result<(), String> {
+    use icrc_ledger_types::icrc1::account::Account;
+    rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block(
+        &block,
+        Some(Account { owner: pool, subaccount: None }),
+        Account { owner: bot, subaccount: None },
+        VAULT158_SWAP_OUTPUT_E6,
+        Some(VAULT158_POOL_MEMO_BYTES),
+        None,
+    ).map_err(|error| format!("ckUSDC swap-output block did not match the pinned transfer: {error}"))?;
+    if block.fee != Some(VAULT158_CKUSDC_FEE_E6) {
+        return Err("ckUSDC swap-output block does not show the pool-paid 10,000 e6 ledger fee".into());
+    }
+    Ok(())
+}
+
 /// Record an ambiguous DEX dispatch without changing the claim's
 /// `SwapMayHaveStarted` status or attempting any financial cleanup. Amounts
 /// in the history row are only the amounts observed before the ambiguous call.
@@ -465,8 +1053,30 @@ fn apply_confirmed_payment_totals_once(
         .total_collateral_received_e8s
         .saturating_add(journal.collateral_amount_e8s);
     bot_state.stats.events_count = bot_state.stats.events_count.saturating_add(1);
+    if let Some(evidence) = bot_state.vault158_recovery.as_mut().filter(|evidence| {
+        evidence.vault_id == journal.vault_id
+            && evidence.claim_generation == journal.claim_generation
+            && Some(evidence.record_id) == journal.record_id
+            && evidence.payment_created_at_time == Some(journal.created_at_time)
+            && evidence.payment_memo == journal.memo
+    }) {
+        evidence.payment_receipt = journal.receipt.clone();
+        evidence.status = state::Vault158RecoveryStatus::PaymentConfirmed;
+    }
     bot_state.pending_payments.remove(&journal.vault_id);
     true
+}
+
+fn record_vault158_payment_receipt(bot_state: &mut state::BotState, journal: &state::BotPaymentJournal) {
+    if let Some(evidence) = bot_state.vault158_recovery.as_mut().filter(|evidence| {
+        evidence.vault_id == journal.vault_id
+            && evidence.claim_generation == journal.claim_generation
+            && Some(evidence.record_id) == journal.record_id
+            && evidence.payment_created_at_time == Some(journal.created_at_time)
+            && evidence.payment_memo == journal.memo
+    }) {
+        evidence.payment_receipt = journal.receipt.clone();
+    }
 }
 
 fn pending_payment_matches(
@@ -1242,6 +1852,7 @@ pub async fn process_pending() {
         collateral_received_amount_e8s: Some(collateral_received_amount),
         collateral_price_e8s: collateral_price,
         icp_swapped_e8s: swap_amount,
+        swap_input_fee_e8s: 0,
         ckusdc_received_e6: ckusdc_received,
         held_surplus_e6: payment_allocation.held_surplus_e6,
         gross_amount_e6: payment_allocation.gross_to_transfer_e6,
@@ -1393,7 +2004,9 @@ pub async fn process_pending() {
     state::save_config_to_stable();
 
     // -- Phase 5: TREASURY (liquidation bonus) --
-    let gross_bonus_e8s = collateral_received_amount.saturating_sub(swap_amount);
+    let gross_bonus_e8s = claim_icp_residual_after_swap(
+        collateral_received_amount, swap_amount, payment_journal.swap_input_fee_e8s,
+    );
     let record = LiquidationRecordV1 {
         id: record_id, vault_id: vault.vault_id, timestamp,
         status: if gross_bonus_e8s == 0 { LiquidationStatus::Completed } else { LiquidationStatus::TransferFailed },
@@ -1571,6 +2184,13 @@ pub async fn admin_reconcile_treasury_block(
 /// Resume one claim-bound bonus transfer. Ambiguous outcomes replay the exact
 /// tuple; metrics move only after the ledger block matches that tuple.
 async fn resume_pending_treasury(config: &BotConfig) -> bool {
+    resume_pending_treasury_for_record(config, None).await
+}
+
+async fn resume_pending_treasury_for_record(
+    config: &BotConfig,
+    only_record_id: Option<u64>,
+) -> bool {
     const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
     let now = ic_cdk::api::time();
     let selected = state::read_state(|s| {
@@ -1590,8 +2210,11 @@ async fn resume_pending_treasury(config: &BotConfig) -> bool {
         };
         let cursor = s.treasury_resume_cursor;
         s.pending_treasury.iter()
+            .filter(|(id, _)| only_record_id.map_or(true, |expected| **id == expected))
             .find(|(id, j)| cursor.is_some_and(|cursor| **id > cursor) && eligible(j))
-            .or_else(|| s.pending_treasury.iter().find(|(_, j)| eligible(j)))
+            .or_else(|| s.pending_treasury.iter()
+                .filter(|(id, _)| only_record_id.map_or(true, |expected| **id == expected))
+                .find(|(_, j)| eligible(j)))
             .map(|(id, journal)| (*id, journal.clone()))
     });
     let Some((selected_id, mut journal)) = selected else { return false };
@@ -1705,8 +2328,16 @@ async fn resume_pending_treasury(config: &BotConfig) -> bool {
 /// amount, memo and created_at_time. A returned block is never paid again and
 /// is handed to the backend's exact ICRC-3 verifier.
 async fn resume_pending_payment(config: &BotConfig) -> bool {
-    let Some(mut journal) = state::read_state(|s| s.pending_payments.values().next().cloned())
-    else {
+    resume_pending_payment_for_vault(config, None).await
+}
+
+/// Resume one already persisted payment, optionally restricting selection to
+/// the pinned recovery vault instead of the general pending queue.
+async fn resume_pending_payment_for_vault(
+    config: &BotConfig,
+    only_vault_id: Option<u64>,
+) -> bool {
+    let Some(mut journal) = state::read_state(|s| select_pending_payment(s, only_vault_id)) else {
         return false;
     };
     if config.backend_principal != journal.backend_principal
@@ -1742,6 +2373,7 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
             Ok(receipt) => {
                 journal.status = state::BotPaymentStatus::ReceiptObserved;
                 journal.receipt = Some(receipt);
+                state::mutate_state(|s| record_vault158_payment_receipt(s, &journal));
             }
             Err(swap::TransferAttemptError::NoEffect(message)) => {
                 journal.status = state::BotPaymentStatus::NoEffect;
@@ -1766,6 +2398,7 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
             }
         }
         state::mutate_state(|s| { s.pending_payments.insert(journal.vault_id, journal.clone()); });
+        state::mutate_state(|s| record_vault158_payment_receipt(s, &journal));
         state::save_config_to_stable();
     }
 
@@ -1801,7 +2434,9 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
             if let (Some(record_id), Some(collateral_received)) =
                 (journal.record_id, journal.collateral_received_amount_e8s)
             {
-                let gross_bonus = collateral_received.saturating_sub(journal.icp_swapped_e8s);
+                let gross_bonus = claim_icp_residual_after_swap(
+                    collateral_received, journal.icp_swapped_e8s, journal.swap_input_fee_e8s,
+                );
                 let mut record = LiquidationRecordV1 {
                     id: record_id,
                     vault_id: journal.vault_id,
@@ -1834,6 +2469,7 @@ async fn resume_pending_payment(config: &BotConfig) -> bool {
                 write_record(record);
             }
             state::mutate_state(|s| {
+                record_vault158_payment_receipt(s, &journal);
                 apply_confirmed_payment_totals_once(s, &journal, receipt.amount);
             });
             state::save_config_to_stable();
@@ -2429,6 +3065,11 @@ pub async fn admin_retry_no_effect_payment(
     config: &BotConfig,
     vault_id: u64,
 ) -> Result<(), String> {
+    if vault_id == VAULT158_ID
+        && state::read_state(|s| s.vault158_recovery.as_ref().is_some_and(vault158_exact_evidence))
+    {
+        return Err("vault-158 recovery keeps its original payment tuple immutable; reconcile its exact journal and receipt before any further action".into());
+    }
     let Some(mut journal) = state::read_state(|s| s.pending_payments.get(&vault_id).cloned()) else {
         return Err("no durable payment journal for this vault".into());
     };
@@ -2572,9 +3213,12 @@ pub async fn admin_reconcile_payment_block(
         created_at_time: journal.created_at_time,
     });
     journal.status = state::BotPaymentStatus::ReceiptObserved;
-    state::mutate_state(|s| { s.pending_payments.insert(vault_id, journal); });
+    state::mutate_state(|s| {
+        record_vault158_payment_receipt(s, &journal);
+        s.pending_payments.insert(vault_id, journal);
+    });
     state::save_config_to_stable();
-    resume_pending_payment(config).await;
+    resume_pending_payment_for_vault(config, Some(vault_id)).await;
     if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
         Err("candidate block was not accepted or confirmation remains pending; inspect the durable journal".into())
     } else {
@@ -2805,6 +3449,330 @@ fn calculate_slippage(effective_price_e8s: u64, oracle_price_e8s: u64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candid::Decode;
+
+    fn unhex(input: &str) -> Vec<u8> {
+        input.trim().as_bytes().chunks_exact(2).map(|pair| {
+            let digit = |c: u8| match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                b'A'..=b'F' => c - b'A' + 10,
+                _ => panic!("invalid fixture hex"),
+            };
+            digit(pair[0]) * 16 + digit(pair[1])
+        }).collect()
+    }
+
+    #[test]
+    fn captured_vault158_ckusdc_output_block_requires_exact_pool_receipt_and_fee() {
+        let bytes = unhex(include_str!("../tests/fixtures/vault158-ckusdc-output-block-806697.hex"));
+        let result: icrc_ledger_types::icrc3::blocks::GetBlocksResult =
+            candid::Decode!(&bytes, icrc_ledger_types::icrc3::blocks::GetBlocksResult)
+                .expect("captured ICRC-3 response decodes");
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].id.0.to_string(), "806697");
+        let block = rumi_protocol_backend::icrc3_proof::decode_block(&result.blocks[0].block)
+            .expect("captured ckUSDC block decodes");
+        let pool = candid::Principal::from_text("mohjv-bqaaa-aaaag-qjyia-cai").unwrap();
+        let bot = candid::Principal::from_text("nygob-3qaaa-aaaap-qttcq-cai").unwrap();
+        assert!(validate_vault158_swap_output_block(&block, pool, bot).is_ok());
+        assert!(validate_vault158_swap_output_block(&block, candid::Principal::anonymous(), bot).is_err());
+        assert!(validate_vault158_swap_output_block(&block, pool, candid::Principal::anonymous()).is_err());
+        assert!(validate_vault158_swap_output_block(&block, pool, candid::Principal::from_slice(&[7])).is_err());
+        let mut wrong_fee = block.clone();
+        wrong_fee.fee = Some(9_999);
+        assert!(validate_vault158_swap_output_block(&wrong_fee, pool, bot).is_err());
+        let mut wrong_memo = block.clone();
+        wrong_memo.memo = Some(vec![1]);
+        assert!(validate_vault158_swap_output_block(&wrong_memo, pool, bot).is_err());
+        let mut wrong_amount = block.clone();
+        wrong_amount.amount -= 1;
+        assert!(validate_vault158_swap_output_block(&wrong_amount, pool, bot).is_err());
+    }
+
+    fn vault158_evidence_fixture() -> state::Vault158RecoveryEvidence {
+        state::Vault158RecoveryEvidence {
+            record_id: 229,
+            vault_id: 158,
+            claim_generation: 1,
+            backend_principal: candid::Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
+            pool_principal: candid::Principal::from_text("mohjv-bqaaa-aaaag-qjyia-cai").unwrap(),
+            icp_ledger_principal: candid::Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+            ckusdc_ledger_principal: candid::Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),
+            collateral_amount_e8s: 236_783_835,
+            collateral_received_e8s: 236_773_835,
+            debt_covered_e8s: 513_841_815,
+            swap_input_amount_e8s: 226_020_933,
+            swap_input_fee_e8s: 10_000,
+            swap_output_amount_e6: 5_545_309,
+            swap_input_receipt: swap::TransferReceipt {
+                block_index: 39_835_236, amount: 226_020_933,
+                created_at_time: 1_793_306_981_079_625_901,
+            },
+            swap_output_receipt: swap::TransferReceipt {
+                block_index: 806_697, amount: 5_545_309, created_at_time: 0,
+            },
+            pre_swap_ckusdc_balance_e6: 26_190_995,
+            held_surplus_e6: 396_890,
+            payment_gross_e6: 5_148_419,
+            payment_amount_e6: 5_138_419,
+            payment_fee_e6: 10_000,
+            payment_created_at_time: None,
+            payment_memo: payment_memo(158, 1),
+            payment_receipt: None,
+            status: state::Vault158RecoveryStatus::EvidencePrepared,
+        }
+    }
+
+    fn vault158_claim_history_fixture() -> (BotConfig, state::BotClaimJournal, LiquidationRecordV1, candid::Principal) {
+        let bot = candid::Principal::from_text("nygob-3qaaa-aaaap-qttcq-cai").unwrap();
+        let backend = candid::Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap();
+        let pool = candid::Principal::from_text("mohjv-bqaaa-aaaag-qjyia-cai").unwrap();
+        let icp = candid::Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        let ckusdc = candid::Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap();
+        let config = BotConfig {
+            backend_principal: backend,
+            treasury_principal: candid::Principal::anonymous(),
+            admin: candid::Principal::anonymous(),
+            max_slippage_bps: 100,
+            icp_ledger: icp,
+            ckusdc_ledger: ckusdc,
+            icpswap_pool: pool,
+            icpswap_zero_for_one: Some(true),
+            icp_fee_e8s: Some(10_000),
+            ckusdc_fee_e6: Some(10_000),
+            three_pool_principal: None,
+            kong_swap_principal: None,
+            ckusdt_ledger: None,
+            icusd_ledger: None,
+        };
+        let claim = state::BotClaimJournal {
+            vault_id: 158,
+            claim_generation: 1,
+            debt_covered_e8s: 513_841_815,
+            collateral_amount_e8s: 236_783_835,
+            collateral_received_amount_e8s: Some(236_773_835),
+            collateral_outbound_fee_e8s: Some(10_000),
+            collateral_price_e8s: 100_000_000,
+            payment_memo: payment_memo(158, 1),
+            collateral_return_memo: b"return".to_vec(),
+            failed_return_attempts: vec![],
+            collateral_return: None,
+            swap_intents: vec![state::BotSwapIntent {
+                pool_principal: pool,
+                input_ledger_principal: icp,
+                output_ledger_principal: ckusdc,
+                amount_in_e8s: 226_020_933,
+                amount_out_minimum_e6: 5_447_073,
+                zero_for_one: true,
+                input_fee_e8s: 10_000,
+                output_fee_e6: 10_000,
+                attempt_ordinal: 1,
+                created_at_time: 1_793_306_975_110_675_351,
+                pre_swap_ckusdc_balance_e6: 26_190_995,
+            }],
+            status: state::BotClaimJournalStatus::PaymentShortfall,
+        };
+        let record = LiquidationRecordV1 {
+            id: 229,
+            vault_id: 158,
+            timestamp: 1,
+            status: LiquidationStatus::TransferFailed,
+            collateral_claimed_e8s: 236_783_835,
+            debt_to_cover_e8s: 513_841_815,
+            icp_swapped_e8s: 226_020_933,
+            ckusdc_received_e6: 0,
+            ckusdc_transferred_e6: 0,
+            icp_to_treasury_e8s: 0,
+            oracle_price_e8s: 100_000_000,
+            effective_price_e8s: 0,
+            slippage_bps: 0,
+            error_message: Some("short-payment recovery".into()),
+            confirm_retry_count: 0,
+        };
+        (config, claim, record, bot)
+    }
+
+    #[test]
+    fn live_shaped_vault158_claim_and_history_229_are_accepted_exactly() {
+        let (config, claim, record, bot) = vault158_claim_history_fixture();
+        assert!(vault158_identity_matches_for_bot(&config, &claim, &record, bot).is_ok());
+        let mut wrong_generation = claim.clone();
+        wrong_generation.claim_generation = 2;
+        assert!(vault158_identity_matches_for_bot(&config, &wrong_generation, &record, bot).is_err());
+        let mut wrong_output_record = record.clone();
+        wrong_output_record.ckusdc_received_e6 = 5_545_309;
+        assert!(vault158_identity_matches_for_bot(&config, &claim, &wrong_output_record, bot).is_err());
+        let mut returned_claim = claim.clone();
+        returned_claim.collateral_return = Some(state::BotReturnTransferJournal {
+            ledger_principal: config.icp_ledger,
+            backend_principal: config.backend_principal,
+            amount_e8s: 1,
+            fee_e8s: 10_000,
+            transfer_fee_e8s: Some(10_000),
+            memo: b"return".to_vec(),
+            created_at_time: 1,
+            receipt: None,
+            status: state::BotReturnTransferStatus::Prepared,
+        });
+        assert!(vault158_identity_matches_for_bot(&config, &returned_claim, &record, bot).is_err());
+    }
+
+    #[test]
+    fn vault158_evidence_is_exact_generation_and_receipts_are_single_use() {
+        let evidence = vault158_evidence_fixture();
+        assert!(vault158_exact_evidence(&evidence));
+        let mut wrong_generation = evidence.clone();
+        wrong_generation.claim_generation = 2;
+        assert!(!vault158_exact_evidence(&wrong_generation));
+        let mut wrong_input = evidence.clone();
+        wrong_input.swap_input_receipt.block_index += 1;
+        assert!(!vault158_exact_evidence(&wrong_input));
+        let mut wrong_output = evidence.clone();
+        wrong_output.swap_output_receipt.amount -= 1;
+        assert!(!vault158_exact_evidence(&wrong_output));
+        assert_eq!(
+            claim_icp_residual_after_swap(
+                evidence.collateral_received_e8s,
+                evidence.swap_input_amount_e8s,
+                evidence.swap_input_fee_e8s,
+            ),
+            10_742_902,
+            "claim residual excludes the separately paid swap input fee"
+        );
+        assert_eq!(
+            evidence.pre_swap_ckusdc_balance_e6 + evidence.swap_output_amount_e6
+                - evidence.payment_gross_e6,
+            26_587_885,
+            "old balance and 396,890 held surplus remain outside the payment allocation"
+        );
+        let exact_balance = evidence.pre_swap_ckusdc_balance_e6 + evidence.swap_output_amount_e6;
+        assert!(vault158_balance_matches_exact_allocation(exact_balance, &evidence));
+        assert!(!vault158_balance_matches_exact_allocation(exact_balance + 1, &evidence),
+            "unrelated deposits cannot mask a changed aggregate balance");
+        assert!(!vault158_balance_matches_exact_allocation(exact_balance - 1, &evidence),
+            "spent claim proceeds cannot be covered by other funds");
+    }
+
+    #[test]
+    fn vault158_execution_promotes_only_the_exact_claim_once() {
+        let (_, claim, _, _) = vault158_claim_history_fixture();
+        let mut evidence = vault158_evidence_fixture();
+        evidence.payment_created_at_time = Some(99);
+        evidence.status = state::Vault158RecoveryStatus::PaymentPrepared;
+        let journal = state::BotPaymentJournal {
+            record_id: Some(VAULT158_RECORD_ID),
+            vault_id: VAULT158_ID,
+            backend_principal: evidence.backend_principal,
+            ledger_principal: evidence.ckusdc_ledger_principal,
+            claim_generation: VAULT158_GENERATION,
+            debt_covered_e8s: evidence.debt_covered_e8s,
+            collateral_amount_e8s: evidence.collateral_amount_e8s,
+            collateral_received_amount_e8s: Some(evidence.collateral_received_e8s),
+            collateral_price_e8s: claim.collateral_price_e8s,
+            icp_swapped_e8s: evidence.swap_input_amount_e8s,
+            swap_input_fee_e8s: evidence.swap_input_fee_e8s,
+            ckusdc_received_e6: evidence.swap_output_amount_e6,
+            held_surplus_e6: evidence.held_surplus_e6,
+            gross_amount_e6: evidence.payment_gross_e6,
+            amount_e6: evidence.payment_amount_e6,
+            fee_e6: evidence.payment_fee_e6,
+            created_at_time: 99,
+            memo: evidence.payment_memo.clone(),
+            status: state::BotPaymentStatus::Prepared,
+            receipt: None,
+            shortfall_receipt_observed: false,
+            shortfall_topup: None,
+        };
+        let mut bot_state = state::BotState::default();
+        bot_state.vault158_recovery = Some({
+            let mut prepared = evidence.clone();
+            prepared.status = state::Vault158RecoveryStatus::EvidencePrepared;
+            prepared
+        });
+        bot_state.processing_paused = true;
+        bot_state.pending_claims.insert(VAULT158_ID, claim.clone());
+        assert!(commit_vault158_payment_preparation_once(&mut bot_state, &evidence, journal.clone()));
+        assert!(!bot_state.pending_claims.contains_key(&VAULT158_ID),
+            "exact claim is atomically promoted when its payment journal is committed");
+        assert!(vault158_payment_journal_matches_evidence(
+            bot_state.pending_payments.get(&VAULT158_ID).unwrap(), &evidence));
+        let mut unrelated_payment = bot_state.pending_payments.get(&VAULT158_ID).unwrap().clone();
+        unrelated_payment.vault_id = 1;
+        bot_state.pending_payments.insert(1, unrelated_payment);
+        assert_eq!(select_pending_payment(&bot_state, Some(VAULT158_ID)).unwrap().vault_id, VAULT158_ID,
+            "recovery selection ignores lower-ID unrelated payment journals");
+        bot_state.pending_payments.remove(&1);
+        assert_eq!(bot_state.vault158_recovery.as_ref().unwrap().status,
+            state::Vault158RecoveryStatus::PaymentPrepared);
+        assert!(!commit_vault158_payment_preparation_once(&mut bot_state, &evidence, journal),
+            "replay cannot create a second tuple after the claim is consumed");
+
+        let mut unrelated_state = state::BotState::default();
+        unrelated_state.vault158_recovery = Some({
+            let mut prepared = evidence.clone();
+            prepared.status = state::Vault158RecoveryStatus::EvidencePrepared;
+            prepared
+        });
+        unrelated_state.processing_paused = true;
+        let mut wrong_claim = claim;
+        wrong_claim.claim_generation = 2;
+        unrelated_state.pending_claims.insert(VAULT158_ID, wrong_claim);
+        let wrong_journal = bot_state.pending_payments.get(&VAULT158_ID).unwrap().clone();
+        assert!(!commit_vault158_payment_preparation_once(
+            &mut unrelated_state, &evidence, wrong_journal));
+        assert!(unrelated_state.pending_payments.is_empty());
+        assert!(unrelated_state.pending_claims.contains_key(&VAULT158_ID));
+    }
+
+    #[test]
+    fn confirmed_vault158_tombstone_survives_journal_consumption_and_replay() {
+        let mut evidence = vault158_evidence_fixture();
+        evidence.payment_created_at_time = Some(99);
+        evidence.status = state::Vault158RecoveryStatus::PaymentPrepared;
+        let receipt = swap::TransferReceipt { block_index: 900, amount: 5_138_419, created_at_time: 99 };
+        evidence.payment_receipt = Some(receipt.clone());
+        let journal = state::BotPaymentJournal {
+            record_id: Some(229), vault_id: 158,
+            backend_principal: evidence.backend_principal,
+            ledger_principal: evidence.ckusdc_ledger_principal,
+            claim_generation: 1, debt_covered_e8s: 513_841_815,
+            collateral_amount_e8s: 236_783_835,
+            collateral_received_amount_e8s: Some(236_773_835),
+            collateral_price_e8s: 1,
+            icp_swapped_e8s: 226_020_933,
+            swap_input_fee_e8s: 10_000,
+            ckusdc_received_e6: 5_545_309, held_surplus_e6: 396_890,
+            gross_amount_e6: 5_148_419, amount_e6: 5_138_419, fee_e6: 10_000,
+            created_at_time: 99, memo: payment_memo(158, 1),
+            status: state::BotPaymentStatus::ReceiptObserved,
+            receipt: Some(receipt), shortfall_receipt_observed: false, shortfall_topup: None,
+        };
+        assert!(vault158_payment_journal_matches_evidence(&journal, &evidence));
+        let mut ambiguous = journal.clone();
+        ambiguous.status = state::BotPaymentStatus::Ambiguous;
+        assert!(vault158_payment_journal_matches_evidence(&ambiguous, &evidence),
+            "restart/ambiguous state keeps the same outgoing tuple");
+        let mut regenerated = journal.clone();
+        regenerated.created_at_time += 1;
+        assert!(!vault158_payment_journal_matches_evidence(&regenerated, &evidence),
+            "a retry cannot allocate a new timestamp");
+        let mut wrong_receipt = journal.clone();
+        wrong_receipt.receipt.as_mut().unwrap().block_index += 1;
+        assert!(!vault158_payment_journal_matches_evidence(&wrong_receipt, &evidence),
+            "a retry cannot consume a different receipt");
+        let mut bot_state = state::BotState::default();
+        bot_state.vault158_recovery = Some(evidence);
+        bot_state.pending_payments.insert(158, journal.clone());
+        assert!(apply_confirmed_payment_totals_once(&mut bot_state, &journal, 5_138_419));
+        assert!(!bot_state.pending_payments.contains_key(&158));
+        let tombstone = bot_state.vault158_recovery.as_ref().unwrap();
+        assert_eq!(tombstone.status, state::Vault158RecoveryStatus::PaymentConfirmed);
+        assert_eq!(tombstone.payment_receipt, journal.receipt);
+        assert!(!apply_confirmed_payment_totals_once(&mut bot_state, &journal, 5_138_419));
+        assert_eq!(bot_state.stats.events_count, 1);
+        assert!(bot_state.vault158_recovery.is_some(), "receipt tombstone survives journal deletion");
+    }
 
     #[derive(candid::CandidType)]
     #[allow(dead_code)]
@@ -3214,6 +4182,7 @@ mod tests {
             collateral_received_amount_e8s: None,
             collateral_price_e8s: 100_000_000,
             icp_swapped_e8s: 110_000_000,
+            swap_input_fee_e8s: 0,
             ckusdc_received_e6: 1_010_001,
             held_surplus_e6: 0,
             gross_amount_e6: 1_010_001,
@@ -3279,6 +4248,7 @@ mod tests {
             claim_generation: 4, debt_covered_e8s: 100_000_000,
             collateral_amount_e8s: 200_000_000, collateral_received_amount_e8s: None,
             collateral_price_e8s: 100_000_000, icp_swapped_e8s: 110_000_000,
+            swap_input_fee_e8s: 0,
             ckusdc_received_e6: 1_010_000, held_surplus_e6: 0,
             gross_amount_e6: 1_010_000, amount_e6: 1_000_000, fee_e6: 10_000,
             created_at_time: 123, memo: b"claim-19-4".to_vec(),
@@ -3345,6 +4315,7 @@ mod tests {
             collateral_received_amount_e8s: Some(199_980_000),
             collateral_price_e8s: 100_000_000,
             icp_swapped_e8s: 110_000_000,
+            swap_input_fee_e8s: 0,
             ckusdc_received_e6: 1_050_000,
             held_surplus_e6: 40_000,
             gross_amount_e6: 1_010_000,

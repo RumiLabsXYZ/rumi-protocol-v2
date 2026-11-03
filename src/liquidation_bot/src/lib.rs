@@ -160,7 +160,8 @@ fn inspect_message() {
         | "admin_sweep_ckusdc" | "admin_retry_stuck_claim"
         | "set_processing_paused" | "admin_reconcile_payment_block" | "admin_reconcile_return_block"
         | "admin_authorize_shortfall_topup" | "admin_reconcile_shortfall_topup_block"
-        | "admin_refresh_fees" | "admin_test_swap" | "admin_reconcile_treasury_block" => {
+        | "admin_refresh_fees" | "admin_test_swap" | "admin_reconcile_treasury_block"
+        | "admin_prepare_vault158_recovery" | "admin_execute_vault158_recovery" => {
             if ic_cdk::api::caller() != Principal::anonymous() {
                 ic_cdk::api::call::accept_message();
             }
@@ -201,6 +202,13 @@ fn set_processing_paused(paused: bool) -> Result<(), String> {
     require_admin();
     if paused && PROCESSING.with(|p| *p.borrow()) {
         return Err("cannot pause while a liquidation or admin operation is in flight".into());
+    }
+    if !paused && state::read_state(|s| {
+        s.vault158_recovery.as_ref().is_some_and(|evidence| {
+            vault158_blocks_unpause(&evidence.status)
+        })
+    }) {
+        return Err("vault-158 recovery must remain paused until its pinned payment and treasury tuple are settled".into());
     }
     state::mutate_state(|s| s.processing_paused = paused);
     state::save_config_to_stable();
@@ -324,6 +332,14 @@ fn get_pending_treasury_intent(record_id: u64) -> Option<state::BotTreasuryInten
     state::read_state(|s| s.pending_treasury.get(&record_id).map(Into::into))
 }
 
+/// Admin readback of the durable vault-158 receipt evidence and exact payment
+/// tuple. The tombstone remains queryable after ordinary journal cleanup.
+#[query]
+fn get_vault158_recovery() -> Option<state::Vault158RecoveryEvidence> {
+    require_admin();
+    state::read_state(|s| s.vault158_recovery.clone())
+}
+
 // ---- History query endpoints ----
 
 #[query]
@@ -354,6 +370,32 @@ fn get_liquidation_events(offset: u64, limit: u64) -> Vec<history::LiquidationRe
 }
 
 // ---- Admin endpoints ----
+
+/// Verify and durably retain vault 158's already-observed swap receipts. This
+/// performs read-only ledger calls and does not authorize a payment.
+#[update]
+async fn admin_prepare_vault158_recovery() -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    let config = state::read_state(|s| s.config.clone())
+        .ok_or_else(|| "Config not set".to_string())?;
+    process::admin_prepare_vault158_recovery(&config).await
+}
+
+/// Explicitly authorize the pinned ckUSDC payment, backend confirmation, and
+/// record-229 treasury continuation after receipt preparation. The bot must
+/// remain paused through both payments. It persists each exact transfer tuple
+/// before dispatch, and retries or restarts reuse their ledger dedup identity.
+#[update]
+async fn admin_execute_vault158_recovery() -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    let config = state::read_state(|s| s.config.clone())
+        .ok_or_else(|| "Config not set".to_string())?;
+    process::admin_execute_vault158_recovery(&config).await
+}
 
 fn require_admin() {
     let caller = ic_cdk::api::caller();
@@ -635,6 +677,14 @@ fn admin_config_update_allowed(has_payment_recovery: bool, has_claim_recovery: b
     !has_payment_recovery && !has_claim_recovery && !has_treasury_recovery
 }
 
+fn vault158_blocks_unpause(status: &state::Vault158RecoveryStatus) -> bool {
+    matches!(
+        status,
+        state::Vault158RecoveryStatus::PaymentPrepared
+            | state::Vault158RecoveryStatus::PaymentConfirmed
+    )
+}
+
 #[cfg(test)]
 mod admin_retry_tests {
     use super::*;
@@ -668,6 +718,14 @@ mod admin_retry_tests {
     fn config_change_is_blocked_by_pending_treasury_obligation() {
         assert!(admin_config_update_allowed(false, false, false));
         assert!(!admin_config_update_allowed(false, false, true));
+    }
+
+    #[test]
+    fn vault158_keeps_processing_paused_until_treasury_settlement() {
+        assert!(!vault158_blocks_unpause(&state::Vault158RecoveryStatus::EvidencePrepared));
+        assert!(vault158_blocks_unpause(&state::Vault158RecoveryStatus::PaymentPrepared));
+        assert!(vault158_blocks_unpause(&state::Vault158RecoveryStatus::PaymentConfirmed));
+        assert!(!vault158_blocks_unpause(&state::Vault158RecoveryStatus::TreasurySettled));
     }
 }
 

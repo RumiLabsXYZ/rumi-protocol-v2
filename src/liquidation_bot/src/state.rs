@@ -136,6 +136,11 @@ pub struct BotPaymentJournal {
     pub collateral_received_amount_e8s: Option<u64>,
     pub collateral_price_e8s: u64,
     pub icp_swapped_e8s: u64,
+    /// Verified native-ICP swap input ledger fee. Legacy and ordinary
+    /// journals default to zero; the vault-158 evidence path records the
+    /// separate debit explicitly for residual treasury accounting.
+    #[serde(default)]
+    pub swap_input_fee_e8s: u64,
     pub ckusdc_received_e6: u64,
     /// Measured claim proceeds left in the bot after the exact payment tuple.
     #[serde(default)]
@@ -175,6 +180,45 @@ pub struct BotPaymentTopUpJournal {
     pub funding_allocation_e6: u64,
     pub status: BotPaymentStatus,
     pub receipt: Option<crate::swap::TransferReceipt>,
+}
+
+/// Durable, one-time receipt-consumption tombstone for the narrowly pinned
+/// vault-158 recovery. It remains after the ordinary pending payment journal
+/// is consumed so the same swap receipts cannot be reallocated later.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Vault158RecoveryEvidence {
+    pub record_id: u64,
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub backend_principal: Principal,
+    pub pool_principal: Principal,
+    pub icp_ledger_principal: Principal,
+    pub ckusdc_ledger_principal: Principal,
+    pub collateral_amount_e8s: u64,
+    pub collateral_received_e8s: u64,
+    pub debt_covered_e8s: u64,
+    pub swap_input_amount_e8s: u64,
+    pub swap_input_fee_e8s: u64,
+    pub swap_output_amount_e6: u64,
+    pub swap_input_receipt: crate::swap::TransferReceipt,
+    pub swap_output_receipt: crate::swap::TransferReceipt,
+    pub pre_swap_ckusdc_balance_e6: u64,
+    pub held_surplus_e6: u64,
+    pub payment_gross_e6: u64,
+    pub payment_amount_e6: u64,
+    pub payment_fee_e6: u64,
+    pub payment_created_at_time: Option<u64>,
+    pub payment_memo: Vec<u8>,
+    pub payment_receipt: Option<crate::swap::TransferReceipt>,
+    pub status: Vault158RecoveryStatus,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Vault158RecoveryStatus {
+    EvidencePrepared,
+    PaymentPrepared,
+    PaymentConfirmed,
+    TreasurySettled,
 }
 
 /// Durable ICP treasury transfer for one confirmed liquidation claim.
@@ -379,6 +423,10 @@ pub struct BotState {
     /// Missing on older snapshots; those snapshots decode with no new work.
     #[serde(default)]
     pub pending_treasury: BTreeMap<u64, BotTreasuryJournal>,
+    /// Exact receipt evidence and payment tuple retained permanently for the
+    /// bounded vault-158 recovery, including after pending journal cleanup.
+    #[serde(default)]
+    pub vault158_recovery: Option<Vault158RecoveryEvidence>,
     /// Last treasury obligation selected for worker service; round-robin avoids
     /// one repeatedly failing transfer starving later confirmed obligations.
     #[serde(default)]
@@ -683,6 +731,7 @@ mod tests {
             collateral_received_amount_e8s: Some(49_980_000),
             collateral_price_e8s: 200_000_000,
             icp_swapped_e8s: 40_000_000,
+            swap_input_fee_e8s: 0,
             ckusdc_received_e6: 1_010_000,
             held_surplus_e6: 0,
             gross_amount_e6: 1_010_000,
@@ -708,6 +757,39 @@ mod tests {
                 status: BotPaymentStatus::Ambiguous,
                 receipt: None,
             }),
+        });
+        state.vault158_recovery = Some(Vault158RecoveryEvidence {
+            record_id: 229,
+            vault_id: 158,
+            claim_generation: 1,
+            backend_principal: Principal::from_text("tfesu-vyaaa-aaaap-qrd7a-cai").unwrap(),
+            pool_principal: Principal::from_text("mohjv-bqaaa-aaaag-qjyia-cai").unwrap(),
+            icp_ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+            ckusdc_ledger_principal: Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap(),
+            collateral_amount_e8s: 236_783_835,
+            collateral_received_e8s: 236_773_835,
+            debt_covered_e8s: 513_841_815,
+            swap_input_amount_e8s: 226_020_933,
+            swap_input_fee_e8s: 10_000,
+            swap_output_amount_e6: 5_545_309,
+            swap_input_receipt: crate::swap::TransferReceipt {
+                block_index: 39_835_236, amount: 226_020_933,
+                created_at_time: 1_793_306_981_079_625_901,
+            },
+            swap_output_receipt: crate::swap::TransferReceipt {
+                block_index: 806_697, amount: 5_545_309, created_at_time: 0,
+            },
+            pre_swap_ckusdc_balance_e6: 26_190_995,
+            held_surplus_e6: 396_890,
+            payment_gross_e6: 5_148_419,
+            payment_amount_e6: 5_138_419,
+            payment_fee_e6: 10_000,
+            payment_created_at_time: Some(1_700_000_000_002),
+            payment_memo: b"RUMI-BPAY-V2:\0\0\0\0\0\0\0\x9e\0\0\0\0\0\0\0\x01".to_vec(),
+            payment_receipt: Some(crate::swap::TransferReceipt {
+                block_index: 92, amount: 5_138_419, created_at_time: 1_700_000_000_002,
+            }),
+            status: Vault158RecoveryStatus::PaymentPrepared,
         });
         state.pending_claims.insert(vault_id, BotClaimJournal {
             vault_id,
@@ -771,6 +853,8 @@ mod tests {
         assert_eq!(return_journal.status, BotReturnTransferStatus::Ambiguous);
         assert_eq!(journal.memo, b"RUMI-BOT-PAYMENT-V1:73:42");
         assert_eq!(journal.status, BotPaymentStatus::ReceiptObserved);
+        assert_eq!(restored.vault158_recovery, state.vault158_recovery,
+            "verified swap receipts and executed tuple survive restart as a permanent tombstone");
 
         let mut legacy_snapshot = serde_json::to_value(&state).unwrap();
         legacy_snapshot["pending_payments"][vault_id.to_string()]
@@ -785,6 +869,11 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("collateral_received_amount_e8s");
+        legacy_snapshot["pending_payments"][vault_id.to_string()]
+            .as_object_mut()
+            .unwrap()
+            .remove("swap_input_fee_e8s");
+        legacy_snapshot.as_object_mut().unwrap().remove("vault158_recovery");
         legacy_snapshot["pending_claims"][vault_id.to_string()]["collateral_return"]
             .as_object_mut()
             .unwrap()
@@ -823,6 +912,8 @@ mod tests {
             legacy_restored.pending_payments[&vault_id].collateral_received_amount_e8s,
             None
         );
+        assert_eq!(legacy_restored.pending_payments[&vault_id].swap_input_fee_e8s, 0);
+        assert!(legacy_restored.vault158_recovery.is_none());
 
         let mut missing_gross = serde_json::to_value(&state).unwrap();
         missing_gross["pending_claims"][vault_id.to_string()]
