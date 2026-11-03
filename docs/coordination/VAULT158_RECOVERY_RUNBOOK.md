@@ -34,8 +34,9 @@ The bot creates that treasury tuple only after ckUSDC payment confirmation.
 
 ## Operator sequence
 
-Run the following only from an authorized admin identity after reviewing the
-live configuration and exact recovery authority. Every `dfx` command names
+Run the following only from an authorized admin identity after completing the
+read-only pre-execution checks below and reviewing the exact recovery authority.
+Every `dfx` command names
 `--network ic` explicitly so none can fall through to a local network; keep that
 flag on any additional `dfx` call, including `admin_reconcile_payment_block` and
 `admin_reconcile_treasury_block`. Execute explicitly authorizes
@@ -73,10 +74,10 @@ paused. Do not create a fresh payment tuple or manually remove the claim.
 ## Pre-execution checks (read-only)
 
 - Backend claim: `get_bot_claim_vault_ids` on the backend must still list 158.
-  The backend releases a claim only for a payment proof or a bot-supplied,
-  verified collateral-return proof. The bot refuses execution unless its claim
-  has no return attempt, so nothing but this recovery can release the backend
-  claim while the bot is paused.
+  This public readback establishes that a claim is active, but does not itself
+  report its generation. Compare it with the bot's generation-1 journal and
+  recheck immediately before execution; do not assume the backend claim cannot
+  change while the bot is paused.
 - Treasury recipient: the ICP residual goes to the bot's configured
   `treasury_principal`. The bot interface does not expose its config, and the
   treasury tuple (readable with `get_pending_treasury_intent`) exists only after
