@@ -4,7 +4,7 @@ Owner: Mara. Selected demo feature: a developer on an isolated test canister ope
 
 | ID | Actual deferral and reason | Demo limitation | Revisit before client money | Status |
 | --- | --- | --- | --- | --- |
-| XLM-D-01 | Expiry/cancel transitions for pending addresses are deferred from the single developer open-address demo. | Open rows continue to count toward the 10-per-owner cap; the demo uses only an isolated test canister. | Implement bounded expiry/cancel and retain permanent owner/network attribution for funded addresses. | Open |
+| XLM-D-01 | Expiry/cancel transitions for pending addresses are deferred from the single developer open-address demo. | Open rows continue to count toward the 10-per-owner cap; because nothing sets Expired/Cancelled, each developer can open at most 10 pending addresses ever on the isolated canister until expiry/cancel is implemented; the demo uses only an isolated test canister. | Implement bounded expiry/cancel and retain permanent owner/network attribution for funded addresses. | Open |
 | XLM-D-02 | Deposit confirmation, credit, borrow, and payout are outside the selected address-only demo. | An address is not usable XLM collateral and must not be presented as a funded vault. | Complete the verified deposit and claim lifecycles with reserve, fee, oracle, provider, and conservation checks before admitting client funds. | Open |
 | XLM-D-03 | Production key admission is deferred while the isolated demo uses `test_key_1`. | The endpoint is test-build-only, so it cannot be called on the production Wasm; the first attribution still locks the selected key in the isolated canister. | Verify `key_1`, public-network binding, deployed artifact, config, and launch guard before mainnet admission. | Open |
 

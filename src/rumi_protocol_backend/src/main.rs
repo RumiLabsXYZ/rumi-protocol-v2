@@ -16939,6 +16939,15 @@ async fn register_icrc_collateral_token(
     arg: rumi_protocol_backend::AddCollateralArg,
     exact_risk_parameters: Option<IcrcCollateralRiskParameters>,
 ) -> Result<(), ProtocolError> {
+    // Native XLM/XRP collateral use reserved synthetic principals with their own
+    // custody rails; they must never be registered through the ICRC ledger path.
+    if arg.ledger_canister_id == rumi_protocol_backend::state::xlm_collateral_principal()
+        || arg.ledger_canister_id == rumi_protocol_backend::state::xrp_collateral_principal()
+    {
+        return Err(ProtocolError::GenericError(
+            "Native collateral principals cannot be registered as ICRC collateral".to_string(),
+        ));
+    }
     let is_three_pool = read_state(|s| s.is_configured_three_pool_ledger(arg.ledger_canister_id));
     if is_three_pool {
         return Err(ProtocolError::GenericError(

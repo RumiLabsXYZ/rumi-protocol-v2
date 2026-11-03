@@ -169,6 +169,27 @@ fn test_endpoint_opens_only_a_testnet_xlm_address() {
         pic.tick();
     }
 
+    // A non-developer, non-anonymous caller must be rejected. The caller check in
+    // vault::open_xlm_vault runs before increment_vault_id, so this must not
+    // consume a vault id or create any state.
+    let outsider = Principal::from_slice(&[9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    let rejected_reply = pic
+        .update_call(
+            backend,
+            outsider,
+            "open_xlm_vault",
+            encode_args(()).unwrap(),
+        )
+        .expect("non-developer open_xlm_vault call");
+    let rejected: Result<XlmVaultOpenInfo, candid::Reserved> = match rejected_reply {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode rejected XLM open result"),
+        WasmResult::Reject(message) => panic!("open_xlm_vault rejected at ingress: {message}"),
+    };
+    assert!(
+        rejected.is_err(),
+        "non-developer principal must not be able to open an XLM address"
+    );
+
     let reply = pic
         .update_call(
             backend,
@@ -181,6 +202,9 @@ fn test_endpoint_opens_only_a_testnet_xlm_address() {
         WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode XLM open result"),
         WasmResult::Reject(message) => panic!("open_xlm_vault rejected: {message}"),
     };
+    // If this fails, the PocketIC harness could not provision `test_key_1` for the
+    // threshold-Ed25519 public-key call. That is itself the threshold-derive smoke
+    // result to record; do not convert this into a skip.
     let opened = opened.expect("threshold XLM address derivation should succeed");
 
     assert!(
