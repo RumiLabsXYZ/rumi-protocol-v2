@@ -65,11 +65,57 @@ generation-bound memo before dispatch. It also promotes the exact claim out of
 the pending-claim map in the same stable-state mutation. Repeated execution
 uses this saved tuple. After backend confirmation, execution creates and
 continues only the saved treasury tuple for record 229 while processing stays
-paused. If a tuple is ambiguous, inspect its pending journal and reconcile the
-exact ledger block through the existing admin reconciliation endpoint. A
-`NoEffect` payment remains held; the generic retry endpoint is refused for
-vault 158 because changing its timestamp would change the authorized tuple.
-Do not create a fresh payment tuple or manually remove the claim.
+paused. Do not create a fresh payment tuple or manually remove the claim.
+
+## Pre-execution checks (read-only)
+
+- Backend claim: `get_bot_claim_vault_ids` on the backend must still list 158.
+  The backend releases a claim only for a payment proof or a bot-supplied,
+  verified collateral-return proof. The bot refuses execution unless its claim
+  has no return attempt, so nothing but this recovery can release the backend
+  claim while the bot is paused.
+- Treasury recipient: the ICP residual goes to the bot's configured
+  `treasury_principal`. The bot interface does not expose its config, and the
+  treasury tuple (readable with `get_pending_treasury_intent`) exists only after
+  payment confirmation, in the same execution that attempts the transfer. Config
+  changes are rejected while the claim is pending, so the value cannot drift
+  before execution. Confirm it out of band against the last reviewed
+  `set_config`/init arguments (expected rumi_treasury,
+  `tlg74-oiaaa-aaaap-qrd6a-cai`) before authorizing execution.
+- ICP funding: the bot's ICP ledger balance should cover 10,742,902 e8 (the
+  gross residual, which includes the 10,000 e8 fee). A shortfall loses no funds;
+  the transfer returns a definitive `NoEffect` and is handled as described below.
+- ckUSDC balance: preparation and first execution accept only the exact
+  pre-swap balance plus output (31,736,304 e6). Any unexpected deposit or debit,
+  including a dust deposit by a third party, makes both calls fail closed. There
+  is no operator override; clearing it needs a reviewed source change.
+
+## Held states and how they resolve
+
+Every held state keeps processing paused and all funds in place. None unpauses
+the bot or allocates a new tuple.
+
+- **Payment `Ambiguous`, or unreceipted past the 23-hour dedup window:** inside
+  the window, repeating execution re-sends the identical saved tuple, which the
+  ledger deduplicates. Past the window the bot will not re-dispatch. Find the exact ckUSDC block in ICRC-3 history (bot to
+  backend, 5,138,419 e6, the saved memo and `created_at_time`) and call
+  `admin_reconcile_payment_block(158, <block>)`. The backend verifies the whole
+  tuple before accepting it. If no such block exists, there is nothing to
+  reconcile.
+- **Payment `NoEffect`:** the ledger definitively rejected the saved tuple. The
+  generic retry endpoint is refused for vault 158 because a new timestamp would
+  change the authorized tuple, and repeating execution only reports the hold.
+  There is no supported operator exit unless a block can be reconciled as above;
+  the bot stays paused with funds held until a separately reviewed source change.
+- **Treasury `NoEffect` or `Ambiguous`:** repeating
+  `admin_execute_vault158_recovery` re-sends the same saved treasury tuple while
+  it is inside the 23-hour window. After the window, or if the outcome stays
+  ambiguous, reconcile the exact block with
+  `admin_reconcile_treasury_block(229, <block>)`. If none exists, the same
+  no-supported-exit rule applies.
+- **Backend confirmation rejected after payment:** the receipt is kept, and
+  repeating execution re-submits the same proof. The backend returns success for
+  an already-consumed matching proof, so repeating is safe.
 
 Repeat `admin_execute_vault158_recovery` to continue the same saved treasury
 tuple when its readback remains pending. Confirm `TreasurySettled` in
