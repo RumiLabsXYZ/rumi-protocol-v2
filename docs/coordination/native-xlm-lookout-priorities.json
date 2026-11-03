@@ -4,8 +4,8 @@
       "id": "xlm-demo-open-address",
       "title": "Demo: open XLM custody address",
       "status": "in_progress",
-      "blockedReason": "Test-build-only endpoint and PocketIC smoke exist in source; disk headroom is ample, but no local build slot is allocated to XLM. Neither the test-build Candid nor the real threshold derive is verified.",
-      "nextAction": "When Cody allocates an XLM heavy slot, recheck disk headroom, build the test-feature backend Wasm, run focused Rust/PocketIC checks, verify test-build Candid without editing committed declarations, and record the real threshold-derive outcome. Keep production interface generation and key admission separate.",
+      "blockedReason": "Test-build-only endpoint and PocketIC smoke exist in source and passed a static review on 2026-11-03; no XLM heavy-build slot is allocated, so compilation, test-build Candid, and the real threshold derive remain unverified.",
+      "nextAction": "When Cody allocates an XLM heavy slot and disk headroom is rechecked: format the backend, run the focused Stellar tests, build the test-feature backend Wasm, run the address-open PocketIC smoke, confirm the production Wasm lacks the endpoint, check Candid compatibility, run the explorer formatter test, and record the threshold-derive outcome.",
       "cardIds": [
         "D1"
       ]
