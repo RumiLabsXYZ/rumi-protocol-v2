@@ -3320,6 +3320,38 @@ by Miles). Miles decides ranking and execution; the coordinator maintains the li
 - After this delivery all workers stand by. The overall goal stays incomplete: the browser and wallet test, BB-46 probes, D6, native
   activation and the denied XRPL publication remain held.
 
+## Milestone 140 (2026-11-03): readiness pass; everything left is human or authority held
+
+One bounded read-only pass under `DEMO_FIRST_DELIVERY_POLICY.md`, looking for a documented broken Base demo step or a known essential
+defect fixable without Rob. None found. No worker ran, no source changed, nothing pushed or published.
+
+**What actually works.** Base bridge: source, local tests and PocketIC suites at `4169feb8`; the Base Sepolia CLI round trip with
+synthetic tokens passed on 2026-10-25 (test bridge stopped since); the isolated staging page renders, passes the fixture wallet checks
+and a real Internet Identity sign-in (scoped). Multichain (EVM, Solana, Sui and their `/bridge` pages): accepted at source and local-test
+scope; nothing deployed or enabled. PR #591 head `868f027b`, draft, unmerged.
+
+**Checked in this pass.** Every edit target in `base-icusd-bridge-staging-recipe.md` still exists at `868f027b`; the edits apply by
+meaning. Only line numbers in `src/lib/config.ts` drifted since `4169feb8`: `LOCAL_CANISTER_IDS` 105 to 115, `isLocal` 130 to 142,
+`BRIDGE_ENABLED` 73 to 80 (it now also counts the Solana and Sui ids, which stay empty, so nothing changes). The current head includes the
+accepted BB-62 Base fix (a possibly submitted ICP-to-Base request continues under its own id; no discard), so the copy should come from it.
+
+**Evidence storage note.** The temporary folders were cleared when the machine restarted: the saved logs that earlier milestones cite in
+the coordinator scratchpad (`bb50/`, `bb54/`, `bb60/`, `bb61/` and the `53*` logs) and the supervisor's brief folder no longer exist. The
+acceptances that relied on them stand as recorded (Miles read those logs at the time); the repository records, commits and the private
+Lookout publish record are intact.
+
+**Shortest next session with Rob (browser demo, BB-27).**
+1. Miles recreates the isolated staging copy from `868f027b` per the recipe (never serve on port 4943) and confirms the local server
+   answers.
+2. Rob signs in with Touch ID, unlocks Rabby and approves the staging connection.
+3. Miles, under the existing test authorization, runs recipe section 7: consent and rejection, the synthetic browser round trip and
+   reload recovery; then stops the test bridge again. Clear the `rumi:base-bridge:v1:<principal>` journal only if the test canisters
+   changed (recipe section 8).
+4. Record fresh reconciliation and update PR #591 (`acceptance-handoff`). No merge.
+
+Still held and not actionable unattended: BB-27 (Rob's gestures), BB-46 public probes, D6 and native activation, the denied XRPL
+publication, merge and deploy. Workers W28, W29 and W23 on standby.
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
