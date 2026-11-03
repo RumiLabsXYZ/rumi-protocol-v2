@@ -35,17 +35,20 @@ The bot creates that treasury tuple only after ckUSDC payment confirmation.
 ## Operator sequence
 
 Run the following only from an authorized admin identity after reviewing the
-live configuration and exact recovery authority. Execute explicitly authorizes
+live configuration and exact recovery authority. Every `dfx` command names
+`--network ic` explicitly so none can fall through to a local network; keep that
+flag on any additional `dfx` call, including `admin_reconcile_payment_block` and
+`admin_reconcile_treasury_block`. Execute explicitly authorizes
 the bot-to-backend ckUSDC payment, backend confirmation, and the pinned
 record-229 ICP treasury continuation. Preparation and installation authorize
 no transfer.
 
 ```sh
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai get_processing_paused '()'
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai set_processing_paused '(true)'
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai admin_prepare_vault158_recovery '()'
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_processing_paused '()'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai set_processing_paused '(true)'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai admin_prepare_vault158_recovery '()'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
 ```
 
 Review the durable evidence and `EvidencePrepared` status before separately
@@ -54,10 +57,10 @@ ckUSDC balance, then stores the receipts. It does not create an outgoing
 payment tuple, call the backend, remove the active claim, or unpause processing.
 
 ```sh
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai admin_execute_vault158_recovery '()'
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai get_pending_payment_journals '()'
-dfx canister call nygob-3qaaa-aaaap-qttcq-cai get_pending_treasury_intent '(229 : nat64)'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai admin_execute_vault158_recovery '()'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_pending_payment_journals '()'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_pending_treasury_intent '(229 : nat64)'
 ```
 
 The first execution creates and persists the ckUSDC timestamp, fee, amount, and
@@ -79,12 +82,19 @@ paused. Do not create a fresh payment tuple or manually remove the claim.
   treasury tuple (readable with `get_pending_treasury_intent`) exists only after
   payment confirmation, in the same execution that attempts the transfer. Config
   changes are rejected while the claim is pending, so the value cannot drift
-  before execution. Confirm it out of band against the last reviewed
-  `set_config`/init arguments (expected rumi_treasury,
-  `tlg74-oiaaa-aaaap-qrd6a-cai`) before authorizing execution.
-- ICP funding: the bot's ICP ledger balance should cover 10,742,902 e8 (the
-  gross residual, which includes the 10,000 e8 fee). A shortfall loses no funds;
-  the transfer returns a definitive `NoEffect` and is handled as described below.
+  before execution. This runbook has no direct bot config or init evidence for
+  the value. `tlg74-oiaaa-aaaap-qrd6a-cai` (rumi_treasury) is only a
+  **candidate**; the release decision must independently verify the bot's
+  actual configured `treasury_principal` (for example from the last reviewed
+  `set_config`/init arguments) before authorizing execution.
+- ICP funding: a bot ICP ledger balance of at least 10,742,902 e8 (the gross
+  residual, which includes the 10,000 e8 fee) is necessary but does not prove
+  that ICP attributable to this claim remains: the bot's account is shared, so
+  other funds can cover the amount. Before release, reconcile the claim's ICP
+  receipt (block `39835236`) and all subsequent ICP activity on the bot account
+  against the current balance, and do not treat balance alone as isolation. A
+  shortfall the ledger rejects returns a definitive `NoEffect` and is handled
+  as described below.
 - ckUSDC balance: preparation and first execution accept only the exact
   pre-swap balance plus output (31,736,304 e6). Any unexpected deposit or debit,
   including a dust deposit by a third party, makes both calls fail closed. There
@@ -92,8 +102,12 @@ paused. Do not create a fresh payment tuple or manually remove the claim.
 
 ## Held states and how they resolve
 
-Every held state keeps processing paused and all funds in place. None unpauses
-the bot or allocates a new tuple.
+Every held state keeps processing paused and allocates no new tuple; none
+unpauses the bot. Once the ckUSDC payment has reached the backend, funds may
+already have moved (payment, backend credit, possibly the treasury transfer), so
+"held" does not mean funds are in place. In every case the ICRC ledger blocks and
+the bot and backend journals govern what actually happened; check them rather
+than assuming a state.
 
 - **Payment `Ambiguous`, or unreceipted past the 23-hour dedup window:** inside
   the window, repeating execution re-sends the identical saved tuple, which the
@@ -116,6 +130,14 @@ the bot or allocates a new tuple.
 - **Backend confirmation rejected after payment:** the receipt is kept, and
   repeating execution re-submits the same proof. The backend returns success for
   an already-consumed matching proof, so repeating is safe.
+
+No operator cancellation exists in this procedure, and none should be
+improvised solely because an effect failed, no receipt was found, or the outcome
+is uncertain. `NoEffect` is specific to the saved tuple, a missing block in a
+search does not prove the transfer never landed, and abandoning or replacing the
+tuple could duplicate a payment that later appears or desynchronize the claim.
+Resolve uncertainty by evidence (ledger blocks, journals, reconciliation above);
+anything else needs a separately reviewed source change.
 
 Repeat `admin_execute_vault158_recovery` to continue the same saved treasury
 tuple when its readback remains pending. Confirm `TreasurySettled` in
