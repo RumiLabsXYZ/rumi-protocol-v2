@@ -183,6 +183,14 @@ type BotTreasuryIntentView = record {
   receipt : opt TransferReceipt;
 };
 type Vault158RecoveryStatus = variant { EvidencePrepared; PaymentPrepared; PaymentConfirmed; TreasurySettled };
+type BotRecoveryConfigView = record {
+  backend_principal : principal;
+  treasury_principal : principal;
+  icp_ledger : principal;
+  ckusdc_ledger : principal;
+  icp_fee_e8s : opt nat64;
+  ckusdc_fee_e6 : opt nat64;
+};
 type Vault158RecoveryEvidence = record {
   record_id : nat64;
   vault_id : nat64;
@@ -254,6 +262,7 @@ service : (BotInitArgs) -> {
   get_pending_claim_journals : () -> (vec BotClaimJournal) query;
   get_pending_treasury_intent : (nat64) -> (opt BotTreasuryIntentView) query;
   get_vault158_recovery : () -> (opt Vault158RecoveryEvidence) query;
+  get_recovery_config : () -> (opt BotRecoveryConfigView) query;
 
   // Admin actions
   admin_resolve_pool_ordering : () -> ();

@@ -204,6 +204,14 @@ export const idlFactory = ({ IDL }) => {
     'record_id' : IDL.Nat64,
     'sender_principal' : IDL.Principal,
   });
+  const BotRecoveryConfigView = IDL.Record({
+    'icp_fee_e8s' : IDL.Opt(IDL.Nat64),
+    'backend_principal' : IDL.Principal,
+    'ckusdc_ledger' : IDL.Principal,
+    'icp_ledger' : IDL.Principal,
+    'treasury_principal' : IDL.Principal,
+    'ckusdc_fee_e6' : IDL.Opt(IDL.Nat64),
+  });
   const Vault158RecoveryStatus = IDL.Variant({
     'PaymentConfirmed' : IDL.Null,
     'TreasurySettled' : IDL.Null,
@@ -335,6 +343,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_processing_paused' : IDL.Func([], [IDL.Bool], ['query']),
+    'get_recovery_config' : IDL.Func(
+        [],
+        [IDL.Opt(BotRecoveryConfigView)],
+        ['query'],
+      ),
     'get_stuck_liquidations' : IDL.Func(
         [],
         [IDL.Vec(LiquidationRecordVersioned)],

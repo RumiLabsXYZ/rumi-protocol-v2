@@ -340,6 +340,15 @@ fn get_vault158_recovery() -> Option<state::Vault158RecoveryEvidence> {
     state::read_state(|s| s.vault158_recovery.clone())
 }
 
+/// Admin readback of the configured recovery destination and ledger fields.
+/// Read-only: it never changes config or moves funds. Unconfigured state
+/// cannot reach it (`require_admin` traps), so `None` is defensive only.
+#[query]
+fn get_recovery_config() -> Option<state::BotRecoveryConfigView> {
+    require_admin();
+    state::read_state(|s| state::BotRecoveryConfigView::from_config(s.config.as_ref()))
+}
+
 // ---- History query endpoints ----
 
 #[query]

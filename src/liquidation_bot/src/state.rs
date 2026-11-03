@@ -59,6 +59,31 @@ pub struct BotConfig {
     pub icusd_ledger: Option<Principal>,
 }
 
+/// Read-only projection of the live `BotConfig` fields that decide where the
+/// vault-158 recovery moves funds. Excludes the admin and legacy fields.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotRecoveryConfigView {
+    pub backend_principal: Principal,
+    pub treasury_principal: Principal,
+    pub icp_ledger: Principal,
+    pub ckusdc_ledger: Principal,
+    pub icp_fee_e8s: Option<u64>,
+    pub ckusdc_fee_e6: Option<u64>,
+}
+
+impl BotRecoveryConfigView {
+    pub fn from_config(config: Option<&BotConfig>) -> Option<Self> {
+        config.map(|c| Self {
+            backend_principal: c.backend_principal,
+            treasury_principal: c.treasury_principal,
+            icp_ledger: c.icp_ledger,
+            ckusdc_ledger: c.ckusdc_ledger,
+            icp_fee_e8s: c.icp_fee_e8s,
+            ckusdc_fee_e6: c.ckusdc_fee_e6,
+        })
+    }
+}
+
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct BotLiquidationEvent {
     pub timestamp: u64,
@@ -568,6 +593,39 @@ pub fn save_config_to_stable() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_config_view_is_none_when_unconfigured() {
+        assert_eq!(BotRecoveryConfigView::from_config(None), None);
+    }
+
+    #[test]
+    fn recovery_config_view_reports_configured_values_verbatim() {
+        let p = |n: u8| Principal::from_slice(&[n; 29]);
+        let cfg = BotConfig {
+            backend_principal: p(1),
+            treasury_principal: p(2),
+            admin: p(3),
+            max_slippage_bps: 100,
+            icp_ledger: p(4),
+            ckusdc_ledger: p(5),
+            icpswap_pool: p(6),
+            icpswap_zero_for_one: None,
+            icp_fee_e8s: Some(10_000),
+            ckusdc_fee_e6: None,
+            three_pool_principal: None,
+            kong_swap_principal: None,
+            ckusdt_ledger: None,
+            icusd_ledger: None,
+        };
+        let view = BotRecoveryConfigView::from_config(Some(&cfg)).unwrap();
+        assert_eq!(view.treasury_principal, p(2));
+        assert_eq!(view.backend_principal, p(1));
+        assert_eq!(view.icp_ledger, p(4));
+        assert_eq!(view.ckusdc_ledger, p(5));
+        assert_eq!(view.icp_fee_e8s, Some(10_000));
+        assert_eq!(view.ckusdc_fee_e6, None);
+    }
 
     /// Regression fence: a `BotState` JSON blob written by the pre-Apr-9 wasm
     /// (no `icpswap_pool` field, with the legacy `kong_swap_principal` /

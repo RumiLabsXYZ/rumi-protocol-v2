@@ -86,6 +86,14 @@ export interface BotPaymentTopUpJournal {
   'amount_e6' : bigint,
   'created_at_time' : bigint,
 }
+export interface BotRecoveryConfigView {
+  'icp_fee_e8s' : [] | [bigint],
+  'backend_principal' : Principal,
+  'ckusdc_ledger' : Principal,
+  'icp_ledger' : Principal,
+  'treasury_principal' : Principal,
+  'ckusdc_fee_e6' : [] | [bigint],
+}
 export interface BotReturnTransferJournal {
   'status' : BotReturnTransferStatus,
   'backend_principal' : Principal,
@@ -296,6 +304,7 @@ export interface _SERVICE {
     [] | [BotTreasuryIntentView]
   >,
   'get_processing_paused' : ActorMethod<[], boolean>,
+  'get_recovery_config' : ActorMethod<[], [] | [BotRecoveryConfigView]>,
   'get_stuck_liquidations' : ActorMethod<[], Array<LiquidationRecordVersioned>>,
   'get_vault158_recovery' : ActorMethod<[], [] | [Vault158RecoveryEvidence]>,
   'notify_liquidatable_vaults' : ActorMethod<

@@ -47,6 +47,7 @@ no transfer.
 ```sh
 dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_processing_paused '()'
 dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai set_processing_paused '(true)'
+dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_recovery_config '()'
 dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
 dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai admin_prepare_vault158_recovery '()'
 dfx canister call --network ic nygob-3qaaa-aaaap-qttcq-cai get_vault158_recovery '()'
@@ -79,7 +80,7 @@ paused. Do not create a fresh payment tuple or manually remove the claim.
   recheck immediately before execution; do not assume the backend claim cannot
   change while the bot is paused.
 - Treasury recipient: the ICP residual goes to the bot's configured
-  `treasury_principal`. The bot interface does not expose its config, and the
+  `treasury_principal`. The currently deployed bot interface does not expose its config (the recovery build adds `get_recovery_config`, below), and the
   treasury tuple (readable with `get_pending_treasury_intent`) exists only after
   payment confirmation, in the same execution that attempts the transfer. Config
   changes are rejected while the claim is pending, so the value cannot drift
@@ -88,6 +89,32 @@ paused. Do not create a fresh payment tuple or manually remove the claim.
   **candidate**; the release decision must independently verify the bot's
   actual configured `treasury_principal` (for example from the last reviewed
   `set_config`/init arguments) before authorizing execution.
+  Read-only evidence gathered 2026-11-02 Pacific (corroborating, not a config
+  readback): the live bot exposes no config query; its admin event log holds a
+  single value-less `ConfigUpdated` event (2026-04-25) and no later one; and
+  the bot's ICP account sent its earlier treasury transfers (ICP ledger blocks
+  37660138, 37660164, 37660170, 37660177, 2026-08-01) to account identifier
+  `e321f2966ff15e699b52187213762cb16d187b66c8d58e73ed337d02c6a5cdc6`, the
+  default account of `tlg74-oiaaa-aaaap-qrd6a-cai`. That
+  shows where the bot paid on that date; it does not prove the configured value
+  now (for example across a later upgrade), so the candidate stays unverified
+  until the configured value is read back or the `set_config` arguments are
+  produced.
+  Configured-value readback (available only after the recovery build is
+  installed; the currently deployed bot has no such method): the admin-only
+  query `get_recovery_config` returns `treasury_principal`, `backend_principal`,
+  `icp_ledger`, `ckusdc_ledger`, `icp_fee_e8s` and `ckusdc_fee_e6` as stored.
+  Call it as the bot admin after installation and **before** preparation or
+  execution, and require `treasury_principal` to equal the intended recipient
+  (`tlg74-oiaaa-aaaap-qrd6a-cai` remains an unproven historical candidate until
+  then). Do not call `set_config` to "fix" a mismatch while the claim is
+  pending (the method logs the refusal and returns unit, rather than an error);
+  stop and escalate instead. The query only reads
+  state: it moves no funds, changes no config, and is not itself an
+  authorization to execute. A cached fee of `null` is not a readback failure.
+  Treasury tuple construction uses a 10,000 e8 fallback when its cached ICP fee
+  is null; compare the applicable tuple fee with the live ledger fee before
+  execution. Non-admin and anonymous callers trap.
 - ICP funding: a bot ICP ledger balance of at least 10,742,902 e8 (the gross
   residual, which includes the 10,000 e8 fee) is necessary but does not prove
   that ICP attributable to this claim remains: the bot's account is shared, so
