@@ -1,6 +1,6 @@
 {
-  "summary": "Season 1 Points recovery and finalization are verified on mainnet. The final-period compensation is applied, prior entries and receipts are preserved, and replay added zero. Stability Pool live recovery and broader finding reconciliation remain open.",
-  "plainSummary": "Season 1 rewards are finalized, including the days missed while processing was stuck. The final totals were checked, and repeating the operation added no extra points. The wider security review and Stability Pool checks remain open; no action is needed from you for the points closeout.",
+  "summary": "Vault 158 recovery PR #614 is green and ready for review, but live treasury-recipient proof requires a separately authorized bot upgrade before execution. ckSOL ICP-processing PR #610 is green and mergeable, while direct running upgrades remain unsafe and the reserve stays off. Stability Pool work continues consistently, and vault 51 is tracked separately through green PR #613 without claiming repayment, settlement, or withdrawal.",
+  "plainSummary": "Two recovery jobs are now the top focus. Vault 158 software is ready for review but needs a separately approved update before the payment destination can be checked; the Solana payment change still needs a safe upgrade path. Stability Pool and vault 51 work continue under Bram, and Rob does not need to act now.",
   "glossary": [
     {
       "term": "Stability Pool",
@@ -21,6 +21,16 @@
       "term": "archive",
       "definition": "An older ledger block range served from a ledger archive canister.",
       "cardId": "SEC-04"
+    },
+    {
+      "term": "treasury recipient",
+      "definition": "The configured destination that must be read back and confirmed before a recovery payment is allowed.",
+      "cardId": "SEC-06"
+    },
+    {
+      "term": "reserve",
+      "definition": "A limited pool of processing funds. The ckSOL reserve is currently off and cannot spend.",
+      "cardId": "CKICP-01"
     }
   ]
 }
