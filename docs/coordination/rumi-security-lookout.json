@@ -1,6 +1,19 @@
 {
   "cards": [
     {
+      "id": "SEC-06",
+      "state": "Review",
+      "owner": "Bram",
+      "scope": "Prepare vault 158 liquidation recovery without executing it",
+      "evidenceText": "PR #614 is open and its listed check passes. The claim remains held. The installed bot cannot expose its current treasury recipient; the PR adds a read-only admin query so that recipient can be verified after a separately authorized upgrade and before any recovery. No upgrade, recovery, or funds movement occurred.",
+      "evidenceLinks": [
+        {
+          "title": "Vault 158 recovery PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/614"
+        }
+      ]
+    },
+    {
       "id": "SEC-01",
       "state": "In progress",
       "owner": "Bram",
@@ -52,6 +65,132 @@
         {
           "title": "Public security status",
           "url": "https://rumiprotocol.com/security/october-2026"
+        }
+      ]
+    },
+    {
+      "id": "SEC-08",
+      "state": "Review",
+      "owner": "Bram",
+      "scope": "Track vault 51 nICP repayment, settlement, and withdrawal",
+      "evidenceText": "PR #612 is merged. PR #613 is open, mergeable, and its listed frontend and receipt checks pass. The software preserves the vault's debt and nICP terms and prepares owner repayment and settled ICP withdrawal. No repayment, settlement, withdrawal, or funds movement is claimed.",
+      "evidenceLinks": [
+        {
+          "title": "Vault 51 redemption PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/612"
+        },
+        {
+          "title": "Vault 51 owner recovery PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/613"
+        }
+      ]
+    },
+    {
+      "id": "CKICP-01",
+      "state": "Blocked",
+      "owner": "Bram",
+      "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
+      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceLinks": [
+        {
+          "title": "ckSOL PR #610",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
+        },
+        {
+          "title": "Current ckSOL head",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+        },
+        {
+          "title": "Frontend CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+        },
+        {
+          "title": "Stability Pool CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+        }
+      ]
+    },
+    {
+      "id": "CKICP-02",
+      "state": "In progress",
+      "owner": "Bram",
+      "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
+      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceLinks": [
+        {
+          "title": "ckSOL PR #610",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
+        },
+        {
+          "title": "Current ckSOL head",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+        },
+        {
+          "title": "Frontend CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+        },
+        {
+          "title": "Stability Pool CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+        }
+      ]
+    },
+    {
+      "id": "CKICP-03",
+      "state": "Blocked",
+      "owner": "Bram",
+      "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
+      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceLinks": [
+        {
+          "title": "ckSOL PR #610",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
+        },
+        {
+          "title": "Current ckSOL head",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+        },
+        {
+          "title": "Frontend CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+        },
+        {
+          "title": "Stability Pool CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+        }
+      ]
+    },
+    {
+      "id": "XRPTAG-01",
+      "state": "Done",
+      "owner": "agent:xrp_tag_guidance",
+      "scope": "Clarify incoming XRP deposit-tag guidance across vault deposit surfaces",
+      "evidenceText": "PR #607 merged at 5108abc after frontend CI passed. Coordinated frontend asset batch 666 was deployed on the source-matched base; live index, route and XRP notice bundle match the reviewed build. All 2,013 prior asset keys and properties were preserved, with 106 changed encodings verified. No wallet or financial action was performed.",
+      "evidenceLinks": [
+        {
+          "title": "XRP deposit-tag guidance PR #607",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/607"
+        },
+        {
+          "title": "XRP frontend validation",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41338752665"
+        }
+      ]
+    },
+    {
+      "id": "XRPTAG-02",
+      "state": "Done",
+      "owner": "root",
+      "scope": "Check incoming-tag guidance and preserve outgoing XRP destination tags",
+      "evidenceText": "PR #607 merged at 5108abc after frontend CI passed. Coordinated frontend asset batch 666 was deployed on the source-matched base; live index, route and XRP notice bundle match the reviewed build. All 2,013 prior asset keys and properties were preserved, with 106 changed encodings verified. No wallet or financial action was performed.",
+      "evidenceLinks": [
+        {
+          "title": "XRP deposit-tag guidance PR #607",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/607"
+        },
+        {
+          "title": "XRP frontend validation",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41338752665"
         }
       ]
     }
