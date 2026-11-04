@@ -9803,7 +9803,7 @@ fn set_xlm_stellar_key_name(name: String) -> Result<(), ProtocolError> {
             "Only developer can set the Stellar key".to_string(),
         ));
     }
-    let changed = mutate_state(|state| {
+    let changed = mutate_state(|state| -> Result<bool, ProtocolError> {
         let changed = rumi_protocol_backend::state::validate_xlm_stellar_key_change(state, &name)
             .map_err(|error| ProtocolError::GenericError(error.to_string()))?;
         if changed {
