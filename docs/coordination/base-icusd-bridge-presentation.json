@@ -1,5 +1,5 @@
 {
-  "summary": "Multichain bridge and XRPL lifecycle, supervised by Miles at background pace. Done at source and local-test scope: EVM BB-42 to BB-45 and BB-62, reporting and frontend BB-58 to BB-60, Solana BB-47 to BB-50, Sui BB-51 to BB-54, XRPL follow-ups BB-55 to BB-57 (local branch, push held). XRPL lifecycle (PR #586, BB-63): R10 testnet rehearsal passed; awaits Miles' final review. Held: BB-27 waits on Rob, BB-46 probes, D6 and every activation. Nothing merged, deployed, signed or enabled.",
+  "summary": "Multichain bridge and XRPL lifecycle, supervised by Miles at background pace. Done at source and local-test scope: EVM BB-42 to BB-45 and BB-62, reporting and frontend BB-58 to BB-60, Solana BB-47 to BB-50, Sui BB-51 to BB-54, XRPL follow-ups BB-55 to BB-57 (local branch, push held). XRPL lifecycle (PR #586, BB-63): R10 testnet rehearsal passed; awaits Miles' final review. Held: BB-27 waits on Rob, BB-46 probes, D6 and every activation. No production activation; merge and live-action holds remain.",
   "glossary": [
     {
       "term": "proof=source",
