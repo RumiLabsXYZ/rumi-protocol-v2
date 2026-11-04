@@ -464,7 +464,7 @@ mod tests {
             Err(EvidenceDeferReason::ReserveTooOld)
         );
         assert_eq!(
-            decide_evidence_freshness(42, &account, &reserve, now_ns() - 1, 5),
+            decide_evidence_freshness(42, &account, &reserve, parse_utc_timestamp_ns(CLOSED_AT).unwrap() - 1, 5),
             Err(EvidenceDeferReason::ReserveTimestampInFuture)
         );
         let mut invalid = reserve;

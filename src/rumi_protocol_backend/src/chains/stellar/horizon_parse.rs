@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_native_balance_and_non_native_payment() {
-        let dup=br#"{"account_id":"G","sequence":"1","account_last_modified_ledger":1,"balances":[{"asset_type":"native","balance":"1"},{"asset_type":"native","balance":"2"}]}"#;
+        let dup=br#"{"account_id":"G","sequence":"1","account_last_modified_ledger":1,"balances":[{"asset_type":"native","balance":"1","selling_liabilities":"0"},{"asset_type":"native","balance":"2","selling_liabilities":"0"}]}"#;
         assert_eq!(parse_account(dup, "G"), Err(HorizonParseError::Ambiguous));
         let json = format!(
             r#"{{"_embedded":{{"records":[{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true,"type":"payment","asset_type":"credit_alphanum4","amount":"2.0000000","to":"{DEST}"}}]}}}}"#
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_matching_operation_identity() {
         let row = format!(
-            r#"{{"paging_token":"123456789012345678","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}"#
+            r#"{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}"#
         );
         let json = format!(r#"{{"_embedded":{{"records":[{row},{row}]}}}}"#);
         assert_eq!(
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn rejects_full_page_and_any_mismatched_transaction_hash() {
         let row = format!(
-            r#"{{"paging_token":"123456789012345678","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}"#
+            r#"{{"paging_token":"120192344791343105","transaction_hash":"{HASH}","transaction_successful":true,"type":"create_account","starting_balance":"2.0000000","account":"{DEST}"}}"#
         );
         let full = format!(r#"{{"_embedded":{{"records":[{row}]}}}}"#);
         assert_eq!(
