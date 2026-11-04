@@ -3,11 +3,21 @@
     {
       "id": "xlm-demo-open-address",
       "title": "Demo: open XLM custody address",
-      "status": "blocked",
-      "blockedReason": "The address demo passed its local build, Candid check, focused tests and PocketIC threshold-derive smoke on 2026-11-04. The single approved build batch is used; the next slice needs another batch to verify.",
-      "nextAction": "Reserve the next shared build slot, then implement and verify in one batch: a test-build-only get_my_xlm_pending_deposits query (caller's own rows; vault id, address, network, expiry, status) with a unit test and a PocketIC assertion; regenerate frontend declarations for the synced XLM key methods. Installing the demo on an isolated canister needs separate approval.",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "Locally completed: build, Candid, focused tests and the PocketIC threshold-derive smoke passed at daf1c440. Installing on an isolated canister needs separate approval.",
       "cardIds": [
         "D1"
+      ]
+    },
+    {
+      "id": "xlm-pending-readback",
+      "title": "Read back my pending XLM addresses",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "Locally completed at 81fd7c3d/48ea2690 with unit, Candid, Wasm and PocketIC checks. Next slice is deposit confirmation under verified deposits and borrowing.",
+      "cardIds": [
+        "D2"
       ]
     },
     {
@@ -35,7 +45,7 @@
       "title": "Stable state and XLM launch guard",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Cargo-verify the guarded pending-deposit/attribution insertion and existing key/credit state; keep it dormant until public open/confirm APIs and atomic credit flow are implemented.",
+      "nextAction": "Pending-row and attribution insertion is locally tested. Keep it dormant until public confirm APIs and the atomic credit flow are implemented; keep XLM Frozen.",
       "cardIds": [
         "WP2"
       ]
@@ -44,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "The new pure deposit_evidence decision helper is not wired into open/confirm endpoints, provider-account quorum, or atomic mutation; no live credit lifecycle exists. Tests and compilation are pending.",
-      "nextAction": "Compile/test the pending-row and reserve/receipt decisions, then implement public open/confirm, key derivation, provider binding, and atomic deposit credit/receipt/tombstone lifecycle; preserve WP3 blocked until end-to-end evidence exists.",
+      "blockedReason": "The deposit-evidence decision helper is locally tested but not wired into a confirm endpoint, provider-account quorum, or atomic mutation; no live credit lifecycle exists.",
+      "nextAction": "Following XRP's lifecycle, implement deposit confirmation for an opened pending address: provider binding, quorum evidence, and atomic credit/receipt/tombstone, with owner-bound recovery for verified uncredited funds.",
       "cardIds": [
         "WP3"
       ]
@@ -65,7 +75,7 @@
       "title": "User flows, Candid, and monitoring",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Regenerate and verify Candid/frontend declarations after the developer-gated XLM key setter/getter change, then implement supported flows with explicit pending/unresolved states; keep them unavailable until route and integration safety is resolved.",
+      "nextAction": "Interface and frontend declarations are synced. Next, implement supported user flows with explicit pending/unresolved states; keep them unavailable until route and integration safety is resolved. The explorer formatter test still needs to run.",
       "cardIds": [
         "WP5"
       ]
