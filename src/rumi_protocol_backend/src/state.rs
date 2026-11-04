@@ -6320,6 +6320,7 @@ impl State {
     pub fn nicp_claim_collateral_value(&self, vault: &Vault) -> Option<ICUSD> {
         let claim = self.nicp_redemption_claim.as_ref()
             .filter(|claim| claim.vault_id == vault.vault_id && claim.blocks_vault())?;
+        if claim.release.is_some() { return Some(ICUSD::new(0)); }
         let value = (|| {
             let config = self.get_collateral_config(&vault.collateral_type)?;
             let haircut = match &config.price_source {
@@ -16076,6 +16077,20 @@ mod nicp_claim_integration_tests {
         assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(ICUSD::new(171_000_000_000)));
         s.collateral_configs.get_mut(&s.icp_ledger_principal).unwrap().last_price = None;
         assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(ICUSD::new(0)));
+    }
+
+    #[test]
+    fn submitted_release_is_never_counted_as_backing() {
+        let mut s = setup();
+        let claim = s.nicp_redemption_claim.as_mut().unwrap();
+        claim.release = Some(crate::nicp_redemption::ClaimRelease {
+            nonce: 42, fee_e8s: 10_000, amount_e8s: 100_000, block: None,
+        });
+        let vault = s.vault_id_to_vaults[&51].clone();
+        assert_eq!(s.nicp_claim_collateral_value(&vault), Some(ICUSD::new(0)));
+        assert!(s.has_pending_nicp_claim(51));
+        s.nicp_redemption_claim.as_mut().unwrap().release.as_mut().unwrap().block = Some(99);
+        assert_eq!(s.nicp_claim_collateral_value(&vault), Some(ICUSD::new(0)));
     }
 
     #[test]

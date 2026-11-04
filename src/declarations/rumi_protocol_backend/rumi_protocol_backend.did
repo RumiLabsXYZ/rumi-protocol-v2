@@ -368,6 +368,12 @@ type CkSolRelayStatus = variant {
   Rejected : text;
   SubmittedOrUnknown;
 };
+type ClaimRelease = record {
+  fee_e8s : nat64;
+  amount_e8s : nat64;
+  nonce : nat;
+  block : opt nat64;
+};
 type ClaimStage = variant {
   WithdrawalSubmitted;
   Approved;
@@ -1115,6 +1121,7 @@ type NicpRedemptionClaim = record {
   owner : principal;
   withdrawal_id : opt nat64;
   redeem_nicp_e8s : nat64;
+  release : opt ClaimRelease;
   fee_e8s : nat64;
   updated_at_ns : nat64;
   vault_id : nat64;
@@ -2452,6 +2459,7 @@ service : (ProtocolArg) -> {
       nat,
       nat64,
     ) -> (Result_1);
+  reconcile_vault51_icp_payout : (nat64) -> (Result_4);
   reconcile_vault_collateral_pull_from_block : (VaultOperationIdArg, nat64) -> (
       Result_1,
     );
@@ -2464,6 +2472,7 @@ service : (ProtocolArg) -> {
   redeem_quoted : (RedeemQuotedRequest) -> (Result_31);
   redeem_reserves : (nat64, opt principal) -> (Result_32);
   refresh_chain_hot_wallet_balance : (nat32) -> (Result_33);
+  refresh_vault51_redemption_claim : () -> (Result_4);
   refund_stability_pool_burn : (nat64, nat64, SpWritedownProof) -> (Result_34);
   register_chain : (RegisterChainArg) -> (Result_1);
   register_ckdoge_collateral : () -> (Result_1);
@@ -2643,6 +2652,7 @@ service : (ProtocolArg) -> {
   withdraw_liquidity_with_id : (nat, nat64) -> (Result);
   withdraw_partial_collateral : (VaultArg) -> (Result);
   withdraw_solana_collateral : (nat64, nat, text) -> (Result_1);
+  withdraw_vault51_settled_icp : () -> (Result_4);
   xrp_balance : (text) -> (Result);
   xrp_custody_address : (principal, nat64) -> (Result_2);
   xrp_settlement_address : () -> (Result_2);

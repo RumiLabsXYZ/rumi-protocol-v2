@@ -1,0 +1,9 @@
+# Vault 51 owner withdrawal release
+
+Vault 51's owner can refresh the WaterNeuron claim; after verified ICP settlement and full repayment, the owner can withdraw settled ICP to the owner account. The payout has a durable exact-tuple journal, owner authorization and ledger-block reconciliation; a pending payout is excluded from collateral value. Claim repayment never exceeds the signed debt maximum. The interface provides a bounded interest cushion and explicit payout status.
+
+Source `e503f9db`; PR #613. Backend canister `tfesu-vyaaa-aaaap-qrd7a-cai` upgraded from `c543cb1a...` to gzip SHA256 `d4d60e5176efd4aba0be1b583a9f6a9acc2e6b77b1d971a37d5cc82c65740c95`; live readback matched. Withdrawal #1696 and its claim amount were preserved; stage remained ClaimConfirmed and no payout was initiated. No real repayment or payout was performed during this release.
+
+Focused tests: 16 claim, 10 ICRC-21, one capped-repayment, 11 frontend tests passed; production builds and frontend auth assets passed. New Candid is compatible with the live pre-upgrade interface. Two independent custody reviews identified and verified fixes for repayment minimum, consent bounds, and pending status. Whole-frontend diagnostics retain pre-existing errors outside touched files. Hosted frontend check passed; the Stability Pool archived-receipt check was still running at publication.
+
+Frontend immutable batches 667–672 and atomic entry batch 673: all 2,112 pre-existing asset keys and properties preserved; 307 changed/new encodings verified; served index SHA256 `8fd5cb4f3accbfa7dd3623ee158d51b147d451a8b3750b32887c202c7dc5ee41`. Live connected browser showed Vault 51 claim, debt, repayment and Check redemption status. The withdrawal control appears after settlement and zero debt. No real funds lifecycle was tested; WaterNeuron settlement remains pending.

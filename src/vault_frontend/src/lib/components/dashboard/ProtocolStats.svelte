@@ -222,7 +222,7 @@
     <div class="stat-row">
       <span class="stat-label" title="Sunset collateral is excluded from this breakdown but remains included in system value and collateral ratio">Collateral (excl. sunset)</span>
       <span class="stat-value-stack">
-        {#if redemptionClaim}<span>{formatTokenBalance(redemptionClaim.icpAmount)} ICP redemption claim (reserved)</span>{/if}
+        {#if redemptionClaim && !redemptionClaim.releaseBlock && !redemptionClaim.releasePending}<span>{formatTokenBalance(redemptionClaim.icpAmount)} ICP redemption claim (reserved)</span>{/if}
         {#if collateralTotals.length > 0}
           {#each visibleCollateralTotals as ct}
             <span><span class="collateral-dot" style="background:{ct.color}"></span> {formatTokenBalance(ct.amount)} {ct.symbol}</span>
