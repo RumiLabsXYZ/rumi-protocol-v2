@@ -509,16 +509,16 @@ mod tests {
     #[test]
     fn wrapper_rejects_replayed_or_unattributed_receipt() {
         let mut state = state_with_pending(1);
-        let receipt = receipt(DepositKind::NativePayment, "op-1", 10_000_000);
+        let first_receipt = receipt(DepositKind::NativePayment, "op-1", 10_000_000);
         let lists = [
-            Some(vec![receipt.clone()]),
-            Some(vec![receipt.clone()]),
+            Some(vec![first_receipt.clone()]),
+            Some(vec![first_receipt.clone()]),
             None,
         ];
         state.xlm_deposit_receipts.insert(
             (
-                receipt.transaction_hash.clone(),
-                receipt.operation_id.clone(),
+                first_receipt.transaction_hash.clone(),
+                first_receipt.operation_id.clone(),
             ),
             XlmDepositReceipt {
                 vault_id: 1,
@@ -536,7 +536,7 @@ mod tests {
             1,
             NETWORK,
             lists,
-            &receipt,
+            &first_receipt,
             &account(),
             &latest_reserve(),
             now_ns(),

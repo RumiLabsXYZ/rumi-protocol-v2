@@ -99,6 +99,7 @@ pub struct SpLiquidationPayoutTuple {
 }
 
 /// Internal quote retained only until it is copied into the stable journal.
+#[derive(Debug)]
 pub(crate) struct SpLiquidationQuote {
     pub vault_id: u64,
     pub collateral_type: Principal,
