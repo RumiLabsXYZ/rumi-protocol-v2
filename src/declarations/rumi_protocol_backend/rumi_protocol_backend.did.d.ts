@@ -2677,6 +2677,7 @@ export interface _SERVICE {
   'get_vault_operation_status' : ActorMethod<[], Result_22>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
   'get_vaults_page' : ActorMethod<[bigint, bigint], VaultsPageResponse>,
+  'get_xlm_stellar_key_name' : ActorMethod<[], string>,
   'get_xrp_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
   'get_xrp_pending_deposits' : ActorMethod<
     [],
@@ -2943,6 +2944,7 @@ export interface _SERVICE {
   'set_three_usd_reserve_ingress_enabled' : ActorMethod<[boolean], Result_1>,
   'set_treasury_principal' : ActorMethod<[Principal], Result_1>,
   'set_vault_check_tick_interval_secs' : ActorMethod<[bigint], Result_1>,
+  'set_xlm_stellar_key_name' : ActorMethod<[string], Result_1>,
   'set_xrc_fetch_interval_secs' : ActorMethod<[bigint], Result_1>,
   'set_xrp_schnorr_key_name' : ActorMethod<[string], Result_1>,
   'settle_pending_chain_burn' : ActorMethod<[number, bigint, string], Result_1>,
@@ -3045,6 +3047,10 @@ export interface _SERVICE {
   'stellar_transform_ledger' : ActorMethod<[TransformArgs], HttpResponse>,
   'stellar_transform_operations' : ActorMethod<[TransformArgs], HttpResponse>,
   'stellar_transform_transaction' : ActorMethod<[TransformArgs], HttpResponse>,
+  'stellar_transform_transaction_status' : ActorMethod<
+    [TransformArgs],
+    HttpResponse
+  >,
   'submit_burn_proof' : ActorMethod<[number, string], Result_44>,
   'sweep_xrp_pending_open' : ActorMethod<[bigint], Result_1>,
   'unfreeze_protocol' : ActorMethod<[], Result_1>,

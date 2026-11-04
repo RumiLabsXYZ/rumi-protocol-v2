@@ -2868,6 +2868,7 @@ export const idlFactory = ({ IDL }) => {
         [VaultsPageResponse],
         ['query'],
       ),
+    'get_xlm_stellar_key_name' : IDL.Func([], [IDL.Text], ['query']),
     'get_xrp_claims' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Nat64, XrpClaim))],
@@ -3325,6 +3326,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'set_xlm_stellar_key_name' : IDL.Func([IDL.Text], [Result_1], []),
     'set_xrc_fetch_interval_secs' : IDL.Func([IDL.Nat64], [Result_1], []),
     'set_xrp_schnorr_key_name' : IDL.Func([IDL.Text], [Result_1], []),
     'settle_pending_chain_burn' : IDL.Func(
@@ -3484,6 +3486,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'stellar_transform_transaction' : IDL.Func(
+        [TransformArgs],
+        [HttpResponse],
+        ['query'],
+      ),
+    'stellar_transform_transaction_status' : IDL.Func(
         [TransformArgs],
         [HttpResponse],
         ['query'],

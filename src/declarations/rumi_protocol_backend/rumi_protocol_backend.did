@@ -2358,6 +2358,7 @@ service : (ProtocolArg) -> {
       vec record { nat64; XrpPendingDeposit },
     ) query;
   get_xrp_quarantined_claims : () -> (vec record { nat64; XrpClaim }) query;
+  get_xlm_stellar_key_name : () -> (text) query;
   get_xrp_schnorr_key_name : () -> (text) query;
   harvest_chain_interest : (nat32) -> (Result);
   http_request : (HttpRequest) -> (HttpResponse_1) query;
@@ -2533,6 +2534,7 @@ service : (ProtocolArg) -> {
   set_treasury_principal : (principal) -> (Result_1);
   set_vault_check_tick_interval_secs : (nat64) -> (Result_1);
   set_xrc_fetch_interval_secs : (nat64) -> (Result_1);
+  set_xlm_stellar_key_name : (text) -> (Result_1);
   set_xrp_schnorr_key_name : (text) -> (Result_1);
   settle_pending_chain_burn : (nat32, nat, text) -> (Result_1);
   settle_pending_chain_burn_with_proof : (nat32, BurnSettlementProofArg) -> (
@@ -2594,6 +2596,9 @@ service : (ProtocolArg) -> {
   stellar_transform_ledger : (TransformArgs) -> (HttpResponse) query;
   stellar_transform_operations : (TransformArgs) -> (HttpResponse) query;
   stellar_transform_transaction : (TransformArgs) -> (HttpResponse) query;
+  stellar_transform_transaction_status : (TransformArgs) -> (
+      HttpResponse,
+    ) query;
   submit_burn_proof : (nat32, text) -> (Result_44);
   sweep_xrp_pending_open : (nat64) -> (Result_1);
   unfreeze_protocol : () -> (Result_1);
