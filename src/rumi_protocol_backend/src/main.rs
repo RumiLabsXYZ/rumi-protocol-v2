@@ -10184,6 +10184,15 @@ fn get_my_xrp_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::XrpP
     })
 }
 
+/// Test-build-only: the caller's own XLM open-address rows (slim view; no owner or nonce).
+#[cfg(feature = "test_endpoints")]
+#[candid_method(query)]
+#[query]
+fn get_my_xlm_pending_deposits() -> Vec<rumi_protocol_backend::state::XlmPendingDepositView> {
+    let caller = ic_cdk::caller();
+    read_state(|s| s.xlm_pending_deposit_views_for(caller))
+}
+
 /// P5 (frontend): the caller's OWN outstanding native-XRP claims (those the caller
 /// is the `claimant` of — XRP owed to them from a withdraw/close/liquidation). The UI
 /// uses this to list claims the user can `settle_xrp_claim` to an XRPL address.

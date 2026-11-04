@@ -36,6 +36,24 @@ struct XlmVaultOpenInfo {
     expires_at_ns: u64,
 }
 
+#[derive(CandidType, Deserialize, Debug, PartialEq, Eq)]
+enum XlmPendingDepositStatus {
+    Pending,
+    Open,
+    Expired,
+    Cancelled,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct XlmPendingDepositView {
+    vault_id: u64,
+    custody_address: String,
+    network_passphrase: String,
+    opened_at_ns: u64,
+    expires_at_ns: u64,
+    status: XlmPendingDepositStatus,
+}
+
 #[derive(CandidType, Deserialize)]
 struct LedgerInitArgs {
     minting_account: Account,
@@ -222,6 +240,36 @@ fn test_endpoint_opens_only_a_testnet_xlm_address() {
         .as_nanos() as u64;
     assert!(opened.expires_at_ns > now_ns);
     assert_eq!(opened.vault_id, 1);
+
+    let query_pending = |caller: Principal| -> Vec<XlmPendingDepositView> {
+        match pic
+            .query_call(
+                backend,
+                caller,
+                "get_my_xlm_pending_deposits",
+                encode_args(()).unwrap(),
+            )
+            .expect("query get_my_xlm_pending_deposits")
+        {
+            WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode pending views"),
+            WasmResult::Reject(message) => {
+                panic!("get_my_xlm_pending_deposits rejected: {message}")
+            }
+        }
+    };
+    let mine = query_pending(developer());
+    assert_eq!(mine.len(), 1, "developer must see exactly its one open row");
+    assert_eq!(mine[0].vault_id, opened.vault_id);
+    assert_eq!(mine[0].custody_address, opened.custody_address);
+    assert_eq!(mine[0].network_passphrase, opened.network_passphrase);
+    assert_eq!(mine[0].expires_at_ns, opened.expires_at_ns);
+    assert!(mine[0].opened_at_ns > 0 && mine[0].opened_at_ns < mine[0].expires_at_ns);
+    assert_eq!(mine[0].status, XlmPendingDepositStatus::Open);
+    assert!(
+        query_pending(outsider).is_empty(),
+        "another principal must not see the developer's rows"
+    );
+    assert!(query_pending(Principal::anonymous()).is_empty());
 
     let vault_count: u64 = match pic
         .query_call(

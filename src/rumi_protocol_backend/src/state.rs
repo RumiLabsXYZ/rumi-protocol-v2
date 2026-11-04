@@ -2023,10 +2023,23 @@ pub struct XlmPendingDeposit {
     pub status: XlmPendingDepositStatus,
 }
 
+/// Caller-facing view of an XLM pending deposit. Omits owner and derivation nonce.
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct XlmPendingDepositView {
+    pub vault_id: u64,
+    pub custody_address: String,
+    pub network_passphrase: String,
+    pub opened_at_ns: u64,
+    pub expires_at_ns: u64,
+    pub status: XlmPendingDepositStatus,
+}
+
 /// Lifecycle of an XLM deposit staging row. Terminal states retain their
 /// corresponding `XlmCustodyAttribution` so funds sent to an old address still
 /// have a permanent owner/nonce/network binding.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(
+    candid::CandidType, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, Serialize,
+)]
 pub enum XlmPendingDepositStatus {
     /// Legacy rows without an explicit status decode conservatively as pending.
     #[default]
@@ -5721,6 +5734,31 @@ impl State {
             },
         );
         Ok(())
+    }
+
+    /// Pure: the `owner`'s own XLM pending-deposit rows as slim views, ordered by
+    /// vault id. Other owners' rows (and anonymous callers, who own none) yield nothing.
+    pub fn xlm_pending_deposit_views_for(&self, owner: Principal) -> Vec<XlmPendingDepositView> {
+        use crate::chains::stellar::codec::Network;
+        let passphrase_for = |id: &[u8; 32]| {
+            [Network::Public, Network::Test]
+                .into_iter()
+                .find(|n| &n.network_id() == id)
+                .map(|n| n.passphrase().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        };
+        self.xlm_pending_deposits
+            .iter()
+            .filter(|(_, d)| d.owner == owner)
+            .map(|(id, d)| XlmPendingDepositView {
+                vault_id: *id,
+                custody_address: d.custody_address.clone(),
+                network_passphrase: passphrase_for(&d.network_id),
+                opened_at_ns: d.opened_at_ns,
+                expires_at_ns: d.expires_at_ns,
+                status: d.status,
+            })
+            .collect()
     }
 
     /// Record a failed 3USD refund attempt while retaining the liability row,
@@ -16721,6 +16759,42 @@ mod xlm_pending_reservation_tests {
             1_000_000_000,
             3_600_000_000_000,
         )
+    }
+
+    #[test]
+    fn pending_views_are_caller_scoped_and_slim() {
+        let mut state = State::default();
+        let a = Principal::from_slice(&[1]);
+        let b = Principal::from_slice(&[2]);
+        let (id1, id2, id3) = (
+            state.increment_vault_id(),
+            state.increment_vault_id(),
+            state.increment_vault_id(),
+        );
+        reserve(&mut state, id1, a, address(21)).unwrap();
+        reserve(&mut state, id2, b, address(22)).unwrap();
+        reserve(&mut state, id3, a, address(23)).unwrap();
+        let views = state.xlm_pending_deposit_views_for(a);
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].vault_id, id1);
+        assert_eq!(views[0].custody_address, address(21));
+        assert_eq!(views[1].vault_id, id3);
+        assert_eq!(views[1].custody_address, address(23));
+        for v in &views {
+            assert_eq!(v.network_passphrase, "Test SDF Network ; September 2015");
+            assert_eq!(v.opened_at_ns, 1_000_000_000);
+            assert_eq!(v.expires_at_ns, 3_600_000_000_000);
+            assert_eq!(v.status, XlmPendingDepositStatus::Open);
+        }
+        let only_b = state.xlm_pending_deposit_views_for(b);
+        assert_eq!(only_b.len(), 1);
+        assert_eq!(only_b[0].vault_id, id2);
+        assert!(state
+            .xlm_pending_deposit_views_for(Principal::from_slice(&[3]))
+            .is_empty());
+        assert!(state
+            .xlm_pending_deposit_views_for(Principal::anonymous())
+            .is_empty());
     }
 
     #[test]
