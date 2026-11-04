@@ -12,6 +12,16 @@
       ]
     },
     {
+      "id": "xrpl-lifecycle",
+      "title": "XRPL deposits, borrow and repay (PR #586)",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Background pace. Next milestone: Miles' final review of PR #586 at 549d59f6; the original XRPL implementer owns any fixes in its own worktree. After that, merge and each mainnet step (issuer setup, activation) need separate authorization. The BB-55 to BB-57 follow-ups are separate and are not the full lifecycle.",
+      "cardIds": [
+        "BB-63"
+      ]
+    },
+    {
       "id": "integrated-plan",
       "title": "Integrated implementation plan and local smoke",
       "status": "done",
@@ -66,7 +76,7 @@
       "title": "XRPL follow-ups to PR #586",
       "status": "done",
       "blockedReason": "",
-      "nextAction": "",
+      "nextAction": "Done at source and local-test scope on the local branch codex/xrpl-icusd-followups (46cf6b34), based on an older PR #586 head (41 commits behind 549d59f6). Publication is held: the push was denied and is not retried or relayed. Not the full XRPL lifecycle (see xrpl-lifecycle).",
       "cardIds": [
         "BB-55",
         "BB-56",

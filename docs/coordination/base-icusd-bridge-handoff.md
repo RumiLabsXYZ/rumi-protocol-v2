@@ -3352,6 +3352,24 @@ Lookout publish record are intact.
 Still held and not actionable unattended: BB-27 (Rob's gestures), BB-46 public probes, D6 and native activation, the denied XRPL
 publication, merge and deploy. Workers W28, W29 and W23 on standby.
 
+## Milestone 141 (2026-11-04): ownership, allocation and the XRPL lifecycle subproject
+
+- Coordination only, from Merritt (Rumi CTO; Rob's directions verified by him): Miles is the accountable supervisor for both the
+  multichain bridge (#4) and XRPL deposits, borrow and repay (#5); Nora stays the execution coordinator and publishing owner. Both run
+  at background pace; Rumi as a whole is about 20% of the portfolio, not per subproject. Recorded in the board's new "Ownership and
+  allocation" section. No code review, build, test, query, deploy or push.
+- New priority item `xrpl-lifecycle` (rank 2, ready) and the minimum coordination card BB-63, owned by the supervisor with the original
+  XRPL Claude implementer, who keeps PR #586, branch `codex/xrpl-icusd` and its worktree. Classified from read-only refs: PR #586 open
+  and mergeable at `549d59f6`, not merged or deployed, disabled by default; R10 rehearsal passed on 2026-10-31 (local IC canisters
+  against the public XRPL testnet with Rob's real Xaman wallet: deposit, trust line, borrow, repay, escrow reconciled; evidence in
+  PR #586's `docs/verification/2026-10-18-xrpl-icusd-verification.md`). Next milestone: Miles' final review of PR #586; merge and each
+  mainnet step need separate authorization.
+- The BB-55 to BB-57 follow-ups stay done at source and local-test scope on `codex/xrpl-icusd-followups` (`46cf6b34`), based on an older
+  PR #586 head (41 commits behind `549d59f6`); publication held by the denied push (no retry, relay or cherry-pick). Their completion is
+  not the full lifecycle.
+- Both summaries, the priority order (later items shift down one), card links (69 of 70 linked) and a `testnet-rehearsal` proof level
+  updated. Product overview and product priorities untouched (Merritt owns them).
+
 ## Held live actions
 
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,

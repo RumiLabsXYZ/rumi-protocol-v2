@@ -30,40 +30,57 @@ this list and the JSON. Selection rule: `base-icusd-bridge-operating-rules.md`, 
 | Rank | Item | Status | Cards | Blocker and what clears it | Next action |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `browser-round-trip`: Finish real-wallet browser acceptance | blocked | BB-26, BB-27 | The renewed staging identity sign-in awaits Rob's Touch ID, and Rabby unlock and connection are still pending. Cleared when Rob completes sign-in, unlocks Rabby and approves the staging connection. | After sign-in and wallet approval: connect the Base wallet, then test transaction consent and rejection, the synthetic browser round trip and reload recovery. Earlier real Internet Identity sign-in remains scoped proof. |
-| 2 | `integrated-plan`: Integrated implementation plan and local smoke | done | BB-40 | - | - |
-| 3 | `evm-implementation`: EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad | blocked | BB-42, BB-43, BB-44, BB-45, BB-46, BB-62 | EVM source cards BB-42 to BB-45 are accepted. BB-46 needs public activation evidence: a separate authorization to run read-only probes (Robinhood finalized tag and keyless providers, Monad fast-tag consensus, HyperEVM archive providers). Optional probe tooling is deferred. | BB-62 done (the EVM uncertain-request repair, f4ae611c, pushed in 2bb8e816). When BB-46 probes are authorized: run them read-only and record the evidence; a passing Robinhood record flips its row's head rule and install gate. |
-| 4 | `shared-reporting-frontend`: Shared aggregate reporting, frontend destination selection and profile upkeep | done | BB-58, BB-59, BB-60 | - | - |
-| 5 | `solana-implementation`: Solana implementation (memo plus durable nonce) | done | BB-47, BB-48, BB-49, BB-50 | - | BB-47 to BB-50 done at source and local-test scope. Activation, a real wallet round trip, provider and history evidence and Rob's D6 custody decision stay separately held; Solana stays disabled. |
-| 6 | `xrpl-follow-ups`: XRPL follow-ups to PR #586 | done | BB-55, BB-56, BB-57 | - | - |
-| 7 | `sui-implementation`: Sui implementation (Move gate) | done | BB-51, BB-52, BB-53, BB-54 | - | BB-51 to BB-54 done at source and local-test scope (gate, canister, lanes, collector reader, bridge page; not activated). Activation, real provider, node and wallet evidence and Rob's D6 custody decision stay separately held; Sui stays disabled. |
-| 8 | `authority-decision-d6`: Decide controllers, custody and authority activation (D6) | paused | BB-61 | Rob's decision, not yet made; it gates live activation of any network, not source work. | Rob decides with Miles. A source-grounded decision packet (docs/coordination/multichain/authority-decision-d6.md at 266a7f9c) is accepted as preparation only: an authority inventory, unadopted demo and production options and an empty decision form. D6 itself is not decided. |
-| 9 | `acceptance-handoff`: Close browser evidence and PR handoff | blocked | BB-14, BB-22, BB-27 | Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work. | Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge. |
-| 10 | `production-launch`: Production launch | paused | none | Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test. | - |
-| 11 | `multichain-recon`: Research what each of the nine chains needs | done | BB-30, BB-31, BB-32, BB-41 | - | - |
-| 12 | `shared-escrow-contract`: Shared escrow accounting and destination-profile contract | done | BB-33 | - | - |
-| 13 | `evm-expansion`: Reuse the Base design for Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad | done | BB-34 | - | - |
-| 14 | `solana-groundwork`: Solana groundwork | done | BB-35 | - | - |
-| 15 | `xrpl-groundwork`: XRPL groundwork | done | BB-37 | - | - |
-| 16 | `sui-groundwork`: Sui groundwork | done | BB-36 | - | - |
-| 17 | `destination-profiles`: Disabled destination profiles for all nine chains and a validator | done | BB-38 | - | - |
-| 18 | `frontend-chain-wallets`: Frontend chain selection and wallet requirements | done | BB-39 | - | - |
-| 19 | `priorities-and-handoff`: Keep priorities and test handoff current | done | BB-28, BB-29 | - | None for this checkpoint. Ongoing upkeep follows the priority selection rule at each later checkpoint. |
-| 20 | `implementation-local-verification`: Implementation and local verification | done | BB-R1, BB-R2, BB-R3, BB-R4, BB-01, BB-02, BB-03, BB-04, BB-05, BB-06, BB-07, BB-08, BB-09a, BB-09b, BB-10, BB-12, BB-13, BB-05b, BB-15, BB-16, BB-17, BB-18, BB-19, BB-20, BB-22 | - | - |
-| 21 | `cli-public-test`: Public synthetic CLI round trip | done | BB-11, BB-21, BB-23, BB-24, BB-25 | - | - |
+| 2 | `xrpl-lifecycle`: XRPL deposits, borrow and repay (PR #586) | ready | BB-63 | - | Background pace. Next milestone: Miles' final review of PR #586 at 549d59f6; the original XRPL implementer owns any fixes in its own worktree. After that, merge and each mainnet step (issuer setup, activation) need separate authorization. The BB-55 to BB-57 follow-ups are separate and are not the full lifecycle. |
+| 3 | `integrated-plan`: Integrated implementation plan and local smoke | done | BB-40 | - | - |
+| 4 | `evm-implementation`: EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad | blocked | BB-42, BB-43, BB-44, BB-45, BB-46, BB-62 | EVM source cards BB-42 to BB-45 are accepted. BB-46 needs public activation evidence: a separate authorization to run read-only probes (Robinhood finalized tag and keyless providers, Monad fast-tag consensus, HyperEVM archive providers). Optional probe tooling is deferred. | BB-62 done (the EVM uncertain-request repair, f4ae611c, pushed in 2bb8e816). When BB-46 probes are authorized: run them read-only and record the evidence; a passing Robinhood record flips its row's head rule and install gate. |
+| 5 | `shared-reporting-frontend`: Shared aggregate reporting, frontend destination selection and profile upkeep | done | BB-58, BB-59, BB-60 | - | - |
+| 6 | `solana-implementation`: Solana implementation (memo plus durable nonce) | done | BB-47, BB-48, BB-49, BB-50 | - | BB-47 to BB-50 done at source and local-test scope. Activation, a real wallet round trip, provider and history evidence and Rob's D6 custody decision stay separately held; Solana stays disabled. |
+| 7 | `xrpl-follow-ups`: XRPL follow-ups to PR #586 | done | BB-55, BB-56, BB-57 | - | Done at source and local-test scope on the local branch codex/xrpl-icusd-followups (46cf6b34), based on an older PR #586 head (41 commits behind 549d59f6). Publication is held: the push was denied and is not retried or relayed. Not the full XRPL lifecycle (see xrpl-lifecycle). |
+| 8 | `sui-implementation`: Sui implementation (Move gate) | done | BB-51, BB-52, BB-53, BB-54 | - | BB-51 to BB-54 done at source and local-test scope (gate, canister, lanes, collector reader, bridge page; not activated). Activation, real provider, node and wallet evidence and Rob's D6 custody decision stay separately held; Sui stays disabled. |
+| 9 | `authority-decision-d6`: Decide controllers, custody and authority activation (D6) | paused | BB-61 | Rob's decision, not yet made; it gates live activation of any network, not source work. | Rob decides with Miles. A source-grounded decision packet (docs/coordination/multichain/authority-decision-d6.md at 266a7f9c) is accepted as preparation only: an authority inventory, unadopted demo and production options and an empty decision form. D6 itself is not decided. |
+| 10 | `acceptance-handoff`: Close browser evidence and PR handoff | blocked | BB-14, BB-22, BB-27 | Waits until the browser acceptance (BB-27) settles and fresh reconciliation and review evidence is recorded. There is no merge authority in this work. | Once BB-27 settles: record fresh reconciliation and review evidence, then update the PR description and the handoff. Do not merge. |
+| 11 | `production-launch`: Production launch | paused | none | Paused until Rob separately authorizes a production launch and a reviewed launch scope exists. This is held future scope and never a gate on the authorized test. | - |
+| 12 | `multichain-recon`: Research what each of the nine chains needs | done | BB-30, BB-31, BB-32, BB-41 | - | - |
+| 13 | `shared-escrow-contract`: Shared escrow accounting and destination-profile contract | done | BB-33 | - | - |
+| 14 | `evm-expansion`: Reuse the Base design for Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad | done | BB-34 | - | - |
+| 15 | `solana-groundwork`: Solana groundwork | done | BB-35 | - | - |
+| 16 | `xrpl-groundwork`: XRPL groundwork | done | BB-37 | - | - |
+| 17 | `sui-groundwork`: Sui groundwork | done | BB-36 | - | - |
+| 18 | `destination-profiles`: Disabled destination profiles for all nine chains and a validator | done | BB-38 | - | - |
+| 19 | `frontend-chain-wallets`: Frontend chain selection and wallet requirements | done | BB-39 | - | - |
+| 20 | `priorities-and-handoff`: Keep priorities and test handoff current | done | BB-28, BB-29 | - | None for this checkpoint. Ongoing upkeep follows the priority selection rule at each later checkpoint. |
+| 21 | `implementation-local-verification`: Implementation and local verification | done | BB-R1, BB-R2, BB-R3, BB-R4, BB-01, BB-02, BB-03, BB-04, BB-05, BB-06, BB-07, BB-08, BB-09a, BB-09b, BB-10, BB-12, BB-13, BB-05b, BB-15, BB-16, BB-17, BB-18, BB-19, BB-20, BB-22 | - | - |
+| 22 | `cli-public-test`: Public synthetic CLI round trip | done | BB-11, BB-21, BB-23, BB-24, BB-25 | - | - |
 
 Item 1 (the Base browser test) stays first because it is the next demo step, but it waits on Rob's
-sign-in and wallet. Item 2, the integrated plan, is done and closes groundwork. Items 3 to 7 are the implementation subprojects
-(EVM, shared reporting and frontend, Solana, XRPL follow-ups to PR #586, Sui), opened on 2026-10-30; their source is delivered and
-accepted at source and local-test scope. Item 3 (EVM) stays blocked only on the held BB-46 public probes. Item 6's XRPL source is
-accepted on a separate local branch whose publication push was denied and stays held. No network is activated. Item 8 is Rob's
-D6 decision; items 9 and 10 wait on the browser test and a production authorization; the rest are done.
+sign-in and wallet. Item 2 is the XRPL deposits, borrow and repay lifecycle (PR #586, kept by its original implementer under
+Miles): ready at background pace for Miles' final review, and distinct from the BB-55 to BB-57 follow-ups (item 7), whose completion
+is not the full lifecycle. Item 3, the integrated plan, is done and closes groundwork. Items 4 to 8 are the implementation
+subprojects (EVM, shared reporting and frontend, Solana, XRPL follow-ups to PR #586, Sui), opened on 2026-10-30; their source is
+delivered and accepted at source and local-test scope. Item 4 (EVM) stays blocked only on the held BB-46 public probes. Item 7's
+XRPL follow-up source is accepted on a separate local branch whose publication push was denied and stays held. No network is
+activated. Item 9 is Rob's D6 decision; items 10 and 11 wait on the browser test and a production authorization; the rest are done.
 
 Card membership: the Cards column (each item's `cardIds`) decides which cards Lookout badges with
 that item's rank. Links are set from each card's scope, files, dependencies and evidence, never its
-title alone (operating rules, "Priority selection", clause 7). 68 of the 69 cards are linked.
+title alone (operating rules, "Priority selection", clause 7). 69 of the 70 cards are linked.
 BB-00 (baseline and inventory) stays unlinked because it serves every item. BB-22 and BB-27 each
 belong to two items: BB-22 finishes the implementation reviews and is review evidence for the PR
-handoff, and BB-27 is the browser test that item 9 (`acceptance-handoff`) also waits on.
+handoff, and BB-27 is the browser test that item 10 (`acceptance-handoff`) also waits on.
+
+## Ownership and allocation
+
+Recorded 2026-11-04 from Merritt (Rumi CTO), who verified Rob's consolidation and named-owner directions.
+
+- Accountable supervisor: Miles (Codex) for both portfolio items on this board, the multichain bridge (#4) and XRPL deposits,
+  borrow and repay (#5).
+- Execution coordinator and publishing owner: Nora (this coordinator, Claude Opus), the only publisher of this board's mirror.
+- XRPL lifecycle: the original XRPL Claude implementer keeps PR #586, branch `codex/xrpl-icusd` and its worktree (card BB-63). The
+  BB-55 to BB-57 follow-up scopes (worker W29) stay as recorded. No source moves between them and there is no competing team.
+- Allocation: both subprojects run at measured background pace. Rumi as a whole is about 20% of the portfolio, not 20% per
+  subproject; higher portfolio priorities are set outside this board.
+- Resources in use: none. Workers W28, W29 (Sonnet) and W23 (Haiku) on standby. No timer and no new team.
+- Product overview and product priorities belong to Merritt (product CTO) and are not edited from here.
 
 ## Proof levels
 
@@ -81,6 +98,7 @@ handoff, and BB-27 is the browser test that item 9 (`acceptance-handoff`) also w
 | `public-finalized` | Authorized run: the receipt block is at or behind the finalized head with a matching canonical hash. |
 | `public-settled` | Authorized run: the bridge records the operation complete and ledger, Base and supply-audit readbacks agree. |
 | `staging-fixture` | Isolated staging UI only: the page rendered against the test canisters and wallet adapters were exercised with a read-only fixture. Not a real-wallet approval, transaction rejection, browser transfer or reload-recovery proof. |
+| `testnet-rehearsal` | XRPL lifecycle only (BB-63): an authorized rehearsal with local IC canisters against the public XRPL testnet and a real wallet. Not a mainnet, production or funds proof. |
 | `staging-auth` | Isolated staging UI: a real wallet sign-in completed and the page shows the signed-in principal. Sign-in only: no transaction consent or rejection, browser transfer or reload-recovery proof. |
 
 The `public-*` levels apply only to the isolated Base Sepolia run in the deployment packet (synthetic
@@ -172,6 +190,7 @@ derive script maps these to Lookout columns Queue, Ready, In progress, Review, B
 | BB-55 XRPL: 15-digit wiring and cap clamps on PR #586's module | done | worker W29 (Sonnet / Sonnet 5.5) | `xrpl_icusd/mod.rs`, `state.rs`, `chains/xrp/issued_amount.rs`, XRPL frontend service | PR #586 (merged, or a stacked or rebased branch on its head for local work) | Miles accepted f887fab5 plus 868ebca8: 15-digit clamp, pending imports counted, validator wired, parser parity; reissue respects current caps; ceiling checked before any new attempt; 161 focused tests; local branch, push denied | local-test |
 | BB-56 XRPL: no-vault return to an ICP account | done | worker W29 (Sonnet / Sonnet 5.5) | `xrpl_icusd/repay.rs`, `observer.rs`, `issuance.rs`, `state.rs` | BB-55 | Miles accepted at source and focused-test level: e48dc18d, fee fence 0b73ae95, distinct interface 0a315971 and the origin movement report 8ecab197 (172 focused tests, Candid check); no live or public proof | local-test |
 | BB-57 XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end | done | worker W29 (Sonnet / Sonnet 5.5) | backend `.did`, declarations, frontend | BB-56 | Miles accepted at source and local-PocketIC level: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45, 46cf6b34; 7 new Return PocketIC cases pass; Code section 9,707,926 bytes; artifact verified; not public-chain proof | local-integration |
+| BB-63 XRPL: deposits, borrow and repay lifecycle (PR #586) | ready | supervisor (Miles), with the original XRPL implementer (Claude) on PR #586 | PR #586, branch `codex/xrpl-icusd` in its own worktree (read only from this board) | none | Coordination card for the full lifecycle. PR #586 open and mergeable at 549d59f6, not merged or deployed, disabled by default. R10 testnet rehearsal passed 2026-10-31 with a real Xaman wallet: deposit, trust line, borrow, repay | testnet-rehearsal |
 | BB-58 Shared: aggregate reporting and analytics escrow subtraction | done | worker W25 (Sonnet / Sonnet 5.5) | `src/rumi_analytics/src/timers.rs`, a read-only aggregator | BB-42 | Miles accepted EVM reporting at 10c18502 (with 15bb73dc, 78e8ae3d, 8b88a96f): analytics escrow subtraction; collector with chain-id filtering, count-once ids, instance audits; source, fixture and mock only; native readers on BB-49, 53, 57 | local-test |
 | BB-59 Shared: frontend destination selection and safe signing gate | done | worker W27 (Sonnet / Sonnet 5.5) | `src/vault_frontend/src/lib/services/baseBridge/`, `routes/bridge/` | BB-43 | Miles accepted 2191d2b6 plus 103ad82c: destination selection, synchronous signing guard in both flows, retries bound to the intent's destination, legacy Base recovery kept; 485 then 521 bridge vitest; check at baseline | local-test |
 | BB-60 Shared: profile consumption and upkeep | done | worker W27 (Sonnet / Sonnet 5.5) | `src/rumi_bridge_destinations/profiles/`, a small frontend reader | BB-59 | Miles accepted 28ba5867 (profile reader) and the profile text upkeep 875a1428, a73731a8, 6b545dd9 (W23, Haiku 5.5): 52 text and source leaves only; all 19 networks disabled; dry run clean | local-test |
@@ -373,3 +392,4 @@ Resolved: the "first operational Lookout upload" hold (2026-10-24 approval-revie
 - 2026-10-31: D6 decision packet frozen for Miles' review at d2cb5537 (W29 Sonnet 5.5 factual corrections 012b7f65 plus restored decision-form value rows; W23 Haiku 5.5 wording pass in 92631f9d). Proposal only; BB-61 stays queued; nothing pushed.
 - 2026-10-31: D6 decision packet final candidate 266a7f9c (W29): grant-scope wording (class A alone excludes B and C; an explicit grant may pre-authorize B and C together) and the XRPL false/false flag wording corrected from source. Frozen for Miles' acceptance; proposal only; nothing pushed.
 - 2026-10-31: Miles accepted the BB-61 decision preparation (authority-decision-d6.md at 266a7f9c, sha256 94296cee...) as optional, source-grounded preparation only; D6 is not decided; BB-61 stays queued. Hosted CI run 41193536473 on db24716f completed SUCCESS (Miles).
+- 2026-11-04: Ownership and allocation recorded (Merritt, Rumi CTO): Miles supervises the multichain bridge and XRPL deposits, borrow and repay; Nora coordinates and publishes. New coordination card BB-63 and priority item `xrpl-lifecycle` (rank 2, ready, background pace) for the full XRPL lifecycle on PR #586, kept by its original implementer; distinct from the BB-55 to BB-57 follow-ups.
