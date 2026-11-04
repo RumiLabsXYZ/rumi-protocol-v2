@@ -3,9 +3,9 @@
     {
       "id": "xlm-demo-open-address",
       "title": "Demo: open XLM custody address",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Active allocation (2026-11-04, Merritt at Rob's request): one bounded local batch formats the backend, runs focused Stellar tests and the Candid check, builds the test-feature backend Wasm, runs the address-open PocketIC smoke with the real threshold derive, and confirms the production Wasm lacks the endpoint. Then shape the next smallest XRP-templated slice within the two-hour tranche.",
+      "status": "blocked",
+      "blockedReason": "The address demo passed its local build, Candid check, focused tests and PocketIC threshold-derive smoke on 2026-11-04. The single approved build batch is used; the next slice needs another batch to verify.",
+      "nextAction": "Reserve the next shared build slot, then implement and verify in one batch: a test-build-only get_my_xlm_pending_deposits query (caller's own rows; vault id, address, network, expiry, status) with a unit test and a PocketIC assertion; regenerate frontend declarations for the synced XLM key methods. Installing the demo on an isolated canister needs separate approval.",
       "cardIds": [
         "D1"
       ]
@@ -25,7 +25,7 @@
       "title": "Stellar rail and independent vectors",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Run focused Cargo tests after 3ff9f64e when the shared slot is available; add a caller for the full LatestLedgerReserve record only after validating quorum semantics, provider independence, and evidence freshness.",
+      "nextAction": "Focused Stellar library tests now pass locally (156/156 at daf1c440). Add a caller for the full LatestLedgerReserve record only after validating quorum semantics, provider independence, and evidence freshness.",
       "cardIds": [
         "WP1"
       ]

@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen, unregistered and undeployed. Merritt allocated active Claude-first XLM delivery on 2026-11-04 (two-hour aggregate cap, one bounded local build/focused-test batch, no hosted CI). The batch is running: backend format, focused Stellar tests, Candid check, test-feature Wasm, address-open PocketIC smoke with real threshold derive, production-Wasm endpoint absence. Prior static review found no compile blockers; nothing has compiled yet. Deposit, payout, oracle, provider, frontend and release work remain.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Build time has now been assigned, and the team is running the first real tests of the address demo. Next is a checkpoint with those results; Rob does not need to act now.",
+  "summary": "XLM remains Frozen, unregistered and undeployed. The 2026-11-04 Merritt-allocated local batch at daf1c440 passed: 156/156 focused Stellar/XLM tests (test-only fixes), Candid compatibility (three existing XLM methods synced into the .did), test-feature Wasm exporting open_xlm_vault, the address-open PocketIC smoke with real test_key_1 threshold derive, and a production Wasm without the endpoint. No CI, install or registration. Next: reserve another batch for a caller-scoped pending-address query and declaration regeneration. Deposit, payout, oracle, provider, frontend and release work remain.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. The address demo now passes its first real local tests, including creating a genuine test deposit address. The next small step needs one more build slot; Rob does not need to act now.",
   "glossary": [
     {
       "term": "Stellar",
