@@ -43,10 +43,27 @@ pub(super) fn request_at(
         body: None,
         max_response_bytes: Some(max_response_bytes),
         headers: vec![],
-        transform: Some(TransformContext::from_name(
-            transform_name.to_string(),
-            vec![],
-        )),
+        transform: Some(transform_context(transform_name)),
+    }
+}
+
+/// Canister-facing transform context. `TransformContext::from_name` reads the
+/// canister's own id via an ic0 system call, which panics in native unit
+/// tests, so tests substitute a fixed principal (same name and empty context).
+#[cfg(not(test))]
+fn transform_context(transform_name: &str) -> TransformContext {
+    TransformContext::from_name(transform_name.to_string(), vec![])
+}
+
+#[cfg(test)]
+fn transform_context(transform_name: &str) -> TransformContext {
+    use ic_cdk::api::management_canister::http_request::TransformFunc;
+    TransformContext {
+        function: TransformFunc(candid::Func {
+            principal: candid::Principal::management_canister(),
+            method: transform_name.to_string(),
+        }),
+        context: vec![],
     }
 }
 
@@ -566,7 +583,7 @@ mod tests {
 
     #[test]
     fn root_request_targets_provider_origin_with_bounded_deterministic_transform() {
-        let request = root_request("https://horizon.example/").unwrap();
+        let request = root_request("https://horizon.example").unwrap();
         assert_eq!(request.url, "https://horizon.example");
         assert_eq!(request.max_response_bytes, Some(MAX_ROOT_RESPONSE_BYTES));
         assert!(request.transform.is_some());
