@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 remains separate. Integrated PR #624 backend/frontend production builds passed. Actual artifact Candid matches refreshed live interface; code reserve and frontend auth checks pass. New installation-only packet is for Merritt review, not execution authority. Snapshot archive preservation is still unperformed. Hosted workflows intentionally unrun. Build slot closed; reserve off and all management/financial actions held.",
-  "plainSummary": "The corrected-source builds are complete and the backend interface matches the live service. The installation proposal is ready for coordinator review; no upgrade, snapshot replacement or reserve activation occurred.",
+  "summary": "Vault 158 remains separate. Corrected-source backend/frontend artifacts pass packaging, live interface and auth checks. Oldest managed snapshot is now archived locally via read-only snapshot APIs; metadata, payload lengths/hashes and permissions verified. All ten managed snapshots and backend module/settings are unchanged; backend Running. Updated installation-only packet awaits Merritt review and exact approval. No snapshot mutation, deployment or financial action; reserve off.",
+  "plainSummary": "Builds and preservation of the existing oldest snapshot are complete. The backend is still running unchanged. The installation proposal awaits coordinator review and explicit execution approval; reserve stays off.",
   "glossary": [
     {
       "term": "Stability Pool",

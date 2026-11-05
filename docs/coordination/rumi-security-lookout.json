@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Corrected-source production backend/frontend built serially from PR #624 merge 6847982b. New gzip d3888725, 2,323,301 bytes; code 8,697,159 bytes with preserved reserve. Actual embedded Candid passes refreshed live compatibility; recovery/ICP exports verified. Frontend manifest 740 files; auth check passes. Slot closed (~1m54s build, ~695 MiB net disk growth). Installation-only packet pushed for Merritt review; snapshot archive remains execution precondition, no mutation done. Hosted workflows intentionally unrun; no invented gate. Reserve off; all live/financial actions held.",
+      "evidenceText": "Corrected 6847982b backend/frontend artifacts built and checked; gzip d3888725, embedded/live Candid compatible, auth assets pass. Oldest snapshot 0007 is now fully archived via existing-snapshot reads: payload lengths, timestamp, hashes, globals/chunk store and protected local permissions verified. Managed inventory unchanged; backend Running/module/settings unchanged. Pushed installation-only packet updated. No snapshot mutation/install/upload/reserve/financial action. All execution authority remains held; Merritt reviews exact packet and asks canonical approval.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",

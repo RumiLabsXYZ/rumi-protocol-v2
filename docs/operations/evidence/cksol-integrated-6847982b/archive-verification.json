@@ -1,0 +1,46 @@
+{
+  "canister": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "network": "ic",
+  "identity": "rumi_identity",
+  "snapshotId": "00000000000000070000000001f088fe0101",
+  "archiveDirectory": "/Users/robertripley/coding/rumi-protocol-v2/.recovery-artifacts/rumi-cksol-integrated-20261104/snapshot-00000000000000070000000001f088fe0101",
+  "takenAtTimestampNs": "1789335008780980551",
+  "payloadBytes": 88432494,
+  "chunkStoreCount": 0,
+  "globalsRepresentableForNativeUpload": true,
+  "files": [
+    {
+      "path": "metadata.json",
+      "bytes": 518,
+      "sha256": "9fa1e635d4f48e888d11dd06eb95fcbf8f6ef7e5e99c6494a45a654cdacd7295"
+    },
+    {
+      "path": "wasm_module.bin",
+      "bytes": 2121582,
+      "sha256": "bc75ca47f86d475b40d13e8198bae77d1e65aa4ce4981335ce3aae1d44a59b83",
+      "expectedBytes": 2121582
+    },
+    {
+      "path": "wasm_memory.bin",
+      "bytes": 2359296,
+      "sha256": "ceb3ab821c77f911ab9d34cb10cd8bafc9b4d5b38dd74b1023780a6ad1bbf1bb",
+      "expectedBytes": 2359296
+    },
+    {
+      "path": "stable_memory.bin",
+      "bytes": 83951616,
+      "sha256": "f83ed27784df09c227249fa91cd71a157b24ec89986a0b55d7fd5d9e91558456",
+      "expectedBytes": 83951616
+    }
+  ],
+  "restoreRoundtripPerformed": false,
+  "verificationUtc": "2026-11-05T04:22:26.464332+00:00",
+  "snapshotInventoryUnchanged": true,
+  "snapshotInventorySha256": "06f7845088b262372dbe967b9a766de86f552327469394b83372ccb9fcd6fdd1",
+  "backendRunning": true,
+  "backendModuleUnchanged": "0xd4d60e5176efd4aba0be1b583a9f6a9acc2e6b77b1d971a37d5cc82c65740c95",
+  "backendSettingsUnchanged": true,
+  "archiveDirectoryMode": "0700",
+  "payloadFileModes": "0600",
+  "operation": "ICP CLI 1.3.0 snapshot download; read_canister_snapshot_metadata + read_canister_snapshot_data only"
+}
