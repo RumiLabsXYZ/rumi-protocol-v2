@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Full PR #613 Rust/frontend recovery source integrated as a807384f + bb48c70f; canonical Candid regenerated and live compatibility now passes. Frontend focused tests 9/9 pass. Native library tests cannot compile: unchanged icrc3_proof.rs fixtures set nonexistent memo/created_at_time fields (four E0559 errors); no preservation tests executed, no retries. Exact merge hold: source checks not green. Slot closed under two minutes/~286 MiB growth. No new production artifact or live action; reserve off. Snapshot policy clarified from existing ckSOL release precedent.",
+      "evidenceText": "Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). Source merge-when-green proceeds without paid CI. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
