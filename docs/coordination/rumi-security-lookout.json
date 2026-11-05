@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Upgrade-only packet prepared with authenticated backend status and scoped journal/config reads. Candidate fails fresh live Candid compatibility: missing reconcile_vault51_icp_payout, refresh_vault51_redemption_claim, withdraw_vault51_settled_icp. Installation held; Bram owns read-only provenance/composition inventory. No rebuild or live action authorized. Reserve off; snapshot policy unresolved. Frontend stays separate pending full live asset comparison. Bram identified PR #613 source commits acab050b + e503f9db; deployment record a73f2a02 matches live d4d60e51. Preserve full coupled recovery composition; no removal authority found. Integration/rebuild awaits separate allocation.",
+      "evidenceText": "PR #613 source commits integrated as a807384f + bb48c70f on merged main/ckSOL. Recovery Rust/frontend source applied cleanly; generated interface conflicts provisionally retain old files pending canonical regeneration. Focused frontend tests 9/9 pass. Not merge-ready: coordinate native generator/focused Rust slot; no heavy compile or fresh ckSOL build started. Prior artifact excludes composition. Snapshot policy clarified from accepted ckSOL precedent: verified oldest archive then explicitly authorized replacement/fresh stopped-state snapshot. No live actions; reserve off.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -145,6 +145,10 @@
         {
           "title": "Held upgrade-only packet",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-upgrade-only-packet-20261104.md"
+        },
+        {
+          "title": "Source composition checkpoint",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-pr613-composition-20261104.md"
         }
       ]
     },
