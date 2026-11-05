@@ -9893,6 +9893,16 @@ async fn open_xlm_vault() -> Result<rumi_protocol_backend::vault::XlmVaultOpenIn
     check_postcondition(rumi_protocol_backend::vault::open_xlm_vault().await)
 }
 
+/// Native-XLM: verify the first deposit through Horizon provider quorum and create a
+/// zero-debt Vault. Developer-only; the caller supplies only a tx-hash locator.
+#[cfg(feature = "test_endpoints")]
+#[candid_method(update)]
+#[update]
+async fn confirm_xlm_deposit(vault_id: u64, transaction_hash: String) -> Result<u64, ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(rumi_protocol_backend::vault::confirm_xlm_deposit(vault_id, transaction_hash).await)
+}
+
 /// P3 (native-XRP collateral): verify the deposit to a vault's custody address and
 /// credit it as collateral (creating the Vault with zero debt). Owner-only,
 /// idempotent. Borrow icUSD afterwards via the normal `borrow_from_vault`.

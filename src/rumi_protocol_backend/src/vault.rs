@@ -3704,6 +3704,204 @@ pub async fn open_xlm_vault() -> Result<XlmVaultOpenInfo, ProtocolError> {
     })
 }
 
+/// Reserve-observation freshness window for first-funding evidence.
+/// Policy value chosen here (no pre-existing source in the repo).
+pub(crate) const XLM_MAX_RESERVE_AGE_SECS: u64 = 300;
+/// Additional uncredited headroom beyond fee budget and live reserve. Zero: no
+/// extra policy beyond `XLM_FIRST_FUNDING_FEE_BUDGET_STROOPS`.
+pub(crate) const XLM_EXTRA_RESERVED_HEADROOM_STROOPS: u64 = 0;
+/// Fee budget kept uncredited at custody for the later settlement transaction
+/// (10_000 stroops = 100x Stellar's 100-stroop base fee). Policy value chosen here.
+pub(crate) const XLM_FIRST_FUNDING_FEE_BUDGET_STROOPS: u64 = 10_000;
+
+/// Horizon provider quorum configuration. NOT yet persisted anywhere in State, so
+/// this fails closed until a reviewed provider-config source exists.
+fn configured_horizon_providers(
+) -> Result<crate::chains::stellar::horizon_provider_fanout::HorizonProviderConfig, ProtocolError>
+{
+    Err(ProtocolError::GenericError(
+        "Stellar Horizon provider quorum is not configured".to_string(),
+    ))
+}
+
+/// Synchronous, all-or-nothing materialization of a verified XLM first-funding
+/// credit: applies the credit (owner/expiry/network/destination/replay/bounds
+/// checks, receipt insert, pending removal) and, only on success, opens a
+/// zero-debt Vault holding the credited stroops. No await between the two steps.
+pub(crate) fn materialize_verified_xlm_deposit(
+    s: &mut State,
+    vault_id: u64,
+    caller: Principal,
+    receipt: &crate::chains::stellar::horizon_parse::FinalizedDeposit,
+    network_id: [u8; 32],
+    credited_stroops: u64,
+    now_ns: u64,
+) -> Result<(), crate::state::XlmCreditError> {
+    materialize_verified_xlm_deposit_with(
+        s, vault_id, caller, receipt, network_id, credited_stroops, now_ns, record_open_vault,
+    )
+}
+
+/// Same as above with the vault-opening step injected (the event-log writer needs
+/// IC system calls, so unit tests inject a plain `State::open_vault`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_verified_xlm_deposit_with(
+    s: &mut State,
+    vault_id: u64,
+    caller: Principal,
+    receipt: &crate::chains::stellar::horizon_parse::FinalizedDeposit,
+    network_id: [u8; 32],
+    credited_stroops: u64,
+    now_ns: u64,
+    open: impl FnOnce(&mut State, Vault, u64),
+) -> Result<(), crate::state::XlmCreditError> {
+    let record =
+        s.apply_verified_xlm_deposit_credit(vault_id, caller, receipt, network_id, credited_stroops, now_ns)?;
+    open(
+        s,
+        Vault {
+            owner: caller,
+            borrowed_icusd_amount: 0.into(),
+            collateral_amount: record.credited_stroops,
+            vault_id,
+            collateral_type: crate::state::xlm_collateral_principal(),
+            last_accrual_time: now_ns,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        },
+        u64::from(record.ledger),
+    );
+    Ok(())
+}
+
+/// Native-XLM: verify the first deposit to a vault's custody address via Horizon
+/// provider quorum and create the Vault. The caller supplies only the vault id and
+/// a transaction-hash locator; receipt, amounts and owner come from the quorum.
+/// Developer-only like `open_xlm_vault`. Returns credited stroops.
+pub async fn confirm_xlm_deposit(
+    vault_id: u64,
+    transaction_hash: String,
+) -> Result<u64, ProtocolError> {
+    use crate::chains::stellar::deposit_evidence::{
+        decide_initial_funding_credit, finalized_deposit_list_quorum, InitialCreditDecision,
+    };
+    use crate::chains::stellar::horizon_provider_fanout as fanout;
+
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer may call the experimental XLM endpoints".to_string(),
+        ));
+    }
+    let guard = GuardPrincipal::new(caller, &format!("confirm_xlm_deposit_{}", vault_id))?;
+    macro_rules! bail {
+        ($e:expr) => {{
+            guard.fail();
+            return Err($e);
+        }};
+    }
+    let generic = |m: String| ProtocolError::GenericError(m);
+
+    let pending = match read_state(|s| s.xlm_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => bail!(generic(
+            "No pending XLM deposit for this vault (already confirmed or unknown).".to_string()
+        )),
+    };
+    if pending.owner != caller {
+        bail!(ProtocolError::CallerNotOwner);
+    }
+    let selection = match read_state(|s| crate::chains::stellar::config::selection_from_state(s)) {
+        Ok(sel) => sel,
+        Err(e) => bail!(generic(e.to_string())),
+    };
+    let network = selection.network;
+    let network_id = network.network_id();
+    if pending.network_id != network_id {
+        bail!(generic("Pending XLM deposit belongs to a different Stellar network.".to_string()));
+    }
+    let xlm_ct = crate::state::xlm_collateral_principal();
+    let blocked = read_state(|s| {
+        s.get_collateral_config(&xlm_ct)
+            .map(|c| !c.status.allows_open() || c.custody() != crate::state::CustodyKind::NativeXlm)
+            .unwrap_or(false)
+    });
+    if blocked {
+        bail!(generic("XLM collateral is not accepting new vaults.".to_string()));
+    }
+    let config = match configured_horizon_providers() {
+        Ok(c) => c,
+        Err(e) => bail!(e),
+    };
+
+    let ledger = match fanout::fetch_transaction_ledger_quorum(&config, network, &transaction_hash).await {
+        Ok(l) => l,
+        Err(e) => bail!(generic(format!("xlm transaction quorum failed: {e}"))),
+    };
+    let lists = match fanout::fetch_custody_deposit_observations(
+        &config,
+        network,
+        &transaction_hash,
+        ledger,
+        &pending.custody_address,
+    )
+    .await
+    {
+        Ok(l) => l,
+        Err(e) => bail!(generic(format!("xlm deposit observation failed: {e}"))),
+    };
+    let quorum = match finalized_deposit_list_quorum(lists.clone()) {
+        Ok(q) => q,
+        Err(e) => bail!(generic(format!("xlm deposit list quorum failed: {e:?}"))),
+    };
+    let receipt = match quorum.as_slice() {
+        [one] => one.clone(),
+        _ => bail!(generic(
+            "Transaction must contain exactly one deposit to this custody address.".to_string()
+        )),
+    };
+    let account = match fanout::fetch_account_snapshot_quorum(&config, network, &pending.custody_address).await {
+        Ok(a) => a,
+        Err(e) => bail!(generic(format!("xlm account quorum failed: {e}"))),
+    };
+    let (_slots, reserve) = match fanout::fetch_latest_reserve_observations(&config, network).await {
+        Ok(r) => r,
+        Err(e) => bail!(generic(format!("xlm reserve quorum failed: {e}"))),
+    };
+
+    let now_ns = ic_cdk::api::time();
+    let decision = read_state(|s| {
+        decide_initial_funding_credit(
+            s,
+            vault_id,
+            network_id,
+            lists,
+            &receipt,
+            &account,
+            &reserve,
+            u128::from(now_ns),
+            XLM_MAX_RESERVE_AGE_SECS,
+            XLM_EXTRA_RESERVED_HEADROOM_STROOPS,
+            XLM_FIRST_FUNDING_FEE_BUDGET_STROOPS,
+        )
+    });
+    let credited = match decision {
+        InitialCreditDecision::Credit { amount_stroops } => amount_stroops,
+        InitialCreditDecision::Defer(r) => bail!(generic(format!("XLM deposit evidence deferred: {r:?}"))),
+        InitialCreditDecision::Reject(r) => bail!(generic(format!("XLM deposit rejected: {r:?}"))),
+    };
+
+    // Re-check everything atomically (concurrent confirms across the awaits).
+    let applied = mutate_state(|s| {
+        materialize_verified_xlm_deposit(s, vault_id, caller, &receipt, network_id, credited, ic_cdk::api::time())
+    });
+    if let Err(e) = applied {
+        bail!(generic(format!("XLM credit refused: {e:?}")));
+    }
+    guard.complete();
+    Ok(credited)
+}
+
 /// Pure: collateral drops to credit from a verified XRP custody balance, net of the
 /// base reserve the user funds. Errors if nothing is creditable (balance ≤ reserve),
 /// the net exceeds u64 drops, or the net is below the per-collateral minimum.
@@ -16658,5 +16856,97 @@ mod xlm_open_tests {
         );
         assert_eq!(state.xlm_custody_attributions[&address].owner, owner);
         assert!(xlm_open_expiry_ns(u64::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod xlm_materialize_tests {
+    use super::materialize_verified_xlm_deposit_with;
+    use crate::chains::stellar::horizon_parse::{DepositKind, FinalizedDeposit};
+    use crate::state::{State, XlmCreditError, XLM_MIN_CREDIT_STROOPS};
+    use candid::Principal;
+
+    const NOW: u64 = 2_000_000_000;
+    fn open(s: &mut State, v: crate::vault::Vault, _b: u64) {
+        s.open_vault(v);
+    }
+    fn owner() -> Principal {
+        Principal::from_slice(&[1])
+    }
+    fn setup(seed: u8) -> (State, u64, String, [u8; 32]) {
+        let mut s = State::default();
+        let id = s.increment_vault_id();
+        let addr = crate::chains::stellar::classic_address_from_ed25519_pubkey(&[seed; 32]);
+        let net = crate::chains::stellar::config::selection_from_state(&s).unwrap().network.network_id();
+        s.reserve_xlm_pending_deposit(id, owner(), addr.clone(), net, 1_000_000_000, 3_600_000_000_000)
+            .unwrap();
+        (s, id, addr, net)
+    }
+    fn receipt(dest: &str, amount: u64) -> FinalizedDeposit {
+        FinalizedDeposit {
+            transaction_hash: "tx1".to_string(),
+            ledger: 7,
+            operation_id: "30064771072001".to_string(),
+            destination: dest.to_string(),
+            amount_stroops: amount,
+            kind: DepositKind::CreateAccount,
+        }
+    }
+    type Snap = (usize, usize, usize, usize);
+    fn snap(s: &State) -> Snap {
+        (
+            s.vault_id_to_vaults.len(),
+            s.xlm_deposit_receipts.len(),
+            s.xlm_pending_deposits.len(),
+            s.principal_to_vault_ids.len(),
+        )
+    }
+
+    #[test]
+    fn success_creates_exactly_one_vault_and_consumes_pending() {
+        let (mut s, id, addr, net) = setup(41);
+        let r = receipt(&addr, 25_000_000);
+        materialize_verified_xlm_deposit_with(&mut s, id, owner(), &r, net, 24_000_000, NOW, open).unwrap();
+        assert_eq!(s.vault_id_to_vaults.len(), 1);
+        let v = &s.vault_id_to_vaults[&id];
+        assert_eq!(v.owner, owner());
+        assert_eq!(v.collateral_amount, 24_000_000);
+        assert_eq!(v.collateral_type, crate::state::xlm_collateral_principal());
+        assert_eq!(v.borrowed_icusd_amount, 0u64);
+        assert!(s.xlm_pending_deposits.is_empty());
+        assert_eq!(s.xlm_deposit_receipts.len(), 1);
+        // replay: refused, no second vault
+        let before = snap(&s);
+        assert_eq!(
+            materialize_verified_xlm_deposit_with(&mut s, id, owner(), &r, net, 24_000_000, NOW, open),
+            Err(XlmCreditError::MissingPendingDeposit)
+        );
+        assert_eq!(snap(&s), before);
+    }
+
+    #[test]
+    fn refusals_create_no_vault_and_no_receipt() {
+        let (mut s, id, addr, net) = setup(42);
+        let before = snap(&s);
+        let good = receipt(&addr, 25_000_000);
+        let other = Principal::from_slice(&[9]);
+        assert_eq!(
+            materialize_verified_xlm_deposit_with(&mut s, id, other, &good, net, 24_000_000, NOW, open),
+            Err(XlmCreditError::CallerNotOwner)
+        );
+        let wrong_dest = receipt(
+            &crate::chains::stellar::classic_address_from_ed25519_pubkey(&[99; 32]),
+            25_000_000,
+        );
+        assert_eq!(
+            materialize_verified_xlm_deposit_with(&mut s, id, owner(), &wrong_dest, net, 24_000_000, NOW, open),
+            Err(XlmCreditError::DestinationMismatch)
+        );
+        assert_eq!(
+            materialize_verified_xlm_deposit_with(&mut s, id, owner(), &good, net, XLM_MIN_CREDIT_STROOPS - 1, NOW, open),
+            Err(XlmCreditError::InvalidCredit)
+        );
+        assert_eq!(snap(&s), before);
+        assert!(s.vault_id_to_vaults.is_empty() && s.xlm_deposit_receipts.is_empty());
     }
 }
