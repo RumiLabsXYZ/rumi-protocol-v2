@@ -28,7 +28,7 @@ use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromErro
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use num_traits::ToPrimitive;
 
-use super::state::XrplIcusdState;
+use super::state::{EscrowBalanceSnapshot, XrplIcusdState};
 use super::types::*;
 use crate::icrc3_proof::{decode_block, DecodedBlock};
 
@@ -378,6 +378,10 @@ pub enum ScanEffect {
 
 impl XrplIcusdState {
     fn job_mut(&mut self, op_id: OperationId, idx: usize) -> Result<&mut IcLedgerJob, XrplIcusdError> {
+        if self.job(op_id, idx).is_some_and(IcLedgerJob::touches_escrow) {
+            // Covers dispatch, outcome, archive scan and proof transitions.
+            self.invalidate_escrow_balance_reads();
+        }
         self.op_mut(op_id)?
             .ic_jobs
             .get_mut(idx)
@@ -552,6 +556,13 @@ pub async fn escrow_balance_e8s() -> Result<u128, String> {
         .await
         .map_err(|(c, m)| format!("icrc1_balance_of failed: {c:?} {m}"))?;
     bal.0.to_u128().ok_or_else(|| "balance exceeds u128".to_string())
+}
+
+/// Capture before the balance await; admission rechecks after every further await.
+pub async fn escrow_balance_for_return() -> Result<EscrowBalanceSnapshot, XrplIcusdError> {
+    let generation = crate::state::read_state(|s| s.xrpl_icusd.begin_escrow_balance_read())?;
+    let balance_e8s = escrow_balance_e8s().await.map_err(XrplIcusdError::Unavailable)?;
+    Ok(EscrowBalanceSnapshot { generation, balance_e8s })
 }
 
 /// Query the ledger's minting account and prove it is usable with the escrow design.

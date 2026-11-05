@@ -5,7 +5,7 @@ import {
   xrpDepositBreakdown,
   type XrpDepositDeps,
 } from './xrpDepositFlow';
-import type { XrplConnection, WalletSubmission } from '$lib/services/xrplWalletService';
+import { payloadToSubmission, type XrplConnection, type WalletSubmission } from '$lib/services/xrplWalletService';
 
 const CUSTODY = 'rCustody1111111111111111111111';
 const USER = 'rUser';
@@ -420,17 +420,44 @@ describe('deposit resume amount drift', () => {
   });
 });
 
-describe('wallet warnings reach the deposit UI', () => {
-  it('a payload signed by another account or refused by the ledger is rejected with the warning, never credited', async () => {
+describe('signed dispatch recovery in the deposit UI', () => {
+  it.each(['terQUEUED', 'tecUNFUNDED_PAYMENT', 'unknown'])('keeps %s request/hash through reload without another Payment', async (engine) => {
     const wallet = makeWallet();
-    wallet.signAndSubmit.mockResolvedValue({ requestId: 'req-1', status: 'rejected', signed: false, hash: null, warning: 'The XRP Ledger refused this transaction (tecUNFUNDED_PAYMENT). Nothing was applied.' });
-    const { controller, vault } = setup({ wallet });
-    await controller.prepare(12_345_678n);
-    controller.propose();
-    await controller.pay();
-    expect(controller.getState().phase).toBe('rejected');
-    expect(controller.getState().error).toMatch(/tecUNFUNDED_PAYMENT/);
-    expect(vault.confirm).not.toHaveBeenCalled();
+    const sub = payloadToSubmission('req-1', { meta: { signed: true, resolved: true }, response: { account: USER, txid: 'HASH1', dispatched_result: engine } }, USER);
+    wallet.signAndSubmit.mockResolvedValue(sub);
+    wallet.resumeRequest.mockResolvedValue(sub);
+    const storage = memoryStorage();
+    const a = setup({ wallet, storage, balance: 'unfunded' });
+    await a.controller.prepare(12_345_678n);
+    a.controller.propose();
+    await a.controller.pay();
+    expect(JSON.parse(storage.m.get('rumi_xrpl_deposit_hint_v1:owner-1')!)).toMatchObject({ requestId: 'req-1', hash: 'HASH1', payStarted: true });
+    expect(a.vault.confirm).not.toHaveBeenCalled();
+    const b = setup({ wallet, storage, vault: makeVault({ pending: [7] }), balance: 'unfunded' });
+    await b.controller.prepare(20_000_000n);
+    await b.controller.resume();
+    expect(wallet.resumeRequest).toHaveBeenCalledWith('req-1');
+    expect(wallet.signAndSubmit).toHaveBeenCalledTimes(1);
+    expect(b.controller.getState().txHash).toBe('HASH1');
+    expect(b.vault.confirm).not.toHaveBeenCalled();
+  });
+
+  it('retains a signed wrong-account request without polling or crediting it', async () => {
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockResolvedValue(payloadToSubmission('req-1', { meta: { signed: true }, response: { account: 'rOther', txid: 'OTHERHASH' } }, USER));
+    const t = setup({ wallet });
+    await t.controller.prepare(12_345_678n);
+    t.controller.propose();
+    await t.controller.pay();
+    expect(t.controller.getState()).toMatchObject({ phase: 'wallet_pending', txHash: 'OTHERHASH' });
+    expect(t.controller.getState().error).toMatch(/rOther/);
+    expect(JSON.parse(t.storage.m.get('rumi_xrpl_deposit_hint_v1:owner-1')!)).toMatchObject({ requestId: 'req-1', hash: 'OTHERHASH', payStarted: true });
+    expect(t.fetchImpl).not.toHaveBeenCalled();
+    wallet.resumeRequest.mockResolvedValue({ requestId: 'req-1', status: 'pending', signed: false, hash: null });
+    await t.controller.resume();
+    expect(t.controller.getState()).toMatchObject({ phase: 'wallet_pending', txHash: 'OTHERHASH' });
+    expect(t.fetchImpl).not.toHaveBeenCalled();
+    expect(t.vault.confirm).not.toHaveBeenCalled();
   });
 });
 

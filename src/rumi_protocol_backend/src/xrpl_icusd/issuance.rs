@@ -9,7 +9,7 @@
 use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
 
-use super::state::{Admission, JobSpec, XrplIcusdState};
+use super::state::{Admission, EscrowBalanceSnapshot, JobSpec, XrplIcusdState};
 use super::types::*;
 use crate::chains::xrp::address::is_valid_classic_address;
 use crate::chains::xrp::network::XrplNetwork;
@@ -136,6 +136,7 @@ pub fn advance_import(
     if job.is_proven_done() {
         op.phase = Phase::IssuePrepared;
         op.updated_at_ns = now_ns;
+        st.invalidate_escrow_balance_reads();
         return Ok(ImportAdvance::Funded);
     }
     if let IcJobStatus::Failed { reason } = &job.status {
@@ -277,11 +278,13 @@ pub fn begin_receive_canonical(
     st: &mut XrplIcusdState,
     op_id: OperationId,
     fee_e8s: u64,
-    escrow_balance_e8s: u128,
+    snapshot: &EscrowBalanceSnapshot,
     op_nonce: u128,
     ledger_tip: u64,
     now_ns: u64,
 ) -> Result<usize, XrplIcusdError> {
+    st.check_escrow_balance_snapshot(snapshot)?;
+    let escrow_balance_e8s = snapshot.balance_e8s;
     let (owner, amount) = {
         let op = st.op(op_id).ok_or(XrplIcusdError::NotFound)?;
         let amount = op
@@ -355,6 +358,7 @@ pub fn advance_resolution(
         }
         op.phase = if leftover { Phase::Held } else { Phase::ClaimResolved };
         op.updated_at_ns = now_ns;
+        st.invalidate_escrow_balance_reads();
         return Ok(true);
     }
     if let IcJobStatus::Failed { reason } = &job.status {
@@ -362,6 +366,7 @@ pub fn advance_resolution(
         // Proven not executed: the claim is untouched and may be resolved again.
         op.resolution = None;
         op.push_note(format!("canonical return failed: {reason}"));
+        st.invalidate_escrow_balance_reads();
     }
     Ok(false)
 }

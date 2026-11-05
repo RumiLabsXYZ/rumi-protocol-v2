@@ -243,7 +243,7 @@ describe('signing account is pinned', () => {
     expect(h.sdk.payload.create).not.toHaveBeenCalled();
   });
 
-  it('treats a payload signed by another account as rejected, never submitted', async () => {
+  it('retains a wrong-signer payload as unresolved, never submitted', async () => {
     const h = makeSdk();
     const { adapter } = makeAdapter(h);
     await adapter.connect();
@@ -251,36 +251,48 @@ describe('signing account is pinned', () => {
     expect(first.status).toBe('pending');
     respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'EVIL', account: 'rAttacker' });
     const res = await adapter.resumeRequest('uuid-1');
-    expect(res).toMatchObject({ status: 'rejected', signed: false, hash: null });
+    expect(res).toMatchObject({ status: 'pending', signed: true, hash: 'EVIL' });
     expect(res.warning).toMatch(/rAttacker/);
-    expect(payloadToSubmission('r', { meta: { signed: true }, response: { txid: 'T', account: 'rA' } }, 'rB').status).toBe('rejected');
-    expect(payloadToSubmission('r', { meta: { signed: true }, response: { txid: 'T' } }, 'rB').status).toBe('rejected');
+    expect(payloadToSubmission('r', { meta: { signed: true }, response: { txid: 'T', account: 'rA' } }, 'rB').status).toBe('pending');
+    expect(payloadToSubmission('r', { meta: { signed: true }, response: { txid: 'T' } }, 'rB').status).toBe('pending');
   });
 });
 
 describe('engine result and TrustSet idempotency', () => {
   const trust = { TransactionType: 'TrustSet' as const, LimitAmount: { currency: 'C', issuer: 'rI', value: '1' } };
 
-  it('a non-tesSUCCESS dispatched_result is rejected with a warning', () => {
-    const p = { meta: { signed: true, resolved: true }, response: { txid: 'H', account: 'rUser', dispatched_result: 'tecNO_LINE' } };
-    expect(payloadToSubmission('r', p, 'rUser')).toMatchObject({ status: 'rejected', hash: null, engineResult: 'tecNO_LINE' });
-    expect(payloadToSubmission('r', p, 'rUser').warning).toMatch(/tecNO_LINE/);
-    const ok = { meta: { signed: true, resolved: true }, response: { txid: 'H', account: 'rUser', dispatched_result: 'tesSUCCESS' } };
-    expect(payloadToSubmission('r', ok, 'rUser')).toMatchObject({ status: 'submitted', hash: 'H', engineResult: 'tesSUCCESS' });
+  it.each(['terQUEUED', 'terPRE_SEQ', 'tecNO_LINE', 'tefPAST_SEQ', 'temMALFORMED', 'telLOCAL_ERROR', 'unknown'])('retains signed dispatch %s as a reconciliation hint, never final failure', (engine) => {
+    const p = { meta: { signed: true, resolved: true }, response: { txid: 'H', account: 'rUser', dispatched_result: engine } };
+    expect(payloadToSubmission('r', p, 'rUser')).toMatchObject({ status: 'submitted', signed: true, hash: 'H', engineResult: engine });
+    expect(payloadToSubmission('r', p, 'rUser').warning).toMatch(/awaiting.*validation/i);
+    p.response.txid = '';
+    expect(payloadToSubmission('r', p, 'rUser')).toMatchObject({ status: 'pending', signed: true, hash: null, engineResult: engine });
   });
 
-  it('a failed engine result frees the key so a retry makes a fresh request', async () => {
+  it.each(['terQUEUED', 'tecUNFUNDED_PAYMENT', 'unknown'])('resumes the same signed Payment after dispatch %s, including reload', async (engine) => {
     const h = makeSdk();
-    const { adapter } = makeAdapter(h, { maxWaitMs: 1_000_000, sleep: () => new Promise((r) => setTimeout(r, 1)) });
+    const { adapter, storage } = makeAdapter(h);
     await adapter.connect();
-    const p = adapter.signAndSubmit(trust, { key: 'ts' });
-    await vi.waitFor(() => expect(h.sdk.payload.create).toHaveBeenCalledTimes(1));
-    respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'H', dispatched_result: 'tecNO_LINE_INSUF_RESERVE' });
-    await expect(p).resolves.toMatchObject({ status: 'rejected' });
-    const again = adapter.signAndSubmit(trust, { key: 'ts' });
-    await vi.waitFor(() => expect(h.sdk.payload.create).toHaveBeenCalledTimes(2));
-    respond(h.payloads, 'uuid-2', { resolved: true, signed: true }, { txid: 'H2', dispatched_result: 'tesSUCCESS' });
-    await expect(again).resolves.toMatchObject({ status: 'submitted', hash: 'H2' });
+    const pay = { TransactionType: 'Payment' as const, Destination: 'rCustody', Amount: '1000000' };
+    await adapter.signAndSubmit(pay, { key: 'payment' });
+    respond(h.payloads, 'uuid-1', { resolved: true, signed: true }, { txid: 'H', dispatched_result: engine });
+    await expect(adapter.signAndSubmit(pay, { key: 'payment' })).resolves.toMatchObject({ requestId: 'uuid-1', status: 'submitted', signed: true, hash: 'H' });
+    const reloaded = makeAdapter(h, { storage }).adapter;
+    await reloaded.connect();
+    await expect(reloaded.signAndSubmit(pay, { key: 'payment' })).resolves.toMatchObject({ requestId: 'uuid-1', hash: 'H', signed: true });
+    expect(h.sdk.payload.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('an unsigned user rejection releases the Payment key for a fresh request', async () => {
+    const h = makeSdk();
+    const { adapter } = makeAdapter(h);
+    await adapter.connect();
+    const pay = { TransactionType: 'Payment' as const, Destination: 'rCustody', Amount: '1000000' };
+    await adapter.signAndSubmit(pay, { key: 'payment' });
+    respond(h.payloads, 'uuid-1', { resolved: true, signed: false });
+    await expect(adapter.signAndSubmit(pay, { key: 'payment' })).resolves.toMatchObject({ status: 'rejected', signed: false, hash: null });
+    await adapter.signAndSubmit(pay, { key: 'payment' });
+    expect(h.sdk.payload.create).toHaveBeenCalledTimes(2);
   });
 
   it('a TrustSet key is released once a hash is returned (no old payload replay)', async () => {

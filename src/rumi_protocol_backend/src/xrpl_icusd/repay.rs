@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 use super::borrow::record_lane_event;
 use super::ledger;
-use super::state::{Admission, XrplIcusdState};
+use super::state::{Admission, EscrowBalanceSnapshot, XrplIcusdState};
 use super::types::*;
 use crate::chains::xrp::address::is_valid_classic_address;
 use crate::chains::xrp::issued_amount::{ExactIssuedAmount, ICUSD_CURRENCY_HEX};
@@ -1251,11 +1251,13 @@ pub fn begin_receive_canonical_held(
     st: &mut XrplIcusdState,
     op_id: OperationId,
     fee_e8s: u64,
-    escrow_balance_e8s: u128,
+    snapshot: &EscrowBalanceSnapshot,
     op_nonce: u128,
     ledger_tip: u64,
     now_ns: u64,
 ) -> Result<usize, XrplIcusdError> {
+    st.check_escrow_balance_snapshot(snapshot)?;
+    let escrow_balance_e8s = snapshot.balance_e8s;
     let (owner, amount) = {
         let op = st.op(op_id).ok_or(XrplIcusdError::NotFound)?;
         let OperationKind::Repayment { held, .. } = &op.kind else {
@@ -1414,9 +1416,7 @@ pub async fn resolve_repayment_claim(
             let fee = crate::management::get_or_refresh_fee(ledger_id)
                 .await
                 .map_err(XrplIcusdError::Unavailable)?;
-            let balance = ledger::escrow_balance_e8s()
-                .await
-                .map_err(XrplIcusdError::Unavailable)?;
+            let balance = ledger::escrow_balance_for_return().await?;
             let tip = ledger::ledger_tip()
                 .await
                 .map_err(|e| XrplIcusdError::Unavailable(format!("ledger tip: {e}")))?;
@@ -1427,7 +1427,7 @@ pub async fn resolve_repayment_claim(
                     &mut s.xrpl_icusd,
                     arg.operation_id,
                     fee,
-                    balance,
+                    &balance,
                     op_nonce,
                     tip,
                     super::now(),

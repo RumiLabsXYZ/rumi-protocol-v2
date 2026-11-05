@@ -202,3 +202,48 @@ Post-fix checks:
 ### Still not covered by R10
 
 Liquidation, Stability Pool and redemption paths with XRPL supply outstanding were exercised only in PocketIC, not on testnet. The same is true of Oisy-login flows. The rehearsal used a local Internet Identity rather than mainnet login.
+
+## Bounded final-source review repairs (2026-11-04 Pacific)
+
+Candidate base: `0b91be97f9fef5ad2bf43e6c9d9bd519a8784b46`. One bounded source reviewer
+found XR-F1 (P1), queued signed Payments losing request/hash/retry identity, and XR-F2 (P2),
+canonical-return fee surplus reused through a stale escrow balance across awaits. Miles checked
+the cited source paths; Merritt accepted both within the existing recovery/backing scope.
+
+- XR-F1: preserve signed queued/uncertain wallet evidence and Payment idempotency; wrong-signer
+  evidence stays unresolved without automatic observation. Unsigned true rejection still releases
+  replacement. Dispatch acceptance is not validated success; existing TrustSet reopening remains.
+- XR-F2: internal balance evidence captures a durable escrow generation before the balance await
+  and revalidates at admission. Existing unsettled escrow work blocks capture/admission; escrow
+  job and accounting transitions invalidate old evidence, including full claim retirement. Return
+  fee reservation survives Done/proof until retirement. Additive generation defaults to zero for
+  old state and refuses permanently at saturation. No public Candid or declaration change.
+
+Exact tested repair source: the base above plus binary diff SHA256
+`ad10c0786a4ee9272d2b5339e1a266933e1e736c476bb7f6b988a36bed80c219` (15 source/spec files).
+The runtime source diff was confirmed unchanged throughout the Cargo execution and before this
+document-only evidence addition.
+
+| Focused check | Actual result |
+| --- | --- |
+| Existing wallet adapter, XRP deposit and XRPL panel specs, one worker | 3 files, 112 passed; exit 0; 3.43 seconds |
+| `cargo test --offline -p rumi_protocol_backend --lib xrpl_escrow_snapshot --jobs 1 -- --test-threads=1` | Exactly 6 selected, 6 passed, 0 failed/ignored; 1557 filtered; native exit 0 |
+
+The one allocated Cargo attempt ran from 2026-11-05 05:20:19.842903 UTC to 05:21:20.334603 UTC
+(60.491 seconds), using the existing cache/target. It compiled the host library test binary;
+no Wasm, PocketIC, dependency download, broad suite or paid CI ran. The six regressions cover the
+original balance/transfer/tip/proof schedule, full retirement before stale admission, existing/new
+escrow work, FeeMint actual-account classification, old-state default/generation exhaustion, and
+held-return admission/fee retirement. Compiler warnings remain; no clippy claim is made.
+
+The bounded runner preserved native output, exact tested diff and terminal receipt privately.
+Owned process closure was verified; existing PocketIC groups were preserved. Maximum observed
+volume free-space drop was 225,632,256 bytes, below the allocated 4 GiB; no cap stop or retry.
+
+Limits: this proves the named local regressions, not full-system or live readiness. Stable decode
+is covered by the focused old-field test, not a fresh upgrade/PocketIC rehearsal. Separate
+canonical return admission waits for unsettled escrow work to reconcile. Signed failed Payments
+remain held for authoritative/manual reconciliation because dispatch metadata supplies no final
+no-effect proof. Historical merge7 logs remain unbound and lack their overall native exit receipt;
+PR #625's fixture fix does not retroactively make that batch green. No new public-chain test,
+Oisy flow, staging cost measurement, deployment, merge or activation is claimed.

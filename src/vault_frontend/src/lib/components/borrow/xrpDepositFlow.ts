@@ -416,16 +416,17 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
   }
 
   function handleSubmission(sub: WalletSubmission, sendDrops: bigint) {
-    set({ requestId: sub.requestId, txHash: sub.hash });
-    if (sub.status === 'rejected') {
+    const hash = sub.hash ?? state.txHash ?? readHint()?.hash ?? null;
+    set({ requestId: sub.requestId, txHash: hash });
+    if (sub.status === 'rejected' && !sub.signed && !hash) {
       writeHint({ requestId: undefined, hash: undefined, payStarted: undefined });
       committedSend = null;
       set({ phase: 'rejected', proposal: null, error: sub.warning ?? 'The wallet request was rejected or expired. Nothing was sent and no collateral was credited.' });
       return Promise.resolve();
     }
-    writeHint({ requestId: sub.requestId, hash: sub.hash ?? undefined, sendDrops: sendDrops.toString() });
-    if (sub.status === 'pending' || !sub.hash) {
-      set({ phase: 'wallet_pending', sentDrops: sendDrops, error: null });
+    writeHint({ requestId: sub.requestId, hash: hash ?? undefined, sendDrops: sendDrops.toString() });
+    if (sub.status !== 'submitted' || !hash) {
+      set({ phase: 'wallet_pending', sentDrops: sendDrops, error: sub.warning ?? null });
       return Promise.resolve();
     }
     set({ sentDrops: sendDrops, error: null });
@@ -600,10 +601,8 @@ export function createXrpDepositController(deps: XrpDepositDeps): XrpDepositCont
         set({ error: e instanceof Error ? e.message : String(e) });
         return;
       }
-      if (sub.status === 'pending' && sub.hash === null && state.txHash) {
-        await startPolling();
-        return;
-      }
+      // An unavailable payload cannot promote a saved (possibly wrong-signer)
+      // hash into permission to poll/confirm. Keep the same request for recovery.
       await handleSubmission(sub, send);
     },
     async confirmFromClick() {

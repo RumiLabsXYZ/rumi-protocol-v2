@@ -50,10 +50,7 @@ export interface WalletSubmission {
   status: 'pending' | 'submitted' | 'rejected';
   signed: boolean;
   hash: string | null;
-  /**
-   * Why a request was treated as rejected when it was NOT a plain user
-   * rejection (signed by a different account, or refused by the XRP Ledger).
-   */
+  /** Signer mismatch or dispatch uncertainty; never proof of ledger finality. */
   warning?: string;
   /** Engine result Xaman reported after dispatch (e.g. tesSUCCESS), if any. */
   engineResult?: string | null;
@@ -149,12 +146,11 @@ function networkFromXaman(networkId: number | undefined, networkType: string | u
 }
 
 /**
- * Map a Xaman payload (as returned by `payload.get`) to a WalletSubmission.
- * Only a payload that is signed, carries a transaction id, was signed by the
- * expected account and was not refused by the XRP Ledger is 'submitted'.
- *
- * `expectedAccount` is the connection address frozen when the request was
- * created: a payload signed by any other account is 'rejected' with a warning.
+ * Map a Xaman payload to a recovery hint, never a validated ledger outcome.
+ * A signed request stays bound to its original id even if dispatch reports a
+ * server rejection: another node may still relay it (see issuer_rpc::SubmitOutcome).
+ * A matching signer plus a hash means 'submitted', not validated or successful.
+ * Wrong-signer evidence stays pending for reconciliation and is never auto-observed.
  */
 export function payloadToSubmission(
   requestId: string,
@@ -165,26 +161,24 @@ export function payloadToSubmission(
   if (!meta) return { requestId, status: 'pending', signed: false, hash: null };
   const txid = typeof payload?.response?.txid === 'string' && payload.response.txid ? payload.response.txid : null;
   if (meta.signed) {
-    const signer = payload?.response?.account;
-    if (expectedAccount && signer !== expectedAccount) {
-      return {
-        requestId, status: 'rejected', signed: false, hash: null,
-        warning: `The request was signed by ${typeof signer === 'string' && signer ? signer : 'a different account'}, not the connected wallet ${expectedAccount}. It was not used.`,
-      };
-    }
     const engine = typeof payload?.response?.dispatched_result === 'string' && payload.response.dispatched_result
       ? payload.response.dispatched_result
       : null;
-    if (engine && engine !== 'tesSUCCESS') {
+    const extra = engine ? { engineResult: engine } : {};
+    const signer = payload?.response?.account;
+    if (expectedAccount && signer !== expectedAccount) {
       return {
-        requestId, status: 'rejected', signed: false, hash: null, engineResult: engine,
-        warning: `The XRP Ledger refused this transaction (${engine}). Nothing was applied.`,
+        requestId, status: 'pending', signed: true, hash: txid, ...extra,
+        warning: `The request was signed by ${typeof signer === 'string' && signer ? signer : 'a different account'}, not the connected wallet ${expectedAccount}. Keep this request for reconciliation; do not send a replacement.`,
       };
     }
-    const extra = engine ? { engineResult: engine } : {};
+    // tes/ter/tec/tef/tem/tel are dispatch results, not final validation evidence.
+    const warning = engine && engine !== 'tesSUCCESS'
+      ? { warning: `Wallet dispatch reported ${engine}; awaiting ledger validation. Do not send a replacement.` }
+      : {};
     return txid
-      ? { requestId, status: 'submitted', signed: true, hash: txid, ...extra }
-      : { requestId, status: 'pending', signed: true, hash: null, ...extra };
+      ? { requestId, status: 'submitted', signed: true, hash: txid, ...extra, ...warning }
+      : { requestId, status: 'pending', signed: true, hash: null, ...extra, ...warning };
   }
   if (meta.cancelled || meta.expired || meta.resolved) {
     return { requestId, status: 'rejected', signed: false, hash: null };
@@ -340,7 +334,8 @@ export function createXamanAdapter(options: XamanAdapterOptions): XrplWalletAdap
    */
   function settleKeyed(key: string | undefined, sub: WalletSubmission, tx: XrplPaymentOrTrustSet): WalletSubmission {
     if (!key) return sub;
-    if (sub.status === 'rejected' || (tx.TransactionType === 'TrustSet' && sub.hash)) forgetKey(key);
+    if ((sub.status === 'rejected' && !sub.signed && !sub.hash)
+      || (tx.TransactionType === 'TrustSet' && sub.status === 'submitted' && sub.hash)) forgetKey(key);
     return sub;
   }
 

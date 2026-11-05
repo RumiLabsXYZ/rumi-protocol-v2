@@ -804,6 +804,7 @@ pub fn apply_rebuilt_mint_proof(
             "that mint block already belongs to another operation".into(),
         ));
     }
+    st.invalidate_escrow_balance_reads();
     st.remember_proven_mint_block(block);
     let op = st.op_mut(op_id)?;
     op.ic_jobs.push(IcLedgerJob {

@@ -1551,11 +1551,13 @@ fn resolve_claim_receive_canonical_reserves_the_ic_fee_separately() {
     // Escrow must cover the claim + buffer + THIS fee (10_000 e8s ledger fee here).
     let fee = 10_000u64;
     assert_eq!(s.required_backing_e8s(fee).unwrap(), 5_000 + 10 + 10_000);
+    let short = xrpl_escrow_snapshot(&s, 5_009 + 10_000);
     assert!(matches!(
-        issuance::begin_receive_canonical(&mut s, id, fee, 5_009 + 10_000, nonce(60), 100, 1),
+        issuance::begin_receive_canonical(&mut s, id, fee, &short, nonce(60), 100, 1),
         Err(XrplIcusdError::CoverageUnavailable(_))
     ));
-    let idx = issuance::begin_receive_canonical(&mut s, id, fee, 5_010 + 10_000, nonce(60), 100, 1).unwrap();
+    let funded = xrpl_escrow_snapshot(&s, 5_010 + 10_000);
+    let idx = issuance::begin_receive_canonical(&mut s, id, fee, &funded, nonce(60), 100, 1).unwrap();
     let job = s.job(id, idx).unwrap().clone();
     assert_eq!(job.purpose, IcJobPurpose::CanonicalReturn);
     assert_eq!(job.from_subaccount, Some(escrow_subaccount()));
@@ -1585,7 +1587,8 @@ fn resolve_claim_failure_unwinds_and_unresolved_attempts_block_it() {
     let mut s = ready_state();
     let id = new_import(&mut s, owner(1), 1, 5_000);
     fund_import(&mut s, id);
-    let idx = issuance::begin_receive_canonical(&mut s, id, 10, 1_000_000, nonce(61), 100, 1).unwrap();
+    let funded = xrpl_escrow_snapshot(&s, 1_000_000);
+    let idx = issuance::begin_receive_canonical(&mut s, id, 10, &funded, nonce(61), 100, 1).unwrap();
     s.begin_job_call(id, idx).unwrap();
     s.finish_job_call(id, idx, LedgerCallResult::Rejected("insufficient".into()), 2).unwrap();
     issuance::advance_resolution(&mut s, id, 3).unwrap();
@@ -2126,7 +2129,8 @@ fn canonical_return_refusal_names_the_unfunded_ledger_fee_surplus() {
     let fee = 10;
     // Holder backing alone (5,000) is present, but the operator-funded surplus
     // (buffer 25 + this return's fee 10) is not.
-    let e = issuance::begin_receive_canonical(&mut s, id, fee, 5_000, nonce(70), 100, 1).unwrap_err();
+    let short = xrpl_escrow_snapshot(&s, 5_000);
+    let e = issuance::begin_receive_canonical(&mut s, id, fee, &short, nonce(70), 100, 1).unwrap_err();
     let XrplIcusdError::CoverageUnavailable(m) = e else { panic!("{e:?}") };
     assert!(m.contains("ledger-fee surplus not funded"), "{m}");
     assert!(m.contains("get_xrpl_icusd_coverage"), "{m}");
@@ -2137,5 +2141,106 @@ fn canonical_return_refusal_names_the_unfunded_ledger_fee_surplus() {
     assert_eq!(r.fee_surplus_required_e8s, 25 + u128::from(r.ic_fee_reserve_e8s));
     assert_eq!(r.required_e8s, r.holder_backing_e8s + r.fee_surplus_required_e8s);
     // With the surplus funded the same return is admitted.
-    assert!(issuance::begin_receive_canonical(&mut s, id, fee, 5_035, nonce(71), 100, 1).is_ok());
+    let funded = xrpl_escrow_snapshot(&s, 5_035);
+    assert!(issuance::begin_receive_canonical(&mut s, id, fee, &funded, nonce(71), 100, 1).is_ok());
+}
+
+// XR-F2: interleavings use production pure transitions; no mocked counter oracle.
+fn xrpl_escrow_snapshot_fixture() -> (XrplIcusdState, u64, u64) {
+    let mut s = ready_state();
+    s.config.rounding_buffer_e8s = 0;
+    let a = new_import(&mut s, owner(1), 91, 100);
+    fund_import(&mut s, a);
+    let b = new_import(&mut s, owner(2), 92, 100);
+    fund_import(&mut s, b);
+    s.issued_outstanding = WideAmount::from_e8s(800);
+    (s, a, b)
+}
+
+fn xrpl_escrow_snapshot(s: &XrplIcusdState, balance_e8s: u128) -> EscrowBalanceSnapshot {
+    EscrowBalanceSnapshot { generation: s.begin_escrow_balance_read().unwrap(), balance_e8s }
+}
+
+#[test]
+fn xrpl_escrow_snapshot_rejects_balance_transfer_tip_proof_interleaving() {
+    let (mut s, a, b) = xrpl_escrow_snapshot_fixture();
+    // B balance=1010, then A transfer, then B tip, then A proof.
+    let b_balance = xrpl_escrow_snapshot(&s, 1_010);
+    let a_balance = xrpl_escrow_snapshot(&s, 1_010);
+    let ai = issuance::begin_receive_canonical(&mut s, a, 10, &a_balance, nonce(91), 100, 1).unwrap();
+    s.begin_job_call(a, ai).unwrap();
+    s.finish_job_call(a, ai, LedgerCallResult::Ok(901), 2).unwrap();
+    assert_eq!(s.buckets().unwrap().ic_fee_reserve_e8s, 10, "Done is not fee retirement");
+    assert!(matches!(issuance::begin_receive_canonical(&mut s, b, 10, &b_balance, nonce(92), 101, 3), Err(XrplIcusdError::Unavailable(_))));
+    assert_eq!(s.op(b).unwrap().ic_jobs.len(), 1, "no second return job admitted");
+    s.mark_proof_verified(a, ai).unwrap();
+    assert_eq!(s.buckets().unwrap().ic_fee_reserve_e8s, 10, "proof still retains fee until claim retirement");
+    issuance::advance_resolution(&mut s, a, 4).unwrap();
+    assert_eq!(s.buckets().unwrap().ic_fee_reserve_e8s, 0);
+}
+
+#[test]
+fn xrpl_escrow_snapshot_rejects_after_other_claim_retired() {
+    let (mut s, a, b) = xrpl_escrow_snapshot_fixture();
+    let stale = xrpl_escrow_snapshot(&s, 1_010);
+    let ai = issuance::begin_receive_canonical(&mut s, a, 10, &stale, nonce(93), 100, 1).unwrap();
+    s.begin_job_call(a, ai).unwrap();
+    s.finish_job_call(a, ai, LedgerCallResult::Ok(902), 2).unwrap();
+    s.mark_proof_verified(a, ai).unwrap();
+    issuance::advance_resolution(&mut s, a, 3).unwrap();
+    assert_eq!(s.required_backing_e8s(0).unwrap(), 900);
+    assert!(matches!(issuance::begin_receive_canonical(&mut s, b, 10, &stale, nonce(94), 101, 4), Err(XrplIcusdError::Unavailable(_))));
+    let fresh = xrpl_escrow_snapshot(&s, 900); // actual E after A paid 100+10
+    assert!(matches!(issuance::begin_receive_canonical(&mut s, b, 10, &fresh, nonce(94), 101, 4), Err(XrplIcusdError::CoverageUnavailable(_))));
+}
+
+#[test]
+fn xrpl_escrow_snapshot_blocks_existing_escrow_work_and_rejects_new_work() {
+    for purpose in [IcJobPurpose::EscrowMint, IcJobPurpose::ImportPull, IcJobPurpose::EscrowBurn, IcJobPurpose::CanonicalReturn] {
+        let (mut s, a, _) = xrpl_escrow_snapshot_fixture();
+        let old = xrpl_escrow_snapshot(&s, 1_010);
+        let idx = s.add_job(a, JobSpec { purpose, from_subaccount: Some(escrow_subaccount()), from_owner: None, to: escrow_account(backend()), amount_e8s: 1, reserved_fee_e8s: 0, ledger_tip_before: Some(100) }, nonce(95), 1).unwrap();
+        assert!(s.begin_escrow_balance_read().is_err(), "pending {purpose:?} blocks capture");
+        assert!(s.check_escrow_balance_snapshot(&old).is_err());
+        s.begin_job_call(a, idx).unwrap();
+        assert!(s.begin_escrow_balance_read().is_err(), "in-flight {purpose:?} blocks capture");
+        s.finish_job_call(a, idx, LedgerCallResult::Unknown("reply lost".into()), 2).unwrap();
+        assert!(s.begin_escrow_balance_read().is_err(), "unknown {purpose:?} blocks capture");
+        s.begin_job_call(a, idx).unwrap();
+        s.finish_job_call(a, idx, LedgerCallResult::Duplicate(903), 3).unwrap();
+        assert!(s.begin_escrow_balance_read().is_err(), "unproven Done {purpose:?} blocks capture");
+    }
+}
+
+#[test]
+fn xrpl_escrow_snapshot_fee_mint_exclusion_checks_actual_accounts() {
+    let (mut s, a, _) = xrpl_escrow_snapshot_fixture();
+    let snap = xrpl_escrow_snapshot(&s, 1_010);
+    s.add_job(a, fee_mint_job_spec(Account { owner: owner(9), subaccount: None }, 1, 100), nonce(96), 1).unwrap();
+    assert!(s.check_escrow_balance_snapshot(&snap).is_ok(), "ordinary treasury mint does not touch escrow");
+    s.add_job(a, fee_mint_job_spec(escrow_account(backend()), 1, 100), nonce(97), 1).unwrap();
+    assert!(s.check_escrow_balance_snapshot(&snap).is_err(), "FeeMint label cannot hide an escrow destination");
+}
+
+#[test]
+fn xrpl_escrow_snapshot_generation_defaults_and_exhaustion_fail_closed() {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&XrplIcusdState::default(), &mut bytes).unwrap();
+    let mut snapshot: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+    let fields = match &mut snapshot {
+        ciborium::value::Value::Map(fields) => fields,
+        _ => panic!("lane snapshot must be a map"),
+    };
+    fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "escrow_generation"));
+    bytes.clear();
+    ciborium::ser::into_writer(&snapshot, &mut bytes).unwrap();
+    let mut restored: XrplIcusdState = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+    assert_eq!(restored.escrow_generation, 0, "pre-field stable snapshot defaults safely");
+    restored.escrow_generation = u64::MAX - 1;
+    let old = xrpl_escrow_snapshot(&restored, 0);
+    restored.invalidate_escrow_balance_reads();
+    restored.invalidate_escrow_balance_reads(); // cannot wrap back into equality
+    assert!(restored.begin_escrow_balance_read().is_err());
+    assert!(restored.check_escrow_balance_snapshot(&old).is_err());
+    assert!(restored.check_escrow_balance_snapshot(&EscrowBalanceSnapshot { generation: u64::MAX, balance_e8s: 0 }).is_err());
 }

@@ -21,6 +21,10 @@ pub struct XrplIcusdState {
     pub config: XrplIcusdConfig,
     pub operations: BTreeMap<OperationId, Operation>,
     pub next_operation_id: OperationId,
+    /// Invalidates balance reads across escrow jobs and accounting handoffs.
+    /// Older snapshots default to zero; MAX is permanently fail-closed, never reused.
+    #[serde(default)]
+    pub escrow_generation: u64,
     /// `(owner, request nonce) -> operation`: the same nonce never creates a second
     /// operation.
     pub request_nonce_index: BTreeMap<(Principal, [u8; 32]), OperationId>,
@@ -217,15 +221,60 @@ pub(crate) fn add_op_liability(b: &mut Buckets, op: &Operation) -> Result<(), Xr
         }
         _ => {}
     }
-    for j in &op.ic_jobs {
-        if j.purpose == IcJobPurpose::CanonicalReturn && !j.is_resolved() {
+    let active_return = op.ic_jobs.iter().rposition(|j| j.purpose == IcJobPurpose::CanonicalReturn);
+    for (idx, j) in op.ic_jobs.iter().enumerate() {
+        let awaiting_retirement = op.resolution == Some(ClaimAction::ReceiveCanonical)
+            && op.phase != Phase::ClaimResolved && Some(idx) == active_return;
+        if j.purpose == IcJobPurpose::CanonicalReturn
+            && !matches!(j.status, IcJobStatus::Failed { .. })
+            && (!j.is_proven_done() || awaiting_retirement)
+        {
             b.ic_fee_reserve_e8s += u128::from(j.reserved_fee_e8s);
         }
     }
     Ok(())
 }
 
+/// A balance query bound to the escrow state captured BEFORE its await.
+/// Internal evidence only: never supplied by a public caller or serialized.
+#[derive(Clone, Copy, Debug)]
+pub struct EscrowBalanceSnapshot {
+    pub generation: u64,
+    pub balance_e8s: u128,
+}
+
 impl XrplIcusdState {
+    pub fn invalidate_escrow_balance_reads(&mut self) {
+        // Saturation is a permanent refusal below, not a reusable generation.
+        self.escrow_generation = self.escrow_generation.saturating_add(1);
+    }
+
+    /// Existing unsettled work may already have changed the remote balance, even
+    /// before its callback arrives. Do not use those funds as fee surplus.
+    pub fn begin_escrow_balance_read(&self) -> Result<u64, XrplIcusdError> {
+        if self.escrow_generation == u64::MAX {
+            return Err(XrplIcusdError::Unavailable("escrow balance generation exhausted".into()));
+        }
+        let busy = self.live_ops.iter().filter_map(|id| self.op(*id)).any(|op| {
+            op.phase.is_reservation()
+                || matches!(op.phase, Phase::EscrowPullPending | Phase::EscrowBurnPending)
+                || (op.resolution == Some(ClaimAction::ReceiveCanonical) && op.phase != Phase::ClaimResolved)
+                || op.ic_jobs.iter().any(|job| job.touches_escrow()
+                    && !job.is_proven_done() && !matches!(job.status, IcJobStatus::Failed { .. }))
+        });
+        if busy {
+            return Err(XrplIcusdError::Unavailable("escrow ledger work is unsettled; reconcile it before returning another claim".into()));
+        }
+        Ok(self.escrow_generation)
+    }
+
+    pub fn check_escrow_balance_snapshot(&self, snapshot: &EscrowBalanceSnapshot) -> Result<(), XrplIcusdError> {
+        if self.begin_escrow_balance_read()? != snapshot.generation {
+            return Err(XrplIcusdError::Unavailable("escrow changed while reading its balance; retry claim resolution".into()));
+        }
+        Ok(())
+    }
+
     // ---- readiness / admission ----------------------------------------------------
 
     /// The lane answers user methods only when fully configured.
@@ -536,11 +585,13 @@ impl XrplIcusdState {
             sends: 0,
             in_flight_since_ns: None,
         };
+        let touches_escrow = job.touches_escrow();
         op.ic_jobs.push(job);
         op.updated_at_ns = now_ns;
         let idx = op.ic_jobs.len() - 1;
         // A terminal operation can gain a job (a fee-remainder retry): keep it live.
         self.live_ops.insert(op_id);
+        if touches_escrow { self.invalidate_escrow_balance_reads(); }
         Ok(idx)
     }
 
@@ -816,6 +867,7 @@ impl XrplIcusdState {
         reason: ReleaseReason,
         timestamp: u64,
     ) {
+        self.invalidate_escrow_balance_reads();
         if let Some(op) = self.operations.get_mut(&op_id) {
             if op.phase.is_reservation() {
                 op.phase = match reason {
@@ -921,6 +973,7 @@ impl XrplIcusdState {
     /// `State::apply_xrpl_repay_settlement`, the single function used by BOTH the live
     /// path and replay. What remains of the receipt (excess, sub-e8s) stays held.
     pub fn apply_repay_settled(&mut self, op_id: u64, vault_id: u64, settled_at: u64) {
+        self.invalidate_escrow_balance_reads();
         if let Some(op) = self.operations.get_mut(&op_id) {
             let leftover = matches!(&op.kind, OperationKind::Repayment { held, .. } if !held.is_zero());
             op.phase = if leftover { Phase::Held } else { Phase::Complete };
@@ -933,6 +986,7 @@ impl XrplIcusdState {
     /// Operation bookkeeping of a proven never-executed burn: the applied amount goes
     /// back to the payer's held claim; the freeze and the exclusion are lifted.
     pub fn apply_repay_cancelled(&mut self, op_id: u64, vault_id: u64, at: u64) {
+        self.invalidate_escrow_balance_reads();
         if let Some(op) = self.operations.get_mut(&op_id) {
             if let OperationKind::Repayment {
                 applied_e8s,

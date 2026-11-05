@@ -468,6 +468,15 @@ pub struct IcLedgerJob {
 }
 
 impl IcLedgerJob {
+    /// A purpose label cannot exempt a job that actually names the escrow
+    /// subaccount. Ordinary fee mints target a treasury default account.
+    pub fn touches_escrow(&self) -> bool {
+        self.purpose != IcJobPurpose::FeeMint
+            || self.from_subaccount == Some(escrow_subaccount())
+            || self.from_owner.as_ref().is_some_and(|a| a.subaccount == Some(escrow_subaccount()))
+            || self.to.subaccount == Some(escrow_subaccount())
+    }
+
     pub fn is_resolved(&self) -> bool {
         matches!(
             self.status,

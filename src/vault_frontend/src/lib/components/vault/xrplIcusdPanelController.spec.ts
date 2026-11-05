@@ -7,7 +7,7 @@ import {
   type XrplIcusdControllerDeps,
 } from './xrplIcusdPanelController';
 import { mapOperation, type RepaymentIntent, type XrplIcusdConfigView } from '$lib/services/xrplIcusdService';
-import type { WalletSubmission, XrplConnection } from '$lib/services/xrplWalletService';
+import { payloadToSubmission, type WalletSubmission, type XrplConnection } from '$lib/services/xrplWalletService';
 
 const ISSUER = 'rIssuer1111111111111111111111111';
 const CURRENCY = '6963555344000000000000000000000000000000';
@@ -760,15 +760,34 @@ describe('recovery review fixes', () => {
     expect(t.c.getState().repay.phase).toBe('observed');
   });
 
-  it('a payment signed by another account or refused by the ledger shows the wallet warning, never submitted', async () => {
+  it.each(['terQUEUED', 'tecUNFUNDED_PAYMENT', 'unknown'])('retains repayment %s hints and resumes without another Payment', async (engine) => {
     const wallet = makeWallet();
-    wallet.signAndSubmit.mockResolvedValue({ requestId: 'r', status: 'rejected', signed: false, hash: null, warning: 'The request was signed by rAttacker, not the connected wallet. It was not used.' });
+    const sub = payloadToSubmission('req-1', { meta: { signed: true, resolved: true }, response: { account: USER, txid: 'HASH1', dispatched_result: engine } }, USER);
+    wallet.signAndSubmit.mockResolvedValue(sub);
+    wallet.resumeRequest.mockResolvedValue(sub);
+    const t = setup({ wallet, api: repayApi(), oisy: true });
+    await t.c.init();
+    await t.c.refresh();
+    await t.c.prepareRepayment(PAY);
+    await t.c.payRepayment();
+    expect(t.c.getState().repay).toMatchObject({ phase: 'submitted', requestId: 'req-1', hash: 'HASH1' });
+    expect(JSON.parse(t.storage.m.get('rumi_xrpl_icusd_repay_v1:owner-1')!)['9']).toMatchObject({ requestId: 'req-1', hash: 'HASH1' });
+    await t.c.payRepayment();
+    expect(wallet.resumeRequest).toHaveBeenCalledWith('req-1');
+    expect(wallet.signAndSubmit).toHaveBeenCalledTimes(1);
+    expect(t.api.observeRepayment).not.toHaveBeenCalled();
+  });
+
+  it('retains a signed wrong-account request without observing it or allowing replacement', async () => {
+    const wallet = makeWallet();
+    wallet.signAndSubmit.mockResolvedValue(payloadToSubmission('req-1', { meta: { signed: true }, response: { account: OTHER, txid: 'OTHERHASH' } }, USER));
     const t = setup({ wallet, api: repayApi() });
     await t.c.init();
     await t.c.prepareRepayment(PAY);
     await t.c.payRepayment();
-    expect(t.c.getState().repay.phase).toBe('rejected');
-    expect(t.c.getState().repay.error).toMatch(/rAttacker/);
+    expect(t.c.getState().repay).toMatchObject({ phase: 'wallet_pending', requestId: 'req-1', hash: 'OTHERHASH' });
+    expect(t.c.getState().repay.error).toContain(OTHER);
+    expect(JSON.parse(t.storage.m.get('rumi_xrpl_icusd_repay_v1:owner-1')!)['9']).toMatchObject({ requestId: 'req-1', hash: 'OTHERHASH' });
     expect(t.api.observeRepayment).not.toHaveBeenCalled();
   });
 });

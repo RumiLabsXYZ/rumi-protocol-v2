@@ -507,7 +507,8 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
 
   // --- repay wallet handling ---
   async function handleSubmission(sub: WalletSubmission, opId: bigint) {
-    if (sub.status === 'rejected') {
+    const hash = sub.hash ?? readHints()[String(opId)]?.hash ?? null;
+    if (sub.status === 'rejected' && !sub.signed && !hash) {
       // Keep the prepared intent (the operation is still IntentPrepared); drop only the request.
       saveHint(opId, { requestId: undefined, hash: undefined, paymentJson: undefined, account: undefined });
       setRepay({
@@ -518,12 +519,12 @@ export function createXrplIcusdController(deps: XrplIcusdControllerDeps): XrplIc
       });
       return;
     }
-    saveHint(opId, { requestId: sub.requestId, hash: sub.hash ?? undefined });
-    if (sub.status === 'pending' || !sub.hash) {
-      setRepay({ phase: 'wallet_pending', requestId: sub.requestId, hash: null, error: null });
+    saveHint(opId, { requestId: sub.requestId, hash: hash ?? undefined });
+    if (sub.status !== 'submitted' || !hash) {
+      setRepay({ phase: 'wallet_pending', requestId: sub.requestId, hash, error: sub.warning ?? null });
       return;
     }
-    setRepay({ phase: 'submitted', requestId: sub.requestId, hash: sub.hash, error: null });
+    setRepay({ phase: 'submitted', requestId: sub.requestId, hash, error: sub.warning ?? null });
     await controller.observeRepayment({ auto: true });
   }
 

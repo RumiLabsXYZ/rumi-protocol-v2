@@ -542,9 +542,7 @@ pub async fn resolve_claim(
             let fee = crate::management::get_or_refresh_fee(ledger_id)
                 .await
                 .map_err(XrplIcusdError::Unavailable)?;
-            let balance = ledger::escrow_balance_e8s()
-                .await
-                .map_err(XrplIcusdError::Unavailable)?;
+            let balance = ledger::escrow_balance_for_return().await?;
             let tip = ledger::ledger_tip()
                 .await
                 .map_err(|e| XrplIcusdError::Unavailable(format!("ledger tip: {e}")))?;
@@ -556,7 +554,7 @@ pub async fn resolve_claim(
                     &mut s.xrpl_icusd,
                     arg.operation_id,
                     fee,
-                    balance,
+                    &balance,
                     op_nonce,
                     tip,
                     now(),

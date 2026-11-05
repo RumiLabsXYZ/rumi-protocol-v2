@@ -812,11 +812,13 @@ fn excess_remains_backed_owned_claim() {
     );
     // Escrow must cover the claim plus the ledger fee reserve.
     let short = mutate_state(|s| {
-        repay::begin_receive_canonical_held(&mut s.xrpl_icusd, id, 10, (40 * E8) as u128, nonce_n(1), 5, NOW + 20)
+        let snapshot = super::state::EscrowBalanceSnapshot { generation: s.xrpl_icusd.begin_escrow_balance_read().unwrap(), balance_e8s: (40 * E8) as u128 };
+        repay::begin_receive_canonical_held(&mut s.xrpl_icusd, id, 10, &snapshot, nonce_n(1), 5, NOW + 20)
     });
     assert!(matches!(short, Err(XrplIcusdError::CoverageUnavailable(_))));
     let idx = mutate_state(|s| {
-        repay::begin_receive_canonical_held(&mut s.xrpl_icusd, id, 10, (41 * E8) as u128, nonce_n(2), 5, NOW + 20)
+        let snapshot = super::state::EscrowBalanceSnapshot { generation: s.xrpl_icusd.begin_escrow_balance_read().unwrap(), balance_e8s: (41 * E8) as u128 };
+        repay::begin_receive_canonical_held(&mut s.xrpl_icusd, id, 10, &snapshot, nonce_n(2), 5, NOW + 20)
     })
     .unwrap();
     read_state(|s| {
@@ -2594,4 +2596,32 @@ fn overflow_quarantine_receipt_is_reconciled_by_proof_exactly_once() {
     let e = block_on(observer::reconcile_overflow_with(&Mock::default().with_receipt(&pathy), &h, NOW + 11))
         .unwrap_err();
     assert_eq!(e, XrplIcusdError::NotFound);
+}
+
+#[test]
+fn xrpl_escrow_snapshot_held_return_uses_shared_generation() {
+    replace_state(rworld(60 * E8, 0, 100 * E8, Decimal::ZERO));
+    let id = intent(1, 100 * E8, 101, true);
+    apply_ret(&ret(101, &payer(), Some(tag_of(id)), "100"));
+    settle(id);
+    prove_burn(id, 904);
+    advance_at(id, NOW + 1);
+    assert_eq!(op_phase(id), Phase::Held);
+    mutate_state(|s| {
+        let old = super::state::EscrowBalanceSnapshot { generation: s.xrpl_icusd.begin_escrow_balance_read().unwrap(), balance_e8s: 41 * E8 as u128 };
+        // A different operation's accounting retirement invalidates this balance,
+        // even if it leaves no pending return to discover at admission.
+        s.xrpl_icusd.invalidate_escrow_balance_reads();
+        assert!(matches!(repay::begin_receive_canonical_held(&mut s.xrpl_icusd, id, 10, &old, nonce_n(101), 100, NOW + 2), Err(XrplIcusdError::Unavailable(_))));
+        let fresh = super::state::EscrowBalanceSnapshot { generation: s.xrpl_icusd.begin_escrow_balance_read().unwrap(), balance_e8s: 41 * E8 as u128 };
+        let idx = repay::begin_receive_canonical_held(&mut s.xrpl_icusd, id, 10, &fresh, nonce_n(102), 101, NOW + 2).unwrap();
+        assert!(s.xrpl_icusd.begin_escrow_balance_read().is_err());
+        s.xrpl_icusd.begin_job_call(id, idx).unwrap();
+        s.xrpl_icusd.finish_job_call(id, idx, LedgerCallResult::Ok(905), NOW + 3).unwrap();
+        assert_eq!(s.xrpl_icusd.buckets().unwrap().ic_fee_reserve_e8s, 10);
+        s.xrpl_icusd.mark_proof_verified(id, idx).unwrap();
+        assert_eq!(s.xrpl_icusd.buckets().unwrap().ic_fee_reserve_e8s, 10);
+        super::issuance::advance_resolution(&mut s.xrpl_icusd, id, NOW + 4).unwrap();
+        assert_eq!(s.xrpl_icusd.buckets().unwrap().ic_fee_reserve_e8s, 0);
+    });
 }
