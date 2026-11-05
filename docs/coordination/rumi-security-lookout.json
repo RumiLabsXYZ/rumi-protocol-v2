@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). Source merge-when-green proceeds without paid CI. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
+      "evidenceText": "Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). PR #624 merged normally at 6847982b without paid CI or an admin bypass. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -149,6 +149,10 @@
         {
           "title": "Source composition checkpoint",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-pr613-composition-20261104.md"
+        },
+        {
+          "title": "Merged composition PR #624",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/624"
         }
       ]
     },

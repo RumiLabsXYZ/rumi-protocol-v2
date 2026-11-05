@@ -1,5 +1,5 @@
 {
-  "summary": "Vault 158 remains separate. Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). Source merge-when-green proceeds without paid CI. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
+  "summary": "Vault 158 remains separate. PR #613 recovery source and canonical declarations are integrated with ckSOL; live Candid compatibility passes. Focused backend 21/21, generator 1/1 and frontend 9/9 pass. E0559 was stale shared 3pool output; source and fixtures were unchanged. Native slot closed under cap. No production artifact includes this composition yet. Snapshot sequence follows accepted archive-before-replace policy. Reserve off; no live actions.",
   "plainSummary": "The source preserves the deployed recovery behavior and passes the focused checks. A fresh release build is still needed; no deployment or reserve activation occurred.",
   "glossary": [
     {
