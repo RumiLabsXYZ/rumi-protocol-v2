@@ -512,6 +512,296 @@ export interface ThreePoolPendingClaim {
   'symbol' : string,
   'reason' : string,
 }
+export interface ThreepoolRailWireNextNext_Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
+export interface ThreepoolRailWireNextNext_AddLiquidityRequestV1 {
+  'source_subaccount' : [] | [Uint8Array | number[]],
+  'min_lp' : bigint,
+  'amounts' : Array<bigint>,
+  'max_transfer_fee' : [] | [bigint],
+  'intent_id' : Uint8Array | number[],
+}
+export type ThreepoolRailWireNextNext_LiquidityLegStatusV1 = {
+    'Skipped' : null
+  } |
+  { 'Refunded' : null } |
+  { 'Confirmed' : { 'block' : bigint } } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : { 'reason' : string } } |
+  { 'RejectedNoTransfer' : { 'reason' : string } } |
+  { 'Submitted' : null };
+export type ThreepoolRailWireNextNext_LiquidityReceiptErrorV1 = {
+    'RecoveryRequired' : null
+  } |
+  { 'Concurrent' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'IntentConflict' : null } |
+  { 'NotFound' : null } |
+  { 'PoolLocked' : null } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : null } |
+  { 'InvalidIntentId' : null };
+export type ThreepoolRailWireNextNext_LiquidityReceiptStatusV1 = {
+    'Refunded' : null
+  } |
+  { 'RecoveryPending' : null } |
+  { 'Executing' : null } |
+  { 'Prepared' : null } |
+  { 'Rejected' : null } |
+  { 'Completed' : null };
+export interface ThreepoolRailWireNextNext_LiquidityReceiptV1 {
+  'status' : ThreepoolRailWireNextNext_LiquidityReceiptStatusV1,
+  'balances_after' : [] | [Array<bigint>],
+  'old_caller_lp' : [] | [bigint],
+  'imbalance_after' : [] | [bigint],
+  'input_ids' : Array<[] | [bigint]>,
+  'refund_transfers' : Array<[] | [ThreepoolRailWireNextNext_PayoutTransfer]>,
+  'is_rebalancing' : [] | [boolean],
+  'mint_event_id' : [] | [bigint],
+  'owner' : Principal,
+  'old_balances' : [] | [Array<bigint>],
+  'input_status' : Array<[] | [ThreepoolRailWireNextNext_LiquidityLegStatusV1]>,
+  'request' : ThreepoolRailWireNextNext_AddLiquidityRequestV1,
+  'input_transfers' : Array<
+    [] | [ThreepoolRailWireNextNext_PayoutInputTransfer]
+  >,
+  'fee_bps' : [] | [number],
+  'error' : [] | [string],
+  'imbalance_before' : [] | [bigint],
+  'refund_ids' : Array<[] | [bigint]>,
+  'version' : number,
+  'compensation_started' : boolean,
+  'lp_supply_after' : [] | [bigint],
+  'refund_status' : Array<
+    [] | [ThreepoolRailWireNextNext_LiquidityLegStatusV1]
+  >,
+  'caller_lp_after' : [] | [bigint],
+  'old_lp_supply' : [] | [bigint],
+  'lp_minted' : [] | [bigint],
+}
+export interface ThreepoolRailWireNextNext_PayoutInputTransfer {
+  'to' : ThreepoolRailWireNextNext_Account,
+  'fee' : [] | [bigint],
+  'from' : ThreepoolRailWireNextNext_Account,
+  'memo' : [] | [Uint8Array | number[]],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
+export interface ThreepoolRailWireNextNext_PayoutTransfer {
+  'to' : ThreepoolRailWireNextNext_Account,
+  'fee' : bigint,
+  'net' : bigint,
+  'from' : ThreepoolRailWireNextNext_Account,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'gross' : bigint,
+  'created_at_time' : bigint,
+}
+export type ThreepoolRailWireNextNext_Result = { 'Ok' : null } |
+  { 'Err' : ThreepoolRailWireNextNext_ThreePoolError };
+export type ThreepoolRailWireNextNext_Result_2 = {
+    'Ok' : ThreepoolRailWireNextNext_LiquidityReceiptV1
+  } |
+  { 'Err' : ThreepoolRailWireNextNext_LiquidityReceiptErrorV1 };
+export type ThreepoolRailWireNextNext_ThreePoolError = {
+    'InsufficientOutput' : { 'actual' : bigint, 'expected_min' : bigint }
+  } |
+  { 'PoolPaused' : null } |
+  { 'InvalidCoinIndex' : null } |
+  { 'BurnSlippageExceeded' : { 'actual_bps' : number, 'max_bps' : number } } |
+  { 'NotAuthorizedBurnCaller' : null } |
+  { 'ZeroAmount' : null } |
+  { 'InsufficientLpBalance' : { 'available' : bigint, 'required' : bigint } } |
+  { 'BurnFailed' : { 'token' : string, 'reason' : string } } |
+  { 'PoolLocked' : null } |
+  { 'MathOverflow' : null } |
+  { 'Unauthorized' : null } |
+  { 'InvariantNotConverged' : null } |
+  { 'InsufficientLiquidity' : null } |
+  { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
+  { 'SlippageExceeded' : null } |
+  { 'ClaimNotFound' : null } |
+  { 'PoolEmpty' : null } |
+  {
+    'InsufficientPoolBalance' : {
+      'token' : string,
+      'available' : bigint,
+      'required' : bigint,
+    }
+  };
+export interface ThreepoolRailWireNext_Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
+export interface ThreepoolRailWireNext_AddLiquidityRequestV1 {
+  'source_subaccount' : [] | [Uint8Array | number[]],
+  'min_lp' : bigint,
+  'amounts' : Array<bigint>,
+  'max_transfer_fee' : [] | [bigint],
+  'intent_id' : Uint8Array | number[],
+}
+export type ThreepoolRailWireNext_LiquidityLegStatusV1 = { 'Skipped' : null } |
+  { 'Refunded' : null } |
+  { 'Confirmed' : { 'block' : bigint } } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : { 'reason' : string } } |
+  { 'RejectedNoTransfer' : { 'reason' : string } } |
+  { 'Submitted' : null };
+export type ThreepoolRailWireNext_LiquidityReceiptErrorV1 = {
+    'RecoveryRequired' : null
+  } |
+  { 'Concurrent' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'IntentConflict' : null } |
+  { 'NotFound' : null } |
+  { 'PoolLocked' : null } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : null } |
+  { 'InvalidIntentId' : null };
+export type ThreepoolRailWireNext_LiquidityReceiptStatusV1 = {
+    'Refunded' : null
+  } |
+  { 'RecoveryPending' : null } |
+  { 'Executing' : null } |
+  { 'Prepared' : null } |
+  { 'Rejected' : null } |
+  { 'Completed' : null };
+export interface ThreepoolRailWireNext_LiquidityReceiptV1 {
+  'status' : ThreepoolRailWireNext_LiquidityReceiptStatusV1,
+  'balances_after' : [] | [Array<bigint>],
+  'old_caller_lp' : [] | [bigint],
+  'imbalance_after' : [] | [bigint],
+  'input_ids' : Array<[] | [bigint]>,
+  'refund_transfers' : Array<[] | [ThreepoolRailWireNext_PayoutTransfer]>,
+  'is_rebalancing' : [] | [boolean],
+  'mint_event_id' : [] | [bigint],
+  'owner' : Principal,
+  'old_balances' : [] | [Array<bigint>],
+  'input_status' : Array<[] | [ThreepoolRailWireNext_LiquidityLegStatusV1]>,
+  'request' : ThreepoolRailWireNext_AddLiquidityRequestV1,
+  'input_transfers' : Array<[] | [ThreepoolRailWireNext_PayoutInputTransfer]>,
+  'fee_bps' : [] | [number],
+  'error' : [] | [string],
+  'imbalance_before' : [] | [bigint],
+  'refund_ids' : Array<[] | [bigint]>,
+  'version' : number,
+  'compensation_started' : boolean,
+  'lp_supply_after' : [] | [bigint],
+  'refund_status' : Array<[] | [ThreepoolRailWireNext_LiquidityLegStatusV1]>,
+  'caller_lp_after' : [] | [bigint],
+  'old_lp_supply' : [] | [bigint],
+  'lp_minted' : [] | [bigint],
+}
+export interface ThreepoolRailWireNext_PayoutInputTransfer {
+  'to' : ThreepoolRailWireNext_Account,
+  'fee' : [] | [bigint],
+  'from' : ThreepoolRailWireNext_Account,
+  'memo' : [] | [Uint8Array | number[]],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
+export interface ThreepoolRailWireNext_PayoutTransfer {
+  'to' : ThreepoolRailWireNext_Account,
+  'fee' : bigint,
+  'net' : bigint,
+  'from' : ThreepoolRailWireNext_Account,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'gross' : bigint,
+  'created_at_time' : bigint,
+}
+export type ThreepoolRailWireNext_Result_2 = {
+    'Ok' : ThreepoolRailWireNext_LiquidityReceiptV1
+  } |
+  { 'Err' : ThreepoolRailWireNext_LiquidityReceiptErrorV1 };
+export interface ThreepoolRailWire_Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
+export interface ThreepoolRailWire_AddLiquidityRequestV1 {
+  'source_subaccount' : [] | [Uint8Array | number[]],
+  'min_lp' : bigint,
+  'amounts' : Array<bigint>,
+  'max_transfer_fee' : [] | [bigint],
+  'intent_id' : Uint8Array | number[],
+}
+export type ThreepoolRailWire_LiquidityLegStatusV1 = { 'Skipped' : null } |
+  { 'Refunded' : null } |
+  { 'Confirmed' : { 'block' : bigint } } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : { 'reason' : string } } |
+  { 'RejectedNoTransfer' : { 'reason' : string } } |
+  { 'Submitted' : null };
+export type ThreepoolRailWire_LiquidityReceiptErrorV1 = {
+    'RecoveryRequired' : null
+  } |
+  { 'Concurrent' : null } |
+  { 'CapacityExceeded' : null } |
+  { 'IntentConflict' : null } |
+  { 'NotFound' : null } |
+  { 'PoolLocked' : null } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : null } |
+  { 'InvalidIntentId' : null };
+export type ThreepoolRailWire_LiquidityReceiptStatusV1 = { 'Refunded' : null } |
+  { 'RecoveryPending' : null } |
+  { 'Executing' : null } |
+  { 'Prepared' : null } |
+  { 'Rejected' : null } |
+  { 'Completed' : null };
+export interface ThreepoolRailWire_LiquidityReceiptV1 {
+  'status' : ThreepoolRailWire_LiquidityReceiptStatusV1,
+  'balances_after' : [] | [Array<bigint>],
+  'old_caller_lp' : [] | [bigint],
+  'imbalance_after' : [] | [bigint],
+  'input_ids' : Array<[] | [bigint]>,
+  'refund_transfers' : Array<[] | [ThreepoolRailWire_PayoutTransfer]>,
+  'is_rebalancing' : [] | [boolean],
+  'mint_event_id' : [] | [bigint],
+  'owner' : Principal,
+  'old_balances' : [] | [Array<bigint>],
+  'input_status' : Array<[] | [ThreepoolRailWire_LiquidityLegStatusV1]>,
+  'request' : ThreepoolRailWire_AddLiquidityRequestV1,
+  'input_transfers' : Array<[] | [ThreepoolRailWire_PayoutInputTransfer]>,
+  'fee_bps' : [] | [number],
+  'error' : [] | [string],
+  'imbalance_before' : [] | [bigint],
+  'refund_ids' : Array<[] | [bigint]>,
+  'version' : number,
+  'compensation_started' : boolean,
+  'lp_supply_after' : [] | [bigint],
+  'refund_status' : Array<[] | [ThreepoolRailWire_LiquidityLegStatusV1]>,
+  'caller_lp_after' : [] | [bigint],
+  'old_lp_supply' : [] | [bigint],
+  'lp_minted' : [] | [bigint],
+}
+export interface ThreepoolRailWire_PayoutInputTransfer {
+  'to' : ThreepoolRailWire_Account,
+  'fee' : [] | [bigint],
+  'from' : ThreepoolRailWire_Account,
+  'memo' : [] | [Uint8Array | number[]],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
+export interface ThreepoolRailWire_PayoutTransfer {
+  'to' : ThreepoolRailWire_Account,
+  'fee' : bigint,
+  'net' : bigint,
+  'from' : ThreepoolRailWire_Account,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'gross' : bigint,
+  'created_at_time' : bigint,
+}
+export type ThreepoolRailWire_Result_2 = {
+    'Ok' : ThreepoolRailWire_LiquidityReceiptV1
+  } |
+  { 'Err' : ThreepoolRailWire_LiquidityReceiptErrorV1 };
 export interface TokenConfig {
   'decimals' : number,
   'precision_mul' : bigint,
@@ -580,6 +870,14 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : ThreePoolError }
   >,
+  'add_liquidity_with_receipt_client_v1' : ActorMethod<
+    [ThreepoolRailWireNextNext_AddLiquidityRequestV1],
+    ThreepoolRailWireNextNext_Result_2
+  >,
+  'add_liquidity_with_receipt_v1' : ActorMethod<
+    [ThreepoolRailWire_AddLiquidityRequestV1],
+    ThreepoolRailWire_Result_2
+  >,
   'authorized_redeem_and_burn' : ActorMethod<
     [AuthorizedRedeemAndBurnArgs],
     { 'Ok' : RedeemAndBurnResult } |
@@ -616,6 +914,10 @@ export interface _SERVICE {
     [number, bigint],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
+  >,
+  'get_active_liquidity_receipt_v1' : ActorMethod<
+    [],
+    [] | [[Principal, Uint8Array | number[]]]
   >,
   'get_admin_event_count' : ActorMethod<[], bigint>,
   'get_admin_events' : ActorMethod<
@@ -660,6 +962,11 @@ export interface _SERVICE {
   'get_liquidity_events_v2_forward' : ActorMethod<
     [bigint, bigint],
     ForwardLiquidityEventsV2
+  >,
+  'get_liquidity_receipt_client' : ActorMethod<[], [] | [Principal]>,
+  'get_liquidity_receipt_v1' : ActorMethod<
+    [Uint8Array | number[]],
+    [] | [ThreepoolRailWire_LiquidityReceiptV1]
   >,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
   'get_lp_holders' : ActorMethod<[bigint, bigint], Array<[Principal, bigint]>>,
@@ -778,6 +1085,26 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'reconcile_liquidity_receipt_input_for_v1' : ActorMethod<
+    [Principal, Uint8Array | number[], number, bigint],
+    ThreepoolRailWireNext_Result_2
+  >,
+  'reconcile_liquidity_receipt_input_v1' : ActorMethod<
+    [Uint8Array | number[], number, bigint],
+    ThreepoolRailWire_Result_2
+  >,
+  'reconcile_liquidity_receipt_refund_for_v1' : ActorMethod<
+    [Principal, Uint8Array | number[], number, bigint],
+    ThreepoolRailWireNext_Result_2
+  >,
+  'recover_liquidity_receipt_for_v1' : ActorMethod<
+    [Principal, Uint8Array | number[]],
+    ThreepoolRailWireNext_Result_2
+  >,
+  'recover_liquidity_receipt_v1' : ActorMethod<
+    [Uint8Array | number[]],
+    ThreepoolRailWire_Result_2
+  >,
   'remove_authorized_burn_caller' : ActorMethod<
     [Principal],
     { 'Ok' : null } |
@@ -802,6 +1129,10 @@ export interface _SERVICE {
     [FeeCurveParams],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
+  >,
+  'set_liquidity_receipt_client' : ActorMethod<
+    [[] | [Principal]],
+    ThreepoolRailWireNextNext_Result
   >,
   'set_paused' : ActorMethod<
     [boolean],

@@ -1188,6 +1188,13 @@ pub enum Event {
         reason: String,
         timestamp: u64,
     },
+
+    /// XRPL icUSD lane: durable borrow reservations, vault exclusions and
+    /// repayment interest-accrual freezes (see `xrpl_icusd::XrplIcusdEvent`). One
+    /// wrapping variant keeps the public Event surface additive; replay applies the
+    /// sub-event through the same pure functions the live path uses.
+    #[serde(rename = "xrpl_icusd")]
+    XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent),
 }
 
 /// Durable bot proof audit transitions. These are kept in the private ordered
@@ -1222,6 +1229,7 @@ pub enum BotProofAuditEvent {
 /// adding public Event variants would break older clients of `get_events`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
+    NicpRedemptionClaimUpdated { claim: crate::nicp_redemption::NicpRedemptionClaim },
     /// Internal bot claim proof transitions share the ordered private journal
     /// so they remain replayable without expanding the public Event variant set.
     BotProofAudit { event: BotProofAuditEvent },
@@ -1325,6 +1333,7 @@ impl Event {
     // Define a method to check if the event contains vault_id
     pub fn is_vault_related(&self, filter_vault_id: &u64) -> bool {
         match self {
+            Event::XrplIcusd(e) => e.vault_id() == *filter_vault_id,
             Event::OpenVault { vault, .. } => &vault.vault_id == filter_vault_id,
             Event::CloseVault { vault_id, .. } => vault_id == filter_vault_id,
             Event::MarginTransfer { vault_id, .. } => vault_id == filter_vault_id,
@@ -1611,6 +1620,8 @@ impl Event {
             Event::ChainSettlementFailed { .. } => Some("ChainSettlementFailed"),
             Event::ChainReorgDetected { .. } => Some("ChainReorgDetected"),
             Event::ChainHotWalletLow { .. } => Some("ChainHotWalletLow"),
+            // XRPL icUSD lane bookkeeping (reservations, exclusions, accrual freezes).
+            Event::XrplIcusd(e) => Some(e.type_name()),
             // Any variant that surfaces `Admin` via `type_filter` but isn't
             // enumerated here still matches `Admin` type filters; it just
             // carries no fine-grained label.
@@ -1666,6 +1677,7 @@ impl Event {
             Event::ChainBadDebtCircuitThresholdSet { timestamp, .. } => Some(*timestamp),
             Event::ChainBadDebtCircuitTripped { timestamp, .. } => Some(*timestamp),
             Event::ChainBadDebtCircuitCleared { timestamp, .. } => Some(*timestamp),
+            Event::XrplIcusd(e) => Some(e.timestamp()),
             _ => None,
         }
     }
@@ -1677,6 +1689,11 @@ impl Event {
     pub fn collateral_token(&self, vault_lookup: &HashMap<u64, Principal>) -> Option<Principal> {
         match self {
             Event::OpenVault { vault, .. } => Some(vault.collateral_type),
+            Event::XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent::ReservationBegun {
+                collateral_type,
+                ..
+            }) => Some(*collateral_type),
+            Event::XrplIcusd(e) => vault_lookup.get(&e.vault_id()).copied(),
             Event::AddCollateralType {
                 collateral_type, ..
             }
@@ -1769,6 +1786,12 @@ impl Event {
             Event::BorrowFromVault {
                 borrowed_amount, ..
             } => Some(borrowed_amount.0),
+            Event::XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent::ReservationBegun {
+                gross_e8s, ..
+            }) => Some(*gross_e8s),
+            Event::XrplIcusd(crate::xrpl_icusd::XrplIcusdEvent::RepayCutoffBegun {
+                repay_e8s, ..
+            }) => Some(*repay_e8s),
             Event::RepayToVault { repayed_amount, .. } => Some(repayed_amount.0),
             Event::RedemptionOnVaults { icusd_amount, .. } => Some(icusd_amount.0),
             Event::ReserveRedemption { icusd_amount, .. } => Some(icusd_amount.0),
@@ -1883,6 +1906,7 @@ impl Event {
             Event::WithdrawLiquidity { caller, .. } => caller == p,
             Event::ClaimLiquidityReturns { caller, .. } => caller == p,
             Event::AdminMint { to, .. } => to == p,
+            Event::XrplIcusd(e) => e.owner().as_ref() == Some(p),
             _ => false,
         }
     }
@@ -1918,6 +1942,20 @@ fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
 
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
+        PendingPayoutEvent::NicpRedemptionClaimUpdated { claim } => {
+            for nonce in [claim.funding_nonce, claim.approval_nonce] {
+                state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
+            }
+            if let Some(release) = &claim.release {
+                state.op_nonce_counter = state.op_nonce_counter.max((release.nonce as u64).wrapping_add(1));
+            }
+            let vault_id = claim.vault_id;
+            state.nicp_redemption_claim = Some(claim);
+            state.reindex_vault_cr(vault_id);
+            state.update_total_collateral_ratio_and_mode(
+                state.last_icp_rate.unwrap_or(UsdIcp::from(Decimal::ZERO)),
+            );
+        }
         PendingPayoutEvent::BotProofAudit { event } => apply_bot_proof_audit_event(state, event),
         PendingPayoutEvent::Amm1DonationStarted { operation } => {
             state.amm1_donation_nonce = state.amm1_donation_nonce.max(operation.notify_nonce);
@@ -2484,7 +2522,7 @@ pub fn replay_with_pending_payout_events(
 }
 
 #[cfg(test)]
-fn replay_with_nonce_time(
+pub(crate) fn replay_with_nonce_time(
     events: impl Iterator<Item = Event>,
     nonce_time: impl FnMut() -> u64,
 ) -> Result<State, ReplayLogError> {
@@ -3240,6 +3278,11 @@ fn replay_with_nonce_time_and_payout_events(
             | Event::ChainReserveBurnSettled { .. }
             | Event::ChainLiquidationDeferred { .. }
             | Event::ChainHotWalletLow { .. } => {},
+            // XRPL icUSD lane: rebuild durable reservations, vault exclusions and
+            // interest-accrual freezes IN LOG ORDER (before any later AccrueInterest).
+            Event::XrplIcusd(ev) => {
+                crate::xrpl_icusd::apply_xrpl_icusd_event(&mut state, &ev);
+            },
         }
         public_event_count = public_event_count.saturating_add(1);
     }
@@ -3755,13 +3798,18 @@ pub fn record_deficit_repaid(
     timestamp: u64,
 ) {
     state.apply_deficit_repayment(amount);
-    record_event(&Event::DeficitRepaid {
-        amount,
-        source,
-        remaining_deficit: state.protocol_deficit_icusd,
-        anchor_block_index,
+    // Pinned timestamp: the callers pass the time they already captured (the
+    // production wrapper passes the IC clock), so the side log agrees with the event.
+    record_event_at(
+        &Event::DeficitRepaid {
+            amount,
+            source,
+            remaining_deficit: state.protocol_deficit_icusd,
+            anchor_block_index,
+            timestamp,
+        },
         timestamp,
-    });
+    );
 }
 
 /// Admin: tune the per-fee fraction routed to deficit repayment.
@@ -7308,5 +7356,40 @@ mod add_margin_recording_tests {
         ));
         assert_eq!(crate::storage::count_events(), events_before);
         assert_eq!(state.vault_id_to_vaults.get(&73).unwrap().collateral_amount, u64::MAX);
+    }
+}
+
+/// Persist the complete claim transition before any external continuation.
+/// The vault debt, accrued interest, owner and nICP source reference do not
+/// change. Only the separate claim now supplies collateral value and custody.
+pub fn record_nicp_redemption_claim(
+    state: &mut State,
+    claim: crate::nicp_redemption::NicpRedemptionClaim,
+) {
+    let event = PendingPayoutEvent::NicpRedemptionClaimUpdated { claim };
+    crate::storage::record_pending_payout_event(&event);
+    apply_pending_payout_event(state, event);
+}
+
+#[cfg(test)]
+mod nicp_private_claim_journal_tests {
+    use super::*;
+
+    #[test]
+    fn claim_replay_restores_custody_and_advances_nonce_without_minting() {
+        let mut state = State::default();
+        state.frozen = true;
+        let mut claim = crate::nicp_redemption::tests::fixture();
+        claim.funding_nonce = (100u128 << 64) | 7;
+        claim.approval_nonce = (100u128 << 64) | 8;
+        let event = PendingPayoutEvent::NicpRedemptionClaimUpdated { claim: claim.clone() };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&event, &mut bytes).unwrap();
+        let restored: PendingPayoutEvent = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        apply_pending_payout_event(&mut state, restored);
+        assert_eq!(state.nicp_redemption_claim, Some(claim));
+        assert_eq!(state.op_nonce_counter, 9);
+        assert_eq!(state.total_borrowed_icusd_amount(), ICUSD::new(0));
+        assert!(state.has_pending_nicp_claim(51));
     }
 }

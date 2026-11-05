@@ -215,7 +215,7 @@
             </button>
             {#if showOptOutTooltip && !showOptOutMenu}
               <div class="opt-out-tooltip">
-                Choose which collateral types you receive during liquidations. Opted-out collateral is redistributed to other depositors.
+                Choose which collateral types you receive during liquidations. Sunset collateral is manual-only; legacy positions may still opt out of its borrowing interest.
               </div>
             {/if}
             {#if showOptOutMenu}
@@ -234,7 +234,7 @@
                     {#if toggleLoading[key]}
                       <span class="mini-spinner"></span>
                     {:else}
-                      <span class="opt-out-status" class:opted-out-label={isOut}>{isOut ? 'Opted out' : 'Receiving'}</span>
+                      <span class="opt-out-status" class:opted-out-label={isOut}>{isOut ? 'Opted out' : isSunsetCollateral(collateral) ? 'Interest enabled' : 'Receiving'}</span>
                     {/if}
                   </button>
                 {/each}
@@ -251,6 +251,7 @@
               gainEntry ? gainEntry[1] : 0n,
               pendingXrpDrops,
             )}
+            {#if !isSunsetCollateral(col) || display.amount > 0n}
             <span class="gain-line" class:gain-dim={display.amount === 0n}>
               <span class="collateral-dot" style="background:{getCollateralColor(col)}"></span>
               <span class="gain-ticker">{col.symbol}</span>
@@ -262,6 +263,7 @@
                 <span class="gain-note">via XRP payout</span>
               {/if}
             </span>
+            {/if}
           {/each}
         </span>
       </div>

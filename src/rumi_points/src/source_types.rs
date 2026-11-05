@@ -441,6 +441,7 @@ pub mod balances {
     #[derive(CandidType, Deserialize, Clone, Debug)]
     pub struct ProtocolStatus {
         pub last_icp_rate: f64,
+        pub last_icp_timestamp: u64,
     }
 
     /// `rumi_3pool::get_pool_status() -> PoolStatus` (1e18-scaled virtual price).

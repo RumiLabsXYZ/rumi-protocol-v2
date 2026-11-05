@@ -253,6 +253,95 @@ mod three_usd_reserve_ingress_state_tests {
         (journal, request, tuple)
     }
 
+    fn retirement_state() -> (super::State, super::ThreeUsdReserveIngressKey, ThreeUsdReserveIngressRequest) {
+        let mut state = super::State::default();
+        let pool = Principal::from_slice(&[1]);
+        state.stability_pool_canister = Some(pool);
+        (state, super::ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 7, absorb_id: 11 }, submitted_journal().1)
+    }
+
+    fn encoded_state(state: &super::State) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(state, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn three_usd_retirement_absent_request_is_bound_durable_and_idempotent() {
+        let (mut state, key, request) = retirement_state();
+        let phase = super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap();
+        assert!(matches!(phase, ThreeUsdReserveIngressPhase::PreTransferRejected { .. }));
+        let before = encoded_state(&state);
+        assert_eq!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap(), phase);
+        assert_eq!(encoded_state(&state), before);
+        let mut restored: super::State = ciborium::de::from_reader(before.as_slice()).unwrap();
+        assert_eq!(restored.three_usd_reserve_ingress_journals[&key].request, request);
+        assert_eq!(super::retire_three_usd_reserve_ingress_in_state(&mut restored, &key, &request).unwrap(), phase);
+        for conflict in [ThreeUsdReserveIngressRequest { icusd_debt_covered_e8s: 91, ..request.clone() },
+            ThreeUsdReserveIngressRequest { three_usd_amount_e8s: 101, ..request.clone() },
+            ThreeUsdReserveIngressRequest { ledger: Principal::from_slice(&[9]), ..request.clone() }] {
+            let before = encoded_state(&restored);
+            assert!(super::retire_three_usd_reserve_ingress_in_state(&mut restored, &key, &conflict).is_err());
+            assert_eq!(encoded_state(&restored), before);
+        }
+    }
+
+    #[test]
+    fn three_usd_retirement_admission_pending_releases_only_protocol_reservation() {
+        let (mut state, key, request) = retirement_state();
+        let mut row = submitted_journal().0;
+        row.phase = ThreeUsdReserveIngressPhase::AdmissionPending;
+        row.protocol_refund_fee_reserve_e8s = 123;
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), row);
+        let mut expected: super::State = ciborium::de::from_reader(encoded_state(&state).as_slice()).unwrap();
+        let phase = super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap();
+        expected.three_usd_reserve_ingress_journals.get_mut(&key).unwrap().phase = phase;
+        expected.three_usd_reserve_ingress_journals.get_mut(&key).unwrap().protocol_refund_fee_reserve_e8s = 0;
+        assert_eq!(encoded_state(&state), encoded_state(&expected));
+    }
+
+    #[test]
+    fn three_usd_retirement_preserves_submitted_confirmed_and_wide_receipts() {
+        let (base, key, request) = retirement_state();
+        let (journal, _, tuple) = submitted_journal();
+        for phase in [journal.phase.clone(), ThreeUsdReserveIngressPhase::TransferConfirmed { tuple, block_index: 44 }] {
+            let mut state: super::State = ciborium::de::from_reader(encoded_state(&base).as_slice()).unwrap();
+            let mut row = journal.clone(); row.phase = phase.clone();
+            state.three_usd_reserve_ingress_journals.insert(key.clone(), row);
+            let before = encoded_state(&state);
+            assert_eq!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).unwrap(), phase);
+            assert_eq!(encoded_state(&state), before);
+        }
+        let mut state = base;
+        let mut row = journal; row.phase = ThreeUsdReserveIngressPhase::AdmissionPending;
+        row.confirmed_unindexable_block = Some(Nat::from(u128::MAX));
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), row);
+        let before = encoded_state(&state);
+        assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).is_err());
+        assert_eq!(encoded_state(&state), before);
+    }
+
+    #[test]
+    fn three_usd_retirement_auth_zero_and_capacity_fail_closed() {
+        let (mut state, key, request) = retirement_state();
+        for owner in [Principal::anonymous(), Principal::from_slice(&[9])] {
+            let before = encoded_state(&state);
+            let bad = super::ThreeUsdReserveIngressKey { stability_pool: owner, ..key.clone() };
+            assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &bad, &request).is_err());
+            assert_eq!(encoded_state(&state), before);
+        }
+        let zero = super::ThreeUsdReserveIngressKey { absorb_id: 0, ..key.clone() };
+        assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &zero, &request).is_err());
+        assert!(state.three_usd_reserve_ingress_journals.is_empty());
+        for id in 1..=super::MAX_THREE_USD_RESERVE_PAYOUT_JOURNALS {
+            let k = super::ThreeUsdReserveIngressKey { absorb_id: id as u64 + 100, ..key.clone() };
+            state.three_usd_reserve_ingress_journals.insert(k, submitted_journal().0);
+        }
+        let before = encoded_state(&state);
+        assert!(super::retire_three_usd_reserve_ingress_in_state(&mut state, &key, &request).is_err());
+        assert_eq!(encoded_state(&state), before);
+    }
+
     #[test]
     fn older_than_dedup_candidate_receipt_promotes_only_exact_persisted_tuple() {
         let (mut journal, request, tuple) = submitted_journal();
@@ -1808,6 +1897,21 @@ pub struct XrpLaunchGuardrailMigration {
 /// (the audit's F-01 fix). Intentionally idempotent so upgrades, replay recovery,
 /// and tests can call it without a one-shot migration flag. The debt ceiling is NOT
 /// clamped here — XRP uses a normal `debt_ceiling` like every other collateral.
+/// Key gate for native-XRP collateral activation. Normal builds: the production
+/// Schnorr key only (unchanged). The default-off `xrpl-testnet-fixture` artifact:
+/// `test_key_1` only (`network::require_collateral_key`), so the testnet fixture can
+/// activate XRP collateral and can never do so with the production key.
+pub fn xrp_collateral_key_ok(key: &str) -> bool {
+    #[cfg(feature = "xrpl-testnet-fixture")]
+    {
+        crate::chains::xrp::network::require_collateral_key(key).is_ok()
+    }
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
+    {
+        crate::chains::xrp::config::is_xrp_production_key_name(key)
+    }
+}
+
 pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMigration {
     let mut migration = XrpLaunchGuardrailMigration::default();
     let xrp_ct = xrp_collateral_principal();
@@ -1815,7 +1919,7 @@ pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMig
         return migration;
     };
 
-    if !crate::chains::xrp::config::is_xrp_production_key_name(&state.xrp_schnorr_key_name)
+    if !xrp_collateral_key_ok(&state.xrp_schnorr_key_name)
         && !matches!(
             config.status,
             CollateralStatus::Frozen | CollateralStatus::Deprecated
@@ -1867,11 +1971,16 @@ pub fn validate_xrp_launch_config_update(
     if !matches!(
         config.status,
         CollateralStatus::Frozen | CollateralStatus::Deprecated
-    ) && !crate::chains::xrp::config::is_xrp_production_key_name(configured_key)
+    ) && !xrp_collateral_key_ok(configured_key)
     {
+        let kind = if crate::chains::xrp::network::FIXTURE_BUILD {
+            "fixture"
+        } else {
+            "production"
+        };
         return Err(ProtocolError::GenericError(format!(
-            "XRP collateral cannot be activated without production Schnorr key {} (configured: {})",
-            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+            "XRP collateral cannot be activated without {kind} Schnorr key {} (configured: {})",
+            crate::chains::xrp::network::expected_collateral_key_name(),
             configured_key
         )));
     }
@@ -2159,6 +2268,180 @@ pub struct PendingMarginTransfer {
     /// older snapshots/events, preserving their historical unbounded behavior.
     #[serde(default)]
     pub min_net_collateral_raw: Option<u64>,
+}
+
+/// Payment rail selected by the stability pool for an ordinary liquidation.
+/// The rail is part of the durable request identity so an icUSD request cannot
+/// be replayed as a ckStable pull (or vice versa).
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord,
+    serde::Serialize, serde::Deserialize)]
+pub enum SpLiquidationPayment {
+    Icusd,
+    Ckusdc,
+    Ckusdt,
+}
+
+impl Default for SpLiquidationPayment {
+    fn default() -> Self { Self::Icusd }
+}
+
+/// Lifecycle of one ordinary stability-pool liquidation. A submitted phase is
+/// deliberately retained across reply loss and upgrades; retrying it reuses
+/// the exact tuple stored on the journal.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize,
+    serde::Deserialize)]
+pub enum SpLiquidationPhase {
+    Prepared,
+    PaymentSubmitted,
+    PaymentConfirmed,
+    DebtCommitted,
+    PayoutSubmitted,
+    PayoutSettled,
+    PaymentNoEffect(String),
+    PayoutNoEffect(String),
+    Cancelled,
+}
+
+impl SpLiquidationPhase {
+    pub fn blocks_vault(&self) -> bool {
+        matches!(
+            self,
+            Self::Prepared
+                | Self::PaymentSubmitted
+                | Self::PaymentConfirmed
+                | Self::DebtCommitted
+                | Self::PayoutSubmitted
+        )
+    }
+
+    pub fn terminal(&self) -> bool {
+        matches!(self, Self::PayoutSettled | Self::PaymentNoEffect(_) | Self::Cancelled)
+    }
+}
+
+/// Exact payment tuple for the incoming ICRC-2 pull. It is persisted before
+/// dispatch and remains immutable for the entire request lifetime.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize,
+    serde::Deserialize)]
+pub struct SpLiquidationPaymentTuple {
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_raw: u64,
+    pub ledger_fee_raw: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+}
+
+/// Durable ordinary SP liquidation journal. All values used after the payment
+/// await are frozen here; no continuation recomputes from a changing vault or
+/// fee cache.
+pub(crate) fn default_anonymous_principal() -> Principal {
+    Principal::anonymous()
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Serialize,
+    serde::Deserialize)]
+pub struct SpLiquidationJournal {
+    pub request_id: [u8; 32],
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub payment: SpLiquidationPayment,
+    #[serde(default)]
+    pub max_debt_e8s: u64,
+    pub max_gross_raw: u64,
+    pub collateral_type: Principal,
+    /// Immutable ICRC ledger identity resolved from the collateral config.
+    /// This is separate from `collateral_type` because legacy ICP vaults use
+    /// the anonymous principal as a synthetic type key.
+    #[serde(default = "default_anonymous_principal")]
+    pub collateral_ledger: Principal,
+    #[serde(default)]
+    pub quote_collateral_decimals: u8,
+    pub quote_debt_e8s: u64,
+    pub quote_collateral_gross_raw: u64,
+    pub quote_collateral_net_raw: u64,
+    #[serde(default)]
+    pub quote_collateral_payout_net_raw: u64,
+    pub quote_protocol_cut_raw: u64,
+    pub quote_interest_share_e8s: u64,
+    pub quote_price_e8s: u64,
+    #[serde(default)]
+    pub quote_price_usd_bits: u64,
+    /// Exact rust_decimal representation used for the frozen quote. The f64
+    /// bits above remain only as a compatibility fallback for an interrupted
+    /// pre-rail snapshot; new rows never reconstruct economics from f64.
+    #[serde(default)]
+    pub quote_price_decimal: [u8; 16],
+    #[serde(default)]
+    pub quote_payout_fee_raw: u64,
+    /// Whether `quote_payout_fee_raw` was fetched and pinned by the durable
+    /// rail. Older rows used zero as an implicit sentinel; a real zero-fee
+    /// ledger must remain zero on every replay.
+    #[serde(default)]
+    pub quote_payout_fee_known: bool,
+    pub principal_raw: u64,
+    pub surcharge_raw: u64,
+    pub gross_payment_raw: u64,
+    pub payment_tuple: SpLiquidationPaymentTuple,
+    pub phase: SpLiquidationPhase,
+    #[serde(default)]
+    pub payment_block_index: Option<u64>,
+    #[serde(default)]
+    pub payout_operation_id: Option<u128>,
+    #[serde(default)]
+    pub payout_op_nonce: Option<u128>,
+    #[serde(default)]
+    pub payout_ledger: Option<Principal>,
+    #[serde(default)]
+    pub payout_gross_raw: Option<u64>,
+    #[serde(default)]
+    pub payout_net_raw: Option<u64>,
+    #[serde(default)]
+    pub payout_fee_raw: Option<u64>,
+    #[serde(default)]
+    pub payout_memo: [u8; 16],
+    #[serde(default)]
+    pub payout_created_at_time_ns: u64,
+    #[serde(default)]
+    pub payout_block_index: Option<u64>,
+    /// A prior payment call may have committed even when its reply was lost.
+    /// Once set, a later typed ledger error cannot prove that the original
+    /// payment had no effect; retries retain this exact tuple indefinitely.
+    #[serde(default)]
+    pub payment_ambiguous: bool,
+    /// Set synchronously before the first payment await. A later typed error
+    /// after this fence cannot prove that the earlier attempt had no effect.
+    #[serde(default)]
+    pub payment_attempted: bool,
+    /// Exact treasury-fee destination and dedup identity captured with the
+    /// quote. These fields let execute retry the fee transfer after upgrade
+    /// without consulting mutable treasury configuration.
+    #[serde(default)]
+    pub protocol_fee_treasury: Option<Principal>,
+    #[serde(default)]
+    pub protocol_fee_op_nonce: Option<u128>,
+    #[serde(default)]
+    pub protocol_fee_ledger_fee_raw: Option<u64>,
+    #[serde(default)]
+    pub protocol_fee_attempted: bool,
+    #[serde(default)]
+    pub protocol_fee_block_index: Option<u64>,
+    #[serde(default)]
+    pub interest_dispatch_started: bool,
+    #[serde(default)]
+    pub post_accounting_done: bool,
+    /// Interest actually removed with the debt commit. The prepare quote is
+    /// only a preview: a harvest can change the per-vault accrued amount while
+    /// the request is waiting, so settlement must distribute this committed
+    /// value and never the stale preview.
+    #[serde(default)]
+    pub applied_interest_share_e8s: Option<u64>,
+    #[serde(default)]
+    pub created_at_ns: u64,
+    #[serde(default)]
+    pub updated_at_ns: u64,
 }
 
 /// Wave-4 ICC-007: durable refund record for `redeem_reserves` failures.
@@ -2854,6 +3137,55 @@ pub struct ThreeUsdReserveIngressJournal {
     pub confirmed_unindexable_block: Option<candid::Nat>,
 }
 
+/// Permanently fence an exact SP request that never reached ledger dispatch.
+/// Callers hold both V2 admission guards. Never infer no transfer from an
+/// absent query alone: the inserted tombstone rejects any delayed original.
+pub fn retire_three_usd_reserve_ingress_in_state(
+    state: &mut State,
+    key: &ThreeUsdReserveIngressKey,
+    request: &ThreeUsdReserveIngressRequest,
+) -> Result<ThreeUsdReserveIngressPhase, ProtocolError> {
+    if key.stability_pool == Principal::anonymous()
+        || state.stability_pool_canister != Some(key.stability_pool)
+    {
+        return Err(ProtocolError::GenericError("Caller is not the registered Stability Pool".into()));
+    }
+    if key.absorb_id == 0 || request.icusd_debt_covered_e8s == 0 || request.three_usd_amount_e8s == 0 {
+        return Err(ProtocolError::GenericError("Retirement requires a nonzero exact 3USD absorb request".into()));
+    }
+    if let Some(row) = state.three_usd_reserve_ingress_journals.get_mut(key) {
+        if &row.request != request {
+            return Err(ProtocolError::GenericError("SP absorb ID was reused with different arguments".into()));
+        }
+        if matches!(row.phase, ThreeUsdReserveIngressPhase::AdmissionPending) {
+            if row.ingress_proof_verified || row.refund.is_some()
+                || row.non_inclusion_scan.is_some() || row.confirmed_unindexable_block.is_some()
+            {
+                return Err(ProtocolError::TemporarilyUnavailable("Admission journal contains transfer evidence; retirement remains held".into()));
+            }
+            row.phase = ThreeUsdReserveIngressPhase::PreTransferRejected {
+                reason: "Exact request retired before any 3USD ledger dispatch".into(),
+            };
+            row.protocol_refund_fee_reserve_e8s = 0;
+        }
+        // Submitted, confirmed and settled money phases are authoritative.
+        // Returning their current status never releases the SP reservation.
+        return Ok(row.phase.clone());
+    }
+    if state.three_usd_reserve_ingress_journals.len() >= MAX_THREE_USD_RESERVE_PAYOUT_JOURNALS {
+        return Err(ProtocolError::TemporarilyUnavailable("3USD retirement journal capacity exhausted; no retirement fence committed".into()));
+    }
+    let phase = ThreeUsdReserveIngressPhase::PreTransferRejected {
+        reason: "Exact request retired before any 3USD ledger dispatch".into(),
+    };
+    state.three_usd_reserve_ingress_journals.insert(key.clone(), ThreeUsdReserveIngressJournal {
+        request: request.clone(), phase: phase.clone(), ingress_proof_verified: false,
+        refund: None, protocol_refund_fee_reserve_e8s: 0, non_inclusion_scan: None,
+        confirmed_unindexable_block: None,
+    });
+    Ok(phase)
+}
+
 /// Immutable ICRC-1 tuple for the single collateral leg queued by a 3USD
 /// reserve absorb. `candidate_block_index` is only the ledger-returned block
 /// locator; SP must independently read and authenticate that block.
@@ -3140,27 +3472,175 @@ thread_local! {
 // CL14: queues are keyed by (VaultId, recipient, operation_id). The visitor also
 // accepts V7/V8's integer and (VaultId, recipient) keys without collapsing rows.
 //
-// We can't use `#[serde(untagged)]` here because ciborium's untagged-enum
-// dispatch doesn't reliably distinguish a CBOR map with integer keys from one
-// with array keys when both variants are themselves maps. Instead, we drive a
-// Visitor over MapAccess and decide per-entry: each key is deserialized as
-// `EitherKey`, which ciborium handles cleanly via deserialize_any (integer vs. array).
+// Do not use `#[serde(untagged)]` here. Ciborium's buffered untagged decoding
+// asks the integer arm to deserialize a CBOR u128 as u64 before it considers
+// the tuple arm. Operation IDs are intentionally full u128 values, so an
+// ordinary liquidation payout can trap during an upgrade when it exceeds
+// u64. The explicit visitors below inspect the CBOR shape and decode integers
+// directly as u128.
+#[derive(Debug)]
+enum PendingKey {
+    Current(VaultId, Principal, u128),
+    Previous(VaultId, Principal),
+    Legacy(VaultId),
+}
+
+struct PendingKeyVisitor;
+
+struct PendingOperationIdVisitor;
+
+struct PendingOperationId(u128);
+
+fn pending_key_vault_id<E>(value: u128) -> Result<VaultId, E>
+where
+    E: serde::de::Error,
+{
+    if value > u64::MAX as u128 {
+        return Err(E::custom("pending payout vault id does not fit u64"));
+    }
+    Ok(value as VaultId)
+}
+
+fn pending_key_from_signed<E>(value: i128) -> Result<PendingKey, E>
+where
+    E: serde::de::Error,
+{
+    if value < 0 {
+        return Err(E::custom("pending payout key cannot be negative"));
+    }
+    Ok(PendingKey::Legacy(pending_key_vault_id(value as u128)?))
+}
+
+fn pending_operation_id_from_signed<E>(value: i128) -> Result<PendingOperationId, E>
+where
+    E: serde::de::Error,
+{
+    if value < 0 {
+        return Err(E::custom("pending payout operation id cannot be negative"));
+    }
+    Ok(PendingOperationId(value as u128))
+}
+
+impl<'de> serde::de::Visitor<'de> for PendingOperationIdVisitor {
+    type Value = PendingOperationId;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a non-negative pending payout operation id")
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingOperationId(value as u128))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingOperationId(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_operation_id_from_signed(value as i128)
+    }
+
+    fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_operation_id_from_signed(value)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PendingOperationId {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        d.deserialize_any(PendingOperationIdVisitor)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for PendingKeyVisitor {
+    type Value = PendingKey;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a pending payout key (legacy u64, V7/V8 pair, or CL14 triple)")
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingKey::Legacy(value))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PendingKey::Legacy(pending_key_vault_id(value)?))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_key_from_signed(value as i128)
+    }
+
+    fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        pending_key_from_signed(value)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let vault_id = seq
+            .next_element::<VaultId>()?
+            .ok_or_else(|| serde::de::Error::custom("pending payout key is missing vault id"))?;
+        let owner = seq
+            .next_element::<Principal>()?
+            .ok_or_else(|| serde::de::Error::custom("pending payout key is missing owner"))?;
+        let operation_id = seq.next_element::<PendingOperationId>()?;
+        match operation_id {
+            Some(PendingOperationId(operation_id)) => {
+                if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "pending payout key has more than three elements",
+                    ));
+                }
+                Ok(PendingKey::Current(vault_id, owner, operation_id))
+            }
+            None => Ok(PendingKey::Previous(vault_id, owner)),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PendingKey {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        d.deserialize_any(PendingKeyVisitor)
+    }
+}
+
 fn deserialize_pending_keyed<'de, D>(
     d: D,
 ) -> Result<BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use std::fmt;
-
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum EitherKey {
-        Current((VaultId, Principal, u128)),
-        Previous((VaultId, Principal)),
-        Legacy(VaultId),
-    }
-
     struct V;
     impl<'de> serde::de::Visitor<'de> for V {
         type Value = BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>;
@@ -3174,10 +3654,10 @@ where
             A: serde::de::MapAccess<'de>,
         {
             let mut out = BTreeMap::new();
-            while let Some(key) = map.next_key::<EitherKey>()? {
+            while let Some(key) = map.next_key::<PendingKey>()? {
                 let value: PendingMarginTransfer = map.next_value()?;
                 let final_key = match key {
-                    EitherKey::Current((vault_id, owner, operation_id)) => (
+                    PendingKey::Current(vault_id, owner, operation_id) => (
                         vault_id,
                         owner,
                         if operation_id == 0 {
@@ -3186,10 +3666,14 @@ where
                             operation_id
                         },
                     ),
-                    EitherKey::Previous((vault_id, owner)) => (vault_id, owner, value.operation_id),
-                    EitherKey::Legacy(vault_id) => (vault_id, value.owner, value.operation_id),
+                    PendingKey::Previous(vault_id, owner) => (vault_id, owner, value.operation_id),
+                    PendingKey::Legacy(vault_id) => (vault_id, value.owner, value.operation_id),
                 };
-                out.insert(final_key, value);
+                if out.insert(final_key, value).is_some() {
+                    return Err(serde::de::Error::custom(
+                        "duplicate pending payout key after legacy normalization",
+                    ));
+                }
             }
             Ok(out)
         }
@@ -3228,6 +3712,11 @@ pub struct State {
     #[serde(deserialize_with = "deserialize_pending_keyed")]
     pub pending_excess_transfers: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Caller-owned ordinary stability-pool liquidation journals. Rows are
+    /// retained until the incoming payment and collateral payout both have
+    /// definitive receipts or the request is explicitly cancelled/no-effect.
+    #[serde(default)]
+    pub sp_liquidation_journals: BTreeMap<[u8; 32], SpLiquidationJournal>,
     /// Owner-facing index over all durable payout receipts, keyed by stable ID.
     #[serde(default)]
     pub pending_payout_index: BTreeMap<u128, PendingPayoutLocator>,
@@ -3415,6 +3904,10 @@ pub struct State {
     pub price_pusher_allowed: std::collections::BTreeSet<(u32, String)>,
     pub next_available_vault_id: u64,
     pub total_collateral_ratio: Ratio,
+    /// Dedicated, protocol-controlled nICP redemption. Its nICP vault amount
+    /// is historical only; claim valuation and payout fences take precedence.
+    #[serde(default)]
+    pub nicp_redemption_claim: Option<crate::nicp_redemption::NicpRedemptionClaim>,
     pub current_base_rate: Ratio,
     pub last_redemption_time: u64,
     pub liquidity_pool: BTreeMap<Principal, ICUSD>,
@@ -3552,6 +4045,15 @@ pub struct State {
     /// Caller-funded receipts and refundable liabilities, independent of sponsorship.
     #[serde(default)]
     pub cksol_paid_sequence: u64,
+    #[serde(default)]
+    pub cksol_icp_sequence: u64,
+    /// Epoch increments on upgrade to prevent stale guards clearing new locks.
+    #[serde(default)]
+    pub cksol_icp_upgrade_epoch: u64,
+    #[serde(default)]
+    pub cksol_icp_reserve: u64,
+    #[serde(default)]
+    pub cksol_icp_payments: BTreeMap<Principal, crate::cksol_icp_paid::Journal>,
     #[serde(default)]
     pub cksol_paid_payments: BTreeMap<Principal, crate::cksol_paid::CkSolPayment>,
     /// One bounded attempt per owner. Rows are retained until the upstream
@@ -4068,6 +4570,12 @@ pub struct State {
     /// snapshot that lacks this key decodes with the field defaulting to 0.
     #[serde(default)]
     pub chain_vault_id_counter: u64,
+
+    /// XRPL icUSD lane (Task 3): configuration (DISABLED by default), operations,
+    /// durable reservations/exclusions, issuer sequencer state. `#[serde(default)]`
+    /// so a pre-lane snapshot decodes to a disabled, empty lane.
+    #[serde(default)]
+    pub xrpl_icusd: crate::xrpl_icusd::XrplIcusdState,
 }
 
 /// Upgrade-safe gate between the non-journaled V1 reserve path and V2's
@@ -4201,6 +4709,7 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
             payout_history_scan_window_ns: 0,
@@ -4239,6 +4748,7 @@ impl Default for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             next_available_vault_id: 1,
             total_collateral_ratio: Ratio::from(Decimal::MAX),
+            nicp_redemption_claim: None,
             current_base_rate: Ratio::from(Decimal::ZERO),
             last_redemption_time: 0,
             liquidity_pool: BTreeMap::new(),
@@ -4291,6 +4801,10 @@ impl Default for State {
             collateral_to_vault_ids: BTreeMap::new(),
             cksol_relay_budget: 0,
             cksol_paid_sequence: 0,
+            cksol_icp_sequence: 0,
+            cksol_icp_upgrade_epoch: 0,
+            cksol_icp_reserve: 0,
+            cksol_icp_payments: BTreeMap::new(),
             cksol_paid_payments: BTreeMap::new(),
             cksol_relay_attempts: BTreeMap::new(),
             cksol_relay_in_flight: BTreeSet::new(),
@@ -4384,6 +4898,7 @@ impl Default for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            xrpl_icusd: Default::default(),
         }
     }
 }
@@ -4400,6 +4915,7 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
             payout_history_scan_window_ns: 0,
@@ -4438,6 +4954,7 @@ impl From<InitArg> for State {
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
+            nicp_redemption_claim: None,
             last_icp_timestamp: None,
             last_icp_rate: None,
             next_available_vault_id: 1,
@@ -4540,6 +5057,10 @@ impl From<InitArg> for State {
 
             cksol_relay_budget: 0,
             cksol_paid_sequence: 0,
+            cksol_icp_sequence: 0,
+            cksol_icp_upgrade_epoch: 0,
+            cksol_icp_reserve: 0,
+            cksol_icp_payments: BTreeMap::new(),
             cksol_paid_payments: BTreeMap::new(),
             cksol_relay_attempts: BTreeMap::new(),
             cksol_relay_in_flight: BTreeSet::new(),
@@ -4704,6 +5225,7 @@ impl From<InitArg> for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            xrpl_icusd: Default::default(),
         }
     }
 }
@@ -5455,6 +5977,16 @@ impl State {
             .any(|journal| journal.vault_id == vault_id)
     }
 
+    /// Durable ordinary SP liquidation reservations are considered vault
+    /// locks by synchronous redemption scans as well as by async guards. This
+    /// state-local helper avoids consulting the transient thread-local guard
+    /// while a redemption simulation already holds an immutable State borrow.
+    pub fn has_unresolved_sp_liquidation_for_vault(&self, vault_id: u64) -> bool {
+        self.sp_liquidation_journals
+            .values()
+            .any(|journal| journal.vault_id == vault_id && journal.phase.blocks_vault())
+    }
+
     pub fn vault_operation_status(&self, owner: Principal) -> VaultOperationStatus {
         VaultOperationStatus {
             acknowledged_through: self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0),
@@ -5819,6 +6351,37 @@ impl State {
             .sum()
     }
 
+    /// A claim remains fenced after settlement while its ICP is held in the
+    /// dedicated claim account. It is never spendable as ordinary nICP.
+    pub fn has_pending_nicp_claim(&self, vault_id: u64) -> bool {
+        self.nicp_redemption_claim.as_ref().is_some_and(|claim| {
+            claim.vault_id == vault_id && claim.blocks_vault()
+        })
+    }
+
+    /// Fixed ICP receivable, priced in USD with the existing nICP haircut.
+    /// Some(0) is deliberately fail-closed when a retained claim lacks usable
+    /// terms or a price: do not fall back to the burned nICP's live value.
+    pub fn nicp_claim_collateral_value(&self, vault: &Vault) -> Option<ICUSD> {
+        let claim = self.nicp_redemption_claim.as_ref()
+            .filter(|claim| claim.vault_id == vault.vault_id && claim.blocks_vault())?;
+        if claim.release.is_some() { return Some(ICUSD::new(0)); }
+        let value = (|| {
+            let config = self.get_collateral_config(&vault.collateral_type)?;
+            let haircut = match &config.price_source {
+                PriceSource::LstWrapped { haircut, .. } if haircut.is_finite()
+                    && (0.0..=1.0).contains(haircut) => Decimal::from_f64(*haircut)?,
+                _ => return None,
+            };
+            let price = self.get_collateral_price_decimal(&self.icp_ledger_principal)?;
+            if price <= Decimal::ZERO { return None; }
+            Some(crate::numeric::collateral_usd_value(
+                claim.fixed_icp_amount_e8s(), price * (Decimal::ONE - haircut), 8,
+            ))
+        })();
+        Some(value.unwrap_or(ICUSD::new(0)))
+    }
+
     /// Deprecated: use `total_collateral_for(&icp_ledger)` for ICP specifically,
     /// or sum across all collateral types for cross-collateral totals.
     /// Kept for backward compat with dashboard and metrics endpoints.
@@ -5836,6 +6399,11 @@ impl State {
         // against legacy vaults with Principal::anonymous() collateral_type.
         let mut total_value = ICUSD::new(0);
         for vault in self.vault_id_to_vaults.values() {
+            if let Some(value) = self.nicp_claim_collateral_value(vault) {
+                total_value = crate::numeric::checked_icusd_add(total_value, value)
+                    .unwrap_or(ICUSD::new(u64::MAX));
+                continue;
+            }
             if let Some(config) = self.get_collateral_config(&vault.collateral_type) {
                 if let Some(price) = config.last_price {
                     let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
@@ -6035,9 +6603,11 @@ impl State {
 
         for vault in self.vault_id_to_vaults.values() {
             if vault.borrowed_icusd_amount == 0
-                || vault.bot_processing
+                || self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -6524,6 +7094,12 @@ impl State {
     /// Re-keying inside passive accrual would be O(N log N) per timer tick for
     /// zero ordering benefit at the band tolerance scale (default 1% CR).
     pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
+        // XRPL icUSD lane: while a repayment burn is unresolved the vault's accrual
+        // clock is frozen at the saved settlement cutoff (every accrual path, including
+        // `Event::AccrueInterest` replay, defers this vault; others continue normally).
+        if self.xrpl_icusd.accrual_frozen_vaults.contains(&vault_id) {
+            return;
+        }
         // Phase 1: compute rate (immutable borrow of self)
         let rate_and_elapsed = {
             let s: &State = &*self;
@@ -6591,7 +7167,11 @@ impl State {
                 .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
             s.vault_id_to_vaults
                 .iter()
-                .filter(|(_, v)| v.borrowed_icusd_amount.0 > 0 && v.last_accrual_time < now_nanos)
+                .filter(|(id, v)| {
+                    v.borrowed_icusd_amount.0 > 0
+                        && v.last_accrual_time < now_nanos
+                        && !s.xrpl_icusd.accrual_frozen_vaults.contains(id)
+                })
                 .map(|(id, vault)| {
                     let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
                     let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
@@ -6636,7 +7216,13 @@ impl State {
     /// will re-accumulate before the next harvest). `borrowed_icusd_amount` is unchanged
     /// so user debt is unaffected.
     pub fn harvest_accrued_interest(&mut self) {
-        for vault in self.vault_id_to_vaults.values_mut() {
+        for (vault_id, vault) in self.vault_id_to_vaults.iter_mut() {
+            // XRPL icUSD lane: the accrued allocation of a vault with an unresolved
+            // repayment burn is part of the saved cutoff snapshot; harvesting it now
+            // would let the settlement distribute the same interest twice.
+            if self.xrpl_icusd.accrual_frozen_vaults.contains(vault_id) {
+                continue;
+            }
             let interest = vault.accrued_interest.to_u64();
             if interest > 0 {
                 *self
@@ -6878,6 +7464,7 @@ impl State {
             Some(vault_ids) => vault_ids
                 .iter()
                 .filter_map(|id| self.vault_id_to_vaults.get(id))
+                .filter(|vault| !self.has_pending_nicp_claim(vault.vault_id))
                 .map(|v| v.collateral_amount)
                 .sum(),
             None => 0,
@@ -6888,7 +7475,7 @@ impl State {
     /// Returns ICUSD value in e8s.
     pub fn total_collateral_value_for(&self, ct: &CollateralType) -> ICUSD {
         let raw_amount = self.total_collateral_for(ct);
-        if let Some(config) = self.collateral_configs.get(ct) {
+        let liquid_value = if let Some(config) = self.collateral_configs.get(ct) {
             if let Some(price) = config.last_price {
                 let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
                 crate::numeric::collateral_usd_value(raw_amount, price_dec, config.decimals)
@@ -6897,7 +7484,14 @@ impl State {
             }
         } else {
             ICUSD::new(0)
-        }
+        };
+        let claim_value = self.nicp_redemption_claim.as_ref()
+            .and_then(|claim| self.vault_id_to_vaults.get(&claim.vault_id))
+            .filter(|vault| &vault.collateral_type == ct)
+            .and_then(|vault| self.nicp_claim_collateral_value(vault))
+            .unwrap_or(ICUSD::new(0));
+        crate::numeric::checked_icusd_add(liquid_value, claim_value)
+            .unwrap_or(ICUSD::new(u64::MAX))
     }
 
     /// Whether a wind-down collateral has fully settled and must no longer be
@@ -7383,7 +7977,10 @@ impl State {
                     None => continue, // index drift — ignore
                 };
                 visited += 1;
-                if vault.bot_processing {
+                if self.has_pending_nicp_claim(vault.vault_id)
+                    || vault.bot_processing
+                    || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
+                {
                     continue;
                 }
                 if compute_collateral_ratio(vault, rate, self)
@@ -7622,22 +8219,11 @@ impl State {
                 // clamp instead of asserting so any residual drift degrades
                 // to a smaller applied repayment, never a trap-after-pull.
                 let repayed_amount = repayed_amount.min(vault.borrowed_icusd_amount);
-                let interest_share =
-                    if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                        let share = crate::numeric::checked_proportional_amount(
-                            repayed_amount.0,
-                            vault.borrowed_icusd_amount.0,
-                            vault.accrued_interest.0,
-                        )
-                        .unwrap_or(0);
-                        // INT-001: also cap by `repayed_amount` so the saturating
-                        // subtraction below cannot lose principal silently. The
-                        // deduct-side clamp keeps `accrued <= borrowed`, but defense
-                        // in depth here pins the property even on legacy state.
-                        ICUSD::new(share.min(vault.accrued_interest.0).min(repayed_amount.0))
-                    } else {
-                        ICUSD::new(0)
-                    };
+                let interest_share = ICUSD::new(proportional_repay_interest_share(
+                    repayed_amount.0,
+                    vault.borrowed_icusd_amount.0,
+                    vault.accrued_interest.0,
+                ));
                 // INT-001: saturating subtraction so a stale `accrued > borrowed`
                 // state cannot panic the canister via `Token::Sub`. With the
                 // `.min(repayed_amount)` cap above this can never under-flow
@@ -8309,9 +8895,11 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing
+            if self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -8551,9 +9139,11 @@ impl State {
             // Replay stays exact because `RedemptionOnVaults` replay applies
             // the event's stored `vault_redemptions` instead of re-running
             // this scan (see `apply_vault_redemptions`).
-            if vault.bot_processing
+            if self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -8742,9 +9332,11 @@ impl State {
                 continue;
             };
             if vault.borrowed_icusd_amount == 0
-                || vault.bot_processing
+                || self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -8882,9 +9474,11 @@ impl State {
             if vault.borrowed_icusd_amount == 0 {
                 continue;
             }
-            if vault.bot_processing
+            if self.has_pending_nicp_claim(vault.vault_id) || vault.bot_processing
                 || self.has_unresolved_push_sweep_for_vault(vault.vault_id)
+                || self.has_unresolved_sp_liquidation_for_vault(vault.vault_id)
                 || crate::guard::is_vault_liquidating(vault.vault_id)
+                || crate::xrpl_icusd::xrpl_vault_excluded(self, vault.vault_id)
             {
                 continue;
             }
@@ -9798,6 +10392,48 @@ pub fn has_pending_borrow_mint(vault_id: u64) -> bool {
             .borrow()
             .as_ref()
             .is_some_and(|s| s.pending_borrow_mints.contains_key(&vault_id))
+    })
+}
+
+/// Interest portion of a repayment: proportional to how much of the vault's debt is
+/// accrued interest. The ONE formula shared by the legacy `repay_to_vault` and the
+/// XRPL lane's non-mutating cutoff snapshot.
+pub fn proportional_repay_interest_share(repay: u64, debt: u64, accrued: u64) -> u64 {
+    if accrued > 0 && debt > 0 {
+        let share = crate::numeric::checked_proportional_amount(repay, debt, accrued).unwrap_or(0);
+        // INT-001: also cap by `repay` so the saturating subtraction in the caller
+        // cannot lose principal silently. The deduct-side clamp keeps
+        // `accrued <= borrowed`, but defense in depth pins the property on legacy state.
+        share.min(accrued).min(repay)
+    } else {
+        0
+    }
+}
+
+/// Safe pre-initialization probe: a durable XRPL icUSD operation excludes the vault
+/// from every conflicting mutation (see `xrpl_icusd::xrpl_vault_excluded`).
+pub fn has_xrpl_vault_exclusion(vault_id: u64) -> bool {
+    __STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| crate::xrpl_icusd::xrpl_vault_excluded(s, vault_id))
+    })
+}
+
+/// Durable XRPL borrow reservations `(for collateral, total)`; `(0, 0)` before init.
+pub fn xrpl_durable_reserved(collateral: Principal) -> (u64, u64) {
+    __STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map(|s| {
+                (
+                    s.xrpl_icusd.durable_reserved_for(collateral),
+                    s.xrpl_icusd.durable_reserved_total(),
+                )
+            })
+            .unwrap_or((0, 0))
     })
 }
 
@@ -12620,6 +13256,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     fn xrp_launch_guardrails_freeze_non_production_key_without_clamping_ceiling() {
         let mut state = test_state();
         let xrp = xrp_collateral_principal();
@@ -12664,6 +13301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
     fn xrp_launch_config_update_allows_any_ceiling_but_keeps_key_gate() {
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
@@ -12690,6 +13328,80 @@ mod tests {
             ),
             Err(ProtocolError::GenericError(_))
         ));
+    }
+
+    /// Fixture build: `test_key_1` activates XRP collateral (no freeze, update
+    /// accepted) and the production key is rejected, so the testnet fixture can never
+    /// activate collateral with `key_1`.
+    #[test]
+    #[cfg(feature = "xrpl-testnet-fixture")]
+    fn xrp_fixture_build_activates_with_test_key_and_refuses_production_key() {
+        let mut state = test_state();
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.status = CollateralStatus::Active;
+        state.collateral_configs.insert(xrp, cfg.clone());
+        state.xrp_schnorr_key_name =
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME.to_string();
+        let migration = enforce_xrp_launch_guardrails(&mut state);
+        assert_eq!(migration.previous_status, None, "test_key_1 must not freeze the fixture");
+        assert_eq!(state.collateral_configs[&xrp].status, CollateralStatus::Active);
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
+        )
+        .is_ok());
+        // The production key is refused (and a state on it is frozen) in the fixture.
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+        )
+        .is_err());
+        state.xrp_schnorr_key_name =
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME.to_string();
+        assert_eq!(
+            enforce_xrp_launch_guardrails(&mut state).previous_status,
+            Some(CollateralStatus::Active)
+        );
+    }
+
+    /// Normal build: the original behaviour, byte for byte: only `key_1` activates.
+    #[test]
+    #[cfg(not(feature = "xrpl-testnet-fixture"))]
+    fn xrp_normal_build_key_gate_is_production_only() {
+        assert!(xrp_collateral_key_ok(
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME
+        ));
+        assert!(!xrp_collateral_key_ok(
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME
+        ));
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.status = CollateralStatus::Active;
+        let err = validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
+        )
+        .unwrap_err();
+        match err {
+            ProtocolError::GenericError(m) => assert_eq!(
+                m,
+                "XRP collateral cannot be activated without production Schnorr key key_1 (configured: test_key_1)",
+                "the normal-build message is unchanged"
+            ),
+            other => panic!("unexpected error {other:?}"),
+        }
     }
 
     #[test]
@@ -13574,6 +14286,207 @@ mod tests {
         assert_eq!(key, (12, owner, 0));
         assert_eq!(value.op_nonce, 9001);
         assert_eq!(value.retry_count, 60);
+    }
+
+    fn pending_payout_test_row(owner: Principal, operation_id: u128) -> PendingMarginTransfer {
+        PendingMarginTransfer {
+            owner,
+            margin: ICP::new(500),
+            collateral_type: Principal::anonymous(),
+            retry_count: 2,
+            op_nonce: operation_id,
+            vault_id: 12,
+            operation_id,
+            payout_kind: PendingPayoutKind::Margin,
+            ledger: None,
+            transfer_amount_raw: None,
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 0,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        }
+    }
+
+    fn pending_sp_journal_test_row(
+        request_id: [u8; 32],
+        phase: SpLiquidationPhase,
+    ) -> SpLiquidationJournal {
+        use icrc_ledger_types::icrc1::account::Account;
+
+        let caller = Principal::from_slice(&[33]);
+        let ledger = Principal::from_slice(&[34]);
+        let account = |owner| Account { owner, subaccount: None };
+        let operation_id = (1_u128 << 100) + 91;
+        SpLiquidationJournal {
+            request_id,
+            caller,
+            vault_id: 12,
+            payment: SpLiquidationPayment::Icusd,
+            max_debt_e8s: 900,
+            max_gross_raw: 1_000,
+            collateral_type: Principal::anonymous(),
+            collateral_ledger: ledger,
+            quote_collateral_decimals: 8,
+            quote_debt_e8s: 800,
+            quote_collateral_gross_raw: 700,
+            quote_collateral_net_raw: 690,
+            quote_collateral_payout_net_raw: 680,
+            quote_protocol_cut_raw: 20,
+            quote_interest_share_e8s: 10,
+            quote_price_e8s: 5_000_000,
+            quote_price_usd_bits: 5.0_f64.to_bits(),
+            quote_price_decimal: [7; 16],
+            quote_payout_fee_raw: 10,
+            quote_payout_fee_known: true,
+            principal_raw: 800,
+            surcharge_raw: 8,
+            gross_payment_raw: 808,
+            payment_tuple: SpLiquidationPaymentTuple {
+                ledger,
+                source: account(caller),
+                destination: account(Principal::from_slice(&[35])),
+                amount_raw: 808,
+                ledger_fee_raw: 10,
+                memo: [8; 16],
+                created_at_time_ns: 9,
+                op_nonce: operation_id,
+            },
+            phase,
+            payment_block_index: Some(41),
+            payout_operation_id: Some(operation_id),
+            payout_op_nonce: Some(operation_id + 1),
+            payout_ledger: Some(ledger),
+            payout_gross_raw: Some(700),
+            payout_net_raw: Some(680),
+            payout_fee_raw: Some(10),
+            payout_memo: [9; 16],
+            payout_created_at_time_ns: 10,
+            payout_block_index: Some(42),
+            payment_ambiguous: false,
+            payment_attempted: true,
+            protocol_fee_treasury: Some(Principal::from_slice(&[36])),
+            protocol_fee_op_nonce: Some(operation_id + 2),
+            protocol_fee_ledger_fee_raw: Some(10),
+            protocol_fee_attempted: true,
+            protocol_fee_block_index: Some(43),
+            interest_dispatch_started: true,
+            post_accounting_done: false,
+            applied_interest_share_e8s: Some(10),
+            created_at_ns: 11,
+            updated_at_ns: 12,
+        }
+    }
+
+    #[test]
+    fn full_state_roundtrip_preserves_large_pending_key_and_sp_journal_phases() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[37]);
+        let operation_id = 29_892_980_702_760_322_383_038_576_878_241_710_092_u128;
+        state.pending_margin_transfers.insert(
+            (12, owner, operation_id),
+            pending_payout_test_row(owner, operation_id),
+        );
+        state
+            .sp_liquidation_journals
+            .insert(
+                [55; 32],
+                pending_sp_journal_test_row([55; 32], SpLiquidationPhase::DebtCommitted),
+            );
+        state
+            .sp_liquidation_journals
+            .insert(
+                [56; 32],
+                pending_sp_journal_test_row([56; 32], SpLiquidationPhase::PayoutSubmitted),
+            );
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let restored: State = ciborium::de::from_reader(encoded.as_slice())
+            .expect("full state with a high-bit payout operation id must decode");
+
+        assert_eq!(
+            restored
+                .pending_margin_transfers
+                .get(&(12, owner, operation_id))
+                .unwrap()
+                .operation_id,
+            operation_id
+        );
+        assert_eq!(
+            restored.sp_liquidation_journals[&[55; 32]].phase,
+            SpLiquidationPhase::DebtCommitted
+        );
+        assert_eq!(
+            restored.sp_liquidation_journals[&[56; 32]].phase,
+            SpLiquidationPhase::PayoutSubmitted
+        );
+    }
+
+    #[test]
+    fn pending_payout_legacy_integer_keys_decode_without_u128_buffering() {
+        #[derive(serde::Serialize)]
+        struct LegacyState {
+            pending: BTreeMap<VaultId, PendingMarginTransfer>,
+        }
+        #[derive(serde::Deserialize)]
+        struct CurrentState {
+            #[serde(deserialize_with = "deserialize_pending_keyed")]
+            pending: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
+        }
+
+        let owner = Principal::from_slice(&[38]);
+        let legacy = LegacyState {
+            pending: BTreeMap::from([(12, pending_payout_test_row(owner, 901))]),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        let restored: CurrentState = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.pending.len(), 1);
+        assert_eq!(
+            restored.pending.keys().next().copied(),
+            Some((12, owner, 901))
+        );
+    }
+
+    #[test]
+    fn pending_payout_key_conflicts_fail_closed_instead_of_collapsing_rows() {
+        #[derive(serde::Deserialize)]
+        struct CurrentState {
+            #[serde(deserialize_with = "deserialize_pending_keyed")]
+            pending: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
+        }
+
+        fn value<T: serde::Serialize>(item: &T) -> ciborium::Value {
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(item, &mut bytes).unwrap();
+            ciborium::de::from_reader(bytes.as_slice()).unwrap()
+        }
+
+        let owner = Principal::from_slice(&[39]);
+        let row = pending_payout_test_row(owner, 902);
+        let pending = ciborium::Value::Map(vec![
+            (value(&(12_u64, owner)), value(&row)),
+            (value(&(12_u64, owner, 902_u128)), value(&row)),
+        ]);
+        let state = ciborium::Value::Map(vec![(
+            ciborium::Value::Text("pending".to_string()),
+            pending,
+        )]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let decoded: Result<CurrentState, _> = ciborium::de::from_reader(bytes.as_slice());
+        assert!(
+            decoded.is_err(),
+            "legacy/current aliases for one payout key must not silently replace a row"
+        );
     }
 
     #[test]
@@ -15281,5 +16194,145 @@ mod add_margin_checked_transition_tests {
             Err(ProtocolError::GenericError(_))
         ));
         assert_eq!(state.vault_id_to_vaults.get(&41).unwrap().collateral_amount, u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod nicp_claim_integration_tests {
+    use super::*;
+    use crate::guard::VaultLiquidationGuard;
+    use crate::nicp_redemption::{tests::fixture, ClaimStage};
+    use crate::vault::CandidVault;
+
+    fn setup() -> State {
+        let icp = Principal::from_slice(&[2]);
+        let nicp = Principal::from_slice(&[3]);
+        let mut s = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(), icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: icp, fee_e8s: 0, developer_principal: Principal::anonymous(),
+            treasury_principal: None, stability_pool_principal: None,
+            ckusdt_ledger_principal: None, ckusdc_ledger_principal: None,
+        });
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(2.0);
+        let mut config = s.collateral_configs[&icp].clone();
+        config.ledger_canister_id = nicp;
+        config.last_price = Some(2.6);
+        config.interest_rate_apr = Ratio::from_f64(0.08);
+        config.price_source = PriceSource::LstWrapped {
+            base_asset: "ICP".into(), base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".into(), quote_asset_class: XrcAssetClass::FiatCurrency,
+            rate_canister_id: Principal::from_slice(&[4]), rate_method: "get_info".into(), haircut: 0.1,
+        };
+        s.collateral_configs.insert(nicp, config);
+        s.vault_id_to_vaults.insert(51, Vault {
+            vault_id: 51, owner: Principal::from_slice(&[1]), collateral_type: nicp,
+            collateral_amount: 150_000_000_000, borrowed_icusd_amount: ICUSD::new(290_000_000_000),
+            last_accrual_time: 1, accrued_interest: ICUSD::new(0), bot_processing: false,
+        });
+        let mut claim = fixture();
+        claim.icp_due_e8s = 190_000_000_000;
+        s.nicp_redemption_claim = Some(claim);
+        s
+    }
+
+    #[test]
+    fn fixed_claim_value_tracks_icp_and_haircut_without_phantom_nicp() {
+        let mut s = setup();
+        let nicp = s.vault_id_to_vaults[&51].collateral_type;
+        let rate = UsdIcp::from(dec!(2));
+        let expected = ICUSD::new(342_000_000_000);
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(expected));
+        assert_eq!(s.total_collateral_for(&nicp), 0);
+        assert_eq!(s.total_collateral_value_for(&nicp), expected);
+        assert_eq!(s.total_collateral_value_for(&s.icp_ledger_principal), ICUSD::new(0));
+        assert_eq!(s.total_borrowed_icusd_amount(), ICUSD::new(290_000_000_000));
+        assert_eq!(s.compute_total_collateral_ratio(rate), expected / ICUSD::new(290_000_000_000));
+        s.collateral_configs.get_mut(&nicp).unwrap().last_price = Some(100.0);
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(expected));
+        s.collateral_configs.get_mut(&s.icp_ledger_principal).unwrap().last_price = Some(1.0);
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(ICUSD::new(171_000_000_000)));
+        s.collateral_configs.get_mut(&s.icp_ledger_principal).unwrap().last_price = None;
+        assert_eq!(s.nicp_claim_collateral_value(&s.vault_id_to_vaults[&51]), Some(ICUSD::new(0)));
+    }
+
+    #[test]
+    fn submitted_release_is_never_counted_as_backing() {
+        let mut s = setup();
+        let claim = s.nicp_redemption_claim.as_mut().unwrap();
+        claim.release = Some(crate::nicp_redemption::ClaimRelease {
+            nonce: 42, fee_e8s: 10_000, amount_e8s: 100_000, block: None,
+        });
+        let vault = s.vault_id_to_vaults[&51].clone();
+        assert_eq!(s.nicp_claim_collateral_value(&vault), Some(ICUSD::new(0)));
+        assert!(s.has_pending_nicp_claim(51));
+        s.nicp_redemption_claim.as_mut().unwrap().release.as_mut().unwrap().block = Some(99);
+        assert_eq!(s.nicp_claim_collateral_value(&vault), Some(ICUSD::new(0)));
+    }
+
+    #[test]
+    fn claim_retains_nicp_interest_and_debt_even_after_full_repayment() {
+        let mut s = setup();
+        let original = s.vault_id_to_vaults[&51].clone();
+        let config = s.collateral_configs[&original.collateral_type].clone();
+        let cr = crate::compute_collateral_ratio(&original, UsdIcp::from(dec!(2)), &s);
+        let rate = s.get_dynamic_interest_rate_for(&original.collateral_type, cr);
+        let expected = (Decimal::from(original.borrowed_icusd_amount.to_u64()) * (Decimal::ONE + rate.0)).ceil().to_u64().unwrap();
+        s.accrue_single_vault(51, 1 + crate::numeric::NANOS_PER_YEAR);
+        assert_eq!(s.vault_id_to_vaults[&51].borrowed_icusd_amount.to_u64(), expected);
+        assert_eq!(s.vault_id_to_vaults[&51].collateral_type, original.collateral_type);
+        assert_eq!(s.collateral_configs[&original.collateral_type], config);
+        s.repay_to_vault(51, ICUSD::new(expected));
+        assert_eq!(s.total_borrowed_icusd_amount(), ICUSD::new(0));
+        assert!(s.has_pending_nicp_claim(51));
+        assert!(s.vault_id_to_vaults.contains_key(&51));
+    }
+
+    #[test]
+    fn claim_is_not_redemption_or_liquidation_inventory_and_public_projection_is_explicit() {
+        let mut s = setup();
+        let vault = s.vault_id_to_vaults[&51].clone();
+        assert!(crate::stability_pool_liquidation_candidate(&s, 51).is_none());
+        assert_eq!(s.total_redeemable_debt_for(&vault.collateral_type), ICUSD::new(0));
+        assert!(s.redemption_runs().is_empty());
+        let public = CandidVault::from_state(vault.clone(), &s);
+        assert_eq!(public.collateral_amount, 0);
+        assert_eq!(public.icp_margin_amount, 0);
+        assert!(public.nicp_redemption_claim.is_some());
+        let claim = s.nicp_redemption_claim.as_mut().unwrap();
+        claim.stage = ClaimStage::Settled;
+        claim.received_icp_e8s = Some(180_000_000_000);
+        assert!(s.has_pending_nicp_claim(51));
+        assert_eq!(s.nicp_claim_collateral_value(&vault), Some(ICUSD::new(324_000_000_000)));
+    }
+
+    #[test]
+    fn claim_guard_allows_only_specialized_paths_and_still_serializes() {
+        replace_state(setup());
+        assert!(VaultLiquidationGuard::new(51).is_err());
+        assert!(VaultLiquidationGuard::new_for_borrow_retry(51).is_err());
+        let repay = VaultLiquidationGuard::new_for_nicp_repayment(51).unwrap();
+        assert!(VaultLiquidationGuard::new_for_nicp_claim(51).is_err());
+        drop(repay);
+        let migrate = VaultLiquidationGuard::new_for_nicp_claim(51).unwrap();
+        assert!(VaultLiquidationGuard::new_for_nicp_repayment(51).is_err());
+        drop(migrate);
+        assert!(VaultLiquidationGuard::new(52).is_ok());
+    }
+
+    #[test]
+    fn claim_survives_snapshot_and_pre_claim_snapshot_defaults_to_none() {
+        let state = setup();
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(restored.nicp_redemption_claim, state.nicp_redemption_claim);
+        let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut map = match value { ciborium::value::Value::Map(map) => map, _ => panic!("state must be a map") };
+        map.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "nicp_redemption_claim"));
+        let mut legacy = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy).unwrap();
+        let restored: State = ciborium::de::from_reader(legacy.as_slice()).unwrap();
+        assert!(restored.nicp_redemption_claim.is_none());
+        assert_eq!(restored.vault_id_to_vaults[&51].borrowed_icusd_amount, state.vault_id_to_vaults[&51].borrowed_icusd_amount);
     }
 }

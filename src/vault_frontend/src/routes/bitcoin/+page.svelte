@@ -6,6 +6,9 @@
   import { CANISTER_IDS, CONFIG } from '$lib/config';
   import { ICRC1_IDL } from '$lib/idls/ledger.idl.js';
   import { fetchLedgerFeeStrict } from '$lib/services/ledgerFeeService';
+  import { beginMinterOisyAction, type MinterOisyAction } from '$lib/services/minterOisySigner';
+  import { isOisyWallet } from '$lib/services/protocol/walletOperations';
+  import { walletSessionGeneration } from '$lib/services/auth';
   import {
     getPublicCkbtcLedgerActor,
     getPublicCkbtcMinterActor,
@@ -16,8 +19,11 @@
 
   const ledgerFeeRef = { ledgerId: CANISTER_IDS.CKBTC_LEDGER, decimals: 8, symbol: 'ckBTC' };
   const POLL_MS = 60_000;
-  const POLL_LIMIT = 120;
   const NETWORK_KEY = CONFIG.isLocal ? `local:${CONFIG.host}` : 'mainnet';
+  type WithdrawalAttempt = { owner: string; address: string; amount: string; startedAt: number; attemptId: string; state: 'uncertain' | 'accepted'; blockIndex?: string };
+  type PreservedWithdrawalRecord = { owner: string; state: 'preserved' };
+  type WithdrawalReceipt = WithdrawalAttempt & { status: string; txid: string };
+  const PRESERVED_RECORD_MESSAGE = 'This browser cannot safely read a saved withdrawal record. It has been preserved and new withdrawals are paused. Contact support to reconcile the previous request.';
 
   let connected = false;
   let principal: Principal | null = null;
@@ -44,44 +50,64 @@
   let statusBusy = false;
   let statusBlock: bigint | null = null;
   let statusText = '';
-  let blockedAttempt: { owner: string; address: string; amount: string; startedAt: number; attemptId: string; state: 'uncertain' | 'accepted'; blockIndex?: string } | null = null;
+  let blockedAttempt: WithdrawalAttempt | PreservedWithdrawalRecord | null = null;
+  let withdrawalReceipt: WithdrawalReceipt | null = null;
   let txid = '';
   let mintText = '';
   let error = '';
   let notice = '';
   let mintTimer: ReturnType<typeof setTimeout> | null = null;
   let statusTimer: ReturnType<typeof setTimeout> | null = null;
-  let mintAttempt = 0;
-  let statusAttempt = 0;
+  let quoteTimer: ReturnType<typeof setTimeout> | null = null;
+  let quoteRequest = 0;
+  let quoteBusy = false;
   let mintOwner = '';
   let withdrawalOwner = '';
   let mintStopped = false;
   let mintConfirmations: number | null = null;
   let mintRequiredConfirmations: number | null = null;
+  let walletGeneration = 0;
+  let lastWalletGeneration = -1;
+  const unsubscribeWalletGeneration = walletSessionGeneration.subscribe((value) => {
+    walletGeneration = value;
+    // Invalidate captured requests synchronously, including coalesced same-owner transitions.
+    generation++;
+    quoteRequest++;
+    quote = null;
+    clearTimers();
+  });
   $: mintStepIndex = mintText.startsWith('Minted ') ? 3 : mintConfirmations !== null ? 2 : 1;
 
   $: connected = $connectedStore;
   $: principal = $principalStore;
   $: ownerText = principal?.toText() ?? '';
-  $: if (ownerText !== lastOwnerText || connected !== lastConnected) resetForOwnerChange();
+  $: if (ownerText !== lastOwnerText || connected !== lastConnected || walletGeneration !== lastWalletGeneration) resetForOwnerChange();
   $: parsedAmount = parseBtcSats(amount);
   $: quoteFresh = !!quote && quote.owner === ownerText && quote.amount === parsedAmount && quote.address === recipient.trim() && clockNow - quote.at <= 60_000;
   $: receivedEstimate = quoteFresh && quote ? formatBtcSats(parsedAmount! > quote.bitcoinFee + quote.minterFee ? parsedAmount! - quote.bitcoinFee - quote.minterFee : 0n) : null;
+  $: scheduleQuote(mode, connected, ownerText, amount, recipient);
 
   onMount(() => {
     void loadMinterInfo();
-    clockTimer = setInterval(() => { clockNow = Date.now(); }, 1000);
+    window.addEventListener('storage', onStorage);
+    clockTimer = setInterval(() => {
+      clockNow = Date.now();
+      if (mode === 'redeem' && quote && clockNow - quote.at >= 50_000 && !quoteBusy && !withdrawalBusy && !blockedAttempt) void refreshQuote();
+    }, 1000);
   });
   onDestroy(() => {
     destroyed = true;
+    unsubscribeWalletGeneration();
     generation++;
     clearTimers();
+    if (typeof window !== 'undefined') window.removeEventListener('storage', onStorage);
     if (clockTimer) clearInterval(clockTimer);
   });
 
   function resetForOwnerChange() {
     lastOwnerText = ownerText;
     lastConnected = connected;
+    lastWalletGeneration = walletGeneration;
     generation++;
     clearTimers();
     address = '';
@@ -91,9 +117,13 @@
     balance = null;
     ledgerFee = null;
     quote = null;
+    quoteRequest++;
+    quoteBusy = false;
     statusBlock = null;
     statusText = '';
+    statusBusy = false;
     blockedAttempt = readBlockedAttempt(ownerText);
+    withdrawalReceipt = readWithdrawalReceipt(ownerText);
     txid = '';
     mintText = '';
     error = '';
@@ -101,47 +131,80 @@
     mintBusy = false;
     withdrawalBusy = false;
     busyAddress = false;
-    mintAttempt = 0;
-    statusAttempt = 0;
     mintStopped = false;
     mintConfirmations = null;
     mintRequiredConfirmations = minterInfo?.min_confirmations ?? null;
-    if (connected && principal && !principal.isAnonymous()) void refreshBalance(principal, generation);
-    if (blockedAttempt?.state === 'accepted' && blockedAttempt.blockIndex) {
+    if (connected && principal && !principal.isAnonymous()) {
+      void refreshBalance(principal, generation);
+      void createAddress();
+    }
+    if (connected && blockedAttempt?.state === 'accepted' && blockedAttempt.blockIndex) {
       statusBlock = BigInt(blockedAttempt.blockIndex);
       withdrawalOwner = ownerText;
       statusText = 'Restored a previously accepted withdrawal. Checking its current minter status.';
       void refreshWithdrawalStatus(generation, statusBlock);
     } else if (blockedAttempt?.state === 'uncertain') {
       statusText = 'A previous withdrawal has an uncertain result. Reconcile its status before starting another request.';
+    } else if (blockedAttempt?.state === 'preserved') {
+      statusText = PRESERVED_RECORD_MESSAGE;
     }
   }
 
   function clearTimers() {
     if (mintTimer) clearTimeout(mintTimer);
     if (statusTimer) clearTimeout(statusTimer);
+    if (quoteTimer) clearTimeout(quoteTimer);
     mintTimer = null;
     statusTimer = null;
+    quoteTimer = null;
   }
 
   function storageKey(owner: string): string { return `rumi:ckbtc-withdrawal:${NETWORK_KEY}:${CANISTER_IDS.CKBTC_LEDGER}:${CANISTER_IDS.CKBTC_MINTER}:${owner}`; }
+  function receiptKey(owner: string): string { return `${storageKey(owner)}:receipt`; }
 
-  function readBlockedAttempt(owner: string) {
+  function onStorage(event: StorageEvent) {
+    if (!connected || !ownerText || event.key !== storageKey(ownerText)) return;
+    const saved = readBlockedAttempt(ownerText);
+    blockedAttempt = saved;
+    withdrawalReceipt = readWithdrawalReceipt(ownerText);
+    if (statusTimer) clearTimeout(statusTimer);
+    statusBlock = null;
+    if (saved) showBlockedAttempt(saved, generation);
+  }
+
+  function readWithdrawalReceipt(owner: string): WithdrawalReceipt | null {
     if (typeof localStorage === 'undefined' || !owner) return null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(receiptKey(owner)) || 'null');
+      return saved?.owner === owner && saved.state === 'accepted' && /^\d+$/.test(saved.amount) && /^\d+$/.test(saved.blockIndex) && typeof saved.status === 'string' && typeof saved.txid === 'string' ? saved : null;
+    } catch { return null; }
+  }
+
+  function isStoredNat64(value: unknown, positive = false): value is string {
+    return typeof value === 'string' && /^\d{1,20}$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n && (!positive || BigInt(value) > 0n);
+  }
+
+  function readBlockedAttempt(owner: string): WithdrawalAttempt | PreservedWithdrawalRecord | null {
+    if (typeof localStorage === 'undefined' || !owner) return null;
+    const preserved: PreservedWithdrawalRecord = { owner, state: 'preserved' };
     try {
       const raw = localStorage.getItem(storageKey(owner));
       if (!raw) return null;
       const saved = JSON.parse(raw);
-      if (saved?.owner !== owner || !['uncertain', 'accepted'].includes(saved.state)) return null;
-      if (typeof saved.attemptId !== 'string') return null;
-      return saved as { owner: string; address: string; amount: string; startedAt: number; attemptId: string; state: 'uncertain' | 'accepted'; blockIndex?: string };
-    } catch { return null; }
+      if (saved?.owner !== owner || !['uncertain', 'accepted'].includes(saved.state)) return preserved;
+      if (typeof saved.attemptId !== 'string' || !saved.attemptId.trim()
+        || typeof saved.address !== 'string' || !isValidBitcoinMainnetAddress(saved.address)
+        || !isStoredNat64(saved.amount, true)
+        || !Number.isSafeInteger(saved.startedAt) || saved.startedAt < 0
+        || (saved.state === 'accepted' ? !isStoredNat64(saved.blockIndex) : saved.blockIndex !== undefined)) return preserved;
+      return saved as WithdrawalAttempt;
+    } catch { return preserved; }
   }
 
-  function saveBlockedAttempt(attempt: NonNullable<typeof blockedAttempt>, paint = connected && ownerText === attempt.owner): boolean {
+  // Called only while the account's withdrawal Web Lock is held.
+  function saveBlockedAttempt(attempt: WithdrawalAttempt, paint = connected && ownerText === attempt.owner, expectedRaw: string | null = null): boolean {
     try {
-      const saved = readBlockedAttempt(attempt.owner);
-      if (saved && saved.attemptId !== attempt.attemptId) return false;
+      if (localStorage.getItem(storageKey(attempt.owner)) !== expectedRaw) return false;
       localStorage.setItem(storageKey(attempt.owner), JSON.stringify(attempt));
       if (paint && connected && ownerText === attempt.owner) blockedAttempt = attempt;
       return true;
@@ -149,14 +212,20 @@
     catch { error = 'The withdrawal safety record could not be saved in this browser. Check browser storage before continuing.'; return false; }
   }
 
-  function clearBlockedAttempt(owner: string) {
-    try { localStorage.removeItem(storageKey(owner)); } catch { /* keep the visible in-memory lock */ }
+  // Also called inside the existing withdrawal lock for definite non-dispatch/rejection outcomes.
+  function clearBlockedAttempt(owner: string, expectedRaw: string): boolean {
+    try {
+      if (localStorage.getItem(storageKey(owner)) !== expectedRaw) return false;
+      localStorage.removeItem(storageKey(owner));
+    } catch { return false; }
     if (connected && principal?.toText() === owner) {
       blockedAttempt = null;
       quote = null;
       balance = null;
       void refreshBalance(principal, generation);
+      scheduleQuote(mode, connected, ownerText, amount, recipient);
     }
+    return true;
   }
 
   async function reconcileUncertainWithdrawal() {
@@ -232,6 +301,7 @@
       if (!live(key, token)) return;
       address = value;
       qrDataUrl = qr;
+      void beginMintCheck();
     } catch (cause) {
       if (live(key, token)) error = `Could not get a Bitcoin deposit address: ${readableError(cause)}`;
     } finally {
@@ -248,7 +318,6 @@
   async function beginMintCheck() {
     if (!connected || !principal || principal.isAnonymous() || !address || mintBusy) return;
     if (mintTimer) clearTimeout(mintTimer);
-    mintAttempt = 0;
     mintStopped = false;
     mintText = '';
     error = '';
@@ -260,7 +329,6 @@
   async function runMintCheck(token: number) {
     const owner = mintOwner;
     if (!live(owner, token)) return;
-    mintAttempt++;
     try {
       const result = await updateBtcBalanceForOwner(Principal.fromText(owner), () => live(owner, token));
       if (!live(owner, token)) return;
@@ -270,10 +338,7 @@
         if (minted.length) {
           mintText = `Minted ${formatBtcSats(total)} ckBTC to ${owner}.`;
           mintConfirmations = mintRequiredConfirmations;
-          mintBusy = false;
-          mintStopped = true;
           await refreshBalance(principal, token);
-          return;
         }
         const terminal = result.Ok.find((row: any) => 'Tainted' in row || 'ValueTooSmall' in row);
         if (terminal) {
@@ -282,8 +347,10 @@
           mintStopped = true;
           return;
         }
-        mintText = 'The minter checked a deposit and is still processing it.';
-        mintConfirmations = mintRequiredConfirmations;
+        if (!minted.length) {
+          mintText = result.Ok.length ? 'The minter is processing your deposit.' : 'Waiting for your Bitcoin deposit. We check and mint automatically while this page is open.';
+          mintConfirmations = result.Ok.length ? mintRequiredConfirmations : null;
+        }
       } else if ('Err' in result) {
         const issue = result.Err;
         if ('NoNewUtxos' in issue) {
@@ -299,32 +366,32 @@
         else if ('GenericError' in issue) throw new Error(issue.GenericError.error_message);
         else throw new Error('The minter returned an unrecognized deposit result.');
       }
-    } catch (cause) {
-      if (live(owner, token)) {
-        error = `Deposit check stopped: ${readableError(cause)}. Check again manually before retrying.`;
-        mintBusy = false;
-        mintStopped = true;
-      }
-      return;
+    } catch {
+      if (!live(owner, token)) return;
+      mintText = 'Deposit checks are temporarily unavailable. We will keep checking automatically.';
     }
     if (!live(owner, token)) return;
-    if (mintAttempt >= POLL_LIMIT) {
-      mintBusy = false;
-      mintStopped = true;
-      mintText += ' Automatic checks stopped; you can check again when ready.';
-      return;
-    }
     mintTimer = setTimeout(() => void runMintCheck(token), POLL_MS);
   }
 
-  async function refreshQuote() {
+  function scheduleQuote(nextMode: string, isConnected: boolean, owner: string, inputAmount: string, inputRecipient: string) {
+    if (quoteTimer) clearTimeout(quoteTimer);
+    quoteRequest++;
     quote = null;
+    quoteBusy = false;
+    if (nextMode !== 'redeem' || !isConnected || !owner || !parseBtcSats(inputAmount) || !isValidBitcoinMainnetAddress(inputRecipient)) return;
+    const request = quoteRequest;
+    quoteTimer = setTimeout(() => void refreshQuote(request), 300);
+  }
+
+  async function refreshQuote(request = ++quoteRequest) {
     const sats = parseBtcSats(amount);
     if (!connected || !principal || principal.isAnonymous() || !sats || !isValidBitcoinMainnetAddress(recipient)) return;
     const owner = principal.toText();
     const token = generation;
     const addressAtRequest = recipient.trim();
     const amountAtRequest = sats;
+    quoteBusy = true;
     error = '';
     try {
       const actor = await getPublicCkbtcMinterActor();
@@ -333,12 +400,14 @@
         fetchLedgerFeeStrict(ledgerFeeRef),
         actor.get_minter_info(),
       ]);
-      if (!live(owner, token) || parseBtcSats(amount) !== amountAtRequest || recipient.trim() !== addressAtRequest) return;
+      if (request !== quoteRequest || !live(owner, token) || parseBtcSats(amount) !== amountAtRequest || recipient.trim() !== addressAtRequest) return;
       minterInfo = info;
       quote = { bitcoinFee: BigInt(estimate.bitcoin_fee), minterFee: BigInt(estimate.minter_fee), amount: amountAtRequest, address: addressAtRequest, owner, at: Date.now() };
       ledgerFee = fee;
     } catch (cause) {
-      if (live(owner, token)) error = `Could not refresh withdrawal fees: ${readableError(cause)}`;
+      if (live(owner, token) && request === quoteRequest) error = `Could not refresh withdrawal fees: ${readableError(cause)}`;
+    } finally {
+      if (live(owner, token) && request === quoteRequest) quoteBusy = false;
     }
   }
 
@@ -347,6 +416,9 @@
     const owner = principal;
     const ownerKey = owner.toText();
     const token = generation;
+    // Check storage synchronously before opening a wallet popup; repeat under the Web Lock below.
+    const saved = readBlockedAttempt(ownerKey);
+    if (saved) { blockedAttempt = saved; showBlockedAttempt(saved, token); return; }
     const amountSats = parseBtcSats(amount);
     const addressAtClick = recipient.trim();
     if (!amountSats) { error = 'Enter a positive BTC amount with at most eight decimal places.'; return; }
@@ -356,11 +428,17 @@
       error = 'This browser cannot safely prevent duplicate withdrawal requests. Use a browser with Web Locks support to continue.';
       return;
     }
+    let action: MinterOisyAction | null = null;
+    withdrawalBusy = true;
     try {
+      if (isOisyWallet()) action = beginMinterOisyAction(owner);
+      if (action) await action.ready;
+      if (!live(ownerKey, token)) return;
       await lockManager.request(
         storageKey(ownerKey),
         { mode: 'exclusive', ifAvailable: true },
         async (lock: unknown) => {
+          if (!live(ownerKey, token)) return;
           if (!lock) {
             const saved = readBlockedAttempt(ownerKey);
             if (saved) { blockedAttempt = saved; showBlockedAttempt(saved, token); }
@@ -379,6 +457,9 @@
       );
     } catch (cause) {
       if (live(ownerKey, token)) error = `Could not safely acquire the withdrawal lock: ${readableError(cause)}`;
+    } finally {
+      if (action) await action.close().catch(() => {});
+      if (live(ownerKey, token)) withdrawalBusy = false;
     }
   }
 
@@ -388,6 +469,8 @@
       withdrawalOwner = saved.owner;
       statusText = 'Restored a previously accepted withdrawal. Checking its current minter status.';
       void refreshWithdrawalStatus(token, statusBlock);
+    } else if (saved.state === 'preserved') {
+      statusText = PRESERVED_RECORD_MESSAGE;
     } else {
       statusText = 'A previous withdrawal has an uncertain result. Reconcile its status before starting another request.';
     }
@@ -411,11 +494,13 @@
     statusText = '';
     txid = '';
     const attemptId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    if (!saveBlockedAttempt({ owner: ownerKey, address: addressAtClick, amount: amountSats.toString(), startedAt: Date.now(), attemptId, state: 'uncertain' }, live(ownerKey, token))) {
+    const attempt: WithdrawalAttempt = { owner: ownerKey, address: addressAtClick, amount: amountSats.toString(), startedAt: Date.now(), attemptId, state: 'uncertain' };
+    if (!saveBlockedAttempt(attempt, live(ownerKey, token))) {
       withdrawalBusy = false;
       error = 'A previous withdrawal attempt is already saved for this account. Reconcile it before continuing.';
       return;
     }
+    const attemptRaw = JSON.stringify(attempt);
     try {
       const now = BigInt(Date.now()) * 1_000_000n;
       const outcome = await submitCkbtcWithdrawal({
@@ -432,26 +517,26 @@
         retrieveArgs: { address: addressAtClick, amount: amountSats, from_subaccount: [] },
         isLive: () => live(ownerKey, token) && parseBtcSats(amount) === amountSats && recipient.trim() === addressAtClick,
       });
-      if (outcome.kind === 'stale') { clearBlockedAttempt(ownerKey); return; }
+      if (outcome.kind === 'stale') { clearBlockedAttempt(ownerKey, attemptRaw); return; }
       if (outcome.kind === 'approval-only') {
-        clearBlockedAttempt(ownerKey);
+        clearBlockedAttempt(ownerKey, attemptRaw);
         if (live(ownerKey, token)) notice = `Approval block ${outcome.approveBlockIndex} completed, but the wallet changed before a withdrawal request was sent. Refresh fees before any new request.`;
         return;
       }
-      if (outcome.kind === 'approve-error') { clearBlockedAttempt(ownerKey); if (live(ownerKey, token)) error = `Approval was rejected: ${outcome.message}`; return; }
+      if (outcome.kind === 'approve-error') { clearBlockedAttempt(ownerKey, attemptRaw); if (live(ownerKey, token)) error = `Approval was rejected: ${outcome.message}`; return; }
       if (outcome.kind === 'approve-uncertain') { if (live(ownerKey, token)) error = `Approval outcome is uncertain (${outcome.message}). Check the ledger before trying again.`; return; }
       if (outcome.kind === 'retrieve-error') {
         if (outcome.retrySafety === 'unknown') {
           if (live(ownerKey, token)) error = `Approval block ${outcome.approveBlockIndex} succeeded, but the minter result may be uncertain (${outcome.message}). This account remains blocked until status is reconciled.`;
         } else {
-          clearBlockedAttempt(ownerKey);
+          clearBlockedAttempt(ownerKey, attemptRaw);
           if (live(ownerKey, token)) error = `Approval block ${outcome.approveBlockIndex} succeeded, but the minter rejected this withdrawal: ${outcome.message}. Refresh the estimate before trying again.`;
         }
         return;
       }
       if (outcome.kind === 'retrieve-uncertain') { if (live(ownerKey, token)) error = `Approval block ${outcome.approveBlockIndex} succeeded, but the withdrawal result is uncertain (${outcome.message}). Check minter status before retrying.`; return; }
       const acceptedBlock = outcome.withdrawalBlockIndex;
-      const recorded = saveBlockedAttempt({ owner: ownerKey, address: addressAtClick, amount: amountSats.toString(), startedAt: Date.now(), attemptId, state: 'accepted', blockIndex: acceptedBlock.toString() }, live(ownerKey, token));
+      const recorded = saveBlockedAttempt({ ...attempt, state: 'accepted', blockIndex: acceptedBlock.toString() }, live(ownerKey, token), attemptRaw);
       if (!live(ownerKey, token)) {
         if (connected && ownerText === ownerKey) {
           const saved = readBlockedAttempt(ownerKey);
@@ -462,42 +547,56 @@
       statusBlock = acceptedBlock;
       if (!recorded) error = 'The minter accepted the withdrawal, but the browser could not update its safety record. Keep this account blocked and check the displayed request status.';
       statusText = `Withdrawal accepted at ledger block ${statusBlock}. Bitcoin settlement is still pending.`;
-      statusAttempt = 0;
-      await refreshWithdrawalStatus(token, statusBlock);
+      // Release the submission lock before a status response tries to retire this record.
+      void refreshWithdrawalStatus(token, statusBlock);
     } catch (cause) {
       if (live(ownerKey, token)) error = `Withdrawal result is uncertain: ${readableError(cause)}. Check wallet and minter status before trying again.`;
-    } finally {
-      if (live(ownerKey, token)) withdrawalBusy = false;
     }
   }
 
   async function refreshWithdrawalStatus(token = generation, block = statusBlock) {
     if (block === null || !connected || ownerText !== withdrawalOwner) return;
     const owner = withdrawalOwner;
+    const tracked = readBlockedAttempt(owner);
+    if (tracked?.state !== 'accepted' || tracked.blockIndex !== block.toString()) return;
+    let expectedRaw: string | null;
+    try { expectedRaw = localStorage.getItem(storageKey(owner)); } catch { return; }
+    if (!expectedRaw) return;
     statusBusy = true;
+    let terminal = false;
     try {
       const actor = await getPublicCkbtcMinterActor();
       const status = await actor.retrieve_btc_status_v2({ block_index: block });
-      if (!live(owner, token) || statusBlock !== block) return;
+      if (!live(owner, token) || statusBlock !== block || localStorage.getItem(storageKey(owner)) !== expectedRaw) return;
       if ('Unknown' in status) statusText = 'The minter has no status for this request yet.';
       else if ('Pending' in status) statusText = 'Queued by the minter.';
       else if ('Signing' in status) statusText = 'The minter is signing the Bitcoin transaction.';
       else if ('Sending' in status) { statusText = 'Sent to the Bitcoin canister; waiting for its response.'; txid = txidBytesToHex(status.Sending.txid); }
       else if ('Submitted' in status) { statusText = 'Submitted to Bitcoin; waiting for confirmations.'; txid = txidBytesToHex(status.Submitted.txid); }
-      else if ('Confirmed' in status) { statusText = 'Confirmed on Bitcoin.'; txid = txidBytesToHex(status.Confirmed.txid); statusAttempt = POLL_LIMIT; clearBlockedAttempt(owner); }
-      else if ('AmountTooLow' in status) { statusText = 'The minter reports that the amount was too low after current fees.'; statusAttempt = POLL_LIMIT; clearBlockedAttempt(owner); }
-      else if ('Reimbursed' in status || 'WillReimburse' in status) {
-        statusText = 'The minter reports a reimbursement state. Review this request before attempting another withdrawal.';
-        statusAttempt = POLL_LIMIT;
-        if ('Reimbursed' in status) clearBlockedAttempt(owner);
+      else if ('Confirmed' in status) { statusText = 'Confirmed on Bitcoin.'; txid = txidBytesToHex(status.Confirmed.txid); terminal = true; }
+      // This post-submission status does not prove reimbursement. Keep the accepted request held.
+      else if ('AmountTooLow' in status) { statusText = 'The amount does not cover Bitcoin network fees. We are checking for reimbursement. Contact support if this status persists.'; txid = ''; }
+      else if ('Reimbursed' in status) { statusText = 'The minter reimbursed this request.'; txid = ''; terminal = true; }
+      else if ('WillReimburse' in status) statusText = 'The minter is preparing a reimbursement. We will keep tracking it automatically.';
+      if (terminal) {
+        const locks = (navigator as any).locks;
+        if (!locks?.request) { statusText += ' This browser cannot safely finish tracking this request; reopen in a browser with Web Locks support.'; return; }
+        const receipt: WithdrawalReceipt = { ...tracked, status: statusText, txid };
+        await locks.request(storageKey(owner), { mode: 'exclusive' }, async () => {
+          if (!live(owner, token) || localStorage.getItem(storageKey(owner)) !== expectedRaw) return;
+          // Save the receipt before clearing the exact tracked journal. A storage failure keeps the hold.
+          localStorage.setItem(receiptKey(owner), JSON.stringify(receipt));
+          if (!clearBlockedAttempt(owner, expectedRaw!)) return;
+          withdrawalReceipt = receipt;
+          statusBlock = null;
+        });
       }
     } catch (cause) {
       if (live(owner, token)) statusText = `Could not refresh minter status: ${readableError(cause)}`;
     } finally {
       if (live(owner, token)) statusBusy = false;
     }
-    if (live(owner, token) && statusBlock === block && statusAttempt < POLL_LIMIT && !/Confirmed|reimbursement|too low/i.test(statusText)) {
-      statusAttempt++;
+    if (live(owner, token) && statusBlock === block) {
       statusTimer = setTimeout(() => void refreshWithdrawalStatus(token, block), POLL_MS);
     }
   }
@@ -529,7 +628,7 @@
     {#if mode === 'mint'}
       <div class="flow-line"><span class:active={mintStepIndex === 1} class="step">01 <b>Deposit BTC</b></span><i></i><span class:active={mintStepIndex === 2} class="step">02 <b>Confirm</b></span><i></i><span class:active={mintStepIndex === 3} class="step">03 <b>Mint ckBTC</b></span></div>
       <h2>Receive ckBTC</h2>
-      <p class="muted">Use a Bitcoin wallet to send BTC to your DFINITY minter address. The returned ckBTC is credited to your connected wallet.</p>
+      <p class="muted">Send BTC to your reusable minter address. We detect and mint deposits automatically while this page is open, crediting ckBTC to your connected wallet.</p>
       {#if !connected}
         <div class="callout">Connect the account that should receive ckBTC to continue.</div>
       {:else if !address}
@@ -550,9 +649,9 @@
           <div><dt>Deposit check fee</dt><dd>{formatWholeBtc(depositFee)}</dd></div>
         </dl>
         <p class="callout">Send only Bitcoin to this address. Your Bitcoin wallet pays the network fee. The minter checks deposits after the displayed confirmation requirement; timing depends on Bitcoin block production and minter processing.</p>
-        <button class="primary" disabled={mintBusy} on:click={beginMintCheck}>{mintBusy ? 'Checking deposit…' : mintStopped ? 'Check deposit again' : 'Check deposit and mint'}</button>
+        {#if mintStopped}<button class="quiet" on:click={beginMintCheck}>Resume deposit checks</button>{/if}
         {#if mintConfirmations !== null && mintRequiredConfirmations !== null}<p class="small">Confirmations observed: {mintConfirmations} of {mintRequiredConfirmations} required.</p>{/if}
-        {#if mintBusy}<p class="small" aria-live="polite">Check {mintAttempt} of {POLL_LIMIT} · next check in about 60 seconds</p>{/if}
+        {#if mintBusy}<p class="small" aria-live="polite">Deposits are checked automatically about once a minute.</p>{/if}
         {#if mintText}<div class="result" role="status">{mintText}</div>{/if}
       {/if}
     {:else}
@@ -566,7 +665,7 @@
       <label>Amount in BTC
         <input bind:value={amount} on:input={changeQuoteInput} placeholder="0.001" inputmode="decimal" autocomplete="off" disabled={withdrawalBusy || !!blockedAttempt} />
       </label>
-      <button class="quiet" disabled={!connected || !parsedAmount || !isValidBitcoinMainnetAddress(recipient) || withdrawalBusy} on:click={refreshQuote}>Refresh fee estimate</button>
+      {#if !quote && !quoteBusy && error.includes('withdrawal fees')}<button class="quiet" on:click={() => void refreshQuote()}>Retry fee estimate</button>{/if}
       <dl class="facts">
         <div><dt>Connected ckBTC balance</dt><dd>{balance === null ? 'Loading…' : `${formatBtcSats(balance)} ckBTC`}</dd></div>
         {#if quoteFresh && quote}
@@ -578,19 +677,26 @@
           <div><dt>Minimum withdrawal</dt><dd>{minterInfo ? `${formatBtcSats(BigInt(minterInfo.retrieve_btc_min_amount))} ckBTC` : 'Loading…'}</dd></div>
           <div><dt>Estimate age</dt><dd>{Math.max(0, Math.floor((Date.now() - quote.at) / 1000))} seconds · expires after 60 seconds</dd></div>
         {:else}
-          <div><dt>Withdrawal estimate</dt><dd>Enter a valid address and amount, then refresh.</dd></div>
+          <div><dt>Withdrawal estimate</dt><dd>{quoteBusy ? 'Estimating fees…' : 'Enter a valid address and amount. Fees are estimated automatically.'}</dd></div>
         {/if}
       </dl>
-      <p class="callout">The estimate can change before the minter processes the request. The approval also pays the current ckBTC ledger fee. BTC settlement is asynchronous; verify minter status before making another request.</p>
-      <button class="primary" disabled={!connected || withdrawalBusy || !!blockedAttempt || !quoteFresh || ledgerFee === null || balance === null} on:click={withdraw}>{blockedAttempt ? 'Resolve previous request first' : withdrawalBusy ? 'Waiting for wallet and minter…' : 'Approve and request BTC'}</button>
+      <p class="callout">Review the address, amount, and fees before approving in your wallet. The estimate can change before processing. We track the withdrawal automatically after you submit.</p>
+      <button class="primary" disabled={!connected || withdrawalBusy || !!blockedAttempt || !quoteFresh || ledgerFee === null || balance === null} on:click={withdraw}>{blockedAttempt ? blockedAttempt.state === 'accepted' ? 'Withdrawal in progress' : 'Resolve previous request first' : withdrawalBusy ? 'Waiting for wallet and minter…' : 'Approve and request BTC'}</button>
       {#if blockedAttempt?.state === 'uncertain'}
         <div class="status" role="alert"><strong>Previous result needs reconciliation</strong><p>{statusText || 'The previous approval or withdrawal call may have completed even though the response was not received.'}</p><p>Saved request: {formatBtcSats(BigInt(blockedAttempt.amount))} ckBTC to <span class="mono">{blockedAttempt.address}</span></p><button class="quiet" disabled={statusBusy} on:click={reconcileUncertainWithdrawal}>{statusBusy ? 'Checking history…' : 'Check minter request history'}</button></div>
       {/if}
+      {#if blockedAttempt?.state === 'preserved'}
+        <div class="status" role="alert"><strong>Saved withdrawal record preserved</strong><p>{PRESERVED_RECORD_MESSAGE}</p></div>
+      {/if}
       {#if statusBlock !== null}
-        <div class="status" aria-live="polite"><strong>Withdrawal status</strong><p>{statusText}</p><small>Request block {statusBlock.toString()} · check {statusAttempt} of {POLL_LIMIT}</small>
+        <div class="status" aria-live="polite"><strong>Withdrawal status</strong><p>{statusText}</p><details><summary>Request details</summary><small>Request block {statusBlock.toString()}</small></details>
           {#if txid}<p><a href={`https://mempool.space/tx/${txid}`} target="_blank" rel="noreferrer">View Bitcoin transaction ↗</a></p>{/if}
-          {#if statusAttempt >= POLL_LIMIT && !statusText.includes('Confirmed')}<button class="quiet" disabled={statusBusy} on:click={() => { statusAttempt = 0; void refreshWithdrawalStatus(); }}>{statusBusy ? 'Refreshing…' : 'Refresh status'}</button>{/if}
         </div>
+      {/if}
+      {#if withdrawalReceipt}
+        <details class="status withdrawal-receipt"><summary>Previous withdrawal receipt</summary><p>{withdrawalReceipt.status}</p><p>{formatBtcSats(BigInt(withdrawalReceipt.amount))} ckBTC to <span class="mono">{withdrawalReceipt.address}</span></p><small>Request block {withdrawalReceipt.blockIndex}</small>
+          {#if withdrawalReceipt.txid}<p><a href={`https://mempool.space/tx/${withdrawalReceipt.txid}`} target="_blank" rel="noreferrer">View Bitcoin transaction ↗</a></p>{/if}
+        </details>
       {/if}
     {/if}
     {#if notice}<div class="result" role="status">{notice}</div>{/if}

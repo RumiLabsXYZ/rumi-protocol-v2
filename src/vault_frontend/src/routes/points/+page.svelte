@@ -173,6 +173,7 @@
       state={$myPointsStore.state}
       {rank}
       detail={$myPointsStore.detail}
+      onRetry={retry}
       {status}
       {config}
     />

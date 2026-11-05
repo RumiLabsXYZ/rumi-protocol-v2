@@ -1,0 +1,72 @@
+{
+    "result": {
+        "info": {
+            "build_version": "3.4.1",
+            "complete_ledgers": "12929081-21968761",
+            "hostid": "CURD",
+            "initial_sync_duration_us": "405462425",
+            "io_latency_ms": 1,
+            "jq_trans_overflow": "383122",
+            "last_close": {
+                "converge_time_s": 2.001,
+                "proposers": 6
+            },
+            "load_factor": 1,
+            "network_id": 1,
+            "peer_disconnects": "55848",
+            "peer_disconnects_resources": "1013",
+            "peers": 108,
+            "ports": [
+                {
+                    "port": "2459",
+                    "protocol": [
+                        "peer"
+                    ]
+                },
+                {
+                    "port": "50051",
+                    "protocol": [
+                        "grpc"
+                    ]
+                }
+            ],
+            "pubkey_node": "n9K8mtp6bVXSamRmLw3US2mWKBc88Q1xfxu22Ltvt2hGSjGStcZ9",
+            "server_state": "full",
+            "server_state_duration_us": "1268659132056",
+            "state_accounting": {
+                "connected": {
+                    "duration_us": "401330591",
+                    "transitions": "2"
+                },
+                "disconnected": {
+                    "duration_us": "1121602",
+                    "transitions": "2"
+                },
+                "full": {
+                    "duration_us": "2862741769501",
+                    "transitions": "31"
+                },
+                "syncing": {
+                    "duration_us": "93994402",
+                    "transitions": "31"
+                },
+                "tracking": {
+                    "duration_us": "4064",
+                    "transitions": "31"
+                }
+            },
+            "time": "2026-Oct-31 18:35:58.068057 UTC",
+            "uptime": 2863238,
+            "validated_ledger": {
+                "age": 2,
+                "base_fee_xrp": 1e-05,
+                "hash": "071FEE540967540B66FFBD4B165E1C6B0D61E43B877FFCBBFE7DD6B0E96940E1",
+                "reserve_base_xrp": 1,
+                "reserve_inc_xrp": 0.2,
+                "seq": 21968761
+            },
+            "validation_quorum": 5
+        },
+        "status": "success"
+    }
+}

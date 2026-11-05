@@ -13,11 +13,13 @@ import type { Principal } from '@dfinity/principal';
 import type {
   EpochSummary,
   PointEntry,
+  OutageCredit,
   PrincipalState,
 } from '$declarations/rumi_points/rumi_points.did';
 import {
   getEpochHistory,
   getPrincipalPointEntries,
+  getPrincipalOutageCredits,
   getPrincipalState,
   isExcluded,
 } from '$lib/services/pointsService';
@@ -30,6 +32,9 @@ export interface MyPointsDetail {
   /** Audit-ledger rows (history). null = failed or reader not deployed. */
   ledger: PointEntry[] | null;
   ledgerFailed: boolean;
+  /** Separate compensation audit. null = unavailable, never treated as zero. */
+  outageCredits: OutageCredit[] | null;
+  outageCreditsFailed: boolean;
   /** Closed-epoch calendar, for the timeline's date column. Empty on failure. */
   epochs: EpochSummary[];
   /** Live positions (what the next snapshot would credit). */
@@ -49,6 +54,8 @@ const emptyDetail: MyPointsDetail = {
   loading: false,
   ledger: null,
   ledgerFailed: false,
+  outageCredits: null,
+  outageCreditsFailed: false,
   epochs: [],
   live: null,
 };
@@ -96,10 +103,11 @@ function createMyPointsStore() {
     if (!wantsDetail) return;
 
     // Phase 2 — independent slices; a failure in one never blanks the others.
-    const [ledgerRes, epochsRes, liveInputsRes] = await Promise.allSettled([
+    const [ledgerRes, epochsRes, liveInputsRes, outageRes] = await Promise.allSettled([
       getPrincipalPointEntries(p),
       getEpochHistory(0, 200),
       fetchLiveInputs(p, state),
+      getPrincipalOutageCredits(p),
     ]);
     if (mySeq !== seq) return;
 
@@ -109,6 +117,9 @@ function createMyPointsStore() {
     }
     if (epochsRes.status === 'rejected') {
       console.error('[pointsStore] epoch history load failed', epochsRes.reason);
+    }
+    if (outageRes.status === 'rejected') {
+      console.error('[pointsStore] compensation audit load failed', outageRes.reason);
     }
     // fetchLiveInputs never rejects, but guard anyway.
     const live =
@@ -120,6 +131,8 @@ function createMyPointsStore() {
         loading: false,
         ledger,
         ledgerFailed: ledgerRes.status === 'rejected',
+        outageCredits: outageRes.status === 'fulfilled' ? outageRes.value : null,
+        outageCreditsFailed: outageRes.status === 'rejected',
         epochs: epochsRes.status === 'fulfilled' ? epochsRes.value : [],
         live,
       },

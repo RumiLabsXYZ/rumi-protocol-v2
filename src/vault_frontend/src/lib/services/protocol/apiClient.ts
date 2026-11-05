@@ -1,3 +1,4 @@
+import { decodeNicpClaim } from '../../utils/nicpClaim';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
 import { BigIntUtils } from '../../utils/bigintUtils';
@@ -354,6 +355,23 @@ private static async refreshVaultData(): Promise<void> {
       }
     }
 
+    /** One owner-authorized claim action. Never auto-retry an uncertain payout. */
+    static async vault51ClaimAction(action: 'refresh' | 'withdraw' | 'reconcile', owner: string, blockIndex?: bigint): Promise<void> {
+      const wallet = get(walletStore);
+      const walletType = get(currentWalletType);
+      const generation = get(walletSessionGeneration);
+      if (!wallet.isConnected || wallet.loading || !walletType || ApiClient.currentPrincipalText() !== owner) throw new Error('Connect the vault owner wallet.');
+      const ctx: ActionBoundContext = { expectedPrincipalText: owner, assertCurrent: () => get(walletStore).isConnected && !get(walletStore).loading && get(currentWalletType) === walletType && get(walletSessionGeneration) === generation };
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      const method = action === 'refresh' ? 'refresh_vault51_redemption_claim' : action === 'reconcile' ? 'reconcile_vault51_icp_payout' : 'withdraw_vault51_settled_icp';
+      if (action === 'reconcile' && blockIndex === undefined) throw new Error('Enter the ICP payout block.');
+      const result = action === 'reconcile' ? await (actor as any)[method](blockIndex) : await (actor as any)[method]();
+      assertActionBoundContextCurrent(ctx);
+      if ('Err' in result) throw new Error(result.Err);
+      if (!('Ok' in result)) throw new Error('Unknown result. Check the claim status before taking another action.');
+    }
+
     /** Run or resume one exact ID-bound collateral pull through the backend journal. */
     private static async runVaultCollateralPull(
       request: VaultPullRequest,
@@ -498,6 +516,19 @@ private static async refreshVaultData(): Promise<void> {
             if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
             return response.Ok;
           },
+          // A successful V2 reply is the certified result of this exact request.
+          // Typed errors and lost replies still reconcile through the backend journal.
+          resultFromDispatch: (reply, exact) => {
+            // The compound endpoint also returns Ok when only vault creation succeeded.
+            // Its journal is still needed to distinguish a deferred/failed borrow.
+            if (!('OpenVault' in exact)) return undefined;
+            const opened = reply as { vault_id?: unknown; block_index?: unknown };
+            if (typeof opened?.vault_id !== 'bigint' || typeof opened?.block_index !== 'bigint' ||
+                opened.vault_id < 0n || opened.block_index < 0n ||
+                opened.vault_id > BigInt(Number.MAX_SAFE_INTEGER) ||
+                opened.block_index > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
+            return { success: true, vaultId: Number(opened.vault_id), blockIndex: Number(opened.block_index) };
+          },
           beforeDispatch: () => lifecycle?.onDispatch?.(),
           completed,
           acknowledge: async (operationId) => {
@@ -505,6 +536,7 @@ private static async refreshVaultData(): Promise<void> {
             const response = await actor.ack_vault_operation({ operation_id: operationId });
             assertVaultOwner();
             if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+            return response.Ok;
           },
           reconcileFromBlock: async (operationId: bigint, blockIndex: bigint) => {
             assertVaultOwner();
@@ -1260,7 +1292,7 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         };
       }
 
-      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
+      if (vaultId !== 51 && icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
         return {
           success: false,
           error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
@@ -1525,7 +1557,7 @@ static async repayToVaultWithStable(
         };
       }
 
-      if (amount * E8S < MIN_ICUSD_AMOUNT) {
+      if (vaultId !== 51 && amount * E8S < MIN_ICUSD_AMOUNT) {
         return {
           success: false,
           error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S}`
@@ -1837,6 +1869,7 @@ static async repayToVaultWithStable(
           console.log(`Processing vault #${vaultId}: ${ctSymbol}=${collateralAmount}, icUSD=${borrowedIcusd}`);
 
           vaults.push({
+            nicpRedemptionClaim: decodeNicpClaim((v as any).nicp_redemption_claim),
             vaultId,
             owner: v.owner.toString(),
             icpMargin,

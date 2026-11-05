@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   walletGetActor: vi.fn(async (id: string) => mocks.actors[id]),
   isOisyWallet: vi.fn(() => false),
   getOisySignerAgent: vi.fn(async () => ({ signer: 'one signer' })),
+  getMinterOisySignerAgent: vi.fn(() => ({ signer: 'scoped signer' })),
   createOisyActor: vi.fn((id: string, _idl: any, agent: any) => ({ ...mocks.actors[id], signer: agent })),
 }));
 
@@ -34,6 +35,7 @@ vi.mock('../idls/ckbtc_minter.idl.js', () => ({ idlFactory: { name: 'ckbtc' } })
 vi.mock('../idls/ledger.idl.js', () => ({ ICRC1_IDL: { name: 'ledger' } }));
 vi.mock('./protocol/walletOperations', () => ({ isOisyWallet: mocks.isOisyWallet }));
 vi.mock('./oisySigner', () => ({ getOisySignerAgent: mocks.getOisySignerAgent, createOisyActor: mocks.createOisyActor }));
+vi.mock('./minterOisySigner', () => ({ getMinterOisySignerAgent: mocks.getMinterOisySignerAgent }));
 
 import { Principal } from '@dfinity/principal';
 import {
@@ -86,7 +88,8 @@ describe('ckbtcMinterActors', () => {
     });
     expect(result).toEqual({ kind: 'success', approveBlockIndex: 8n, withdrawalBlockIndex: 9n });
     expect(callOrder).toEqual(['approve', 'retrieve']);
-    expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(1);
+    expect(mocks.getMinterOisySignerAgent).toHaveBeenCalledTimes(1);
+    expect(mocks.getOisySignerAgent).not.toHaveBeenCalled();
     expect(mocks.createOisyActor).toHaveBeenCalledTimes(2);
     expect(mocks.createOisyActor.mock.calls[0][2]).toBe(mocks.createOisyActor.mock.calls[1][2]);
   });

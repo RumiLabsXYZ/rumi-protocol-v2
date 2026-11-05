@@ -41,7 +41,7 @@ fn fresh_state() -> State {
 }
 
 fn attempt(vault_id: u64, success: bool) -> SpNotificationResult {
-    SpNotificationResult { vault_id, success }
+    SpNotificationResult { vault_id, success, admitted: None }
 }
 
 #[test]

@@ -105,11 +105,11 @@
     [POOL_TOKENS[2].ledgerId]: 'CKUSDC',
   };
 
-  function getBalance(index: number): bigint {
-    if (!$walletStore.tokenBalances) return 0n;
+  function getBalance(index: number, balances: typeof $walletStore.tokenBalances): bigint {
+    if (!balances) return 0n;
     const key = LEDGER_TO_KEY[POOL_TOKENS[index].ledgerId];
     if (!key) return 0n;
-    return $walletStore.tokenBalances[key]?.raw ?? 0n;
+    return balances[key]?.raw ?? 0n;
   }
 
   // ── LP balance ──
@@ -145,7 +145,7 @@
     if (!val || val <= 0) return false;
     const raw = parseTokenAmount(a, POOL_TOKENS[i].decimals);
     const fees = getCachedLedgerFee(poolLedgerRef(i)) * 2n;
-    return raw + fees > getBalance(i);
+    return raw + fees > getBalance(i, $walletStore.tokenBalances);
   });
 
   $: removeExceedsBalance = (() => {
@@ -284,7 +284,7 @@
 
   // ── Max buttons ──
   function setAddMax(index: number) {
-    const balance = getBalance(index);
+    const balance = getBalance(index, $walletStore.tokenBalances);
     const totalFees = getCachedLedgerFee(poolLedgerRef(index)) * 2n;
     const adjusted = balance > totalFees ? balance - totalFees : 0n;
     const divisor = Math.pow(10, POOL_TOKENS[index].decimals);
@@ -323,7 +323,7 @@
     // the Oisy signer popup. The cache is warmed on mount and during quoting.
     for (let k = 0; k < 3; k++) {
       if (amounts[k] > 0n) {
-        const balance = getBalance(k);
+        const balance = getBalance(k, $walletStore.tokenBalances);
         const fees = getCachedLedgerFee(poolLedgerRef(k)) * 2n;
         if (amounts[k] + fees > balance) {
           addError = `Insufficient ${POOL_TOKENS[k].symbol} balance`;
@@ -499,7 +499,7 @@
           </div>
           <div class="balance-info">
             <span class="balance-label">Bal:</span>
-            <span class="balance-value">{formatStableTokenDisplay(getBalance(i), token.decimals)}</span>
+            <span class="balance-value">{formatStableTokenDisplay(getBalance(i, $walletStore.tokenBalances), token.decimals)}</span>
             <button class="max-btn" on:click={() => setAddMax(i)} disabled={addLoading}>MAX</button>
           </div>
         </div>
@@ -517,7 +517,7 @@
             if (!val || val <= 0) return false;
             const raw = parseTokenAmount(addAmounts[i], token.decimals);
             const fees = getCachedLedgerFee(poolLedgerRef(i)) * 2n;
-            return raw + fees > getBalance(i);
+            return raw + fees > getBalance(i, $walletStore.tokenBalances);
           })()}
         />
       </div>

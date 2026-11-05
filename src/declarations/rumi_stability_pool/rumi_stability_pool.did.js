@@ -35,6 +35,42 @@ export const idlFactory = ({ IDL }) => {
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
     'InsufficientPoolBalance' : IDL.Null,
   });
+  const SpRailWire_StabilityPoolError = IDL.Variant({
+    'LedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'RefundClaimNotFound' : IDL.Null,
+    'EmergencyPaused' : IDL.Null,
+    'AlreadyOptedOut' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientBalance' : IDL.Record({
+      'token' : IDL.Principal,
+      'available' : IDL.Nat64,
+      'required' : IDL.Nat64,
+    }),
+    'InvalidPayoutAddress' : IDL.Record({ 'reason' : IDL.Text }),
+    'CollateralNotFound' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'NoPositionFound' : IDL.Null,
+    'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
+    'Unauthorized' : IDL.Null,
+    'InterCanisterCallFailed' : IDL.Record({
+      'method' : IDL.Text,
+      'target' : IDL.Text,
+    }),
+    'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
+    'LiquidationFailed' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'reason' : IDL.Text,
+    }),
+    'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'SystemBusy' : IDL.Null,
+    'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientPoolBalance' : IDL.Null,
+  });
+  const SpRailWire_Result = IDL.Variant({
+    'Ok' : IDL.Null,
+    'Err' : SpRailWire_StabilityPoolError,
+  });
   const ThreeUsdAbsorbInventoryCursor = IDL.Variant({
     'AfterCompletedAbsorbId' : IDL.Nat64,
     'AfterPendingVaultId' : IDL.Nat64,
@@ -72,6 +108,87 @@ export const idlFactory = ({ IDL }) => {
     'chain_id' : IDL.Nat32,
     'icusd_burned_e8s' : IDL.Nat64,
     'success' : IDL.Bool,
+  });
+  const SpRailWire_ConversionPhase = IDL.Variant({
+    'Refunding' : IDL.Null,
+    'Revoking' : IDL.Null,
+    'Reserved' : IDL.Null,
+    'Refunded' : IDL.Null,
+    'Pulling' : IDL.Null,
+    'Rejected' : IDL.Null,
+    'Approving' : IDL.Null,
+    'PoolCall' : IDL.Null,
+    'CreditPending' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const SpRailWire_ConversionStatus = IDL.Variant({
+    'Refunded' : IDL.Record({
+      'refunded_raw' : IDL.Nat64,
+      'retained_dust_raw' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+    }),
+    'Rejected' : IDL.Record({ 'intent_seq' : IDL.Nat64, 'reason' : IDL.Text }),
+    'Completed' : IDL.Record({
+      'uncredited_lp' : IDL.Opt(IDL.Nat),
+      'retained_dust_raw' : IDL.Nat64,
+      'lp_credited' : IDL.Bool,
+      'lp_minted' : IDL.Nat,
+      'intent_seq' : IDL.Nat64,
+    }),
+    'Pending' : IDL.Record({
+      'phase' : SpRailWire_ConversionPhase,
+      'intent_seq' : IDL.Nat64,
+      'reason' : IDL.Opt(IDL.Text),
+    }),
+  });
+  const SpRailWire_ConversionError = IDL.Variant({
+    'EmergencyPaused' : IDL.Null,
+    'CapacityExceeded' : IDL.Null,
+    'SequenceExhausted' : IDL.Null,
+    'NonZeroFeeBudgetRequired' : IDL.Record({
+      'minimum_budget_raw' : IDL.Nat64,
+      'fee_raw' : IDL.Nat64,
+    }),
+    'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'IntentConflict' : IDL.Null,
+    'SequenceMismatch' : IDL.Record({ 'expected_seq' : IDL.Nat64 }),
+    'NotFound' : IDL.Null,
+    'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
+    'Unauthorized' : IDL.Null,
+    'InvalidRequest' : IDL.Record({ 'reason' : IDL.Text }),
+    'LpTokenUnavailable' : IDL.Null,
+    'ActiveIntent' : IDL.Record({ 'intent_seq' : IDL.Nat64 }),
+    'CannotCancel' : IDL.Null,
+    'SystemBusy' : IDL.Null,
+    'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
+  });
+  const SpRailWire_Result_4 = IDL.Variant({
+    'Ok' : SpRailWire_ConversionStatus,
+    'Err' : SpRailWire_ConversionError,
+  });
+  const SpRailWire_LiquidationResult = IDL.Record({
+    'admitted' : IDL.Opt(IDL.Bool),
+    'error_message' : IDL.Opt(IDL.Text),
+    'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'vault_id' : IDL.Nat64,
+    'collateral_gained' : IDL.Nat64,
+    'success' : IDL.Bool,
+    'collateral_type' : IDL.Principal,
+  });
+  const SpRailWire_Result_5 = IDL.Variant({
+    'Ok' : SpRailWire_LiquidationResult,
+    'Err' : SpRailWire_StabilityPoolError,
+  });
+  const InterestRecoveryWire_RecoveryStatus = IDL.Record({
+    'next_packet' : IDL.Nat16,
+    'manifest_hash' : IDL.Vec(IDL.Nat8),
+    'credited_raw' : IDL.Nat64,
+    'packet_count' : IDL.Nat16,
+    'live_interest_only' : IDL.Bool,
+  });
+  const InterestRecoveryWire_Result_7 = IDL.Variant({
+    'Ok' : InterestRecoveryWire_RecoveryStatus,
+    'Err' : IDL.Text,
   });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
@@ -154,13 +271,29 @@ export const idlFactory = ({ IDL }) => {
     'InsufficientPoolBalance' : IDL.Null,
     'DepositIntentPayloadMismatch' : IDL.Null,
   });
-  const LiquidationResult = IDL.Record({
+  const SpRailWire_IntentionalDrift_LiquidationResult = IDL.Record({
+    'admitted' : IDL.Opt(IDL.Bool),
     'error_message' : IDL.Opt(IDL.Text),
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'vault_id' : IDL.Nat64,
     'collateral_gained' : IDL.Nat64,
     'success' : IDL.Bool,
     'collateral_type' : IDL.Principal,
+  });
+  const SpRailWire_Result_11 = IDL.Variant({
+    'Ok' : IDL.Nat64,
+    'Err' : SpRailWire_ConversionError,
+  });
+  const SpRailWire_ConversionRequest = IDL.Record({
+    'min_lp' : IDL.Nat,
+    'max_fee_budget_raw' : IDL.Nat64,
+    'principal_raw' : IDL.Nat64,
+    'intent_seq' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+  });
+  const SpRailWire_ConversionView = IDL.Record({
+    'status' : SpRailWire_ConversionStatus,
+    'request' : SpRailWire_ConversionRequest,
   });
   const ChainAbsorbAutoTickRecord = IDL.Record({
     'skipped_reason' : IDL.Opt(IDL.Text),
@@ -201,6 +334,26 @@ export const idlFactory = ({ IDL }) => {
     'legacy_floor' : IDL.Opt(IDL.Nat64),
     'capacity' : IDL.Nat64,
     'admission_blocked_reason' : IDL.Opt(IDL.Text),
+  });
+  const InterestRecoveryWire_InterestMintReceiptPayload = IDL.Record({
+    'collateral_type' : IDL.Opt(IDL.Principal),
+    'amount' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+  });
+  const InterestRecoveryWire_RecoveryPacketReceipt = IDL.Record({
+    'source_mint_block' : IDL.Nat64,
+    'allocation_digest' : IDL.Vec(IDL.Nat8),
+    'manifest_hash' : IDL.Vec(IDL.Nat8),
+    'credited' : IDL.Bool,
+    'payload' : InterestRecoveryWire_InterestMintReceiptPayload,
+  });
+  const InterestRecoveryWire_Result_10 = IDL.Variant({
+    'Ok' : IDL.Opt(InterestRecoveryWire_RecoveryPacketReceipt),
+    'Err' : IDL.Text,
+  });
+  const InterestRecoveryWire_Result_11 = IDL.Variant({
+    'Ok' : IDL.Opt(InterestRecoveryWire_RecoveryStatus),
+    'Err' : IDL.Text,
   });
   const LedgerReconciliationEntry = IDL.Record({
     'healthy' : IDL.Bool,
@@ -265,6 +418,111 @@ export const idlFactory = ({ IDL }) => {
     'candidate_block_index_raw' : IDL.Opt(IDL.Text),
     'transfer_memo' : IDL.Vec(IDL.Nat8),
     'gross_amount' : IDL.Nat64,
+  });
+  const WithdrawalWire_Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const WithdrawalWire_PendingOutboundPayoutStatus = IDL.Record({
+    'last_error' : IDL.Opt(IDL.Text),
+    'ambiguous_seen' : IDL.Bool,
+    'transfer_fee' : IDL.Nat64,
+    'reconciliation_attempts' : IDL.Nat64,
+    'last_reconciliation_at_ns' : IDL.Opt(IDL.Nat64),
+    'recipient' : WithdrawalWire_Account,
+    'transfer_amount' : IDL.Nat64,
+    'from_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'transfer_created_at_time_ns' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'candidate_block_index' : IDL.Opt(IDL.Nat64),
+    'dispatch_in_flight' : IDL.Bool,
+    'candidate_block_index_raw' : IDL.Opt(IDL.Text),
+    'transfer_memo' : IDL.Vec(IDL.Nat8),
+    'gross_amount' : IDL.Nat64,
+  });
+  const SpRailWire_Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const SpRailWire_OrdinaryPayoutTuple = IDL.Record({
+    'destination' : SpRailWire_Account,
+    'source' : SpRailWire_Account,
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'amount_raw' : IDL.Nat64,
+    'ledger_fee_raw' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+    'gross_raw' : IDL.Nat64,
+  });
+  const SpRailWire_OrdinaryPaymentTuple = IDL.Record({
+    'destination' : SpRailWire_Account,
+    'source' : SpRailWire_Account,
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'amount_raw' : IDL.Nat64,
+    'ledger_fee_raw' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+  });
+  const SpRailWire_OrdinaryLiquidationQuote = IDL.Record({
+    'payout_tuple' : IDL.Opt(SpRailWire_OrdinaryPayoutTuple),
+    'payout_operation_id' : IDL.Opt(IDL.Nat),
+    'collateral_price_e8s' : IDL.Nat64,
+    'collateral_gross_raw' : IDL.Nat64,
+    'pull_fee_raw' : IDL.Nat64,
+    'payment_block_index' : IDL.Opt(IDL.Nat64),
+    'payout_block_index' : IDL.Opt(IDL.Nat64),
+    'payout_net_raw' : IDL.Opt(IDL.Nat64),
+    'surcharge_raw' : IDL.Nat64,
+    'principal_raw' : IDL.Nat64,
+    'collateral_ledger' : IDL.Principal,
+    'collateral_net_raw' : IDL.Nat64,
+    'gross_payment_raw' : IDL.Nat64,
+    'collateral_fee_raw' : IDL.Nat64,
+    'payment_tuple' : SpRailWire_OrdinaryPaymentTuple,
+    'debt_e8s' : IDL.Nat64,
+  });
+  const SpRailWire_OrdinaryApprovalTuple = IDL.Record({
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_raw' : IDL.Nat64,
+    'amount_raw' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'spender' : IDL.Principal,
+    'expires_at_time_ns' : IDL.Nat64,
+  });
+  const SpRailWire_OrdinaryLiquidationPhase = IDL.Variant({
+    'BackendPrepared' : IDL.Null,
+    'ApprovalConfirmed' : IDL.Null,
+    'CancellationSubmitted' : IDL.Null,
+    'PaymentConfirmed' : IDL.Null,
+    'PaymentNoEffect' : IDL.Null,
+    'BackendSubmitted' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'ApprovalSubmitted' : IDL.Null,
+    'PayoutNoEffect' : IDL.Null,
+    'Cancelled' : IDL.Null,
+    'PayoutHeld' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const SpRailWire_SpLiquidationPayment = IDL.Variant({
+    'Icusd' : IDL.Null,
+    'Ckusdc' : IDL.Null,
+    'Ckusdt' : IDL.Null,
+  });
+  const SpRailWire_OrdinaryLiquidationStatus = IDL.Record({
+    'request_id' : IDL.Vec(IDL.Nat8),
+    'last_error' : IDL.Opt(IDL.Text),
+    'approval_attempted' : IDL.Bool,
+    'stable_ledger' : IDL.Principal,
+    'backend_attempted' : IDL.Bool,
+    'quote' : IDL.Opt(SpRailWire_OrdinaryLiquidationQuote),
+    'vault_id' : IDL.Nat64,
+    'approval' : IDL.Opt(SpRailWire_OrdinaryApprovalTuple),
+    'phase' : SpRailWire_OrdinaryLiquidationPhase,
+    'collateral_type' : IDL.Principal,
+    'payment' : SpRailWire_SpLiquidationPayment,
   });
   const ChainSpAbsorbIntentStatus = IDL.Variant({
     'BackendRejected' : IDL.Null,
@@ -510,6 +768,113 @@ export const idlFactory = ({ IDL }) => {
     'vault_id' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
   });
+  const SpRailWire_ConversionQuote = IDL.Record({
+    'lp_ledger' : IDL.Principal,
+    'quoted_lp' : IDL.Nat,
+    'pool_coin_index' : IDL.Nat8,
+    'minimum_fee_budget_raw' : IDL.Nat64,
+    'principal_raw' : IDL.Nat64,
+    'live_transfer_fee_raw' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+    'pool_canister' : IDL.Principal,
+  });
+  const SpRailWire_Result_15 = IDL.Variant({
+    'Ok' : SpRailWire_ConversionQuote,
+    'Err' : SpRailWire_ConversionError,
+  });
+  const SpRailWireNext_ConversionPhase = IDL.Variant({
+    'Refunding' : IDL.Null,
+    'Revoking' : IDL.Null,
+    'Reserved' : IDL.Null,
+    'Refunded' : IDL.Null,
+    'Pulling' : IDL.Null,
+    'Rejected' : IDL.Null,
+    'Approving' : IDL.Null,
+    'PoolCall' : IDL.Null,
+    'CreditPending' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const SpRailWireNext_ConversionStatus = IDL.Variant({
+    'Refunded' : IDL.Record({
+      'refunded_raw' : IDL.Nat64,
+      'retained_dust_raw' : IDL.Nat64,
+      'intent_seq' : IDL.Nat64,
+    }),
+    'Rejected' : IDL.Record({ 'intent_seq' : IDL.Nat64, 'reason' : IDL.Text }),
+    'Completed' : IDL.Record({
+      'uncredited_lp' : IDL.Opt(IDL.Nat),
+      'retained_dust_raw' : IDL.Nat64,
+      'lp_credited' : IDL.Bool,
+      'lp_minted' : IDL.Nat,
+      'intent_seq' : IDL.Nat64,
+    }),
+    'Pending' : IDL.Record({
+      'phase' : SpRailWireNext_ConversionPhase,
+      'intent_seq' : IDL.Nat64,
+      'reason' : IDL.Opt(IDL.Text),
+    }),
+  });
+  const SpRailWireNext_ConversionError = IDL.Variant({
+    'EmergencyPaused' : IDL.Null,
+    'CapacityExceeded' : IDL.Null,
+    'SequenceExhausted' : IDL.Null,
+    'NonZeroFeeBudgetRequired' : IDL.Record({
+      'minimum_budget_raw' : IDL.Nat64,
+      'fee_raw' : IDL.Nat64,
+    }),
+    'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'IntentConflict' : IDL.Null,
+    'SequenceMismatch' : IDL.Record({ 'expected_seq' : IDL.Nat64 }),
+    'NotFound' : IDL.Null,
+    'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
+    'Unauthorized' : IDL.Null,
+    'InvalidRequest' : IDL.Record({ 'reason' : IDL.Text }),
+    'LpTokenUnavailable' : IDL.Null,
+    'ActiveIntent' : IDL.Record({ 'intent_seq' : IDL.Nat64 }),
+    'CannotCancel' : IDL.Null,
+    'SystemBusy' : IDL.Null,
+    'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
+  });
+  const SpRailWireNext_Result_4 = IDL.Variant({
+    'Ok' : SpRailWireNext_ConversionStatus,
+    'Err' : SpRailWireNext_ConversionError,
+  });
+  const WithdrawalWire_StabilityPoolError = IDL.Variant({
+    'LedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'RefundClaimNotFound' : IDL.Null,
+    'EmergencyPaused' : IDL.Null,
+    'AlreadyOptedOut' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientBalance' : IDL.Record({
+      'token' : IDL.Principal,
+      'available' : IDL.Nat64,
+      'required' : IDL.Nat64,
+    }),
+    'InvalidPayoutAddress' : IDL.Record({ 'reason' : IDL.Text }),
+    'CollateralNotFound' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'NoPositionFound' : IDL.Null,
+    'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
+    'Unauthorized' : IDL.Null,
+    'InterCanisterCallFailed' : IDL.Record({
+      'method' : IDL.Text,
+      'target' : IDL.Text,
+    }),
+    'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
+    'LiquidationFailed' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'reason' : IDL.Text,
+    }),
+    'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'SystemBusy' : IDL.Null,
+    'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
+    'InsufficientPoolBalance' : IDL.Null,
+  });
+  const WithdrawalWire_Result_6 = IDL.Variant({
+    'Ok' : IDL.Nat64,
+    'Err' : WithdrawalWire_StabilityPoolError,
+  });
   const CfxClaimPayoutRecovery = IDL.Record({
     'claim_id' : IDL.Nat64,
     'claimant' : IDL.Principal,
@@ -536,6 +901,17 @@ export const idlFactory = ({ IDL }) => {
     'vault' : ChainLiquidatableVaultInfo,
     'pending_status' : IDL.Opt(ChainSpAbsorbIntentStatus),
   });
+  const InterestRecoveryWire_RecoveryPacket = IDL.Record({
+    'source_mint_block' : IDL.Nat64,
+    'allocations' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'collateral_type' : IDL.Principal,
+    'amount' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+  });
+  const InterestRecoveryWire_RecoveryManifest = IDL.Record({
+    'packets' : IDL.Vec(InterestRecoveryWire_RecoveryPacket),
+    'baseline_digest' : IDL.Vec(IDL.Nat8),
+  });
   const PoolConfiguration = IDL.Record({
     'emergency_pause' : IDL.Bool,
     'min_deposit_e8s' : IDL.Nat64,
@@ -546,6 +922,11 @@ export const idlFactory = ({ IDL }) => {
     'ack_native_xrp_payout_settled' : IDL.Func(
         [IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'admin_acknowledge_three_usd_reserve_v2_client' : IDL.Func(
+        [],
+        [SpRailWire_Result],
         [],
       ),
     'admin_correct_balance' : IDL.Func(
@@ -581,6 +962,12 @@ export const idlFactory = ({ IDL }) => {
     'admin_recover_ambiguous_native_xrp_burn' : IDL.Func(
         [IDL.Nat64, IDL.Opt(IDL.Nat64)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'cancel_3usd_conversion' : IDL.Func([IDL.Nat64], [SpRailWire_Result_4], []),
+    'cancel_ordinary_liquidation' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [SpRailWire_Result_5],
         [],
       ),
     'check_chain_absorb_capacity' : IDL.Func(
@@ -623,6 +1010,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'continue_interest_recovery' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat16, IDL.Nat8],
+        [InterestRecoveryWire_Result_7],
+        [],
+      ),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -656,8 +1048,38 @@ export const idlFactory = ({ IDL }) => {
       ),
     'execute_liquidation' : IDL.Func(
         [IDL.Nat64],
-        [IDL.Variant({ 'Ok' : LiquidationResult, 'Err' : StabilityPoolError })],
+        [
+          IDL.Variant({
+            'Ok' : SpRailWire_IntentionalDrift_LiquidationResult,
+            'Err' : StabilityPoolError,
+          }),
+        ],
         [],
+      ),
+    'finish_interest_recovery' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [InterestRecoveryWire_Result_7],
+        [],
+      ),
+    'get_3usd_conversion_next_seq' : IDL.Func(
+        [],
+        [SpRailWire_Result_11],
+        ['query'],
+      ),
+    'get_3usd_conversion_status' : IDL.Func(
+        [IDL.Nat64],
+        [SpRailWire_Result_4],
+        ['query'],
+      ),
+    'get_active_3usd_conversion' : IDL.Func(
+        [],
+        [IDL.Opt(SpRailWire_ConversionStatus)],
+        ['query'],
+      ),
+    'get_active_3usd_conversion_v1' : IDL.Func(
+        [],
+        [IDL.Opt(SpRailWire_ConversionView)],
+        ['query'],
       ),
     'get_chain_absorb_auto_status' : IDL.Func(
         [],
@@ -678,6 +1100,16 @@ export const idlFactory = ({ IDL }) => {
     'get_interest_mint_receipt_capacity' : IDL.Func(
         [],
         [InterestMintReceiptCapacity],
+        ['query'],
+      ),
+    'get_interest_recovery_packet_receipt' : IDL.Func(
+        [IDL.Nat64],
+        [InterestRecoveryWire_Result_10],
+        [],
+      ),
+    'get_interest_recovery_status' : IDL.Func(
+        [],
+        [InterestRecoveryWire_Result_11],
         ['query'],
       ),
     'get_ledger_reconciliation' : IDL.Func(
@@ -713,6 +1145,16 @@ export const idlFactory = ({ IDL }) => {
     'get_my_pending_collateral_claims' : IDL.Func(
         [],
         [IDL.Vec(PendingOutboundPayoutStatus)],
+        ['query'],
+      ),
+    'get_my_pending_withdrawals' : IDL.Func(
+        [],
+        [IDL.Vec(WithdrawalWire_PendingOutboundPayoutStatus)],
+        ['query'],
+      ),
+    'get_ordinary_liquidation_status' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [IDL.Opt(SpRailWire_OrdinaryLiquidationStatus)],
         ['query'],
       ),
     'get_pending_chain_absorbs' : IDL.Func(
@@ -759,7 +1201,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'notify_liquidatable_vaults' : IDL.Func(
         [IDL.Vec(LiquidatableVaultInfo)],
-        [IDL.Vec(LiquidationResult)],
+        [IDL.Vec(SpRailWire_IntentionalDrift_LiquidationResult)],
         [],
       ),
     'opt_in_cfx' : IDL.Func(
@@ -792,6 +1234,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'quote_3usd_conversion' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Nat],
+        [SpRailWire_Result_15],
+        [],
+      ),
     'receive_interest_revenue' : IDL.Func(
         [IDL.Principal, IDL.Nat64, IDL.Opt(IDL.Principal)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
@@ -802,9 +1249,44 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'reconcile_3usd_conversion_approval_v1' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [SpRailWireNext_Result_4],
+        [],
+      ),
+    'reconcile_3usd_conversion_pool_input_v1' : IDL.Func(
+        [IDL.Nat64, IDL.Nat8, IDL.Nat64],
+        [SpRailWire_Result_4],
+        [],
+      ),
+    'reconcile_3usd_conversion_pull_v1' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [SpRailWire_Result_4],
+        [],
+      ),
+    'reconcile_3usd_conversion_refund_v1' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [SpRailWireNext_Result_4],
+        [],
+      ),
+    'reconcile_3usd_conversion_revoke_v1' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [SpRailWireNext_Result_4],
+        [],
+      ),
     'reconcile_collateral_claim' : IDL.Func(
         [IDL.Principal, IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'reconcile_ordinary_liquidation_approval' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat64],
+        [SpRailWire_Result_5],
+        [],
+      ),
+    'reconcile_withdrawal' : IDL.Func(
+        [IDL.Principal, IDL.Principal, IDL.Nat64],
+        [WithdrawalWire_Result_6],
         [],
       ),
     'recredit_failed_cfx_claim_payout' : IDL.Func(
@@ -827,9 +1309,15 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'resume_3usd_conversion' : IDL.Func([IDL.Nat64], [SpRailWire_Result_4], []),
     'resume_operations' : IDL.Func(
         [],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'retry_ordinary_liquidation' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [SpRailWire_Result_5],
         [],
       ),
     'retry_unallocated_interest_forward' : IDL.Func(
@@ -865,6 +1353,16 @@ export const idlFactory = ({ IDL }) => {
             'Err' : StabilityPoolError,
           }),
         ],
+        [],
+      ),
+    'stage_interest_recovery' : IDL.Func(
+        [InterestRecoveryWire_RecoveryManifest],
+        [InterestRecoveryWire_Result_7],
+        [],
+      ),
+    'start_3usd_conversion' : IDL.Func(
+        [SpRailWire_ConversionRequest],
+        [SpRailWire_Result_4],
         [],
       ),
     'update_pool_configuration' : IDL.Func(

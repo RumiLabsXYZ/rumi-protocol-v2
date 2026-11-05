@@ -1,0 +1,194 @@
+{
+  "cards": [
+    {
+      "id": "SEC-06",
+      "state": "Review",
+      "owner": "Bram",
+      "scope": "Prepare vault 158 liquidation recovery without executing it",
+      "evidenceText": "The exact candidate pinned by merged PR #618 is installed: module SHA-256 db8931273a83bb3dfbd8c516b85808b24ad5bd9daed0df9f7265b440658fe098. Readback confirmed the bot is running but processing remains paused, its recovery configuration is readable, vault 158 is still a generation-1 PaymentShortfall claim, and no recovery, payment journal, or treasury intent was created. The upgrade-only step is complete. Recovery preparation, execution, reconciliation, unpause, and funds remain held for separate authority.",
+      "evidenceLinks": [
+        {
+          "title": "Vault 158 recovery PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/614"
+        },
+        {
+          "title": "Pinned upgrade-only decision",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/618"
+        }
+      ]
+    },
+    {
+      "id": "SEC-01",
+      "state": "Review",
+      "owner": "Bram",
+      "scope": "Verify Stability Pool recovery and current rails",
+      "evidenceText": "Public read-only production checks show the pool open and consistent, accepting interest receipts, with no public pending refund, unallocated-interest, chain-absorb, or active 3USD-conversion queue. Authorized readback shows recovery at 237 of 237 packets and an empty backend Treasury recovery page. Management status reports the pool running with module SHA-256 a2a042ecff6f934cf25f797fa08d0984d84ab8e28f954e50f3582f54a331298f, superseding the stale October hash in the public dashboard. No examined retained release artifact binds that current hash to source, so PR #623 deployment is unproved either way. Preserve that limitation; do not build or install merely to attribute it.",
+      "evidenceLinks": [
+        {
+          "title": "Stability Pool rails PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/590"
+        },
+        {
+          "title": "Stability Pool Sunset admission PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/623"
+        }
+      ]
+    },
+    {
+      "id": "SEC-02",
+      "state": "In progress",
+      "owner": "Bram",
+      "scope": "Reconcile accepted security findings",
+      "evidenceText": "Compare the prior audits and later fixes with current main and live modules. Track source, deployment, and historical obligations separately.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "SEC-03",
+      "state": "Done",
+      "owner": "Bram",
+      "scope": "Verify Points held-epoch resolution",
+      "evidenceText": "Season 1 scoring finalized on mainnet. The open period closed and final-period compensation was applied. Earlier entries and receipts were preserved, replay added zero, and both season timers are off.",
+      "evidenceLinks": [
+        {
+          "title": "Points finalization PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/608"
+        }
+      ]
+    },
+    {
+      "id": "SEC-04",
+      "state": "Review",
+      "owner": "Bram",
+      "scope": "Check 3pool payout and archive recovery",
+      "evidenceText": "Verify exact receipt proof and pending payout identities. Keep ambiguous outcomes held until positive evidence or a safe recovery route is shown.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "SEC-05",
+      "state": "Blocked",
+      "owner": "Bram",
+      "scope": "Refresh release and public security status",
+      "evidenceText": "Waiting for current live readback and finding closure evidence. Any public update must state verified production status without private exploit detail.",
+      "evidenceLinks": [
+        {
+          "title": "Public security status",
+          "url": "https://rumiprotocol.com/security/october-2026"
+        }
+      ]
+    },
+    {
+      "id": "SEC-08",
+      "state": "Review",
+      "owner": "Bram",
+      "scope": "Track vault 51 nICP repayment, settlement, and withdrawal",
+      "evidenceText": "PR #612 is merged. PR #613 is open, mergeable, and its listed frontend and receipt checks pass. The software preserves the vault's debt and nICP terms and prepares owner repayment and settled ICP withdrawal. No repayment, settlement, withdrawal, or funds movement is claimed.",
+      "evidenceLinks": [
+        {
+          "title": "Vault 51 redemption PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/612"
+        },
+        {
+          "title": "Vault 51 owner recovery PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/613"
+        }
+      ]
+    },
+    {
+      "id": "CKICP-01",
+      "state": "Done",
+      "owner": "Bram",
+      "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
+      "evidenceText": "PR #610 merged at 93d9ece7. The backend ICP escrow/accounting implementation is merged; focused backend checks and independent backend review passed. PR #620 is also merged. The source merge does not prove installation, live reserve funding, activation, or a financial canary.",
+      "evidenceLinks": [
+        {
+          "title": "ckSOL PR #610 and current checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
+        },
+        {
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
+        }
+      ]
+    },
+    {
+      "id": "CKICP-02",
+      "state": "Done",
+      "owner": "Bram",
+      "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
+      "evidenceText": "PR #610 merged at 93d9ece7. The ICP quote and consent flow, existing SOL deposit recovery path, and rent/dust address preflight are in merged source; the 35-test focused fixture passed and independent frontend review passed. PR #605 remains open, but its two changed balance-interface files match current main. Its reported earlier asset publication has not been independently read back here.",
+      "evidenceLinks": [
+        {
+          "title": "ckSOL PR #610 and current checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
+        },
+        {
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
+        }
+      ]
+    },
+    {
+      "id": "CKICP-03",
+      "state": "Blocked",
+      "owner": "Bram",
+      "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
+      "evidenceText": "Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). Source merge-when-green proceeds without paid CI. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
+      "evidenceLinks": [
+        {
+          "title": "ckSOL PR #610 and current checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
+        },
+        {
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
+        },
+        {
+          "title": "ckSOL release decision",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-release-decision-2026-11-04.md"
+        },
+        {
+          "title": "Held upgrade-only packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-upgrade-only-packet-20261104.md"
+        },
+        {
+          "title": "Source composition checkpoint",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-pr613-composition-20261104.md"
+        }
+      ]
+    },
+    {
+      "id": "XRPTAG-01",
+      "state": "Done",
+      "owner": "agent:xrp_tag_guidance",
+      "scope": "Clarify incoming XRP deposit-tag guidance across vault deposit surfaces",
+      "evidenceText": "PR #607 merged at 5108abc after frontend CI passed. Coordinated frontend asset batch 666 was deployed on the source-matched base; live index, route and XRP notice bundle match the reviewed build. All 2,013 prior asset keys and properties were preserved, with 106 changed encodings verified. No wallet or financial action was performed.",
+      "evidenceLinks": [
+        {
+          "title": "XRP deposit-tag guidance PR #607",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/607"
+        },
+        {
+          "title": "XRP frontend validation",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41338752665"
+        }
+      ]
+    },
+    {
+      "id": "XRPTAG-02",
+      "state": "Done",
+      "owner": "root",
+      "scope": "Check incoming-tag guidance and preserve outgoing XRP destination tags",
+      "evidenceText": "PR #607 merged at 5108abc after frontend CI passed. Coordinated frontend asset batch 666 was deployed on the source-matched base; live index, route and XRP notice bundle match the reviewed build. All 2,013 prior asset keys and properties were preserved, with 106 changed encodings verified. No wallet or financial action was performed.",
+      "evidenceLinks": [
+        {
+          "title": "XRP deposit-tag guidance PR #607",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/607"
+        },
+        {
+          "title": "XRP frontend validation",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41338752665"
+        }
+      ]
+    }
+  ]
+}

@@ -40,7 +40,7 @@ const mocks = vi.hoisted(() => ({
   walletActors: {} as Record<string, any>,
   walletGetActor: vi.fn(async (canisterId: string) => (mocks.walletActors as any)[canisterId] ?? { __kind: 'wallet-actor' }),
   isOisyWallet: vi.fn(() => false),
-  getOisySignerAgent: vi.fn(async () => ({ __kind: 'signer-agent' })),
+  getMinterOisySignerAgent: vi.fn(async () => ({ __kind: 'signer-agent' })),
   oisyActors: {} as Record<string, any>,
   createOisyActor: vi.fn((canisterId: string) => (mocks.oisyActors as any)[canisterId]),
 }));
@@ -98,10 +98,8 @@ vi.mock('./protocol/walletOperations', () => ({
   isOisyWallet: mocks.isOisyWallet,
 }));
 
-vi.mock('./oisySigner', () => ({
-  getOisySignerAgent: mocks.getOisySignerAgent,
-  createOisyActor: mocks.createOisyActor,
-}));
+vi.mock('./oisySigner', () => ({ createOisyActor: mocks.createOisyActor }));
+vi.mock('./minterOisySigner', () => ({ getMinterOisySignerAgent: mocks.getMinterOisySignerAgent }));
 
 import { Principal } from '@dfinity/principal';
 import {
@@ -322,7 +320,7 @@ describe('ckdogeMinterActors', () => {
 
   // redeemDogeWithApproval: the click-to-consent-screen routing this file's
   // redemption-fix regression guards. Oisy must build BOTH actors from one
-  // getOisySignerAgent() call so the two sequential consent screens open in a
+  // getMinterOisySignerAgent() call so the two sequential consent screens open in a
   // single popup and no live query burns the gesture window before the first
   // one; non-Oisy must keep using walletStore.getActor as before; a failed
   // approval must halt before retrieve_doge_with_approval is ever called; and
@@ -339,7 +337,7 @@ describe('ckdogeMinterActors', () => {
       const outcome = await redeemDogeWithApproval(redeemParams());
 
       expect(outcome).toEqual({ kind: 'success', approveBlockIndex: 42n, burnBlockIndex: 7n });
-      expect(mocks.getOisySignerAgent).not.toHaveBeenCalled();
+      expect(mocks.getMinterOisySignerAgent).not.toHaveBeenCalled();
       expect(mocks.walletGetActor).toHaveBeenCalledWith(LEDGER_ID, { name: 'ckdoge_ledger' });
       expect(mocks.walletGetActor).toHaveBeenCalledWith(MINTER_ID, { name: 'ckdoge_minter' });
       expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
@@ -356,10 +354,38 @@ describe('ckdogeMinterActors', () => {
       const outcome = await redeemDogeWithApproval(redeemParams());
 
       expect(outcome).toEqual({ kind: 'success', approveBlockIndex: 42n, burnBlockIndex: 7n });
-      expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(1);
+      expect(mocks.getMinterOisySignerAgent).toHaveBeenCalledTimes(1);
       expect(mocks.walletGetActor).not.toHaveBeenCalled();
       expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
       expect(minterActor.retrieve_doge_with_approval).toHaveBeenCalledTimes(1);
+    });
+
+
+    it('persists approval and dispatch lineage before retrieval, and preserves success after session leaves', async () => {
+      const sequence: string[] = [];
+      const ledger = makeLedgerActor();
+      let live = true;
+      const minter = { retrieve_doge_with_approval: vi.fn(async () => { sequence.push('retrieve'); live = false; return { Ok: { block_index: 7n } }; }) };
+      mocks.walletActors[LEDGER_ID] = ledger;
+      mocks.walletActors[MINTER_ID] = minter;
+      const result = await redeemDogeWithApproval(redeemParams({ isLive: () => live,
+        onApproved: () => sequence.push('approved-saved'), beforeRetrieve: () => sequence.push('dispatch-saved') }));
+      expect(sequence).toEqual(['approved-saved', 'dispatch-saved', 'retrieve']);
+      expect(result).toEqual({ kind: 'success', approveBlockIndex: 42n, burnBlockIndex: 7n });
+    });
+
+    it('does not convert retrieval transport loss into a definite rejection', async () => {
+      mocks.walletActors[LEDGER_ID] = makeLedgerActor();
+      mocks.walletActors[MINTER_ID] = { retrieve_doge_with_approval: vi.fn().mockRejectedValue(new Error('reply lost')) };
+      await expect(redeemDogeWithApproval(redeemParams())).rejects.toThrow('reply lost');
+    });
+
+    it.each(['GenericError', 'AlreadyProcessing', 'TemporarilyUnavailable', 'NewUnknownVariant'])('holds %s retrieval responses for reconciliation', async (variant) => {
+      mocks.walletActors[LEDGER_ID] = makeLedgerActor();
+      mocks.walletActors[MINTER_ID] = makeMinterActor({ Err: { [variant]: variant === 'GenericError' ? { error_message: 'uncertain' } : null } });
+      const result = await redeemDogeWithApproval(redeemParams());
+      expect(result.kind).toBe('retrieve-error');
+      if (result.kind === 'retrieve-error') expect(result.definite).toBe(false);
     });
 
     it('a failed approval halts before retrieve_doge_with_approval is ever called', async () => {
@@ -383,10 +409,9 @@ describe('ckdogeMinterActors', () => {
       mocks.walletActors[LEDGER_ID] = ledgerActor;
       mocks.walletActors[MINTER_ID] = minterActor;
 
-      let liveChecks = 0;
-      const outcome = await redeemDogeWithApproval(
-        redeemParams({ isLive: () => (liveChecks += 1) <= 2 }),
-      );
+      let live = true;
+      ledgerActor.icrc2_approve.mockImplementation(async () => { live = false; return { Ok: 42n }; });
+      const outcome = await redeemDogeWithApproval(redeemParams({ isLive: () => live }));
 
       expect(outcome).toEqual({ kind: 'stale' });
       expect(minterActor.retrieve_doge_with_approval).not.toHaveBeenCalled();

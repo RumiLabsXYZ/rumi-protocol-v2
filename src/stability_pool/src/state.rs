@@ -198,6 +198,23 @@ pub struct StabilityPoolState {
     pub three_usd_absorb_recovery_cursor: Option<u64>,
     #[serde(default)]
     pub completed_three_usd_absorbs: Option<BTreeSet<u64>>,
+    /// Durable request-ID journal for ordinary icUSD/ckUSDC/ckUSDT
+    /// liquidations. The row is admitted before backend preparation or any
+    /// approval await and retains every immutable tuple needed for retry.
+    #[serde(default)]
+    pub pending_ordinary_liquidations:
+        Option<BTreeMap<[u8; 32], crate::ordinary_liquidation::OrdinaryLiquidationIntent>>,
+    /// Completion tombstones prevent a late callback or upgrade recovery from
+    /// debiting or crediting the same ordinary request twice.
+    #[serde(default)]
+    pub completed_ordinary_liquidations:
+        Option<BTreeMap<[u8; 32], crate::ordinary_liquidation::OrdinaryLiquidationTombstone>>,
+    #[serde(default)]
+    pub next_ordinary_liquidation_nonce: Option<u64>,
+    #[serde(default)]
+    pub ordinary_liquidation_vault_index: Option<BTreeMap<u64, [u8; 32]>>,
+    #[serde(default)]
+    pub ordinary_liquidation_recovery_cursor: Option<[u8; 32]>,
     pub total_liquidations_executed: u64,
     pub pool_creation_timestamp: u64,
     /// Lifetime interest revenue received from backend (e8s).
@@ -259,6 +276,11 @@ pub struct StabilityPoolState {
     /// a first-attempt no-effect response. Missing on old snapshots is initialized empty.
     #[serde(default)]
     pub pending_outbound_payouts: Option<BTreeMap<(Principal, Principal), PendingOutboundPayout>>,
+    /// Stablecoin withdrawals already debited from depositor books. Exact
+    /// transfer tuples remain held until paid or an authoritative first-attempt
+    /// no-effect response. Separate from collateral-claim accounting.
+    #[serde(default)]
+    pub pending_withdrawals: Option<BTreeMap<(Principal, Principal), PendingOutboundPayout>>,
     /// Monotonic ICRC-1 created_at_time allocator shared by collateral claims.
     #[serde(default)]
     pub last_outbound_payout_created_at_ns: Option<u64>,
@@ -292,6 +314,22 @@ pub struct StabilityPoolState {
     /// Immutable boundary for history the old rolling replay set may have evicted.
     #[serde(default)]
     pub legacy_interest_mint_receipt_floor: Option<LegacyInterestMintReceiptFloor>,
+    /// Retained sealed packet allocations, cursor and positive per-source audit.
+    #[serde(default)]
+    pub interest_recovery: Option<crate::interest_recovery::RecoveryProgress>,
+    /// Hold all unrelated mutations immediately after this scoped repair upgrade.
+    #[serde(default)]
+    pub interest_recovery_bootstrap_hold: Option<bool>,
+    /// Durable caller/sequence keyed conversion sagas.  Terminal rows are
+    /// retained as permanent tombstones so a late callback can never allocate
+    /// a second escrow or spend a completed pool intent.
+    #[serde(default)]
+    pub conversion_intents:
+        Option<BTreeMap<(Principal, u64), crate::conversion::ConversionIntent>>,
+    /// Permanent per-caller conversion sequence floors.  The map is never
+    /// rolled back when a transfer is proven to have had no effect.
+    #[serde(default)]
+    pub conversion_high_watermarks: Option<BTreeMap<Principal, u64>>,
 }
 
 impl Default for StabilityPoolState {
@@ -323,6 +361,11 @@ impl Default for StabilityPoolState {
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
             completed_three_usd_absorbs: Some(BTreeSet::new()),
+            pending_ordinary_liquidations: Some(BTreeMap::new()),
+            completed_ordinary_liquidations: Some(BTreeMap::new()),
+            next_ordinary_liquidation_nonce: Some(1),
+            ordinary_liquidation_vault_index: Some(BTreeMap::new()),
+            ordinary_liquidation_recovery_cursor: None,
             total_liquidations_executed: 0,
             pool_creation_timestamp: 0,
             total_interest_received_e8s: Some(0),
@@ -342,6 +385,7 @@ impl Default for StabilityPoolState {
             pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
             pending_outbound_payouts: Some(BTreeMap::new()),
+            pending_withdrawals: Some(BTreeMap::new()),
             last_outbound_payout_created_at_ns: None,
             completed_outbound_payouts: Some(BTreeMap::new()),
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
@@ -351,6 +395,10 @@ impl Default for StabilityPoolState {
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
             legacy_interest_mint_receipt_floor: Some(LegacyInterestMintReceiptFloor { through: None }),
+            interest_recovery: None,
+            interest_recovery_bootstrap_hold: None,
+            conversion_intents: Some(BTreeMap::new()),
+            conversion_high_watermarks: Some(BTreeMap::new()),
         }
     }
 }
@@ -370,6 +418,8 @@ pub const MAX_PENDING_OUTBOUND_PAYOUTS: usize = 10_000;
 pub const MAX_RECENT_OUTBOUND_PAYOUTS: usize = 100;
 pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
 pub const MAX_PENDING_NATIVE_XRP_ABSORBS: usize = 1_000;
+pub const MAX_PENDING_ORDINARY_LIQUIDATIONS: usize = 2_048;
+pub const MAX_COMPLETED_ORDINARY_LIQUIDATIONS: usize = 10_000;
 pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
 pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
 pub const MAX_COMPLETED_DEPOSIT_INTENTS: usize = 10_000;
@@ -2073,6 +2123,7 @@ impl StabilityPoolState {
         self.has_pending_chain_absorbs()
             || self.has_pending_native_xrp_absorbs()
             || self.pending_three_usd_absorb_count() > 0
+            || self.has_pending_ordinary_liquidations()
     }
 
     pub fn pending_three_usd_absorb_count(&self) -> usize {
@@ -2278,6 +2329,537 @@ impl StabilityPoolState {
                 completed.remove(&oldest);
             }
         }
+    }
+
+    pub fn pending_ordinary_liquidation_count(&self) -> usize {
+        self.pending_ordinary_liquidations
+            .as_ref()
+            .map_or(0, BTreeMap::len)
+    }
+
+    pub fn has_pending_ordinary_liquidations(&self) -> bool {
+        self.pending_ordinary_liquidation_count() > 0
+    }
+
+    pub fn get_pending_ordinary_liquidation(
+        &self,
+        request_id: &[u8; 32],
+    ) -> Option<crate::ordinary_liquidation::OrdinaryLiquidationIntent> {
+        self.pending_ordinary_liquidations
+            .as_ref()
+            .and_then(|pending| pending.get(request_id))
+            .cloned()
+    }
+
+    pub fn get_completed_ordinary_liquidation(
+        &self,
+        request_id: &[u8; 32],
+    ) -> Option<crate::ordinary_liquidation::OrdinaryLiquidationTombstone> {
+        self.completed_ordinary_liquidations
+            .as_ref()
+            .and_then(|completed| completed.get(request_id))
+            .cloned()
+    }
+
+    pub fn get_pending_ordinary_liquidation_for_vault(
+        &self,
+        vault_id: u64,
+    ) -> Option<crate::ordinary_liquidation::OrdinaryLiquidationIntent> {
+        let request_id = self
+            .ordinary_liquidation_vault_index
+            .as_ref()
+            .and_then(|index| index.get(&vault_id).copied());
+        request_id
+            .and_then(|request_id| self.get_pending_ordinary_liquidation(&request_id))
+            .or_else(|| {
+                self.pending_ordinary_liquidations
+                    .as_ref()
+                    .and_then(|pending| pending.values().find(|intent| intent.vault_id == vault_id))
+                    .cloned()
+            })
+    }
+
+    pub fn allocate_ordinary_request_id(&mut self, vault_id: u64) -> Result<[u8; 32], StabilityPoolError> {
+        let mut nonce = self.next_ordinary_liquidation_nonce.unwrap_or(1);
+        loop {
+            let request_id = crate::ordinary_liquidation::ordinary_request_id(vault_id, nonce);
+            let occupied = self
+                .pending_ordinary_liquidations
+                .as_ref()
+                .is_some_and(|pending| pending.contains_key(&request_id))
+                || self
+                    .completed_ordinary_liquidations
+                    .as_ref()
+                    .is_some_and(|completed| completed.contains_key(&request_id));
+            let next = nonce.checked_add(1).ok_or(StabilityPoolError::SystemBusy)?;
+            self.next_ordinary_liquidation_nonce = Some(next);
+            if !occupied {
+                return Ok(request_id);
+            }
+            nonce = next;
+        }
+    }
+
+    pub fn admit_ordinary_liquidation(
+        &mut self,
+        intent: crate::ordinary_liquidation::OrdinaryLiquidationIntent,
+    ) -> Result<crate::ordinary_liquidation::OrdinaryLiquidationIntent, StabilityPoolError> {
+        if let Some(existing) = self.get_pending_ordinary_liquidation(&intent.request_id) {
+            let same_identity = existing.vault_id == intent.vault_id
+                && existing.collateral_type == intent.collateral_type
+                && existing.payment == intent.payment
+                && existing.stable_ledger == intent.stable_ledger
+                && existing.stable_decimals == intent.stable_decimals
+                && existing.requested_debt_e8s == intent.requested_debt_e8s
+                && existing.max_gross_raw == intent.max_gross_raw
+                && existing.participant_snapshot == intent.participant_snapshot;
+            return if same_identity {
+                Ok(existing)
+            } else {
+                Err(StabilityPoolError::SystemBusy)
+            };
+        }
+        if self.get_completed_ordinary_liquidation(&intent.request_id).is_some()
+            || self.pending_ordinary_liquidation_count() > 0
+            || self.has_pending_chain_absorbs()
+            || self.has_pending_native_xrp_absorbs()
+            || self.pending_three_usd_absorb_count() > 0
+        {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        if self.pending_ordinary_liquidation_count() >= MAX_PENDING_ORDINARY_LIQUIDATIONS {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        self.pending_ordinary_liquidations
+            .get_or_insert_with(BTreeMap::new)
+            .insert(intent.request_id, intent.clone());
+        self.ordinary_liquidation_vault_index
+            .get_or_insert_with(BTreeMap::new)
+            .insert(intent.vault_id, intent.request_id);
+        Ok(intent)
+    }
+
+    pub fn update_ordinary_liquidation<F>(
+        &mut self,
+        request_id: [u8; 32],
+        expected_phase: Option<crate::ordinary_liquidation::OrdinaryLiquidationPhase>,
+        update: F,
+    ) -> Result<crate::ordinary_liquidation::OrdinaryLiquidationIntent, StabilityPoolError>
+    where
+        F: FnOnce(&mut crate::ordinary_liquidation::OrdinaryLiquidationIntent),
+    {
+        self.update_ordinary_liquidation_at(request_id, expected_phase, ic_cdk::api::time(), update)
+    }
+
+    pub fn update_ordinary_liquidation_at<F>(
+        &mut self,
+        request_id: [u8; 32],
+        expected_phase: Option<crate::ordinary_liquidation::OrdinaryLiquidationPhase>,
+        now_ns: u64,
+        update: F,
+    ) -> Result<crate::ordinary_liquidation::OrdinaryLiquidationIntent, StabilityPoolError>
+    where
+        F: FnOnce(&mut crate::ordinary_liquidation::OrdinaryLiquidationIntent),
+    {
+        let current = self
+            .get_pending_ordinary_liquidation(&request_id)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if expected_phase.is_some_and(|phase| current.phase != phase) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        let mut next = current;
+        update(&mut next);
+        next.updated_at_ns = now_ns;
+        self.pending_ordinary_liquidations
+            .get_or_insert_with(BTreeMap::new)
+            .insert(request_id, next.clone());
+        Ok(next)
+    }
+
+    pub fn clear_pending_ordinary_liquidation(&mut self, request_id: &[u8; 32]) -> bool {
+        let Some(intent) = self
+            .pending_ordinary_liquidations
+            .as_mut()
+            .and_then(|pending| pending.remove(request_id))
+        else {
+            return false;
+        };
+        if let Some(index) = self.ordinary_liquidation_vault_index.as_mut() {
+            if index.get(&intent.vault_id) == Some(request_id) {
+                index.remove(&intent.vault_id);
+            }
+        }
+        true
+    }
+
+    pub fn complete_ordinary_liquidation_no_effect(
+        &mut self,
+        request_id: [u8; 32],
+        phase: crate::ordinary_liquidation::OrdinaryLiquidationPhase,
+        error_message: String,
+        timestamp: u64,
+    ) -> Result<LiquidationResult, StabilityPoolError> {
+        if let Some(done) = self.get_completed_ordinary_liquidation(&request_id) {
+            return Ok(done.result);
+        }
+        let intent = self
+            .get_pending_ordinary_liquidation(&request_id)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if !matches!(
+            phase,
+            crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
+                | crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled
+        ) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        // An approval is an external ledger operation in its own right.  If
+        // the later backend pull is authoritatively proven to have had no
+        // effect, the approval fee still left the pool canister and must be
+        // apportioned exactly once.  Cancellation before approval has no
+        // physical outflow and therefore keeps this at zero.
+        let approval_fee = if phase
+            == crate::ordinary_liquidation::OrdinaryLiquidationPhase::PaymentNoEffect
+            && intent.approval_block_index.is_some()
+        {
+            intent.approval.as_ref().map(|approval| approval.fee_raw).unwrap_or(0)
+        } else {
+            0
+        };
+        let debit_allocations = if approval_fee > 0 {
+            crate::ordinary_liquidation::allocate_exact_debit(
+                &intent.participant_snapshot,
+                approval_fee,
+            )
+            .map_err(|_| StabilityPoolError::SystemBusy)?
+        } else {
+            Vec::new()
+        };
+        if approval_fee > 0 {
+            for allocation in &debit_allocations {
+                let Some(position) = self.deposits.get(&allocation.owner) else {
+                    return Err(StabilityPoolError::SystemBusy);
+                };
+                if position
+                    .stablecoin_balances
+                    .get(&intent.stable_ledger)
+                    .copied()
+                    .unwrap_or(0)
+                    < allocation.debit_raw
+                {
+                    return Err(StabilityPoolError::SystemBusy);
+                }
+            }
+            let aggregate = self
+                .total_stablecoin_balances
+                .get(&intent.stable_ledger)
+                .copied()
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            let next_aggregate = aggregate
+                .checked_sub(approval_fee)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+            for allocation in &debit_allocations {
+                let position = self.deposits.get_mut(&allocation.owner).unwrap();
+                let balance = position
+                    .stablecoin_balances
+                    .get_mut(&intent.stable_ledger)
+                    .unwrap();
+                *balance -= allocation.debit_raw;
+                if *balance == 0 {
+                    position.stablecoin_balances.remove(&intent.stable_ledger);
+                }
+            }
+            self.total_stablecoin_balances
+                .insert(intent.stable_ledger, next_aggregate);
+        }
+        let stables_consumed = if approval_fee > 0 {
+            BTreeMap::from([(intent.stable_ledger, approval_fee)])
+        } else {
+            BTreeMap::new()
+        };
+        let result = LiquidationResult {
+            vault_id: intent.vault_id,
+            stables_consumed: stables_consumed.clone(),
+            collateral_gained: 0,
+            collateral_type: intent.collateral_type,
+            success: false,
+            error_message: Some(error_message),
+            // The durable request was admitted internally, but no backend
+            // payment can remain possible once this terminal no-effect or
+            // cancellation tombstone is written. Callers may therefore make
+            // a fresh safe attempt.
+            admitted: Some(false),
+        };
+        if approval_fee > 0 {
+            let collateral_price_e8s = intent.quote.as_ref().map(|quote| quote.collateral_price_e8s);
+            self.record_liquidation_in_history(PoolLiquidationRecord {
+                vault_id: intent.vault_id,
+                timestamp,
+                stables_consumed,
+                collateral_gained: 0,
+                collateral_type: intent.collateral_type,
+                depositors_count: debit_allocations.len() as u64,
+                collateral_price_e8s,
+            });
+        }
+        self.clear_pending_ordinary_liquidation(&request_id);
+        self.completed_ordinary_liquidations
+            .get_or_insert_with(BTreeMap::new)
+            .insert(
+                request_id,
+                crate::ordinary_liquidation::OrdinaryLiquidationTombstone {
+                    request_id,
+                    vault_id: intent.vault_id,
+                    payment: intent.payment,
+                    stable_ledger: intent.stable_ledger,
+                    collateral_type: intent.collateral_type,
+                    terminal_phase: phase,
+                    quote: intent.quote.clone(),
+                    result: result.clone(),
+                    completed_at_ns: timestamp,
+                },
+            );
+        while self
+            .completed_ordinary_liquidations
+            .as_ref()
+            .map_or(0, BTreeMap::len)
+            > MAX_COMPLETED_ORDINARY_LIQUIDATIONS
+        {
+            if let Some(oldest) = self
+                .completed_ordinary_liquidations
+                .as_ref()
+                .and_then(|completed| completed.keys().next().copied())
+            {
+                self.completed_ordinary_liquidations
+                    .as_mut()
+                    .unwrap()
+                    .remove(&oldest);
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn cancel_ordinary_liquidation(
+        &mut self,
+        request_id: [u8; 32],
+        timestamp: u64,
+    ) -> Result<LiquidationResult, StabilityPoolError> {
+        if let Some(done) = self.get_completed_ordinary_liquidation(&request_id) {
+            return Ok(done.result);
+        }
+        let intent = self
+            .get_pending_ordinary_liquidation(&request_id)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if !matches!(
+            intent.phase,
+            crate::ordinary_liquidation::OrdinaryLiquidationPhase::Prepared
+                | crate::ordinary_liquidation::OrdinaryLiquidationPhase::BackendPrepared
+                | crate::ordinary_liquidation::OrdinaryLiquidationPhase::CancellationSubmitted
+        ) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        self.complete_ordinary_liquidation_no_effect(
+            request_id,
+            crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled,
+            "ordinary liquidation cancelled before approval dispatch".into(),
+            timestamp,
+        )
+    }
+
+    pub fn take_pending_ordinary_liquidation_page(
+        &mut self,
+        limit: usize,
+    ) -> Vec<crate::ordinary_liquidation::OrdinaryLiquidationIntent> {
+        let Some(rows) = self.pending_ordinary_liquidations.as_ref() else {
+            self.ordinary_liquidation_recovery_cursor = None;
+            return Vec::new();
+        };
+        if rows.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let cursor = self.ordinary_liquidation_recovery_cursor;
+        let mut selected: Vec<_> = rows
+            .iter()
+            .filter(|(request_id, _)| cursor.is_none_or(|last| **request_id > last))
+            .take(limit)
+            .map(|(request_id, intent)| (*request_id, intent.clone()))
+            .collect();
+        if selected.len() < limit {
+            let remaining = limit - selected.len();
+            selected.extend(
+                rows.iter()
+                    .take(remaining)
+                    .map(|(request_id, intent)| (*request_id, intent.clone())),
+            );
+        }
+        self.ordinary_liquidation_recovery_cursor = selected.last().map(|(request_id, _)| *request_id);
+        selected.into_iter().map(|(_, intent)| intent).collect()
+    }
+
+    /// Apply one verified payout atomically. The frozen participant snapshot
+    /// determines the exact debit/gain weights; current balances may only be
+    /// larger due to interest earned while the request was pending.
+    pub fn settle_ordinary_liquidation(
+        &mut self,
+        request_id: [u8; 32],
+        collateral_gained: u64,
+        timestamp: u64,
+    ) -> Result<LiquidationResult, StabilityPoolError> {
+        if let Some(done) = self.get_completed_ordinary_liquidation(&request_id) {
+            return Ok(done.result);
+        }
+        let intent = self
+            .get_pending_ordinary_liquidation(&request_id)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let quote = intent.quote.clone().ok_or(StabilityPoolError::SystemBusy)?;
+        if quote.payout_net_raw != Some(collateral_gained) {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        let debit = crate::ordinary_liquidation::exact_stable_debit(
+            quote.principal_raw,
+            quote.surcharge_raw,
+            quote.pull_fee_raw,
+            intent.approval.as_ref().map(|approval| approval.fee_raw).unwrap_or(0),
+            intent.revoke_fee_raw,
+        )
+        .ok_or(StabilityPoolError::SystemBusy)?;
+        let debit_allocations = crate::ordinary_liquidation::allocate_exact_debit(
+            &intent.participant_snapshot,
+            debit,
+        )
+        .map_err(|_| StabilityPoolError::SystemBusy)?;
+        let gain_allocations = crate::ordinary_liquidation::allocate_exact_gain(
+            &debit_allocations,
+            collateral_gained,
+        )
+        .map_err(|_| StabilityPoolError::SystemBusy)?;
+
+        for allocation in &debit_allocations {
+            let Some(position) = self.deposits.get(&allocation.owner) else {
+                return Err(StabilityPoolError::SystemBusy);
+            };
+            if position
+                .stablecoin_balances
+                .get(&intent.stable_ledger)
+                .copied()
+                .unwrap_or(0)
+                < allocation.debit_raw
+            {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+        }
+        for allocation in &gain_allocations {
+            let Some(position) = self.deposits.get(&allocation.owner) else {
+                return Err(StabilityPoolError::SystemBusy);
+            };
+            let current = position
+                .collateral_gains
+                .get(&intent.collateral_type)
+                .copied()
+                .unwrap_or(0);
+            current
+                .checked_add(allocation.gain_raw)
+                .ok_or(StabilityPoolError::SystemBusy)?;
+        }
+        self.total_liquidations_executed
+            .checked_add(1)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let aggregate = self
+            .total_stablecoin_balances
+            .get(&intent.stable_ledger)
+            .copied()
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        let next_aggregate = aggregate
+            .checked_sub(debit)
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        self.total_liquidations_executed += 1;
+
+        for allocation in &debit_allocations {
+            let position = self.deposits.get_mut(&allocation.owner).unwrap();
+            let balance = position
+                .stablecoin_balances
+                .get_mut(&intent.stable_ledger)
+                .unwrap();
+            *balance -= allocation.debit_raw;
+            if *balance == 0 {
+                position.stablecoin_balances.remove(&intent.stable_ledger);
+            }
+        }
+        self.total_stablecoin_balances
+            .insert(intent.stable_ledger, next_aggregate);
+        for allocation in &gain_allocations {
+            let position = self.deposits.get_mut(&allocation.owner).unwrap();
+            let current = position
+                .collateral_gains
+                .get(&intent.collateral_type)
+                .copied()
+                .unwrap_or(0);
+            position.collateral_gains.insert(
+                intent.collateral_type,
+                current
+                    .checked_add(allocation.gain_raw)
+                    .ok_or(StabilityPoolError::SystemBusy)?,
+            );
+        }
+        let stables_consumed = BTreeMap::from([(intent.stable_ledger, debit)]);
+        let result = LiquidationResult {
+            vault_id: intent.vault_id,
+            stables_consumed: stables_consumed.clone(),
+            collateral_gained,
+            collateral_type: intent.collateral_type,
+            success: true,
+            error_message: None,
+            admitted: Some(true),
+        };
+        self.record_liquidation_in_history(PoolLiquidationRecord {
+            vault_id: intent.vault_id,
+            timestamp,
+            stables_consumed,
+            collateral_gained,
+            collateral_type: intent.collateral_type,
+            depositors_count: gain_allocations.len() as u64,
+            collateral_price_e8s: Some(quote.collateral_price_e8s),
+        });
+        self.deposits.retain(|_, position| !position.is_empty());
+        self.pending_ordinary_liquidations
+            .as_mut()
+            .and_then(|pending| pending.remove(&request_id));
+        if let Some(index) = self.ordinary_liquidation_vault_index.as_mut() {
+            index.remove(&intent.vault_id);
+        }
+        self.completed_ordinary_liquidations
+            .get_or_insert_with(BTreeMap::new)
+            .insert(
+                request_id,
+                crate::ordinary_liquidation::OrdinaryLiquidationTombstone {
+                    request_id,
+                    vault_id: intent.vault_id,
+                    payment: intent.payment,
+                    stable_ledger: intent.stable_ledger,
+                    collateral_type: intent.collateral_type,
+                    terminal_phase: crate::ordinary_liquidation::OrdinaryLiquidationPhase::Completed,
+                    quote: intent.quote.clone(),
+                    result: result.clone(),
+                    completed_at_ns: timestamp,
+                },
+            );
+        while self
+            .completed_ordinary_liquidations
+            .as_ref()
+            .map_or(0, BTreeMap::len)
+            > MAX_COMPLETED_ORDINARY_LIQUIDATIONS
+        {
+            if let Some(oldest) = self
+                .completed_ordinary_liquidations
+                .as_ref()
+                .and_then(|completed| completed.keys().next().copied())
+            {
+                self.completed_ordinary_liquidations
+                    .as_mut()
+                    .unwrap()
+                    .remove(&oldest);
+            }
+        }
+        Ok(result)
     }
 
     pub fn pending_chain_absorb_status(&self, vault_id: u64) -> Option<ChainSpAbsorbIntentStatus> {
@@ -4603,6 +5185,11 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
             completed_three_usd_absorbs: Some(BTreeSet::new()),
+            pending_ordinary_liquidations: Some(BTreeMap::new()),
+            completed_ordinary_liquidations: Some(BTreeMap::new()),
+            next_ordinary_liquidation_nonce: Some(1),
+            ordinary_liquidation_vault_index: Some(BTreeMap::new()),
+            ordinary_liquidation_recovery_cursor: None,
             total_liquidations_executed: v1.total_liquidations_executed,
             pool_creation_timestamp: v1.pool_creation_timestamp,
             total_interest_received_e8s: v1.total_interest_received_e8s,
@@ -4622,6 +5209,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             pending_refund_attempt_initialization: Some(BTreeSet::new()),
             last_deposit_transfer_created_at: None,
             pending_outbound_payouts: Some(BTreeMap::new()),
+            pending_withdrawals: Some(BTreeMap::new()),
             last_outbound_payout_created_at_ns: None,
             completed_outbound_payouts: Some(BTreeMap::new()),
             deposit_intent_high_watermarks: Some(BTreeMap::new()),
@@ -4631,6 +5219,10 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
             legacy_interest_mint_receipt_floor: Some(LegacyInterestMintReceiptFloor { through: None }),
+            interest_recovery: None,
+            interest_recovery_bootstrap_hold: None,
+            conversion_intents: Some(BTreeMap::new()),
+            conversion_high_watermarks: Some(BTreeMap::new()),
         }
     }
 }
@@ -4774,6 +5366,67 @@ mod tests {
             dispatch_started: false,
             last_error: None,
         }
+    }
+
+    fn ordinary_intent_for_test(
+        request_id: [u8; 32],
+        vault_id: u64,
+    ) -> crate::ordinary_liquidation::OrdinaryLiquidationIntent {
+        let owner = Principal::from_slice(&[72]);
+        crate::ordinary_liquidation::OrdinaryLiquidationIntent {
+            request_id,
+            vault_id,
+            collateral_type: Principal::from_slice(&[73]),
+            payment: rumi_protocol_backend::state::SpLiquidationPayment::Icusd,
+            stable_ledger: Principal::from_slice(&[74]),
+            stable_decimals: 8,
+            requested_debt_e8s: 100,
+            max_gross_raw: 100,
+            participant_snapshot: vec![crate::ordinary_liquidation::ParticipantBalance {
+                owner,
+                balance_raw: 100,
+                opted_in: true,
+            }],
+            quote: None,
+            approval: None,
+            approval_attempted: false,
+            approval_block_index: None,
+            revoke_fee_raw: 0,
+            backend_attempted: false,
+            phase: crate::ordinary_liquidation::OrdinaryLiquidationPhase::Prepared,
+            last_error: None,
+            created_at_ns: 1,
+            updated_at_ns: 1,
+        }
+    }
+
+    #[test]
+    fn ordinary_admission_and_completion_tombstone_are_idempotent() {
+        let request_id = crate::ordinary_liquidation::ordinary_request_id(88, 1);
+        let intent = ordinary_intent_for_test(request_id, 88);
+        let mut state = StabilityPoolState::default();
+        assert_eq!(state.admit_ordinary_liquidation(intent.clone()).unwrap(), intent.clone());
+        assert_eq!(state.get_pending_ordinary_liquidation_for_vault(88), Some(intent));
+
+        let first = state
+            .complete_ordinary_liquidation_no_effect(
+                request_id,
+                crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled,
+                "cancelled before dispatch".into(),
+                9,
+            )
+            .unwrap();
+        assert!(state.get_pending_ordinary_liquidation(&request_id).is_none());
+        assert_eq!(state.get_completed_ordinary_liquidation(&request_id).unwrap().result, first);
+        let replay = state
+            .complete_ordinary_liquidation_no_effect(
+                request_id,
+                crate::ordinary_liquidation::OrdinaryLiquidationPhase::Cancelled,
+                "different late callback".into(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(replay, first);
     }
 
     #[test]
@@ -8556,6 +9209,9 @@ mod tests {
 
         let mut decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
         assert!(decoded.pending_outbound_payouts.is_none());
+        assert!(decoded.pending_withdrawals.is_none());
+        decoded.reconcile_pending_withdrawals_after_upgrade();
+        assert!(decoded.pending_withdrawals.as_ref().unwrap().is_empty());
         decoded.initialize_pending_outbound_payouts();
         assert_eq!(
             decoded

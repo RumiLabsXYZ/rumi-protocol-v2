@@ -27,6 +27,7 @@
     getPrincipalState,
     getExcludedPrincipals,
     getPrincipalPointEntries,
+    getPrincipalOutageCredits,
     getPointLedgerLen,
     invalidatePointsCache,
   } from '$lib/services/pointsService';
@@ -42,6 +43,7 @@
     LeaderboardEntry,
     PrincipalState,
     PointEntry,
+    OutageCredit,
   } from '$declarations/rumi_points/rumi_points.did';
 
   // ── data ──────────────────────────────────────────────────────────────────
@@ -60,6 +62,7 @@
   type Detail = {
     state: PrincipalState | null;
     entries: PointEntry[] | null;
+    outageCredits: OutageCredit[] | null;
     loading: boolean;
     failed: boolean;
   };
@@ -115,16 +118,17 @@
   async function loadDetail(entry: LeaderboardEntry) {
     const key = entry.principal.toText();
     if (details[key]?.state || details[key]?.loading) return;
-    details[key] = { state: null, entries: null, loading: true, failed: false };
+    details[key] = { state: null, entries: null, outageCredits: null, loading: true, failed: false };
     try {
-      const [ps, entries] = await Promise.all([
+      const [ps, entries, outageCredits] = await Promise.all([
         getPrincipalState(entry.principal),
         getPrincipalPointEntries(entry.principal),
+        getPrincipalOutageCredits(entry.principal),
       ]);
-      details[key] = { state: ps, entries, loading: false, failed: false };
+      details[key] = { state: ps, entries, outageCredits, loading: false, failed: false };
     } catch (e) {
       console.error('[points/admin] detail load failed', key, e);
-      details[key] = { state: null, entries: null, loading: false, failed: true };
+      details[key] = { state: null, entries: null, outageCredits: null, loading: false, failed: true };
     }
   }
 
@@ -175,6 +179,7 @@
       { label: m.label, mult: m.kind === 'adjustment' ? 'adjustment' : m.multiplier === null ? 'unavailable' : `${m.multiplier}×` },
     ]),
   );
+  SOURCE_META.OutageMakeWhole = { label: 'Outage compensation', mult: 'compensation' };
   const SOURCE_TAGS: Record<number, string> = {
     0: 'rumi_protocol_backend',
     1: 'rumi_3pool',
@@ -190,7 +195,7 @@
   };
 
   /** Group ledger rows: per-source totals and a per-epoch timeline. */
-  function breakdown(entries: PointEntry[]) {
+  function breakdown(entries: PointEntry[], outageCredits: OutageCredit[] | null) {
     const bySource = new Map<string, bigint>();
     const byEpoch = new Map<bigint, bigint>();
     for (const e of entries) {
@@ -198,6 +203,10 @@
       if (e.points_delta === 0n && src === 'Registration') continue;
       bySource.set(src, (bySource.get(src) ?? 0n) + e.points_delta);
       byEpoch.set(e.epoch_index, (byEpoch.get(e.epoch_index) ?? 0n) + e.points_delta);
+    }
+    for (const credit of outageCredits ?? []) {
+      bySource.set('OutageMakeWhole', (bySource.get('OutageMakeWhole') ?? 0n) + credit.credited_points);
+      byEpoch.set(credit.epoch_index, (byEpoch.get(credit.epoch_index) ?? 0n) + credit.credited_points);
     }
     const total = [...bySource.values()].reduce((a, b) => a + b, 0n);
     return {
@@ -226,10 +235,14 @@
         if (e.points_delta === 0n) continue;
         agg.set(src, (agg.get(src) ?? 0n) + e.points_delta);
       }
+      for (const credit of d!.outageCredits ?? []) {
+        agg.set('OutageMakeWhole', (agg.get('OutageMakeWhole') ?? 0n) + credit.credited_points);
+      }
     }
     const total = [...agg.values()].reduce((a, b) => a + b, 0n);
     return {
       total,
+      compensationAvailable: loaded.every((d) => d!.outageCredits !== null),
       sources: [...agg.entries()].sort((a, b) => (b[1] > a[1] ? 1 : -1)),
     };
   });
@@ -430,6 +443,9 @@
         {/if}
       </div>
       {#if seasonBySource}
+        {#if !seasonBySource.compensationAvailable}
+          <p class="text-xs text-amber-300 mb-2">Compensation history is unavailable for some participants; this is not a complete season total.</p>
+        {/if}
         {#if seasonBySource.sources.length === 0}
           <p class="text-xs text-gray-500">No accrual rows yet.</p>
         {:else}
@@ -575,7 +591,10 @@
                               just have no reader on the deployed build yet.
                             </p>
                           {:else}
-                            {@const b = breakdown(d.entries)}
+                            {@const b = breakdown(d.entries, d.outageCredits)}
+                            {#if d.outageCredits === null}
+                              <p class="text-xs text-amber-300">Compensation history is unavailable; showing ordinary earnings only.</p>
+                            {/if}
                             <div>
                               <div class="text-xs text-gray-500 mb-1">Points by source</div>
                               {#if b.sources.length === 0}
@@ -597,7 +616,7 @@
                             </div>
                             {#if b.epochs.length > 0}
                               <div>
-                                <div class="text-xs text-gray-500 mb-1">Accrual by epoch</div>
+                                <div class="text-xs text-gray-500 mb-1">Credited points by epoch</div>
                                 <div class="flex flex-wrap gap-1.5">
                                   {#each b.epochs as [epoch, points] (epoch)}
                                     <span class="px-2 py-1 rounded bg-gray-900/50 border border-gray-700/30 text-[11px] tabular-nums text-gray-300">

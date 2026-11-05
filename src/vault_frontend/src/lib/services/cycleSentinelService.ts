@@ -26,6 +26,7 @@ import { get } from 'svelte/store';
 import { auth, currentWalletType, WALLET_TYPES } from './auth';
 import { pnp } from './pnp';
 import { CONFIG, CANISTER_IDS, isCycleSentinelConfigured } from '../config';
+import { LOCAL_IC_HOST } from '../localNetwork';
 export { isCycleSentinelConfigured } from '../config';
 
 export type SentinelActor = _SERVICE;
@@ -85,7 +86,7 @@ function requireConfiguredId(id: string): string {
 export function createAnonymousSentinelActor(id?: string): SentinelActor {
   const canisterId = requireConfiguredId(id ?? CANISTER_IDS.CYCLE_SENTINEL);
   const agent = new HttpAgent({
-    host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://ic0.app',
+    host: CONFIG.isLocal ? LOCAL_IC_HOST : 'https://ic0.app',
     identity: new AnonymousIdentity(),
   });
   if (CONFIG.isLocal) agent.fetchRootKey().catch(() => undefined);

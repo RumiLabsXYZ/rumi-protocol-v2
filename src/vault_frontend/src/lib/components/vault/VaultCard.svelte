@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { nicpClaimValueUsd } from '../../utils/nicpClaim';
   import { formatNumber, formatTokenBalance, formatStableDisplay, formatStableTx } from '../../utils/format';
   import type { Vault } from '../../services/types';
   import { protocolService } from '../../services/protocol';
@@ -17,7 +18,7 @@
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
-  import { computeSafeIcusdRepayMax } from '$lib/utils/repayLimits';
+  import { computeSafeIcusdRepayMax, claimRepayMaximum } from '$lib/utils/repayLimits';
   import { getVaultCrTextColor, VAULT_CR_DANGER } from '$lib/utils/vaultHealth';
   import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
@@ -29,6 +30,9 @@
   // The backend keeps AddMargin V2 as an explicit rejecting method until its
   // journal can safely compensate a pull if liquidation removes the vault.
   const ADD_MARGIN_V2_ENABLED: boolean = false;
+
+  $: redemptionClaim = vault.nicpRedemptionClaim;
+  $: isRedemptionClaim = !!redemptionClaim;
 
   // ── Per-collateral derived values ──
   $: vaultCollateralType = vault.collateralType || CANISTER_IDS.ICP_LEDGER;
@@ -61,9 +65,9 @@
   $: vaultCollateralPrice = vaultCollateralInfo?.price || (vaultCollateralType === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
   $: vaultMinCR = getMinimumCR(vaultCollateralType);
   $: vaultLiqCR = getLiquidationCR(vaultCollateralType);
-  $: vaultCollateralAmount = vault.collateralAmount ?? vault.icpMargin;
+  $: vaultCollateralAmount = redemptionClaim?.icpAmount ?? vault.collateralAmount ?? vault.icpMargin;
 
-  const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number } }>();
+  const dispatch = createEventDispatcher<{ updated: void; toggle: { vaultId: number }; xrplrepay: { vaultId: number } }>();
 
   $: expanded = expandedVaultId === vault.vaultId;
 
@@ -81,7 +85,9 @@
   }
 
   // ── Derived display ──
-  $: collateralValueUsd = vaultCollateralAmount * vaultCollateralPrice;
+  $: collateralValueUsd = redemptionClaim
+    ? nicpClaimValueUsd(redemptionClaim, icpPrice, vaultCollateralInfo?.lstHaircut)
+    : vaultCollateralAmount * vaultCollateralPrice;
   $: collateralRatio = tickingDebt > 0
     ? collateralValueUsd / tickingDebt : Infinity;
   $: borrowedValueUsd = tickingDebt;
@@ -163,7 +169,10 @@
         100_000n,
         BigInt(Math.max(0, Math.round(vaultCollateralInfo?.minVaultDebt ?? 10_000_000))),
       )) / E8S;
-  $: maxRepayable = Math.min(maxRepayBase, tickingDebt);
+  $: claimSpendable = isCkStableRepay
+    ? effectiveRepayBalance / (1 + ckstableRepayFee)
+    : Number(walletIcusdRaw > 100_000n ? walletIcusdRaw - 100_000n : 0n) / E8S;
+  $: maxRepayable = isRedemptionClaim ? claimRepayMaximum(tickingDebt, claimSpendable, maxRepayBase) : Math.min(maxRepayBase, tickingDebt);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
   // 0.5% haircut when debt exists so Max never overshoots backend oracle price
@@ -313,7 +322,7 @@
     ? computeProjectedRate(rateCurveBaseRate, rateCurveMarkers, collateralRatio, recoveryMultiplier)
     : baseInterestRate;
   $: fmtRatio = collateralRatio === Infinity ? '—' : `${(collateralRatio * 100).toFixed(1)}%`;
-  $: riskTooltip = riskLevel === 'warning'
+  $: riskTooltip = isRedemptionClaim ? 'Liquidation suspended during protocol-controlled redemption' : riskLevel === 'warning'
     ? 'Approaching minimum collateral ratio'
     : riskLevel === 'danger' ? 'At risk of liquidation. Add collateral or repay.' : '';
 
@@ -392,6 +401,7 @@
 
   // ── Action state ──
   let activeAction: 'add' | 'withdraw' | 'borrow' | 'repay' | null = null;
+  $: if (isRedemptionClaim && activeAction && activeAction !== 'repay') activeAction = 'repay';
   let addCollateralAmount = '';
   let withdrawAmount = '';
   let borrowAmount = '';
@@ -406,7 +416,7 @@
   let closeOnFullRepay = true;
 
   function selectAction(action: 'add' | 'withdraw' | 'borrow' | 'repay') {
-    if (isProcessing) return;
+    if (isProcessing || (isRedemptionClaim && action !== 'repay')) return;
     if (activeAction === action) return; // already selected — do nothing
     clearMessages();
     addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
@@ -524,8 +534,8 @@
     return v > 0 && maxRepayable > 0 && v > maxRepayable;
   })();
 
-  $: canWithdraw = tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
-  $: canClose = tickingDebt < DUST_THRESHOLD;
+  $: canWithdraw = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
+  $: canClose = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD;
 
   // Detect if withdraw amount is the full collateral (max)
   $: isMaxWithdraw = (() => {
@@ -551,7 +561,7 @@
   // instead of three). `isMaxRepay` guarantees `repayAmount == maxRepayable`
   // (the live debt), so the compound method always receives a full-debt amount.
   $: fullIcusdRepayWithCollateral =
-      repayTokenType === 'icUSD'
+      !isRedemptionClaim && repayTokenType === 'icUSD'
       && isMaxRepay
       && vaultCollateralAmount > 0;
   // The "keep vault open" alternative routes through plain repay_to_vault, which
@@ -719,13 +729,29 @@
     } finally { isProcessing = false; }
   }
 
+  let claimPayoutBlock = '';
+  async function handleClaimAction(action: 'refresh' | 'withdraw' | 'reconcile') {
+    clearMessages(); isProcessing = true;
+    try {
+      if (action === 'reconcile' && !/^[0-9]+$/.test(claimPayoutBlock)) throw new Error('Enter a valid ICP ledger block number.');
+      await ApiClient.vault51ClaimAction(action, vault.owner, action === 'reconcile' ? BigInt(claimPayoutBlock) : undefined);
+      await vaultStore.refreshVaults();
+      await walletStore.refreshBalance({ skipCache: true });
+      dispatch('updated');
+      toastStore.success(action === 'refresh' ? 'Redemption status refreshed.' : 'ICP withdrawal recorded.', 8000);
+    } catch (err) {
+      toastStore.error(`Action not confirmed: ${err instanceof Error ? err.message : 'Unknown error'}. Refresh claim status before retrying.`, 12000);
+      await vaultStore.refreshVaults().catch(() => {});
+    } finally { isProcessing = false; }
+  }
+
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
     if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
     // MIN_ICUSD floor still applies to partial repays (anti-spam guarantee on
     // the backend). The compound `repay_and_close_vault` path bypasses it so
     // stuck-zone vaults can be cleared — match that here.
-    if (!isRepayAndClose && amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
+    if (!isRepayAndClose && !(isRedemptionClaim && amount >= tickingDebt) && amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
     if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
@@ -807,8 +833,8 @@
     {/if}
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
-      <span class="cell-label">Collateral</span>
-      <span class="cell-value">{fmtMargin} {collateralSymbol}</span>
+      <span class="cell-label">{redemptionClaim?.releaseBlock ? 'Original ICP claim' : isRedemptionClaim ? 'ICP redemption claim' : 'Collateral'}</span>
+      <span class="cell-value">{fmtMargin} {isRedemptionClaim ? 'ICP' : collateralSymbol}</span>
       <span class="cell-sub">${fmtCollateralUsd}</span>
     </span>
     <span class="vault-cell">
@@ -817,6 +843,9 @@
       <span class="cell-sub" style="color:{interestColor}">{(vaultInterestRate * 100).toFixed(2)}% APR</span>
     </span>
     <span class="vault-cell vault-cell-bar">
+      {#if isRedemptionClaim}
+        <span class="cell-sub">Liquidation suspended</span>
+      {:else}
       <span class="gauge-track">
         <span class="gauge-zone gauge-zone-pink" style="width:{liqZonePct}%"></span>
         <span class="gauge-zone gauge-zone-pink-purple" style="width:{fadeEndPct - liqZonePct}%; left:{liqZonePct}%"></span>
@@ -830,6 +859,7 @@
         <span class="gauge-label-abs" style="left:{liqZonePct}%">liq</span>
         <span class="gauge-label-abs gauge-label-end">300%+</span>
       </span>
+      {/if}
     </span>
     <span class="vault-cell vault-cell-ratio">
       <span class="cell-label">CR</span>
@@ -843,7 +873,7 @@
         </span>
       {:else}
         <span class="cell-value ratio-text" style="color:{crColor}" title={riskTooltip}>
-          {#if riskLevel === 'warning' || riskLevel === 'danger'}
+          {#if !isRedemptionClaim && (riskLevel === 'warning' || riskLevel === 'danger')}
             <svg class="warn-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
           {/if}
           {fmtRatio}
@@ -864,10 +894,28 @@
   <!-- ── Expanded: pill groups + two-column layout ── -->
   {#if expanded}
     <div class="vault-actions">
+      {#if redemptionClaim}
+        <p class="cell-sub">Protocol-controlled ICP redemption claim · {redemptionClaim.stage}. Liquidation and borrowing are suspended. Debt continues under the existing nICP interest rules; repayment remains available. Once ICP arrives and debt is fully repaid, withdraw it to this vault owner’s wallet.</p>
+        {#if redemptionClaim.releaseBlock}
+          <p class="cell-sub">ICP withdrawal confirmed in ledger block #{redemptionClaim.releaseBlock}.</p>
+        {:else if redemptionClaim.releasePending}
+          <p class="cell-sub">Withdrawal initiated; its outcome is unconfirmed and needs reconciliation. Check its status before retrying.</p>
+          <label class="cell-sub" for={`claim-block-${vault.vaultId}`}>If you have the ICP payout block, enter it to verify the transfer:</label>
+          <input id={`claim-block-${vault.vaultId}`} type="text" inputmode="numeric" bind:value={claimPayoutBlock} disabled={isProcessing} />
+          <button class="btn-submit" on:click={() => handleClaimAction('reconcile')} disabled={isProcessing || !claimPayoutBlock}>Verify payout block</button>
+        {/if}
+        <button class="btn-submit" on:click={() => handleClaimAction('refresh')} disabled={isProcessing}>Check redemption status</button>
+        {#if redemptionClaim.stage === 'Settled' && tickingDebt <= 0 && !redemptionClaim.releaseBlock}
+          <button class="btn-submit" on:click={() => handleClaimAction('withdraw')} disabled={isProcessing}>
+            {redemptionClaim.releasePending ? 'Reconcile ICP withdrawal' : 'Withdraw ICP to owner wallet'}
+          </button>
+        {/if}
+      {/if}
       <!-- Action layout: pills top-right, stats left, input right -->
       <div class="action-layout">
         <!-- Pill groups: right column -->
         <div class="pill-groups">
+          {#if !isRedemptionClaim}
           <div class="pill-group pill-group-collateral">
             {#if !isNativeXrp}
               <!-- Native-XRP has no IC-side top-up: add_margin is backend-rejected
@@ -880,9 +928,10 @@
               class:pill-disabled={maxWithdrawable <= 0 && tickingDebt > 0}
               on:click={() => selectAction('withdraw')} disabled={isProcessing || (maxWithdrawable <= 0 && tickingDebt > 0)}>Withdraw</button>
           </div>
+          {/if}
           <div class="pill-group pill-group-debt">
-            <button class="pill pill-debt" class:pill-active-debt={activeAction === 'borrow'}
-              on:click={() => selectAction('borrow')} disabled={isProcessing}>Borrow</button>
+            {#if !isRedemptionClaim}<button class="pill pill-debt" class:pill-active-debt={activeAction === 'borrow'}
+              on:click={() => selectAction('borrow')} disabled={isProcessing}>Borrow</button>{/if}
             <button class="pill pill-debt" class:pill-active-debt={activeAction === 'repay'}
               on:click={() => selectAction('repay')} disabled={isProcessing}>Repay</button>
           </div>
@@ -944,7 +993,7 @@
               </span>
             </div>
             <!-- Liq price row -->
-            {#if tickingDebt > 0 || activeAction === 'borrow'}
+            {#if !isRedemptionClaim && (tickingDebt > 0 || activeAction === 'borrow')}
               <div class="stat-row">
                 <span class="stat-label">Liq. price</span>
                 <span class="stat-value">
@@ -1069,6 +1118,7 @@
               </div>
 
             {:else if activeAction === 'repay'}
+              {#if isRedemptionClaim}<span class="repay-close-hint">The entered amount is the maximum payment. Max includes a small buffer for accrued interest, bounded by your available balance. The protocol charges the actual debt, up to that maximum. Keep enough balance and allowance for fees; refresh if the outcome is unclear.</span>{/if}
               <div class="input-header">
                 <span class="input-label">Repay Debt {#if $earningActive}<MultiplierBadge multiplier={5} comingSoon label="5× soon" />{/if}</span>
                 {#if maxRepayable > 0}
@@ -1140,6 +1190,12 @@
                 {#if !bitcoinOnly && !hasChangedToken}
                   <span class="token-hint">Click token name to pay with ckUSDT or ckUSDC</span>
                 {/if}
+                {#if isNativeXrp}
+                  <button type="button" class="btn-xrpl-repay" data-testid="repay-from-xrpl"
+                    on:click={() => dispatch('xrplrepay', { vaultId: vault.vaultId })} disabled={isProcessing}>
+                    Repay from XRPL wallet
+                  </button>
+                {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}
                   disabled={isProcessing || !repayAmount || repayOverMax}>
                   {#if isProcessing}
@@ -1163,6 +1219,8 @@
 </div>
 
 <style>
+  .btn-xrpl-repay { background: none; border: 1px solid var(--rumi-border); color: var(--rumi-text-secondary, inherit); border-radius: 0.5rem; padding: 0.375rem 0.75rem; font-size: 0.75rem; cursor: pointer; font-family: inherit; }
+  .btn-xrpl-repay:hover:not(:disabled) { border-color: rgba(209,118,232,0.35); }
   .vault-card {
     background: var(--rumi-bg-surface1);
     border: 1px solid var(--rumi-border);

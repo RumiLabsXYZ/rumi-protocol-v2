@@ -156,6 +156,7 @@ pub trait Transport {
     fn now(&self) -> u64;
     fn balance(&self) -> u128;
     fn canister(&self) -> Principal;
+    async fn deposit_terminal(&self, id: u64) -> Result<bool, String>;
     async fn fund(&self, args: WithdrawFromArgs) -> Result<Result<Nat, WithdrawFromError>, String>;
     async fn submit(&self, owner: Principal) -> (DepositOutcome, u128);
     async fn refund(
@@ -175,6 +176,9 @@ impl Transport for IcTransport {
     }
     fn canister(&self) -> Principal {
         ic_cdk::id()
+    }
+    async fn deposit_terminal(&self, id: u64) -> Result<bool, String> {
+        crate::cksol::deposit_terminal(id).await
     }
     async fn fund(&self, args: WithdrawFromArgs) -> Result<Result<Nat, WithdrawFromError>, String> {
         let result: Result<(Result<Nat, WithdrawFromError>,), _> =
@@ -203,7 +207,7 @@ impl Transport for IcTransport {
         )
     }
 }
-struct Guard(Principal);
+struct Guard(Principal, u64);
 impl Guard {
     fn acquire(owner: Principal) -> Result<Self, String> {
         if owner == Principal::anonymous() {
@@ -217,14 +221,16 @@ impl Guard {
                 return Err("ckSOL relay capacity reached".into());
             }
             s.cksol_relay_in_flight.insert(owner);
-            Ok(Guard(owner))
+            Ok(Guard(owner, s.cksol_icp_upgrade_epoch))
         })
     }
 }
 impl Drop for Guard {
     fn drop(&mut self) {
         mutate_state(|s| {
-            s.cksol_relay_in_flight.remove(&self.0);
+            if s.cksol_icp_upgrade_epoch == self.1 {
+                s.cksol_relay_in_flight.remove(&self.0);
+            }
         });
     }
 }
@@ -235,7 +241,7 @@ fn liabilities(s: &State) -> u128 {
         .sum()
 }
 fn has_backing(s: &State, balance: u128) -> bool {
-    balance >= CKSOL_RELAY_CANISTER_RESERVE.saturating_add(liabilities(s))
+    balance >= CKSOL_RELAY_CANISTER_RESERVE.saturating_add(liabilities(s)).saturating_add(crate::cksol_icp_paid::icp_protected(s))
 }
 fn prepare(s: &mut State, owner: Principal, sequence: u64, now: u64) -> Result<bool, String> {
     if let Some(existing) = s.cksol_paid_payments.get(&owner) {
@@ -393,7 +399,7 @@ async fn refund_with<T: Transport>(owner: Principal, t: &T) -> Result<CkSolPayme
     if before.phase != CkSolPaymentPhase::RefundReady {
         return Ok(before);
     }
-    if !read_state(|s| t.balance() >= liabilities(s)) {
+    if !read_state(|s| t.balance() >= liabilities(s).saturating_add(crate::cksol_icp_paid::icp_protected(s))) {
         return Err(
             "Refund retained: backend cannot currently cover all user cycle credits".into(),
         );
@@ -436,6 +442,39 @@ async fn refund_with<T: Transport>(owner: Principal, t: &T) -> Result<CkSolPayme
     });
     row(owner)
 }
+/// Reconcile metadata only, under the same per-owner guard as funding.
+/// A settled cycles payment alone says nothing about SOL mint finality.
+async fn reconcile_previous<T: Transport>(owner: Principal, sequence: u64, t: &T) -> Result<(), String> {
+    let previous = payment(owner);
+    if previous.as_ref().is_some_and(|p| p.sequence == sequence) {
+        return Ok(()); // Same-request recovery must not retire its active deposit.
+    }
+    if previous.as_ref().is_some_and(|p| p.refundable_cycles != 0 ||
+        !matches!(p.phase, CkSolPaymentPhase::Complete | CkSolPaymentPhase::FundingRejected)) {
+        return Err("Resolve the previous ckSOL payment before starting another".into());
+    }
+    if read_state(|s| s.cksol_paid_sequence.checked_add(1)) != Some(sequence) {
+        return Err("Refresh the ckSOL payment sequence".into());
+    }
+    let Some(attempt) = crate::cksol::attempt(owner) else { return Ok(()); };
+    match attempt.status {
+        CkSolRelayStatus::Queued(id) => {
+            if !t.deposit_terminal(id).await? {
+                return Err("Your previous SOL deposit is still processing. Its status will update automatically.".into());
+            }
+        }
+        CkSolRelayStatus::Rejected(_) => {} // Known rejection; payment settlement was checked above.
+        CkSolRelayStatus::SubmittedOrUnknown => return Err("The previous SOL deposit has an uncertain outcome. Keep its record for reconciliation.".into()),
+    }
+    mutate_state(|s| {
+        if s.cksol_relay_attempts.get(&owner) != Some(&attempt) || s.cksol_paid_payments.get(&owner) != previous.as_ref() {
+            return Err("Previous deposit changed while checking its status. Check again.".into());
+        }
+        s.cksol_relay_attempts.remove(&owner);
+        Ok(())
+    })
+}
+
 pub async fn start_with<T: Transport>(
     owner: Principal,
     sequence: u64,
@@ -443,9 +482,11 @@ pub async fn start_with<T: Transport>(
     t: &T,
 ) -> Result<CkSolPayment, String> {
     let _guard = Guard::acquire(owner)?;
+    if read_state(|s| s.cksol_icp_payments.get(&owner).is_some_and(crate::cksol_icp_paid::blocks_cycles_payment)) { return Err("Resolve previous ICP payment first".into()); }
     if max_payment != FUNDING {
         return Err("Payment terms changed; refresh the quote".into());
     }
+    reconcile_previous(owner, sequence, t).await?;
     let fresh = mutate_state(|s| prepare(s, owner, sequence, t.now()))?;
     if fresh {
         let p = row(owner)?;
@@ -517,11 +558,23 @@ pub async fn claim_with<T: Transport>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_cycles_guard_does_not_clear_newer_lock() {
+        let owner = Principal::from_slice(&[7]);
+        crate::state::replace_state(State::default());
+        let old = Guard::acquire(owner).unwrap();
+        mutate_state(|s| { s.cksol_icp_upgrade_epoch += 1; s.cksol_relay_in_flight.clear(); s.cksol_relay_in_flight.insert(owner); });
+        drop(old);
+        assert!(read_state(|s| s.cksol_relay_in_flight.contains(&owner)));
+    }
+
     use futures::executor::block_on;
     use std::cell::{Cell, RefCell};
     type FundingResult = Result<Result<Nat, WithdrawFromError>, String>;
     struct Mock {
         now: Cell<u64>,
+        terminal: RefCell<Result<bool, String>>,
+        replace_attempt_during_status: Cell<bool>,
         fill_capacity_during_funding: Cell<bool>,
         funds: RefCell<Vec<WithdrawFromArgs>>,
         sends: Cell<usize>,
@@ -537,6 +590,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 now: Cell::new(100),
+                terminal: RefCell::new(Ok(false)),
+                replace_attempt_during_status: Cell::new(false),
                 fill_capacity_during_funding: Cell::new(false),
                 funds: RefCell::new(vec![]),
                 sends: Cell::new(0),
@@ -560,6 +615,12 @@ mod tests {
         }
         fn canister(&self) -> Principal {
             Principal::from_slice(&[9])
+        }
+        async fn deposit_terminal(&self, _id: u64) -> Result<bool, String> {
+            if self.replace_attempt_during_status.get() {
+                mutate_state(|s| s.cksol_relay_attempts.get_mut(&owner()).unwrap().status = CkSolRelayStatus::SubmittedOrUnknown);
+            }
+            self.terminal.borrow().clone()
         }
         async fn fund(&self, a: WithdrawFromArgs) -> FundingResult {
             self.funds.borrow_mut().push(a);
@@ -607,6 +668,87 @@ mod tests {
     fn reset() {
         crate::state::replace_state(State::default());
     }
+    #[test]
+    fn completed_mint_rolls_over_without_acknowledgement_and_replay_never_recharges() {
+        reset();
+        let first = Mock::new();
+        block_on(start_with(owner(), 1, FUNDING, &first)).unwrap();
+        let next = Mock::new();
+        next.now.set(101);
+        *next.terminal.borrow_mut() = Ok(true);
+        let result = block_on(start_with(owner(), 2, FUNDING, &next)).unwrap();
+        assert_eq!(result.sequence, 2);
+        assert_eq!(next.funds.borrow().len(), 1);
+        assert_eq!(next.sends.get(), 1);
+        block_on(start_with(owner(), 2, FUNDING, &next)).unwrap();
+        assert_eq!(next.funds.borrow().len(), 1);
+        assert_eq!(next.sends.get(), 1);
+    }
+
+    #[test]
+    fn pending_or_unreadable_mint_keeps_previous_record_without_funding() {
+        for status in [Ok(false), Err("minter unavailable".into())] {
+            reset();
+            block_on(start_with(owner(), 1, FUNDING, &Mock::new())).unwrap();
+            let before = crate::cksol::attempt(owner()).unwrap();
+            let next = Mock::new();
+            next.now.set(101);
+            *next.terminal.borrow_mut() = status;
+            assert!(block_on(start_with(owner(), 2, FUNDING, &next)).is_err());
+            assert_eq!(crate::cksol::attempt(owner()).unwrap(), before);
+            assert_eq!(row(owner()).unwrap().sequence, 1);
+            assert!(next.funds.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn unknown_relay_and_unsettled_payment_never_roll_over() {
+        for unknown_relay in [true, false] {
+            reset();
+            block_on(start_with(owner(), 1, FUNDING, &Mock::new())).unwrap();
+            mutate_state(|s| {
+                if unknown_relay {
+                    s.cksol_relay_attempts.get_mut(&owner()).unwrap().status = CkSolRelayStatus::SubmittedOrUnknown;
+                } else {
+                    s.cksol_paid_payments.get_mut(&owner()).unwrap().phase = CkSolPaymentPhase::RefundUnknown;
+                }
+            });
+            let before = crate::cksol::attempt(owner()).unwrap();
+            let next = Mock::new();
+            next.now.set(101);
+            *next.terminal.borrow_mut() = Ok(true);
+            assert!(block_on(start_with(owner(), 2, FUNDING, &next)).is_err());
+            assert_eq!(crate::cksol::attempt(owner()).unwrap(), before);
+            assert!(next.funds.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn rollover_rechecks_retained_attempt_after_status_await() {
+        reset();
+        block_on(start_with(owner(), 1, FUNDING, &Mock::new())).unwrap();
+        let next=Mock::new();
+        next.now.set(101);
+        *next.terminal.borrow_mut()=Ok(true);
+        next.replace_attempt_during_status.set(true);
+        assert!(block_on(start_with(owner(), 2, FUNDING, &next)).unwrap_err().contains("changed while checking"));
+        assert_eq!(crate::cksol::attempt(owner()).unwrap().status, CkSolRelayStatus::SubmittedOrUnknown);
+        assert!(next.funds.borrow().is_empty());
+    }
+
+    #[test]
+    fn stale_sequence_never_retires_a_completed_attempt() {
+        reset();
+        block_on(start_with(owner(), 1, FUNDING, &Mock::new())).unwrap();
+        let before=crate::cksol::attempt(owner());
+        let next=Mock::new();
+        next.now.set(101);
+        *next.terminal.borrow_mut()=Ok(true);
+        assert!(block_on(start_with(owner(), 99, FUNDING, &next)).is_err());
+        assert_eq!(crate::cksol::attempt(owner()),before);
+        assert!(next.funds.borrow().is_empty());
+    }
+
     #[test]
     fn paid_success_returns_unused_cycles_and_replay_never_charges_twice() {
         reset();

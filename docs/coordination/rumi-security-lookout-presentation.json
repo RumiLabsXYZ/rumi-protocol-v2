@@ -1,0 +1,36 @@
+{
+  "summary": "Read-only production checks show the Stability Pool open, consistent and receiving interest. Authorized status shows recovery complete through all 237 packets, no pending Treasury recovery mint, and a running module newer than the stale public-dashboard record. Its exact source binding remains unproved, so PR #623 deployment is not claimed either way. Vault 158 recovery preparation and corrected ckSOL installation retain their existing holds.",
+  "plainSummary": "The live Stability Pool is open, consistent, and receiving interest. Its recorded recovery is complete and the related Treasury recovery list is empty. The running software is newer than the stale public record, but its exact source version is still unconfirmed; Vault 158 recovery and the corrected ckSOL installation remain separately held.",
+  "glossary": [
+    {
+      "term": "Stability Pool",
+      "definition": "The pool that absorbs certain liquidations and receives protocol interest.",
+      "cardId": "SEC-01"
+    },
+    {
+      "term": "Wasm",
+      "definition": "The compiled canister program installed on the Internet Computer. A merged source change may differ from the installed program.",
+      "cardId": "SEC-01"
+    },
+    {
+      "term": "held epoch",
+      "definition": "A points period paused for operator review before its rewards are finalized.",
+      "cardId": "SEC-03"
+    },
+    {
+      "term": "archive",
+      "definition": "An older ledger block range served from a ledger archive canister.",
+      "cardId": "SEC-04"
+    },
+    {
+      "term": "treasury recipient",
+      "definition": "The configured destination that must be read back and confirmed before a recovery payment is allowed.",
+      "cardId": "SEC-06"
+    },
+    {
+      "term": "reserve",
+      "definition": "A limited pool of processing funds. The ckSOL reserve is currently off and cannot spend.",
+      "cardId": "CKICP-01"
+    }
+  ]
+}

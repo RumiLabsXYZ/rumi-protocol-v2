@@ -708,46 +708,59 @@ fn run_ckusdc_sole_holder_ledger_shortfall_withdraw(withdraw_recorded_amount: bo
     } else {
         live_pool_balance
     };
+    // Withdrawals fail closed while the pool's live ledger balance is below its
+    // recorded total: nothing is debited, journaled, or transferred, and the
+    // recorded position stays intact for operator reconciliation.
     let user_before = ledger_balance(&pic, ckusdc_ledger, test_user);
-    let result = pic
-        .update_call(
-            sp_id,
-            test_user,
-            "withdraw",
-            encode_args((ckusdc_ledger, requested_withdrawal)).unwrap(),
-        )
-        .expect("withdraw call failed");
-    match result {
-        WasmResult::Reply(bytes) => {
-            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode withdraw");
-            r.expect("withdraw failed despite sole-holder ledger drift");
+    let position_before = get_user_position(&pic, sp_id, test_user);
+    assert!(position_before.is_some(), "deposit must be recorded before the drift check");
+    for attempt in 0..2 {
+        let result = pic
+            .update_call(
+                sp_id,
+                test_user,
+                "withdraw",
+                encode_args((ckusdc_ledger, requested_withdrawal)).unwrap(),
+            )
+            .expect("withdraw call failed");
+        match result {
+            WasmResult::Reply(bytes) => {
+                let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode withdraw");
+                // A retained journal row would surface as SystemBusy on the
+                // second attempt, so the same error twice proves no row exists.
+                assert!(
+                    matches!(r, Err(StabilityPoolError::InsufficientPoolBalance)),
+                    "attempt {attempt}: withdraw must fail closed on ledger shortfall, got {r:?}",
+                );
+            }
+            WasmResult::Reject(msg) => panic!("withdraw rejected: {}", msg),
         }
-        WasmResult::Reject(msg) => panic!("withdraw rejected: {}", msg),
     }
 
     assert_eq!(
-        ledger_balance(&pic, ckusdc_ledger, test_user) - user_before,
-        (live_pool_balance - ckusdc_fee) as u128,
-        "user should receive the real ledger balance net of one transfer fee",
+        ledger_balance(&pic, ckusdc_ledger, test_user),
+        user_before,
+        "no tokens may leave the pool while it is short",
     );
     assert_eq!(
-        ledger_balance(&pic, ckusdc_ledger, sp_id),
-        0,
-        "withdraw should drain the real pool ledger balance",
+        ledger_balance(&pic, ckusdc_ledger, sp_id) as u64,
+        live_pool_balance,
+        "the pool ledger balance must be unchanged",
     );
-    assert!(
-        get_user_position(&pic, sp_id, test_user).is_none(),
-        "sole-holder shortfall correction should remove the phantom balance",
+    assert_eq!(
+        get_user_position(&pic, sp_id, test_user),
+        position_before,
+        "the recorded position must be unchanged",
     );
 }
 
 #[test]
-fn test_ckusdc_max_withdraw_self_corrects_sole_holder_ledger_shortfall() {
+fn test_ckusdc_max_withdraw_fails_closed_on_sole_holder_ledger_shortfall() {
     run_ckusdc_sole_holder_ledger_shortfall_withdraw(true);
 }
 
 #[test]
-fn test_ckusdc_capped_max_withdraw_self_corrects_sole_holder_ledger_shortfall() {
+fn test_ckusdc_capped_max_withdraw_fails_closed_on_sole_holder_ledger_shortfall() {
     run_ckusdc_sole_holder_ledger_shortfall_withdraw(false);
 }
 
@@ -1488,58 +1501,66 @@ fn test_get_ledger_reconciliation_reports_healthy_and_is_admin_gated() {
     );
 }
 
-/// The convenience route is fail-closed until every inter-canister phase has
-/// durable recovery. Official ledger canisters verify no pull/allowance/state
-/// mutation for both zero- and positive-fee tokens.
-#[test]
-fn test_deposit_as_3usd_fails_closed_without_ledger_or_state_mutation() {
-    for fee in [0, 10_000] {
-        let env = setup_test_env_with_transfer_fee(fee);
-        register_stablecoin(&env.pic, env.sp_id, env.admin, StablecoinConfig {
-            ledger_id: env.pool_id,
-            symbol: "3USD".to_string(),
-            decimals: 8,
-            priority: 0,
-            is_active: true,
-            transfer_fee: Some(0),
-            is_lp_token: Some(true),
-            underlying_pool: Some(env.pool_id),
-        });
-        let amount = 1_000_000u64;
-        let user_before = ledger_balance(&env.pic, env.icusd_ledger, env.test_user);
-        let sp_before = ledger_balance(&env.pic, env.icusd_ledger, env.sp_id);
-        let user_allowance_before = ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id);
-        let pool_allowance_before = ledger_allowance(&env.pic, env.icusd_ledger, env.sp_id, env.pool_id);
+fn register_3usd_lp(env: &TestEnv) {
+    register_stablecoin(&env.pic, env.sp_id, env.admin, StablecoinConfig {
+        ledger_id: env.pool_id,
+        symbol: "3USD".to_string(),
+        decimals: 8,
+        priority: 0,
+        is_active: true,
+        transfer_fee: Some(0),
+        is_lp_token: Some(true),
+        underlying_pool: Some(env.pool_id),
+    });
+}
 
-        let result = env.pic.update_call(
-            env.sp_id,
-            env.test_user,
-            "deposit_as_3usd",
-            encode_args((env.icusd_ledger, amount)).unwrap(),
-        ).expect("typed fail-closed reply");
-        match result {
-            WasmResult::Reply(bytes) => {
-                let result: Result<u64, StabilityPoolError> = decode_one(&bytes).expect("decode result");
-                assert!(result.is_err(), "conversion must be disabled for fee {fee}");
-            }
-            WasmResult::Reject(message) => panic!("unexpected transport reject: {message}"),
-        }
-
-        assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.test_user), user_before);
-        assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), sp_before);
-        assert_eq!(sp_before, 0);
-        assert_eq!(
-            ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id),
-            user_allowance_before,
-        );
-        assert_eq!(
-            ledger_allowance(&env.pic, env.icusd_ledger, env.sp_id, env.pool_id),
-            pool_allowance_before,
-        );
-        assert_eq!(pool_allowance_before, 0, "route grants no conversion allowance");
-        assert!(get_user_position(&env.pic, env.sp_id, env.test_user).is_none());
-        assert_eq!(query_3pool_lp_balance(&env.pic, env.pool_id, env.sp_id), 0);
+fn call_deposit_as_3usd(env: &TestEnv, ledger: Principal, amount: u64) -> Result<u64, StabilityPoolError> {
+    match env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "deposit_as_3usd",
+        encode_args((ledger, amount)).unwrap(),
+    ).expect("typed deposit_as_3usd reply") {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode result"),
+        WasmResult::Reject(message) => panic!("unexpected transport reject: {message}"),
     }
+}
+
+/// The legacy convenience wrapper cannot carry a fee budget, so it fails
+/// closed for any nonzero-fee input (every production stablecoin input today)
+/// before pulling funds or granting an allowance. Callers must use
+/// start_3usd_conversion with an explicit budget. Zero-fee inputs enter the
+/// durable conversion saga instead and are not asserted here.
+#[test]
+fn test_deposit_as_3usd_rejects_nonzero_fee_without_ledger_or_state_mutation() {
+    let env = setup_test_env_with_transfer_fee(10_000);
+    register_3usd_lp(&env);
+    let amount = 1_000_000u64;
+    let user_before = ledger_balance(&env.pic, env.icusd_ledger, env.test_user);
+    let sp_before = ledger_balance(&env.pic, env.icusd_ledger, env.sp_id);
+    let user_allowance_before = ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id);
+    let pool_allowance_before = ledger_allowance(&env.pic, env.icusd_ledger, env.sp_id, env.pool_id);
+
+    let result = call_deposit_as_3usd(&env, env.icusd_ledger, amount);
+    assert!(
+        matches!(&result, Err(StabilityPoolError::LedgerTransferFailed { reason }) if reason.contains("nonzero ledger fee")),
+        "nonzero-fee legacy conversion must fail closed, got {result:?}",
+    );
+
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.test_user), user_before);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), sp_before);
+    assert_eq!(sp_before, 0);
+    assert_eq!(
+        ledger_allowance(&env.pic, env.icusd_ledger, env.test_user, env.sp_id),
+        user_allowance_before,
+    );
+    assert_eq!(
+        ledger_allowance(&env.pic, env.icusd_ledger, env.sp_id, env.pool_id),
+        pool_allowance_before,
+    );
+    assert_eq!(pool_allowance_before, 0, "route grants no conversion allowance");
+    assert!(get_user_position(&env.pic, env.sp_id, env.test_user).is_none());
+    assert_eq!(query_3pool_lp_balance(&env.pic, env.pool_id, env.sp_id), 0);
 }
 
 /// Test 3: deposit_as_3usd rejects LP token as input (can't deposit 3USD via 3pool again)
@@ -1558,7 +1579,7 @@ fn test_deposit_as_3usd_rejects_lp_token() {
         underlying_pool: Some(env.pool_id),
     });
 
-    // The endpoint is disabled before all ledger/state work, even for LP input.
+    // 3USD itself is not a 3pool input; it is rejected before any ledger or state work.
     let user_before = ledger_balance(&env.pic, env.pool_id, env.test_user);
     let sp_before = ledger_balance(&env.pic, env.pool_id, env.sp_id);
     let user_position_before = get_user_position(&env.pic, env.sp_id, env.test_user);
@@ -1572,8 +1593,8 @@ fn test_deposit_as_3usd_rejects_lp_token() {
         WasmResult::Reply(bytes) => {
             let r: Result<u64, StabilityPoolError> = decode_one(&bytes).expect("decode");
             assert!(
-                matches!(r, Err(StabilityPoolError::SystemBusy)),
-                "disabled convenience conversion should return SystemBusy, got {:?}",
+                matches!(r, Err(StabilityPoolError::TokenNotAccepted { ledger }) if ledger == env.pool_id),
+                "3USD input must be rejected as a conversion source, got {:?}",
                 r,
             );
         }

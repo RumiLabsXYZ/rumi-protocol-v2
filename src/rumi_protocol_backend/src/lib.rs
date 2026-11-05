@@ -1517,17 +1517,20 @@ fn redemption_transfer_meets_minimum(
 pub mod chains;
 pub mod cksol;
 pub mod cksol_paid;
+pub mod cksol_icp_paid;
 pub mod dashboard;
 pub mod event;
 pub mod guard;
 pub mod icrc21;
 pub mod icrc3_proof;
 pub mod sp_burn_refund;
+pub mod sp_liquidation;
 pub mod liquidity_pool;
 pub mod logs;
 pub mod management;
 pub mod native_icp_proof;
 pub mod numeric;
+pub mod nicp_redemption;
 pub mod payout_history;
 pub mod state;
 pub mod three_usd_inventory;
@@ -1535,6 +1538,7 @@ pub mod storage;
 pub mod treasury;
 pub mod vault;
 pub mod xrc;
+pub mod xrpl_icusd;
 
 #[cfg(any(test, feature = "test_endpoints"))]
 pub mod test_helpers;
@@ -2513,6 +2517,48 @@ pub struct LiquidatableVaultInfo {
 pub struct SpNotificationResult {
     pub vault_id: u64,
     pub success: bool,
+    /// Missing on older pool releases: preserve their one-shot semantics.
+    /// New clients explicitly distinguish a pre-dispatch refusal from an
+    /// admitted durable operation whose outcome may still be unresolved.
+    #[serde(default)]
+    pub admitted: Option<bool>,
+}
+
+/// Point lookup for the permissionless SP fallback. It uses the same price
+/// and sizing calculation as backend push notifications, without depending on
+/// a capped enumeration or passing a zero price into an irreversible route.
+pub fn stability_pool_liquidation_candidate(
+    state: &state::State,
+    vault_id: u64,
+) -> Option<LiquidatableVaultInfo> {
+    if state.has_pending_nicp_claim(vault_id) {
+        return None;
+    }
+    let vault = state.vault_id_to_vaults.get(&vault_id)?;
+    let config = state.get_collateral_config(&vault.collateral_type)?;
+    if !config.status.allows_liquidation() || vault.borrowed_icusd_amount.to_u64() == 0 {
+        return None;
+    }
+    let price = state.get_collateral_price_decimal(&vault.collateral_type)?;
+    if price <= rust_decimal::Decimal::ZERO {
+        return None;
+    }
+    let rate = numeric::UsdIcp::from(price);
+    if compute_collateral_ratio(vault, rate, state)
+        >= state.get_min_liquidation_ratio_for(&vault.collateral_type)
+    {
+        return None;
+    }
+    Some(LiquidatableVaultInfo {
+        vault_id,
+        collateral_type: vault.collateral_type,
+        debt_amount: vault.borrowed_icusd_amount.to_u64(),
+        collateral_amount: vault.collateral_amount,
+        recommended_liquidation_amount: state
+            .recommended_liquidation_amount_for(vault, rate)
+            .to_u64(),
+        collateral_price_e8s: rate.to_e8s(),
+    })
 }
 
 /// Wave-14a CDP-10: post-spawn handler for the stability_pool
@@ -2554,7 +2600,9 @@ pub fn record_sp_notification_result_at(
         Ok(results) => {
             let dispatched: std::collections::BTreeSet<u64> = vault_ids.into_iter().collect();
             for result in results {
-                if dispatched.contains(&result.vault_id) {
+                if dispatched.contains(&result.vault_id)
+                    && (result.success || result.admitted != Some(false))
+                {
                     state.sp_attempted_vaults.insert(result.vault_id);
                 }
             }
@@ -2566,6 +2614,48 @@ pub fn record_sp_notification_result_at(
             reject_message,
             timestamp: now_ns,
         }),
+    }
+}
+
+#[cfg(test)]
+mod sp_admission_reply_tests {
+    use super::*;
+
+    fn state() -> state::State {
+        state::State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::from_slice(&[10]),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        })
+    }
+
+    #[test]
+    fn pre_dispatch_refusal_is_retryable_but_unknown_and_legacy_remain_attempted() {
+        let mut state = state();
+        let rows = vec![
+            SpNotificationResult { vault_id: 1, success: false, admitted: Some(false) },
+            SpNotificationResult { vault_id: 2, success: false, admitted: Some(true) },
+            SpNotificationResult { vault_id: 3, success: false, admitted: None },
+            SpNotificationResult { vault_id: 4, success: true, admitted: Some(false) },
+            SpNotificationResult { vault_id: 99, success: true, admitted: Some(true) },
+        ];
+        assert!(record_sp_notification_result_at(&mut state, vec![1, 2, 3, 4], Ok(rows), 1).is_none());
+        assert_eq!(state.sp_attempted_vaults, [2, 3, 4].into_iter().collect());
+    }
+
+    #[test]
+    fn old_reply_missing_admission_field_decodes_conservatively() {
+        #[derive(CandidType)]
+        struct OldReply { vault_id: u64, success: bool }
+        let bytes = candid::encode_args((vec![OldReply { vault_id: 7, success: false }],)).unwrap();
+        let (rows,): (Vec<SpNotificationResult>,) = candid::decode_args(&bytes).unwrap();
+        assert_eq!(rows, vec![SpNotificationResult { vault_id: 7, success: false, admitted: None }]);
     }
 }
 
@@ -2930,6 +3020,12 @@ pub async fn check_vaults() {
         let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
 
         for vault_info in &vault_notifications {
+            // Sunset positions remain visible to manual liquidators, but are
+            // not offered to either automated liquidation route.
+            if read_state(|s| s.get_collateral_config(&vault_info.collateral_type)
+                .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset)) {
+                continue;
+            }
             // `vault_routable_to_bot` enforces both the operator allowlist and
             // the custody fence (native-XRP is claim-based and must never go
             // to the bot; it falls through to the SP's absorb path).
@@ -3068,6 +3164,9 @@ pub async fn check_vaults() {
 pub fn compute_collateral_ratio(vault: &Vault, _rate: UsdIcp, state: &state::State) -> Ratio {
     if vault.borrowed_icusd_amount == 0 {
         return Ratio::from(Decimal::MAX);
+    }
+    if let Some(value) = state.nicp_claim_collateral_value(vault) {
+        return value / vault.borrowed_icusd_amount;
     }
     let margin_value: ICUSD =
         if let Some(config) = state.get_collateral_config(&vault.collateral_type) {

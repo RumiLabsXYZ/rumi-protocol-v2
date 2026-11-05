@@ -50,6 +50,9 @@
 //   41      unsettled_exit_index            — (token, payout id) donation liability fence
 //   42      payout_exit_index_cursor         — resumable bounded backfill cursor
 //   43      payout_exit_index_complete       — backfill completion marker
+//   44      liquidity_receipts_v1            — caller+intent keyed add-liquidity sagas
+//   45      liquidity_receipt_fence           — durable active caller+intent fence
+//   46      liquidity_receipt_client          — optional trusted conversion client
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -121,6 +124,9 @@ const MEM_INPUT_ARCHIVE_PROOFS: MemoryId = MemoryId::new(40);
 const MEM_UNSETTLED_EXIT_INDEX: MemoryId = MemoryId::new(41);
 const MEM_PAYOUT_EXIT_INDEX_CURSOR: MemoryId = MemoryId::new(42);
 const MEM_PAYOUT_EXIT_INDEX_COMPLETE: MemoryId = MemoryId::new(43);
+const MEM_LIQUIDITY_RECEIPTS_V1: MemoryId = MemoryId::new(44);
+const MEM_LIQUIDITY_RECEIPT_FENCE: MemoryId = MemoryId::new(45);
+const MEM_LIQUIDITY_RECEIPT_CLIENT: MemoryId = MemoryId::new(46);
 const MAX_PAYOUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 const MAX_INPUT_ARCHIVE_PROOF_CURSORS: u64 = 64;
 
@@ -512,6 +518,54 @@ impl Storable for Unit {
     };
 }
 
+/// The one active receipt is persisted separately from the receipt map so a
+/// callback loss or upgrade cannot reopen pool mutations against a saved
+/// pre-operation balance snapshot.  The payload is bounded to the maximum IC
+/// principal length plus the fixed 32-byte intent id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LiquidityReceiptFence {
+    pub owner: Principal,
+    pub intent_id: [u8; 32],
+}
+
+impl Default for LiquidityReceiptFence {
+    fn default() -> Self {
+        Self {
+            owner: Principal::anonymous(),
+            intent_id: [0; 32],
+        }
+    }
+}
+
+impl Storable for LiquidityReceiptFence {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let principal = self.owner.as_slice();
+        let mut bytes = Vec::with_capacity(1 + principal.len() + 32);
+        bytes.push(principal.len() as u8);
+        bytes.extend_from_slice(principal);
+        bytes.extend_from_slice(&self.intent_id);
+        Cow::Owned(bytes)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        assert!(bytes.len() >= 1 + 32, "invalid liquidity receipt fence length");
+        let owner_len = bytes[0] as usize;
+        assert_eq!(bytes.len(), 1 + owner_len + 32, "invalid liquidity receipt fence principal length");
+        let mut intent_id = [0; 32];
+        intent_id.copy_from_slice(&bytes[1 + owner_len..]);
+        Self {
+            owner: Principal::from_slice(&bytes[1..1 + owner_len]),
+            intent_id,
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 62,
+        is_fixed_size: false,
+    };
+}
+
 /// Helper macro that implements Storable for a Candid-serializable type with
 /// unbounded size. We use this for all event and block payloads.
 macro_rules! impl_storable_candid_unbounded {
@@ -540,6 +594,7 @@ impl_storable_candid_unbounded!(Icrc3Block);
 impl_storable_candid_unbounded!(LpAllowance);
 impl_storable_candid_unbounded!(ThreePoolPendingClaim);
 impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
+impl_storable_candid_unbounded!(crate::liquidity_receipts::LiquidityReceiptV1);
 impl_storable_candid_unbounded!(crate::payouts::PayoutEntitlement);
 impl_storable_candid_unbounded!(crate::payouts::PayoutJournalEvent);
 impl_storable_candid_unbounded!(crate::payout_reconciliation::ArchivePayoutProofProgress);
@@ -582,6 +637,24 @@ thread_local! {
     pub(crate) static SLIM_STATE: RefCell<StableCell<SlimState, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_SLIM_STATE)), SlimState::default())
             .expect("init SlimState cell"),
+    );
+    pub(crate) static LIQUIDITY_RECEIPTS_V1: RefCell<StableBTreeMap<Vec<u8>, crate::liquidity_receipts::LiquidityReceiptV1, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_LIQUIDITY_RECEIPTS_V1))));
+    pub(crate) static LIQUIDITY_RECEIPT_FENCE: RefCell<StableCell<LiquidityReceiptFence, Memory>> = RefCell::new(
+        StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_LIQUIDITY_RECEIPT_FENCE)),
+            LiquidityReceiptFence::default(),
+        )
+        .expect("init liquidity receipt fence"),
+    );
+    /// Optional admin-configured canister allowed to reserve a receipt before
+    /// its read-only preflight.  Anonymous is the durable unset marker.
+    pub(crate) static LIQUIDITY_RECEIPT_CLIENT: RefCell<StableCell<StorablePrincipal, Memory>> = RefCell::new(
+        StableCell::init(
+            MM.with(|m| m.borrow().get(MEM_LIQUIDITY_RECEIPT_CLIENT)),
+            StorablePrincipal(Principal::anonymous()),
+        )
+        .expect("init liquidity receipt client"),
     );
     pub(crate) static ICRC_DEDUP_BY_HASH: RefCell<StableBTreeMap<StorableHash, DedupEntry, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_ICRC_DEDUP_BY_HASH))));
@@ -754,6 +827,72 @@ thread_local! {
     #[cfg(feature = "test_endpoints")]
     static TEST_PAYOUT_INPUT_INDEX_BACKFILL_BATCH: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// Read the durable active add-liquidity fence.  The anonymous/zero value is
+/// the empty marker and is never a valid receipt identity.
+pub(crate) fn liquidity_receipt_fence() -> Option<(Principal, [u8; 32])> {
+    LIQUIDITY_RECEIPT_FENCE.with(|cell| {
+        let fence = cell.borrow().get().clone();
+        if fence.owner == Principal::anonymous() && fence.intent_id == [0; 32] {
+            None
+        } else {
+            Some((fence.owner, fence.intent_id))
+        }
+    })
+}
+
+/// Claim the single active add-liquidity fence, or confirm that this exact
+/// receipt already owns it after an upgrade.
+pub(crate) fn claim_liquidity_receipt_fence(
+    owner: Principal,
+    intent_id: [u8; 32],
+) -> Result<(), ()> {
+    LIQUIDITY_RECEIPT_FENCE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let current = cell.get().clone();
+        if (current.owner != Principal::anonymous() || current.intent_id != [0; 32])
+            && (current.owner != owner || current.intent_id != intent_id)
+        {
+            return Err(());
+        }
+        if current.owner != owner || current.intent_id != intent_id {
+            cell.set(LiquidityReceiptFence { owner, intent_id })
+                .expect("persist liquidity receipt fence");
+        }
+        Ok(())
+    })
+}
+
+/// Clear only the exact active receipt fence.  A stale callback cannot unlock
+/// a later receipt, and repeated terminal cleanup is harmless.
+pub(crate) fn clear_liquidity_receipt_fence(owner: Principal, intent_id: [u8; 32]) -> bool {
+    LIQUIDITY_RECEIPT_FENCE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let current = cell.get().clone();
+        if current.owner != owner || current.intent_id != intent_id {
+            return false;
+        }
+        cell.set(LiquidityReceiptFence::default())
+            .expect("clear liquidity receipt fence");
+        true
+    })
+}
+
+/// Read the optional trusted conversion client.  Anonymous is the stable
+/// unset marker so upgrades preserve the distinction without changing the
+/// legacy heap state.
+pub(crate) fn liquidity_receipt_client() -> Option<Principal> {
+    LIQUIDITY_RECEIPT_CLIENT.with(|cell| {
+        let principal = cell.borrow().get().0;
+        (principal != Principal::anonymous()).then_some(principal)
+    })
+}
+
+pub(crate) fn set_liquidity_receipt_client(client: Option<Principal>) {
+    LIQUIDITY_RECEIPT_CLIENT
+        .with(|cell| cell.borrow_mut().set(StorablePrincipal(client.unwrap_or_else(Principal::anonymous))))
+        .expect("set liquidity receipt client");
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────
@@ -1675,6 +1814,17 @@ pub mod payouts {
 
     pub fn fenced() -> bool {
         PAYOUT_FENCE.with(|cell| cell.borrow().get().0 != 0)
+    }
+
+    /// Return the exact entitlement identity encoded by the durable fence.
+    /// Invalid overflowed encodings are rejected by callers while `fenced()`
+    /// remains true, so an impossible cell value can never be treated as an
+    /// empty fence.
+    pub fn fence_id() -> Option<u64> {
+        PAYOUT_FENCE.with(|cell| {
+            let raw = cell.borrow().get().0;
+            (raw != 0).then(|| u64::try_from(raw - 1).ok()).flatten()
+        })
     }
 
     pub fn set_fence_for(id: u64) {

@@ -1140,13 +1140,15 @@ fn accounts_match_default_subaccount(actual: &Account, expected: &Account) -> bo
         }
 }
 
-/// Fetch an exact ledger-global block. Archive metadata must identify exactly
-/// one bounded callback covering the requested index; nested archives fail
-/// closed.
-pub async fn fetch_icrc3_block(
+/// Fetch the raw value for one exact ledger-global block. Archive metadata must
+/// identify exactly one bounded callback covering the requested index; nested
+/// archives fail closed. Callers that need fields not represented by
+/// `DecodedBlock` (for example approval expiry metadata) should use this
+/// helper and decode the returned value themselves.
+pub async fn fetch_icrc3_block_value(
     ledger: Principal,
     block_index: u64,
-) -> Result<DecodedBlock, String> {
+) -> Result<ICRC3Value, String> {
     let request = vec![GetBlocksRequest {
         start: Nat::from(block_index),
         length: Nat::from(1u64),
@@ -1168,7 +1170,7 @@ pub async fn fetch_icrc3_block(
         && response.blocks[0].id.0.to_u64() == Some(block_index)
         && response.archived_blocks.is_empty()
     {
-        return decode_block(&response.blocks[0].block);
+        return Ok(response.blocks[0].block.clone());
     }
     if !response.blocks.is_empty() || response.archived_blocks.len() != 1 {
         return Err("icrc3_get_blocks returned ambiguous or incomplete archive evidence".into());
@@ -1190,7 +1192,18 @@ pub async fn fetch_icrc3_block(
     .await;
     let (archived,) = result
         .map_err(|(code, message)| format!("icrc3 archive call failed: {code:?} {message}"))?;
-    decode_block(exact_archive_callback_block(block_index, &archived)?)
+    Ok(exact_archive_callback_block(block_index, &archived)?.clone())
+}
+
+/// Fetch an exact ledger-global block and decode its canonical fields. This is
+/// kept as the compatibility wrapper for existing callers; the raw helper
+/// above retains the same bounded direct-or-single-archive proof boundary.
+pub async fn fetch_icrc3_block(
+    ledger: Principal,
+    block_index: u64,
+) -> Result<DecodedBlock, String> {
+    let value = fetch_icrc3_block_value(ledger, block_index).await?;
+    decode_block(&value)
 }
 
 /// Fetch an exact block from the ledger canister itself. An archive descriptor
@@ -2105,6 +2118,20 @@ mod three_usd_reserve_ingress_tests {
         assert!(exact_archive_callback_block(6, &exact).is_err());
         assert!(exact_archive_callback_block(7, &response(&[], 8, &tuple)).is_err());
         assert!(exact_archive_callback_block(7, &response(&[7, 8], 9, &tuple)).is_err());
+        // Archive `log_length` is local to the archive canister. The block ID
+        // and advertised callback range remain ledger-global, so a high
+        // global index is valid even when the archive's local length is 100.
+        let high_global_index = 1_000_000;
+        let high = response(&[high_global_index], 100, &tuple);
+        assert!(exact_archive_callback_block(high_global_index, &high).is_ok());
+        assert!(validate_exact_archive_ranges(
+            high_global_index,
+            &[GetBlocksRequest {
+                start: Nat::from(high_global_index),
+                length: Nat::from(1u64),
+            }],
+        )
+        .is_ok());
         let mut nested = response(&[7], 8, &tuple);
         nested.archived_blocks.push(ArchivedBlocks {
             args: vec![GetBlocksRequest { start: Nat::from(7u64), length: Nat::from(1u64) }],

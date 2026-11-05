@@ -44,6 +44,10 @@ export interface NativeXrpDepositCopy {
   reserveAmount: number;
   /** What actually lands as collateral: sendAmount minus the XRPL base reserve. */
   creditedAmount: number;
+  /** Exact integer drops (null if the typed amount is not exactly representable). */
+  sendDrops: bigint | null;
+  reserveDrops: bigint;
+  creditedDrops: bigint | null;
   sendAmountLabel: string;
   collateralAmountLabel: string;
   reserveAmountLabel: string;
@@ -66,6 +70,55 @@ export function isNativeXrpCollateral(
   return collateralInfo?.custodyKind === 'NativeXrp';
 }
 
+/** XRPL maximum supply: 100 billion XRP. */
+const MAX_XRP_DROPS = 100_000_000_000n * BigInt(XRP_DROPS_PER_XRP);
+const XRP_DECIMAL_TEXT = /^(\d+)(?:\.(\d{1,6}))?$/;
+
+/**
+ * Parse decimal XRP text to integer drops using string/BigInt math only.
+ * Accepts `digits[.digits{1,6}]`; rejects seven or more decimals, signs,
+ * exponents, empty and garbage input. Never goes through Number.
+ */
+export function tryParseXrpToDrops(text: string): bigint | null {
+  if (typeof text !== 'string') return null;
+  const m = XRP_DECIMAL_TEXT.exec(text.trim());
+  if (!m) return null;
+  const whole = BigInt(m[1]);
+  const frac = BigInt((m[2] ?? '').padEnd(6, '0') || '0');
+  const drops = whole * BigInt(XRP_DROPS_PER_XRP) + frac;
+  return drops > MAX_XRP_DROPS ? null : drops;
+}
+
+export function parseXrpToDrops(text: string): bigint {
+  const drops = tryParseXrpToDrops(text);
+  if (drops === null) {
+    throw new Error('Enter an XRP amount with at most 6 decimal places.');
+  }
+  return drops;
+}
+
+/** Exact decimal text for integer drops (no trailing zeros, no float math). */
+export function formatDropsAsXrp(drops: bigint): string {
+  const negative = drops < 0n;
+  const abs = negative ? -drops : drops;
+  const whole = abs / BigInt(XRP_DROPS_PER_XRP);
+  const frac = (abs % BigInt(XRP_DROPS_PER_XRP)).toString().padStart(6, '0').replace(/0+$/, '');
+  return `${negative ? '-' : ''}${whole}${frac ? `.${frac}` : ''}`;
+}
+
+/**
+ * Convert a JS number that originated from user-typed decimal text into exact
+ * drops. The shortest round-trip repr of such a number is the typed text, so
+ * this only succeeds when that text has at most 6 decimals; any other float
+ * (for example 0.1 + 0.2) is refused rather than rounded.
+ */
+export function xrpNumberToDrops(amount: number): bigint | null {
+  if (!Number.isFinite(amount) || amount < 0) return null;
+  const text = String(amount);
+  if (/e/i.test(text)) return null;
+  return tryParseXrpToDrops(text);
+}
+
 export function formatXrpAmount(amount: number): string {
   const rounded = amount.toFixed(6).replace(/\.?0+$/, '');
   return `${rounded} XRP`;
@@ -75,9 +128,15 @@ export function xrpAmountFromDrops(drops: bigint | number): number {
   return Number(drops) / XRP_DROPS_PER_XRP;
 }
 
-export function buildXrpPaymentUri(address: string, amount: number): string {
-  const amountParam = formatXrpAmount(amount).replace(/ XRP$/, '');
-  return `ripple:${encodeURIComponent(address)}?amount=${encodeURIComponent(amountParam)}`;
+/**
+ * `ripple:` payment URI. The amount is formatted from integer drops, exactly.
+ * A number is accepted only when it is exactly representable in drops;
+ * otherwise this returns '' so no inexact QR/URI is ever produced.
+ */
+export function buildXrpPaymentUri(address: string, amount: number | bigint): string {
+  const drops = typeof amount === 'bigint' ? amount : xrpNumberToDrops(amount);
+  if (drops === null || drops < 0n) return '';
+  return `ripple:${encodeURIComponent(address)}?amount=${encodeURIComponent(formatDropsAsXrp(drops))}`;
 }
 
 export function nativeXrpDepositCopy(intent: NativeXrpDepositIntent): NativeXrpDepositCopy {
@@ -88,10 +147,18 @@ export function nativeXrpDepositCopy(intent: NativeXrpDepositIntent): NativeXrpD
   // instruction never differs from the number they typed.
   const sendAmount = intent.collateralAmount;
   const creditedAmount = xrpCreditedCollateral(sendAmount, reserveAmount);
-  const collateralAmountLabel = formatXrpAmount(creditedAmount);
-  const reserveAmountLabel = formatXrpAmount(reserveAmount);
-  const sendAmountLabel = formatXrpAmount(sendAmount);
+  const sendDrops = xrpNumberToDrops(sendAmount);
+  const reserveDrops = BigInt(intent.reserveBaseDrops);
+  const creditedDrops = sendDrops === null ? null : sendDrops > reserveDrops ? sendDrops - reserveDrops : 0n;
+  const exact = (drops: bigint | null, fallback: number) =>
+    drops === null ? formatXrpAmount(fallback) : `${formatDropsAsXrp(drops)} XRP`;
+  const collateralAmountLabel = exact(creditedDrops, creditedAmount);
+  const reserveAmountLabel = exact(reserveDrops, reserveAmount);
+  const sendAmountLabel = exact(sendDrops, sendAmount);
   return {
+    sendDrops,
+    reserveDrops,
+    creditedDrops,
     assetName,
     sendAmount,
     reserveAmount,

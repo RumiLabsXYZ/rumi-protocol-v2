@@ -1,6 +1,9 @@
 import { Actor, AnonymousIdentity, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
 import { CANISTER_IDS, CONFIG } from '../config';
+import { get } from 'svelte/store';
+import { auth, walletSessionGeneration } from './auth';
+import { getMinterOisySignerAgent, type MinterOisyAction } from './minterOisySigner';
 import { walletStore } from '../stores/wallet';
 import { idlFactory as ledgerIdl } from '../idls/ledger.idl.js';
 import { idlFactory as minterIdl } from '../idls/ckerc20_minter.idl.js';
@@ -35,12 +38,23 @@ export async function getCkErc20LedgerActor(ledgerId: string): Promise<any> {
   return Actor.createActor(ledgerIdl as any, { agent, canisterId: ledgerId });
 }
 
-export async function getWalletLedgerActor(ledgerId: string): Promise<any> {
-  return walletStore.getActor(ledgerId, ledgerIdl);
+export function isCkErc20OisyWallet(): boolean { return get(auth).walletType === 'oisy'; }
+
+async function walletActor(ledgerId: string, idl: any, owner: Principal): Promise<any> {
+  const actor: any = isCkErc20OisyWallet()
+    ? Actor.createActor(idl, { agent: getMinterOisySignerAgent(owner), canisterId: ledgerId })
+    : await walletStore.getActor(ledgerId, idl);
+  const agent = Actor.agentOf(actor);
+  if (!agent || (await agent.getPrincipal()).toText() !== owner.toText()) throw new Error('The wallet signer changed. Reconnect before continuing.');
+  return actor;
 }
 
-export async function getWalletCkErc20MinterActor(): Promise<any> {
-  return walletStore.getActor(CANISTER_IDS.CKERC20_MINTER, minterIdl);
+export async function getWalletLedgerActor(ledgerId: string, owner: Principal): Promise<any> {
+  return walletActor(ledgerId, ledgerIdl, owner);
+}
+
+export async function getWalletCkErc20MinterActor(owner: Principal): Promise<any> {
+  return walletActor(CANISTER_IDS.CKERC20_MINTER, minterIdl, owner);
 }
 
 export async function discoverCkErc20Tokens(info: any): Promise<CkErc20TokenConfig[]> {
@@ -203,73 +217,82 @@ export async function approveAndWithdrawCkErc20(params: {
   owner: Principal;
   quote: CkErc20WithdrawalQuote;
   isLive: () => boolean;
+  oisyAction?: MinterOisyAction;
   onWithdrawalSubmitted?: () => void;
-  onWithdrawalResolved?: () => void;
+  onWithdrawalResolved?: (result: any) => void;
 }): Promise<{ ckEthApproveBlock: bigint; ckTokenApproveBlock: bigint; ckEthBurnBlock: bigint; ckTokenBurnBlock: bigint }> {
-  const { token, amount, recipient, owner, quote, isLive, onWithdrawalSubmitted, onWithdrawalResolved } = params;
-  if (!validateEthereumAddress(recipient)) throw new Error('Enter a valid Ethereum address.');
-  if (quote.owner.toText() !== owner.toText() || quote.tokenLedgerId !== token.ledgerId || quote.amount !== amount) {
-    throw new Error('The withdrawal quote does not match the current wallet, token, or amount. Refresh the quote.');
-  }
-  if (Date.now() - quote.quotedAtMs > 60_000) throw new Error('The withdrawal fee quote expired. Refresh it before approving.');
-  const ckTokenPrincipal = Principal.fromText(token.ledgerId);
-  const minterPrincipal = Principal.fromText(CANISTER_IDS.CKERC20_MINTER);
-  if (!isLive()) throw new Error('Wallet changed before approval. Reconnect and review the request again.');
-  const freshQuote = await getCkErc20WithdrawalQuote(token, amount, owner);
-  if (!isLive()) throw new Error('Wallet changed while refreshing the withdrawal fees.');
-  if (freshQuote.ckTokenFee !== quote.ckTokenFee || freshQuote.ckEthFee !== quote.ckEthFee || freshQuote.maxTransactionFee !== quote.maxTransactionFee) {
-    throw new Error('The ledger fee or ckETH fee cap changed since the displayed quote. Refresh the quote before approving.');
-  }
-  if (freshQuote.ckEthBalance < freshQuote.ckEthAllowance + freshQuote.ckEthFee) {
-    throw new Error(`Not enough ckETH for the displayed fee cap and approval fees. Required allowance: ${formatTokenAmount(freshQuote.ckEthAllowance, 18, 8)} ckETH.`);
-  }
-  if (freshQuote.ckTokenBalance < amount + freshQuote.ckTokenFee * 2n) {
-    throw new Error(`Not enough ${token.symbol} for the amount and ICRC-2 approval/withdrawal fees. Current balance: ${formatTokenAmount(freshQuote.ckTokenBalance, token.decimals)} ${token.symbol}.`);
-  }
-
-  const expiresAt = BigInt(Date.now() + 10 * 60 * 1000) * 1_000_000n;
-  const ckEthActor = await getWalletLedgerActor(CANISTER_IDS.CKETH_LEDGER);
-  const ckEthApprove = await ckEthActor.icrc2_approve({
-    from_subaccount: [], spender: { owner: minterPrincipal, subaccount: [] }, amount: freshQuote.ckEthAllowance,
-    expected_allowance: [], expires_at: [expiresAt], fee: [freshQuote.ckEthFee], memo: [], created_at_time: [],
-  });
-  const ckEthApproveBlock = unwrapOk(ckEthApprove, 'ckETH approval failed');
-  if (!isLive()) throw new Error(`ckETH approval confirmed at block ${ckEthApproveBlock}, but the connected wallet changed. No withdrawal was requested.`);
-
-  const ckTokenActor = await getWalletLedgerActor(token.ledgerId);
-  const ckTokenApprove = await ckTokenActor.icrc2_approve({
-    from_subaccount: [], spender: { owner: minterPrincipal, subaccount: [] }, amount: freshQuote.ckTokenAllowance,
-    expected_allowance: [], expires_at: [expiresAt], fee: [freshQuote.ckTokenFee], memo: [], created_at_time: [],
-  });
-  const ckTokenApproveBlock = unwrapOk(ckTokenApprove, `${token.symbol} approval failed`);
-  if (!isLive()) throw new Error(`Both approvals were confirmed (ckETH ${ckEthApproveBlock}, ${token.symbol} ${ckTokenApproveBlock}), but the connected wallet changed. No withdrawal was requested.`);
-
-  const minterActor = await getWalletCkErc20MinterActor();
-  if (!isLive()) throw new Error('Wallet changed before the withdrawal request was submitted. No withdrawal was requested.');
-  onWithdrawalSubmitted?.();
-  const result = await minterActor.withdraw_erc20({
-    amount,
-    ckerc20_ledger_id: ckTokenPrincipal,
-    recipient: recipient.trim(),
-    from_cketh_subaccount: [],
-    from_ckerc20_subaccount: [],
-  });
-  // A Candid response, including Err, resolves the request. A rejected call
-  // leaves the caller's persisted reconciliation lock in place because the
-  // minter may have processed it before the response was lost.
-  onWithdrawalResolved?.();
-  if ('Err' in result) {
-    const errorTag = Object.keys(result.Err)[0];
-    if (errorTag === 'CkErc20LedgerError') {
-      const partial = result.Err.CkErc20LedgerError;
-      throw new Error(`${token.symbol} withdrawal was rejected after ckETH processing. ckETH burn block: ${partial.cketh_block_index}. Ledger error: ${Object.keys(partial.error)[0]}.`);
+  const { token, amount, recipient, owner, quote, onWithdrawalSubmitted, onWithdrawalResolved } = params;
+  const generation = get(walletSessionGeneration), walletType = get(auth).walletType;
+  const isLive = () => params.isLive() && get(walletSessionGeneration) === generation && get(auth).walletType === walletType;
+  try {
+    await params.oisyAction?.ready;
+    if (!validateEthereumAddress(recipient)) throw new Error('Enter a valid Ethereum address.');
+    if (quote.owner.toText() !== owner.toText() || quote.tokenLedgerId !== token.ledgerId || quote.amount !== amount) {
+      throw new Error('The withdrawal quote does not match the current wallet, token, or amount. Refresh the quote.');
     }
-    throw new Error(`Withdrawal request rejected: ${errorTag}`);
-  }
-  return {
-    ckEthApproveBlock,
-    ckTokenApproveBlock,
-    ckEthBurnBlock: BigInt(result.Ok.cketh_block_index),
-    ckTokenBurnBlock: BigInt(result.Ok.ckerc20_block_index),
-  };
+    if (Date.now() - quote.quotedAtMs > 60_000) throw new Error('The withdrawal fee quote expired. Refresh it before approving.');
+    const ckTokenPrincipal = Principal.fromText(token.ledgerId);
+    const minterPrincipal = Principal.fromText(CANISTER_IDS.CKERC20_MINTER);
+    if (!isLive()) throw new Error('Wallet changed before approval. Reconnect and review the request again.');
+    const freshQuote = await getCkErc20WithdrawalQuote(token, amount, owner);
+    if (!isLive()) throw new Error('Wallet changed while refreshing the withdrawal fees.');
+    if (freshQuote.ckTokenFee !== quote.ckTokenFee || freshQuote.ckEthFee !== quote.ckEthFee || freshQuote.maxTransactionFee !== quote.maxTransactionFee) {
+      throw new Error('The ledger fee or ckETH fee cap changed since the displayed quote. Refresh the quote before approving.');
+    }
+    if (freshQuote.ckEthBalance < freshQuote.ckEthAllowance + freshQuote.ckEthFee) {
+      throw new Error(`Not enough ckETH for the displayed fee cap and approval fees. Required allowance: ${formatTokenAmount(freshQuote.ckEthAllowance, 18, 8)} ckETH.`);
+    }
+    if (freshQuote.ckTokenBalance < amount + freshQuote.ckTokenFee * 2n) {
+      throw new Error(`Not enough ${token.symbol} for the amount and ICRC-2 approval/withdrawal fees. Current balance: ${formatTokenAmount(freshQuote.ckTokenBalance, token.decimals)} ${token.symbol}.`);
+    }
+
+    const expiresAt = BigInt(Date.now() + 10 * 60 * 1000) * 1_000_000n;
+    const ckEthActor = await getWalletLedgerActor(CANISTER_IDS.CKETH_LEDGER, owner);
+    if (!isLive()) throw new Error('Wallet changed before ckETH approval.');
+    const ckEthApprove = await ckEthActor.icrc2_approve({
+      from_subaccount: [], spender: { owner: minterPrincipal, subaccount: [] }, amount: freshQuote.ckEthAllowance,
+      expected_allowance: [], expires_at: [expiresAt], fee: [freshQuote.ckEthFee], memo: [], created_at_time: [],
+    });
+    const ckEthApproveBlock = unwrapOk(ckEthApprove, 'ckETH approval failed');
+    if (!isLive()) throw new Error(`ckETH approval confirmed at block ${ckEthApproveBlock}, but the connected wallet changed. No withdrawal was requested.`);
+
+    const ckTokenActor = await getWalletLedgerActor(token.ledgerId, owner);
+    if (!isLive()) throw new Error('Wallet changed before token approval.');
+    const ckTokenApprove = await ckTokenActor.icrc2_approve({
+      from_subaccount: [], spender: { owner: minterPrincipal, subaccount: [] }, amount: freshQuote.ckTokenAllowance,
+      expected_allowance: [], expires_at: [expiresAt], fee: [freshQuote.ckTokenFee], memo: [], created_at_time: [],
+    });
+    const ckTokenApproveBlock = unwrapOk(ckTokenApprove, `${token.symbol} approval failed`);
+    if (!isLive()) throw new Error(`Both approvals were confirmed (ckETH ${ckEthApproveBlock}, ${token.symbol} ${ckTokenApproveBlock}), but the connected wallet changed. No withdrawal was requested.`);
+
+    const minterActor = await getWalletCkErc20MinterActor(owner);
+    if (!isLive()) throw new Error('Wallet changed before the withdrawal request was submitted. No withdrawal was requested.');
+    onWithdrawalSubmitted?.();
+    const result = await minterActor.withdraw_erc20({
+      amount,
+      ckerc20_ledger_id: ckTokenPrincipal,
+      recipient: recipient.trim(),
+      from_cketh_subaccount: [],
+      from_ckerc20_subaccount: [],
+    });
+    // A Candid response resolves the request outcome; partial ledger errors
+    // still carry a ckETH burn that the page must persist. A rejected call
+    // leaves the caller's persisted reconciliation lock in place because the
+    // minter may have processed it before the response was lost.
+    onWithdrawalResolved?.(result);
+    if ('Err' in result) {
+      const errorTag = Object.keys(result.Err)[0];
+      if (errorTag === 'CkErc20LedgerError') {
+        const partial = result.Err.CkErc20LedgerError;
+        throw new Error(`${token.symbol} withdrawal was rejected after ckETH processing. ckETH burn block: ${partial.cketh_block_index}. Ledger error: ${Object.keys(partial.error)[0]}.`);
+      }
+      throw new Error(`Withdrawal request rejected: ${errorTag}`);
+    }
+    return {
+      ckEthApproveBlock,
+      ckTokenApproveBlock,
+      ckEthBurnBlock: BigInt(result.Ok.cketh_block_index),
+      ckTokenBurnBlock: BigInt(result.Ok.ckerc20_block_index),
+    };
+  } finally { try { await params.oisyAction?.close(); } catch { /* Keep the financial result even if popup cleanup fails. */ } }
 }

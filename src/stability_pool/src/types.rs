@@ -374,6 +374,10 @@ pub struct LiquidationResult {
     pub collateral_type: Principal,
     pub success: bool,
     pub error_message: Option<String>,
+    /// False is an authoritative pre-dispatch refusal. None retains the
+    /// historical backend one-shot acknowledgement for older routes.
+    #[serde(default)]
+    pub admitted: Option<bool>,
 }
 
 /// Mirror of the backend's `ChainLiquidatableVault` Candid record. Kept local

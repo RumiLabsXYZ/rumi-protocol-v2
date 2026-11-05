@@ -537,6 +537,347 @@ type Icrc10SupportedStandard = record {
 // Service
 // ──────────────────────────────────────────────────────────────
 
+type InterestRecoveryWire_InterestMintReceiptPayload = record {
+  collateral_type : opt principal;
+  amount : nat64;
+  token_ledger : principal;
+};
+type InterestRecoveryWire_RecoveryManifest = record {
+  packets : vec InterestRecoveryWire_RecoveryPacket;
+  baseline_digest : blob;
+};
+type InterestRecoveryWire_RecoveryPacket = record {
+  source_mint_block : nat64;
+  allocations : vec record { principal; nat64 };
+  collateral_type : principal;
+  amount : nat64;
+  token_ledger : principal;
+};
+type InterestRecoveryWire_RecoveryPacketReceipt = record {
+  source_mint_block : nat64;
+  allocation_digest : blob;
+  manifest_hash : blob;
+  credited : bool;
+  payload : InterestRecoveryWire_InterestMintReceiptPayload;
+};
+type InterestRecoveryWire_RecoveryStatus = record {
+  next_packet : nat16;
+  manifest_hash : blob;
+  credited_raw : nat64;
+  packet_count : nat16;
+  live_interest_only : bool;
+};
+type InterestRecoveryWire_Result_10 = variant { Ok : opt InterestRecoveryWire_RecoveryPacketReceipt; Err : text };
+type InterestRecoveryWire_Result_11 = variant { Ok : opt InterestRecoveryWire_RecoveryStatus; Err : text };
+type InterestRecoveryWire_Result_7 = variant { Ok : InterestRecoveryWire_RecoveryStatus; Err : text };
+type WithdrawalWire_Account = record { owner : principal; subaccount : opt blob };
+type WithdrawalWire_PendingOutboundPayoutStatus = record {
+  last_error : opt text;
+  ambiguous_seen : bool;
+  transfer_fee : nat64;
+  reconciliation_attempts : nat64;
+  last_reconciliation_at_ns : opt nat64;
+  recipient : WithdrawalWire_Account;
+  transfer_amount : nat64;
+  from_subaccount : opt blob;
+  transfer_created_at_time_ns : nat64;
+  ledger : principal;
+  candidate_block_index : opt nat64;
+  dispatch_in_flight : bool;
+  candidate_block_index_raw : opt text;
+  transfer_memo : blob;
+  gross_amount : nat64;
+};
+type WithdrawalWire_Result_6 = variant { Ok : nat64; Err : WithdrawalWire_StabilityPoolError };
+type WithdrawalWire_StabilityPoolError = variant {
+  LedgerTransferFailed : record { reason : text };
+  RefundClaimNotFound;
+  EmergencyPaused;
+  AlreadyOptedOut : record { collateral : principal };
+  TokenNotActive : record { ledger : principal };
+  InsufficientBalance : record {
+    token : principal;
+    available : nat64;
+    required : nat64;
+  };
+  InvalidPayoutAddress : record { reason : text };
+  CollateralNotFound : record { ledger : principal };
+  NoPositionFound;
+  AmountTooLow : record { minimum_e8s : nat64 };
+  Unauthorized;
+  InterCanisterCallFailed : record { method : text; target : text };
+  PayoutAddressRequired : record { collateral : principal };
+  XrpClaimStillOutstanding : record { claim_id : nat64 };
+  LiquidationFailed : record { vault_id : nat64; reason : text };
+  XrpClaimStatusCheckFailed : record { reason : text };
+  SystemBusy;
+  AlreadyOptedIn : record { collateral : principal };
+  TokenNotAccepted : record { ledger : principal };
+  InsufficientPoolBalance;
+};
+type SpRailWire_Account = record { owner : principal; subaccount : opt blob };
+type SpRailWire_ConversionError = variant {
+  EmergencyPaused;
+  CapacityExceeded;
+  SequenceExhausted;
+  NonZeroFeeBudgetRequired : record {
+    minimum_budget_raw : nat64;
+    fee_raw : nat64;
+  };
+  TokenNotActive : record { ledger : principal };
+  IntentConflict;
+  SequenceMismatch : record { expected_seq : nat64 };
+  NotFound;
+  AmountTooLow : record { minimum_e8s : nat64 };
+  Unauthorized;
+  InvalidRequest : record { reason : text };
+  LpTokenUnavailable;
+  ActiveIntent : record { intent_seq : nat64 };
+  CannotCancel;
+  SystemBusy;
+  TokenNotAccepted : record { ledger : principal };
+};
+type SpRailWire_ConversionPhase = variant {
+  Refunding;
+  Revoking;
+  Reserved;
+  Refunded;
+  Pulling;
+  Rejected;
+  Approving;
+  PoolCall;
+  CreditPending;
+  Completed;
+};
+type SpRailWire_ConversionQuote = record {
+  lp_ledger : principal;
+  quoted_lp : nat;
+  pool_coin_index : nat8;
+  minimum_fee_budget_raw : nat64;
+  principal_raw : nat64;
+  live_transfer_fee_raw : nat64;
+  token_ledger : principal;
+  pool_canister : principal;
+};
+type SpRailWire_ConversionRequest = record {
+  min_lp : nat;
+  max_fee_budget_raw : nat64;
+  principal_raw : nat64;
+  intent_seq : nat64;
+  token_ledger : principal;
+};
+type SpRailWire_ConversionStatus = variant {
+  Refunded : record {
+    refunded_raw : nat64;
+    retained_dust_raw : nat64;
+    intent_seq : nat64;
+  };
+  Rejected : record { intent_seq : nat64; reason : text };
+  Completed : record {
+    uncredited_lp : opt nat;
+    retained_dust_raw : nat64;
+    lp_credited : bool;
+    lp_minted : nat;
+    intent_seq : nat64;
+  };
+  Pending : record {
+    phase : SpRailWire_ConversionPhase;
+    intent_seq : nat64;
+    reason : opt text;
+  };
+};
+type SpRailWire_ConversionView = record {
+  status : SpRailWire_ConversionStatus;
+  request : SpRailWire_ConversionRequest;
+};
+type SpRailWire_LiquidationResult = record {
+  admitted : opt bool;
+  error_message : opt text;
+  stables_consumed : vec record { principal; nat64 };
+  vault_id : nat64;
+  collateral_gained : nat64;
+  success : bool;
+  collateral_type : principal;
+};
+type SpRailWire_OrdinaryApprovalTuple = record {
+  created_at_time_ns : nat64;
+  memo : blob;
+  fee_raw : nat64;
+  amount_raw : nat64;
+  ledger : principal;
+  spender : principal;
+  expires_at_time_ns : nat64;
+};
+type SpRailWire_OrdinaryLiquidationPhase = variant {
+  BackendPrepared;
+  ApprovalConfirmed;
+  CancellationSubmitted;
+  PaymentConfirmed;
+  PaymentNoEffect;
+  BackendSubmitted;
+  Prepared;
+  ApprovalSubmitted;
+  PayoutNoEffect;
+  Cancelled;
+  PayoutHeld;
+  Completed;
+};
+type SpRailWire_OrdinaryLiquidationQuote = record {
+  payout_tuple : opt SpRailWire_OrdinaryPayoutTuple;
+  payout_operation_id : opt nat;
+  collateral_price_e8s : nat64;
+  collateral_gross_raw : nat64;
+  pull_fee_raw : nat64;
+  payment_block_index : opt nat64;
+  payout_block_index : opt nat64;
+  payout_net_raw : opt nat64;
+  surcharge_raw : nat64;
+  principal_raw : nat64;
+  collateral_ledger : principal;
+  collateral_net_raw : nat64;
+  gross_payment_raw : nat64;
+  collateral_fee_raw : nat64;
+  payment_tuple : SpRailWire_OrdinaryPaymentTuple;
+  debt_e8s : nat64;
+};
+type SpRailWire_OrdinaryLiquidationStatus = record {
+  request_id : blob;
+  last_error : opt text;
+  approval_attempted : bool;
+  stable_ledger : principal;
+  backend_attempted : bool;
+  quote : opt SpRailWire_OrdinaryLiquidationQuote;
+  vault_id : nat64;
+  approval : opt SpRailWire_OrdinaryApprovalTuple;
+  phase : SpRailWire_OrdinaryLiquidationPhase;
+  collateral_type : principal;
+  payment : SpRailWire_SpLiquidationPayment;
+};
+type SpRailWire_OrdinaryPaymentTuple = record {
+  destination : SpRailWire_Account;
+  source : SpRailWire_Account;
+  created_at_time_ns : nat64;
+  memo : blob;
+  amount_raw : nat64;
+  ledger_fee_raw : nat64;
+  ledger : principal;
+  op_nonce : nat;
+};
+type SpRailWire_OrdinaryPayoutTuple = record {
+  destination : SpRailWire_Account;
+  source : SpRailWire_Account;
+  created_at_time_ns : nat64;
+  memo : blob;
+  amount_raw : nat64;
+  ledger_fee_raw : nat64;
+  ledger : principal;
+  op_nonce : nat;
+  gross_raw : nat64;
+};
+type SpRailWire_Result = variant { Ok; Err : SpRailWire_StabilityPoolError };
+type SpRailWire_Result_11 = variant { Ok : nat64; Err : SpRailWire_ConversionError };
+type SpRailWire_Result_15 = variant { Ok : SpRailWire_ConversionQuote; Err : SpRailWire_ConversionError };
+type SpRailWire_Result_4 = variant { Ok : SpRailWire_ConversionStatus; Err : SpRailWire_ConversionError };
+type SpRailWire_Result_5 = variant { Ok : SpRailWire_LiquidationResult; Err : SpRailWire_StabilityPoolError };
+type SpRailWire_SpLiquidationPayment = variant { Icusd; Ckusdc; Ckusdt };
+type SpRailWire_StabilityPoolError = variant {
+  LedgerTransferFailed : record { reason : text };
+  RefundClaimNotFound;
+  EmergencyPaused;
+  AlreadyOptedOut : record { collateral : principal };
+  TokenNotActive : record { ledger : principal };
+  InsufficientBalance : record {
+    token : principal;
+    available : nat64;
+    required : nat64;
+  };
+  InvalidPayoutAddress : record { reason : text };
+  CollateralNotFound : record { ledger : principal };
+  NoPositionFound;
+  AmountTooLow : record { minimum_e8s : nat64 };
+  Unauthorized;
+  InterCanisterCallFailed : record { method : text; target : text };
+  PayoutAddressRequired : record { collateral : principal };
+  XrpClaimStillOutstanding : record { claim_id : nat64 };
+  LiquidationFailed : record { vault_id : nat64; reason : text };
+  XrpClaimStatusCheckFailed : record { reason : text };
+  SystemBusy;
+  AlreadyOptedIn : record { collateral : principal };
+  TokenNotAccepted : record { ledger : principal };
+  InsufficientPoolBalance;
+};
+type SpRailWire_IntentionalDrift_LiquidationResult = record {
+  admitted : opt bool;
+  error_message : opt text;
+  stables_consumed : vec record { principal; nat64 };
+  vault_id : nat64;
+  collateral_gained : nat64;
+  success : bool;
+  collateral_type : principal;
+};
+type SpRailWireNext_ConversionError = variant {
+  EmergencyPaused;
+  CapacityExceeded;
+  SequenceExhausted;
+  NonZeroFeeBudgetRequired : record {
+    minimum_budget_raw : nat64;
+    fee_raw : nat64;
+  };
+  TokenNotActive : record { ledger : principal };
+  IntentConflict;
+  SequenceMismatch : record { expected_seq : nat64 };
+  NotFound;
+  AmountTooLow : record { minimum_e8s : nat64 };
+  Unauthorized;
+  InvalidRequest : record { reason : text };
+  LpTokenUnavailable;
+  ActiveIntent : record { intent_seq : nat64 };
+  CannotCancel;
+  SystemBusy;
+  TokenNotAccepted : record { ledger : principal };
+};
+type SpRailWireNext_ConversionPhase = variant {
+  Refunding;
+  Revoking;
+  Reserved;
+  Refunded;
+  Pulling;
+  Rejected;
+  Approving;
+  PoolCall;
+  CreditPending;
+  Completed;
+};
+type SpRailWireNext_ConversionStatus = variant {
+  Refunded : record {
+    refunded_raw : nat64;
+    retained_dust_raw : nat64;
+    intent_seq : nat64;
+  };
+  Rejected : record { intent_seq : nat64; reason : text };
+  Completed : record {
+    uncredited_lp : opt nat;
+    retained_dust_raw : nat64;
+    lp_credited : bool;
+    lp_minted : nat;
+    intent_seq : nat64;
+  };
+  Pending : record {
+    phase : SpRailWireNext_ConversionPhase;
+    intent_seq : nat64;
+    reason : opt text;
+  };
+};
+type SpRailWireNext_Result_4 = variant { Ok : SpRailWireNext_ConversionStatus; Err : SpRailWireNext_ConversionError };
+type SpRailWireNext_IntentionalDrift_LiquidationResult = record {
+  admitted : opt bool;
+  error_message : opt text;
+  stables_consumed : vec record { principal; nat64 };
+  vault_id : nat64;
+  collateral_gained : nat64;
+  success : bool;
+  collateral_type : principal;
+};
 service : (StabilityPoolInitArgs) -> {
 
   // ── Deposit / Withdraw / Claim ──
@@ -566,8 +907,7 @@ service : (StabilityPoolInitArgs) -> {
   ack_native_xrp_payout_settled : (nat64) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Liquidation ──
-  notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
-  execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
+
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   admin_recover_ambiguous_chain_burn : (nat64, opt nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   admin_recover_ambiguous_native_xrp_burn : (nat64, opt nat64) -> (variant { Ok; Err : StabilityPoolError });
@@ -626,4 +966,34 @@ service : (StabilityPoolInitArgs) -> {
   get_completed_chain_absorbs : (opt nat64) -> (vec ChainSpAbsorbCompletion) query;
   get_chain_absorb_auto_status : () -> (ChainAbsorbAutoStatus) query;
   get_chain_collateral_sentinel : (nat32) -> (principal) query;
-};
+
+  stage_interest_recovery : (InterestRecoveryWire_RecoveryManifest) -> (InterestRecoveryWire_Result_7);
+  continue_interest_recovery : (blob, nat16, nat8) -> (InterestRecoveryWire_Result_7);
+  finish_interest_recovery : (blob) -> (InterestRecoveryWire_Result_7);
+  get_interest_recovery_status : () -> (InterestRecoveryWire_Result_11) query;
+  get_interest_recovery_packet_receipt : (nat64) -> (InterestRecoveryWire_Result_10);
+
+  get_my_pending_withdrawals : () -> (vec WithdrawalWire_PendingOutboundPayoutStatus) query;
+  reconcile_withdrawal : (principal, principal, nat64) -> (WithdrawalWire_Result_6);
+start_3usd_conversion : (SpRailWire_ConversionRequest) -> (SpRailWire_Result_4);
+resume_3usd_conversion : (nat64) -> (SpRailWire_Result_4);
+reconcile_3usd_conversion_pull_v1 : (nat64, nat64) -> (SpRailWire_Result_4);
+get_3usd_conversion_status : (nat64) -> (SpRailWire_Result_4) query;
+get_active_3usd_conversion : () -> (opt SpRailWire_ConversionStatus) query;
+get_3usd_conversion_next_seq : () -> (SpRailWire_Result_11) query;
+get_active_3usd_conversion_v1 : () -> (opt SpRailWire_ConversionView) query;
+cancel_3usd_conversion : (nat64) -> (SpRailWire_Result_4);
+quote_3usd_conversion : (principal, nat64, nat) -> (SpRailWire_Result_15);
+get_ordinary_liquidation_status : (blob) -> (
+      opt SpRailWire_OrdinaryLiquidationStatus,
+    ) query;
+retry_ordinary_liquidation : (blob) -> (SpRailWire_Result_5);
+cancel_ordinary_liquidation : (blob) -> (SpRailWire_Result_5);
+reconcile_3usd_conversion_pool_input_v1 : (nat64, nat8, nat64) -> (SpRailWire_Result_4);
+reconcile_ordinary_liquidation_approval : (blob, nat64) -> (SpRailWire_Result_5);
+admin_acknowledge_three_usd_reserve_v2_client : () -> (SpRailWire_Result);
+reconcile_3usd_conversion_approval_v1 : (nat64, nat64) -> (SpRailWireNext_Result_4);
+reconcile_3usd_conversion_revoke_v1 : (nat64, nat64) -> (SpRailWireNext_Result_4);
+reconcile_3usd_conversion_refund_v1 : (nat64, nat64) -> (SpRailWireNext_Result_4);
+notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec SpRailWire_IntentionalDrift_LiquidationResult);
+execute_liquidation : (nat64) -> (variant { Ok : SpRailWire_IntentionalDrift_LiquidationResult; Err : StabilityPoolError });};

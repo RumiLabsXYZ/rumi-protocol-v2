@@ -260,6 +260,88 @@ Worktree: `/private/tmp/rumi-cksol-20261018`; branch: `codex/cksol-collateral-mi
 - Safe worktree inventory under disk pressure: zero eligible removals; dirty/locked/unmerged/active trees preserved.
 
 
+---
+
+# SP conversion and liquidation restoration
+
+Root coordinates implementation, integration and all production operations.
+Starting source: `b16077a97639a60cf2f3064ba3b504b9a83c1733`.
+Working branch: `codex/sp-conversion-liquidation-restoration-20261023`.
+
+| ID | State | Owner | Task | Depends on | Evidence / blocker |
+| --- | --- | --- | --- | --- | --- |
+| R-01 | Done | agent:rails_conversion_review | Review durable conversion requirements | — | Caller intent, escrow, capped fees and 3pool durable receipt requirements accepted |
+| R-02 | Done | agent:rails_liquidation_review | Review ordinary stable liquidation receipt requirements | — | Payment/result/payout identities, exact rounding, fallback metadata and routing markers accepted |
+| R-03 | Review | agent:rails_3usd_review | Review 3USD ingress cutover and deployed protocol coupling | — | 34 reserve operations matched; 82.19310823 3USD recorded, 2.51791010 excess retained separately |
+| R-04 | In progress | root | Fresh live/source inventory and scoped implementation | R-01, R-02, R-03 | Current public state captured privately; preserve reopened SP and interest receipts |
+| R-04a | Review | agent:rails_3pool_receipts_impl | Durable add-liquidity receipts and fee-capped escrow compensation | R-01 | Source ready for root compile/runtime checks; prior revision compiled |
+| R-04b | Review | agent:rails_backend_receipts_impl | Ordinary liquidation payment/debt/payout journal | R-02 | Source checkpoint f853310e; full backend library tests 1296 pass, one prior ignored |
+| R-04c | Review | agent:rails_sp_conversion_impl | SP escrow conversion and recovery | R-04a | Explicit budget/sequence, escrow proofs, exact recovery implemented; SP unit suite passes |
+| R-04d | Review | agent:rails_sp_ordinary_impl | SP exact ordinary settlement and routing | R-04b | Durable ordinary rail, affordable partials, exact proofs and cancellation implemented |
+| R-04e | Review | agent:rails_conversion_ui_impl | Explicit quote, fee authorization and wallet recovery UI | R-04c | Exact NotFound replay and approval Duplicate fixes; 13 focused tests pass; final build pending |
+| R-05a | In progress | agent:rails_3usd_review | Exact-artifact local multi-canister runtime harness | R-04 | Candidate01 runtime checks in progress |
+| R-05b | In progress | agent:rails_aged_backend_runtime | Actual aged payment, protocol fee and payout proof recovery | R-04b | Separate local fixture; exact candidate02 pending |
+| R-05 | In progress | root | Deterministic regression, runtime, migration and interface checks | R-04 | Repaired source: SP267, 3pool180, backend1299 pass; final interface refresh/build/runtime/migration repetition pending |
+| R-06 | In progress | two fresh independent reviewers | Adversarial final release review | R-05 | Both candidate01 reviews FAIL; findings assigned and repaired; fresh candidate review pending |
+| R-07 | Blocked | root | Deploy and restore reviewed conversion/liquidation paths | R-06 | No task upgrades or activation yet; exact final artifact and adversarial passes required |
+
+## Scope and acceptance
+
+- Restore SP convenience conversion, ordinary stablecoin liquidations, and the
+  configured 3USD liquidation route without weakening ambiguity/replay safeguards.
+- Preserve all depositor credit, interest receipts, existing unknown operations,
+  controller/protocol bindings, and unrelated production features.
+- Every financial phase must have a durable identity before dispatch and conserve
+  funds under success, rejection, transport ambiguity, retry and upgrade.
+- New public interfaces and state fields must have compatibility and migration
+  evidence. Runtime proof must cover real ledgers and fault outcomes.
+- Root alone executes authorized production upgrades/activation. Unknown outcomes
+  require authoritative reconciliation before another mutation.
+
+## Execution notes
+
+Local native reviewers are used for R-01 through R-03 and root owns implementation.
+
+
+Candidate01 is explicitly rejected for deployment. Its immutable evidence and
+both review reports are retained under the private task evidence root. Production
+remains on the reopened SP predecessor while source repairs and new checks run.
+
+## 2026-10-23 completion and donation reconciliation
+
+The preceding R-series working rows are superseded by the completed candidate08
+release: source8d7c7e75, PR590, deployed/open at19:29UTC, both source and both live
+adversarial audits PASS. See docs/operations/sp-rails-restoration-20261023.md.
+
+| ID | State | Owner | Task | Depends on | Evidence / blocker |
+| --- | --- | --- | --- | --- | --- |
+| DON-01 | Review | agent:donation_ledger_evidence | Exhaustive icUSD ledger history and pool-directed donations | — | Must prove contiguous ledger coverage, archives and every matching tuple; read-only |
+| DON-02 | In progress | agent:donation_pool_accounting | Map pool donation receipts/reserves and legacy accounting | — | Current source plus reviewed snapshots; identify exact read-only extraction; no production mutation |
+| DON-03 | In progress | root | Backend mint/donation journals, histories and live baseline | — | Pin live modules/identity; no remint or re-credit without positive missing-credit proof |
+| DON-04 | In progress | root | Repair confirmed missed donation credits | DON-01, DON-02, DON-03 | Only proven gaps, exact replay identities, conservation and migration/runtime checks |
+| DON-05 | Ready | two independent reviewers | Adversarial reconciliation/repair verification | DON-01, DON-02, DON-03, DON-04 | Exhaustive coverage, exact amounts, no double credit, all residuals classified |
+
+All DON evidence is retained in the operator's private evidence store.
+Root is sole production executor. Investigators may make bounded read-only calls;
+no stop/start, snapshots, installs, transfers, mints or accounting writes.
+
+DON-04 frozen repair manifest v1 (SHA256 30edc54ad35151a4dba7a7ff37d9d17f0bf2a7a4630a3d4a58162bdf65d011a6): 7 October 14 credits totaling 36063541 raw. Existing deployed V2 controller path only; no new code. Ledger 1999 pool mints found; early 92 before April 10 remain under investigation.
+
+DON-05a claimed by agent:donation_repair_review_a; DON-05b claimed by agent:donation_repair_review_b. Both independently apply repair-review-rubric-v1.md to the frozen seven-credit manifest/executor and write separate reports. They may not inspect each other's reports. PASS admits only the seven-credit repair; early92 audit remains DON-02 in progress. Root alone may execute.
+
+DON-04 seven-credit repair completed 2026-10-24T00:31:42Z: seven exact receive_donation_v2 calls, executed once, all Ok. Reserve +36063541 raw, physical and supply unchanged, receipts 100 to 107. Independent pre- and post-execution audits PASS. Remaining 19616202 raw surplus untouched. DON-02 older-92 audit continues; no whole-audit completion claim.
+
+DON-06c claimed by fresh agent:donation_final_review_c; DON-06d claimed by fresh agent:donation_final_review_d. Both independently apply final-audit-rubric-v1.md to entire1999paymentaudit, early92reconstruction andactualsevenrepair. They maynotread/contacteachother. Onlyassignedreviewwrites; no productioncalls. Rootownscoordination andfinalartifacts. Wholeauditcompletionstillpendingtheirreviews.
+
+## Donation audit final disposition — 2026-10-24
+
+- DON-01 Done: certified contiguous icUSD ledger0..42696, supplementalcertifiedtip42698;1999poolmints145.04987166icUSD, allrowsclassified.
+- DON-03 Done:93exactstoredreceipts+journaljoins,7newnormaldonations, latestlive00:55:35UTCwith107receipts,unchangedmodules/backing andemptyjournals.
+- DON-04 Done:7positiveOctober14gaps correctedonce,0.36063541icUSD,allOk; no transfer/mint/install/stop/export. Both preflight and postexecution A/B PASS.
+- DON-06c/06d Done: both fresh final reviewers PASS exact reportv4/CSVv4, specifically bounded findings and proof limits. They do NOT certify every historical individual credit.
+- DON-02 Pending external historical evidence: earliest 92 arrivals (39.87276282 icUSD) verified; observed accounting model closes, but part of the pre-March-13 operation history is unavailable. Need older backup or original operation logs; requested asynchronously. No additional positive credit amount, no speculative correction.
+- Separateinitial0.10icUSDpartialdepositclaim and residual0.19616202icUSDremainuntouched; ownership/oldLPallocations notassumed.
+- No source files changed for this audit.
 # ckSOL user-funded processing
 
 | ID | State | Owner | Scope | Acceptance / evidence |
@@ -269,3 +351,20 @@ Worktree: `/private/tmp/rumi-cksol-20261018`; branch: `codex/cksol-collateral-mi
 | SOLPAY-3 | Passed | Yara and Zane | Final integrated patch | 101 focused tests; production builds; interface/state compatibility; both fresh round-5 reviewers PASS after capacity/recovery fixes. No live funds or deployment proof. |
 
 Worktree: `/private/tmp/rumi-cksol-user-funded-20261020`; branch `codex/cksol-user-funded`, base `ed99a4d7`. Existing dirty primary preserved. Shared generated backend declarations owned by Root only. Backend/source integration owned by Root. Native frontend worker uses available GPT-6 Luna; external provider route previously rejected for private-source envelope and is not retried. No live funds test or deployment is part of this implementation pass.
+
+## Oisy vault approval UX — November 1, 2026
+
+| Card | State | Owner | Scope | Evidence |
+| --- | --- | --- | --- | --- |
+| OVUX-01 | Review | Oisy vault approval UX agent | Reduce redundant Oisy signer requests for new-vault creation while preserving the operation journal and ambiguous-transfer recovery. Separate from paused existing-vault top-ups. | 81 focused tests, production build/auth assets and two bounded source reviews pass. Expected signer requests: deposit-only 6→4; compound 6→5, with background Oisy status checks deferred to a user click. Live wallet screen count and publication unverified. See `oisy-vault-approval-ux-20261101.md`. |
+
+## Vault 51 redemption migration — November 1, 2026
+
+User authorizes protocol-controlled nICP redemption, retained debt, a public transparency entry, and temporary liquidation suspension for this vault backed by his personal guarantee. No other vault's collateral may fund this migration. Main coordinator applies team-agent-orchestration; existing reviewers are reused for integration/review without a new team. Sol-class agents remain integration/review roles; primary agent owns new implementation. No private-source export to another provider.
+
+| ID | State | Owner | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- |
+| V51-01 | Source verified | root | New durable redemption module and operator methods | 12 backend tests; live Candid compatibility; no migration dispatched; branch `codex/vault51-redemption-claim-20261101` |
+| V51-02 | Source verified | claim_accounting_review | Integrate claim accounting and spending exclusions | fixed ICP valuation, retained nICP terms, repayment-only, 33 frontend regressions; current deployed sunset/3USD fixes preserved |
+| V51-03 | Software published | root | Transparency notice and release evidence | exact backend/asset readbacks verified; claim=null, vault51 still1500 nICP; financial initiation remains manual user action; PR612 |
+| V51-04 | Passed | claim_custody_review | Independent custody review | exact dispatch, unknown outcomes, settlement attribution, no extra mint; final scoped compatibility/replay review passed |

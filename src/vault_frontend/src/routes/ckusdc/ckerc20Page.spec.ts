@@ -15,14 +15,19 @@ const mocks = vi.hoisted(() => {
 	return {
 		isConnected: readable(false),
 		principal: readable(null as any),
+		generation: readable(0),
 		getMinter: vi.fn(),
 		discoverTokens: vi.fn(),
 		getLedger: vi.fn(),
 		getQuote: vi.fn(),
 		parseAmount: vi.fn(),
 		approveAndWithdraw: vi.fn(),
+		isOisy: vi.fn(),
+		beginAction: vi.fn(),
 	};
 });
+
+vi.mock('$lib/services/auth', () => ({ walletSessionGeneration: mocks.generation }));
 
 vi.mock('$lib/stores/wallet', () => ({
 	isConnected: mocks.isConnected,
@@ -38,6 +43,7 @@ vi.mock('$lib/config', () => ({
 }));
 
 vi.mock('$lib/services/ckerc20Minter', () => ({
+	isCkErc20OisyWallet: mocks.isOisy,
 	CKERC20_MINTER_DASHBOARD: 'https://example.invalid/dashboard',
 	discoverCkErc20Tokens: mocks.discoverTokens,
 	getCkErc20MinterActor: mocks.getMinter,
@@ -57,6 +63,8 @@ vi.mock('$lib/services/ckerc20Minter', () => ({
 	parseTokenAmount: mocks.parseAmount,
 	validateEthereumAddress: vi.fn(() => true),
 }));
+
+vi.mock('$lib/services/minterOisySigner', () => ({ beginMinterOisyAction: mocks.beginAction }));
 
 import Page from './+page.svelte';
 
@@ -145,13 +153,16 @@ async function chooseMintToken(ledgerId: string, symbol: string) {
 }
 
 beforeEach(() => {
+	vi.useFakeTimers();
+	Object.defineProperty(navigator, 'locks', { configurable: true, value: { request: vi.fn(async (_name, _options, callback) => callback({})) } });
 	sessionStorage.clear();
 	localStorage.clear();
 	host = document.createElement('div');
 	document.body.appendChild(host);
+	mocks.generation.set(0);
 	mocks.isConnected.set(true);
 	mocks.principal.set(OWNER);
-	mocks.getMinter.mockReset().mockResolvedValue({ get_minter_info: vi.fn().mockResolvedValue({ deposit_with_subaccount_helper_contract_address: [HELPER] }) });
+	mocks.getMinter.mockReset().mockResolvedValue({ get_minter_info: vi.fn().mockResolvedValue({ deposit_with_subaccount_helper_contract_address: [HELPER] }), get_events: vi.fn().mockResolvedValue({ events: [], total_event_count: 0n }) });
 	mocks.discoverTokens.mockReset().mockResolvedValue([CKUSDC, CKLINK]);
 	mocks.parseAmount.mockReset().mockReturnValue(1n);
 	mocks.getQuote.mockReset().mockImplementation((token: typeof CKUSDC, amount: bigint, owner: Principal) => Promise.resolve({
@@ -160,6 +171,8 @@ beforeEach(() => {
 		ckTokenBalance: 10n, ckEthBalance: 10n, quotedAtMs: Date.now(), minterPriceTimestampMs: null,
 	}));
 	mocks.approveAndWithdraw.mockReset();
+	mocks.isOisy.mockReset().mockReturnValue(false);
+	mocks.beginAction.mockReset();
 	mocks.getLedger.mockReset().mockImplementation((ledgerId: string) => Promise.resolve({
 		icrc1_total_supply: vi.fn().mockResolvedValue(ledgerId === CKLINK.ledgerId ? 900_000_000_000_000_000n : 50_000_000n),
 		icrc1_balance_of: vi.fn().mockResolvedValue(0n),
@@ -175,6 +188,7 @@ afterEach(() => {
 	host.remove();
 	delete (window as Window & { ethereum?: Provider }).ethereum;
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 describe('ckERC20 page wallet and supply regressions', () => {
@@ -208,7 +222,8 @@ describe('ckERC20 page wallet and supply regressions', () => {
 			const firstAddress = host.querySelector<HTMLInputElement>('#redeem-address')!;
 			firstAddress.value = ACCOUNT;
 			firstAddress.dispatchEvent(new Event('input', { bubbles: true }));
-			clickButton(/Get current fee quote/);
+			await settle();
+			await vi.advanceTimersByTimeAsync(400);
 			await settle();
 			clickButton(/Approve and request USDC redemption/);
 			await settle();
@@ -230,7 +245,8 @@ describe('ckERC20 page wallet and supply regressions', () => {
 			const secondAddress = host.querySelector<HTMLInputElement>('input[id="redeem-address"]')!;
 			secondAddress.value = ACCOUNT;
 			secondAddress.dispatchEvent(new Event('input', { bubbles: true }));
-			clickButton(/Get current fee quote/);
+			await settle();
+			await vi.advanceTimersByTimeAsync(400);
 			await settle();
 			clickButton(/Approve and request LINK redemption/);
 			await settle();
@@ -285,14 +301,14 @@ describe('ckERC20 page wallet and supply regressions', () => {
 	it('keeps an unresolved deposit marker across disconnect and restores its lock on explicit reconnect', async () => {
 		const storageKey = `rumi:ckerc20:pending-deposit:${ACCOUNT}:${OWNER.toText()}:${CKUSDC.ledgerId}`;
 		localStorage.setItem(storageKey, JSON.stringify({
-			hash: '0xdeadbeef', amount: '2', recipient: OWNER.toText(), evmAccount: ACCOUNT,
+			hash: HASH, amount: '2', recipient: OWNER.toText(), evmAccount: ACCOUNT,
 			principal: OWNER.toText(), tokenLedgerId: CKUSDC.ledgerId, tokenSymbol: CKUSDC.symbol, createdAt: Date.now(),
 		}));
 		render();
 		await settle();
 		expect(host.textContent).toContain('A previous ckUSDC deposit is unresolved');
 		clickButton(/^Disconnect$/);
-		expect(localStorage.getItem(storageKey)).toContain('0xdeadbeef');
+		expect(localStorage.getItem(storageKey)).toContain(HASH);
 		expect(host.textContent).not.toContain('A previous ckUSDC deposit is unresolved');
 		clickButton(/Connect Ethereum/);
 		await settle();
@@ -331,4 +347,295 @@ describe('ckERC20 page wallet and supply regressions', () => {
 		expect(selectedSupply?.textContent).not.toContain('5');
 		expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(false);
 	});
+});
+
+const HASH = `0x${'ab'.repeat(32)}`;
+const depositKey = () => `rumi:ckerc20:pending-deposit:${ACCOUNT}:${OWNER.toText()}:${CKUSDC.ledgerId}`;
+const withdrawalKey = () => `rumi:ckerc20:pending-withdrawal:${OWNER.toText()}`;
+function savedDeposit(extra: Record<string, unknown> = {}) {
+  return JSON.stringify({ hash: HASH, amount: '2', recipient: OWNER.toText(), evmAccount: ACCOUNT, principal: OWNER.toText(), tokenLedgerId: CKUSDC.ledgerId, tokenSymbol: CKUSDC.symbol, createdAt: 10, ...extra });
+}
+function savedWithdrawal(extra: Record<string, unknown> = {}) {
+  return JSON.stringify({ amount: '1', recipient: ACCOUNT, owner: OWNER.toText(), tokenLedgerId: CKUSDC.ledgerId, tokenSymbol: CKUSDC.symbol, createdAt: 10, ckEthBurn: '3', ckTokenBurn: '4', ...extra });
+}
+function receipt(status = '0x1') { return { transactionHash: HASH, status, blockHash: `0x${'cd'.repeat(32)}`, blockNumber: '0x10' }; }
+function setInput(selector: string, value: string) {
+  const input = host.querySelector<HTMLInputElement>(selector)!;
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  flushSync();
+}
+function installStatus(status: any, extra: Record<string, unknown> = {}) {
+  const withdrawal_status = vi.fn().mockResolvedValue([{ withdrawal_id: 3n, from: OWNER, from_subaccount: [], token_symbol: 'ckUSDC', withdrawal_amount: 1n, recipient_address: ACCOUNT, status, ...extra }]);
+  mocks.getMinter.mockResolvedValue({ get_minter_info: vi.fn().mockResolvedValue({ deposit_with_subaccount_helper_contract_address: [HELPER] }), withdrawal_status });
+  return withdrawal_status;
+}
+
+describe('ckERC20 automatic lifecycle reconciliation', () => {
+  it.each(['0x1', '0x0'])('reconciles a saved deposit receipt %s without sending another transaction', async (status) => {
+    localStorage.setItem(depositKey(), savedDeposit());
+    const fixture = makeProvider({ eth_getTransactionReceipt: async () => receipt(status), eth_getBlockByNumber: async (params) => params?.[0] === 'finalized' ? { number: '0x20' } : { number: '0x10', hash: `0x${'cd'.repeat(32)}` } });
+    Object.defineProperty(window, 'ethereum', { configurable: true, value: fixture.provider });
+    render(); await settle();
+    expect(localStorage.getItem(depositKey())).toBeNull();
+    expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(status === '0x1');
+    if (status === '0x1') {
+      expect(localStorage.getItem(`${depositKey()}:confirmed`)).toContain(HASH);
+      expect(host.textContent).toContain('Ethereum deposit confirmed; awaiting ckUSDC mint');
+      // Arbitrary ledger balances are not evidence of mint finality.
+      window.dispatchEvent(new Event('focus')); await settle();
+      expect(host.textContent).toContain('awaiting ckUSDC mint');
+    } else expect(host.textContent).toContain('Ethereum transaction reverted');
+    expect((fixture.provider.request as any).mock.calls.some(([args]: any[]) => args.method === 'eth_sendTransaction')).toBe(false);
+  });
+
+  it('keeps pending and no-hash deposits held, with no user-clear control', async () => {
+    localStorage.setItem(depositKey(), savedDeposit({ hash: '' }));
+    render(); await settle();
+    window.dispatchEvent(new Event('focus')); await settle();
+    expect(host.textContent).toContain('contact Rumi support');
+    expect(host.textContent).not.toContain('Clear retry lock');
+    expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(true);
+    expect(localStorage.getItem(depositKey())).toContain('"hash":""');
+  });
+
+  it('does not replace a newer deposit journal with a delayed old receipt', async () => {
+    const late = deferred<any>();
+    localStorage.setItem(depositKey(), savedDeposit());
+    const fixture = makeProvider({ eth_getTransactionReceipt: () => late.promise });
+    Object.defineProperty(window, 'ethereum', { configurable: true, value: fixture.provider });
+    render(); await settle();
+    const newer = savedDeposit({ hash: `0x${'ef'.repeat(32)}`, createdAt: 20 });
+    localStorage.setItem(depositKey(), newer);
+    late.resolve(receipt()); await settle();
+    expect(localStorage.getItem(depositKey())).toBe(newer);
+    expect(localStorage.getItem(`${depositKey()}:confirmed`)).toBeNull();
+  });
+
+  it('invalidates receipt observations after same-owner ICP session replacement', async () => {
+    const late = deferred<any>();
+    localStorage.setItem(depositKey(), savedDeposit());
+    const fixture = makeProvider({ eth_getTransactionReceipt: () => late.promise });
+    Object.defineProperty(window, 'ethereum', { configurable: true, value: fixture.provider });
+    render(); await settle();
+    mocks.generation.set(1);
+    late.resolve(receipt()); await settle();
+    expect(localStorage.getItem(depositKey())).toBe(savedDeposit());
+    expect(localStorage.getItem(`${depositKey()}:confirmed`)).toBeNull();
+  });
+
+  it.each(['reset', 'approval'])('does not mistake confirmed %s for a completed deposit', async (phase) => {
+    localStorage.setItem(depositKey(), savedDeposit({ phase }));
+    const fixture = makeProvider({ eth_getTransactionReceipt: async () => receipt() });
+    Object.defineProperty(window, 'ethereum', { configurable: true, value: fixture.provider });
+    render(); await settle();
+    expect(localStorage.getItem(depositKey())).toBeNull();
+    expect(localStorage.getItem(`${depositKey()}:confirmed`)).toBeNull();
+    expect(host.textContent).toContain('allowance transaction confirmed');
+    expect(host.textContent).not.toContain('awaiting ckUSDC mint');
+  });
+
+  it('retains null Ethereum receipts and resumes automatically when the page regains focus', async () => {
+    let result: any = null;
+    localStorage.setItem(depositKey(), savedDeposit());
+    const fixture = makeProvider({ eth_getTransactionReceipt: async () => result });
+    Object.defineProperty(window, 'ethereum', { configurable: true, value: fixture.provider });
+    render(); await settle();
+    expect(localStorage.getItem(depositKey())).toBeTruthy();
+    result = receipt(); window.dispatchEvent(new Event('focus')); await settle();
+    expect(localStorage.getItem(depositKey())).toBeNull();
+    expect(host.textContent).toContain('awaiting ckUSDC mint');
+  });
+
+  it('restores awaiting-mint receipt when returning to the token and after remount', async () => {
+    localStorage.setItem(`${depositKey()}:confirmed`, savedDeposit());
+    render(); await settle();
+    expect(host.textContent).toContain('awaiting ckUSDC mint');
+    await chooseMintToken(CKLINK.ledgerId, CKLINK.symbol); await settle();
+    expect(host.textContent).not.toContain('awaiting ckUSDC mint');
+    await chooseMintToken(CKUSDC.ledgerId, CKUSDC.symbol); await settle();
+    expect(host.textContent).toContain('awaiting ckUSDC mint');
+    unmount(instance as any); instance = undefined; host.replaceChildren();
+    render(); await settle(); expect(host.textContent).toContain('awaiting ckUSDC mint');
+  });
+
+  it.each([
+    [{ Pending: null }, false, 'Ethereum payout pending'],
+    [{ TxSent: { transaction_hash: HASH } }, false, 'awaiting finality'],
+    [{ TxFinalized: { PendingReimbursement: { transaction_hash: HASH } } }, false, 'reimbursement pending'],
+    [{ TxFinalized: { Reimbursed: { transaction_hash: HASH, reimbursed_amount: 1n, reimbursed_in_block: 5n } } }, true, 'reimbursement completed'],
+    [{ TxFinalized: { Success: { transaction_hash: HASH, effective_transaction_fee: [] } } }, true, 'payout finalized'],
+  ])('tracks accepted withdrawal status case %# with explicit terminal semantics', async (status, settled, message) => {
+    localStorage.setItem(withdrawalKey(), savedWithdrawal()); installStatus(status);
+    render(); await settle(); clickButton(/^Redeem$/); await settle();
+    expect(host.textContent).toContain(message);
+    expect(JSON.parse(localStorage.getItem(withdrawalKey())!).settled).toBe(settled);
+    expect(mocks.approveAndWithdraw).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain('Clear retry lock');
+  });
+
+  it('never resolves unknown withdrawals from empty history or mismatched accepted receipts', async () => {
+    localStorage.setItem(withdrawalKey(), savedWithdrawal({ ckEthBurn: undefined, ckTokenBurn: undefined }));
+    const status = installStatus({ TxFinalized: { Success: { transaction_hash: HASH } } });
+    render(); await settle(); clickButton(/^Redeem$/); await settle();
+    expect(status).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('no confirmed response');
+    const known = savedWithdrawal(); localStorage.setItem(withdrawalKey(), known);
+    status.mockResolvedValue([]); window.dispatchEvent(new Event('focus')); await settle();
+    expect(localStorage.getItem(withdrawalKey())).toBe(known);
+    status.mockResolvedValue([{ withdrawal_id: 3n, from: OWNER, from_subaccount: [], token_symbol: 'ckLINK', withdrawal_amount: 1n, recipient_address: ACCOUNT, status: { TxFinalized: { Success: { transaction_hash: HASH } } } }]);
+    window.dispatchEvent(new Event('focus')); await settle(); expect(localStorage.getItem(withdrawalKey())).toBe(known);
+  });
+
+  it('estimates fees automatically and ignores a delayed quote from a previous token', async () => {
+    const oldQuote = deferred<any>(); mocks.getQuote.mockImplementationOnce(() => oldQuote.promise);
+    render(); await settle(); clickButton(/^Redeem$/); await settle();
+    setInput('#redeem-amount', '1'); setInput('#redeem-address', ACCOUNT);
+    await vi.advanceTimersByTimeAsync(400); await settle();
+    expect(mocks.getQuote).toHaveBeenCalledTimes(1);
+    await chooseMintToken(CKLINK.ledgerId, CKLINK.symbol); await settle();
+    setInput('#redeem-amount', '1'); await vi.advanceTimersByTimeAsync(400); await settle();
+    expect(host.textContent).toContain('ckLINK allowance cap');
+    oldQuote.resolve({ owner: OWNER, tokenLedgerId: CKUSDC.ledgerId, amount: 1n, ckTokenFee: 1n, ckEthFee: 1n, maxTransactionFee: 999999n, ckTokenAllowance: 2n, ckEthAllowance: 999999n, ckTokenBalance: 10n, ckEthBalance: 10n, quotedAtMs: Date.now() });
+    await settle(); expect(host.textContent).toContain('ckLINK allowance cap');
+    expect(host.textContent).not.toContain('ckUSDC allowance cap');
+    expect(host.textContent).not.toContain('Get current fee quote');
+  });
+});
+
+describe('ckERC20 exact automatic mint completion', () => {
+  const saved = () => savedDeposit({ atomicAmount: '2000000', erc20Address: CKUSDC.erc20Address, eventCursor: '100' });
+  const accepted = () => ({ timestamp: 1n, payload: { AcceptedErc20Deposit: { transaction_hash: HASH, log_index: 7n, principal: OWNER, subaccount: [], from_address: ACCOUNT, erc20_contract_address: CKUSDC.erc20Address, value: 2000000n } } });
+  const minted = () => ({ timestamp: 2n, payload: { MintedCkErc20: { event_source: { transaction_hash: HASH, log_index: 7n }, erc20_contract_address: CKUSDC.erc20Address, ckerc20_token_symbol: 'ckUSDC', mint_block_index: 55n } } });
+  function eventFeed(get_events: ReturnType<typeof vi.fn>) {
+    mocks.getMinter.mockResolvedValue({ get_minter_info: vi.fn().mockResolvedValue({ deposit_with_subaccount_helper_contract_address: [HELPER] }), get_events });
+  }
+  it('resumes a saved cursor and reaches exact mint completion across polls', async () => {
+    const key = `${depositKey()}:confirmed`; localStorage.setItem(key, saved());
+    const feed = vi.fn().mockResolvedValueOnce({ events: [accepted()], total_event_count: 102n }).mockResolvedValue({ events: [minted()], total_event_count: 102n }); eventFeed(feed);
+    render(); await settle();
+    expect(JSON.parse(localStorage.getItem(key)!).eventCursor).toBe('101');
+    expect(host.textContent).toContain('awaiting ckUSDC mint');
+    expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(true);
+    window.dispatchEvent(new Event('focus')); await settle();
+    expect(feed).toHaveBeenLastCalledWith({ start: 101n, length: 1000n });
+    expect(host.textContent).toContain('mint confirmed by the minter at ledger block 55');
+    expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(false);
+    expect(mocks.approveAndWithdraw).not.toHaveBeenCalled();
+  });
+  it('does not overwrite a newer persisted mint cursor with a delayed old batch', async () => {
+    const key = `${depositKey()}:confirmed`, late = deferred<any>(); localStorage.setItem(key, saved());
+    const feed = vi.fn().mockImplementation(() => late.promise); eventFeed(feed);
+    render(); await settle();
+    const newer = savedDeposit({ atomicAmount: '2000000', erc20Address: CKUSDC.erc20Address, eventCursor: '101', eventLogIndex: '7' }); localStorage.setItem(key, newer);
+    late.resolve({ events: [accepted()], total_event_count: 102n }); await settle();
+    expect(localStorage.getItem(key)).toBe(newer);
+    feed.mockResolvedValue({ events: [minted()], total_event_count: 102n }); window.dispatchEvent(new Event('focus')); await settle();
+    expect(JSON.parse(localStorage.getItem(key)!).mintBlock).toBe('55');
+  });
+  it('marks legacy history as limited and never infers no mint from an empty page', async () => {
+    const key = `${depositKey()}:confirmed`; localStorage.setItem(key, savedDeposit());
+    const feed = vi.fn().mockImplementation(({ length }) => Promise.resolve({ events: [], total_event_count: length === 0n ? 10000n : 10000n })); eventFeed(feed);
+    render(); await settle();
+    expect(feed).toHaveBeenLastCalledWith({ start: 9000n, length: 1000n });
+    expect(JSON.parse(localStorage.getItem(key)!).eventCursor).toBe('9000');
+    expect(host.textContent).toContain('Only recent minter history is available');
+    expect(host.textContent).toContain('awaiting ckUSDC mint');
+  });
+});
+
+describe('ckERC20 reverted Ethereum submission finality', () => {
+  it('holds a pre-final revert until its block becomes finalized and canonical', async () => {
+    let finalized = '0x0f', canonicalHash = `0x${'cd'.repeat(32)}`;
+    localStorage.setItem(depositKey(), savedDeposit());
+    const fixture = makeProvider({ eth_getTransactionReceipt: async () => receipt('0x0'), eth_getBlockByNumber: async (params) => params?.[0] === 'finalized' ? { number: finalized } : { number: '0x10', hash: canonicalHash } });
+    Object.defineProperty(window, 'ethereum', { configurable: true, value: fixture.provider });
+    render(); await settle();
+    expect(localStorage.getItem(depositKey())).toBeTruthy(); expect(host.textContent).toContain('waiting for Ethereum finality');
+    finalized = '0x20'; canonicalHash = `0x${'ee'.repeat(32)}`; window.dispatchEvent(new Event('focus')); await settle();
+    expect(localStorage.getItem(depositKey())).toBeTruthy();
+    canonicalHash = `0x${'cd'.repeat(32)}`; window.dispatchEvent(new Event('focus')); await settle();
+    expect(localStorage.getItem(depositKey())).toBeNull(); expect(host.textContent).toContain('Ethereum transaction reverted');
+  });
+  it('keeps a reverted hash held when the provider cannot read finalized blocks', async () => {
+    localStorage.setItem(depositKey(), savedDeposit());
+    const fixture = makeProvider({ eth_getTransactionReceipt: async () => receipt('0x0'), eth_getBlockByNumber: async () => { throw new Error('unsupported'); } });
+    Object.defineProperty(window, 'ethereum', { configurable: true, value: fixture.provider });
+    render(); await settle(); expect(localStorage.getItem(depositKey())).toBeTruthy();
+    expect(host.textContent).toContain('waiting for Ethereum finality');
+    expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(true);
+  });
+});
+
+describe('ckERC20 preserves unreadable and ambiguous financial journals', () => {
+  it.each([
+    ['deposit', () => depositKey(), '{bad json'],
+    ['deposit', () => depositKey(), '{}'],
+    ['deposit', () => `rumi:ckusdc:pending-deposit:${ACCOUNT}:${OWNER.toText()}`, '{bad json'],
+    ['deposit', () => `rumi:ckusdc:pending-deposit:${ACCOUNT}:${OWNER.toText()}`, '[]'],
+    ['deposit', () => `${depositKey()}:confirmed`, '{bad json'],
+    ['deposit', () => `${depositKey()}:confirmed`, '{}'],
+    ['deposit', () => `${depositKey()}:confirmed`, savedDeposit({ mintBlock: '55' })],
+    ['deposit', () => depositKey(), savedDeposit({ tokenLedgerId: CKLINK.ledgerId })],
+    ['withdrawal', () => withdrawalKey(), '{bad json'],
+    ['withdrawal', () => withdrawalKey(), '{}'],
+    ['withdrawal', () => withdrawalKey(), savedWithdrawal({ settled: true })],
+    ['withdrawal', () => withdrawalKey(), savedWithdrawal({ tokenLedgerId: 'invalid' })],
+    ['withdrawal', () => `rumi:ckusdc:pending-withdrawal:${OWNER.toText()}`, '{bad json'],
+    ['withdrawal', () => `rumi:ckusdc:pending-withdrawal:${OWNER.toText()}`, 'null'],
+  ] as const)('holds malformed journal case %# without dispatch or overwrite', async (direction, key, raw) => {
+    localStorage.setItem(key(), raw); render(); await settle();
+    if (direction === 'withdrawal') { clickButton(/^Redeem$/); await settle(); setInput('#redeem-amount', '1'); setInput('#redeem-address', ACCOUNT); await vi.advanceTimersByTimeAsync(400); await settle(); }
+    else setInput('#deposit-amount', '2');
+    expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(true);
+    expect(host.textContent).toContain('tracking could not be read safely');
+    host.querySelector<HTMLButtonElement>('.primary')!.click(); window.dispatchEvent(new Event('focus')); await settle();
+    expect(localStorage.getItem(key())).toBe(raw);
+    expect(mocks.approveAndWithdraw).not.toHaveBeenCalled();
+    expect((provider.request as any).mock.calls.some(([args]: any[]) => args.method === 'eth_sendTransaction')).toBe(false);
+  });
+
+  it.each([
+    { Err: { CkEthLedgerError: { error: { TemporarilyUnavailable: 'burn reply lost' } } } },
+    { Err: { TemporarilyUnavailable: 'unknown disposition' } },
+    { Err: { NewUnknownError: null } },
+  ])('keeps the exact pre-dispatch hold after ambiguous minter error %#', async (response) => {
+    let submittedRaw: string | null = null;
+    mocks.approveAndWithdraw.mockImplementation(async (params) => {
+      params.onWithdrawalSubmitted(); submittedRaw = localStorage.getItem(withdrawalKey());
+      params.onWithdrawalResolved(response); throw new Error('Withdrawal response needs reconciliation.');
+    });
+    render(); await settle(); clickButton(/^Redeem$/); await settle();
+    setInput('#redeem-amount', '1'); setInput('#redeem-address', ACCOUNT); await vi.advanceTimersByTimeAsync(400); await settle();
+    clickButton(/Approve and request USDC redemption/); await settle();
+    expect(submittedRaw).toBeTruthy(); expect(localStorage.getItem(withdrawalKey())).toBe(submittedRaw);
+    expect(host.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(true);
+    host.querySelector<HTMLButtonElement>('.primary')!.click(); await settle(); expect(mocks.approveAndWithdraw).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves accepted receipt and releases page busy state if popup cleanup rejects', async () => {
+    const close = vi.fn().mockRejectedValue(new Error('popup already gone'));
+    mocks.isOisy.mockReturnValue(true); mocks.beginAction.mockReturnValue({ ready: Promise.resolve(), close });
+    mocks.approveAndWithdraw.mockImplementation(async (params) => {
+      params.onWithdrawalSubmitted(); params.onWithdrawalResolved({ Ok: { cketh_block_index: 3n, ckerc20_block_index: 4n } });
+      return { ckEthBurnBlock: 3n, ckTokenBurnBlock: 4n };
+    });
+    render(); await settle(); clickButton(/^Redeem$/); await settle();
+    setInput('#redeem-amount', '1'); setInput('#redeem-address', ACCOUNT); await vi.advanceTimersByTimeAsync(400); await settle();
+    clickButton(/Approve and request USDC redemption/); await settle();
+    expect(close).toHaveBeenCalledOnce(); expect(JSON.parse(localStorage.getItem(withdrawalKey())!).ckEthBurn).toBe('3');
+    expect(host.querySelector<HTMLInputElement>('#redeem-address')?.disabled).toBe(false);
+    expect(host.textContent).toContain('Withdrawal accepted; Ethereum payout pending');
+    expect(mocks.approveAndWithdraw).toHaveBeenCalledOnce();
+  });
+});
+
+it('does not show old mint completion after its journal was replaced during the query', async () => {
+  const key = `${depositKey()}:confirmed`, late = deferred<any>();
+  localStorage.setItem(key, savedDeposit({ atomicAmount: '2000000', erc20Address: CKUSDC.erc20Address, eventCursor: '100', eventLogIndex: '7' }));
+  mocks.getMinter.mockResolvedValue({ get_minter_info: vi.fn().mockResolvedValue({ deposit_with_subaccount_helper_contract_address: [HELPER] }), get_events: vi.fn(() => late.promise) });
+  render(); await settle();
+  const newer = savedDeposit({ hash: `0x${'ef'.repeat(32)}`, atomicAmount: '2000000', erc20Address: CKUSDC.erc20Address, eventCursor: '101', createdAt: 20 }); localStorage.setItem(key, newer);
+  late.resolve({ events: [{ timestamp: 1n, payload: { MintedCkErc20: { event_source: { transaction_hash: HASH, log_index: 7n }, erc20_contract_address: CKUSDC.erc20Address, ckerc20_token_symbol: 'ckUSDC', mint_block_index: 55n } } }], total_event_count: 102n }); await settle();
+  expect(localStorage.getItem(key)).toBe(newer); expect(host.textContent).not.toContain('mint confirmed by the minter');
 });
