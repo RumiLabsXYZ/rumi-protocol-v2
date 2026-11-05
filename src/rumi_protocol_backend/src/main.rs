@@ -13390,6 +13390,42 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
 /// Bypasses XRC — useful for testing liquidation flows with synthetic assets.
 ///
 /// Compiled out of the mainnet wasm via `cfg(feature = "test_endpoints")` (AUTH-002).
+/// Test-build only: register an ACTIVE native-XLM config (derived from the XRP
+/// builder, like production's frozen scaffold) so PocketIC can exercise borrow.
+#[cfg(feature = "test_endpoints")]
+#[candid_method(update)]
+#[update]
+async fn dev_register_xlm_collateral() -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError("Developer only".to_string()));
+    }
+    let xlm_ct = rumi_protocol_backend::state::xlm_collateral_principal();
+    if read_state(|s| s.collateral_configs.contains_key(&xlm_ct)) {
+        return Err(ProtocolError::GenericError(
+            "XLM collateral already registered".to_string(),
+        ));
+    }
+    let (fee, apr, recovery_mult) = read_state(|s| {
+        let icp = s.get_collateral_config(&s.icp_collateral_type());
+        (
+            icp.map(|c| c.borrowing_fee).unwrap_or(Ratio::from_f64(0.0)),
+            icp.map(|c| c.interest_rate_apr)
+                .unwrap_or(Ratio::from_f64(0.0)),
+            s.recovery_cr_multiplier,
+        )
+    });
+    let xrp = rumi_protocol_backend::state::xrp_collateral_config(fee, apr, recovery_mult);
+    let mut config = rumi_protocol_backend::state::xlm_collateral_config(&xrp)
+        .map_err(|e| ProtocolError::GenericError(e.to_string()))?;
+    config.status = rumi_protocol_backend::state::CollateralStatus::Active;
+    mutate_state(|s| {
+        event::record_add_collateral_type(s, xlm_ct, config);
+    });
+    Ok(())
+}
+
 #[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
