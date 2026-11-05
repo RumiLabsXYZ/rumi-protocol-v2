@@ -20,6 +20,11 @@ pub mod address;
 pub mod adapter;
 pub mod codec;
 pub mod config;
+pub mod issued_amount;
+pub mod issued_codec;
+pub mod issued_rpc;
+pub mod issuer_rpc;
+pub mod network;
 pub mod sign;
 pub mod ted25519;
 pub mod xrp_rpc;
@@ -30,4 +35,6 @@ pub use address::{
 pub use adapter::XrpAdapter;
 pub use codec::{serialize_signed, serialize_unsigned, Payment};
 pub use config::{XRP_CHAIN_ID, XRP_NATIVE_DECIMALS};
+pub use issued_amount::{CurrencyCode, ExactIssuedAmount, IssuedAsset};
+pub use network::XrplNetwork;
 pub use sign::{ed25519_signing_pubkey, signing_message, tx_hash};

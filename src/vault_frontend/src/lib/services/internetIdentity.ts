@@ -3,11 +3,12 @@ import { HttpAgent, Actor } from '@dfinity/agent';
 import type { Identity } from '@dfinity/agent';
 import type { Principal } from '@dfinity/principal';
 import { CONFIG } from '../config';
+import { LOCAL_IC_HOST, LOCAL_II_URL } from '../localNetwork';
 
 // Internet Identity canister ID
 const II_CANISTER_ID = 'rdmx6-jaaaa-aaaaa-aaadq-cai';
 const II_URL = CONFIG.isLocal
-  ? `http://uxrrr-q7777-77774-qaaaq-cai.localhost:4943`
+  ? LOCAL_II_URL
   : 'https://id.ai';
 
 export interface IIAuthService {
@@ -60,7 +61,7 @@ class InternetIdentityService implements IIAuthService {
 
     this.agent = new HttpAgent({
       identity: this.identity,
-      host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://ic0.app'
+      host: CONFIG.isLocal ? LOCAL_IC_HOST : 'https://ic0.app'
     });
 
     // Fetch root key for local development

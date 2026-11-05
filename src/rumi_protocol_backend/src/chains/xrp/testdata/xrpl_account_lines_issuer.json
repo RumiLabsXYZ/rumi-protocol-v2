@@ -1,0 +1,20 @@
+{
+    "result": {
+        "account": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+        "ledger_hash": "071FEE540967540B66FFBD4B165E1C6B0D61E43B877FFCBBFE7DD6B0E96940E1",
+        "ledger_index": 21968761,
+        "lines": [
+            {
+                "account": "rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D",
+                "balance": "-2.95",
+                "currency": "6963555344000000000000000000000000000000",
+                "limit": "0",
+                "limit_peer": "1000",
+                "quality_in": 0,
+                "quality_out": 0
+            }
+        ],
+        "status": "success",
+        "validated": true
+    }
+}

@@ -1,0 +1,95 @@
+{
+    "result": {
+        "close_time_iso": "2026-10-31T18:32:21Z",
+        "ctid": "C14F373C000F0001",
+        "hash": "5AE743C50D45244BDA29E5D5945099AB7BFE0939A7D1D3076312B5C6AF9D4CDD",
+        "ledger_hash": "152B2D72C4ED8BBC3AC06F427E13414A9B591FCA356FC4B4B25A02F3456DE142",
+        "ledger_index": 21968700,
+        "meta": {
+            "AffectedNodes": [
+                {
+                    "ModifiedNode": {
+                        "FinalFields": {
+                            "Balance": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji",
+                                "value": "2.95"
+                            },
+                            "Flags": 65536,
+                            "HighLimit": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+                                "value": "0"
+                            },
+                            "HighNode": "0",
+                            "LowLimit": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D",
+                                "value": "1000"
+                            },
+                            "LowNode": "0"
+                        },
+                        "LedgerEntryType": "RippleState",
+                        "LedgerIndex": "380E0122DE216ED9A02B28957FAE10FDAC74F45953ACA24AD910EFF75C1014E9",
+                        "PreviousFields": {
+                            "Balance": {
+                                "currency": "6963555344000000000000000000000000000000",
+                                "issuer": "rrrrrrrrrrrrrrrrrrrrBZbvji",
+                                "value": "4.95"
+                            }
+                        },
+                        "PreviousTxnID": "DFEACE1C9DAFF3A507B4E3431F3972749A12A4373267FA3A46AE76AB0D2B4F83",
+                        "PreviousTxnLgrSeq": 21968687
+                    }
+                },
+                {
+                    "ModifiedNode": {
+                        "FinalFields": {
+                            "Account": "rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D",
+                            "Balance": "69999964",
+                            "Flags": 0,
+                            "OwnerCount": 1,
+                            "Sequence": 21663851
+                        },
+                        "LedgerEntryType": "AccountRoot",
+                        "LedgerIndex": "B051B4A346EDEF8FC2D4E5B3D137B436B0CE5D9F5492D157158F1B1606DB6A75",
+                        "PreviousFields": {
+                            "Balance": "69999976",
+                            "Sequence": 21663850
+                        },
+                        "PreviousTxnID": "A516309D990836A28DBDC5191142E7E6E82EEBDCD33A7275ADFED1A6DF6A49BE",
+                        "PreviousTxnLgrSeq": 21968666
+                    }
+                }
+            ],
+            "TransactionIndex": 15,
+            "TransactionResult": "tesSUCCESS",
+            "delivered_amount": {
+                "currency": "6963555344000000000000000000000000000000",
+                "issuer": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+                "value": "2"
+            }
+        },
+        "status": "success",
+        "tx_json": {
+            "Account": "rs9FJ1AEXLJJji4zm3cX3BHWmkccCtob4D",
+            "DeliverMax": {
+                "currency": "6963555344000000000000000000000000000000",
+                "issuer": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+                "value": "2"
+            },
+            "Destination": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+            "DestinationTag": 1,
+            "Fee": "12",
+            "LastLedgerSequence": 21968718,
+            "Sequence": 21663850,
+            "SigningPubKey": "02ABCAE833EA4153127AD59CFEB8010E415CC0C3633FDEF6294825343DE4FCEBB0",
+            "TransactionType": "Payment",
+            "TxnSignature": "304402205B4A46DD30B655AE644A07968EEE313B8B50FF6B27E8E23642224EEE77388D380220255D6131B5EEEAD22A2E652ECADEFE7F7FCB7189F9043526409BE46B5FFE67CF",
+            "ctid": "C14F373C000F0001",
+            "date": 846786741,
+            "ledger_index": 21968700
+        },
+        "validated": true
+    }
+}

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import QRCode from 'qrcode';
   import type { CollateralInfo } from '$lib/services/types';
   import { protocolService } from '$lib/services/protocol';
@@ -22,6 +23,15 @@
   } from '$lib/utils/nativeXrpBorrowFlow';
   import { formatAddress } from '$lib/utils/format';
   import { WALLET_TYPES, currentWalletType } from '$lib/services/auth';
+  import { walletStore } from '$lib/stores/wallet';
+  import XrplWalletConnect from '$components/wallet/XrplWalletConnect.svelte';
+  import { getXrplWalletAdapter, type WalletSigningPrompt } from '$lib/services/xrplWalletService';
+  import { formatDropsAsXrp, xrpNumberToDrops } from '$lib/utils/nativeXrpBorrowFlow';
+  import {
+    createDefaultXrpDepositController,
+    type XrpDepositController,
+    type XrpDepositState,
+  } from './xrpDepositFlow';
   import XrpDepositTagNotice from '$lib/components/vault/XrpDepositTagNotice.svelte';
 
   export let collateralAmount: number;
@@ -47,7 +57,7 @@
     collateralInfo,
     reserveBaseDrops: opened?.reserveBaseDrops ?? 0n,
   });
-  $: paymentUri = opened ? buildXrpPaymentUri(opened.custodyAddress, copy.sendAmount) : '';
+  $: paymentUri = opened ? buildXrpPaymentUri(opened.custodyAddress, copy.sendDrops ?? copy.sendAmount) : '';
   $: hasDepositAddress = Boolean(opened?.custodyAddress);
   $: shouldRenderModal = nativeXrpModalShouldRender(phase, hasDepositAddress);
   $: modalTitle = nativeXrpModalTitle(phase, hasDepositAddress);
@@ -63,9 +73,70 @@
   // such constraint, so they keep the single-click flow.
   $: borrowNeedsOwnClick = $currentWalletType === WALLET_TYPES.OISY;
 
+  // Wallet click-to-deposit controller. It owns the single open_xrp_vault call,
+  // reload recovery, the frozen payment snapshot, readiness polling and the
+  // Oisy-vs-delegated confirm rule. The manual address/QR path stays available.
+  let controller: XrpDepositController | null = null;
+  let dep: XrpDepositState | null = null;
+  let unsubscribeController: (() => void) | null = null;
+  let unsubscribePrompt: (() => void) | null = null;
+  let signingPrompt: WalletSigningPrompt | null = null;
+  let promptQr = '';
+  let advanced = false;
+
+  $: walletBusy = dep?.phase === 'signing' || dep?.phase === 'confirming' || dep?.phase === 'polling';
+  $: walletDepositDone = dep?.phase === 'confirmed';
+  $: canWalletDeposit = !!dep && ['awaiting_payment', 'invalidated', 'rejected'].includes(dep.phase);
+
   onMount(() => {
     void openVault();
   });
+
+  onDestroy(() => {
+    unsubscribePrompt?.();
+    unsubscribeController?.();
+    controller?.dispose();
+  });
+
+  function ownerKey(): string {
+    try {
+      return get(walletStore).principal?.toText?.() ?? 'anonymous';
+    } catch {
+      return 'anonymous';
+    }
+  }
+
+  function onDepState(s: XrpDepositState) {
+    dep = s;
+    opened = s.vault;
+    const borrowPhases = ['borrowing', 'borrow_failed', 'ready_to_borrow'];
+    if (borrowPhases.includes(phase)) return;
+    if (s.vault && (phase === 'opening' || phase === 'confirming') && s.phase !== 'confirming') {
+      phase = 'awaiting';
+    }
+    if (s.phase === 'confirming') phase = 'confirming';
+    if (s.phase === 'needs_open_confirmation' && !s.vault) {
+      // Pending state unknown (signer wallet, empty cache): nothing opened until the user says so.
+      phase = 'error';
+      errorMessage = s.error ?? '';
+      return;
+    }
+    if (s.phase === 'error' && !s.vault) {
+      phase = 'error';
+      errorMessage = s.error ?? 'Could not reserve an XRP custody address.';
+      return;
+    }
+    errorMessage = s.error ?? '';
+    if (s.phase === 'confirmed' && !advanced) {
+      advanced = true;
+      confirmWasResilient = s.oisyResilient;
+      if (borrowNeedsOwnClick) {
+        phase = 'ready_to_borrow';
+      } else {
+        void borrowFromConfirmedVault(confirmWasResilient);
+      }
+    }
+  }
 
   async function openVault() {
     if (started) return;
@@ -73,26 +144,78 @@
     phase = 'opening';
     errorMessage = '';
     try {
-      const result = await XrpVaultService.openXrpVault();
-      if (!result.success || !result.data) {
+      const sendDrops = copy.sendDrops;
+      if (sendDrops === null || sendDrops <= 0n) {
         phase = 'error';
-        errorMessage = result.error ?? 'Could not reserve an XRP custody address.';
+        errorMessage = 'Enter an XRP amount with at most 6 decimal places.';
         return;
       }
-
-      opened = result.data;
-      phase = 'awaiting';
-      const openedCopy = nativeXrpDepositCopy({
-        collateralAmount,
-        icusdAmount,
-        collateralInfo,
-        reserveBaseDrops: result.data.reserveBaseDrops,
+      const minDeposit = collateralInfo ? xrpNumberToDrops(collateralInfo.minCollateralDeposit) : null;
+      controller = createDefaultXrpDepositController(ownerKey(), minDeposit && minDeposit > 0n ? minDeposit : 1n);
+      unsubscribeController = controller.subscribe(onDepState);
+      unsubscribePrompt = getXrplWalletAdapter().onPrompt((p) => {
+        signingPrompt = p;
+        promptQr = p.qrPng ?? '';
       });
-      await generateQr(buildXrpPaymentUri(result.data.custodyAddress, openedCopy.sendAmount));
+      await controller.prepare(sendDrops);
+      if (controller.getState().vault) {
+        const v = controller.getState().vault!;
+        await generateQr(buildXrpPaymentUri(v.custodyAddress, controller.getState().sentDrops ?? sendDrops));
+      }
     } catch (err) {
       phase = 'error';
       errorMessage = err instanceof Error ? err.message : 'Could not reserve an XRP custody address.';
     }
+  }
+
+  /** The pending-deposit check failed (nothing was opened): ask the backend again. */
+  async function retryPrepare() {
+    if (!controller) return;
+    const sendDrops = copy.sendDrops;
+    if (sendDrops === null || sendDrops <= 0n) return;
+    phase = 'opening';
+    errorMessage = '';
+    try {
+      await controller.prepare(sendDrops);
+      const v = controller.getState().vault;
+      if (v) await generateQr(buildXrpPaymentUri(v.custodyAddress, controller.getState().sentDrops ?? sendDrops));
+    } catch (err) {
+      phase = 'error';
+      errorMessage = err instanceof Error ? err.message : 'Could not reserve an XRP custody address.';
+    }
+  }
+
+  /** Explicit confirmation that no unfinished XRP deposit exists: only then open a new vault. */
+  async function acknowledgeAndOpen() {
+    if (!controller) return;
+    const sendDrops = copy.sendDrops;
+    if (sendDrops === null || sendDrops <= 0n) return;
+    phase = 'opening';
+    errorMessage = '';
+    try {
+      await controller.acknowledgeNoPendingAndOpen();
+      const v = controller.getState().vault;
+      if (v) await generateQr(buildXrpPaymentUri(v.custodyAddress, controller.getState().sentDrops ?? sendDrops));
+    } catch (err) {
+      phase = 'error';
+      errorMessage = err instanceof Error ? err.message : 'Could not reserve an XRP custody address.';
+    }
+  }
+
+  async function depositFromWallet() {
+    if (!controller) return;
+    controller.propose();
+    await controller.pay();
+  }
+
+  async function resumeWalletDeposit() {
+    await controller?.resume();
+  }
+
+  // Explicit click only. For Oisy this is the sole place a signer-backed
+  // confirm is ever started; timers never call it.
+  async function confirmCollateralClick() {
+    await controller?.confirmNow();
   }
 
   async function generateQr(uri = paymentUri) {
@@ -122,30 +245,14 @@
   }
 
   async function confirmDepositAndBorrow() {
-    if (!opened) return;
-    phase = 'confirming';
+    if (!opened || !controller) return;
     errorMessage = '';
-
-    try {
-      const confirmed = await XrpVaultService.confirmXrpDeposit(opened.vaultId);
-      if (!confirmed.success) {
-        phase = 'awaiting';
-        errorMessage = confirmed.error ?? 'Deposit not detected yet.';
-        return;
-      }
-
-      // The collateral is credited from here on: never leave the user without a
-      // way to finish the borrow.
-      confirmWasResilient = confirmed.oisyResilient ?? false;
-      if (borrowNeedsOwnClick) {
-        phase = 'ready_to_borrow';
-        return;
-      }
-
-      await borrowFromConfirmedVault(confirmWasResilient);
-    } catch (err) {
+    // confirmNow() settles the controller state; onDepState() advances to the borrow step.
+    await controller.confirmNow();
+    const s = controller.getState();
+    if (s.phase !== 'confirmed') {
       phase = 'awaiting';
-      errorMessage = err instanceof Error ? err.message : 'Deposit confirmation failed.';
+      errorMessage = s.error ?? 'Deposit not detected yet.';
     }
   }
 
@@ -193,7 +300,7 @@
         <p class="eyebrow">Native {copy.assetName} collateral</p>
         <h2 id="xrp-borrow-title">{modalTitle}</h2>
       </div>
-      <div class="status-pill" class:status-busy={isBusy}>
+      <div class="status-pill" class:status-busy={isBusy} role="status" aria-live="polite">
         {modalStatusLabel}
       </div>
     </div>
@@ -241,6 +348,59 @@
       </div>
     {/if}
 
+    {#if opened && dep && !awaitingBorrowApproval && phase !== 'borrowing'}
+      <div class="wallet-step">
+        <span class="field-label">Pay with an XRP wallet</span>
+        <XrplWalletConnect />
+        <dl class="breakdown">
+          <div><dt>You send</dt><dd>{formatDropsAsXrp(dep.proposal?.sendDrops ?? dep.sentDrops ?? copy.sendDrops ?? 0n)} XRP</dd></div>
+          <div><dt>Account reserve (stays locked on XRPL)</dt><dd>{dep.reservedDrops !== null ? formatDropsAsXrp(dep.reservedDrops) : '0'} XRP</dd></div>
+          <div><dt>Expected collateral</dt><dd>{dep.expectedCreditedDrops !== null ? formatDropsAsXrp(dep.expectedCreditedDrops) : '0'} XRP</dd></div>
+          <div><dt>Credited by Rumi</dt><dd>{dep.creditedDrops !== null ? `${formatDropsAsXrp(dep.creditedDrops)} XRP` : dep.phase === 'confirmed' ? 'Confirmed' : 'Not yet confirmed'}</dd></div>
+        </dl>
+
+        <div role="status" aria-live="polite">
+        {#if (dep.phase === 'signing' || dep.phase === 'wallet_pending') && signingPrompt}
+          <p class="detail-line">Approve in Xaman.
+            <a href={signingPrompt.deepLink} target="_blank" rel="noopener noreferrer">Open Xaman</a>
+          </p>
+          {#if promptQr}<img class="qr-code" src={promptQr} alt="Xaman signing QR code" />{/if}
+          <p class="detail-line">Waiting for the wallet to submit the payment. Do not pay again; resume the same request.</p>
+        {:else if dep.phase === 'wallet_pending'}
+          <p class="detail-line">Waiting for the wallet to submit the payment. Do not pay again; resume the same request.</p>
+        {:else if dep.phase === 'polling'}
+          <p class="detail-line">Payment sent{dep.txHash ? ` (${formatAddress(dep.txHash, 8, 6)})` : ''}. Waiting for XRPL to validate it. The wallet hash alone does not credit collateral.</p>
+        {:else if dep.phase === 'ready_to_confirm'}
+          <p class="detail-line">XRPL shows funds at your vault address. Rumi must confirm the collateral.</p>
+        {:else if dep.phase === 'timed_out'}
+          <p class="detail-line">Still waiting for XRPL. Resume checking, or confirm in Rumi if the payment has settled.</p>
+        {:else if dep.phase === 'invalidated'}
+          <p class="detail-line">Your wallet account or network changed, so the prepared payment was cancelled. Nothing was sent.</p>
+        {:else if dep.phase === 'rejected'}
+          <p class="detail-line">The wallet request was rejected or expired. Nothing was sent.</p>
+        {:else if walletDepositDone}
+          <p class="detail-line">{dep.alreadyConfirmed ? 'This vault already has its deposit confirmed. No further payment is needed.' : 'Rumi confirmed the deposit.'}</p>
+        {/if}
+        </div>
+
+        <div class="wallet-actions">
+          {#if canWalletDeposit}
+            <button class="primary-action" type="button" disabled={walletBusy} on:click={depositFromWallet}>
+              Deposit {copy.sendAmountLabel} from wallet
+            </button>
+          {/if}
+          {#if dep.phase === 'wallet_pending' || dep.phase === 'timed_out'}
+            <button class="secondary-action" type="button" on:click={resumeWalletDeposit}>Resume</button>
+          {/if}
+          {#if dep.phase === 'ready_to_confirm' || dep.phase === 'timed_out'}
+            <button class="primary-action" type="button" disabled={walletBusy} on:click={confirmCollateralClick}>
+              Confirm collateral in Rumi
+            </button>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
     {#if awaitingBorrowApproval && opened}
       <div class="borrow-step">
         <p class="borrow-step-lead">{nativeXrpBorrowSeparateApprovalCopy(copy.borrowAmountLabel)}</p>
@@ -249,13 +409,23 @@
     {/if}
 
     {#if errorMessage}
-      <div class="modal-error">{errorMessage}</div>
+      <div class="modal-error" role="alert" aria-live="assertive">{errorMessage}</div>
     {/if}
 
     <div class="modal-actions">
       <button class="secondary-action" type="button" disabled={isBusy} on:click={close}>
         {awaitingBorrowApproval ? 'Finish later' : 'Cancel'}
       </button>
+
+      {#if dep?.phase === 'needs_open_confirmation' && !opened}
+        <button class="primary-action" type="button" on:click={acknowledgeAndOpen}>
+          I have no unfinished XRP deposit, open a new one
+        </button>
+      {/if}
+
+      {#if dep?.pendingReadFailed && !opened}
+        <button class="primary-action" type="button" on:click={retryPrepare}>Try again</button>
+      {/if}
 
       {#if modalPrimaryActionLabel}
         <button
@@ -525,6 +695,37 @@
     color: var(--rumi-text-secondary);
     font-size: 0.8125rem;
     line-height: 1.45;
+  }
+
+  .wallet-step {
+    margin-top: 1rem;
+    padding: 0.875rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .breakdown {
+    display: grid;
+    gap: 0.375rem;
+    margin: 0.5rem 0;
+  }
+
+  .breakdown div {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.8125rem;
+  }
+
+  .breakdown dt { color: var(--rumi-text-secondary); }
+  .breakdown dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+  .wallet-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
   }
 
   .modal-error {

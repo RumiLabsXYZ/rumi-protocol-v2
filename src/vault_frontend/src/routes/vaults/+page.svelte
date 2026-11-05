@@ -4,6 +4,7 @@
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { permissionStore } from '$lib/stores/permissionStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
+  import XrplIcusdPanel from '$lib/components/vault/XrplIcusdPanel.svelte';
   import { isDevelopment, CANISTER_IDS } from '$lib/config';
   import { developerAccess } from '$lib/stores/developer';
   import { collateralStore } from '$lib/stores/collateralStore';
@@ -16,6 +17,16 @@
   // Subscribe to collateral store so sort re-runs when configs load
   $: collateralState = $collateralStore;
 
+  // XRPL icUSD (borrow into / repay from an XRPL wallet) is offered only for
+  // native-XRP vaults; every other collateral keeps its existing UI untouched.
+  let xrplFocusVaultId: number | null = null;
+  let xrplSection: HTMLElement | null = null;
+
+  function handleXrplRepay(e: CustomEvent<{ vaultId: number }>) {
+    xrplFocusVaultId = e.detail.vaultId;
+    xrplSection?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }
+
   function handleToggle(e: CustomEvent<{ vaultId: number }>) {
     expandedVaultId = expandedVaultId === e.detail.vaultId ? null : e.detail.vaultId;
   }
@@ -27,6 +38,10 @@
   function getInfoFromState(principalText: string): CollateralInfo | undefined {
     return collateralState.collaterals.find(c => c.principal === principalText);
   }
+
+  $: xrpVaults = $userVaults.filter(
+    (v) => getInfoFromState(v.collateralType || CANISTER_IDS.ICP_LEDGER)?.custodyKind === 'NativeXrp'
+  );
 
   // Health score = CR / liquidation_ratio. A score of 1.0 means at liquidation threshold.
   // Sort by health score ascending so the most at-risk vaults appear first.
@@ -111,14 +126,22 @@
   {:else}
     <div class="vault-list">
       {#each sortedVaults as vault (vault.vaultId)}
-        <VaultCard {vault} {icpPrice} {expandedVaultId} on:updated={loadUserVaults} on:toggle={handleToggle} />
+        <VaultCard {vault} {icpPrice} {expandedVaultId} on:updated={loadUserVaults} on:toggle={handleToggle} on:xrplrepay={handleXrplRepay} />
       {/each}
     </div>
+    {#if xrpVaults.length > 0}
+      <section class="xrpl-icusd-section" id="xrpl-icusd" bind:this={xrplSection}>
+        {#key $principal?.toText?.() ?? ''}
+          <XrplIcusdPanel vaults={xrpVaults} focusVaultId={xrplFocusVaultId} />
+        {/key}
+      </section>
+    {/if}
   {/if}
 </div>
 
 <style>
   .page-container { max-width: 800px; margin: 0 auto; }
+  .xrpl-icusd-section { margin-top: 1.5rem; }
   .page-header {
     display: flex;
     justify-content: space-between;

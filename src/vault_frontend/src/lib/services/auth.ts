@@ -3,6 +3,7 @@ import { browser } from '$app/environment';
 import { pnp, connectWithComprehensivePermissions, getPnpInstance, silentPlugReconnect } from './pnp';
 import { TokenService } from './tokenService';
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS, vault_frontend } from '../config';
+import { LOCAL_IC_HOST, LOCAL_II_OVERRIDDEN, LOCAL_II_URL } from '../localNetwork';
 import { canisterIDLs } from './pnp';
 import { permissionManager } from './PermissionManager';
 import { Principal } from '@dfinity/principal';
@@ -158,7 +159,7 @@ function createAuthStore() {
             // Create agent for Internet Identity
             agent = new HttpAgent({
               identity,
-              host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://ic0.app'
+              host: CONFIG.isLocal ? LOCAL_IC_HOST : 'https://ic0.app'
             });
             
             if (CONFIG.isLocal) {
@@ -394,7 +395,9 @@ function createAuthStore() {
       return new Promise((resolve, reject) => {
         client.login({
           identityProvider: CONFIG.isLocal
-            ? `http://localhost:4943/?canisterId=${LOCAL_CANISTER_IDS.INTERNET_IDENTITY}`
+            ? (LOCAL_II_OVERRIDDEN
+                ? LOCAL_II_URL
+                : `${LOCAL_IC_HOST}/?canisterId=${LOCAL_CANISTER_IDS.INTERNET_IDENTITY}`)
             : "https://id.ai",
           derivationOrigin: CONFIG.isLocal
             ? undefined
@@ -407,7 +410,7 @@ function createAuthStore() {
               // Create agent for Internet Identity
               agent = new HttpAgent({
                 identity,
-                host: CONFIG.isLocal ? 'http://localhost:4943' : 'https://ic0.app'
+                host: CONFIG.isLocal ? LOCAL_IC_HOST : 'https://ic0.app'
               });
               
               if (CONFIG.isLocal) {

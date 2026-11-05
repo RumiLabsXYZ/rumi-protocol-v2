@@ -1,0 +1,50 @@
+{
+    "result": {
+        "close_time_iso": "2026-10-31T18:21:42Z",
+        "ctid": "C14F368700140001",
+        "hash": "BA366F803C391282FE63DB884BB6C4CB85F04243D979C825F0A0DE0BC535B9D8",
+        "ledger_hash": "D4E5C108CD59CB81CD9B34976D66910FDF75CC34EC4C01B143001D269072B85D",
+        "ledger_index": 21968519,
+        "meta": {
+            "AffectedNodes": [
+                {
+                    "ModifiedNode": {
+                        "FinalFields": {
+                            "Account": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+                            "Balance": "99999910",
+                            "Flags": 8519680,
+                            "OwnerCount": 0,
+                            "Sequence": 21642765
+                        },
+                        "LedgerEntryType": "AccountRoot",
+                        "LedgerIndex": "B3CD974B3BFD619318200AA153C71CBDD55CF0E01AD65A621EDD929CBBCFDA4A",
+                        "PreviousFields": {
+                            "Balance": "99999920",
+                            "Sequence": 21642764
+                        },
+                        "PreviousTxnID": "8893EF3AFED73B0E0D1C5178D6B32DA2782C1CF65964A20E2EDE207C32701941",
+                        "PreviousTxnLgrSeq": 21968461
+                    }
+                }
+            ],
+            "TransactionIndex": 20,
+            "TransactionResult": "tesSUCCESS"
+        },
+        "status": "success",
+        "tx_json": {
+            "Account": "rLtraAW4HjtCS4rPtt1iK6BvtJ6Xd6LTd9",
+            "Fee": "10",
+            "Flags": 2147483648,
+            "LastLedgerSequence": 21968550,
+            "Sequence": 21642764,
+            "SigningPubKey": "EDE563A96E8C6C053E64445DC6D93B5D205D44E93C6FC392CC8E4DBD8500704123",
+            "TransactionType": "AccountSet",
+            "TransferRate": 1000000000,
+            "TxnSignature": "7761224787E98FF5272C41C9303D35CF99EBFD1005FC5AD3FD0F6B1F9133AD1F70E7E3BFC4BE3E35ACB68CCF73E8085E45A246C93F8E026F316F6B4D3420C70B",
+            "ctid": "C14F368700140001",
+            "date": 846786102,
+            "ledger_index": 21968519
+        },
+        "validated": true
+    }
+}

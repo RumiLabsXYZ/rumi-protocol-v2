@@ -423,6 +423,11 @@ pub fn load_state_from_stable() -> Option<crate::state::State> {
 /// thread-local stable memory.
 pub fn decode_state_body(buf: &[u8]) -> Result<crate::state::State, String> {
     ciborium::de::from_reader::<crate::state::State, _>(buf)
+        .map(|mut state| {
+            // Derived (unserialized) XRPL lane indexes.
+            state.xrpl_icusd.rebuild_indexes();
+            state
+        })
         .map_err(|e| format!("ciborium decode failed: {e:?}"))
 }
 

@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { readCachedPendingDeposits, writeCachedPendingDeposits } from './xrpVaultService';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readCachedPendingDeposits, writeCachedPendingDeposits, XrpVaultService } from './xrpVaultService';
+import { walletStore } from '../stores/wallet';
+import { currentWalletType, WALLET_TYPES } from './auth';
 
 const OWNER = 'aaaaa-aa';
 const CACHE_KEY = `rumi_xrp_pending_deposits:${OWNER}`;
@@ -49,5 +51,53 @@ describe('XRP pending-deposit cache', () => {
         OWNER
       )
     ).not.toThrow();
+  });
+});
+
+describe('readMyPendingDeposits (tri-state)', () => {
+  beforeEach(() => { localStorage.clear(); vi.restoreAllMocks(); });
+
+  it('a failed read is observable (not an empty list)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(walletStore, 'getActor').mockResolvedValue({ get_my_xrp_pending_deposits: async () => { throw new Error('replica down'); } } as any);
+    expect(await XrpVaultService.readMyPendingDeposits()).toEqual({ ok: false, error: 'replica down' });
+    // the legacy reader keeps its behavior (empty list on failure)
+    expect(await XrpVaultService.getMyPendingDeposits()).toEqual([]);
+  });
+
+  it('returns backend deposits unfiltered by user-hidden ids', async () => {
+    vi.spyOn(walletStore, 'getActor').mockResolvedValue({
+      get_my_xrp_pending_deposits: async () => [[7n, { custody_address: 'rC', opened_at_ns: 5_000_000n, reserve_base_drops: 1_000_000n }]],
+    } as any);
+    const r = await XrpVaultService.readMyPendingDeposits();
+    expect(r).toEqual({ ok: true, source: 'backend', deposits: [{ vaultId: 7, custodyAddress: 'rC', openedAtMs: 5, reserveBaseDrops: 1_000_000n }] });
+  });
+});
+
+describe('readMyPendingDeposits for a gesture-gated signer (Oisy)', () => {
+  beforeEach(() => { localStorage.clear(); vi.restoreAllMocks(); });
+  afterEach(() => { currentWalletType.set(null); });
+
+  it('an EMPTY cache is "unknown", never a clean empty answer', async () => {
+    currentWalletType.set(WALLET_TYPES.OISY);
+    const actorSpy = vi.spyOn(walletStore, 'getActor');
+    const r = await XrpVaultService.readMyPendingDeposits();
+    expect(r).toEqual({ ok: true, deposits: [], source: 'cache', unknown: true });
+    expect(actorSpy).not.toHaveBeenCalled(); // no signer popup
+  });
+
+  it('a non-empty cache is returned as a cache hit (not flagged unknown)', async () => {
+    currentWalletType.set(WALLET_TYPES.OISY);
+    vi.spyOn(walletStore, 'subscribe').mockImplementation(((fn: (s: unknown) => void) => {
+      fn({ principal: { toText: () => OWNER } });
+      return () => {};
+    }) as any);
+    writeCachedPendingDeposits(
+      [{ vaultId: 4, custodyAddress: 'rC', openedAtMs: 1, reserveBaseDrops: 1_000_000n }],
+      OWNER
+    );
+    const r = await XrpVaultService.readMyPendingDeposits();
+    expect(r.ok && r.source).toBe('cache');
+    expect(r.ok && r.unknown).toBeUndefined();
   });
 });
