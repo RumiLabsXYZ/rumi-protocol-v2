@@ -1,4 +1,6 @@
-# ckSOL / deployed PR #613 composition — source checkpoint
+# ckSOL / deployed PR #613 composition — held source result
+
+**Current status:** canonical generation and live Candid compatibility pass. Source merge is held by the concrete existing library-test fixture compile failure described in the admitted-slot result below. Initial checkpoint/resource planning is retained as history, superseded by that result.
 
 Source edits began after snapshot clarification commit `7941b036`. Base main is `93d9ece7`; refreshed `origin/main` remained at that merge. Existing worktree/branch and retained build evidence were preserved. No other implementer owns this composition.
 
@@ -16,3 +18,13 @@ The integrated delta is 15 source/test files, 415 additions and 17 deletions. `n
 - Review risk: state compatibility, owner/exact-tuple payout reconciliation, pending-release collateral fencing, bounded repayment/consent and frontend/declaration parity. No recovery semantics or stable layout changes were introduced intentionally. Independent semantic review and required green checks remain before merge. Standing merge-when-green is preserved; the exact present hold is unfinished canonical generation/checks, not a new approval gate.
 
 The prior 93d9-built Wasm/frontend artifacts do not include this source composition and cannot be used to deploy it. A fresh ckSOL build stays held until source composition/generation is resolved and a bounded build slot is coordinated. No stop/start, snapshot export/create/delete/restore, installation, financial action, reserve funding/activation or customer message occurred. Reserve remains off. Snapshot clarification is in the [upgrade packet](cksol-upgrade-only-packet-20261104.md#snapshot-policy-clarification--source-inspection-only); no new blanket policy decision is required, but exact replacement authority and archive evidence remain necessary before execution.
+
+## Admitted native-slot result
+
+Merritt/Bram allocated one serial source-check slot, 30 elapsed minutes / 6 GB growth. Fresh preflight at November 4 7:59:10 PM PST found no competing compiler, about 67.5 GiB free and target cache 19,356,424 KiB. Canonical generator session `14929` compiled the native binary in 44.69 seconds, then passed its one Candid test. `lib.rs` mtime was refreshed to invalidate the known stale shared-library fingerprint; source SHA-256 remained `70f20d334373a310dfef17ef4ab53415bdaacd4881b18270c7df1feaca42786f`. No source bytes were changed for cache handling.
+
+The canonical declaration script completed; all four generated files add only ten recovery-interface lines each. `didc check` against the captured deployed Candid now exits 0. Backend/declaration DID byte parity and `git diff --check` pass. This resolves the old Candid-removal failure; the old Wasm still excludes this composition and remains unusable for its deployment.
+
+Focused library-test session `82204` (`cargo test -p rumi_protocol_backend --lib nicp_redemption`) exits 101 before executing tests. Existing test fixtures in unchanged `src/rumi_protocol_backend/src/icrc3_proof.rs` lines 1985–1986 and 2006–2007 initialize `Icrc3Transaction::Transfer` with nonexistent `memo` and `created_at_time` fields (four E0559 errors). The file has no delta from main `93d9ece7` in this composition. No broad retry, fixture fix, additional Rust filter or full suite was attempted after this concrete failure. The library preservation/repayment/consent tests therefore remain unexecuted; source is **not green and must not merge yet**. This is the exact narrower hold under standing merge-when-green.
+
+By November 4 8:00:47 PM PST, native checks had terminated. Final process inventory confirmed no owned Cargo/rustc/ic-wasm/Vite build. Target cache was 19,649,492 KiB: growth 293,068 KiB (about 286 MiB), within the slot. Duration was under two minutes. Logs remain locally under `build-evidence/cksol-pr613-native-20261104/`; source-generated files and this readable result are pushed. Next safe step is supervisor routing of the specific pre-existing fixture compile failure before rerunning only the unexecuted focused tests. No production build, hosted CI, live mutation or reserve action was performed.

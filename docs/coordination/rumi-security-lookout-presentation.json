@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 remains separate and held. Upgrade-only packet prepared with authenticated backend status and scoped journal/config reads. Candidate fails fresh live Candid compatibility: missing reconcile_vault51_icp_payout, refresh_vault51_redemption_claim, withdraw_vault51_settled_icp. Installation held; Bram owns read-only provenance/composition inventory. No rebuild or live action authorized. Reserve off; snapshot policy unresolved. Frontend stays separate pending full live asset comparison.",
-  "plainSummary": "The ckSOL build is complete, but it would remove three currently deployed recovery methods. Installation is held while Bram checks their source provenance. Reserve stays off.",
+  "summary": "Vault 158 remains distinct. Full PR #613 Rust/frontend recovery source integrated as a807384f + bb48c70f; canonical Candid regenerated and live compatibility now passes. Frontend focused tests 9/9 pass. Native library tests cannot compile: unchanged icrc3_proof.rs fixtures set nonexistent memo/created_at_time fields (four E0559 errors); no preservation tests executed, no retries. Exact merge hold: source checks not green. Slot closed under two minutes/~286 MiB growth. No new production artifact or live action; reserve off. Snapshot policy clarified from existing ckSOL release precedent.",
+  "plainSummary": "The source now preserves the deployed recovery methods, and interface compatibility passes. Merge is held because existing backend test fixtures fail to compile. No deployment occurred; the reserve stays off.",
   "glossary": [
     {
       "term": "Stability Pool",

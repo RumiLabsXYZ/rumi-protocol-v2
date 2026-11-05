@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Fresh Candid compatibility fails: current build omits three live Vault 51 recovery methods. No removal authority established; reserve off.",
-      "nextAction": "Bram inventories authoritative deployed recovery source and coupled changes, then Merritt reviews the minimal preservation/composition dependency. No rebuild or installation yet. Review held upgrade packet and settle snapshot policy before any canonical approval question.",
+      "blockedReason": "Source composition and canonical interface are resolved, but native library tests fail compilation in unchanged icrc3_proof.rs fixtures (four E0559 errors). Focused preservation tests not yet executed; no merge.",
+      "nextAction": "Bram/Merritt route the exact pre-existing fixture compile failure, then allocate only the unexecuted focused checks. Preserve merge-when-green and no-build/deploy/financial holds; old artifact excludes new source. Use clarified existing snapshot preservation sequence for a later approval packet.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",

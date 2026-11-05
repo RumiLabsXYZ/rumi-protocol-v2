@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "PR #613 source commits integrated as a807384f + bb48c70f on merged main/ckSOL. Recovery Rust/frontend source applied cleanly; generated interface conflicts provisionally retain old files pending canonical regeneration. Focused frontend tests 9/9 pass. Not merge-ready: coordinate native generator/focused Rust slot; no heavy compile or fresh ckSOL build started. Prior artifact excludes composition. Snapshot policy clarified from accepted ckSOL precedent: verified oldest archive then explicitly authorized replacement/fresh stopped-state snapshot. No live actions; reserve off.",
+      "evidenceText": "Full PR #613 Rust/frontend recovery source integrated as a807384f + bb48c70f; canonical Candid regenerated and live compatibility now passes. Frontend focused tests 9/9 pass. Native library tests cannot compile: unchanged icrc3_proof.rs fixtures set nonexistent memo/created_at_time fields (four E0559 errors); no preservation tests executed, no retries. Exact merge hold: source checks not green. Slot closed under two minutes/~286 MiB growth. No new production artifact or live action; reserve off. Snapshot policy clarified from existing ckSOL release precedent.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
