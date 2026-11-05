@@ -1,0 +1,6 @@
+(variant {
+  Upgrade = record {
+    mode = null;
+    description = opt "ckSOL ICP processing: merged source 93d9ece7; reserve remains off"
+  }
+})
