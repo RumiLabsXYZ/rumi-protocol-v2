@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-06",
-      "state": "Blocked",
+      "state": "Review",
       "owner": "Bram",
       "scope": "Prepare vault 158 liquidation recovery without executing it",
-      "evidenceText": "PR #614 merged at 99027b67 after its listed check and two independent source reviews passed. PR #618 pins the source-matched candidate and upgrade-only readback procedure. The installed bot remains unchanged and the claim is held. Separate upgrade-only authority is required; recovery preparation, execution, reconciliation, unpause, and funds remain outside scope.",
+      "evidenceText": "The exact candidate pinned by merged PR #618 is installed: module SHA-256 db8931273a83bb3dfbd8c516b85808b24ad5bd9daed0df9f7265b440658fe098. Readback confirmed the bot is running but processing remains paused, its recovery configuration is readable, vault 158 is still a generation-1 PaymentShortfall claim, and no recovery, payment journal, or treasury intent was created. The upgrade-only step is complete. Recovery preparation, execution, reconciliation, unpause, and funds remain held for separate authority.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
@@ -94,7 +94,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
-      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 was refreshed onto current main at head ace2fb83 without ckSOL source conflicts. Canonical backend declaration generation produced no differences; JSON and diff checks passed. Frontend CI passed on this head and the focused archived-receipt check is still running. Earlier stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback; the opt-in wrapper passed seven mocked tests, two reviews, and a disposable-canister CLI rehearsal. No production action occurred and the reserve remains off. Exact Rumi Arc-stack validation and any checks genuinely invalidated by the refresh remain to be classified before merge.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610",
@@ -102,15 +102,15 @@
         },
         {
           "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ace2fb831e4217728cf22d6db8b4daf4859c3a78"
         },
         {
           "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572436"
         },
         {
-          "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+          "title": "Archived receipt CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572448"
         }
       ]
     },
@@ -119,7 +119,7 @@
       "state": "In progress",
       "owner": "Bram",
       "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
-      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 was refreshed onto current main at head ace2fb83 without ckSOL source conflicts. Canonical backend declaration generation produced no differences; JSON and diff checks passed. Frontend CI passed on this head and the focused archived-receipt check is still running. Earlier stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback; the opt-in wrapper passed seven mocked tests, two reviews, and a disposable-canister CLI rehearsal. No production action occurred and the reserve remains off. Exact Rumi Arc-stack validation and any checks genuinely invalidated by the refresh remain to be classified before merge.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610",
@@ -127,15 +127,15 @@
         },
         {
           "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ace2fb831e4217728cf22d6db8b4daf4859c3a78"
         },
         {
           "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572436"
         },
         {
-          "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+          "title": "Archived receipt CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572448"
         }
       ]
     },
@@ -144,7 +144,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 was refreshed onto current main at head ace2fb83 without ckSOL source conflicts. Canonical backend declaration generation produced no differences; JSON and diff checks passed. Frontend CI passed on this head and the focused archived-receipt check is still running. Earlier stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback; the opt-in wrapper passed seven mocked tests, two reviews, and a disposable-canister CLI rehearsal. No production action occurred and the reserve remains off. Exact Rumi Arc-stack validation and any checks genuinely invalidated by the refresh remain to be classified before merge.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610",
@@ -152,15 +152,15 @@
         },
         {
           "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ace2fb831e4217728cf22d6db8b4daf4859c3a78"
         },
         {
           "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572436"
         },
         {
-          "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+          "title": "Archived receipt CI",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572448"
         }
       ]
     },
