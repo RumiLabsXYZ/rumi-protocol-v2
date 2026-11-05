@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "The atomic credit step with duplicate and ownership guards is locally tested (85a7249e). Next, following XRP: materialize the vault from the credited receipt, then add a confirm endpoint that verifies evidence through provider quorum and the funding-credit decision before calling the credit step.",
+      "status": "blocked",
+      "blockedReason": "The confirm endpoint is wired but fails closed: no reviewed Horizon provider configuration is stored, and reserve-age, headroom and fee-budget values await review.",
+      "nextAction": "Add a persisted, validated three-provider Horizon config with a versioned state migration, run the confirm path in PocketIC against a Horizon mock, and have Rob confirm the safety values.",
       "cardIds": [
         "WP3"
       ]
