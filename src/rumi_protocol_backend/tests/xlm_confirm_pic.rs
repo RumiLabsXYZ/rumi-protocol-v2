@@ -118,6 +118,15 @@ fn backend_wasm() -> Vec<u8> {
         .to_vec()
 }
 
+fn xrc_wasm() -> Vec<u8> {
+    include_bytes!("../../xrc_demo/xrc/xrc.wasm").to_vec()
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+struct MockXRC {
+    rates: std::collections::HashMap<String, u64>,
+}
+
 fn ledger_wasm() -> Vec<u8> {
     include_bytes!("../../ledger/ic-icrc1-ledger.wasm").to_vec()
 }
@@ -243,8 +252,15 @@ fn boot() -> Env {
         },
     };
     pic.install_canister(ledger, ledger_wasm(), encode_one(LedgerArg::Init(ledger_init)).unwrap(), None);
+    // XRC mock (same wasm as xrp_native_e2e_pic): validate_call() refreshes the
+    // ICP price on demand, which fails against an unroutable XRC.
+    let xrc = pic.create_canister();
+    pic.add_cycles(xrc, 100_000_000_000_000);
+    let mut rates = std::collections::HashMap::new();
+    rates.insert("ICP/USD".to_string(), 10 * 100_000_000u64);
+    pic.install_canister(xrc, xrc_wasm(), encode_one(MockXRC { rates }).unwrap(), None);
     let init = ProtocolArg::Init(ProtocolInitArg {
-        xrc_principal: Principal::anonymous(),
+        xrc_principal: xrc,
         icusd_ledger_principal: ledger,
         icp_ledger_principal: ledger,
         fee_e8s: 10_000,
