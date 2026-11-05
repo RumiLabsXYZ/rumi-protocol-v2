@@ -164,10 +164,22 @@ fn iso(pic: &PocketIc, back_secs: u64) -> String {
 
 /// Raw Horizon-shaped body for `url`; provider "b" deviates under `Disagree`.
 fn horizon_body(url: &str, custody: &str, scenario: Scenario, closed_at: &str) -> String {
-    let host_b = url.contains("horizon-mock-b.test");
+    // Keyed by the three REAL compiled-in testnet provider base URLs. Ankr is
+    // the deviating provider under `Disagree`; Ankr's base carries a path prefix.
+    const SDF: &str = "https://horizon-testnet.stellar.org";
+    const ANKR: &str = "https://rpc.ankr.com/http/stellar_testnet_horizon";
+    const TATUM: &str = "https://stellar-testnet.gateway.tatum.io";
+    let (base, rest) = [SDF, ANKR, TATUM]
+        .iter()
+        .find_map(|b| {
+            url.strip_prefix(b)
+                .filter(|r| r.is_empty() || r.starts_with('/'))
+                .map(|r| (*b, r.trim_start_matches('/')))
+        })
+        .unwrap_or_else(|| panic!("unexpected provider URL {url}"));
+    let host_b = base == ANKR;
     let amount = if scenario == Scenario::Disagree && host_b { "50.0000000" } else { "100.0000000" };
     let op_id = ((TX_LEDGER << 32) | 1).to_string();
-    let rest = url.splitn(4, '/').nth(3).unwrap_or("");
     if rest.is_empty() {
         r#"{"network_passphrase":"Test SDF Network ; September 2015"}"#.to_string()
     } else if rest.starts_with("ledgers") {
@@ -307,6 +319,29 @@ fn vault_count(env: &Env) -> u64 {
     }
 }
 
+#[derive(CandidType, Deserialize, Debug)]
+struct VaultView {
+    owner: Principal,
+    borrowed_icusd_amount: u64,
+    icp_margin_amount: u64,
+    vault_id: u64,
+    collateral_amount: u64,
+    collateral_type: Principal,
+    accrued_interest: u64,
+}
+
+/// `get_vaults(opt owner)` query: the owner-scoped vault list.
+fn vaults_of(env: &Env, owner: Principal) -> Vec<VaultView> {
+    match env
+        .pic
+        .query_call(env.backend, owner, "get_vaults", encode_one(Some(owner)).unwrap())
+        .unwrap()
+    {
+        WasmResult::Reply(b) => decode_one(&b).unwrap(),
+        WasmResult::Reject(m) => panic!("{m}"),
+    }
+}
+
 fn pending_count(env: &Env) -> usize {
     match env
         .pic
@@ -320,21 +355,38 @@ fn pending_count(env: &Env) -> usize {
 
 #[test]
 fn confirm_xlm_deposit_success_replay_and_disagreement() {
+    // Same synthetic key the backend uses for native XLM
+    // (`rumi_protocol_backend::state::xlm_collateral_principal()`).
+    let xlm = Principal::from_slice(b"rumi-xlm-native");
+
     // (b) provider disagreement: no vault, pending row stays.
     let env = boot();
     assert!(confirm(&env, Scenario::Disagree).is_err(), "disagreement must fail");
     assert_eq!(vault_count(&env), 0);
+    assert!(vaults_of(&env, developer()).is_empty(), "no vault for owner after disagreement");
     assert_eq!(pending_count(&env), 1);
 
     // (a) success on the same canister after providers agree again.
     // 100 XLM balance - 1 XLM minimum (2 x 0.5 base reserve) - 10_000 fee budget.
     let credited = confirm(&env, Scenario::Success).expect("agreeing providers must credit");
-    assert_eq!(credited, 1_000_000_000 - 10_000_000 - 10_000);
+    assert_eq!(credited, 989_990_000);
     assert_eq!(vault_count(&env), 1);
     assert_eq!(pending_count(&env), 0, "pending row consumed");
+    let vaults = vaults_of(&env, developer());
+    assert_eq!(vaults.len(), 1);
+    assert_eq!(vaults[0].vault_id, env.vault_id);
+    assert_eq!(vaults[0].owner, developer());
+    assert_eq!(vaults[0].collateral_type, xlm);
+    assert_eq!(vaults[0].collateral_amount, 989_990_000);
+    assert_eq!(vaults[0].borrowed_icusd_amount, 0);
 
-    // (c) replay of the same hash: error, still exactly one vault.
+    // (c) replay of the same hash: error, still exactly one vault, unchanged.
     assert!(confirm(&env, Scenario::Success).is_err(), "replay must fail");
     assert_eq!(vault_count(&env), 1);
+    let after = vaults_of(&env, developer());
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].owner, developer());
+    assert_eq!(after[0].collateral_type, xlm);
+    assert_eq!(after[0].collateral_amount, 989_990_000);
+    assert_eq!(after[0].borrowed_icusd_amount, 0);
 }
-

@@ -172,14 +172,36 @@ pub fn validate_root_network(body: &[u8], network: Network) -> Result<(), ()> {
 }
 
 fn is_https_origin(value: &str) -> bool {
-    let Some(authority) = value.strip_prefix("https://") else {
+    let Some(rest) = value.strip_prefix("https://") else {
         return false;
     };
+    let (authority, path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
     !authority.is_empty()
-        && !authority.contains('/')
-        && !authority.contains('?')
-        && !authority.contains('#')
-        && !authority.contains('@')
+        && !authority.contains(|c: char| matches!(c, '?' | '#' | '@'))
+        && is_valid_base_path(path)
+}
+
+/// Optional fixed path prefix of a provider base URL (e.g. a gateway's
+/// `/http/stellar_testnet_horizon`). Empty, or `/seg(/seg)*` with no trailing
+/// slash, no empty/`.`/`..` segments, and only unreserved characters.
+pub(super) fn is_valid_base_path(path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    let Some(segments) = path.strip_prefix('/') else {
+        return false;
+    };
+    segments.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+    })
 }
 
 /// Request the ledger at the account body's last-modified ledger. This is a
@@ -568,7 +590,29 @@ mod tests {
         assert!(
             transaction_operations_request_at("https://configured.example/", hash, 200).is_none()
         );
-        assert!(transaction_operations_request_at("https://bad.example/path", hash, 200).is_none());
+        // A fixed path prefix is a valid base (gateway-style providers).
+        let prefixed = transaction_operations_request_at(
+            "https://rpc.ankr.com/http/stellar_testnet_horizon",
+            hash,
+            OPERATIONS_PAGE_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(
+            prefixed.url,
+            format!(
+                "https://rpc.ankr.com/http/stellar_testnet_horizon/transactions/{hash}/operations?limit=200&order=asc"
+            )
+        );
+        for bad in [
+            "https://bad.example/path/",
+            "https://bad.example/a//b",
+            "https://bad.example/a/../b",
+            "https://bad.example/path?x=1",
+            "https://bad.example/path#f",
+            "https://u@bad.example/path",
+        ] {
+            assert!(transaction_operations_request_at(bad, hash, 200).is_none(), "{bad}");
+        }
         assert!(
             transaction_operations_request_at("https://configured.example", "bad", 200).is_none()
         );

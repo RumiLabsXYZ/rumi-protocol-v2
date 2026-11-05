@@ -1,8 +1,7 @@
 //! Dormant, caller-configured Horizon provider set for read-only XLM evidence.
 //!
-//! Nothing in the canister API invokes this module. Provider identity and
-//! origin configuration must be supplied explicitly; no vendor URLs or
-//! credentials are embedded here.
+//! Provider identity and origin configuration are supplied by callers or the
+//! compiled-in public-testnet table below; no credentials are embedded.
 
 use super::{
     codec::Network,
@@ -133,20 +132,18 @@ impl HorizonProviderConfig {
 }
 
 /// Compiled-in public testnet Horizon origins (no State field, like XRP's
-/// `TESTNET_READ_URLS`). Only the SDF endpoint has in-repo evidence
-/// (docs/coordination/native-xlm-testnet-horizon-read-2026-10-29.md). Remaining
-/// slots stay `None` (fail closed) in production builds until two further
-/// independent providers are reviewed; duplicates would fail `validate`.
+/// `TESTNET_READ_URLS`), identical in every build. Three independent keyless
+/// operators, read-only verified 2026-11-04 (root, ledgers, accounts,
+/// transactions, operations; passphrase "Test SDF Network ; September 2015").
+/// Tatum's anonymous tier is rate-limited (5 req/min) so it is usually
+/// throttled; it keeps the 3-slot / 2-matching quorum rule intact.
 const TESTNET_PROVIDERS: [Option<(&str, &str)>; 3] = [
     Some(("sdf-testnet", "https://horizon-testnet.stellar.org")),
-    #[cfg(feature = "test_endpoints")]
-    Some(("mock-testnet-b", "https://horizon-mock-b.test")),
-    #[cfg(not(feature = "test_endpoints"))]
-    None,
-    #[cfg(feature = "test_endpoints")]
-    Some(("mock-testnet-c", "https://horizon-mock-c.test")),
-    #[cfg(not(feature = "test_endpoints"))]
-    None,
+    Some((
+        "ankr-testnet",
+        "https://rpc.ankr.com/http/stellar_testnet_horizon",
+    )),
+    Some(("tatum-testnet", "https://stellar-testnet.gateway.tatum.io")),
 ];
 
 /// Pubnet has no reviewed in-repo provider set yet: always unconfigured.
@@ -169,9 +166,18 @@ pub fn compiled_in_config(network: Network) -> HorizonProviderConfig {
 }
 
 fn canonical_https_origin(value: &str) -> Option<String> {
-    let authority = value.strip_prefix("https://")?;
+    let rest = value.strip_prefix("https://")?;
+    // Optional fixed path prefix (e.g. `/http/stellar_testnet_horizon`) is
+    // validated but excluded from the canonical origin, so duplicate detection
+    // is by host: two slots on one host are never "independent".
+    let (authority, path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    if !horizon_rpc::is_valid_base_path(path) {
+        return None;
+    }
     if authority.is_empty()
-        || authority.contains('/')
         || authority.contains('?')
         || authority.contains('#')
         || authority.contains('@')
@@ -569,7 +575,9 @@ mod tests {
     fn rejects_non_https_paths_and_credentials() {
         for invalid in [
             "http://one.example",
-            "https://one.example/path",
+            "https://one.example/path/",
+            "https://one.example/a/../b",
+            "https://one.example/path?x=1",
             "https://user@one.example",
         ] {
             let config = config([
@@ -693,19 +701,61 @@ mod compiled_config_tests {
     use super::*;
 
     #[test]
-    fn testnet_config_is_distinct_and_includes_sdf() {
+    fn testnet_config_is_three_real_distinct_providers_in_every_build() {
         let cfg = compiled_in_config(Network::Test);
+        let v = cfg.validate().expect("compiled testnet config validates");
+        assert_eq!(v[0].identity, "sdf-testnet");
+        assert_eq!(v[0].base_url, "https://horizon-testnet.stellar.org");
+        assert_eq!(v[1].identity, "ankr-testnet");
+        assert_eq!(v[1].base_url, "https://rpc.ankr.com/http/stellar_testnet_horizon");
+        assert_eq!(v[2].identity, "tatum-testnet");
+        assert_eq!(v[2].base_url, "https://stellar-testnet.gateway.tatum.io");
+        let hosts: Vec<_> = v.iter().map(|p| canonical_https_origin(&p.base_url).unwrap()).collect();
+        assert_eq!(hosts[0], "https://horizon-testnet.stellar.org");
+        assert_eq!(hosts[1], "https://rpc.ankr.com");
+        assert_eq!(hosts[2], "https://stellar-testnet.gateway.tatum.io");
+        assert!(!v.iter().any(|p| p.base_url.contains(".test")));
+    }
+
+    #[test]
+    fn ankr_path_prefix_requests_have_exact_urls() {
+        let ankr = compiled_in_config(Network::Test).slots[1].clone().unwrap();
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let account_id = "GAYOLLLUIZE4DZMBB2ZBKGBUBZLIOYU6XFLW37GBP2VZD3ABNXCW4BVA";
+        let base = "https://rpc.ankr.com/http/stellar_testnet_horizon";
+        assert_eq!(horizon_rpc::root_request(&ankr.base_url).unwrap().url, base);
         assert_eq!(
-            cfg.slots[0].as_ref().unwrap().base_url,
-            "https://horizon-testnet.stellar.org"
+            horizon_rpc::latest_ledger_reserve_request(&ankr.base_url).unwrap().url,
+            format!("{base}/ledgers?order=desc&limit=1")
         );
-        if cfg!(feature = "test_endpoints") {
-            let v = cfg.validate().expect("test-build config validates");
-            assert_ne!(v[0].identity, v[1].identity);
-            assert_ne!(v[1].base_url, v[2].base_url);
-        } else {
-            assert_eq!(cfg.validate(), Err(ProviderConfigError::MissingProvider(1)));
-        }
+        assert_eq!(
+            account_request_for_provider(&ankr, account_id).unwrap().url,
+            format!("{base}/accounts/{account_id}")
+        );
+        assert_eq!(
+            transaction_request_for_provider(&ankr, hash).unwrap().url,
+            format!("{base}/transactions/{hash}")
+        );
+        assert_eq!(
+            horizon_rpc::transaction_status_request_at(&ankr.base_url, hash).unwrap().url,
+            format!("{base}/transactions/{hash}")
+        );
+        assert_eq!(
+            horizon_rpc::transaction_operations_request_at(&ankr.base_url, hash, 200).unwrap().url,
+            format!("{base}/transactions/{hash}/operations?limit=200&order=asc")
+        );
+    }
+
+    #[test]
+    fn same_host_with_different_paths_is_a_duplicate_origin() {
+        let cfg = HorizonProviderConfig {
+            slots: [
+                Some(HorizonProvider { identity: "a".into(), base_url: "https://h.example/x".into() }),
+                Some(HorizonProvider { identity: "b".into(), base_url: "https://h.example/y".into() }),
+                Some(HorizonProvider { identity: "c".into(), base_url: "https://i.example".into() }),
+            ],
+        };
+        assert_eq!(cfg.validate(), Err(ProviderConfigError::DuplicateOrigin(1)));
     }
 
     #[test]
