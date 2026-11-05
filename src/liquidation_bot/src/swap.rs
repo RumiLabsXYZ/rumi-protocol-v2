@@ -434,6 +434,49 @@ pub async fn transfer_ckusdc_to_backend(
     }
 }
 
+/// Verify the exact native ICP pool input receipt pinned by the vault-158
+/// recovery. This uses the ICP ledger's official `query_blocks` path and the
+/// repository's native block decoder, including a single advertised archive
+/// callback when needed.
+pub async fn verify_vault158_swap_input_receipt(
+    ledger: Principal,
+    sender: Principal,
+    pool: Principal,
+    block_index: u64,
+    amount_e8s: u64,
+    fee_e8s: u64,
+    memo: &[u8],
+    created_at_time: u64,
+) -> Result<(), String> {
+    let request = native_icp_blocks::GetBlocksArgs { start: block_index, length: 1 };
+    let request_bytes = candid::Encode!(&request)
+        .map_err(|error| format!("could not encode ICP query_blocks request: {error}"))?;
+    let response_bytes = ic_cdk::api::call::call_raw(ledger, "query_blocks", request_bytes, 0)
+        .await
+        .map_err(|(code, msg)| format!("ICP query_blocks failed: {code:?} {msg}"))?;
+    let response = native_icp_blocks::decode_query_blocks(&response_bytes)?;
+    let block = match native_icp_blocks::select_block_source(response, block_index)? {
+        native_icp_blocks::BlockSource::Direct(block) => block,
+        native_icp_blocks::BlockSource::Archive { canister_id, method } => {
+            let args = candid::Encode!(&request)
+                .map_err(|error| format!("could not encode ICP archive request: {error}"))?;
+            let bytes = ic_cdk::api::call::call_raw(canister_id, &method, args, 0)
+                .await
+                .map_err(|(code, msg)| format!("ICP archive callback failed: {code:?} {msg}"))?;
+            let mut blocks = native_icp_blocks::decode_archive_result(&bytes)?
+                .map_err(|error| format!("ICP archive rejected the exact request: {error:?}"))?
+                .blocks;
+            if blocks.len() != 1 {
+                return Err("ICP archive did not return exactly one block".into());
+            }
+            blocks.remove(0)
+        }
+    };
+    native_icp_blocks::verify_swap_input_transfer(
+        &block, sender, pool, amount_e8s, fee_e8s, memo, created_at_time,
+    )
+}
+
 /// Prepare and persist this exact ICRC tuple before dispatch. `gross` includes
 /// the fee; the recorded amount is what the treasury account receives.
 pub fn prepare_icp_treasury_transfer(
@@ -473,7 +516,7 @@ pub(crate) fn icp_treasury_transfer_amount(gross_e8s: u64, fee_e8s: u64) -> Resu
         .ok_or_else(|| format!("ICP treasury bonus {} e8s does not exceed fee {} e8s", gross_e8s, fee_e8s))
 }
 
-fn icp_treasury_memo(record_id: u64, claim_generation: u64) -> Vec<u8> {
+pub(crate) fn icp_treasury_memo(record_id: u64, claim_generation: u64) -> Vec<u8> {
     let mut memo = b"RUMI:TB1:".to_vec();
     memo.extend_from_slice(&record_id.to_be_bytes());
     memo.extend_from_slice(&claim_generation.to_be_bytes());

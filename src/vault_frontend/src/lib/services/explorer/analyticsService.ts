@@ -185,7 +185,10 @@ export async function fetchSwapSeries(limit = 365): Promise<SwapSeriesResponse['
 	}
 }
 
-export async function fetchFeeSeries(limit = 365): Promise<FeeSeriesResponse['rows']> {
+export async function fetchFeeSeries(
+	limit = 365,
+	options: { throwOnError?: boolean } = {},
+): Promise<FeeSeriesResponse['rows']> {
 	const key = `analytics:fee:${limit}`;
 	const cached = getCached<FeeSeriesResponse['rows']>(key, TTL.SERIES);
 	if (cached) return cached;
@@ -195,6 +198,7 @@ export async function fetchFeeSeries(limit = 365): Promise<FeeSeriesResponse['ro
 		return setCache(key, result.rows);
 	} catch (err) {
 		console.error('[analyticsService] fetchFeeSeries failed:', err);
+		if (options.throwOnError) throw err;
 		return [];
 	}
 }

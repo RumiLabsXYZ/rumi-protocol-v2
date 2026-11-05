@@ -1,6 +1,28 @@
 {
   "items": [
     {
+      "id": "vault158-recovery",
+      "title": "Joint top: vault 158 liquidation recovery",
+      "status": "blocked",
+      "blockedReason": "The installed bot cannot expose its current treasury recipient. Recovery stays held until the new query is installed through a separately authorized upgrade and read back.",
+      "nextAction": "Obtain separate upgrade-only authority for the exact candidate pinned in PR #618. After installation, read back the configured recipient and stop; recovery preparation and execution require separate authority.",
+      "cardIds": [
+        "SEC-06"
+      ]
+    },
+    {
+      "id": "cksol-icp-processing",
+      "title": "Joint top: ckSOL processing paid in ICP",
+      "status": "blocked",
+      "blockedReason": "Direct running upgrades can trap callbacks; the tested stop-and-drain wrapper cannot enforce other deploy paths.",
+      "nextAction": "Keep the reserve off and decide the narrow source and release disposition for PR #610 using the tested stop-and-drain mitigation. No production install or reserve funding is authorized.",
+      "cardIds": [
+        "CKICP-01",
+        "CKICP-02",
+        "CKICP-03"
+      ]
+    },
+    {
       "id": "sp-live-recovery",
       "title": "Stability Pool live recovery",
       "status": "in_progress",
@@ -8,6 +30,16 @@
       "nextAction": "Verify current installed state, interest receipts, and any remaining holds before changing release status.",
       "cardIds": [
         "SEC-01"
+      ]
+    },
+    {
+      "id": "vault51-nicp-recovery",
+      "title": "Vault 51 nICP recovery",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Review green PR #613 and preserve the separate authorization boundary for owner repayment, nICP settlement, and ICP withdrawal.",
+      "cardIds": [
+        "SEC-08"
       ]
     },
     {
@@ -42,23 +74,11 @@
       ]
     },
     {
-      "id": "cksol-icp-processing",
-      "title": "ckSOL processing with ICP escrow",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Check required hosted Stability Pool workflow run 41330323415 and the follow-up run after the PR head changes; record exact results and do not claim CI green before evidence. Keep reserve zero and lifecycle/canary deferred before client money.",
-      "cardIds": [
-        "CKICP-01",
-        "CKICP-02",
-        "CKICP-03"
-      ]
-    },
-    {
       "id": "xrp-deposit-tag-guidance",
       "title": "Incoming XRP deposit-tag guidance",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Track draft PR #607 through review, merge, and deployment evidence; no live-wallet action is authorized.",
+      "nextAction": "Deployed and verified. Customer-specific exchange behavior and any existing funds require separate identifiers.",
       "cardIds": [
         "XRPTAG-01",
         "XRPTAG-02"

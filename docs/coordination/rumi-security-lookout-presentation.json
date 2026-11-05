@@ -1,6 +1,6 @@
 {
-  "summary": "Season 1 Points finalization is verified on mainnet: final-period compensation applied, prior entries and receipts preserved, replay added zero, and both timers are off. Stability Pool recovery and broader finding reconciliation remain open. ckSOL PR #610 has 116 frontend and 37 backend focused tests, generated Candid checks, and both scoped review rechecks passing on the merged tree; hosted Stability Pool run 41330323415 is still building Wasms, and a new run follows the PR head change. XRP PR #607 remains in review. Neither new flow is deployed; the ckSOL reserve remains zero.",
-  "plainSummary": "Season 1 rewards are finalized, including missed days, and repeating the operation added no extra points. The wider security review and Stability Pool checks remain open; ckSOL PR #610 and XRP PR #607 are under review while a required ckSOL check runs. Neither change is installed, and the ckSOL reserve remains off.",
+  "summary": "Season 1 Points finalization is verified; Stability Pool recovery and broader finding reconciliation remain open. Vault 158 recovery source is merged and PR #618 pins the upgrade-only candidate and recipient readback. ckSOL PR #610 is draft: direct running upgrades can trap callbacks, so stop/drain is the practical mitigation; other deploy paths remain unprotected and the reserve stays off. XRP deposit guidance is deployed.",
+  "plainSummary": "Season 1 rewards are finalized and the XRP deposit guidance is live. Vault 158 recovery software and its plan are ready, but the live bot remains unchanged. ckSOL stays in draft review; stop/drain tests passed locally, other upgrade paths still need protection, and its reserve remains off.",
   "glossary": [
     {
       "term": "Stability Pool",
@@ -21,6 +21,16 @@
       "term": "archive",
       "definition": "An older ledger block range served from a ledger archive canister.",
       "cardId": "SEC-04"
+    },
+    {
+      "term": "treasury recipient",
+      "definition": "The configured destination that must be read back and confirmed before a recovery payment is allowed.",
+      "cardId": "SEC-06"
+    },
+    {
+      "term": "reserve",
+      "definition": "A limited pool of processing funds. The ckSOL reserve is currently off and cannot spend.",
+      "cardId": "CKICP-01"
     }
   ]
 }
