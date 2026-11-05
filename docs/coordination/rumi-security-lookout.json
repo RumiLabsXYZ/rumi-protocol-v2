@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). PR #624 merged normally at 6847982b without paid CI or an admin bypass. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
+      "evidenceText": "PR #624 validly merged at 6847982b. Focused local backend 21/21, generator 1/1, frontend 9/9 and live Candid compatibility passed. Both path-triggered hosted workflows were intentionally unrun at e9466ecb ([skip ci], empty rollup); hosted CI is not claimed green. Full policy audit found no independent mandate: no new CI/source-merge gate. Hosted checks are deferred evidence only if later release procedure selects them. Artifact held because old build excludes integrated source; coordinate rebuild separately. No competing hosted load; reserve off.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",

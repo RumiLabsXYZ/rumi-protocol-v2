@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Focused source composition checks pass; production artifact still excludes the recovery composition. No production build slot or deployment/financial authority is active.",
-      "nextAction": "PR #624 merged at 6847982b. Coordinate one source-matched artifact build from this composed main and refresh the upgrade packet. Preserve accepted stop/drain and exact archive-before-replace snapshot policy; reserve stays off. No live deployment or financial authority.",
+      "blockedReason": "Source validly merged and focused local checks pass. Production artifact was built before recovery composition and must be rebuilt from integrated source in a separately coordinated slot. Hosted workflows unrun, not a new mandatory gate.",
+      "nextAction": "Coordinate a source-matched rebuild from merged 6847982b and refresh the release packet. Record hosted workflows as unrun; defer exact-head hosted evidence unless the later release procedure selects it. Do not start competing hosted load while Dorian occupies the slot. Keep all live-action holds and reserve off.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",

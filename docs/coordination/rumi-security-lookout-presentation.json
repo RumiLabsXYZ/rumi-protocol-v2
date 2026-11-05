@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 remains separate. PR #613 recovery source and canonical declarations are integrated with ckSOL; live Candid compatibility passes. Focused backend 21/21, generator 1/1 and frontend 9/9 pass. E0559 was stale shared 3pool output; source and fixtures were unchanged. Native slot closed under cap. No production artifact includes this composition yet. Snapshot sequence follows accepted archive-before-replace policy. Reserve off; no live actions.",
-  "plainSummary": "The source preserves the deployed recovery behavior and passes the focused checks. A fresh release build is still needed; no deployment or reserve activation occurred.",
+  "summary": "Vault 158 remains separate. PR #624 source validly merged; focused local checks and live Candid compatibility passed. Both path-triggered hosted workflows were intentionally unrun, so hosted CI is not green. Policy audit found no independent mandate or new source-merge gate. Later release procedure may select hosted checks as deferred evidence. Existing artifact predates the integrated source and needs a separately coordinated rebuild. No new hosted load or deployment; reserve off.",
+  "plainSummary": "Source is merged and local checks passed. Hosted workflows intentionally did not run; they are not a new merge requirement. The old artifact lacks the integrated source, so a new build still needs coordination. Reserve stays off.",
   "glossary": [
     {
       "term": "Stability Pool",
