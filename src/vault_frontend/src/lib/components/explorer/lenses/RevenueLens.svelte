@@ -17,6 +17,7 @@
   import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
 
   let feeRows: any[] = $state([]);
+  let feeSeriesState = $state<'loading' | 'success' | 'error'>('loading');
   let apys: any = $state(null);
   let fees24hData = $state<FeeBreakdown | null>(null);
   let fees90dData = $state<FeeBreakdown | null>(null);
@@ -39,7 +40,7 @@
       // 90d totals previously showed only swap fees. Swap fees stay on
       // analytics (`evt_swaps` was always populated correctly).
       const [feeR, apR, f24R, f90R, spR, psR, poolR, tpR, b24R, b90R] = await Promise.allSettled([
-        fetchFeeSeries(90),
+        fetchFeeSeries(90, { throwOnError: true }),
         fetchApys(),
         fetchFeeBreakdownWindow(1),
         fetchFeeBreakdownWindow(90),
@@ -50,7 +51,12 @@
         fetchProtocolFeeTotalsFromBackend(MS_PER_DAY),
         fetchProtocolFeeTotalsFromBackend(90 * MS_PER_DAY),
       ]);
-      if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
+      if (feeR.status === 'fulfilled') {
+        feeRows = feeR.value ?? [];
+        feeSeriesState = 'success';
+      } else {
+        feeSeriesState = 'error';
+      }
       if (apR.status === 'fulfilled') apys = apR.value;
       if (f24R.status === 'fulfilled') fees24hData = f24R.value;
       if (f90R.status === 'fulfilled') fees90dData = f90R.value;
@@ -69,15 +75,19 @@
 
   // Borrow / redemption: backend event log (authoritative). Swap: analytics
   // (`evt_swaps` was always populated correctly by the 3pool / AMM tailers).
-  const totalBorrow = $derived(backendFees90d?.borrowIcusd ?? fees90dData?.borrowIcusd ?? 0);
-  const totalRedemption = $derived(backendFees90d?.redemptionIcusd ?? fees90dData?.redemptionIcusd ?? 0);
-  const totalSwap = $derived(fees90dData?.swapIcusd ?? 0);
-  const totalFees = $derived(totalBorrow + totalRedemption + totalSwap);
+  const totalBorrow = $derived(backendFees90d?.borrowIcusd ?? null);
+  const totalRedemption = $derived(backendFees90d?.redemptionIcusd ?? null);
+  const totalSwap = $derived(fees90dData?.swapIcusd ?? null);
+  const totalFees = $derived(
+    totalBorrow != null && totalRedemption != null && totalSwap != null
+      ? totalBorrow + totalRedemption + totalSwap
+      : null
+  );
 
   const fees24h = $derived(
-    (backendFees24h?.borrowIcusd ?? fees24hData?.borrowIcusd ?? 0)
-      + (backendFees24h?.redemptionIcusd ?? fees24hData?.redemptionIcusd ?? 0)
-      + (fees24hData?.swapIcusd ?? 0)
+    backendFees24h != null && fees24hData != null
+      ? backendFees24h.borrowIcusd + backendFees24h.redemptionIcusd + fees24hData.swapIcusd
+      : null
   );
 
   // Live formulas first; analytics 7d rolling as the fallback (the rolling
@@ -98,12 +108,13 @@
   const lpApySub = $derived(liveLp != null ? 'live' : '7d');
   const spApySub = $derived(liveSp != null ? 'live' : '7d');
 
+  // The analytics borrowing/redemption fields include historical rows that
+  // predate fee capture; only the independently reliable swap series belongs
+  // in this chart.
   const feePoints = $derived(
     feeRows.map((r: any) => {
-      const b = e8sToNumber(r.borrowing_fees_e8s?.[0] ?? r.borrowing_fees_e8s ?? 0n);
-      const rd = e8sToNumber(r.redemption_fees_e8s?.[0] ?? r.redemption_fees_e8s ?? 0n);
       const s = e8sToNumber(r.swap_fees_e8s ?? 0n);
-      return { t: Number(r.timestamp_ns) / 1_000_000, v: b + rd + s };
+      return { t: Number(r.timestamp_ns) / 1_000_000, v: s };
     })
   );
 
@@ -126,8 +137,8 @@
   });
 
   const healthMetrics = $derived.by(() => [
-    { label: 'Fees (90d)', value: `$${formatCompact(totalFees)}` },
-    { label: '24h fees', value: `$${formatCompact(fees24h)}` },
+    { label: 'Fees (90d)', value: totalFees == null ? 'Unavailable' : `$${formatCompact(totalFees)}` },
+    { label: '24h fees', value: fees24h == null ? 'Unavailable' : `$${formatCompact(fees24h)}` },
     { label: '3Pool LP APY', value: lpApy != null ? `${Number(lpApy).toFixed(2)}%` : '--', sub: lpApySub },
     { label: 'SP APY', value: spApy != null ? `${Number(spApy).toFixed(2)}%` : '--', sub: spApySub },
     {
@@ -153,17 +164,24 @@
 
 <LensHealthStrip title="Revenue" metrics={healthMetrics} loading={loading} />
 
-<div class="explorer-card">
-  <MiniAreaChart
-    points={feePoints}
-    label="Daily protocol fees (90d)"
-    color={CHART_COLORS.action}
-    valueFormat={(v) => `$${formatCompact(v)}`}
-    headlineValue={feePoints.reduce((s, p) => s + p.v, 0)}
-    height={180}
-    kind="bar"
-    loading={loading}
-  />
+<div class="explorer-card" role="region" aria-label="Daily swap fees over 90 days">
+  {#if feeSeriesState === 'loading'}
+    <div class="flex items-center justify-center py-8">
+      <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
+    </div>
+  {:else if feeSeriesState === 'error'}
+    <p class="text-sm text-gray-500 py-4">Swap fee history unavailable.</p>
+  {:else}
+    <MiniAreaChart
+      points={feePoints}
+      label="Daily swap fees (90d)"
+      color={CHART_COLORS.action}
+      valueFormat={(v) => `$${formatCompact(v)}`}
+      headlineValue={feePoints.reduce((s, p) => s + p.v, 0)}
+      height={180}
+      kind="bar"
+    />
+  {/if}
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -179,15 +197,15 @@
         { label: 'Redemption', value: totalRedemption, color: CHART_COLORS.purple },
         { label: 'Swap', value: totalSwap, color: CHART_COLORS.action },
       ]}
-      {@const max = Math.max(1, totalBorrow, totalRedemption, totalSwap)}
+      {@const max = Math.max(1, ...items.map((item) => item.value ?? 0))}
       <div class="space-y-2">
         {#each items as it}
           <div class="flex items-center gap-3 text-sm">
             <span class="w-24 text-gray-400">{it.label}</span>
             <div class="flex-1 h-4 rounded-sm overflow-hidden" style="background: var(--rumi-bg-surface2);">
-              <div class="h-full rounded-sm" style="width: {(it.value / max) * 100}%; background: {it.color}; opacity: 0.7;"></div>
+              <div class="h-full rounded-sm" style="width: {((it.value ?? 0) / max) * 100}%; background: {it.color}; opacity: 0.7;"></div>
             </div>
-            <span class="w-20 text-right tabular-nums text-gray-300">${formatCompact(it.value)}</span>
+            <span class="w-20 text-right tabular-nums text-gray-300">{it.value == null ? 'Unavailable' : `$${formatCompact(it.value)}`}</span>
           </div>
         {/each}
       </div>
@@ -225,9 +243,9 @@
 
 <TreasuryHoldingsCard />
 
-<!-- Revenue-bearing = redemptions + liquidations + swaps (everything the protocol charges a fee on). -->
+<!-- Revenue-bearing = borrow fees + redemptions + liquidations + swaps. -->
 <LensActivityPanel
   scope="revenue"
   title="Revenue-bearing activity"
-  viewAllHref="/explorer/activity?type=redemption,liquidation,swap"
+  viewAllHref="/explorer/activity?type=borrow,redemption,liquidation,swap"
 />
