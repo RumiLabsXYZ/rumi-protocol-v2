@@ -16,7 +16,7 @@
       "title": "XRPL deposits, borrow and repay (PR #586)",
       "status": "ready",
       "blockedReason": "",
-      "nextAction": "Background pace. Next milestone: Miles' final review of PR #586 at 549d59f6; the original XRPL implementer owns any fixes in its own worktree. After that, merge and each mainnet step (issuer setup, activation) need separate authorization. The BB-55 to BB-57 follow-ups are separate and are not the full lifecycle.",
+      "nextAction": "Background pace: final source review of PR #586 after confirming its review candidate (latest observed handoff 0b91be97). Keep merge7 partial results unbound; PR #625 fixture fix does not prove that historical batch green. No rerun or broad batch requested. Original implementer owns any fixes; merge and live activation remain separately held.",
       "cardIds": [
         "BB-63"
       ]

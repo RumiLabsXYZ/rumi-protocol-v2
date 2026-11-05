@@ -3372,6 +3372,24 @@ publication, merge and deploy. Workers W28, W29 and W23 on standby.
 
 ## Held live actions
 
+### Supervisory publication checkpoint (Miles, 2026-11-04)
+
+At Merritt's explicit request, Miles closed the material XRPL board-sync gap using the existing
+`rumi-base-bridge` manifest and scoped publisher identity, with no access grant or new publisher.
+The canonical BB-63 evidence, both summaries and XRPL next action now retain the merge7 partial
+results, missing tested-commit binding and overall exit receipt, and Tamsin's reported PR #625
+fixture-only fix. Original XRPL source was not integrated or changed.
+
+Published 70 cards at backend revision **136**, source revision
+`d635c7dc62879ce5755742086043ea40bf78ec4f9f84d46f43b95a75d9ca9f6c`.
+Publish exited 0. Immediate scoped dry-run exited 0 and reported board, presentation, plain
+summary, priorities and repository association all unchanged. No test/build/worker was started.
+The next accepted actionable milestone is allocated final XRPL source review after confirming
+the candidate (latest observed handoff `0b91be97`); no review began in this checkpoint. Base
+browser acceptance still needs Rob's Touch ID/Rabby. All exact custody, probe, merge, deployment,
+activation, financial and denied follow-up-publication holds remain. Nora remains normal
+execution coordinator and publisher. These coordination edits remain local and unpushed.
+
 Authorized, executed only by Miles from the deployment packet: the isolated Base Sepolia test,
 meaning steps A to E (a new synthetic test ledger and a dedicated bridge canister on ICP, their
 installation and configuration, deriving the bridge's public Base addresses) and steps F to J on

@@ -30,7 +30,7 @@ this list and the JSON. Selection rule: `base-icusd-bridge-operating-rules.md`, 
 | Rank | Item | Status | Cards | Blocker and what clears it | Next action |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `browser-round-trip`: Finish real-wallet browser acceptance | blocked | BB-26, BB-27 | The renewed staging identity sign-in awaits Rob's Touch ID, and Rabby unlock and connection are still pending. Cleared when Rob completes sign-in, unlocks Rabby and approves the staging connection. | After sign-in and wallet approval: connect the Base wallet, then test transaction consent and rejection, the synthetic browser round trip and reload recovery. Earlier real Internet Identity sign-in remains scoped proof. |
-| 2 | `xrpl-lifecycle`: XRPL deposits, borrow and repay (PR #586) | ready | BB-63 | - | Background pace. Next milestone: Miles' final review of PR #586 at 549d59f6; the original XRPL implementer owns any fixes in its own worktree. After that, merge and each mainnet step (issuer setup, activation) need separate authorization. The BB-55 to BB-57 follow-ups are separate and are not the full lifecycle. |
+| 2 | `xrpl-lifecycle`: XRPL deposits, borrow and repay (PR #586) | ready | BB-63 | - | Background pace: final source review of PR #586 after confirming its review candidate (latest observed handoff 0b91be97). Keep merge7 partial results unbound; PR #625 fixture fix does not prove that historical batch green. No rerun or broad batch requested. Original implementer owns any fixes; merge and live activation remain separately held. |
 | 3 | `integrated-plan`: Integrated implementation plan and local smoke | done | BB-40 | - | - |
 | 4 | `evm-implementation`: EVM family implementation: Ethereum, Arbitrum, Robinhood Chain, HyperEVM, Monad | blocked | BB-42, BB-43, BB-44, BB-45, BB-46, BB-62 | EVM source cards BB-42 to BB-45 are accepted. BB-46 needs public activation evidence: a separate authorization to run read-only probes (Robinhood finalized tag and keyless providers, Monad fast-tag consensus, HyperEVM archive providers). Optional probe tooling is deferred. | BB-62 done (the EVM uncertain-request repair, f4ae611c, pushed in 2bb8e816). When BB-46 probes are authorized: run them read-only and record the evidence; a passing Robinhood record flips its row's head rule and install gate. |
 | 5 | `shared-reporting-frontend`: Shared aggregate reporting, frontend destination selection and profile upkeep | done | BB-58, BB-59, BB-60 | - | - |
@@ -69,6 +69,34 @@ belong to two items: BB-22 finishes the implementation reviews and is review evi
 handoff, and BB-27 is the browser test that item 10 (`acceptance-handoff`) also waits on.
 
 ## Ownership and allocation
+
+### BB-63 supervisory evidence reconciliation (2026-11-04, Miles)
+
+The original owner's saved `merge7-verify` log reports: backend library 1551 passed / 1 ignored;
+binary 85 passed; fixture 311 passed; XRPL PocketIC 17/17 and native XRP PocketIC 4/4, none gated;
+production artifact gate exit 0, code section 9,822,068 bytes. Frontend reports 1505 passed / 1 failed:
+`explorerService.revenue.spec.ts > authoritative explorer fee totals > rejects a later page failure without caching a zero or partial total`.
+Frontend build asset verification passed. No overall native exit receipt is saved in that log;
+this is partial suite evidence, not an all-green batch or final source acceptance.
+
+Current original worktree and handoff identify `0b91be97f9fef5ad2bf43e6c9d9bd519a8784b46`.
+The saved log has no immutable tested-commit binding, so its results are not asserted to prove that
+head. The earlier card pin `549d59f6` is historical. Merritt separately established PG3457 closure;
+process closure does not prove test success. The original owner retains the existing attempt.
+
+Before any rerun, compare the failing case with merged PR #620: its merge commit is already an
+ancestor of the current XRPL head, and the current test and `explorerService.ts` are byte-identical
+to PR #620 head `984813f14a6dad8c0c3663fbc55805dc5545568e`. This alone neither explains the
+failure nor proves it fixed. Next: Explorer owner evidence reconciliation, then final XRPL source
+review at background allocation. No new broad batch or worker. This supervisory annotation is included in the scoped publication checkpoint; readback evidence
+is recorded in the existing handoff. Nora remains the normal scoped publisher.
+
+Follow-up reported by Merritt from Tamsin: PR #625 merged as `e1f9158f`, with focused 5/5
+and required exact-head CI passing; Explorer Lookout revision 6 verified. The fix freezes
+`Date.now` in the fixture only, preserving production semantics and assertions. Reference this
+resolution at the next normal publication. It does not bind the historical XRPL log to a commit,
+recover its missing overall exit receipt, or turn that batch all-green. No rerun, cherry-pick or
+build is requested; the original XRPL source tree is preserved.
 
 Recorded 2026-11-04 from Merritt (Rumi CTO), who verified Rob's consolidation and named-owner directions.
 
@@ -190,7 +218,7 @@ derive script maps these to Lookout columns Queue, Ready, In progress, Review, B
 | BB-55 XRPL: 15-digit wiring and cap clamps on PR #586's module | done | worker W29 (Sonnet / Sonnet 5.5) | `xrpl_icusd/mod.rs`, `state.rs`, `chains/xrp/issued_amount.rs`, XRPL frontend service | PR #586 (merged, or a stacked or rebased branch on its head for local work) | Miles accepted f887fab5 plus 868ebca8: 15-digit clamp, pending imports counted, validator wired, parser parity; reissue respects current caps; ceiling checked before any new attempt; 161 focused tests; local branch, push denied | local-test |
 | BB-56 XRPL: no-vault return to an ICP account | done | worker W29 (Sonnet / Sonnet 5.5) | `xrpl_icusd/repay.rs`, `observer.rs`, `issuance.rs`, `state.rs` | BB-55 | Miles accepted at source and focused-test level: e48dc18d, fee fence 0b73ae95, distinct interface 0a315971 and the origin movement report 8ecab197 (172 focused tests, Candid check); no live or public proof | local-test |
 | BB-57 XRPL: Candid, frontend return and opt-in cards, PocketIC end-to-end | done | worker W29 (Sonnet / Sonnet 5.5) | backend `.did`, declarations, frontend | BB-56 | Miles accepted at source and local-PocketIC level: 0a315971, dd817f27, 457e6675, 8ecab197, 91a27a45, 46cf6b34; 7 new Return PocketIC cases pass; Code section 9,707,926 bytes; artifact verified; not public-chain proof | local-integration |
-| BB-63 XRPL: deposits, borrow and repay lifecycle (PR #586) | ready | supervisor (Miles), with the original XRPL implementer (Claude) on PR #586 | PR #586, branch `codex/xrpl-icusd` in its own worktree (read only from this board) | none | Coordination card for the full lifecycle. PR #586 open and mergeable at 549d59f6, not merged or deployed, disabled by default. R10 testnet rehearsal passed 2026-10-31 with a real Xaman wallet: deposit, trust line, borrow, repay | testnet-rehearsal |
+| BB-63 XRPL: deposits, borrow and repay lifecycle (PR #586) | ready | supervisor (Miles), with the original XRPL implementer (Claude) on PR #586 | PR #586, branch `codex/xrpl-icusd` in its own worktree (read only from this board) | none | R10 testnet rehearsal recorded. Original merge7 logs: backend 1551 passed, 1 ignored; binary 85; fixture 311; XRPL PocketIC 17/17, native 4/4; artifact gate passed. Frontend 1505 passed, 1 failed; PR #625 fixture-only fix reported merged with focused 5/5 and required CI. Log has no tested-commit binding or overall exit receipt; not all-green. Latest observed handoff head 0b91be97; PG3457 closure separately reported by Merritt. | testnet-rehearsal |
 | BB-58 Shared: aggregate reporting and analytics escrow subtraction | done | worker W25 (Sonnet / Sonnet 5.5) | `src/rumi_analytics/src/timers.rs`, a read-only aggregator | BB-42 | Miles accepted EVM reporting at 10c18502 (with 15bb73dc, 78e8ae3d, 8b88a96f): analytics escrow subtraction; collector with chain-id filtering, count-once ids, instance audits; source, fixture and mock only; native readers on BB-49, 53, 57 | local-test |
 | BB-59 Shared: frontend destination selection and safe signing gate | done | worker W27 (Sonnet / Sonnet 5.5) | `src/vault_frontend/src/lib/services/baseBridge/`, `routes/bridge/` | BB-43 | Miles accepted 2191d2b6 plus 103ad82c: destination selection, synchronous signing guard in both flows, retries bound to the intent's destination, legacy Base recovery kept; 485 then 521 bridge vitest; check at baseline | local-test |
 | BB-60 Shared: profile consumption and upkeep | done | worker W27 (Sonnet / Sonnet 5.5) | `src/rumi_bridge_destinations/profiles/`, a small frontend reader | BB-59 | Miles accepted 28ba5867 (profile reader) and the profile text upkeep 875a1428, a73731a8, 6b545dd9 (W23, Haiku 5.5): 52 text and source leaves only; all 19 networks disabled; dry run clean | local-test |

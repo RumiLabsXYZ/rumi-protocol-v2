@@ -522,7 +522,7 @@
       "state": "Ready",
       "owner": "supervisor",
       "scope": "XRPL: deposits, borrow and repay lifecycle (PR #586)",
-      "evidenceText": "proof=testnet-rehearsal; Coordination card for the full lifecycle. PR #586 open and mergeable at 549d59f6, not merged or deployed, disabled by default. R10 testnet rehearsal passed 2026-10-31 with a real Xaman wallet: deposit, trust line, borrow, repay",
+      "evidenceText": "proof=testnet-rehearsal; R10 testnet rehearsal recorded. Original merge7 logs: backend 1551 passed, 1 ignored; binary 85; fixture 311; XRPL PocketIC 17/17, native 4/4; artifact gate passed. Frontend 1505 passed, 1 failed [truncated]",
       "evidenceLinks": []
     },
     {

@@ -1,5 +1,5 @@
 {
-  "summary": "Multichain bridge and XRPL lifecycle, supervised by Miles at background pace. Done at source and local-test scope: EVM BB-42 to BB-45 and BB-62, reporting and frontend BB-58 to BB-60, Solana BB-47 to BB-50, Sui BB-51 to BB-54, XRPL follow-ups BB-55 to BB-57 (local branch, push held). XRPL lifecycle (PR #586, BB-63): R10 testnet rehearsal passed; awaits Miles' final review. Held: BB-27 waits on Rob, BB-46 probes, D6 and every activation. No production activation; merge and live-action holds remain.",
+  "summary": "Miles supervises the multichain bridge and XRPL lifecycle at background pace. XRPL merge7 logs show backend and PocketIC passes plus one frontend failure; PR #625 fixture-only fix is reported merged. Logs lack a tested-commit binding and overall exit receipt, so the historical batch remains partial. Next: allocated final source review. Base browser acceptance needs Rob; network probes, custody decisions, merge and activation remain held.",
   "glossary": [
     {
       "term": "proof=source",
@@ -7,7 +7,7 @@
     },
     {
       "term": "proof=local-test",
-      "definition": "Automated checks passed on a developer’s computer. This does not show a live transfer."
+      "definition": "Automated checks passed on a developer\u2019s computer. This does not show a live transfer."
     },
     {
       "term": "proof=local-integration",
@@ -57,7 +57,7 @@
     },
     {
       "term": "forge",
-      "definition": "Foundry’s command-line program; forge test runs the contract’s automated tests."
+      "definition": "Foundry\u2019s command-line program; forge test runs the contract\u2019s automated tests."
     },
     {
       "term": "CI",
@@ -78,7 +78,7 @@
     {
       "term": "burn(amount,vault_id)",
       "cardId": "BB-R1",
-      "definition": "The older token’s loan-repayment operation. It is not the new bridge’s return-transfer operation."
+      "definition": "The older token\u2019s loan-repayment operation. It is not the new bridge\u2019s return-transfer operation."
     },
     {
       "term": "RPC",
@@ -90,7 +90,7 @@
     },
     {
       "term": "nonce",
-      "definition": "An account’s transaction sequence number. Reusing the correct number helps prevent duplicate execution during replacements."
+      "definition": "An account\u2019s transaction sequence number. Reusing the correct number helps prevent duplicate execution during replacements."
     },
     {
       "term": "invariant",
@@ -110,11 +110,11 @@
     },
     {
       "term": "Candid",
-      "definition": "The description of a canister’s callable methods and data formats, used to generate matching app bindings."
+      "definition": "The description of a canister\u2019s callable methods and data formats, used to generate matching app bindings."
     },
     {
       "term": "declarations",
-      "definition": "Generated app files that describe how to call the canister’s published interface."
+      "definition": "Generated app files that describe how to call the canister\u2019s published interface."
     },
     {
       "term": "EIP-1193",
@@ -174,7 +174,7 @@
     },
     {
       "term": "reorg",
-      "definition": "A change to the chain’s previously observed block history; unsettled work must be checked again."
+      "definition": "A change to the chain\u2019s previously observed block history; unsettled work must be checked again."
     },
     {
       "term": "atomic",
@@ -182,7 +182,7 @@
     },
     {
       "term": "dedup window",
-      "definition": "The ledger’s time window for recognizing a repeated transfer request as the same request."
+      "definition": "The ledger\u2019s time window for recognizing a repeated transfer request as the same request."
     },
     {
       "term": "archive",
@@ -202,7 +202,7 @@
     },
     {
       "term": "tECDSA",
-      "definition": "Threshold ECDSA: ICP network nodes collectively sign the bridge’s Base transactions."
+      "definition": "Threshold ECDSA: ICP network nodes collectively sign the bridge\u2019s Base transactions."
     },
     {
       "term": "mocked",
@@ -215,7 +215,7 @@
     {
       "term": "C3",
       "cardId": "BB-09b",
-      "definition": "The check that observed Base token supply exactly matches the bridge’s accounting when no transfers are in flight."
+      "definition": "The check that observed Base token supply exactly matches the bridge\u2019s accounting when no transfers are in flight."
     },
     {
       "term": "C3",
@@ -224,7 +224,7 @@
     },
     {
       "term": "mint-then-burn",
-      "definition": "A tested attack scenario: extra tokens are created outside the bridge’s records, then burned to try to withdraw backing."
+      "definition": "A tested attack scenario: extra tokens are created outside the bridge\u2019s records, then burned to try to withdraw backing."
     },
     {
       "term": "un-ignored",
@@ -236,11 +236,11 @@
     },
     {
       "term": "svelte-check",
-      "definition": "The app’s Svelte and TypeScript checker. At baseline means the bridge added no new reported issues."
+      "definition": "The app\u2019s Svelte and TypeScript checker. At baseline means the bridge added no new reported issues."
     },
     {
       "term": "Base Sepolia",
-      "definition": "Base’s public test network. No bridge deployment or transfer there has been authorized or proved."
+      "definition": "Base\u2019s public test network. No bridge deployment or transfer there has been authorized or proved."
     },
     {
       "term": "HELD",
@@ -264,7 +264,7 @@
     },
     {
       "term": "Cumulative mint guard",
-      "definition": "A check comparing all tokens ever created by the Base contract with the bridge’s recorded mint activity before paying a return."
+      "definition": "A check comparing all tokens ever created by the Base contract with the bridge\u2019s recorded mint activity before paying a return."
     },
     {
       "term": "draft PR",
@@ -284,11 +284,11 @@
     },
     {
       "term": "lib",
-      "definition": "The canister library’s Rust unit-test suite, not the local end-to-end tests."
+      "definition": "The canister library\u2019s Rust unit-test suite, not the local end-to-end tests."
     },
     {
       "term": "clippy",
-      "definition": "Rust’s automated checker for common code mistakes and quality issues."
+      "definition": "Rust\u2019s automated checker for common code mistakes and quality issues."
     },
     {
       "term": "serial rerun",
@@ -316,7 +316,7 @@
     },
     {
       "term": "6208c117",
-      "definition": "Short Git version identifier for the first review round’s fixes."
+      "definition": "Short Git version identifier for the first review round\u2019s fixes."
     },
     {
       "term": "e4213be1",
@@ -345,12 +345,12 @@
     {
       "term": "de4ad399",
       "cardId": "BB-16",
-      "definition": "Prefix of the compiled executable’s SHA-256 fingerprint for the earlier third-round review candidate."
+      "definition": "Prefix of the compiled executable\u2019s SHA-256 fingerprint for the earlier third-round review candidate."
     },
     {
       "term": "c03ce4f1",
       "cardId": "BB-17",
-      "definition": "Prefix of the final reviewed compiled executable’s SHA-256 fingerprint; tests were tied to that exact file."
+      "definition": "Prefix of the final reviewed compiled executable\u2019s SHA-256 fingerprint; tests were tied to that exact file."
     },
     {
       "term": "mutation checks",
@@ -514,5 +514,5 @@
       "cardId": "BB-63"
     }
   ],
-  "plainSummary": "Moving test tokens to Base and back works outside the app; the browser test waits for Rob to sign in and unlock his wallet. Code for several more networks is written and tested locally, and the separate XRPL borrow and repay feature passed a test-network rehearsal with Rob's wallet and awaits a final review. Nothing new is switched on."
+  "plainSummary": "The Base test-token round trip works outside the app; browser testing still needs Rob to sign in and connect his wallet. XRPL testing recorded several passes and one browser-code test failure; its fixture fix is reported merged, but the old run is not proven fully green. Final source review is next at background pace."
 }
