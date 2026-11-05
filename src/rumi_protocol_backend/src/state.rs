@@ -16733,6 +16733,125 @@ mod add_margin_checked_transition_tests {
         assert_eq!(state.vault_id_to_vaults.get(&41).unwrap().collateral_amount, u64::MAX);
     }
 }
+/// Minimum net XLM credit, in stroops (1 XLM). Mirrors
+/// `xlm_collateral_config().min_collateral_deposit`.
+pub const XLM_MIN_CREDIT_STROOPS: u64 = 10_000_000;
+
+/// Why `State::apply_verified_xlm_deposit_credit` refused. Every variant is
+/// returned before any mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlmCreditError {
+    MissingPendingDeposit,
+    InactivePendingDeposit,
+    Expired,
+    CallerNotOwner,
+    NetworkMismatch,
+    DestinationMismatch,
+    AttributionMismatch,
+    ReceiptAlreadyRecorded,
+    VaultAlreadyFunded,
+    KindMismatch,
+    /// Credit is zero, below `XLM_MIN_CREDIT_STROOPS`, or exceeds the gross amount.
+    InvalidCredit,
+}
+
+impl State {
+    /// Atomic, synchronous XLM first-funding credit, called by a future confirm
+    /// endpoint after evidence is verified (quorum, freshness, reserve).
+    /// All checks precede any mutation and there is no await.
+    ///
+    /// Mirrors `confirm_xrp_deposit` (vault.rs): owner-only, pending row consumed so
+    /// a second call fails, credit = verified balance net of reserve with
+    /// zero/below-minimum rejected (`xrp_credit_amount`). Here the net amount comes
+    /// from `decide_initial_funding_credit` (already net of reserve, fee budget and
+    /// claims) as `credited_stroops`; it is re-bounded here.
+    ///
+    /// Unlike XRP this does NOT create a `Vault`, mint, or touch collateral config:
+    /// the credit lives in the permanent `xlm_deposit_receipts` row (the durable
+    /// replay tombstone, owned by this vault/owner). The pending row is removed
+    /// like XRP; its `xlm_custody_attributions` binding is retained. Vault
+    /// materialization from the receipt is the next increment.
+    pub fn apply_verified_xlm_deposit_credit(
+        &mut self,
+        vault_id: u64,
+        caller: Principal,
+        receipt: &crate::chains::stellar::horizon_parse::FinalizedDeposit,
+        network_id: [u8; 32],
+        credited_stroops: u64,
+        now_ns: u64,
+    ) -> Result<XlmDepositReceipt, XlmCreditError> {
+        use crate::chains::stellar::horizon_parse::DepositKind;
+        let pending = self
+            .xlm_pending_deposits
+            .get(&vault_id)
+            .ok_or(XlmCreditError::MissingPendingDeposit)?;
+        if !matches!(
+            pending.status,
+            XlmPendingDepositStatus::Open | XlmPendingDepositStatus::Pending
+        ) {
+            return Err(XlmCreditError::InactivePendingDeposit);
+        }
+        if now_ns >= pending.expires_at_ns {
+            return Err(XlmCreditError::Expired);
+        }
+        if pending.owner != caller {
+            return Err(XlmCreditError::CallerNotOwner);
+        }
+        if pending.network_id != network_id {
+            return Err(XlmCreditError::NetworkMismatch);
+        }
+        if receipt.destination != pending.custody_address {
+            return Err(XlmCreditError::DestinationMismatch);
+        }
+        match self.xlm_custody_attributions.get(&pending.custody_address) {
+            Some(a)
+                if a.owner == pending.owner
+                    && a.derivation_nonce == pending.derivation_nonce
+                    && a.network_id == pending.network_id => {}
+            _ => return Err(XlmCreditError::AttributionMismatch),
+        }
+        let key = (
+            receipt.transaction_hash.clone(),
+            receipt.operation_id.clone(),
+        );
+        if self.xlm_deposit_receipts.contains_key(&key) {
+            return Err(XlmCreditError::ReceiptAlreadyRecorded);
+        }
+        if self
+            .xlm_deposit_receipts
+            .values()
+            .any(|r| r.vault_id == vault_id)
+            || self.vault_id_to_vaults.contains_key(&vault_id)
+        {
+            return Err(XlmCreditError::VaultAlreadyFunded);
+        }
+        let kind = match receipt.kind {
+            DepositKind::CreateAccount => XlmDepositKind::CreateAccount,
+            DepositKind::NativePayment => XlmDepositKind::NativePayment,
+        };
+        if credited_stroops == 0
+            || credited_stroops < XLM_MIN_CREDIT_STROOPS
+            || credited_stroops > receipt.amount_stroops
+        {
+            return Err(XlmCreditError::InvalidCredit);
+        }
+
+        let record = XlmDepositReceipt {
+            vault_id,
+            owner: caller,
+            destination: receipt.destination.clone(),
+            ledger: receipt.ledger,
+            gross_stroops: receipt.amount_stroops,
+            credited_stroops,
+            kind,
+            confirmed_at_ns: now_ns,
+        };
+        self.xlm_deposit_receipts.insert(key, record.clone());
+        self.xlm_pending_deposits.remove(&vault_id);
+        Ok(record)
+    }
+}
+
 #[cfg(test)]
 mod xlm_pending_reservation_tests {
     use super::{State, XlmPendingDepositStatus};
@@ -16929,5 +17048,132 @@ mod xlm_pending_reservation_tests {
         assert!(reserve(&mut state, 0, owner, address(22)).is_err());
         assert!(state.xlm_pending_deposits.is_empty());
         assert!(state.xlm_custody_attributions.is_empty());
+    }
+}
+#[cfg(test)]
+mod xlm_deposit_credit_tests {
+    use super::{State, XlmCreditError, XlmDepositKind, XLM_MIN_CREDIT_STROOPS};
+    use crate::chains::stellar::horizon_parse::{DepositKind, FinalizedDeposit};
+    use candid::Principal;
+
+    const NOW: u64 = 2_000_000_000;
+
+    fn address(seed: u8) -> String {
+        crate::chains::stellar::classic_address_from_ed25519_pubkey(&[seed; 32])
+    }
+    fn network(state: &State) -> [u8; 32] {
+        crate::chains::stellar::config::selection_from_state(state)
+            .unwrap()
+            .network
+            .network_id()
+    }
+    fn owner() -> Principal {
+        Principal::from_slice(&[1])
+    }
+    fn setup(seed: u8) -> (State, u64, String) {
+        let mut state = State::default();
+        let id = state.increment_vault_id();
+        let addr = address(seed);
+        let net = network(&state);
+        state
+            .reserve_xlm_pending_deposit(id, owner(), addr.clone(), net, 1_000_000_000, 3_600_000_000_000)
+            .unwrap();
+        (state, id, addr)
+    }
+    fn receipt(dest: &str, tx: &str) -> FinalizedDeposit {
+        FinalizedDeposit {
+            transaction_hash: tx.to_string(),
+            ledger: 7,
+            operation_id: "30064771072001".to_string(),
+            destination: dest.to_string(),
+            amount_stroops: 25_000_000,
+            kind: DepositKind::CreateAccount,
+        }
+    }
+    type Snap = (
+        std::collections::BTreeMap<u64, super::XlmPendingDeposit>,
+        std::collections::BTreeMap<String, super::XlmCustodyAttribution>,
+        std::collections::BTreeMap<(String, String), super::XlmDepositReceipt>,
+    );
+    fn snap(s: &State) -> Snap {
+        (
+            s.xlm_pending_deposits.clone(),
+            s.xlm_custody_attributions.clone(),
+            s.xlm_deposit_receipts.clone(),
+        )
+    }
+    fn assert_fails(s: &mut State, id: u64, who: Principal, r: &FinalizedDeposit, net: [u8; 32], credit: u64, now: u64, want: XlmCreditError) {
+        let before = snap(s);
+        assert_eq!(s.apply_verified_xlm_deposit_credit(id, who, r, net, credit, now), Err(want));
+        assert_eq!(snap(s), before, "failure must not mutate state");
+    }
+
+    #[test]
+    fn happy_path_credits_once_and_owns_receipt() {
+        let (mut s, id, addr) = setup(31);
+        let net = network(&s);
+        let r = receipt(&addr, "tx1");
+        let rec = s
+            .apply_verified_xlm_deposit_credit(id, owner(), &r, net, 24_000_000, NOW)
+            .unwrap();
+        assert_eq!(rec.credited_stroops, 24_000_000);
+        assert_eq!(rec.gross_stroops, 25_000_000);
+        assert_eq!(rec.owner, owner());
+        assert_eq!(rec.vault_id, id);
+        assert_eq!(rec.kind, XlmDepositKind::CreateAccount);
+        let key = ("tx1".to_string(), r.operation_id.clone());
+        assert_eq!(s.xlm_deposit_receipts[&key], rec);
+        assert!(!s.xlm_pending_deposits.contains_key(&id));
+        assert!(s.xlm_custody_attributions.contains_key(&addr));
+        assert!(s.vault_id_to_vaults.is_empty());
+        // second apply of same receipt: no mutation
+        assert_fails(&mut s, id, owner(), &r, net, 24_000_000, NOW, XlmCreditError::MissingPendingDeposit);
+    }
+
+    #[test]
+    fn same_receipt_on_another_vault_fails() {
+        let (mut s, id, addr) = setup(32);
+        let net = network(&s);
+        let id2 = s.increment_vault_id();
+        let addr2 = address(33);
+        s.reserve_xlm_pending_deposit(id2, owner(), addr2.clone(), net, 1_000_000_000, 3_600_000_000_000)
+            .unwrap();
+        let r = receipt(&addr, "tx1");
+        s.apply_verified_xlm_deposit_credit(id, owner(), &r, net, 24_000_000, NOW).unwrap();
+        let replay = receipt(&addr2, "tx1");
+        assert_fails(&mut s, id2, owner(), &replay, net, 24_000_000, NOW, XlmCreditError::ReceiptAlreadyRecorded);
+    }
+
+    #[test]
+    fn rejects_wrong_owner_expired_and_mismatches_without_mutation() {
+        let (mut s, id, addr) = setup(34);
+        let net = network(&s);
+        let r = receipt(&addr, "tx2");
+        assert_fails(&mut s, id, Principal::from_slice(&[9]), &r, net, 24_000_000, NOW, XlmCreditError::CallerNotOwner);
+        assert_fails(&mut s, id, owner(), &r, net, 24_000_000, 3_600_000_000_000, XlmCreditError::Expired);
+        assert_fails(&mut s, id, owner(), &r, [7; 32], 24_000_000, NOW, XlmCreditError::NetworkMismatch);
+        let wrong = receipt(&address(99), "tx2");
+        assert_fails(&mut s, id, owner(), &wrong, net, 24_000_000, NOW, XlmCreditError::DestinationMismatch);
+        assert_fails(&mut s, 12345, owner(), &r, net, 24_000_000, NOW, XlmCreditError::MissingPendingDeposit);
+        s.xlm_pending_deposits.get_mut(&id).unwrap().status = super::XlmPendingDepositStatus::Cancelled;
+        assert_fails(&mut s, id, owner(), &r, net, 24_000_000, NOW, XlmCreditError::InactivePendingDeposit);
+        s.xlm_pending_deposits.get_mut(&id).unwrap().status = super::XlmPendingDepositStatus::Open;
+        s.xlm_custody_attributions.get_mut(&addr).unwrap().owner = Principal::from_slice(&[8]);
+        assert_fails(&mut s, id, owner(), &r, net, 24_000_000, NOW, XlmCreditError::AttributionMismatch);
+        s.xlm_custody_attributions.remove(&addr);
+        assert_fails(&mut s, id, owner(), &r, net, 24_000_000, NOW, XlmCreditError::AttributionMismatch);
+    }
+
+    #[test]
+    fn zero_below_minimum_and_over_gross_credit_fail() {
+        let (mut s, id, addr) = setup(35);
+        let net = network(&s);
+        let r = receipt(&addr, "tx3");
+        for bad in [0, XLM_MIN_CREDIT_STROOPS - 1, 25_000_001] {
+            assert_fails(&mut s, id, owner(), &r, net, bad, NOW, XlmCreditError::InvalidCredit);
+        }
+        assert!(s
+            .apply_verified_xlm_deposit_credit(id, owner(), &r, net, XLM_MIN_CREDIT_STROOPS, NOW)
+            .is_ok());
     }
 }
