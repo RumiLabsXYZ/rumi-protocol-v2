@@ -1,6 +1,6 @@
 {
-  "summary": "The exact vault 158 recovery-capable bot is installed and running with processing still paused. Readback verified its recovery configuration; the original PaymentShortfall claim is unchanged and no recovery or payment was created. Financial recovery remains a separate hold. ckSOL PR #610 is refreshed onto current main at ace2fb83, remains draft, and has one focused CI check still running; its reserve stays off. Stability Pool and vault 51 work continue under Bram.",
-  "plainSummary": "The vault 158 software upgrade is complete, but recovery has not been started and no funds moved. The bot remains paused while the exact recovery step is reviewed separately. The Solana processing branch is refreshed and still under review, with its reserve off. Stability Pool and vault 51 work continue under Bram.",
+  "summary": "Vault 158 recovery remains held after its authorized configuration readback. ckSOL PR #610 remains draft with the reserve off. A rent-only/dust balance could expose the SOL address before processing funds were ready; the preflight now requires either a minimum deposit already present or processing funds ready, with a focused regression test. Callback safety still relies on stop-and-drain; other deploy paths are not enforced. Stability Pool and vault 51 work continue under Bram.",
+  "plainSummary": "Vault 158 recovery remains held. ckSOL stays in draft review with its reserve off; a fix now hides the SOL address for rent-only or dust balances until processing is ready. Stop-and-drain remains the callback mitigation.",
   "glossary": [
     {
       "term": "Stability Pool",

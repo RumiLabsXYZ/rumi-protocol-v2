@@ -94,23 +94,15 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
-      "evidenceText": "Draft PR #610 was refreshed onto current main at head ace2fb83 without ckSOL source conflicts. Canonical backend declaration generation produced no differences; JSON and diff checks passed. Frontend CI passed on this head and the focused archived-receipt check is still running. Earlier stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback; the opt-in wrapper passed seven mocked tests, two reviews, and a disposable-canister CLI rehearsal. No production action occurred and the reserve remains off. Exact Rumi Arc-stack validation and any checks genuinely invalidated by the refresh remain to be classified before merge.",
+      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
       "evidenceLinks": [
         {
-          "title": "ckSOL PR #610",
+          "title": "ckSOL PR #610 and current checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
         },
         {
-          "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ace2fb831e4217728cf22d6db8b4daf4859c3a78"
-        },
-        {
-          "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572436"
-        },
-        {
-          "title": "Archived receipt CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572448"
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
         }
       ]
     },
@@ -119,23 +111,15 @@
       "state": "In progress",
       "owner": "Bram",
       "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
-      "evidenceText": "Draft PR #610 was refreshed onto current main at head ace2fb83 without ckSOL source conflicts. Canonical backend declaration generation produced no differences; JSON and diff checks passed. Frontend CI passed on this head and the focused archived-receipt check is still running. Earlier stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback; the opt-in wrapper passed seven mocked tests, two reviews, and a disposable-canister CLI rehearsal. No production action occurred and the reserve remains off. Exact Rumi Arc-stack validation and any checks genuinely invalidated by the refresh remain to be classified before merge.",
+      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
       "evidenceLinks": [
         {
-          "title": "ckSOL PR #610",
+          "title": "ckSOL PR #610 and current checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
         },
         {
-          "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ace2fb831e4217728cf22d6db8b4daf4859c3a78"
-        },
-        {
-          "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572436"
-        },
-        {
-          "title": "Archived receipt CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572448"
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
         }
       ]
     },
@@ -144,23 +128,15 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Draft PR #610 was refreshed onto current main at head ace2fb83 without ckSOL source conflicts. Canonical backend declaration generation produced no differences; JSON and diff checks passed. Frontend CI passed on this head and the focused archived-receipt check is still running. Earlier stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback; the opt-in wrapper passed seven mocked tests, two reviews, and a disposable-canister CLI rehearsal. No production action occurred and the reserve remains off. Exact Rumi Arc-stack validation and any checks genuinely invalidated by the refresh remain to be classified before merge.",
+      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
       "evidenceLinks": [
         {
-          "title": "ckSOL PR #610",
+          "title": "ckSOL PR #610 and current checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
         },
         {
-          "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ace2fb831e4217728cf22d6db8b4daf4859c3a78"
-        },
-        {
-          "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572436"
-        },
-        {
-          "title": "Archived receipt CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953572448"
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
         }
       ]
     },

@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Direct running upgrades can trap callbacks; the tested stop-and-drain wrapper cannot enforce other deploy paths. PR #610 is refreshed, but one focused CI check is still running and exact invalidation from the refresh needs classification.",
-      "nextAction": "Keep the reserve off, finish the essential current-head review for PR #610, and merge only when its required checks are green. No production install or reserve funding is authorized.",
+      "blockedReason": "Direct running upgrades can trap callbacks; stop-and-drain cannot enforce other deploy paths. The rent-only/dust address-exposure fix is under current-head validation.",
+      "nextAction": "Review the focused rent-only regression and current PR #610 checks after the refresh; keep the reserve off and do not install or fund production.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",
