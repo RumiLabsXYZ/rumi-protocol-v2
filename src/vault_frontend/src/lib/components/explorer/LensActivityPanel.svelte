@@ -157,8 +157,9 @@
     }
   }
 
-  // Sparse-scope server-side filtering: redemptions, revenue (liquidations +
-  // redemptions), and admin all match a small fraction of the backend log. A
+  // Sparse-scope server-side filtering: redemptions, revenue (borrow +
+  // redemptions + liquidations), and admin match a small fraction of the
+  // backend log. A
   // tail-fetch of the most recent 72 events rarely contains any of them, so
   // those scopes pass an explicit `types` filter that lets the backend pick
   // matching events from the entire log. The full-log search is paginated by

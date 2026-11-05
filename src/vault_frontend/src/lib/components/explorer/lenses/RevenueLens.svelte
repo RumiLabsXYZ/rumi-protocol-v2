@@ -17,6 +17,7 @@
   import { liveSpApyPct, liveLpApyPct } from '$utils/liveApy';
 
   let feeRows: any[] = $state([]);
+  let feeSeriesState = $state<'loading' | 'success' | 'error'>('loading');
   let apys: any = $state(null);
   let fees24hData = $state<FeeBreakdown | null>(null);
   let fees90dData = $state<FeeBreakdown | null>(null);
@@ -39,7 +40,7 @@
       // 90d totals previously showed only swap fees. Swap fees stay on
       // analytics (`evt_swaps` was always populated correctly).
       const [feeR, apR, f24R, f90R, spR, psR, poolR, tpR, b24R, b90R] = await Promise.allSettled([
-        fetchFeeSeries(90),
+        fetchFeeSeries(90, { throwOnError: true }),
         fetchApys(),
         fetchFeeBreakdownWindow(1),
         fetchFeeBreakdownWindow(90),
@@ -50,7 +51,12 @@
         fetchProtocolFeeTotalsFromBackend(MS_PER_DAY),
         fetchProtocolFeeTotalsFromBackend(90 * MS_PER_DAY),
       ]);
-      if (feeR.status === 'fulfilled') feeRows = feeR.value ?? [];
+      if (feeR.status === 'fulfilled') {
+        feeRows = feeR.value ?? [];
+        feeSeriesState = 'success';
+      } else {
+        feeSeriesState = 'error';
+      }
       if (apR.status === 'fulfilled') apys = apR.value;
       if (f24R.status === 'fulfilled') fees24hData = f24R.value;
       if (f90R.status === 'fulfilled') fees90dData = f90R.value;
@@ -158,17 +164,24 @@
 
 <LensHealthStrip title="Revenue" metrics={healthMetrics} loading={loading} />
 
-<div class="explorer-card">
-  <MiniAreaChart
-    points={feePoints}
-    label="Daily swap fees (90d)"
-    color={CHART_COLORS.action}
-    valueFormat={(v) => `$${formatCompact(v)}`}
-    headlineValue={feePoints.reduce((s, p) => s + p.v, 0)}
-    height={180}
-    kind="bar"
-    loading={loading}
-  />
+<div class="explorer-card" role="region" aria-label="Daily swap fees over 90 days">
+  {#if feeSeriesState === 'loading'}
+    <div class="flex items-center justify-center py-8">
+      <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
+    </div>
+  {:else if feeSeriesState === 'error'}
+    <p class="text-sm text-gray-500 py-4">Swap fee history unavailable.</p>
+  {:else}
+    <MiniAreaChart
+      points={feePoints}
+      label="Daily swap fees (90d)"
+      color={CHART_COLORS.action}
+      valueFormat={(v) => `$${formatCompact(v)}`}
+      headlineValue={feePoints.reduce((s, p) => s + p.v, 0)}
+      height={180}
+      kind="bar"
+    />
+  {/if}
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -230,9 +243,9 @@
 
 <TreasuryHoldingsCard />
 
-<!-- Revenue-bearing = redemptions + liquidations + swaps (everything the protocol charges a fee on). -->
+<!-- Revenue-bearing = borrow fees + redemptions + liquidations + swaps. -->
 <LensActivityPanel
   scope="revenue"
   title="Revenue-bearing activity"
-  viewAllHref="/explorer/activity?type=redemption,liquidation,swap"
+  viewAllHref="/explorer/activity?type=borrow,redemption,liquidation,swap"
 />
