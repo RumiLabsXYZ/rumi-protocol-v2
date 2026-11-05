@@ -1,6 +1,6 @@
 {
-  "summary": "Season 1 Points finalization is verified; Stability Pool recovery and broader finding reconciliation remain open. Vault 158 recovery source is merged and PR #618 pins the upgrade-only candidate and recipient readback. ckSOL PR #610 is draft: direct running upgrades can trap callbacks, so stop/drain is the practical mitigation; other deploy paths remain unprotected and the reserve stays off. XRP deposit guidance is deployed.",
-  "plainSummary": "Season 1 rewards are finalized and the XRP deposit guidance is live. Vault 158 recovery software and its plan are ready, but the live bot remains unchanged. ckSOL stays in draft review; stop/drain tests passed locally, other upgrade paths still need protection, and its reserve remains off.",
+  "summary": "Vault 158 recovery remains held after its authorized configuration readback. ckSOL PR #610 remains draft with the reserve off. A rent-only/dust balance could expose the SOL address before processing funds were ready; the preflight now requires either a minimum deposit already present or processing funds ready, with a focused regression test. Callback safety still relies on stop-and-drain; other deploy paths are not enforced. Stability Pool and vault 51 work continue under Bram.",
+  "plainSummary": "Vault 158 recovery remains held. ckSOL stays in draft review with its reserve off; a fix now hides the SOL address for rent-only or dust balances until processing is ready. Stop-and-drain remains the callback mitigation.",
   "glossary": [
     {
       "term": "Stability Pool",

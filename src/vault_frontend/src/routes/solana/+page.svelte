@@ -93,7 +93,10 @@
   // Its payment phase distinguishes that reservation from an unknown dispatch.
   $: blockingLegacy = legacyBlocked && !(legacyAttempt?.status && 'SubmittedOrUnknown' in legacyAttempt.status &&
     ['FundingPending','FundingUnknown','Funded'].includes(icpReceipt?.phase));
-  $: addressReady = (solBalance !== null && solBalance > 0n) || (paymentMethod === 'icp' ? icpReady : cyclesReady);
+  // A positive balance may be only the address's rent reserve or dust. Reveal
+  // a new-send address only after processing is ready; a deposit at the
+  // minter's minimum remains visible so its owner can finish processing it.
+  $: addressReady = fundsReceived || (paymentMethod === 'icp' ? icpReady : cyclesReady);
   $: mintEnabled = !!owner && !busy && !icpBusy && !icpPending && (refundReady || (!depositBlocked && !blockingLegacy && !minterPending &&
     (resumeApproval || resumeFunding || (cyclesReady && !pendingPayment && (fundsReceived || balanceUnavailable)))));
   $: primaryLabel = resumeApproval || resumeFunding ? 'Continue minting' : refundReady ? 'Return unused cycles' : 'Mint ckSOL';

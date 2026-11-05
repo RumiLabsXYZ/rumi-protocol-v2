@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-06",
-      "state": "Blocked",
+      "state": "Review",
       "owner": "Bram",
       "scope": "Prepare vault 158 liquidation recovery without executing it",
-      "evidenceText": "PR #614 merged at 99027b67 after its listed check and two independent source reviews passed. PR #618 pins the source-matched candidate and upgrade-only readback procedure. The installed bot remains unchanged and the claim is held. Separate upgrade-only authority is required; recovery preparation, execution, reconciliation, unpause, and funds remain outside scope.",
+      "evidenceText": "The exact candidate pinned by merged PR #618 is installed: module SHA-256 db8931273a83bb3dfbd8c516b85808b24ad5bd9daed0df9f7265b440658fe098. Readback confirmed the bot is running but processing remains paused, its recovery configuration is readable, vault 158 is still a generation-1 PaymentShortfall claim, and no recovery, payment journal, or treasury intent was created. The upgrade-only step is complete. Recovery preparation, execution, reconciliation, unpause, and funds remain held for separate authority.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
@@ -94,7 +94,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
-      "evidenceText": "Draft PR #610 branch refreshed against current main 0f40a0a8. Three Lookout snapshot conflicts were resolved by preserving current-main evidence and reconciling local updates; no ckSOL source conflicts. The canonical declaration generator passed with no generated-file differences. Earlier tests and CI were run on the prior source head and are historical, not exact-head proof. Use the PR checks panel for current frontend and Stability Pool workflow status. No production action occurred; reserve remains zero/off. Direct running-upgrade callback traps remain reproduced; stop/drain is the practical mitigation, while other deploy paths are not enforced and the exact Rumi Arc stack is unproven. Durable callback ABI exploration remains unimplemented.",
+      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -111,7 +111,7 @@
       "state": "In progress",
       "owner": "Bram",
       "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
-      "evidenceText": "Draft PR #610 branch refreshed against current main 0f40a0a8. Three Lookout snapshot conflicts were resolved by preserving current-main evidence and reconciling local updates; no ckSOL source conflicts. The canonical declaration generator passed with no generated-file differences. Earlier tests and CI were run on the prior source head and are historical, not exact-head proof. Use the PR checks panel for current frontend and Stability Pool workflow status. No production action occurred; reserve remains zero/off. Direct running-upgrade callback traps remain reproduced; stop/drain is the practical mitigation, while other deploy paths are not enforced and the exact Rumi Arc stack is unproven. Durable callback ABI exploration remains unimplemented.",
+      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Draft PR #610 branch refreshed against current main 0f40a0a8. Three Lookout snapshot conflicts were resolved by preserving current-main evidence and reconciling local updates; no ckSOL source conflicts. The canonical declaration generator passed with no generated-file differences. Earlier tests and CI were run on the prior source head and are historical, not exact-head proof. Use the PR checks panel for current frontend and Stability Pool workflow status. No production action occurred; reserve remains zero/off. Direct running-upgrade callback traps remain reproduced; stop/drain is the practical mitigation, while other deploy paths are not enforced and the exact Rumi Arc stack is unproven. Durable callback ABI exploration remains unimplemented.",
+      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",

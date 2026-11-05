@@ -291,6 +291,17 @@ describe('ICP-first page integration',()=>{
     fx.wallet.set({isConnected:true,principal:ownerA});fx.paidQuote.mockResolvedValue({...await fx.paidQuote(),balance:0n});
     await renderIcp();expect(host.textContent).toContain('1.92 SOL received');expect(host.textContent).toContain('GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax');expect(button('Mint with ICP').disabled).toBe(false);
   });
+  it('does not expose a rent-only deposit address while both processing payment methods are unavailable',async()=>{
+    fx.wallet.set({isConnected:true,principal:ownerA});fx.solBalance.mockResolvedValue(890_880n);
+    fx.paidQuote.mockResolvedValue({...await fx.paidQuote(),balance:0n});
+    fx.icpQuote.mockResolvedValue({...await fx.icpQuote(),balance:0n});
+    await renderIcp();
+    const address='GXVewvv6HehcLFYCmwpqh5CrMjqN9zJ8rqzGq3HEt9Ax';
+    expect(host.textContent).not.toContain(address);
+    expect(host.textContent).toContain('Check processing funds before sending SOL');
+    button('Use existing cycles').click();flushSync();
+    expect(host.textContent).not.toContain(address);
+  });
   it('recognizes an ICP funding reservation without mislabeling it as an unknown minter submission',async()=>{
     fx.wallet.set({isConnected:true,principal:ownerA});fx.attempt.mockResolvedValue([{status:{SubmittedOrUnknown:null}}]);
     fx.icpRecover.mockResolvedValue({owner:ownerA.toText(),sequence:'4',createdAt:1,phase:'Receipt',receipt:{sequence:4n,phase:'Funded',deposit_id:[]}});
