@@ -1,0 +1,6 @@
+(variant {
+  Upgrade = record {
+    mode = null;
+    description = opt "ckSOL ICP processing with deployed Vault 51 recovery; source 6847982b; reserve off"
+  }
+})

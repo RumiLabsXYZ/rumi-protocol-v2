@@ -1,0 +1,77 @@
+[
+  {
+    "name": "cargo",
+    "args": [
+      "cargo",
+      "build",
+      "--locked",
+      "--release",
+      "--target",
+      "wasm32-unknown-unknown",
+      "--package",
+      "rumi_protocol_backend"
+    ],
+    "start": "2026-11-05T04:13:36.588050+00:00",
+    "end": "2026-11-05T04:15:01.251481+00:00",
+    "exit": 0
+  },
+  {
+    "name": "metadata",
+    "args": [
+      "ic-wasm",
+      "/Users/robertripley/.codex/worktrees/solana-icp-processing/rumi-protocol-v2/build-evidence/cksol-integrated-6847982b/backend-optimized.wasm",
+      "-o",
+      "/Users/robertripley/.codex/worktrees/solana-icp-processing/rumi-protocol-v2/build-evidence/cksol-integrated-6847982b/backend-optimized.wasm",
+      "metadata",
+      "candid:service",
+      "-f",
+      "src/rumi_protocol_backend/rumi_protocol_backend.did",
+      "-v",
+      "public"
+    ],
+    "start": "2026-11-05T04:15:01.272141+00:00",
+    "end": "2026-11-05T04:15:02.088324+00:00",
+    "exit": 0
+  },
+  {
+    "name": "shrink",
+    "args": [
+      "ic-wasm",
+      "/Users/robertripley/.codex/worktrees/solana-icp-processing/rumi-protocol-v2/build-evidence/cksol-integrated-6847982b/backend-optimized.wasm",
+      "-o",
+      "/Users/robertripley/.codex/worktrees/solana-icp-processing/rumi-protocol-v2/build-evidence/cksol-integrated-6847982b/backend-optimized.wasm",
+      "shrink",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-05T04:15:02.088837+00:00",
+    "end": "2026-11-05T04:15:02.897087+00:00",
+    "exit": 0
+  },
+  {
+    "name": "optimize",
+    "args": [
+      "ic-wasm",
+      "/Users/robertripley/.codex/worktrees/solana-icp-processing/rumi-protocol-v2/build-evidence/cksol-integrated-6847982b/backend-optimized.wasm",
+      "-o",
+      "/Users/robertripley/.codex/worktrees/solana-icp-processing/rumi-protocol-v2/build-evidence/cksol-integrated-6847982b/backend-optimized.wasm",
+      "optimize",
+      "O1",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-05T04:15:02.897617+00:00",
+    "end": "2026-11-05T04:15:07.958065+00:00",
+    "exit": 0
+  },
+  {
+    "name": "frontend",
+    "args": [
+      "npm",
+      "run",
+      "build",
+      "--workspace=src/vault_frontend"
+    ],
+    "start": "2026-11-05T04:15:08.494212+00:00",
+    "end": "2026-11-05T04:15:31.019986+00:00",
+    "exit": 0
+  }
+]

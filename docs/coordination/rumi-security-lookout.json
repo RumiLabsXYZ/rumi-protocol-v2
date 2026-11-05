@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "PR #624 validly merged at 6847982b. Focused local backend 21/21, generator 1/1, frontend 9/9 and live Candid compatibility passed. Both path-triggered hosted workflows were intentionally unrun at e9466ecb ([skip ci], empty rollup); hosted CI is not claimed green. Full policy audit found no independent mandate: no new CI/source-merge gate. Hosted checks are deferred evidence only if later release procedure selects them. Artifact held because old build excludes integrated source; coordinate rebuild separately. No competing hosted load; reserve off.",
+      "evidenceText": "Corrected-source production backend/frontend built serially from PR #624 merge 6847982b. New gzip d3888725, 2,323,301 bytes; code 8,697,159 bytes with preserved reserve. Actual embedded Candid passes refreshed live compatibility; recovery/ICP exports verified. Frontend manifest 740 files; auth check passes. Slot closed (~1m54s build, ~695 MiB net disk growth). Installation-only packet pushed for Merritt review; snapshot archive remains execution precondition, no mutation done. Hosted workflows intentionally unrun; no invented gate. Reserve off; all live/financial actions held.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -153,6 +153,10 @@
         {
           "title": "Merged composition PR #624",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/624"
+        },
+        {
+          "title": "Integrated-source installation-only packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-installation-only-packet-20261104.md"
         }
       ]
     },

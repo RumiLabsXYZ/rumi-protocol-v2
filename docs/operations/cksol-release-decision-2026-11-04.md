@@ -1,5 +1,6 @@
 # ckSOL ICP-processing release decision
 
+> Historical candidate record. The corrected integrated-source artifact and current proposal are in [the installation-only packet](cksol-installation-only-packet-20261104.md); this older artifact remains obsolete.
 **Decision: source is merged and local artifacts were built, with installation approval and reserve-use checks still outstanding.** Keep the processing reserve at zero/off. This record documents build evidence; it does not authorize installation, funding, reserve activation, a financial canary, or funds movement.
 
 ## Source composition

@@ -1,0 +1,50 @@
+[
+  {
+    "method": "get_protocol_config",
+    "args": "()",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:37.613088+00:00"
+  },
+  {
+    "method": "get_protocol_status",
+    "args": "()",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:38.307886+00:00"
+  },
+  {
+    "method": "get_cksol_relay_budget",
+    "args": "()",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:39.260732+00:00"
+  },
+  {
+    "method": "get_cksol_payment_quote",
+    "args": "()",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:40.104913+00:00"
+  },
+  {
+    "method": "get_pending_payouts",
+    "args": "(null, opt 100)",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:41.010130+00:00"
+  },
+  {
+    "method": "get_vault_operation_status",
+    "args": "()",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:41.859828+00:00"
+  },
+  {
+    "method": "get_cksol_deposit",
+    "args": "(principal \"fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae\")",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:42.651771+00:00"
+  },
+  {
+    "method": "get_cksol_payment",
+    "args": "(principal \"fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae\")",
+    "exit": 0,
+    "utc": "2026-11-05T04:14:43.468576+00:00"
+  }
+]

@@ -1,0 +1,197 @@
+(
+  record {
+    last_icp_timestamp = 1_793_851_800_000_000_000 : nat64;
+    borrowing_fee_curve_resolved = vec {
+      record { 1.3868264538007882 : float64; 3.0 : float64 };
+      record { 1.6026369588449274 : float64; 1.75 : float64 };
+      record { 1.868447463889067 : float64; 1.0 : float64 };
+    };
+    deficit_readonly_threshold_e8s = 0 : nat64;
+    recovery_mode_threshold = 1.3368264538007881 : float64;
+    per_collateral_interest = vec {
+      record {
+        total_debt_e8s = 208_813_166_898 : nat64;
+        collateral_type = principal "ryjl3-tyaaa-aaaaa-aaaba-cai";
+        weighted_interest_rate = 0.02204198357485052 : float64;
+      };
+      record {
+        total_debt_e8s = 270_974_225 : nat64;
+        collateral_type = principal "rh2pm-ryaaa-aaaan-qeniq-cai";
+        weighted_interest_rate = 0.08930976991717679 : float64;
+      };
+      record {
+        total_debt_e8s = 80_685_022_296 : nat64;
+        collateral_type = principal "mxzaz-hqaaa-aaaar-qaada-cai";
+        weighted_interest_rate = 0.02457403365419071 : float64;
+      };
+      record {
+        total_debt_e8s = 40_238_683_623 : nat64;
+        collateral_type = principal "ss2fx-dyaaa-aaaar-qacoq-cai";
+        weighted_interest_rate = 0.021375208525571194 : float64;
+      };
+      record {
+        total_debt_e8s = 288_039_673_939 : nat64;
+        collateral_type = principal "buwm7-7yaaa-aaaar-qagva-cai";
+        weighted_interest_rate = 0.07388494440717738 : float64;
+      };
+      record {
+        total_debt_e8s = 124_774_290_910 : nat64;
+        collateral_type = principal "nza5v-qaaaa-aaaar-qahzq-cai";
+        weighted_interest_rate = 0.008322881513372807 : float64;
+      };
+      record {
+        total_debt_e8s = 0 : nat64;
+        collateral_type = principal "efmc5-wyaaa-aaaar-qb3wa-cai";
+        weighted_interest_rate = 0.0 : float64;
+      };
+      record {
+        total_debt_e8s = 10_002_339_922 : nat64;
+        collateral_type = principal "ls5lp-lqaaa-aaaar-qb5oa-cai";
+        weighted_interest_rate = 0.018128682221060302 : float64;
+      };
+      record {
+        total_debt_e8s = 0 : nat64;
+        collateral_type = principal "7pail-xaaaa-aaaas-aabmq-cai";
+        weighted_interest_rate = 0.0 : float64;
+      };
+      record {
+        total_debt_e8s = 1_203_949_340_061 : nat64;
+        collateral_type = principal "5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i";
+        weighted_interest_rate = 0.01921452089041753 : float64;
+      };
+    };
+    reserve_redemption_fee = 0.003 : float64;
+    mode = variant { GeneralAvailability };
+    interest_split = vec {
+      record { bps = 4_200 : nat64; destination = "stability_pool" };
+      record { bps = 5_100 : nat64; destination = "three_pool" };
+      record { bps = 700 : nat64; destination = "treasury" };
+    };
+    recovery_cr_multiplier = 1.0333333333333334 : float64;
+    interest_pool_share = 0.75 : float64;
+    dust_liquidation_threshold_e8s = 100_000_000 : nat64;
+    total_icusd_borrowed = 1_956_773_491_874 : nat64;
+    min_icusd_amount = 10_000_000 : nat64;
+    snapshot_ts_ns = 1_793_852_077_039_228_887 : nat64;
+    total_collateral_ratio = 1.868447463889067 : float64;
+    deficit_repayment_fraction = 0.5 : float64;
+    ckstable_repay_fee = 0.01 : float64;
+    windowed_liquidation_total_e8s = 0 : nat64;
+    total_icp_margin = 171_959_135_432 : nat64;
+    recovery_target_cr = 1.3813873355941477 : float64;
+    frozen = false;
+    weighted_average_interest_rate = 0.02713887932887846 : float64;
+    liquidation_breaker_tripped = false;
+    protocol_deficit_icusd = 0 : nat64;
+    breaker_window_ns = 1_800_000_000_000 : nat64;
+    manual_mode_override = false;
+    liquidation_bonus = 1.12 : float64;
+    per_collateral_rate_curves = vec {
+      record {
+        markers = vec {
+          record { 1.33 : float64; 5.0 : float64 };
+          record { 1.5 : float64; 2.5 : float64 };
+          record { 1.75 : float64; 1.5 : float64 };
+          record { 2.0 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.02 : float64;
+        collateral_type = principal "ryjl3-tyaaa-aaaaa-aaaba-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.5 : float64; 5.0 : float64 };
+          record { 1.7 : float64; 2.5 : float64 };
+          record { 2.125 : float64; 1.75 : float64 };
+          record { 2.55 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.04 : float64;
+        collateral_type = principal "rh2pm-ryaaa-aaaan-qeniq-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.15 : float64; 5.0 : float64 };
+          record { 1.23456 : float64; 3.333333333333333 : float64 };
+          record { 1.5432000000000001 : float64; 1.666666666666667 : float64 };
+          record { 1.85184 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.01 : float64;
+        collateral_type = principal "mxzaz-hqaaa-aaaar-qaada-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.2 : float64; 5.0 : float64 };
+          record { 1.35 : float64; 3.333333333333333 : float64 };
+          record { 1.6875000000000002 : float64; 1.666666666666667 : float64 };
+          record { 2.0250000000000004 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.015000000000000001 : float64;
+        collateral_type = principal "ss2fx-dyaaa-aaaar-qacoq-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.38 : float64; 5.0 : float64 };
+          record { 1.55 : float64; 3.333333333333333 : float64 };
+          record { 1.9375 : float64; 1.666666666666667 : float64 };
+          record { 2.325 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.03 : float64;
+        collateral_type = principal "buwm7-7yaaa-aaaar-qagva-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.12 : float64; 5.0 : float64 };
+          record { 1.18 : float64; 3.333333333333333 : float64 };
+          record { 1.475 : float64; 1.666666666666667 : float64 };
+          record { 1.77 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.005 : float64;
+        collateral_type = principal "nza5v-qaaaa-aaaar-qahzq-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.2 : float64; 5.0 : float64 };
+          record { 1.35 : float64; 3.333333333333333 : float64 };
+          record { 1.6875 : float64; 1.666666666666667 : float64 };
+          record { 2.025 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.0175 : float64;
+        collateral_type = principal "efmc5-wyaaa-aaaar-qb3wa-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.2 : float64; 5.0 : float64 };
+          record { 1.35 : float64; 3.333333333333333 : float64 };
+          record { 1.6875000000000002 : float64; 1.666666666666667 : float64 };
+          record { 2.0250000000000004 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.015000000000000001 : float64;
+        collateral_type = principal "ls5lp-lqaaa-aaaar-qb5oa-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.47 : float64; 5.0 : float64 };
+          record { 1.6600000000000001 : float64; 2.5 : float64 };
+          record { 2.0749999999999997 : float64; 1.75 : float64 };
+          record { 2.4899999999999998 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.03500000000000001 : float64;
+        collateral_type = principal "7pail-xaaaa-aaaas-aabmq-cai";
+      };
+      record {
+        markers = vec {
+          record { 1.2 : float64; 5.0 : float64 };
+          record { 1.35 : float64; 3.333333333333333 : float64 };
+          record { 1.6875 : float64; 1.666666666666667 : float64 };
+          record { 2.025 : float64; 1.0 : float64 };
+        };
+        base_rate = 0.015 : float64;
+        collateral_type = principal "5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i";
+      };
+    };
+    reserve_redemptions_enabled = false;
+    total_deficit_repaid_icusd = 0 : nat64;
+    global_icusd_mint_cap = 2_200_000_000_000 : nat64;
+    breaker_window_debt_ceiling_e8s = 0 : nat64;
+    last_icp_rate = 2.616592733 : float64;
+  },
+)

@@ -1,5 +1,6 @@
 # ckSOL backend upgrade-only packet — 2026-11-04
 
+> Historical candidate record. The corrected integrated-source artifact and current proposal are in [the installation-only packet](cksol-installation-only-packet-20261104.md); this older artifact remains obsolete.
 **Disposition: HOLD; return to Merritt for review. Do not present the current candidate for execution approval.** Fresh deployed Candid comparison failed: the candidate removes three live Vault 51 recovery methods. This is a demonstrated compatibility failure, separate from the pending vault 158 preparation question. No build, stop/start, installation, asset upload, reserve action, financial canary, or customer message was performed in this preparation.
 
 ## Exact target and candidate

@@ -1,0 +1,34 @@
+{
+  "source": "6847982b44f247e0c99f0a453b583d3fab8107a2",
+  "checkout": "73d88a684af60ce7786284f12b8754af7674967b",
+  "raw": {
+    "bytes": 13869749,
+    "sha256": "53ac689d9be3f5234dff69a18ad220a32800631a874ef2cfde6d0b241988ec9d",
+    "codeSectionBytes": 9845480
+  },
+  "optimized": {
+    "bytes": 9618614,
+    "sha256": "3fca699dbecf214fb4f1693244e89a38677cb09635018abb0ed8e61fb4527d5f",
+    "codeSectionBytes": 8697159
+  },
+  "gzip": {
+    "bytes": 2323301,
+    "sha256": "d38887253da67b405f5baf9cb3a53b377a39f7f1a227aced422f97565bceaa10"
+  },
+  "codeReserveBytes": 262144,
+  "networkCodeLimitBytes": 12582912,
+  "headroomBeyondReserveBytes": 3623609,
+  "exportCount": 402,
+  "requiredExportsVerified": [
+    "reconcile_vault51_icp_payout",
+    "refresh_vault51_redemption_claim",
+    "withdraw_vault51_settled_icp",
+    "start_cksol_deposit_with_icp",
+    "get_cksol_icp_terms"
+  ],
+  "gzipRoundtrip": true,
+  "embeddedCandidSourceMatch": "exact plus one extractor newline",
+  "embeddedCandidSha256": "eff9065a3c2015d84ee46e0b600af4c020a2dbdc12a3e9171f229e230e7e20fd",
+  "liveCandidSha256": "48d202ada181389c1b473067e3b23396fae0fe6fd75055b1e126e73a268487d5",
+  "upgradeArgsSha256": "88df3b8241946fddd77dd273bf9325e4855794f70fee06272060c57359965a3f"
+}

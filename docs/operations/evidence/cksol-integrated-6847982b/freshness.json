@@ -1,0 +1,5 @@
+{
+  "src/rumi_protocol_backend/src/lib.rs": "70f20d334373a310dfef17ef4ab53415bdaacd4881b18270c7df1feaca42786f",
+  "src/rumi_protocol_backend/src/main.rs": "6895ae72d990548ef26ca76c7de7f9d8ec3795f58c8f6dd922467b924a36ad5c",
+  "src/rumi_cycle_manager/src/lib.rs": "f3df315f632ce9251cc418d03c69b45debc8fd4bee9a0f24da1dd9ebd7d461c3"
+}

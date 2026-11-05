@@ -1,0 +1,3 @@
+Actual optimized Wasm embedded Candid versus refreshed live Candid
+Command: didc check build-evidence/cksol-integrated-6847982b/embedded.did build-evidence/cksol-integrated-6847982b/live.did
+Exit: 0

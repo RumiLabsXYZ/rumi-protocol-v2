@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 remains separate. PR #624 source validly merged; focused local checks and live Candid compatibility passed. Both path-triggered hosted workflows were intentionally unrun, so hosted CI is not green. Policy audit found no independent mandate or new source-merge gate. Later release procedure may select hosted checks as deferred evidence. Existing artifact predates the integrated source and needs a separately coordinated rebuild. No new hosted load or deployment; reserve off.",
-  "plainSummary": "Source is merged and local checks passed. Hosted workflows intentionally did not run; they are not a new merge requirement. The old artifact lacks the integrated source, so a new build still needs coordination. Reserve stays off.",
+  "summary": "Vault 158 remains separate. Integrated PR #624 backend/frontend production builds passed. Actual artifact Candid matches refreshed live interface; code reserve and frontend auth checks pass. New installation-only packet is for Merritt review, not execution authority. Snapshot archive preservation is still unperformed. Hosted workflows intentionally unrun. Build slot closed; reserve off and all management/financial actions held.",
+  "plainSummary": "The corrected-source builds are complete and the backend interface matches the live service. The installation proposal is ready for coordinator review; no upgrade, snapshot replacement or reserve activation occurred.",
   "glossary": [
     {
       "term": "Stability Pool",
