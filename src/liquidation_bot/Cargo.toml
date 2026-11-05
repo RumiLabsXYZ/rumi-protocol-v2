@@ -20,6 +20,7 @@ ic-cdk-macros = "0.8.3"
 ic-canister-log = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 rumi_cycle_manager = { path = "../rumi_cycle_manager" }
+rumi_protocol_backend = { path = "../rumi_protocol_backend" }
 
 [dev-dependencies]
 candid = { version = "0.10.6", features = ["value"] }

@@ -1,6 +1,6 @@
 {
-  "summary": "Season 1 Points recovery and finalization are verified on mainnet. The final-period compensation is applied, prior entries and receipts are preserved, and replay added zero. Stability Pool live recovery and broader finding reconciliation remain open.",
-  "plainSummary": "Season 1 rewards are finalized, including the days missed while processing was stuck. The final totals were checked, and repeating the operation added no extra points. The wider security review and Stability Pool checks remain open; no action is needed from you for the points closeout.",
+  "summary": "Vault 158 recovery remains held after its authorized configuration readback. ckSOL PR #610 remains draft with the reserve off. A rent-only/dust balance could expose the SOL address before processing funds were ready; the preflight now requires either a minimum deposit already present or processing funds ready, with a focused regression test. Callback safety still relies on stop-and-drain; other deploy paths are not enforced. Stability Pool and vault 51 work continue under Bram.",
+  "plainSummary": "Vault 158 recovery remains held. ckSOL stays in draft review with its reserve off; a fix now hides the SOL address for rent-only or dust balances until processing is ready. Stop-and-drain remains the callback mitigation.",
   "glossary": [
     {
       "term": "Stability Pool",
@@ -21,6 +21,16 @@
       "term": "archive",
       "definition": "An older ledger block range served from a ledger archive canister.",
       "cardId": "SEC-04"
+    },
+    {
+      "term": "treasury recipient",
+      "definition": "The configured destination that must be read back and confirmed before a recovery payment is allowed.",
+      "cardId": "SEC-06"
+    },
+    {
+      "term": "reserve",
+      "definition": "A limited pool of processing funds. The ckSOL reserve is currently off and cannot spend.",
+      "cardId": "CKICP-01"
     }
   ]
 }

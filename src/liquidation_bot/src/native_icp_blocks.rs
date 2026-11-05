@@ -192,6 +192,37 @@ pub fn verify_treasury_transfer(
     Ok(())
 }
 
+/// Verify the exact native-ICP ICPSwap input leg for the bounded vault-158
+/// recovery. ICPSwap records the memo in the native ledger's `icrc1_memo` byte
+/// field; created_at_time is checked separately because the transfer did not
+/// use the ICRC-1 created_at_time dedup field.
+pub fn verify_swap_input_transfer(
+    block: &Block,
+    sender: Principal,
+    pool: Principal,
+    amount_e8s: u64,
+    fee_e8s: u64,
+    memo: &[u8],
+    created_at_time: u64,
+) -> Result<(), String> {
+    let operation = block.transaction.operation.as_ref().ok_or("ICP ledger block has no operation")?;
+    let Operation::Transfer { from, to, spender, amount, fee } = operation else {
+        return Err("ICP swap input block is not a native ICP transfer".into());
+    };
+    if spender.as_deref() != Some(default_account_identifier(pool).as_slice())
+        || *from != default_account_identifier(sender)
+        || *to != default_account_identifier(pool)
+        || amount.e8s != amount_e8s
+        || fee.e8s != fee_e8s
+        || block.transaction.memo != 0
+        || block.transaction.icrc1_memo.as_deref() != Some(memo)
+        || block.transaction.created_at_time.timestamp_nanos != created_at_time
+    {
+        return Err("native ICP swap input block does not match the pinned pool transfer".into());
+    }
+    Ok(())
+}
+
 pub fn default_account_identifier(owner: Principal) -> Vec<u8> {
     let mut hasher = Sha224::new();
     hasher.update(b"\x0Aaccount-id");
@@ -219,6 +250,19 @@ pub fn default_account_identifier(owner: Principal) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn unhex(input: &str) -> Vec<u8> {
+        let input = input.trim();
+        input.as_bytes().chunks_exact(2).map(|pair| {
+            let digit = |c: u8| match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                b'A'..=b'F' => c - b'A' + 10,
+                _ => panic!("invalid fixture hex"),
+            };
+            digit(pair[0]) * 16 + digit(pair[1])
+        }).collect()
+    }
+
     #[test]
     fn supplied_wrong_block_index_is_rejected() {
         let response = QueryBlocksResponse {
@@ -236,5 +280,83 @@ mod tests {
             archived_blocks: vec![],
         };
         assert!(select_block_source(response, 6).is_err());
+    }
+
+    fn vault158_input_block(sender: Principal, pool: Principal, amount: u64, fee: u64, memo: Option<Vec<u8>>) -> Block {
+        Block {
+            transaction: Transaction {
+                memo: 0,
+                icrc1_memo: memo,
+                operation: Some(Operation::Transfer {
+                    from: default_account_identifier(sender),
+                    to: default_account_identifier(pool),
+                    spender: Some(default_account_identifier(pool)),
+                    amount: Tokens { e8s: amount },
+                    fee: Tokens { e8s: fee },
+                }),
+                created_at_time: Timestamp { timestamp_nanos: 1_793_306_981_079_625_901 },
+            },
+        }
+    }
+
+    #[test]
+    fn vault158_native_swap_input_requires_exact_sender_amount_fee_memo_and_timestamp() {
+        let sender = Principal::from_slice(&[1]);
+        let pool = Principal::from_slice(&[2]);
+        let memo = [0, 0, 0, 0, 0, 0x11, 0xbe, 0x56];
+        let block = vault158_input_block(sender, pool, 226_020_933, 10_000, Some(memo.to_vec()));
+        assert!(verify_swap_input_transfer(
+            &block, sender, pool, 226_020_933, 10_000, &memo,
+            1_793_306_981_079_625_901,
+        ).is_ok());
+        assert!(verify_swap_input_transfer(
+            &block, Principal::from_slice(&[3]), pool, 226_020_933, 10_000, &memo,
+            1_793_306_981_079_625_901,
+        ).is_err(), "wrong sender must fail");
+        assert!(verify_swap_input_transfer(
+            &block, sender, pool, 226_020_934, 10_000, &memo,
+            1_793_306_981_079_625_901,
+        ).is_err(), "wrong amount must fail");
+        assert!(verify_swap_input_transfer(
+            &block, sender, pool, 226_020_933, 10_001, &memo,
+            1_793_306_981_079_625_901,
+        ).is_err(), "wrong fee must fail");
+        assert!(verify_swap_input_transfer(
+            &vault158_input_block(sender, pool, 226_020_933, 10_000, Some(vec![9])),
+            sender, pool, 226_020_933, 10_000, &memo, 1_793_306_981_079_625_901,
+        ).is_err(), "wrong memo must fail");
+        assert!(verify_swap_input_transfer(
+            &block, sender, pool, 226_020_933, 10_000, &memo, 1,
+        ).is_err(), "wrong timestamp must fail");
+    }
+
+    #[test]
+    fn archived_vault158_native_receipt_fixture_matches_exact_transferfrom_block() {
+        // Captured from ICP ledger query_blocks(39835236)'s advertised archive
+        // callback q3fc5-haaaa-aaaaa-aaahq-cai.get_blocks on 2026-11-02.
+        let response = unhex(include_str!("../tests/fixtures/vault158-icp-input-block-39835236.hex"));
+        let blocks = decode_archive_result(&response).expect("captured ICP archive response decodes");
+        let mut block = blocks.expect("archive response succeeds").blocks;
+        assert_eq!(block.len(), 1);
+        let block = block.remove(0);
+        let sender = Principal::from_text("nygob-3qaaa-aaaap-qttcq-cai").unwrap();
+        let pool = Principal::from_text("mohjv-bqaaa-aaaag-qjyia-cai").unwrap();
+        let memo = [0, 0, 0, 0, 0, 0x11, 0xbe, 0x56];
+        assert!(verify_swap_input_transfer(
+            &block, sender, pool, 226_020_933, 10_000, &memo,
+            1_793_306_981_079_625_901,
+        ).is_ok());
+        assert!(verify_swap_input_transfer(
+            &block, Principal::anonymous(), pool, 226_020_933, 10_000, &memo,
+            1_793_306_981_079_625_901,
+        ).is_err(), "wrong bot must fail against captured evidence");
+        assert!(verify_swap_input_transfer(
+            &block, sender, pool, 226_020_933, 9_999, &memo,
+            1_793_306_981_079_625_901,
+        ).is_err(), "wrong fee must fail against captured evidence");
+        assert!(verify_swap_input_transfer(
+            &block, sender, pool, 226_020_933, 10_000, &[9],
+            1_793_306_981_079_625_901,
+        ).is_err(), "wrong memo must fail against captured evidence");
     }
 }

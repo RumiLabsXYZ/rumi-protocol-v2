@@ -189,7 +189,7 @@ pub fn attempt(owner: Principal) -> Option<CkSolRelayAttempt> {
     read_state(|state| state.cksol_relay_attempts.get(&owner).cloned())
 }
 
-fn begin_in_flight(owner: Principal) -> Result<(), String> {
+fn begin_in_flight(owner: Principal) -> Result<u64, String> {
     mutate_state(|state| {
         if state.cksol_relay_in_flight.contains(&owner) {
             return Err("ckSOL deposit is already processing for this owner".into());
@@ -198,13 +198,15 @@ fn begin_in_flight(owner: Principal) -> Result<(), String> {
             return Err("ckSOL relay owner cap reached".into());
         }
         state.cksol_relay_in_flight.insert(owner);
-        Ok(())
+        Ok(state.cksol_icp_upgrade_epoch)
     })
 }
 
-fn end_in_flight(owner: Principal) {
+fn end_in_flight(owner: Principal, epoch: u64) {
     mutate_state(|state| {
-        state.cksol_relay_in_flight.remove(&owner);
+        if state.cksol_icp_upgrade_epoch == epoch {
+            state.cksol_relay_in_flight.remove(&owner);
+        }
     });
 }
 
@@ -308,6 +310,9 @@ pub fn bind_observed_id(
     if owner == Principal::anonymous() {
         return Err("Cannot recover an anonymous ckSOL owner".into());
     }
+    if read_state(|state| state.cksol_icp_payments.get(&owner).is_some_and(|j| matches!(j.payment.phase, crate::cksol_paid::CkSolPaymentPhase::FundingPending | crate::cksol_paid::CkSolPaymentPhase::FundingUnknown | crate::cksol_paid::CkSolPaymentPhase::Funded))) {
+        return Err("ICP funding has not reached minter dispatch; no deposit ID can be bound".into());
+    }
     mutate_state(|state| match state.cksol_relay_attempts.get_mut(&owner) {
         Some(row) if row.status == CkSolRelayStatus::SubmittedOrUnknown => {
             row.status = CkSolRelayStatus::Queued(deposit_id);
@@ -346,6 +351,14 @@ pub(crate) async fn call_paid_minter(owner: Principal) -> (crate::cksol_paid::De
 /// Reclaim a completed owner slot after independently reading the upstream
 /// terminal status. The owner can never use this endpoint to discard an
 /// unknown, queued, swept, or finalized deposit record.
+fn clear_if_current(state: &mut crate::state::State, owner: Principal, epoch: u64, existing: &CkSolRelayAttempt) -> Result<(), String> {
+    if state.cksol_icp_upgrade_epoch != epoch || state.cksol_relay_attempts.get(&owner) != Some(existing) {
+        return Err("ckSOL attempt changed while checking status; retained for reconciliation".into());
+    }
+    state.cksol_relay_attempts.remove(&owner);
+    Ok(())
+}
+
 pub async fn clear(owner: Principal) -> Result<(), String> {
     if owner == Principal::anonymous() {
         return Err("Anonymous callers cannot clear a ckSOL deposit".into());
@@ -360,16 +373,13 @@ pub async fn clear(owner: Principal) -> Result<(), String> {
     let CkSolRelayStatus::Queued(id) = existing.status else {
         return Err("only a queued ckSOL deposit can be cleared after terminal status".into());
     };
-    begin_in_flight(owner)?;
+    let epoch = begin_in_flight(owner)?;
     let status_result: Result<(DepositSolStatus,), _> =
         ic_cdk::call(minter_principal(), "deposit_sol_status", (id,)).await;
-    end_in_flight(owner);
+    end_in_flight(owner, epoch);
     match status_result {
         Ok((status,)) if is_terminal(&status) => {
-            mutate_state(|state| {
-                state.cksol_relay_attempts.remove(&owner);
-            });
-            Ok(())
+            mutate_state(|state| clear_if_current(state, owner, epoch, &existing))
         }
         Ok((status,)) => Err(format!(
             "ckSOL deposit {id} remains {}; retained for reconciliation",
@@ -384,6 +394,31 @@ pub async fn clear(owner: Principal) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_clear_cannot_remove_newer_relay_attempt() {
+        let owner = Principal::from_slice(&[7]);
+        let mut state = crate::state::State::default();
+        let old = CkSolRelayAttempt { started_at_ns: 1, status: CkSolRelayStatus::Queued(1) };
+        let new = CkSolRelayAttempt { started_at_ns: 2, status: CkSolRelayStatus::Queued(2) };
+        state.cksol_relay_attempts.insert(owner, new.clone());
+        assert!(clear_if_current(&mut state, owner, 0, &old).is_err());
+        assert_eq!(state.cksol_relay_attempts.get(&owner), Some(&new));
+        state.cksol_icp_upgrade_epoch = 1;
+        assert!(clear_if_current(&mut state, owner, 0, &new).is_err());
+        assert_eq!(state.cksol_relay_attempts.get(&owner), Some(&new));
+        assert!(clear_if_current(&mut state, owner, 1, &new).is_ok());
+    }
+
+    #[test]
+    fn stale_sponsored_release_does_not_clear_newer_lock() {
+        let owner = Principal::from_slice(&[7]);
+        crate::state::replace_state(crate::state::State::default());
+        let old_epoch = begin_in_flight(owner).unwrap();
+        mutate_state(|s| { s.cksol_icp_upgrade_epoch += 1; s.cksol_relay_in_flight.clear(); s.cksol_relay_in_flight.insert(owner); });
+        end_in_flight(owner, old_epoch);
+        assert!(read_state(|s| s.cksol_relay_in_flight.contains(&owner)));
+    }
+
 
     #[test]
     fn fixed_constants_match_live_cksol_contract() {

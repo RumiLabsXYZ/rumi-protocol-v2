@@ -207,7 +207,7 @@ impl Transport for IcTransport {
         )
     }
 }
-struct Guard(Principal);
+struct Guard(Principal, u64);
 impl Guard {
     fn acquire(owner: Principal) -> Result<Self, String> {
         if owner == Principal::anonymous() {
@@ -221,14 +221,16 @@ impl Guard {
                 return Err("ckSOL relay capacity reached".into());
             }
             s.cksol_relay_in_flight.insert(owner);
-            Ok(Guard(owner))
+            Ok(Guard(owner, s.cksol_icp_upgrade_epoch))
         })
     }
 }
 impl Drop for Guard {
     fn drop(&mut self) {
         mutate_state(|s| {
-            s.cksol_relay_in_flight.remove(&self.0);
+            if s.cksol_icp_upgrade_epoch == self.1 {
+                s.cksol_relay_in_flight.remove(&self.0);
+            }
         });
     }
 }
@@ -239,7 +241,7 @@ fn liabilities(s: &State) -> u128 {
         .sum()
 }
 fn has_backing(s: &State, balance: u128) -> bool {
-    balance >= CKSOL_RELAY_CANISTER_RESERVE.saturating_add(liabilities(s))
+    balance >= CKSOL_RELAY_CANISTER_RESERVE.saturating_add(liabilities(s)).saturating_add(crate::cksol_icp_paid::icp_protected(s))
 }
 fn prepare(s: &mut State, owner: Principal, sequence: u64, now: u64) -> Result<bool, String> {
     if let Some(existing) = s.cksol_paid_payments.get(&owner) {
@@ -397,7 +399,7 @@ async fn refund_with<T: Transport>(owner: Principal, t: &T) -> Result<CkSolPayme
     if before.phase != CkSolPaymentPhase::RefundReady {
         return Ok(before);
     }
-    if !read_state(|s| t.balance() >= liabilities(s)) {
+    if !read_state(|s| t.balance() >= liabilities(s).saturating_add(crate::cksol_icp_paid::icp_protected(s))) {
         return Err(
             "Refund retained: backend cannot currently cover all user cycle credits".into(),
         );
@@ -480,6 +482,7 @@ pub async fn start_with<T: Transport>(
     t: &T,
 ) -> Result<CkSolPayment, String> {
     let _guard = Guard::acquire(owner)?;
+    if read_state(|s| s.cksol_icp_payments.get(&owner).is_some_and(crate::cksol_icp_paid::blocks_cycles_payment)) { return Err("Resolve previous ICP payment first".into()); }
     if max_payment != FUNDING {
         return Err("Payment terms changed; refresh the quote".into());
     }
@@ -555,6 +558,16 @@ pub async fn claim_with<T: Transport>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_cycles_guard_does_not_clear_newer_lock() {
+        let owner = Principal::from_slice(&[7]);
+        crate::state::replace_state(State::default());
+        let old = Guard::acquire(owner).unwrap();
+        mutate_state(|s| { s.cksol_icp_upgrade_epoch += 1; s.cksol_relay_in_flight.clear(); s.cksol_relay_in_flight.insert(owner); });
+        drop(old);
+        assert!(read_state(|s| s.cksol_relay_in_flight.contains(&owner)));
+    }
+
     use futures::executor::block_on;
     use std::cell::{Cell, RefCell};
     type FundingResult = Result<Result<Nat, WithdrawFromError>, String>;
