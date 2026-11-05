@@ -18,7 +18,7 @@
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
-  import { computeSafeIcusdRepayMax } from '$lib/utils/repayLimits';
+  import { computeSafeIcusdRepayMax, claimRepayMaximum } from '$lib/utils/repayLimits';
   import { getVaultCrTextColor, VAULT_CR_DANGER } from '$lib/utils/vaultHealth';
   import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
@@ -169,7 +169,10 @@
         100_000n,
         BigInt(Math.max(0, Math.round(vaultCollateralInfo?.minVaultDebt ?? 10_000_000))),
       )) / E8S;
-  $: maxRepayable = Math.min(maxRepayBase, tickingDebt);
+  $: claimSpendable = isCkStableRepay
+    ? effectiveRepayBalance / (1 + ckstableRepayFee)
+    : Number(walletIcusdRaw > 100_000n ? walletIcusdRaw - 100_000n : 0n) / E8S;
+  $: maxRepayable = isRedemptionClaim ? claimRepayMaximum(tickingDebt, claimSpendable, maxRepayBase) : Math.min(maxRepayBase, tickingDebt);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
   // 0.5% haircut when debt exists so Max never overshoots backend oracle price
@@ -726,13 +729,29 @@
     } finally { isProcessing = false; }
   }
 
+  let claimPayoutBlock = '';
+  async function handleClaimAction(action: 'refresh' | 'withdraw' | 'reconcile') {
+    clearMessages(); isProcessing = true;
+    try {
+      if (action === 'reconcile' && !/^[0-9]+$/.test(claimPayoutBlock)) throw new Error('Enter a valid ICP ledger block number.');
+      await ApiClient.vault51ClaimAction(action, vault.owner, action === 'reconcile' ? BigInt(claimPayoutBlock) : undefined);
+      await vaultStore.refreshVaults();
+      await walletStore.refreshBalance({ skipCache: true });
+      dispatch('updated');
+      toastStore.success(action === 'refresh' ? 'Redemption status refreshed.' : 'ICP withdrawal recorded.', 8000);
+    } catch (err) {
+      toastStore.error(`Action not confirmed: ${err instanceof Error ? err.message : 'Unknown error'}. Refresh claim status before retrying.`, 12000);
+      await vaultStore.refreshVaults().catch(() => {});
+    } finally { isProcessing = false; }
+  }
+
   async function handleRepay() {
     const amount = parseFloat(repayAmount);
     if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
     // MIN_ICUSD floor still applies to partial repays (anti-spam guarantee on
     // the backend). The compound `repay_and_close_vault` path bypasses it so
     // stuck-zone vaults can be cleared — match that here.
-    if (!isRepayAndClose && amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
+    if (!isRepayAndClose && !(isRedemptionClaim && amount >= tickingDebt) && amount < MIN_ICUSD) { toastStore.error(`Minimum repay amount is ${MIN_ICUSD} icUSD`, 8000); return; }
     if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
@@ -814,7 +833,7 @@
     {/if}
     <span class="vault-id"><span class="collateral-dot" style="background:{collateralColor}"></span>#{vault.vaultId}</span>
     <span class="vault-cell">
-      <span class="cell-label">{isRedemptionClaim ? 'ICP redemption claim' : 'Collateral'}</span>
+      <span class="cell-label">{redemptionClaim?.releaseBlock ? 'Original ICP claim' : isRedemptionClaim ? 'ICP redemption claim' : 'Collateral'}</span>
       <span class="cell-value">{fmtMargin} {isRedemptionClaim ? 'ICP' : collateralSymbol}</span>
       <span class="cell-sub">${fmtCollateralUsd}</span>
     </span>
@@ -876,7 +895,21 @@
   {#if expanded}
     <div class="vault-actions">
       {#if redemptionClaim}
-        <p class="cell-sub">Protocol-controlled ICP redemption claim · {redemptionClaim.stage}. Collateral cannot be withdrawn or borrowed against. Liquidation is suspended. Debt continues under the existing nICP interest rules, including after settlement; repayment remains available.</p>
+        <p class="cell-sub">Protocol-controlled ICP redemption claim · {redemptionClaim.stage}. Liquidation and borrowing are suspended. Debt continues under the existing nICP interest rules; repayment remains available. Once ICP arrives and debt is fully repaid, withdraw it to this vault owner’s wallet.</p>
+        {#if redemptionClaim.releaseBlock}
+          <p class="cell-sub">ICP withdrawal confirmed in ledger block #{redemptionClaim.releaseBlock}.</p>
+        {:else if redemptionClaim.releasePending}
+          <p class="cell-sub">Withdrawal initiated; its outcome is unconfirmed and needs reconciliation. Check its status before retrying.</p>
+          <label class="cell-sub" for={`claim-block-${vault.vaultId}`}>If you have the ICP payout block, enter it to verify the transfer:</label>
+          <input id={`claim-block-${vault.vaultId}`} type="text" inputmode="numeric" bind:value={claimPayoutBlock} disabled={isProcessing} />
+          <button class="btn-submit" on:click={() => handleClaimAction('reconcile')} disabled={isProcessing || !claimPayoutBlock}>Verify payout block</button>
+        {/if}
+        <button class="btn-submit" on:click={() => handleClaimAction('refresh')} disabled={isProcessing}>Check redemption status</button>
+        {#if redemptionClaim.stage === 'Settled' && tickingDebt <= 0 && !redemptionClaim.releaseBlock}
+          <button class="btn-submit" on:click={() => handleClaimAction('withdraw')} disabled={isProcessing}>
+            {redemptionClaim.releasePending ? 'Reconcile ICP withdrawal' : 'Withdraw ICP to owner wallet'}
+          </button>
+        {/if}
       {/if}
       <!-- Action layout: pills top-right, stats left, input right -->
       <div class="action-layout">
@@ -1085,6 +1118,7 @@
               </div>
 
             {:else if activeAction === 'repay'}
+              {#if isRedemptionClaim}<span class="repay-close-hint">The entered amount is the maximum payment. Max includes a small buffer for accrued interest, bounded by your available balance. The protocol charges the actual debt, up to that maximum. Keep enough balance and allowance for fees; refresh if the outcome is unclear.</span>{/if}
               <div class="input-header">
                 <span class="input-label">Repay Debt {#if $earningActive}<MultiplierBadge multiplier={5} comingSoon label="5× soon" />{/if}</span>
                 {#if maxRepayable > 0}

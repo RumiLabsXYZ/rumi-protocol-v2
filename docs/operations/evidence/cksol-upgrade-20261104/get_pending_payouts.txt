@@ -1,0 +1,1 @@
+(record { next_cursor = null; items = vec {} })

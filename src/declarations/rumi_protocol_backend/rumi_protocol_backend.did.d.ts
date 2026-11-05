@@ -416,6 +416,12 @@ export type CkSolRelayStatus = { 'Queued' : bigint } |
 export type ClaimAction = { 'ReissueXrpl' : null } |
   { 'CancelUnexecutedRepayment' : null } |
   { 'ReceiveCanonical' : null };
+export interface ClaimRelease {
+  'fee_e8s' : bigint,
+  'amount_e8s' : bigint,
+  'nonce' : bigint,
+  'block' : [] | [bigint],
+}
 export type ClaimStage = { 'WithdrawalSubmitted' : null } |
   { 'Approved' : null } |
   { 'ClaimConfirmed' : null } |
@@ -1396,6 +1402,7 @@ export interface NicpRedemptionClaim {
   'owner' : Principal,
   'withdrawal_id' : [] | [bigint],
   'redeem_nicp_e8s' : bigint,
+  'release' : [] | [ClaimRelease],
   'fee_e8s' : bigint,
   'updated_at_ns' : bigint,
   'vault_id' : bigint,
@@ -3149,6 +3156,7 @@ export interface _SERVICE {
     [bigint, bigint],
     Result_1
   >,
+  'reconcile_vault51_icp_payout' : ActorMethod<[bigint], Result_4>,
   'reconcile_vault_collateral_pull_from_block' : ActorMethod<
     [VaultOperationIdArg, bigint],
     Result_1
@@ -3165,6 +3173,7 @@ export interface _SERVICE {
   'redeem_quoted' : ActorMethod<[RedeemQuotedRequest], Result_38>,
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_39>,
   'refresh_chain_hot_wallet_balance' : ActorMethod<[number], Result_40>,
+  'refresh_vault51_redemption_claim' : ActorMethod<[], Result_4>,
   'refund_stability_pool_burn' : ActorMethod<
     [bigint, bigint, SpWritedownProof],
     Result_41
@@ -3453,6 +3462,7 @@ export interface _SERVICE {
     [bigint, bigint, string],
     Result_1
   >,
+  'withdraw_vault51_settled_icp' : ActorMethod<[], Result_4>,
   'xrp_balance' : ActorMethod<[string], Result>,
   'xrp_custody_address' : ActorMethod<[Principal, bigint], Result_2>,
   'xrp_settlement_address' : ActorMethod<[], Result_2>,

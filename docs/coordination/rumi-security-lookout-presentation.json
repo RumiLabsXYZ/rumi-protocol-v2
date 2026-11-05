@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 recovery remains held after its authorized configuration readback. ckSOL PR #610 remains draft with the reserve off. A rent-only/dust balance could expose the SOL address before processing funds were ready; the preflight now requires either a minimum deposit already present or processing funds ready, with a focused regression test. Callback safety still relies on stop-and-drain; other deploy paths are not enforced. Stability Pool and vault 51 work continue under Bram.",
-  "plainSummary": "Vault 158 recovery remains held. ckSOL stays in draft review with its reserve off; a fix now hides the SOL address for rent-only or dust balances until processing is ready. Stop-and-drain remains the callback mitigation.",
+  "summary": "Vault 158 remains separate. Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). Source merge-when-green proceeds without paid CI. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
+  "plainSummary": "The source preserves the deployed recovery behavior and passes the focused checks. A fresh release build is still needed; no deployment or reserve activation occurred.",
   "glossary": [
     {
       "term": "Stability Pool",

@@ -1,0 +1,12 @@
+(
+  opt record {
+    deposit_id = null;
+    message = opt "Funding not confirmed: InsufficientAllowance { allowance: Nat(0) }";
+    refund_block = null;
+    phase = variant { FundingRejected };
+    created_at_time = 1_793_135_940_788_600_951 : nat64;
+    refundable_cycles = 0 : nat64;
+    funding_block = null;
+    sequence = 1 : nat64;
+  },
+)

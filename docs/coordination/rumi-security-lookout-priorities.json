@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Direct running upgrades can trap callbacks; stop-and-drain cannot enforce other deploy paths. The rent-only/dust address-exposure fix is under current-head validation.",
-      "nextAction": "Review the focused rent-only regression and current PR #610 checks after the refresh; keep the reserve off and do not install or fund production.",
+      "blockedReason": "Focused source composition checks pass; production artifact still excludes the recovery composition. No production build slot or deployment/financial authority is active.",
+      "nextAction": "Complete standing green source merge, then coordinate one source-matched artifact build and refresh the upgrade packet. Preserve accepted stop/drain and exact archived-slot replacement policy; reserve stays off.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",

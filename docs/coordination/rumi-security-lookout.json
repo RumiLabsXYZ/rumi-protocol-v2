@@ -91,10 +91,10 @@
     },
     {
       "id": "CKICP-01",
-      "state": "Blocked",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
-      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
+      "evidenceText": "PR #610 merged at 93d9ece7. The backend ICP escrow/accounting implementation is merged; focused backend checks and independent backend review passed. PR #620 is also merged. The source merge does not prove installation, live reserve funding, activation, or a financial canary.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -108,10 +108,10 @@
     },
     {
       "id": "CKICP-02",
-      "state": "In progress",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
-      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
+      "evidenceText": "PR #610 merged at 93d9ece7. The ICP quote and consent flow, existing SOL deposit recovery path, and rent/dust address preflight are in merged source; the 35-test focused fixture passed and independent frontend review passed. PR #605 remains open, but its two changed balance-interface files match current main. Its reported earlier asset publication has not been independently read back here.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -128,7 +128,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "PR #610 remains draft and is refreshed onto current main 2a71ec64. The rent-only/dust preflight defect was reproduced: positive SOL below the minter minimum exposed the address with ICP and cycles unavailable. The predicate now requires either a minimum deposit already present or processing payment readiness; the focused regression failed before and passes after the fix, alongside existing full-deposit and insufficient-ICP cases. Previous frontend and Stability Pool checks passed on the prior head; use the PR checks panel for the updated head. Backend lifecycle source and Candid are unchanged from the previously validated source head. No production action occurred; reserve remains zero/off. Direct running-upgrade traps remain reproduced; tested stop/drain is the interim mitigation, but other deployment paths are not enforced.",
+      "evidenceText": "Complete deployed PR #613 source integrated (a807384f + bb48c70f) and declarations canonically regenerated. Live Candid compatibility passes; focused backend checks 21/21, generator 1/1, frontend 9/9 pass. Initial E0559 was stale shared 3pool library, corrected by timestamp-only freshness invalidation; no fixture/proof changes. Native slot closed under cap (~775 MiB growth). Source merge-when-green proceeds without paid CI. Old production artifact excludes composition; fresh build requires separate slot. No live actions; reserve off. Snapshot preservation sequence clarified.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -137,6 +137,18 @@
         {
           "title": "PR #610 checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
+        },
+        {
+          "title": "ckSOL release decision",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-release-decision-2026-11-04.md"
+        },
+        {
+          "title": "Held upgrade-only packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-upgrade-only-packet-20261104.md"
+        },
+        {
+          "title": "Source composition checkpoint",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-pr613-composition-20261104.md"
         }
       ]
     },
