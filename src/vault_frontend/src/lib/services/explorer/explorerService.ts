@@ -725,6 +725,7 @@ export async function fetchEvents(
 	page: bigint,
 	pageSize: bigint,
 	filters?: BackendEventFilters,
+	throwOnError = false,
 ): Promise<{ total: bigint; events: [bigint, any][] }> {
 	const filterKey = backendFiltersCacheKey(filters);
 	const key = `events:filtered:${page}:${pageSize}:${filterKey}`;
@@ -779,6 +780,7 @@ export async function fetchEvents(
 		return setCache(key, data);
 	} catch (err) {
 		console.error('[explorerService] fetchEvents failed:', err);
+		if (throwOnError) throw err;
 		return { total: 0n, events: [] };
 	}
 }
@@ -792,8 +794,8 @@ export async function fetchEvents(
  * function paginates the backend's filtered event log, which has authoritative
  * `fee_amount` on every Borrow / Redemption variant, and sums them.
  *
- * Returns icUSD values (e8s normalized). Capped at MAX_PAGES * 200 events,
- * which covers any realistic 90d window for this protocol.
+ * Returns icUSD values (e8s normalized). A failed or capped scan rejects so
+ * callers cannot present a partial total as complete.
  */
 export async function fetchProtocolFeeTotalsFromBackend(
 	windowMs: number,
@@ -811,14 +813,20 @@ export async function fetchProtocolFeeTotalsFromBackend(
 	let redemptionFeesE8s = 0n;
 	let borrowCount = 0;
 	let redemptionCount = 0;
-	let offset = 0n;
+	let page = 0n;
+	let processed = 0n;
+	let complete = false;
 
 	for (let p = 0; p < MAX_PAGES; p++) {
-		const result = await fetchEvents(offset, PAGE_SIZE, {
+		const result = await fetchEvents(page, PAGE_SIZE, {
 			types: ['Borrow', 'Redemption'],
 			time_range: { start_ns: startNs, end_ns: nowNs },
-		});
-		if (result.events.length === 0) break;
+		}, true);
+		if (result.events.length === 0) {
+			if (processed < result.total) throw new Error('Fee event scan incomplete: an expected page was empty');
+			complete = true;
+			break;
+		}
 		for (const [, evt] of result.events) {
 			const variantKey = Object.keys(evt ?? {})[0];
 			const data = evt?.[variantKey] ?? {};
@@ -830,9 +838,14 @@ export async function fetchProtocolFeeTotalsFromBackend(
 				redemptionCount += 1;
 			}
 		}
-		offset += BigInt(result.events.length);
-		if (offset >= result.total) break;
+		processed += BigInt(result.events.length);
+		if (processed >= result.total) {
+			complete = true;
+			break;
+		}
+		page += 1n;
 	}
+	if (!complete) throw new Error(`Fee event scan incomplete after ${MAX_PAGES} pages`);
 
 	const out = {
 		borrowIcusd: Number(borrowFeesE8s) / 1e8,

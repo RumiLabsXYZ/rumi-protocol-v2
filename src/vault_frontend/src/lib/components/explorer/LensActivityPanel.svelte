@@ -21,7 +21,7 @@
     | 'vault_ops'          // Collateral: backend vault events only, no admin
     | 'stability_pool'     // Stability Pool: SP events only
     | 'redemptions'        // Redemptions: backend Redeem events only
-    | 'revenue'            // Revenue: fee-bearing (swaps + redemptions + liquidations)
+    | 'revenue'            // Revenue: fee-bearing (swaps + borrow + redemptions + liquidations)
     | 'dexs'               // DEXs: 3pool swaps/liquidity, AMM swaps/liquidity (no admin)
     | 'admin'              // Admin: admin events from all sources
     | 'health';            // System: protocol-health incidents (oracle, breaker, deficit, ops)
@@ -43,6 +43,7 @@
   let vaultCollateralMap: Map<number, string> = $state(new Map());
   let vaultOwnerMap: Map<number, string> = $state(new Map());
   let loading = $state(true);
+  let activityUnavailable = $state(false);
 
   // Backend events serialize as snake_case JSON (via #[serde(rename = ...)]).
   // The previous filters used CamelCase variant names that don't actually exist
@@ -109,7 +110,8 @@
 
   function isBackendRevenue(evt: any): boolean {
     const key = backendEventKey(evt);
-    return key === 'redemption_on_vaults'
+    return key === 'borrow_from_vault'
+      || key === 'redemption_on_vaults'
       || key === 'liquidate_vault'
       || key === 'partial_liquidate_vault';
   }
@@ -170,10 +172,9 @@
       case 'redemptions':
         return { length: 50n, filters: { types: ['Redemption'] } };
       case 'revenue':
-        // Mirrors `isBackendRevenue` (liquidate_vault, partial_liquidate_vault,
-        // redemption_on_vaults). `Redemption` also yields RedemptionTransfered,
-        // which the client-side filter then drops.
-        return { length: 50n, filters: { types: ['Redemption', 'Liquidation', 'PartialLiquidation'] } };
+        // Mirrors `isBackendRevenue`; `Redemption` also yields
+        // RedemptionTransfered, which the client-side filter then drops.
+        return { length: 50n, filters: { types: ['Borrow', 'Redemption', 'Liquidation', 'PartialLiquidation'] } };
       case 'admin':
         // Mirrors `ADMIN_EVENT_KEYS`. Most setter / config variants collapse
         // into the backend's catch-all `Admin` filter, but `admin_mint`,
@@ -198,6 +199,7 @@
 
   async function loadEvents() {
     loading = true;
+    activityUnavailable = false;
     const sampleSize = BigInt(limit * 4);  // overfetch then trim after merging
 
     try {
@@ -205,7 +207,10 @@
       const needsBackend = scope === 'all' || scope === 'vault_ops' || scope === 'redemptions' || scope === 'revenue' || scope === 'admin' || scope === 'health';
       const { length: backendLength, filters: backendFilters } = backendQueryForScope(scope);
       const backendPromise = needsBackend
-        ? fetchEvents(0n, backendLength, backendFilters).catch(() => ({ total: 0n, events: [] }))
+        ? fetchEvents(0n, backendLength, backendFilters, scope === 'revenue').catch((err) => {
+          if (scope === 'revenue') activityUnavailable = true;
+          return { total: 0n, events: [] };
+        })
         : Promise.resolve({ total: 0n, events: [] });
 
       const vaultsPromise = fetchAllVaults().catch(() => []);
@@ -334,9 +339,16 @@
     <div class="flex items-center justify-center py-6">
       <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
     </div>
-  {:else if events.length === 0}
-    <p class="text-sm text-gray-500 py-4">No recent events in this scope.</p>
   {:else}
-    <MixedEventsTable {events} {vaultCollateralMap} {vaultOwnerMap} headerCellClass="px-4 py-2" />
+    {#if activityUnavailable}
+      <p class="text-sm text-amber-400 py-2">Backend revenue activity is unavailable. Independently available swap activity is still shown.</p>
+    {/if}
+    {#if events.length === 0}
+      {#if !activityUnavailable}
+        <p class="text-sm text-gray-500 py-4">No recent events in this scope.</p>
+      {/if}
+    {:else}
+      <MixedEventsTable {events} {vaultCollateralMap} {vaultOwnerMap} headerCellClass="px-4 py-2" />
+    {/if}
   {/if}
 </div>
