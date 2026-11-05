@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen, unregistered and undeployed. Locally completed on 2026-11-04: the test-build-only address demo (daf1c440: 156/156 focused tests, Candid check, PocketIC smoke with real test_key_1 derive, production Wasm omits it) and caller-scoped pending-address readback on XRP's pattern (81fd7c3d: unit, Candid, PocketIC; declarations regenerated at 48ea2690). No hosted CI, install or registration. Next: deposit confirmation, then payout, oracle, provider, frontend and release work.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. In local tests, a developer can now create a test deposit address and look up their own pending addresses. The next step is confirming deposits sent to those addresses; Rob does not need to act now.",
+  "summary": "XLM remains Frozen, unregistered and undeployed. Locally completed on 2026-11-04: the test-build-only address demo (daf1c440), caller-scoped pending-address readback (81fd7c3d, declarations 48ea2690), and the dormant atomic deposit-credit step with ownership, duplicate-receipt and bounds checks (85a7249e; 20/20 XLM unit tests). No hosted CI, install or registration. Next: vault materialization from the credited receipt, then a confirm endpoint with provider quorum, then payout, oracle, frontend and release work.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. In local tests, a developer can create a test deposit address, look it up, and the system can safely record a confirmed deposit exactly once. Next is turning that recorded deposit into a vault; Rob does not need to act now.",
   "glossary": [
     {
       "term": "Stellar",

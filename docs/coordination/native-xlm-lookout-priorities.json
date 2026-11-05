@@ -15,7 +15,7 @@
       "title": "Read back my pending XLM addresses",
       "status": "done",
       "blockedReason": "",
-      "nextAction": "Locally completed at 81fd7c3d/48ea2690 with unit, Candid, Wasm and PocketIC checks. Next slice is deposit confirmation under verified deposits and borrowing.",
+      "nextAction": "Locally completed at 81fd7c3d/48ea2690 with unit, Candid, Wasm and PocketIC checks. Deposit confirmation continues under verified deposits and borrowing.",
       "cardIds": [
         "D2"
       ]
@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "blocked",
-      "blockedReason": "The deposit-evidence decision helper is locally tested but not wired into a confirm endpoint, provider-account quorum, or atomic mutation; no live credit lifecycle exists.",
-      "nextAction": "Following XRP's lifecycle, implement deposit confirmation for an opened pending address: provider binding, quorum evidence, and atomic credit/receipt/tombstone, with owner-bound recovery for verified uncredited funds.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "The atomic credit step with duplicate and ownership guards is locally tested (85a7249e). Next, following XRP: materialize the vault from the credited receipt, then add a confirm endpoint that verifies evidence through provider quorum and the funding-credit decision before calling the credit step.",
       "cardIds": [
         "WP3"
       ]
