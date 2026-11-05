@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 recovery PR #614 is green and ready for review, but live treasury-recipient proof requires a separately authorized bot upgrade before execution. ckSOL ICP-processing PR #610 is green and mergeable, while direct running upgrades remain unsafe and the reserve stays off. Stability Pool work continues consistently, and vault 51 is tracked separately through green PR #613 without claiming repayment, settlement, or withdrawal.",
-  "plainSummary": "Two recovery jobs are now the top focus. Vault 158 software is ready for review but needs a separately approved update before the payment destination can be checked; the Solana payment change still needs a safe upgrade path. Stability Pool and vault 51 work continue under Bram, and Rob does not need to act now.",
+  "summary": "Vault 158 recovery PR #614 merged at 99027b67 after its listed check and two independent source reviews passed. The live bot remains unchanged, so treasury-recipient readback and recovery stay held behind separate upgrade and financial authority. ckSOL PR #610 remains green and mergeable but direct running upgrades are unsafe and its reserve stays off. Stability Pool and vault 51 work continue under Bram.",
+  "plainSummary": "Vault 158 recovery software has been merged after two independent reviews. The live bot has not been upgraded, so its payment destination still cannot be checked and recovery remains held. The Solana processing upgrade issue is unchanged; Stability Pool and vault 51 work continue under Bram, and Rob has no immediate action in this tranche.",
   "glossary": [
     {
       "term": "Stability Pool",

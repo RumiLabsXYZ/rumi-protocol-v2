@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-06",
-      "state": "Review",
+      "state": "Blocked",
       "owner": "Bram",
       "scope": "Prepare vault 158 liquidation recovery without executing it",
-      "evidenceText": "PR #614 is open and its listed check passes. The claim remains held. The installed bot cannot expose its current treasury recipient; the PR adds a read-only admin query so that recipient can be verified after a separately authorized upgrade and before any recovery. No upgrade, recovery, or funds movement occurred.",
+      "evidenceText": "PR #614 merged at 99027b67 after its listed check and two independent source reviews passed. The claim remains held. The installed bot is unchanged and cannot expose its current treasury recipient; the merged source adds an admin-only readback for use after a separately authorized upgrade and before any recovery. No installation, recovery, or funds movement occurred.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
