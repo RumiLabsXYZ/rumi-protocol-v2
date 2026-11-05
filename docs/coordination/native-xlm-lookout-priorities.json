@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "blocked",
-      "blockedReason": "Real testnet providers are configured but unbuilt (compute held). Only two free providers are independent and reliable; the third (Tatum keyless) is throttled, so live confirmation depends on both SDF and Ankr.",
-      "nextAction": "When XLM gets a fresh compute slot, build and run the focused tests; CTO chooses the third-provider option (keep throttled Tatum, paid keyed provider, or Rumi-run Horizon); then a live testnet confirm.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Local verification passed at 32bed0e8. Next: a bounded live testnet confirm with the free SDF/Ankr/Tatum providers (2-of-3 agreement; Tatum usually throttled) once a coordinated slot and testnet funds approval exist; then borrowing. Production providers are not chosen.",
       "cardIds": [
         "WP3"
       ]

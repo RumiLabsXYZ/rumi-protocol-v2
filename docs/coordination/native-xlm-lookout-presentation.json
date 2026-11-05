@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen, unregistered and undeployed. Test-build confirm verifies deposits via 2-of-3 Horizon quorum and atomically opens the vault; mocked PocketIC passed at 2e80bf27. Real testnet providers now configured (SDF, Ankr, Tatum): read-only probes show SDF and Ankr are independent and complete; Tatum keyless is throttled to 5/min, so live confirm needs both SDF and Ankr. That change and new vault-ownership assertions are unbuilt, held for a fresh compute slot. Next: build/test, CTO provider decision, live testnet confirm.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. The system is now pointed at three real Stellar test data sources, but only two are reliable for free, so a decision is needed on the third. The latest changes still need a test run once build time is free.",
+  "summary": "XLM remains Frozen, unregistered and not installed anywhere. Local batch 2026-11-04 at 32bed0e8 passed: lib stellar 145/145, lib xlm 22/22, test Wasm rebuilt, mocked PocketIC confirm 1/1 (real SDF/Ankr/Tatum URLs; disagreement no vault; success one vault with owner, type, amount, zero debt asserted; replay rejected), production Wasm check clean. Non-200 and 429 never count as agreement. Free testnet providers are for bounded testnet validation only. Next: live testnet confirm.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests now show a deposit becomes a vault for the right owner only when independent Stellar sources agree, and repeats or disagreements are refused. The next step is a real test-network trial, which needs a separate go-ahead.",
   "glossary": [
     {
       "term": "Stellar",
