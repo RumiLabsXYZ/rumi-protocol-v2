@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Direct running upgrades can trap callbacks; stop-and-drain cannot enforce other deploy paths. The rent-only/dust address-exposure fix is under current-head validation.",
-      "nextAction": "Review the focused rent-only regression and current PR #610 checks after the refresh; keep the reserve off and do not install or fund production.",
+      "blockedReason": "No source-matched backend Wasm is available; checked-in frontend assets predate merged source. Direct-running-upgrade callback traps remain unresolved, and remaining full lifecycle/canary evidence is incomplete. Keep the reserve at zero/off.",
+      "nextAction": "After a shared, disk-capable build slot is allocated, build both artifacts from the same source revision, verify the backend hashes and frontend auth assets, compare all live asset keys/encodings, and finish the remaining lifecycle checks. Do not install, fund, or activate the reserve as part of this step.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",

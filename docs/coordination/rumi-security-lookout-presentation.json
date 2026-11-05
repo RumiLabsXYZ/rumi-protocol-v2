@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 recovery remains held after its authorized configuration readback. ckSOL PR #610 remains draft with the reserve off. A rent-only/dust balance could expose the SOL address before processing funds were ready; the preflight now requires either a minimum deposit already present or processing funds ready, with a focused regression test. Callback safety still relies on stop-and-drain; other deploy paths are not enforced. Stability Pool and vault 51 work continue under Bram.",
-  "plainSummary": "Vault 158 recovery remains held. ckSOL stays in draft review with its reserve off; a fix now hides the SOL address for rent-only or dust balances until processing is ready. Stop-and-drain remains the callback mitigation.",
+  "summary": "Vault 158 recovery remains held after its configuration readback. ckSOL PR #610 merged at 93d9ece7 and PR #620 also merged. Rent/dust preflight passed focused testing and independent review; reserve stays off. No matching backend Wasm exists, and checked-in frontend assets predate merged source. Direct-running-upgrade callback traps remain unresolved; use stop/drain and journal readback. The full mocked asynchronous lifecycle and operator-owned canary remain incomplete. Next: allocate build capacity, then create source-matched artifacts and compare live assets.",
+  "plainSummary": "The ckSOL ICP-payment changes are merged, and focused preflight checks passed. The change has not been installed: the available web assets are older than the merged source, and there is no matching backend build. A shared build slot is needed before preparing a release; the cycles reserve stays off.",
   "glossary": [
     {
       "term": "Stability Pool",
