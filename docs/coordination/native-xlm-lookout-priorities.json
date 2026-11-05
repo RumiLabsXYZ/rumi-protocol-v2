@@ -54,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "Only one reviewed real testnet Horizon provider exists; quorum needs two more independent providers before a live testnet confirm.",
-      "nextAction": "Rob names two more independent testnet Horizon providers; then run a live testnet confirm, followed by borrow, payout and oracle.",
+      "blockedReason": "Real testnet providers are configured but unbuilt (compute held). Only two free providers are independent and reliable; the third (Tatum keyless) is throttled, so live confirmation depends on both SDF and Ankr.",
+      "nextAction": "When XLM gets a fresh compute slot, build and run the focused tests; CTO chooses the third-provider option (keep throttled Tatum, paid keyed provider, or Rumi-run Horizon); then a live testnet confirm.",
       "cardIds": [
         "WP3"
       ]
