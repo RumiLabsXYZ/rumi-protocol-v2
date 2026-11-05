@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 remains separate. Corrected-source backend/frontend artifacts pass packaging, live interface and auth checks. Oldest managed snapshot is now archived locally via read-only snapshot APIs; metadata, payload lengths/hashes and permissions verified. All ten managed snapshots and backend module/settings are unchanged; backend Running. Updated installation-only packet awaits Merritt review and exact approval. No snapshot mutation, deployment or financial action; reserve off.",
-  "plainSummary": "Builds and preservation of the existing oldest snapshot are complete. The backend is still running unchanged. The installation proposal awaits coordinator review and explicit execution approval; reserve stays off.",
+  "summary": "Vault 158 stays separate. Backend install approval remains pending in Merritt. Corrected artifacts and archived oldest snapshot are verified. Read-only frontend plan inventories all 2667 live keys and properties, preserving auth/balance behavior. Proposed 411 immutable additions and seven mutable encoding updates; no removals/property resets. Activate only after approved paired backend readback, reserve off. No builds, batches, uploads or financial actions.",
+  "plainSummary": "The frontend publication plan is ready for review. It preserves every existing asset and authentication setting. Backend approval remains pending; no publication or reserve activation occurred.",
   "glossary": [
     {
       "term": "Stability Pool",

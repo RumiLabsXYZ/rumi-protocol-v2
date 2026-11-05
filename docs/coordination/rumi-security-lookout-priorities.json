@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Corrected-source builds and oldest-slot archive preservation are verified. Snapshot replacement, stop/drain, installation/restart, frontend upload and reserve/financial actions still lack exact execution authority.",
-      "nextAction": "Merritt reviews updated installation-only packet and its verified archive evidence, then asks the canonical exact approval question. Preserve stop/drain, only-one-slot replacement, fresh snapshot verification and unknown-outcome holds. Frontend upload separate; reserve off.",
+      "blockedReason": "Backend exact-install approval question is pending in Merritt. Read-only frontend inventory/composition is complete; publication and all live/financial actions remain held.",
+      "nextAction": "Merritt reviews the pushed frontend plan while preserving the original backend approval question. If later authorized, stage immutable content and activate the seven mutable encodings only after paired backend verification with reserve off. Re-read full live inventory before any publication; no new optional test gate.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",

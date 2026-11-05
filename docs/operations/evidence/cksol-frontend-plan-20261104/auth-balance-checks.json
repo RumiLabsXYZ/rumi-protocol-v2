@@ -1,0 +1,29 @@
+{
+  "authAssets": {
+    "/.well-known/ii-alternative-origins": {
+      "localAndLiveSha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "contentChanged": false,
+      "propertyChangesPlanned": false
+    },
+    "/.well-known/ic-domains": {
+      "localAndLiveSha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "contentChanged": false,
+      "propertyChangesPlanned": false
+    }
+  },
+  "localCspMatchesLiveIndex": true,
+  "indexEnvironmentCookiePreserved": true,
+  "balanceSourceRef": "45af74a433c169c08e52bc1ad2bda23e1df215a9",
+  "balanceSourceFiles": [
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/LiquidityInterface.svelte",
+      "sha256": "c43073715d570b6e54ed0fe178cc1a1a44ad96bf43fc632575ef1b9b72cc03ff",
+      "matchesReference": true
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/LiquidityInterface.depositPolicy.spec.ts",
+      "sha256": "01f38ce220579cd11f4927b9495f365b9cb411721ff93494dc3e3f2356216cc7",
+      "matchesReference": true
+    }
+  ]
+}
