@@ -5,7 +5,7 @@
       "title": "Joint top: vault 158 liquidation recovery",
       "status": "blocked",
       "blockedReason": "The installed bot cannot expose its current treasury recipient. Recovery stays held until the new query is installed through a separately authorized upgrade and read back.",
-      "nextAction": "Prepare the source-matched bot upgrade artifact and obtain separate upgrade authority. After installation, read back the configured recipient before any recovery preparation or execution.",
+      "nextAction": "Obtain separate upgrade-only authority for the exact candidate pinned in PR #618. After installation, read back the configured recipient and stop; recovery preparation and execution require separate authority.",
       "cardIds": [
         "SEC-06"
       ]
