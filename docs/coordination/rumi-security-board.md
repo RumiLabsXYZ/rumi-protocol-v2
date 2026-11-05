@@ -4,7 +4,7 @@ Updated: 2026-11-04. Coordinator: Bram. This board tracks the security review an
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
-| SEC-06 | Review | Bram | Vault 158 liquidation recovery | PR #614 is open with its listed check passing. The claim remains held. The live treasury recipient cannot be proven until the new read-only query is installed through a separately authorized bot upgrade; no recovery or funds movement occurred. |
+| SEC-06 | Blocked | Bram | Vault 158 liquidation recovery | PR #614 merged at `99027b67` after its listed check and two independent source reviews passed. The live bot remains unchanged, so the treasury recipient cannot be read back until a separately authorized bot upgrade. The claim remains held; no installation, recovery, or funds movement occurred. |
 | SEC-07 | Blocked | Bram | ckSOL processing paid in ICP | Draft PR #610 is mergeable and its listed checks pass. Direct running upgrades can trap callbacks; tested stop-and-drain is the practical mitigation, other deploy paths are not enforced, and the reserve remains off. |
 | SEC-01 | In progress | Bram | Verify Stability Pool recovery and current rails | PR #590 merged. Check current canister state, interest receipts, remaining holds, and source-to-Wasm binding before declaring live closure. |
 | SEC-08 | Review | Bram | Vault 51 nICP recovery | PR #612 is merged. PR #613 is open, mergeable, and its listed checks pass. Owner repayment, nICP settlement, and ICP withdrawal remain separate live actions with no execution claimed. |
@@ -28,6 +28,6 @@ Updated: 2026-11-04. Coordinator: Bram. This board tracks the security review an
 
 - [Stability Pool rails PR #590](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/590) merged 2026-10-24. Merge is not proof of installation or historical settlement.
 - [Points recovery PR #583](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/583) merged 2026-10-24. The current live epoch and receipts require a fresh check.
-- [Vault 158 recovery PR #614](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/614) is open with source and checks ready for review; live recipient verification and execution remain separate.
+- [Vault 158 recovery PR #614](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/614) merged 2026-11-04 at `99027b67` after its listed check and two independent source reviews passed. Merge is not installation, recipient verification, or recovery execution.
 - [ckSOL ICP-processing PR #610](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610) is a green, mergeable draft with its reserve off; production upgrade and funding remain separate.
 - [Vault 51 owner recovery PR #613](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/613) is open and green; repayment, settlement, and withdrawal remain unexecuted.
