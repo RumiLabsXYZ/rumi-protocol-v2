@@ -3714,14 +3714,17 @@ pub(crate) const XLM_EXTRA_RESERVED_HEADROOM_STROOPS: u64 = 0;
 /// (10_000 stroops = 100x Stellar's 100-stroop base fee). Policy value chosen here.
 pub(crate) const XLM_FIRST_FUNDING_FEE_BUDGET_STROOPS: u64 = 10_000;
 
-/// Horizon provider quorum configuration. NOT yet persisted anywhere in State, so
-/// this fails closed until a reviewed provider-config source exists.
+/// Horizon provider quorum configuration, compiled in per network (no State field).
+/// Unconfigured slots make `validate` fail, so confirmation fails closed.
 fn configured_horizon_providers(
+    network: crate::chains::stellar::codec::Network,
 ) -> Result<crate::chains::stellar::horizon_provider_fanout::HorizonProviderConfig, ProtocolError>
 {
-    Err(ProtocolError::GenericError(
-        "Stellar Horizon provider quorum is not configured".to_string(),
-    ))
+    let config = crate::chains::stellar::horizon_provider_fanout::compiled_in_config(network);
+    config.validate().map_err(|e| {
+        ProtocolError::GenericError(format!("Stellar Horizon provider quorum is not configured: {e:?}"))
+    })?;
+    Ok(config)
 }
 
 /// Synchronous, all-or-nothing materialization of a verified XLM first-funding
@@ -3829,7 +3832,7 @@ pub async fn confirm_xlm_deposit(
     if blocked {
         bail!(generic("XLM collateral is not accepting new vaults.".to_string()));
     }
-    let config = match configured_horizon_providers() {
+    let config = match configured_horizon_providers(network) {
         Ok(c) => c,
         Err(e) => bail!(e),
     };

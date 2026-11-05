@@ -132,6 +132,42 @@ impl HorizonProviderConfig {
     }
 }
 
+/// Compiled-in public testnet Horizon origins (no State field, like XRP's
+/// `TESTNET_READ_URLS`). Only the SDF endpoint has in-repo evidence
+/// (docs/coordination/native-xlm-testnet-horizon-read-2026-10-29.md). Remaining
+/// slots stay `None` (fail closed) in production builds until two further
+/// independent providers are reviewed; duplicates would fail `validate`.
+const TESTNET_PROVIDERS: [Option<(&str, &str)>; 3] = [
+    Some(("sdf-testnet", "https://horizon-testnet.stellar.org")),
+    #[cfg(feature = "test_endpoints")]
+    Some(("mock-testnet-b", "https://horizon-mock-b.test")),
+    #[cfg(not(feature = "test_endpoints"))]
+    None,
+    #[cfg(feature = "test_endpoints")]
+    Some(("mock-testnet-c", "https://horizon-mock-c.test")),
+    #[cfg(not(feature = "test_endpoints"))]
+    None,
+];
+
+/// Pubnet has no reviewed in-repo provider set yet: always unconfigured.
+const PUBLIC_PROVIDERS: [Option<(&str, &str)>; 3] = [None, None, None];
+
+/// Provider quorum configuration compiled in for `network`.
+pub fn compiled_in_config(network: Network) -> HorizonProviderConfig {
+    let table = match network {
+        Network::Test => &TESTNET_PROVIDERS,
+        Network::Public => &PUBLIC_PROVIDERS,
+    };
+    HorizonProviderConfig {
+        slots: table.map(|entry| {
+            entry.map(|(identity, base_url)| HorizonProvider {
+                identity: identity.to_string(),
+                base_url: base_url.to_string(),
+            })
+        }),
+    }
+}
+
 fn canonical_https_origin(value: &str) -> Option<String> {
     let authority = value.strip_prefix("https://")?;
     if authority.is_empty()
@@ -197,7 +233,15 @@ async fn read_latest(provider: &ValidatedHorizonProvider) -> Result<LatestLedger
 }
 
 async fn read_request(request: CanisterHttpRequestArgument) -> Result<Vec<u8>, String> {
-    let (response,) = http_request(request, super::horizon_reads::READ_CYCLES)
+    read_request_with_cycles(request, super::horizon_reads::READ_CYCLES).await
+}
+
+/// Operations pages declare a 256 KiB response cap and need the larger budget.
+async fn read_request_with_cycles(
+    request: CanisterHttpRequestArgument,
+    cycles: u128,
+) -> Result<Vec<u8>, String> {
+    let (response,) = http_request(request, cycles)
         .await
         .map_err(|(code, message)| {
             format!("Horizon HTTPS outcall rejected ({code:?}): {message}")
@@ -402,7 +446,9 @@ pub async fn fetch_custody_deposit_observations(
         ) else {
             continue;
         };
-        if let Ok(body) = read_request(request).await {
+        if let Ok(body) =
+            read_request_with_cycles(request, super::horizon_reads::OPERATIONS_READ_CYCLES).await
+        {
             observations[index] = horizon_parse::parse_custody_deposits(
                 &body,
                 transaction_hash,
@@ -638,6 +684,38 @@ mod tests {
         assert_eq!(
             latest.url,
             "https://horizon.example/ledgers?order=desc&limit=1"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compiled_config_tests {
+    use super::*;
+
+    #[test]
+    fn testnet_config_is_distinct_and_includes_sdf() {
+        let cfg = compiled_in_config(Network::Test);
+        assert_eq!(
+            cfg.slots[0].as_ref().unwrap().base_url,
+            "https://horizon-testnet.stellar.org"
+        );
+        if cfg!(feature = "test_endpoints") {
+            let v = cfg.validate().expect("test-build config validates");
+            assert_ne!(v[0].identity, v[1].identity);
+            assert_ne!(v[1].base_url, v[2].base_url);
+        } else {
+            assert_eq!(cfg.validate(), Err(ProviderConfigError::MissingProvider(1)));
+        }
+    }
+
+    #[test]
+    fn duplicate_providers_fail_validation_and_pubnet_is_unconfigured() {
+        let p = compiled_in_config(Network::Test).slots[0].clone();
+        let dup = HorizonProviderConfig { slots: [p.clone(), p.clone(), p] };
+        assert!(matches!(dup.validate(), Err(ProviderConfigError::DuplicateIdentity(1))));
+        assert_eq!(
+            compiled_in_config(Network::Public).validate(),
+            Err(ProviderConfigError::MissingProvider(0))
         );
     }
 }
