@@ -25,6 +25,8 @@ import {
 
 describe('authoritative explorer fee totals', () => {
 	beforeEach(() => {
+		// The retry checks successful page reuse within the same time window.
+		vi.spyOn(Date, 'now').mockReturnValue(1_793_750_400_000);
 		publicActor.get_events_filtered.mockReset();
 		publicActor.get_event_timestamps.mockReset();
 		invalidateCache();
