@@ -19,14 +19,18 @@
     },
     {
       "id": "SEC-01",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Bram",
       "scope": "Verify Stability Pool recovery and current rails",
-      "evidenceText": "PR #590 is merged. Current installed state, interest receipts, remaining holds, and source-to-Wasm binding still require a fresh review.",
+      "evidenceText": "Fresh read-only production checks show the pool open and consistent, interest receipt admission accepting new entries with 530 retained and no legacy-unknown row, zero held backend interest notifications, and no public pending refunds, unallocated interest forwards, chain absorbs, or active 3USD conversion. The latest 21 events are successful interest receipts. The installed module still matches the October 23 source-bound rails-restoration artifact. PR #623 merged with its archived-receipt check passing, but its fresh Sunset admission change is not installed. The current identity cannot read privileged recovery status, Treasury recovery journals, or management status. Next: build one source-matched PR #623 artifact and complete the privileged readback before any separate installation decision.",
       "evidenceLinks": [
         {
           "title": "Stability Pool rails PR",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/590"
+        },
+        {
+          "title": "Stability Pool Sunset admission PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/623"
         }
       ]
     },
