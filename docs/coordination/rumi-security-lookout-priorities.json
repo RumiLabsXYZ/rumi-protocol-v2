@@ -25,9 +25,9 @@
     {
       "id": "sp-live-recovery",
       "title": "Stability Pool live recovery",
-      "status": "blocked",
-      "blockedReason": "The live pool is open and healthy on the October 23 source-bound artifact, but merged PR #623 is not installed and the current identity cannot read the privileged recovery and Treasury journal views.",
-      "nextAction": "Allocate one source-matched PR #623 artifact build and complete the privileged readback. Keep installation, reconciliation, and every financial action separate.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Preserve the authenticated recovery and management readback. Bind the current module hash only if an existing release receipt or retained artifact proves it; otherwise keep the source provenance limitation explicit. Do not allocate a build or install solely for attribution.",
       "cardIds": [
         "SEC-01"
       ]

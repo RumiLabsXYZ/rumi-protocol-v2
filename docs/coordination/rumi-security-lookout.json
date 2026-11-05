@@ -22,7 +22,7 @@
       "state": "Review",
       "owner": "Bram",
       "scope": "Verify Stability Pool recovery and current rails",
-      "evidenceText": "Fresh read-only production checks show the pool open and consistent, interest receipt admission accepting new entries with 530 retained and no legacy-unknown row, zero held backend interest notifications, and no public pending refunds, unallocated interest forwards, chain absorbs, or active 3USD conversion. The latest 21 events are successful interest receipts. The installed module still matches the October 23 source-bound rails-restoration artifact. PR #623 merged with its archived-receipt check passing, but its fresh Sunset admission change is not installed. The current identity cannot read privileged recovery status, Treasury recovery journals, or management status. Next: build one source-matched PR #623 artifact and complete the privileged readback before any separate installation decision.",
+      "evidenceText": "Public read-only production checks show the pool open and consistent, accepting interest receipts, with no public pending refund, unallocated-interest, chain-absorb, or active 3USD-conversion queue. Authorized readback shows recovery at 237 of 237 packets and an empty backend Treasury recovery page. Management status reports the pool running with module SHA-256 a2a042ecff6f934cf25f797fa08d0984d84ab8e28f954e50f3582f54a331298f, superseding the stale October hash in the public dashboard. No examined retained release artifact binds that current hash to source, so PR #623 deployment is unproved either way. Preserve that limitation; do not build or install merely to attribute it.",
       "evidenceLinks": [
         {
           "title": "Stability Pool rails PR",
