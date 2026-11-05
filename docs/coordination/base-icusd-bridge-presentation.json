@@ -1,5 +1,5 @@
 {
-  "summary": "Miles supervises the multichain bridge and XRPL lifecycle at background pace. XRPL merge7 logs show backend and PocketIC passes plus one frontend failure; PR #625 fixture-only fix is reported merged. Logs lack a tested-commit binding and overall exit receipt, so the historical batch remains partial. Next: allocated final source review. Base browser acceptance needs Rob; network probes, custody decisions, merge and activation remain held.",
+  "summary": "XRPL software PR #586 merged at 0dea74a1 with XR-F1/F2 fixes: 112 frontend tests and six escrow regressions passed, plus exact-head Frontend and SP proof CI on 648ef2b6. Repair source inclusion was verified. No deployment or activation; historical merge7 provenance and live/staging limitations remain. Base browser acceptance still needs Rob; network probes, custody, funding and denied follow-up publication remain held. No further heavy batch allocated.",
   "glossary": [
     {
       "term": "proof=source",
@@ -512,7 +512,12 @@
       "term": "R10",
       "definition": "The XRPL test-network rehearsal of PR #586: local IC canisters against the public XRPL testnet with Rob's real Xaman wallet (deposit, trust line, borrow and repay).",
       "cardId": "BB-63"
+    },
+    {
+      "term": "proof=source-merged",
+      "definition": "The reviewed software is included in main. This does not mean it is deployed, enabled or ready for live funds.",
+      "cardId": "BB-63"
     }
   ],
-  "plainSummary": "The Base test-token round trip works outside the app; browser testing still needs Rob to sign in and connect his wallet. XRPL testing recorded several passes and one browser-code test failure; its fixture fix is reported merged, but the old run is not proven fully green. Final source review is next at background pace."
+  "plainSummary": "The XRPL deposit, borrow and repay software is merged after fixing the two review problems and passing the focused tests and hosted checks. It has not been deployed or activated. The Base browser demo still needs Rob to sign in and connect his wallet; live launch decisions remain separate."
 }

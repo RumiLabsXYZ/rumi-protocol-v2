@@ -519,10 +519,10 @@
     },
     {
       "id": "BB-63",
-      "state": "Ready",
+      "state": "done",
       "owner": "supervisor",
       "scope": "XRPL: deposits, borrow and repay lifecycle (PR #586)",
-      "evidenceText": "proof=testnet-rehearsal; R10 testnet rehearsal recorded. Original merge7 logs: backend 1551 passed, 1 ignored; binary 85; fixture 311; XRPL PocketIC 17/17, native 4/4; artifact gate passed. Frontend 1505 passed, 1 failed [truncated]",
+      "evidenceText": "proof=source-merged; Software delivery merged: PR #586 merge 0dea74a1 at 2026-11-05 05:34:34 UTC includes exact repair head 648ef2b6 and all 16 intended files. XR-F1/F2 focused 112 frontend plus six escrow regressions passed [truncated]",
       "evidenceLinks": []
     },
     {

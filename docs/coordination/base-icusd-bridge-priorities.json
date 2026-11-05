@@ -14,9 +14,9 @@
     {
       "id": "xrpl-lifecycle",
       "title": "XRPL deposits, borrow and repay (PR #586)",
-      "status": "ready",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Background pace: final source review of PR #586 after confirming its review candidate (latest observed handoff 0b91be97). Keep merge7 partial results unbound; PR #625 fixture fix does not prove that historical batch green. No rerun or broad batch requested. Original implementer owns any fixes; merge and live activation remain separately held.",
+      "nextAction": "Software-delivery milestone merged in PR #586 at 0dea74a1 after focused repairs and exact-head CI. Live launch is separately held under the existing launch checklist; no deployment, activation, signing, funding or denied follow-up publication is authorized.",
       "cardIds": [
         "BB-63"
       ]

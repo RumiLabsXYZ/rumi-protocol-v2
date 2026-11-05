@@ -3370,6 +3370,216 @@ publication, merge and deploy. Workers W28, W29 and W23 on standby.
 - Both summaries, the priority order (later items shift down one), card links (69 of 70 linked) and a `testnet-rehearsal` proof level
   updated. Product overview and product priorities untouched (Merritt owns them).
 
+### Final XRPL source-review handoff (Miles, 2026-11-04 Pacific)
+
+- Candidate: `0b91be97f9fef5ad2bf43e6c9d9bd519a8784b46`; baseline `6847982b44f247e0c99f0a453b583d3fab8107a2`.
+- One reviewer: `xrpl_final_source_0b91`, configured `gpt-6.1-sol` / high. Runtime model metadata was not separately surfaced.
+  Review began 2026-11-05 04:55:16 UTC and returned by 05:00:55 UTC, within the 15-minute cap.
+  Candidate clean at entry and exit. Prior verification/review records reused; no tests, builds, CI,
+  network probes, Claude API spend, source edits or live actions. Miles checked the cited finding seams.
+- Verdict: two confirmed source defects in inspected scope. This is not whole-system safety or runtime reproduction.
+
+**XR-F1 (P1): queued Payment discarded.** `src/vault_frontend/src/lib/services/xrplWalletService.ts:175-183`
+classifies any non-`tesSUCCESS` dispatch as rejected, clears signed status and transaction hash, including
+`terQUEUED` (backend `chains/xrp/xrp_rpc.rs:355-368` recognizes queued acceptance). `settleKeyed` at
+wallet-service 341-344 forgets the idempotency key. `components/borrow/xrpDepositFlow.ts:418-424` clears
+request/hash/commitment and `components/vault/xrplIcusdPanelController.ts:509-518` clears repayment hints.
+A retry can create a second Payment while the original queued transaction later validates. Minimum repair:
+preserve and reconcile signed queued/uncertain requests; release replacement only after proven final no-effect.
+Dispatch acceptance remains distinct from validated success.
+
+**XR-F2 (P2): stale escrow admission can overspend fee surplus.** Backend `xrpl_icusd/mod.rs:545-563`
+and `repay.rs:1417-1434` capture escrow balance before awaiting ledger tip, then use that snapshot with
+current liability buckets. `ledger.rs:213-218` marks a transfer Done before proof; `types.rs:471-475`
+considers Done resolved and `state.rs:220-223` drops its canonical-return fee reserve. Example with
+liabilities 1000, escrow 1010, fee 10, buffer 0 and two 100 claims: B reads 1010; A transfers 110 and
+receives Done; B's tip completes and admits against stale 1010/current requirement 1010; both complete,
+leaving escrow 790 for obligations 800. No response reordering is needed. Minimum repair: bind balance
+admission to shared escrow mutation/reservation state, retaining fee accounting through proof and claim
+retirement. This is a source counterexample, not an executed test.
+
+Coverage: persisted ledger retries and issuer attempts (`ledger.rs:135-238,316-530,567-781`,
+`state.rs:549-598`, `settlement.rs:272-356,545-735,798-941`); owner/network/frozen proposals
+(`borrow.rs:118-291`, wallet adapter/controller/deposit paths); XRPL exclusion in ordinary, retry,
+SP, redemption and nICP mutation guards (`guard.rs:210-357`, `borrow.rs:316-465`, `repay.rs:684-1018`);
+exact return attribution/held values (`repay.rs:137-303,431-664,720-1018,1100-1299`,
+`issuance.rs:163-367`); history quorum and cursor advancement (`observer.rs:141-295,336-418`,
+`issued_rpc.rs:828-885,1236-1469,1606-1650`, `issuer_rpc.rs:419-571`); additive replay/storage/Event
+seam (`state.rs:755-955,1272-1357`, `storage.rs:389-431`, integration diff). No additional confirmed
+finding in those inspected paths. Existing pre-lane rollback/old-consumer limits remain.
+
+Omitted: exhaustive callsite/numeric-domain proof, generated-interface equality, runtime interleaving
+reproduction, artifact verification and live behavior. Historical merge7 provenance remains incomplete;
+PR #625 fixture fix does not make that batch all-green. No optional new gate is introduced.
+Next handoff: original XRPL implementer repairs XR-F1/F2 at a bounded allocation, with proportional
+focused verification after shared scheduling; no repairs started here. Stop before merge/activation.
+
+Review publication: existing scoped publisher exited 0 at revision **137**, 70 cards, source
+`748d26103d6e10abad4e4c8868829a33ce3fdaf07b3c2a12d4622118f3ec2ae6`.
+Immediate readback exited 0 with board, presentation, plain summary, priorities and repository
+association unchanged. These source coordination edits remain local and unpushed.
+
+Merritt then accepted XR-F1 and XR-F2 and authorized bounded repairs, one worker at a time.
+The existing reviewer is preparing XR-F1's exact patch and focused regression source outside
+the original worktree first, preserving the original implementer's files while ownership is
+reconciled. No test/build runs, source integration or F2 edits in that first patch-preparation
+step. No heavy Cargo batch without a bounded batch plan, fresh occupancy/disk evidence and
+shared allocation. Paid CI, Claude API spend, merge, deployment, wallets and funds remain held.
+
+XR-F1 repair checkpoint: the single worker prepared patch SHA256
+`64a604f4751379c42238860bde81df19d58eda33978641c5d823c5d954530cd3`.
+Miles checked the patch and applied it only after confirming the original XRPL checkout clean
+at `0b91be97`. Six frontend paths changed (wallet adapter, deposit/repay controllers and their
+three existing spec files). Signed queued/uncertain payments retain hash/request/idempotency
+and recovery hints; mismatched signers retain evidence without automatic observation. True
+unsigned rejection still permits replacement; submitted TrustSet key release is preserved.
+The adapter has no final validated-failure proof interface: signed failed attempts remain held
+for reconciliation/manual recovery, not automatically replaced from dispatch metadata.
+
+Focused local verification: three named Vitest files, `--maxWorkers=1 --minWorkers=1`, exited 0:
+112/112 passed in 3.43 seconds. No Cargo, build or CI. Original XRPL HEAD unchanged; six frontend
+files remain uncommitted. The same worker now prepares XR-F2's backend patch and deterministic
+regression source outside that worktree, preserving XR-F1. No backend integration or Cargo run
+until the bounded patch/batch handoff and normal shared allocation.
+
+Repair allocation checkpoint (2026-11-05 05:14:09 UTC): same live agent
+`/root/xrpl_final_source_0b91`, no children or running shell sessions. F1's exact start was not
+recorded; its explicit ten-minute patch-preparation allocation ended with the artifact handoff
+by 05:06:58 UTC, followed by the parent's focused frontend run at 05:07:41 UTC. F2 received a
+separate explicit fifteen-minute source-only allocation in the existing agent's follow-up task;
+this is not an extension of F1. First recorded F2 tool clock was 05:08:33 UTC. Conservatively
+counting from 05:07:45 UTC, terminal handoff is due no later than **05:22:45 UTC**, leaving
+8 minutes 36 seconds at this checkpoint. Temporary F2 source/regression draft exists; final
+patch/evidence note not yet handed off. Stop at that deadline with patch/WIP and remaining
+issues; no implicit extension and no Cargo start.
+
+XR-F2 terminal handoff: same worker completed at **2026-11-05 05:16:35 UTC**, before the
+05:22:45 deadline; its supported runtime status is completed, with no child workers/shells.
+Prepared patch SHA256 `2e59bbfdcc4df52d97b3000db90158f5205ea7c209f85989b7ec73e37d25a136`.
+Nine backend domain files only, including six focused regression tests; original backend is
+unchanged and the integrated six-file frontend repair is preserved. Parent independently read
+the generation/capture/admission, unsettled-job, fee-retirement and stable-default changes and
+ran `git apply --check --whitespace=error` successfully. This source design addresses both the
+accepted transfer/tip/proof interleaving and claim-retirement-before-admission; compilation and
+runtime correctness remain unverified. No new worker or extension.
+
+One proposed allocated batch (NOT RUN): reuse the original XRPL target/cache, offline,
+`cargo test --offline -p rumi_protocol_backend --lib xrpl_escrow_snapshot --jobs 1 -- --test-threads=1`.
+Expected six selected tests; one attempt, maximum 20 minutes including host compilation. No Wasm,
+PocketIC, network dependency fetch, CI or additional test filters. Stop on missing offline cache,
+failure or deadline, preserve the original handle/results and reconcile owned closure before
+another allocation. Integrate the exact backend patch only after confirming its base and the
+current owned frontend diff again at that checkpoint.
+
+Allocation evidence at 05:17:26 UTC: no Cargo/rustc/Graphify process; existing PocketIC groups
+200 (11), 40536 (11), 53574 (12), untouched. Latest disk read: 69,019,828 KiB available (~65.8 GiB),
+93% used. Snapshot is evidence only, not a slot grant; Thayer retains the shared slot. Recheck
+occupancy/disk immediately before any approved start. No Cargo was run in this checkpoint.
+
+Resource correction: read-only process check found no matching Graphify hook process. Missing historical
+hook exit evidence is not an active reservation. Merritt reports Mara's run/owned processes closed and
+slot transferred to Thayer; no Rumi heavy batch is allocated.
+
+### XR-F2 allocated batch completion (2026-11-04 Pacific, Miles)
+
+After Thayer released the shared slot and Merritt allocated one bounded batch, Miles confirmed
+HEAD `0b91be97`, the exact six-file F1 diff (reverse patch check), clean backend, exact F2 patch
+hash/applicability and fresh occupancy/disk. F2 was applied to the same original worktree.
+One offline Cargo job then ran the proposed `xrpl_escrow_snapshot` filter with one test thread,
+existing target/cache, no Wasm/PocketIC/download/CI. No retry or extra filter ran.
+
+Start **2026-11-05 05:20:19.842903 UTC**; finish **05:21:20.334603 UTC**; elapsed **60.491s**;
+native Cargo exit **0**, bounded runner exit **0**. Exactly six intended regressions selected and
+passed (not zero): held-return generation; existing/new escrow work; actual-account FeeMint
+exclusion; old-state default and exhaustion; other claim retired before stale admission; original
+balance/transfer/tip/proof interleaving. 1557 unrelated library tests were filtered, not executed.
+Host test binary compiled (58.84s); compiler warnings remain disclosed, no clippy/build claim.
+
+Exact tested source: base `0b91be97f9fef5ad2bf43e6c9d9bd519a8784b46` plus saved binary diff
+SHA256 `ad10c0786a4ee9272d2b5339e1a266933e1e736c476bb7f6b988a36bed80c219` (F1+F2, 15 files).
+Runner confirmed the diff unchanged during execution. Native log, source patch, start and terminal
+JSON receipt preserved together in the executor's private batch directory. These are fresh bounded
+repair results, not a relabeling of the historical merge7 batch.
+
+Owned PID/PGID **53678** closed: runner found no remaining group members, and independent approved
+read-only ps at **05:22:12 UTC** confirmed group absent and no Cargo/rustc/Graphify. Pre-existing
+PocketIC groups 200, 40536 and 53574 remain at 11 processes each; none were mutated. Maximum observed
+volume free-space drop **225,632,256 bytes** (~215.2 MiB), below 4 GiB; no deadline/growth stop.
+Post-run disk available **68,796,612 KiB** (~65.6 GiB), 93% used. The allocated batch is closed;
+no further heavy reservation is claimed.
+
+F1 retains its separate 112/112 focused frontend result. All 15 repair files remain uncommitted
+in the original XRPL worktree; HEAD/PR unchanged. Next: assess repaired source and relevant existing
+release checks before a reviewable commit or merge. No merge, deployment, live wallet action or
+new broad batch is authorized by these results. Repairs are local-test evidence only.
+
+Preservation/integration checkpoint: after confirming the only changes were the exact fifteen
+tested repair source/spec files plus the matching verification record, Miles committed
+`648ef2b672029a78aae73d8c3fa88b508ae0c7b8` and pushed it once to existing `codex/xrpl-icusd`.
+Remote PR readback confirms that head, open/unmerged and mergeable. The per-invocation optional
+Graphify commit hook was skipped (only non-sample commit hook was Graphify); no repository hook
+configuration or required check was changed and no unallocated graph rebuild was launched.
+
+Before push, Rumi and DV hosted queues were empty (DV verified through existing authorized gh
+access). The connector could not read protection (403), but authorized gh's actual protection
+response was `Branch not protected`; `gh pr checks --required` reported none and rulesets were
+empty. This does not replace the explicitly allocated normal checks or authorize merge.
+
+Merritt allocated one normal push-triggered cycle, no credits/retries/duplicate dispatch:
+Frontend validation **41974067051**, Stability Pool deposit-intent proof **41974067056**,
+both observed in progress on exact `648ef2b6`. Miles owns the single monitoring lane.
+PR description rewritten around final behavior, XR-F1/F2 fixes, exact focused evidence and
+remaining runtime/provenance limits. No further local suite or review campaign started.
+
+### XRPL source delivery merged (2026-11-04 Pacific, Miles)
+
+The single allocated push cycle completed SUCCESS on unchanged repair head
+`648ef2b672029a78aae73d8c3fa88b508ae0c7b8`: Frontend validation **41974067051**
+(completed 2026-11-05 05:27:38 UTC), Stability Pool proof **41974067056**
+(completed 05:33:51 UTC). Original watch exited 0; no rerun or duplicate dispatch.
+These workflow scopes are not full XRPL runtime or deployment proof.
+
+Merritt accepted the repaired source/focused evidence and conditionally released the integration
+hold under standing merge-when-green authority. Miles rechecked exact head, both successes,
+mergeability and accepted finding disposition; normal `gh pr merge --merge --match-head-commit`
+exited 0, with no override. PR #586 is closed/merged at **0dea74a1d33456ee28a9837b99a3be9dae7f674f**,
+merged at **2026-11-05 05:34:34 UTC**. Local readback proved repair ancestry and byte-identical
+Git blobs for all 16 intended repair/evidence files in the merge. Original XRPL worktree clean;
+no post-merge source checkout/reset, deployment, activation, signing or funding.
+
+The PR description now states final behavior, XR-F1/F2 fixes, exact focused evidence, both CI
+results and remaining proof limits. Original source-review omissions, historical merge7 missing
+provenance/exit receipt, signed-failure reconciliation limitation, conservative return admission,
+pre-lane rollback restriction and untested live/staging paths remain explicit. No optional new gate.
+
+BB-63's source-delivery milestone is done (not live launch). The next project item remains Base
+browser acceptance requiring Rob's Touch ID/Rabby; held network probes, custody/activation, funding
+and the separately denied XRPL follow-up publication retain their own boundaries. No worker,
+Cargo, CI watcher or additional heavy reservation remains owned by this lane. Supervisor board
+records remain local pending a normally allocated documentation push; the live mirror is updated
+through the existing scoped publisher instead of creating an unallocated PR #591 CI cycle.
+
+Final merge-state publication: existing scoped publisher exited 0 at Lookout revision **139**,
+70 cards, source `c10fd639557435e273b5d4d62625c96eb7059dcefc1a518fb4a932e5527b7fff`.
+Immediate readback exited 0, with board, presentation, plain summary, priorities and repository
+association all unchanged. BB-63 is Done at source-merged scope; no live launch claim. Original
+CI observer, bounded local runner and single repair worker are terminal; no owned work remains
+running. Normal project publishing remains with Nora after this supervised closeout.
+
+### Evidence-only remote preservation (2026-11-04 Pacific)
+
+Merritt authorized preservation of the remaining supervisor records on the existing coordination
+branch using the repository's established `[skip ci]` convention. Only the five coordination
+files are included; no runtime source, workflow, dependency or manifest change. This push does
+not merge PR #591, and skipped or pending checks must not be described as green. The optional
+Graphify post-commit rebuild is skipped for this invocation to preserve the no-runtime-work scope;
+repository hook configuration and mandatory checks are not changed.
+
+Next existing holds: Base browser acceptance (BB-27) needs Rob's renewed Internet Identity
+Touch ID sign-in and Rabby unlock/connection/consent. XRPL software is merged, but production
+upgrade, issuer funding/setup and activation remain separately held under the existing launch
+checklist; the denied follow-up branch publication remains separately held. No new gate is added.
+
 ## Held live actions
 
 ### Supervisory publication checkpoint (Miles, 2026-11-04)
