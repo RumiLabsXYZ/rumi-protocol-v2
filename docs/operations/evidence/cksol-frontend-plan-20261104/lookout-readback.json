@@ -1,0 +1,14 @@
+{
+  "projectId": "rumi-security",
+  "boardRevision": 42,
+  "sourceRevision": "d6a33bf59af13ad9703f4f3e39ddd4dc1d8cfd37294c89dff8739285f39f5c34",
+  "proposalCommit": "ba1ef31b",
+  "proposalSha256": "700a67b4664bed11ee4f9844a0d740dc80ac28a57f06f0f204464d81389ea821",
+  "initialPublish": "Board/presentation/plain summary succeeded; source-binding guard refused priorities before a write.",
+  "authoritativeRead": "Current board matched desired source and cards exactly; no newer card change found.",
+  "reconciliation": "Canonical publisher with transport guard permitting only publishPriorities and publishCompletionMetadata; all board/presentation/summary writes denied.",
+  "result": "Priorities and three unchanged completion timestamps published/verified; board stayed revision 42.",
+  "finalDryRun": "Board, presentation, plain summary, priorities, repository association and completion metadata all unchanged.",
+  "publicationAuthority": "None; reviewed plan accepted by Merritt only. Backend exact-install approval question remains pending in its original chat.",
+  "verificationUtc": "2026-11-05T04:38:07.905799+00:00"
+}
