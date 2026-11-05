@@ -204,6 +204,7 @@ fn horizon_body(url: &str, custody: &str, scenario: Scenario, closed_at: &str) -
 struct Env {
     pic: PocketIc,
     backend: Principal,
+    ledger: Principal,
     vault_id: u64,
     custody: String,
 }
@@ -265,7 +266,7 @@ fn boot() -> Env {
         WasmResult::Reject(m) => panic!("{m}"),
     };
     let opened = opened.expect("open");
-    Env { pic, backend, vault_id: opened.vault_id, custody: opened.custody_address }
+    Env { pic, backend, ledger, vault_id: opened.vault_id, custody: opened.custody_address }
 }
 
 /// Submit confirm_xlm_deposit and answer every parked outcall with Horizon JSON.
@@ -389,4 +390,78 @@ fn confirm_xlm_deposit_success_replay_and_disagreement() {
     assert_eq!(after[0].collateral_type, xlm);
     assert_eq!(after[0].collateral_amount, 989_990_000);
     assert_eq!(after[0].borrowed_icusd_amount, 0);
+
+    // (d) test-build-only: register XLM Active, mock price, borrow through the
+    // normal endpoint as the vault owner.
+    let ledger = env.ledger;
+    let call = |sender: Principal, method: &str, args: Vec<u8>| -> Vec<u8> {
+        match env.pic.update_call(env.backend, sender, method, args).unwrap() {
+            WasmResult::Reply(b) => b,
+            WasmResult::Reject(m) => panic!("{method} rejected: {m}"),
+        }
+    };
+    let reg_bytes = call(developer(), "dev_register_xlm_collateral", encode_args(()).unwrap());
+    let reg: Result<(), candid::Reserved> = decode_one(&reg_bytes).unwrap();
+    reg.unwrap_or_else(|_| panic!("register xlm: {}", candid::IDLArgs::from_bytes(&reg_bytes).unwrap()));
+    let price: Result<String, candid::Reserved> = decode_one(&call(
+        developer(),
+        "dev_set_collateral_price",
+        encode_args((xlm, 0.10f64)).unwrap(),
+    ))
+    .unwrap();
+    price.expect("set price");
+
+    #[derive(CandidType, Deserialize)]
+    struct VaultArg {
+        vault_id: u64,
+        amount: u64,
+    }
+    let bal = |who: Principal| -> u64 {
+        let r = env
+            .pic
+            .query_call(
+                ledger,
+                Principal::anonymous(),
+                "icrc1_balance_of",
+                Encode!(&Account { owner: who, subaccount: None }).unwrap(),
+            )
+            .unwrap();
+        match r {
+            WasmResult::Reply(b) => {
+                let n: Nat = decode_one(&b).unwrap();
+                n.0.try_into().unwrap()
+            }
+            WasmResult::Reject(m) => panic!("{m}"),
+        }
+    };
+    let before = bal(developer());
+    // 98.999 XLM at $0.10 = ~$9.90 collateral; 5 icUSD debt is well inside limits.
+    let borrow_amount: u64 = 5 * 100_000_000;
+    let r: Result<candid::Reserved, candid::Reserved> = decode_one(&call(
+        developer(),
+        "borrow_from_vault",
+        Encode!(&VaultArg { vault_id: env.vault_id, amount: borrow_amount }).unwrap(),
+    ))
+    .unwrap();
+    assert!(r.is_ok(), "in-limit XLM borrow must succeed");
+    let v = vaults_of(&env, developer());
+    assert_eq!(v[0].borrowed_icusd_amount, borrow_amount, "debt = borrowed amount");
+    let minted = bal(developer()) - before;
+    let fee = borrow_amount - minted;
+    eprintln!("XLM borrow: debt={} minted={} fee_deducted={}", v[0].borrowed_icusd_amount, minted, fee);
+    assert!(minted > 0 && minted <= borrow_amount, "minted net of borrow fee");
+    assert!(fee <= borrow_amount / 50, "fee is a small borrowing fee (<=2%)");
+
+    // (e) over-limit borrow: 50 icUSD against ~$9.90 collateral must fail, unchanged.
+    let bal_mid = bal(developer());
+    let r: Result<candid::Reserved, candid::Reserved> = decode_one(&call(
+        developer(),
+        "borrow_from_vault",
+        Encode!(&VaultArg { vault_id: env.vault_id, amount: 50 * 100_000_000 }).unwrap(),
+    ))
+    .unwrap();
+    assert!(r.is_err(), "over-limit borrow must be rejected");
+    let v2 = vaults_of(&env, developer());
+    assert_eq!(v2[0].borrowed_icusd_amount, borrow_amount, "debt unchanged");
+    assert_eq!(bal(developer()), bal_mid, "icUSD balance unchanged");
 }

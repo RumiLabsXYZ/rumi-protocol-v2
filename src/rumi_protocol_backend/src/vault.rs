@@ -7297,7 +7297,20 @@ where
     HFut: std::future::Future<Output = Result<u64, String>>,
 {
     let amount: ICUSD = arg.amount.into();
+    #[cfg(not(feature = "test_endpoints"))]
     reject_native_xlm_on_unsupported_route(arg.vault_id)?;
+    #[cfg(feature = "test_endpoints")]
+    {
+        // Test builds only: allow borrow on native-XLM when XLM config is Active.
+        let xlm_active = read_state(|s| {
+            s.get_collateral_config(&crate::state::xlm_collateral_principal())
+                .map(|c| c.status == crate::state::CollateralStatus::Active)
+                .unwrap_or(false)
+        });
+        if !xlm_active {
+            reject_native_xlm_on_unsupported_route(arg.vault_id)?;
+        }
+    }
 
     let compound_binding_valid = read_state(|s| match compound_operation_id {
         Some(operation_id) => s.vault_collateral_pull_journals.get(&caller).is_some_and(|journal| {
