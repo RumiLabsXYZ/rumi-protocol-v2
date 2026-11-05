@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen, unregistered and not installed anywhere. Local batch 2026-11-04 at 32bed0e8 passed: lib stellar 145/145, lib xlm 22/22, test Wasm rebuilt, mocked PocketIC confirm 1/1 (real SDF/Ankr/Tatum URLs; disagreement no vault; success one vault with owner, type, amount, zero debt asserted; replay rejected), production Wasm check clean. Non-200 and 429 never count as agreement. Free testnet providers are for bounded testnet validation only. Next: live testnet confirm.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests now show a deposit becomes a vault for the right owner only when independent Stellar sources agree, and repeats or disagreements are refused. The next step is a real test-network trial, which needs a separate go-ahead.",
+  "summary": "XLM remains Frozen, unregistered and not installed anywhere. Verified at 32bed0e8: mocked PocketIC confirm-to-vault with real provider URLs, ownership asserted; non-200/429 never agree. Test-only borrowing analysis (no code change): the vault-route guard rejects XLM on borrow, repay, withdraw, close and liquidation in all builds, and no XLM config or price exists in tests. Next: CTO picks test-only borrow exception, math-only tests, or full debt lifecycle design.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests prove a deposit becomes a vault for the right owner, but borrowing against it is deliberately switched off everywhere. A decision is needed on how to switch it on safely for tests.",
   "glossary": [
     {
       "term": "Stellar",
