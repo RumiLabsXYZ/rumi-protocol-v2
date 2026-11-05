@@ -54,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
-      "blockedReason": "Test-only borrowing is approved if compiled out of production. The first attempt failed in PocketIC because every guarded call needs a fresh ICP price, which tests cannot fetch.",
-      "nextAction": "Resume the saved test-only WIP: give test builds a fresh ICP price (test-only setter), use the not-frozen validation for XLM registration, rebuild, rerun the extended confirm test, and run the production compile check.",
+      "blockedReason": "",
+      "nextAction": "Test-build borrowing is proven in PocketIC. Next: test-only repay and withdraw on the same vault, then the full XLM debt lifecycle (liquidation, payout) before any production admission.",
       "cardIds": [
         "WP3"
       ]
