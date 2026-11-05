@@ -167,6 +167,7 @@ export const idlFactory = ({ IDL }) => {
     'shortfall_topup' : IDL.Opt(BotPaymentTopUpJournal),
     'ckusdc_received_e6' : IDL.Nat64,
     'memo' : IDL.Vec(IDL.Nat8),
+    'swap_input_fee_e8s' : IDL.Nat64,
     'collateral_amount_e8s' : IDL.Nat64,
     'claim_generation' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
@@ -203,6 +204,46 @@ export const idlFactory = ({ IDL }) => {
     'record_id' : IDL.Nat64,
     'sender_principal' : IDL.Principal,
   });
+  const BotRecoveryConfigView = IDL.Record({
+    'icp_fee_e8s' : IDL.Opt(IDL.Nat64),
+    'backend_principal' : IDL.Principal,
+    'ckusdc_ledger' : IDL.Principal,
+    'icp_ledger' : IDL.Principal,
+    'treasury_principal' : IDL.Principal,
+    'ckusdc_fee_e6' : IDL.Opt(IDL.Nat64),
+  });
+  const Vault158RecoveryStatus = IDL.Variant({
+    'PaymentConfirmed' : IDL.Null,
+    'TreasurySettled' : IDL.Null,
+    'PaymentPrepared' : IDL.Null,
+    'EvidencePrepared' : IDL.Null,
+  });
+  const Vault158RecoveryEvidence = IDL.Record({
+    'status' : Vault158RecoveryStatus,
+    'payment_memo' : IDL.Vec(IDL.Nat8),
+    'backend_principal' : IDL.Principal,
+    'swap_input_receipt' : TransferReceipt,
+    'swap_output_amount_e6' : IDL.Nat64,
+    'ckusdc_ledger_principal' : IDL.Principal,
+    'swap_output_receipt' : TransferReceipt,
+    'icp_ledger_principal' : IDL.Principal,
+    'swap_input_fee_e8s' : IDL.Nat64,
+    'payment_amount_e6' : IDL.Nat64,
+    'collateral_amount_e8s' : IDL.Nat64,
+    'swap_input_amount_e8s' : IDL.Nat64,
+    'payment_receipt' : IDL.Opt(TransferReceipt),
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'payment_gross_e6' : IDL.Nat64,
+    'held_surplus_e6' : IDL.Nat64,
+    'pre_swap_ckusdc_balance_e6' : IDL.Nat64,
+    'payment_fee_e6' : IDL.Nat64,
+    'pool_principal' : IDL.Principal,
+    'debt_covered_e8s' : IDL.Nat64,
+    'record_id' : IDL.Nat64,
+    'payment_created_at_time' : IDL.Opt(IDL.Nat64),
+    'collateral_received_e8s' : IDL.Nat64,
+  });
   const LiquidatableVaultInfo = IDL.Record({
     'collateral_amount' : IDL.Nat64,
     'recommended_liquidation_amount' : IDL.Nat64,
@@ -215,6 +256,16 @@ export const idlFactory = ({ IDL }) => {
     'admin_approve_pool' : IDL.Func([], [], []),
     'admin_authorize_shortfall_topup' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
+    'admin_execute_vault158_recovery' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
+    'admin_prepare_vault158_recovery' : IDL.Func(
+        [],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
         [],
       ),
@@ -292,9 +343,19 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_processing_paused' : IDL.Func([], [IDL.Bool], ['query']),
+    'get_recovery_config' : IDL.Func(
+        [],
+        [IDL.Opt(BotRecoveryConfigView)],
+        ['query'],
+      ),
     'get_stuck_liquidations' : IDL.Func(
         [],
         [IDL.Vec(LiquidationRecordVersioned)],
+        ['query'],
+      ),
+    'get_vault158_recovery' : IDL.Func(
+        [],
+        [IDL.Opt(Vault158RecoveryEvidence)],
         ['query'],
       ),
     'notify_liquidatable_vaults' : IDL.Func(
