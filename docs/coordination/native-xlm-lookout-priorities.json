@@ -54,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "The confirm endpoint is wired but fails closed: no reviewed Horizon provider configuration is stored, and reserve-age, headroom and fee-budget values await review.",
-      "nextAction": "Add a persisted, validated three-provider Horizon config with a versioned state migration, run the confirm path in PocketIC against a Horizon mock, and have Rob confirm the safety values.",
+      "blockedReason": "Only one reviewed real testnet Horizon provider exists; quorum needs two more independent providers before a live testnet confirm.",
+      "nextAction": "Rob names two more independent testnet Horizon providers; then run a live testnet confirm, followed by borrow, payout and oracle.",
       "cardIds": [
         "WP3"
       ]
