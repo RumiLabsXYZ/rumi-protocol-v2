@@ -1,0 +1,11 @@
+(
+  record {
+    approval_amount = 1_001_100_000_000 : nat64;
+    processing_fee = 1_000_000_000 : nat64;
+    funding_cycles = 1_001_000_000_000 : nat64;
+    next_sequence = 5 : nat64;
+    refund_fee_reserve = 100_000_000 : nat64;
+    ledger_fee = 100_000_000 : nat64;
+    cycles_ledger = principal "um5iw-rqaaa-aaaaq-qaaba-cai";
+  },
+)

@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Installation and reserve actions require separate authority and current release readbacks. Local source-matched artifacts now exist; 2 MiB is a chunked-transport threshold, not a demonstrated blocker. Reserve stays off.",
-      "nextAction": "Review the pushed build record and supported ICP CLI 1.3.0 chunked-install path; obtain explicit installation authority and current journal/canister/live asset readbacks. Preserve demo-first and stop/drain. Full async lifecycle and financial canary remain later client-money evidence, not a pre-build gate.",
+      "blockedReason": "Fresh Candid compatibility fails: current build omits three live Vault 51 recovery methods. No removal authority established; reserve off.",
+      "nextAction": "Bram inventories authoritative deployed recovery source and coupled changes, then Merritt reviews the minimal preservation/composition dependency. No rebuild or installation yet. Review held upgrade packet and settle snapshot policy before any canonical approval question.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",

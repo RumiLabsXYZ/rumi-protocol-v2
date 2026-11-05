@@ -1,0 +1,6 @@
+Command: didc check src/rumi_protocol_backend/rumi_protocol_backend.did docs/operations/evidence/cksol-upgrade-20261104/live.did
+Exit: 1
+Error: Method reconcile_vault51_icp_payout is only in the expected type
+
+Live-only methods: reconcile_vault51_icp_payout, refresh_vault51_redemption_claim, withdraw_vault51_settled_icp
+Candidate-only methods: get_cksol_icp_payment, get_cksol_icp_terms, reconcile_cksol_icp_funding_from_block, resume_cksol_icp_payment, set_cksol_icp_reserve, start_cksol_deposit_with_icp
