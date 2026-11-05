@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen, unregistered and not installed anywhere. Verified at 32bed0e8: mocked PocketIC confirm-to-vault with real provider URLs, ownership asserted; non-200/429 never agree. Test-only borrowing analysis (no code change): the vault-route guard rejects XLM on borrow, repay, withdraw, close and liquidation in all builds, and no XLM config or price exists in tests. Next: CTO picks test-only borrow exception, math-only tests, or full debt lifecycle design.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests prove a deposit becomes a vault for the right owner, but borrowing against it is deliberately switched off everywhere. A decision is needed on how to switch it on safely for tests.",
+  "summary": "XLM remains Frozen; production borrow guard unchanged. Verified at 32bed0e8: mocked PocketIC confirm-to-vault with ownership asserted. Coordinator approved test-build-only XLM config, price and borrow exception. Attempt 2026-11-04 20:33-20:44: test Wasm built, extended PocketIC test failed because guarded calls need a fresh ICP price unavailable in tests; WIP saved on a separate unmerged branch. Next: test-only ICP price setup, rerun, production compile check.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. A deposit already becomes a vault in local tests; the first try at test-only borrowing stalled on a missing test price feed. The work is saved and the fix is understood; Rob does not need to act.",
   "glossary": [
     {
       "term": "Stellar",

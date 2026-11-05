@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "blocked",
-      "blockedReason": "Borrowing against an XLM vault is refused by an unconditional guard on every vault route, and no XLM collateral config or price exists even in test builds. Enabling it needs a CTO decision.",
-      "nextAction": "CTO chooses: (A) test-build-only XLM config registration plus a test-build-only borrow exception, proven in PocketIC with mint; (B) unit-test borrow math only; or (C) design the full XLM debt lifecycle first.",
+      "status": "in_progress",
+      "blockedReason": "Test-only borrowing is approved if compiled out of production. The first attempt failed in PocketIC because every guarded call needs a fresh ICP price, which tests cannot fetch.",
+      "nextAction": "Resume the saved test-only WIP: give test builds a fresh ICP price (test-only setter), use the not-frozen validation for XLM registration, rebuild, rerun the extended confirm test, and run the production compile check.",
       "cardIds": [
         "WP3"
       ]
