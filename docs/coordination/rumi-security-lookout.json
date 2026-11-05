@@ -94,23 +94,15 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
-      "evidenceText": "Draft PR #610 refreshed at 7dd6ff23 by merging current main 0f40a0a8. Direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced; the exact Rumi Arc stack remains unproven. New-head frontend workflow 41953263762 and Stability Pool workflow 41953263868 are IN_PROGRESS; prior-head CI is historical only. No production action occurred; reserve remains zero/off. Durable callback ABI exploration remains unimplemented. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 branch refreshed against current main 0f40a0a8. Three Lookout snapshot conflicts were resolved by preserving current-main evidence and reconciling local updates; no ckSOL source conflicts. The canonical declaration generator passed with no generated-file differences. Earlier tests and CI were run on the prior source head and are historical, not exact-head proof. Use the PR checks panel for current frontend and Stability Pool workflow status. No production action occurred; reserve remains zero/off. Direct running-upgrade callback traps remain reproduced; stop/drain is the practical mitigation, while other deploy paths are not enforced and the exact Rumi Arc stack is unproven. Durable callback ABI exploration remains unimplemented.",
       "evidenceLinks": [
         {
-          "title": "ckSOL PR #610",
+          "title": "ckSOL PR #610 and current checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
         },
         {
-          "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/7dd6ff23c088961771bf5bb548d9c9eda6eb4dd3"
-        },
-        {
-          "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263762"
-        },
-        {
-          "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263868"
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
         }
       ]
     },
@@ -119,23 +111,15 @@
       "state": "In progress",
       "owner": "Bram",
       "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
-      "evidenceText": "Draft PR #610 refreshed at 7dd6ff23 by merging current main 0f40a0a8. Direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced; the exact Rumi Arc stack remains unproven. New-head frontend workflow 41953263762 and Stability Pool workflow 41953263868 are IN_PROGRESS; prior-head CI is historical only. No production action occurred; reserve remains zero/off. Durable callback ABI exploration remains unimplemented. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 branch refreshed against current main 0f40a0a8. Three Lookout snapshot conflicts were resolved by preserving current-main evidence and reconciling local updates; no ckSOL source conflicts. The canonical declaration generator passed with no generated-file differences. Earlier tests and CI were run on the prior source head and are historical, not exact-head proof. Use the PR checks panel for current frontend and Stability Pool workflow status. No production action occurred; reserve remains zero/off. Direct running-upgrade callback traps remain reproduced; stop/drain is the practical mitigation, while other deploy paths are not enforced and the exact Rumi Arc stack is unproven. Durable callback ABI exploration remains unimplemented.",
       "evidenceLinks": [
         {
-          "title": "ckSOL PR #610",
+          "title": "ckSOL PR #610 and current checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
         },
         {
-          "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/7dd6ff23c088961771bf5bb548d9c9eda6eb4dd3"
-        },
-        {
-          "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263762"
-        },
-        {
-          "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263868"
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
         }
       ]
     },
@@ -144,23 +128,15 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Draft PR #610 refreshed at 7dd6ff23 by merging current main 0f40a0a8. Direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced; the exact Rumi Arc stack remains unproven. New-head frontend workflow 41953263762 and Stability Pool workflow 41953263868 are IN_PROGRESS; prior-head CI is historical only. No production action occurred; reserve remains zero/off. Durable callback ABI exploration remains unimplemented. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 branch refreshed against current main 0f40a0a8. Three Lookout snapshot conflicts were resolved by preserving current-main evidence and reconciling local updates; no ckSOL source conflicts. The canonical declaration generator passed with no generated-file differences. Earlier tests and CI were run on the prior source head and are historical, not exact-head proof. Use the PR checks panel for current frontend and Stability Pool workflow status. No production action occurred; reserve remains zero/off. Direct running-upgrade callback traps remain reproduced; stop/drain is the practical mitigation, while other deploy paths are not enforced and the exact Rumi Arc stack is unproven. Durable callback ABI exploration remains unimplemented.",
       "evidenceLinks": [
         {
-          "title": "ckSOL PR #610",
+          "title": "ckSOL PR #610 and current checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
         },
         {
-          "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/7dd6ff23c088961771bf5bb548d9c9eda6eb4dd3"
-        },
-        {
-          "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263762"
-        },
-        {
-          "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263868"
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
         }
       ]
     },

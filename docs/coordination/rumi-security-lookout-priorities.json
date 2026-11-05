@@ -15,7 +15,7 @@
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
       "blockedReason": "Direct running upgrades can trap callbacks; the tested stop-and-drain wrapper cannot enforce other deploy paths.",
-      "nextAction": "Keep reserve off. New-head frontend and Stability Pool checks are in progress for 7dd6ff23; review their results and any affected findings before changing release disposition. No production install or reserve funding is authorized.",
+      "nextAction": "Keep the reserve off. Review current PR #610 frontend and Stability Pool checks and any affected findings before changing release disposition. No production install or reserve funding is authorized.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",
