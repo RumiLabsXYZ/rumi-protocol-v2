@@ -94,7 +94,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Build additive ICP escrow accounting and backend API for ckSOL mint attempts",
-      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 refreshed at 7dd6ff23 by merging current main 0f40a0a8. Direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced; the exact Rumi Arc stack remains unproven. New-head frontend workflow 41953263762 and Stability Pool workflow 41953263868 are IN_PROGRESS; prior-head CI is historical only. No production action occurred; reserve remains zero/off. Durable callback ABI exploration remains unimplemented. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610",
@@ -102,15 +102,15 @@
         },
         {
           "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/7dd6ff23c088961771bf5bb548d9c9eda6eb4dd3"
         },
         {
           "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263762"
         },
         {
           "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263868"
         }
       ]
     },
@@ -119,7 +119,7 @@
       "state": "In progress",
       "owner": "Bram",
       "scope": "Integrate ICP quote/consent flow and recovery path for existing SOL deposits",
-      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 refreshed at 7dd6ff23 by merging current main 0f40a0a8. Direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced; the exact Rumi Arc stack remains unproven. New-head frontend workflow 41953263762 and Stability Pool workflow 41953263868 are IN_PROGRESS; prior-head CI is historical only. No production action occurred; reserve remains zero/off. Durable callback ABI exploration remains unimplemented. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610",
@@ -127,15 +127,15 @@
         },
         {
           "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/7dd6ff23c088961771bf5bb548d9c9eda6eb4dd3"
         },
         {
           "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263762"
         },
         {
           "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263868"
         }
       ]
     },
@@ -144,7 +144,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Draft PR #610 head ac3b2d68: direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced. Exact Rumi Arc stack remains unproven. Frontend CI and Stability Pool CI passed on the current head. No production action occurred; reserve remains off. Durable callback ABI exploration remains unimplemented: the minimal prototype agent was interrupted by an automated cybersecurity filter and produced no outcome. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
+      "evidenceText": "Draft PR #610 refreshed at 7dd6ff23 by merging current main 0f40a0a8. Direct running-upgrade controls reproduced callback and cleanup traps; stop/drain and cancel-stop controls passed 3/3 in PocketIC, including an outstanding callback. The opt-in drained-upgrade wrapper passed seven mocked tests, two reviews, and real ICP CLI stop/upgrade/start on a disposable idle local canister with final hash verified. Other deployment paths are not enforced; the exact Rumi Arc stack remains unproven. New-head frontend workflow 41953263762 and Stability Pool workflow 41953263868 are IN_PROGRESS; prior-head CI is historical only. No production action occurred; reserve remains zero/off. Durable callback ABI exploration remains unimplemented. Tested stop/drain remains the practical mitigation; direct running upgrades remain unsafe.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610",
@@ -152,15 +152,15 @@
         },
         {
           "title": "Current ckSOL head",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/ac3b2d6872fabe731369b16d40d2d960f2a07817"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/7dd6ff23c088961771bf5bb548d9c9eda6eb4dd3"
         },
         {
           "title": "Frontend CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104949"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263762"
         },
         {
           "title": "Stability Pool CI",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41371104975"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41953263868"
         }
       ]
     },
