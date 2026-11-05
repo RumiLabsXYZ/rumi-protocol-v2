@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 recovery source is merged, and PR #618 now pins the exact upgrade-only candidate and recipient-readback procedure. The live bot remains unchanged; upgrade authority and financial recovery authority remain separate holds. ckSOL PR #610 is draft and conflicting with main; its stop-and-drain procedure is the recommended interim release choice while the reserve stays off. Stability Pool and vault 51 work continue under Bram.",
-  "plainSummary": "Vault 158 recovery software and its exact upgrade plan are ready, but the live bot has not been changed and recovery remains held. The Solana processing work needs its branch conflicts resolved before review; its reserve remains off. Stability Pool and vault 51 work continue under Bram.",
+  "summary": "The exact vault 158 recovery-capable bot is installed and running with processing still paused. Readback verified its recovery configuration; the original PaymentShortfall claim is unchanged and no recovery or payment was created. Financial recovery remains a separate hold. ckSOL PR #610 is refreshed onto current main at ace2fb83, remains draft, and has one focused CI check still running; its reserve stays off. Stability Pool and vault 51 work continue under Bram.",
+  "plainSummary": "The vault 158 software upgrade is complete, but recovery has not been started and no funds moved. The bot remains paused while the exact recovery step is reviewed separately. The Solana processing branch is refreshed and still under review, with its reserve off. Stability Pool and vault 51 work continue under Bram.",
   "glossary": [
     {
       "term": "Stability Pool",

@@ -4,8 +4,8 @@
       "id": "vault158-recovery",
       "title": "Joint top: vault 158 liquidation recovery",
       "status": "blocked",
-      "blockedReason": "The installed bot cannot expose its current treasury recipient. Recovery stays held until the new query is installed through a separately authorized upgrade and read back.",
-      "nextAction": "Obtain separate upgrade-only authority for the exact candidate pinned in PR #618. After installation, read back the configured recipient and stop; recovery preparation and execution require separate authority.",
+      "blockedReason": "The exact recovery-capable bot is installed and its configuration was read back, but financial recovery remains outside the completed upgrade-only authority.",
+      "nextAction": "Review the immutable upgrade readback and draft the smallest readable recovery-authorization artifact. Do not unpause, transfer funds, or call recovery preparation, execution, or reconciliation without separate authority.",
       "cardIds": [
         "SEC-06"
       ]
@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Direct running upgrades can trap callbacks; the tested stop-and-drain wrapper cannot enforce other deploy paths.",
-      "nextAction": "Keep the reserve off and decide the narrow source and release disposition for PR #610 using the tested stop-and-drain mitigation. No production install or reserve funding is authorized.",
+      "blockedReason": "Direct running upgrades can trap callbacks; the tested stop-and-drain wrapper cannot enforce other deploy paths. PR #610 is refreshed, but one focused CI check is still running and exact invalidation from the refresh needs classification.",
+      "nextAction": "Keep the reserve off, finish the essential current-head review for PR #610, and merge only when its required checks are green. No production install or reserve funding is authorized.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",
