@@ -1,0 +1,281 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+// `loadDestinations()` runs the REAL `loadBridgeConfig` (so the real `get_bridge_info` -> `resolveBridgeConfig`
+// wiring is what these specs exercise). Only the world around it is replaced: the agent and the wallet stores.
+const mocks = vi.hoisted(() => ({ getBridgeInfo: vi.fn() }));
+
+vi.mock('$lib/config', () => ({
+  CANISTER_IDS: { ICUSD_BRIDGE: 'tfesu-vyaaa-aaaap-qrd7a-cai' },
+  CONFIG: { isLocal: false, host: 'https://icp0.io', currentIcusdLedgerId: 't6bor-paaaa-aaaap-qrd5q-cai' },
+}));
+vi.mock('@dfinity/agent', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@dfinity/agent')>();
+  return {
+    ...original,
+    Actor: { createActor: () => ({ get_bridge_info: mocks.getBridgeInfo }) },
+    HttpAgent: class {
+      async fetchRootKey() {}
+    },
+    AnonymousIdentity: class {},
+  };
+});
+vi.mock('$lib/services/auth', () => ({ walletSessionGeneration: { subscribe: () => () => {} } }));
+vi.mock('$lib/stores/wallet', () => ({ principal: { subscribe: () => () => {} }, walletStore: { getActor: vi.fn() } }));
+vi.mock('$lib/services/protocol/walletOperations', () => ({ isOisyWallet: () => false }));
+vi.mock('$lib/services/ledgerFeeService', () => ({ fetchLedgerFeeStrict: vi.fn() }));
+
+import type { BridgeInfo } from '$declarations/rumi_icusd_bridge/rumi_icusd_bridge.did';
+import { resolveBridgeConfig } from './chains';
+import {
+  BASE_UNKNOWN_ID,
+  baseDestination,
+  buildDestinations,
+  findDestination,
+  nextEnabledDestination,
+  pickSelected,
+  unavailableEvmDestinations,
+  unreachableDestinations,
+  type DestinationView,
+} from './destinations';
+import { loadDestinations } from './destinationLoader';
+import { makeBridgeInfo } from './testSupport';
+
+/** En and em dashes are not allowed in UI copy. Built from code points so this file holds none itself. */
+const DASHES = new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}]`);
+
+const BRIDGE_ID = 'tfesu-vyaaa-aaaap-qrd7a-cai';
+const OTHER_IDS = ['ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet'];
+
+function byId(list: DestinationView[], id: string): DestinationView {
+  const found = list.find((destination) => destination.id === id);
+  if (!found) throw new Error(`no destination ${id}`);
+  return found;
+}
+
+beforeEach(() => {
+  mocks.getBridgeInfo.mockReset().mockResolvedValue(makeBridgeInfo());
+});
+
+describe('loadDestinations: the Base entry', () => {
+  it('is synthesized from get_bridge_info exactly as resolveBridgeConfig reads it', async () => {
+    const info = makeBridgeInfo();
+    mocks.getBridgeInfo.mockResolvedValue(info);
+    const list = await loadDestinations();
+    const base = byId(list, 'base-mainnet');
+    const resolved = resolveBridgeConfig(info);
+    if (!resolved.ok) throw new Error('unreachable');
+
+    expect(mocks.getBridgeInfo).toHaveBeenCalledTimes(1);
+    expect(base).toMatchObject({
+      id: 'base-mainnet',
+      profileId: 'base',
+      family: 'evm',
+      name: 'Base',
+      chainId: '8453',
+      network: 'mainnet',
+      status: 'enabled',
+      reason: null,
+      actorCanisterId: BRIDGE_ID,
+    });
+    // The live configuration the forms use is the very object resolveBridgeConfig produces.
+    expect(base.config).toEqual(resolved.config);
+    expect(base.limits).toEqual({
+      minDepositE8s: resolved.config.minDepositE8s,
+      maxDepositE8s: resolved.config.maxDepositE8s,
+      minBridgeOutE8s: resolved.config.minBridgeOutE8s,
+    });
+    expect(base.fees).toEqual({ depositFeeE8s: 10_000n, releaseFeeE8s: 0n, ledgerFeeE8s: 100_000n });
+  });
+
+  it('labels a Base Sepolia canister as a testnet', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 84532n }));
+    const base = byId(await loadDestinations(), 'base-sepolia');
+    expect(base).toMatchObject({ id: 'base-sepolia', profileId: 'base', name: 'Base Sepolia', chainId: '84532', network: 'testnet', status: 'enabled' });
+  });
+
+  it('is disabled with the same message when the contract is not bound, and still names the chain', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ contract: [] }));
+    const base = byId(await loadDestinations(), 'base-mainnet');
+    expect(base).toMatchObject({
+      status: 'disabled',
+      reason: 'The Base contract is not bound yet.',
+      name: 'Base',
+      chainId: '8453',
+      config: null,
+      limits: null,
+      fees: null,
+      actorCanisterId: BRIDGE_ID,
+    });
+  });
+
+  it('is disabled with the same message for an unsupported chain or an invalid contract', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 1n }));
+    const unsupported = byId(await loadDestinations(), BASE_UNKNOWN_ID);
+    expect(unsupported.status).toBe('disabled');
+    expect(unsupported.reason).toBe('The bridge is configured for chain 1, which this app does not support.');
+    expect(unsupported.chainId).toBe('');
+
+    const bad = makeBridgeInfo();
+    bad.contract = [{ ...bad.contract[0]!, address: '0x1234' }];
+    mocks.getBridgeInfo.mockResolvedValue(bad);
+    const invalid = byId(await loadDestinations(), 'base-mainnet');
+    expect(invalid).toMatchObject({ status: 'disabled', reason: 'The bridge reported an invalid Base contract address.' });
+  });
+
+  it('stays ENABLED while paused or halted: paused is not disabled', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(
+      makeBridgeInfo({ pauses: { mints: true, observer: false, releases: true, deposits: true }, halted: ['coverage mismatch'] }),
+    );
+    const base = byId(await loadDestinations(), 'base-mainnet');
+    expect(base.status).toBe('enabled');
+    expect(base.reason).toBeNull();
+    expect(base.config).toMatchObject({ depositsPaused: true, releasesPaused: true, mintsPaused: true, halted: 'coverage mismatch' });
+  });
+
+  it('rejects when the canister cannot be read, so a caller can keep its last good list', async () => {
+    mocks.getBridgeInfo.mockRejectedValue(new Error('replica offline'));
+    await expect(loadDestinations()).rejects.toThrow('replica offline');
+  });
+
+  it('takes the Base read from a seam when one is given', async () => {
+    const info = makeBridgeInfo({ contract: [] });
+    const list = await loadDestinations(async () => resolveBridgeConfig(info));
+    expect(byId(list, 'base-mainnet').status).toBe('disabled');
+    expect(mocks.getBridgeInfo).not.toHaveBeenCalled();
+  });
+});
+
+describe('the other EVM destinations', () => {
+  it('lists Ethereum, Arbitrum, Robinhood Chain, HyperEVM and Monad, all DISABLED, after Base', async () => {
+    const list = await loadDestinations();
+    expect(list.map((destination) => destination.id)).toEqual(['base-mainnet', ...OTHER_IDS, 'solana-mainnet', 'sui-mainnet']);
+    for (const id of OTHER_IDS) {
+      const entry = byId(list, id);
+      expect(entry).toMatchObject({
+        family: 'evm',
+        network: 'mainnet',
+        status: 'disabled',
+        actorCanisterId: null,
+        config: null,
+        limits: null,
+        fees: null,
+      });
+    }
+  });
+
+  it('gives every chain identifier as a STRING', async () => {
+    const list = await loadDestinations();
+    expect(list.map((destination) => destination.chainId)).toEqual(['8453', '1', '42161', '4663', '999', '143', '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d', '35834a8ac17ca48fb14ac8f99c17c98747e95dd07294ae41a46b382246a4499b']);
+    for (const destination of list) expect(typeof destination.chainId).toBe('string');
+  });
+
+  it('explains each one in plain words, with no jargon and no em dash', () => {
+    for (const entry of unavailableEvmDestinations()) {
+      expect(entry.reason).toBe(`Not available yet: there is no icUSD bridge to ${entry.name} at the moment.`);
+      expect(entry.reason).not.toMatch(DASHES);
+    }
+  });
+
+  it('never enables an entry other than Base', () => {
+    const enabled = (list: DestinationView[]) => list.filter((destination) => destination.status === 'enabled').map((destination) => destination.id);
+    expect(enabled(buildDestinations(resolveBridgeConfig(makeBridgeInfo()), BRIDGE_ID))).toEqual(['base-mainnet']);
+    expect(enabled(unreachableDestinations('x'))).toEqual([]);
+    // A canister that reports another chain id to the Base page does not enable that chain's entry either.
+    expect(enabled(buildDestinations(resolveBridgeConfig(makeBridgeInfo({ chain_id: 143n })), BRIDGE_ID))).toEqual([]);
+  });
+});
+
+describe('destination keys are per network', () => {
+  it('keys each entry by its network and keeps the profile label apart', async () => {
+    const list = await loadDestinations();
+    expect(list.map((destination) => [destination.id, destination.profileId])).toEqual([
+      ['base-mainnet', 'base'],
+      ['ethereum-mainnet', 'ethereum'],
+      ['arbitrum-mainnet', 'arbitrum'],
+      ['robinhood-mainnet', 'robinhood'],
+      ['hyperevm-mainnet', 'hyperevm'],
+      ['monad-mainnet', 'monad'],
+      ['solana-mainnet', 'solana'],
+      ['sui-mainnet', 'sui'],
+    ]);
+    expect(new Set(list.map((destination) => destination.id)).size).toBe(list.length);
+  });
+
+  it('gives a Base mainnet and a Base Sepolia canister different keys, from the chain id the canister reports', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 8453n }));
+    const mainnet = byId(await loadDestinations(), 'base-mainnet');
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 84532n }));
+    const sepolia = byId(await loadDestinations(), 'base-sepolia');
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 31337n }));
+    const local = byId(await loadDestinations(), 'base-local');
+    expect([mainnet.id, sepolia.id, local.id]).toEqual(['base-mainnet', 'base-sepolia', 'base-local']);
+    expect([mainnet.network, sepolia.network, local.network]).toEqual(['mainnet', 'testnet', 'testnet']);
+  });
+
+  it('keeps the same key when a bound Base turns off, and uses an unknown key only when no chain is known', async () => {
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ contract: [], chain_id: 84532n }));
+    expect((await loadDestinations())[0]).toMatchObject({ id: 'base-sepolia', status: 'disabled' });
+    mocks.getBridgeInfo.mockResolvedValue(makeBridgeInfo({ chain_id: 1n }));
+    expect((await loadDestinations())[0]).toMatchObject({ id: BASE_UNKNOWN_ID, status: 'disabled' });
+  });
+});
+
+describe('when the bridge cannot be reached at all', () => {
+  it('shows every destination unavailable, with the reason on Base', () => {
+    const list = unreachableDestinations('replica offline');
+    expect(list.map((destination) => destination.status)).toEqual(Array(8).fill('disabled'));
+    expect(byId(list, BASE_UNKNOWN_ID).reason).toBe('The bridge could not be reached: replica offline');
+    expect(list.map((destination) => destination.id)).toEqual([BASE_UNKNOWN_ID, ...OTHER_IDS, 'solana-mainnet', 'sui-mainnet']);
+  });
+});
+
+describe('selection', () => {
+  const list = (): DestinationView[] => buildDestinations(resolveBridgeConfig(makeBridgeInfo()), BRIDGE_ID);
+
+  function twoEnabled(): DestinationView[] {
+    // A future state: a second instance exists. The helpers must already skip the disabled entries between.
+    const all = list();
+    const second: DestinationView = { ...byId(all, 'arbitrum-mainnet'), status: 'enabled', reason: null };
+    return [all[0], all[1], second, ...all.slice(3).filter((destination) => destination.id !== 'arbitrum-mainnet')];
+  }
+
+  it('picks the chosen destination, even once it is disabled, else the first enabled one, else the first', () => {
+    const all = list();
+    expect(pickSelected(all, null)?.id).toBe('base-mainnet');
+    expect(pickSelected(all, 'monad-mainnet')?.id).toBe('monad-mainnet'); // chosen earlier, now disabled: the page says so
+    expect(pickSelected(all, 'nope')?.id).toBe('base-mainnet');
+    const none = unreachableDestinations('x');
+    expect(pickSelected(none, null)?.id).toBe(BASE_UNKNOWN_ID); // nothing enabled: the first entry explains why
+    expect(pickSelected([], null)).toBeNull();
+    expect(findDestination(all, 'monad-mainnet')?.name).toBe('Monad');
+    expect(findDestination(all, null)).toBeNull();
+  });
+
+  it('moves between ENABLED entries only, so a disabled one is never reached by a key', () => {
+    const entries = twoEnabled();
+    expect(entries.map((destination) => destination.id)).toEqual(['base-mainnet', 'ethereum-mainnet', 'arbitrum-mainnet', 'robinhood-mainnet', 'hyperevm-mainnet', 'monad-mainnet', 'solana-mainnet', 'sui-mainnet']);
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowRight')?.id).toBe('arbitrum-mainnet');
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowDown')?.id).toBe('arbitrum-mainnet');
+    expect(nextEnabledDestination(entries, 'arbitrum-mainnet', 'ArrowRight')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'ArrowLeft')?.id).toBe('arbitrum-mainnet');
+    expect(nextEnabledDestination(entries, 'arbitrum-mainnet', 'ArrowUp')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(entries, 'arbitrum-mainnet', 'Home')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(entries, 'base-mainnet', 'End')?.id).toBe('arbitrum-mainnet');
+  });
+
+  it('stays put with one enabled entry, and returns nothing when none is enabled', () => {
+    expect(nextEnabledDestination(list(), 'base-mainnet', 'ArrowRight')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(list(), 'base-mainnet', 'End')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(unreachableDestinations('x'), null, 'ArrowRight')).toBeNull();
+    // From a disabled current entry the keys land on the first or last enabled one.
+    expect(nextEnabledDestination(list(), 'monad-mainnet', 'ArrowRight')?.id).toBe('base-mainnet');
+    expect(nextEnabledDestination(list(), 'monad-mainnet', 'ArrowLeft')?.id).toBe('base-mainnet');
+  });
+});
+
+describe('baseDestination', () => {
+  it('carries the bridge canister id even when the configuration is unusable', () => {
+    const failed = resolveBridgeConfig({ ...makeBridgeInfo(), contract: [] } as unknown as BridgeInfo);
+    expect(baseDestination(failed, BRIDGE_ID).actorCanisterId).toBe(BRIDGE_ID);
+  });
+});

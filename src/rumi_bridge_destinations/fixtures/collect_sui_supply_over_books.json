@@ -1,0 +1,116 @@
+{
+ "description": "SYNTHETIC FIXTURE, not live data. Base plus one Sui destination, as collect_base_plus_sui.json, except that the Gate was read with one e8s more minted than the instance's books explain (a mint nobody on the ICP side made): supply 3.00000001 against outstanding 3. The Gate's own identity still holds (minted 5.00000001 less burned 2 is the supply), so the read is accepted and the supply-bound check (supply <= outstanding + inflight mint) fails. The collector prints a FAILURE flag and exits 3.",
+ "config": {
+  "destinations": [
+   {
+    "network_id": "base-mainnet",
+    "in_d": true,
+    "escrow": {
+     "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+     "subaccount": null
+    },
+    "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq"
+   },
+   {
+    "network_id": "sui-mainnet",
+    "in_d": true,
+    "escrow": {
+     "owner": "py3vd-r3tpf-xhi2d-foruw-glljn-zzxiy-lomns-s243v-ne",
+     "subaccount": "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4"
+    },
+    "instance": "py3vd-r3tpf-xhi2d-foruw-glljn-zzxiy-lomns-s243v-ne"
+   }
+  ],
+  "xrpl": null
+ },
+ "readings": {
+  "icp_ledger_total_supply": "100000000000",
+  "debt_backed_chain_supplies": "0",
+  "icrc1_balances": [
+   {
+    "escrow": {
+     "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+     "subaccount": null
+    },
+    "balance": "20012345678"
+   },
+   {
+    "escrow": {
+     "owner": "py3vd-r3tpf-xhi2d-foruw-glljn-zzxiy-lomns-s243v-ne",
+     "subaccount": "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4"
+    },
+    "balance": "300000000"
+   }
+  ],
+  "evm_supplies": [
+   {
+    "network_id": "base-mainnet",
+    "supply": "20012345678",
+    "finality": "evm_tag",
+    "block": 1000
+   }
+  ],
+  "sui_supplies": [
+   {
+    "network_id": "sui-mainnet",
+    "supply": "300000001",
+    "finality": "sui_checkpoint",
+    "checkpoint": 123456789,
+    "checkpoint_digest": "93MB2qRDNVLxbmmPuYpLdAqn3u2x9ZhaVZK5wELHueP8",
+    "epoch": 900,
+    "gate_version": 1,
+    "supply_cap": 100000000000,
+    "minted_total": "500000001",
+    "burned_total": "200000000",
+    "mint_count": 1,
+    "bridge_out_count": 1
+   }
+  ],
+  "instance_audits": [
+   {
+    "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq",
+    "audit": {
+     "escrow_account": {
+      "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+      "subaccount": null
+     },
+     "escrow_balance_e8s": "20012345678",
+     "outstanding_e8s": "20000000000",
+     "pending_mint_e8s": "12345678",
+     "inflight_mint_e8s": "12345678",
+     "pending_release_e8s": "0",
+     "pending_refund_e8s": "0",
+     "held_e8s": "0",
+     "fees_e8s": "0",
+     "reserved_pulls_e8s": "0",
+     "unknown_outflow_e8s": "0",
+     "liabilities_e8s": "20012345678",
+     "required_escrow_e8s": "20012345678",
+     "coverage_ok": true,
+     "reported_supply_e8s": "20012345678",
+     "reported_supply_block": 1000
+    }
+   },
+   {
+    "instance": "py3vd-r3tpf-xhi2d-foruw-glljn-zzxiy-lomns-s243v-ne",
+    "audit": {
+     "escrow_account": {
+      "owner": "py3vd-r3tpf-xhi2d-foruw-glljn-zzxiy-lomns-s243v-ne",
+      "subaccount": "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4"
+     },
+     "outstanding_e8s": "300000000",
+     "pending_mint_e8s": "0",
+     "inflight_mint_e8s": "0",
+     "pending_release_e8s": "0",
+     "pending_refund_e8s": "0",
+     "held_e8s": "0",
+     "fees_e8s": "0",
+     "reserved_pulls_e8s": "0",
+     "unknown_outflow_e8s": "0",
+     "liabilities_e8s": "300000000",
+     "required_escrow_e8s": "300000000"
+    }
+   }
+  ]
+ }
+}

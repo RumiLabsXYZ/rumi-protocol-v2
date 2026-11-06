@@ -191,6 +191,15 @@ pub struct SlimState {
     /// firing in a single post-upgrade burst) and bumps it.
     #[serde(default)]
     pub schedule_layout_version: Option<u32>,
+    /// ICRC-1 accounts on the production icUSD ledger that escrow icUSD for a
+    /// bridged token on another chain (BB-58). Their balances are subtracted
+    /// from `icrc1_total_supply` when refreshing the circulating supply.
+    /// `None` (or empty) means no subtraction, today's behavior. Set only by
+    /// the admin method `admin_set_bridge_escrow_accounts`. Candid `Decode!`
+    /// does not honor `serde(default)`, so this stays an `opt`: a snapshot
+    /// written before the field existed decodes it as `None`.
+    #[serde(default)]
+    pub bridge_escrow_accounts: Option<Vec<icrc_ledger_types::icrc1::account::Account>>,
 }
 
 /// Snapshot of one AMM pool's composition for portfolio LP valuation.
@@ -250,6 +259,7 @@ impl Default for SlimState {
             pull_period_secs_override: None,
             pull_tick_secs_override: None,
             schedule_layout_version: None,
+            bridge_escrow_accounts: None,
         }
     }
 }
@@ -634,6 +644,105 @@ mod slim_state_upgrade_tests {
         assert_eq!(decoded.pull_period_secs_override, None);
         assert_eq!(decoded.pull_tick_secs_override, None);
         assert_eq!(decoded.schedule_layout_version, None);
+        assert_eq!(decoded.bridge_escrow_accounts, None);
+    }
+
+    /// `SlimState` as persisted by the build that preceded BB-58: every field
+    /// except `bridge_escrow_accounts`. A live snapshot has exactly this shape
+    /// once that build has run, so the BB-58 build must decode it (no UPG-002
+    /// wipe) with the escrow list as `None` and the cached supply untouched.
+    #[derive(CandidType, Serialize, Deserialize)]
+    struct SlimStatePreBridgeEscrow {
+        admin: Principal,
+        sources: SourceCanisterIds,
+        circulating_supply_icusd_e8s: Option<u128>,
+        circulating_supply_3usd_e8s: Option<u128>,
+        last_daily_snapshot_ns: u64,
+        error_counters: ErrorCounters,
+        cursor_last_success: Option<std::collections::HashMap<u8, u64>>,
+        cursor_last_error: Option<std::collections::HashMap<u8, String>>,
+        cursor_source_counts: Option<std::collections::HashMap<u8, u64>>,
+        backfill_active_icusd: Option<bool>,
+        backfill_active_3usd: Option<bool>,
+        last_pull_cycle_ns: Option<u64>,
+        collateral_decimals: Option<std::collections::HashMap<Principal, u8>>,
+        add_margin_backfill_cursor: Option<u64>,
+        amm_pools: Option<Vec<AmmPoolSnapshot>>,
+        source_next_pull_ns: Option<std::collections::HashMap<u8, u64>>,
+        pull_period_secs_override: Option<u64>,
+        pull_tick_secs_override: Option<u64>,
+        schedule_layout_version: Option<u32>,
+    }
+
+    #[test]
+    fn decodes_pre_bridge_escrow_slim_state_with_none_escrow_list() {
+        let legacy = SlimStatePreBridgeEscrow {
+            admin: Principal::from_slice(&[7]),
+            sources: SourceCanisterIds {
+                backend: Principal::from_slice(&[2]),
+                icusd_ledger: Principal::from_slice(&[3]),
+                three_pool: Principal::from_slice(&[4]),
+                stability_pool: Principal::from_slice(&[5]),
+                amm: Principal::from_slice(&[6]),
+            },
+            circulating_supply_icusd_e8s: Some(123),
+            circulating_supply_3usd_e8s: Some(456),
+            last_daily_snapshot_ns: 999,
+            error_counters: ErrorCounters::default(),
+            cursor_last_success: None,
+            cursor_last_error: None,
+            cursor_source_counts: None,
+            backfill_active_icusd: None,
+            backfill_active_3usd: None,
+            last_pull_cycle_ns: Some(555),
+            collateral_decimals: None,
+            add_margin_backfill_cursor: Some(10),
+            amm_pools: None,
+            source_next_pull_ns: None,
+            pull_period_secs_override: Some(300),
+            pull_tick_secs_override: Some(30),
+            schedule_layout_version: Some(2),
+        };
+
+        let bytes = Encode!(&legacy).expect("encode pre-BB-58 SlimState");
+        let decoded: SlimState = Decode!(&bytes, SlimState)
+            .expect("decode pre-BB-58 SlimState as current schema (no UPG-002 wipe)");
+
+        assert_eq!(decoded.admin, Principal::from_slice(&[7]));
+        assert_eq!(decoded.circulating_supply_icusd_e8s, Some(123));
+        assert_eq!(decoded.circulating_supply_3usd_e8s, Some(456));
+        assert_eq!(decoded.pull_period_secs_override, Some(300));
+        assert_eq!(decoded.schedule_layout_version, Some(2));
+        assert_eq!(decoded.bridge_escrow_accounts, None);
+    }
+
+    #[test]
+    fn bridge_escrow_accounts_round_trip_through_the_storable_encoding() {
+        use icrc_ledger_types::icrc1::account::Account;
+        let mut sub = [0u8; 32];
+        sub[0] = 9;
+        let accounts = vec![
+            Account {
+                owner: Principal::from_slice(&[1]),
+                subaccount: None,
+            },
+            Account {
+                owner: Principal::from_slice(&[2]),
+                subaccount: Some(sub),
+            },
+        ];
+        let mut s = SlimState::default();
+        s.bridge_escrow_accounts = Some(accounts.clone());
+
+        let bytes = <SlimState as Storable>::to_bytes(&s);
+        let decoded = <SlimState as Storable>::from_bytes(bytes);
+
+        assert_eq!(decoded.bridge_escrow_accounts, Some(accounts));
+        // The decoded subaccount is byte-exact, not just ledger-equivalent.
+        assert_eq!(
+            decoded.bridge_escrow_accounts.unwrap()[1].subaccount,
+            Some(sub)
+        );
     }
 
     #[test]

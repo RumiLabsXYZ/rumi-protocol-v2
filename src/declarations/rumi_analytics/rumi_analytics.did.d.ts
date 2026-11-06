@@ -2,6 +2,10 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface Account {
+  'owner' : Principal,
+  'subaccount' : [] | [Uint8Array | number[]],
+}
 export interface AddressValuePoint {
   'ts_ns' : bigint,
   'breakdown' : Array<AddressValueSourceBreakdown>,
@@ -502,6 +506,7 @@ export interface VolatilityResponse {
 }
 export interface _SERVICE {
   'admin_backfill_add_margin_events' : ActorMethod<[bigint], Result>,
+  'admin_set_bridge_escrow_accounts' : ActorMethod<[Array<Account>], Result_1>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycle_manager_targets' : ActorMethod<[], Array<CycleManagerTarget>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
