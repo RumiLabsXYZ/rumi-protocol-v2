@@ -139,44 +139,36 @@
       "evidenceText": "Rob approved assets-only publication. Paired frontend published: corrected immutable batch 680 and atomic entry batch 681. Final inventory 3078 keys/3272 encodings; all affected hashes/retained assets/properties and primary-domain identity/gzip/auth readbacks pass. Wasm/controllers/settings unchanged. Backend Running; reserve=0/unavailable and relay=0. Known rejected staging commit reconciled before distinct chunk correction; no ambiguous outcome. No build/wallet/canary/funds. Publication complete; lifecycle/activation authority remains separate.",
       "evidenceLinks": [
         {
-          "title": "ckSOL PR #610 and current checks",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
-        },
-        {
-          "title": "PR #610 checks",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
-        },
-        {
-          "title": "ckSOL release decision",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-release-decision-2026-11-04.md"
-        },
-        {
-          "title": "Held upgrade-only packet",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-upgrade-only-packet-20261104.md"
-        },
-        {
-          "title": "Source composition checkpoint",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-pr613-composition-20261104.md"
-        },
-        {
-          "title": "Merged composition PR #624",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/624"
-        },
-        {
-          "title": "Integrated-source installation-only packet",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-installation-only-packet-20261104.md"
-        },
-        {
-          "title": "Read-only paired frontend publication plan",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-frontend-publication-plan-20261104.md"
+          "title": "Verified assets-only frontend publication",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-frontend-publication-result-20261105.md"
         },
         {
           "title": "Backend installation and readback result",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-backend-installation-result-20261105.md"
         },
         {
-          "title": "Verified assets-only frontend publication",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-frontend-publication-result-20261105.md"
+          "title": "Read-only paired frontend publication plan",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-frontend-publication-plan-20261104.md"
+        },
+        {
+          "title": "Integrated-source installation-only packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-installation-only-packet-20261104.md"
+        },
+        {
+          "title": "Merged composition PR #624",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/624"
+        },
+        {
+          "title": "Source composition checkpoint",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-pr613-composition-20261104.md"
+        },
+        {
+          "title": "ckSOL PR #610 and current checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610"
+        },
+        {
+          "title": "PR #610 checks",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/610/checks"
         }
       ]
     },
