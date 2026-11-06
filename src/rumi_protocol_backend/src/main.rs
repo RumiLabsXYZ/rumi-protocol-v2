@@ -383,6 +383,36 @@ async fn validate_freshness_for_vault(vault_id: u64) -> Result<(), ProtocolError
     }
 }
 
+/// Debt-free native-XRP withdrawal is an ownership/accounting operation. All other
+/// withdrawals retain their oracle gates; the vault module re-reads current state.
+async fn validate_withdrawal_call(
+    vault_id: u64,
+    refresh_collateral: bool,
+) -> Result<(), ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    let (without_oracle, native_xrp) = read_state(|s| {
+        (
+            rumi_protocol_backend::vault::native_xrp_withdrawal_without_oracle(
+                s,
+                ic_cdk::caller(),
+                vault_id,
+            ),
+            s.vault_id_to_vaults
+                .get(&vault_id)
+                .and_then(|v| s.get_collateral_config(&v.collateral_type))
+                .is_some_and(|c| c.is_native_xrp()),
+        )
+    });
+    if !without_oracle {
+        validate_call().await?;
+        if refresh_collateral || native_xrp {
+            validate_freshness_for_vault(vault_id).await?;
+        }
+        validate_authenticated_not_frozen()?;
+    }
+    Ok(())
+}
+
 /// Audit ORACLE-001: refresh a collateral's cached price before a debt-increasing
 /// or collateral-decreasing op whose collateral is given directly (the open-*
 /// endpoints). `None` means ICP (the default collateral). `ensure_fresh_price_for`
@@ -7025,9 +7055,7 @@ async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 #[candid_method(update)]
 #[update]
 async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
-    validate_call().await?;
-    // ORACLE-001: refresh this vault's collateral price before releasing collateral.
-    validate_freshness_for_vault(vault_id).await?;
+    validate_withdrawal_call(vault_id, true).await?;
     check_postcondition(rumi_protocol_backend::vault::withdraw_collateral(vault_id).await)
 }
 
@@ -7036,9 +7064,7 @@ async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
 async fn withdraw_partial_collateral(
     arg: rumi_protocol_backend::vault::VaultArg,
 ) -> Result<u64, ProtocolError> {
-    validate_call().await?;
-    // ORACLE-001: refresh this vault's collateral price before releasing collateral.
-    validate_freshness_for_vault(arg.vault_id).await?;
+    validate_withdrawal_call(arg.vault_id, true).await?;
     check_postcondition(
         rumi_protocol_backend::vault::withdraw_partial_collateral(arg.vault_id, arg.amount).await,
     )
@@ -7047,7 +7073,7 @@ async fn withdraw_partial_collateral(
 #[candid_method(update)]
 #[update]
 async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
-    validate_call().await?;
+    validate_withdrawal_call(vault_id, false).await?;
     check_postcondition(rumi_protocol_backend::vault::withdraw_and_close_vault(vault_id).await)
 }
 
