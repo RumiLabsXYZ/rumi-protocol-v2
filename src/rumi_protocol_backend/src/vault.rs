@@ -10567,6 +10567,111 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         }
     }
 }
+/// Only an owned, exact-zero-debt native-XRP vault can skip oracle validation.
+pub fn native_xrp_withdrawal_without_oracle(
+    state: &State,
+    caller: Principal,
+    vault_id: u64,
+) -> bool {
+    state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .is_some_and(|vault| {
+            vault.owner == caller
+                && vault.borrowed_icusd_amount.0 == 0
+                && state
+                    .get_collateral_config(&vault.collateral_type)
+                    .is_some_and(|c| c.is_native_xrp())
+        })
+}
+
+/// Current-state admission used in the same synchronous block as the XRP claim.
+/// Deposit activation minimums do not apply to withdrawals; settlement still charges fees.
+fn native_xrp_partial_withdrawal_admission(
+    state: &State,
+    caller: Principal,
+    vault_id: u64,
+    amount: u64,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if state.frozen {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen".into(),
+        ));
+    }
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::GenericError("Vault not found".into()))?;
+    if vault.owner != caller {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    let config = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| ProtocolError::GenericError("Collateral type not configured".into()))?;
+    if !config.is_native_xrp() || !config.status.allows_withdraw() {
+        return Err(ProtocolError::GenericError(
+            "Native-XRP withdrawal is not allowed".into(),
+        ));
+    }
+    if vault.bot_processing
+        || state.bot_claims.contains_key(&vault_id)
+        || state.has_pending_nicp_claim(vault_id)
+        || state.pending_borrow_mints.contains_key(&vault_id)
+        || state.has_unresolved_push_sweep_for_vault(vault_id)
+        || state.has_unresolved_sp_liquidation_for_vault(vault_id)
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Vault has an unresolved operation".into(),
+        ));
+    }
+    ensure_no_active_xrp_sp_absorb_preflight(state, vault_id, now_ns)?;
+    if amount == 0 {
+        return Err(ProtocolError::AmountTooLow { minimum_amount: 1 });
+    }
+    if amount > vault.collateral_amount {
+        return Err(ProtocolError::GenericError(
+            "Withdrawal exceeds available collateral".into(),
+        ));
+    }
+    if vault.borrowed_icusd_amount.0 > 0 {
+        // Even one e8s of debt needs a real, fresh price and CR headroom. Never forgive
+        // native-XRP debt here just to make an oracle-free withdrawal admissible.
+        let fresh = config
+            .last_price_timestamp
+            .is_some_and(|ts| ts <= now_ns && now_ns - ts <= 600_000_000_000);
+        let price = state
+            .get_collateral_price_decimal(&vault.collateral_type)
+            .filter(|p| *p > rust_decimal::Decimal::ZERO)
+            .filter(|_| fresh)
+            .ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable("No fresh native-XRP price available".into())
+            })?;
+        let base = state.get_min_collateral_ratio_for(&vault.collateral_type);
+        let recovery = state.get_recovery_cr_for(&vault.collateral_type);
+        let min_ratio = if state.mode == Mode::Recovery && recovery > base {
+            recovery
+        } else {
+            base
+        };
+        let required = crate::numeric::icusd_to_collateral_amount(
+            vault.borrowed_icusd_amount * min_ratio,
+            price,
+            config.decimals,
+        )
+        .max(1);
+        if vault.collateral_amount.saturating_sub(amount) < required {
+            return Err(ProtocolError::GenericError(
+                "Withdrawal would violate the minimum collateral ratio".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_partial_{}", vault_id))?;
@@ -10586,6 +10691,16 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     let now = ic_cdk::api::time();
     reject_active_xrp_sp_absorb_preflight(vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(vault_id, now));
+
+    let native_xrp = read_state(|s| s.vault_id_to_vaults.get(&vault_id)
+        .and_then(|v| s.get_collateral_config(&v.collateral_type)).is_some_and(|c| c.is_native_xrp()));
+    if native_xrp {
+        return mutate_state(|s| {
+            native_xrp_partial_withdrawal_admission(s, caller, vault_id, amount, now)?;
+            crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
+            Ok(record_xrp_claim(s, caller, caller, vault_id, amount, now))
+        });
+    }
 
     // Read vault, per-collateral price + config from state
     let (
@@ -10863,6 +10978,12 @@ async fn withdraw_and_close_vault_internal(
             vault_id
         );
         return Err(ProtocolError::CallerNotOwner);
+    }
+
+    // SEC-10: only exactly zero native-XRP debt may release all collateral.
+    // Preserve the legacy dust policy for other collateral types.
+    if vault.borrowed_icusd_amount.0 > 0 && read_state(|s| s.get_collateral_config(&vault.collateral_type).is_some_and(|c| c.is_native_xrp())) {
+        return Err(ProtocolError::GenericError("Repay all native-XRP vault debt before withdrawing all collateral".into()));
     }
 
     // Forgive dust debt before checking
@@ -16431,5 +16552,138 @@ mod add_margin_overflow_tests {
         assert!(!payout_state.cas_reserve_redemption_phase(9, &payout_submitted, ReserveRedemptionPhase::PayoutAmbiguous).is_some(),
             "the original callback cannot overwrite a reconciler's newer state");
         assert!(payout_state.check_invariants().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod sec10_native_xrp_withdrawal_tests {
+    use super::*;
+    const NOW: u64 = 700_000_000_000;
+    fn fixture() -> (State, Principal) {
+        let owner = Principal::from_slice(&[71]);
+        let mut s = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: owner,
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let mut cfg = s
+            .get_collateral_config(&s.icp_collateral_type())
+            .unwrap()
+            .clone();
+        let xrp = crate::state::xrp_collateral_principal();
+        cfg.ledger_canister_id = xrp;
+        cfg.custody_kind = Some(crate::state::CustodyKind::NativeXrp);
+        cfg.decimals = 6;
+        cfg.min_collateral_deposit = 1_000_000;
+        cfg.last_price = None;
+        cfg.last_price_timestamp = None;
+        s.collateral_configs.insert(xrp, cfg);
+        s.open_vault(Vault {
+            owner,
+            vault_id: 71,
+            collateral_type: xrp,
+            collateral_amount: 2_000_000,
+            borrowed_icusd_amount: ICUSD::new(0),
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: NOW,
+            bot_processing: false,
+        });
+        (s, owner)
+    }
+    #[test]
+    fn sec10_zero_debt_native_xrp_withdraws_without_price_or_deposit_minimum() {
+        let (s, owner) = fixture();
+        assert!(native_xrp_withdrawal_without_oracle(&s, owner, 71));
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_ok()); // 0.01 XRP
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 2_000_000, NOW).is_ok());
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 0, NOW).is_err());
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 2_000_001, NOW).is_err());
+    }
+    #[test]
+    fn sec10_positive_dust_retains_oracle_freshness_and_cr() {
+        let (mut s, owner) = fixture();
+        s.vault_id_to_vaults
+            .get_mut(&71)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(1);
+        assert!(!native_xrp_withdrawal_without_oracle(&s, owner, 71));
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_err());
+        let cfg = s
+            .collateral_configs
+            .get_mut(&crate::state::xrp_collateral_principal())
+            .unwrap();
+        cfg.last_price = Some(1.0);
+        cfg.last_price_timestamp = Some(NOW - 600_000_000_001);
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_err());
+        s.collateral_configs
+            .get_mut(&crate::state::xrp_collateral_principal())
+            .unwrap()
+            .last_price_timestamp = Some(NOW);
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_ok());
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 2_000_000, NOW).is_err());
+    }
+    #[test]
+    fn sec10_normal_debt_cr_boundary_and_future_timestamp() {
+        let (mut s, owner) = fixture();
+        let xrp = crate::state::xrp_collateral_principal();
+        s.vault_id_to_vaults.get_mut(&71).unwrap().borrowed_icusd_amount = ICUSD::new(100_000_000);
+        let cfg = s.collateral_configs.get_mut(&xrp).unwrap();
+        cfg.borrow_threshold_ratio = Ratio::from(dec!(1.5));
+        cfg.last_price = Some(1.0);
+        cfg.last_price_timestamp = Some(NOW);
+        // 2 XRP at $1, debt $1, minimum CR 150%: exactly 0.5 XRP headroom.
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 500_000, NOW).is_ok());
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 500_001, NOW).is_err());
+        s.collateral_configs.get_mut(&xrp).unwrap().last_price_timestamp = Some(NOW + 1);
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 1, NOW).is_err());
+        s.collateral_configs.get_mut(&xrp).unwrap().last_price_timestamp = Some(NOW);
+        s.mode = Mode::Recovery;
+        s.recovery_cr_multiplier = Ratio::from(dec!(1.2)); // 180% => 0.2 XRP headroom.
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 200_000, NOW).is_ok());
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 200_001, NOW).is_err());
+    }
+
+    #[test]
+    fn sec10_current_owner_freeze_status_and_locks_are_not_bypassed() {
+        let (mut s, owner) = fixture();
+        assert!(native_xrp_partial_withdrawal_admission(
+            &s,
+            Principal::anonymous(),
+            71,
+            10_000,
+            NOW
+        )
+        .is_err());
+        assert!(native_xrp_partial_withdrawal_admission(
+            &s,
+            Principal::from_slice(&[72]),
+            71,
+            10_000,
+            NOW
+        )
+        .is_err());
+        s.frozen = true;
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_err());
+        s.frozen = false;
+        s.vault_id_to_vaults.get_mut(&71).unwrap().bot_processing = true;
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_err());
+        s.vault_id_to_vaults.get_mut(&71).unwrap().bot_processing = false;
+        s.xrpl_icusd.vault_exclusions.insert(71);
+        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_err());
+    }
+    #[test]
+    fn sec10_non_native_zero_debt_does_not_skip_oracle() {
+        let (mut s, owner) = fixture();
+        s.collateral_configs
+            .get_mut(&crate::state::xrp_collateral_principal())
+            .unwrap()
+            .custody_kind = None;
+        assert!(!native_xrp_withdrawal_without_oracle(&s, owner, 71));
     }
 }
