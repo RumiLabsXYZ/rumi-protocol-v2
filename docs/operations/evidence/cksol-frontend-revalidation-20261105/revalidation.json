@@ -1,0 +1,342 @@
+{
+  "reviewedPlanCommit": "ba1ef31b",
+  "reviewedPlanSha256": "700a67b4664bed11ee4f9844a0d740dc80ac28a57f06f0f204464d81389ea821",
+  "planReusedWithoutContentChange": true,
+  "source": "6847982b44f247e0c99f0a453b583d3fab8107a2",
+  "canister": "tcfua-yaaaa-aaaap-qrd7q-cai",
+  "readStartedUtc": "2026-11-06T01:41:00.108Z",
+  "readFinishedUtc": "2026-11-06T01:41:21.796Z",
+  "pagesPerPass": [
+    {
+      "start": 0,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 100,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 200,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 300,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 400,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 500,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 600,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 700,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 800,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 900,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1000,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1100,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1200,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1300,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1400,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1500,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1600,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1700,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1800,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1900,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2000,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2100,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2200,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2300,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2400,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2500,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2600,
+      "length": 250,
+      "returned": 67
+    },
+    {
+      "start": 2667,
+      "length": 250,
+      "returned": 0
+    }
+  ],
+  "verificationPages": [
+    {
+      "start": 0,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 100,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 200,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 300,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 400,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 500,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 600,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 700,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 800,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 900,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1000,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1100,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1200,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1300,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1400,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1500,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1600,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1700,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1800,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 1900,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2000,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2100,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2200,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2300,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2400,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2500,
+      "length": 250,
+      "returned": 100
+    },
+    {
+      "start": 2600,
+      "length": 250,
+      "returned": 67
+    },
+    {
+      "start": 2667,
+      "length": 250,
+      "returned": 0
+    }
+  ],
+  "stableDoubleRead": true,
+  "liveKeys": 2667,
+  "liveEncodings": 2861,
+  "allKeysPropertiesAndEncodingMetadataMatchAcceptedBaseline": true,
+  "frontendRunning": true,
+  "frontendModuleAndSettingsUnchanged": true,
+  "frontendInterfaceUnchanged": true,
+  "localFilesRehashed": 740,
+  "localManifestSha256": "de790d03ea64e9e00d6600b9f2d415ab5135d5ed707c4a9f1a0e46b20b6931b2",
+  "comparisonSha256": "6425758d24d204e9bc8987a57811f5ecc3f83d1b331a0cb62e0a5b82be7333de",
+  "comparisonMatchesAcceptedPlan": true,
+  "scope": {
+    "source": "6847982b44f247e0c99f0a453b583d3fab8107a2",
+    "liveCanister": "tcfua-yaaaa-aaaap-qrd7q-cai",
+    "liveKeyCount": 2667,
+    "liveEncodingCount": 2861,
+    "literalCompressedLiveKeys": 1760,
+    "localFilesVerified": 740,
+    "localPublishKeys": 737,
+    "excludedControlFiles": [
+      ".ic-assets.json",
+      ".ic-assets.json.br",
+      ".ic-assets.json.gz"
+    ],
+    "newKeys": 411,
+    "changedExistingIdentities": 6,
+    "changedExistingOtherEncodings": 1,
+    "unchangedExistingIdentities": 320,
+    "oldKeysAbsentLocallyPreserved": 2341,
+    "plannedSetEncodings": 418,
+    "plannedPayloadBytes": 5135495,
+    "expectedKeyCount": 3078,
+    "existingPropertyChanges": 0,
+    "deletes": 0,
+    "clears": 0,
+    "unsets": 0,
+    "propertyTemplateAmbiguities": 0,
+    "deferredCompressedOnlyDifferences": 58
+  },
+  "backendPrerequisiteNowSatisfied": true,
+  "backendModuleSha256": "d38887253da67b405f5baf9cb3a53b377a39f7f1a227aced422f97565bceaa10",
+  "reserveCycles": 0,
+  "reserveAvailable": false,
+  "relayBudgetCycles": 0,
+  "newInventoryReadRecordSha256": "c37403ddcc414b0adc968b1a581325ccc9c94212a611595f09d899fa3fe28a47",
+  "baselineInventoryReference": "../cksol-frontend-plan-20261104/frontend-live-inventory-compact.json",
+  "concreteDrift": [],
+  "recommendation": "Reuse the exact accepted publication scope for Ansel consolidation; no publication authority is inferred.",
+  "mutationsOrBuildsPerformed": false
+}
