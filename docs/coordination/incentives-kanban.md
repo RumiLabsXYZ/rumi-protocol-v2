@@ -14,6 +14,7 @@ The authenticated inventory contained no incentives board at setup. Existing Sec
 | S2-DECISIONS-01 | Backlog | Orin | Retain only genuinely unresolved policy choices | No token-allocation gate; continuous November1 start is directed. End date remains undecided; January31 tentative. No changed rates/eligibility or blanket uncredited default approved. Next: surface only concrete interpretation questions after source reconstruction. |
 | TOKEN-CUSTODY-01 | Parked | Orin | Custody of RUMI token, SNS/DAO and airdrop claims | Rob parked project 9. Acceptance: preserve evidence and separate point totals from token allocation, funding, launch and executable claims. Next: retain custody; resume only on Rob's instruction. Historical launch dates and claim tiers are planning terms, not readiness or authorization. |
 | POOL-GROWTH-CUSTODY-01 | Parked | Orin | Custody of 3pool liquidity growth and promotion | Rob parked project 10. Acceptance: preserve promotion ideas without publishing promises. Next: retain custody; resume only on Rob's instruction. Main-branch report corrects the old 10x label; future messaging still needs approved Season 2 rates and eligibility. |
+| FEE-NEURON-PROP-01 | Backlog | Orin | Preserve liquidity plus RUMI neuron fee-sharing sketch | Rob requested proposal custody only. Illustrative realized-surplus split50/30/20 and capped1x-2x commitment boost; ordinary yield and earned Season1/2 points preserved. No implementation or rewards approved. Next: Merritt discussion review when allocated. [Proposal](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/season2-terms-proposal-20261104/docs/coordination/lp-neuron-fee-sharing-proposal-20261105.md) |
 
 ## Task details and evidence
 
@@ -45,3 +46,7 @@ Merritt accepted the proposal as reviewable, not approved terms, and asked Rob a
 ## November 5 clarification — controlling status
 
 Rob directs continuous November1 UTC Season2 accounting with no voluntary uncredited gap. Token allocation/split is deferred, not a preparation blocker. End undecided; January31 tentative only. Nov30, changed rates/eligibility and blanket uncredited default are not approved. This supersedes conflicting earlier recommendations/status notes above. Actual anonymous analytics/source reads confirm substantial history and completed existing Season1 compensation. Detailed rows stay private; no source loss was established from failed queries or incomplete exports. [Clarification and sanitized evidence](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/season2-terms-proposal-20261104/docs/coordination/season2-clarification-20261105.md). No awards, activation, new spending or parked work resumed.
+
+## Retention proposal custody
+
+FEE-NEURON-PROP-01 records Rob requested proposal-only LP plus neuron fee-sharing. Orin retains the readable sketch and questions; no new team, automation, emissions, implementation or rewards. This is future incentive strategy, not reactivation of parked token/claims or promotion, nor a gate on continuous Season2 accounting.
