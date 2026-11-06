@@ -19,14 +19,18 @@
     },
     {
       "id": "SEC-01",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Bram",
       "scope": "Verify Stability Pool recovery and current rails",
-      "evidenceText": "PR #590 is merged. Current installed state, interest receipts, remaining holds, and source-to-Wasm binding still require a fresh review.",
+      "evidenceText": "Public read-only production checks show the pool open and consistent, accepting interest receipts, with no public pending refund, unallocated-interest, chain-absorb, or active 3USD-conversion queue. Authorized readback shows recovery at 237 of 237 packets and an empty backend Treasury recovery page. Management status reports the pool running with module SHA-256 a2a042ecff6f934cf25f797fa08d0984d84ab8e28f954e50f3582f54a331298f, superseding the stale October hash in the public dashboard. No examined retained release artifact binds that current hash to source, so PR #623 deployment is unproved either way. Preserve that limitation; do not build or install merely to attribute it.",
       "evidenceLinks": [
         {
           "title": "Stability Pool rails PR",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/590"
+        },
+        {
+          "title": "Stability Pool Sunset admission PR",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/623"
         }
       ]
     },
@@ -128,7 +132,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Backend install approval remains pending in Merritt; no action taken. Read-only paired frontend plan complete: stable double-read of all 2667 live keys/properties and 2861 encodings, 28 pages/pass. Existing 6847982b artifact rehashed. Proposed 411 new immutable keys + 6 mutable identities + index gzip; retain all old keys/properties, auth/domain files and balance fix. 58 compressed-only differences deferred. Expected 3078 keys; no batches/uploads/builds. Entry activation conditional on approved paired backend readback with reserve off. Pushed plan returned for review.",
+      "evidenceText": "Rob approved the exact backend-only packet. Backend tfesu installed once with reviewed gzip d3888725; controller Running/new module/Candid/settings readback passes. Stop/drain confirmed; only archived snapshot 0007 replaced by fresh 0016, verified download, other nine unchanged. Fixed config and scoped payment/operation/claim records retained. ICP reserve=0/available=false; relay budget=0. No frontend, funding, activation or financial call. Backend mutation window complete; frontend plan and later lifecycle/activation remain separately held. Execution evidence pushed.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -161,6 +165,10 @@
         {
           "title": "Read-only paired frontend publication plan",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-frontend-publication-plan-20261104.md"
+        },
+        {
+          "title": "Backend installation and readback result",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-backend-installation-result-20261105.md"
         }
       ]
     },

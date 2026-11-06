@@ -1,0 +1,44 @@
+[
+  {
+    "method": "get_cksol_payment",
+    "beforeSha256": "ef512301f8912a842ad5243da1e6a1ba978230c45d17a7cd8ac346c9e58237c5",
+    "afterSha256": "ef512301f8912a842ad5243da1e6a1ba978230c45d17a7cd8ac346c9e58237c5",
+    "byteIdentical": true
+  },
+  {
+    "method": "get_cksol_deposit",
+    "beforeSha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f",
+    "afterSha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f",
+    "byteIdentical": true
+  },
+  {
+    "method": "get_cksol_payment_quote",
+    "beforeSha256": "917c9fcf0aa7e505f20a77efeca2123dcbee88ca2d82ee7633e6666d7e806247",
+    "afterSha256": "917c9fcf0aa7e505f20a77efeca2123dcbee88ca2d82ee7633e6666d7e806247",
+    "byteIdentical": true
+  },
+  {
+    "method": "get_vault_operation_status",
+    "beforeSha256": "0b5cae49ab09d5622672e1ea82d1cf32b3f496eb23b015f46f41743ed21c4e5c",
+    "afterSha256": "0b5cae49ab09d5622672e1ea82d1cf32b3f496eb23b015f46f41743ed21c4e5c",
+    "byteIdentical": true
+  },
+  {
+    "method": "get_pending_payouts",
+    "beforeSha256": "c6950b52f66709487c2cc3dc24d4170a71f5c2ffe8b8288addb41b378c0726d0",
+    "afterSha256": "c6950b52f66709487c2cc3dc24d4170a71f5c2ffe8b8288addb41b378c0726d0",
+    "byteIdentical": true
+  },
+  {
+    "method": "get_nicp_redemption_claim",
+    "beforeSha256": "b05ac408cfd24c2832742bcced1618bc3b29700199ca9061bfd79e523ab99c25",
+    "afterSha256": "b05ac408cfd24c2832742bcced1618bc3b29700199ca9061bfd79e523ab99c25",
+    "byteIdentical": true
+  },
+  {
+    "method": "get_cksol_relay_budget",
+    "beforeSha256": "0fe8f250567a8656dd9d2a3c3a34f43277bf939b6749ab2a65bc8770fdff9268",
+    "afterSha256": "0fe8f250567a8656dd9d2a3c3a34f43277bf939b6749ab2a65bc8770fdff9268",
+    "byteIdentical": true
+  }
+]

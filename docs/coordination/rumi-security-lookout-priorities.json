@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Backend exact-install approval question is pending in Merritt. Read-only frontend inventory/composition is complete; publication and all live/financial actions remain held.",
-      "nextAction": "Merritt reviews the pushed frontend plan while preserving the original backend approval question. If later authorized, stage immutable content and activate the seven mutable encodings only after paired backend verification with reserve off. Re-read full live inventory before any publication; no new optional test gate.",
+      "blockedReason": "Approved backend installation/readback completed with reserve zero/off. Frontend publication, funding/activation and financial canary remain outside completed authority.",
+      "nextAction": "Merritt reviews completed backend receipt and may proceed with the separately approved vault 158 preparation. Obtain separate explicit frontend publication decision using the held plan and fresh inventory; retain lifecycle/activation/financial holds.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",
@@ -27,7 +27,7 @@
       "title": "Stability Pool live recovery",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Verify current installed state, interest receipts, and any remaining holds before changing release status.",
+      "nextAction": "Preserve the authenticated recovery and management readback. Bind the current module hash only if an existing release receipt or retained artifact proves it; otherwise keep the source provenance limitation explicit. Do not allocate a build or install solely for attribution.",
       "cardIds": [
         "SEC-01"
       ]

@@ -1,0 +1,37 @@
+{
+  "canister": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "snapshotId": "00000000000000160000000001f088fe0101",
+  "replacedSnapshotId": "00000000000000070000000001f088fe0101",
+  "takenAtTimestampNs": "1793927851682795038",
+  "otherNineEntriesUnchanged": true,
+  "managedSnapshotCount": 10,
+  "snapshotModuleMatchesPreUpgradeModule": true,
+  "globalsRepresentable": true,
+  "chunkStoreCount": 0,
+  "payloadBytes": 113971168,
+  "inventoryTotalBytes": 113971296,
+  "files": [
+    {
+      "path": "metadata.json",
+      "bytes": 519,
+      "sha256": "5c55b17c60154c0a977e71131aa4963190afe2f51c0c1994f3c0fd185356ac83"
+    },
+    {
+      "path": "wasm_module.bin",
+      "bytes": 2297824,
+      "sha256": "d4d60e5176efd4aba0be1b583a9f6a9acc2e6b77b1d971a37d5cc82c65740c95"
+    },
+    {
+      "path": "wasm_memory.bin",
+      "bytes": 2555904,
+      "sha256": "a4a2f021e59ca4ec822ba8e842184bc1e498417433b71f96fd29a07e8de265fd"
+    },
+    {
+      "path": "stable_memory.bin",
+      "bytes": 109117440,
+      "sha256": "5ea9946787f0b0a5bb3feca98eb5375c5d010cc7608e3a99121f7e82c8b92610"
+    }
+  ],
+  "restorePerformed": false,
+  "verificationUtc": "2026-11-06T01:18:45.170931+00:00"
+}

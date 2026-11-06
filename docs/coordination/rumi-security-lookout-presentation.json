@@ -1,6 +1,6 @@
 {
-  "summary": "Vault 158 stays separate. Backend install approval remains pending in Merritt. Corrected artifacts and archived oldest snapshot are verified. Read-only frontend plan inventories all 2667 live keys and properties, preserving auth/balance behavior. Proposed 411 immutable additions and seven mutable encoding updates; no removals/property resets. Activate only after approved paired backend readback, reserve off. No builds, batches, uploads or financial actions.",
-  "plainSummary": "The frontend publication plan is ready for review. It preserves every existing asset and authentication setting. Backend approval remains pending; no publication or reserve activation occurred.",
+  "summary": "Backend installation is complete: exact reviewed ckSOL module Running, Candid/settings and scoped records preserved. Stop/drain and one-slot snapshot replacement/download verified; nine other snapshots unchanged. ICP reserve zero/unavailable; relay budget zero. Frontend publication and financial/activation actions remain held. Backend mutation window released; vault 158 preparation remains separate. Preserve the newer Stability Pool Review/provenance limitation.",
+  "plainSummary": "The approved backend upgrade is installed and running. Existing records and settings were preserved; funding and activation remain off. Frontend publication still needs its separate decision.",
   "glossary": [
     {
       "term": "Stability Pool",
