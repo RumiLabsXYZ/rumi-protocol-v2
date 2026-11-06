@@ -5,7 +5,7 @@
       "state": "Review",
       "owner": "Bram",
       "scope": "Prepare vault 158 liquidation recovery without executing it",
-      "evidenceText": "The exact candidate pinned by merged PR #618 is installed: module SHA-256 db8931273a83bb3dfbd8c516b85808b24ad5bd9daed0df9f7265b440658fe098. Readback confirmed the bot is running but processing remains paused, its recovery configuration is readable, vault 158 is still a generation-1 PaymentShortfall claim, and no recovery, payment journal, or treasury intent was created. The upgrade-only step is complete. Recovery preparation, execution, reconciliation, unpause, and funds remain held for separate authority.",
+      "evidenceText": "The recovery-capable bot remains Running and paused. The approved single preparation call succeeded. Readback shows the exact vault 158 record in EvidencePrepared with no payment timestamp or receipt; the generation-1 PaymentShortfall claim remains, payment journals are empty, treasury intent 229 is null, and the backend still lists vault 158. Preparation is complete. Recovery execution, reconciliation, unpause, and funds remain held for separate authority.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
@@ -14,6 +14,10 @@
         {
           "title": "Pinned upgrade-only decision",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/618"
+        },
+        {
+          "title": "Vault 158 preparation-only decision",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/895a140353bc68945e6f1dae0a622baa7e0cd346/docs/coordination/vault158-evidence-preparation-decision-2026-11-04.md"
         }
       ]
     },

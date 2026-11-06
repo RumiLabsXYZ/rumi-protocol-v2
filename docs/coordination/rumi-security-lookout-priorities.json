@@ -4,8 +4,8 @@
       "id": "vault158-recovery",
       "title": "Joint top: vault 158 liquidation recovery",
       "status": "blocked",
-      "blockedReason": "The exact recovery-capable bot is installed and its configuration was read back, but financial recovery remains outside the completed upgrade-only authority.",
-      "nextAction": "Review the immutable upgrade readback and draft the smallest readable recovery-authorization artifact. Do not unpause, transfer funds, or call recovery preparation, execution, or reconciliation without separate authority.",
+      "blockedReason": "Evidence preparation completed exactly once, but recovery execution, payment, reconciliation and unpause remain outside the completed authority.",
+      "nextAction": "Review the immutable EvidencePrepared record and reconcile the claim-attributable ICP residual before proposing a separate readable execution decision. Do not execute, reconcile, unpause or move funds without that separate authority.",
       "cardIds": [
         "SEC-06"
       ]
@@ -15,7 +15,7 @@
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
       "blockedReason": "Approved backend installation/readback completed with reserve zero/off. Frontend publication, funding/activation and financial canary remain outside completed authority.",
-      "nextAction": "Merritt reviews completed backend receipt and may proceed with the separately approved vault 158 preparation. Obtain separate explicit frontend publication decision using the held plan and fresh inventory; retain lifecycle/activation/financial holds.",
+      "nextAction": "Preserve the completed backend receipt and reserve-off state. Obtain a separate explicit frontend publication decision using the held plan and fresh inventory; retain lifecycle, activation and financial holds.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",

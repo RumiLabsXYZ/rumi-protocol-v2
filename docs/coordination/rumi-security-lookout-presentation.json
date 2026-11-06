@@ -1,6 +1,6 @@
 {
-  "summary": "Backend installation is complete: exact reviewed ckSOL module Running, Candid/settings and scoped records preserved. Stop/drain and one-slot snapshot replacement/download verified; nine other snapshots unchanged. ICP reserve zero/unavailable; relay budget zero. Frontend publication and financial/activation actions remain held. Backend mutation window released; vault 158 preparation remains separate. Preserve the newer Stability Pool Review/provenance limitation.",
-  "plainSummary": "The approved backend upgrade is installed and running. Existing records and settings were preserved; funding and activation remain off. Frontend publication still needs its separate decision.",
+  "summary": "The approved ckSOL backend module is installed and Running with preserved settings/records; reserve and activation remain off. Vault 158 preparation also completed: the bot is paused, evidence is durably prepared, and no payment record or Treasury intent was created. Recovery execution, reconciliation, unpause, funds, and frontend publication remain separately held. Preserve the Stability Pool provenance limitation.",
+  "plainSummary": "The approved backend upgrade is installed and running, with funding and activation still off. Vault 158 evidence is now prepared while the bot remains paused; no recovery payment was sent. Recovery execution and frontend publication still require their separate decisions.",
   "glossary": [
     {
       "term": "Stability Pool",
