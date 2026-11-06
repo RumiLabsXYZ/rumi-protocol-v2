@@ -136,7 +136,7 @@
       "state": "Blocked",
       "owner": "Bram",
       "scope": "Validate the integrated escrow flow and prepare a bounded release packet",
-      "evidenceText": "Rob approved the exact backend-only packet. Backend tfesu installed once with reviewed gzip d3888725; controller Running/new module/Candid/settings readback passes. Stop/drain confirmed; only archived snapshot 0007 replaced by fresh 0016, verified download, other nine unchanged. Fixed config and scoped payment/operation/claim records retained. ICP reserve=0/available=false; relay budget=0. No frontend, funding, activation or financial call. Backend mutation window complete; frontend plan and later lifecycle/activation remain separately held. Execution evidence pushed.",
+      "evidenceText": "Rob approved assets-only publication. Paired frontend published: corrected immutable batch 680 and atomic entry batch 681. Final inventory 3078 keys/3272 encodings; all affected hashes/retained assets/properties and primary-domain identity/gzip/auth readbacks pass. Wasm/controllers/settings unchanged. Backend Running; reserve=0/unavailable and relay=0. Known rejected staging commit reconciled before distinct chunk correction; no ambiguous outcome. No build/wallet/canary/funds. Publication complete; lifecycle/activation authority remains separate.",
       "evidenceLinks": [
         {
           "title": "ckSOL PR #610 and current checks",
@@ -173,6 +173,10 @@
         {
           "title": "Backend installation and readback result",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-backend-installation-result-20261105.md"
+        },
+        {
+          "title": "Verified assets-only frontend publication",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-frontend-publication-result-20261105.md"
         }
       ]
     },

@@ -1,0 +1,14 @@
+{
+  "stageBatch": "680",
+  "entryBatch": "681",
+  "createAssets": 411,
+  "contentSets": 418,
+  "distinctChunkReferences": 418,
+  "allContentHashesMatchApprovedComparison": true,
+  "atomicEntryContentSets": 7,
+  "forbiddenOperations": [],
+  "deletes": 0,
+  "clears": 0,
+  "unsets": 0,
+  "existingPropertyChanges": 0
+}

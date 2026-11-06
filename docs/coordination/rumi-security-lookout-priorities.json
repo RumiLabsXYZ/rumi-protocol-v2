@@ -14,8 +14,8 @@
       "id": "cksol-icp-processing",
       "title": "Joint top: ckSOL processing paid in ICP",
       "status": "blocked",
-      "blockedReason": "Approved backend installation/readback completed with reserve zero/off. Frontend publication, funding/activation and financial canary remain outside completed authority.",
-      "nextAction": "Preserve the completed backend receipt and reserve-off state. Obtain a separate explicit frontend publication decision using the held plan and fresh inventory; retain lifecycle, activation and financial holds.",
+      "blockedReason": "Approved backend and frontend deployment/publication are verified. Reserve funding/activation and client-money canary remain outside completed authority; asynchronous/client-money lifecycle evidence remains incomplete.",
+      "nextAction": "Merritt/Ansel close publication with pushed served-readback evidence. Preserve reserve zero/off; separately scope remaining lifecycle/activation work without inferring financial authority from deployment. No further approval is needed for the completed publication scope.",
       "cardIds": [
         "CKICP-01",
         "CKICP-02",
