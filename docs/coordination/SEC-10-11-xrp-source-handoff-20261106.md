@@ -133,6 +133,32 @@ ownership and may force-add these normally ignored local handoff documents.
 
 ## Miles coordinator source review
 
+### Integration clarification: interest and native-unit rounding
+
+Dorian's normal integration review confirmed that partial withdrawal calls
+`accrue_single_vault` before the new native-XRP admission/claim block.
+`State::accrue_single_vault` includes the newly accrued interest in
+`borrowed_icusd_amount` and tracks that increment in `accrued_interest`; the debt
+accrual uses `ceil` at icUSD-e8 precision. The separate accrued-interest field is
+therefore not an additional debt amount to add again. Exactly zero recorded debt
+does not accrue interest. Any positive debt, including one e8, keeps the oracle
+and residual-collateral checks and cannot use native-XRP dust forgiveness.
+
+The residual-collateral calculation deliberately retains the existing numeric
+semantics: `Token * Ratio` narrows to integer e8 units, and
+`icusd_to_collateral_amount` narrows to native collateral units by truncation.
+The native-XRP check then retains at least one raw unit for positive debt via
+`max(1)`. This is not a new conservative ceiling-rounding policy: fractional
+thresholds can truncate below the mathematical ratio by native-unit precision.
+The focused vectors pin exactly representable normal/Recovery boundaries, not
+every fractional rounding case. Any broader change to the inherited rounding
+policy is separate from this source fix, not a new integration gate.
+
+Current main was refreshed and remains the candidate base
+`0dea74a1d33456ee28a9837b99a3be9dae7f674f`; no source conflict or production-code
+change was needed for integration. The six focused tests and offline binary
+check remain evidence for the unchanged three Rust blobs. SEC-11 stays deferred.
+
 Reviewed the actual frozen three-file diff independently of its implementer and
 read native-exit JSON/log receipts. Accepted this bounded source/test outcome:
 only owned exact-zero NativeXrp skips oracle work, with no suspension before
