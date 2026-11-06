@@ -1,6 +1,6 @@
 {
-  "summary": "Approved frontend publication is complete. Batches 680/681 and authoritative/served readbacks verify 411 additions plus seven atomic replacements, preserving old keys/properties/auth/settings. Frontend Wasm unchanged; backend Running. ICP reserve zero/unavailable and relay budget zero. A known staging rejection was reconciled before correction. No build, wallet, canary or funds action. Lifecycle/activation remain separate; preserve other project authority.",
-  "plainSummary": "The approved frontend is published and its served files verified. Existing assets, authentication files and settings were preserved. The ICP reserve remains off; no mint or other financial transaction was tested.",
+  "summary": "The current incident queue is now tracked in this project. A paid ckSOL request is held before relay dispatch by protected-backing enforcement; exact receipt and remedy reconciliation is in progress. Native XRP withdrawal currently appears to require a fresh collateral price even for a debt-free vault, while the frontend lacks a persistent existing-address view. Source diagnosis and repairs may proceed; funding, deployment, refunds, withdrawals and customer messages remain separate.",
+  "plainSummary": "Three customer-impact issues are now assigned and being worked. The team is tracing a paid ckSOL request, fixing a blocked XRP withdrawal, and then adding a way to view and copy an existing XRP deposit address. No money movement, deployment, refund, or customer message is authorized by this board.",
   "glossary": [
     {
       "term": "Stability Pool",
@@ -31,6 +31,16 @@
       "term": "reserve",
       "definition": "A limited pool of processing funds. The ckSOL reserve is currently off and cannot spend.",
       "cardId": "CKICP-01"
+    },
+    {
+      "term": "protected backing",
+      "definition": "Backend ICP that must remain available for operating needs and already-recorded liabilities before a paid request may proceed.",
+      "cardId": "SEC-09"
+    },
+    {
+      "term": "debt-free withdrawal",
+      "definition": "A collateral withdrawal from a vault with no outstanding stablecoin debt; health checks still apply if debt is present.",
+      "cardId": "SEC-10"
     }
   ]
 }

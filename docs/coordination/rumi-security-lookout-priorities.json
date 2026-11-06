@@ -1,6 +1,36 @@
 {
   "items": [
     {
+      "id": "customer-cksol-paid-blocked",
+      "title": "Customer impact: reconcile paid ckSOL processing",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Ellis will reconcile the exact payment receipt, current phase and protected-backing arithmetic, then propose the minimum safe remedy. Keep customer identifiers private. Do not fund, activate, mint, refund, recover, release or message the customer under this card.",
+      "cardIds": [
+        "SEC-09"
+      ]
+    },
+    {
+      "id": "customer-xrp-withdrawal",
+      "title": "Customer impact: unblock safe native XRP withdrawal",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Miles will verify current deployed behavior and vault state, then prepare and test a narrow debt-free withdrawal repair that retains price and health enforcement whenever debt exists. Deployment, signing and a live withdrawal remain separate actions.",
+      "cardIds": [
+        "SEC-10"
+      ]
+    },
+    {
+      "id": "xrp-existing-deposit-address",
+      "title": "Show and copy an existing XRP deposit address",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "After the withdrawal diagnosis, Miles will reuse the existing address query to add a persistent view and copy surface with focused tests, without changing derivation, custody or creating a new address on view.",
+      "cardIds": [
+        "SEC-11"
+      ]
+    },
+    {
       "id": "vault158-recovery",
       "title": "Joint top: vault 158 liquidation recovery",
       "status": "blocked",

@@ -1,6 +1,30 @@
 {
   "cards": [
     {
+      "id": "SEC-09",
+      "state": "In progress",
+      "owner": "Ellis",
+      "scope": "Reconcile the paid ckSOL request blocked by protected backend backing",
+      "evidenceText": "Current source confirms the customer-facing error occurs only after the ICP payment reaches Funded and before relay dispatch when protected backing is insufficient. Acceptance: bind the current phase and sequence to an exact ledger receipt, enumerate claim, attempt and refund records, calculate current backing and the minimum safe remedy, and distinguish public observations from owner-only queries. Diagnosis only: no reserve funding, activation, mint, refund, recovery, release or customer message.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "SEC-10",
+      "state": "In progress",
+      "owner": "Miles",
+      "scope": "Restore debt-free native XRP withdrawal when price freshness fails",
+      "evidenceText": "Current source still validates a fresh collateral price before native XRP withdrawal, including the debt-free path. The screenshot is historical evidence, not current production attestation. Acceptance: verify current installed behavior and vault state, produce a narrowly tested source repair that preserves health checks whenever debt exists, and return exact release evidence. Source work is authorized; deployment, signing and a live withdrawal are not.",
+      "evidenceLinks": []
+    },
+    {
+      "id": "SEC-11",
+      "state": "In progress",
+      "owner": "Miles",
+      "scope": "Show and copy an existing native XRP deposit address",
+      "evidenceText": "Current frontend hides the ordinary Deposit action for native XRP and does not give the user a persistent view and copy surface for the already-derived address. Acceptance: reuse the existing address and query contract without changing derivation or custody, add view and copy UX with focused tests, and verify that no new address is created merely by viewing it. This follows the withdrawal failure in priority.",
+      "evidenceLinks": []
+    },
+    {
       "id": "SEC-06",
       "state": "Review",
       "owner": "Bram",
