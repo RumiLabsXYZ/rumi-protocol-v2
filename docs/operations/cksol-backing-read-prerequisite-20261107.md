@@ -1,10 +1,26 @@
-# SEC-09 — precise backing visibility prerequisite
+# SEC-09 — backing observability and conservative-remedy preparation
 
 Preparation only. No execution approval, exact top-up quote, client receipt data,
 or new financial observations are contained in this note. Ellis owns the case.
 Existing released source reference: `6847982b44f247e0c99f0a453b583d3fab8107a2`.
 Fresh private read receipts remain in the originating diagnostic chat pending
 scoped disclosure approval; they must not be copied into this packet indirectly.
+
+## Scope correction — exact remedy does not require a minimal amount
+
+The earlier version treated an exact liability census as the remedy gate. That
+was narrower than the user request. A fixed conservative top-up can be an exact
+executable remedy if a complete source-proven liability upper bound, current
+source-account availability, verified fee, burn/concurrency cushion, debit
+ceiling and finite freshness window prove sufficiency. Label bounds as bounds;
+do not claim a measured total. The query below is optional observability backlog,
+not a required gate unless an actual missing safe-bound condition is demonstrated.
+No implementation, deployment, funding or processing is authorized by this note.
+
+A higher operational refill trigger/target is separate from the protected
+operating floor. Raising the protected floor would increase the funding needed
+to process deposits; earlier replenishment can instead preserve headroom without
+changing that floor. No threshold, floor, target or automatic refill is changed.
 
 ## Existing read surface cannot return the exact total
 
@@ -34,7 +50,10 @@ snapshot creation/download, impersonation, speculative owner enumeration or
 unbounded ledger scan was performed. No existing controller read returning the
 complete application backing predicate was established.
 
-## Smallest prerequisite — proposal only
+The conservative argument and remaining execution conditions are preserved in
+[the source-bound refill proof](cksol-conservative-refill-proof-20261107.md).
+
+## Optional exact-total observability — proposal only
 
 Add one authenticated read-only backing-status query, reusing existing operator/
 controller authorization without adding roles. Compute, in **one synchronous
@@ -54,11 +73,9 @@ funding or authentication while adding observability. Canonical Candid generatio
 and normal scoped verification/release controls would apply. **No code/API change
 or deployment is authorized or implemented by this note.**
 
-This prerequisite is specific to the requested exact-total backing evidence. It
-is not a new general audit or requirement for unrelated source work. Ellis/Rob
-may separately decide whether an explicitly conservative, time-bounded remedy
-using proven upper bounds is acceptable; never silently substitute it for exact
-measurement.
+This query would provide exact-total backing evidence. It is not a required
+prerequisite to a conservatively sized remedy or unrelated source work. The
+selected remedy must clearly distinguish measured values from proven bounds.
 
 ## Prepared execution shape — incomplete, do not run
 
@@ -91,4 +108,18 @@ create a new funded sequence or rerun top-up to overcome uncertainty.
 References: installed `icp 1.3.0` help; official CLI v1.3
 [cycles/top-up distinction](https://cli.internetcomputer.org/1.3/guides/tokens-and-cycles/#cycles-transfer-vs-canister-top-up),
 [cycles ledger operations and fees](https://docs.internetcomputer.org/concepts/cycles/).
-No funding-account balance/fee query or financial call was executed in this task.
+No funding-account balance query or state-changing financial call was executed.
+
+## Separate public fee observation
+
+On November 7, 2026, immediately before 17:20:50 UTC, Ellis ran:
+
+```text
+icp canister call um5iw-rqaaa-aaaaq-qaaba-cai icrc1_fee '()' --query --network ic --identity rumi_identity
+```
+
+Native exit 0 returned `(100_000_000 : nat)`. This is the public cycles-ledger
+fee observation, not source-account availability, a top-up receipt, a locked
+future fee or proof that a particular CLI send used that fee. Revalidate the
+applicable top-up fee before executing an eventual fixed-debit authorization.
+No private customer or internal balance observation is contained here.
