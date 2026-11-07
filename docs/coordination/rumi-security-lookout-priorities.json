@@ -34,8 +34,8 @@
       "id": "vault158-recovery",
       "title": "Joint top: vault 158 liquidation recovery",
       "status": "blocked",
-      "blockedReason": "Evidence preparation completed exactly once, but recovery execution, payment, reconciliation and unpause remain outside the completed authority.",
-      "nextAction": "Review the immutable EvidencePrepared record and reconcile the claim-attributable ICP residual before proposing a separate readable execution decision. Do not execute, reconcile, unpause or move funds without that separate authority.",
+      "blockedReason": "The exact recovery execution packet is ready for Rob\u2019s separate financial approval; the bot remains paused.",
+      "nextAction": "Adrian: obtain the scoped one-call execution decision from the pushed packet after current read-only accounting checks. Repeat preconditions before any later approved call. No execution, reconciliation mutation, unpause or funds movement is currently authorized.",
       "cardIds": [
         "SEC-06"
       ]

@@ -32,9 +32,9 @@
     {
       "id": "SEC-06",
       "state": "Review",
-      "owner": "Bram",
-      "scope": "Prepare vault 158 liquidation recovery without executing it",
-      "evidenceText": "The recovery-capable bot remains Running and paused. The approved single preparation call succeeded. Readback shows the exact vault 158 record in EvidencePrepared with no payment timestamp or receipt; the generation-1 PaymentShortfall claim remains, payment journals are empty, treasury intent 229 is null, and the backend still lists vault 158. Preparation is complete. Recovery execution, reconciliation, unpause, and funds remain held for separate authority.",
+      "owner": "Adrian",
+      "scope": "Review the exact vault 158 recovery execution proposal",
+      "evidenceText": "Adrian took ownership by Rob on November 7. Fresh read-only claim, recipient, fee and ledger-history checks support the prepared recovery and reconcile its remaining collateral. A readable exact execution packet is pushed for separate financial approval. Processing remains paused; no execution, reconciliation mutation, unpause or funds movement occurred.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
@@ -47,6 +47,10 @@
         {
           "title": "Vault 158 preparation-only decision",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/895a140353bc68945e6f1dae0a622baa7e0cd346/docs/coordination/vault158-evidence-preparation-decision-2026-11-04.md"
+        },
+        {
+          "title": "Vault 158 execution approval packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/433576e32d8ddbdb0a314c4b4fd0a421f1b38850/docs/coordination/vault158-execution-approval-2026-11-07.md"
         }
       ]
     },
