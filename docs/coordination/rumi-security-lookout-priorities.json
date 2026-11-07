@@ -33,9 +33,9 @@
     {
       "id": "vault158-recovery",
       "title": "Joint top: vault 158 liquidation recovery",
-      "status": "blocked",
-      "blockedReason": "The exact recovery execution packet is ready for Rob\u2019s separate financial approval; the bot remains paused.",
-      "nextAction": "Adrian: obtain the scoped one-call execution decision from the pushed packet after current read-only accounting checks. Repeat preconditions before any later approved call. No execution, reconciliation mutation, unpause or funds movement is currently authorized.",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "Adrian: retain the completed recovery evidence and paused worker. Any ordinary liquidation resumption or later vault action needs a separate decision; do not replay the settled recovery.",
       "cardIds": [
         "SEC-06"
       ]

@@ -31,10 +31,10 @@
     },
     {
       "id": "SEC-06",
-      "state": "Review",
+      "state": "Done",
       "owner": "Adrian",
-      "scope": "Review the exact vault 158 recovery execution proposal",
-      "evidenceText": "Adrian took ownership by Rob on November 7. Fresh read-only claim, recipient, fee and ledger-history checks support the prepared recovery and reconcile its remaining collateral. A readable exact execution packet is pushed for separate financial approval. Processing remains paused; no execution, reconciliation mutation, unpause or funds movement occurred.",
+      "scope": "Settle the existing vault 158 liquidation claim",
+      "evidenceText": "Rob approved one exact execution call. It returned Ok; recovery TreasurySettled and record 229 Completed are verified against both new ledger receipts. Claim cleared on bot and backend, payment and treasury journals empty, final balances match the approved conservation equations. Processing remains paused. This settles the existing partial liquidation, not all vault debt. No unpause or further financial action occurred.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
@@ -51,6 +51,10 @@
         {
           "title": "Vault 158 execution approval packet",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/433576e32d8ddbdb0a314c4b4fd0a421f1b38850/docs/coordination/vault158-execution-approval-2026-11-07.md"
+        },
+        {
+          "title": "Verified vault 158 execution receipt",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/02058505b6617412b9f8187c1e8506b9967889f7/docs/coordination/vault158-execution-receipt-2026-11-07.md"
         }
       ]
     },
