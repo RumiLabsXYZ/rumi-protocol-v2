@@ -1,6 +1,6 @@
 {
-  "summary": "The current incident queue is now tracked in this project. A paid ckSOL request is held before relay dispatch by protected-backing enforcement; exact receipt and remedy reconciliation is in progress. Native XRP withdrawal currently appears to require a fresh collateral price even for a debt-free vault, while the frontend lacks a persistent existing-address view. Source diagnosis and repairs may proceed; funding, deployment, refunds, withdrawals and customer messages remain separate. Vault 158\u2019s approved partial-liquidation recovery is now verified complete under Adrian, with claim cleared and processing still paused.",
-  "plainSummary": "Vault 158\u2019s approved recovery payment is complete and its stuck liquidation claim has cleared. The bot remains paused, and this recovery did not pay off all remaining vault debt. Other customer recovery work continues under its existing owners.",
+  "summary": "Customer case: the reviewed ckSOL refill awaits funding approval. XRP withdrawal source is merged; deployment and customer recovery remain unverified. Existing XRP address and safe repeat-deposit UX are deferred. Vault 158 approved partial recovery is complete and its claim cleared; the bot remains paused and remaining debt was not paid off.",
+  "plainSummary": "The customer refill is prepared for approval; no customer mint or refund is verified. XRP source fixes are merged but not verified deployed. Vault 158 partial recovery completed; the bot remains paused.",
   "glossary": [
     {
       "term": "Stability Pool",

@@ -4,8 +4,8 @@
       "id": "customer-cksol-paid-blocked",
       "title": "Customer impact: reconcile paid ckSOL processing",
       "status": "blocked",
-      "blockedReason": "The newly obtained private backing report awaits scoped handoff approval.",
-      "nextAction": "Ellis will review the current report after approved handoff and prepare an exact bounded remedy or precise missing prerequisite. No duplicate reads; previous snapshots are not current backing. Financial execution and customer recovery remain held/unverified.",
+      "blockedReason": "One reviewed conditional funding action awaits direct approval.",
+      "nextAction": "Ellis will present the frozen packet with the private source binding in the authorized case chat. After approval, all fresh guards must pass before one send. No processing, refund, reserve activation, deployment or customer message; customer outcome remains unverified.",
       "cardIds": [
         "SEC-09"
       ]

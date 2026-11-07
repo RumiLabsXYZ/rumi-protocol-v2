@@ -2,11 +2,16 @@
   "cards": [
     {
       "id": "SEC-09",
-      "state": "Blocked",
+      "state": "Review",
       "owner": "Ellis",
       "scope": "Reconcile the paid ckSOL request blocked by protected backend backing",
-      "evidenceText": "Current read-only backing and receipt checks executed on November 7; the new private report handoff awaits direct scoped approval in the executor chat. Do not substitute previous snapshots for current backing or infer exact total liabilities. Exact remedy packet is not ready; customer recovery remains unverified. No funding, activation, processing, refund, recovery, deployment or customer message occurred.",
-      "evidenceLinks": []
+      "evidenceText": "Current read-only evidence and conservative source-bound proof support one conditional refill proposal. Immutable packet at 7b8ab344 passed independent Miles and Merritt source/math/scope reviews after fixing the pre-send crash journal. Exact private source binding stays in the authorized case chat. Awaiting one funding-only approval; no top-up, processing, refund, activation, deployment or customer message executed. Customer recovery remains unverified.",
+      "evidenceLinks": [
+        {
+          "title": "Reviewed conditional refill approval packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/7b8ab3443fc7a44cde8e95570e3504f8b10b0677/docs/operations/cksol-conservative-remedy-20261107.md"
+        }
+      ]
     },
     {
       "id": "SEC-10",
