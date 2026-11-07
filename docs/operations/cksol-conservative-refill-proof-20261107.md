@@ -92,6 +92,7 @@ After backing is available the original owner resumes the SAME funded request;
 operator preparation does not impersonate that owner or authorize processing.
 
 No new query, account lookup, ledger scan, tests, implementation or live action
-was performed in this source-verification step. New private report disclosure
-remains pending separately. The actual missing conditions are executable funding
-inputs/limits and action approval, not a new aggregate getter.
+was performed in this source-verification step. The backing-report handoff is now approved. Private funding-account bindings
+remain in Ellis's authorized review channel and are not disclosed to other
+reviewers. The remaining execution requirements are the fixed packet
+preconditions and action approval, not a new aggregate getter.

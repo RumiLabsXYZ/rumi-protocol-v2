@@ -92,8 +92,11 @@ icp canister top-up tfesu-vyaaa-aaaap-qrd7a-cai --amount 8000000000000 --network
 
 This is a cycles-ledger withdrawal delivering cycles to the canister, not an
 ICRC transfer credit to the backend's ledger account. `icp cycles transfer` and
-reserve setters are not substitutes. Record status=Submitted and capture stdout,
-stderr and native exit; no retries/wrappers that automatically repeat the command.
+reserve setters are not substitutes. BEFORE invoking the CLI, durably persist and flush
+status=SubmittedOrUnknown with the SAME attempt ID and exact parameters. Then
+invoke once and capture stdout, stderr and native exit. A crash leaving Prepared
+is NOT proof that no send occurred; reconcile the attempt before deciding anything.
+No retries or wrappers that automatically repeat the command.
 
 The CLI has no exposed fee-cap or retry-idempotency flag in the examined help.
 The ledger withdraw interface charges its fixed fee and has no fee argument;
