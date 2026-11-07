@@ -108,7 +108,8 @@ create a new funded sequence or rerun top-up to overcome uncertainty.
 References: installed `icp 1.3.0` help; official CLI v1.3
 [cycles/top-up distinction](https://cli.internetcomputer.org/1.3/guides/tokens-and-cycles/#cycles-transfer-vs-canister-top-up),
 [cycles ledger operations and fees](https://docs.internetcomputer.org/concepts/cycles/).
-No funding-account balance query or state-changing financial call was executed.
+Funding-account availability is a separate private preflight observation; no
+account balance is published here. No state-changing financial call was executed.
 
 ## Separate public fee observation
 
