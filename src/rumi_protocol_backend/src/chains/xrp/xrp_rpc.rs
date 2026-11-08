@@ -92,7 +92,7 @@ pub fn rpc_url(chain_key_name: &str) -> &'static str {
     read_provider_urls(chain_key_name)[0]
 }
 
-fn read_provider_urls(chain_key_name: &str) -> &'static [&'static str] {
+pub(super) fn read_provider_urls(chain_key_name: &str) -> &'static [&'static str] {
     if is_xrp_production_key_name(chain_key_name) {
         MAINNET_READ_URLS
     } else {
@@ -122,7 +122,7 @@ fn build_request(
     )
 }
 
-fn build_request_to_url(
+pub(super) fn build_request_to_url(
     url: &str,
     method: &str,
     params: Value,
@@ -211,7 +211,7 @@ fn tx_request_to_url(url: &str, tx_hash: &str) -> CanisterHttpRequestArgument {
 /// ("a transform that lets a volatile field through → consensus failures"). All
 /// error/edge signal is carried in the body (`parse_error`/`error`), and the
 /// parsers key entirely off the body, so pinning the status to 200 is loss-free.
-fn reduced_response(body: Vec<u8>) -> HttpResponse {
+pub(super) fn reduced_response(body: Vec<u8>) -> HttpResponse {
     HttpResponse {
         status: candid::Nat::from(200u16),
         headers: vec![],
@@ -442,7 +442,7 @@ fn is_transient(code: RejectionCode, msg: &str) -> bool {
         || msg.contains("Timeout expired")
 }
 
-const READ_QUORUM: usize = 2;
+pub(super) const READ_QUORUM: usize = 2;
 const RESERVE_READ_MIN_RESPONSES: usize = 1;
 
 fn require_minimum_provider_set(
@@ -622,7 +622,7 @@ where
     outcall_read_provider_bodies_with_min(provider_urls, build, READ_QUORUM).await
 }
 
-async fn outcall_read_quorum<F, T, Q>(
+pub(super) async fn outcall_read_quorum<F, T, Q>(
     provider_urls: &[&str],
     mut build: F,
     quorum: Q,

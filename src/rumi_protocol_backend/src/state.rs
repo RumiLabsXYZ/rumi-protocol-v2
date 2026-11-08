@@ -4503,6 +4503,15 @@ pub struct State {
     #[serde(default)]
     pub xrp_pending_deposits: BTreeMap<u64, XrpPendingDeposit>,
 
+    /// SEC-11 immutable original custody binding and opening ledger cutoff.
+    #[serde(default)]
+    pub xrp_vault_origins: BTreeMap<u64, crate::xrp_vault_deposit::XrpVaultOrigin>,
+    /// Permanent receipt tombstones: never remove these when a vault closes.
+    #[serde(default)]
+    pub xrp_topup_receipts: BTreeMap<(String, String), crate::xrp_vault_deposit::XrpTopupReceipt>,
+    #[serde(default)]
+    pub xrp_topup_receipt_counts: BTreeMap<u64, u64>,
+
     /// P4: native-XRP collateral that has left a vault and is owed to a claimant
     /// (owner withdrawal, liquidation payout, or redemption payout), settled later
     /// via `settle_xrp_claim` (a threshold-signed XRPL Payment from the vault's
@@ -4866,6 +4875,9 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_vault_origins: BTreeMap::new(),
+            xrp_topup_receipts: BTreeMap::new(),
+            xrp_topup_receipt_counts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -5192,6 +5204,9 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_vault_origins: BTreeMap::new(),
+            xrp_topup_receipts: BTreeMap::new(),
+            xrp_topup_receipt_counts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,

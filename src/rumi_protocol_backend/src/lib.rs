@@ -1537,6 +1537,7 @@ pub mod three_usd_inventory;
 pub mod storage;
 pub mod treasury;
 pub mod vault;
+pub mod xrp_vault_deposit;
 pub mod xrc;
 
 #[cfg(any(test, feature = "test_endpoints"))]
