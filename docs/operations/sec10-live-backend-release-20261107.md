@@ -20,7 +20,7 @@ All ten snapshot slots are occupied. The current oldest entry is `00000000000000
 
 ## Status
 
-Source composition, focused tests, production build, artifact hashes and bounded source/preservation review are complete. Live execution remains pending. This document makes no deployed or customer-outcome claim. The shared target `/private/tmp/rumi-cksol-icp-target` belongs to this serial test/build slot; Miles may edit source independently. Heavy jobs use two Cargo workers.
+Source composition, focused tests, production build, artifact hashes and bounded source/preservation review are complete. Live execution and scoped retained-state readback are complete, as recorded below. This document makes no deployed or customer-outcome claim. The shared target `/private/tmp/rumi-cksol-icp-target` belongs to this serial test/build slot; Miles may edit source independently. Heavy jobs use two Cargo workers.
 
 ## Live-base test adaptation
 
@@ -41,3 +41,27 @@ The normal scoped deployment authorization includes replacement of only fully ar
 ## One bounded combined-release checkpoint
 
 At 2026-11-07 16:42:30 PST the SEC10 artifact and cache were released to Miles. Before any stop, one readiness checkpoint through 16:52:30 PST allows a reviewed SEC11 combined candidate to avoid duplicate drain/snapshot operations. This is an efficiency checkpoint, not a new SEC10 requirement: the frozen SEC10 artifact remains the fallback if SEC11 is not ready. A changed combined candidate requires its own exact artifact and additive API/state checks; this SEC10 executor must not be reused with substituted hashes or Candid. Future SEC11 receipt/journal state requires roll-forward recovery; no downgrade or old-snapshot restore is implied.
+
+## Installed and read back — November 7, 2026
+
+**Result: exact SEC10 artifact installed; backend Running; scoped retained-state checks pass.** The one combined-release checkpoint ended without a reviewed combined binary. SEC11 source `ef8a694a4490bf06e3d36086399b9261a61e84c1` remains separate: its parent is the older live684 source, so eventual integration must apply that delta on top of the now-deployed SEC10 port rather than replacing source files wholesale. It is not deployed by this release.
+
+The controller-authorized management sequence completed once with exit0 for each write, with exclusive fsynced dispatch markers and no unknown outcome or retry. Times below are Nov7 **PST**:
+
+| Action | Dispatch → completion | Evidence |
+| --- | --- | --- |
+| Stop | 16:52:49 → 16:52:50 | Controller-authenticated Stopped confirmed before any replacement/install |
+| Replace archived snapshot8 | 16:52:54 → 16:52:57 | Only that managed slot replaced; all9 others unchanged |
+| Fresh backup download/verification | Before 16:53:31 | Native metadata, all named lengths/hashes, globals and empty chunk store verified |
+| Install exact gzip | 16:53:31 → 16:53:52 | Exact uploaded module hash confirmed while Stopped; Candid/settings preserved |
+| Restart | 16:53:55 → 16:53:56 | Controller-authenticated Running; exact module/settings confirmed |
+
+Final controller status and snapshot inventory completed at **16:53:59 PST**. Stop dispatch through restart completion was about68seconds. CLI request IDs were not exposed; none are invented. Original CLI arguments, stdout/stderr and timestamps remain private in the existing recovery store. There is no pending owned mutation process.
+
+Installed module/upload SHA256: **`a7f9af49f6e5139730e025f6be0533ffb0d7afa6d5eaaec7d02a607b998a6834`**. Artifact source: **`bd253ddf1ebd233347452603e1e63c6d924820b1`**. Previous module: `d38887253da67b405f5baf9cb3a53b377a39f7f1a227aced422f97565bceaa10`. Current managed fresh snapshot: **`00000000000000170000000001f088fe0101`**, with **113,996,645 named payload bytes**; its saved module exactly matches the previous live module. Oldsnapshot8 and freshsnapshot17 complete native archives both remain preserved locally; the other nine managed snapshot IDs/timestamps/sizes are unchanged. No restore or rollback occurred.
+
+Fresh post-upgrade checks match the immediately pre-stop private baseline for **all11 scoped receipt/claim/terms/operation/payout reads, byte for byte**. That includes the retained customer ckSOL payment/deposit projection, operator paid records, nICP claim, XRP claims, pending payout page, operation watermark, relay budget and processing terms. ICP reserve remains0/availablefalse and relay sponsorship remains0. Fixed protocol configuration matches after excluding only collateral prices/timestamps and their documented derived recovery threshold/borrowing curve. All controllers/settings and the deployed Candid are preserved.
+
+These observations establish this exact installation and the named retained-state readbacks. They do not enumerate every owner or prove a successful customer withdrawal, live paid mint, payout, refund, settlement or backing sufficiency. No financial/canary/funding/activation, new claim/signature, frontend publication or customer-message call was performed by this release. SEC11 and the eventual customer retry remain separate.
+
+Read [deployment result](evidence/sec10-live-release-20261107/deployment-result.json), [retained-state comparison](evidence/sec10-live-release-20261107/retained-state-comparison.json), [fixed configuration comparison](evidence/sec10-live-release-20261107/configuration-comparison.json), and [controller status](evidence/sec10-live-release-20261107/status-running.json).
