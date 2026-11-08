@@ -67,7 +67,7 @@
       "title": "Vault 51 nICP recovery",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Adrian: implement and verify the exact settlement-to-ordinary-ICP custody/accounting transition on the SEC11-preserving source, then prepare the concrete release for Dorian. No live action yet.",
+      "nextAction": "Dorian/Merritt: inspect the pushed source e979cd69 and exact release packet; use the existing SEC11-preserving release path. Adrian retains implementation ownership. Automatic adoption requires no new owner repayment/approval at arrival; no production execution yet.",
       "cardIds": [
         "SEC-08"
       ]

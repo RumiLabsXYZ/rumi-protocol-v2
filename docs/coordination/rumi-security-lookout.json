@@ -149,10 +149,10 @@
     },
     {
       "id": "SEC-08",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Adrian",
       "scope": "Automatic WaterNeuron settlement adoption as ordinary ICP collateral in vault 51",
-      "evidenceText": "Rob explicitly approved automatic adoption of the actual WaterNeuron ICP payout into the same vault 51, preserving owner, debt, accrued interest and history. Adrian owns implementation on the verified SEC11 deployed source; existing Bram/PR612-613 and Dorian evidence reused. Exact target: withdrawal 1696/burn3435761. Fresh read: still dissolving, escrow ICP zero, no settlement or payout. Planned hourly settlement verification, journaled net-fee custody sweep, once-only ICP collateral/index switch and payout exclusion. Source work in progress; no deployment, timer activation or live custody action.",
+      "evidenceText": "Rob approved automatic ICP adoption in the same vault51 with owner/debt/interest/history retained. Adrian implemented on the verified deployed SEC11 source; candidate source e979cd69 and upload 7e099a2c are frozen. Passed: 23 focused claim/replay tests, 7 SEC11 preservation tests, 13 frontend tests, canonical/backward-compatible Candid, backend/frontend builds and actual artifact exports/size/hashes. Hourly verified settlement -> exact net-fee custody sweep -> once-only collateral/index switch; no owner repayment/payout required. Dorian/Merritt final source/artifact review and live release remain pending. No deployment, production timer activation, custody transfer or hosted CI claimed. Fresh WN read still dissolving, escrow zero.",
       "evidenceLinks": [
         {
           "title": "Vault 51 redemption PR",
@@ -165,6 +165,10 @@
         {
           "title": "Vault51 automatic adoption scope and live baseline",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/337977a6/docs/coordination/vault51-auto-adoption-2026-11-07.md"
+        },
+        {
+          "title": "Frozen vault51 automatic adoption release candidate",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/d41a4c5c3abd3ac52b87ed0d87517c17d41cc457/docs/operations/vault51-auto-adoption-release-20261107.md"
         }
       ]
     },
