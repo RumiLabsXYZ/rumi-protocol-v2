@@ -18,7 +18,7 @@
       "state": "Review",
       "owner": "Miles",
       "scope": "Restore safe native XRP withdrawal and price-refresh availability",
-      "evidenceText": "XRP withdrawal fix deployed November 7, 16:53:59 PST. Controller confirmed Running on exact module a7f9af49f6e5139730e025f6be0533ffb0d7afa6d5eaaec7d02a607b998a6834, source bd253ddf (verified live base plus bounded withdrawal fix). Six focused tests, exact production build and two reviews passed. Drained upgrade, verified snapshot replacement, settings/Candid and 11 retained receipt/claim/terms reads preserved. Customer withdrawal success remains unverified; no customer financial execution or message.",
+      "evidenceText": "Withdrawal fix deployed and preserved in the verified SEC11 follow-up. Current backend Running on b81583ae81421b88d3bd64bf27976b338b2b09748e9dd6b863849b40ac6fd736, source 0eff84c9; withdrawal files remain equal to deployed SEC10 bd253ddf. All 14 focused backend tests and canonical interface check passed. Controlled drained upgrades, verified backups, settings, existing API and 11 scoped retained reads preserved. Customer withdrawal success still needs owner confirmation; no customer financial execution or message.",
       "evidenceLinks": [
         {
           "title": "Merged XRP source fix",
@@ -32,14 +32,18 @@
     },
     {
       "id": "SEC-11",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Miles",
       "scope": "Restore existing XRP address and safely credit repeat deposits",
-      "evidenceText": "Frozen source ef8a694a passed two independent narrow reviews, eight focused backend tests, one canonical interface test, seven frontend tests, generated interface consistency and Svelte parsing. Existing project-wide TypeScript errors match baseline; none in changed files. Original owner/vault custody and opening-ledger binding, validated native Payment quorum, permanent transaction dedup, checked current collateral and durable private journal protect repeat credit. Dorian integrates delta atop deployed SEC10 for new artifact/build/publication and retained-state readback. Not deployed. Public Explorer/points history integration deferred; old writer downgrade prohibited without receipt preservation. Customer transactions and messaging remain held.",
+      "evidenceText": "Backend installed and frontend published November 7. Exact backend b81583ae is Running; staged batch 682 and mutable entry batch 683 completed once without unknown outcomes. Final inventory 3384 keys/3578 encodings preserved every old key/property; 308 stage and 9 final served checks plus primary-domain identity/gzip/auth checks passed. Root independently matched live page, new XRP UI, configuration and two auth files to the reviewed build. Controllers/settings/permissions and all 11 scoped retained reads match. Existing address view/copy and validated native transaction verification are live, with permanent receipt dedup. Actual customer additional deposit/withdrawal remains unverified. Explorer/points projection deferred; future releases must preserve receipt maps/journal and cannot use an older writer as rollback. Customer message remains held.",
       "evidenceLinks": [
         {
           "title": "Reviewed repeat-deposit implementation and checks",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/ef8a694a4490bf06e3d36086399b9261a61e84c1/docs/coordination/SEC-11-xrp-repeat-deposit-implementation-20261107.md"
+        },
+        {
+          "title": "Reviewed exact backend and frontend release packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8b0123247e907f658569cc0612c758e1a6eb28ea/docs/operations/sec11-live-release-20261107.md"
         }
       ]
     },

@@ -13,19 +13,19 @@
     {
       "id": "customer-xrp-withdrawal",
       "title": "Customer impact: unblock safe native XRP withdrawal",
-      "status": "in_progress",
+      "status": "ready",
       "blockedReason": "",
-      "nextAction": "Withdrawal fix is deployed and Running; retain exact-module and preservation evidence. Customer withdrawal confirmation remains separate. Dorian now builds and releases the reviewed SEC11 deposit delta atop this deployed source.",
+      "nextAction": "Withdrawal fix is deployed and preserved in current SEC11 module. Confirm the customer\u2019s owner-authorized withdrawal after Rob relays unified retry instructions; message stays held until Rob decides to send. Do not claim funds recovered from deployment alone.",
       "cardIds": [
         "SEC-10"
       ]
     },
     {
       "id": "xrp-existing-deposit-address",
-      "title": "Show and copy an existing XRP deposit address",
-      "status": "in_progress",
+      "title": "Use the live existing XRP address and repeat-deposit flow",
+      "status": "ready",
       "blockedReason": "",
-      "nextAction": "Source ef8a694a passed focused tests and two reviews. Dorian integrates its delta atop deployed SEC10, runs coupled checks, builds exact backend/frontend artifacts, publishes and verifies retained state/assets. Public history/points visibility is deferred; preserve permanent receipt accounting.",
+      "nextAction": "Address view/copy and transaction verification are deployed and served-byte verified. Customer can reopen the XRP vault deposit section and verify a direct native Payment by transaction hash. Customer acceptance remains unverified. Future releases must preserve receipt maps/journal; Explorer/points projection is deferred.",
       "cardIds": [
         "SEC-11"
       ]

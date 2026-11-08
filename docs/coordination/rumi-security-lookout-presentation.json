@@ -1,6 +1,6 @@
 {
-  "summary": "XRP withdrawal fix deployed and Running; configuration and retained records preserved. Safe existing-address/repeat-deposit source passed focused tests and two reviews; Dorian owns final integration, new artifacts and publication. ckSOL backing cleared without refill at preflight; owner resumption and recovery unverified. Customer message held. Vault 158 partial recovery complete; corrected-fee liquidation bot resumed.",
-  "plainSummary": "The XRP withdrawal fix is deployed, with existing records and settings preserved. The address and additional-deposit fix has passed tests and source review; its production build and publication are next. Customer minting and withdrawals still need confirmation, and the message remains held.",
+  "summary": "Both XRP fixes are deployed: withdrawal behavior plus existing-address view/copy and safe validated repeat credits. Exact backend b81583ae Running; frontend batches 682/683 verified with all old assets/settings/auth and 11 scoped records preserved. ckSOL backing cleared without refill; actual owner mint/withdrawal success remains unverified. Customer message held. Preserve SEC11 receipt schema on future releases. Vault 158 partial recovery and fee-corrected bot resumption remain preserved.",
+  "plainSummary": "Both XRP fixes are live: withdrawals and reopening the deposit address, with verified additional-deposit accounting. Existing receipts, assets and login settings were preserved. The remaining confirmation is the customer\u2019s own XRP withdrawal and paid SOL mint retry; no transaction success is claimed, and his message remains held.",
   "glossary": [
     {
       "term": "Stability Pool",
@@ -34,7 +34,7 @@
     },
     {
       "term": "protected backing",
-      "definition": "Backend ICP that must remain available for operating needs and already-recorded liabilities before a paid request may proceed.",
+      "definition": "Backend cycles that must remain available for operating needs and already-recorded liabilities before a paid request may proceed.",
       "cardId": "SEC-09"
     },
     {
