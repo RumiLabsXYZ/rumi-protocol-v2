@@ -12,6 +12,8 @@ use crate::guard::VaultLiquidationGuard;
 use crate::management::{nonce_to_created_at_time, nonce_to_memo, transfer_idempotent_pinned_fee};
 use crate::state::{mutate_state, read_state};
 
+pub mod adoption;
+
 pub const VAULT_ID: u64 = 51;
 const WN: &str = "tsbvt-pyaaa-aaaar-qafva-cai";
 const NICP: &str = "buwm7-7yaaa-aaaar-qagva-cai";
@@ -53,6 +55,8 @@ pub struct NicpRedemptionClaim {
     pub last_error: Option<String>,
     #[serde(default)]
     pub release: Option<ClaimRelease>,
+    #[serde(default)]
+    pub adoption: Option<adoption::CollateralAdoption>,
 }
 
 #[derive(CandidType, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,13 +68,19 @@ pub struct ClaimRelease {
 }
 
 impl NicpRedemptionClaim {
-    // Settled ICP stays in the isolated account under the same nICP terms.
-    // An ordinary nICP payout can never spend or release this collateral.
+    // Settlement alone never removes the fence. Only a completed, receipted
+    // adoption into ordinary custody can retire the separate claim.
     pub fn blocks_vault(&self) -> bool {
-        true
+        !self.adoption_completed()
+    }
+    pub fn adoption_completed(&self) -> bool {
+        self.stage == ClaimStage::Settled
+            && self.settlement_block.is_some()
+            && self.adoption.as_ref().is_some_and(|a| a.completed && a.block.is_some())
     }
     pub fn fixed_icp_amount_e8s(&self) -> u64 {
-        self.received_icp_e8s.unwrap_or(self.icp_due_e8s)
+        self.adoption.as_ref().map(|a| a.amount_e8s)
+            .unwrap_or_else(|| self.received_icp_e8s.unwrap_or(self.icp_due_e8s))
     }
     pub fn account(&self, protocol: Principal) -> Account {
         Account {
@@ -256,6 +266,7 @@ pub async fn prepare(arg: PrepareNicpRedemption) -> Result<NicpRedemptionClaim, 
         updated_at_ns: now,
         last_error: None,
         release: None,
+        adoption: None,
     };
     if balance(principal(NICP), claim.account(ic_cdk::id())).await? != 0
         || balance(principal(ICP), claim.account(ic_cdk::id())).await? != 0
@@ -486,6 +497,11 @@ pub async fn withdraw_owner() -> Result<NicpRedemptionClaim, String> {
     let mut claim = current().ok_or("No redemption claim")?;
     let caller = ic_cdk::caller();
     authorize_claim_owner(&claim, caller)?;
+    if claim.adoption.is_some()
+        || (adoption::is_automatic_target(&claim) && claim.release.is_none())
+    {
+        return Err("This claim is committed to automatic ICP collateral adoption in vault 51, not an owner payout".into());
+    }
     if claim.stage != ClaimStage::Settled {
         return Err("ICP settlement has not been verified".into());
     }
@@ -660,6 +676,31 @@ fn verify_receipt(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn nicp_completed_adoption_retires_claim_fence_and_valuation() {
+        let mut value = serde_json::to_value(approved_adoption_fixture()).unwrap();
+        value["adoption"] = serde_json::json!({
+            "nonce": 41, "fee_e8s": 10_000, "amount_e8s": 194_282_921_553u64,
+            "block": 101, "completed": true
+        });
+        let claim: NicpRedemptionClaim = serde_json::from_value(value).unwrap();
+        assert!(!claim.blocks_vault(), "completed adoption must retire the old claim fence");
+    }
+
+    pub(crate) fn approved_adoption_fixture() -> NicpRedemptionClaim {
+        let mut claim = fixture();
+        claim.owner = Principal::from_text("zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae").unwrap();
+        claim.withdrawal_id = Some(1696);
+        claim.burn_block = Some(3_435_761);
+        claim.redeem_nicp_e8s = 149_998_000_000;
+        claim.icp_due_e8s = 194_282_931_553;
+        claim.escrow_subaccount = hex::decode("6bbd6ba3f7aa00a12f213cc93301395c882beb8bd5615f3177d6eb3336f1796a").unwrap().try_into().unwrap();
+        claim.stage = ClaimStage::Settled;
+        claim.received_icp_e8s = Some(194_282_931_553);
+        claim.settlement_block = Some(100);
+        claim
+    }
+
     pub(crate) fn fixture() -> NicpRedemptionClaim {
         NicpRedemptionClaim {
             vault_id: 51,
@@ -682,6 +723,7 @@ pub(crate) mod tests {
             updated_at_ns: 100,
             last_error: None,
             release: None,
+            adoption: None,
         }
     }
     #[test]

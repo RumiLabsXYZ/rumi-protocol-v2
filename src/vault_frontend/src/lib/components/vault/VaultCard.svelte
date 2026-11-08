@@ -896,7 +896,7 @@
   {#if expanded}
     <div class="vault-actions">
       {#if redemptionClaim}
-        <p class="cell-sub">Protocol-controlled ICP redemption claim · {redemptionClaim.stage}. Liquidation and borrowing are suspended. Debt continues under the existing nICP interest rules; repayment remains available. Once ICP arrives and debt is fully repaid, withdraw it to this vault owner’s wallet.</p>
+        <p class="cell-sub">Protocol-controlled ICP redemption claim · {redemptionClaim.stage}. Rumi will automatically verify the payout and make the net ICP ordinary collateral in this same vault. Your debt and accrued interest stay in vault 51; repayment is not required for this switch. The existing nICP rules apply until conversion completes, then normal ICP interest and liquidation rules apply.</p>
         {#if redemptionClaim.releaseBlock}
           <p class="cell-sub">ICP withdrawal confirmed in ledger block #{redemptionClaim.releaseBlock}.</p>
         {:else if redemptionClaim.releasePending}
@@ -906,10 +906,8 @@
           <button class="btn-submit" on:click={() => handleClaimAction('reconcile')} disabled={isProcessing || !claimPayoutBlock}>Verify payout block</button>
         {/if}
         <button class="btn-submit" on:click={() => handleClaimAction('refresh')} disabled={isProcessing}>Check redemption status</button>
-        {#if redemptionClaim.stage === 'Settled' && tickingDebt <= 0 && !redemptionClaim.releaseBlock}
-          <button class="btn-submit" on:click={() => handleClaimAction('withdraw')} disabled={isProcessing}>
-            {redemptionClaim.releasePending ? 'Reconcile ICP withdrawal' : 'Withdraw ICP to owner wallet'}
-          </button>
+        {#if !redemptionClaim.releasePending && !redemptionClaim.releaseBlock}
+          <p class="cell-sub">Settlement checks run automatically, usually within an hour of the payout. No wallet withdrawal or approval is needed when it arrives. Borrowing, collateral withdrawal and liquidation remain suspended until the custody transition completes.</p>
         {/if}
       {/if}
       <!-- Action layout: pills top-right, stats left, input right -->

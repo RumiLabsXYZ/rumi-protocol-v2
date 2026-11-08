@@ -145,6 +145,13 @@ export const idlFactory = ({ IDL }) => {
     'ReleaseForRetry' : IDL.Null,
     'ConfirmPaid' : IDL.Null,
   });
+  const CollateralAdoption = IDL.Record({
+    'completed' : IDL.Bool,
+    'fee_e8s' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'nonce' : IDL.Nat,
+    'block' : IDL.Opt(IDL.Nat64),
+  });
   const ClaimRelease = IDL.Record({
     'fee_e8s' : IDL.Nat64,
     'amount_e8s' : IDL.Nat64,
@@ -164,6 +171,7 @@ export const idlFactory = ({ IDL }) => {
   const NicpRedemptionClaim = IDL.Record({
     'last_error' : IDL.Opt(IDL.Text),
     'burn_block' : IDL.Opt(IDL.Nat64),
+    'adoption' : IDL.Opt(CollateralAdoption),
     'icp_due_e8s' : IDL.Nat64,
     'owner' : IDL.Principal,
     'withdrawal_id' : IDL.Opt(IDL.Nat64),
@@ -3144,6 +3152,11 @@ export const idlFactory = ({ IDL }) => {
     'reconcile_v2_default_account_three_usd_refund_candidate_block' : IDL.Func(
         [IDL.Nat, IDL.Nat64],
         [Result_1],
+        [],
+      ),
+    'reconcile_vault51_collateral_adoption' : IDL.Func(
+        [IDL.Nat64],
+        [Result_4],
         [],
       ),
     'reconcile_vault51_icp_payout' : IDL.Func([IDL.Nat64], [Result_4], []),

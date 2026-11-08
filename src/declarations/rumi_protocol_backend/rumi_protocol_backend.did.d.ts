@@ -413,6 +413,13 @@ export type ClaimStage = { 'WithdrawalSubmitted' : null } |
   { 'Funded' : null } |
   { 'FundingSubmitted' : null } |
   { 'Settled' : null };
+export interface CollateralAdoption {
+  'completed' : boolean,
+  'fee_e8s' : bigint,
+  'amount_e8s' : bigint,
+  'nonce' : bigint,
+  'block' : [] | [bigint],
+}
 export interface CollateralConfig {
   'last_redemption_time' : bigint,
   'status' : CollateralStatus,
@@ -1316,6 +1323,7 @@ export type Mode = { 'ReadOnly' : null } |
 export interface NicpRedemptionClaim {
   'last_error' : [] | [string],
   'burn_block' : [] | [bigint],
+  'adoption' : [] | [CollateralAdoption],
   'icp_due_e8s' : bigint,
   'owner' : Principal,
   'withdrawal_id' : [] | [bigint],
@@ -2876,6 +2884,7 @@ export interface _SERVICE {
     [bigint, bigint],
     Result_1
   >,
+  'reconcile_vault51_collateral_adoption' : ActorMethod<[bigint], Result_4>,
   'reconcile_vault51_icp_payout' : ActorMethod<[bigint], Result_4>,
   'reconcile_vault_collateral_pull_from_block' : ActorMethod<
     [VaultOperationIdArg, bigint],

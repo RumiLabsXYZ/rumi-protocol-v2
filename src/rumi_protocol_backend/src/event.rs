@@ -1930,11 +1930,18 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                 .expect("inconsistent XRP topup journal");
         }
         PendingPayoutEvent::NicpRedemptionClaimUpdated { claim } => {
+            if claim.adoption.as_ref().is_some_and(|adoption| adoption.completed) {
+                crate::nicp_redemption::adoption::apply_completed(state, &claim)
+                    .expect("inconsistent completed nICP collateral adoption");
+            }
             for nonce in [claim.funding_nonce, claim.approval_nonce] {
                 state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
             }
             if let Some(release) = &claim.release {
                 state.op_nonce_counter = state.op_nonce_counter.max((release.nonce as u64).wrapping_add(1));
+            }
+            if let Some(adoption) = &claim.adoption {
+                state.op_nonce_counter = state.op_nonce_counter.max((adoption.nonce as u64).wrapping_add(1));
             }
             let vault_id = claim.vault_id;
             state.nicp_redemption_claim = Some(claim);
@@ -7371,6 +7378,59 @@ pub fn record_nicp_redemption_claim(
 #[cfg(test)]
 mod nicp_private_claim_journal_tests {
     use super::*;
+
+    #[test]
+    fn nicp_automatic_adoption_replay_preserves_debt_and_reindexes_same_vault() {
+        let mut state = State::default();
+        state.frozen = true;
+        let mut claim = crate::nicp_redemption::tests::approved_adoption_fixture();
+        state.icp_ledger_principal = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        claim.stage = crate::nicp_redemption::ClaimStage::Settled;
+        claim.received_icp_e8s = Some(194_282_931_553);
+        claim.settlement_block = Some(100);
+        let mut encoded = serde_json::to_value(&claim).unwrap();
+        encoded["adoption"] = serde_json::json!({
+            "nonce": 41, "fee_e8s": 10_000, "amount_e8s": 194_282_921_553u64,
+            "block": 101, "completed": false
+        });
+        let pending: crate::nicp_redemption::NicpRedemptionClaim = serde_json::from_value(encoded.clone()).unwrap();
+        state.nicp_redemption_claim = Some(pending);
+        let old_ct = Principal::from_text("buwm7-7yaaa-aaaar-qagva-cai").unwrap();
+        let icp = state.icp_ledger_principal;
+        let original = crate::vault::Vault {
+            owner: claim.owner, vault_id: 51, collateral_type: old_ct, collateral_amount: 0,
+            borrowed_icusd_amount: ICUSD::new(287_535_228_114),
+            accrued_interest: ICUSD::new(99), last_accrual_time: 1234, bot_processing: false,
+        };
+        state.open_vault(original.clone());
+        encoded["adoption"]["completed"] = serde_json::json!(true);
+        let completed: crate::nicp_redemption::NicpRedemptionClaim = serde_json::from_value(encoded).unwrap();
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::NicpRedemptionClaimUpdated { claim: completed.clone() });
+        let after = &state.vault_id_to_vaults[&51];
+        assert_eq!(after.collateral_type, icp);
+        assert_eq!(after.collateral_amount, 194_282_921_553);
+        assert_eq!(after.owner, original.owner);
+        assert_eq!(after.borrowed_icusd_amount, original.borrowed_icusd_amount);
+        assert_eq!(after.accrued_interest, original.accrued_interest);
+        assert_eq!(after.last_accrual_time, original.last_accrual_time);
+        assert!(state.collateral_to_vault_ids[&icp].contains(&51));
+        assert!(!state.collateral_to_vault_ids.get(&old_ct).is_some_and(|ids| ids.contains(&51)));
+        assert!(!state.has_pending_nicp_claim(51));
+        let public = crate::vault::CandidVault::from_state(after.clone(), &state);
+        assert!(public.nicp_redemption_claim.is_none());
+        assert_eq!(public.collateral_amount, 194_282_921_553);
+        assert_eq!(state.total_debt_for_collateral(&old_ct), ICUSD::new(0));
+        assert_eq!(state.total_debt_for_collateral(&icp), original.borrowed_icusd_amount);
+        assert_eq!(state.total_collateral_for(&icp), 194_282_921_553);
+        // A repeated completion must not re-credit the claim or roll back
+        // ordinary deposits/borrows made after it became ICP collateral.
+        state.add_margin_to_vault(51, ICP::new(99));
+        state.borrow_from_vault(51, ICUSD::new(50));
+        apply_pending_payout_event(&mut state, PendingPayoutEvent::NicpRedemptionClaimUpdated { claim: completed });
+        assert_eq!(state.vault_id_to_vaults[&51].collateral_amount, 194_282_921_652);
+        assert_eq!(state.vault_id_to_vaults[&51].borrowed_icusd_amount,
+            ICUSD::new(original.borrowed_icusd_amount.to_u64() + 50));
+    }
 
     #[test]
     fn claim_replay_restores_custody_and_advances_nonce_without_minting() {

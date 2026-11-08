@@ -413,6 +413,13 @@ type ClaimStage = variant {
   FundingSubmitted;
   Settled;
 };
+type CollateralAdoption = record {
+  completed : bool;
+  fee_e8s : nat64;
+  amount_e8s : nat64;
+  nonce : nat;
+  block : opt nat64;
+};
 type CollateralConfig = record {
   last_redemption_time : nat64;
   status : CollateralStatus;
@@ -1146,6 +1153,7 @@ type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type NicpRedemptionClaim = record {
   last_error : opt text;
   burn_block : opt nat64;
+  adoption : opt CollateralAdoption;
   icp_due_e8s : nat64;
   owner : principal;
   withdrawal_id : opt nat64;
@@ -2502,6 +2510,7 @@ service : (ProtocolArg) -> {
       nat,
       nat64,
     ) -> (Result_1);
+  reconcile_vault51_collateral_adoption : (nat64) -> (Result_4);
   reconcile_vault51_icp_payout : (nat64) -> (Result_4);
   reconcile_vault_collateral_pull_from_block : (VaultOperationIdArg, nat64) -> (
       Result_1,

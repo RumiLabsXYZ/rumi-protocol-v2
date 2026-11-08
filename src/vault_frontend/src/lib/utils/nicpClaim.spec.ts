@@ -26,3 +26,25 @@ describe('protocol-controlled nICP redemption display', () => {
     expect(decodeNicpClaim([])).toBeUndefined();
   });
 });
+
+
+describe('automatic vault 51 collateral adoption', () => {
+  it('does not value an adopted claim a second time', () => {
+    const claim = decodeNicpClaim([{ stage: { Settled: null }, icp_due_e8s: 190_000_000_000n,
+      received_icp_e8s: [180_000_000_000n], withdrawal_id: [1696n],
+      adoption: [{ amount_e8s: 179_999_990_000n, block: [123n], completed: true }] }])!;
+    expect(claim.stage).toBe('Adopted');
+    expect(claim.icpAmount).toBe(1799.9999);
+    expect(nicpClaimValueUsd(claim, 2, 0.1)).toBe(0);
+  });
+});
+
+
+describe('pending adoption receipt', () => {
+  it('does not retire claim backing from a marker without a receipt', () => {
+    const claim = decodeNicpClaim([{ stage: { Settled: null }, icp_due_e8s: 190_000_000_000n,
+      received_icp_e8s: [180_000_000_000n], adoption: [{ amount_e8s: 179_999_990_000n, block: [], completed: true }] }])!;
+    expect(claim.stage).toBe('Adopting');
+    expect(nicpClaimValueUsd(claim, 2, 0.1)).toBeCloseTo(3239.99982);
+  });
+});

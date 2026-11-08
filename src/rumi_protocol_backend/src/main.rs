@@ -792,6 +792,7 @@ fn register_conflux_hot_wallet_refresh_timer() {
 }
 
 fn setup_timers() {
+    rumi_protocol_backend::nicp_redemption::adoption::register_timer();
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
     // the collateral configs have stale or missing prices.  An immediate
@@ -20280,6 +20281,12 @@ async fn withdraw_vault51_settled_icp() -> Result<rumi_protocol_backend::nicp_re
 #[update]
 async fn reconcile_vault51_icp_payout(block_index: u64) -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
     rumi_protocol_backend::nicp_redemption::reconcile_owner_payout(block_index).await
+}
+
+#[candid_method(update)]
+#[update]
+async fn reconcile_vault51_collateral_adoption(block_index: u64) -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
+    rumi_protocol_backend::nicp_redemption::adoption::reconcile(block_index).await
 }
 
 // Keep last: export_service! only collects #[candid_method]s declared above it.

@@ -55,12 +55,12 @@ valuation must become zero so it cannot double count the same backing.
 
 ## Implementation steps and proof
 
-- [ ] Add focused failing regressions for collateral adoption/debt preservation
+- [x] Add focused failing regressions for collateral adoption/debt preservation
   and terminal claim fencing; implement the replay transition.
-- [ ] Implement exact-target automatic settlement/sweep, immutable fees and
+- [x] Implement exact-target automatic settlement/sweep, immutable fees and
   receipts, once-only completion and reconciliation; retain payout exclusion.
-- [ ] Wire bounded hourly timer and update owner/transparency/dashboard copy.
-- [ ] Run focused claim/state/replay tests, legacy CBOR decode, negative receipt
+- [x] Wire bounded hourly timer and update owner/transparency/dashboard copy.
+- [x] Run focused claim/state/replay tests, legacy CBOR decode, negative receipt
   and conflicting-payout tests, focused frontend tests. Reuse current test stack.
 - [ ] Regenerate canonical Candid/bindings; verify deployed API compatibility,
   one source-matched release build/artifact and scoped independent review.
@@ -70,3 +70,15 @@ No broad audit, new team or framework is planned. Deployment, timer activation
 on production and actual future adoption are not claimed by this document.
 A release must preserve the deployed SEC-11 state/journals and current custody
 obligations; implementation approval is not evidence of installation.
+
+## Source verification checkpoint
+
+The two initial backend regressions failed on the old code for the intended
+missing transition/fence behavior, then passed. Current results: 23 focused
+nICP/claim/replay tests, 7 SEC11/native-XRP preservation tests, 13 frontend
+claim/CR tests, canonical self-check plus binding regeneration, and backward
+Candid compatibility all passed. The three edited Svelte components compile;
+frontend production build and mandatory auth-origin/custom-domain checks passed.
+Pre-existing compiler/Svelte warnings remain; no clean project-wide typecheck
+or real WaterNeuron payout/custody transfer is claimed. Production build and
+independent release review are the next preparation steps.
