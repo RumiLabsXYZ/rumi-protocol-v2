@@ -1222,6 +1222,8 @@ pub enum BotProofAuditEvent {
 /// adding public Event variants would break older clients of `get_events`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
+    XrpVaultOriginReconciled { vault_id: u64, origin: crate::xrp_vault_deposit::XrpVaultOrigin },
+    XrpVaultTopupCredited { receipt: crate::xrp_vault_deposit::XrpTopupReceipt },
     NicpRedemptionClaimUpdated { claim: crate::nicp_redemption::NicpRedemptionClaim },
     /// Internal bot claim proof transitions share the ordered private journal
     /// so they remain replayable without expanding the public Event variant set.
@@ -1919,6 +1921,14 @@ fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
 
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
+        PendingPayoutEvent::XrpVaultOriginReconciled { vault_id, origin } => {
+            crate::xrp_vault_deposit::apply_origin(state, vault_id, origin)
+                .expect("inconsistent XRP origin journal");
+        }
+        PendingPayoutEvent::XrpVaultTopupCredited { receipt } => {
+            crate::xrp_vault_deposit::apply_credit(state, receipt)
+                .expect("inconsistent XRP topup journal");
+        }
         PendingPayoutEvent::NicpRedemptionClaimUpdated { claim } => {
             for nonce in [claim.funding_nonce, claim.approval_nonce] {
                 state.op_nonce_counter = state.op_nonce_counter.max((nonce as u64).wrapping_add(1));
@@ -2537,7 +2547,7 @@ fn replay_with_nonce_time_and_payout_events(
         match event {
             Event::OpenVault {
                 mut vault,
-                block_index: _,
+                block_index,
                 ..
             } => {
                 vault_id += 1;
@@ -2545,6 +2555,7 @@ fn replay_with_nonce_time_and_payout_events(
                 if vault.collateral_type == Principal::anonymous() {
                     vault.collateral_type = state.icp_ledger_principal;
                 }
+                crate::xrp_vault_deposit::seed_open_origin(&mut state, &vault, block_index, public_event_count);
                 state.open_vault(vault);
             }
             Event::CloseVault {
@@ -3366,12 +3377,31 @@ pub fn record_claim_liquidity_returns(
 }
 
 pub fn record_open_vault(state: &mut State, vault: Vault, block_index: u64) {
+    crate::xrp_vault_deposit::seed_open_origin(state, &vault, block_index, crate::storage::count_events());
     record_event(&Event::OpenVault {
         vault: vault.clone(),
         block_index,
         timestamp: Some(now()),
     });
     state.open_vault(vault);
+}
+
+/// One ordered private journal entry applies collateral and permanent receipt
+/// together; no public AddMargin event also applies this amount on replay.
+pub fn record_xrp_topup(state: &mut State, receipt: crate::xrp_vault_deposit::XrpTopupReceipt) -> Result<u64, crate::ProtocolError> {
+    if let Some(saved) = state.xrp_topup_receipts.get(&(receipt.network.clone(), receipt.proof.tx_hash.clone())) {
+        if saved.vault_id == receipt.vault_id { return Ok(saved.proof.delivered_drops); }
+        return Err(crate::ProtocolError::GenericError("XRP transaction was already credited to another vault".into()));
+    }
+    crate::xrp_vault_deposit::validate_credit(state, &receipt)?;
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::XrpVaultTopupCredited { receipt: receipt.clone() });
+    crate::xrp_vault_deposit::apply_credit(state, receipt)
+}
+
+pub fn record_xrp_origin(state: &mut State, vault_id: u64, origin: crate::xrp_vault_deposit::XrpVaultOrigin) -> Result<(), crate::ProtocolError> {
+    crate::xrp_vault_deposit::validate_origin(state, vault_id, &origin)?;
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::XrpVaultOriginReconciled { vault_id, origin: origin.clone() });
+    crate::xrp_vault_deposit::apply_origin(state, vault_id, origin)
 }
 
 pub fn record_close_vault(state: &mut State, vault_id: u64, block_index: Option<u64>) {

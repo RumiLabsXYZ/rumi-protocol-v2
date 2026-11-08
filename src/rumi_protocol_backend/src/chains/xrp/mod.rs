@@ -23,6 +23,7 @@ pub mod config;
 pub mod sign;
 pub mod ted25519;
 pub mod xrp_rpc;
+pub mod deposit_rpc;
 
 pub use address::{
     account_id_from_classic_address, classic_address_from_ed25519_pubkey, is_valid_classic_address,
