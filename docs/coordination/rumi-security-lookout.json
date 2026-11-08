@@ -39,7 +39,7 @@
       "state": "Done",
       "owner": "Adrian",
       "scope": "Settle the existing vault 158 liquidation claim",
-      "evidenceText": "Rob approved one exact execution call. It returned Ok; recovery TreasurySettled and record 229 Completed are verified against both new ledger receipts. Claim cleared on bot and backend, payment and treasury journals empty, final balances match the approved conservation equations. Processing remains paused. This settles the existing partial liquidation, not all vault debt. No unpause or further financial action occurred.",
+      "evidenceText": "Vault 158 remains TreasurySettled and record 229 Completed, with bot/backend claims cleared. Under Rob's authorized continuation, ordinary swap-fee fix PR #629 merged and was installed; the exact module hash was verified. Worker resumed November 7 (00:44 UTC November 8). Readbacks through 00:45:23 UTC show an empty queue and no pending claim/payment or treasury-229 obligation. No new liquidation ran. The existing partial recovery does not pay off all remaining vault debt.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
@@ -60,6 +60,10 @@
         {
           "title": "Verified vault 158 execution receipt",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/02058505b6617412b9f8187c1e8506b9967889f7/docs/coordination/vault158-execution-receipt-2026-11-07.md"
+        },
+        {
+          "title": "Bot fee-fix release and verified resumption",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/62f1033e5ccee41be96719300cba6bf0369df3d6/docs/coordination/liquidation-bot-fee-release-receipt-2026-11-07.md"
         }
       ]
     },

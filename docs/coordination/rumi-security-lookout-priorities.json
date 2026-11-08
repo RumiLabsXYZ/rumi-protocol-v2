@@ -35,7 +35,7 @@
       "title": "Joint top: vault 158 liquidation recovery",
       "status": "done",
       "blockedReason": "",
-      "nextAction": "Adrian: retain the completed recovery evidence and paused worker. Any ordinary liquidation resumption or later vault action needs a separate decision; do not replay the settled recovery.",
+      "nextAction": "Adrian: retain settled recovery and bot fee-release evidence. The ordinary worker is resumed; no queued work or new holds appeared in initial monitoring. Never replay the settled recovery. Generic delayed-receipt reconciliation remains follow-up work.",
       "cardIds": [
         "SEC-06"
       ]

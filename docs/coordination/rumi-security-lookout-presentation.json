@@ -1,6 +1,6 @@
 {
-  "summary": "Customer case: XRP withdrawal deployment and safe existing-address/repeat-deposit completion are authorized and active. Dorian owns releases; Miles owns XRP source. The ckSOL refill was unnecessary at preflight; owner resumption and recovery remain unverified. Customer message is held. Vault 158 partial recovery completed; bot paused and remaining debt not paid off.",
-  "plainSummary": "We are deploying the XRP withdrawal fix and finishing safe additional deposits to an existing XRP vault. The customer message is held until the situation is resolved. No ckSOL refill was needed; actual minting and customer recovery remain unverified.",
+  "summary": "Customer case: XRP withdrawal deployment and safe existing-address/repeat-deposit completion are authorized and active. Dorian owns releases; Miles owns XRP source. The ckSOL refill was unnecessary at preflight; owner resumption and recovery remain unverified. Customer message is held. Vault 158 partial recovery completed; ordinary fee fix installed and bot resumed. Initial queue empty; remaining vault debt is not paid off.",
+  "plainSummary": "We are deploying the XRP withdrawal fix and finishing safe additional deposits; the customer message stays held until recovery is verified. No ckSOL refill was needed, and actual customer minting or recovery is still unverified. The liquidation bot is running again with corrected swap fees; vault 158\u2019s partial recovery is complete.",
   "glossary": [
     {
       "term": "Stability Pool",
