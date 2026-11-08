@@ -31,6 +31,7 @@ def verify_snapshot(path,expected_module):
   f=path/(stem+'.bin');assert f.stat().st_size==m[stem+'_size'];rows.append({'file':f.name,'bytes':f.stat().st_size,'sha256':sha(f)})
  assert rows[0]['sha256']==expected_module;assert m['wasm_chunk_store']==[];assert all(list(g)==['i32'] and -(2**31)<=int(g['i32'])<2**32 for g in m['globals']);return {'timestamp_ns':m['taken_at_timestamp'],'files':rows,'all_named_lengths_match':True,'chunk_store_empty':True}
 try:
+ assert sha(__file__)==PIN['executor_sha256']
  assert sha(E/'backend-optimized.wasm.gz')==PIN['gzip_sha256'];assert sha(E/'upgrade-args.did')==PIN['args_sha256'];assert sha(E/'execution-pins.json')==os.environ['SEC10_PINS_SHA256']
  principal=cli('identity',['identity','principal','--identity','rumi_identity']).strip();assert principal==IDENTITY
  before=status('status-prestop',OLD,'Running'); expected=json.loads(pathlib.Path('/private/tmp/sec10-live-status-20261107.json').read_text());assert before['settings']==expected['settings']
