@@ -406,6 +406,24 @@ fn claim_icp_residual_after_swap(
         .saturating_sub(swap_input_fee_e8s)
 }
 
+/// Claim-attributable ICP still unspent: net collateral minus swapped inputs
+/// and the input fees ICPSwap charged separately for them.
+fn claim_icp_remaining(net_e8s: u64, swapped_e8s: u64, swap_input_fees_e8s: u64) -> u64 {
+    net_e8s
+        .saturating_sub(swapped_e8s)
+        .saturating_sub(swap_input_fees_e8s)
+}
+
+/// Largest swap input whose amount plus its own input fee fits in `available`.
+fn max_swap_input_for_claim(available_e8s: u64, input_fee_e8s: u64) -> u64 {
+    available_e8s.saturating_sub(input_fee_e8s)
+}
+
+/// A swap may dispatch only if input plus fee never draws on shared float.
+fn swap_fits_claim(available_e8s: u64, amount_e8s: u64, input_fee_e8s: u64) -> bool {
+    amount_e8s > 0 && amount_e8s.checked_add(input_fee_e8s).is_some_and(|total| total <= available_e8s)
+}
+
 fn vault158_payment_journal_matches_evidence(
     journal: &state::BotPaymentJournal,
     evidence: &state::Vault158RecoveryEvidence,
@@ -1465,7 +1483,11 @@ pub async fn process_pending() {
     };
 
     // -- Phase 2: SWAP ICP -> ckUSDC --
-    let mut swap_amount = calculate_swap_amount(collateral_received_amount, debt_covered, collateral_price);
+    // ICPSwap debits the input fee on top of the input amount, so size the
+    // swap such that amount + fee stays within this claim's net collateral.
+    let mut swap_amount = calculate_swap_amount(collateral_received_amount, debt_covered, collateral_price)
+        .min(max_swap_input_for_claim(collateral_received_amount, swap::swap_input_fee_e8s(&config)));
+    let mut initial_swap_fee_e8s = 0u64;
 
     // Per-claim reservation: bracket the swap with wallet balance reads so
     // we know the EXACT ckUSDC this claim earned, independent of any leftover
@@ -1534,6 +1556,12 @@ pub async fn process_pending() {
 
     let swap_result = match swap::prepare_icp_for_ckusdc(&config, swap_amount).await {
         Err(error) => Err(error),
+        Ok(prepared) if !swap_fits_claim(collateral_received_amount, prepared.amount_in_e8s, prepared.input_fee_e8s) => {
+            Err(swap::SwapAttemptError::NoEffect(format!(
+                "swap input {} + fee {} e8s exceeds claim net collateral {}; not dispatched",
+                prepared.amount_in_e8s, prepared.input_fee_e8s, collateral_received_amount
+            )))
+        }
         Ok(prepared) => match persist_swap_intent(
             vault.vault_id,
             claim_generation,
@@ -1541,7 +1569,10 @@ pub async fn process_pending() {
             &prepared,
             bal_before_swap,
         ) {
-            Ok(()) => swap::dispatch_prepared_swap(&config, &prepared).await,
+            Ok(()) => {
+                initial_swap_fee_e8s = prepared.input_fee_e8s;
+                swap::dispatch_prepared_swap(&config, &prepared).await
+            }
             Err(error) => Err(swap::SwapAttemptError::NoEffect(error)),
         },
     };
@@ -1704,6 +1735,8 @@ pub async fn process_pending() {
         }
     };
 
+    // Reaching here means the initial swap confirmed, so its fee was charged.
+    let mut swap_input_fees_e8s = initial_swap_fee_e8s;
     let slippage_bps = calculate_slippage(effective_price, collateral_price);
 
     // The router's report is advisory. A failed wallet read cannot produce a
@@ -1745,8 +1778,10 @@ pub async fn process_pending() {
     let required_gross = required_ckusdc_gross(debt_covered, ckusdc_fee);
     if reservation.to_transfer_e6 < required_gross {
         let shortfall = required_gross - reservation.to_transfer_e6;
-        let remaining_icp = collateral_received_amount.saturating_sub(swap_amount);
-        match choose_bounded_topup_amount(&config, remaining_icp, shortfall).await {
+        let remaining_icp = claim_icp_remaining(collateral_received_amount, swap_amount, swap_input_fees_e8s);
+        let max_topup_icp = max_swap_input_for_claim(remaining_icp, swap::swap_input_fee_e8s(&config));
+        let mut topup_fee_e8s = 0u64;
+        match choose_bounded_topup_amount(&config, max_topup_icp, shortfall).await {
             Ok(Some(topup_icp)) => {
                 let before = match swap::balance_of_self_ckusdc(&config).await {
                     Ok(balance) => balance,
@@ -1758,6 +1793,12 @@ pub async fn process_pending() {
                 };
                 let topup_result = match swap::prepare_icp_for_ckusdc(&config, topup_icp).await {
                     Err(error) => Err(error),
+                    Ok(prepared) if !swap_fits_claim(remaining_icp, prepared.amount_in_e8s, prepared.input_fee_e8s) => {
+                        Err(swap::SwapAttemptError::NoEffect(format!(
+                            "top-up input {} + fee {} e8s exceeds claim remaining {}; not dispatched",
+                            prepared.amount_in_e8s, prepared.input_fee_e8s, remaining_icp
+                        )))
+                    }
                     Ok(prepared) => match persist_swap_intent(
                         vault.vault_id,
                         claim_generation,
@@ -1765,7 +1806,10 @@ pub async fn process_pending() {
                         &prepared,
                         before,
                     ) {
-                        Ok(()) => swap::dispatch_prepared_swap(&config, &prepared).await,
+                        Ok(()) => {
+                            topup_fee_e8s = prepared.input_fee_e8s;
+                            swap::dispatch_prepared_swap(&config, &prepared).await
+                        }
                         Err(error) => Err(swap::SwapAttemptError::NoEffect(error)),
                     },
                 };
@@ -1783,6 +1827,7 @@ pub async fn process_pending() {
                         reservation.to_transfer_e6 = reservation.to_transfer_e6.saturating_add(extra_reservation.to_transfer_e6);
                         reservation.recorded_received_e6 = reservation.recorded_received_e6.saturating_add(extra_reservation.recorded_received_e6);
                         swap_amount = swap_amount.saturating_add(topup_icp);
+                        swap_input_fees_e8s = swap_input_fees_e8s.saturating_add(topup_fee_e8s);
                     }
                     Err(swap::SwapAttemptError::Ambiguous(error)) => {
                         let message = format!(
@@ -1852,7 +1897,7 @@ pub async fn process_pending() {
         collateral_received_amount_e8s: Some(collateral_received_amount),
         collateral_price_e8s: collateral_price,
         icp_swapped_e8s: swap_amount,
-        swap_input_fee_e8s: 0,
+        swap_input_fee_e8s: swap_input_fees_e8s,
         ckusdc_received_e6: ckusdc_received,
         held_surplus_e6: payment_allocation.held_surplus_e6,
         gross_amount_e6: payment_allocation.gross_to_transfer_e6,
@@ -3616,6 +3661,64 @@ mod tests {
             status: state::BotReturnTransferStatus::Prepared,
         });
         assert!(vault158_identity_matches_for_bot(&config, &returned_claim, &record, bot).is_err());
+    }
+
+    const FEE: u64 = 10_000;
+
+    #[test]
+    fn ordinary_single_swap_fee_is_excluded_from_treasury_residual() {
+        let net = 100_000_000u64;
+        let swap = calculate_swap_amount(net, 50_000_000_000, 1_000_000_000_000);
+        assert!(swap_fits_claim(net, swap, FEE));
+        // Treasury gets only genuine residual; the fee is not drawn from float.
+        assert_eq!(claim_icp_residual_after_swap(net, swap, FEE), net - swap - FEE);
+        // The pre-fix journal value (0) over-allocates by exactly one fee.
+        assert_eq!(
+            claim_icp_residual_after_swap(net, swap, 0) - claim_icp_residual_after_swap(net, swap, FEE),
+            FEE
+        );
+    }
+
+    #[test]
+    fn ordinary_initial_plus_topup_charge_both_fees() {
+        let net = 100_000_000u64;
+        let (initial, topup) = (60_000_000u64, 20_000_000u64);
+        assert!(swap_fits_claim(net, initial, FEE));
+        let remaining = claim_icp_remaining(net, initial, FEE);
+        assert_eq!(remaining, net - initial - FEE);
+        assert!(swap_fits_claim(remaining, topup, FEE));
+        let fees = FEE + FEE;
+        assert_eq!(claim_icp_remaining(net, initial + topup, fees), net - initial - topup - fees);
+        assert_eq!(claim_icp_residual_after_swap(net, initial + topup, fees), 20_000_000 - 2 * FEE);
+        // A top-up bounded by remaining-minus-fee fits exactly and leaves no residual.
+        let max_topup = max_swap_input_for_claim(remaining, FEE);
+        assert!(swap_fits_claim(remaining, max_topup, FEE));
+        assert!(!swap_fits_claim(remaining, max_topup + 1, FEE));
+        assert_eq!(claim_icp_residual_after_swap(net, initial + max_topup, fees), 0);
+    }
+
+    #[test]
+    fn swap_that_cannot_cover_its_fee_from_the_claim_is_refused() {
+        // Full-collateral swap (e.g. zero oracle price) must be shrunk by the fee.
+        let net = 5_000_000u64;
+        assert!(!swap_fits_claim(net, net, FEE));
+        assert!(swap_fits_claim(net, max_swap_input_for_claim(net, FEE), FEE));
+        // Remaining no larger than the fee: nothing can be swapped.
+        assert_eq!(max_swap_input_for_claim(FEE, FEE), 0);
+        assert!(!swap_fits_claim(FEE, 0, FEE));
+        assert!(!swap_fits_claim(FEE - 1, 1, FEE));
+        assert!(!swap_fits_claim(u64::MAX, u64::MAX, FEE), "overflow must not pass");
+        // Fees already charged shrink what the top-up may use, never below zero.
+        assert_eq!(claim_icp_remaining(net, net, FEE), 0);
+    }
+
+    #[test]
+    fn legacy_zero_fee_journal_residual_semantics_are_unchanged() {
+        // Old payment journals decode with swap_input_fee_e8s == 0 and must not
+        // have a fee guessed for them.
+        assert_eq!(claim_icp_residual_after_swap(100, 60, 0), 40);
+        assert_eq!(claim_icp_residual_after_swap(60, 60, 0), 0);
+        assert_eq!(claim_icp_residual_after_swap(50, 60, 0), 0);
     }
 
     #[test]
