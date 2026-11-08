@@ -15,7 +15,7 @@
       "title": "Customer impact: unblock safe native XRP withdrawal",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Dorian will deploy the reviewed withdrawal fix using exact artifact and drained-upgrade preservation controls, then verify installed bytes and readback. This scoped deployment is now authorized; customer financial execution remains separate.",
+      "nextAction": "Withdrawal fix is deployed and Running; retain exact-module and preservation evidence. Customer withdrawal confirmation remains separate. Dorian now builds and releases the reviewed SEC11 deposit delta atop this deployed source.",
       "cardIds": [
         "SEC-10"
       ]
@@ -25,7 +25,7 @@
       "title": "Show and copy an existing XRP deposit address",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Miles will finish safe repeat-deposit accounting and existing-address view/copy using the existing worker; Dorian owns eventual backend/frontend release. Preserve custody derivation, authorization and durable idempotence; no unsafe address-only completion.",
+      "nextAction": "Source ef8a694a passed focused tests and two reviews. Dorian integrates its delta atop deployed SEC10, runs coupled checks, builds exact backend/frontend artifacts, publishes and verifies retained state/assets. Public history/points visibility is deferred; preserve permanent receipt accounting.",
       "cardIds": [
         "SEC-11"
       ]
