@@ -5,7 +5,7 @@
       "state": "Review",
       "owner": "Ellis",
       "scope": "Reconcile the paid ckSOL request blocked by protected backend backing",
-      "evidenceText": "Current read-only evidence and conservative source-bound proof support one conditional refill proposal. Immutable packet at 7b8ab344 passed independent Miles and Merritt source/math/scope reviews after fixing the pre-send crash journal. Exact private source binding stays in the authorized case chat. Awaiting one funding-only approval; no top-up, processing, refund, activation, deployment or customer message executed. Customer recovery remains unverified.",
+      "evidenceText": "Direct approval was verified, but read-only preflight found backend backing already above the full approved conservative target with bound-defining inputs unchanged. No top-up or financial invocation occurred; unused approval does not trigger a later automatic transfer. The backing blocker was cleared at observation. Actual owner resumption/mint/refund and customer recovery remain unverified. Private evidence retained only in authorized case channel.",
       "evidenceLinks": [
         {
           "title": "Reviewed conditional refill approval packet",

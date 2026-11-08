@@ -1,6 +1,6 @@
 {
-  "summary": "Customer case: the reviewed ckSOL refill awaits funding approval. XRP withdrawal source is merged; deployment and customer recovery remain unverified. Existing XRP address and safe repeat-deposit UX are deferred. Vault 158 approved partial recovery is complete and its claim cleared; the bot remains paused and remaining debt was not paid off.",
-  "plainSummary": "The customer refill is prepared for approval; no customer mint or refund is verified. XRP source fixes are merged but not verified deployed. Vault 158 partial recovery completed; the bot remains paused.",
+  "summary": "Customer case: approved ckSOL refill was unnecessary at fresh preflight and was not sent; backing was already sufficient. Owner resumption and recovery remain unverified. XRP withdrawal source is merged, deployment unverified; address/repeat-deposit UX deferred. Vault 158 partial recovery completed; bot paused and remaining debt not paid off.",
+  "plainSummary": "No ckSOL refill was sent because backing was already sufficient. The owner still needs to resume the existing request; mint/refund success is unverified. XRP source fixes are merged, not verified deployed. Vault 158 partial recovery completed; bot paused.",
   "glossary": [
     {
       "term": "Stability Pool",

@@ -4,8 +4,8 @@
       "id": "customer-cksol-paid-blocked",
       "title": "Customer impact: reconcile paid ckSOL processing",
       "status": "blocked",
-      "blockedReason": "One reviewed conditional funding action awaits direct approval.",
-      "nextAction": "Ellis will present the frozen packet with the private source binding in the authorized case chat. After approval, all fresh guards must pass before one send. No processing, refund, reserve activation, deployment or customer message; customer outcome remains unverified.",
+      "blockedReason": "Actual owner resumption and customer outcome remain unverified; no customer-message or processing authority implied.",
+      "nextAction": "Ellis will provide the no-send result and owner instructions to Rob. Approved refill was unnecessary at fresh preflight and was not sent. Do not execute a later automatic top-up or claim mint/refund success; customer communication and owner processing are separate.",
       "cardIds": [
         "SEC-09"
       ]
