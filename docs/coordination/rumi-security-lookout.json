@@ -15,10 +15,10 @@
     },
     {
       "id": "SEC-10",
-      "state": "Review",
+      "state": "In progress",
       "owner": "Miles",
       "scope": "Restore safe native XRP withdrawal and price-refresh availability",
-      "evidenceText": "Bounded source fix merged in PR #628 (merge 5edd1ff1). Six focused local tests and offline compile check were reported passing and independently reviewed before integration. Exact-zero debt handling and native-XRP refresh cadence are repaired in source while debt-bearing freshness and collateral-health checks remain. Deployment, live withdrawal, and customer outcome remain unverified.",
+      "evidenceText": "Rob explicitly authorized deployment of the merged XRP withdrawal fix. Dorian owns the single release lane: reconcile current source/live composition, build the exact artifact, use stopped-and-drained backend upgrade controls, preserve customer and ckSOL records, and verify installed bytes/readback. PR #628 source is merged; deployment and customer withdrawal success are not yet verified. No customer funds, signing, issuer setup or messages authorized.",
       "evidenceLinks": [
         {
           "title": "Merged XRP source fix",
@@ -28,10 +28,10 @@
     },
     {
       "id": "SEC-11",
-      "state": "Blocked",
+      "state": "In progress",
       "owner": "Miles",
       "scope": "Show and copy an existing native XRP deposit address",
-      "evidenceText": "Deferred, not complete. Source assessment found no safe existing repeat-deposit credit primitive. Preserve original owner/vault address derivation; do not advertise reusable top-ups until accounting excludes reserves, recorded collateral and settled or unresolved payouts with durable idempotence and serialization. A bounded design note is preserved with PR #628; no address API, UI, or repeat-credit change was delivered. This does not block SEC-10 independently.",
+      "evidenceText": "Rob explicitly requested completion of existing XRP deposit address and continued deposits. Miles owns the existing implementation lane: original owner/vault address binding plus safe repeat-credit accounting, durable replay/outflow/frontier controls, validated chain evidence and stable-state compatibility. Address-only UI is not sufficient. Focused lifecycle/auth/stale-balance/concurrency tests and independent review precede Dorian release. No real deposits/withdrawals/signing or customer message.",
       "evidenceLinks": []
     },
     {

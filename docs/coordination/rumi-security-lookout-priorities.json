@@ -15,7 +15,7 @@
       "title": "Customer impact: unblock safe native XRP withdrawal",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Source merged in PR #628. Preserve exact-head integration receipts; assess deployment separately through the existing release lane. Do not claim live withdrawal or customer recovery.",
+      "nextAction": "Dorian will deploy the reviewed withdrawal fix using exact artifact and drained-upgrade preservation controls, then verify installed bytes and readback. This scoped deployment is now authorized; customer financial execution remains separate.",
       "cardIds": [
         "SEC-10"
       ]
@@ -23,9 +23,9 @@
     {
       "id": "xrp-existing-deposit-address",
       "title": "Show and copy an existing XRP deposit address",
-      "status": "blocked",
-      "blockedReason": "Safe repeat-deposit accounting primitive is absent; implementation is deferred.",
-      "nextAction": "Preserve the bounded design note. Resolve repeat-credit accounting before advertising reusable top-ups; keep this separate from SEC-10 source delivery.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Miles will finish safe repeat-deposit accounting and existing-address view/copy using the existing worker; Dorian owns eventual backend/frontend release. Preserve custody derivation, authorization and durable idempotence; no unsafe address-only completion.",
       "cardIds": [
         "SEC-11"
       ]
