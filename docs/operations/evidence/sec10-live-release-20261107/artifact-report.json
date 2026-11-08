@@ -1,0 +1,25 @@
+{
+  "source": "bd253ddf1ebd233347452603e1e63c6d924820b1",
+  "deployed_base": "6847982b44f247e0c99f0a453b583d3fab8107a2",
+  "code_section_bytes": 8695731,
+  "project_guard_bytes": 10223616,
+  "files": [
+    {
+      "name": "backend-raw.wasm",
+      "bytes": 13867792,
+      "sha256": "22a6837e8e7fa1def7bb0e15df89fc4a19b51f884eeefbc5eb63075a9ec3d465"
+    },
+    {
+      "name": "backend-optimized.wasm",
+      "bytes": 9616603,
+      "sha256": "acf0afc8fb31d8afd306b39aa658db09f698e4b11803af4fd2dd68305ba3222e"
+    },
+    {
+      "name": "backend-optimized.wasm.gz",
+      "bytes": 2322664,
+      "sha256": "a7f9af49f6e5139730e025f6be0533ffb0d7afa6d5eaaec7d02a607b998a6834"
+    }
+  ],
+  "gzip_packaging": "gzip -9 -n -c",
+  "candid_strict_equality_with_live": true
+}

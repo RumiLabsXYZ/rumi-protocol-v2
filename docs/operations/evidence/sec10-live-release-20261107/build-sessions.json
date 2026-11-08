@@ -1,0 +1,66 @@
+[
+  {
+    "name": "cargo-release",
+    "args": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "--release",
+      "--target",
+      "wasm32-unknown-unknown",
+      "--package",
+      "rumi_protocol_backend"
+    ],
+    "start": "2026-11-08T00:33:05.394903+00:00",
+    "end": "2026-11-08T00:39:53.589175+00:00",
+    "exit": 0
+  },
+  {
+    "name": "metadata",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/sec10-release-evidence-20261107/backend-optimized.wasm",
+      "-o",
+      "/private/tmp/sec10-release-evidence-20261107/backend-optimized.wasm",
+      "metadata",
+      "candid:service",
+      "-f",
+      "src/rumi_protocol_backend/rumi_protocol_backend.did",
+      "-v",
+      "public"
+    ],
+    "start": "2026-11-08T00:39:53.606862+00:00",
+    "end": "2026-11-08T00:39:57.736164+00:00",
+    "exit": 0
+  },
+  {
+    "name": "shrink",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/sec10-release-evidence-20261107/backend-optimized.wasm",
+      "-o",
+      "/private/tmp/sec10-release-evidence-20261107/backend-optimized.wasm",
+      "shrink",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-08T00:39:57.736744+00:00",
+    "end": "2026-11-08T00:40:06.740318+00:00",
+    "exit": 0
+  },
+  {
+    "name": "optimize",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/sec10-release-evidence-20261107/backend-optimized.wasm",
+      "-o",
+      "/private/tmp/sec10-release-evidence-20261107/backend-optimized.wasm",
+      "optimize",
+      "O1",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-08T00:40:06.741277+00:00",
+    "end": "2026-11-08T00:40:16.080895+00:00",
+    "exit": 0
+  }
+]

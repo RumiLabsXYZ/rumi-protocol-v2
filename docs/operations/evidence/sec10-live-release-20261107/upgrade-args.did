@@ -1,0 +1,6 @@
+(variant {
+  Upgrade = record {
+    mode = null;
+    description = opt "SEC10 XRP withdrawal fix; live-base 6847982b plus bd253ddf; preserve mode and funding holds"
+  }
+})

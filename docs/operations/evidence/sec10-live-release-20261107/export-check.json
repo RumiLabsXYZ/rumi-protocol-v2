@@ -1,0 +1,18 @@
+{
+  "expected_method_count": 392,
+  "actual_method_count": 393,
+  "missing": [],
+  "lifecycle_exports": [
+    "canister_init",
+    "canister_inspect_message",
+    "canister_post_upgrade",
+    "canister_pre_upgrade",
+    "canister_global_timer"
+  ],
+  "preserved_cdk_internal_exports": [
+    "canister_update <ic-cdk internal> timer_executor"
+  ],
+  "unexpected_extra": [],
+  "pass": true,
+  "baseline_gzip_sha256": "d38887253da67b405f5baf9cb3a53b377a39f7f1a227aced422f97565bceaa10"
+}

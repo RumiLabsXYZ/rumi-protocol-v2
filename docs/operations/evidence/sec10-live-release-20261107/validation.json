@@ -1,0 +1,15 @@
+{
+  "source": "bd253ddf1ebd233347452603e1e63c6d924820b1",
+  "tests": {
+    "result": "6 passed, 0 failed",
+    "log_sha256": "14d6babd7c0b8011eb5577f991f6374a927b94373df759ea3e995c936e9c4859",
+    "initial_compile_failure": "test-only reference to absent issuance state; three lines removed; production patch unchanged"
+  },
+  "reviews": [
+    "Ellis source/composition/preservation PASS",
+    "Merritt independent source/composition/preservation PASS"
+  ],
+  "candid": "embedded service strict-equal to live; 392 declared methods all exported; only existing CDK timer executor extra",
+  "extractor_limitation": "production omits test-only export_service pointer; no new extractor harness or additional compile added",
+  "proof_limit": "no customer withdrawal, mint, refund, financial canary or activation performed"
+}
