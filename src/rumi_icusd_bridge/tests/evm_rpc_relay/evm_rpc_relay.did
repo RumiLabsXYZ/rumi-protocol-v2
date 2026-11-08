@@ -1,0 +1,76 @@
+// Hand-written interface of the TEST-ONLY evm_rpc_relay canister.
+//
+// `request` and `requestCost` mirror the live DFINITY EVM RPC canister
+// (7hfb6-caaaa-aaaar-qadga-cai) raw JSON-RPC escape hatch byte-for-byte, so the
+// bridge canister can be pointed at this relay unchanged. Only the `Custom`
+// provider arm is served; every other RpcService arm yields
+// ProviderError(ProviderNotFound).
+//
+// `probe_ecdsa` and `request_seq` are harness-only helpers: the first proves
+// threshold ECDSA is available in the PocketIC build under test, the second
+// proves the outcall pump handles one call making several sequential outcalls.
+
+type HttpHeader = record { value : text; name : text };
+type RpcApi = record { url : text; headers : opt vec HttpHeader };
+
+type L2MainnetService = variant { Alchemy; Ankr; BlockPi; PublicNode; Llama };
+type EthMainnetService = variant { Alchemy; Ankr; BlockPi; Cloudflare; PublicNode; Llama };
+type EthSepoliaService = variant { Alchemy; Ankr; BlockPi; PublicNode; Sepolia };
+
+type RpcService = variant {
+  EthSepolia : EthSepoliaService;
+  EthMainnet : EthMainnetService;
+  ArbitrumOne : L2MainnetService;
+  BaseMainnet : L2MainnetService;
+  OptimismMainnet : L2MainnetService;
+  Provider : nat64;
+  Custom : RpcApi;
+};
+
+type RejectionCode = variant {
+  NoError;
+  CanisterError;
+  SysTransient;
+  DestinationInvalid;
+  Unknown;
+  SysFatal;
+  CanisterReject;
+};
+
+type ProviderError = variant {
+  TooFewCycles : record { expected : nat; received : nat };
+  MissingRequiredProvider;
+  ProviderNotFound;
+  NoPermission;
+  InvalidRpcConfig : text;
+};
+
+type HttpOutcallError = variant {
+  IcError : record { code : RejectionCode; message : text };
+  InvalidHttpJsonRpcResponse : record {
+    status : nat16;
+    body : text;
+    parsingError : opt text;
+  };
+};
+
+type JsonRpcError = record { code : int64; message : text };
+type ValidationError = variant { Custom : text; InvalidHex : text };
+
+type RpcError = variant {
+  ProviderError : ProviderError;
+  HttpOutcallError : HttpOutcallError;
+  JsonRpcError : JsonRpcError;
+  ValidationError : ValidationError;
+};
+
+type RequestResult = variant { Ok : text; Err : RpcError };
+type RequestCostResult = variant { Ok : nat; Err : RpcError };
+
+service : {
+  request : (RpcService, text, nat64) -> (RequestResult);
+  requestCost : (RpcService, text, nat64) -> (RequestCostResult) query;
+  probe_ecdsa : (text, vec blob) -> (variant { Ok : blob; Err : text });
+  // Harness-only: runs several `request`s sequentially inside one update call.
+  request_seq : (RpcService, vec text, nat64) -> (vec RequestResult);
+}

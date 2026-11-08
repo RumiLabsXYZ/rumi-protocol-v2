@@ -1,0 +1,408 @@
+{
+  "schema_version": 1,
+  "id": "sui",
+  "display_name": "Sui",
+  "family": "sui",
+  "topology": {
+    "kind": {
+      "value": "bridge_instance",
+      "rationale": "One Sui-family instance per network (design section 1.2); Sui source exists at local source and test scope only (move/rumi_icusd_gate from BB-51, src/rumi_icusd_sui_bridge from BB-52 and BB-53); it is not published, bound or activated, and the ledger saga and accounting are reused by copy.",
+      "status": "recommendation"
+    },
+    "wasm_family": "sui",
+    "existing_work": null
+  },
+  "representation": {
+    "standard": {
+      "value": "sui_currency",
+      "rationale": "Recommended for groundwork: Currency Standard (coin_registry), 8 decimals, unregulated, unknown-supply model; make_regulated is never called (irreversible).",
+      "status": "recommendation"
+    },
+    "backing": "escrow_locked_icusd",
+    "debt_creating": false,
+    "decimals": 8,
+    "amount_bounds": {
+      "value": {
+        "min_e8s": "1",
+        "max_e8s": "18446744073709551614",
+        "max_outstanding_e8s": null,
+        "encoding": "u64",
+        "basis": "Conservative bound: supply_cap at most U64_MAX minus 1. balance.move asserts value is at most u64::MAX minus supply (so supply may reach U64_MAX), while the coin::mint_balance doc comment says it aborts at or above U64_MAX. The code and the comment differ by one unit, so the conservative bound is kept."
+      },
+      "source_url": "https://docs.sui.io/references/framework/sui_sui/balance",
+      "verified": "2026-10-30",
+      "source_kind": "derived"
+    }
+  },
+  "signing": {
+    "scheme": "schnorr_ed25519",
+    "key_name": {
+      "value": {
+        "mainnet": "key_1",
+        "testnet": "test_key_1"
+      },
+      "source_url": "https://docs.internetcomputer.org/concepts/chain-key-cryptography.md",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    "derivation_domain": [
+      "rumi-icusd-sui-bridge",
+      "v1",
+      "{role}",
+      "{network_identity}"
+    ],
+    "roles": [
+      "treasury",
+      "gas",
+      "upgrade-custody"
+    ],
+    "domains": {
+      "mint_id": "rumi.icusd.sui.mint.v1",
+      "remint_id": "rumi.icusd.sui.remint.v1",
+      "return_id": "rumi.icusd.sui.return.v1",
+      "burn_id": null,
+      "escrow_label": "rumi-icusd-sui-bridge:escrow:v1"
+    },
+    "signed_payload": {
+      "value": "BLAKE2b-256 digest of the intent prefix and the BCS transaction data, signed with Ed25519 (signature flag 0x00). A second, different hash, BLAKE2b-256 over the type name TransactionData:: and the BCS bytes, is the typed transaction digest used for lookup; store both. The ICP mapping is still an inference from two docs. Both digests have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. Neither is the official Sui Rust SDK, and no network execution has been run.",
+      "source_url": "https://docs.sui.io/develop/transactions/transaction-auth/intent-signing",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "wallet": {
+    "standard": "sui_wallet_standard",
+    "named": {
+      "value": [
+        "Slush"
+      ],
+      "source_url": "https://docs.sui.io/onchain-finance/asset-custody/wallets/slush",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "prerequisites": [
+    {
+      "value": {
+        "id": "sui-gas-funding",
+        "text": "SUI for gas must be sent to the canister's Sui address from outside the canister.",
+        "unavoidable": true
+      },
+      "source_url": "https://docs.sui.io/concepts/tokenomics/gas-in-sui",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    {
+      "value": {
+        "id": "package-publish",
+        "text": "Publishing the Move package needs gas and yields an UpgradeCap to the publisher.",
+        "unavoidable": true
+      },
+      "source_url": "https://docs.sui.io/concepts/sui-move-concepts/packages/custom-policies",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    {
+      "value": {
+        "id": "registry-finalization",
+        "text": "After the gate package is published, a separate coin_registry finalize_registration transaction (the registry is the system object 0xc; anyone can send it) is needed before the registry lists the currency.",
+        "unavoidable": true
+      },
+      "source_url": "https://docs.sui.io/standards/currency",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    {
+      "value": {
+        "id": "user-gas-on-return",
+        "text": "A returning holder needs SUI for their own gas: the wallet signs and pays for the bridge_out transaction, and the canister signs nothing on Sui for a return.",
+        "unavoidable": true
+      },
+      "source_url": "https://docs.sui.io/standards/wallet-standard",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  ],
+  "open_decisions": [
+    {
+      "id": "D4",
+      "topic": "Sui: Move gate module or per-intent deposit addresses",
+      "choice": {
+        "value": "move_gate_with_separate_disclosed_upgradecap",
+        "rationale": "Design section 12 (settled for planning): plan the small Sui Move gate wrapping TreasuryCap, mint-id consumption, counters and recipient-bound returns; UpgradeCap stays a separate, disclosed authority; custody and live changes remain held.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D9",
+      "topic": "Testnet escrow: real icUSD ledger or a test ledger",
+      "choice": {
+        "value": "synthetic_test_ledgers",
+        "rationale": "Design section 12 (settled for planning): synthetic test ledgers for future testnet demos; no real canonical icUSD is locked for a new testnet rollout under this groundwork.",
+        "status": "planning_decision"
+      }
+    }
+  ],
+  "networks": [
+    {
+      "network_id": "sui-mainnet",
+      "role": "mainnet",
+      "identity": {
+        "value": {
+          "kind": "sui_chain_identifier",
+          "value": "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S"
+        },
+        "source_url": "https://raw.githubusercontent.com/MystenLabs/sui/main/crates/sui-types/src/digests.rs",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "sui-gate-module-missing",
+          "text": "A plain coin transfer carries no ICP account, and a TreasuryCap mint keeps no consumed-id record. A Move gate module (consumed table, counters, BridgeOut event) is needed (D4). The gate package is accepted at local source and offline Move test scope (BB-51, 23f75ef1: 47 offline Move tests), and it is not publish-ready. Still held: publish and bind, and the UpgradeCap policy (sui-upgradecap-policy). Disclosed and deferred, not a source gate: the module-bytes match (MC-DEF-13), which has not been performed.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3 (D4); docs/coordination/multichain/reuse-inventory.md section 6; move/rumi_icusd_gate (BB-51, 23f75ef1)"
+        },
+        {
+          "id": "sui-rpc-provider-contract",
+          "text": "JSON-RPC is disabled on Sui Foundation mainnet full nodes and the Foundation GraphQL endpoints are rate-limited and for development and testing only. A contracted GraphQL provider is needed for anything beyond a demo.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/sources-native.md section 2 rows 1 and 5, open question 2"
+        },
+        {
+          "id": "sui-upgradecap-policy",
+          "text": "UpgradeCap stays a separate, disclosed authority (D4 planning decision), and it is a mint-path authority: make_immutable removes the fix path and a lost key strands the cap. By inference (not in the docs) an additive upgrade can add a function that mints, so only a dependency-only or immutable policy closes the code path. Custody and any live change are held until D6 is decided.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 7 and 12 (D4)"
+        },
+        {
+          "id": "sui-observer-lane-missing",
+          "text": "Source for the owned-version mint lane, the return observer, the C1 to C4 monitors and the independent Sui supply reader is accepted at local source and test scope (BB-53 53a to 53d: 7eaef24f, 1b71eae8, e2507b16, 5da0804e, e4ee506a, 53c21490, 29295fb4). It is tested on a simulated chain and mocks only and is not activated. As accepted, the observer (src/rumi_icusd_sui_bridge/src/flows/observer.rs) reads finalized checkpoints through GraphQL, lists BridgeOut events in bounded windows and from hints, re-derives each transfer id, and releases only against the Gate's durable ReturnRecord, in Gate sequence order. It detects foreign mints from the Gate's own counters (C2 and C4) and does not name the foreign mint id, because it never scans Minted events (MC-DEF-14, disclosed). Held recovery limit (MC-DEF-14): one checkpoint with more than a page of BridgeOut events, or a pruned or lagging event index, holds later returns until hints account for the Gate's counter; there is no override. Still held: publish and bind on Sui, live checkpoint evidence, and the measured outcall consensus (sui-outcall-consensus-unmeasured).",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-sui.md sections 3, 4 and 7; src/rumi_icusd_sui_bridge/src/flows/mint.rs, flows/observer.rs and monitor.rs (BB-53, 1b71eae8, e4ee506a, 53c21490); src/rumi_bridge_destinations/src/live/sui.rs (BB-53 53d, 29295fb4)"
+        },
+        {
+          "id": "sui-outcall-consensus-unmeasured",
+          "text": "Outcall consensus is unmeasured. Every read must name a checkpoint, the transform keeps only extracted facts, a head is found by rounding the checkpoint number down to a profile constant chosen after measurement, and executeTransaction is treated as maybe sent. Cycles per GraphQL call, checkpoint cadence and schema drift are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-sui.md sections 5 and 7"
+        },
+        {
+          "id": "sui-signing-vectors-unverified",
+          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. The official Sui Rust SDK comparison is disclosed and deferred: it has not been performed and is not a source gate.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2, accepted at source and local injected-flow scope)"
+        },
+        {
+          "id": "sui-wallet-display-unverified",
+          "text": "The one-time-witness path creates no legacy CoinMetadata, and whether Slush and other wallets read a registry-only currency is unverified (BB-32 open question 8). Test on testnet first.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-sui.md sections 1 and 7"
+        },
+        {
+          "id": "sui-epoch-expiry-nonexecution-proof",
+          "text": "Epoch advancement plus a missing digest is not proof that a quorum-certified transaction will never execute. An attempt stays held until authoritative non-execution proof exists. Delivery is reconciled from the gate's consumed mint-id record, and no refund or second payable claim is created.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-sui.md section 3 (rule 4); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.2 (rule 4)"
+        },
+        {
+          "id": "sui-wallet-connector-missing",
+          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Real wallet display (sui-wallet-display-unverified), endpoint and deployment evidence stay unmeasured and held. Slush is the main wallet named in the docs.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2)"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "sui_checkpoint",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": null,
+            "checkpoint": "finalized",
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": null,
+            "typical_wait": "not found in a primary source (transactions are final once in a finalized checkpoint, and checkpoints do not fork)"
+          },
+          "source_url": "https://docs.sui.io/guides/operator/exchange-integration",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "https_outcall_graphql",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Baseline of 2 identical results. Only one Foundation GraphQL endpoint is documented per network, so a contracted provider is needed (blocker sui-rpc-provider-contract).",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "graphql.mainnet.sui.io"
+          ],
+          "source_url": "https://docs.sui.io/develop/accessing-data/graphql/query-with-graphql",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "GraphQL is an HTTPS POST of JSON, so it is the only Sui path that plainly fits HTTPS outcalls; JSON-RPC is being decommissioned and no official ICP canister exists for Sui. Foundation endpoints have strict rate limits.",
+          "source_url": "https://docs.sui.io/references/sui-api",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "sui-testnet",
+      "role": "testnet",
+      "identity": {
+        "value": {
+          "kind": "sui_chain_identifier",
+          "value": "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
+        },
+        "source_url": "https://raw.githubusercontent.com/MystenLabs/sui/main/crates/sui-types/src/digests.rs",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "sui-gate-module-missing",
+          "text": "A plain coin transfer carries no ICP account, and a TreasuryCap mint keeps no consumed-id record. A Move gate module (consumed table, counters, BridgeOut event) is needed (D4). The gate package is accepted at local source and offline Move test scope (BB-51, 23f75ef1: 47 offline Move tests), and it is not publish-ready. Still held: publish and bind, and the UpgradeCap policy (sui-upgradecap-policy). Disclosed and deferred, not a source gate: the module-bytes match (MC-DEF-13), which has not been performed.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3 (D4); docs/coordination/multichain/reuse-inventory.md section 6; move/rumi_icusd_gate (BB-51, 23f75ef1)"
+        },
+        {
+          "id": "sui-rpc-provider-contract",
+          "text": "JSON-RPC is disabled on Sui Foundation mainnet full nodes and the Foundation GraphQL endpoints are rate-limited and for development and testing only. A contracted GraphQL provider is needed for anything beyond a demo.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/sources-native.md section 2 rows 1 and 5, open question 2"
+        },
+        {
+          "id": "sui-upgradecap-policy",
+          "text": "UpgradeCap stays a separate, disclosed authority (D4 planning decision), and it is a mint-path authority: make_immutable removes the fix path and a lost key strands the cap. By inference (not in the docs) an additive upgrade can add a function that mints, so only a dependency-only or immutable policy closes the code path. Custody and any live change are held until D6 is decided.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 7 and 12 (D4)"
+        },
+        {
+          "id": "sui-observer-lane-missing",
+          "text": "Source for the owned-version mint lane, the return observer, the C1 to C4 monitors and the independent Sui supply reader is accepted at local source and test scope (BB-53 53a to 53d: 7eaef24f, 1b71eae8, e2507b16, 5da0804e, e4ee506a, 53c21490, 29295fb4). It is tested on a simulated chain and mocks only and is not activated. As accepted, the observer (src/rumi_icusd_sui_bridge/src/flows/observer.rs) reads finalized checkpoints through GraphQL, lists BridgeOut events in bounded windows and from hints, re-derives each transfer id, and releases only against the Gate's durable ReturnRecord, in Gate sequence order. It detects foreign mints from the Gate's own counters (C2 and C4) and does not name the foreign mint id, because it never scans Minted events (MC-DEF-14, disclosed). Held recovery limit (MC-DEF-14): one checkpoint with more than a page of BridgeOut events, or a pruned or lagging event index, holds later returns until hints account for the Gate's counter; there is no override. Still held: publish and bind on Sui, live checkpoint evidence, and the measured outcall consensus (sui-outcall-consensus-unmeasured).",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-sui.md sections 3, 4 and 7; src/rumi_icusd_sui_bridge/src/flows/mint.rs, flows/observer.rs and monitor.rs (BB-53, 1b71eae8, e4ee506a, 53c21490); src/rumi_bridge_destinations/src/live/sui.rs (BB-53 53d, 29295fb4)"
+        },
+        {
+          "id": "sui-outcall-consensus-unmeasured",
+          "text": "Outcall consensus is unmeasured. Every read must name a checkpoint, the transform keeps only extracted facts, a head is found by rounding the checkpoint number down to a profile constant chosen after measurement, and executeTransaction is treated as maybe sent. Cycles per GraphQL call, checkpoint cadence and schema drift are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-sui.md sections 5 and 7"
+        },
+        {
+          "id": "sui-signing-vectors-unverified",
+          "text": "Both digests (the signing digest over the intent prefix and BCS data, and the typed transaction digest over TransactionData:: and the BCS bytes) now have golden vectors from independent references: the Python and BCS reference accepted at BB-52 (34e68d9e, 9cbbc589), and a frontend SDK byte comparison accepted at BB-54 (37f9c77c, 412f1fda, 25852bb2) at source and local injected-flow scope. The Schnorr Ed25519 mapping is still an inference from the docs. These vectors are NOT from the official Sui Rust SDK, and no real network execution has been run. The official Sui Rust SDK comparison is disclosed and deferred: it has not been performed and is not a source gate.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-sui.md sections 3 and 7; src/rumi_icusd_sui_bridge/reference/sui_golden_reference.py (BB-52, 34e68d9e); src/vault_frontend/src/lib/services/suiBridge/reference.spec.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2, accepted at source and local injected-flow scope)"
+        },
+        {
+          "id": "sui-wallet-display-unverified",
+          "text": "The one-time-witness path creates no legacy CoinMetadata, and whether Slush and other wallets read a registry-only currency is unverified (BB-32 open question 8). Test on testnet first.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-sui.md sections 1 and 7"
+        },
+        {
+          "id": "sui-epoch-expiry-nonexecution-proof",
+          "text": "Epoch advancement plus a missing digest is not proof that a quorum-certified transaction will never execute. An attempt stays held until authoritative non-execution proof exists. Delivery is reconciled from the gate's consumed mint-id record, and no refund or second payable claim is created.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-sui.md section 3 (rule 4); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.2 (rule 4)"
+        },
+        {
+          "id": "sui-wallet-connector-missing",
+          "text": "A Sui Wallet Standard connector is accepted at source and local injected-flow scope (BB-54: 37f9c77c, 412f1fda, 25852bb2; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts). It is not a real wallet, node or genesis probe, deployment, served-byte, signing or settlement proof. Real wallet display (sui-wallet-display-unverified), endpoint and deployment evidence stay unmeasured and held. Slush is the main wallet named in the docs.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md section 2 row 6; src/vault_frontend/src/lib/services/suiBridge/walletStandard.ts (BB-54, 37f9c77c, 412f1fda, 25852bb2)"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "sui_checkpoint",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": null,
+            "checkpoint": "finalized",
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": null,
+            "typical_wait": "not found in a primary source (transactions are final once in a finalized checkpoint, and checkpoints do not fork)"
+          },
+          "source_url": "https://docs.sui.io/guides/operator/exchange-integration",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "https_outcall_graphql",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Baseline of 2 identical results. Only one Foundation GraphQL endpoint is documented per network, so a contracted provider is needed (blocker sui-rpc-provider-contract).",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "graphql.testnet.sui.io"
+          ],
+          "source_url": "https://docs.sui.io/develop/accessing-data/graphql/query-with-graphql",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "GraphQL is an HTTPS POST of JSON, so it is the only Sui path that plainly fits HTTPS outcalls; JSON-RPC is being decommissioned and no official ICP canister exists for Sui. Foundation endpoints have strict rate limits.",
+          "source_url": "https://docs.sui.io/references/sui-api",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    }
+  ]
+}

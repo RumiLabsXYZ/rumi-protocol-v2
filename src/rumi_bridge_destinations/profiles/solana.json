@@ -1,0 +1,510 @@
+{
+  "schema_version": 1,
+  "id": "solana",
+  "display_name": "Solana",
+  "family": "solana",
+  "topology": {
+    "kind": {
+      "value": "bridge_instance",
+      "rationale": "One Solana-family instance per cluster (design section 1.2); ledger saga and accounting are reused by copy.",
+      "status": "recommendation"
+    },
+    "wasm_family": "solana",
+    "existing_work": null
+  },
+  "representation": {
+    "standard": {
+      "value": "spl_token_2022",
+      "rationale": "Recommended for groundwork in the native facts file: Token-2022 mint, 8 decimals, only MetadataPointer and TokenMetadata extensions, freeze authority unset. Classic spl_token is the fallback if a wallet or venue mishandles Token-2022.",
+      "status": "recommendation"
+    },
+    "backing": "escrow_locked_icusd",
+    "debt_creating": false,
+    "decimals": 8,
+    "amount_bounds": {
+      "value": {
+        "min_e8s": "1",
+        "max_e8s": "18446744073709551615",
+        "max_outstanding_e8s": null,
+        "encoding": "u64",
+        "basis": null
+      },
+      "source_url": "https://docs.rs/spl-token-interface/latest/spl_token_interface/state/struct.Mint.html",
+      "verified": "2026-10-30",
+      "source_kind": "derived"
+    }
+  },
+  "signing": {
+    "scheme": "schnorr_ed25519",
+    "key_name": {
+      "value": {
+        "mainnet": "key_1",
+        "testnet": "test_key_1"
+      },
+      "source_url": "https://docs.internetcomputer.org/concepts/chain-key-cryptography.md",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    "derivation_domain": [
+      "rumi-icusd-sol-bridge",
+      "v1",
+      "{role}",
+      "{network_identity}"
+    ],
+    "roles": [
+      "mint-authority",
+      "fee-payer",
+      "return-owner",
+      "mint-account"
+    ],
+    "domains": {
+      "mint_id": "rumi.icusd.sol.mint.v1",
+      "remint_id": "rumi.icusd.sol.remint.v1",
+      "return_id": "rumi.icusd.sol.return.v1",
+      "burn_id": "rumi.icusd.sol.burn.v1",
+      "escrow_label": "rumi-icusd-sol-bridge:escrow:v1"
+    },
+    "signed_payload": {
+      "value": "The full serialized transaction message bytes (not a hash), signed with Ed25519 through sign_with_schnorr; the 32-byte public key is the base58 address.",
+      "source_url": "https://docs.internetcomputer.org/guides/chain-fusion/solana.md",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "wallet": {
+    "standard": "solana_wallet_standard",
+    "named": {
+      "value": [],
+      "source_url": "https://github.com/anza-xyz/wallet-standard",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "prerequisites": [
+    {
+      "value": {
+        "id": "canister-sol-fees",
+        "text": "The canister's fee-payer address needs SOL for the 5,000 lamport per-signature fee and for associated token account rent (about 0.002 SOL per account, derived).",
+        "unavoidable": true
+      },
+      "source_url": "https://raw.githubusercontent.com/anza-xyz/solana-sdk/master/rent/src/lib.rs",
+      "verified": "2026-10-30",
+      "source_kind": "derived"
+    }
+  ],
+  "open_decisions": [
+    {
+      "id": "D3",
+      "topic": "Solana guard: memo plus durable nonce, or a small program",
+      "choice": {
+        "value": "memo_plus_durable_nonce_first",
+        "rationale": "Design section 12 (settled for planning): memo plus durable nonce with exact instruction, mint, owner and memo verification and the RC/BU/PR lifecycle; same-attempt reconciliation and archival history availability are mandatory; the missing monotone mint counter (C4) stays explicit; a program guard is a stronger later option, not a research gate.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D9",
+      "topic": "Testnet escrow: real icUSD ledger or a test ledger",
+      "choice": {
+        "value": "synthetic_test_ledgers",
+        "rationale": "Design section 12 (settled for planning): synthetic test ledgers for future testnet demos; no real canonical icUSD is locked for a new testnet rollout under this groundwork.",
+        "status": "planning_decision"
+      }
+    }
+  ],
+  "networks": [
+    {
+      "network_id": "solana-mainnet",
+      "role": "mainnet",
+      "identity": {
+        "value": {
+          "kind": "solana_genesis_hash",
+          "value": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+        },
+        "source_url": "https://docs.anza.xyz/clusters/available",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "solana-guard-missing",
+          "text": "The memo-bound guard and the durable-nonce lane are accepted at local source and test scope (BB-47 to BB-49, src/rumi_icusd_sol_bridge). Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured). Still held: live Solana evidence, deployment, and the history measurement (solana-history-availability-unmeasured).",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3); src/rumi_icusd_sol_bridge/src/memo.rs (BB-47, df53ea32) and nonce.rs (BB-48, 45ecd9fe, 614ced92)"
+        },
+        {
+          "id": "sol-rpc-canister-id-conflict",
+          "text": "Activation re-verification of DFINITY's published production SOL RPC canister id, tghme-zyaaa-aaaar-qarca-cai. The dfinity README states it on the fiduciary subnet, the DFINITY forum names it as production deployed with proposal 136985, and the dashboard API shows that proposal executed on 2025-06-16 with the canister controlled by the NNS root. DFINITY's own docs pages print a different id that fails the principal checksum (a docs typo to report). At activation, re-check the controller and the latest module on the dashboard.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 5 and 9; docs/coordination/multichain/sources-native.md open question 1"
+        },
+        {
+          "id": "solana-return-custody",
+          "text": "Returns are held in a canister-owned return account until a finalized burn. No ICP payout happens before the burn is final. The observer must verify the exact allowed transfer instruction, the mint, the owner or authority and the memo association, and never credit a net balance delta alone.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-unattributed-burn-policy",
+          "text": "Holder burns can lower supply without a return: a token account owner or delegate can run Burn or BurnChecked, which lowers mint supply and leaves the outstanding amount unchanged. No ICP credit without a recipient-bound claim, no automatic escrow sweep or refund, and no global halt solely from a legitimate supply decrease. Until a burn observer exists only supply at most outstanding is checked and the gap is reported as unattributed. The unattributed-burn accounting seam is implementation missing.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-solana.md section 12 (item 2); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-history-availability-unmeasured",
+          "text": "Before activation, show through the SOL RPC canister that getTransaction, getSignaturesForAddress and getSignatureStatuses with searchTransactionHistory return Consistent results for a signature older than the history horizon. A validator's local ledger serves history on the order of days and no retention figure is stated, so late memo and signature lookups are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 4 (P5) and 9"
+        },
+        {
+          "id": "solana-return-observer-missing",
+          "text": "The return observer and memo parser are accepted at local source and test scope (BB-49 49c: src/rumi_icusd_sol_bridge/src/observer.rs; memo parser src/rumi_icusd_sol_bridge/src/memo.rs from BB-47). Still held: live Solana evidence, deployment, and custody activation proof. The backend deposit watch polls balances, not burns.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; src/rumi_icusd_sol_bridge/src/observer.rs (BB-49 49c)"
+        },
+        {
+          "id": "solana-nonce-lane-missing",
+          "text": "A durable-nonce pool and lane are accepted at local source and test scope (BB-48: 45ecd9fe, 614ced92; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs), with one reserved nonce slot per in-flight operation. Still held: live nonce accounts, deployment, and mainnet or testnet evidence. getLatestBlockhash is not supported by the SOL RPC canister, so the durable nonce pool is the path used.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs (BB-48, 45ecd9fe, 614ced92)"
+        },
+        {
+          "id": "solana-ata-rent-funding",
+          "text": "The canister creates and pays for each holder's associated token account, so its fee-payer address needs SOL for fees and rent.",
+          "kind": "config",
+          "source": "docs/coordination/multichain/sources-native.md section 1 row 7"
+        },
+        {
+          "id": "solana-wallet-connector-missing",
+          "text": "A Solana Wallet Standard connector is accepted at local source and injected-flow scope (BB-50: adcbf1a9, 25b9d4d9, 053f8ed5; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts). It is not a real wallet, provider or live proof. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts (BB-50, 053f8ed5)"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "solana_commitment",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": "finalized",
+            "checkpoint": null,
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": null,
+            "typical_wait": "about 12.8 seconds under TowerBFT; Anza reports Alpenglow live on mainnet-beta, under which confirmed equals finalized"
+          },
+          "source_url": "https://www.anza.xyz/alpenglow",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "sol_rpc_canister",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Baseline of 2 identical results; the SOL RPC canister defaults to 3 providers with multi-provider consensus.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "api.mainnet-beta.solana.com"
+          ],
+          "source_url": "https://docs.anza.xyz/clusters/available",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Reads go through the DFINITY SOL RPC canister (multi-provider consensus, default 3 providers drawn from Alchemy, Ankr, Chainstack, dRPC, Helius, PublicNode). getLatestBlockhash is not supported. The listed hosts are the clusters' own public RPC, for reference.",
+          "source_url": "https://github.com/dfinity/sol-rpc-canister",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "solana-testnet",
+      "role": "testnet",
+      "identity": {
+        "value": {
+          "kind": "solana_genesis_hash",
+          "value": "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
+        },
+        "source_url": "https://docs.anza.xyz/clusters/available",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "solana-guard-missing",
+          "text": "The memo-bound guard and the durable-nonce lane are accepted at local source and test scope (BB-47 to BB-49, src/rumi_icusd_sol_bridge). Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured). Still held: live Solana evidence, deployment, and the history measurement (solana-history-availability-unmeasured).",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3); src/rumi_icusd_sol_bridge/src/memo.rs (BB-47, df53ea32) and nonce.rs (BB-48, 45ecd9fe, 614ced92)"
+        },
+        {
+          "id": "sol-rpc-canister-id-conflict",
+          "text": "Activation re-verification of DFINITY's published production SOL RPC canister id, tghme-zyaaa-aaaar-qarca-cai. The dfinity README states it on the fiduciary subnet, the DFINITY forum names it as production deployed with proposal 136985, and the dashboard API shows that proposal executed on 2025-06-16 with the canister controlled by the NNS root. DFINITY's own docs pages print a different id that fails the principal checksum (a docs typo to report). At activation, re-check the controller and the latest module on the dashboard.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 5 and 9; docs/coordination/multichain/sources-native.md open question 1"
+        },
+        {
+          "id": "solana-return-custody",
+          "text": "Returns are held in a canister-owned return account until a finalized burn. No ICP payout happens before the burn is final. The observer must verify the exact allowed transfer instruction, the mint, the owner or authority and the memo association, and never credit a net balance delta alone.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-unattributed-burn-policy",
+          "text": "Holder burns can lower supply without a return: a token account owner or delegate can run Burn or BurnChecked, which lowers mint supply and leaves the outstanding amount unchanged. No ICP credit without a recipient-bound claim, no automatic escrow sweep or refund, and no global halt solely from a legitimate supply decrease. Until a burn observer exists only supply at most outstanding is checked and the gap is reported as unattributed. The unattributed-burn accounting seam is implementation missing.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-solana.md section 12 (item 2); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-history-availability-unmeasured",
+          "text": "Before activation, show through the SOL RPC canister that getTransaction, getSignaturesForAddress and getSignatureStatuses with searchTransactionHistory return Consistent results for a signature older than the history horizon. A validator's local ledger serves history on the order of days and no retention figure is stated, so late memo and signature lookups are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 4 (P5) and 9"
+        },
+        {
+          "id": "solana-return-observer-missing",
+          "text": "The return observer and memo parser are accepted at local source and test scope (BB-49 49c: src/rumi_icusd_sol_bridge/src/observer.rs; memo parser src/rumi_icusd_sol_bridge/src/memo.rs from BB-47). Still held: live Solana evidence, deployment, and custody activation proof. The backend deposit watch polls balances, not burns.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; src/rumi_icusd_sol_bridge/src/observer.rs (BB-49 49c)"
+        },
+        {
+          "id": "solana-nonce-lane-missing",
+          "text": "A durable-nonce pool and lane are accepted at local source and test scope (BB-48: 45ecd9fe, 614ced92; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs), with one reserved nonce slot per in-flight operation. Still held: live nonce accounts, deployment, and mainnet or testnet evidence. getLatestBlockhash is not supported by the SOL RPC canister, so the durable nonce pool is the path used.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs (BB-48, 45ecd9fe, 614ced92)"
+        },
+        {
+          "id": "solana-ata-rent-funding",
+          "text": "The canister creates and pays for each holder's associated token account, so its fee-payer address needs SOL for fees and rent.",
+          "kind": "config",
+          "source": "docs/coordination/multichain/sources-native.md section 1 row 7"
+        },
+        {
+          "id": "solana-wallet-connector-missing",
+          "text": "A Solana Wallet Standard connector is accepted at local source and injected-flow scope (BB-50: adcbf1a9, 25b9d4d9, 053f8ed5; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts). It is not a real wallet, provider or live proof. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts (BB-50, 053f8ed5)"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "solana_commitment",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": "finalized",
+            "checkpoint": null,
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": null,
+            "typical_wait": "about 12.8 seconds under TowerBFT; Anza reports Alpenglow live on mainnet-beta, under which confirmed equals finalized"
+          },
+          "source_url": "https://www.anza.xyz/alpenglow",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "sol_rpc_canister",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Baseline of 2 identical results; the SOL RPC canister defaults to 3 providers with multi-provider consensus.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "api.testnet.solana.com"
+          ],
+          "source_url": "https://docs.anza.xyz/clusters/available",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Reads go through the DFINITY SOL RPC canister (multi-provider consensus, default 3 providers drawn from Alchemy, Ankr, Chainstack, dRPC, Helius, PublicNode). getLatestBlockhash is not supported. The listed hosts are the clusters' own public RPC, for reference.",
+          "source_url": "https://github.com/dfinity/sol-rpc-canister",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "solana-devnet",
+      "role": "devnet",
+      "identity": {
+        "value": {
+          "kind": "solana_genesis_hash",
+          "value": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+        },
+        "source_url": "https://docs.anza.xyz/clusters/available",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "solana-guard-missing",
+          "text": "The memo-bound guard and the durable-nonce lane are accepted at local source and test scope (BB-47 to BB-49, src/rumi_icusd_sol_bridge). Native token programs give neither consumed-mint nor bridge-out semantics. The first plan is a memo-bound transfer plus a durable nonce (D3, settled for planning), with no on-chain consumed record, so the cumulative-mint check (C4) is unavailable without a program. Same-attempt reconciliation and archival history availability are mandatory; RPC history retention bounds how late a memo lookup works (unmeasured). Still held: live Solana evidence, deployment, and the history measurement (solana-history-availability-unmeasured).",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3 (D3); src/rumi_icusd_sol_bridge/src/memo.rs (BB-47, df53ea32) and nonce.rs (BB-48, 45ecd9fe, 614ced92)"
+        },
+        {
+          "id": "sol-rpc-canister-id-conflict",
+          "text": "Activation re-verification of DFINITY's published production SOL RPC canister id, tghme-zyaaa-aaaar-qarca-cai. The dfinity README states it on the fiduciary subnet, the DFINITY forum names it as production deployed with proposal 136985, and the dashboard API shows that proposal executed on 2025-06-16 with the canister controlled by the NNS root. DFINITY's own docs pages print a different id that fails the principal checksum (a docs typo to report). At activation, re-check the controller and the latest module on the dashboard.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 5 and 9; docs/coordination/multichain/sources-native.md open question 1"
+        },
+        {
+          "id": "solana-return-custody",
+          "text": "Returns are held in a canister-owned return account until a finalized burn. No ICP payout happens before the burn is final. The observer must verify the exact allowed transfer instruction, the mint, the owner or authority and the memo association, and never credit a net balance delta alone.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-unattributed-burn-policy",
+          "text": "Holder burns can lower supply without a return: a token account owner or delegate can run Burn or BurnChecked, which lowers mint supply and leaves the outstanding amount unchanged. No ICP credit without a recipient-bound claim, no automatic escrow sweep or refund, and no global halt solely from a legitimate supply decrease. Until a burn observer exists only supply at most outstanding is checked and the gap is reported as unattributed. The unattributed-burn accounting seam is implementation missing.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-solana.md section 12 (item 2); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md sections 2.3 and 6.3"
+        },
+        {
+          "id": "solana-history-availability-unmeasured",
+          "text": "Before activation, show through the SOL RPC canister that getTransaction, getSignaturesForAddress and getSignatureStatuses with searchTransactionHistory return Consistent results for a signature older than the history horizon. A validator's local ledger serves history on the order of days and no retention figure is stated, so late memo and signature lookups are unmeasured.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-solana.md sections 4 (P5) and 9"
+        },
+        {
+          "id": "solana-return-observer-missing",
+          "text": "The return observer and memo parser are accepted at local source and test scope (BB-49 49c: src/rumi_icusd_sol_bridge/src/observer.rs; memo parser src/rumi_icusd_sol_bridge/src/memo.rs from BB-47). Still held: live Solana evidence, deployment, and custody activation proof. The backend deposit watch polls balances, not burns.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 3 (Solana adapter set); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; src/rumi_icusd_sol_bridge/src/observer.rs (BB-49 49c)"
+        },
+        {
+          "id": "solana-nonce-lane-missing",
+          "text": "A durable-nonce pool and lane are accepted at local source and test scope (BB-48: 45ecd9fe, 614ced92; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs), with one reserved nonce slot per in-flight operation. Still held: live nonce accounts, deployment, and mainnet or testnet evidence. getLatestBlockhash is not supported by the SOL RPC canister, so the durable nonce pool is the path used.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 6.3; docs/coordination/multichain/sources-native.md section 1 row 5; src/rumi_icusd_sol_bridge/src/nonce.rs and lane.rs (BB-48, 45ecd9fe, 614ced92)"
+        },
+        {
+          "id": "solana-ata-rent-funding",
+          "text": "The canister creates and pays for each holder's associated token account, so its fee-payer address needs SOL for fees and rent.",
+          "kind": "config",
+          "source": "docs/coordination/multichain/sources-native.md section 1 row 7"
+        },
+        {
+          "id": "solana-wallet-connector-missing",
+          "text": "A Solana Wallet Standard connector is accepted at local source and injected-flow scope (BB-50: adcbf1a9, 25b9d4d9, 053f8ed5; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts). It is not a real wallet, provider or live proof. Per-wallet Token-2022 support was not stated on the wallets' doc pages read.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 4; docs/coordination/multichain/sources-native.md open question 4; src/vault_frontend/src/lib/services/solanaBridge/walletStandard.ts (BB-50, 053f8ed5)"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "solana_commitment",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": "finalized",
+            "checkpoint": null,
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": null,
+            "typical_wait": "about 12.8 seconds under TowerBFT; Anza reports Alpenglow live on mainnet-beta, under which confirmed equals finalized"
+          },
+          "source_url": "https://www.anza.xyz/alpenglow",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "sol_rpc_canister",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Baseline of 2 identical results; the SOL RPC canister defaults to 3 providers with multi-provider consensus.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "api.devnet.solana.com"
+          ],
+          "source_url": "https://docs.anza.xyz/clusters/available",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Reads go through the DFINITY SOL RPC canister (multi-provider consensus, default 3 providers drawn from Alchemy, Ankr, Chainstack, dRPC, Helius, PublicNode). getLatestBlockhash is not supported. The listed hosts are the clusters' own public RPC, for reference.",
+          "source_url": "https://github.com/dfinity/sol-rpc-canister",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+[package]
+name = "rumi_icusd_sol_bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Escrow-backed ICP icUSD <-> Solana icUSD bridge canister instance (BB-47 skeleton: ids, memo grammar, accounting, message builders)"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# A throwaway probe build only (see HISTORY_PROBE.md): adds the controller-only update
+# `probe_history_availability`. Never enabled in the production wasm.
+history_probe = []
+
+[dependencies]
+candid = "0.10.6"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_bytes = "0.11"
+ic-cdk = "0.12.0"
+ic-cdk-timers = "0.10.0"
+ic-stable-structures = "0.6.5"
+ciborium = "0.2.1"
+icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
+sha2 = "0.10.2"
+num-traits = "0.2"
+hex = "0.4"
+# Base58 for Solana addresses and signatures. Already in Cargo.lock (backend uses it).
+bs58 = "0.5"
+# Base64 for account data and wire transactions in the SOL RPC mirror. Already in Cargo.lock.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# Used for exactly one thing: the ed25519 point decompression that decides whether a
+# derived associated-token address is off-curve (the same call Solana's
+# `bytes_are_curve_point` makes). Already in Cargo.lock; not a Solana SDK crate.
+curve25519-dalek = { version = "4.1.3", default-features = false }
+
+[dev-dependencies]
+candid_parser = "0.1"
