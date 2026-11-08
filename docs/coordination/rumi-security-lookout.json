@@ -27,6 +27,10 @@
         {
           "title": "Verified XRP withdrawal deployment",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/fd076fef/docs/operations/sec10-live-backend-release-20261107.md"
+        },
+        {
+          "title": "Verified combined XRP deployment and served-byte result",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db916835ec78a7c812ef3f09e173b2c5155/docs/operations/sec11-live-release-20261107.md"
         }
       ]
     },
@@ -44,6 +48,10 @@
         {
           "title": "Reviewed exact backend and frontend release packet",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8b0123247e907f658569cc0612c758e1a6eb28ea/docs/operations/sec11-live-release-20261107.md"
+        },
+        {
+          "title": "Verified combined XRP deployment and served-byte result",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db916835ec78a7c812ef3f09e173b2c5155/docs/operations/sec11-live-release-20261107.md"
         }
       ]
     },
