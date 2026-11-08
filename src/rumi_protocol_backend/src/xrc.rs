@@ -297,15 +297,21 @@ pub const DEFAULT_COLLATERAL_PRICE_FETCH_SECS: u64 = 300;
 /// 2026-07-03: resolve the effective background price-fetch cadence for a
 /// collateral. Returns the per-collateral override when set, else the 300s
 /// default. A stored 0 (should never happen — the setter rejects it) or any
-/// value below 60s is floored to protect against a busy-loop timer.
+/// value below 60s is floored to protect against a busy-loop timer. Native XRP
+/// alone is capped at 300s; scheduler registration and reporting use this resolver.
 pub fn collateral_price_fetch_secs(state: &State, ledger_id: &Principal) -> u64 {
-    match state
+    let configured = match state
         .collateral_price_fetch_interval_secs
         .get(ledger_id)
         .copied()
     {
         None | Some(0) => DEFAULT_COLLATERAL_PRICE_FETCH_SECS,
         Some(secs) => secs.max(60),
+    };
+    if state.get_collateral_config(ledger_id).is_some_and(|c| c.is_native_xrp()) {
+        configured.min(300)
+    } else {
+        configured
     }
 }
 
@@ -2111,6 +2117,25 @@ mod cycle_cadence_tests {
             collateral_price_fetch_secs(&s, &ckbtc()),
             DEFAULT_COLLATERAL_PRICE_FETCH_SECS
         );
+    }
+
+    #[test]
+    fn sec10_native_xrp_scheduler_and_reporting_share_300s_cap() {
+        let mut state = configured_state();
+        let xrp = crate::state::xrp_collateral_principal();
+        let mut cfg = state.get_collateral_config(&state.icp_collateral_type()).unwrap().clone();
+        cfg.ledger_canister_id = xrp;
+        cfg.custody_kind = Some(crate::state::CustodyKind::NativeXrp);
+        state.collateral_configs.insert(xrp, cfg);
+        for (configured, expected) in [(900, 300), (300, 300), (120, 120), (60, 60), (5, 60), (0, 300)] {
+            state.collateral_price_fetch_interval_secs.insert(xrp, configured);
+            assert_eq!(collateral_price_fetch_secs(&state, &xrp), expected);
+            assert_eq!(effective_collateral_price_fetch_secs(&state, &xrp), expected);
+        }
+        state.collateral_price_fetch_interval_secs.insert(ckbtc(), 900);
+        assert_eq!(collateral_price_fetch_secs(&state, &ckbtc()), 900);
+        state.xrc_fetch_interval_secs = 480;
+        assert_eq!(effective_collateral_price_fetch_secs(&state, &state.icp_collateral_type()), 480);
     }
 
     #[test]
