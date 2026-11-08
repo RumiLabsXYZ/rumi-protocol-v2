@@ -16521,9 +16521,6 @@ mod sec10_native_xrp_withdrawal_tests {
         s.frozen = false;
         s.vault_id_to_vaults.get_mut(&71).unwrap().bot_processing = true;
         assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_err());
-        s.vault_id_to_vaults.get_mut(&71).unwrap().bot_processing = false;
-        s.xrpl_icusd.vault_exclusions.insert(71);
-        assert!(native_xrp_partial_withdrawal_admission(&s, owner, 71, 10_000, NOW).is_err());
     }
     #[test]
     fn sec10_non_native_zero_debt_does_not_skip_oracle() {

@@ -6,7 +6,7 @@ Release owner: Dorian. Rob requested deployment of the XRP withdrawal fix in Ell
 
 The controller-authenticated live module is `d38887253da67b405f5baf9cb3a53b377a39f7f1a227aced422f97565bceaa10`, bound by the November 5 installation report to source `6847982b44f247e0c99f0a453b583d3fab8107a2`. Identity `rumi_identity` resolves to controller `fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae` on backend `tfesu-vyaaa-aaaap-qrd7a-cai`, mainnet.
 
-This release starts at that exact deployed source and applies only the three Rust-file patch from accepted SEC10 commit `c02c4bffffd10521362d3cae3047efdb4626cf42` (merged in PR628). The patch applies without conflicts: main.rs 33 additions/7 removals, vault.rs 254 additions, xrc.rs 27 additions/2 removals. Every other tracked build input remains equal to the deployed source. Current main `5edd1ff1e49d68dc77f50a109017ab6d834bc218` also includes about 28,000 lines of XRPL issuance work beyond live; those changes are outside this bounded release. No Candid, generated declarations, stable-state schema, dependency, manifest, upgrade hook or timer setup changes are introduced.
+This release starts at that exact deployed source and applies only the three Rust-file patch from accepted SEC10 commit `c02c4bffffd10521362d3cae3047efdb4626cf42` (merged in PR628). The production patch applies without conflicts; the test-only XRPL issuance exclusion assertion is omitted because that state does not exist on the live base: main.rs 33 additions/7 removals, vault.rs 251 additions, xrc.rs 27 additions/2 removals. Every other tracked build input remains equal to the deployed source. Current main `5edd1ff1e49d68dc77f50a109017ab6d834bc218` also includes about 28,000 lines of XRPL issuance work beyond live; those changes are outside this bounded release. No Candid, generated declarations, stable-state schema, dependency, manifest, upgrade hook or timer setup changes are introduced.
 
 Exact zero-debt owned NativeXrp withdrawals may skip oracle work; any positive debt including dust retains freshness and CR admission. Partial withdrawal re-reads current owner, freeze, status and locks at mutation. Deposit minimum is not a withdrawal minimum. Native XRP cadence is capped at 300 seconds, preserving any shorter interval and other collateral behavior. Existing accrued-interest and conversion rounding semantics are preserved; this does not introduce a new ceiling-rounding policy.
 
@@ -21,3 +21,7 @@ All ten snapshot slots are occupied. The current oldest entry is `00000000000000
 ## Status
 
 Prepared source composition; tests/build, artifact hashes, release review and live execution are pending. This document makes no deployed or customer-outcome claim. The shared target `/private/tmp/rumi-cksol-icp-target` belongs to this serial test/build slot; Miles may edit source independently. Heavy jobs use two Cargo workers.
+
+## Live-base test adaptation
+
+The initial focused compile stopped at E0609: the accepted patch test referenced `State.xrpl_icusd.vault_exclusions`, a field belonging to the separate issuance feature absent from the live base. Removed only that assertion and its preceding fixture reset (three test-only lines); production behavior is unchanged. The same six focused test functions are being rerun with the now-warm dependency cache.
