@@ -149,10 +149,10 @@
     },
     {
       "id": "SEC-08",
-      "state": "Review",
-      "owner": "Bram",
-      "scope": "Track vault 51 nICP repayment, settlement, and withdrawal",
-      "evidenceText": "PR #612 is merged. PR #613 is open, mergeable, and its listed frontend and receipt checks pass. The software preserves the vault's debt and nICP terms and prepares owner repayment and settled ICP withdrawal. No repayment, settlement, withdrawal, or funds movement is claimed.",
+      "state": "In progress",
+      "owner": "Adrian",
+      "scope": "Automatic WaterNeuron settlement adoption as ordinary ICP collateral in vault 51",
+      "evidenceText": "Rob explicitly approved automatic adoption of the actual WaterNeuron ICP payout into the same vault 51, preserving owner, debt, accrued interest and history. Adrian owns implementation on the verified SEC11 deployed source; existing Bram/PR612-613 and Dorian evidence reused. Exact target: withdrawal 1696/burn3435761. Fresh read: still dissolving, escrow ICP zero, no settlement or payout. Planned hourly settlement verification, journaled net-fee custody sweep, once-only ICP collateral/index switch and payout exclusion. Source work in progress; no deployment, timer activation or live custody action.",
       "evidenceLinks": [
         {
           "title": "Vault 51 redemption PR",
@@ -161,6 +161,10 @@
         {
           "title": "Vault 51 owner recovery PR",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/613"
+        },
+        {
+          "title": "Vault51 automatic adoption scope and live baseline",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/337977a6/docs/coordination/vault51-auto-adoption-2026-11-07.md"
         }
       ]
     },

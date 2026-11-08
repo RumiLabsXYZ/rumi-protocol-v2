@@ -67,7 +67,7 @@
       "title": "Vault 51 nICP recovery",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Review green PR #613 and preserve the separate authorization boundary for owner repayment, nICP settlement, and ICP withdrawal.",
+      "nextAction": "Adrian: implement and verify the exact settlement-to-ordinary-ICP custody/accounting transition on the SEC11-preserving source, then prepare the concrete release for Dorian. No live action yet.",
       "cardIds": [
         "SEC-08"
       ]
