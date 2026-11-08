@@ -82,3 +82,14 @@ frontend production build and mandatory auth-origin/custom-domain checks passed.
 Pre-existing compiler/Svelte warnings remain; no clean project-wide typecheck
 or real WaterNeuron payout/custody transfer is claimed. Production build and
 independent release review are the next preparation steps.
+
+## Frozen candidate
+
+Source `e979cd699874c0d866db18cdd22fd42b2b72c427` produced the frozen candidate
+upload `7e099a2cd01ec3f78315125c3aaa716356c908d9fcf14983edcf8e9a2fbdc681`.
+The one backend production build, canonical packaging, actual exports/embedded
+Candid and size checks passed. The [release packet](../operations/vault51-auto-adoption-release-20261107.md)
+contains exact hashes, frontend file manifest, retained-state/no-downgrade
+procedure and evidence limits. Final independent release-owner review and live
+release remain pending; no new financial approval is imposed on the future
+verified automatic-adoption happy path.

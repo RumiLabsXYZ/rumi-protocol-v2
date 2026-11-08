@@ -1,0 +1,18 @@
+{
+  "source": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+  "files": {
+    "backend.raw.wasm": {
+      "bytes": 14075845,
+      "sha256": "fddfe58c7d90e3afb54fc0a5c8f0aa81be44e9779348cb12b3ccb9a1b5620821"
+    },
+    "backend.optimized.wasm": {
+      "bytes": 9774310,
+      "sha256": "3b9d4e40b9e005e38db43c3f20ce8db00f6826373e74399800f62836451ff48c"
+    },
+    "backend.wasm.gz": {
+      "bytes": 2370770,
+      "sha256": "7e099a2cd01ec3f78315125c3aaa716356c908d9fcf14983edcf8e9a2fbdc681"
+    }
+  },
+  "executable_code_section_bytes": 8843099
+}

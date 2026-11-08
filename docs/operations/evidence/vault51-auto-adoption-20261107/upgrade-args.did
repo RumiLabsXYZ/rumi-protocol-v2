@@ -1,0 +1,1 @@
+(variant { Upgrade = record { mode = null; description = opt "Vault 51 automatic verified ICP collateral adoption; preserve debt and SEC11 state" } })

@@ -1,0 +1,7 @@
+canister_update:<ic-cdk internal> timer_executor
+canister_global_timer
+canister_init
+canister_inspect_message
+canister_post_upgrade
+canister_pre_upgrade
+main
