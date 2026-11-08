@@ -40,4 +40,42 @@ The current frontend is Running on unchanged module04e565b3; rumicontroller and 
 
 Execution order after exact-packet review: fresh frontend inventory/module/permission preflight; stage only306 new asset keys and independently verify served bytes with allold assets unchanged; refresh private backend baselines; execute the pinned once-only stop/Stopped/backup/install/restart procedure; confirm retained state and holds; then activate only the7 approved mutable content sets and verify complete inventory, served changed bytes, primary domain and authorization. Identical chunk payloads are split across calls and every returned reference must be unique before commit. Unknown management or commit outcomes halt without replay.
 
-The exact [backend pins/procedure](evidence/sec11-live-release-20261107/execution-pins.json), [frontend pins/procedure](evidence/sec11-live-release-20261107/publication-pins.json), full manifest/comparison, compact complete live inventory and backup verification are pushed under this evidence directory. Binary and private state payloads remain local. No SEC11 live mutation or customer action is claimed yet.
+The exact [backend pins/procedure](evidence/sec11-live-release-20261107/execution-pins.json), [frontend pins/procedure](evidence/sec11-live-release-20261107/publication-pins.json), full manifest/comparison, compact complete live inventory and backup verification are pushed under this evidence directory. Binary and private state payloads remain local. SEC11 live release and readback are complete below; no customer financial action is claimed.
+
+## Deployment/publication terminal result — November 7 PST
+
+**Both XRP fixes are deployed; the deposit UI is served; all named preservation checks passed.** Exact backend upload/module **`b81583ae81421b88d3bd64bf27976b338b2b09748e9dd6b863849b40ac6fd736`**, build source **`0eff84c93742ef6679a2ef09b1bd72e34b511665`**. This source includes the deployed SEC10 withdrawal/cadence repair plus the reviewed SEC11 delta; no main-branch issuance feature was substituted. Source remains on the reviewed release branch, not claimed merged into current main.
+
+### Once-only execution
+
+| Action | Nov7 PST dispatch → completion | Outcome |
+| --- | --- | --- |
+| Frontend new-key stage commit, batch682 | 17:20:26 → 17:20:30 | Exit0;306new keys,4chunk calls; unique references; allold entry points untouched |
+| Backend stop | 17:22:57 → 17:22:59 | Exit0; controller-authenticated Stopped confirmed |
+| Replace archived snapshot0c | 17:23:02 → 17:23:05 | Exit0; exactly that slot replaced; other9 verified unchanged |
+| Fresh snapshot download/verification | Before17:23:30 | Native module/memory/stable/global/chunk-store verification passed |
+| Install exactb815 gzip | 17:23:30 → 17:23:52 | Exit0; installed hash/API/settings verified while Stopped |
+| Backend restart | 17:23:54 → 17:23:55 | Exit0; controllerRunning and exact module confirmed |
+| Frontend mutable activation, batch683 | 17:26:41 → 17:26:42 | Exit0; only7reviewed content sets,2chunk calls |
+
+Backend stop dispatch through restart completion was about58seconds; final backend status/inventory at17:23:58PST confirmed success. No unknown management/commit outcome, retry, restore, standalone snapshot delete or pending owned mutation process remains. Every write had an exclusive fsynced dispatch marker before invocation; original CLI output remains in the private recovery store.
+
+Fresh snapshot **`00000000000000180000000001f088fe0101`** contains113,340,648 verified named payload bytes; its module matches the immediately previous livea7f9 artifact. Complete local archives of oldslot0c and fresh18 remain preserved. The nine other managed entries, including SEC10backup17, are unchanged.
+
+### Readback and serving evidence
+
+- All11scoped receipt/claim/terms/operation/payout reads are byte-identical to the fresh pre-stop baseline. The retained customer ckSOL deposit/payment projections, operator paid records, nICP/XRP claims, payout page, operation watermark, relay budget and processing terms are preserved. ICP processing reserve remains0/unavailable; relay sponsorship remains0. Fixed protocol configuration matches after excluding only the already-documented live price/timestamp and derived curve/threshold fields.
+- The actual new backend is controller-confirmed Running on exactb815, with395application methods and the expected canonical additive Candid. Controllers/settings are unchanged.
+- Final complete stable double-read frontend inventory has **3,384keys /3,578encodings**. All3,078oldkeys and every property/untouched encoding are preserved; only the approved6mutableidentities+1gzip changed. All306newkeys/properties/content hashes match the frozen plan. No delete/clear/unset/property/authorization mutation occurred.
+- Independent served-byte checks passed: **308staging**, **9activation**, and **5primary-domain** checks, including identity/gzip entry points, version and auth/domain assets. A separate root review read5public primary-domain files, including the new UI/config chunks, and matched the reviewed build byte-for-byte.
+- `app.rumiprotocol.com` serves frontend version **`1794099947058`**. Its root HTML identity SHA256 is `1e9ceb053b60f29ca54d93e18a3e8a591e0f53005cafcb908d1e6376206d12af`. The existing frontend module `04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62`, controller/settings and Commit/Prepare authorization responses are unchanged.
+
+### Boundaries and next owner
+
+No real customer deposit, withdrawal, receipt credit, signing, mint, refund, processing retry, reserve/issuer activation, funding transfer or customer message was executed by this release. Published/served controls and local lifecycle tests are not proof of a successful real wallet action; Ellis owns the actual customer retry and held communication. The public Explorer/points omission remains SEC11-DEF-01.
+
+**Future backend upgrades must retain the SEC11 origin/receipt maps and private journal schema. An older main-branch writer is not a valid rollback.** Preserve receipts and recover forward; do not restore an older snapshot or empty/reseed dedup state over later activity. Forward-porting source to current main is a separate follow-up, not a gate on this completed release. This is the accepted state-preservation/no-downgrade rule above, not optional new hardening.
+
+Worktree hygiene: required inventory/guarded cleanup under disk pressure found0eligible and removed0; all70blocked worktrees and dirty primary files were preserved. One isolated release checkout and existing shared caches were reused; no package installation, duplicate production build, new team, paid hosted run or branch deletion was performed.
+
+See [terminal summary](evidence/sec11-live-release-20261107/terminal-summary.json), [backend execution](evidence/sec11-live-release-20261107/backend-deployment-result.json), [retained-state comparison](evidence/sec11-live-release-20261107/retained-state-comparison.json), [final asset/served verification](evidence/sec11-live-release-20261107/activate-verification.json), [primary domain](evidence/sec11-live-release-20261107/primary-domain-readback.json), and [authorization comparison](evidence/sec11-live-release-20261107/frontend-authorization-comparison.json).

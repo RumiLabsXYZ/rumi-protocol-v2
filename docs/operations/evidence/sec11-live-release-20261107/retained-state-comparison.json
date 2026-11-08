@@ -1,0 +1,75 @@
+{
+  "all_scoped_retained_reads_equal": true,
+  "reads": [
+    {
+      "read": "get_cksol_deposit",
+      "before_sha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f",
+      "after_sha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f",
+      "equal": true
+    },
+    {
+      "read": "get_vault_operation_status",
+      "before_sha256": "0b5cae49ab09d5622672e1ea82d1cf32b3f496eb23b015f46f41743ed21c4e5c",
+      "after_sha256": "0b5cae49ab09d5622672e1ea82d1cf32b3f496eb23b015f46f41743ed21c4e5c",
+      "equal": true
+    },
+    {
+      "read": "get_cksol_icp_terms",
+      "before_sha256": "8e67abe36a60f4176324464e5e12323828abf066086057433b777f16447795e6",
+      "after_sha256": "8e67abe36a60f4176324464e5e12323828abf066086057433b777f16447795e6",
+      "equal": true
+    },
+    {
+      "read": "get_xrp_claims",
+      "before_sha256": "0fcd513d95ab58e58113cf931527fa0fd77660ec073ffb475f6a5c4c19702cea",
+      "after_sha256": "0fcd513d95ab58e58113cf931527fa0fd77660ec073ffb475f6a5c4c19702cea",
+      "equal": true
+    },
+    {
+      "read": "get_cksol_payment",
+      "before_sha256": "ef512301f8912a842ad5243da1e6a1ba978230c45d17a7cd8ac346c9e58237c5",
+      "after_sha256": "ef512301f8912a842ad5243da1e6a1ba978230c45d17a7cd8ac346c9e58237c5",
+      "equal": true
+    },
+    {
+      "read": "get_cksol_payment_quote",
+      "before_sha256": "917c9fcf0aa7e505f20a77efeca2123dcbee88ca2d82ee7633e6666d7e806247",
+      "after_sha256": "917c9fcf0aa7e505f20a77efeca2123dcbee88ca2d82ee7633e6666d7e806247",
+      "equal": true
+    },
+    {
+      "read": "get_pending_payouts",
+      "before_sha256": "c6950b52f66709487c2cc3dc24d4170a71f5c2ffe8b8288addb41b378c0726d0",
+      "after_sha256": "c6950b52f66709487c2cc3dc24d4170a71f5c2ffe8b8288addb41b378c0726d0",
+      "equal": true
+    },
+    {
+      "read": "get_cksol_relay_budget",
+      "before_sha256": "0fe8f250567a8656dd9d2a3c3a34f43277bf939b6749ab2a65bc8770fdff9268",
+      "after_sha256": "0fe8f250567a8656dd9d2a3c3a34f43277bf939b6749ab2a65bc8770fdff9268",
+      "equal": true
+    },
+    {
+      "read": "customer-get_cksol_deposit",
+      "before_sha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f",
+      "after_sha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f",
+      "equal": true
+    },
+    {
+      "read": "get_nicp_redemption_claim",
+      "before_sha256": "b05ac408cfd24c2832742bcced1618bc3b29700199ca9061bfd79e523ab99c25",
+      "after_sha256": "b05ac408cfd24c2832742bcced1618bc3b29700199ca9061bfd79e523ab99c25",
+      "equal": true
+    },
+    {
+      "read": "customer-get_cksol_payment",
+      "before_sha256": "6b247725dfdbf4fcc67ece925355a5c7253b153c82da41c28b6faae554d36481",
+      "after_sha256": "6b247725dfdbf4fcc67ece925355a5c7253b153c82da41c28b6faae554d36481",
+      "equal": true
+    }
+  ],
+  "excluded_from_exact_comparison": [
+    "get_protocol_config: normalized separately",
+    "get_protocol_status: dynamic telemetry"
+  ]
+}
