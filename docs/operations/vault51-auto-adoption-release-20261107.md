@@ -102,7 +102,7 @@ record, SEC11 receipts/maps, other retained payouts and processing/reserve holds
 Unexpected divergence requires review of its actual cause, not silently resetting it.
 
 Follow Dorian's accepted stop/drain and snapshot-preservation procedure from the
-[SEC11 release](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db916835ec78a7c812ef3f09e173b2c5155/docs/operations/sec11-live-release-20261107.md): confirm Stopped, fully archive the
+[SEC11 release](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db916835ec78a7c812ef3f09e173b2c5155/docs/operations/sec11-live-release-20261107.md#L15): confirm Stopped, fully archive the
 exact oldest managed snapshot before replacing only that slot, preserve the other
 nine, verify/download the fresh stopped-state backup, then install the exact
 pinned gzip in upgrade mode using the pinned args. Dispatch each management
@@ -126,3 +126,7 @@ See the [implementation scope](../coordination/vault51-auto-adoption-2026-11-07.
 [artifact manifest](evidence/vault51-auto-adoption-20261107/artifact-manifest.json),
 [release pins](evidence/vault51-auto-adoption-20261107/release-pins.json), and
 [exports](evidence/vault51-auto-adoption-20261107/export-verification.json).
+
+Accepted state-preservation source: [SEC11 release lines 17 and 77](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db916835ec78a7c812ef3f09e173b2c5155/docs/operations/sec11-live-release-20261107.md#L77).
+The stop/drain/snapshot procedure is [line 15](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db916835ec78a7c812ef3f09e173b2c5155/docs/operations/sec11-live-release-20261107.md#L15).
+These are retained release controls, not newly invented optional work gates.
