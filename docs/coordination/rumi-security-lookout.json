@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-09",
-      "state": "Review",
+      "state": "Done",
       "owner": "Ellis",
       "scope": "Reconcile the paid ckSOL request blocked by protected backend backing",
-      "evidenceText": "Direct approval was verified, but read-only preflight found backend backing already above the full approved conservative target with bound-defining inputs unchanged. No top-up or financial invocation occurred; unused approval does not trigger a later automatic transfer. The backing blocker was cleared at observation. Actual owner resumption/mint/refund and customer recovery remain unverified. Private evidence retained only in authorized case channel.",
+      "evidenceText": "Read-only verification November 8 confirms the retained customer request advanced: payment Complete with a refund block recorded; minter status Minted; the ckSOL ledger mint transaction credits the verified original owner and the current owner balance matches the minted amount. Customer mint/credit is now verified, superseding the earlier owner-retry hold. No new processing, transfer or financial action was invoked by this verification. Refund amount/recipient were not independently ledger-verified. The unused conditional refill remains unused; ICP reserve activation remains separate. Exact customer identifiers and amounts stay in the authorized case chat.",
       "evidenceLinks": [
         {
           "title": "Reviewed conditional refill approval packet",
