@@ -1,6 +1,6 @@
 {
-  "summary": "Both XRP fixes remain deployed and live bytes match the release. Fresh November 8 read-only checks now confirm the customer SOL mint: minter Minted, ledger mint to verified owner, current balance matches. Processing payment Complete/refund block recorded; refund ledger not independently checked. XRP withdrawal acceptance still unverified; customer message remains a draft. ICP reserve remains separate. Preserve SEC11 receipt schema. Vault 158 and bot outcomes unchanged.",
-  "plainSummary": "The customer\u2019s SOL has now minted successfully, with the credit and current balance verified on the ckSOL ledger. Both XRP fixes are live; his XRP withdrawal still needs confirmation. Rob can now relay the updated outcome and retry instructions. The ICP processing reserve remains separate.",
+  "summary": "SOL mint and owner credit are confirmed; XRP withdrawal/address fixes are live. New SEC12 borrowing recovery is active: exact saved-request restore and safely fenced cancellation, preserving unknown/post-pull outcomes. Caller-scoped status must be read from the connected owner, not an operator. Miles owns source; Dorian owns release; Ellis owns the case. No customer financial execution or new message. Preserve SEC11 state and separate disabled ICP reserve.",
+  "plainSummary": "The customer\u2019s SOL has minted and both XRP fixes are live. A saved borrowing request now blocks use of ckSOL collateral; the next fix will let him restore it or safely cancel it. The existing team is implementing and testing that recovery before release, without submitting a loan or moving his funds.",
   "glossary": [
     {
       "term": "Stability Pool",

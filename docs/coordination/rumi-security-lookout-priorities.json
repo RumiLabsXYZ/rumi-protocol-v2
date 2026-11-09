@@ -1,6 +1,16 @@
 {
   "items": [
     {
+      "id": "customer-cksol-collateral-recovery",
+      "title": "Customer impact: restore or safely cancel saved borrowing request",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Miles implements exact saved-request restore and owner-authenticated, durably fenced cancellation. Preserve uncertain/post-pull receipts and cross-tab/wallet/storage protection; test the next ckSOL collateral request with fixtures. Dorian reviews exact integration and publishes after focused checks and independent review. Ellis maintains this case. No customer financial operation or message.",
+      "cardIds": [
+        "SEC-12"
+      ]
+    },
+    {
       "id": "customer-cksol-paid-blocked",
       "title": "Customer impact: reconcile paid ckSOL processing",
       "status": "done",

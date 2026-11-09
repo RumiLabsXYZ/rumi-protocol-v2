@@ -1,6 +1,14 @@
 {
   "cards": [
     {
+      "id": "SEC-12",
+      "state": "In progress",
+      "owner": "Ellis case; Miles source; Dorian release",
+      "scope": "Restore or safely cancel a saved borrowing request and unblock ckSOL collateral",
+      "evidenceText": "Rob authorized the follow-up. The confirmed mint remains complete; a browser saved-request mismatch blocks a later collateral/borrow form. Show and restore exact saved asset/amount/borrow details without dispatch. Cancellation must obtain an owner-authenticated durable no-effect fence before clearing only the same local intent; Submitted, uncertain and post-pull outcomes remain held. The earlier operator status read is explicitly not customer evidence because the endpoint is caller-scoped. Test stale replies, wallet/tab changes, storage faults, exact decimals and successful next-request admission. Miles reuses isolated SEC11 source; Dorian is the single integrator/publisher. No customer borrow/ACK/cancel, funds movement, reserve activation or outgoing message will be executed. Source, checks, reviews and deployed bytes remain separate.",
+      "evidenceLinks": []
+    },
+    {
       "id": "SEC-09",
       "state": "Done",
       "owner": "Ellis",
