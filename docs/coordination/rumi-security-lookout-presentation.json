@@ -1,6 +1,6 @@
 {
-  "summary": "SEC12 source f1d2e77e passed two fresh round-2 reviews after fixing the one queued-session race from round1. Targeted tests, canonical generation and synthetic Chrome desktop/mobile QA passed. Dorian owns one exact backend/frontend production build and controlled publication, preserving existing state/assets/auth. No SEC12 deployment or customer financial action yet; existing SOL mint/XRP releases confirmed and ICP reserve separate.",
-  "plainSummary": "The saved-request recovery fix passed both independent reviews after correcting a queued wallet-session race. Desktop/mobile checks verify exact amounts, separate Continue and confirmed cancellation. The production build and deployment are next; no loan or transfer has been submitted for the customer.",
+  "summary": "SEC12 deployed from f1d2e77e: backend Running 2ca84c20; primary-domain frontend 1794195655486 matches reviewed build. 69 focused checks, two fresh reviews and synthetic desktop/mobile QA passed; existing global typecheck baseline remains. Final assets/settings/auth preserved; retained state is 10 byte-equal plus one locally reconciled pre-install XRP transition. Owner retry remains pending, with no customer financial actions. Original SOL mint is verified complete; ICP reserve activation remains separate.",
+  "plainSummary": "The saved borrowing request repair is live. The customer can review and restore the original request or confirm cancellation when it is safe, then use their minted balance as collateral. Their own wallet retry is still needed to confirm success; no loan has been submitted for them, and Rob has no release action pending.",
   "glossary": [
     {
       "term": "Stability Pool",

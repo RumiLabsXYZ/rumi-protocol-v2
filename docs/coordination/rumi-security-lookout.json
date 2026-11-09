@@ -5,11 +5,15 @@
       "state": "Review",
       "owner": "Ellis case; Miles source; Dorian release",
       "scope": "Restore or safely cancel a saved borrowing request and unblock ckSOL collateral",
-      "evidenceText": "Revised frozen source f1d2e77e passed two fresh independent round-2 reviews with no confirmed blockers. Round 1 found one queued wallet-session capture race; context is now captured before waiting and asserted before actor access. Both real ApiClient queue regressions and all 18 targeted adapter checks pass with zero stale-session approval/dispatch/ACK and preserved storage. Other unchanged checks journal38/UI8/Rust4/canonical1 plus generated copies and real-Chrome synthetic desktop/mobile QA passed. Global typecheck remains at the documented existing baseline. Dorian now performs the one exact production backend/frontend build and controlled release with state/assets/auth readback. Not deployed yet; no real customer financial action or cancellation.",
+      "evidenceText": "Deployed November 8 from reviewed source f1d2e77e: backend Running on 2ca84c20 and primary-domain frontend version 1794195655486. Exact saved amounts can be restored read-only, then continued separately; explicit cancellation fences the original operation before clearing only the matching local intent. Unknown/submitted/post-pull outcomes remain protected. All 69 focused checks, two fresh corrected-source reviews, synthetic desktop/mobile QA and production builds passed. Global typecheck retains 30 existing errors/66 warnings. Final inventory 3687 keys/3881 encodings preserves prior assets/settings/auth; all served checks passed and case owner independently matched six public files to the build. Retained state: 10 byte-equal projections plus one locally reconciled pre-install XRP transition; no external payout-finality claim. Customer phase/intent and actual collateral loan remain unverified; no customer Continue/Cancel/ACK, approval, storage clear or financial action executed. Next: owner refreshes and chooses recovery through the same wallet.",
       "evidenceLinks": [
         {
           "title": "Reviewed revision and queue-race evidence",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff/docs/operations/sec12-vault-pull-recovery-20261108.md"
+        },
+        {
+          "title": "Deployed recovery release and preservation receipt",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0f00344208bbf9f46184956fafaceb3fa9961ccb/docs/operations/sec12-release-20261108/RESULT.md"
         }
       ]
     },
@@ -31,7 +35,7 @@
       "state": "Review",
       "owner": "Miles",
       "scope": "Restore safe native XRP withdrawal and price-refresh availability",
-      "evidenceText": "Withdrawal fix deployed and preserved in the verified SEC11 follow-up. Current backend Running on b81583ae81421b88d3bd64bf27976b338b2b09748e9dd6b863849b40ac6fd736, source 0eff84c9; withdrawal files remain equal to deployed SEC10 bd253ddf. All 14 focused backend tests and canonical interface check passed. Controlled drained upgrades, verified backups, settings, existing API and 11 scoped retained reads preserved. Customer withdrawal success still needs owner confirmation; no customer financial execution or message.",
+      "evidenceText": "Withdrawal fix deployed and preserved in the verified SEC11 follow-up. SEC11 baseline b81583ae/source 0eff84c9 is now superseded by SEC12 Running module 2ca84c20/source f1d2e77e; withdrawal files remain equal to deployed SEC10 bd253ddf. All 14 focused backend tests and canonical interface check passed. Controlled drained upgrades, verified backups, settings, existing API and 11 scoped retained reads preserved. Customer withdrawal success still needs owner confirmation; no customer financial execution or message.",
       "evidenceLinks": [
         {
           "title": "Merged XRP source fix",
@@ -52,7 +56,7 @@
       "state": "Review",
       "owner": "Miles",
       "scope": "Restore existing XRP address and safely credit repeat deposits",
-      "evidenceText": "Backend installed and frontend published November 7. Exact backend b81583ae is Running; staged batch 682 and mutable entry batch 683 completed once without unknown outcomes. Final inventory 3384 keys/3578 encodings preserved every old key/property; 308 stage and 9 final served checks plus primary-domain identity/gzip/auth checks passed. Root independently matched live page, new XRP UI, configuration and two auth files to the reviewed build. Controllers/settings/permissions and all 11 scoped retained reads match. Existing address view/copy and validated native transaction verification are live, with permanent receipt dedup. Actual customer additional deposit/withdrawal remains unverified. Explorer/points projection deferred; future releases must preserve receipt maps/journal and cannot use an older writer as rollback. Customer message remains held.",
+      "evidenceText": "Backend installed and frontend published November 7. SEC11 backend b81583ae has since been upgraded by SEC12 to Running 2ca84c20; staged batch 682 and mutable entry batch 683 completed once without unknown outcomes. Final inventory 3384 keys/3578 encodings preserved every old key/property; 308 stage and 9 final served checks plus primary-domain identity/gzip/auth checks passed. Root independently matched live page, new XRP UI, configuration and two auth files to the reviewed build. Controllers/settings/permissions and all 11 scoped retained reads match. Existing address view/copy and validated native transaction verification are live, with permanent receipt dedup. Actual customer additional deposit/withdrawal remains unverified. Explorer/points projection deferred; future releases must preserve receipt maps/journal and cannot use an older writer as rollback. Customer message remains held.",
       "evidenceLinks": [
         {
           "title": "Reviewed repeat-deposit implementation and checks",
