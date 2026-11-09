@@ -1,6 +1,6 @@
 # Rumi security and recovery board
 
-Updated: 2026-11-08. Coordinator: Bram. This board tracks the security review, recovery subprojects, and the current customer-impact incident queue; the separate incident and release records remain evidence, not a second task queue. A source diagnosis, merged PR, installed module, active feature, executed recovery, and settled obligation are different outcomes.
+Updated: 2026-11-09. Coordinator: Bram. This board tracks the security review, recovery subprojects, and the current customer-impact incident queue; the separate incident and release records remain evidence, not a second task queue. A source diagnosis, merged PR, installed module, active feature, executed recovery, and settled obligation are different outcomes.
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
@@ -53,3 +53,5 @@ Updated: 2026-11-08. Coordinator: Bram. This board tracks the security review, r
 - Gate: scoped source and canonical bindings where changed, focused regression checks, two independent reviews, exact production artifacts, controlled backend upgrade if required, additive frontend publication/readback. No extra broad audit or new dependency is required by this card.
 
 - SEC12 deployment result: [terminal release receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0f00344208bbf9f46184956fafaceb3fa9961ccb/docs/operations/sec12-release-20261108/RESULT.md). Backend `2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13` Running; frontend `1794195655486`, 3687 keys/3881 encodings. Case owner independently matched primary-domain root, version, both auth files and recovery UI/API bundles to the frozen build. Retained reads: ten byte-equal plus one independently reconciled pre-install XRP transition, without external payout-finality proof. No customer request, loan, approval, ACK, cancellation, storage change or transfer was executed. Keep Review until owner acceptance.
+
+- November 9 recheck: source remains f1d2e77e; 108 frontend tests and four existing cached backend cancellation/replay tests passed (no fresh backend rebuild). Two fresh independent source and revised customer-copy reviews passed. Dorian checked the current Running module/API/settings and 18 served files across primary/canister hosts; Ellis independently matched six primary-domain files. Public ckSOL configuration remains Active with nine decimals. Keep SEC12 Review pending authenticated customer recovery/loan acceptance; no customer action was performed. See [recheck evidence](../operations/sec12-customer-recheck-20261109.md).

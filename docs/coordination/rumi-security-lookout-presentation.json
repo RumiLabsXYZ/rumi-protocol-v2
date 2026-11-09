@@ -1,6 +1,6 @@
 {
-  "summary": "SEC12 deployed from f1d2e77e: backend Running 2ca84c20; primary-domain frontend 1794195655486 matches reviewed build. 69 focused checks, two fresh reviews and synthetic desktop/mobile QA passed; existing global typecheck baseline remains. Final assets/settings/auth preserved; retained state is 10 byte-equal plus one locally reconciled pre-install XRP transition. Owner retry remains pending, with no customer financial actions. Original SOL mint is verified complete; ICP reserve activation remains separate.",
-  "plainSummary": "The saved borrowing request repair is live. The customer can review and restore the original request or confirm cancellation when it is safe, then use their minted balance as collateral. Their own wallet retry is still needed to confirm success; no loan has been submitted for them, and Rob has no release action pending.",
+  "summary": "SEC12 f1d2e77e remains live: backend Running 2ca84c20; frontend1794195655486. November9 recheck:108 frontend/four cached backend tests and two fresh source/copy reviews passed. Current API/settings and18 served-file checks match; ckSOL Active. Original release retained10 byte-equal projections plus one pre-install-reconciled XRP transition. Customer phase/loan unknown; no customer financial action. Same-wallet recovery is next; reserve activation separate.",
+  "plainSummary": "The saved borrowing request repair is live and passed another check of the software, recovery safeguards and customer instructions. The customer can review the original request or safely retire it when allowed, but still needs to complete recovery through their own wallet. Successful borrowing is not yet confirmed; Rob has no release action pending.",
   "glossary": [
     {
       "term": "Stability Pool",
