@@ -1,0 +1,1 @@
+(variant { Upgrade = record { mode = null; description = opt "SEC12 saved vault-pull restore and cancellation fence; source f1d2e77e; preserve prior receipts, mode and funding holds" } })
