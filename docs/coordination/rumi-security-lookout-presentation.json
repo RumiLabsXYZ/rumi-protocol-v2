@@ -1,6 +1,6 @@
 {
-  "summary": "SEC12 review found one queued wallet-session capture race in 3f88ebca; Miles is fixing it and testing the queue boundary. Backend cancellation/replay had no confirmed blocker. Existing focused tests and synthetic Chrome desktop/mobile QA passed, including precision, stale-notice and clipping fixes. Fresh review precedes Dorian build/publication. No deployment or customer financial action; SOL mint and XRP deployments remain confirmed, ICP reserve separate.",
-  "plainSummary": "The recovery controls pass the initial tests, but independent review caught a wallet-session race while Continue waits behind another action. That is being fixed and tested before release. Existing SOL minting and XRP fixes remain verified; no loan or transfer has been submitted for the customer.",
+  "summary": "SEC12 source f1d2e77e passed two fresh round-2 reviews after fixing the one queued-session race from round1. Targeted tests, canonical generation and synthetic Chrome desktop/mobile QA passed. Dorian owns one exact backend/frontend production build and controlled publication, preserving existing state/assets/auth. No SEC12 deployment or customer financial action yet; existing SOL mint/XRP releases confirmed and ICP reserve separate.",
+  "plainSummary": "The saved-request recovery fix passed both independent reviews after correcting a queued wallet-session race. Desktop/mobile checks verify exact amounts, separate Continue and confirmed cancellation. The production build and deployment are next; no loan or transfer has been submitted for the customer.",
   "glossary": [
     {
       "term": "Stability Pool",

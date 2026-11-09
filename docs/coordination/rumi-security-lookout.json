@@ -2,14 +2,14 @@
   "cards": [
     {
       "id": "SEC-12",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Ellis case; Miles source; Dorian release",
       "scope": "Restore or safely cancel a saved borrowing request and unblock ckSOL collateral",
-      "evidenceText": "Frozen candidate 3f88ebca passed 67 focused checks, canonical generation and synthetic Chrome desktop/mobile QA. Both independent reviewers found one confirmed blocker: a queued Continue could capture a replacement wallet session after waiting, because the recovery context was created inside the queue. Miles is pinning the click-time context before the wait and adding a queued same-owner/session-change regression. Reviewers found no additional backend cancellation/replay blocker. No production build or deployment will start until the new pin passes fresh review. Caller status remains owner-scoped; no customer financial action, cancellation or new message has been invoked.",
+      "evidenceText": "Revised frozen source f1d2e77e passed two fresh independent round-2 reviews with no confirmed blockers. Round 1 found one queued wallet-session capture race; context is now captured before waiting and asserted before actor access. Both real ApiClient queue regressions and all 18 targeted adapter checks pass with zero stale-session approval/dispatch/ACK and preserved storage. Other unchanged checks journal38/UI8/Rust4/canonical1 plus generated copies and real-Chrome synthetic desktop/mobile QA passed. Global typecheck remains at the documented existing baseline. Dorian now performs the one exact production backend/frontend build and controlled release with state/assets/auth readback. Not deployed yet; no real customer financial action or cancellation.",
       "evidenceLinks": [
         {
-          "title": "Frozen saved-request recovery source and checks",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/3f88ebca881e092a66b426dc16a02044f669be3f/docs/operations/sec12-vault-pull-recovery-20261108.md"
+          "title": "Reviewed revision and queue-race evidence",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff/docs/operations/sec12-vault-pull-recovery-20261108.md"
         }
       ]
     },
