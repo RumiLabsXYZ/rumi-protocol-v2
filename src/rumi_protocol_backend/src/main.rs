@@ -6856,6 +6856,26 @@ fn ack_vault_operation(arg: rumi_protocol_backend::vault::VaultOperationIdArg) -
         .map_err(ProtocolError::GenericError)
 }
 
+/// Cancellation is a synchronous caller-owned sequence fence. Do not acquire
+/// GuardPrincipal: the delayed original request can hold it during preflight.
+#[candid_method(update)]
+#[update]
+fn cancel_vault_operation(
+    arg: rumi_protocol_backend::vault::VaultOperationCancelArg,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    check_postcondition(mutate_state(|state| {
+        rumi_protocol_backend::event::record_vault_operation_cancelled(
+            state,
+            caller,
+            arg.operation_id,
+            arg.request,
+        )
+    }))
+}
 /// Positive-only recovery for an ambiguous collateral transfer_from. The
 /// ledger-global block index is a candidate; the backend fetches and checks
 /// the direct block against the authenticated caller's pinned journal.

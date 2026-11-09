@@ -1,14 +1,16 @@
+import type { Writable } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
 import { Principal } from '@dfinity/principal';
 
 const mocks = vi.hoisted(() => ({ getSubmitted: vi.fn(), openChannel: vi.fn() }));
 vi.mock('$lib/services/protocol/apiClient', () => ({ ApiClient: {
+  getVaultPullRecovery: mocks.getSubmitted,
   getSubmittedVaultCollateralPull: mocks.getSubmitted,
   recoverSubmittedVaultCollateralPull: vi.fn(),
 } }));
 vi.mock('$lib/services/oisySigner', () => ({ openOisySignerChannel: mocks.openChannel }));
-vi.mock('$lib/stores/vaultStore', () => ({ vaultStore: { refreshVaults: vi.fn() } }));
+vi.mock('$lib/stores/vaultStore', async () => { const { writable } = await import('svelte/store'); return { vaultStore: Object.assign(writable({ vaults: [] }), { refreshVaults: vi.fn() }) }; });
 vi.mock('$lib/stores/toast', () => ({ toastStore: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('$lib/services/auth', async () => {
   const { writable } = await import('svelte/store');
@@ -20,6 +22,7 @@ vi.mock('$lib/stores/wallet', async () => {
 });
 import Banner from './VaultPullRecoveryBanner.svelte';
 import { walletStore } from '$lib/stores/wallet';
+const mockWalletStore = walletStore as unknown as Writable<{ isConnected: boolean; loading: boolean; principal: Principal | null }>;
 import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
 import { VAULT_PULL_STATUS_EVENT } from '$lib/services/protocol/vaultOperationJournal';
 let component: ReturnType<typeof mount>;
@@ -31,7 +34,7 @@ beforeEach(() => {
   mocks.openChannel.mockReset().mockResolvedValue(undefined);
   currentWalletType.set('oisy');
   walletSessionGeneration.set(0);
-  walletStore.set({ isConnected: true, loading: false, principal: owner } as any);
+  mockWalletStore.set({ isConnected: true, loading: false, principal: owner } as any);
   target = document.createElement('div'); document.body.append(target);
 });
 afterEach(async () => { if (component) await unmount(component); target.remove(); });
@@ -54,7 +57,7 @@ describe('Oisy vault recovery status consent', () => {
     mocks.openChannel.mockImplementation(() => new Promise<void>(resolve => { opened = resolve; }));
     component = mount(Banner, { target }); await tick();
     target.querySelector('button')!.click();
-    walletStore.set({ isConnected: true, loading: false, principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])) } as any);
+    mockWalletStore.set({ isConnected: true, loading: false, principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])) } as any);
     await tick(); opened(); await tick();
     expect(mocks.getSubmitted).not.toHaveBeenCalled();
   });

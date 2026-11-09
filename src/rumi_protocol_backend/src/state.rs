@@ -6297,6 +6297,87 @@ impl State {
         Ok(())
     }
 
+    fn vault_pull_is_cancellable(journal: &VaultCollateralPullJournal) -> bool {
+        if journal.confirmed_wide_block_index.is_some() {
+            return false;
+        }
+        match journal.phase {
+            VaultCollateralPullPhase::Prepared => journal.dispatch_attempts == 0,
+            VaultCollateralPullPhase::SafeNoEffect { .. } => journal.dispatch_attempts == 1,
+            _ => false,
+        }
+    }
+
+    pub fn validate_vault_operation_cancellation(
+        &self,
+        owner: Principal,
+        operation_id: u64,
+        request: &VaultCollateralPullRequest,
+    ) -> Result<(), String> {
+        if owner == Principal::anonymous() || operation_id == 0 {
+            return Err("authenticated owner and positive operation ID required".into());
+        }
+        let acknowledged = self
+            .vault_operation_acknowledged_through
+            .get(&owner)
+            .copied()
+            .unwrap_or(0);
+        if operation_id <= acknowledged {
+            return Ok(());
+        }
+        let next = acknowledged
+            .checked_add(1)
+            .ok_or("vault operation sequence exhausted")?;
+        if operation_id != next {
+            return Err(format!("expected vault operation ID {next}"));
+        }
+        if let Some(journal) = self.vault_collateral_pull_journals.get(&owner) {
+            if journal.operation_id != operation_id || &journal.request != request {
+                return Err("saved request does not match the active vault operation".into());
+            }
+            if !Self::vault_pull_is_cancellable(journal) {
+                return Err(
+                    "vault operation may have transferred collateral; it cannot be cancelled"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply only a trusted, already-admitted private cancellation event.
+    /// Older ordinary ACKs are snapshot-only, so replay may legitimately jump
+    /// from an earlier watermark to this ID. A later active journal is retained.
+    pub fn apply_vault_operation_cancellation(
+        &mut self,
+        owner: Principal,
+        operation_id: u64,
+        request: &VaultCollateralPullRequest,
+    ) -> Result<u64, String> {
+        if owner == Principal::anonymous() || operation_id == 0 {
+            return Err("invalid cancelled vault operation".into());
+        }
+        if let Some(journal) = self.vault_collateral_pull_journals.get(&owner) {
+            if journal.operation_id < operation_id {
+                return Err("cancellation conflicts with another active operation".into());
+            }
+            if journal.operation_id == operation_id {
+                if &journal.request != request || !Self::vault_pull_is_cancellable(journal) {
+                    return Err(
+                        "cancel event conflicts with a dispatched or different request".into(),
+                    );
+                }
+                self.vault_collateral_pull_journals.remove(&owner);
+            }
+        }
+        let watermark = self
+            .vault_operation_acknowledged_through
+            .entry(owner)
+            .or_default();
+        *watermark = (*watermark).max(operation_id);
+        Ok(*watermark)
+    }
+
     pub fn acknowledge_vault_operation(&mut self, owner: Principal, operation_id: u64) -> Result<u64, String> {
         let acknowledged = self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0);
         if operation_id <= acknowledged { return Ok(acknowledged); }
@@ -16190,5 +16271,249 @@ mod nicp_claim_integration_tests {
         let restored: State = ciborium::de::from_reader(legacy.as_slice()).unwrap();
         assert!(restored.nicp_redemption_claim.is_none());
         assert_eq!(restored.vault_id_to_vaults[&51].borrowed_icusd_amount, state.vault_id_to_vaults[&51].borrowed_icusd_amount);
+    }
+}
+
+#[cfg(test)]
+mod vault_pull_cancellation_tests {
+    use super::*;
+    fn fixture() -> (State, Principal, Principal, VaultCollateralPullRequest) {
+        let owner = Principal::from_slice(&[61]);
+        let ledger = crate::cksol::ledger_principal();
+        let mut state = State::default();
+        let mut config = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.01)),
+            Ratio::new(dec!(1)),
+        );
+        config.ledger_canister_id = ledger;
+        config.custody_kind = None;
+        config.decimals = 9;
+        config.min_collateral_deposit = 0;
+        state.collateral_configs.insert(ledger, config);
+        let request = VaultCollateralPullRequest::OpenVault {
+            collateral_type: ledger,
+            amount_e8s: 100,
+        };
+        (state, owner, ledger, request)
+    }
+    fn cancel(
+        state: &mut State,
+        owner: Principal,
+        id: u64,
+        request: &VaultCollateralPullRequest,
+    ) -> Result<u64, String> {
+        state.validate_vault_operation_cancellation(owner, id, request)?;
+        state.apply_vault_operation_cancellation(owner, id, request)
+    }
+    #[test]
+    fn vault_pull_cancel_absent_fences_late_preflight_and_allows_next_cksol_request() {
+        let (mut state, owner, ledger, request) = fixture();
+        let before_id = state.next_available_vault_id;
+        let before_nonce = state.op_nonce_counter;
+        assert_eq!(cancel(&mut state, owner, 1, &request).unwrap(), 1);
+        assert_eq!(state.next_available_vault_id, before_id);
+        assert_eq!(state.op_nonce_counter, before_nonce);
+        assert!(state.vault_operation_status(owner).active.is_none());
+        // The old call already passed its read-only checks and ledger preflight;
+        // its final reservation must still observe this durable tombstone.
+        assert!(state
+            .prepare_vault_collateral_pull(
+                owner,
+                1,
+                request.clone(),
+                ledger,
+                Principal::from_slice(&[63]),
+                2,
+                10
+            )
+            .is_err());
+        let next = state
+            .prepare_vault_collateral_pull(
+                owner,
+                2,
+                request.clone(),
+                ledger,
+                Principal::from_slice(&[63]),
+                2,
+                11,
+            )
+            .unwrap();
+        assert_eq!(next.ledger, ledger);
+        assert_eq!(cancel(&mut state, owner, 1, &request).unwrap(), 1);
+        assert_eq!(
+            state.vault_collateral_pull_journals[&owner], next,
+            "stale cancel cannot erase later operation"
+        );
+    }
+    #[test]
+    fn vault_pull_cancel_prepared_wins_before_dispatch_or_refuses_after_dispatch() {
+        let (mut state, owner, ledger, request) = fixture();
+        let prepared = state
+            .prepare_vault_collateral_pull(
+                owner,
+                1,
+                request.clone(),
+                ledger,
+                Principal::from_slice(&[63]),
+                2,
+                10,
+            )
+            .unwrap();
+        cancel(&mut state, owner, 1, &request).unwrap();
+        assert!(state
+            .mark_vault_collateral_pull_dispatched(&owner, &prepared)
+            .is_err());
+        let next = state
+            .prepare_vault_collateral_pull(
+                owner,
+                2,
+                request.clone(),
+                ledger,
+                Principal::from_slice(&[63]),
+                2,
+                11,
+            )
+            .unwrap();
+        let submitted = state
+            .mark_vault_collateral_pull_dispatched(&owner, &next)
+            .unwrap();
+        for phase in [
+            VaultCollateralPullPhase::Submitted,
+            VaultCollateralPullPhase::PullConfirmed { block_index: 7 },
+            VaultCollateralPullPhase::VaultCredited { block_index: 7 },
+            VaultCollateralPullPhase::Completed {
+                result: VaultOperationResult::OpenVault {
+                    vault_id: next.vault_id,
+                    block_index: 7,
+                },
+            },
+        ] {
+            state
+                .vault_collateral_pull_journals
+                .get_mut(&owner)
+                .unwrap()
+                .phase = phase;
+            assert!(cancel(&mut state, owner, 2, &request).is_err());
+            assert_eq!(state.vault_operation_status(owner).acknowledged_through, 1);
+        }
+        state
+            .vault_collateral_pull_journals
+            .insert(owner, submitted.clone());
+        assert!(state.record_vault_collateral_pull_no_effect(
+            &owner,
+            &submitted,
+            "typed first-attempt no-effect".into()
+        ));
+        assert_eq!(cancel(&mut state, owner, 2, &request).unwrap(), 2);
+    }
+    #[test]
+    fn vault_pull_cancel_requires_exact_binding_proven_phase_and_owner_namespace() {
+        let (mut state, owner, ledger, request) = fixture();
+        assert!(cancel(&mut state, owner, 2, &request).is_err());
+        assert!(cancel(&mut state, owner, 0, &request).is_err());
+        assert!(cancel(&mut state, Principal::anonymous(), 1, &request).is_err());
+        let prepared = state
+            .prepare_vault_collateral_pull(
+                owner,
+                1,
+                request.clone(),
+                ledger,
+                Principal::from_slice(&[63]),
+                2,
+                10,
+            )
+            .unwrap();
+        let wrong = VaultCollateralPullRequest::OpenVault {
+            collateral_type: ledger,
+            amount_e8s: 101,
+        };
+        assert!(cancel(&mut state, owner, 1, &wrong).is_err());
+        for (phase, attempts, wide) in [
+            (VaultCollateralPullPhase::Prepared, 1, None),
+            (
+                VaultCollateralPullPhase::SafeNoEffect {
+                    message: "unproven".into(),
+                },
+                0,
+                None,
+            ),
+            (
+                VaultCollateralPullPhase::SafeNoEffect {
+                    message: "earlier ambiguity".into(),
+                },
+                2,
+                None,
+            ),
+            (
+                VaultCollateralPullPhase::Prepared,
+                0,
+                Some(candid::Nat::from(7u64)),
+            ),
+        ] {
+            let row = state
+                .vault_collateral_pull_journals
+                .get_mut(&owner)
+                .unwrap();
+            row.phase = phase;
+            row.dispatch_attempts = attempts;
+            row.confirmed_wide_block_index = wide;
+            assert!(cancel(&mut state, owner, 1, &request).is_err());
+        }
+        state
+            .vault_collateral_pull_journals
+            .insert(owner, prepared.clone());
+        let other = Principal::from_slice(&[64]);
+        cancel(&mut state, other, 1, &request).unwrap();
+        assert_eq!(state.vault_collateral_pull_journals[&owner], prepared);
+        assert_eq!(state.vault_operation_status(owner).acknowledged_through, 0);
+    }
+    #[test]
+    fn vault_pull_cancel_snapshot_and_ordered_replay_keep_tombstone_after_prior_unlogged_acks() {
+        let (mut state, owner, ledger, request) = fixture();
+        state.vault_operation_acknowledged_through.insert(owner, 3);
+        cancel(&mut state, owner, 4, &request).unwrap();
+        let mut bytes = vec![];
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(
+            restored.vault_operation_status(owner).acknowledged_through,
+            4
+        );
+        let init = crate::InitArg {
+            xrc_principal: ledger,
+            icusd_ledger_principal: ledger,
+            icp_ledger_principal: ledger,
+            fee_e8s: 0,
+            developer_principal: owner,
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        };
+        let entry = crate::storage::PendingPayoutJournalEntry {
+            after_event_count: 1,
+            event: crate::event::PendingPayoutEvent::VaultPullCancelled {
+                owner,
+                operation_id: 4,
+                request: request.clone(),
+            },
+        };
+        let mut replayed = crate::event::replay_with_pending_payout_events(
+            vec![crate::event::Event::Init(init)].into_iter(),
+            vec![entry.clone(), entry].into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            replayed.vault_operation_status(owner).acknowledged_through,
+            4
+        );
+        assert!(replayed
+            .prepare_vault_collateral_pull(owner, 4, request, ledger, owner, 2, 20)
+            .is_err());
+        assert!(
+            replayed.xrp_topup_receipts.is_empty(),
+            "cancellation does not mutate SEC-11 receipt accounting"
+        );
     }
 }

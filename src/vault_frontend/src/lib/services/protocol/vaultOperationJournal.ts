@@ -1,3 +1,5 @@
+import { Principal } from '@dfinity/principal';
+
 /**
  * Browser-side intent journal for collateral-pulling vault operations.
  *
@@ -60,7 +62,12 @@ export function normalizeVaultPullStatus(status: VaultPullStatus): VaultPullStat
 	} else if (request.AddMargin) {
 		request = { AddMargin: { ...request.AddMargin } };
 	}
-	return { ...status, active: [{ ...view, request, confirmed_wide_block_index: view.confirmed_wide_block_index ?? [] }] };
+	return {
+		...status,
+		active: [
+			{ ...view, request, confirmed_wide_block_index: view.confirmed_wide_block_index ?? [] }
+		]
+	};
 }
 
 function principalText(value: unknown): string {
@@ -98,10 +105,25 @@ export interface VaultPullAdapter<T> {
 	completed(view: VaultPullView): T;
 	/** A certified update reply may confirm the ACK directly. Older adapters fall back to status. */
 	acknowledge(operationId: bigint): Promise<bigint | void>;
+	/** Synchronous backend tombstone; never an approval or ledger transfer. */
+	cancel?(operationId: bigint, request: VaultPullRequest): Promise<bigint>;
 	/** Map only a definitive successful dispatch reply; undefined preserves journal reconciliation. */
 	resultFromDispatch?(reply: unknown, request: VaultPullRequest): T | undefined;
 	reconcileFromBlock?(operationId: bigint, blockIndex: bigint): Promise<void>;
 }
+
+export interface VaultPullRecoverySnapshot {
+	intent: VaultPullIntent | null;
+	status: VaultPullStatus;
+}
+export type VaultPullRecoveryReader = Pick<
+	VaultPullAdapter<unknown>,
+	'currentOwner' | 'assertCurrent' | 'getStatus'
+>;
+export type VaultPullCancellationAdapter = VaultPullRecoveryReader &
+	Pick<VaultPullAdapter<unknown>, 'cancel'>;
+const reviewedRawIntents = new WeakMap<VaultPullIntent, string>();
+const pendingVaultPullNotifications = new Set<string>();
 
 const STORAGE_PREFIX = 'rumi:vault-pull-operation:v1:';
 const NAT64_MAX = 18_446_744_073_709_551_615n;
@@ -125,29 +147,99 @@ export function vaultPullIntentKey(owner: string): string {
 	return `${STORAGE_PREFIX}${owner}`;
 }
 
-export function sameVaultPullRequest(a: VaultPullRequest, b: VaultPullRequest): boolean {
+function isNat64(value: unknown): value is bigint {
+	return typeof value === 'bigint' && value >= 0n && value <= NAT64_MAX;
+}
+function hasKeys(value: unknown, keys: string[]): value is Record<string, unknown> {
 	return (
-		JSON.stringify(a, (_key, value) => (typeof value === 'bigint' ? value.toString() : value)) ===
-		JSON.stringify(b, (_key, value) => (typeof value === 'bigint' ? value.toString() : value))
+		!!value &&
+		typeof value === 'object' &&
+		!Array.isArray(value) &&
+		Object.keys(value).sort().join(',') === [...keys].sort().join(',')
 	);
 }
-
+function isCollateralPrincipal(value: unknown): value is string {
+	if (typeof value !== 'string') return false;
+	try {
+		return Principal.fromText(value).toText() === value;
+	} catch {
+		return false;
+	}
+}
+function validRequest(request: unknown): request is VaultPullRequest {
+	if (hasKeys(request, ['OpenVault'])) {
+		const row = request.OpenVault;
+		return (
+			hasKeys(row, ['amount_e8s', 'collateral_type']) &&
+			isNat64(row.amount_e8s) &&
+			isCollateralPrincipal(row.collateral_type)
+		);
+	}
+	if (hasKeys(request, ['OpenVaultAndBorrow'])) {
+		const row = request.OpenVaultAndBorrow;
+		return (
+			hasKeys(row, ['amount_e8s', 'borrow_amount_e8s', 'collateral_type']) &&
+			isNat64(row.amount_e8s) &&
+			isNat64(row.borrow_amount_e8s) &&
+			isCollateralPrincipal(row.collateral_type)
+		);
+	}
+	if (hasKeys(request, ['AddMargin'])) {
+		const row = request.AddMargin;
+		return (
+			hasKeys(row, ['vault_id', 'amount_e8s']) && isNat64(row.vault_id) && isNat64(row.amount_e8s)
+		);
+	}
+	return false;
+}
+function canonicalRequest(request: VaultPullRequest): unknown[] {
+	if ('OpenVault' in request)
+		return [
+			'OpenVault',
+			request.OpenVault.collateral_type,
+			request.OpenVault.amount_e8s.toString()
+		];
+	if ('OpenVaultAndBorrow' in request)
+		return [
+			'OpenVaultAndBorrow',
+			request.OpenVaultAndBorrow.collateral_type,
+			request.OpenVaultAndBorrow.amount_e8s.toString(),
+			request.OpenVaultAndBorrow.borrow_amount_e8s.toString()
+		];
+	return [
+		'AddMargin',
+		request.AddMargin.vault_id.toString(),
+		request.AddMargin.amount_e8s.toString()
+	];
+}
+export function sameVaultPullRequest(a: VaultPullRequest, b: VaultPullRequest): boolean {
+	return (
+		validRequest(a) &&
+		validRequest(b) &&
+		JSON.stringify(canonicalRequest(a)) === JSON.stringify(canonicalRequest(b))
+	);
+}
 export function parseVaultPullIntent(raw: string | null): VaultPullIntent | null {
 	if (!raw) return null;
 	try {
-		const value = JSON.parse(raw, (_key, item) => {
-			if (typeof item === 'string' && /^\d+n$/.test(item)) return BigInt(item.slice(0, -1));
-			return item;
-		});
+		const value = JSON.parse(raw, (_key, item) =>
+			typeof item === 'string' && /^\d+n$/.test(item) ? BigInt(item.slice(0, -1)) : item
+		);
 		if (
 			value?.version !== 1 ||
 			typeof value.owner !== 'string' ||
+			!value.owner ||
 			typeof value.operationId !== 'string' ||
 			!/^\d+$/.test(value.operationId) ||
-			!value.request ||
-			typeof value.request !== 'object'
+			BigInt(value.operationId) <= 0n ||
+			BigInt(value.operationId) > NAT64_MAX ||
+			BigInt(value.operationId).toString() !== value.operationId ||
+			!Number.isSafeInteger(value.savedAt) ||
+			value.savedAt < 0 ||
+			!validRequest(value.request)
 		)
 			return null;
+		reviewedRawIntents.set(value, raw);
 		return value as VaultPullIntent;
 	} catch {
 		return null;
@@ -176,24 +268,51 @@ function readIntent(owner: string): VaultPullIntent | null {
 	return intent;
 }
 
+function sameIntent(a: VaultPullIntent, b: VaultPullIntent): boolean {
+	return (
+		a.version === b.version &&
+		a.owner === b.owner &&
+		a.operationId === b.operationId &&
+		a.savedAt === b.savedAt &&
+		sameVaultPullRequest(a.request, b.request)
+	);
+}
+function assertReviewedIntent(owner: string, intent: VaultPullIntent): void {
+	const expectedRaw = reviewedRawIntents.get(intent);
+	const raw = globalThis.localStorage.getItem(vaultPullIntentKey(owner));
+	const current = readIntent(owner);
+	if (
+		intent.owner !== owner ||
+		expectedRaw === undefined ||
+		raw !== expectedRaw ||
+		!current ||
+		!sameIntent(current, intent)
+	) {
+		throw new Error(
+			'The saved vault request changed after review. Refresh it before continuing; it remains held.'
+		);
+	}
+}
 function saveIntent(intent: VaultPullIntent): void {
-	globalThis.localStorage.setItem(vaultPullIntentKey(intent.owner), serializeIntent(intent));
+	const raw = serializeIntent(intent);
+	globalThis.localStorage.setItem(vaultPullIntentKey(intent.owner), raw);
 	const saved = readIntent(intent.owner);
 	if (
 		!saved ||
-		saved.operationId !== intent.operationId ||
-		!sameVaultPullRequest(saved.request, intent.request)
+		!sameIntent(saved, intent) ||
+		globalThis.localStorage.getItem(vaultPullIntentKey(intent.owner)) !== raw
 	) {
 		throw new Error(
 			'Could not persist the exact vault operation before approval. No approval was requested.'
 		);
 	}
+	reviewedRawIntents.set(intent, raw);
+	pendingVaultPullNotifications.add(intent.owner);
 }
-
-function clearIntent(owner: string, operationId: bigint): void {
-	const key = vaultPullIntentKey(owner);
-	const current = readIntent(owner);
-	if (current?.operationId === operationId.toString()) globalThis.localStorage.removeItem(key);
+function clearIntent(owner: string, intent: VaultPullIntent): void {
+	assertReviewedIntent(owner, intent);
+	globalThis.localStorage.removeItem(vaultPullIntentKey(owner));
+	pendingVaultPullNotifications.add(owner);
 }
 
 function getBrowserLockManager(): LockManager | undefined {
@@ -234,17 +353,26 @@ async function withCrossTabLock<T>(owner: string, run: () => Promise<T>): Promis
 			'This browser cannot safely lock vault operations across tabs. Use a browser with Web Locks enabled before continuing.'
 		);
 	}
-	return locks.request(
-		`rumi:vault-collateral-pull:${owner}`,
-		{ mode: 'exclusive', ifAvailable: true },
-		(lock) => {
-			if (!lock)
-				throw new Error(
-					'Another tab is already handling this wallet vault operation. Wait for it to finish, then refresh the vault view.'
-				);
-			return run();
-		}
-	);
+	let acquired = false;
+	return locks
+		.request(
+			`rumi:vault-collateral-pull:${owner}`,
+			{ mode: 'exclusive', ifAvailable: true },
+			(lock) => {
+				if (!lock)
+					throw new Error(
+						'Another tab is already handling this wallet vault operation. Wait for it to finish, then refresh the vault view.'
+					);
+				acquired = true;
+				return run();
+			}
+		)
+		.finally(() => {
+			// The request callback has settled and released the Web Lock. A save
+			// signal during approval would make the recovery banner contend with
+			// its own operation instead of discovering the newly saved request.
+			if (acquired && pendingVaultPullNotifications.delete(owner)) notifySubmittedVaultPull(owner);
+		});
 }
 
 /**
@@ -265,189 +393,206 @@ async function runVaultPullOperationLocked<T>(
 	owner: string,
 	request: VaultPullRequest,
 	adapter: VaultPullAdapter<T>,
-	expectedRecoveredOperationId?: bigint
+	expectedRecoveredOperationId?: bigint,
+	reviewedIntent?: VaultPullIntent
 ): Promise<T> {
-		const assertOwner = () => {
-			adapter.assertCurrent?.();
-			if (adapter.currentOwner() !== owner)
-				throw new Error(
-					'Wallet identity changed during the vault operation. The saved operation remains held for its original wallet.'
-				);
-		};
-		assertOwner();
-
-		const acknowledgeAndClear = async (operationId: bigint) => {
-			const acknowledgedThrough = await adapter.acknowledge(operationId);
-			assertOwner();
-			if (typeof acknowledgedThrough === 'bigint') {
-				if (acknowledgedThrough < operationId) throw new Error(`Vault operation ${operationId} ACK did not confirm completion. Its exact intent remains saved.`);
-			} else {
-				const acknowledged = await adapter.getStatus();
-				assertOwner();
-				if (acknowledged.acknowledged_through < operationId) throw new Error(`Vault operation ${operationId} completed, but ACK is not yet confirmed. Its exact intent remains saved.`);
-			}
-			clearIntent(owner, operationId);
-		};
-
-		let intent = readIntent(owner);
-		const status = await adapter.getStatus();
-		assertOwner();
-		const active = status.active[0];
-
-		if (intent) {
-			const operationId = BigInt(intent.operationId);
-			if (status.acknowledged_through >= operationId) {
-				if (expectedRecoveredOperationId === operationId) {
-					throw new Error(
-						`Vault operation ${operationId} was acknowledged during recovery. Refresh vault data before starting another request.`
-					);
-				}
-				clearIntent(owner, operationId);
-				intent = null;
-			} else if (active) {
-				validateActive(active, intent);
-			} else if (operationId !== status.acknowledged_through + 1n) {
-				throw new Error(
-					`Saved vault operation ${operationId} no longer matches backend sequence ${status.acknowledged_through}. It remains held for recovery.`
-				);
-			}
-		}
-		if (expectedRecoveredOperationId !== undefined) {
-			if (!intent || BigInt(intent.operationId) !== expectedRecoveredOperationId || !active) {
-				throw new Error(
-					`Recovered vault operation ${expectedRecoveredOperationId} no longer has its active backend record. Its exact intent remains held.`
-				);
-			}
-			validateActive(active, intent);
-			if (
-				!('PullConfirmed' in active.phase || 'VaultCredited' in active.phase || 'Completed' in active.phase)
-			) {
-				throw new Error(
-					`Vault operation ${expectedRecoveredOperationId} is not in a verified post-pull phase. Its exact intent remains held.`
-				);
-			}
-		}
-
-		if (!intent) {
-			if (status.acknowledged_through >= NAT64_MAX) {
-				throw new Error(
-					'The backend vault operation sequence is exhausted. No new operation was approved or dispatched.'
-				);
-			}
-			if (active) {
-				intent = {
-					version: 1,
-					owner,
-					operationId: active.operation_id.toString(),
-					request: active.request,
-					savedAt: Date.now()
-				};
-			} else {
-				intent = {
-					version: 1,
-					owner,
-					operationId: (status.acknowledged_through + 1n).toString(),
-					request,
-					savedAt: Date.now()
-				};
-			}
-			saveIntent(intent);
-		}
-
-		const operationId = BigInt(intent.operationId);
-		let currentStatus = status;
-		let currentView = currentStatus.active[0];
-		if (currentView) validateActive(currentView, intent);
-		if (!sameVaultPullRequest(request, intent.request)) {
+	const assertOwner = () => {
+		adapter.assertCurrent?.();
+		if (reviewedIntent) assertReviewedIntent(owner, reviewedIntent);
+		if (adapter.currentOwner() !== owner)
 			throw new Error(
-				`Vault operation ${operationId} is still bound to different arguments. It remains held; restore the exact saved request before retrying. No approval or dispatch was made for this action.`
+				'Wallet identity changed during the vault operation. The saved operation remains held for its original wallet.'
+			);
+	};
+	assertOwner();
+
+	const acknowledgeAndClear = async (expected: VaultPullIntent) => {
+		const operationId = BigInt(expected.operationId);
+		const acknowledgedThrough = await adapter.acknowledge(operationId);
+		assertOwner();
+		if (typeof acknowledgedThrough === 'bigint') {
+			if (acknowledgedThrough < operationId)
+				throw new Error(
+					`Vault operation ${operationId} ACK did not confirm completion. Its exact intent remains saved.`
+				);
+		} else {
+			const acknowledged = await adapter.getStatus();
+			assertOwner();
+			if (acknowledged.acknowledged_through < operationId)
+				throw new Error(
+					`Vault operation ${operationId} completed, but ACK is not yet confirmed. Its exact intent remains saved.`
+				);
+		}
+		clearIntent(owner, expected);
+	};
+
+	let intent = readIntent(owner);
+	const status = await adapter.getStatus();
+	assertOwner();
+	const active = status.active[0];
+
+	if (intent) {
+		const operationId = BigInt(intent.operationId);
+		if (status.acknowledged_through >= operationId) {
+			if (expectedRecoveredOperationId === operationId || reviewedIntent) {
+				throw new Error(
+					`Vault operation ${operationId} was acknowledged during recovery. Refresh vault data before starting another request.`
+				);
+			}
+			clearIntent(owner, intent);
+			intent = null;
+		} else if (active) {
+			validateActive(active, intent);
+		} else if (operationId !== status.acknowledged_through + 1n) {
+			throw new Error(
+				`Saved vault operation ${operationId} no longer matches backend sequence ${status.acknowledged_through}. It remains held for recovery.`
 			);
 		}
+	}
+	if (expectedRecoveredOperationId !== undefined) {
+		if (!intent || BigInt(intent.operationId) !== expectedRecoveredOperationId || !active) {
+			throw new Error(
+				`Recovered vault operation ${expectedRecoveredOperationId} no longer has its active backend record. Its exact intent remains held.`
+			);
+		}
+		validateActive(active, intent);
+		if (
+			!(
+				'PullConfirmed' in active.phase ||
+				'VaultCredited' in active.phase ||
+				'Completed' in active.phase
+			)
+		) {
+			throw new Error(
+				`Vault operation ${expectedRecoveredOperationId} is not in a verified post-pull phase. Its exact intent remains held.`
+			);
+		}
+	}
 
-		if (currentView && terminal(currentView)) {
-			if ('Completed' in currentView.phase) {
-				const result = adapter.completed(currentView);
-				await acknowledgeAndClear(operationId);
+	if (!intent) {
+		if (reviewedIntent)
+			throw new Error(
+				'The reviewed operation is no longer saved. Refresh before starting another request.'
+			);
+		if (status.acknowledged_through >= NAT64_MAX) {
+			throw new Error(
+				'The backend vault operation sequence is exhausted. No new operation was approved or dispatched.'
+			);
+		}
+		if (active) {
+			intent = {
+				version: 1,
+				owner,
+				operationId: active.operation_id.toString(),
+				request: active.request,
+				savedAt: Date.now()
+			};
+		} else {
+			intent = {
+				version: 1,
+				owner,
+				operationId: (status.acknowledged_through + 1n).toString(),
+				request,
+				savedAt: Date.now()
+			};
+		}
+		saveIntent(intent);
+	}
+
+	const operationId = BigInt(intent.operationId);
+	let currentStatus = status;
+	let currentView = currentStatus.active[0];
+	if (currentView) validateActive(currentView, intent);
+	if (!sameVaultPullRequest(request, intent.request)) {
+		throw new Error(
+			`Vault operation ${operationId} is still bound to different arguments. It remains held; restore the exact saved request before retrying. No approval or dispatch was made for this action.`
+		);
+	}
+
+	if (currentView && terminal(currentView)) {
+		if ('Completed' in currentView.phase) {
+			const result = adapter.completed(currentView);
+			await acknowledgeAndClear(intent);
+			return result;
+		}
+		// SafeNoEffect can be retried with the same ID and exact request. Do not
+		// ACK it here, because doing so would make that exact retry stale.
+	}
+
+	if (currentView && 'Submitted' in currentView.phase) {
+		notifySubmittedVaultPull(owner);
+		throw new Error(heldMessage(currentView));
+	}
+
+	if (
+		!currentView ||
+		'Prepared' in currentView.phase ||
+		'SafeNoEffect' in currentView.phase ||
+		'PullConfirmed' in currentView.phase ||
+		'VaultCredited' in currentView.phase
+	) {
+		if (!currentView || 'Prepared' in currentView.phase || 'SafeNoEffect' in currentView.phase) {
+			assertOwner();
+			const approval = await adapter.approve(intent.request);
+			assertOwner();
+			if (!approval.success) {
+				throw new Error(
+					approval.error ||
+						'Collateral approval failed. The exact vault operation remains saved for safe retry.'
+				);
+			}
+		}
+		let dispatchReply: unknown;
+		let dispatchSucceeded = false;
+		try {
+			assertOwner();
+			adapter.beforeDispatch?.();
+			dispatchReply = await adapter.dispatch(operationId, intent.request);
+			assertOwner();
+			dispatchSucceeded = true;
+		} catch {
+			// Always read the wallet-authenticated backend journal after a lost or
+			// typed reply. Its phase, rather than transport behavior, controls the
+			// next step and whether this intent can be retired.
+		}
+		if (dispatchSucceeded && adapter.resultFromDispatch) {
+			const result = adapter.resultFromDispatch(dispatchReply, intent.request);
+			if (result !== undefined) {
+				await acknowledgeAndClear(intent);
 				return result;
 			}
-			// SafeNoEffect can be retried with the same ID and exact request. Do not
-			// ACK it here, because doing so would make that exact retry stale.
 		}
+	}
 
-		if (currentView && 'Submitted' in currentView.phase) {
-			notifySubmittedVaultPull(owner);
-			throw new Error(heldMessage(currentView));
-		}
-
-		if (
-			!currentView ||
-			'Prepared' in currentView.phase ||
-			'SafeNoEffect' in currentView.phase ||
-			'PullConfirmed' in currentView.phase ||
-			'VaultCredited' in currentView.phase
-		) {
-			if (!currentView || 'Prepared' in currentView.phase || 'SafeNoEffect' in currentView.phase) {
-				assertOwner();
-				const approval = await adapter.approve(intent.request);
-				assertOwner();
-				if (!approval.success) {
-					throw new Error(
-						approval.error ||
-							'Collateral approval failed. The exact vault operation remains saved for safe retry.'
-					);
-				}
-			}
-			let dispatchReply: unknown;
-			let dispatchSucceeded = false;
-			try {
-				assertOwner();
-				adapter.beforeDispatch?.();
-				dispatchReply = await adapter.dispatch(operationId, intent.request);
-				assertOwner();
-				dispatchSucceeded = true;
-			} catch {
-				// Always read the wallet-authenticated backend journal after a lost or
-				// typed reply. Its phase, rather than transport behavior, controls the
-				// next step and whether this intent can be retired.
-			}
-			if (dispatchSucceeded && adapter.resultFromDispatch) {
-				const result = adapter.resultFromDispatch(dispatchReply, intent.request);
-				if (result !== undefined) {
-					await acknowledgeAndClear(operationId);
-					return result;
-				}
-			}
-		}
-
-		assertOwner();
-		currentStatus = await adapter.getStatus();
-		assertOwner();
-		currentView = currentStatus.active[0];
-		if (!currentView) {
-			if (currentStatus.acknowledged_through >= operationId) {
-				clearIntent(owner, operationId);
-				throw new Error(
-					`Vault operation ${operationId} was already acknowledged; refresh vault data before starting another request.`
-				);
-			}
+	assertOwner();
+	currentStatus = await adapter.getStatus();
+	assertOwner();
+	currentView = currentStatus.active[0];
+	if (!currentView) {
+		if (currentStatus.acknowledged_through >= operationId) {
+			clearIntent(owner, intent);
 			throw new Error(
-				`Vault operation ${operationId} has no backend status yet. Its exact intent remains saved; retry only the same arguments.`
+				`Vault operation ${operationId} was already acknowledged; refresh vault data before starting another request.`
 			);
 		}
-		validateActive(currentView, intent);
-
-		if ('Submitted' in currentView.phase) notifySubmittedVaultPull(owner);
-		if (!terminal(currentView)) throw new Error(heldMessage(currentView));
-		if ('SafeNoEffect' in currentView.phase) {
-			const message = currentView.phase.SafeNoEffect.message;
-			await acknowledgeAndClear(operationId);
-			throw new Error(message || `Vault operation ${operationId} completed with no effect.`);
-		}
-
-		const result = adapter.completed(currentView);
-		await acknowledgeAndClear(operationId);
-		return result;
+		throw new Error(
+			`Vault operation ${operationId} has no backend status yet. Its exact intent remains saved; retry only the same arguments.`
+		);
 	}
+	validateActive(currentView, intent);
+
+	if ('Submitted' in currentView.phase) notifySubmittedVaultPull(owner);
+	if (!terminal(currentView)) throw new Error(heldMessage(currentView));
+	if ('SafeNoEffect' in currentView.phase) {
+		const message = currentView.phase.SafeNoEffect.message;
+		await acknowledgeAndClear(intent);
+		throw new Error(message || `Vault operation ${operationId} completed with no effect.`);
+	}
+
+	const result = adapter.completed(currentView);
+	await acknowledgeAndClear(intent);
+	return result;
+}
 
 /** Reconcile one explicitly supplied candidate for the currently saved Submitted operation. */
 export async function recoverSubmittedVaultPullFromBlock<T>(args: {
@@ -457,15 +602,20 @@ export async function recoverSubmittedVaultPullFromBlock<T>(args: {
 }): Promise<T> {
 	const { owner, blockIndex, adapter } = args;
 	if (blockIndex < 0n || blockIndex > NAT64_MAX) {
-		throw new Error('Enter a nonnegative ledger block index within the supported range. The saved operation remains held.');
+		throw new Error(
+			'Enter a nonnegative ledger block index within the supported range. The saved operation remains held.'
+		);
 	}
 	const reconcile = adapter.reconcileFromBlock;
-	if (!reconcile) throw new Error('Exact-block recovery is unavailable. The saved operation remains held.');
+	if (!reconcile)
+		throw new Error('Exact-block recovery is unavailable. The saved operation remains held.');
 	return withCrossTabLock(owner, async () => {
 		const assertOwner = () => {
 			adapter.assertCurrent?.();
 			if (adapter.currentOwner() !== owner)
-				throw new Error('Wallet identity changed during recovery. The saved operation remains held for its original wallet.');
+				throw new Error(
+					'Wallet identity changed during recovery. The saved operation remains held for its original wallet.'
+				);
 		};
 		assertOwner();
 		let intent = readIntent(owner);
@@ -473,9 +623,10 @@ export async function recoverSubmittedVaultPullFromBlock<T>(args: {
 		assertOwner();
 		const active = before.active[0];
 		if (!active || !('Submitted' in active.phase))
-			throw new Error(`There is no active Submitted vault operation to recover. Refresh its backend status.`);
-		if (active.confirmed_wide_block_index?.[0] !== undefined)
-			throw new Error(heldMessage(active));
+			throw new Error(
+				`There is no active Submitted vault operation to recover. Refresh its backend status.`
+			);
+		if (active.confirmed_wide_block_index?.[0] !== undefined) throw new Error(heldMessage(active));
 		if (!intent) {
 			intent = {
 				version: 1,
@@ -501,12 +652,122 @@ export async function recoverSubmittedVaultPullFromBlock<T>(args: {
 		if (
 			!recovered ||
 			recovered.operation_id !== operationId ||
-			!('PullConfirmed' in recovered.phase || 'VaultCredited' in recovered.phase || 'Completed' in recovered.phase)
+			!(
+				'PullConfirmed' in recovered.phase ||
+				'VaultCredited' in recovered.phase ||
+				'Completed' in recovered.phase
+			)
 		) {
 			if (reconcileError) throw reconcileError;
-			throw new Error(`Block ${blockIndex} did not move vault operation ${operationId} past Submitted. Its exact intent remains saved.`);
+			throw new Error(
+				`Block ${blockIndex} did not move vault operation ${operationId} past Submitted. Its exact intent remains saved.`
+			);
 		}
 		validateActive(recovered, intent);
 		return runVaultPullOperationLocked(owner, intent.request, adapter, operationId);
+	});
+}
+
+function assertRecoveryOwner(owner: string, adapter: VaultPullRecoveryReader): void {
+	adapter.assertCurrent?.();
+	if (!owner || adapter.currentOwner() !== owner) {
+		throw new Error(
+			'Wallet identity changed during recovery. The saved operation remains held for its original wallet.'
+		);
+	}
+}
+
+/** Read only: mismatched valid records remain visible for an explicit review. */
+export async function inspectVaultPullRecovery(args: {
+	owner: string;
+	adapter: VaultPullRecoveryReader;
+}): Promise<VaultPullRecoverySnapshot> {
+	const { owner, adapter } = args;
+	return withCrossTabLock(owner, async () => {
+		assertRecoveryOwner(owner, adapter);
+		const raw = globalThis.localStorage.getItem(vaultPullIntentKey(owner));
+		const intent = readIntent(owner);
+		const status = await adapter.getStatus();
+		assertRecoveryOwner(owner, adapter);
+		if (globalThis.localStorage.getItem(vaultPullIntentKey(owner)) !== raw) {
+			throw new Error(
+				'The saved vault request changed while checking status. Refresh it before continuing.'
+			);
+		}
+		return { intent, status };
+	});
+}
+
+/** Retire only this reviewed exact intent, after a backend sequence fence. */
+export async function cancelSavedVaultPullOperation(args: {
+	owner: string;
+	intent: VaultPullIntent;
+	adapter: VaultPullCancellationAdapter;
+}): Promise<bigint> {
+	const { owner, intent, adapter } = args;
+	return withCrossTabLock(owner, async () => {
+		const assertCurrent = () => {
+			assertRecoveryOwner(owner, adapter);
+			assertReviewedIntent(owner, intent);
+		};
+		assertCurrent();
+		const cancel = adapter.cancel;
+		if (!cancel)
+			throw new Error(
+				'Safe backend request retirement is unavailable. The saved request remains held.'
+			);
+		const operationId = BigInt(intent.operationId);
+		const status = await adapter.getStatus();
+		assertCurrent();
+		if (status.acknowledged_through < operationId) {
+			const active = status.active[0];
+			if (active) {
+				validateActive(active, intent);
+				if (!('Prepared' in active.phase || 'SafeNoEffect' in active.phase)) {
+					throw new Error(
+						'This vault operation may have transferred collateral or completed. Resume/reconcile it; it cannot be cancelled.'
+					);
+				}
+			} else if (operationId !== status.acknowledged_through + 1n) {
+				throw new Error(
+					'Saved vault operation does not match the backend sequence. It remains held.'
+				);
+			}
+		}
+		let retired: bigint;
+		try {
+			retired = await cancel(operationId, intent.request);
+		} catch (cancelError) {
+			// The update may have committed. Reconcile once, never resend or
+			// mistake empty active status for a tombstone.
+			assertCurrent();
+			const after = await adapter.getStatus();
+			assertCurrent();
+			if (!isNat64(after.acknowledged_through) || after.acknowledged_through < operationId)
+				throw cancelError;
+			retired = after.acknowledged_through;
+		}
+		assertCurrent();
+		if (!isNat64(retired) || retired < operationId) {
+			throw new Error(
+				'Backend retirement did not cover this request. Its exact intent remains saved.'
+			);
+		}
+		clearIntent(owner, intent);
+		return retired;
+	});
+}
+
+/** Explicit continuation of the reviewed ID/arguments, never a fresh request. */
+export async function resumeSavedVaultPullOperation<T>(args: {
+	owner: string;
+	intent: VaultPullIntent;
+	adapter: VaultPullAdapter<T>;
+}): Promise<T> {
+	const { owner, intent, adapter } = args;
+	return withCrossTabLock(owner, async () => {
+		assertRecoveryOwner(owner, adapter);
+		assertReviewedIntent(owner, intent);
+		return runVaultPullOperationLocked(owner, intent.request, adapter, undefined, intent);
 	});
 }

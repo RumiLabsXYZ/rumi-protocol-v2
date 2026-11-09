@@ -1959,6 +1959,12 @@ pub struct VaultOperationIdArg {
     pub operation_id: u64,
 }
 
+#[derive(CandidType, Clone, Debug, Deserialize, Serialize)]
+pub struct VaultOperationCancelArg {
+    pub operation_id: u64,
+    pub request: VaultCollateralPullRequest,
+}
+
 fn completed_compound_operation_response(
     journal: &VaultCollateralPullJournal,
     operation_id: u64,
