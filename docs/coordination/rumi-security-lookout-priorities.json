@@ -5,7 +5,7 @@
       "title": "Customer impact: restore or safely cancel saved borrowing request",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Two fresh reviewers inspect frozen source 3f88ebca and the focused evidence. After confirmed findings are resolved, Dorian builds exact backend/frontend artifacts, preserves state/assets/auth, deploys backend before UI activation and verifies readback. Customer borrowing/cancellation is not executed by agents.",
+      "nextAction": "Miles fixes the confirmed queued-session capture race by binding the wallet before queuing and tests same-owner/session changes. Re-freeze the source for two fresh reviews; only then Dorian builds and deploys exact artifacts with retained state/assets/auth checks. No customer financial operation.",
       "cardIds": [
         "SEC-12"
       ]

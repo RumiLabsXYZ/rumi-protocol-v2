@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-12",
-      "state": "Review",
+      "state": "In progress",
       "owner": "Ellis case; Miles source; Dorian release",
       "scope": "Restore or safely cancel a saved borrowing request and unblock ckSOL collateral",
-      "evidenceText": "Frozen source 3f88ebca is pushed on the deployed SEC11 base. Owner-only synchronous cancellation fences the exact next ID in the durable existing watermark/private journal; uncertain, Submitted and post-pull phases cannot cancel. Restore preserves exact raw values and requires separate Continue; cancel has confirmation. Focused tests passed: journal38, API16, components8, Rust4, canonical1; canonical generation matches. Global typecheck retains 30 pre-existing errors/66 warnings with no added diagnostics. Root real-Chrome desktop/390px synthetic QA passed after fixing observed stale notices/mobile clipping; actual ckSOL nine-decimal/full-precision fixtures verified. Two fresh independent reviews pending, then Dorian exact build/deployment/readback. No customer transaction or cancellation executed; caller-scoped status is never inferred from an operator read.",
+      "evidenceText": "Frozen candidate 3f88ebca passed 67 focused checks, canonical generation and synthetic Chrome desktop/mobile QA. Both independent reviewers found one confirmed blocker: a queued Continue could capture a replacement wallet session after waiting, because the recovery context was created inside the queue. Miles is pinning the click-time context before the wait and adding a queued same-owner/session-change regression. Reviewers found no additional backend cancellation/replay blocker. No production build or deployment will start until the new pin passes fresh review. Caller status remains owner-scoped; no customer financial action, cancellation or new message has been invoked.",
       "evidenceLinks": [
         {
           "title": "Frozen saved-request recovery source and checks",
