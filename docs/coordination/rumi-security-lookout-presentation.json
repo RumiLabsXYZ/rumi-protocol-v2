@@ -1,6 +1,6 @@
 {
-  "summary": "SOL mint and owner credit are confirmed; XRP withdrawal/address fixes are live. New SEC12 borrowing recovery is active: exact saved-request restore and safely fenced cancellation, preserving unknown/post-pull outcomes. Caller-scoped status must be read from the connected owner, not an operator. Miles owns source; Dorian owns release; Ellis owns the case. No customer financial execution or new message. Preserve SEC11 state and separate disabled ICP reserve.",
-  "plainSummary": "The customer\u2019s SOL has minted and both XRP fixes are live. A saved borrowing request now blocks use of ckSOL collateral; the next fix will let him restore it or safely cancel it. The existing team is implementing and testing that recovery before release, without submitting a loan or moving his funds.",
+  "summary": "SEC12 restore/cancel source 3f88ebca is pushed; 67 focused checks, canonical generation and real Chrome synthetic desktop/mobile QA passed. Two independent reviews precede exact Dorian release. Owner-auth cancellation uses a durable ID fence; unknown/post-pull outcomes remain held. Existing SOL mint and XRP deployments remain verified. No customer financial invocation or new message; preserve SEC11 schema and disabled ICP reserve boundary.",
+  "plainSummary": "The recovery fix now passes focused tests and desktop/mobile browser checks using synthetic requests. It lets the customer review the exact saved amounts or request safe cancellation; independent reviews and deployment are next. His SOL mint remains complete, and no loan or transfer has been submitted for him.",
   "glossary": [
     {
       "term": "Stability Pool",

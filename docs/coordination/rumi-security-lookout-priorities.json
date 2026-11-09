@@ -5,7 +5,7 @@
       "title": "Customer impact: restore or safely cancel saved borrowing request",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Miles implements exact saved-request restore and owner-authenticated, durably fenced cancellation. Preserve uncertain/post-pull receipts and cross-tab/wallet/storage protection; test the next ckSOL collateral request with fixtures. Dorian reviews exact integration and publishes after focused checks and independent review. Ellis maintains this case. No customer financial operation or message.",
+      "nextAction": "Two fresh reviewers inspect frozen source 3f88ebca and the focused evidence. After confirmed findings are resolved, Dorian builds exact backend/frontend artifacts, preserves state/assets/auth, deploys backend before UI activation and verifies readback. Customer borrowing/cancellation is not executed by agents.",
       "cardIds": [
         "SEC-12"
       ]
