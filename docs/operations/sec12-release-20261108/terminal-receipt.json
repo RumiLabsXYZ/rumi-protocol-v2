@@ -1,0 +1,28 @@
+{
+  "source": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+  "releasePacketCommit": "6be460d4",
+  "backendModule": "2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13",
+  "backendRunning": true,
+  "candidateCandidMatches": true,
+  "previousApiCompatible": true,
+  "backendSettingsPreserved": true,
+  "freshStoppedSnapshotVerified": true,
+  "otherNineSnapshotsPreserved": true,
+  "frontendVersion": "1794195655486",
+  "frontendKeys": 3687,
+  "frontendEncodings": 3881,
+  "stageBatch": 684,
+  "activationBatch": 685,
+  "stageServedChecks": 305,
+  "finalCanisterServedChecks": 9,
+  "primaryDomainServedChecks": 5,
+  "servedFailures": 0,
+  "retainedState": {
+    "byteEqualProjections": 10,
+    "preinstallReconciledProjections": 1,
+    "fixedConfigurationPreserved": true,
+    "qualification": "One actual XRP claim transition predates installation; no claim of 11 byte-equal reads or external payout finality."
+  },
+  "customerContinueCancelAckOrFinancialActions": false,
+  "verifiedUtc": "2026-11-09T04:02:41.264475+00:00"
+}

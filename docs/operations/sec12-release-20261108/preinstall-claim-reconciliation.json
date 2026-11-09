@@ -1,0 +1,9 @@
+{
+  "recordCountsEqual": true,
+  "idsEqual": true,
+  "oneRecordChanged": true,
+  "exactOneFeeDelta": true,
+  "newHashInOldStoppedSnapshot": true,
+  "oldHashInOldStoppedSnapshot": false,
+  "snapshotModuleIsOldB815": true
+}

@@ -1,0 +1,57 @@
+{
+  "host": "app.rumiprotocol.com",
+  "verifiedUtc": "2026-11-09T04:01:32.190Z",
+  "results": [
+    {
+      "key": "/",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "676147db04bf145c5e6cdd229823c0fd70e314e6a556058c7b1aab5e6fc68640",
+      "expectedSha256": "676147db04bf145c5e6cdd229823c0fd70e314e6a556058c7b1aab5e6fc68640",
+      "pass": true
+    },
+    {
+      "key": "/_app/version.json",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 27,
+      "sha256": "e60a769b7dc12e044a66938d8f8e861d8a8584edc20d789f00128a9108af61e1",
+      "expectedSha256": "e60a769b7dc12e044a66938d8f8e861d8a8584edc20d789f00128a9108af61e1",
+      "pass": true
+    },
+    {
+      "key": "/",
+      "requestedEncoding": "gzip",
+      "status": 200,
+      "servedEncoding": "gzip",
+      "bytes": 644,
+      "sha256": "55c5d550b153a58a14965ac640c8f8450e2ec1fcee438e30f09434251e3735ea",
+      "expectedSha256": "55c5d550b153a58a14965ac640c8f8450e2ec1fcee438e30f09434251e3735ea",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ii-alternative-origins",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 385,
+      "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "expectedSha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ic-domains",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 58,
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "expectedSha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "pass": true
+    }
+  ],
+  "allPassed": true
+}
