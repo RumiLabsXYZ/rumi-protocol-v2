@@ -603,8 +603,10 @@ private static async refreshVaultData(): Promise<void> {
 
     /** Explicit continuation of reviewed raw values; never reconstruct a new loan from rounded UI numbers. */
     static async resumeSavedVaultCollateralPull(intent: VaultPullIntent): Promise<VaultOperationResult> {
+      // Bind the click before the queue can yield, including same-owner reconnects.
+      const { ctx } = ApiClient.vaultPullRecoveryContext(intent.owner);
       return ApiClient.executeSequentialOperation(async () => {
-        const { ctx } = ApiClient.vaultPullRecoveryContext(intent.owner);
+        assertActionBoundContextCurrent(ctx);
         return ApiClient.runVaultCollateralPull(intent.request, ctx, undefined, undefined, intent);
       }, undefined, { refreshBefore: false, refreshAfter: false });
     }

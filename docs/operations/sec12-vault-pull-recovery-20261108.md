@@ -72,9 +72,18 @@ No customer status or intent is inferred from an operator call.
 - Canonical bin Candid check with `self_check` and regeneration: **1 passed**,
   exit 0; canonical declarations script and DID-copy comparison exit 0. Only the
   cancellation argument record and method are added to the public contract.
-- Real ApiClient adapter plus existing standard ICRC-2 path filter: **16 passed**.
+- Real ApiClient adapter plus existing standard ICRC-2 path filter: **18 passed**.
   Includes zero-argument status, caller-switch/unavailable-status holds, metadata
   retirement without approval/dispatch, and exact raw ckSOL/borrow continuation.
+  Round-one independent reviews found one queue-session race: Continue captured
+  its context only after waiting for the sequential-operation queue. Two real
+  queue regressions first reproduced a successful stale mocked loan result
+  after same-owner reconnect/provider round-trip. The fix captures the context
+  synchronously before enqueueing and checks it before queued actor access.
+  Both now prove zero actor/approval/dispatch/ACK calls and unchanged saved bytes.
+  Backend, interface and UI evidence above is reused because those files did not
+  change in this focused correction. Fresh independent review remains required
+  for the corrected candidate before release.
 - Mounted recovery components: **8 passed** (four existing Oisy consent/session,
   four saved-request/precision/confirmation/next-notice cases). No test moves funds.
 - Svelte parsing succeeds. Project typecheck remains exit 1 with **30 errors,

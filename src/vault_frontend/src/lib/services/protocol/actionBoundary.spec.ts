@@ -1123,6 +1123,42 @@ describe('saved request recovery adapter', () => {
     expect(sent.operation_id).toBe(1n);
     expect(sent.collateral_type[0].toText()).toBe(CANISTER_IDS.CKSOL_LEDGER);
   });
+  it.each(['same-owner reconnect', 'provider round-trip'])('rejects an old Continue click after queued %s', async (transition) => {
+    const original = seed();
+    const snapshot = await ApiClient.getVaultPullRecovery();
+    vi.useFakeTimers();
+    try {
+      let release!: () => void;
+      const blocking = ApiClient.executeSequentialOperation(() => new Promise<void>(resolve => {
+        release = resolve;
+      }), undefined, { refreshBefore: false, refreshAfter: false });
+      mocks.getActor.mockClear();
+      const pending = ApiClient.resumeSavedVaultCollateralPull(snapshot!.intent!);
+      // Attach immediately so a rejected queued action is never unhandled.
+      const outcome = pending.then(value => value, error => error);
+      expect(mocks.getActor).not.toHaveBeenCalled();
+      if (transition === 'same-owner reconnect') {
+        setLivePrincipal(null);
+        setLivePrincipal(PRINCIPAL_A);
+      } else {
+        currentWalletType.set(WALLET_TYPES.OISY);
+        currentWalletType.set(WALLET_TYPES.PLUG);
+      }
+      walletSessionGeneration.update(value => value + 1);
+      release();
+      await blocking;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await outcome).toBeInstanceOf(StaleActionSessionError);
+      expect(mocks.getActor).not.toHaveBeenCalled();
+      expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+      expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
+      expect(backendActor.ack_vault_operation).not.toHaveBeenCalled();
+      expect(localStorage.getItem(key)).toBe(original);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('holds the original browser record when the authenticated status is unavailable', async () => {
     const original = seed();
     const snapshot = await ApiClient.getVaultPullRecovery();
