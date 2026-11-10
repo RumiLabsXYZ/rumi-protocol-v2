@@ -4,7 +4,7 @@ Reviewer and accountable release owner: **Dorian**. Source owner: **Adrian**. RO
 
 ## Decision
 
-**PASS for bounded source/artifact preparation. HOLD installation and automatic activation.** No confirmed blocking source finding remains in the reviewed scope. This review performs no customer action, custody transfer, stop/start, installation or frontend publication. It is not deployment authority or evidence of actual settlement/adoption. Merritt can assess this exact candidate without another source-research campaign.
+**PASS for bounded source/artifact preparation. HOLD installation and automatic activation.** No confirmed blocking source finding remains in the reviewed scope. This review performs no customer action, custody transfer, stop/start, installation or frontend publication. It is not deployment authority or evidence of actual settlement/adoption. Merritt has accepted this exact source/artifact preparation. No repeat source review, tests or build is required. Deployment, automatic activation and financial execution remain held pending Rob’s exact release decision.
 
 Frozen source `42478174029e6edb54e26578bebfe79a25f576bc`, reconciled packet `b16a87f8a10a978ef0e759d131f96c5a5d5ab229`. Deployed SEC12 `f1d2e77e` is an ancestor; this review freshly read its backend Running on `2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13`. All 17 recorded source identity proofs were independently compared to Git blobs. Adoption code is unchanged from reviewed `e979cd69`; SEC12 state, cancellation/watermark, vault admission and saved-request services/UI are retained. Dispatcher/API additions coexist; canonical combined bindings were regenerated. November 7 artifacts remain superseded and must not be installed.
 
@@ -34,8 +34,106 @@ Code section: **8,880,660 bytes**, below the unchanged **10,223,616-byte project
 
 ## Remaining limits and next decision
 
-The next deliverable is Merritt's decision on this exact preparation, then any separately authorized release action through the existing stop/drain/snapshot preservation and additive frontend stage/activate procedure. At that future checkpoint, re-read live module/settings/controller, exact claim/vault/owner/debt/interest/custody, vault158 record, SEC11/SEC12 journals, current snapshot inventory and frontend assets/auth. Current byte/state drift must be reconciled, not overwritten. Those are the already accepted release controls, not a new test campaign. No replacement executable/publisher that could mutate production was dispatched here.
+Merritt accepted source/artifact preparation on November 10. The next decision
+is Rob’s authorization of the exact release below, including its automatic
+financial behavior. His automatic-adoption preference is already settled; do
+not request a new repayment, owner payout or preference decision. Season 2
+accounting remains higher priority, and this packet adds no build/review work.
+
+## Exact release decision for Rob — HELD
+
+Proposed authorization: upgrade the existing mainnet backend
+`tfesu-vyaaa-aaaap-qrd7a-cai`, using `rumi_identity`, to the frozen source and
+artifacts above; activate the matching frontend assets on existing
+`tcfua-yaaaa-aaaap-qrd7q-cai` through the additive staged publication procedure.
+Do not create/reinstall canisters, change controllers/settings, or deploy the
+whole stack. Use only the November 10 SEC12-composed artifacts, never the
+historical November 7 upload/bundle.
+
+**Backend installation itself registers the hourly and ten-second automatic
+checks. It authorizes the eventual verified escrow-to-default-account sweep and
+same-vault ICP adoption described below; it is not an inert installation with
+a separate later activation toggle.** The automatic happy path needs no further
+owner action after the actual payout. All installation/activation/financial
+holds remain in place until this exact decision is approved.
+
+### Frozen inputs
+
+The source, raw/optimized/upload bytes and hashes are in the artifact table
+above. Additional exact pins:
+
+| Input | SHA256 |
+| --- | --- |
+| Canonical/embedded backend Candid | `43da24f0341ca8fe52837071020e910f9ff3ecdef83a04f0dbc8f6e3033334db` |
+| November 10 frontend manifest, 740 files | `79e75bd3d0f6016b4d4ae968a83d79b6b558dcf35828c595aad0b6e96afac6a3` |
+| Upgrade args below | `c6b21cbd1abc383aa85b6f2f821cd35c75a5a60597189e9b79ca296add4634c2` |
+
+Pinned [upgrade args](evidence/vault51-dorian-review-20261110/upgrade-args.did)
+are `Upgrade` with `mode = null`, preserving the existing mode. The description
+explicitly states automatic timer registration. The upload is the already built
+`backend-optimized.wasm.gz`, not a recipe rebuild. Prior deployed source/module
+are `f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff` /
+`2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13`.
+These are recorded baselines, not a claim of a new live read in this update.
+
+### Authorized sequence if Rob approves
+
+1. Re-read current module/settings/controllers and frontend inventory/permissions,
+   then privately capture exact claim/vault/owner/debt/interest/custody, completed
+   vault158 record, SEC11/SEC12 journals, retained payouts and processing/reserve
+   holds. Reconcile actual drift before overwriting anything. Reuse valid source,
+   build and review evidence; do not rebuild or repeat a review campaign.
+2. Stage only the matching new frontend asset keys through the existing additive
+   procedure; preserve every existing asset, property and auth setting. Verify
+   staged bytes before backend mutation. Prepare the exact entry-point/content
+   delta from that fresh inventory; never clear assets or blindly reuse chunk IDs.
+3. Follow the existing [SEC11 stop/drain/snapshot preservation procedure](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db916835ec78a7c812ef3f09e173b2c5155/docs/operations/sec11-live-release-20261107.md#L15):
+   controller-confirm Stopped, fully archive the exact oldest managed snapshot
+   before replacing only that slot with a fresh stopped-state backup, preserve
+   the other nine entries, and download/verify the fresh backup. No standalone
+   snapshot deletion or restoration is included.
+4. Install the exact pinned gzip in **upgrade** mode using the pinned args,
+   dispatching once. Verify installed optimized hash, API and settings while
+   stopped, then start once. The upgrade registers the automatic checks; once
+   scheduled they may progress a verified settlement without another manual toggle.
+   Compare retained state against the captured baseline, including vault158,
+   SEC11 receipts and SEC12 cancellation/replay fences.
+5. Activate only the prepared frontend entry-point/content delta. Verify final
+   full inventory, changed served bytes, primary domain and authentication assets.
+   Preserve the asset-canister module/settings and permission lists.
+6. Read back adoption state and available custody/ledger receipts. A Running
+   module proves deployment only; report Waiting, verified settlement, verified
+   sweep and completed collateral adoption separately. If the automatic check
+   has already progressed custody, reconcile its exact immutable journal/receipts
+   rather than repeating a transfer or assuming state must remain byte-equal.
+
+Every management/asset write is dispatched once with durable evidence. Unknown
+outcomes mean stop and reconcile by readback, never automatic replay. No old
+writer/snapshot rollback may discard SEC11 receipts or SEC12 cancellation state;
+recover forward. These are existing accepted release controls, not new tests.
+
+### Exact automatic financial scope
+
+Only the existing vault51 claim/request1696/burn3435761 and its bound original
+owner/dedicated subaccount qualify. No new WaterNeuron withdrawal is initiated.
+The recorded 1,942.82931553 ICP receivable is not treated as money received.
+After actual WaterNeuron settlement, require the canonical native-ledger receipt
+and dedicated balance. Sweep only the verified received amount minus its one
+queried/frozen ICP fee (bounded by 10,000 e8s) into the backend default ICP account;
+unrelated escrow deposits and shared float are excluded. Unknown results retain
+the original immutable tuple for proof-based reconciliation, not replacement spend.
+
+Only after exact sweep verification, accrue the old interest period through
+cutover and atomically switch the same vault to ordinary ICP collateral. Preserve
+owner, vault ID, full outstanding debt, accrued interest and history; refresh
+collateral/debt buckets and CR/TCR and retire the old receivable/fence with its
+terminal receipt. Ordinary ICP interest/liquidation parameters apply thereafter.
+Owner payout and adoption are mutually exclusive; an existing payout journal
+prevents adoption. Repayment, owner payout, customer messaging, additional loans,
+other collateral movement and liquidation-bot configuration changes are outside
+this decision. No actual settlement, sweep or adoption is claimed by preparation.
+
 
 No funded async WaterNeuron/ledger canary, actual settlement, sweep or collateral adoption is established. Existing compiler/Svelte warnings and global typecheck debt are not claimed clean. The current source/packet retains demo-deferred limitations. Future writers must preserve SEC11 receipts and SEC12 cancellation journals; old-writer rollback is unsafe.
 
-The source board ROPS-09 is updated with owner/next deliverable. Lookout connector large-board replies are truncated/undecodable; the available scoped local reader does not expose this release board. No grant, self-enrollment or blind overwrite was attempted. A verified public mirror refresh remains separate from the local source-board update.
+The source board ROPS-09 records source/artifact acceptance and this exact release decision as the next deliverable. Lookout connector large-board replies are truncated/undecodable; the available scoped local reader does not expose this release board. No grant, self-enrollment or blind overwrite was attempted. A verified public mirror refresh remains separate from the local source-board update.
