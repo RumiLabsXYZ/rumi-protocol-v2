@@ -1123,10 +1123,12 @@ fn season2_import_upgrade_and_first_epoch() {
     let count: u32 = std::env::var("SEASON2_TEST_PARTICIPANTS").unwrap_or_else(|_| "1".into()).parse().unwrap();
     assert!((1..=50).contains(&count));
     set_vault_debt(&pic, mock, participant, 100_000_000);
-    let begun = update(&pic, rp, "begin_season2_import", Encode!(&count).unwrap());
+    let begun = update(&pic, rp, "begin_season2_import", Encode!(&0u32).unwrap());
     let begun: Result<Season2ImportStatus, String> = Decode!(&begun, Result<Season2ImportStatus, String>).unwrap();
     assert!(!begun.unwrap().complete);
     set_time_ns(&pic, cutoff);
+    let sealed = update(&pic, rp, "begin_season2_import", Encode!(&count).unwrap());
+    assert_eq!(Decode!(&sealed, Result<Season2ImportStatus, String>).unwrap().unwrap().expected_rows, count);
     let rows: Vec<_> = (0..count).map(|i| {
         let principal = if i == 0 { participant } else { Principal::from_slice(&[i as u8; 6]) };
         Season2ImportRow { principal_state: PrincipalState::new(principal, cutoff - 1, QualifyingAction::MintIcUsd),

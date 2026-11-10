@@ -2364,8 +2364,15 @@ pub fn begin_season2_import(
     now: u64,
 ) -> Result<Season2ImportStatus, String> {
     require_admin(caller).map_err(|_| "unauthorized")?;
-    if let Some(v) = season2_import_status() {
-        if v.expected_rows == expected_rows {
+    if let Some(mut v) = season2_import_status() {
+        if v.expected_rows == expected_rows { return Ok(v); }
+        // Seal the actual all-eligible cutoff cohort after T0, before any row
+        // is written. The cutoff, source bindings and seed never move. This
+        // admits qualifying entrants observed between preparation and T0.
+        if !v.complete && v.imported_rows == 0 && v.batch_digests.is_empty()
+            && now >= v.cutoff_ns && expected_rows <= SEASON2_MAX_ROWS {
+            v.expected_rows = expected_rows;
+            set_season2_import(v.clone());
             return Ok(v);
         }
         return Err("import already initialized with different parameters".into());
@@ -4347,6 +4354,18 @@ mod season2_import_tests {
         assert_eq!(get_principal_state(&p(1)).unwrap(), before);
         assert!(season2_import_status().is_none());
         assert!(!fiat_stable_points_policy().active_for_current_epoch);
+    }
+    #[test]
+    fn cutoff_cohort_can_be_sealed_before_first_row_without_retiming() {
+        let admin=p(9);let start=SEASON2_LOGICAL_START+100;fresh(admin,start);
+        begin_season2_import(admin,0,start-1).unwrap();
+        assert!(begin_season2_import(admin,2,start-1).is_err());
+        assert!(begin_season2_backfill(admin,2).is_err());
+        let sealed=begin_season2_import(admin,2,start).unwrap();
+        assert_eq!(sealed.cutoff_ns,start);
+        let row=Season2ImportRow { principal_state:PrincipalState::new(p(1),start-1,QualifyingAction::MintIcUsd),category_points:vec![0;7] };
+        import_season2_batch(admin,0,vec![row],start).unwrap();
+        assert!(begin_season2_import(admin,3,start).is_err());
     }
     #[test]
     fn bounded_retry_receipts_and_unresolved_fence() {

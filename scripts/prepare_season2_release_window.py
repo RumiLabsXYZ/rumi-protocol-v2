@@ -14,7 +14,7 @@ START_NS = 1_793_491_200_000_000_000
 QUARTER_NS = 900_000_000_000
 H0 = "d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8"
 ADMIN = "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
-WASM_SHA256 = "be20d35e0c77d5d6de4c6be20fbd4eb11d51749441f53ccbb12f54c295c11360"
+WASM_SHA256 = "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603"
 
 
 def parse_time(value):
