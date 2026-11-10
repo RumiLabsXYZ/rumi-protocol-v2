@@ -1,0 +1,57 @@
+# Season 2 analytics coverage: checked facts and unfinished reconstruction
+
+Status: evidence note, not a credit proposal. No participant-specific public query was repeated. Public analytics interface metadata was read anonymously on November 10: canister dtlu2-uqaaa-aaaap-qugcq-cai; Candid text SHA-256 c35e66a15ded99cd81bae4a51f1fdf627f8c2c833a1f5f632d7732e97571e65d. Source references below describe the checked-in implementation at base 5ecd5196, not a deployed-Wasm attestation.
+
+## What was checked
+
+| Evidence | Actual content | What it does not establish |
+| --- | --- | --- |
+| Saved get_vault_series and get_vault_series-earliest-0 responses; current public Candid | Daily protocol totals and per-collateral count, collateral, debt and CR statistics | Per-owner/per-vault debt at each historical time |
+| Saved get_stability_series and earliest response | Pool-wide balances, depositor count, interest received and liquidation count | Per-user interest allocation |
+| Saved backend get_protocol_snapshots: 917 rows in the month export plus tail | Hourly protocol/per-collateral totals, not individual vault rows; gaps exist | Continuous participant debt history |
+| Current get_address_value_series interface and checked-in implementation | Per-principal chart reconstructed from normalized events and current wallet balances; response has approximate_sources | Exact per-vault accrued-interest history; this cohort endpoint was not queried under the existing denial |
+| Analytics stable normalized EVT_VAULTS/EVT_STABILITY logs | Retained event rows with internal accessors | Public raw vault/SP export: current Candid and HTTP route table expose no such endpoint |
+| Full retained source SP events, IDs 0..2547, plus saved positions | Complete observed source-event interval; interest amounts and opt-in/out changes | Interest event collateral type or recipient amounts, which are not fields of InterestReceived |
+
+## Specific source evidence
+
+- [DailyVaultSnapshotRow / DailyStabilityRow](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_analytics/src/storage/mod.rs#L314-L343) are aggregate schemas. [get_vault_series](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_analytics/src/queries/historical.rs#L23-L33) pages that daily log.
+- [get_address_value_series](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_analytics/src/queries/address_value.rs#L133-L208) loads normalized logs and marks vault equity approximate; [VaultPositionState](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_analytics/src/queries/address_value.rs#L394-L416) explicitly omits accrued interest and per-vault redemption adjustments. This chart implementation cannot be treated as an exact debt snapshot archive.
+- [Normalized event schemas](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_analytics/src/storage/events.rs#L82-L143) retain owner/vault IDs and debt action amounts, including a DustForgiven kind. The internal stable logs/accessors exist, but [HTTP routes](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_analytics/src/http/mod.rs#L13-L34) expose aggregate series, not those raw rows. Retained but not publicly exported is different from absent.
+- [SP analytics tailing](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_analytics/src/tailing/stability_pool.rs#L135-L190) records deposits/withdrawals/claims but skips interest, opt-in/out and liquidation events. [Source InterestReceived](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/stability_pool/src/types.rs#L1290-L1293) contains token ledger and amount, while the distribution function takes collateral_type. Analytics normalized history therefore does not provide collateral-specific user interest allocation.
+- [Backend ProtocolSnapshot](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/5ecd5196/src/rumi_protocol_backend/src/lib.rs#L2337-L2353) is also aggregate. Those hourly rows cannot simply be assigned to individual owners.
+
+## Corrected legacy-case finding
+
+The earlier claim that fourteen older vault balances were zero-current was wrong. Independent SDK decoding of the saved cursor-558710 49-vault page shows all fourteen still present with positive debt. The later liquidated vault is separate. No identity is published here.
+
+The proposed 20 points was the total debt component for that one participant, not 20 extra. It rounded a provisional 19.01356466 model to 20, adding 0.98643534. That optional compensation proposal is withdrawn; it was neither a protocol requirement nor an approved award.
+
+A complete local event scan now locates the later vault's opening and borrow, and its successful source SP liquidation. The old positions' recorded actions are before November 1, not proved post-November writeoffs. All 16,021 backend timestamp entries in the examined November interval were present, nonzero and nonregressing. The replay mismatch is not evidence that this history is lost.
+
+## What remains unfinished
+
+1. Reconcile the actual participant debt timeline using correct typed endpoints and joined source events, including the SP retirement that is not mirrored as a backend liquidation event. Do not invent a legacy compensation case from owner-level aggregation.
+2. Determine whether per-vault interest can be reconstructed from the retained source inputs/versioned behavior. The analytics chart omits it; that fact alone does not prove reconstruction from other retained inputs impossible.
+3. Check whether backend notification/receipt or ledger provenance can restore SP collateral-specific allocation. The normalized analytics log does not supply it. A missing public field is not proof that every underlying receipt was lost; no held update/recovery method has been invoked.
+4. Keep the lack of actual random A/B captures separate from balance reconstruction. Choosing a retrospective scoring convention is a policy question, not evidence that balances cannot be reconstructed.
+
+Until these are resolved, no estimate or compensation is submitted for acceptance. Continue independent timing/init preparation, preserve S1 and denied-query boundaries, and keep all eligible November 1 continuity explicit.
+
+## Further retrieved evidence, not a missing-history claim
+
+A previously unqueried public source method, get_liquidation_history(opt 100), returned 61 pool-wide records without participant arguments. Its typed record for the later loan identifies only icUSD in stables_consumed, at 202,479,288 raw units. This resolves the event summary's token ambiguity using an existing historical record. The checked-in icUSD path uses realized debt without a stable-token surcharge (liquidation.rs:6471–6485); exact retirement evidence should be bound to this record/path or its underlying receipt, not assumed from a mixed-token aggregate. This is another reason to complete retrieval before declaring data missing.
+
+The public backend INFO log was also read without participant arguments. Its retained buffer contained 579 entries spanning Nov 9 03:52 UTC–Nov 10 19:43 UTC, including 35 interest-related messages. That buffer does not cover the whole requested interval. This observed span is not proof that older logs/receipts were never retained elsewhere.
+
+## Former proposal's numerical effect, not an award
+
+For transparency, the withdrawn proposal's comparisons were:
+
+- Debt upper versus its lower comparator after the late Nov 1 checkpoint: 143.52669719 points.
+- SP icUSD upper versus lower envelopes: 136.71617410 points.
+- Rounding the special-case model from 19.01356466 to 20: 0.98643534 point.
+- Sum of those three differences: 281.22930663 points.
+- An additional 14,140.47611671 debt-point difference came from counting the early Nov 1 interval versus a formal zero lower bound before the first checkpoint. That zero was an uncertainty bound, not an acceptable uncredited gap.
+
+These are comparisons within the former estimates, not measured excess over exact earned points. No hypothetical random A/B award exists to compare. They do not validate the underlying estimates, and the corrected old-vault observation removes the rationale for the special rounding proposal.
