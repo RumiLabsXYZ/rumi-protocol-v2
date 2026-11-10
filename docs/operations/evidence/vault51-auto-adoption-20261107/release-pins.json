@@ -1,12 +1,11 @@
 {
-  "source": "e979cd699874c0d866db18cdd22fd42b2b72c427",
-  "base_source": "0eff84c93742ef6679a2ef09b1bd72e34b511665",
-  "expected_previous_module": "b81583ae81421b88d3bd64bf27976b338b2b09748e9dd6b863849b40ac6fd736",
+  "source": null,
+  "base_source": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+  "expected_previous_module": "2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13",
   "target_backend": "tfesu-vyaaa-aaaap-qrd7a-cai",
   "target_frontend": "tcfua-yaaaa-aaaap-qrd7q-cai",
   "network": "ic",
   "identity": "rumi_identity",
-  "upload_gzip_sha256": "7e099a2cd01ec3f78315125c3aaa716356c908d9fcf14983edcf8e9a2fbdc681",
   "candid_sha256": "ffd1fe2c68807a855b189ad74e281f1ce8fcaaccc620a54b2165eded47e7194b",
   "upgrade_args_sha256": "6d41d3b39bf5ccee3c7a8d7687d7557a94f2ceaedfa5a1d66468b5035f8a5e10",
   "executed": false,
@@ -17,5 +16,10 @@
     "burn_block": 3435761,
     "owner": "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae",
     "escrow_subaccount_hex": "6bbd6ba3f7aa00a12f213cc93301395c882beb8bd5615f3177d6eb3336f1796a"
-  }
+  },
+  "historical_source": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+  "historical_upload_gzip_sha256": "7e099a2cd01ec3f78315125c3aaa716356c908d9fcf14983edcf8e9a2fbdc681",
+  "upload_gzip_sha256": null,
+  "artifact_status": "superseded_do_not_install_replacement_not_built",
+  "install_allowed": false
 }

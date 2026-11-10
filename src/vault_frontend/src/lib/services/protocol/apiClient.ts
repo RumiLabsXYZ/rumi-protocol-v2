@@ -73,6 +73,11 @@ import {
   recoverSubmittedVaultPullFromBlock,
   hasCompatibleVaultPullIntent,
   normalizeVaultPullStatus,
+  inspectVaultPullRecovery,
+  cancelSavedVaultPullOperation,
+  resumeSavedVaultPullOperation,
+  type VaultPullRecoverySnapshot,
+  type VaultPullIntent,
   type VaultPullRequest,
   type VaultPullView,
   type VaultPullAdapter,
@@ -378,6 +383,7 @@ private static async refreshVaultData(): Promise<void> {
       ctx?: ActionBoundContext,
       lifecycle?: { onApprovalMayHaveMutated?: () => void; onDispatch?: () => void },
       recoveryBlockIndex?: bigint,
+      reviewedIntent?: VaultPullIntent,
     ): Promise<VaultOperationResult> {
       const owner = ApiClient.currentPrincipalText();
       if (!owner || !get(walletStore).isConnected) {
@@ -547,12 +553,92 @@ private static async refreshVaultData(): Promise<void> {
             if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
           },
         };
+      if (reviewedIntent) {
+        return resumeSavedVaultPullOperation({ owner, intent: reviewedIntent, adapter });
+      }
       if (recoveryBlockIndex !== undefined) {
         return recoverSubmittedVaultPullFromBlock<VaultOperationResult>({
           owner, blockIndex: recoveryBlockIndex, adapter,
         });
       }
       return runVaultPullOperation<VaultOperationResult>({ owner, request, adapter });
+    }
+
+    /** Pin recovery to the actual caller, wallet transport and signer session. */
+    private static vaultPullRecoveryContext(expectedOwner?: string): { owner: string; ctx: ActionBoundContext } {
+      const wallet = get(walletStore);
+      const owner = wallet.principal?.toText();
+      const walletType = get(currentWalletType);
+      const generation = get(walletSessionGeneration);
+      if (!wallet.isConnected || wallet.loading || !owner || !walletType || (expectedOwner && owner !== expectedOwner)) {
+        throw new Error('Connect the wallet that owns the saved request.');
+      }
+      const ctx: ActionBoundContext = {
+        expectedPrincipalText: owner,
+        assertCurrent: () => get(walletStore).isConnected && !get(walletStore).loading
+          && get(currentWalletType) === walletType && get(walletSessionGeneration) === generation,
+      };
+      assertActionBoundContextCurrent(ctx);
+      return { owner, ctx };
+    }
+
+    /** Caller-scoped backend status plus this wallet's exact browser intent. */
+    static async getVaultPullRecovery(): Promise<VaultPullRecoverySnapshot | null> {
+      if (USE_MOCK_DATA || !get(walletStore).isConnected || get(walletStore).loading) return null;
+      const { owner, ctx } = ApiClient.vaultPullRecoveryContext();
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      return inspectVaultPullRecovery({ owner, adapter: {
+        currentOwner: () => ApiClient.currentPrincipalText(),
+        assertCurrent: () => assertActionBoundContextCurrent(ctx),
+        getStatus: async () => {
+          assertActionBoundContextCurrent(ctx);
+          const response = await actor.get_vault_operation_status();
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return normalizeVaultPullStatus(response.Ok as any);
+        },
+      } });
+    }
+
+    /** Explicit continuation of reviewed raw values; never reconstruct a new loan from rounded UI numbers. */
+    static async resumeSavedVaultCollateralPull(intent: VaultPullIntent): Promise<VaultOperationResult> {
+      // Bind the click before the queue can yield, including same-owner reconnects.
+      const { ctx } = ApiClient.vaultPullRecoveryContext(intent.owner);
+      return ApiClient.executeSequentialOperation(async () => {
+        assertActionBoundContextCurrent(ctx);
+        return ApiClient.runVaultCollateralPull(intent.request, ctx, undefined, undefined, intent);
+      }, undefined, { refreshBefore: false, refreshAfter: false });
+    }
+
+    /** Retire only an authoritative no-dispatch/no-effect operation; never an approval or transfer. */
+    static async cancelSavedVaultCollateralPull(intent: VaultPullIntent): Promise<bigint> {
+      const { owner, ctx } = ApiClient.vaultPullRecoveryContext(intent.owner);
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      return cancelSavedVaultPullOperation({ owner, intent, adapter: {
+        currentOwner: () => ApiClient.currentPrincipalText(),
+        assertCurrent: () => assertActionBoundContextCurrent(ctx),
+        getStatus: async () => {
+          assertActionBoundContextCurrent(ctx);
+          const response = await actor.get_vault_operation_status();
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return normalizeVaultPullStatus(response.Ok as any);
+        },
+        cancel: async (operationId, exact) => {
+          assertActionBoundContextCurrent(ctx);
+          const request = 'OpenVault' in exact
+            ? { OpenVault: { ...exact.OpenVault, collateral_type: Principal.fromText(exact.OpenVault.collateral_type) } }
+            : 'OpenVaultAndBorrow' in exact
+              ? { OpenVaultAndBorrow: { ...exact.OpenVaultAndBorrow, collateral_type: Principal.fromText(exact.OpenVaultAndBorrow.collateral_type) } }
+              : { AddMargin: exact.AddMargin };
+          const response = await actor.cancel_vault_operation({ operation_id: operationId, request });
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return response.Ok;
+        },
+      } });
     }
 
     /** Return the authenticated active Submitted operation for the active wallet. */

@@ -1,3 +1,7 @@
+> November 10: SEC12 source is merged into this branch; November 7 binaries are
+> superseded. See the updated release packet for the source-only reconciliation
+> and focused check results. Replacement builds await Dorian coordination.
+
 # Vault 51 automatic ICP collateral adoption
 
 Rob approved: “make it automatic when the ICP arrives. keep the debt and everything

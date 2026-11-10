@@ -1,0 +1,22 @@
+{
+  "source": "0eff84c93742ef6679a2ef09b1bd72e34b511665",
+  "backend_module": "b81583ae81421b88d3bd64bf27976b338b2b09748e9dd6b863849b40ac6fd736",
+  "backend_running": true,
+  "candidate_api_matches": true,
+  "previous_api_compatible": true,
+  "retained_reads_equal": 11,
+  "fixed_config_equal": true,
+  "frontend_version": "1794099947058",
+  "frontend_keys": 3384,
+  "frontend_encodings": 3578,
+  "old_keys_preserved": 3078,
+  "new_keys": 306,
+  "stage_served_checks": 308,
+  "activation_served_checks": 9,
+  "primary_domain_checks": 5,
+  "independent_primary_checks": 5,
+  "frontend_module_settings_permissions_preserved": true,
+  "unknown_management_or_commit_outcomes": 0,
+  "customer_deposit_withdrawal_attempted": false,
+  "customer_message_sent": false
+}

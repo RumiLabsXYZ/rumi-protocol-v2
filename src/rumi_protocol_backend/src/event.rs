@@ -1222,6 +1222,7 @@ pub enum BotProofAuditEvent {
 /// adding public Event variants would break older clients of `get_events`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
+    VaultPullCancelled { owner: Principal, operation_id: u64, request: crate::state::VaultCollateralPullRequest },
     XrpVaultOriginReconciled { vault_id: u64, origin: crate::xrp_vault_deposit::XrpVaultOrigin },
     XrpVaultTopupCredited { receipt: crate::xrp_vault_deposit::XrpTopupReceipt },
     NicpRedemptionClaimUpdated { claim: crate::nicp_redemption::NicpRedemptionClaim },
@@ -1921,6 +1922,10 @@ fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
 
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
+        PendingPayoutEvent::VaultPullCancelled { owner, operation_id, request } => {
+            state.apply_vault_operation_cancellation(owner, operation_id, &request)
+                .expect("inconsistent vault cancellation journal");
+        }
         PendingPayoutEvent::XrpVaultOriginReconciled { vault_id, origin } => {
             crate::xrp_vault_deposit::apply_origin(state, vault_id, origin)
                 .expect("inconsistent XRP origin journal");
@@ -3411,6 +3416,30 @@ pub fn record_xrp_origin(state: &mut State, vault_id: u64, origin: crate::xrp_va
     crate::xrp_vault_deposit::apply_origin(state, vault_id, origin)
 }
 
+/// Retire a no-effect request atomically before any delayed pull can reserve
+/// or mark its tuple dispatched. No allowance change, ledger call, or await.
+pub fn record_vault_operation_cancelled(
+    state: &mut State,
+    owner: Principal,
+    operation_id: u64,
+    request: crate::state::VaultCollateralPullRequest,
+) -> Result<u64, crate::ProtocolError> {
+    state
+        .validate_vault_operation_cancellation(owner, operation_id, &request)
+        .map_err(crate::ProtocolError::GenericError)?;
+    let acknowledged = state.vault_operation_status(owner).acknowledged_through;
+    if acknowledged >= operation_id {
+        return Ok(acknowledged);
+    }
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::VaultPullCancelled {
+        owner,
+        operation_id,
+        request: request.clone(),
+    });
+    state
+        .apply_vault_operation_cancellation(owner, operation_id, &request)
+        .map_err(crate::ProtocolError::GenericError)
+}
 pub fn record_close_vault(state: &mut State, vault_id: u64, block_index: Option<u64>) {
     record_event(&Event::CloseVault {
         vault_id,

@@ -1,0 +1,150 @@
+{
+  "source": "0eff84c93742ef6679a2ef09b1bd72e34b511665",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "steps": [
+    {
+      "name": "identity",
+      "start": "2026-11-08T01:22:54.640778+00:00",
+      "write": false,
+      "end": "2026-11-08T01:22:54.743796+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-prestop",
+      "start": "2026-11-08T01:22:54.744144+00:00",
+      "write": false,
+      "end": "2026-11-08T01:22:56.027602+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-prestop",
+      "start": "2026-11-08T01:22:56.028722+00:00",
+      "write": false,
+      "end": "2026-11-08T01:22:57.343917+00:00",
+      "exit": 0
+    },
+    {
+      "name": "stop",
+      "start": "2026-11-08T01:22:57.421138+00:00",
+      "write": true,
+      "end": "2026-11-08T01:22:59.196476+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-stopped",
+      "start": "2026-11-08T01:22:59.197143+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:00.821304+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-stopped",
+      "start": "2026-11-08T01:23:00.821722+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:02.432089+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-replace",
+      "start": "2026-11-08T01:23:02.432651+00:00",
+      "write": true,
+      "end": "2026-11-08T01:23:05.029612+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-after-replace",
+      "start": "2026-11-08T01:23:05.030086+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:06.344706+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-download",
+      "start": "2026-11-08T01:23:06.345049+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:28.722613+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-before-install",
+      "start": "2026-11-08T01:23:28.804193+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:30.215531+00:00",
+      "exit": 0
+    },
+    {
+      "name": "install",
+      "start": "2026-11-08T01:23:30.216022+00:00",
+      "write": true,
+      "end": "2026-11-08T01:23:52.007173+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-installed",
+      "start": "2026-11-08T01:23:52.007836+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:53.714346+00:00",
+      "exit": 0
+    },
+    {
+      "name": "candid-installed",
+      "start": "2026-11-08T01:23:53.714802+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:54.355698+00:00",
+      "exit": 0
+    },
+    {
+      "name": "start",
+      "start": "2026-11-08T01:23:54.356490+00:00",
+      "write": true,
+      "end": "2026-11-08T01:23:55.829988+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-running",
+      "start": "2026-11-08T01:23:55.830537+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:57.506041+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-final",
+      "start": "2026-11-08T01:23:57.506329+00:00",
+      "write": false,
+      "end": "2026-11-08T01:23:58.785040+00:00",
+      "exit": 0
+    }
+  ],
+  "fresh_snapshot_id": "00000000000000180000000001f088fe0101",
+  "fresh_snapshot_verification": {
+    "timestamp_ns": 1794100984221282184,
+    "files": [
+      {
+        "file": "wasm_module.bin",
+        "bytes": 2322664,
+        "sha256": "a7f9af49f6e5139730e025f6be0533ffb0d7afa6d5eaaec7d02a607b998a6834"
+      },
+      {
+        "file": "wasm_memory.bin",
+        "bytes": 1900544,
+        "sha256": "896317ed0c3f19c84e85653220cc772123a372278d9d8ee0b30410bd2f56fa7a"
+      },
+      {
+        "file": "stable_memory.bin",
+        "bytes": 109117440,
+        "sha256": "dd74be5cdf567f1c026f50ac6185c76c5d240b8ebc37405d75c45876ef6cf545"
+      }
+    ],
+    "all_named_lengths_match": true,
+    "chunk_store_empty": true
+  },
+  "outcome": "installed-and-running",
+  "completed": "2026-11-08T01:23:58.785345+00:00",
+  "old_module": "a7f9af49f6e5139730e025f6be0533ffb0d7afa6d5eaaec7d02a607b998a6834",
+  "new_module": "b81583ae81421b88d3bd64bf27976b338b2b09748e9dd6b863849b40ac6fd736",
+  "settings_preserved": true,
+  "candidate_candid_matches": true,
+  "previous_api_compatible": true,
+  "other_nine_snapshots_preserved": true,
+  "proof_limit": "Exact installation and scoped retained-state readback, not a customer deposit/withdrawal, financial canary or settlement."
+}

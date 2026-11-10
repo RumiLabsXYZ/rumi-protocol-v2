@@ -1,0 +1,35 @@
+{
+  "source": "0eff84c93742ef6679a2ef09b1bd72e34b511665",
+  "deployed_base": "bd253ddf1ebd233347452603e1e63c6d924820b1",
+  "code_section_bytes": 8826325,
+  "project_guard_bytes": 10223616,
+  "files": [
+    {
+      "name": "backend-raw.wasm",
+      "bytes": 14049429,
+      "sha256": "e2980a2693bb548ad839b5a88650b5f75ca60ee3631b0a3aefd3085f6dc3d089"
+    },
+    {
+      "name": "backend-optimized.wasm",
+      "bytes": 9753571,
+      "sha256": "a79d8f5d54482c52591ecd83b59a1051341beefb835ce0850a7f5408a7cd0232"
+    },
+    {
+      "name": "backend-optimized.wasm.gz",
+      "bytes": 2365879,
+      "sha256": "b81583ae81421b88d3bd64bf27976b338b2b09748e9dd6b863849b40ac6fd736"
+    }
+  ],
+  "candid_backward_compatible": true,
+  "canonical_candid_pass": true,
+  "actual_exports_review": {
+    "declared": 395,
+    "actual_application": 395,
+    "missing": [],
+    "unexpected": [],
+    "preserved_internal": [
+      "canister_update <ic-cdk internal> timer_executor"
+    ]
+  },
+  "gzip_packaging": "gzip -9 -n -c"
+}

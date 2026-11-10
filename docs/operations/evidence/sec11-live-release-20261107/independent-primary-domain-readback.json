@@ -1,0 +1,27 @@
+[
+  {
+    "path": "index.html",
+    "matches_reviewed_build": true,
+    "sha256": "1e9ceb053b60f29ca54d93e18a3e8a591e0f53005cafcb908d1e6376206d12af"
+  },
+  {
+    "path": "_app/immutable/chunks/BYsES3kK.js",
+    "matches_reviewed_build": true,
+    "sha256": "10e673dbdd38f7a11a2c0f3f1f293ee71c8a6ec43f8b79aac40159b40deb1bd4"
+  },
+  {
+    "path": "_app/immutable/chunks/FGMK_EIN.js",
+    "matches_reviewed_build": true,
+    "sha256": "4af19949314b7e57af79c048a802559c64dde0242224a7be13555307cabaa15b"
+  },
+  {
+    "path": ".well-known/ii-alternative-origins",
+    "matches_reviewed_build": true,
+    "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd"
+  },
+  {
+    "path": ".well-known/ic-domains",
+    "matches_reviewed_build": true,
+    "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4"
+  }
+]

@@ -1,0 +1,25 @@
+{
+  "canister": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "snapshot_id": "000000000000000c0000000001f088fe0101",
+  "timestamp_ns": 1790655092787165123,
+  "all_named_lengths_match": true,
+  "native_globals_representable": true,
+  "chunk_store_empty": true,
+  "files": [
+    {
+      "file": "wasm_module.bin",
+      "bytes": 2183716,
+      "sha256": "073d5b3be913a19019b3781f14eb732b01eb42d9e8ee4988cf97d79e181de8f5"
+    },
+    {
+      "file": "wasm_memory.bin",
+      "bytes": 1900544,
+      "sha256": "12c7782e4ad6622819af48d504d3d6914389cd88f43b7e2ab6cc86687cb18e84"
+    },
+    {
+      "file": "stable_memory.bin",
+      "bytes": 83951616,
+      "sha256": "d87f1cf9821b560ac6aacc257965ffd7d2f3c52a46b38cf0b11f871f0817b354"
+    }
+  ]
+}

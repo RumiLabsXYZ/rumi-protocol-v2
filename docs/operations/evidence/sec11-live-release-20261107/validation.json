@@ -1,0 +1,22 @@
+{
+  "source": "0eff84c93742ef6679a2ef09b1bd72e34b511665",
+  "integrated_delta": "e0de879b",
+  "upstream_delta": "ef8a694a4490bf06e3d36086399b9261a61e84c1",
+  "sec10_tests": "6 passed",
+  "sec11_tests": "8 passed",
+  "canonical_self_check": "1 passed",
+  "bindings": "canonical regeneration no drift",
+  "frontend_tests_reused": "7 passed; frontend files unchanged by integration",
+  "frontend_typecheck": "32 pre-existing diagnostics matched baseline; no new-file errors, not clean",
+  "reviews": [
+    "Ellis source/state/UI PASS",
+    "Merritt independent source/state/UI PASS",
+    "Ellis actual binary/hash/Candid/export/frontend inventory inspection PASS"
+  ],
+  "privacy": "No customer identities, private payloads or signing material in this packet",
+  "limitations": [
+    "No real customer deposit/withdrawal, financial canary or customer acceptance",
+    "Public Explorer/points projection deferred",
+    "No downgrade/restore after receipt journal use"
+  ]
+}

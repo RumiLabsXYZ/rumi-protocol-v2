@@ -1,0 +1,6 @@
+(variant {
+  Upgrade = record {
+    mode = null;
+    description = opt "SEC11 validated XRP repeat deposits; integrated source0eff84c9; preserve mode, funding holds and SEC10 withdrawal fix"
+  }
+})

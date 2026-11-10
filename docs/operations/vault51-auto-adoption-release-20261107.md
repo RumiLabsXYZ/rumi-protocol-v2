@@ -1,5 +1,36 @@
 # Vault 51 automatic collateral adoption — release candidate
 
+## November 10 reconciliation — current source only
+
+**The November 7 binaries and frontend bundle below are superseded and must not
+be installed over SEC12. No replacement production build has been run.**
+
+The verified successor is SEC12 source `f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff`,
+backend module `2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13`,
+recorded in [Dorian's deployed result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0f00344208bbf9f46184956fafaceb3fa9961ccb/docs/operations/sec12-release-20261108/RESULT.md).
+This is retained November 8/9 release evidence, not a fresh November 10 live read.
+The adoption branch now merges that deployed lineage without rewriting history.
+
+Actual overlap: additive private-event dispatcher arms and public entry points
+in `event.rs`/`main.rs`, plus Candid/declarations. There were no source conflicts.
+Bindings are regenerated from combined Rust rather than accepting their textual
+auto-merge as proof. SEC12 state/watermark/cancellation, vault admission checks,
+saved-request/Continue/Cancel UI and protocol service files remain byte-identical
+to SEC12. Adoption logic and edited adoption UI remain byte-identical to the
+November 7 tested source. No new owner preference or lifecycle change is introduced.
+
+Validation results and reconciled source pin are recorded in the companion
+`evidence/vault51-auto-adoption-20261107/reconciliation-20261110.json`. The
+November 7 builds/export checks below remain historical only. The next expensive
+backend/frontend build is to be scheduled with Dorian under the existing measured
+allocation; current fresh inventory/artifacts/exports must be pinned then. Dorian
+owns independent release review. No deployment, activation or financial action is
+authorized by this reconciliation packet.
+
+The accepted preservation rule now also includes the SEC12 cancellation journal
+and replay watermark: [deployed result, final preservation paragraph](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0f00344208bbf9f46184956fafaceb3fa9961ccb/docs/operations/sec12-release-20261108/RESULT.md#L15).
+Do not use an older SEC11-only writer as rollback.
+
 Adrian owns the bounded implementation. Rob explicitly approved automatic
 adoption after the actual WaterNeuron ICP payout, retaining vault 51, owner,
 full outstanding debt, accrued interest and history. Repayment and owner payout
@@ -7,7 +38,7 @@ are not prerequisites. This is a concrete preparation packet; **not installed,
 not activated, and no custody transfer executed**. Dorian's existing release
 procedure and Bram's SEC-08 evidence/PRs 612–613 are reused; vault 158 is unchanged.
 
-## Exact candidate
+## Historical November 7 candidate
 
 Build source `e979cd699874c0d866db18cdd22fd42b2b72c427` on
 `codex/vault51-auto-icp-adoption`, based on the actual SEC11 deployed composition
@@ -42,7 +73,7 @@ wording. The frontend is built, not published.
 
 A timer registered once per lifecycle checks the exact owner/vault51/request1696/
 burn3435761/subaccount hourly, plus one check ten seconds after upgrade. It
-cannot submit a fresh nICP withdrawal. The current read-only observation still
+cannot submit a fresh nICP withdrawal. The November 7 read-only observation
 shows WaitingDissolvement, zero ICP in escrow, no settlement and no payout.
 The amount 1,942.82931553 ICP is a recorded receivable, not money received.
 
@@ -69,7 +100,7 @@ reconciliation method can verify the exact sweep after a lost/expired reply; it
 cannot spend tokens or change delivery parameters. Happy-path adoption requires
 no additional owner action at arrival. A held ambiguity still requires proof.
 
-## Verification
+## Historical November 7 verification
 
 - Two initial backend regressions failed on the old code for the intended missing
   adoption/fence behavior, then passed.
@@ -92,7 +123,10 @@ owners. No new review team or hosted CI campaign was started for this release-
 branch preparation. Any later PR must retain its enforced repository checks;
 no CI pass is claimed here.
 
-## Existing release procedure and remaining boundary
+## Retained release procedure — replacement artifacts required
+
+This procedure must use a new SEC12-composed artifact and current inventory,
+not the historical November 7 upload or frontend manifest.
 
 Use the existing backend `tfesu-vyaaa-aaaap-qrd7a-cai`, frontend
 `tcfua-yaaaa-aaaap-qrd7q-cai`, mainnet and `rumi_identity`; never substitute a

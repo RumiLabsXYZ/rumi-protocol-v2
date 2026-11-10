@@ -14,5 +14,6 @@
       "sha256": "7e099a2cd01ec3f78315125c3aaa716356c908d9fcf14983edcf8e9a2fbdc681"
     }
   },
-  "executable_code_section_bytes": 8843099
+  "executable_code_section_bytes": 8843099,
+  "status": "historical_SEC11_only_superseded_do_not_deploy"
 }

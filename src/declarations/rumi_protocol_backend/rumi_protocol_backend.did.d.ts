@@ -2335,6 +2335,10 @@ export interface VaultIntent {
   'deadline_secs' : bigint,
   'debt_e8s' : bigint,
 }
+export interface VaultOperationCancelArg {
+  'request' : VaultCollateralPullRequest,
+  'operation_id' : bigint,
+}
 export interface VaultOperationIdArg { 'operation_id' : bigint }
 export type VaultOperationResult = {
     'AddMargin' : { 'block_index' : bigint, 'vault_id' : bigint }
@@ -2513,6 +2517,7 @@ export interface _SERVICE {
     [BotPaymentProof],
     Result_1
   >,
+  'cancel_vault_operation' : ActorMethod<[VaultOperationCancelArg], Result>,
   'cancel_xrp_pending_open' : ActorMethod<[bigint], Result_1>,
   'chain_has_active_settlement_op' : ActorMethod<[number], boolean>,
   'claim_chain_collateral' : ActorMethod<

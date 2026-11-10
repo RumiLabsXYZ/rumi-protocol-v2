@@ -253,6 +253,25 @@ export const idlFactory = ({ IDL }) => {
     'created_at_time' : IDL.Nat64,
     'amount' : IDL.Nat64,
   });
+  const VaultCollateralPullRequest = IDL.Variant({
+    'AddMargin' : IDL.Record({
+      'vault_id' : IDL.Nat64,
+      'amount_e8s' : IDL.Nat64,
+    }),
+    'OpenVault' : IDL.Record({
+      'amount_e8s' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
+    }),
+    'OpenVaultAndBorrow' : IDL.Record({
+      'amount_e8s' : IDL.Nat64,
+      'borrow_amount_e8s' : IDL.Nat64,
+      'collateral_type' : IDL.Principal,
+    }),
+  });
+  const VaultOperationCancelArg = IDL.Record({
+    'request' : VaultCollateralPullRequest,
+    'operation_id' : IDL.Nat64,
+  });
   const CkSolPaymentPhase = IDL.Variant({
     'RefundUnknown' : IDL.Null,
     'FundingPending' : IDL.Null,
@@ -1992,21 +2011,6 @@ export const idlFactory = ({ IDL }) => {
     'pending_interest_for_pools_total' : IDL.Nat64,
   });
   const Result_22 = IDL.Variant({ 'Ok' : IDL.Float64, 'Err' : ProtocolError });
-  const VaultCollateralPullRequest = IDL.Variant({
-    'AddMargin' : IDL.Record({
-      'vault_id' : IDL.Nat64,
-      'amount_e8s' : IDL.Nat64,
-    }),
-    'OpenVault' : IDL.Record({
-      'amount_e8s' : IDL.Nat64,
-      'collateral_type' : IDL.Principal,
-    }),
-    'OpenVaultAndBorrow' : IDL.Record({
-      'amount_e8s' : IDL.Nat64,
-      'borrow_amount_e8s' : IDL.Nat64,
-      'collateral_type' : IDL.Principal,
-    }),
-  });
   const VaultOperationResult = IDL.Variant({
     'AddMargin' : IDL.Record({
       'block_index' : IDL.Nat64,
@@ -2535,6 +2539,11 @@ export const idlFactory = ({ IDL }) => {
     'bot_verify_liquidation_payment_proof' : IDL.Func(
         [BotPaymentProof],
         [Result_1],
+        [],
+      ),
+    'cancel_vault_operation' : IDL.Func(
+        [VaultOperationCancelArg],
+        [Result],
         [],
       ),
     'cancel_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result_1], []),

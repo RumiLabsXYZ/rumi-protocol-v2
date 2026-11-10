@@ -2116,6 +2116,10 @@ type VaultIntent = record {
   deadline_secs : nat64;
   debt_e8s : nat;
 };
+type VaultOperationCancelArg = record {
+  request : VaultCollateralPullRequest;
+  operation_id : nat64;
+};
 type VaultOperationIdArg = record { operation_id : nat64 };
 type VaultOperationResult = variant {
   AddMargin : record { block_index : nat64; vault_id : nat64 };
@@ -2258,6 +2262,7 @@ service : (ProtocolArg) -> {
       Result_1,
     );
   bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result_1);
+  cancel_vault_operation : (VaultOperationCancelArg) -> (Result);
   cancel_xrp_pending_open : (nat64) -> (Result_1);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result);
