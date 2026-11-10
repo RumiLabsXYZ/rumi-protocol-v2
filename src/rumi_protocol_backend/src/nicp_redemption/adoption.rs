@@ -72,7 +72,9 @@ fn validate_original_vault(state: &State, claim: &NicpRedemptionClaim) -> Result
         .ok_or("Vault 51 is missing")?;
     if vault.owner != claim.owner
         || vault.collateral_type != principal(NICP)
-        || vault.collateral_amount != 0
+        // Raw nICP remains as the claim's historical source reference; only
+        // CandidVault projects zero while the separate claim owns custody.
+        || vault.collateral_amount != claim.original_nicp_e8s
         || vault.bot_processing
     {
         return Err(
@@ -360,6 +362,54 @@ pub async fn reconcile(block_index: u64) -> Result<NicpRedemptionClaim, String> 
 mod tests {
     use super::*;
     use crate::native_icp_proof::{Block, Operation, Timestamp, Tokens, Transaction};
+
+    fn retained_original_state() -> (State, NicpRedemptionClaim) {
+        let mut state = State::default();
+        state.icp_ledger_principal = principal(ICP);
+        let mut claim = super::super::tests::approved_adoption_fixture();
+        claim.stage = ClaimStage::ClaimConfirmed;
+        claim.received_icp_e8s = None;
+        claim.settlement_block = None;
+        state.nicp_redemption_claim = Some(claim.clone());
+        state.open_vault(crate::vault::Vault {
+            owner: claim.owner, vault_id: VAULT_ID, collateral_type: principal(NICP),
+            collateral_amount: claim.original_nicp_e8s,
+            borrowed_icusd_amount: crate::numeric::ICUSD::new(287_535_228_114),
+            accrued_interest: crate::numeric::ICUSD::new(99), last_accrual_time: 1234,
+            bot_processing: false,
+        });
+        (state, claim)
+    }
+
+    #[test]
+    fn nicp_retained_raw_collateral_passes_despite_zero_public_projection() {
+        let (state, claim) = retained_original_state();
+        let raw = state.vault_id_to_vaults[&VAULT_ID].clone();
+        assert_eq!(raw.collateral_amount, 150_000_000_000);
+        let public = crate::vault::CandidVault::from_state(raw.clone(), &state);
+        assert_eq!(public.collateral_amount, 0);
+        assert!(validate_original_vault(&state, &claim).is_ok());
+        assert_eq!(state.vault_id_to_vaults[&VAULT_ID], raw);
+        assert!(state.has_pending_nicp_claim(VAULT_ID));
+    }
+
+    #[test]
+    fn nicp_retained_raw_collateral_still_refuses_changed_vault_identity_and_bot_state() {
+        for change in ["owner", "type", "less", "more", "zero", "bot"] {
+            let (mut state, claim) = retained_original_state();
+            let vault = state.vault_id_to_vaults.get_mut(&VAULT_ID).unwrap();
+            match change {
+                "owner" => vault.owner = Principal::anonymous(),
+                "type" => vault.collateral_type = principal(ICP),
+                "less" => vault.collateral_amount -= 1,
+                "more" => vault.collateral_amount += 1,
+                "zero" => vault.collateral_amount = 0,
+                "bot" => vault.bot_processing = true,
+                _ => unreachable!(),
+            }
+            assert!(validate_original_vault(&state, &claim).is_err(), "{change}");
+        }
+    }
 
     fn journal() -> CollateralAdoption {
         CollateralAdoption {

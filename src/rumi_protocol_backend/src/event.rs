@@ -7427,7 +7427,7 @@ mod nicp_private_claim_journal_tests {
         let old_ct = Principal::from_text("buwm7-7yaaa-aaaar-qagva-cai").unwrap();
         let icp = state.icp_ledger_principal;
         let original = crate::vault::Vault {
-            owner: claim.owner, vault_id: 51, collateral_type: old_ct, collateral_amount: 0,
+            owner: claim.owner, vault_id: 51, collateral_type: old_ct, collateral_amount: claim.original_nicp_e8s,
             borrowed_icusd_amount: ICUSD::new(287_535_228_114),
             accrued_interest: ICUSD::new(99), last_accrual_time: 1234, bot_processing: false,
         };

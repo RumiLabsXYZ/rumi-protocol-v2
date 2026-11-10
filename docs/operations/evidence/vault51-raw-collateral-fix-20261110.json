@@ -1,0 +1,25 @@
+{
+  "base_commit": "9d02bea890afe89e283b1d329e4b00ca948c29d8",
+  "production_change": "raw collateral equals claim.original_nicp_e8s; all other guards retained",
+  "tests": {
+    "command": "cargo test --locked -p rumi_protocol_backend --lib nicp -- --test-threads=1",
+    "corrected_passed": 25,
+    "corrected_failed": 0,
+    "old_predicate_passed": 22,
+    "old_predicate_failed": 3
+  },
+  "source_files": [
+    "src/rumi_protocol_backend/src/nicp_redemption/adoption.rs",
+    "src/rumi_protocol_backend/src/event.rs (fixture only)"
+  ],
+  "candid_unchanged": true,
+  "frontend_unchanged": true,
+  "state_shape_unchanged": true,
+  "new_production_build": false,
+  "new_live_action": false,
+  "test_logs_sha256": {
+    "v51-raw-red-refreshed.log": "85153e1cc87ad6443d655d4c409edba52c10b082e7a1c980e1441cf83ab09cfc",
+    "v51-raw-green.log": "447e6b055bab3e753c2e9c35eb8a9911565bdd66cb692782fe92b5fa1b3f8219"
+  },
+  "snapshot_evidence": "Dorian independently verified raw original amount in stopped prior-module snapshot; private diagnosis retained in release lane"
+}
