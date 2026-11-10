@@ -1,5 +1,18 @@
 # Vault 51 automatic collateral adoption — release candidate
 
+## November 10 independent release-owner handoff
+
+Dorian completed the one coordinated production build and independently verified
+the actual artifacts, API/exports and 740-file frontend manifest. His pushed
+[review receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/38b675d3cbc98f1f38aa9fab6718a10b4931daa8/docs/operations/vault51-release-review-20261110.md)
+accepts **source/artifact preparation only**. Installation, automatic timer
+activation and financial operations remain held. Source stays `42478174`; the
+new gzip is `43bbbca98df29296a7dde2f134ce15db519bb745c53c1fcf442ef97b54223f09`.
+Use Dorian's review pins for the new artifacts; the old November 7 artifacts
+remain superseded. The reconciliation checkpoint below predates his build and
+is retained as dated evidence, not the current build status. Merritt's exact
+preparation decision is next; no further test/build or live action was run here.
+
 ## November 10 reconciliation — current source only
 
 **The November 7 binaries and frontend bundle below are superseded and must not
