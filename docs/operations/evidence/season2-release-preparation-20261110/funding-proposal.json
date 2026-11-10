@@ -32,5 +32,9 @@
   "environment": "mainnet-season2",
   "allocatedCanisterId": null,
   "payerApproved": false,
-  "creationFundingInstallActivationApproved": false
+  "creationFundingInstallActivationApproved": false,
+  "fifteenOwnerMinimalFixtureEvidence": "fifteen-owner-lifecycle.json",
+  "operationAllowanceConfidence": "plausible minimal-fixture allowance only; full real polling and post-install consumption unmeasured",
+  "historicalAwardImportReady": false,
+  "historicalReplayStatus": "Orin reports an unresolved backend reconciliation mismatch; no awards use unreconciled totals"
 }

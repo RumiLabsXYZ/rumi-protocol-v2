@@ -88,12 +88,14 @@ storage to 317,500 cycles/GiB/second and base idle cost to 10,000/second.
 Node count, eligibility, pricing revision and ledger fee are execution-time
 preconditions, not permission to silently substitute a different subnet.
 
-The measured one-owner first-epoch footprint is 151,493,408 bytes. Local PocketIC
+The measured first-epoch footprint is 151,493,408 bytes in both the original
+one-owner fixture and the bounded 15-owner fixture. Local PocketIC
 pricing is not mainnet pricing. At a **256 MiB planning envelope** (77.2% memory
 headroom), 30-day idle reserve is **231.66B**. Partition the proposed 400B into
 that reserve, **50B** install/reconciliation, **100B** initial polling/driver and
-**18.34B** margin. This is not a measured sustained 15-owner workload, enforceable
-spending subaccounts, or guaranteed runway. Read actual post-install/import memory,
+**18.34B** margin. The 15-owner fixture passed with the same footprint, but it
+is not a sustained real-cohort workload, enforceable spending subaccounts, or
+guaranteed runway. Read actual post-install/import memory,
 idle burn and cycles before authorized activation; retain the normal freezing
 threshold. The generic 1T health watermark will still show `healthy=false` at a
 400B balance; that indicator is distinct from replica freezing, not a claimed
@@ -137,3 +139,28 @@ prospective snapshot awards are observed only when an epoch closes, normally
 after a week. Running timers do not establish an ordinary ledger accrual or
 complete historical November 1 reconciliation. No earlier close or live award
 is inferred here.
+
+## Bounded 15-owner budget cross-check
+
+The existing lifecycle fixture passed with 15 synthetic owners on the same
+candidate. All traverse import, snapshots A/B and epoch close; one has mock
+debt and fourteen have zero positions. After-epoch managed memory remains
+151,493,408 bytes and stable memory 142,671,872 bytes. Local balance decreases
+were 45,078,705 cycles install-to-import, 16,640,757,193 import-to-upgrade,
+30,645,558 upgrade-to-partial-poll, and 11,468,040,159 partial-poll-to-close.
+These include intervening calls/time and are not isolated transaction costs.
+
+The mock poll succeeds only for its backend endpoint; 3pool/SP/AMM event-poll
+endpoints are absent. This is not a complete initial-poll cost, full real
+15-owner positions or deployed-price measurement. It supports the unchanged
+100B operating allowance as plausible for this minimal case, not guaranteed
+runway or permission to activate. Use deployed pricing and actual post-install
+readback; no additional fixture campaign is requested. See
+[fifteen-owner evidence](evidence/season2-release-preparation-20261110/fifteen-owner-lifecycle.json).
+
+Orin separately reports that the canonical historical backend replay still
+differs from current borrowed amounts at a matching source cursor. The narrow
+principal/interest diagnosis remains open. No historical award import uses
+unreconciled totals; the scorer candidate and funding proposal are unchanged.
+This is an unresolved accounting result, not a claim that retained history is
+missing and not a new token-allocation or end-date gate.
