@@ -3,8 +3,9 @@
 Dorian owns configuration and this release-preparation record. Orin owns Points
 Rust, calculator, private participant reconciliation and the actual running-scoring
 outcome. This source-only change is on `codex/season2-accounting-20261110`, atop
-Orin’s committed `87f78737` implementation. No new build, worker, review campaign,
-canister creation, funding, installation, imported award or activation occurred.
+Orin’s committed `87f78737` implementation. This release-preparation lane has executed no new build, worker, review campaign,
+canister creation, funding, installation, imported award or activation. Rob’s
+incoming funding has now been independently observed as recorded below.
 
 ## Exact configuration changes
 
@@ -61,22 +62,30 @@ automatically imports credits, starts the season or enables either timer.
 
 Creation source account: cycles ledger **`um5iw-rqaaa-aaaaq-qaaba-cai`**,
 owner **`fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae`**
-(`rumi_identity`), **default/null subaccount**. Observed balance:
-**300,650,044,313 cycles**. Proposed additional **650,000,000,000 NET cycles**
-credit to that exact account. **The payer is unknown and unapproved.** A
-cycles-ledger ICRC transfer providing that credit would debit its payer 650.1B
-including the current 0.1B ledger fee; no payer account is selected by this doc.
+(`rumi_identity`), **default/null subaccount**. Independently re-read balance:
+**4,300,650,044,313 cycles**, exactly **4,000,000,000,000** above the previous
+300,650,044,313 observation. Orin relays Rob as the payer; the balance read
+verifies the credit amount but does not independently attribute the sender.
+The previous +650B funding request is superseded by funding received. No
+additional funding is requested here.
+
+The separate earlier **1T** top-up of the ledger canister itself is **not** a
+credit to this deploy account and is excluded from the 4T delta. See
+[funding received](evidence/season2-release-preparation-20261110/funding-received.json).
+These additional funds do not expand the proposed creation allocation or
+authorize spending the account balance.
 
 | Item | Exact cycles |
 | --- | ---: |
-| Existing deploy balance | 300,650,044,313 |
-| Proposed additional NET credit | 650,000,000,000 |
-| Amount forwarded for creation | 900,000,000,000 |
+| Previous deploy-account balance | 300,650,044,313 |
+| Independently observed account credit | 4,000,000,000,000 |
+| Current deploy-account balance | 4,300,650,044,313 |
+| Amount forwarded for creation, unchanged | 900,000,000,000 |
 | Subnet creation fee deducted from amount | 500,000,000,000 |
 | Initial new canister balance before install | 400,000,000,000 |
 | Additional ledger creation fee | 100,000,000 |
-| Total deploy-account creation debit | 900,100,000,000 |
-| Deploy account remaining | 50,550,044,313 |
+| Total proposed deploy-account creation debit | 900,100,000,000 |
+| Deploy account remaining after that proposal | 3,400,550,044,313 |
 
 The target proposal pins public CMC-eligible **13-node** application subnet
 `jtdsg-3h6gi-hs7o5-z2soi-43w3z-soyl3-ajnp3-ekni5-sw553-5kw67-nqe`.
@@ -102,8 +111,9 @@ threshold. The generic 1T health watermark will still show `healthy=false` at a
 blocker or permission to change the watermark.
 
 These exact figures are in [funding-proposal.json](evidence/season2-release-preparation-20261110/funding-proposal.json).
-No funds are taken from S1 or another canister. No ICP conversion, top-up,
-creation, install, award import or activation is authorized by this preparation.
+This packet proposes no funding from S1 or another canister. Incoming funding
+does not authorize creation, installation, historical award import, timer
+activation, ICP conversion or spending beyond any separately approved scope.
 
 ## Existing candidate and narrow validation
 
@@ -128,7 +138,8 @@ does not make the unfilled initialization or unresolved historical categories re
 
 See [configuration-validation.json](evidence/season2-release-preparation-20261110/configuration-validation.json).
 The source board and numerical reconciliation remain Orin-owned. His next
-release packet can name the actual payer, complete historical result, frozen
+release packet can retain Rob’s reported funding and independently observed
+balance, complete historical result, frozen
 T0 and private seed custody (public H0 already fixed), target/controller/artifact,
 exact import transcript and separate activation authority. Rob’s actual-running/all-November-1-points outcome is still
 open; this preparation is not a source-only substitute for it.
@@ -161,6 +172,16 @@ readback; no additional fixture campaign is requested. See
 Orin separately reports that the canonical historical backend replay still
 differs from current borrowed amounts at a matching source cursor. The narrow
 principal/interest diagnosis remains open. No historical award import uses
-unreconciled totals; the scorer candidate and funding proposal are unchanged.
+unreconciled totals; the scorer candidate and creation allocation are unchanged.
 This is an unresolved accounting result, not a claim that retained history is
 missing and not a new token-allocation or end-date gate.
+
+## Source PR status snapshot
+
+Orin reports draft [PR #630](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/630)
+at source head `12eae76c`, merge state CLEAN and no checks matching the changed
+paths. This is a reported source/PR snapshot, **not CI validation or merge
+acceptance**. This later funding-document commit does not alter the scorer.
+Historical debt reconciliation remains open; unreconciled canonical debt totals
+are not used for awards. No complete all-category November 1 import, ordinary
+live accrual or activation is claimed.
