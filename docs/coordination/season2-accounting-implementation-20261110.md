@@ -32,6 +32,10 @@ calculator result authorizes or performs a production credit import.
 
 - Existing points library suite: 194 tests passed before the final focused test
   additions; the four import tests and two binary tests subsequently passed.
+- Offline calculator: 16 focused tests passed, including source/asset evidence
+  requirements, per-interval repayment rounding and cross-participant duplicate
+  rejection. Evidence references supplied by an operator remain attestations;
+  the calculator does not independently verify a ledger transaction.
 - Canonical declarations regenerated with
   `bash scripts/regenerate-declarations.sh rumi_points`.
 - Canonical `icp build rumi_points --environment local` passed after the manifest
@@ -45,6 +49,33 @@ calculator result authorizes or performs a production credit import.
 - The test measured management memory of 151,493,408 bytes after its first epoch.
   This is a one-row local fixture, not sustained production usage or deployed
   network cycle pricing.
+- A bounded 15-participant variant also passed, traversing every participant at
+  both captures and close. One had mock debt and fourteen had zero positions;
+  all imported receipts survived upgrade/retry. Final management memory was the
+  same 151,493,408 bytes. Its partial poll to epoch-close balance change was
+  approximately 11.468B local cycles, including intervening calls and time.
+  The mock implements only backend event polling, so this is not a complete
+  successful four-source initial-poll cost measurement. The original one-row
+  invocation passed after parameterization as well.
+
+Sustained real-cohort workload measurement remains deferred as DEMO-S2-001. The
+release packet uses deployed pricing for its reserve and requires actual
+post-install resource readback; the local fixture is not guaranteed runway.
+
+## Historical debt diagnostic
+
+An ignored operator-only test adapter decodes retained backend event and timestamp
+pages and observes the existing canonical replay through test-only hooks. It adds
+no production replay behavior. One pass processed 558,710 contiguous events and
+compared its final state to a 49-vault readback bracketed by the identical event
+cursor. Borrowed amounts differed for 43 vaults. The source archive was complete
+for that cursor; this result does not establish the cause of the state difference.
+
+That replay's debt values are excluded from authoritative award inputs. A
+historical model must instead identify its observed checkpoints, event adjustments
+and uncertainty explicitly. Completing or fixing general backend replay semantics
+is not included in this Points source change. The private diagnostic is not a
+passing historical-balance reconciliation or proof that exact A/B awards existed.
 
 ## Built artifact
 

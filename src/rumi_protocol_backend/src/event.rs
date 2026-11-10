@@ -2529,6 +2529,21 @@ pub(crate) fn replay_with_nonce_time(
     replay_with_nonce_time_and_payout_events(events, std::iter::empty(), nonce_time)
 }
 
+#[cfg(test)]
+thread_local! {
+    static REPLAY_STATE_OBSERVER: std::cell::RefCell<Option<Box<dyn FnMut(u64, &State)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn notify_replay_state_observer(event_count: u64, state: &State) {
+    REPLAY_STATE_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer(event_count, state);
+        }
+    });
+}
+
 fn replay_with_nonce_time_and_payout_events(
     mut events: impl Iterator<Item = Event>,
     payout_events: impl Iterator<Item = crate::storage::PendingPayoutJournalEntry>,
@@ -2547,6 +2562,8 @@ fn replay_with_nonce_time_and_payout_events(
     let mut payout_events = payout_events.peekable();
     let mut public_event_count = 1u64;
     let mut vault_id = 0;
+    #[cfg(test)]
+    notify_replay_state_observer(public_event_count, &state);
     for event in events {
         while payout_events
             .peek()
@@ -3285,6 +3302,8 @@ fn replay_with_nonce_time_and_payout_events(
             },
         }
         public_event_count = public_event_count.saturating_add(1);
+        #[cfg(test)]
+        notify_replay_state_observer(public_event_count, &state);
     }
     while let Some(entry) = payout_events.next() {
         if entry.after_event_count > public_event_count {
@@ -5134,6 +5153,229 @@ pub fn record_price_update(collateral_type: CollateralType, price: Decimal, time
 mod filter_tests {
     use super::*;
     use crate::vault::Vault;
+
+    // Private operator adapter for replaying archived all-events Candid pages.
+    // Its observer is test-only; the replay match and production behavior are unchanged.
+    #[derive(candid::CandidType, candid::Deserialize)]
+    struct ReplayPage {
+        events: Vec<(u64, Event)>,
+        next_start: u64,
+        reached_end: bool,
+    }
+
+    fn private_response_bytes(path: &std::path::Path) -> Vec<u8> {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).expect("read private history file"))
+            .expect("parse private history JSON");
+        hex::decode(value.get("response_bytes").and_then(|v| v.as_str()).expect("response_bytes hex field"))
+            .expect("decode response_bytes hex")
+    }
+
+    fn owner_debts(state: &State) -> std::collections::BTreeMap<String, u128> {
+        let mut debts = std::collections::BTreeMap::new();
+        for vault in state.vault_id_to_vaults.values() {
+            *debts.entry(vault.owner.to_text()).or_insert(0u128) +=
+                u128::from(vault.borrowed_icusd_amount.to_u64());
+        }
+        debts
+    }
+
+    #[test]
+    #[ignore = "operator-only private full-history replay; requires archived Candid pages"]
+    fn replay_private_november_debt_timeline() {
+        use sha2::{Digest, Sha256};
+        use std::{cell::RefCell, collections::BTreeMap, path::PathBuf, rc::Rc};
+
+        const START_NS: u64 = 1_793_491_200_000_000_000;
+        const END_NS: u64 = 1_794_326_400_000_000_000;
+        let dir = PathBuf::from(std::env::var("RUMI_POINTS_REPLAY_INPUT_DIR")
+            .expect("set RUMI_POINTS_REPLAY_INPUT_DIR to private backend-genesis export"));
+        let mut page_paths: Vec<(u64, PathBuf)> = std::fs::read_dir(&dir).expect("list event pages")
+            .filter_map(Result::ok).filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                Some((name.strip_suffix(".json")?.parse::<u64>().ok()?, entry.path()))
+            }).collect();
+        page_paths.sort_by_key(|(start, _)| *start);
+        assert!(!page_paths.is_empty(), "no numbered event page files found");
+        let mut events = Vec::<Event>::new();
+        let mut timestamps = Vec::<u64>::new();
+        let mut cursor = 0u64;
+        let mut input_hashes = BTreeMap::<String, String>::new();
+        for (start, path) in &page_paths {
+            assert_eq!(*start, cursor, "event page gap/overlap at {start}");
+            let raw = std::fs::read(path).expect("read event page");
+            input_hashes.insert(path.file_name().unwrap().to_string_lossy().into_owned(), format!("{:x}", Sha256::digest(&raw)));
+            let page: ReplayPage = candid::decode_one(&private_response_bytes(path)).expect("decode event page Candid");
+            assert_eq!(page.events.first().map(|(id, _)| *id), Some(cursor), "page start mismatch");
+            for (expected, (id, event)) in (cursor..).zip(page.events.into_iter()) {
+                assert_eq!(id, expected, "event ID discontinuity");
+                events.push(event);
+            }
+            cursor = page.next_start;
+            assert_eq!(cursor as usize, events.len(), "next_start disagrees with event count");
+            if page.reached_end {
+                assert_eq!(Some(*start), page_paths.last().map(|(s, _)| s).copied(), "reached_end before final page");
+                break;
+            }
+        }
+        assert_eq!(cursor, 558_646, "unexpected frozen backend cursor");
+        assert!(matches!(events.first(), Some(Event::Init(_))), "history must start with Init");
+
+        let mut ts_paths: Vec<(u64, PathBuf)> = std::fs::read_dir(&dir).expect("list timestamp pages")
+            .filter_map(Result::ok).filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                Some((name.strip_prefix("timestamps-")?.strip_suffix(".json")?.parse::<u64>().ok()?, entry.path()))
+            }).collect();
+        ts_paths.sort_by_key(|(start, _)| *start);
+        for (start, path) in ts_paths {
+            assert_eq!(start as usize, timestamps.len(), "timestamp overlay gap");
+            let raw = std::fs::read(&path).expect("read timestamp overlay");
+            input_hashes.insert(path.file_name().unwrap().to_string_lossy().into_owned(), format!("{:x}", Sha256::digest(&raw)));
+            let page: Vec<u64> = candid::decode_one(&private_response_bytes(&path)).expect("decode timestamp overlay Candid");
+            timestamps.extend(page);
+        }
+        assert_eq!(timestamps.len(), events.len(), "genesis timestamp overlay must align with event log");
+        if let Ok(tail_dir) = std::env::var("RUMI_POINTS_REPLAY_TAIL_DIR") {
+            let tail_dir = PathBuf::from(tail_dir);
+            let tail_event_path = tail_dir.join("000558646.json");
+            let tail: ReplayPage = candid::decode_one(&private_response_bytes(&tail_event_path))
+                .expect("decode current bracket tail Candid");
+            assert_eq!(tail.events.first().map(|(id, _)| *id), Some(cursor), "current tail start mismatch");
+            for (expected, (id, event)) in (cursor..).zip(tail.events.into_iter()) {
+                assert_eq!(id, expected, "current tail event ID discontinuity");
+                events.push(event);
+            }
+            cursor = tail.next_start;
+            assert!(tail.reached_end, "current bracket tail should reach its captured end");
+            let raw = std::fs::read(&tail_event_path).expect("read current bracket tail");
+            input_hashes.insert(tail_event_path.file_name().unwrap().to_string_lossy().into_owned(),
+                format!("{:x}", Sha256::digest(&raw)));
+            let tail_ts_path = tail_dir.join("timestamps-000558646.json");
+            let raw = std::fs::read(&tail_ts_path).expect("read current bracket timestamps");
+            input_hashes.insert(tail_ts_path.file_name().unwrap().to_string_lossy().into_owned(),
+                format!("{:x}", Sha256::digest(&raw)));
+            let tail_timestamps: Vec<u64> = candid::decode_one(&private_response_bytes(&tail_ts_path))
+                .expect("decode current bracket timestamps");
+            assert_eq!(tail_timestamps.len(), (cursor - 558_646) as usize, "current tail timestamps misaligned");
+            timestamps.extend(tail_timestamps);
+        }
+        assert_eq!(timestamps.len(), events.len(), "timestamp overlay must align with event log");
+        let period_times: Vec<_> = timestamps.iter().copied().filter(|t| *t >= START_NS && *t <= END_NS).collect();
+        assert!(!period_times.is_empty(), "no events fall in requested period");
+        assert!(period_times.windows(2).all(|w| w[0] <= w[1]), "November event timestamps are not monotonic");
+
+        #[derive(Default)]
+        struct Timeline {
+            previous: BTreeMap<String, u128>,
+            anchor: Option<(u64, BTreeMap<String, u128>)>,
+            changes: Vec<serde_json::Value>,
+            last_period_timestamp: Option<u64>,
+            end_state: Option<(u64, BTreeMap<String, u128>)>,
+        }
+        let timeline = Rc::new(RefCell::new(Timeline::default()));
+        let observed_timestamps = Rc::new(timestamps.clone());
+        let capture = timeline.clone();
+        REPLAY_STATE_OBSERVER.with(|slot| {
+            assert!(slot.borrow().is_none(), "observer already installed");
+            *slot.borrow_mut() = Some(Box::new(move |event_count, state| {
+                let ts = observed_timestamps[(event_count - 1) as usize];
+                let current = owner_debts(state);
+                let mut t = capture.borrow_mut();
+                if ts < START_NS {
+                    t.previous = current;
+                    return;
+                }
+                if t.anchor.is_none() {
+                    t.anchor = Some((event_count - 1, t.previous.clone()));
+                }
+                if ts >= END_NS {
+                    if t.end_state.is_none() {
+                        t.end_state = Some((event_count - 1, t.previous.clone()));
+                    }
+                    t.previous = current;
+                    return;
+                }
+                if let Some(last) = t.last_period_timestamp {
+                    assert!(ts >= last, "November event timestamp regressed");
+                }
+                t.last_period_timestamp = Some(ts);
+                if current != t.previous {
+                    let owners: std::collections::BTreeSet<_> = t.previous.keys().chain(current.keys()).cloned().collect();
+                    let deltas: Vec<_> = owners.into_iter().filter_map(|owner| {
+                        let before = *t.previous.get(&owner).unwrap_or(&0);
+                        let after = *current.get(&owner).unwrap_or(&0);
+                        (before != after).then(|| serde_json::json!({"owner": owner, "delta_e8s": (after as i128) - (before as i128)}))
+                    }).collect();
+                    t.changes.push(serde_json::json!({"event_index": event_count - 1, "timestamp_ns": ts, "owner_debt_deltas": deltas}));
+                }
+                t.previous = current;
+            }));
+        });
+        let final_state = super::replay_with_nonce_time(events.into_iter(), || 2).expect("canonical event replay");
+        REPLAY_STATE_OBSERVER.with(|slot| *slot.borrow_mut() = None);
+        let mut t = Rc::try_unwrap(timeline).ok().expect("observer released").into_inner();
+        let anchor = t.anchor.take().expect("Nov 1 anchor captured");
+        let end = t.end_state.take().unwrap_or((timestamps.len() as u64 - 1, t.previous.clone()));
+        let final_debts = owner_debts(&final_state);
+        let output_dir = std::env::var("RUMI_POINTS_REPLAY_OUTPUT_DIR").map(PathBuf::from).unwrap_or_else(|_| dir.clone());
+        std::fs::create_dir_all(&output_dir).expect("create private output dir");
+        let mut output = serde_json::json!({
+            "source_event_cursor": cursor,
+            "period_start_ns": START_NS,
+            "period_end_ns": END_NS,
+            "anchor_before_event_index": anchor.0,
+            "anchor_owner_borrowed_debt_e8s": anchor.1,
+            "changes": t.changes,
+            "end_before_event_index": end.0,
+            "end_owner_borrowed_debt_e8s": end.1,
+            "latest_captured_owner_borrowed_debt_e8s": final_debts,
+            "latest_timestamp_ns": timestamps.last(),
+            "debt_field_note": "borrowed_icusd_amount already includes accrued interest; accrued_interest was not added",
+            "input_sha256": input_hashes
+        });
+        if let Ok(snapshot_path) = std::env::var("RUMI_POINTS_REPLAY_CURRENT_VAULTS") {
+            let snapshot_bytes = std::fs::read(&snapshot_path).expect("read bracketed current vault snapshot");
+            let value: serde_json::Value = serde_json::from_slice(&snapshot_bytes)
+                .expect("parse current snapshot JSON");
+            let current: crate::VaultsPageResponse = candid::decode_one(
+                &hex::decode(value["response_bytes"].as_str().expect("snapshot response_bytes"))
+                    .expect("decode snapshot hex")).expect("decode current vault page");
+            assert!(current.next_start_id.is_none(), "current snapshot must contain final page");
+            let replay_by_id: BTreeMap<u64, u64> = final_state.vault_id_to_vaults.values()
+                .map(|v| (v.vault_id, v.borrowed_icusd_amount.to_u64())).collect();
+            let mismatches: Vec<_> = current.vaults.iter().filter_map(|v| {
+                (replay_by_id.get(&v.vault_id) != Some(&v.borrowed_icusd_amount)).then_some(serde_json::json!({
+                    "vault_id": v.vault_id,
+                    "snapshot_borrowed_icusd_amount": v.borrowed_icusd_amount,
+                    "replay_borrowed_icusd_amount": replay_by_id.get(&v.vault_id)
+                }))
+            }).collect();
+            let live_ids: std::collections::BTreeSet<_> = current.vaults.iter().map(|v| v.vault_id).collect();
+            let replay_only_vault_ids: Vec<_> = replay_by_id.keys().filter(|id| !live_ids.contains(id)).copied().collect();
+            input_hashes.insert("current_vault_snapshot_sha256".into(), format!("{:x}", Sha256::digest(&snapshot_bytes)));
+            output["input_sha256"] = serde_json::json!(input_hashes);
+            output["current_readback"] = serde_json::json!({
+                "event_cursor_before": value.get("event_cursor_before"),
+                "event_cursor_after": value.get("event_cursor_after"),
+                "query_finished_utc": value.get("query_finished_utc"),
+                "vault_count": current.vaults.len(),
+                "replay_vault_count": replay_by_id.len(),
+                "cursor_bracket_matches_replay": value.get("event_cursor_before").and_then(|v| v.as_u64()) == Some(cursor)
+                    && value.get("event_cursor_after").and_then(|v| v.as_u64()) == Some(cursor),
+                "debt_mismatches": mismatches,
+                "replay_only_vault_ids": replay_only_vault_ids
+            });
+        }
+        let path = output_dir.join("backend-replay-debt-timeline.json");
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true)
+            .open(&path).expect("open private debt timeline");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600)).expect("restrict private output permissions");
+        }
+        file.write_all(&serde_json::to_vec_pretty(&output).unwrap()).expect("write private debt timeline");
+    }
 
     #[test]
     fn legacy_partial_liquidation_event_defaults_missing_ledger_fee_to_none() {

@@ -1120,17 +1120,22 @@ fn season2_import_upgrade_and_first_epoch() {
     footprint(&pic, rp, "installed");
     set_all_sources(&pic, rp, mock);
     let participant = Principal::from_slice(&[7; 5]);
+    let count: u32 = std::env::var("SEASON2_TEST_PARTICIPANTS").unwrap_or_else(|_| "1".into()).parse().unwrap();
+    assert!((1..=50).contains(&count));
     set_vault_debt(&pic, mock, participant, 100_000_000);
-    let begun = update(&pic, rp, "begin_season2_import", Encode!(&1u32).unwrap());
+    let begun = update(&pic, rp, "begin_season2_import", Encode!(&count).unwrap());
     let begun: Result<Season2ImportStatus, String> = Decode!(&begun, Result<Season2ImportStatus, String>).unwrap();
     assert!(!begun.unwrap().complete);
     set_time_ns(&pic, cutoff);
-    let row = Season2ImportRow { principal_state: PrincipalState::new(participant, cutoff - 1, QualifyingAction::MintIcUsd),
-        category_points: vec![1, 2, 3, 4, 5, 6, 7] };
-    let imported = update(&pic, rp, "import_season2_batch", Encode!(&0u32, &vec![row.clone()]).unwrap());
+    let rows: Vec<_> = (0..count).map(|i| {
+        let principal = if i == 0 { participant } else { Principal::from_slice(&[i as u8; 6]) };
+        Season2ImportRow { principal_state: PrincipalState::new(principal, cutoff - 1, QualifyingAction::MintIcUsd),
+            category_points: vec![1, 2, 3, 4, 5, 6, 7] }
+    }).collect();
+    let imported = update(&pic, rp, "import_season2_batch", Encode!(&0u32, &rows).unwrap());
     let imported: Result<Season2ImportStatus, String> = Decode!(&imported, Result<Season2ImportStatus, String>).unwrap();
     let imported = imported.unwrap();
-    assert_eq!(imported.credited_points, 28);
+    assert_eq!(imported.credited_points, 28 * count as u128);
     assert_eq!(total_points(&pic, rp, participant), 28);
     let ordinary_before = query(&pic, rp, "get_point_ledger_len", Encode!().unwrap());
     assert_eq!(Decode!(&ordinary_before, u64).unwrap(), 0);
@@ -1146,16 +1151,22 @@ fn season2_import_upgrade_and_first_epoch() {
     let finished: Result<Season2ImportStatus, String> = Decode!(&finished, Result<Season2ImportStatus, String>).unwrap();
     let finished = finished.unwrap();
     assert!(finished.complete);
-    assert_eq!(finished.receipts.len(), 1);
+    assert_eq!(finished.receipts.len(), count as usize);
     pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None).expect("upgrade Season 2 candidate");
     let status = query(&pic, rp, "get_season2_import_status", Encode!().unwrap());
     let status: Option<Season2ImportStatus> = Decode!(&status, Option<Season2ImportStatus>).unwrap();
     assert_eq!(status.unwrap(), finished);
     assert_eq!(total_points(&pic, rp, participant), 28);
-    let retry = update(&pic, rp, "import_season2_batch", Encode!(&0u32, &vec![row]).unwrap());
+    let retry = update(&pic, rp, "import_season2_batch", Encode!(&0u32, &rows).unwrap());
     let retry: Result<Season2ImportStatus, String> = Decode!(&retry, Result<Season2ImportStatus, String>).unwrap();
     assert_eq!(retry.unwrap(), finished);
     footprint(&pic, rp, "upgraded");
+    // The existing mock only implements backend event polling. Other event
+    // endpoints fail, so this is a partial-poll measurement, not a full poll.
+    let polled = update(&pic, rp, "trigger_poll", Encode!().unwrap());
+    let polled: Result<u64, PointsError> = Decode!(&polled, Result<u64, PointsError>).unwrap();
+    assert!(polled.is_ok());
+    footprint(&pic, rp, "partial_poll");
     start_season_ok(&pic, rp, SEASON_SEED);
     admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
     let epoch = epoch_status(&pic, rp).open_epoch.unwrap();
