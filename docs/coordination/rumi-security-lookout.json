@@ -173,7 +173,7 @@
       "state": "Review",
       "owner": "Adrian",
       "scope": "Automatic WaterNeuron settlement adoption as ordinary ICP collateral in vault 51",
-      "evidenceText": "November10: adoption source reconciled onto deployed SEC12 f1d2e77e as 42478174; packet b16a87f8 pushed. No source conflicts; canonical bindings regenerated. Passed 23 adoption/claim, 4 cancellation and 7 SEC11 preservation tests plus canonical/backward-compatible Candid. Non-overlapping source byte-identical; unaffected frontend proofs reused. November7 binaries/bundle explicitly superseded and not installable. Dorian received source/evidence and owns independent review/serial build allocation. No replacement production build, deployment, timer activation or financial operation. Same vault/owner/debt/interest retained; existing automatic-adoption approval unchanged.",
+      "evidenceText": "November10: Dorian independently accepted bounded source/artifact preparation at receipt38b675d3; source42478174 retains deployed SEC12 and SEC11 state. One serial backend/frontend build and actual397-method/API/740-file verification passed; 17 source identity proofs independently checked. New upload43bbbca9 is frozen; November7 artifacts remain superseded. Installation registers hourly and +10-second automatic adoption, so installation/activation/financial operations remain explicitly held. No deployment or custody action. Merritt exact preparation decision next; no duplicate tests/build or new owner preference. Adrian implementation; Dorian release owner.",
       "evidenceLinks": [
         {
           "title": "Vault 51 redemption PR",
@@ -194,6 +194,10 @@
         {
           "title": "SEC12-reconciled vault51 source and current release boundary",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b16a87f8a10a978ef0e759d131f96c5a5d5ab229/docs/operations/vault51-auto-adoption-release-20261107.md"
+        },
+        {
+          "title": "Dorian preparation acceptance; installation and activation held",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/38b675d3cbc98f1f38aa9fab6718a10b4931daa8/docs/operations/vault51-release-review-20261110.md"
         }
       ]
     },
