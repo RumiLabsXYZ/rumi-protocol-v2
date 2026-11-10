@@ -1,0 +1,10 @@
+{
+  "wasm_sha256": "dc6b6fe48e79571d0bbe371b9fb8854bc77207abf3b5005c0eda7455388a9c17",
+  "wasm_bytes": 3018333,
+  "code_section_bytes": 2457901,
+  "gzip_sha256": "967e22d162579f5626283b094bd0a1457f09c009f34ed455b676f252975def8c",
+  "gzip_bytes": 747354,
+  "deployed": false,
+  "sourceCommit": "87f78737",
+  "preparedBy": "Orin; reused without rebuilding"
+}

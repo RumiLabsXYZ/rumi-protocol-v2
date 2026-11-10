@@ -1,0 +1,18 @@
+{
+  "baseSource": "87f78737",
+  "cliVersion": "1.3.0",
+  "effectiveConfigurationAccepted": true,
+  "newSelector": "rumi_points_season2",
+  "environment": "mainnet-season2",
+  "environmentHasExactlyOneCanister": true,
+  "allExistingCanisterDefinitionsPreserved": true,
+  "allExistingEnvironmentsPreserved": true,
+  "season1MappingByteIdentical": true,
+  "season2MappingEmpty": true,
+  "pendingInitFailsEncodingAsIntended": true,
+  "syntheticFilledInitEncodesAgainstCurrentCandid": true,
+  "realCutoffAndH0Frozen": false,
+  "noRustCalculatorOrEventEditsByThisChange": true,
+  "newBuilds": 0,
+  "canisterWrites": 0
+}

@@ -648,6 +648,32 @@ canisters:
         shrink: true
     init_args: '(null)'
 
+  # Independent Season 2 instance. The finalized rumi_points/S1 selector and
+  # mainnet-live mapping above remain unchanged. Use only mainnet-season2;
+  # never the implicit `ic` environment or an all-canister deployment.
+  # This definition is preparation, not creation/install/activation authority.
+  - name: rumi_points_season2
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_points
+        candid: src/rumi_points/rumi_points.did
+        locked: true
+        shrink: true
+    settings:
+      controllers:
+        - fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae
+      compute_allocation: 0
+      memory_allocation: 0
+      freezing_threshold: 2592000
+      log_visibility: controllers
+    # Explicit held initialization: prospective cutoff/H0 are not yet frozen.
+    # The referenced text deliberately cannot encode until those fields are
+    # supplied in the reviewed release packet; it cannot fall back to S1 dates.
+    init_args:
+      path: docs/operations/evidence/season2-release-preparation-20261110/season2-init.did
+      format: candid
+
   # ---------------------------------------------------------------------------
   # Frontend asset canisters
   # ---------------------------------------------------------------------------
@@ -1043,3 +1069,10 @@ environments:
       - rumi_cycle_sentinel
       - rumi_amm
       - rumi_points
+
+  # Separate ID namespace: .icp/data/mappings/mainnet-season2.ids.json.
+  # Only this new instance belongs here. No frontend/S1/source canisters.
+  - name: mainnet-season2
+    network: ic
+    canisters:
+      - rumi_points_season2

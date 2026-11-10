@@ -1,0 +1,125 @@
+# Season 2 isolated release preparation — November 10, 2026
+
+Dorian owns configuration and this release-preparation record. Orin owns Points
+Rust, calculator, private participant reconciliation and the actual running-scoring
+outcome. This source-only change is on `codex/season2-accounting-20261110`, atop
+Orin’s committed `87f78737` implementation. No new build, worker, review campaign,
+canister creation, funding, installation, imported award or activation occurred.
+
+## Exact configuration changes
+
+- Add selector **`rumi_points_season2`**, using the same `rumi_points` Rust package
+  and Candid, pinned `@dfinity/rust@v3.2.0` recipe with locked dependencies and
+  shrink enabled. Existing candidate artifacts are reused; this change did not
+  execute that recipe or rebuild the binary.
+- Add **`mainnet-season2`**, network `ic`, containing only that selector. Do not
+  use implicit `ic`, `mainnet-live` or a whole-stack deployment for this release.
+- Add `.icp/data/mappings/mainnet-season2.ids.json` as **`{}`**. It is a separate
+  tracked ID namespace, not a fabricated principal. No ID is allocated; a later
+  specifically authorized creation records its returned ID there. Never copy the
+  S1 ID into it or repoint the S1 selector.
+- Proposed settings are explicitly `rumi_identity` as the sole controller, zero
+  reserved compute, zero fixed memory allocation, 30-day freezing threshold and
+  controller-only logs. They have not been applied to any canister.
+- File-backed, explicit initialization is in
+  `evidence/season2-release-preparation-20261110/season2-init.did`: fixed admin
+  `rumi_identity`, default protocol exclusions (`null` preserves the built-in
+  seed), prospective cutoff T0, `u64::MAX` as the technical open end, and public
+  H0 commitment. **T0 and H0 are named unresolved tokens; the file deliberately
+  does not encode yet.** Do not install it, substitute an invented timestamp or
+  zero hash, or put the unrevealed seed S0 in public source.
+
+S1 selector/definition, every existing environment and the complete
+`mainnet-live.ids.json` are unchanged. S1 remains
+`bfnu3-6aaaa-aaaab-qhanq-cai`. No Points Rust, generated bindings, calculator,
+backend `event.rs`, source endpoints or frontend route was edited by this change.
+
+## Initialization boundary
+
+The candidate’s `begin_season2_import` requires an empty stopped instance,
+committed seed hash, a future T0 later than November 1 and no decided end
+(`u64::MAX`). T0 is both exclusive historical replay end and prospective engine
+start. The logical backfill start remains November 1, 2026 00:00 UTC. Those two
+starts are deliberately distinct. Freeze the actual T0/H0 and private source
+manifest/participant state with Orin’s reconciliation, then replace both tokens
+in the readable reviewed init artifact. Token allocation and a final end-date
+decision are not added as accounting blockers.
+
+[CLI 1.3 file-backed init syntax](https://cli.internetcomputer.org/1.3/reference/configuration/#init-args)
+was checked against the installed `icp 1.3.0`. A synthetic T0/nonzero-H0 fixture
+encoded against the current `(opt InitArgs)`; it is validation only, not release
+parameters. The real unfilled file was verified to reject encoding. No sync hook
+automatically imports credits, starts the season or enables either timer.
+
+## One exact bounded funding proposal
+
+Creation source account: cycles ledger **`um5iw-rqaaa-aaaaq-qaaba-cai`**,
+owner **`fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae`**
+(`rumi_identity`), **default/null subaccount**. Observed balance:
+**300,650,044,313 cycles**. Proposed additional **650,000,000,000 NET cycles**
+credit to that exact account. **The payer is unknown and unapproved.** A
+cycles-ledger ICRC transfer providing that credit would debit its payer 650.1B
+including the current 0.1B ledger fee; no payer account is selected by this doc.
+
+| Item | Exact cycles |
+| --- | ---: |
+| Existing deploy balance | 300,650,044,313 |
+| Proposed additional NET credit | 650,000,000,000 |
+| Amount forwarded for creation | 900,000,000,000 |
+| Subnet creation fee deducted from amount | 500,000,000,000 |
+| Initial new canister balance before install | 400,000,000,000 |
+| Additional ledger creation fee | 100,000,000 |
+| Total deploy-account creation debit | 900,100,000,000 |
+| Deploy account remaining | 50,550,044,313 |
+
+The target proposal pins public CMC-eligible **13-node** application subnet
+`jtdsg-3h6gi-hs7o5-z2soi-43w3z-soyl3-ajnp3-ekni5-sw553-5kw67-nqe`.
+Deployed replica revision
+`83f29e0803496ba6aaea3d6b43f6c6bebea12dd9` sets creation to 500B,
+storage to 317,500 cycles/GiB/second and base idle cost to 10,000/second.
+[Deployed pricing source](https://github.com/dfinity/ic/blob/83f29e0803496ba6aaea3d6b43f6c6bebea12dd9/rs/config/src/subnet_config.rs#L112),
+[ledger debit semantics](https://github.com/dfinity/cycles-ledger/blob/main/INTERFACE_SPECIFICATION.md#create_canister).
+Node count, eligibility, pricing revision and ledger fee are execution-time
+preconditions, not permission to silently substitute a different subnet.
+
+The measured one-owner first-epoch footprint is 151,493,408 bytes. Local PocketIC
+pricing is not mainnet pricing. At a **256 MiB planning envelope** (77.2% memory
+headroom), 30-day idle reserve is **231.66B**. Partition the proposed 400B into
+that reserve, **50B** install/reconciliation, **100B** initial polling/driver and
+**18.34B** margin. This is not a measured sustained 15-owner workload, enforceable
+spending subaccounts, or guaranteed runway. Read actual post-install/import memory,
+idle burn and cycles before authorized activation; retain the normal freezing
+threshold. The generic 1T health watermark will still show `healthy=false` at a
+400B balance; that indicator is distinct from replica freezing, not a claimed
+blocker or permission to change the watermark.
+
+These exact figures are in [funding-proposal.json](evidence/season2-release-preparation-20261110/funding-proposal.json).
+No funds are taken from S1 or another canister. No ICP conversion, top-up,
+creation, install, award import or activation is authorized by this preparation.
+
+## Existing candidate and narrow validation
+
+Orin’s already-built candidate is recorded in
+[candidate-artifact.json](evidence/season2-release-preparation-20261110/candidate-artifact.json):
+optimized Wasm `dc6b6fe48e79571d0bbe371b9fb8854bc77207abf3b5005c0eda7455388a9c17`,
+3,018,333 bytes; executable code 2,457,901 bytes; gzip
+`967e22d162579f5626283b094bd0a1457f09c009f34ed455b676f252975def8c`,
+747,354 bytes. These are not deployed hashes. This configuration-only addition
+does not make the unfilled initialization or unresolved historical categories ready.
+
+- `icp project show` passed, expanding the recipe and explicit init path without
+  building, installing or invoking an update.
+- Parsed comparison proves every pre-existing canister definition/environment
+  preserved and S2 environment contains exactly one new selector.
+- S1 mapping bytes match the previous commit; S2 mapping is empty.
+- Real pending init rejects encoding; synthetic filled values encode against
+  canonical Candid. No real cutoff, commitment or secret is manufactured.
+- Scoped `git diff --check` passed; only the configuration, new mapping and
+  Dorian-owned release-preparation paths are staged for this commit.
+
+See [configuration-validation.json](evidence/season2-release-preparation-20261110/configuration-validation.json).
+The source board and numerical reconciliation remain Orin-owned. His next
+release packet can name the actual payer, complete historical result, frozen
+T0/H0/seed custody, target/controller/artifact, exact import transcript and separate
+activation authority. Rob’s actual-running/all-November-1-points outcome is still
+open; this preparation is not a source-only substitute for it.

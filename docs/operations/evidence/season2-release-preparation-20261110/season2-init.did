@@ -1,0 +1,12 @@
+// PREPARATION HOLD: replace both named tokens with reviewed exact values.
+// This file is deliberately not encodable Candid until the prospective cutoff
+// and public H0 commitment are pinned. Never put the unrevealed seed S0 here.
+// cutoff_ns is the exclusive historical replay end / prospective engine start,
+// not the logical backfill start (2026-11-01T00:00:00Z).
+(opt record {
+  admin = opt principal "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae";
+  excluded_principals = null;
+  season_start_ns = opt PENDING_REVIEWED_CUTOFF_NS;
+  season_end_ns = opt 18_446_744_073_709_551_615 : opt nat64;
+  snapshot_seed_commit = opt blob PENDING_REVIEWED_H0_CANDID_BYTES;
+})
