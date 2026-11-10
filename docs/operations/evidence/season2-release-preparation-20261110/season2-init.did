@@ -1,12 +1,12 @@
-// PREPARATION HOLD: the prospective cutoff T0 is not frozen.
-// H0 is fixed below; S0 remains in Orin’s private custody, never in this file.
-// This file deliberately cannot encode until the reviewed T0 is supplied.
+// EXECUTION HOLD: proposed T0 = 2026-11-10T19:00:00Z, H0 fixed below.
+// This encodable proposal is not approved for installation or activation.
+// S0 remains in Orin's private custody, never in this file.
 // cutoff_ns is the exclusive historical replay end / prospective engine start,
 // not the logical backfill start (2026-11-01T00:00:00Z).
 (opt record {
   admin = opt principal "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae";
   excluded_principals = null;
-  season_start_ns = opt PENDING_REVIEWED_CUTOFF_NS;
+  season_start_ns = opt 1_794_337_200_000_000_000 : opt nat64;
   season_end_ns = opt 18_446_744_073_709_551_615 : opt nat64;
   snapshot_seed_commit = opt blob "\d0\50\af\46\4e\a9\62\52\b3\7b\21\da\99\ea\a7\e7\dd\82\91\76\66\27\ae\e3\ea\bd\05\61\0d\04\48\b8";
 })

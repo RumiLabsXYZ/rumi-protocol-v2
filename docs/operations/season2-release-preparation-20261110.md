@@ -26,9 +26,10 @@ incoming funding has now been independently observed as recorded below.
   `evidence/season2-release-preparation-20261110/season2-init.did`: fixed admin
   `rumi_identity`, default protocol exclusions (`null` preserves the built-in
   seed), prospective cutoff T0, `u64::MAX` as the technical open end, and public
-  H0 commitment. **H0 is fixed; T0 remains a named unresolved token and the
-  file deliberately does not encode yet.** Do not install it, substitute an
-  invented timestamp or zero hash, or put the unrevealed seed S0 in public source.
+  H0 commitment. **H0 is fixed; proposed T0 is 2026-11-10T19:00:00Z (11 AM Pacific),
+  nat64 1794337200000000000. The actual init encodes but remains unapproved.**
+  Approval must arrive by 18:45 UTC (10:45 AM Pacific); otherwise HOLD without
+  silently moving T0. Never put the unrevealed seed S0 in public source.
 
 S1 selector/definition, every existing environment and the complete
 `mainnet-live.ids.json` are unchanged. S1 remains
@@ -41,9 +42,8 @@ The candidate’s `begin_season2_import` requires an empty stopped instance,
 committed seed hash, a future T0 later than November 1 and no decided end
 (`u64::MAX`). T0 is both exclusive historical replay end and prospective engine
 start. The logical backfill start remains November 1, 2026 00:00 UTC. Those two
-starts are deliberately distinct. Freeze the actual T0 and private source
-manifest/participant state with Orin’s reconciliation, then replace the remaining T0 token in the readable reviewed
-init artifact. The public H0 commitment is fixed as
+starts are deliberately distinct. The proposal now pins T0 at 2026-11-10T19:00:00Z; approval remains held.
+Orin owns the final cutoff source manifest and participant reconciliation. The public H0 commitment is fixed as
 `d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8`
 (32 bytes). Orin reports preparing the prospective seed once using OS randomness
 at `2026-11-10T17:21:39.845469Z` and retaining S0 only in a private ignored
@@ -52,11 +52,14 @@ or transmitting S0. See [commitment evidence](evidence/season2-release-preparati
 Token allocation and a final end-date decision are not added as accounting blockers.
 
 [CLI 1.3 file-backed init syntax](https://cli.internetcomputer.org/1.3/reference/configuration/#init-args)
-was checked against the installed `icp 1.3.0`. A synthetic T0 with the exact fixed
-H0 encoded against the current `(opt InitArgs)`; the synthetic T0 is validation
-only, not a release parameter. The real unfilled file was verified to reject
-encoding. No sync hook
-automatically imports credits, starts the season or enables either timer.
+was checked against the installed `icp 1.3.0`. The actual proposed init now
+encodes against canonical `(opt InitArgs)`: 139 bytes, binary SHA256
+`be20ba1f4f068c00dd0a503942da86c0f0b948f853fae65e2c192cddae535c3a`.
+No sync hook automatically imports credits, starts the season or enables timers.
+See the [held exact command plan](season2-creation-install-plan-20261110.md).
+The [final decision packet](../coordination/season2-release-decision-20261110.md)
+owns the accounting method, credit caps, fresh cohort-query scope and activation
+authority. This preparation does not grant any of those permissions.
 
 ## One exact bounded funding proposal
 
@@ -123,16 +126,15 @@ optimized Wasm `dc6b6fe48e79571d0bbe371b9fb8854bc77207abf3b5005c0eda7455388a9c17
 3,018,333 bytes; executable code 2,457,901 bytes; gzip
 `967e22d162579f5626283b094bd0a1457f09c009f34ed455b676f252975def8c`,
 747,354 bytes. These are not deployed hashes. This configuration-only addition
-does not make the unfilled initialization or unresolved historical categories ready.
+does not approve installation, historical credit or activation.
 
 - `icp project show` passed, expanding the recipe and explicit init path without
   building, installing or invoking an update.
 - Parsed comparison proves every pre-existing canister definition/environment
   preserved and S2 environment contains exactly one new selector.
 - S1 mapping bytes match the previous commit; S2 mapping is empty.
-- Real pending T0 init rejects encoding; a synthetic cutoff with the exact
-  fixed 32-byte public H0 encodes against canonical Candid. No real cutoff or
-  private seed is manufactured or read by this release-preparation change.
+- Actual proposed T0 and the fixed 32-byte public H0 encode against canonical
+  Candid. No private seed was read by this release-preparation change.
 - Scoped `git diff --check` passed; only the configuration, new mapping and
   Dorian-owned release-preparation paths are staged for this commit.
 
@@ -169,12 +171,9 @@ runway or permission to activate. Use deployed pricing and actual post-install
 readback; no additional fixture campaign is requested. See
 [fifteen-owner evidence](evidence/season2-release-preparation-20261110/fifteen-owner-lifecycle.json).
 
-Orin separately reports that the canonical historical backend replay still
-differs from current borrowed amounts at a matching source cursor. The narrow
-principal/interest diagnosis remains open. No historical award import uses
-unreconciled totals; the scorer candidate and creation allocation are unchanged.
-This is an unresolved accounting result, not a claim that retained history is
-missing and not a new token-allocation or end-date gate.
+The canonical historical replay discrepancy and bounded treatment are recorded
+in Orin’s final decision packet. That packet controls the selected method and
+credit caps; this configuration record neither changes them nor adds a gate.
 
 ## Source PR status snapshot
 
@@ -182,6 +181,6 @@ Orin reports draft [PR #630](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pul
 at source head `12eae76c`, merge state CLEAN and no checks matching the changed
 paths. This is a reported source/PR snapshot, **not CI validation or merge
 acceptance**. This later funding-document commit does not alter the scorer.
-Historical debt reconciliation remains open; unreconciled canonical debt totals
-are not used for awards. No complete all-category November 1 import, ordinary
+The final decision packet governs the bounded historical method; this record
+does not authorize historical awards. No complete all-category November 1 import, ordinary
 live accrual or activation is claimed.

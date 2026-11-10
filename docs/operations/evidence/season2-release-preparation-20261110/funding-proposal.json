@@ -42,5 +42,8 @@
   "creationApprovedByThisPreparation": false,
   "installApprovedByThisPreparation": false,
   "historicalImportApprovedByThisPreparation": false,
-  "activationApprovedByThisPreparation": false
+  "activationApprovedByThisPreparation": false,
+  "proposedCutoffNs": 1794337200000000000,
+  "approvalDeadlineUtc": "2026-11-10T18:45:00Z",
+  "executionHeld": true
 }

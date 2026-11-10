@@ -5,6 +5,8 @@
   "reportedPreparedAtUtc": "2026-11-10T17:21:39.845469Z",
   "privateSeedCustody": "Orin reports one OS-random seed stored only in an ignored mode-0600 private file; no seed or private path included",
   "privateSeedReadOrTransmittedByReleaseOwner": false,
-  "prospectiveCutoffFrozen": false,
-  "activation": false
+  "activation": false,
+  "prospectiveCutoffFrozenInProposal": true,
+  "prospectiveCutoffNs": 1794337200000000000,
+  "prospectiveCutoffApproved": false
 }
