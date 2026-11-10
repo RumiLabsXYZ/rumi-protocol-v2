@@ -180,7 +180,7 @@ fn get_vaults(target: Option<Principal>) -> Vec<CandidVault> {
 
 #[ic_cdk::query]
 fn get_protocol_status() -> ProtocolStatus {
-    ProtocolStatus { last_icp_rate: 1.0, last_icp_timestamp: 0 }
+    ProtocolStatus { last_icp_rate: 1.0, last_icp_timestamp: ic_cdk::api::time() }
 }
 
 #[ic_cdk::query]

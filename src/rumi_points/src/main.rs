@@ -42,6 +42,30 @@ async fn admin_resume_points_recovery_v2() -> Result<(),String> {
     Ok(())
 }
 
+// Imported credits are separately receipted, not fabricated snapshot entries.
+#[ic_cdk::query]
+fn get_season2_import_status() -> Option<state::Season2ImportStatus> { state::season2_import_status() }
+
+#[ic_cdk::update]
+fn begin_season2_import(expected_rows: u32) -> Result<state::Season2ImportStatus, String> {
+    state::begin_season2_import(ic_cdk::caller(), expected_rows, ic_cdk::api::time())
+}
+
+#[ic_cdk::update]
+fn import_season2_batch(batch: u32, rows: Vec<state::Season2ImportRow>) -> Result<state::Season2ImportStatus, String> {
+    state::import_season2_batch(ic_cdk::caller(), batch, rows, ic_cdk::api::time())
+}
+
+#[ic_cdk::query]
+fn get_season2_import_manifest_hash(cursors: Vec<u64>, unresolved: u8) -> Result<Vec<u8>, String> {
+    state::season2_import_manifest_hash(cursors, unresolved)
+}
+
+#[ic_cdk::update]
+fn finish_season2_import(cursors: Vec<u64>, provenance: Vec<u8>, unresolved: u8) -> Result<state::Season2ImportStatus, String> {
+    state::finish_season2_import(ic_cdk::caller(), cursors, provenance, unresolved, ic_cdk::api::time())
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 #[ic_cdk::init]
@@ -113,7 +137,7 @@ fn get_point_ledger_len() -> u64 {
 /// A page of the raw audit ledger. Together with `get_principal_point_entries`
 /// this decomposes ordinary earnings into per-source, per-epoch deltas.
 /// Any separately applied outage compensation is exposed by the outage-credit
-/// readers; both ledgers together explain `total_points`.
+/// readers; Season 2 import receipts provide a third, separate component.
 #[ic_cdk::query]
 fn get_point_entries(offset: u64, limit: u32) -> PointEntryPage {
     state::point_entries(offset, limit)
@@ -435,6 +459,10 @@ fn get_ingest_status() -> IngestStatus {
 
 // ── Phase 5: epoch driver + commit-reveal audit ─────────────────────────────
 
+fn ensure_season2_import_finished() -> Result<(), String> {
+    if state::season2_import_active() { Err("Season 2 import is active".into()) } else { Ok(()) }
+}
+
 /// Admin: open Season 1's epoch 0 with the secret seed S0 (verified against the
 /// committed H0), then enable the periodic driver. Call once, in-season, after the
 /// poll has registered participants. `initial_seed` is the 32-byte S0.
@@ -444,6 +472,7 @@ fn start_season(initial_seed: Vec<u8>) -> Result<(), String> {
     if !state::is_admin(caller) {
         return Err("unauthorized".to_string());
     }
+    ensure_season2_import_finished()?;
     let seed: [u8; 32] = initial_seed
         .try_into()
         .map_err(|_| "initial_seed must be exactly 32 bytes".to_string())?;
@@ -548,6 +577,19 @@ ic_cdk::export_candid!();
 mod candid_tests {
     use candid_parser::utils::{service_equal, CandidSource};
     use std::path::Path;
+
+    #[test]
+    fn season_start_checks_active_import() {
+        use rumi_points::{state, types::InitArgs};
+        let admin = candid::Principal::from_slice(&[9]);
+        let cutoff = 1_793_491_200_000_000_100u64;
+        state::init_state(Some(InitArgs { admin: Some(admin), excluded_principals: Some(vec![]),
+            season_start_ns: Some(cutoff), season_end_ns: Some(u64::MAX),
+            snapshot_seed_commit: Some([42; 32]) }), admin);
+        assert!(super::ensure_season2_import_finished().is_ok());
+        state::begin_season2_import(admin, 0, cutoff - 1).unwrap();
+        assert_eq!(super::ensure_season2_import_finished(), Err("Season 2 import is active".into()));
+    }
 
     /// The committed `rumi_points.did` must stay structurally equal to the
     /// interface generated from the endpoint signatures. Catches schema drift.
