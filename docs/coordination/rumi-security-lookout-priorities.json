@@ -77,7 +77,7 @@
       "title": "Vault 51 nICP recovery",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Dorian/Merritt: inspect the pushed source e979cd69 and exact release packet; use the existing SEC11-preserving release path. Adrian retains implementation ownership. Automatic adoption requires no new owner repayment/approval at arrival; no production execution yet.",
+      "nextAction": "Dorian: independently review reconciled source 42478174/packet b16a87f8 and allocate one serial replacement build. Adrian retains implementation. Prior SEC11-only artifacts are superseded; no deployment, activation or financial action.",
       "cardIds": [
         "SEC-08"
       ]

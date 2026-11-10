@@ -173,7 +173,7 @@
       "state": "Review",
       "owner": "Adrian",
       "scope": "Automatic WaterNeuron settlement adoption as ordinary ICP collateral in vault 51",
-      "evidenceText": "Rob approved automatic ICP adoption in the same vault51 with owner/debt/interest/history retained. Adrian implemented on the verified deployed SEC11 source; candidate source e979cd69 and upload 7e099a2c are frozen. Passed: 23 focused claim/replay tests, 7 SEC11 preservation tests, 13 frontend tests, canonical/backward-compatible Candid, backend/frontend builds and actual artifact exports/size/hashes. Hourly verified settlement -> exact net-fee custody sweep -> once-only collateral/index switch; no owner repayment/payout required. Dorian/Merritt final source/artifact review and live release remain pending. No deployment, production timer activation, custody transfer or hosted CI claimed. Fresh WN read still dissolving, escrow zero.",
+      "evidenceText": "November10: adoption source reconciled onto deployed SEC12 f1d2e77e as 42478174; packet b16a87f8 pushed. No source conflicts; canonical bindings regenerated. Passed 23 adoption/claim, 4 cancellation and 7 SEC11 preservation tests plus canonical/backward-compatible Candid. Non-overlapping source byte-identical; unaffected frontend proofs reused. November7 binaries/bundle explicitly superseded and not installable. Dorian received source/evidence and owns independent review/serial build allocation. No replacement production build, deployment, timer activation or financial operation. Same vault/owner/debt/interest retained; existing automatic-adoption approval unchanged.",
       "evidenceLinks": [
         {
           "title": "Vault 51 redemption PR",
@@ -190,6 +190,10 @@
         {
           "title": "Frozen vault51 automatic adoption release candidate",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/d41a4c5c3abd3ac52b87ed0d87517c17d41cc457/docs/operations/vault51-auto-adoption-release-20261107.md"
+        },
+        {
+          "title": "SEC12-reconciled vault51 source and current release boundary",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b16a87f8a10a978ef0e759d131f96c5a5d5ab229/docs/operations/vault51-auto-adoption-release-20261107.md"
         }
       ]
     },
