@@ -66,6 +66,24 @@ fn finish_season2_import(cursors: Vec<u64>, provenance: Vec<u8>, unresolved: u8)
     state::finish_season2_import(ic_cdk::caller(), cursors, provenance, unresolved, ic_cdk::api::time())
 }
 
+// Deferred historical credits are separate from the zero-credit position bootstrap.
+#[ic_cdk::query]
+fn get_season2_backfill_status() -> Option<state::Season2ImportStatus> { state::season2_backfill_status() }
+#[ic_cdk::update]
+fn begin_season2_backfill(expected_rows: u32) -> Result<state::Season2ImportStatus, String> {
+    state::begin_season2_backfill(ic_cdk::caller(), expected_rows)
+}
+#[ic_cdk::update]
+fn import_season2_backfill_batch(batch: u32, rows: Vec<state::Season2ImportRow>) -> Result<state::Season2ImportStatus, String> {
+    state::import_season2_backfill_batch(ic_cdk::caller(), batch, rows)
+}
+#[ic_cdk::query]
+fn get_season2_backfill_manifest_hash() -> Result<Vec<u8>, String> { state::season2_backfill_manifest_hash() }
+#[ic_cdk::update]
+fn finish_season2_backfill(provenance: Vec<u8>) -> Result<state::Season2ImportStatus, String> {
+    state::finish_season2_backfill(ic_cdk::caller(), provenance)
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 #[ic_cdk::init]
@@ -137,7 +155,7 @@ fn get_point_ledger_len() -> u64 {
 /// A page of the raw audit ledger. Together with `get_principal_point_entries`
 /// this decomposes ordinary earnings into per-source, per-epoch deltas.
 /// Any separately applied outage compensation is exposed by the outage-credit
-/// readers; Season 2 import receipts provide a third, separate component.
+/// readers; Season 2 bootstrap and deferred backfill receipts are separate components.
 #[ic_cdk::query]
 fn get_point_entries(offset: u64, limit: u32) -> PointEntryPage {
     state::point_entries(offset, limit)

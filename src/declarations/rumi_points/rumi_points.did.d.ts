@@ -332,9 +332,11 @@ export interface _SERVICE {
   'admin_stage_outage_allocation' : ActorMethod<[OutageAllocation], Result_2>,
   'apply_fiat_stable_topups' : ActorMethod<[number], Result_5>,
   'apply_season1_final_supplement' : ActorMethod<[], Result_6>,
+  'begin_season2_backfill' : ActorMethod<[number], Result_7>,
   'begin_season2_import' : ActorMethod<[number], Result_7>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
+  'finish_season2_backfill' : ActorMethod<[Uint8Array | number[]], Result_7>,
   'finish_season2_import' : ActorMethod<
     [BigUint64Array | bigint[], Uint8Array | number[], number],
     Result_7
@@ -375,11 +377,17 @@ export interface _SERVICE {
   'get_registration_info' : ActorMethod<[Principal], [] | [RegistrationInfo]>,
   'get_revealed_seed' : ActorMethod<[bigint], [] | [RevealedSeed]>,
   'get_season1_final_supplement' : ActorMethod<[], Status>,
+  'get_season2_backfill_manifest_hash' : ActorMethod<[], Result_8>,
+  'get_season2_backfill_status' : ActorMethod<[], [] | [Season2ImportStatus]>,
   'get_season2_import_manifest_hash' : ActorMethod<
     [BigUint64Array | bigint[], number],
     Result_8
   >,
   'get_season2_import_status' : ActorMethod<[], [] | [Season2ImportStatus]>,
+  'import_season2_backfill_batch' : ActorMethod<
+    [number, Array<Season2ImportRow>],
+    Result_7
+  >,
   'import_season2_batch' : ActorMethod<
     [number, Array<Season2ImportRow>],
     Result_7

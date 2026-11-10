@@ -310,9 +310,11 @@ service : (opt InitArgs) -> {
   admin_stage_outage_allocation : (OutageAllocation) -> (Result_2);
   apply_fiat_stable_topups : (nat32) -> (Result_5);
   apply_season1_final_supplement : () -> (Result_6);
+  begin_season2_backfill : (nat32) -> (Result_7);
   begin_season2_import : (nat32) -> (Result_7);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
+  finish_season2_backfill : (blob) -> (Result_7);
   finish_season2_import : (vec nat64, blob, nat8) -> (Result_7);
   force_epoch_tick : () -> (Result_1);
   get_asset_ledgers : () -> (vec record { nat8; principal }) query;
@@ -342,8 +344,11 @@ service : (opt InitArgs) -> {
   get_registration_info : (principal) -> (opt RegistrationInfo) query;
   get_revealed_seed : (nat64) -> (opt RevealedSeed) query;
   get_season1_final_supplement : () -> (Status) query;
+  get_season2_backfill_manifest_hash : () -> (Result_8) query;
+  get_season2_backfill_status : () -> (opt Season2ImportStatus) query;
   get_season2_import_manifest_hash : (vec nat64, nat8) -> (Result_8) query;
   get_season2_import_status : () -> (opt Season2ImportStatus) query;
+  import_season2_backfill_batch : (nat32, vec Season2ImportRow) -> (Result_7);
   import_season2_batch : (nat32, vec Season2ImportRow) -> (Result_7);
   is_excluded : (principal) -> (bool) query;
   is_registered : (principal) -> (bool) query;

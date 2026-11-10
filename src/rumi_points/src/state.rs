@@ -2576,6 +2576,124 @@ pub fn finish_season2_import(
     Ok(v)
 }
 
+// Deferred history is additive and uses its own stable cell. Bootstrap can
+// finish with zero credits so prospective epochs run while reconciliation does.
+// The interval and source bindings are copied from that completed bootstrap;
+// none of these methods changes a prospective cursor, epoch, position or seed.
+thread_local! {
+    static SEASON2_BACKFILL: RefCell<StableCell<StoredSeason2Import, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableCell::init(
+            m.borrow().get(MemoryId::new(22)), StoredSeason2Import::Empty
+        ).expect("initialize Season 2 backfill")));
+}
+fn set_season2_backfill(value: Season2ImportStatus) {
+    SEASON2_BACKFILL.with(|c| {
+        c.borrow_mut().set(StoredSeason2Import::V1(value)).expect("store Season 2 backfill");
+    });
+}
+pub fn season2_backfill_status() -> Option<Season2ImportStatus> {
+    SEASON2_BACKFILL.with(|c| match c.borrow().get() {
+        StoredSeason2Import::Empty => None,
+        StoredSeason2Import::V1(v) => Some(v.clone()),
+    })
+}
+
+/// Only a completed, zero-credit Season 2 bootstrap can accept deferred history.
+/// This rejects S1 and prevents crediting the same historical interval through
+/// both the original combined import and the deferred path.
+pub fn begin_season2_backfill(caller: Principal, expected_rows: u32) -> Result<Season2ImportStatus, String> {
+    require_admin(caller).map_err(|_| "unauthorized")?;
+    if let Some(v) = season2_backfill_status() {
+        return if v.expected_rows == expected_rows { Ok(v) }
+            else { Err("backfill already initialized with different parameters".into()) };
+    }
+    let bootstrap = season2_import_status().ok_or("Season 2 bootstrap missing")?;
+    if !bootstrap.complete || bootstrap.credited_points != 0 || expected_rows > SEASON2_MAX_ROWS {
+        return Err("requires completed zero-credit bootstrap and bounded row count".into());
+    }
+    let v = Season2ImportStatus {
+        expected_rows, imported_rows: 0, complete: false, unresolved_categories: 0x7f,
+        credited_points: 0, batch_digests: vec![], receipts: vec![], provenance_digest: vec![],
+        ..bootstrap
+    };
+    set_season2_backfill(v.clone());
+    Ok(v)
+}
+
+/// Rows use only registration metadata and seven historical category amounts.
+/// Position/window/epoch fields must be empty. Existing participant state is
+/// read at commit time and only its total is incremented, never replaced.
+pub fn import_season2_backfill_batch(caller: Principal, batch: u32, rows: Vec<Season2ImportRow>)
+    -> Result<Season2ImportStatus, String>
+{
+    use sha2::{Digest, Sha256};
+    require_admin(caller).map_err(|_| "unauthorized")?;
+    let mut v = season2_backfill_status().ok_or("backfill not initialized")?;
+    if rows.is_empty() || rows.len() > SEASON2_BATCH { return Err("invalid batch size".into()); }
+    let digest = Sha256::digest(candid::encode_one(&rows).map_err(|e| e.to_string())?).to_vec();
+    if (batch as usize) < v.batch_digests.len() {
+        return if v.batch_digests[batch as usize] == digest { Ok(v) }
+            else { Err("batch retry differs".into()) };
+    }
+    if v.complete || batch as usize != v.batch_digests.len()
+        || v.imported_rows as usize + rows.len() > v.expected_rows as usize {
+        return Err("backfill batch out of sequence or too many rows".into());
+    }
+    // A running poll may retain participant input across an await. Retry this
+    // bounded synchronous credit after it completes, without disabling timers.
+    let _guard = PollGuard::new().ok_or("points writer active")?;
+    let mut seen: BTreeSet<_> = v.receipts.iter().map(|r| r.principal).collect();
+    let mut updates = Vec::with_capacity(rows.len());
+    let mut total = v.credited_points;
+    for row in &rows {
+        let input = &row.principal_state;
+        if input.principal == Principal::anonymous() || is_excluded(&input.principal)
+            || !seen.insert(input.principal) || input.registered_at_ns >= v.cutoff_ns
+            || input.total_points != 0 || input.last_epoch_processed != 0
+            || !input.active_deposits.is_empty() || !input.repayment_events.is_empty()
+            || row.category_points.len() != 7 {
+            return Err("invalid or duplicate historical credit row".into());
+        }
+        let amount = row.category_points.iter().try_fold(0u128, |a,b| a.checked_add(*b))
+            .ok_or("participant total overflow")?;
+        let mut current = get_principal_state(&input.principal).unwrap_or_else(|| input.clone());
+        current.total_points = current.total_points.checked_add(amount).ok_or("participant total overflow")?;
+        total = total.checked_add(amount).ok_or("backfill total overflow")?;
+        updates.push(current);
+    }
+    for (row, current) in rows.into_iter().zip(updates) {
+        put_principal_state(current);
+        v.receipts.push(Season2Receipt { principal: row.principal_state.principal, category_points: row.category_points });
+        v.imported_rows += 1;
+    }
+    v.credited_points = total;
+    v.batch_digests.push(digest);
+    set_season2_backfill(v.clone());
+    Ok(v)
+}
+
+pub fn season2_backfill_manifest_hash() -> Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+    let v = season2_backfill_status().ok_or("backfill not initialized")?;
+    let inner = season2_manifest_digest(&v, &v.source_canisters, &v.source_cursors, 0)?;
+    Ok(Sha256::digest(candid::encode_one(("rumi-points-season2-deferred-backfill-v1", inner))
+        .map_err(|e|e.to_string())?).to_vec())
+}
+
+/// Seals the once-only transcript; prospective cursors and scoring remain live.
+pub fn finish_season2_backfill(caller: Principal, provenance: Vec<u8>) -> Result<Season2ImportStatus, String> {
+    require_admin(caller).map_err(|_| "unauthorized")?;
+    let mut v = season2_backfill_status().ok_or("backfill not initialized")?;
+    if v.imported_rows != v.expected_rows || provenance != season2_backfill_manifest_hash()? {
+        return Err("incomplete backfill or manifest digest mismatch".into());
+    }
+    v.provenance_digest = provenance;
+    v.unresolved_categories = 0;
+    v.complete = true;
+    set_season2_backfill(v.clone());
+    Ok(v)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 // Native unit tests exercise the real stable structures: off-wasm,
 // `DefaultMemoryImpl` is a heap-backed `VectorMemory`, and libtest runs each
@@ -4281,5 +4399,76 @@ mod season2_import_tests {
         assert_eq!(finish_season2_import(admin, cursors.clone(), final_hash.clone(), 0, start).unwrap(), complete);
         assert_eq!(season2_import_manifest_hash(cursors, 0).unwrap(), final_hash);
         assert!(PollGuard::new().is_some());
+    }
+}
+
+#[cfg(test)]
+mod season2_backfill_tests {
+    use super::*;
+    fn p(n: u8) -> Principal { Principal::from_slice(&[n]) }
+    fn bootstrap(points: u128) -> (Principal,u64) {
+        let admin=p(9); let start=SEASON2_LOGICAL_START+100;
+        init_state(Some(InitArgs { admin:Some(admin),excluded_principals:Some(vec![]),
+            season_start_ns:Some(start),season_end_ns:Some(u64::MAX),snapshot_seed_commit:Some([42;32]) }),admin);
+        begin_season2_import(admin,1,start-1).unwrap();
+        import_season2_batch(admin,0,vec![row(p(1),points)],start).unwrap();
+        let cursors=vec![10,20,30,40];
+        let hash=season2_import_manifest_hash(cursors.clone(),0).unwrap();
+        finish_season2_import(admin,cursors,hash,0,start).unwrap();
+        (admin,start)
+    }
+    fn row(principal:Principal,amount:u128)->Season2ImportRow {
+        Season2ImportRow { principal_state:PrincipalState::new(principal,SEASON2_LOGICAL_START-1,QualifyingAction::MintIcUsd),
+            category_points:vec![amount,0,0,0,0,0,0] }
+    }
+    #[test]
+    fn late_credits_preserve_running_state_and_retry_after_upgrade() {
+        let (admin,start)=bootstrap(0);
+        let mut live=get_principal_state(&p(1)).unwrap(); live.total_points=700;live.last_epoch_processed=3;
+        put_principal_state(live.clone());
+        set_cursor(0,12345); for _ in 0..4 { advance_epoch_index(); }
+        set_poll_enabled(admin,true).unwrap();set_epoch_driver_enabled(admin,true).unwrap();
+        let before_epoch=epoch_count();let before_ledger=point_ledger_len();
+        let begun=begin_season2_backfill(admin,2).unwrap();
+        assert_eq!((begun.logical_start_ns,begun.cutoff_ns),(SEASON2_LOGICAL_START,start));
+        assert!(PollGuard::new().is_some());
+        let rows=vec![row(p(1),28),row(p(2),30)];
+        let credited=import_season2_backfill_batch(admin,0,rows.clone()).unwrap();
+        let mut expected=live;expected.total_points+=28;
+        assert_eq!(get_principal_state(&p(1)).unwrap(),expected);
+        assert_eq!(get_principal_state(&p(2)).unwrap().total_points,30);
+        assert_eq!(get_cursor(0),12345);assert_eq!(current_epoch_index(),4);
+        assert_eq!(epoch_count(),before_epoch);assert_eq!(point_ledger_len(),before_ledger);
+        assert!(poll_enabled() && epoch_driver_enabled());
+        assert!(begin_season2_backfill(admin,3).is_err());
+        assert!(import_season2_backfill_batch(admin,1,vec![row(p(1),1)]).is_err());
+        save_state_to_stable();STATE.with(|s| *s.borrow_mut()=None);restore_from_stable_or_trap();
+        let reopened=MEMORY_MANAGER.with(|m|StableCell::init(m.borrow().get(MemoryId::new(22)),StoredSeason2Import::Empty).unwrap());
+        assert!(matches!(reopened.get(),StoredSeason2Import::V1(v) if v==&credited));
+        let digest=season2_backfill_manifest_hash().unwrap();
+        assert!(finish_season2_backfill(admin,vec![0;32]).is_err());
+        let complete=finish_season2_backfill(admin,digest.clone()).unwrap();
+        assert_eq!(finish_season2_backfill(admin,digest).unwrap(),complete);
+        assert_eq!(import_season2_backfill_batch(admin,0,rows).unwrap(),complete);
+        assert_eq!(get_principal_state(&p(1)).unwrap(),expected);
+        assert_eq!(get_cursor(0),12345);
+    }
+    #[test]
+    fn preflight_rejects_unauthorized_duplicates_overflow_and_position_writes() {
+        let (admin,_)=bootstrap(0);begin_season2_backfill(admin,2).unwrap();
+        assert!(import_season2_backfill_batch(p(8),0,vec![row(p(1),1)]).is_err());
+        assert!(import_season2_backfill_batch(admin,0,vec![row(p(1),1),row(p(1),2)]).is_err());
+        let mut changed=row(p(1),1);changed.principal_state.last_epoch_processed=1;
+        assert!(import_season2_backfill_batch(admin,0,vec![changed]).is_err());
+        let mut saturated=get_principal_state(&p(1)).unwrap();saturated.total_points=u128::MAX;put_principal_state(saturated);
+        assert!(import_season2_backfill_batch(admin,0,vec![row(p(2),3),row(p(1),1)]).is_err());
+        assert!(get_principal_state(&p(2)).is_none());
+        assert_eq!(season2_backfill_status().unwrap().imported_rows,0);
+    }
+    #[test]
+    fn combined_historical_import_cannot_be_credited_twice() {
+        let (admin,_)=bootstrap(1);
+        assert!(begin_season2_backfill(admin,1).is_err());
+        assert!(season2_backfill_status().is_none());
     }
 }

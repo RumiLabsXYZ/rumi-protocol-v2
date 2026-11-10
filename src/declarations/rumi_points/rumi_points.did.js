@@ -345,6 +345,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'apply_fiat_stable_topups' : IDL.Func([IDL.Nat32], [Result_5], []),
     'apply_season1_final_supplement' : IDL.Func([], [Result_6], []),
+    'begin_season2_backfill' : IDL.Func([IDL.Nat32], [Result_7], []),
     'begin_season2_import' : IDL.Func([IDL.Nat32], [Result_7], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
@@ -352,6 +353,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
+    'finish_season2_backfill' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_7], []),
     'finish_season2_import' : IDL.Func(
         [IDL.Vec(IDL.Nat64), IDL.Vec(IDL.Nat8), IDL.Nat8],
         [Result_7],
@@ -441,6 +443,12 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_season1_final_supplement' : IDL.Func([], [Status], ['query']),
+    'get_season2_backfill_manifest_hash' : IDL.Func([], [Result_8], ['query']),
+    'get_season2_backfill_status' : IDL.Func(
+        [],
+        [IDL.Opt(Season2ImportStatus)],
+        ['query'],
+      ),
     'get_season2_import_manifest_hash' : IDL.Func(
         [IDL.Vec(IDL.Nat64), IDL.Nat8],
         [Result_8],
@@ -450,6 +458,11 @@ export const idlFactory = ({ IDL }) => {
         [],
         [IDL.Opt(Season2ImportStatus)],
         ['query'],
+      ),
+    'import_season2_backfill_batch' : IDL.Func(
+        [IDL.Nat32, IDL.Vec(Season2ImportRow)],
+        [Result_7],
+        [],
       ),
     'import_season2_batch' : IDL.Func(
         [IDL.Nat32, IDL.Vec(Season2ImportRow)],

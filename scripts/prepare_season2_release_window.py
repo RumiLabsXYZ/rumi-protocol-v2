@@ -14,7 +14,7 @@ START_NS = 1_793_491_200_000_000_000
 QUARTER_NS = 900_000_000_000
 H0 = "d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8"
 ADMIN = "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
-WASM_SHA256 = "dc6b6fe48e79571d0bbe371b9fb8854bc77207abf3b5005c0eda7455388a9c17"
+WASM_SHA256 = "be20d35e0c77d5d6de4c6be20fbd4eb11d51749441f53ccbb12f54c295c11360"
 
 
 def parse_time(value):
@@ -50,7 +50,9 @@ def derive(approved_at, preflight_at):
         "cutoff_ns": cutoff_ns,
         "cutoff_utc": iso(EPOCH + dt.timedelta(seconds=cutoff_ns // 1_000_000_000)),
         "logical_start_ns": START_NS,
-        "credit_policy_status": "unresolved; timing preparation does not approve estimates or compensation",
+        "credit_policy_status": "historical backfill pending; prospective bootstrap carries zero historical credits",
+        "bootstrap_historical_points": 0,
+        "deferred_backfill_interval": "[2026-11-01T00:00:00Z,T0)",
         "credit_import_authorized_by_this_binding": False,
         "creation_source_debit_cycles": 900_100_000_000,
         "creation_amount_cycles": 900_000_000_000,
