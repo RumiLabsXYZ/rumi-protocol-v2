@@ -55,3 +55,9 @@ For transparency, the withdrawn proposal's comparisons were:
 - An additional 14,140.47611671 debt-point difference came from counting the early Nov 1 interval versus a formal zero lower bound before the first checkpoint. That zero was an uncertainty bound, not an acceptable uncredited gap.
 
 These are comparisons within the former estimates, not measured excess over exact earned points. No hypothetical random A/B award exists to compare. They do not validate the underlying estimates, and the corrected old-vault observation removes the rationale for the special rounding proposal.
+
+## Bounded reconstruction experiment
+
+One offline diagnostic replay completed through cursor 558710 using all retained backend events, 40 observed vault snapshots from the late November 1 checkpoint, and the recorded icUSD Stability Pool payment. It did not reconcile the saved endpoint: 10 of 49 current vault debts matched, 39 differed, and the replay retained two additional vaults. The test completed in 301 seconds; successful execution is not successful accounting reconciliation. No second pass, participant query, production code change or live mutation was performed.
+
+The anchor is around 16:51 UTC rather than midnight, omits internal accrual clocks, and spans eight seconds containing one backend event. The injected debt payment does not reconstruct the associated collateral change. These known limitations keep this diagnostic from establishing exact historical balances; they do not establish that retained history is absent. The earlier first 16 hours 51 minutes also remain unresolved by this experiment. No diagnostic output is an approved award.
