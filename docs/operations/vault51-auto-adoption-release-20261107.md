@@ -9,7 +9,7 @@ The verified successor is SEC12 source `f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff
 backend module `2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13`,
 recorded in [Dorian's deployed result](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0f00344208bbf9f46184956fafaceb3fa9961ccb/docs/operations/sec12-release-20261108/RESULT.md).
 This is retained November 8/9 release evidence, not a fresh November 10 live read.
-The adoption branch now merges that deployed lineage without rewriting history.
+Reconciled source `42478174029e6edb54e26578bebfe79a25f576bc` merges that deployed lineage without rewriting history.
 
 Actual overlap: additive private-event dispatcher arms and public entry points
 in `event.rs`/`main.rs`, plus Candid/declarations. There were no source conflicts.
@@ -18,6 +18,11 @@ auto-merge as proof. SEC12 state/watermark/cancellation, vault admission checks,
 saved-request/Continue/Cancel UI and protocol service files remain byte-identical
 to SEC12. Adoption logic and edited adoption UI remain byte-identical to the
 November 7 tested source. No new owner preference or lifecycle change is introduced.
+
+Fresh checks passed: 23 adoption/claim/replay tests, four SEC12 cancellation tests,
+seven SEC11/native-XRP tests, canonical Candid regeneration/comparison and
+backward compatibility against SEC12. Thirteen adoption and 108 SEC12 frontend
+tests are reused only for byte-identical covered source; no new bundle is claimed.
 
 Validation results and reconciled source pin are recorded in the companion
 `evidence/vault51-auto-adoption-20261107/reconciliation-20261110.json`. The

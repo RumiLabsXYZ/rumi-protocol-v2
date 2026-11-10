@@ -1,0 +1,123 @@
+{
+  "source": "42478174029e6edb54e26578bebfe79a25f576bc",
+  "deployed_base_source": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+  "release_receipt": "0f00344208bbf9f46184956fafaceb3fa9961ccb",
+  "deployed_module_per_receipt": "2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13",
+  "source_conflicts": [],
+  "overlap": [
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did",
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.d.ts",
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.js",
+    "src/rumi_protocol_backend/rumi_protocol_backend.did",
+    "src/rumi_protocol_backend/src/event.rs",
+    "src/rumi_protocol_backend/src/main.rs"
+  ],
+  "identity_proofs": [
+    {
+      "path": "src/rumi_protocol_backend/src/state.rs",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "3d07b771387a21e4335ea665bfd905b00bfaba28aa08cde02842d67067f2b27f"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "86e696b65e1817b16f724b2ffdaa252b0615844cc4d114c60bef5fca0aaf139e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.spec.ts",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "e1f7bef4f9a6fdb9413550bffc6a59855fe67cc7013c4fe47fb03a45318821ec"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.svelte",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "45b58af1e72d352528ce8ee5eec510d3eb160e65c13fd90112e8dcd4782cfec7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultPullSavedRequest.spec.ts",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "d8808cf50f7d1b9f1d628f0095dabe892c1f49a7d9c3f0619f9f9e164fafdd6c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "b919cf01ca905bfb6acaf37b077d35008aedac785b15fb962ad0a479599eefae"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/apiClient.ts",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "c3b6a87db3a553c0506d0ccbc86dd6831f777c0944bad688bb4845a26b74ccce"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultOperationJournal.spec.ts",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "3a8b89a74a0dde31d14563d9aac66394884830098a0fdf99123e9a1b842219fb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultOperationJournal.ts",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "a3220db28e2c6c7807184f2fe9465d2ac87712c4c2d6e12216147382e7074c81"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultPullRecoveryDetails.ts",
+      "identical_to": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+      "sha256": "574f208b17cc7401c0ae583fdfe8b79a1e1c9a64854a8b2c1622e748c5464c4d"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/nicp_redemption.rs",
+      "identical_to": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+      "sha256": "18044e8462ddd7dacde871d1b378dd18b42cad92efa8f2a4afc676b3c3080832"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/nicp_redemption/adoption.rs",
+      "identical_to": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+      "sha256": "3f2f2dd8e30f1b873433c1564a13345e967df205306b5628d090828c9b97c97f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/dashboard/ProtocolStats.svelte",
+      "identical_to": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+      "sha256": "950de0da2f93ca3378ab86bc8c4ec3b30d25e4862a2f29f5cdaf2f314b632403"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultCard.svelte",
+      "identical_to": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+      "sha256": "c2104e2eb812100f1c5aaaa1dd60ad07f0b3fef327317c40ad45671b9ef79d52"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/nicpClaim.spec.ts",
+      "identical_to": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+      "sha256": "7c05023db0ecdde7ea35f5e3376a80501746601562d949f97b70845a320de58b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/nicpClaim.ts",
+      "identical_to": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+      "sha256": "b207be89b49ff541b52e6cfe62987268176ba0c18043aff801a2bd9c316ed7b1"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/transparency/+page.svelte",
+      "identical_to": "e979cd699874c0d866db18cdd22fd42b2b72c427",
+      "sha256": "7c3b2e8abe14148bfd3cc426838efd9154bbf863c529ce2af524b5220cd8b96b"
+    }
+  ],
+  "checks": {
+    "nicp_claim_replay": 23,
+    "sec12_cancellation": 4,
+    "sec11_native_xrp": 7,
+    "canonical_candid_regeneration": "passed",
+    "canonical_candid_comparison": "passed",
+    "bindings_regenerated": true,
+    "backward_compatible_with_SEC12": true,
+    "diff_check": "passed"
+  },
+  "reused_evidence": {
+    "adoption_frontend_tests": 13,
+    "sec12_frontend_tests": 108,
+    "condition": "covered source byte-identical; no fresh frontend test/build claimed"
+  },
+  "replacement_production_build": "not_run_pending_Dorian_allocation",
+  "old_artifacts": "superseded_do_not_install",
+  "independent_release_review": "Dorian_pending",
+  "deployment": false,
+  "activation": false,
+  "financial_action": false
+}
