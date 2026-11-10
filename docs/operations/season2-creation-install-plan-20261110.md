@@ -1,11 +1,21 @@
 # Season 2 creation and installation plan — HELD
 
+**Accounting and execution remain paused pending corrected analytics
+reconstruction. No new approval request is being presented. The window mechanism
+is timing-only and authorizes no historical credit or participant query.**
+
 This is a reviewable plan, not execution authority. Execute only after Rob approves
 the [final decision packet](../coordination/season2-release-decision-20261110.md)
-by **2026-11-10 18:45 UTC (10:45 AM Pacific)**. Proposed T0 is **19:00 UTC
-(11 AM Pacific)**, nat64 **1794337200000000000**. If approval is late or setup
-cannot finish in time, HOLD. Do not silently move T0. This preparation executed
-no creation, installation, cohort query, import or activation.
+under a new **approval-relative window proposal, still unapproved**. The old
+19:00 UTC T0 / 18:45 UTC approval deadline are EXPIRED/SUPERSEDED. Direct approval
+would be valid for 24 hours from its recorded timestamp. After fresh preflight,
+choose the first UTC 15-minute boundary at or after preflight completion + 60
+minutes, no later than approval + 24 hours. Root owns the local no-RPC renderer
+`scripts/prepare_season2_release_window.py`; the current `DERIVED_T0_NS` init
+is intentionally non-executable. Freeze, validate and push the rendered exact
+init before install. No silent retiming after install/begin. A missed T0,
+snapshot A safety margin or approval-window expiry means HOLD. This preparation
+executes no creation, installation, cohort query, import or activation.
 
 ## Pins and budget
 
@@ -33,14 +43,14 @@ Settings: zero reserved compute, zero fixed memory, normal 2,592,000-second
 | --- | --- |
 | Gzip, 747,354 bytes | `967e22d162579f5626283b094bd0a1457f09c009f34ed455b676f252975def8c` |
 | Module, 3,018,333 bytes | `dc6b6fe48e79571d0bbe371b9fb8854bc77207abf3b5005c0eda7455388a9c17` |
-| Exact init text | `370b484ec894e849984ffdfcf377ab23ef6f573e26a838474e1a0d470398e179` |
-| Encoded init, 139 bytes | `be20ba1f4f068c00dd0a503942da86c0f0b948f853fae65e2c192cddae535c3a` |
+| Exact init text / binary | Pending approved window rendering; old fixed-time hashes expired |
 
 Public H0: `d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8`.
 S0 remains private with Orin. No seed belongs in source or the transcript.
 Reuse existing candidate source `87f78737`; no rebuild. The gzip is locally staged
-at the ignored path below. Verify gzip, decompressed module and init hashes
-before use. [Machine-readable pins](evidence/season2-release-preparation-20261110/creation-install-pins.json).
+at the ignored path below. Verify gzip and decompressed module hashes before use. Derive the exact init
+text/binary hashes after rendering, encode against canonical Candid and push
+the rendered artifact before install; never install the held template. [Machine-readable pins](evidence/season2-release-preparation-20261110/creation-install-pins.json).
 
 ## Commands prepared for approval
 
@@ -85,13 +95,16 @@ freezing and is not changed.
 
 ## Cutoff ordering and separate authority
 
-The final decision packet controls historical method/caps, private manifest and
-transcript, fresh 15-owner public-position queries and activation. Those queries
+Historical credit methods, the estimated sample and the earlier 20-point
+compensation proposal are withdrawn pending corrected history. No credit model
+is accepted here; the prior zero-current/writeoff interpretation was wrong.
+Any future method, private manifest/transcript, fresh 15-owner public-position
+queries and activation require the final decision packet and direct authority. Those queries
 were previously held by approval review; none run here. This plan itself does
 not authorize begin/import/finalization, seed reveal, timers or `start_season`.
 
 `begin_season2_import` requires future T0: after install/readback and **before
-19:00 UTC**. `import_season2_batch` rejects `now < T0`: cutoff-state capture,
+the frozen derived T0**. `import_season2_batch` rejects `now < T0`: cutoff-state capture,
 final batches and finalization occur **at or after T0**. Full import need not
 finish before T0. If beginning cannot happen in time, HOLD without moving T0.
 

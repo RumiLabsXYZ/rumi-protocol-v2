@@ -15,16 +15,33 @@
   "publicH0Frozen": true,
   "publicH0Hex": "d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8",
   "publicH0ExactByteCount": 32,
-  "realCutoffFrozen": true,
+  "realCutoffFrozen": false,
   "privateSeedReadByReleaseOwner": false,
-  "proposedCutoffNs": 1794337200000000000,
-  "proposedCutoffUtc": "2026-11-10T19:00:00Z",
-  "proposedCutoffPacific": "2026-11-10T11:00:00-08:00",
   "cutoffApproved": false,
-  "actualInitEncodesAgainstCurrentCandid": true,
-  "actualInitCandidSha256": "370b484ec894e849984ffdfcf377ab23ef6f573e26a838474e1a0d470398e179",
-  "actualInitBinarySha256": "be20ba1f4f068c00dd0a503942da86c0f0b948f853fae65e2c192cddae535c3a",
-  "actualInitBinaryBytes": 139,
-  "approvalDeadlineUtc": "2026-11-10T18:45:00Z",
-  "executionHeld": true
+  "actualInitEncodesAgainstCurrentCandid": false,
+  "executionHeld": true,
+  "supersededFixedTimeProposal": {
+    "status": "EXPIRED_SUPERSEDED_NOT_EXECUTABLE",
+    "proposedCutoffNs": 1794337200000000000,
+    "proposedCutoffUtc": "2026-11-10T19:00:00Z",
+    "proposedCutoffPacific": "2026-11-10T11:00:00-08:00",
+    "actualInitCandidSha256": "370b484ec894e849984ffdfcf377ab23ef6f573e26a838474e1a0d470398e179",
+    "actualInitBinarySha256": "be20ba1f4f068c00dd0a503942da86c0f0b948f853fae65e2c192cddae535c3a",
+    "actualInitBinaryBytes": 139,
+    "approvalDeadlineUtc": "2026-11-10T18:45:00Z"
+  },
+  "approvalRelativeWindowProposal": {
+    "status": "PROPOSED_UNAPPROVED",
+    "approvalValiditySeconds": 86400,
+    "minimumPreflightLeadSeconds": 3600,
+    "boundarySeconds": 900,
+    "selectionRule": "first UTC 15-minute boundary at or after fresh preflight completion + 60 minutes, no later than recorded direct approval + 24 hours",
+    "freezeRule": "render, validate and push exact init before install; no silent retiming after install or begin",
+    "missRule": "missed T0, snapshot A safety margin, or approval window expiry means HOLD",
+    "scope": "TIMING_ONLY"
+  },
+  "templateIntentionallyUnencodable": true,
+  "templateTextSha256": "5daf94e64cba146632fe0ba06e5530817406f65d75ae0fea8b595bca92509f17",
+  "credit_policy_status": "unresolved; estimated methods/sample and compensation withdrawn pending corrected analytics reconstruction",
+  "credit_import_authorized_by_this_binding": false
 }

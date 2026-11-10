@@ -1,5 +1,9 @@
 # Season 2 isolated release preparation — November 10, 2026
 
+**Accounting and execution remain paused pending corrected analytics
+reconstruction. No new approval request is being presented. The window mechanism
+is timing-only and authorizes no historical credit or participant query.**
+
 Dorian owns configuration and this release-preparation record. Orin owns Points
 Rust, calculator, private participant reconciliation and the actual running-scoring
 outcome. This source-only change is on `codex/season2-accounting-20261110`, atop
@@ -26,10 +30,14 @@ incoming funding has now been independently observed as recorded below.
   `evidence/season2-release-preparation-20261110/season2-init.did`: fixed admin
   `rumi_identity`, default protocol exclusions (`null` preserves the built-in
   seed), prospective cutoff T0, `u64::MAX` as the technical open end, and public
-  H0 commitment. **H0 is fixed; proposed T0 is 2026-11-10T19:00:00Z (11 AM Pacific),
-  nat64 1794337200000000000. The actual init encodes but remains unapproved.**
-  Approval must arrive by 18:45 UTC (10:45 AM Pacific); otherwise HOLD without
-  silently moving T0. Never put the unrevealed seed S0 in public source.
+  H0 commitment. **H0 is fixed; T0 is now the non-executable token
+  `DERIVED_T0_NS`. The old 19:00 UTC T0 and 18:45 UTC approval deadline are
+  EXPIRED/SUPERSEDED.** The replacement is a new, unapproved proposal: direct
+  approval valid for 24 hours; select the first UTC 15-minute boundary at or
+  after fresh preflight completion + 60 minutes, no later than approval + 24
+  hours. Root's local renderer must freeze, encode and push the exact init
+  before install. No silent retiming after install/begin; missed T0, snapshot A
+  margin or window expiry means HOLD. Never put S0 in public source.
 
 S1 selector/definition, every existing environment and the complete
 `mainnet-live.ids.json` are unchanged. S1 remains
@@ -42,7 +50,7 @@ The candidate’s `begin_season2_import` requires an empty stopped instance,
 committed seed hash, a future T0 later than November 1 and no decided end
 (`u64::MAX`). T0 is both exclusive historical replay end and prospective engine
 start. The logical backfill start remains November 1, 2026 00:00 UTC. Those two
-starts are deliberately distinct. The proposal now pins T0 at 2026-11-10T19:00:00Z; approval remains held.
+starts are deliberately distinct. The approval-relative window proposal leaves T0 unrendered and execution held.
 Orin owns the final cutoff source manifest and participant reconciliation. The public H0 commitment is fixed as
 `d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8`
 (32 bytes). Orin reports preparing the prospective seed once using OS randomness
@@ -52,14 +60,19 @@ or transmitting S0. See [commitment evidence](evidence/season2-release-preparati
 Token allocation and a final end-date decision are not added as accounting blockers.
 
 [CLI 1.3 file-backed init syntax](https://cli.internetcomputer.org/1.3/reference/configuration/#init-args)
-was checked against the installed `icp 1.3.0`. The actual proposed init now
-encodes against canonical `(opt InitArgs)`: 139 bytes, binary SHA256
-`be20ba1f4f068c00dd0a503942da86c0f0b948f853fae65e2c192cddae535c3a`.
+was checked against the installed `icp 1.3.0`. The previous fixed-time init
+encoded to 139 bytes, but that artifact is EXPIRED/SUPERSEDED and is not usable.
+The current held template deliberately fails encoding until root's renderer
+`scripts/prepare_season2_release_window.py` supplies the approved derived T0.
+Re-encode and record exact text/binary hashes of the rendered file, then push it
+before installation. The tracked hex file is also a non-executable held marker.
 No sync hook automatically imports credits, starts the season or enables timers.
 See the [held exact command plan](season2-creation-install-plan-20261110.md).
 The [final decision packet](../coordination/season2-release-decision-20261110.md)
-owns the accounting method, credit caps, fresh cohort-query scope and activation
-authority. This preparation does not grant any of those permissions.
+owns any future accounting-method proposal, fresh cohort-query scope and
+activation authority. Estimated historical-credit methods, the earlier sample
+and the 20-point legacy compensation proposal are withdrawn pending corrected
+history. This preparation accepts no credit model and grants no permissions.
 
 ## One exact bounded funding proposal
 
@@ -133,8 +146,9 @@ does not approve installation, historical credit or activation.
 - Parsed comparison proves every pre-existing canister definition/environment
   preserved and S2 environment contains exactly one new selector.
 - S1 mapping bytes match the previous commit; S2 mapping is empty.
-- Actual proposed T0 and the fixed 32-byte public H0 encode against canonical
-  Candid. No private seed was read by this release-preparation change.
+- The prior fixed-time encoding evidence is retained only as expired history.
+  Current template is intentionally unencodable; exact rendered Candid must be
+  validated and pushed before install. No private seed was read here.
 - Scoped `git diff --check` passed; only the configuration, new mapping and
   Dorian-owned release-preparation paths are staged for this commit.
 
@@ -171,9 +185,11 @@ runway or permission to activate. Use deployed pricing and actual post-install
 readback; no additional fixture campaign is requested. See
 [fifteen-owner evidence](evidence/season2-release-preparation-20261110/fifteen-owner-lifecycle.json).
 
-The canonical historical replay discrepancy and bounded treatment are recorded
-in Orin’s final decision packet. That packet controls the selected method and
-credit caps; this configuration record neither changes them nor adds a gate.
+Historical reconciliation remains unresolved. Orin reports that all 14 old
+loan IDs remain positive in the raw snapshot; the earlier zero-current/writeoff
+interpretation was wrong. A replay mismatch is not proof of missing history.
+The estimated model/sample and 20-point compensation proposal are withdrawn;
+no historical credit method is accepted by this timing/configuration update.
 
 ## Source PR status snapshot
 
@@ -181,6 +197,6 @@ Orin reports draft [PR #630](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pul
 at source head `12eae76c`, merge state CLEAN and no checks matching the changed
 paths. This is a reported source/PR snapshot, **not CI validation or merge
 acceptance**. This later funding-document commit does not alter the scorer.
-The final decision packet governs the bounded historical method; this record
-does not authorize historical awards. No complete all-category November 1 import, ordinary
+Historical credit methods remain withdrawn pending corrected reconstruction;
+this record does not authorize historical awards. No complete all-category November 1 import, ordinary
 live accrual or activation is claimed.
