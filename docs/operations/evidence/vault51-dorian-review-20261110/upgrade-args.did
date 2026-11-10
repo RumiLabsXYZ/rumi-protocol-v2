@@ -1,0 +1,1 @@
+(variant { Upgrade = record { mode = null; description = opt "Vault 51 automatic verified ICP collateral adoption; source 42478174; preserve SEC12 cancellation and SEC11 receipts; automatic timer registers on upgrade" } })

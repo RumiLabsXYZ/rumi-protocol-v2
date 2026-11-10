@@ -1,0 +1,826 @@
+[
+  {
+    "path": "src/rumi_protocol_backend/Cargo.toml",
+    "sha256": "144f587f1959530eb333107e0a10b98ec2a2d4c99c858fd50fee4e3772c3126c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/rumi_protocol_backend.did",
+    "sha256": "43da24f0341ca8fe52837071020e910f9ff3ecdef83a04f0dbc8f6e3033334db"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_008_circuit_breaker.rs",
+    "sha256": "bb3ba2674932c4f0f4ff69a4d24e9825e91e2250eaccade57be1c384b7e4d520"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/xrp_native_e2e_pic.rs",
+    "sha256": "3e1e946e4bcf6b3bba6dd1b8e2130cb891a34b0ada51f14e84cb1985c5e32c34"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_cdp_12_timer_split.rs",
+    "sha256": "0f50b851f16f0f90774c3a751bc2459ea9a80e1c7edb266feec613c84a37f818"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_bot_001_auto_cancel_balance_pic.rs",
+    "sha256": "4ede44b23770b163e399ac912f4f6c8aec11c28f2570e03b4a7133698370308f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_icc_002_3usd_refund.rs",
+    "sha256": "499998a86c74631b7f8ec5b7f7635eafbb7548125449ef153eff9ad1665e6639"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_dos_011_xrc_timer_lifecycle.rs",
+    "sha256": "99235f45a21ab2dfe5d9b72f66ab913fdb8c5489dfad4626a9168554db5f6e45"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_icc_007_durable_refund.rs",
+    "sha256": "5c3293aef595ea48abb4a3b5df36870536c09c19cccd6dc8d3af407baf45fae8"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/solana_m2_pic.rs",
+    "sha256": "2fa9d6257154747ee44a3208864cf3363a3f8ecbdc2f2afd1e367b0573cab7f0"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/chains_xrc_price_feed_pic.rs",
+    "sha256": "720180e699be00da11f9cacd951b43d52fa1dec5701f2ad1cd73c0dd7b7c27d9"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/chains_enable_chain_pic.rs",
+    "sha256": "93ceb3a9c8e8458f46248602173371e7e414a03b1e4a206424d5db5a09de1116"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_008_circuit_breaker_pic.rs",
+    "sha256": "6cc96f9b825566df563d5057fb09641ec59b51c11344682d63844636588c9094"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/conflux_interest_accrual_pic.rs",
+    "sha256": "ff3eceb1043e9bca947469cd12e3eeb6897ee4b2472a3416c4cf50e5c48e0d9e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_routing_state_cleanup.rs",
+    "sha256": "f36ab86074d5a19cbab1575299c30b0118287cff170b3b33e541a3631db47242"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/chains_rpc_endpoint_digest_pic.rs",
+    "sha256": "f1f1ded4f096572f2dc29834457ec7cc10e1ae0716e1f7c92fde1b4d0ed6e825"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_sp_liquidation_fee_accounting.rs",
+    "sha256": "a45898b03cc465f71946390a6de59a8cff9942e65f1110aaa7e23f571c828f35"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1b_supply_gate_pic.rs",
+    "sha256": "874d90e1ffacd2d7b85302b92a83eb4f93cba2b53353f840c705974a4d26b3ad"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_2026_06_09_redemption_userop_locks.rs",
+    "sha256": "31ded9e288c343491e5b11a6827d0074d0e3a6b4660fd200adef4c71959808a8"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/chains_ecdsa_key_rotation_pic.rs",
+    "sha256": "c18cba76f9b7988e2bb72aaee44549cac8b22de6e763773de16fefe1ea0af164"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_bot_002_swap_fail_cleanup_pic.rs",
+    "sha256": "17e3f073fc8761637f818f94790c0f0e63c62a85a4db213cbb1e48626b81043e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_sp_101_realized_consumed.rs",
+    "sha256": "2ce7805a653157e3b87515d68eec42fbe8970205066725bd659f562a2911faa9"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/conflux_liquidation_detection_pic.rs",
+    "sha256": "15cf0f2196d8f2b78bbb0c9e4c25ed5731ccc0de54d8838069c45839cf40246c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_int_004_withdraw_accrues_first.rs",
+    "sha256": "deead57261274dc88687c2bad0071cb63418594d27d4adf167dbee24e5dbb479"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/mock_xrc_canister.rs",
+    "sha256": "3a39309c3ce4f05c819f17eae2a294639ff1da09bfe618c1bfda0ea9ffb0182d"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1c_burn_proof_pic.rs",
+    "sha256": "0c1433d8f20db1ac163ac9c8bdb578ad80a52a3e83efe17aea7db4dfe6cd1bfc"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_dos_005_check_vaults_shard.rs",
+    "sha256": "0e47bd356b4ab917e5a67574c2c548c2c8f18405cc9632cc7ef9dce700ad9d4e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_dos_pagination.rs",
+    "sha256": "f85a19b1c16501ef95209b32b609493856a6a9ea5e04e3cf73e8ea693c2bad40"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/collateral_index_consistency.rs",
+    "sha256": "c75793b60220f516c4b91fef4e725b688956419520f699f040e96601bc4c5518"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/cksol_callback_upgrade_pic.rs",
+    "sha256": "5b6891f12c6c145b1ea02a876ee09bc56a75dfa26535d255498e42cccde40e53"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_async_001_005_liquidation_race.rs",
+    "sha256": "29d98947b6a949d9a7c6462a7489d9f5a2ffc6f4866011a3ab2bc854e8599293"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_cdp_12_followup_timer_setters.rs",
+    "sha256": "cbab11d1e6825844603e0117bc210a0d79597da0b708156ba796f22976b0837f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_cdp_10_sp_blacklist.rs",
+    "sha256": "e041a0a6233f69d179eecb6dc0f34fac1bf81d440f650b2d6606532c0551daec"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/pocket_ic_tests.rs",
+    "sha256": "b8360841574450cc637eeb9268d3f2aaeb1f9901e6b4b2cea5bde795932a93f4"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/conflux_espace_happy_path_pic.rs",
+    "sha256": "0059b5cd4ce2028b8c8159110620d4fd755ec08786e056aee6a60050b429b057"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_cdp_03_per_collateral_fee.rs",
+    "sha256": "2ddd36927770303f9239017d173d0fe0e2de17793f60911814f34fb0b81f3e00"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/vault_collateral_pull_pic.rs",
+    "sha256": "a9dc6cef127aa615a0742d43d18073526341ed5c071eb9680c99cceff591c6b2"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_fee_curve.rs",
+    "sha256": "3f274f1abcec9c5f393b94cb4897f30a52462dce0f4bb69816e6bfae316d0bc3"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_bot_001b_explicit_cancel_balance_pic.rs",
+    "sha256": "72cbc7be0ba5321c723e673a6d286509f353ddfd3cbc828e91fd09479f67ddd0"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_004_icrc3_burn_proof_pic.rs",
+    "sha256": "42791879a5712435be83d067d34b920f521f21d3963c1dd375bc1c398571301e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1b_getlogs_chunking_pic.rs",
+    "sha256": "c47e1bce91583db35a4d0dc43d8c566b61e5fadcd580b29b5721ebc1eb14b005"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_bk_001_002_concurrent_liquidation_pic.rs",
+    "sha256": "39424c485b108cca62b7e107025f57748d05747d5f174e38cdfea24d4da3a15c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_int_002_concurrent_accrual.rs",
+    "sha256": "942e112f711a9d12c0b1ed23a892d24ba9351ba5d03641c43746421f2cae1db5"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/multi_chain_supply_invariant.rs",
+    "sha256": "de353fe66386e63a8ab6511ca0624cb183de5ff5eb428c982a9b4423a982d420"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/cfx_price_pusher_auth_pic.rs",
+    "sha256": "e0dabf7fd264c9a1c65a721e7e5c29c958ec54977ea2879df8c703a8ca31f92a"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/cksol_icp_lifecycle_pic.rs",
+    "sha256": "af8b22d19f21d45c859c9a5b6d9e3b7162b9a1d72bd933f1545fc8656e514647"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/chains_xrc_managed_pricing_pic.rs",
+    "sha256": "2900ea6e6d48aefb397196458289d26863bb3e709bb20aebabc70824a70ec5f8"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/chains_legacy_reconciliation_disabled_pic.rs",
+    "sha256": "6c4e8a210a5a14b5a265a8a7f54283af9e164711cab61972d1bc69d9e6ffadb5"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/solana_bootstrap_pic.rs",
+    "sha256": "9f5a23e2441c75970808c537f6ed1550fb6ac478f2f2721a81a9b47fca5dd65c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_002_sorted_troves_index.rs",
+    "sha256": "257c044628487c108d8cc19d9a84c7c2c43931da0c9e860e4808461c217d85a7"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_cdp_09_close_request_deque.rs",
+    "sha256": "4c422387092bf7597ed40ce329ed42cdee0be3cef99353e12a3d3c15ac1e5fc9"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_101_bot_lock.rs",
+    "sha256": "224c6e87d0f10365d8274d9c84dfacf973bb4fb7e97e1e54916acfd667a8fd18"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/borrow_mint_developer_receipt_pic.rs",
+    "sha256": "7a60c0c51ff8dbf7cab02b5a0f77a67780d0a0eea67eb8db4c2c85b76f4fef03"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_oracle_001_mint_withdraw_freshness.rs",
+    "sha256": "05ce98625e9a73808f8604d2569746ed8e1bada79c06492a7b46db45c4adfd32"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_icrc_idempotent.rs",
+    "sha256": "293d1597a9c4beec59add252e6f52105c75d3f0e69fa4ca9eb50499ca9a38f1e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_cdp_14_xrc_source_floor.rs",
+    "sha256": "cb5747c410757f410f8387b9086b3136a2b8aab8c3fda7cabb1ffb8f959a8b57"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_red_003_readonly_redemption.rs",
+    "sha256": "246388afcc2c22493800f10e1ecae87e9e257ef1ce2c39866f05fc5997b1188b"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1b_monad_happy_path_pic.rs",
+    "sha256": "7526b00a167d8a029cf726498a667c086284bbac8f730862ba0b5d5042287538"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1b_burn_idempotency_pic.rs",
+    "sha256": "b2d510a73b61843ec3097bfe56b9f452599119b771bd08c911129754702163c1"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_dos_006_007_aggregate_cache.rs",
+    "sha256": "89f259ecbe025c3958f11d1b573218c22c55881d7ef150d1a6bb77f709cc2856"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/tests.rs",
+    "sha256": "5ec74b07b3828900963ab56d1708a631351d4d4f693bec8e36610d136350de3d"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_003_partial_liq_min_debt.rs",
+    "sha256": "aab0f06251f174298ffa85850d001652feba91f4ec61b1187d55bbbcae125cf1"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/lst_wrapped_price_derives_from_cached_underlying.rs",
+    "sha256": "99ae103c797e6f1e34f8546aae196139369e1d151586c1bec702c4ac68d250ef"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1a_scaffolding_pic.rs",
+    "sha256": "bcd8964eaed7f330a66f7bdb4568e5b4c0522dea1f6580e0149efd9ebc2181d4"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/per_collateral_xrc_source_floor.rs",
+    "sha256": "f3c89061562dccf2e04627f7ac07414e4c5b455dbd0f5421617773208cef5e07"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_int_003_borrowing_fee_bound.rs",
+    "sha256": "d959bd147cda779224901d1fd365f650436f16f6be6899eba5d9378d1e8fd518"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1b_observer_consensus_safe_pic.rs",
+    "sha256": "b1ebd4efc4f73d8a851ec89debc1ebd5bc0eb2cde3c91df8b9fd43dc1261ede6"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_004_icrc3_burn_proof.rs",
+    "sha256": "14cb70b13aacd0a11a3c9732db37ec7849eada6a484c9d91a51df3bfbebc6857"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_cdp_01_oracle_circuit_breaker.rs",
+    "sha256": "db6158bf0ff81570db0d805d796e6c4a2f673d4f21c95b5d3b24ab99e5ee4bd8"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/conflux_liquidation_swap_pic.rs",
+    "sha256": "795c6e771ce5827f32e97ac5f51bb89583690ab6753f3f1e33c61c217db15170"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_red_002_redemption_deficit.rs",
+    "sha256": "cc4e45b2afeaadb6985ffe33735ae66da76e52c404fd2d8c1a37b8f3b34d278f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/solana_m2_sign_pic.rs",
+    "sha256": "d8c34fdfd1b588b1582a986f21a5132fa6e79c06a7912272ddc02d90401a3684"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_int_001_redemption_clamps_interest.rs",
+    "sha256": "de239df8de14d123108c8187884dafcf0c314f946318a0bb7eea4684ed2212d5"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_005_deficit_account_pic.rs",
+    "sha256": "293bd5b0897d22f1cd3944453f9c37f6c7ac8293ed859a050516bda3f9defebc"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_005_deficit_account.rs",
+    "sha256": "8b051048afb9275d28672d4c39c68890c1734b22ef9ad251a932e762d4747364"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/solana_m1_seam_pic.rs",
+    "sha256": "11b8c2ffacb6ed1bd977819c9448259c7040cd614e318ac8ac98fdb6dac5125c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_007_sanity_band.rs",
+    "sha256": "0217d001caca2cb4d2599ee7bf271e67c7a322a0d478792ab82c07d79b09be10"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/phase1b_timers_pic.rs",
+    "sha256": "f20c54016f285ff4a42bf4caf047d08c8e75c76595e4b518c9a71b6a37e1e774"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_bot_001_auto_cancel_balance.rs",
+    "sha256": "dadfe07dc0f158506802a23989940ea5cc3be02775222a8aa8d368e52a1b38a1"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_001_pending_margin_race.rs",
+    "sha256": "b9a40d541763beadc10d6d26b4c5d20f2217e9019fd2137d97dce8df3ce5a686"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/borrow_mint_official_ledger_expiry_pic.rs",
+    "sha256": "a81b079b38ea2dac24381ca22a00b3cb89d5368bb67b93c528021afddf4b358b"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_int_006_treasury_drain_concurrent.rs",
+    "sha256": "7af2ab0415e1e8ccbe523abd361c61adefbaf15e860d4b51dc776dcc410102d3"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/mock_sequence_fix.rs",
+    "sha256": "bb24d0e59d44a0a5b52ac28990ddcdceb54925de844a85eefa7ef8c217afecbb"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_red_001_freshness_wiring.rs",
+    "sha256": "ff4d6664442eee83598fdb684c9028ed4f793c127b4257500afa44af9e8ba82e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/amm1_pool_id.rs",
+    "sha256": "1857f21aa0da6d7daab3f1539b884010b73b8115c7c92773e94b17b80c1a6725"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_liq_007_liquidation_frozen.rs",
+    "sha256": "3cca08cac537b4ad8bc0794eeffaa06ec605f25ce98a2b3deee6dfab77f6e36c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/audit_pocs_bk_001_002_per_vault_lock.rs",
+    "sha256": "cdc6a53f4be8afe5e564253bcbb76b5e70524b69a79a6375dba7d9dc43d3a4e7"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/cksol_icp_mock/Cargo.toml",
+    "sha256": "cd75611367e4694a102b3b98bc251a373941b2db64fbdfc2e916449d1e5b874a"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/cksol_icp_mock/src/lib.rs",
+    "sha256": "097a82fcfc77a3de603b9a8ac3aa1542582cdcb60f843df91c6f6309830859d9"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/support/pocketic9_compat.rs",
+    "sha256": "88c02d57a4996ee8e15797747f8372375a3225b8dc7665f168c7e8d34896872f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/cksol_callback_upgrade_mock/Cargo.toml",
+    "sha256": "abca87c7cbd2c7e1566de595770473651f9e2d07bd8ae2284745c6bb37cf1048"
+  },
+  {
+    "path": "src/rumi_protocol_backend/tests/cksol_callback_upgrade_mock/src/lib.rs",
+    "sha256": "16d3d6a16aeca81343e1759ebd64d77d7b9367dc55bb997a04ef6ffebb92ef6c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/numeric/tests.rs",
+    "sha256": "094adfd23d7a80c475a79c760e665575a083dbaa451af3896087b4e075c4451d"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/sp_burn_refund.rs",
+    "sha256": "1b53f1bd8bf3dbf2ca2cd75fa70c05d43fca858e84f877bd295b16461c7a6b06"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/icrc21.rs",
+    "sha256": "e7dbcd1547f6b4f2271c5f33aa4a2dba93849b09c600c0e4920046bdb2187484"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/cksol_icp_paid.rs",
+    "sha256": "75186d20bddbe8a1c54659b4a7877540ea765e5b1f411d9750acc8165193f0b2"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/types.rs",
+    "sha256": "eee384d470b1aa29a3f4ef4d338e68a972ad3bfc9fe6759cbf9729b82a5c6165"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/payout_history.rs",
+    "sha256": "a2db333740e7d9a967527488ee76b0fe277cf3dba42442eed6a6bd7f95edb37a"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/nicp_redemption.rs",
+    "sha256": "18044e8462ddd7dacde871d1b378dd18b42cad92efa8f2a4afc676b3c3080832"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/lib.rs",
+    "sha256": "da8823798cdcffb7c3336d777a4135090f7a1ae3e838aac5c1c1304a68674478"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/cksol_paid.rs",
+    "sha256": "9d0c2fcb249b153c656caf48f93e1ae58432e06aa6fa899db070fdf627d9e0c1"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/xrp_vault_deposit.rs",
+    "sha256": "566c79ba421fbb034eb1ff1273c4951b6920aed6276b1c3a63e26240c5505441"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/sp_liquidation.rs",
+    "sha256": "13a71f5dbddda024800fe7915185bb802362c5012d418221448b4f0e7b42ecfa"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/event.rs",
+    "sha256": "c971fb556c3dee107e9c5036ea1334f0089b07d83979772dbb7f796f76c2eb75"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/native_icp_proof.rs",
+    "sha256": "c3efad262062b2d047392e81cf9b43aae9c879f51f1f1e37ecb9c438c04d8f26"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/state.rs",
+    "sha256": "3d07b771387a21e4335ea665bfd905b00bfaba28aa08cde02842d67067f2b27f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/xrc.rs",
+    "sha256": "8064dae6e6595fb38386e5988aa6bd053560db2e55301e44d82c55067f5e444f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/treasury.rs",
+    "sha256": "80ec234d4e812c6fd42cf33ca63e8d57f7c12e9500b848740495308e804844e3"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/test_helpers.rs",
+    "sha256": "c9cb86e8b0ef0d5825715fea88b5b5d97d33c46b743cc7814a44f2af79acd192"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/three_usd_inventory.rs",
+    "sha256": "8e45f37d5d604e1bbf73919c29f2a589e7aa452e2592ba6b8eb7f21bdc2af5b3"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/icrc3_proof.rs",
+    "sha256": "ace9fd342faf6e78bef32e45acc2e2f23320287752e3b2f2fd284844d3b6c3cc"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/main.rs",
+    "sha256": "2d81ea71ca0c465bb337e586de94df27b0a1a722a562538924acbe2f4506592b"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/tests.rs",
+    "sha256": "faa56524a18f04a230fd129058eb25876aa37b49f190f7e9956c73a19c7e3083"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/numeric.rs",
+    "sha256": "54cde2faded9e8c0e273bb0f8a63f586bcfa4502be2ab3916bae51d03bfb3274"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/storage.rs",
+    "sha256": "90bc579a9a5cd6637ae51d121f9cd60456aa88f02cf7a8eaafc78390d7d86225"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/guard.rs",
+    "sha256": "71b96b2c59fca5351fb3aa64694ad93dc136f558eb2929e21ebcb273a17f74b1"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/cksol_icp_lifecycle_tests.rs",
+    "sha256": "245c5f495ec9bcc70d913e81cf840dbd7e8068f54f5c51fe8b35b4e61c23f72c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/management.rs",
+    "sha256": "077ee915ab9683d0ea05f98062654844a0bcbe46ff944c6632b3bf323695862b"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/dashboard.rs",
+    "sha256": "03898714a0148d04ea34bfb982e51117d933ef27a1f099083587d1244c51cdf2"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/liquidity_pool.rs",
+    "sha256": "a2b76a9efe52c282d01e6437485d56a2433a0dadc86c27533e458dddc9b25643"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/logs.rs",
+    "sha256": "3dd430d544419c09206d777f95fb7cce3bf356cde23c5f497c9ca26cefb725e1"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/vault.rs",
+    "sha256": "86e696b65e1817b16f724b2ffdaa252b0615844cc4d114c60bef5fca0aaf139e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/cksol.rs",
+    "sha256": "9518b469ed1a153fa097fbe629cef496dc55e1ad829dfbd5b39bff31255073e7"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/numeric/tests.rs",
+    "sha256": "46c412fb1085a2dd6e0919210f39767d55a7044ef738b931908117b30f29e26c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/multi_chain_state.rs",
+    "sha256": "67bbddf4d4ba1a7e2e38453575525461b761a93fb85e3ec1697a9becd59d4bf0"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_config.rs",
+    "sha256": "505e04c0e181d0d41bdb6f2f40f61effde4716cb1569f393aafb4e015c7d13cf"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_vault.rs",
+    "sha256": "0750607853b1b26b3d7cce57ae6bb55025b283f7110c907fcb46a9d8c4190ecb"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/adapter.rs",
+    "sha256": "35df07d82429a6855487cc3c369d51f16d0879426477ae526a24a98c667306d2"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_admin.rs",
+    "sha256": "0ea2b75cb129f370aad437d5c3d0b376de146737ab592dddc3f3ac671815b11d"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/liquidation_config.rs",
+    "sha256": "e89a6f7f154d6717005739e03f471bff3a6b7da32cead7559d951545d4ebd2b5"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/interest.rs",
+    "sha256": "3099256c091f7ccf3cc5a1c7fa6231cb158397ea07eb189568b515dfa0dfade3"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/recovery.rs",
+    "sha256": "181f4ce68b1b0913c0f569b2b4de746c7156297e4772fb8002df3815557ff142"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/config.rs",
+    "sha256": "8965b3d09da793568bebb04edd5bf10a07194dabeb2c5b96bc7e738abc4d69d2"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/collateral_config.rs",
+    "sha256": "fa41064440e1424cd0428d5a862d8674caefbbcb9d6e4fe3d10b98f358e73052"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_recovery.rs",
+    "sha256": "e886949221d7064dd3926939154f076bccc84e96f1ac5bfd48683576dcaa30c6"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_self_check.rs",
+    "sha256": "6a07d3cd7775c1962db753a9d30a6abbdc627f5fd668084a82c1aac42b55fff5"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/settlement_queue.rs",
+    "sha256": "030c6f2c8720516c561c57a39bcb02b9a7bcad82ae9518bac8f611b2b1aacc8c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_settlement_queue.rs",
+    "sha256": "f355468de8b66aa7bc55a30b352313980773c2e17f0c75c8c351ce0e9aef0fda"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/mod.rs",
+    "sha256": "cb8592b00d74a156a9d1a0275fbe28530db30b5e240c13bfd6c15d1a0608b178"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_adapter.rs",
+    "sha256": "319e040032fe2e5ee00460648becc4ac08a3675e68874f291512d0357d26716d"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/liquidation.rs",
+    "sha256": "4b15239ab556d1cb6ad68be959ba5f719c98cb0a7d25c05d5d19db06dcd2981b"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_supply.rs",
+    "sha256": "e13dd4d3de310df03d5c0c3cd1f82962e35d5ee3235fee411db93a6f036173ac"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_multi_chain_state_v2.rs",
+    "sha256": "c6d626f7c2dce1af59893f414a9b3973dc0600312856456ed31da5c432e07fa4"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/supply.rs",
+    "sha256": "30dcb0ada6749548ec1b4a1c9bd4d7f51edbe57579f3ecf411dae1a0a7f56f54"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/tests_multi_chain_state.rs",
+    "sha256": "161b04b0f1fec05ed9c52498c9c213c2f9d88472ea932280005600d0a394ebbf"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/vault.rs",
+    "sha256": "b3afd2a966037f21feb677148bf8eac6b8c4c976dd6f3a930190b4b0a4729050"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/admin.rs",
+    "sha256": "9c9708cbcbfeaf69a2cc81f79fd4ab87b2739f596230c2046818ae593eb6ba44"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/adapter.rs",
+    "sha256": "ae9f156c2f996a05dfbe3ca576592f03601fba6bf3cebf36a7700ea31b59cefd"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/ted25519.rs",
+    "sha256": "bc78d19ce8c715bf61cf388a2cf57ae812058e5b47dabd4f4188ffc274d21008"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/config.rs",
+    "sha256": "94fbeaaf2ef546a54a32a47899db7952f01000c38c6426f68c9ae9f260c255a8"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/address.rs",
+    "sha256": "daa6b5faffe94ff0bd1639286724a134fc4be7b3268060a47c2fa7b9bdf92713"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/mod.rs",
+    "sha256": "262e7049a229197bf4b0fd18b35f9af916e2beeb56b6d21a945358e6e6a7339d"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/xrp_rpc.rs",
+    "sha256": "52b22501415454ff0a39e82d5f4c6960aa70ad9052207f59a3a0d426882b96d6"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/deposit_rpc.rs",
+    "sha256": "f620d5d9a52bdda82b139362f4f38228860f2b288c5ba010e46663ecf4eaa75a"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/sign.rs",
+    "sha256": "3e6712dbdb220bb4d90d6080128131f9601b7e4bb628dad8473eaffce474b408"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/xrp/codec.rs",
+    "sha256": "74a91a4fe146bb06fc849e0b611d073bf1ecc6c1a9dcf57f3c31336a5d3b95a7"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tests_deposit_watch.rs",
+    "sha256": "24b212b195a9daad30224afa49279a2dcdc588428345594825ed297822c7510e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tests_config.rs",
+    "sha256": "afcea0fb455851b9d083379708d1a98853af5246fe1e8e11c8d1ab2905ead476"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/adapter.rs",
+    "sha256": "79c10080b33999aaa8ac5a4641b83ef275f6f2e4131420900a6fa378a48bf23e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/deposit_watch.rs",
+    "sha256": "cdac77641e0e9f88abbc54e9674296015018f52a5f52d0ee20d08929633536ff"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/ted25519.rs",
+    "sha256": "9b9126233a10c55743e8530e548abbd96c53ba127d8f998f48d713b7afd46009"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/settlement.rs",
+    "sha256": "79609f3b8e23c0586598075d61b998c30b6a919533aac46993b3be0a7da8899c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tests_ted25519.rs",
+    "sha256": "0592a8dc31fedf273a1fa7d4485fcf5dd00136fde582b6030708e694ae6ad877"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tests_settlement.rs",
+    "sha256": "e0d7c55c15702123d7c33d597ba3193faf1951ddf1319d3efcc2c275afbe39a2"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/config.rs",
+    "sha256": "9c9b7183d2ab8d8222dac11e8b0cb803e5e1d8da2f305dc0be1fbd3129ad3b8b"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tests_tx.rs",
+    "sha256": "50ea99fdd433f0e2a65216afd4dfda67d3973457447ca2191b88dcf2358b9942"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tests_sol_rpc.rs",
+    "sha256": "44c1caf53efdac710b8502b719409b3b81bce9da71802fe904f2221b7bd481b8"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/mod.rs",
+    "sha256": "94716540328f7e052d7568d2c83e23785c74f1a564004ac9357c7bed3d62faec"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tx.rs",
+    "sha256": "92523d2de86f2366f629dccaf2a2e40a52466ff6b751d5d00c82d5e1a4eec0c4"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/tests_adapter.rs",
+    "sha256": "ae9529fecb2d6c5e03ddf247a0d96a33afb6b123f2ec0e0c7a354c2a89039eeb"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/hardening.rs",
+    "sha256": "cb592db70b202448e60f7d5d87cc911b0c4be651ec7f312aea8556b318261e0c"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/solana/sol_rpc.rs",
+    "sha256": "0a3fcd9ef4e91d114de79d910737d94a874e2db7a1c857a4e44cf6c970a65027"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_deposit_watch.rs",
+    "sha256": "df3067d80555d1447f65d0a25c5db8688ace92681fba1dfc1de7fbc9a9cd2323"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/burn_proof.rs",
+    "sha256": "e172674c03146031a64fa2c730a169be70bd895280e77c8d8712ba1506305dac"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tecdsa.rs",
+    "sha256": "bdf1f041b66144389cb6c34ece46425db6ddff674591a09b4cea7c2aae4c1fbe"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/evm_rpc.rs",
+    "sha256": "58f2358231a9d6c043aad6aaaa3f5fc5fc65a6f16575e533cbf5dc7436fa129e"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/adapter.rs",
+    "sha256": "a62a7f7229af9faddca9ffb6278746dbf782f4f422e8ce606cbedff3ede4f776"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/deposit_watch.rs",
+    "sha256": "4e290bd26bef840e48d32699c17edd953771bebe447e5bc0a1ae19b360f68597"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/settlement.rs",
+    "sha256": "17bc90ddd5c453fbe326847e62650ca08ea2fea610b4248746818c2669ed6306"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_settlement.rs",
+    "sha256": "169f7436a11454d5989e2208668975ecfb7abeeb8f6dd3550680cb23985cbc4b"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_tx.rs",
+    "sha256": "e95297bf10008afbf0cfa0ec18a2f61eba3f8419ec8d44dfd45ff81c84de2888"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/public_readiness.rs",
+    "sha256": "3347b234070e9a1bc69d9beb407af8963bf013bd910f44ad2f4ed093aed6c640"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_burn_proof.rs",
+    "sha256": "fcf48b900e67f06052db1f7000a1a69de49ec7a0f42c2f559078d1ea1145b53f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_tecdsa.rs",
+    "sha256": "0ab145d04c6102f03b50e30d952f91400aa744a01f2491d0ddc22c9a66ddfd6f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/mod.rs",
+    "sha256": "b136f4955536c1ed43f8eb2026f1d555e3be4a3a9488f8189fe7bb8098f83201"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tx.rs",
+    "sha256": "fafa293da5d2935ea61f7ad92b4adf43cf1ae4c903ee6eb344b006398a5b0481"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_evm_rpc.rs",
+    "sha256": "1b8828e3b93d7a1fd2e14958c6152d1833cf095b3986eb88da430a85b24572d0"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_adapter.rs",
+    "sha256": "a63ac435c86128395e31109cde50ea9796d5b4e7a89dab7885c098f573188368"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/hardening.rs",
+    "sha256": "53462ed943e463fc9a463c3ed8d5dc5415cea00d1d91b54cc3c5668a67a60506"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/eip712.rs",
+    "sha256": "5cafaecada3bf15ba3d63319f2998e441f0ea07a24e2cd756bbc465184050856"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/settlement_proof.rs",
+    "sha256": "7b13f9c86cf021bfefcfd4d27d6d2cab18921aaa86962a30aa7952eab1b3aae9"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_settlement_proof.rs",
+    "sha256": "8fa9712cd09e4c110255cb1aaf4295e1484526e9af4fcd5fcace6d206fa960fd"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_hardening.rs",
+    "sha256": "9025c836e702746e2b286a7fda5993c01f2a4280ea9688cd7ccc2937930b74dd"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs",
+    "sha256": "0951f3cc3faef282472865b8733a671cc8abca910931ab7f3f1f8c798657c101"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/conflux/config.rs",
+    "sha256": "71280560eb19ab135da958e954705f8923c2502aa822c86b9a98df5410f47e5f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/evm/conflux/mod.rs",
+    "sha256": "88814564bf11c852ed5fe7f02355d79fab817e21650e45f5cdfd821550b081d3"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/monad/tests_config.rs",
+    "sha256": "ffffb8e12e6a7865099a44476b3f7305db4b9cfc98285e94985acc60dc51344a"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/monad/tests_chain_vault.rs",
+    "sha256": "78eda80db33dc16edd27df7c44790b4324574f78856a965c0468d047d81eb405"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/monad/tests_withdraw.rs",
+    "sha256": "ebb0a6d3bdf5b62bad0a617c2eafb1c9172c7622a5de08fde264e8c1519f8bb7"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/monad/config.rs",
+    "sha256": "c843e142fa6bcdf177620294d13f740c81d5987cbe3103c1157aa515c19413ae"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/monad/tests_open_vault.rs",
+    "sha256": "d6ed8a30845f9a6cdbaf30f155c0f401ec582379c7d9dc8fc7dfa7e1ea3fcaed"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/monad/mod.rs",
+    "sha256": "799d5f6da199846b0ea1a6d64a9c0c612e4a9bed87a5fbe05bfb03d09655edbc"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/chains/monad/chain_vault.rs",
+    "sha256": "1557dcfba7f84bf9b55f1ecbf3de0dd8c8771714411a2c49587d6a3ba971862f"
+  },
+  {
+    "path": "src/rumi_protocol_backend/src/nicp_redemption/adoption.rs",
+    "sha256": "3f2f2dd8e30f1b873433c1564a13345e967df205306b5628d090828c9b97c97f"
+  },
+  {
+    "path": "src/rumi_cycle_manager/Cargo.toml",
+    "sha256": "93d25a13c9aad1e3e4b5b2df4d45312f6e5e3915cf2d5aa7c5d5688d9f5f7198"
+  },
+  {
+    "path": "src/rumi_cycle_manager/src/lib.rs",
+    "sha256": "f3df315f632ce9251cc418d03c69b45debc8fd4bee9a0f24da1dd9ebd7d461c3"
+  }
+]

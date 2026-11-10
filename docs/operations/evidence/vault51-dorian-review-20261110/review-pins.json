@@ -1,0 +1,16 @@
+{
+  "source": "42478174029e6edb54e26578bebfe79a25f576bc",
+  "priorDeployedSource": "f1d2e77e2387ab6b9fc9a5b5676047b25d7175ff",
+  "priorDeployedModule": "2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13",
+  "candidateUploadSha256": "43bbbca98df29296a7dde2f134ce15db519bb745c53c1fcf442ef97b54223f09",
+  "candidateOptimizedSha256": "941224b5ae5878e889e8fc864887f2b22e18949d08f6a9ec700204519d07d5d8",
+  "candidateCandidSha256": "43da24f0341ca8fe52837071020e910f9ff3ecdef83a04f0dbc8f6e3033334db",
+  "frontendManifestSha256": "79e75bd3d0f6016b4d4ae968a83d79b6b558dcf35828c595aad0b6e96afac6a3",
+  "upgradeArgsSha256": "c6b21cbd1abc383aa85b6f2f821cd35c75a5a60597189e9b79ca296add4634c2",
+  "sourceReview": "PASS, no confirmed blocking source finding",
+  "artifactVerification": "PASS",
+  "decision": "Accept preparation; installation and automatic activation remain held",
+  "installAllowed": false,
+  "activationAllowed": false,
+  "financialActionAllowedByThisReview": false
+}
