@@ -1,0 +1,66 @@
+[
+  {
+    "name": "cargo-release",
+    "args": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "--release",
+      "--target",
+      "wasm32-unknown-unknown",
+      "--package",
+      "rumi_protocol_backend"
+    ],
+    "start": "2026-11-10T22:54:05.240468+00:00",
+    "end": "2026-11-10T22:55:11.155263+00:00",
+    "exit": 0
+  },
+  {
+    "name": "metadata",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/vault51-correction-release-20261110/backend-optimized.wasm",
+      "-o",
+      "/private/tmp/vault51-correction-release-20261110/backend-optimized.wasm",
+      "metadata",
+      "candid:service",
+      "-f",
+      "src/rumi_protocol_backend/rumi_protocol_backend.did",
+      "-v",
+      "public"
+    ],
+    "start": "2026-11-10T22:55:11.173610+00:00",
+    "end": "2026-11-10T22:55:11.997247+00:00",
+    "exit": 0
+  },
+  {
+    "name": "shrink",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/vault51-correction-release-20261110/backend-optimized.wasm",
+      "-o",
+      "/private/tmp/vault51-correction-release-20261110/backend-optimized.wasm",
+      "shrink",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-10T22:55:11.997787+00:00",
+    "end": "2026-11-10T22:55:12.804985+00:00",
+    "exit": 0
+  },
+  {
+    "name": "optimize",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/vault51-correction-release-20261110/backend-optimized.wasm",
+      "-o",
+      "/private/tmp/vault51-correction-release-20261110/backend-optimized.wasm",
+      "optimize",
+      "O1",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-10T22:55:12.805551+00:00",
+    "end": "2026-11-10T22:55:21.171119+00:00",
+    "exit": 0
+  }
+]

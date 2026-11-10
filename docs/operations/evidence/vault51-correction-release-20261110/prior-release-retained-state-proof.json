@@ -1,0 +1,10 @@
+{
+  "snapshot": "000000000000001a0000000001f088fe0101",
+  "snapshotModule": "2ca84c209d537def37f793588e469e34b3ee7301d672e3963ce7d88803c0fd13",
+  "heapSha256": "e7f9ff88b05a4fc15a46bb7300b019cc03a63edad6fc15b32d0423bcede2bfc1",
+  "allFourIdsAndImmutableAnchorsMatch": true,
+  "changedClaimAlreadyHasPostReadbackDropsAndNoSettlement": true,
+  "externalPaymentFinalityProven": false,
+  "allOtherScopedComparisonsEqual": true,
+  "conclusion": "The two changed financial fields were already present under the previous module before installation; not state loss caused by upgrade."
+}

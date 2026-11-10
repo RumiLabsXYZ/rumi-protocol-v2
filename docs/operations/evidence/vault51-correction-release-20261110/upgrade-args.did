@@ -1,0 +1,1 @@
+(variant { Upgrade = record { mode = null; description = opt "Vault 51 raw-collateral guard correction; source 312ebe03; preserve SEC12 cancellation and SEC11 receipts; automatic timer registers on upgrade" } })
