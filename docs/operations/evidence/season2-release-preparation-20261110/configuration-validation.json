@@ -10,9 +10,13 @@
   "season1MappingByteIdentical": true,
   "season2MappingEmpty": true,
   "pendingInitFailsEncodingAsIntended": true,
-  "syntheticFilledInitEncodesAgainstCurrentCandid": true,
-  "realCutoffAndH0Frozen": false,
   "noRustCalculatorOrEventEditsByThisChange": true,
   "newBuilds": 0,
-  "canisterWrites": 0
+  "canisterWrites": 0,
+  "publicH0Frozen": true,
+  "publicH0Hex": "d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8",
+  "publicH0ExactByteCount": 32,
+  "realCutoffFrozen": false,
+  "syntheticCutoffWithFixedH0EncodesAgainstCurrentCandid": true,
+  "privateSeedReadByReleaseOwner": false
 }

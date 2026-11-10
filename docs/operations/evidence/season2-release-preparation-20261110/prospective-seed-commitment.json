@@ -1,0 +1,10 @@
+{
+  "publicH0Sha256": "d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8",
+  "publicCommitmentBytes": 32,
+  "preparationReportedBy": "Orin",
+  "reportedPreparedAtUtc": "2026-11-10T17:21:39.845469Z",
+  "privateSeedCustody": "Orin reports one OS-random seed stored only in an ignored mode-0600 private file; no seed or private path included",
+  "privateSeedReadOrTransmittedByReleaseOwner": false,
+  "prospectiveCutoffFrozen": false,
+  "activation": false
+}

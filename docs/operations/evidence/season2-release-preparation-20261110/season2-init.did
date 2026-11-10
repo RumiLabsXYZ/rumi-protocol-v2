@@ -1,6 +1,6 @@
-// PREPARATION HOLD: replace both named tokens with reviewed exact values.
-// This file is deliberately not encodable Candid until the prospective cutoff
-// and public H0 commitment are pinned. Never put the unrevealed seed S0 here.
+// PREPARATION HOLD: the prospective cutoff T0 is not frozen.
+// H0 is fixed below; S0 remains in Orin’s private custody, never in this file.
+// This file deliberately cannot encode until the reviewed T0 is supplied.
 // cutoff_ns is the exclusive historical replay end / prospective engine start,
 // not the logical backfill start (2026-11-01T00:00:00Z).
 (opt record {
@@ -8,5 +8,5 @@
   excluded_principals = null;
   season_start_ns = opt PENDING_REVIEWED_CUTOFF_NS;
   season_end_ns = opt 18_446_744_073_709_551_615 : opt nat64;
-  snapshot_seed_commit = opt blob PENDING_REVIEWED_H0_CANDID_BYTES;
+  snapshot_seed_commit = opt blob "\d0\50\af\46\4e\a9\62\52\b3\7b\21\da\99\ea\a7\e7\dd\82\91\76\66\27\ae\e3\ea\bd\05\61\0d\04\48\b8";
 })

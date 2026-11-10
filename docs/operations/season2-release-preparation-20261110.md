@@ -25,9 +25,9 @@ canister creation, funding, installation, imported award or activation occurred.
   `evidence/season2-release-preparation-20261110/season2-init.did`: fixed admin
   `rumi_identity`, default protocol exclusions (`null` preserves the built-in
   seed), prospective cutoff T0, `u64::MAX` as the technical open end, and public
-  H0 commitment. **T0 and H0 are named unresolved tokens; the file deliberately
-  does not encode yet.** Do not install it, substitute an invented timestamp or
-  zero hash, or put the unrevealed seed S0 in public source.
+  H0 commitment. **H0 is fixed; T0 remains a named unresolved token and the
+  file deliberately does not encode yet.** Do not install it, substitute an
+  invented timestamp or zero hash, or put the unrevealed seed S0 in public source.
 
 S1 selector/definition, every existing environment and the complete
 `mainnet-live.ids.json` are unchanged. S1 remains
@@ -40,15 +40,21 @@ The candidate’s `begin_season2_import` requires an empty stopped instance,
 committed seed hash, a future T0 later than November 1 and no decided end
 (`u64::MAX`). T0 is both exclusive historical replay end and prospective engine
 start. The logical backfill start remains November 1, 2026 00:00 UTC. Those two
-starts are deliberately distinct. Freeze the actual T0/H0 and private source
-manifest/participant state with Orin’s reconciliation, then replace both tokens
-in the readable reviewed init artifact. Token allocation and a final end-date
-decision are not added as accounting blockers.
+starts are deliberately distinct. Freeze the actual T0 and private source
+manifest/participant state with Orin’s reconciliation, then replace the remaining T0 token in the readable reviewed
+init artifact. The public H0 commitment is fixed as
+`d050af464ea96252b37b21da99eaa7e7dd8291766627aee3eabd05610d0448b8`
+(32 bytes). Orin reports preparing the prospective seed once using OS randomness
+at `2026-11-10T17:21:39.845469Z` and retaining S0 only in a private ignored
+mode-0600 file. Dorian pinned the supplied public commitment without accessing
+or transmitting S0. See [commitment evidence](evidence/season2-release-preparation-20261110/prospective-seed-commitment.json).
+Token allocation and a final end-date decision are not added as accounting blockers.
 
 [CLI 1.3 file-backed init syntax](https://cli.internetcomputer.org/1.3/reference/configuration/#init-args)
-was checked against the installed `icp 1.3.0`. A synthetic T0/nonzero-H0 fixture
-encoded against the current `(opt InitArgs)`; it is validation only, not release
-parameters. The real unfilled file was verified to reject encoding. No sync hook
+was checked against the installed `icp 1.3.0`. A synthetic T0 with the exact fixed
+H0 encoded against the current `(opt InitArgs)`; the synthetic T0 is validation
+only, not a release parameter. The real unfilled file was verified to reject
+encoding. No sync hook
 automatically imports credits, starts the season or enables either timer.
 
 ## One exact bounded funding proposal
@@ -112,14 +118,22 @@ does not make the unfilled initialization or unresolved historical categories re
 - Parsed comparison proves every pre-existing canister definition/environment
   preserved and S2 environment contains exactly one new selector.
 - S1 mapping bytes match the previous commit; S2 mapping is empty.
-- Real pending init rejects encoding; synthetic filled values encode against
-  canonical Candid. No real cutoff, commitment or secret is manufactured.
+- Real pending T0 init rejects encoding; a synthetic cutoff with the exact
+  fixed 32-byte public H0 encodes against canonical Candid. No real cutoff or
+  private seed is manufactured or read by this release-preparation change.
 - Scoped `git diff --check` passed; only the configuration, new mapping and
   Dorian-owned release-preparation paths are staged for this commit.
 
 See [configuration-validation.json](evidence/season2-release-preparation-20261110/configuration-validation.json).
 The source board and numerical reconciliation remain Orin-owned. His next
 release packet can name the actual payer, complete historical result, frozen
-T0/H0/seed custody, target/controller/artifact, exact import transcript and separate
-activation authority. Rob’s actual-running/all-November-1-points outcome is still
+T0 and private seed custody (public H0 already fixed), target/controller/artifact,
+exact import transcript and separate activation authority. Rob’s actual-running/all-November-1-points outcome is still
 open; this preparation is not a source-only substitute for it.
+
+Running configuration and awarded points are separate proof: a successful poll
+and an open committed epoch can show that configuration is running; ordinary
+prospective snapshot awards are observed only when an epoch closes, normally
+after a week. Running timers do not establish an ordinary ledger accrual or
+complete historical November 1 reconciliation. No earlier close or live award
+is inferred here.

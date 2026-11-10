@@ -667,8 +667,8 @@ canisters:
       memory_allocation: 0
       freezing_threshold: 2592000
       log_visibility: controllers
-    # Explicit held initialization: prospective cutoff/H0 are not yet frozen.
-    # The referenced text deliberately cannot encode until those fields are
+    # Explicit held initialization: H0 is fixed; prospective cutoff is pending.
+    # The referenced text deliberately cannot encode until that cutoff is
     # supplied in the reviewed release packet; it cannot fall back to S1 dates.
     init_args:
       path: docs/operations/evidence/season2-release-preparation-20261110/season2-init.did
