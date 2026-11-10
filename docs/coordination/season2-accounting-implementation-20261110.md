@@ -64,9 +64,11 @@ post-install resource readback; the local fixture is not guaranteed runway.
 
 ## Historical debt diagnostic
 
-An ignored operator-only test adapter decodes retained backend event and timestamp
-pages and observes the existing canonical replay through test-only hooks. It adds
-no production replay behavior. One pass processed 558,710 contiguous events and
+An ignored operator-only test adapter, preserved on the
+[backend diagnostic evidence branch](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/season2-backend-replay-evidence-20261110/src/rumi_protocol_backend/src/event.rs),
+decodes retained backend event and timestamp pages and observes the existing
+canonical replay through test-only hooks. The Points release diff has no backend
+source change. One diagnostic pass processed 558,710 contiguous events and
 compared its final state to a 49-vault readback bracketed by the identical event
 cursor. Borrowed amounts differed for 43 vaults. The source archive was complete
 for that cursor; this result does not establish the cause of the state difference.
