@@ -1,6 +1,6 @@
 # Season 2 release preparation — superseding the expired request
 
-**EXECUTION HELD. Historical-credit acceptance is paused pending corrected reconstruction.** Orin owns execution; Dorian prepares and cross-checks evidence. This document does not authorize creation, installation, participant queries, imported credits or activation.
+**Historical-credit acceptance remains paused. The [prospective-only release packet](season2-prospective-release-20261110.md) now supersedes the historical-before-activation ordering in this document. Exact execution approval is pending.** Orin owns execution; Dorian prepares and cross-checks evidence. This document does not authorize creation, installation, participant queries, imported credits or activation.
 
 The fixed-19:00-UTC request at commit 28e0637e, SHA-256 d90a3e8e7504d8aee65405f4046b4f96f48f71943c00f887eb0de98e4fa5de44, is **expired and superseded**, not executable even if its old question is answered later. The old +650B payer question is closed: 4T was received. No additional funding is requested.
 
