@@ -44,7 +44,7 @@ let component: ReturnType<typeof mount>;
 let target: HTMLElement;
 const button = (label: string) => Array.from(target.querySelectorAll('button')).find(b => b.textContent?.trim() === label)!;
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mocks.inspect.mockResolvedValue({ intent, status: { active: [], acknowledged_through: 0n } });
   mocks.resume.mockResolvedValue({ success: true, vaultId: 42 });
   mocks.cancel.mockResolvedValue(1n);
@@ -190,4 +190,26 @@ it('retains the empty-read notice after repeated review clicks during the same r
   resolve({intent:null,status:{active:[],acknowledged_through:1n}});
   await vi.waitFor(()=>expect(target.textContent).toContain('No saved request is pending'));
   expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
+});
+
+
+it('joins a background status read when the form opens recovery instead of contending with itself', async () => {
+  let resolve!: (value: unknown) => void;
+  mocks.inspect.mockImplementationOnce(()=>new Promise(done=>{resolve=done;})).mockRejectedValueOnce(Error('Another tab is already handling this wallet vault operation.'));
+  component=mount(Banner,{target}); await vi.waitFor(()=>expect(mocks.inspect).toHaveBeenCalledOnce());
+  window.dispatchEvent(new CustomEvent('rumi:vault-pull-recovery-review',{detail:{owner:owner.toText()}}));
+  await tick(); await tick(); resolve({intent,status:{active:[],acknowledged_through:0n}});
+  await vi.waitFor(()=>expect(button('Restore saved request')).toBeTruthy());
+  expect(mocks.inspect).toHaveBeenCalledOnce(); expect(target.textContent).not.toContain('Another tab');
+  expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
+});
+
+it('does not share or publish a pending read across owner changes', async () => {
+  let resolve!: (value: unknown) => void;
+  mocks.inspect.mockImplementationOnce(()=>new Promise(done=>{resolve=done;})).mockResolvedValueOnce({intent:null,status:{active:[],acknowledged_through:0n}});
+  component=mount(Banner,{target}); await vi.waitFor(()=>expect(mocks.inspect).toHaveBeenCalledOnce());
+  mockWalletStore.set({isConnected:true,loading:false,principal:Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai')}); await tick();
+  await vi.waitFor(()=>expect(mocks.inspect).toHaveBeenCalledTimes(2));
+  resolve({intent,status:{active:[],acknowledged_through:0n}}); await tick(); await tick();
+  expect(button('Restore saved request')).toBeUndefined(); expect(target.textContent).not.toContain('0.03 ckSOL');
 });

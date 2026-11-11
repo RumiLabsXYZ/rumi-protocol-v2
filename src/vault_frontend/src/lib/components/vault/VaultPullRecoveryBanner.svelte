@@ -31,6 +31,7 @@
   let manualCheckPending = false;
   $: requiresUserCheck = $currentWalletType === WALLET_TYPES.OISY;
   let generation = 0;
+  let pendingStatusRead: { owner: string; walletType: string | null; session: number; generation: number; promise: Promise<void> } | null = null;
   $: owner = $walletStore.isConnected && !$walletStore.loading ? ($walletStore.principal?.toString() ?? '') : '';
   $: if (owner && (owner !== checkedOwner || $currentWalletType !== checkedWalletType || $walletSessionGeneration !== checkedSession)) {
     generation++;
@@ -116,7 +117,24 @@
     }
   }
 
-  async function refresh() {
+  function refresh(): Promise<void> {
+    // Share only a read already started for this exact owner and session. The
+    // journal's Web Lock must not make this component contend with itself.
+    if (pendingStatusRead && pendingStatusRead.owner === owner
+      && pendingStatusRead.walletType === $currentWalletType
+      && pendingStatusRead.session === $walletSessionGeneration
+      && pendingStatusRead.generation === generation) return pendingStatusRead.promise;
+    const read = { owner, walletType: $currentWalletType, session: $walletSessionGeneration,
+      generation: 0, promise: Promise.resolve() };
+    read.promise = readStatus().finally(() => {
+      if (pendingStatusRead === read) pendingStatusRead = null;
+    });
+    read.generation = generation;
+    pendingStatusRead = read;
+    return read.promise;
+  }
+
+  async function readStatus() {
     const current = ++generation;
     const ownerAtStart = owner;
     try {
