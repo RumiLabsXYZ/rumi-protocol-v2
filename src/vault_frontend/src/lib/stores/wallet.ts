@@ -4,7 +4,7 @@ import type { Principal } from '@dfinity/principal';
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS } from '../config';
 import { pnp, canisterIDLs } from '../services/pnp';
 import { TokenService } from '../services/tokenService';
-import { auth, beginWalletSessionTransition, WALLET_TYPES } from '../services/auth';
+import { auth, beginWalletSessionTransition, walletSessionGeneration, WALLET_TYPES } from '../services/auth';
 import { RequestDeduplicator } from '../services/RequestDeduplicator';
 import { getThreeUsdPrice } from '../services/threeUsdPrice';
 import { appDataStore } from './appDataStore';
@@ -45,9 +45,9 @@ async function fetchIcpPrice(): Promise<number | null> {
   return typeof icpPrice === 'number' ? icpPrice : null;
 }
 
-async function clearVaultCache(): Promise<void> {
+async function clearVaultCache(isCurrent = () => true): Promise<void> {
   const { ApiClient } = await import('../services/protocol/apiClient');
-  ApiClient.clearVaultCache();
+  if (isCurrent()) ApiClient.clearVaultCache();
 }
 
 /**
@@ -527,18 +527,24 @@ function createWalletStore() {
     },
 
     async disconnect() {
+      let disconnectGeneration: number | undefined;
       try {
         beginWalletSessionTransition();
-        // Use auth service for proper disconnect handling (Internet Identity + Plug)
-        await auth.disconnect();
-        
+        // auth.disconnect advances the generation synchronously, before awaiting
+        // provider retirement. Capture that generation, not the wrapper's prior one.
+        const pending = auth.disconnect();
+        disconnectGeneration = get(walletSessionGeneration);
+        await pending;
+        const current = () => get(walletSessionGeneration) === disconnectGeneration;
+        if (!current()) return;
+
         authenticatedActor = null;
-        
         stopBalanceRefresh();
 
-        // CRITICAL: Clear the vault cache to prevent stale data from being shown
-        // when switching between wallets (e.g., from Internet Identity to Plug)
-        await clearVaultCache();
+        // The lazy import can yield to another explicit connection. Fence both
+        // the cache mutation itself and the visible state publication afterward.
+        await clearVaultCache(current);
+        if (!current()) return;
 
         appDataStore.setWalletState(false, null);
 
@@ -552,6 +558,7 @@ function createWalletStore() {
           tokenBalances: {}
         });
       } catch (err) {
+        if (disconnectGeneration !== undefined && get(walletSessionGeneration) !== disconnectGeneration) return;
         console.error('Disconnection failed:', err);
         update(s => ({
           ...s,

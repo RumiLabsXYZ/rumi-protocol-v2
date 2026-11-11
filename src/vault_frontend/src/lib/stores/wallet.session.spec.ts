@@ -69,6 +69,7 @@ vi.mock('../services/auth', () => ({
   },
   WALLET_TYPES: { PLUG: 'plug', INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' },
   currentWalletType: writable(null),
+  walletSessionGeneration: writable(0),
   beginWalletSessionTransition: mocks.beginWalletSessionTransition,
   selectedWalletId: writable(null),
   connectionError: writable(null),
@@ -111,6 +112,8 @@ vi.mock('../services/protocol/apiClient', () => ({
 }));
 
 import { walletStore } from './wallet';
+import { walletSessionGeneration } from '../services/auth';
+beforeEach(() => { walletSessionGeneration.set(0); mocks.beginWalletSessionTransition.mockImplementation(() => walletSessionGeneration.update(n => n + 1)); });
 
 describe('walletStore.initialize() — visible connection state (wallet.ts)', () => {
   beforeEach(() => {
@@ -287,5 +290,37 @@ describe('walletStore.refreshWallet() — session identity transition', () => {
     expect(mocks.beginWalletSessionTransition).toHaveBeenCalledOnce();
     expect(get(walletStore)).toMatchObject({ isConnected: false, principal: null, loading: false });
     expect(mocks.setWalletState).toHaveBeenLastCalledWith(false, null);
+  });
+});
+
+describe('walletStore disconnect replacement-session boundary', () => {
+  const replacement = Principal.fromUint8Array(new Uint8Array([9,8,7,6,5]));
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getTokenBalance.mockResolvedValue(0n); mocks.getThreeUsdPrice.mockResolvedValue(1);
+    mocks.fetchSupportedCollateral.mockResolvedValue([]); mocks.fetchBalances.mockResolvedValue({icpBalance:0n,icusdBalance:0n}); mocks.fetchProtocolStatus.mockResolvedValue({lastIcpRate:1});
+    mocks.authConnect.mockResolvedValue({owner:TEST_PRINCIPAL,balance:0n});mocks.authDisconnect.mockResolvedValue(undefined);mocks.clearVaultCache.mockReset();
+  });
+  afterEach(async()=>{mocks.authDisconnect.mockResolvedValue(undefined);mocks.clearVaultCache.mockReset();await walletStore.disconnect()});
+  it('does not clear the replacement UI/app/cache after delayed OISY auth retirement',async()=>{
+    await walletStore.connect('oisy');
+    let finish!:()=>void;mocks.authDisconnect.mockImplementationOnce(()=>new Promise<void>(r=>finish=r));
+    const pending=walletStore.disconnect();
+    mocks.authConnect.mockResolvedValueOnce({owner:replacement,balance:0n});
+    await walletStore.connect('internet-identity');
+    mocks.setWalletState.mockClear();mocks.clearVaultCache.mockClear();
+    finish();await pending;
+    expect(get(walletStore).isConnected).toBe(true);expect(get(walletStore).principal?.toText()).toBe(replacement.toText());
+    expect(mocks.setWalletState).not.toHaveBeenCalledWith(false,null);expect(mocks.clearVaultCache).not.toHaveBeenCalled();
+  });
+  it('does not publish disconnected after a replacement begins at the cache-cleanup boundary',async()=>{
+    await walletStore.connect('oisy');
+    let connected!:Promise<boolean>;
+    mocks.authConnect.mockResolvedValueOnce({owner:replacement,balance:0n});
+    mocks.clearVaultCache.mockImplementationOnce(()=>{ connected=walletStore.connect('internet-identity'); });
+    mocks.setWalletState.mockClear();
+    await walletStore.disconnect();await connected;
+    expect(get(walletStore).principal?.toText()).toBe(replacement.toText());
+    expect(mocks.setWalletState).not.toHaveBeenCalledWith(false,null);
   });
 });

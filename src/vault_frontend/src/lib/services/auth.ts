@@ -470,6 +470,14 @@ function createAuthStore() {
         // asking the wallet for accounts. Use PNP itself: the legacy wrapper's
         // disconnect also disconnects Plug, even when Plug is not active.
         await getPnpInstance().disconnect();
+        if (get(walletSessionGeneration) !== disconnectGeneration) return;
+        // PNP swallows storage-removal errors. Its resolved promise alone is
+        // not proof that reload can no longer restore this cached principal.
+        if (browser) {
+          let retired = false;
+          try { retired = localStorage.getItem('oisy_principal') === null; } catch { /* Unavailable is not retired. */ }
+          if (!retired) throw new Error('OISY principal cache retirement could not be confirmed. The wallet has not been reported disconnected.');
+        }
       } else if (state.walletType === WALLET_TYPES.PLUG) {
         // Clear permission cache on disconnect
         permissionManager.clearCache();
