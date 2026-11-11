@@ -13432,6 +13432,8 @@ async fn dev_register_xlm_collateral() -> Result<(), ProtocolError> {
 struct XlmClaimTestView {
     claim_id: u64,
     vault_id: u64,
+    custody_owner: Principal,
+    custody_nonce: u64,
     claimant: Principal,
     gross_stroops: u64,
     destination: String,
@@ -13452,6 +13454,8 @@ fn get_my_xlm_claims() -> Vec<XlmClaimTestView> {
             .map(|(id, c)| XlmClaimTestView {
                 claim_id: *id,
                 vault_id: c.vault_id,
+                custody_owner: c.custody_owner,
+                custody_nonce: c.custody_nonce,
                 claimant: c.claimant,
                 gross_stroops: c.gross_stroops,
                 destination: c.destination.clone(),
@@ -13473,6 +13477,8 @@ async fn withdraw_xlm_collateral_to_claim(
     destination: String,
 ) -> Result<u64, ProtocolError> {
     validate_call().await?;
+    // ORACLE-001: same per-collateral freshness guard as `withdraw_partial_collateral`.
+    validate_freshness_for_vault(vault_id).await?;
     rumi_protocol_backend::vault::withdraw_xlm_collateral_to_claim(vault_id, amount, destination)
 }
 

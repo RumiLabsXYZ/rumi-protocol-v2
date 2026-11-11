@@ -9,6 +9,7 @@ use candid::{
 };
 use icrc_ledger_types::icrc1::account::Account;
 use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
+use sha2::Digest;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 
 #[derive(CandidType, Deserialize)]
@@ -602,6 +603,8 @@ fn confirm_xlm_deposit_success_replay_and_disagreement() {
     struct XlmClaimTestView {
         claim_id: u64,
         vault_id: u64,
+        custody_owner: Principal,
+        custody_nonce: u64,
         claimant: Principal,
         gross_stroops: u64,
         destination: String,
@@ -631,24 +634,47 @@ fn confirm_xlm_deposit_success_replay_and_disagreement() {
     let w_amount: u64 = 10 * 10_000_000; // 10 XLM
     let owner_bal_g = bal(developer());
     let supply_g = total_supply();
+    // Debt may only grow by bounded interest accrual (accrual can run before a rejection).
+    let assert_debt_bounded = |before: u64, what: &str| {
+        let after = debt_of();
+        assert!(after >= before && after <= before + tol, "{what}: debt {before} -> {after} outside [before, before+tol]");
+    };
+    let assert_no_icrc_movement = |what: &str| {
+        assert_eq!(bal(developer()), owner_bal_g, "{what}: owner icUSD balance unchanged");
+        assert_eq!(total_supply(), supply_g, "{what}: icUSD supply unchanged");
+    };
 
     // (g1) Outsider withdraw rejected; no claim; vault unchanged.
+    let debt_g1 = debt_of();
     assert!(withdraw_call(outsider, w_amount, &dest).is_err(), "outsider withdraw must be rejected");
     assert!(claims_of(outsider).is_empty() && claims_of(developer()).is_empty(), "no claim after outsider");
     assert_vault_identity();
+    assert_eq!(vaults_of(&env, developer())[0].collateral_amount, 989_990_000, "g1 collateral unchanged");
+    assert_debt_bounded(debt_g1, "g1");
+    assert_no_icrc_movement("g1");
 
     // (g2) Withdrawing all collateral with debt outstanding breaks CR -> rejected.
+    let debt_g2 = debt_of();
     assert!(withdraw_call(developer(), 989_990_000, &dest).is_err(), "CR-breaking withdraw must be rejected");
     assert!(claims_of(developer()).is_empty(), "no claim after CR-breaking withdraw");
     assert_vault_identity();
+    assert_eq!(vaults_of(&env, developer())[0].collateral_amount, 989_990_000, "g2 collateral unchanged");
+    assert_debt_bounded(debt_g2, "g2");
+    assert_no_icrc_movement("g2");
 
     // (g3) Invalid (non-classic) destination rejected before any mutation.
+    let debt_g3 = debt_of();
     assert!(withdraw_call(developer(), w_amount, "not-a-stellar-address").is_err(), "bad destination must be rejected");
     assert!(claims_of(developer()).is_empty(), "no claim after bad destination");
     assert_vault_identity();
+    assert_eq!(vaults_of(&env, developer())[0].collateral_amount, 989_990_000, "g3 collateral unchanged");
+    assert_debt_bounded(debt_g3, "g3");
+    assert_no_icrc_movement("g3");
 
     // (g4) Owner partial withdraw of 10 XLM succeeds and records exactly one claim.
+    let debt_g4 = debt_of();
     let claim_id = withdraw_call(developer(), w_amount, &dest).expect("owner partial XLM withdraw");
+    assert_debt_bounded(debt_g4, "g4");
     let v = vaults_of(&env, developer());
     assert_eq!(v.len(), 1);
     assert_eq!(v[0].collateral_amount, 989_990_000 - w_amount, "collateral decreases by exactly the withdrawal");
@@ -658,12 +684,17 @@ fn confirm_xlm_deposit_success_replay_and_disagreement() {
     assert_eq!(claims.len(), 1, "exactly one claim");
     assert_eq!(claims[0].claim_id, claim_id);
     assert_eq!(claims[0].vault_id, env.vault_id);
+    assert_eq!(claims[0].custody_owner, developer(), "custody owner = vault owner");
+    assert_eq!(claims[0].custody_nonce, env.vault_id, "custody nonce = source vault id");
     assert_eq!(claims[0].claimant, developer());
     assert_eq!(claims[0].gross_stroops, w_amount);
     assert_eq!(claims[0].destination, dest);
     assert_eq!(claims[0].reserved_fee_stroops, 10_000);
-    assert_eq!(claims[0].network_id.len(), 32);
+    // Stellar testnet network id = SHA-256("Test SDF Network ; September 2015");
+    // the canister's default xlm_stellar_key_name (test_key_1) selects Network::Test.
+    let expected_network_id: Vec<u8> =
+        sha2::Sha256::digest(b"Test SDF Network ; September 2015").to_vec();
+    assert_eq!(claims[0].network_id, expected_network_id, "claim network id = testnet network id");
     assert!(claims_of(outsider).is_empty(), "outsider has no claim");
-    assert_eq!(bal(developer()), owner_bal_g, "no ICRC movement: owner balance unchanged");
-    assert_eq!(total_supply(), supply_g, "no ICRC movement: supply unchanged");
+    assert_no_icrc_movement("g4");
 }
