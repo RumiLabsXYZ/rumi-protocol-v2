@@ -1,7 +1,8 @@
 # Saved-request recurrence: recovery navigation — November 11, 2026
 
-Accepted frontend code: **ef5b6506c8010c71fdb6c5772c186f5534abfee6** on
-`codex/vault-pull-recovery-navigation-20261111`, based on producer801d60aa and
+Final accepted frontend code: **0aea04e1e5a758cc2c5f597790de26cac377a3ed** on
+`codex/vault-pull-recovery-navigation-20261111`, superseding the held first
+candidate ef5b6506/producer cbcfdabc, based on producer801d60aa and
 accepted OISY codecb1701ee. Four production frontend files and four test/fixture
 files change. Backend, API/journal production logic, Candid, dependencies,
 OISY connection repair, ckSOL processing and reserve state are unchanged.
@@ -95,3 +96,30 @@ customer outcome. The owner's safe choices remain review→explicit continuation
 or confirmed cancellation only when the authoritative phase permits it. Unknown
 transfers remain protected. No agent should act in the customer's wallet or clear
 browser data. The separately accepted OISY swap repair remains Done.
+
+## Final prepublication read-race correction
+
+A targeted check after the first build reproduced a further recovery timing bug:
+Review during a pending delegation-wallet background read started a second status
+inspection, which contended with its own Web Lock. The newer generation then
+rejected the successful older result and left no Restore control. Publication
+was held before any asset write. The first17.84-second build and frozen740 files
+are preserved as superseded evidence; they must not be activated.
+
+Final code0aea04e1 shares an in-flight read only for an exact owner, wallet type,
+signer session and generation. Identity-based cleanup cannot clear a replacement
+read. Existing API context validation, generation rejection, Web Lock, phase
+rules, explicit OISY click boundary and financial guards remain unchanged.
+
+The outside-producer red reproduction is retained. Final focused evidence:
+**21 tests /4 suites passed**, including the new read-join and owner-replacement
+regressions. A fresh typecheck remains30errors/66warnings with no new changed-line
+diagnostics. Two fresh independent reviews of this two-file delta returned PASS;
+no blocker remains. Prior unchanged journal/layout/navigation evidence is reused.
+
+The actual-component browser fixture also held a status read, opened Review,
+then completed the read: read count stayed3, Restore appeared, no contention
+message occurred, and resume/cancel counters stayed0. No real transport or wallet
+was used. A replacement single build is justified by the confirmed race and is
+owned by Dorian after a fresh resource grant. No broader audit/test replay is
+required; actual customer request recovery remains unverified.
