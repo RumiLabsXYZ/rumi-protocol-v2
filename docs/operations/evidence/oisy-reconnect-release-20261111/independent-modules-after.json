@@ -1,0 +1,26 @@
+{
+  "checkedUtc": "2026-11-11T17:02:14.647Z",
+  "records": [
+    {
+      "id": "tfesu-vyaaa-aaaap-qrd7a-cai",
+      "controllers": [
+        "cpbhu-5iaaa-aaaad-aalta-cai",
+        "mi66c-zqlu4-4kxd6-2gtp7-szg5v-6a62a-geoty-fahu5-4trje-xyfby-wqe",
+        "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
+      ],
+      "module_hash": "730f54713dca1938c40b661ef6bd6ddc23555d92ca4c8e1feca282e3a33f8cf9"
+    },
+    {
+      "id": "tcfua-yaaaa-aaaap-qrd7q-cai",
+      "controllers": [
+        "cpbhu-5iaaa-aaaad-aalta-cai",
+        "e3mmv-5qaaa-aaaah-aadma-cai",
+        "m66jx-eiaaa-aaaap-quumq-cai",
+        "mi66c-zqlu4-4kxd6-2gtp7-szg5v-6a62a-geoty-fahu5-4trje-xyfby-wqe",
+        "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
+      ],
+      "module_hash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62"
+    }
+  ],
+  "preserved": true
+}

@@ -5,19 +5,21 @@ Lookout project ID: `rumi-release-operations`. This scoped lane owns portfolio i
 
 ## Frontend release and shared queue — November 11, 2026
 
-Rob’s direct approval01a1cb4b-34a7-7300-b037-678fbcd3e739 resolved both exact
-packet57ba7206 decisions. The swap/ckSOL frontend is **published**, version
-1794386914589, batches687/688. Full stable inventory4398keys/4592encodings,
-all3987prior keys/properties/untouched encodings and300oldstage686keys preserved;
-413stage+9final+5primary checks PASS. Ellis independently verified inventory and
-9primary swap/ckSOL/auth/fallback readbacks. Modules/settings/permissions unchanged;
-no backend/wallet/financial action. [Durable release result](../operations/oisy-cksol-frontend-publication-result-20261111.md).
-Rob’s subsequent OISY acceptance FAILED at the new account-mismatch guard after
-reconnect/hard refresh; SEC14 remains an active usable-flow incident under Ellis,
-the sole browser observer. Preserve ckSOL/frozen assets; do not repeat the same
-build/publication or ask another refresh. Dorian has no ready corrective-source
-heavy reservation; publication proof remains true and prior allowance/history is
-unverified. A new evidence-backed correction needs its own source/artifact path.
+Corrective OISY frontend **1794415826220** is published under Rob's verified
+finish instruction01a1cb65-739a-7840-a34c-a4d303fd4fd4. Source801d60aa/codecb1701ee,
+one18.11second production/auth build, exact batches689/690. Final4701keys /
+4895encodings: all4398prior keys/properties/untouched encodings preserved;
+303new+7changed sets verified. Own305stage+9final+5primary checks pass; Ellis's
+independent stable inventory and10primary readbacks pass. Frontend/backend
+modules/settings/controllers and both permissions unchanged; ckSOL and all recovery
+state retained. [Corrective result](../operations/oisy-reconnect-frontend-result-20261111.md).
+The prior1794386914589 publication and failed owner acceptance stay recorded in
+[its historical receipt](../operations/oisy-cksol-frontend-publication-result-20261111.md).
+SEC14 now waits for actual owner accounts-only diagnostic/acceptance under Ellis;
+the read-only button is available before a swap attempt. Authenticated matching,
+actual swap success and prior allowance/history remain unverified. No financial
+retry, wallet operation, broad review or repeat build is queued. Existing financial
+and reserve holds remain; Vault51 corrective backend is separately deployed.
 
 Scoped Cody/Mara/Thayer coordination messages were delivered under the same
 verified direct approval. Cody granted XLM allocationd29c94a8; Mara's sole runner

@@ -1,0 +1,8 @@
+{
+  "representativeRepeatedZeroChunkIdBytes": 423650,
+  "independentUniqueOneTo303ChunkIdBytes": 423826,
+  "differenceBytes": 176,
+  "explanation": "Unsigned LEB128 IDs128 through303 require one additional byte each:303-127=176. Batch0/1 and activation1..7 use one byte. Actual returned-ID size/sha256 recorded and bounded before dispatch.",
+  "sameOperationContentAndScope": true,
+  "publisherOrPinsChanged": false
+}

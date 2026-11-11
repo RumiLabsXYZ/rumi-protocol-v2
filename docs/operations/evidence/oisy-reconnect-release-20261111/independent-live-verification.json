@@ -1,0 +1,86 @@
+{
+  "checkedUtc": "2026-11-11T17:03:02.100072+00:00",
+  "source": "801d60aa2b99e16cf555af54ba5f8840ab79d284",
+  "version": "1794415826220",
+  "stableDoubleRead": true,
+  "keys": 4701,
+  "encodings": 4895,
+  "priorKeysPreserved": 4398,
+  "newKeysVerified": 303,
+  "existingEncodingChangesVerified": 7,
+  "allOldPropertiesUntouchedEncodingsPreserved": true,
+  "primaryDomainReadbacks": [
+    {
+      "key": "/",
+      "encoding": "identity",
+      "sha256": "f8380b578ac7b749a3c92b74c6d098ca75531a69a1d7287ad3f7bd618ad4f3a5",
+      "bytes": 1822,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/",
+      "encoding": "gzip",
+      "sha256": "e60745e286c774339d41c9ad6eb13d98aecc652894cce154a4b6da1abb4fac8b",
+      "bytes": 651,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/version.json",
+      "encoding": "identity",
+      "sha256": "28e8990ed107214eb90231dd0e92857da63384ac410e427a80ff88f122318539",
+      "bytes": 27,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/.well-known/ii-alternative-origins",
+      "encoding": "identity",
+      "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "bytes": 385,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/.well-known/ic-domains",
+      "encoding": "identity",
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "bytes": 58,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/chunks/hmFKXzdA.js",
+      "encoding": "identity",
+      "sha256": "cae5107e71d4883833a4c9ba9d8f8f40a6e91ef3a3d8ba90792e5f1560b6c1d5",
+      "bytes": 733884,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/nodes/55.BjiQHkGX.js",
+      "encoding": "identity",
+      "sha256": "9d415d9aa67fb5c7680cef89ab947acc6b571cf60cc677167d388ba249daabaf",
+      "bytes": 92341,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/nodes/57.DD9lWGno.js",
+      "encoding": "identity",
+      "sha256": "cfc56914cd122e542f875e47f68e488d4d7eb8920c681059555ec9197dea7434",
+      "bytes": 48265,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/swap",
+      "encoding": "identity",
+      "sha256": "f8380b578ac7b749a3c92b74c6d098ca75531a69a1d7287ad3f7bd618ad4f3a5",
+      "bytes": 1822,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/solana",
+      "encoding": "identity",
+      "sha256": "f8380b578ac7b749a3c92b74c6d098ca75531a69a1d7287ad3f7bd618ad4f3a5",
+      "bytes": 1822,
+      "matchesFrozenBuild": true
+    }
+  ],
+  "walletExecutionVerified": false,
+  "priorAllowanceVerified": false
+}

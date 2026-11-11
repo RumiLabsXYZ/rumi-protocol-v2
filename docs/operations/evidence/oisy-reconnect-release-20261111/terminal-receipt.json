@@ -1,0 +1,33 @@
+{
+  "checkedUtc": "2026-11-11T17:04:36.227278+00:00",
+  "source": "801d60aa2b99e16cf555af54ba5f8840ab79d284",
+  "acceptedCode": "cb1701ee39118d9ac8d76c746dac3cb7dc23cce4",
+  "version": "1794415826220",
+  "pushedPreparation": "4c9496373cf015589f7f25aba6c776da1a9d6e2b",
+  "directHumanInstruction": "01a1cb65-739a-7840-a34c-a4d303fd4fd4",
+  "stage": {
+    "batchId": "689",
+    "completedUtc": "2026-11-11T16:57:53.951Z"
+  },
+  "activation": {
+    "batchId": "690",
+    "completedUtc": "2026-11-11T17:01:13.966Z"
+  },
+  "keys": 4701,
+  "encodings": 4895,
+  "all4398PriorKeysPropertiesUntouchedEncodingsPreserved": true,
+  "newKeysVerified": 303,
+  "changedContentSetsVerified": 7,
+  "stageServedChecks": 305,
+  "finalServedChecks": 9,
+  "primaryDomainChecks": 5,
+  "independentPrimaryDomainChecks": 10,
+  "independentInventoryAndServedPass": true,
+  "allWriteOutcomesKnownNoRetries": true,
+  "backendMutation": false,
+  "walletOrFinancialRequest": false,
+  "actualAuthenticatedAccountMatchVerified": false,
+  "actualSwapSuccessVerified": false,
+  "priorAllowanceAbsenceVerified": false,
+  "next": "Owner accounts-only diagnostic; stop on mismatch or rejection without financial retry"
+}

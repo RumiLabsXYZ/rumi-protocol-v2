@@ -1,0 +1,57 @@
+{
+  "checkedUtc": "2026-11-11T16:53:24.206Z",
+  "source": "801d60aa2b99e16cf555af54ba5f8840ab79d284",
+  "code": "cb1701ee39118d9ac8d76c746dac3cb7dc23cce4",
+  "version": "1794415826220",
+  "pinsSha256": "9b3aaa7782dde7d55d66735e122c78190b25f57bcce3078b23a5dc717f8283d8",
+  "manifestSha256": "b011560485aaae7dfe401c3680bfec7deee9d13465fdc643de65835340a56122",
+  "comparisonSha256": "82916df8b11ca7032b2bb00068618ee8a417413aa2a3e24953bbdd466ab4cf0a",
+  "publisherSha256": "3fa9d120f5fa6af83f5c01db02179bcba0c230ad2a49e06e16da290c39bb6ff6",
+  "filesVerified": 740,
+  "compressedPairsVerified": 476,
+  "inputPinsVerified": 13,
+  "baselineKeys": 4398,
+  "newKeys": 303,
+  "sets": 310,
+  "oldPropertiesPreservedInPlan": true,
+  "authUnchanged": true,
+  "publisherOnlyNamespaceChanged": true,
+  "phases": [
+    {
+      "phase": "stage",
+      "creates": 303,
+      "sets": 303,
+      "operations": 606,
+      "encodedBytes": 423826
+    },
+    {
+      "phase": "activate",
+      "creates": 0,
+      "sets": 7,
+      "operations": 7,
+      "encodedBytes": 652
+    }
+  ],
+  "bundles": {
+    "OISY principal cache retirement could not be confirmed": [
+      "_app/immutable/chunks/hmFKXzdA.js"
+    ],
+    "OISY_LOCAL_OWNER_MISMATCH": [
+      "_app/immutable/chunks/hmFKXzdA.js"
+    ],
+    "OISY_REMOTE_SENDER_REJECTED": [
+      "_app/immutable/chunks/hmFKXzdA.js"
+    ],
+    "Check signing account (read only)": [
+      "_app/immutable/nodes/57.DD9lWGno.js"
+    ],
+    "This does not verify earlier approvals or swaps. No account was changed.": [
+      "_app/immutable/nodes/57.DD9lWGno.js"
+    ],
+    "Last completed deposit": [
+      "_app/immutable/nodes/55.BjiQHkGX.js"
+    ]
+  },
+  "publicationExecuted": false,
+  "walletOperation": false
+}
