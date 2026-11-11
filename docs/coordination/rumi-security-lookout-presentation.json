@@ -1,6 +1,6 @@
 {
-  "summary": "SEC14 unresolved in production. Final correctivecb1701ee/handoff801d60aa:91coretests+18targeted UI/SDKchecks,30/66baseline, realUI/auth/PNP reloadintegration and dualfocusedreviewsPASS. Fresh-page account diagnostic reachable beforefinancialattempt,0mountRPC/noowneradoption. Dorian solebuild queued behind activehosttest; no productionbuild wasted. Ellis verifies artifacts/servedoutput before readiness. Currentbackend730f5471 compatible; actualaccount/earlierallowance unknown. ckSOLguide live; no financialaction.",
-  "plainSummary": "The corrected wallet connection flow passed its integration tests and independent reviews. A read-only account check is now reachable before trying a swap, and the single production build is queued behind an active host test. The old flow remains unresolved; the published correction will be checked before another user attempt.",
+  "summary": "Corrective OISY frontend1794415826220 live via689/690; finalcb1701ee/801d60aa passed91core+18targeted checks, dual reviews and single build. Independent740file preparation and final4701key/4895encoding preservation plus10primarydomain checks pass. Actual owner account/earlierallowance/swap remain unverified. SEC14Review: owner uses fresh-page accounts-onlycheck before any financialattempt. ckSOLguide retained; no signing/replay/backend/reserve action.",
+  "plainSummary": "The wallet connection correction and read-only account check are now live, and independent checks confirm the reviewed files are being served. The earlier swap failed, and any prior token approval remains unverified. Rob can refresh the swap page and check the signing account before another financial attempt.",
   "glossary": [
     {
       "term": "Stability Pool",

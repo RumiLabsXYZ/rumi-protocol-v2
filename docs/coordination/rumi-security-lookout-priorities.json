@@ -3,9 +3,9 @@
     {
       "id": "oisy-stable-swap-owner",
       "title": "Repair OISY stablecoin swap signer ownership",
-      "status": "in_progress",
+      "status": "ready",
       "blockedReason": "",
-      "nextAction": "Dorian executes the single queued corrective frontend build on finalcb1701ee/handoff801d60aa after active host test releases capacity, then exact additive publication checks. Ellis independently verifies artifacts/served output. Fresh-page read-only account check is tested; actual user account/allowance unknown. No financialretry.",
+      "nextAction": "Corrective frontend1794415826220 is live and independently served-byte/inventory verified. Owner refreshes the swap page and uses Check signing account (read only), then reports match/mismatch/unavailable. Actual account, prior allowance and successful swap remain unverified; no financial retry on owner behalf. Ellis owns acceptance; Dorian release complete.",
       "cardIds": [
         "SEC-14"
       ]

@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-14",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Ellis source/case; Dorian release",
       "scope": "Bind direct OISY 3pool swaps to the intended signer owner and wallet session",
-      "evidenceText": "OWNER ACCEPTANCE FAILED on published1794386914589 after disconnect/hardrefresh/reconnect. Actual prior permissions/allowance/failedbranch remain unknown; no repeat-refresh or financialretry requested. Confirmed defect reproduced with installedOISYadapter: oldauth leavescache acrossreload, reconnectswrongsyntheticowner with0accountsRPC. Final corrective codecb1701ee/handoff801d60aa is pushed;91tests7suites, baseline30errors/66warnings, desktop390mockQA and two freshindependentreviewsPASS. It retires actualPNP session and positivelyverifies cacheabsence, fences actualwalletUIcleanup acrossreplacement/awaits, preservesjournals/unrelatedPlug and exactmoney/owner/sessionguards. Explicitaccounts-onlydiagnostic distinguisheslocalcheck fromexactremote502, noowneradoption/mutation. Realwalletstore/auth/PNPmanager plus installedadapter reloadintegration passes. Fresh-page parent regression additionally passes18 targeted checks/two focused confirmations: read-only diagnostic is reachable before any financial attempt and makes0mountRPC. No productionbuild wasted; Dorian solecorrectivebuild is queued behind the active host test batch; backend730f5471 is independentlycurrent and compatible. Oldpublicationproof remains true; correctivebuild/livewalletproof pending. No signing/replay/reserve/financialaction.",
+      "evidenceText": "Corrective frontend1794415826220 DEPLOYED via stage689/activation690 under verified Robfinishauthority. Prior version failed owner acceptance; actual owner account, earlier allowance and successful swap remain unverified. Final codecb1701ee/producer801d60aa:91coretests+18targeted checks, actual installed-connector/PNP integration, synthetic desktop/mobile QA and dual reviews pass; existing30errors/66warnings remain. Reproduced stale cache retirement and outer cleanup defects fixed; fresh-page accounts-only diagnostic reachable before any swap, with no mount RPC or account adoption. One production build; independent740file/476compression/13pin checks pass. Own stable final inventory4701keys4895encodings preserves all4398oldkeys/properties/untouched encodings;303new+7changed hashes exact. Ten primary-domain root/gzip/version/auth/service/diagnostic/ckSOL/fallback reads pass. Public frontend04e565/backend730/controller sets unchanged. Next owner step: refresh and use Check signing account (read only); no financial retry requested. No signing, replay, backend or reserve action. Keep Review until actual owner acceptance.",
       "evidenceLinks": [
         {
           "title": "Accepted source, tests and submission boundary",
@@ -30,6 +30,10 @@
         {
           "title": "Final fresh-page reachable diagnostic and release handoff",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/801d60aa2b99e16cf555af54ba5f8840ab79d284/docs/operations/oisy-owner-reconnect-source-20261111.md"
+        },
+        {
+          "title": "Corrective publication and independent final live verification",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/oisy-reconnect-independent-live-readback-20261111.md"
         }
       ]
     },
