@@ -3,9 +3,9 @@
     {
       "id": "oisy-stable-swap-owner",
       "title": "Repair OISY stablecoin swap signer ownership",
-      "status": "blocked",
-      "blockedReason": "Exact composed frontend-only publication decision57ba7206 is prepared and independently checked; publication approval for this new frozen bundle remains ungranted.",
-      "nextAction": "After approval of exact packet57ba7206/documentSHA06017038, Dorian stages and activates once, then verifies authoritative inventory and served bytes; Ellis independently checks. Preserve backend/reserve/financial holds. Owner wallet retry remains separate; no automatic replay.",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Software is deployed and independently served-byte/inventory verified. Rob may refresh/reconnect the intended OISY account and review prior attempt/allowance history before a deliberate new swap. Actual wallet success remains unverified; agents do not sign, replay or transact.",
       "cardIds": [
         "SEC-14"
       ]
@@ -23,9 +23,9 @@
     {
       "id": "cksol-minting-guidance",
       "title": "Clear ckSOL mint steps and bounded status checks",
-      "status": "blocked",
-      "blockedReason": "Exact composed frontend-only publication decision57ba7206 is prepared and independently checked; publication approval for this new frozen bundle remains ungranted.",
-      "nextAction": "After approval of exact packet57ba7206/documentSHA06017038, Dorian stages and activates once, then verifies authoritative inventory and served bytes; Ellis independently checks. Preserve backend/reserve/financial holds. Owner wallet retry remains separate; no automatic replay.",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "Guided minting and bounded polling are live at version1794386914589, with independent served-byte and asset-preservation verification. Preserve uncertain-payment and wallet-session protections; no new mint, reserve activation or financial canary is implied.",
       "cardIds": [
         "SEC-13"
       ]
