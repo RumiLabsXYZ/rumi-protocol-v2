@@ -1,0 +1,32 @@
+[
+  {
+    "path": "/index.html",
+    "sha256": "676147db04bf145c5e6cdd229823c0fd70e314e6a556058c7b1aab5e6fc68640",
+    "bytes": 1821,
+    "matchesPreReleaseInventory": true
+  },
+  {
+    "path": "/_app/version.json",
+    "sha256": "e60a769b7dc12e044a66938d8f8e861d8a8584edc20d789f00128a9108af61e1",
+    "bytes": 27,
+    "matchesPreReleaseInventory": true
+  },
+  {
+    "path": "/.well-known/ii-alternative-origins",
+    "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+    "bytes": 385,
+    "matchesPreReleaseInventory": true
+  },
+  {
+    "path": "/.well-known/ic-domains",
+    "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+    "bytes": 58,
+    "matchesPreReleaseInventory": true
+  },
+  {
+    "path": "/_app/immutable/chunks/PMwL7kef.js",
+    "sha256": "8b0bb7620c6490c4ad6fa758d493bd3a1e01d37fcfc4e6898a74b45b5480b635",
+    "bytes": 730108,
+    "matchesPreReleaseInventory": true
+  }
+]

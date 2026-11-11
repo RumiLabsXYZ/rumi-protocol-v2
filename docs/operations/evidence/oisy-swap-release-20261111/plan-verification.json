@@ -1,0 +1,31 @@
+{
+  "all740FrozenFilesVerified": true,
+  "allPayloadSourcesAndHashesVerified": true,
+  "authDomainAssetBytesUnchanged": true,
+  "allOldStage686KeysPreserved": true,
+  "oldStage686Keys": 300,
+  "existingPropertiesChanged": 0,
+  "deletes": 0,
+  "clears": 0,
+  "unsets": 0,
+  "mutableKeyScopeVerified": true,
+  "phases": {
+    "stage": {
+      "createCount": 411,
+      "sets": 411,
+      "operations": 822,
+      "representativeCommitEncodedBytes": 574376
+    },
+    "activate": {
+      "createCount": 0,
+      "sets": 7,
+      "operations": 7,
+      "representativeCommitEncodedBytes": 652
+    }
+  },
+  "expectedKeyCount": 4398,
+  "expectedEncodingCount": 4592,
+  "publicationExecuted": false,
+  "backendMutationIncluded": false,
+  "walletOrFinancialActionIncluded": false
+}

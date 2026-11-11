@@ -1,0 +1,23 @@
+{
+  "finalInputsVerified": [
+    "publish-frontend.mjs",
+    "frontend-manifest.json",
+    "frontend-comparison.json",
+    "frontend-inventory-before.json",
+    "frontend-live-idl.mjs",
+    "frontend-live.did",
+    "frontend-status-before.json",
+    "permissions-commit-before.json",
+    "permissions-prepare-before.json",
+    "read-frontend-inventory.mjs",
+    "verify-publication.mjs",
+    "verify-primary-domain.mjs"
+  ],
+  "allFinalInputHashesMatch": true,
+  "reviewedPortablePublisherSha256": "8067226a1d02aec4f3b02b0855870bb381b02fc46ef5d33b2ca56ecd22ca672c",
+  "finalPublisherSha256": "b5d3d599dcb5baabc5666a71f06cfa55eb554d9fec06f343fee43d849d484092",
+  "finalDelta": "Added hash binding of reviewed status/permission baselines and reader/verifier inputs before calls; refusal-only checks, no target/method/mutation/payload/phase changes. Status baseline omits resource balances and retains exact compared id/status/module/settings.",
+  "checkedBy": "Dorian release owner",
+  "independentArtifactMutationAndPortablePathReviewsReused": true,
+  "publicationExecuted": false
+}

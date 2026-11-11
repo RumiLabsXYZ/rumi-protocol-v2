@@ -23,17 +23,23 @@ Season2 remains the independent product priority and its Points-only release
 uses no frontend publisher slot.
 
 
-Next eligible shared heavy-build batch: Mara’s owner-inspected, local-only
-`f26c10d65ebf35636ad6bb89e3e47f3a35a31c2d` (116 test-only lines), in order:
-focused test Wasm → `xlm_confirm_pic` → production compile guard check. It remains
-unbuilt and NOT admitted while the immediately preceding swap reservation is
-pending final source acceptance/build. At 2026-11-11 08:44 UTC, host census showed
-zero heavy build processes and 104.5 GiB writable free space; swap source
-`6e6f32fa` was frozen with final reviews running. Recheck actual occupancy and
-headroom when the swap build closes, then admit one bounded XLM batch without
-concurrent heavy work or paid-CI expansion. This is ordinary queue ordering,
-not a new human approval gate. Preserve production Frozen and all release,
-activation and financial holds; no XLM test/deploy success is claimed.
+The reserved composed frontend build at d54ac7b7 / accepted code6e6f32fa
+closed PASS at2026-11-11 08:48:50 UTC, with mandatory auth/domain checks. All740
+files and411-new-key/seven-mutable-set plan passed independent artifact and
+served-baseline checks. The exact frontend-only publication remains held in
+[the concrete decision](../operations/oisy-cksol-frontend-publication-20261111.md);
+it does not install the separately held Vault51 backend correction.
+
+Mara's owner-inspected local-only f26c10d6 remains next eligible for focused test
+Wasm → xlm_confirm_pic → production compile guard check, but **no XLM admission
+was written or delivered**. A competing existing-host LOCAL reservation appeared
+during admission preflight; it was subsequently released. Cross-project scheduler
+coordination delivery was then rejected by automatic approval review for missing
+destination/payload authorization. Do not retry/relay that message or treat free
+capacity as an accepted grant. The exact scoped communication request is
+[prepared here](../operations/build-slot-coordination-permission-20261111.md).
+This is a tool communication hold, not a new implementation/test approval gate.
+Production Frozen/release/financial and paid-CI/concurrency boundaries remain.
 
 ## Release and operations queue
 

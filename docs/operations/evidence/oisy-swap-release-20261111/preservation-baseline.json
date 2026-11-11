@@ -1,0 +1,12 @@
+{
+  "frontendCanister": "tcfua-yaaaa-aaaap-qrd7q-cai",
+  "frontendModule": "0x04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+  "frontendStatus": "Running",
+  "settingsSha256": "2390fb63a5c361cf3a97b7115183b122079ecda13a75a6d4d5828b53e5738ce7",
+  "permissionListSha256": {
+    "commit": "5f8881fad24cbea522927d8a9646d87acd8b70f94fb11b92469c3ac9c0a0b1ad",
+    "prepare": "5f8881fad24cbea522927d8a9646d87acd8b70f94fb11b92469c3ac9c0a0b1ad"
+  },
+  "noSettingsPermissionsOrBackendMutationPlanned": true,
+  "existingStage686KeysPreserved": 300
+}

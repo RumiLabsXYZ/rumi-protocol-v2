@@ -1,0 +1,63 @@
+{
+  "source": "d54ac7b7235d27cf4aca52416a854d5cfab6240d",
+  "manifestSha256": "aff95d8a06aa00108a5077cabd2732b039f1bfdca2aac58e4bf3bd21868aa8fb",
+  "comparisonSha256": "d1302303309d8ab48536728e47fffe13e750f092e249eea507f1fef9147cd709",
+  "inventorySha256": "f70fb087ab8492f2b20d51874db44ca59dead116f789be57ab67e67f2808345f",
+  "filesVerified": 740,
+  "compressedPairsDecodedAndEqual": true,
+  "sourceMatchesAcceptedCode": true,
+  "liveBaselineStableDoubleRead": true,
+  "liveKeys": 3987,
+  "newKeys": 411,
+  "plannedSets": 418,
+  "existingChanges": [
+    [
+      "/_app/version.json",
+      "identity"
+    ],
+    [
+      "/_app/version.json.br",
+      "identity"
+    ],
+    [
+      "/_app/version.json.gz",
+      "identity"
+    ],
+    [
+      "/index.html",
+      "gzip"
+    ],
+    [
+      "/index.html",
+      "identity"
+    ],
+    [
+      "/index.html.br",
+      "identity"
+    ],
+    [
+      "/index.html.gz",
+      "identity"
+    ]
+  ],
+  "oldKeysPreservedInPlan": true,
+  "newPropertiesMatchUniqueExistingTemplates": true,
+  "authFilesUnchanged": true,
+  "bundleEvidence": {
+    "rumi-swap-": [
+      "_app/immutable/chunks/DrsW40bG.js"
+    ],
+    "OISY account mismatch. Approval already succeeded.": [
+      "_app/immutable/chunks/DrsW40bG.js"
+    ],
+    "This approval and swap were not submitted.": [
+      "_app/immutable/chunks/DrsW40bG.js"
+    ],
+    "Last completed deposit": [
+      "_app/immutable/nodes/55.BdQ1zfce.js"
+    ]
+  },
+  "reportedBackendApiMatches": true,
+  "publication": false,
+  "walletExecution": false
+}

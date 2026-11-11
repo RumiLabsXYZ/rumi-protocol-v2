@@ -1,0 +1,18 @@
+{
+  "publish-frontend.mjs": {
+    "currentSha256": "8067226a1d02aec4f3b02b0855870bb381b02fc46ef5d33b2ca56ecd22ca672c",
+    "onlyReviewedPathImportsChanged": true,
+    "syntaxPass": true
+  },
+  "verify-publication.mjs": {
+    "currentSha256": "c8487f872f83351964433a6c7d6a4ac7589a50d2ae63d6d4cb9751ed17d78bff",
+    "onlyReviewedPathImportsChanged": true,
+    "syntaxPass": true
+  },
+  "verify-primary-domain.mjs": {
+    "currentSha256": "199c721dbcbd4f53a67d84e8b0bd37416c21971da358853587e0dac4d8d5b9e8",
+    "onlyReviewedPathImportsChanged": true,
+    "syntaxPass": true
+  },
+  "pinsSha256": "d9be01ed676c629a692edaea229d67cec654b1d2473209955e823493b28bf232"
+}

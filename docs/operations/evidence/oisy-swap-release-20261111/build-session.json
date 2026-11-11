@@ -1,0 +1,15 @@
+{
+  "source": "d54ac7b7235d27cf4aca52416a854d5cfab6240d",
+  "command": [
+    "npm",
+    "run",
+    "build",
+    "--workspace=src/vault_frontend"
+  ],
+  "start": "2026-11-11T08:48:32.117167+00:00",
+  "end": "2026-11-11T08:48:50.251662+00:00",
+  "exit": 0,
+  "acceptedCode": "6e6f32fa955fc464ad20aa40e2d832ec6931cfd8",
+  "runtimeTreeEqualsAcceptedCode": true,
+  "sourceHandoffSha256": "85f50c35e912f59c99bd1f5fcc4fe3a7e3496701f05333dce085e55ab7fab438"
+}
