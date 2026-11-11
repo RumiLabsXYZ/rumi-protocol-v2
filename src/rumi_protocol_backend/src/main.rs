@@ -13482,6 +13482,20 @@ async fn withdraw_xlm_collateral_to_claim(
     rumi_protocol_backend::vault::withdraw_xlm_collateral_to_claim(vault_id, amount, destination)
 }
 
+/// Test-build only: withdraw ALL remaining XLM collateral into one durable claim
+/// at exactly zero debt; the vault stays open at zero collateral.
+#[cfg(feature = "test_endpoints")]
+#[candid_method(update)]
+#[update]
+async fn withdraw_all_xlm_collateral_to_claim(
+    vault_id: u64,
+    destination: String,
+) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    validate_freshness_for_vault(vault_id).await?;
+    rumi_protocol_backend::vault::withdraw_all_xlm_collateral_to_claim(vault_id, destination)
+}
+
 #[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]

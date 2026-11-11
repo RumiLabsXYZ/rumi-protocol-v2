@@ -4147,8 +4147,42 @@ pub fn withdraw_xlm_collateral_to_claim(
     amount: u64,
     destination: String,
 ) -> Result<u64, ProtocolError> {
+    withdraw_xlm_collateral_to_claim_impl(vault_id, Some(amount), destination)
+}
+
+/// Test-build only: withdraw ALL remaining native-XLM collateral into one
+/// durable `XlmClaim`. The vault is RETAINED OPEN at zero collateral (XRP
+/// precedent `KeepNativeXrpVaultOpen`; `record_close_vault` is never called).
+/// Requires exactly zero debt (no dust forgiveness). The claim is the vault's
+/// `collateral_amount` only, which is already net of the locked custody reserve
+/// and first-funding fee, so the reserve is never claimable. Shares every check
+/// and the record-claim-before-debit ordering with the partial path.
+#[cfg(feature = "test_endpoints")]
+pub fn withdraw_all_xlm_collateral_to_claim(
+    vault_id: u64,
+    destination: String,
+) -> Result<u64, ProtocolError> {
+    withdraw_xlm_collateral_to_claim_impl(vault_id, None, destination)
+}
+
+/// Shared body. `amount_opt == Some(a)` is the partial path (behaviour
+/// unchanged); `None` withdraws the full remaining collateral at zero debt.
+#[cfg(feature = "test_endpoints")]
+fn withdraw_xlm_collateral_to_claim_impl(
+    vault_id: u64,
+    amount_opt: Option<u64>,
+    destination: String,
+) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
-    let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_xlm_claim_{}", vault_id))?;
+    let full = amount_opt.is_none();
+    let _guard_principal = GuardPrincipal::new(
+        caller,
+        &if full {
+            format!("withdraw_all_xlm_claim_{}", vault_id)
+        } else {
+            format!("withdraw_xlm_claim_{}", vault_id)
+        },
+    )?;
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
     let now = ic_cdk::api::time();
     mutate_state(|s| s.accrue_single_vault(vault_id, now));
@@ -4196,8 +4230,16 @@ pub fn withdraw_xlm_collateral_to_claim(
         ));
     }
     require_vault_not_processing(&vault)?;
+    // Full path: the amount is the vault's whole remaining collateral and
+    // requires exactly zero debt (accrued interest is part of the debt).
+    if full && vault.borrowed_icusd_amount != ICUSD::new(0) {
+        return Err(ProtocolError::GenericError(
+            "Full XLM withdrawal requires zero debt.".to_string(),
+        ));
+    }
+    let amount = amount_opt.unwrap_or(vault.collateral_amount);
     let withdraw_amount = ICP::new(amount);
-    if min_deposit > 0 && withdraw_amount < ICP::new(min_deposit) {
+    if !full && min_deposit > 0 && withdraw_amount < ICP::new(min_deposit) {
         return Err(ProtocolError::AmountTooLow { minimum_amount: min_deposit });
     }
     let vault_collateral = ICP::from(vault.collateral_amount);

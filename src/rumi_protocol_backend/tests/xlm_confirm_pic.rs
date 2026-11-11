@@ -697,4 +697,143 @@ fn confirm_xlm_deposit_success_replay_and_disagreement() {
     assert_eq!(claims[0].network_id, expected_network_id, "claim network id = testnet network id");
     assert!(claims_of(outsider).is_empty(), "outsider has no claim");
     assert_no_icrc_movement("g4");
+
+    // (h) Test-only FULL XLM withdrawal into one claim; vault retained open at zero collateral.
+    let remaining: u64 = 989_990_000 - w_amount; // 889_990_000
+    let withdraw_all_call = |sender: Principal, d: &str| -> Result<u64, ()> {
+        let r: Result<u64, candid::Reserved> = decode_one(&call(
+            sender,
+            "withdraw_all_xlm_collateral_to_claim",
+            encode_args((env.vault_id, d.to_string())).unwrap(),
+        ))
+        .unwrap();
+        r.map_err(|_| ())
+    };
+    let collateral_of = || vaults_of(&env, developer())[0].collateral_amount;
+    let assert_h_vault = |collateral: u64, what: &str| {
+        let v = vaults_of(&env, developer());
+        assert_eq!(v.len(), 1, "{what}: still exactly one vault");
+        assert_eq!(v[0].vault_id, env.vault_id, "{what}: vault id");
+        assert_eq!(v[0].owner, developer(), "{what}: owner unchanged");
+        assert_eq!(v[0].collateral_type, xlm, "{what}: collateral_type unchanged");
+        assert_eq!(v[0].collateral_amount, collateral, "{what}: collateral");
+    };
+
+    // Fund the owner on the local mock ledger via the existing developer-only
+    // admin_mint_icusd (first and only admin mint in this test): borrow fee +
+    // interest make the owner's own balance strictly smaller than the debt.
+    let mint_r: Result<u64, candid::Reserved> = decode_one(&call(
+        developer(),
+        "admin_mint_icusd",
+        encode_args((
+            100_000_000u64,
+            developer(),
+            "PocketIC fixture: fund full repay".to_string(),
+        ))
+        .unwrap(),
+    ))
+    .unwrap();
+    assert!(mint_r.is_ok(), "fixture admin mint must succeed");
+    let owner_bal_h = bal(developer());
+    let supply_h = total_supply();
+    let assert_no_icrc_movement_h = |what: &str| {
+        assert_eq!(bal(developer()), owner_bal_h, "{what}: owner icUSD balance unchanged");
+        assert_eq!(total_supply(), supply_h, "{what}: icUSD supply unchanged");
+    };
+
+    // (h1) Owner full withdraw while debt outstanding -> rejected; nothing changes.
+    let debt_h1 = debt_of();
+    assert!(debt_h1 >= 3 * 100_000_000, "debt outstanding before h1");
+    assert!(withdraw_all_call(developer(), &dest).is_err(), "full withdraw with debt must be rejected");
+    assert_eq!(claims_of(developer()).len(), 1, "h1: no new claim");
+    assert_h_vault(remaining, "h1");
+    assert_debt_bounded(debt_h1, "h1");
+    assert_no_icrc_movement_h("h1");
+
+    // (h2) Outsider full withdraw rejected; unchanged.
+    let debt_h2 = debt_of();
+    assert!(withdraw_all_call(outsider, &dest).is_err(), "outsider full withdraw must be rejected");
+    assert_eq!(claims_of(developer()).len(), 1, "h2: no new claim");
+    assert!(claims_of(outsider).is_empty(), "h2: outsider has no claim");
+    assert_h_vault(remaining, "h2");
+    assert_debt_bounded(debt_h2, "h2");
+    assert_no_icrc_movement_h("h2");
+
+    // (h4) Repay ALL remaining debt through repay_to_vault. Approve generously,
+    // then request slightly more than the read debt: the repay path caps the
+    // amount at the post-accrual debt (and snaps within 1%), so debt becomes
+    // exactly zero and the vault is NOT closed by repay_to_vault.
+    let approve_h = icrc_ledger_types::icrc2::approve::ApproveArgs {
+        from_subaccount: None,
+        spender: Account { owner: env.backend, subaccount: None },
+        amount: Nat::from(4 * 100_000_000u64),
+        expected_allowance: None,
+        expires_at: None,
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+    let ap_h: Result<Nat, candid::Reserved> = match env
+        .pic
+        .update_call(ledger, developer(), "icrc2_approve", Encode!(&approve_h).unwrap())
+        .unwrap()
+    {
+        WasmResult::Reply(b) => decode_one(&b).unwrap(),
+        WasmResult::Reject(m) => panic!("icrc2_approve rejected: {m}"),
+    };
+    assert!(ap_h.is_ok(), "h4 approve must succeed");
+    let debt_h4 = debt_of();
+    assert!(
+        bal(developer()) >= debt_h4 + tol + ledger_fee,
+        "owner can fund the full repay"
+    );
+    assert!(repay_call(developer(), debt_h4 + 100_000).is_ok(), "full repay must succeed");
+    assert_eq!(debt_of(), 0, "h4: debt exactly zero after full repay");
+    assert_h_vault(remaining, "h4");
+    assert_eq!(claims_of(developer()).len(), 1, "h4: repay creates no claim");
+
+    // (h3) Bad destination (after repay, so only the destination fails) -> unchanged.
+    let owner_bal_h3 = bal(developer());
+    let supply_h3 = total_supply();
+    assert!(withdraw_all_call(developer(), "not-a-stellar-address").is_err(), "bad destination must be rejected");
+    assert_eq!(claims_of(developer()).len(), 1, "h3: no new claim");
+    assert_h_vault(remaining, "h3");
+    assert_eq!(debt_of(), 0, "h3: debt still zero");
+    assert_eq!(bal(developer()), owner_bal_h3, "h3: owner balance unchanged");
+    assert_eq!(total_supply(), supply_h3, "h3: supply unchanged");
+
+    // (h5) Owner full withdrawal at zero debt -> exactly one NEW claim for all collateral.
+    let owner_bal_h5 = bal(developer());
+    let supply_h5 = total_supply();
+    let claim_id_h5 = withdraw_all_call(developer(), &dest).expect("owner full XLM withdraw at zero debt");
+    let claims = claims_of(developer());
+    assert_eq!(claims.len(), 2, "exactly one new claim");
+    let c = claims.iter().find(|c| c.claim_id == claim_id_h5).expect("new claim present");
+    assert_ne!(claim_id_h5, claim_id, "distinct claim id");
+    assert_eq!(c.vault_id, env.vault_id);
+    assert_eq!(c.custody_owner, developer(), "custody owner = vault owner");
+    assert_eq!(c.custody_nonce, env.vault_id, "custody nonce = source vault id");
+    assert_eq!(c.claimant, developer());
+    assert_eq!(c.gross_stroops, remaining, "gross = all remaining collateral");
+    assert_eq!(c.gross_stroops, 889_990_000);
+    assert_eq!(c.destination, dest);
+    assert_eq!(c.reserved_fee_stroops, 10_000);
+    assert_eq!(c.network_id, expected_network_id, "claim network id = testnet network id");
+    let first = claims.iter().find(|c| c.claim_id == claim_id).expect("first claim retained");
+    assert_eq!(first.gross_stroops, w_amount, "earlier claim untouched");
+    assert_h_vault(0, "h5");
+    assert_eq!(debt_of(), 0, "h5: debt zero");
+    assert_eq!(vault_count(&env), 1, "vault retained open (not closed)");
+    assert_eq!(bal(developer()), owner_bal_h5, "h5: owner icUSD balance unchanged");
+    assert_eq!(total_supply(), supply_h5, "h5: icUSD supply unchanged");
+
+    // (h6) Repeat full withdrawal on the zero-collateral vault -> rejected; unchanged.
+    assert!(withdraw_all_call(developer(), &dest).is_err(), "repeat full withdraw must be rejected");
+    assert_eq!(claims_of(developer()).len(), 2, "h6: claim count unchanged");
+    assert_h_vault(0, "h6");
+    assert_eq!(collateral_of(), 0);
+    assert_eq!(debt_of(), 0, "h6: debt zero");
+    assert_eq!(vault_count(&env), 1, "h6: vault still open");
+    assert_eq!(bal(developer()), owner_bal_h5, "h6: owner balance unchanged");
+    assert_eq!(total_supply(), supply_h5, "h6: supply unchanged");
 }
