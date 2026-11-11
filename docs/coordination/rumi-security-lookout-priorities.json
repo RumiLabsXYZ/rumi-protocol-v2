@@ -5,7 +5,7 @@
       "title": "Repair OISY stablecoin swap signer ownership",
       "status": "ready",
       "blockedReason": "",
-      "nextAction": "Corrective frontend1794415826220 is live and independently served-byte/inventory verified. Owner refreshes the swap page and uses Check signing account (read only), then reports match/mismatch/unavailable. Actual account, prior allowance and successful swap remain unverified; no financial retry on owner behalf. Ellis owns acceptance; Dorian release complete.",
+      "nextAction": "Keep the live corrective release and normal Swap action with its internal owner/session checks. The read-only diagnostic is an optional temporary aid, not a required workflow. Per latest Rob clarification, defer relocating it; do not make polish a release gate. Actual wallet account, prior allowance and successful swap remain unverified. No agent financial action or duplicate build.",
       "cardIds": [
         "SEC-14"
       ]
