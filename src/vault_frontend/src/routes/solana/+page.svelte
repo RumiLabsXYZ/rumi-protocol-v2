@@ -286,7 +286,24 @@
         depositStatus = depositView(raw); depositBlocked = 'Quarantined' in raw || 'NotFound' in raw; pending ||= !depositStatus.terminal;
         if (legacyAttempt?.status && 'Queued' in legacyAttempt.status && BigInt(legacyAttempt.status.Queued) === requestedDepositId)
           legacyBlocked = !('Minted' in raw || 'Dropped' in raw);
-        if ('Minted' in raw) { mintedAmount=BigInt(raw.Minted.minted_amount); mintBlock=BigInt(raw.Minted.block_index); notice=`${formatSol(mintedAmount)} ckSOL minted. Ledger block ${mintBlock}.`; }
+        if ('Minted' in raw) {
+          const nextBlock = BigInt(raw.Minted.block_index), account = owner;
+          const newlyConfirmed = mintBlock !== nextBlock;
+          mintedAmount=BigInt(raw.Minted.minted_amount); mintBlock=nextBlock;
+          notice=`${formatSol(mintedAmount)} ckSOL minted. Ledger block ${mintBlock}.`;
+          if (newlyConfirmed && account) {
+            // The last automatic read must not leave the pre-mint wallet balance on screen.
+            balance = null;
+            try {
+              const currentBalance = await getCksolLedger().icrc1_balance_of({ owner: account, subaccount: [] });
+              if (!currentRequest() || depositId !== requestedDepositId) return;
+              balance = BigInt(currentBalance);
+            } catch {
+              if (!currentRequest() || depositId !== requestedDepositId) return;
+              balance = null;
+            }
+          }
+        }
       }
       if (requestedBurnBlock) {
         const raw = await getCksolMinter().withdraw_sol_status({ block_index: BigInt(requestedBurnBlock) });
@@ -444,7 +461,7 @@
         <section aria-label="Step 4: Check your ICP wallet" class="rounded-xl border border-gray-700 p-4">
           <h3 class="text-lg font-semibold">4. Check your connected ICP wallet</h3>
           {#if depositStatus?.success}<p class="mt-3 text-sm text-emerald-300">Last completed deposit: {mintedAmount !== null ? `${formatSol(mintedAmount)} ckSOL received` : 'ckSOL minted to this ICP account'}.</p>{/if}
-          <p class="mt-3 text-sm">{balance === null ? 'Your ckSOL balance will appear after an account check.' : `Connected wallet balance: ${formatSol(balance)} ckSOL.`}</p>
+          <p class="mt-3 text-sm">{balance === null ? depositStatus?.success ? 'Mint verified. Check your wallet or select Check again to refresh its current balance.' : 'Your ckSOL balance will appear after an account check.' : `Connected wallet balance: ${formatSol(balance)} ckSOL.`}</p>
           <p class="mt-2 text-sm text-gray-400">Look for ckSOL on the Internet Computer in this same wallet. A settled processing payment alone does not confirm mint completion.</p>
           {#if depositStatus?.success && (pendingPayment || icpPending)}<p class="mt-2 text-sm text-amber-300">Minting is complete, but the processing payment or refund is still pending. We keep checking that request; do not pay again.</p>{/if}
           {#if activeCollateral?.status === 'Active'}<a class="mt-3 inline-block text-emerald-400 underline" href="/?collateral={CANISTER_IDS.CKSOL_LEDGER}">Use ckSOL as collateral</a>{/if}

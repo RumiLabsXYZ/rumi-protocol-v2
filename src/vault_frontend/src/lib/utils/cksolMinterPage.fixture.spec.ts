@@ -397,3 +397,41 @@ describe('external ICP receipt progress', () => {
     expect(fx.icpSubmit).not.toHaveBeenCalled();expect(fx.submitPaid).not.toHaveBeenCalled();
   });
 });
+
+describe('terminal mint wallet balance', () => {
+  it('refreshes ckSOL once after a new verified mint before completion polling stops', async () => {
+    vi.useFakeTimers();fx.wallet.set({isConnected:true,principal:ownerA});render();await settle();
+    expect(host.textContent).toContain('Connected wallet balance: 1 ckSOL');
+    fx.balance.mockResolvedValue(2_919_999_999n);
+    fx.submitPaid.mockResolvedValue({owner:ownerA.toText(),sequence:'3',phase:'Receipt',createdAt:1,receipt:{phase:'Complete',deposit_id:[32n]}});
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:1_919_999_999n,block_index:202n}});
+    button('Mint ckSOL').click();await settle();
+    expect(host.textContent).toContain('Connected wallet balance: 2.919999999 ckSOL');
+    const reads=fx.balance.mock.calls.length;await vi.advanceTimersByTimeAsync(180_000);await settle();
+    expect(fx.balance).toHaveBeenCalledTimes(reads);expect(fx.submitPaid).toHaveBeenCalledOnce();
+  });
+});
+
+describe('terminal balance read isolation', () => {
+  const result=()=>({owner:ownerA.toText(),sequence:'3',phase:'Receipt',createdAt:1,receipt:{phase:'Complete',deposit_id:[32n]}});
+  it('shows an honest balance refresh action after a failed final read without resubmitting the mint', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA});render();await settle();
+    fx.balance.mockRejectedValueOnce(new Error('ledger unavailable'));
+    fx.submitPaid.mockResolvedValue(result());fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    button('Mint ckSOL').click();await settle();
+    expect(host.textContent).toContain('Mint verified. Check your wallet or select Check again');
+    expect(host.textContent).not.toContain('Connected wallet balance: 1 ckSOL');
+    button('Check again').click();await settle();expect(fx.submitPaid).toHaveBeenCalledOnce();
+    expect(host.textContent).toContain('Connected wallet balance: 1 ckSOL');
+  });
+  it('discards the old final balance when the connected session changes before it returns', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA});render();await settle();
+    let resolve!: (value:bigint)=>void;fx.balance.mockImplementationOnce(()=>new Promise(r=>resolve=r));
+    fx.submitPaid.mockResolvedValue(result());fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    button('Mint ckSOL').click();await settle();
+    fx.generation.set(1);fx.wallet.set({isConnected:true,principal:ownerB});await settle();
+    resolve(99_000_000_000n);await settle();
+    expect(host.textContent).not.toContain('Connected wallet balance: 99 ckSOL');
+    expect(fx.submitPaid).toHaveBeenCalledOnce();
+  });
+});
