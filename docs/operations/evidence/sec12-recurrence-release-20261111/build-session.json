@@ -1,0 +1,23 @@
+{
+  "source": "cbcfdabc0c7f76e2309a3576fe283356786f2276",
+  "command": [
+    "npm",
+    "run",
+    "build",
+    "--workspace=src/vault_frontend"
+  ],
+  "start": "2026-11-11T23:20:26.792214+00:00",
+  "allocationSha256": "b9b368137a86eb1faa97473082ec7e14bd34a6a7e1b1762cc5b98e7f18f27069",
+  "allocationId": "26f1abb8-e4a8-4157-b131-94e6e41824ee",
+  "initialFreeBytes": 93434875904,
+  "pgid": 70852,
+  "end": "2026-11-11T23:20:44.632128+00:00",
+  "exit": 0,
+  "stopReason": null,
+  "exception": null,
+  "peakOwnedRssBytes": 2257338368,
+  "minFreeBytes": 93349130240,
+  "physicalGrowthBytes": 85745664,
+  "allOwnedClosed": true,
+  "seconds": 17.839902125066146
+}
