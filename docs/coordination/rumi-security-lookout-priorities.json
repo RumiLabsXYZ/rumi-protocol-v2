@@ -13,9 +13,9 @@
     {
       "id": "customer-cksol-collateral-recovery",
       "title": "Customer impact: restore or safely cancel saved borrowing request",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Saved-request repair is deployed and served-byte verified. Await the customer\u2019s same-wallet authenticated restore/continue or confirmed retirement; agents do not execute a loan, cancellation, approval or storage clear.",
+      "nextAction": "Customer reports successful cancellation of the saved request followed by a new vault and loan, with a success screenshot. Customer acceptance is complete for this path; retain the recovery protections. Independent ledger settlement and original-request restoration were not rechecked. No customer retry or further engineering is requested by this report.",
       "cardIds": [
         "SEC-12"
       ]

@@ -1,6 +1,6 @@
 {
-  "summary": "Corrective OISY frontend1794415826220 live via689/690; finalcb1701ee/801d60aa passed91core+18targeted checks, dual reviews and single build. Independent740file preparation and final4701key/4895encoding preservation plus10primarydomain checks pass. Actual owner account/earlierallowance/swap remain unverified. SEC14Review: owner uses fresh-page accounts-onlycheck before any financialattempt. ckSOLguide retained; no signing/replay/backend/reserve action.",
-  "plainSummary": "The wallet connection correction and read-only account check are now live, and independent checks confirm the reviewed files are being served. The earlier swap failed, and any prior token approval remains unverified. Rob can refresh the swap page and check the signing account before another financial attempt.",
+  "summary": "SEC12 customer acceptance complete: direct support-chat report and screenshots show cancellation of the saved request followed by successful new vault creation/borrowing. No independent ledger or cancellation-tombstone readback in this check; no agent financial action. SEC14 corrective frontend1794415826220 remains live/independently verified, Review pending Rob accounts-only check. XRP acceptance and disabled ICP reserve remain separate.",
+  "plainSummary": "The customer reports that cancelling the saved request and creating a new one worked, and sent a borrowing success screenshot. His saved-request recovery case is complete on that evidence. The separate wallet swap correction is live; Rob\u2019s next step is the read-only signing-account check before another swap.",
   "glossary": [
     {
       "term": "Stability Pool",
