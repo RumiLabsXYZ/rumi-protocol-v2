@@ -4,7 +4,7 @@ November 11, 2026. Ellis owns the active case/source; Dorian owns the sole front
 
 ## Scope and truthful status
 
-Candidate code `80ae6ecc71abaf2bc2cb394ef7159c84b7c4de1c` on `codex/oisy-owner-reconnect-20261111`, based on the actually published `d54ac7b7` tree. Eleven frontend files differ: the disconnect lifecycle, its tests, coded swap errors, and an explicit read-only account diagnostic. Backend, Candid, declarations, dependency manifests/locks and accepted ckSOL source are unchanged. The old production build remains frozen; this candidate has not been production-built or published.
+Final candidate code `cb1701ee39118d9ac8d76c746dac3cb7dc23cce4` on `codex/oisy-owner-reconnect-20261111`, based on the actually published `d54ac7b7` tree. Twelve frontend files differ: the disconnect lifecycle, its tests, coded swap errors, and an explicit read-only account diagnostic. Backend, Candid, declarations, dependency manifests/locks and accepted ckSOL source are unchanged. The old production build remains frozen; this candidate has not been production-built or published.
 
 **The incident is unresolved in production.** The earlier source passed its tests and its bytes were published/independently verified, but owner acceptance failed after disconnect, hard refresh and reconnect. Do not describe that publication receipt as a working swap. Rob recalls approving multiple things; whether they were account permissions or ledger allowances, the actual rejected stage and any prior swap result remain unverified. No new retry is requested during diagnosis.
 
@@ -58,3 +58,11 @@ After authorized publication, independently read back the exact new version, dia
 ## Fresh independent acceptance
 
 Both fresh focused reviewers returned **PASS** for exact code `80ae6ecc71abaf2bc2cb394ef7159c84b7c4de1c`, after inspecting all eleven files, installed PNP lifecycle behavior, the original red observation, 91-test acceptance and baseline typecheck. No confirmed blockers remain for bounded source handoff. They explicitly retain the synthetic-transport/live-account/build/publication proof boundaries above. The next work is Dorian's single source-matched corrective frontend build, exact additive artifact/publisher checks and authorized publication/readback; do not repeat the source review or broaden the test campaign without a concrete new defect.
+
+## Final fresh-page reachability correction
+
+Before any production build, the parent wiring was found to hide account inspection until a coded swap error existed. That would require a fresh-page user to try another financial action before reaching the safe diagnostic. Exact final code `cb1701ee39118d9ac8d76c746dac3cb7dc23cce4` moves the existing child outside the error conditional; the child still renders only for connected OISY and performs no request on mount.
+
+The actual mounted `SwapInterface` test failed red on the previous placement, then passed: fresh connected OISY page exposes the check without any quote or swap failure; no inspection/execution on mount, explicit click performs one inspection and zero route execution, and switching to Internet Identity hides it. The final targeted **18 tests/3 suites pass**, with unchanged **30 errors/66 warnings**; prior91 core-test evidence is reused because other runtime source is unchanged. Both independent focused delta confirmations PASS at the final pin. Dorian held the build, so no production build was wasted or repeated.
+
+This adds only parent placement plus its regression to the accepted80ae6ecc source. All lifecycle, real installed-PNP integration, exact money/owner/session checks and earlier-allowance uncertainty remain unchanged. The first owner check can now be read-only on a fresh published page; no financial retry is required to inspect identities.
