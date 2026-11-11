@@ -308,3 +308,73 @@ describe('ICP-first page integration',()=>{
     await renderIcp();expect(button('Continue funded mint').disabled).toBe(false);expect(button('Use existing cycles').disabled).toBe(true);
   });
 });
+
+describe('numbered mint steps and bounded automatic checks', () => {
+  function completedPayment(phase = 'Complete') {
+    return {owner:ownerA.toText(),sequence:'3',phase:'Receipt',createdAt:1,receipt:{phase,deposit_id:[32n]}};
+  }
+  function completedDeposit() {
+    fx.attempt.mockResolvedValue([{status:{Queued:32n}}]);
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:1_919_996_000n,block_index:202n}});
+    fx.solBalance.mockResolvedValue(890_880n);
+    fx.recoverPaid.mockResolvedValue(completedPayment());
+    fx.wallet.set({isConnected:true,principal:ownerA});
+  }
+  it('shows the ordered actions and detected SOL without starting a payment', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle();
+    const steps=[...host.querySelectorAll('h3')].map(h=>h.textContent);
+    expect(steps).toEqual(expect.arrayContaining(['1. Check processing costs','2. Send SOL on Solana mainnet','3. Mint ckSOL','4. Check your connected ICP wallet']));
+    expect(host.textContent).toContain('Detecting SOL does not mint it automatically');
+    expect(host.textContent).toContain('Next: use the mint action in step 3');
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+  it('stops after full completion, permits one manual check, and rearms only an explicit new deposit', async () => {
+    vi.useFakeTimers(); completedDeposit(); render(); await settle();
+    expect(host.textContent).toContain('Last completed deposit: 1.919996 ckSOL received');
+    const initial=fx.recoverPaid.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(180_000); await settle();
+    window.dispatchEvent(new Event('focus')); await settle();
+    expect(fx.recoverPaid).toHaveBeenCalledTimes(initial);
+    button('Check again').click(); await settle();
+    expect(fx.recoverPaid).toHaveBeenCalledTimes(initial+1);
+    await vi.advanceTimersByTimeAsync(180_000); await settle();
+    expect(fx.recoverPaid).toHaveBeenCalledTimes(initial+1);
+    button('Start another deposit').click(); await settle();
+    const newStart=fx.recoverPaid.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(15_000); await settle();
+    expect(fx.recoverPaid).toHaveBeenCalledTimes(newStart+1);
+    expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+  it('backs off unchanged waiting reads and stops checking a hidden or disconnected account', async () => {
+    vi.useFakeTimers(); fx.wallet.set({isConnected:true,principal:ownerA});fx.solBalance.mockResolvedValue(0n);
+    render(); await settle(); const first=fx.recoverPaid.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(15_000); await settle(); expect(fx.recoverPaid).toHaveBeenCalledTimes(first+1);
+    await vi.advanceTimersByTimeAsync(29_999); await settle(); expect(fx.recoverPaid).toHaveBeenCalledTimes(first+1);
+    await vi.advanceTimersByTimeAsync(1); await settle(); expect(fx.recoverPaid).toHaveBeenCalledTimes(first+2);
+    Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+    document.dispatchEvent(new Event('visibilitychange')); await settle();
+    await vi.advanceTimersByTimeAsync(180_000); await settle(); expect(fx.recoverPaid).toHaveBeenCalledTimes(first+2);
+    Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
+    fx.wallet.set({isConnected:false,principal:null}); await settle(); const stopped=fx.recoverPaid.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(180_000); expect(fx.recoverPaid).toHaveBeenCalledTimes(stopped);
+  });
+  it('continues checking a pending refund after the SOL mint is complete', async () => {
+    vi.useFakeTimers(); completedDeposit(); fx.recoverPaid.mockResolvedValue(completedPayment('RefundReady'));
+    render(); await settle(); expect(host.textContent).toContain('processing payment or refund is still pending');
+    const initial=fx.recoverPaid.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(15_000); await settle(); expect(fx.recoverPaid.mock.calls.length).toBeGreaterThan(initial);
+    expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+  it('keeps the mint action stable during a background read and rejects its stale result after a click', async () => {
+    vi.useFakeTimers();fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle();
+    let release!: (v:any)=>void; fx.info.mockImplementationOnce(()=>new Promise(resolve=>release=resolve));
+    await vi.advanceTimersByTimeAsync(15_000); await settle();
+    expect(button('Mint ckSOL').disabled).toBe(false); expect(host.textContent).not.toContain('Checking request…');
+    const reads=fx.recoverPaid.mock.calls.length;
+    fx.submitPaid.mockResolvedValue(completedPayment('FundingPending'));
+    button('Mint ckSOL').click(); await settle();
+    release({minimum_deposit_amount:20_000_000n}); await settle();
+    expect(fx.recoverPaid).toHaveBeenCalledTimes(reads);
+    expect(fx.submitPaid).toHaveBeenCalledOnce(); expect(button('Mint ckSOL').disabled).toBe(true);
+  });
+});

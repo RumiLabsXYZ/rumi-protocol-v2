@@ -269,3 +269,20 @@ describe('ICP-paid mint controls', () => {
 		expect(fx.submit).not.toHaveBeenCalled();
 	});
 });
+
+describe('bounded ICP receipt checks', () => {
+  it('does not poll a completed inactive flow but allows one explicit read', async () => {
+    vi.useFakeTimers(); fx.recover.mockResolvedValue(payment('Complete'));
+    render({pollingActive:false}); await settle(); const reads=fx.recover.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(180_000); await settle(); expect(fx.recover).toHaveBeenCalledTimes(reads);
+    await instance.checkAgain(); await settle(); expect(fx.recover).toHaveBeenCalledTimes(reads+1);
+    await vi.advanceTimersByTimeAsync(180_000); await settle(); expect(fx.recover).toHaveBeenCalledTimes(reads+1);
+    vi.useRealTimers();
+  });
+  it('continues an outstanding refund even when deposit polling has stopped', async () => {
+    vi.useFakeTimers(); fx.recover.mockResolvedValue(payment('RefundReady'));
+    render({pollingActive:false}); await settle(); const reads=fx.recover.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(15_000); await settle(); expect(fx.recover.mock.calls.length).toBeGreaterThan(reads);
+    expect(fx.submit).not.toHaveBeenCalled(); vi.useRealTimers();
+  });
+});

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
+  import { createCksolReadPolling, type CksolReadPolling } from '$lib/utils/cksolReadPolling';
+  import type { CksolIcpQuote } from '$lib/services/cksolIcpPayment';
   import { get } from 'svelte/store';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
@@ -20,6 +22,13 @@
   let epoch = 0;
   let destroyed = false;
   let busy = false;
+  let refreshing = false;
+  let initialized = false;
+  let refreshGeneration = 0;
+  let polling: CksolReadPolling | null = null;
+  let newDeposit = false;
+  let icpCost: CksolIcpQuote | null = null;
+  let icpPanel: CksolIcpPaymentPanel | null = null;
   let error = '';
   let notice = '';
   let info: MinterInfo | null = null;
@@ -36,7 +45,7 @@
   let depositAddress = '';
   let solBalance: bigint | null = null;
   let balanceUnavailable = false;
-  let heartbeat: ReturnType<typeof setInterval> | null = null;
+
   let copied = false;
   let depositId: bigint | null = null;
   let depositStatus: StatusView | null = null;
@@ -78,7 +87,7 @@
   function adoptPaidIntent(value: CksolPaymentIntent) {
     paymentIntent = value;
     const id = value.receipt?.deposit_id?.[0];
-    if (id !== undefined && depositId !== BigInt(id)) { depositId=BigInt(id); depositStatus=null; mintedAmount=null; mintBlock=null; solBalance=null; balanceUnavailable=false; pollCount=0; }
+    if (id !== undefined && depositId !== BigInt(id)) { newDeposit=false; depositId=BigInt(id); depositStatus=null; mintedAmount=null; mintBlock=null; solBalance=null; balanceUnavailable=false; pollCount=0; }
   }
   $: paidPhase = paymentIntent?.receipt?.phase ?? paymentIntent?.phase;
   $: minterPending = depositId !== null && (!depositStatus || !depositStatus.terminal);
@@ -97,7 +106,7 @@
   // a new-send address only after processing is ready; a deposit at the
   // minter's minimum remains visible so its owner can finish processing it.
   $: addressReady = fundsReceived || (paymentMethod === 'icp' ? icpReady : cyclesReady);
-  $: mintEnabled = !!owner && !busy && !icpBusy && !icpPending && (refundReady || (!depositBlocked && !blockingLegacy && !minterPending &&
+  $: mintEnabled = !!owner && initialized && !busy && !icpBusy && !icpPending && (refundReady || (!depositBlocked && !blockingLegacy && !minterPending &&
     (resumeApproval || resumeFunding || (cyclesReady && !pendingPayment && (fundsReceived || balanceUnavailable)))));
   $: primaryLabel = resumeApproval || resumeFunding ? 'Continue minting' : refundReady ? 'Return unused cycles' : 'Mint ckSOL';
   $: paymentMessage = paidPhase === 'Complete' ? 'Processing payment settled. Any unused cycles have been returned.' :
@@ -107,7 +116,22 @@
     paidPhase === 'RefundReady' ? 'Unused cycles are ready to return to your wallet.' :
     ['ApprovalUnknown','StartUnknown','FundingUnknown','RefundUnknown'].includes(paidPhase ?? '') ? 'Checking an uncertain payment result. Your saved request is retained; do not start another payment.' :
     pendingPayment ? 'Processing your request. This page checks its progress automatically.' : '';
+  $: complete = !!depositStatus?.success && !pendingPayment && !icpPending && !depositBlocked && !blockingLegacy;
+  $: autoPolling = !!owner && !busy && !icpBusy && (pendingPayment || icpPending || minterPending || blockingLegacy || depositBlocked || fundsReceived || newDeposit || (!complete && addressReady));
+  $: if (polling) { autoPolling; polling.sync(); }
+  const formatIcp = (value: bigint) => `${value / 100_000_000n}.${(value % 100_000_000n).toString().padStart(8, '0')} ICP`;
+  function pollFingerprint() {
+    return [ownerText, paymentIntent?.sequence, paidPhase, icpReceipt?.sequence, icpReceipt?.phase, depositId, depositStatus?.label, mintedAmount, solBalance, balanceUnavailable, legacyBlocked, depositBlocked].join('|');
+  }
+  async function checkAgain() {
+    if (busy || icpBusy) return;
+    await Promise.all([polling ? polling.checkAgain() : refresh(), icpPanel?.checkAgain()]);
+  }
+  function startAnotherDeposit() { newDeposit = true; void checkAgain(); }
+  function icpBusyChanged(active: boolean) { if (active) refreshGeneration++; icpBusy = active; }
   async function mint() {
+    if (!mintEnabled) return;
+    refreshGeneration++;
     if (resumeApproval) await continuePaidApproval();
     else if (resumeFunding) await resumePaidDispatch();
     else if (refundReady) await refundPaidCycles();
@@ -125,7 +149,8 @@
       lock ? recoverCksolPayment(account,localStorage) : loadCksolPayment(localStorage,account.toText()));
   }
   function refreshWhenVisible() {
-    if (owner && !busy && document.visibilityState !== 'hidden') void refresh();
+    if (document.visibilityState === 'hidden') polling?.sync();
+    else if (autoPolling) void polling?.checkAgain();
   }
   function loadSaved() {
     if (!owner) return;
@@ -138,34 +163,36 @@
     } catch (e) { invalidSavedIntent = true; withdrawalStatus = null; withdrawalStatusFor = null; error = String(e); }
   }
   async function refresh() {
-    if (busy || icpBusy) return;
+    if (busy || icpBusy || refreshing) return;
     const e = epoch, account = owner, text = ownerText;
-    error = ''; busy = true;
+    const request = ++refreshGeneration;
+    const currentRead = () => live(e, text) && request === refreshGeneration && !busy && !icpBusy;
+    error = ''; refreshing = true;
     try {
       const data = await getCksolMinter().get_minter_info();
-      if (!live(e, text)) return;
+      if (!currentRead()) return;
       info = data;
       if (account) {
         const recovered=await recoverPaid(account);
-        if (!live(e,text)) return;
+        if (!currentRead()) return;
         if (recovered) adoptPaidIntent(recovered);
         if (recovered && !paidIntentSettled(recovered)) paymentMethod = 'cycles';
         try {
           const q=await quoteCksolPayment(account,isCksolOisyWallet()?'oisy':(get(auth).walletType ?? 'unknown'));
-          if (!live(e,text)) return;
+          if (!currentRead()) return;
           paymentQuote=q; cyclesBalance=q.balance;
         } catch {
-          if (!live(e,text)) return;
+          if (!currentRead()) return;
           paymentQuote=null;
           notice='Processing payment is temporarily unavailable. Do not send SOL to a new address. Existing deposits remain recorded; status checks will continue.';
         }
       }
-      if (!account || !live(e,text)) return;
+      if (!account || !currentRead()) return;
       const [funds, attempt] = await Promise.all([
         getCksolLedger().icrc1_balance_of({ owner: account, subaccount: [] }),
         getCksolRelay().get_cksol_deposit(account),
       ]);
-      if (!live(e, text)) return;
+      if (!currentRead()) return;
       balance = BigInt(funds); loadSaved();
       if (attempt[0]) {
         legacyAttempt=attempt[0]; legacyBlocked=true;
@@ -177,26 +204,27 @@
         legacyAttempt=null; legacyBlocked=false;
       }
       await checkStatus(false);
-      if (!live(e,text)) return;
+      if (!currentRead()) return;
       if (paymentQuote && !legacyBlocked && !depositBlocked && !depositAddress) {
         const address=await getSolDepositAddress(account);
-        if (!live(e,text)) return;
+        if (!currentRead()) return;
         depositAddress=address;
       }
       if (depositAddress) {
         try {
           const observed=await readSolDepositBalance(depositAddress);
-          if (live(e,text)) { solBalance=observed; balanceUnavailable=false; }
-        } catch { if (live(e,text)) { solBalance=null; balanceUnavailable=true; } }
+          if (currentRead()) { solBalance=observed; balanceUnavailable=false; }
+        } catch { if (currentRead()) { solBalance=null; balanceUnavailable=true; } }
       }
-    } catch (err) { if (live(e, text)) { error = String(err); legacyBlocked=true; } }
-    finally { if (!destroyed && epoch === e) busy = false; }
+    } catch (err) { if (currentRead()) { error = String(err); legacyBlocked=true; } }
+    finally { if (!destroyed && epoch === e) { refreshing = false; if (request === refreshGeneration) initialized = true; }
+      await tick(); polling?.sync(); }
   }
   function adoptIcpReceipt(receipt: any) {
     icpReceipt=receipt;
     const id = receipt.deposit_id?.[0];
     if (id !== undefined && depositId !== BigInt(id)) {
-      depositId=BigInt(id);depositStatus=null;mintedAmount=null;mintBlock=null;solBalance=null;balanceUnavailable=false;pollCount=0;
+      newDeposit=false;depositId=BigInt(id);depositStatus=null;mintedAmount=null;mintBlock=null;solBalance=null;balanceUnavailable=false;pollCount=0;
       void checkStatus(false);
     }
   }
@@ -310,7 +338,7 @@
     } catch (err) { error = String(err); loadSaved(); }
   }
   function resetSession() {
-    epoch++; statusGeneration++; stopPoll(); pollCount = 0;
+    epoch++; refreshGeneration++; statusGeneration++; stopPoll(); polling?.destroy(); polling = null; pollCount = 0; newDeposit = false; initialized = false; refreshing = false; icpCost = null;
     const wallet = get(walletStore);
     owner = wallet.isConnected && !wallet.loading ? wallet.principal : null; ownerText = owner?.toText() ?? '';
     busy = false; error = ''; notice = ''; depositAddress = ''; depositId = null; solBalance=null; balanceUnavailable=false; copied=false; mintedAmount=null; mintBlock=null;
@@ -319,6 +347,7 @@
     icpReady=false;icpBusy=false;icpPending=false;icpReceipt=null;paymentMethod='icp';
     if(owner) { try { paymentIntent=loadCksolPayment(localStorage,ownerText); } catch { error='Saved paid ckSOL request is invalid. Preserve it for support.'; } }
     if (owner) loadSaved();
+    polling = createCksolReadPolling({ read: async () => { await refresh(); await tick(); }, active: () => autoPolling, fingerprint: pollFingerprint, visible: () => document.visibilityState !== 'hidden' });
     void refresh();
   }
   onMount(() => {
@@ -328,12 +357,12 @@
     }));
     // Generation invalidates immediately when a wallet transition begins, including A -> B -> A.
     unsubscribers.push(walletSessionGeneration.subscribe(() => resetSession()));
-    heartbeat=setInterval(refreshWhenVisible,15_000);
+
     window.addEventListener('focus',refreshWhenVisible);
     document.addEventListener('visibilitychange',refreshWhenVisible);
     void collateralStore.fetchSupportedCollateral();
   });
-  onDestroy(() => { destroyed=true; epoch++; stopPoll(); if(heartbeat) clearInterval(heartbeat); window.removeEventListener('focus',refreshWhenVisible); document.removeEventListener('visibilitychange',refreshWhenVisible); unsubscribers.forEach(fn=>fn()); });
+  onDestroy(() => { destroyed=true; epoch++; stopPoll(); polling?.destroy(); window.removeEventListener('focus',refreshWhenVisible); document.removeEventListener('visibilitychange',refreshWhenVisible); unsubscribers.forEach(fn=>fn()); });
 </script>
 
 <svelte:head><title>ckSOL Minter | Rumi</title><meta name="description" content="Mint ckSOL from SOL, redeem ckSOL to Solana, and use active ckSOL collateral on Rumi." /></svelte:head>
@@ -350,64 +379,88 @@
   {#if notice && selectedTab === 'redeem'}<p role="status" class="mb-4 break-words rounded-lg border border-gray-600 bg-gray-800 p-4 text-sm">{notice}</p>{/if}
   <section class="rounded-xl border border-gray-700 bg-gray-900 p-6">
     {#if selectedTab === 'mint'}
-      <div class="flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">SOL → ckSOL</h2><span class="text-xs text-emerald-400">Solana mainnet</span></div>
-      <ol class="mt-5 grid grid-cols-3 gap-3 text-sm text-gray-400" aria-label="Mint progress"><li>1. Check processing costs</li><li>2. Send SOL</li><li>3. Mint ckSOL</li></ol>
-      <div class="mt-5 flex flex-wrap gap-2" role="group" aria-label="Processing payment method">
-        <button class="rounded-lg border px-3 py-2 text-sm" class:border-emerald-500={paymentMethod==='icp'} disabled={busy||icpBusy||pendingPayment} onclick={()=>paymentMethod='icp'}>Pay with ICP</button>
-        <button class="rounded-lg border px-3 py-2 text-sm" class:border-emerald-500={paymentMethod==='cycles'} disabled={busy||icpBusy||icpPending} onclick={()=>paymentMethod='cycles'}>Use existing cycles</button>
+      <h2 class="text-xl font-semibold">SOL → ckSOL</h2>
+      <p class="mt-2 text-sm text-gray-400">Follow these steps with the same connected ICP account. Detecting SOL does not mint it automatically.</p>
+      <div class="mt-6 space-y-6">
+        <section aria-label="Step 1: Check processing costs" class="rounded-xl border border-gray-700 p-4">
+          <h3 class="text-lg font-semibold">1. Check processing costs</h3>
+          <div class="mt-3 flex flex-wrap gap-2" role="group" aria-label="Processing payment method">
+            <button class="rounded-lg border px-3 py-2 text-sm" class:border-emerald-500={paymentMethod==='icp'} disabled={busy||icpBusy||pendingPayment} onclick={()=>paymentMethod='icp'}>Pay with ICP</button>
+            <button class="rounded-lg border px-3 py-2 text-sm" class:border-emerald-500={paymentMethod==='cycles'} disabled={busy||icpBusy||icpPending} onclick={()=>paymentMethod='cycles'}>Use existing cycles</button>
+          </div>
+          {#if paymentMethod === 'icp'}
+            <p class="mt-3 text-sm text-gray-300">Rumi supplies the cycles. You approve a maximum ICP deposit; unused ICP is returned. The service fee is 5% of the minter’s net cycles charge, plus operating and ledger fees.</p>
+            {#if icpCost}<p class="mt-3 text-sm">Maximum wallet debit: <strong>{formatIcp(icpCost.total)}</strong>. Connected balance: {formatIcp(icpCost.balance)}.</p>{/if}
+            {#if icpCost && (!icpCost.terms.available || BigInt(icpCost.terms.reserve_available_cycles) < BigInt(icpCost.terms.attached_cycles))}<p class="mt-2 text-sm text-amber-300">ICP-paid processing is temporarily unavailable. Choose existing cycles or Check again. Do not send SOL for a new mint.</p>
+            {:else if icpCost && icpCost.balance < icpCost.total && !icpPending}<p class="mt-2 text-sm text-amber-300">Add at least {formatIcp(icpCost.total - icpCost.balance)} to this ICP account before a new deposit.</p>
+            {:else if owner && !icpReady && !icpPending}<p class="mt-2 text-sm text-amber-300">Processing is not ready. Review the ICP availability and cost details in step 3 before sending a new deposit.</p>{/if}
+          {:else if paymentQuote}
+            <p class="mt-3 text-sm text-gray-300">Keep <strong>{formatCycles(paymentQuote.approval_amount + paymentQuote.ledger_fee)}</strong> in your connected account temporarily. This is a balance requirement, not the final fee. Unused cycles return as cycles.</p>
+            {#if !cyclesReady && !pendingPayment}<p class="mt-2 text-sm text-amber-300">Not enough cycles. Choose Pay with ICP or add cycles to this account. If you already sent SOL, do not send it again.</p>{/if}
+          {:else}<p class="mt-3 text-sm text-amber-300">{!owner ? 'Connect your ICP wallet to check processing costs.' : notice || 'Processing costs are unavailable. Select Check again; do not send a new deposit yet.'}</p>{/if}
+        </section>
+
+        <section aria-label="Step 2: Send SOL" class="rounded-xl border border-gray-700 p-4">
+          <h3 class="text-lg font-semibold">2. Send SOL on Solana mainnet</h3>
+          {#if complete && !newDeposit && !fundsReceived}
+            <p class="mt-3 text-sm text-emerald-300">Your previous deposit is complete. You do not need to send or mint it again.</p>
+            <button class="mt-3 rounded-lg border border-emerald-600 px-3 py-2 text-sm" disabled={busy || icpBusy} onclick={startAnotherDeposit}>Start another deposit</button>
+          {:else}
+            <p class="mt-3 text-sm text-gray-300">Send SOL to this account’s reusable deposit address. If you already sent it, check detection below instead of sending again.</p>
+          {/if}
+          {#if depositAddress && addressReady}
+            <p class="mt-3 break-all rounded-lg bg-gray-800 p-3 font-mono text-sm">{depositAddress}</p>
+            <button class="mt-3 rounded-lg border border-gray-500 px-3 py-2 text-sm" onclick={copyAddress}>{copied ? 'Address copied' : 'Copy address'}</button>
+            <p class="mt-3 break-words text-xs text-gray-400">Credits ICP account {ownerText}. Reuse only with this account.</p>
+          {:else}<p class="mt-3 text-sm text-gray-400">{!owner ? 'Connect your ICP wallet to see your address.' : legacyBlocked || depositBlocked ? 'Your existing deposit is being checked. You do not need to send more SOL.' : 'Check processing funds before sending SOL. Your address appears when processing is ready; existing deposits are still checked.'}</p>{/if}
+          <p class="mt-3 text-sm text-gray-400">Minimum address balance: {info ? formatSol(BigInt(info.minimum_deposit_amount)) : 'Loading…'} SOL. SOL network fees and any first-deposit rent reserve reduce the final minted amount.</p>
+          <div class="mt-4 rounded-lg bg-gray-800 p-3 text-sm" aria-live="polite">
+            {#if blockingLegacy || depositBlocked}<p class="text-amber-300">Deposit needs attention. Its outcome is uncertain; keep the receipt and contact support before another payment.</p>
+            {:else if minterPending}<p>{depositStatus?.label ?? 'Checking your submitted deposit'} — SOL processing is already underway. Do not send or pay again.</p>
+            {:else if balanceUnavailable}<p class="text-amber-300">SOL balance checks are temporarily unavailable. If you already sent SOL here, the mint action can ask the official minter to verify it. Detection has not confirmed a new deposit.</p>
+            {:else if fundsReceived}<p class="font-semibold text-emerald-300">{formatSol(solBalance!)} SOL received</p><p class="mt-1">Next: use the mint action in step 3. It only enables when processing and previous-request checks permit.</p>
+            {:else if complete && !newDeposit}<p>Automatic checking stopped after completion. Select Start another deposit to watch for a new transfer.</p>
+            {:else}<p>Waiting for SOL at this address. Detection starts at 15 seconds, slows to 60 seconds when unchanged, and pauses when this tab is hidden.</p>{/if}
+            {#if refreshing}<p class="mt-2 text-gray-400">Checking balances and saved receipts… No mint or payment is submitted by this check.</p>{/if}
+            <button class="mt-3 rounded-lg border border-gray-500 px-3 py-2 disabled:opacity-40" disabled={!owner || busy || icpBusy || refreshing} onclick={checkAgain}>Check again</button>
+          </div>
+        </section>
+
+        <section aria-label="Step 3: Mint ckSOL" class="rounded-xl border border-gray-700 p-4">
+          <h3 class="text-lg font-semibold">3. Mint ckSOL</h3>
+          <p class="mt-2 text-sm text-gray-300">Click the mint action below and follow any wallet confirmations. This is a deliberate action; sending SOL or checking its balance never starts a payment.</p>
+          {#if owner && paymentMethod === 'icp'}
+            {#key epoch}<CksolIcpPaymentPanel bind:this={icpPanel} {owner} compact pollingActive={autoPolling} canMint={initialized && (fundsReceived||balanceUnavailable)} blocked={depositBlocked||blockingLegacy||minterPending||pendingPayment}
+              onQuote={(q)=>icpCost=q} onReady={(ready)=>icpReady=ready} onBusy={icpBusyChanged} onActive={(active)=>icpPending=active} onReceipt={adoptIcpReceipt}/>{/key}
+            {#if !icpPending && !fundsReceived && !balanceUnavailable}<p class="mt-3 text-sm text-gray-400">The mint action is waiting for a new SOL deposit meeting the minimum in step 2.</p>{/if}
+          {:else}
+            <button class="mt-4 w-full rounded-xl bg-emerald-600 px-5 py-3 font-semibold disabled:opacity-40" disabled={!mintEnabled} onclick={mint}>{busy ? 'Processing your action…' : primaryLabel}</button>
+            <p class="mt-3 text-sm text-gray-400">{!owner ? 'Connect your ICP wallet to continue.' : pendingPayment || minterPending || blockingLegacy || depositBlocked ? paymentMessage || 'The previous request must finish or be reconciled before a new mint.' : !initialized ? 'Checking initial account status before enabling minting.' : !cyclesReady ? 'Processing funds are not ready. Review step 1.' : !fundsReceived && !balanceUnavailable ? 'Waiting for a new SOL deposit meeting the minimum in step 2.' : 'Ready for your mint action. Keep any wallet confirmation window open until it finishes.'}</p>
+          {/if}
+          {#if paymentMessage && !paidIntentSettled(paymentIntent)}<p class="mt-3 text-sm text-gray-300">{paymentMessage}</p>{/if}
+        </section>
+
+        <section aria-label="Step 4: Check your ICP wallet" class="rounded-xl border border-gray-700 p-4">
+          <h3 class="text-lg font-semibold">4. Check your connected ICP wallet</h3>
+          {#if depositStatus?.success}<p class="mt-3 text-sm text-emerald-300">Last completed deposit: {mintedAmount !== null ? `${formatSol(mintedAmount)} ckSOL received` : 'ckSOL minted to this ICP account'}.</p>{/if}
+          <p class="mt-3 text-sm">{balance === null ? 'Your ckSOL balance will appear after an account check.' : `Connected wallet balance: ${formatSol(balance)} ckSOL.`}</p>
+          <p class="mt-2 text-sm text-gray-400">Look for ckSOL on the Internet Computer in this same wallet. A settled processing payment alone does not confirm mint completion.</p>
+          {#if depositStatus?.success && (pendingPayment || icpPending)}<p class="mt-2 text-sm text-amber-300">Minting is complete, but the processing payment or refund is still pending. We keep checking that request; do not pay again.</p>{/if}
+          {#if activeCollateral?.status === 'Active'}<a class="mt-3 inline-block text-emerald-400 underline" href="/?collateral={CANISTER_IDS.CKSOL_LEDGER}">Use ckSOL as collateral</a>{/if}
+        </section>
       </div>
-      {#if owner && paymentMethod==='icp'}
-        {#key epoch}<CksolIcpPaymentPanel {owner} canMint={fundsReceived||balanceUnavailable} blocked={depositBlocked||blockingLegacy||minterPending||pendingPayment}
-          onReady={(ready)=>icpReady=ready} onBusy={(active)=>icpBusy=active} onActive={(active)=>icpPending=active} onReceipt={adoptIcpReceipt}/>{/key}
-      {/if}
-      <div class="mt-6 rounded-xl border border-gray-700 bg-gray-800/60 p-4" aria-live="polite">
-        {#if blockingLegacy || depositBlocked || minterPending}
-          <h3 class="font-semibold">{depositBlocked || legacyAttempt?.status && 'SubmittedOrUnknown' in legacyAttempt.status ? 'Deposit needs attention' : depositStatus?.label ?? 'Checking your previous deposit'}</h3>
-          <p class="mt-2 text-sm text-gray-300">{depositBlocked || legacyAttempt?.status && 'SubmittedOrUnknown' in legacyAttempt.status ? 'The previous deposit has an uncertain outcome. Its record is preserved. Contact support with the receipt below before trying another payment.' : 'We check the official minter automatically. You can leave this page and return later.'}</p>
-        {:else if pendingPayment}
-          <h3 class="font-semibold">{uncertainPayment ? 'Checking your previous request' : resumeApproval || resumeFunding ? 'Finish authorizing your mint' : refundReady ? 'Your cycles refund is ready' : 'Mint in progress'}</h3>
-          <p class="mt-2 text-sm text-gray-300">{paymentMessage}</p>
-        {:else if fundsReceived}
-          <h3 class="text-lg font-semibold text-emerald-300">{formatSol(solBalance!)} SOL received</h3>
-          <p class="mt-2 text-sm text-gray-300">Ready to mint to your connected ICP account. The address balance includes any rent reserve; the minter calculates the final amount.</p>
-        {:else if depositStatus?.success}
-          <h3 class="text-lg font-semibold text-emerald-300">{mintedAmount !== null ? `${formatSol(mintedAmount)} ckSOL received` : 'ckSOL minted to your ICP account'}</h3>
-          <p class="mt-2 text-sm text-gray-300">Your previous deposit is complete. You can reuse the address below for another deposit.</p>
-        {:else}
-          <h3 class="font-semibold">{addressReady ? 'Send SOL to your deposit address' : 'Check processing funds before sending SOL'}</h3>
-          <p class="mt-2 text-sm text-gray-300">{busy ? 'Checking your account…' : addressReady ? 'After sending SOL, select the mint action above. Your wallet will guide the confirmations.' : 'Minting needs a separate processing payment. Check your ICP balance and the maximum cost above, or choose existing cycles.'}</p>
-        {/if}
-        {#if balanceUnavailable}<p class="mt-2 text-sm text-amber-300">SOL balance checks are temporarily unavailable. If you already sent SOL to this address, you can still mint; the official minter verifies the balance.</p>{/if}
-      </div>
-      <div class="mt-5 rounded-xl bg-gray-800 p-4">
-        <p class="text-sm font-medium">Your reusable SOL deposit address</p>
-        {#if depositAddress && addressReady}
-          <p class="mt-3 break-all font-mono text-sm text-gray-100">{depositAddress}</p>
-          <button class="mt-3 rounded-lg border border-gray-500 px-3 py-2 text-sm" onclick={copyAddress}>{copied ? 'Address copied' : 'Copy address'}</button>
-          <p class="mt-3 text-xs text-gray-400">Credits ICP account <span class="break-all">{ownerText}</span>. Reuse only with this account.</p>
-        {:else}<p class="mt-3 text-sm text-gray-400">{!owner ? 'Connect your ICP wallet to see your address.' : legacyBlocked || depositBlocked ? 'Your existing deposit is being checked. You do not need to send more SOL.' : 'Your address will appear when processing funds are ready. If you already sent SOL, we still check that address automatically; do not send another deposit.'}</p>{/if}
-        <p class="mt-3 text-sm text-gray-400">Minimum deposit balance: {info ? formatSol(BigInt(info.minimum_deposit_amount)) : 'Loading…'} SOL. Send SOL on Solana mainnet only.</p>
-      </div>
-      {#if paymentMethod==='cycles'}
-      {#if paymentQuote}
-        <div class="mt-5 text-sm text-gray-300"><p>Your connected account needs <strong>{formatCycles(paymentQuote.approval_amount + paymentQuote.ledger_fee)}</strong> temporarily for processing. This is a balance requirement, not the final fee. Unused cycles return as cycles, not ICP.</p><p class="mt-2 text-gray-400">SOL network fees are deducted before minting. The first deposit also leaves a small rent reserve on the address.</p></div>
-      {:else if owner}<p class="mt-5 text-sm text-amber-300">{notice || 'Checking processing costs…'}</p>{/if}
-      {#if paymentQuote && !cyclesReady && !pendingPayment}<p role="status" class="mt-3 text-sm text-amber-300">Not enough cycles to start processing. Choose Pay with ICP instead of buying cycles yourself. If you already sent SOL, keep this account connected and finish the existing deposit; do not send more SOL.</p>{/if}
-      <button class="mt-6 w-full rounded-xl bg-emerald-600 px-5 py-3 font-semibold disabled:opacity-40" disabled={!mintEnabled} onclick={mint}>{busy ? 'Checking request…' : primaryLabel}</button>
-      <p class="mt-3 text-sm text-gray-400">Your wallet will ask you to approve the processing payment and authorize minting. Keep it open until both confirmations finish. Status updates automatically afterward.</p>
-      {/if}
-      <p class="mt-5 text-sm text-gray-400">SOL waiting at this address has not become ckSOL yet. Redeem SOL withdraws minted ckSOL; it does not cancel an unprocessed deposit. To recover a deposit that needs attention, keep its receipt and contact support.</p>
+      <p class="mt-5 text-xs text-gray-400">Redeem SOL withdraws already minted ckSOL. It cannot cancel SOL still awaiting processing.</p>
       <details class="mt-6 border-t border-gray-700 pt-4 text-sm text-gray-400"><summary class="cursor-pointer">Receipt and processing details</summary>
         {#if cyclesBalance !== null}<p class="mt-3">Cycles ledger balance: {formatCycles(cyclesBalance)}.</p>{/if}
         {#if paymentQuote}<p class="mt-2">Processing budget: {formatCycles(paymentQuote.funding_cycles)}, including {formatCycles(paymentQuote.processing_fee)} processing fee. Approval cap: {formatCycles(paymentQuote.approval_amount)}. Approval transaction fee: {formatCycles(paymentQuote.ledger_fee)}. Approval expires after 10 minutes.</p>{/if}
-        {#if resumeFunding}<button class="mt-3 rounded-lg border border-gray-600 px-3 py-2" disabled={busy} onclick={refundPaidCycles}>Cancel mint and return funded cycles</button>{/if}
+        {#if resumeFunding}<button class="mt-3 rounded-lg border border-gray-600 px-3 py-2" disabled={busy || icpBusy || refreshing} onclick={refundPaidCycles}>Cancel mint and return funded cycles</button>{/if}
         {#if paymentIntent}<p class="mt-3">Paid payment sequence: {paymentIntent.sequence}; state: {paidPhase}.</p><p class="mt-2">{paymentMessage}</p>
           {#if paymentIntent.receipt?.funding_block?.[0] !== undefined}<p class="mt-2">Funding ledger block: {paymentIntent.receipt.funding_block[0].toString()}</p>{/if}
           {#if paymentIntent.receipt?.refund_block?.[0] !== undefined}<p class="mt-2">Refund ledger block: {paymentIntent.receipt.refund_block[0].toString()}</p>{/if}
         {/if}
         {#if mintedAmount !== null}<p class="mt-3">Minted: {formatSol(mintedAmount)} ckSOL. Ledger block: {mintBlock?.toString()}.</p>{/if}
         {#if depositId !== null}<p class="mt-3">Deposit ID: {depositId.toString()}</p><p class="mt-2">{depositStatus?.label ?? 'Checking minter status…'}</p>{#if depositStatus?.signature}<a class="mt-2 block text-emerald-400 underline" href="https://solscan.io/tx/{depositStatus.signature}" target="_blank" rel="noreferrer">View sweep on Solana</a>{/if}{/if}
-        <button class="mt-4 rounded-lg border border-gray-600 px-3 py-2" disabled={busy} onclick={refresh}>Check for updates</button>
+        <button class="mt-4 rounded-lg border border-gray-600 px-3 py-2" disabled={busy || icpBusy || refreshing} onclick={checkAgain}>Check for updates</button>
         <a class="mt-3 block text-emerald-400 underline" href="https://internetcomputer.org/docs/current/developer-docs/smart-contracts/maintain/cycles-management/" target="_blank" rel="noreferrer">How to add cycles</a>
       </details>
     {:else}
@@ -425,5 +478,5 @@
       {#if quote}<div class="mt-5 space-y-2 rounded-lg bg-gray-800 p-4 text-sm"><p>Minter fee deducted from amount: {formatSol(quote.minterFee)} SOL.</p><p>Approval fee: {formatSol(quote.ledgerFee)} ckSOL. Additional ledger fee reserve: {formatSol(quote.ledgerFee)} ckSOL.</p><p>Estimated SOL received: {formatSol(quote.amount - quote.minterFee)} SOL.</p><p>Approve {formatSol(quote.amount + quote.ledgerFee)} ckSOL for the official minter, then request withdrawal. Quote expires after 60 seconds.</p><button class="mt-3 rounded-lg bg-emerald-600 px-4 py-2 font-medium disabled:opacity-40" disabled={busy || !!intent || oisy} onclick={redeem}>Approve and request SOL</button></div>{/if}
     {/if}
   </section>
-  <div class="mt-6 flex flex-wrap items-center gap-4 text-sm">{#if selectedTab === 'redeem'}<button class="text-gray-300 underline" disabled={busy} onclick={refresh}>Refresh balance and minter terms</button>{/if}{#if activeCollateral?.status === 'Active'}<a class="text-emerald-400 underline" href="/?collateral={CANISTER_IDS.CKSOL_LEDGER}">Borrow icUSD with ckSOL</a>{/if}<a class="text-gray-400 underline" href="https://internetcomputer.org/docs/current/developer-docs/smart-contracts/maintain/cycles-management/" target="_blank" rel="noreferrer">Cycles ledger documentation</a><a class="text-gray-400 underline" href="https://github.com/dfinity/cksol" target="_blank" rel="noreferrer">Official ckSOL documentation</a></div>
+  <div class="mt-6 flex flex-wrap items-center gap-4 text-sm">{#if selectedTab === 'redeem'}<button class="text-gray-300 underline" disabled={busy} onclick={refresh}>Refresh balance and minter terms</button>{/if}{#if selectedTab === 'redeem' && activeCollateral?.status === 'Active'}<a class="text-emerald-400 underline" href="/?collateral={CANISTER_IDS.CKSOL_LEDGER}">Borrow icUSD with ckSOL</a>{/if}<a class="text-gray-400 underline" href="https://github.com/dfinity/cksol" target="_blank" rel="noreferrer">Official ckSOL documentation</a></div>
 </main>

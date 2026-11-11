@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
+	import { createCksolReadPolling, type CksolReadPolling } from '$lib/utils/cksolReadPolling';
 	import type { Principal } from '@dfinity/principal';
 	import { get } from 'svelte/store';
 	import { auth } from '$lib/services/auth';
@@ -19,6 +20,9 @@
 		type CksolIcpIntent
 	} from '$lib/services/cksolIcpPayment';
 	export let owner: Principal;
+	export let compact = false;
+	export let pollingActive = true;
+	export let onQuote: (quote: CksolIcpQuote | null) => void = () => {};
 	export let canMint = false;
 	export let blocked = false;
 	export let onReady: (ready: boolean) => void = () => {};
@@ -34,7 +38,10 @@
 		unavailable = '',
 		damaged = false;
 	let candidateBlock = '', recoveryNotice = '';
-	let timer: ReturnType<typeof setInterval>;
+	let polling: CksolReadPolling | null = null;
+	let refreshing = false, refreshGeneration = 0;
+	$: if (polling) { pollingActive; pending; busy; polling.sync(); }
+	export async function checkAgain() { if (busy) return; await (polling ? polling.checkAgain() : refresh()); }
 	const icp = (amount: bigint) =>
 		`${amount / 100_000_000n}.${(amount % 100_000_000n).toString().padStart(8, '0')} ICP`;
 	$: phase = payment?.receipt?.phase ?? payment?.phase;
@@ -89,7 +96,10 @@
 									? 'Checking the existing payment. Do not approve another deposit while its result is uncertain.'
 									: '';
 	async function refresh() {
-		if (!alive || busy) return;
+		if (!alive || busy || refreshing) return;
+		const request = ++refreshGeneration;
+		const currentRead = () => alive && !busy && request === refreshGeneration;
+		refreshing = true;
 		try {
 			if (!navigator.locks)
 				throw new Error(
@@ -103,19 +113,19 @@
 						? recoverCksolIcpPayment(owner, localStorage)
 						: loadCksolIcpPayment(localStorage, owner.toText())
 			);
-			if (!alive) return;
+			if (!currentRead()) return;
 			payment = recovered;
 			if (!candidateBlock && payment?.fundingCandidateBlock) candidateBlock = payment.fundingCandidateBlock;
 			if (payment?.receipt) onReceipt(payment.receipt);
 			const q = await quoteCksolIcpPayment(owner, get(auth).walletType ?? 'unknown');
-			if (alive) {
-				quote = q;
+			if (currentRead()) {
+				quote = q; onQuote(q);
 				unavailable = '';
 			}
 		} catch (e) {
-			if (alive) {
+			if (currentRead()) {
 				unavailable = String(e);
-				quote = null;
+				quote = null; onQuote(null);
 				try {
 					payment = loadCksolIcpPayment(localStorage, owner.toText());
 				} catch {
@@ -125,11 +135,13 @@
 				}
 			}
 		} finally {
-			if (alive) loading = false;
+			if (alive) { refreshing = false; if (request === refreshGeneration) loading = false; }
+			await tick(); polling?.sync();
 		}
 	}
 	async function mint() {
 		if (!enabled) return;
+		refreshGeneration++;
 		busy = true;
 		onBusy(true);
 		error = '';
@@ -176,6 +188,7 @@
 	async function verifyFunding() {
 		if (busy || loading || damaged || !fundingHeld || !validCandidate || !payment) return;
 		const held = payment, block = candidateBlock;
+		refreshGeneration++;
 		busy = true; onBusy(true); error = ''; recoveryNotice = '';
 		let action: ReturnType<typeof beginCksolOisyAction> | null = null;
 		try {
@@ -199,14 +212,16 @@
 		}
 	}
 	onMount(() => {
+		polling = createCksolReadPolling({ read: async () => { await refresh(); await tick(); }, active: () => !busy && (pollingActive || pending), fingerprint: () => [payment?.sequence, phase, payment?.receipt?.deposit_id?.[0], payment?.receipt?.refund_block?.[0], quote?.balance, reserve].join('|'), visible: () => document.visibilityState !== 'hidden' });
 		void refresh();
-		timer = setInterval(() => {
-			void refresh();
-		}, 15_000);
+		document.addEventListener('visibilitychange', visibilityChanged);
 	});
+	function visibilityChanged() { if (document.visibilityState === 'hidden') polling?.sync(); else if (pollingActive || pending) void polling?.checkAgain(); }
 	onDestroy(() => {
 		alive = false;
-		if (timer) clearInterval(timer);
+		polling?.destroy();
+		document.removeEventListener('visibilitychange', visibilityChanged);
+		onQuote(null);
 		onReady(false);
 		onBusy(false);
 	});
@@ -216,7 +231,7 @@
 	class="mt-5 space-y-3 rounded-xl border border-emerald-900 bg-emerald-950/20 p-4"
 	aria-label="ICP processing payment"
 >
-		<h3 class="font-semibold">{interrupted ? 'ICP processing recovery' : 'Pay processing costs with ICP'}</h3>
+	{#if interrupted || !compact}<h3 class="font-semibold">{interrupted ? 'ICP processing recovery' : 'Pay processing costs with ICP'}</h3>{/if}
 	{#if interrupted}
 		<div role="status" class="space-y-2 text-sm text-amber-300">
 			<h4 class="font-semibold">Processing interrupted; SOL outcome unknown</h4>
@@ -233,7 +248,7 @@
 					more SOL. Keep payment #{payment?.sequence} and contact support to reconcile the original deposit.
 				</p>
 		</div>
-	{:else}
+	{:else if !compact}
 			<p class="text-sm text-gray-300">
 				Rumi supplies the cycles needed to process your SOL. You approve a maximum ICP deposit, and
 				unused ICP is returned automatically when the processing charge is known.
@@ -243,6 +258,8 @@
 				fees are additional. A failed processing attempt can still incur these costs.
 			</p>
 	{/if}
+	<details open={!compact} class="text-sm">
+		<summary class="cursor-pointer">Review processing costs and availability</summary>
 	{#if quote && !interrupted}
 		<dl class="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
 			<div>
@@ -292,6 +309,7 @@
 	{:else if !interrupted}<p role="status" class="text-sm text-amber-300">
 			ICP-paid processing is unavailable. Do not send SOL for a new mint. {unavailable}
 		</p>{/if}
+	</details>
 	{#if message}<p role="status" class="text-sm text-gray-300">{message}</p>{/if}
 		{#if recoveryNotice}<p role="status" class="text-sm text-emerald-300">{recoveryNotice}</p>{/if}
 		{#if fundingHeld}
