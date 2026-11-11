@@ -286,3 +286,14 @@ describe('bounded ICP receipt checks', () => {
     expect(fx.submit).not.toHaveBeenCalled(); vi.useRealTimers();
   });
 });
+
+describe('unavailable receipt is not settlement proof', () => {
+  it('keeps retrying a failed authoritative read even without a local journal', async () => {
+    vi.useFakeTimers();fx.recover.mockRejectedValue(new Error('receipt endpoint unavailable'));fx.load.mockReturnValue(null);
+    const active=vi.fn();render({pollingActive:false,onActive:active});await settle();
+    expect(active).toHaveBeenLastCalledWith(true);
+    const reads=fx.recover.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(15_000);await settle();expect(fx.recover.mock.calls.length).toBeGreaterThan(reads);
+    expect(fx.submit).not.toHaveBeenCalled();vi.useRealTimers();
+  });
+});

@@ -435,3 +435,16 @@ describe('terminal balance read isolation', () => {
     expect(fx.submitPaid).toHaveBeenCalledOnce();
   });
 });
+
+describe('mint completion with unavailable ICP payment status', () => {
+  it('does not stop payment checks when no local receipt can establish settlement', async () => {
+    vi.useFakeTimers();fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.attempt.mockResolvedValue([{status:{Queued:32n}}]);fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});fx.solBalance.mockResolvedValue(890_880n);
+    fx.icpRecover.mockRejectedValue(new Error('payment status unavailable'));fx.icpLoad.mockReturnValue(null);fx.recoverPaid.mockResolvedValue(null);
+    instance=mount(Page,{target:host});await settle();
+    expect(host.textContent).toContain('processing payment or refund is still pending');
+    const reads=fx.icpRecover.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(15_000);await settle();expect(fx.icpRecover.mock.calls.length).toBeGreaterThan(reads);
+    expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+});

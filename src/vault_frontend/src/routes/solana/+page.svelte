@@ -423,6 +423,8 @@
           {#if complete && !newDeposit && !fundsReceived}
             <p class="mt-3 text-sm text-emerald-300">Your previous deposit is complete. You do not need to send or mint it again.</p>
             <button class="mt-3 rounded-lg border border-emerald-600 px-3 py-2 text-sm" disabled={busy || icpBusy} onclick={startAnotherDeposit}>Start another deposit</button>
+          {:else if depositStatus?.success && (pendingPayment || icpPending)}
+            <p class="mt-3 text-sm text-amber-300">The SOL mint is complete. Wait for the existing processing payment or refund to finish; do not send or pay again.</p>
           {:else}
             <p class="mt-3 text-sm text-gray-300">Send SOL to this account’s reusable deposit address. If you already sent it, check detection below instead of sending again.</p>
           {/if}
@@ -434,6 +436,7 @@
           <p class="mt-3 text-sm text-gray-400">Minimum address balance: {info ? formatSol(BigInt(info.minimum_deposit_amount)) : 'Loading…'} SOL. SOL network fees and any first-deposit rent reserve reduce the final minted amount.</p>
           <div class="mt-4 rounded-lg bg-gray-800 p-3 text-sm" aria-live="polite">
             {#if blockingLegacy || depositBlocked}<p class="text-amber-300">Deposit needs attention. Its outcome is uncertain; keep the receipt and contact support before another payment.</p>
+            {:else if depositStatus?.success && (pendingPayment || icpPending)}<p>The mint is verified. Checking the existing processing payment or refund; no new deposit is needed.</p>
             {:else if minterPending}<p>{depositStatus?.label ?? 'Checking your submitted deposit'} — SOL processing is already underway. Do not send or pay again.</p>
             {:else if balanceUnavailable}<p class="text-amber-300">SOL balance checks are temporarily unavailable. If you already sent SOL here, the mint action can ask the official minter to verify it. Detection has not confirmed a new deposit.</p>
             {:else if fundsReceived}<p class="font-semibold text-emerald-300">{formatSol(solBalance!)} SOL received</p><p class="mt-1">Next: use the mint action in step 3. It only enables when processing and previous-request checks permit.</p>

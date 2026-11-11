@@ -38,22 +38,23 @@
 		unavailable = '',
 		damaged = false;
 	let candidateBlock = '', recoveryNotice = '';
+	let receiptUnknown = false;
 	let polling: CksolReadPolling | null = null;
 	let refreshing = false, refreshGeneration = 0;
-	$: if (polling) { pollingActive; pending; busy; polling.sync(); }
+	$: if (polling) { pollingActive; pending; receiptUnknown; busy; polling.sync(); }
 	export async function checkAgain() { if (busy) return; await (polling ? polling.checkAgain() : refresh()); }
 	const icp = (amount: bigint) =>
 		`${amount / 100_000_000n}.${(amount % 100_000_000n).toString().padStart(8, '0')} ICP`;
 	$: phase = payment?.receipt?.phase ?? payment?.phase;
 	$: interrupted = cksolIcpNeedsReconciliation(payment?.receipt);
 	$: pending = interrupted || !icpPaymentSettled(payment);
-	$: onActive(pending || damaged);
+	$: onActive(pending || damaged || receiptUnknown);
 	$: enough = !!quote && quote.balance >= quote.total;
 	$: reserve =
 		!!quote &&
 		quote.terms.available &&
 		BigInt(quote.terms.reserve_available_cycles) >= BigInt(quote.terms.attached_cycles);
-	$: onReady(!blocked && !damaged && !pending && enough && reserve && !unavailable);
+	$: onReady(!blocked && !damaged && !receiptUnknown && !pending && enough && reserve && !unavailable);
 	$: checkingRefund = ['RefundReady', 'RefundPending', 'RefundUnknown'].includes(phase ?? '');
 	$: fundingHeld = ['FundingPending', 'FundingUnknown'].includes(phase ?? '') && !payment?.receipt?.funding_block?.length;
 	$: validCandidate = /^(0|[1-9][0-9]{0,19})$/.test(candidateBlock) && BigInt(candidateBlock) <= (1n << 64n) - 1n;
@@ -76,6 +77,7 @@
 		!busy &&
 		!loading &&
 		!damaged &&
+		!receiptUnknown &&
 		(checkingRefund || (!blocked && (actionable || (!pending && enough && reserve && canMint))));
 	$: message =
 		phase === 'Complete'
@@ -100,6 +102,7 @@
 		const request = ++refreshGeneration;
 		const currentRead = () => alive && !busy && request === refreshGeneration;
 		refreshing = true;
+		let checkedReceipt = false;
 		try {
 			if (!navigator.locks)
 				throw new Error(
@@ -108,12 +111,15 @@
 			const recovered = await navigator.locks.request(
 				cksolPaymentKey(owner.toText()),
 				{ ifAvailable: true },
-				async (lock) =>
-					lock
-						? recoverCksolIcpPayment(owner, localStorage)
-						: loadCksolIcpPayment(localStorage, owner.toText())
+				async (lock) => {
+					if (!lock) return loadCksolIcpPayment(localStorage, owner.toText());
+					const result = await recoverCksolIcpPayment(owner, localStorage);
+					checkedReceipt = true;
+					return result;
+				}
 			);
 			if (!currentRead()) return;
+			receiptUnknown = !checkedReceipt;
 			payment = recovered;
 			if (!candidateBlock && payment?.fundingCandidateBlock) candidateBlock = payment.fundingCandidateBlock;
 			if (payment?.receipt) onReceipt(payment.receipt);
@@ -124,6 +130,7 @@
 			}
 		} catch (e) {
 			if (currentRead()) {
+				if (!checkedReceipt) receiptUnknown = true;
 				unavailable = String(e);
 				quote = null; onQuote(null);
 				try {
@@ -212,11 +219,11 @@
 		}
 	}
 	onMount(() => {
-		polling = createCksolReadPolling({ read: async () => { await refresh(); await tick(); }, active: () => !busy && (pollingActive || pending), fingerprint: () => [payment?.sequence, phase, payment?.receipt?.deposit_id?.[0], payment?.receipt?.refund_block?.[0], quote?.balance, reserve].join('|'), visible: () => document.visibilityState !== 'hidden' });
+		polling = createCksolReadPolling({ read: async () => { await refresh(); await tick(); }, active: () => !busy && (pollingActive || pending || receiptUnknown), fingerprint: () => [payment?.sequence, phase, payment?.receipt?.deposit_id?.[0], payment?.receipt?.refund_block?.[0], quote?.balance, reserve, receiptUnknown].join('|'), visible: () => document.visibilityState !== 'hidden' });
 		void refresh();
 		document.addEventListener('visibilitychange', visibilityChanged);
 	});
-	function visibilityChanged() { if (document.visibilityState === 'hidden') polling?.sync(); else if (pollingActive || pending) void polling?.checkAgain(); }
+	function visibilityChanged() { if (document.visibilityState === 'hidden') polling?.sync(); else if (pollingActive || pending || receiptUnknown) void polling?.checkAgain(); }
 	onDestroy(() => {
 		alive = false;
 		polling?.destroy();
@@ -310,6 +317,7 @@
 			ICP-paid processing is unavailable. Do not send SOL for a new mint. {unavailable}
 		</p>{/if}
 	</details>
+	{#if receiptUnknown}<p role="status" class="text-sm text-amber-300">Processing payment status is unavailable. We keep checking the existing request; do not pay again. Select Check again to retry now.</p>{/if}
 	{#if message}<p role="status" class="text-sm text-gray-300">{message}</p>{/if}
 		{#if recoveryNotice}<p role="status" class="text-sm text-emerald-300">{recoveryNotice}</p>{/if}
 		{#if fundingHeld}
