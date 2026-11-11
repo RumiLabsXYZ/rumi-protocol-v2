@@ -480,4 +480,120 @@ fn confirm_xlm_deposit_success_replay_and_disagreement() {
     let v2 = vaults_of(&env, developer());
     assert_eq!(v2[0].borrowed_icusd_amount, borrow_amount, "debt unchanged");
     assert_eq!(bal(developer()), bal_mid, "icUSD balance unchanged");
+
+    // (f) REPAY through the generic `repay_to_vault` route (no XLM guard on it;
+    // the backend is the icUSD minting account, so the transfer_from pull of
+    // icUSD into the backend account is a burn).
+    let total_supply = || -> u64 {
+        match env
+            .pic
+            .query_call(ledger, Principal::anonymous(), "icrc1_total_supply", Encode!().unwrap())
+            .unwrap()
+        {
+            WasmResult::Reply(b) => {
+                let n: Nat = decode_one(&b).unwrap();
+                n.0.try_into().unwrap()
+            }
+            WasmResult::Reject(m) => panic!("{m}"),
+        }
+    };
+    let ledger_fee: u64 = 10_000;
+    // Interest accrues on the vault between calls, so debt is checked against a
+    // small bounded tolerance (0.01 icUSD) instead of exact equality.
+    let tol: u64 = 1_000_000;
+    let outsider = Principal::from_slice(&[0xAB, 0xCD, 0x01]);
+    let repay_amount: u64 = 2 * 100_000_000;
+
+    // Owner approves the backend to pull the repay amount (approve fee is paid
+    // here, so snapshot balance/supply AFTER the approve).
+    let approve_args = icrc_ledger_types::icrc2::approve::ApproveArgs {
+        from_subaccount: None,
+        spender: Account { owner: env.backend, subaccount: None },
+        amount: Nat::from(repay_amount + ledger_fee),
+        expected_allowance: None,
+        expires_at: None,
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+    let ap: Result<Nat, candid::Reserved> = match env
+        .pic
+        .update_call(ledger, developer(), "icrc2_approve", Encode!(&approve_args).unwrap())
+        .unwrap()
+    {
+        WasmResult::Reply(b) => decode_one(&b).unwrap(),
+        WasmResult::Reject(m) => panic!("icrc2_approve rejected: {m}"),
+    };
+    assert!(ap.is_ok(), "icrc2_approve must succeed");
+
+    let debt_of = || vaults_of(&env, developer())[0].borrowed_icusd_amount;
+    let assert_vault_identity = || {
+        let v = vaults_of(&env, developer());
+        assert_eq!(v.len(), 1, "still exactly one vault");
+        assert_eq!(v[0].vault_id, env.vault_id);
+        assert_eq!(v[0].owner, developer(), "owner unchanged");
+        assert_eq!(v[0].collateral_type, xlm, "collateral_type unchanged");
+        assert_eq!(v[0].collateral_amount, 989_990_000, "collateral_amount unchanged");
+    };
+    let repay_call = |sender: Principal, amount: u64| -> Result<candid::Reserved, candid::Reserved> {
+        decode_one(&call(
+            sender,
+            "repay_to_vault",
+            Encode!(&VaultArg { vault_id: env.vault_id, amount }).unwrap(),
+        ))
+        .unwrap()
+    };
+
+    // (f1) Outsider repay is rejected (CallerNotOwner); nothing mutates.
+    let debt_pre = debt_of();
+    let owner_bal_pre = bal(developer());
+    let outsider_bal_pre = bal(outsider);
+    let supply_pre = total_supply();
+    assert!(repay_call(outsider, repay_amount).is_err(), "outsider repay must be rejected");
+    let debt_post = debt_of();
+    // Interest accrual runs before the owner check, so allow a tiny bounded rise.
+    assert!(
+        debt_post >= debt_pre && debt_post <= debt_pre + tol,
+        "outsider repay must not reduce debt: {debt_pre} -> {debt_post}"
+    );
+    assert_eq!(bal(developer()), owner_bal_pre, "owner balance unchanged by outsider");
+    assert_eq!(bal(outsider), outsider_bal_pre, "outsider balance unchanged");
+    assert_eq!(total_supply(), supply_pre, "supply unchanged by rejected outsider repay");
+    assert_vault_identity();
+
+    // (f2) Invalid repay: 0 icUSD is below min_icusd_amount (0.1) -> AmountTooLow.
+    assert!(repay_call(developer(), 0).is_err(), "zero repay must be rejected");
+    let debt_post2 = debt_of();
+    assert!(
+        debt_post2 >= debt_post && debt_post2 <= debt_post + tol,
+        "zero repay must not change debt: {debt_post} -> {debt_post2}"
+    );
+    assert_eq!(bal(developer()), owner_bal_pre, "owner balance unchanged by zero repay");
+    assert_eq!(total_supply(), supply_pre, "supply unchanged by zero repay");
+    assert_vault_identity();
+
+    // (f3) Owner partial repay of 2 icUSD (3 icUSD remains, above min_vault_debt
+    // and outside the 1% full-repay dust window).
+    let owner_bal_before = bal(developer());
+    let supply_before = total_supply();
+    let debt_before = debt_of();
+    assert!(repay_call(developer(), repay_amount).is_ok(), "owner partial repay must succeed");
+    let owner_debit = owner_bal_before - bal(developer());
+    assert!(
+        owner_debit >= repay_amount && owner_debit <= repay_amount + ledger_fee,
+        "owner debited the repaid amount (burn; at most one ledger fee extra): {owner_debit}"
+    );
+    let supply_drop = supply_before - total_supply();
+    assert!(
+        supply_drop >= repay_amount && supply_drop <= repay_amount + ledger_fee,
+        "icUSD total supply drops by the burned repay: {supply_drop}"
+    );
+    let debt_after = debt_of();
+    assert!(
+        debt_after + repay_amount >= debt_before && debt_after + repay_amount <= debt_before + tol,
+        "debt falls by the repaid amount (plus bounded interest): {debt_before} -> {debt_after}"
+    );
+    assert!(debt_after >= 3 * 100_000_000 && debt_after <= 3 * 100_000_000 + tol);
+    assert_eq!(bal(outsider), outsider_bal_pre, "outsider balance still unchanged");
+    assert_vault_identity();
 }
