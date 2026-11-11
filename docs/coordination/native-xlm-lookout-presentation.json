@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production guards unchanged. Mocked PocketIC proves on one vault: verified deposit, test-only borrow, repay, and withdrawal recorded as a durable XLM claim (approval answered; b6874896 PASS 2026-11-11, receipt 4db74cac). Claims are not settled, signed or paid; nothing ran live. Backlog: test-only close-to-claim, source only.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests now show a deposit can borrow, repay and request a withdrawal, which is recorded but not yet paid out. Closing a vault is next on the list; Rob does not need to act now.",
+  "summary": "XLM remains Frozen; production guards unchanged. Mocked PocketIC proves deposit, test-only borrow, repay and partial withdrawal to a durable claim (PASS, receipt 4db74cac). Test-only full withdrawal to claim, vault kept open at zero collateral like XRP, is source-complete and reviewed but unbuilt (0aa0e623); its focused check needs a fresh admission. No settlement, payout or live proof.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests show deposit, borrow, repay and partial withdrawal working; the code to withdraw everything is written and reviewed but not yet tested. Testing it needs one more local build slot; Rob does not need to act now.",
   "glossary": [
     {
       "term": "Stellar",
