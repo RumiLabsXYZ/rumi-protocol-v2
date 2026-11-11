@@ -15,10 +15,9 @@ modules/settings/controllers and both permissions unchanged; ckSOL and all recov
 state retained. [Corrective result](../operations/oisy-reconnect-frontend-result-20261111.md).
 The prior1794386914589 publication and failed owner acceptance stay recorded in
 [its historical receipt](../operations/oisy-cksol-frontend-publication-result-20261111.md).
-SEC14 now waits for actual owner accounts-only diagnostic/acceptance under Ellis;
-the read-only button is available before a swap attempt. Authenticated matching,
-actual swap success and prior allowance/history remain unverified. No financial
-retry, wallet operation, broad review or repeat build is queued. Existing financial
+SEC14 is Done based on Rob’s direct account-match and successful-swap reports;
+independent ledger receipt/finality, prior allowance and all-route compatibility
+are not inferred. Optional diagnostic relocation stays deferred. Existing financial
 and reserve holds remain; Vault51 corrective backend is separately deployed.
 
 Scoped Cody/Mara/Thayer coordination messages were delivered under the same
@@ -29,6 +28,19 @@ remained clean and the test Wasm hash was retained. Mara and Cody independently
 accepted logs/receipts and verified all owned process groups empty; local slot
 released. Step3 is a production-target cargo check, not a production Wasm build.
 No retry, CI, production installation or financial action was included.
+
+## Reopened SEC12 recovery navigation — November 11
+
+Ellis owns the customer case/source; Dorian owns the single frontend release.
+Rob directly asked to fix the recurrence and make recovery clear. Firstsource
+cbcfdabc/codeef5b6506 built once in17.84seconds,740files frozen, native0 and
+owned closure. Before any publication, Ellis reproduced Review/background-read
+coordination failure that can hide recovery controls. Candidatef48bf8d6 is HELD;
+no asset or financial write was dispatched. Corrected source/regression acceptance
+and a fresh scoped build allocation precede the replacement candidate. The deployed
+1794415826220 OISY/ckSOL software is unchanged; actual customer request phase and
+outcome remain unknown. No customer retry, storage clear, cancellation or wallet
+action is inferred. [Held packet](../operations/sec12-recurrence-frontend-publication-20261111.md).
 
 ## Release and operations queue
 

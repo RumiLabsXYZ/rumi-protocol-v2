@@ -1,5 +1,13 @@
 # Saved-request recovery navigation — frontend release, November 11
 
+**HELD — do not publish this first candidate.** After its build, Ellis reproduced
+a concrete race: Review during an in-flight same-session background status read
+starts another getRecovery, hits the Web Lock as “Another tab”, and fences out
+the first read's success. Recovery controls can remain unavailable. The narrow
+status-read coordination correction is in progress. This first740-file artifact
+set is preserved; no asset publication write or financial action was dispatched.
+A separately pinned corrected source/build will supersede this preparation.
+
 Dorian owns one production frontend build and additive publication; Ellis owns
 source/case acceptance and independent artifact/live checks. No customer wallet,
 backend, reserve or financial action is included.
