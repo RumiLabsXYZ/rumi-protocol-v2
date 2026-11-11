@@ -3,9 +3,9 @@
     {
       "id": "oisy-stable-swap-owner",
       "title": "Repair OISY stablecoin swap signer ownership",
-      "status": "ready",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Software is deployed and independently served-byte/inventory verified. Rob may refresh/reconnect the intended OISY account and review prior attempt/allowance history before a deliberate new swap. Actual wallet success remains unverified; agents do not sign, replay or transact.",
+      "nextAction": "Dorian performs one corrective frontend build and exact additive artifact/publication checks for accepted80ae6ecc/handoff606eb896; Ellis independently verifies artifacts and served output before ready-to-try notice.91tests/two reviews/mockedUI pass. Actual user account/earlier allowance remain unknown; no financialretry or owneradoption.",
       "cardIds": [
         "SEC-14"
       ]

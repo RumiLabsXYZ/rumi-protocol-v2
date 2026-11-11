@@ -28,3 +28,7 @@ The direct OISY stablecoin swap repair and clearer ckSOL minting page are now de
 No wallet signature, approval, swap, mint, transfer, cancellation, storage clear or replay was executed by this verification. A real OISY swap remains an owner-authorized action: refresh the app, reconnect the intended account and review prior attempt/approval history before a deliberate new swap. Customer saved-request recovery/borrowing acceptance remains separately unverified. Backend correction, reserve activation and financial holds remain unchanged.
 
 Routine worktree pressure cleanup found zero eligible removals and removed nothing. All dirty, active, locked and unmerged worktrees were preserved.
+
+## Subsequent owner acceptance failure
+
+After these successful publication-byte/preservation checks, Rob reported the swap still failed after disconnect, hard refresh and reconnect. The exact failed local-versus-remote branch and prior allowance remain unknown. This receipt remains valid evidence of what was published; it is **not evidence that the usable swap was fixed**. SEC14 is reopened. Corrective source and acceptance are tracked in the [November11 handoff](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/606eb896f239bd65aef2cc8f83ce9be20f862352/docs/operations/oisy-owner-reconnect-source-20261111.md); no financial retry was performed.

@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-14",
-      "state": "Review",
+      "state": "In progress",
       "owner": "Ellis source/case; Dorian release",
       "scope": "Bind direct OISY 3pool swaps to the intended signer owner and wallet session",
-      "evidenceText": "DEPLOYED November11 under Rob approval of exact frontend-only packet57ba7206. Stage687 and activation688 completed with no reported retry or unknown write. Live version1794386914589 includes reviewed OISY6e6f32fa and ckSOL94ffd5d5. Source62tests/two independent reviews and single production build passed; existing typecheck30errors/66warnings unchanged. Ellis independently double-read4398keys/4592encodings, verified all3987 prior keys/properties/untouched encodings,411 newassets and7 approved content changes, and matched nine primary-domain root/version/swap/ckSOL/auth/route files to frozenmanifest. Public frontend/backend modules/controllers are unchanged; oldstage686 remains. Fresh action-owned signer/session checks preserve exact financial args and distinguish failed approval from failed swap after approval. Actual initiating state, prior allowance and successful live wallet swap remain unverified. Owner reviews prior history before deliberate retry; no signing/replay/backend/reserve/financial action was executed by verification.",
+      "evidenceText": "OWNER ACCEPTANCE FAILED on published1794386914589 after disconnect/hardrefresh/reconnect. Actual prior permissions/allowance/failedbranch remain unknown; no repeat-refresh or financialretry requested. Confirmed defect reproduced with installedOISYadapter: oldauth leavescache acrossreload, reconnectswrongsyntheticowner with0accountsRPC. Corrective code80ae6ecc/handoff606eb896 is pushed;91tests7suites, baseline30errors/66warnings, desktop390mockQA and two freshindependentreviewsPASS. It retires actualPNP session and positivelyverifies cacheabsence, fences actualwalletUIcleanup acrossreplacement/awaits, preservesjournals/unrelatedPlug and exactmoney/owner/sessionguards. Explicitaccounts-onlydiagnostic distinguisheslocalcheck fromexactremote502, noowneradoption/mutation. Realwalletstore/auth/PNPmanager plus installedadapter reloadintegration passes. Dorian advances solecorrectivefrontendartifact/release lane; backend730f5471 is independentlycurrent and compatible. Oldpublicationproof remains true; correctivebuild/livewalletproof pending. No signing/replay/reserve/financialaction.",
       "evidenceLinks": [
         {
           "title": "Accepted source, tests and submission boundary",
@@ -22,6 +22,10 @@
         {
           "title": "Independent live publication and preservation verification",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/oisy-cksol-independent-live-readback-20261111.md"
+        },
+        {
+          "title": "Corrective source, actual installed-connector regression and dual acceptance",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/606eb896f239bd65aef2cc8f83ce9be20f862352/docs/operations/oisy-owner-reconnect-source-20261111.md"
         }
       ]
     },
