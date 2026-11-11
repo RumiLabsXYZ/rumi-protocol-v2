@@ -22,6 +22,19 @@ inferred. Usable-flow incident work takes precedence over optional polish;
 Season2 remains the independent product priority and its Points-only release
 uses no frontend publisher slot.
 
+
+Next eligible shared heavy-build batch: Mara’s owner-inspected, local-only
+`f26c10d65ebf35636ad6bb89e3e47f3a35a31c2d` (116 test-only lines), in order:
+focused test Wasm → `xlm_confirm_pic` → production compile guard check. It remains
+unbuilt and NOT admitted while the immediately preceding swap reservation is
+pending final source acceptance/build. At 2026-11-11 08:44 UTC, host census showed
+zero heavy build processes and 104.5 GiB writable free space; swap source
+`6e6f32fa` was frozen with final reviews running. Recheck actual occupancy and
+headroom when the swap build closes, then admit one bounded XLM batch without
+concurrent heavy work or paid-CI expansion. This is ordinary queue ordering,
+not a new human approval gate. Preserve production Frozen and all release,
+activation and financial holds; no XLM test/deploy success is claimed.
+
 ## Release and operations queue
 
 | ID | State | Accountable owner | Scope | Evidence / next action |
