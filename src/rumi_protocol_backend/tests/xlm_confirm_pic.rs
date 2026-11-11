@@ -596,4 +596,74 @@ fn confirm_xlm_deposit_success_replay_and_disagreement() {
     assert!(debt_after >= 3 * 100_000_000 && debt_after <= 3 * 100_000_000 + tol);
     assert_eq!(bal(outsider), outsider_bal_pre, "outsider balance still unchanged");
     assert_vault_identity();
+
+    // (g) Test-only partial XLM withdrawal recorded as a durable claim.
+    #[derive(CandidType, Deserialize, Clone, Debug)]
+    struct XlmClaimTestView {
+        claim_id: u64,
+        vault_id: u64,
+        claimant: Principal,
+        gross_stroops: u64,
+        destination: String,
+        network_id: Vec<u8>,
+        reserved_fee_stroops: u64,
+    }
+    let dest = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ".to_string();
+    let withdraw_call = |sender: Principal, amount: u64, d: &str| -> Result<u64, ()> {
+        let r: Result<u64, candid::Reserved> = decode_one(&call(
+            sender,
+            "withdraw_xlm_collateral_to_claim",
+            encode_args((env.vault_id, amount, d.to_string())).unwrap(),
+        ))
+        .unwrap();
+        r.map_err(|_| ())
+    };
+    let claims_of = |who: Principal| -> Vec<XlmClaimTestView> {
+        match env
+            .pic
+            .query_call(env.backend, who, "get_my_xlm_claims", encode_args(()).unwrap())
+            .unwrap()
+        {
+            WasmResult::Reply(b) => decode_one(&b).unwrap(),
+            WasmResult::Reject(m) => panic!("get_my_xlm_claims rejected: {m}"),
+        }
+    };
+    let w_amount: u64 = 10 * 10_000_000; // 10 XLM
+    let owner_bal_g = bal(developer());
+    let supply_g = total_supply();
+
+    // (g1) Outsider withdraw rejected; no claim; vault unchanged.
+    assert!(withdraw_call(outsider, w_amount, &dest).is_err(), "outsider withdraw must be rejected");
+    assert!(claims_of(outsider).is_empty() && claims_of(developer()).is_empty(), "no claim after outsider");
+    assert_vault_identity();
+
+    // (g2) Withdrawing all collateral with debt outstanding breaks CR -> rejected.
+    assert!(withdraw_call(developer(), 989_990_000, &dest).is_err(), "CR-breaking withdraw must be rejected");
+    assert!(claims_of(developer()).is_empty(), "no claim after CR-breaking withdraw");
+    assert_vault_identity();
+
+    // (g3) Invalid (non-classic) destination rejected before any mutation.
+    assert!(withdraw_call(developer(), w_amount, "not-a-stellar-address").is_err(), "bad destination must be rejected");
+    assert!(claims_of(developer()).is_empty(), "no claim after bad destination");
+    assert_vault_identity();
+
+    // (g4) Owner partial withdraw of 10 XLM succeeds and records exactly one claim.
+    let claim_id = withdraw_call(developer(), w_amount, &dest).expect("owner partial XLM withdraw");
+    let v = vaults_of(&env, developer());
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].collateral_amount, 989_990_000 - w_amount, "collateral decreases by exactly the withdrawal");
+    assert_eq!(v[0].owner, developer(), "owner unchanged");
+    assert_eq!(v[0].collateral_type, xlm, "collateral_type unchanged");
+    let claims = claims_of(developer());
+    assert_eq!(claims.len(), 1, "exactly one claim");
+    assert_eq!(claims[0].claim_id, claim_id);
+    assert_eq!(claims[0].vault_id, env.vault_id);
+    assert_eq!(claims[0].claimant, developer());
+    assert_eq!(claims[0].gross_stroops, w_amount);
+    assert_eq!(claims[0].destination, dest);
+    assert_eq!(claims[0].reserved_fee_stroops, 10_000);
+    assert_eq!(claims[0].network_id.len(), 32);
+    assert!(claims_of(outsider).is_empty(), "outsider has no claim");
+    assert_eq!(bal(developer()), owner_bal_g, "no ICRC movement: owner balance unchanged");
+    assert_eq!(total_supply(), supply_g, "no ICRC movement: supply unchanged");
 }

@@ -4133,6 +4133,125 @@ pub(crate) fn record_xlm_claim(
     Ok(claim_id)
 }
 
+/// Test-build only: partial withdrawal of native-XLM collateral recorded as a
+/// durable `XlmClaim` (no ICRC transfer, no signing, no payout). Mirrors the
+/// native-XRP branch of `withdraw_partial_collateral` (reduce vault collateral
+/// via `record_partial_collateral_withdrawn`, then record the claim), with the
+/// same owner, min-deposit, collateral-status and min-CR headroom checks.
+/// The claim is recorded BEFORE the vault is debited so a rejected destination
+/// or network leaves state untouched. The 10_000-stroop fee budget was already
+/// held back uncredited at first funding, so it is reserved on the claim only.
+#[cfg(feature = "test_endpoints")]
+pub fn withdraw_xlm_collateral_to_claim(
+    vault_id: u64,
+    amount: u64,
+    destination: String,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_xlm_claim_{}", vault_id))?;
+    let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
+    let now = ic_cdk::api::time();
+    mutate_state(|s| s.accrue_single_vault(vault_id, now));
+
+    let xlm_ct = crate::state::xlm_collateral_principal();
+    let (vault, price, decimals, min_deposit, status, min_ratio) = read_state(|s| {
+        let vault = s
+            .vault_id_to_vaults
+            .get(&vault_id)
+            .cloned()
+            .ok_or_else(|| "Vault not found. Please check the vault ID.".to_string())?;
+        if vault.collateral_type != xlm_ct {
+            return Err("Vault is not native-XLM collateral.".to_string());
+        }
+        let config = s
+            .get_collateral_config(&xlm_ct)
+            .ok_or_else(|| "Collateral type not configured.".to_string())?;
+        let price = s
+            .get_collateral_price_decimal(&xlm_ct)
+            .ok_or_else(|| "No price available for collateral.".to_string())?;
+        let base = s.get_min_collateral_ratio_for(&xlm_ct);
+        let min_ratio = if s.mode == Mode::Recovery {
+            let recovery_cr = s.get_recovery_cr_for(&xlm_ct);
+            if recovery_cr > base { recovery_cr } else { base }
+        } else {
+            base
+        };
+        Ok((
+            vault,
+            price,
+            config.decimals,
+            config.min_collateral_deposit,
+            config.status,
+            min_ratio,
+        ))
+    })
+    .map_err(ProtocolError::GenericError)?;
+
+    if caller != vault.owner {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    if status != crate::state::CollateralStatus::Active || !status.allows_withdraw() {
+        return Err(ProtocolError::GenericError(
+            "Withdrawal is not allowed for this collateral type.".to_string(),
+        ));
+    }
+    require_vault_not_processing(&vault)?;
+    let withdraw_amount = ICP::new(amount);
+    if min_deposit > 0 && withdraw_amount < ICP::new(min_deposit) {
+        return Err(ProtocolError::AmountTooLow { minimum_amount: min_deposit });
+    }
+    let vault_collateral = ICP::from(vault.collateral_amount);
+    if vault_collateral == ICP::new(0) {
+        return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
+    }
+    // No dust forgiveness here: any debt must stay covered at the minimum ratio.
+    let max_withdrawable = if vault.borrowed_icusd_amount == ICUSD::new(0) {
+        vault_collateral
+    } else {
+        let min_collateral_value: ICUSD = vault.borrowed_icusd_amount * min_ratio;
+        let min_collateral = ICP::from(crate::numeric::icusd_to_collateral_amount(
+            min_collateral_value,
+            price,
+            decimals,
+        ));
+        if vault_collateral <= min_collateral {
+            return Err(ProtocolError::GenericError(
+                "No excess collateral to withdraw. Your vault is already at or below the minimum collateral ratio.".to_string(),
+            ));
+        }
+        vault_collateral - min_collateral
+    };
+    if withdraw_amount > max_withdrawable {
+        return Err(ProtocolError::GenericError(format!(
+            "Withdrawal amount exceeds maximum. Max withdrawable: {} (keeps CR above minimum).",
+            max_withdrawable
+        )));
+    }
+
+    let now_ns = ic_cdk::api::time();
+    mutate_state(|s| {
+        let network_id = crate::chains::stellar::config::selection_from_state(s)
+            .map_err(|reason| ProtocolError::GenericError(reason.to_string()))?
+            .network
+            .network_id();
+        // custody_owner/nonce = vault owner + vault id (the XLM derivation nonce).
+        let claim_id = record_xlm_claim(
+            s,
+            vault_id,
+            vault.owner,
+            vault_id,
+            caller,
+            amount,
+            destination,
+            network_id,
+            XLM_FIRST_FUNDING_FEE_BUDGET_STROOPS,
+            now_ns,
+        )?;
+        crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
+        Ok(claim_id)
+    })
+}
+
 /// P4: queue a collateral payout to `recipient`. ICRC collateral -> a
 /// PendingMarginTransfer (the ICRC transfer machinery pays it). Native-XRP -> an
 /// XrpClaim instead (settled later via settle_xrp_claim from the vault's custody

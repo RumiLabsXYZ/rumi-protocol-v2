@@ -13426,6 +13426,56 @@ async fn dev_register_xlm_collateral() -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Test-build only: slim view of an XLM claim owed to the caller.
+#[cfg(feature = "test_endpoints")]
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+struct XlmClaimTestView {
+    claim_id: u64,
+    vault_id: u64,
+    claimant: Principal,
+    gross_stroops: u64,
+    destination: String,
+    network_id: Vec<u8>,
+    reserved_fee_stroops: u64,
+}
+
+/// Test-build only: the caller's own XLM claims.
+#[cfg(feature = "test_endpoints")]
+#[candid_method(query)]
+#[query]
+fn get_my_xlm_claims() -> Vec<XlmClaimTestView> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.xlm_claims
+            .iter()
+            .filter(|(_, c)| c.claimant == caller)
+            .map(|(id, c)| XlmClaimTestView {
+                claim_id: *id,
+                vault_id: c.vault_id,
+                claimant: c.claimant,
+                gross_stroops: c.gross_stroops,
+                destination: c.destination.clone(),
+                network_id: c.network_id.to_vec(),
+                reserved_fee_stroops: c.reserved_fee_stroops,
+            })
+            .collect()
+    })
+}
+
+/// Test-build only: owner partial XLM withdrawal recorded as a durable claim.
+/// A separate endpoint because `withdraw_partial_collateral` takes no destination.
+#[cfg(feature = "test_endpoints")]
+#[candid_method(update)]
+#[update]
+async fn withdraw_xlm_collateral_to_claim(
+    vault_id: u64,
+    amount: u64,
+    destination: String,
+) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    rumi_protocol_backend::vault::withdraw_xlm_collateral_to_claim(vault_id, amount, destination)
+}
+
 #[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
