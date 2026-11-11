@@ -1,0 +1,15 @@
+{
+  "retainedStatePreserved": true,
+  "allOtherScopedComparisonsEqual": true,
+  "onlyPostInstallClaimDelta": "updated_at_ns",
+  "firstAutomaticReconciliationTimestampNs": "1794413895264700035",
+  "firstAutomaticReconciliationUtc": "2026-11-11T16:18:15.264700+00:00",
+  "prestopInterestRaceReconciledToStructurallyVerifiedStoppedSnapshot": true,
+  "claimStage": "ClaimConfirmed",
+  "claimError": null,
+  "settlementVerified": false,
+  "sweepVerified": false,
+  "adoptionCompleted": false,
+  "escrowBalanceE8s": "0",
+  "independentAdrianReadback": "Running exact approved module; same pending claim and first reconciliation timestamp; no settlement/sweep/adoption"
+}

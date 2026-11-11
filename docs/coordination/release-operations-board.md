@@ -3,43 +3,30 @@
 Accountable orchestrator: **Dorian**, reporting to Merritt. Established 2026-11-04.
 Lookout project ID: `rumi-release-operations`. This scoped lane owns portfolio items #13 and #15 and custodianship of parked #11. Existing release implementers, Cycle Sentinel cards CS-00 through CS-68, source branches and protected worktrees retain their ownership and history. No duplicate implementation team is created.
 
-## Frontend reservation — November 11, 2026
+## Frontend release and shared queue — November 11, 2026
 
-The next focused frontend production-build/preparation slot is reserved for
-Ellis's active OISY `/swap` signer-owner fix, composed with accepted ckSOL source
-`94ffd5d5` and Vault51 lineage `097bf775`. Ellis owns diagnosis/source/regressions;
-Dorian owns serial build, artifact/inventory preservation and the exact release
-packet. No wallet retry is required to finish source/mock checks tonight.
+Rob’s direct approval01a1cb4b-34a7-7300-b037-678fbcd3e739 resolved both exact
+packet57ba7206 decisions. The swap/ckSOL frontend is **published**, version
+1794386914589, batches687/688. Full stable inventory4398keys/4592encodings,
+all3987prior keys/properties/untouched encodings and300oldstage686keys preserved;
+413stage+9final+5primary checks PASS. Ellis independently verified inventory and
+9primary swap/ckSOL/auth/fallback readbacks. Modules/settings/permissions unchanged;
+no backend/wallet/financial action. [Durable release result](../operations/oisy-cksol-frontend-publication-result-20261111.md).
+Rob’s subsequent OISY acceptance FAILED at the new account-mismatch guard after
+reconnect/hard refresh; SEC14 remains an active usable-flow incident under Ellis,
+the sole browser observer. Preserve ckSOL/frozen assets; do not repeat the same
+build/publication or ask another refresh. Dorian has no ready corrective-source
+heavy reservation; publication proof remains true and prior allowance/history is
+unverified. A new evidence-backed correction needs its own source/artifact path.
 
-Frozen Vault51 artifacts, stage686 and its unexecuted entry-point activation
-remain preserved. The corrected backend packet097bf775 retains its separate
-approval hold. Do not make that backend correction an automatic prerequisite
-for an API-compatible frontend-only swap fix: verify current served backend
-compatibility and prepare the distinct exact frontend decision. A new composed
-bundle is not silently substituted under the old publication approval. No new
-deployment, signing, allowance, swap, customer retry or financial authority is
-inferred. Usable-flow incident work takes precedence over optional polish;
-Season2 remains the independent product priority and its Points-only release
-uses no frontend publisher slot.
-
-
-The reserved composed frontend build at d54ac7b7 / accepted code6e6f32fa
-closed PASS at2026-11-11 08:48:50 UTC, with mandatory auth/domain checks. All740
-files and411-new-key/seven-mutable-set plan passed independent artifact and
-served-baseline checks. The exact frontend-only publication remains held in
-[the concrete decision](../operations/oisy-cksol-frontend-publication-20261111.md);
-it does not install the separately held Vault51 backend correction.
-
-Mara's owner-inspected local-only f26c10d6 remains next eligible for focused test
-Wasm → xlm_confirm_pic → production compile guard check, but **no XLM admission
-was written or delivered**. A competing existing-host LOCAL reservation appeared
-during admission preflight; it was subsequently released. Cross-project scheduler
-coordination delivery was then rejected by automatic approval review for missing
-destination/payload authorization. Do not retry/relay that message or treat free
-capacity as an accepted grant. The exact scoped communication request is
-[prepared here](../operations/build-slot-coordination-permission-20261111.md).
-This is a tool communication hold, not a new implementation/test approval gate.
-Production Frozen/release/financial and paid-CI/concurrency boundaries remain.
+Scoped Cody/Mara/Thayer coordination messages were delivered under the same
+verified direct approval. Cody granted XLM allocationd29c94a8; Mara's sole runner
+started16:04:20Z and completed16:06:48Z. All three native commands exited0;
+xlm_confirm_pic ran exactly1test, passed with0failed/0ignored. Sourcef26c10d6
+remained clean and the test Wasm hash was retained. Mara and Cody independently
+accepted logs/receipts and verified all owned process groups empty; local slot
+released. Step3 is a production-target cargo check, not a production Wasm build.
+No retry, CI, production installation or financial action was included.
 
 ## Release and operations queue
 
@@ -51,7 +38,7 @@ Production Frozen/release/financial and paid-CI/concurrency boundaries remain.
 | ROPS-06 | Done | Dorian; original sunset/pool implementer | Integrate missing #606 pool admission checks | [PR623](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/623) merged as34cd6769048f88a224dd78fa8fa59b3230768cee at2026-11-05T04:19:09Z. Approvedheadf660f751 unchanged; [requiredCI41965537346](https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/41965537346) passed. All3 current-source focused tests passed; ownedgroups closed. Source integration complete only; no deployment or liquidation. ROPS05 remains separate. |
 | ROPS-07 | Done | Dorian integration; Ellis case; Miles source; Bram canonical publisher | SEC10 XRP customer source integration | [PR628](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/628) merged as5edd1ff1 at2026-11-06T09:31:28Z, head1d019794. [RequiredCI42193041195](https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/42193041195) passed20m6s; merged3Rustblobs match acceptedc02c4bff,6tests/bincheck reused. Interest/rounding clarified. CanonicalSEC10 publisher remains Bram; handoff retained, this card is integration-only. Source integration complete. Deployment and now-active SEC11 work are tracked separately in ROPS08; financial/customer actions remain held. |
 | ROPS-08 | Done | Dorian release; Miles source; Ellis case | Deploy XRP withdrawal and repeat-deposit repair | Both fixes deployed: backend controllerRunning exactuploadb81583ae, source0eff84c9; frontendversion1794099947058 served. All14focused+1canonical checks and production/backend/frontendauth builds passed; 7frontend source tests reused. Stopped drain/freshbackup18/9other snapshots preserved; all11 scopedreads+fixedconfig match. Full3384keys/3578encodings verified; all3078oldkeys/properties retained,306newkeys+7approvedmutablecontents;308stage+9activation+5primary servedchecks pass. Frontmodule/settings/auth unchanged. [Terminal evidence](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b78e8db9/docs/operations/sec11-live-release-20261107.md). Release acceptance complete; actualcustomerretry/message remains Ellis-owned and held. FuturebackendmustretainSEC11receiptmaps/privatejournal; olderwriterrollback prohibited. No financial/customer action. |
-| ROPS-09 | Review | Dorian release; Adrian source | Vault 51 deployed check held; exact correction decision | Rob approved9d02bea8; exact backend43bbbca9 is Running with Stopped/backup1a/other9/API/settings and retained state verified, including one old-module XRP projection reconciliation. Stage686 added300 assets; entry points remain unchanged. First10-second adoption check exposed raw-versus-public collateral guard defect and held before spend; escrow0, no adoption. Adrian correction312ebe03 has25 focused tests passing; corrected backend730f5471 build and397-method/Candid/gzip checks pass, reusing frontend740-file manifest. Next: Rob approves exact corrective backend bytes and same verified automatic financial scope in the [replacement decision](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/vault51-auto-icp-adoption/docs/operations/vault51-raw-collateral-fix-20261110.md#exact-replacement-decision--held); then finish the already approved frontend activation. [Live receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/vault51-auto-icp-adoption/docs/operations/vault51-live-release-20261110.md). No new team or broad audit; Season2 accounting higher priority. |
+| ROPS-09 | Waiting payout | Dorian release; Adrian source | Corrected Vault51 automatic adoption deployed | Rob approved original9d02bea8 and exact corrective097bf775. Corrected upload730f5471 is Running; stopped backup1b, archived oldest11 and other9snapshots/settings/controllers/API preserved. The active49-vault tree structurally verifies original raw collateral and debt/interest; pre-stop accrual race reconciled, no write replay. First automatic check at16:18:15Z passed corrected guard and reconciled existing request; ClaimConfirmed/no error, escrow0, no settlement/sweep/adoption. All unrelated retained projections/fixed config preserved; Adrian independently verified Running module and claim. Hourly checks now own eventual verified payout/sweep/same-vault ICP adoption; no manual financial action. Existing frontend1794386914589 unchanged; OISY incident remains Ellis-owned. [Corrective live receipt](../operations/vault51-corrective-live-release-20261111.md). |
 | ROPS-03 | Ready | Dorian | Reconcile stale Cycle Sentinel operation cards | Existing CS-66/CS-68 records leave signer-screen proof and proposal 17 activation unresolved; [#416](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/416) is open/unmerged and source-only. Acceptance: timestamped read-only current policy/proposal/status evidence, with stale versus current facts separated and old card owners preserved. Next: one bounded read-only inspection at the next operations allocation. No maintenance-now, proposal execution, activation, funding or controller changes. |
 | ROPS-04 | Ready | Dorian | Produce a small operational-cost baseline | Acceptance: observation date, available cycle-burn/runway coverage, gaps and concrete cost drivers; no fabricated zeroes or savings claims. Next: reuse current Sentinel telemetry and available existing billing evidence, label unavailable inputs, and recommend only evidence-supported upkeep. Lower priority than release closeout and the portfolio's recovery work. |
 | COMMS-01 | Paused | Dorian | Preserve communications, X workflow and introductory video | Rob parked portfolio item #11. Acceptance: retain existing drafts and workflow history without drafting, publishing, scheduling or restarting workers. Next: resume only if Rob changes the parking decision. Blocker owner: Rob; this is deliberate parking, not a technical failure. |

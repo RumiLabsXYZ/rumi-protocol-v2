@@ -1,0 +1,79 @@
+{
+  "checkedUtc": "2026-11-11T15:57:00.793699+00:00",
+  "source": "d54ac7b7235d27cf4aca52416a854d5cfab6240d",
+  "version": "1794386914589",
+  "stableDoubleRead": true,
+  "keys": 4398,
+  "encodings": 4592,
+  "priorKeysPreserved": 3987,
+  "newKeysVerified": 411,
+  "existingEncodingChangesVerified": 7,
+  "allOldPropertiesUntouchedEncodingsPreserved": true,
+  "primaryDomainReadbacks": [
+    {
+      "key": "/",
+      "encoding": "identity",
+      "sha256": "94a8f4b4f453511dab19c4888cd04cf6fc6e951538c0d03665e95404d87ac649",
+      "bytes": 1822,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/",
+      "encoding": "gzip",
+      "sha256": "f929936343f765cfdce1c8d4a05caa28e6abcadddcda4255c2c6d09fa5db3231",
+      "bytes": 650,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/version.json",
+      "encoding": "identity",
+      "sha256": "26fbde01878dd85bf856092600af43faa5f396045dc0cf7f727a55f1d56c79ef",
+      "bytes": 27,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/.well-known/ii-alternative-origins",
+      "encoding": "identity",
+      "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "bytes": 385,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/.well-known/ic-domains",
+      "encoding": "identity",
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "bytes": 58,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/chunks/DrsW40bG.js",
+      "encoding": "identity",
+      "sha256": "b2ab59b469e3077e1594405e65fbef1c1d0737063d2d2613a66da6df28c02917",
+      "bytes": 732631,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/nodes/55.BdQ1zfce.js",
+      "encoding": "identity",
+      "sha256": "f9ace34b91123680f645fdb913d7421f1717745435facf63db8c0999566d0d7b",
+      "bytes": 92341,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/swap",
+      "encoding": "identity",
+      "sha256": "94a8f4b4f453511dab19c4888cd04cf6fc6e951538c0d03665e95404d87ac649",
+      "bytes": 1822,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/solana",
+      "encoding": "identity",
+      "sha256": "94a8f4b4f453511dab19c4888cd04cf6fc6e951538c0d03665e95404d87ac649",
+      "bytes": 1822,
+      "matchesFrozenBuild": true
+    }
+  ],
+  "walletExecutionVerified": false,
+  "priorAllowanceVerified": false
+}

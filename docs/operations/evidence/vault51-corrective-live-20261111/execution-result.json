@@ -1,0 +1,138 @@
+{
+  "source": "312ebe036a7651365c293294bedc8cb3a6585179",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "fresh_snapshot_id": "000000000000001b0000000001f088fe0101",
+  "outcome": "installed-and-running",
+  "raw_guard_verified": true,
+  "local_hold_reconciled": true,
+  "completed": "2026-11-11T16:18:17.777181+00:00",
+  "old_module": "43bbbca98df29296a7dde2f134ce15db519bb745c53c1fcf442ef97b54223f09",
+  "new_module": "730f54713dca1938c40b661ef6bd6ddc23555d92ca4c8e1feca282e3a33f8cf9",
+  "settings_preserved": true,
+  "candidate_candid_matches": true,
+  "previous_api_compatible": true,
+  "other_nine_snapshots_preserved": true,
+  "steps": [
+    {
+      "name": "identity",
+      "start": "2026-11-11T16:13:42.724697+00:00",
+      "write": false,
+      "end": "2026-11-11T16:13:42.820196+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-prestop",
+      "start": "2026-11-11T16:13:42.820420+00:00",
+      "write": false,
+      "end": "2026-11-11T16:13:44.354747+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-prestop",
+      "start": "2026-11-11T16:13:44.355456+00:00",
+      "write": false,
+      "end": "2026-11-11T16:13:46.117126+00:00",
+      "exit": 0
+    },
+    {
+      "name": "stop",
+      "start": "2026-11-11T16:13:46.249488+00:00",
+      "write": true,
+      "end": "2026-11-11T16:13:48.290597+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-stopped",
+      "start": "2026-11-11T16:13:48.292501+00:00",
+      "write": false,
+      "end": "2026-11-11T16:13:50.030528+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-stopped",
+      "start": "2026-11-11T16:13:50.030982+00:00",
+      "write": false,
+      "end": "2026-11-11T16:13:51.756002+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-replace",
+      "start": "2026-11-11T16:13:51.756625+00:00",
+      "write": true,
+      "end": "2026-11-11T16:13:54.631655+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-after-replace",
+      "start": "2026-11-11T16:13:54.632140+00:00",
+      "write": false,
+      "end": "2026-11-11T16:13:56.367406+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-download",
+      "start": "2026-11-11T16:13:56.367749+00:00",
+      "write": false,
+      "end": "2026-11-11T16:14:16.152917+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-before-continuation",
+      "start": "2026-11-11T16:17:42.506176+00:00",
+      "write": false,
+      "end": "2026-11-11T16:17:44.326659+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-before-install",
+      "start": "2026-11-11T16:17:44.375995+00:00",
+      "write": false,
+      "end": "2026-11-11T16:17:46.111710+00:00",
+      "exit": 0
+    },
+    {
+      "name": "install",
+      "start": "2026-11-11T16:17:46.112185+00:00",
+      "write": true,
+      "end": "2026-11-11T16:18:08.411253+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-installed",
+      "start": "2026-11-11T16:18:08.411824+00:00",
+      "write": false,
+      "end": "2026-11-11T16:18:10.156139+00:00",
+      "exit": 0
+    },
+    {
+      "name": "candid-installed",
+      "start": "2026-11-11T16:18:10.156661+00:00",
+      "write": false,
+      "end": "2026-11-11T16:18:10.984901+00:00",
+      "exit": 0
+    },
+    {
+      "name": "start",
+      "start": "2026-11-11T16:18:10.985848+00:00",
+      "write": true,
+      "end": "2026-11-11T16:18:12.905593+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-running",
+      "start": "2026-11-11T16:18:12.906287+00:00",
+      "write": false,
+      "end": "2026-11-11T16:18:15.351481+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-final",
+      "start": "2026-11-11T16:18:15.352070+00:00",
+      "write": false,
+      "end": "2026-11-11T16:18:17.776486+00:00",
+      "exit": 0
+    }
+  ],
+  "frontendUnchanged": true,
+  "independentReadback": "Adrian direct controller status and canonical claim query matched exact Running module and pending reconciliation"
+}
