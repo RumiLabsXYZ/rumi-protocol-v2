@@ -3,9 +3,9 @@
     {
       "id": "oisy-stable-swap-owner",
       "title": "Repair OISY stablecoin swap signer ownership",
-      "status": "ready",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Rob reports matching signing and connected account identities after reconnecting with the corrective release. Await the result of his deliberate intended direct stablecoin swap through normal Swap; no repeat refresh requirement. Diagnostic is optional, relocation deferred. Prior allowance, original failure cause and successful swap remain unverified; no agent financial action or duplicate build.",
+      "nextAction": "Rob directly reports his intended swap worked perfectly after the corrective release and matching account check. Customer-reported acceptance is complete; no further diagnostic, retry or release is requested. Preserve current safeguards and evidence. Optional diagnostic relocation stays deferred. Do not infer all-route compatibility, independent ledger settlement or prior allowance status.",
       "cardIds": [
         "SEC-14"
       ]
