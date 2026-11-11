@@ -5,6 +5,7 @@ const fx = vi.hoisted(() => ({
 	click: false,
 	owner: '',
 	failOpen: false,
+	accountRows: null as null | { owner: string; subaccount?: string }[],
 	requests: [] as any[],
 	windows: new Map<string, any>()
 }));
@@ -38,7 +39,7 @@ vi.mock('@icp-sdk/signer/web', () => ({
 					queueMicrotask(() => {
 						const response =
 							request.method === 'icrc27_accounts'
-								? { result: { accounts: [{ owner: fx.owner }] } }
+								? { result: { accounts: fx.accountRows ?? [{ owner: fx.owner }] } }
 								: request.params?.sender !== fx.owner
 									? {
 											error: {
@@ -59,7 +60,8 @@ vi.mock('@icp-sdk/signer/web', () => ({
 import {
 	beginSwapOisyAction,
 	OisySwapOwnerMismatchError,
-	isOisySenderMismatch
+	isOisySenderMismatch,
+	inspectOisySwapAccount
 } from './swapOisySigner';
 const a = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai'),
 	b = Principal.fromText('ryjl3-tyaaa-aaaaa-aaaba-cai');
@@ -76,6 +78,7 @@ beforeEach(() => {
 	fx.owner = a.toText();
 	fx.requests = [];
 	fx.failOpen = false;
+	fx.accountRows = null;
 	fx.windows.clear();
 	vi.spyOn(window, 'open').mockImplementation((_url, name) => {
 		const key = String(name);
@@ -169,5 +172,48 @@ describe('action-owned OISY swap signer using installed SDK', () => {
 		expect(isOisySenderMismatch(new Error('The sender must match the owner of the signer.'))).toBe(
 			false
 		);
+	});
+});
+
+describe('read-only OISY swap account inspection', () => {
+	it('decodes the published account response shape using the real SDK without any canister call', async () => {
+		fx.accountRows = [
+			{ owner: a.toText(), subaccount: btoa(String.fromCharCode(...new Uint8Array(32))) }
+		];
+		const report = await click(() => inspectOisySwapAccount(a, () => {}));
+		expect(report).toEqual({
+			connectedOwner: a.toText(),
+			signerOwners: [a.toText()],
+			matches: true
+		});
+		expect(fx.requests.map((r) => r.method)).toEqual(['icrc27_accounts']);
+	});
+	it('reports a different owner without adopting it or asking for approval', async () => {
+		fx.owner = b.toText();
+		const report = await click(() => inspectOisySwapAccount(a, () => {}));
+		expect(report).toEqual({
+			connectedOwner: a.toText(),
+			signerOwners: [b.toText()],
+			matches: false
+		});
+		expect(fx.requests.map((r) => r.method)).toEqual(['icrc27_accounts']);
+	});
+	it('reports an empty account list without claiming a match', async () => {
+		fx.accountRows = [];
+		expect((await click(() => inspectOisySwapAccount(a, () => {}))).matches).toBe(false);
+		expect(fx.requests.every((r) => r.method === 'icrc27_accounts')).toBe(true);
+	});
+	it('refuses a stale session during the account response and releases its channel', async () => {
+		let live = true;
+		const report = click(() =>
+			inspectOisySwapAccount(a, () => {
+				if (!live) throw Error('session changed');
+			})
+		);
+		live = false;
+		await expect(report).rejects.toThrow('session changed');
+		current = click(() => beginSwapOisyAction(a, () => {}));
+		await current.ready;
+		expect(fx.requests.every((r) => r.method === 'icrc27_accounts')).toBe(true);
 	});
 });

@@ -53,15 +53,18 @@ export function beginSwapOisyAction(owner: Principal, assertCurrent: () => void)
 		assertCurrent();
 	});
 	let closing: Promise<void> | null = null;
+	const readOwnerTexts = async () => {
+		assertCurrent();
+		const accounts = await signer.getAccounts();
+		assertCurrent();
+		return accounts.map((account) => account.owner.toText());
+	};
 	return {
 		agent,
 		ready,
+		readOwnerTexts,
 		async verifyOwner() {
-			assertCurrent();
-			const accounts = await signer.getAccounts();
-			assertCurrent();
-			if (!accounts.some((account) => account.owner.toText() === ownerText))
-				throw new OisySwapOwnerMismatchError();
+			if (!(await readOwnerTexts()).includes(ownerText)) throw new OisySwapOwnerMismatchError();
 		},
 		close() {
 			if (!closing) {
@@ -71,4 +74,18 @@ export function beginSwapOisyAction(owner: Principal, assertCurrent: () => void)
 			return closing;
 		}
 	};
+}
+
+/** Explicit user-click inspection: accounts RPC only, no canister call or owner adoption. */
+export async function inspectOisySwapAccount(owner: Principal, assertCurrent: () => void) {
+	const action = beginSwapOisyAction(owner, assertCurrent);
+	try {
+		await action.ready;
+		const signerOwners = await action.readOwnerTexts();
+		assertCurrent();
+		const connectedOwner = owner.toText();
+		return { connectedOwner, signerOwners, matches: signerOwners.includes(connectedOwner) };
+	} finally {
+		await action.close().catch(() => {});
+	}
 }

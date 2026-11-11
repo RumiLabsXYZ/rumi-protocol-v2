@@ -137,7 +137,7 @@ describe('3pool signer step results', () => {
 		const { OisySwapOwnerMismatchError } = await import('./swapOisySigner');
 		fx.verify.mockRejectedValueOnce(new OisySwapOwnerMismatchError());
 		await expect(threePoolService.swap(2, 0, 1_000n, 990n)).rejects.toThrow(
-			'approval and swap were not submitted'
+			'No approval or swap was submitted by this action'
 		);
 		expect(fx.approve).not.toHaveBeenCalled();
 		expect(fx.swap).not.toHaveBeenCalled();
@@ -150,6 +150,22 @@ describe('3pool signer step results', () => {
 			.mockRejectedValueOnce(new OisySwapOwnerMismatchError());
 		await expect(threePoolService.swap(2, 0, 1_000n, 990n)).rejects.toThrow(
 			'Approval already succeeded. No swap was requested'
+		);
+		expect(fx.approve).toHaveBeenCalledOnce();
+		expect(fx.swap).not.toHaveBeenCalled();
+	});
+	it('distinguishes local account rejection from remote sender rejection before approval', async () => {
+		const { OisySwapOwnerMismatchError } = await import('./swapOisySigner');
+		fx.verify.mockRejectedValueOnce(new OisySwapOwnerMismatchError());
+		await expect(threePoolService.swap(2, 0, 1_000n, 990n)).rejects.toThrow(
+			'OISY_LOCAL_OWNER_MISMATCH'
+		);
+		expect(fx.approve).not.toHaveBeenCalled();
+		expect(fx.swap).not.toHaveBeenCalled();
+		fx.verify.mockResolvedValue(undefined);
+		fx.approve.mockRejectedValueOnce(mismatch());
+		await expect(threePoolService.swap(2, 0, 1_000n, 990n)).rejects.toThrow(
+			'OISY_REMOTE_SENDER_REJECTED'
 		);
 		expect(fx.approve).toHaveBeenCalledOnce();
 		expect(fx.swap).not.toHaveBeenCalled();

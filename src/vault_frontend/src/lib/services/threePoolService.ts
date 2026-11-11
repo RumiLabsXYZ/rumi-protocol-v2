@@ -542,10 +542,15 @@ class ThreePoolService {
         if (!current()) throw new Error('The swap completed for the original wallet, but the connected session changed. Do not repeat it; check the original wallet.');
         return result.Ok;
       } catch (error) {
-        if (error instanceof OisySwapOwnerMismatchError || isOisySenderMismatch(error)) {
+        if (error instanceof OisySwapOwnerMismatchError) {
           throw new Error(approvalConfirmed
-            ? `OISY account mismatch. Approval already succeeded. ${swapStarted ? 'The wallet rejected the swap before submission.' : 'No swap was requested.'} Check the original account and approval before retrying; do not repeat the payment.`
-            : 'OISY account mismatch. This approval and swap were not submitted. Reconnect the same OISY account and refresh the quote.');
+            ? '[OISY_LOCAL_OWNER_MISMATCH] Approval already succeeded. No swap was requested. The signing account differs from the connected account; inspect the original account and approval before any new attempt.'
+            : '[OISY_LOCAL_OWNER_MISMATCH] The OISY account response does not include the connected Rumi account. No approval or swap was submitted by this action. Stop here and inspect the account identities; an earlier attempt may have left an allowance.');
+        }
+        if (isOisySenderMismatch(error)) {
+          throw new Error(approvalConfirmed
+            ? `[OISY_REMOTE_SENDER_REJECTED] Approval already succeeded. ${swapStarted ? 'The wallet rejected the swap before submission.' : 'No swap was requested.'} Inspect the original account and approval before any new attempt; do not repeat the payment.`
+            : '[OISY_REMOTE_SENDER_REJECTED] OISY rejected the approval sender. This approval and swap were not submitted. An earlier attempt may have left an allowance; inspect its history before any new attempt.');
         }
         throw error;
       } finally {

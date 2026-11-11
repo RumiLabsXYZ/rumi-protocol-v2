@@ -456,6 +456,7 @@ function createAuthStore() {
 
     async disconnect(): Promise<void> {
       beginWalletSessionTransition();
+      const disconnectGeneration = get(walletSessionGeneration);
       const state = get(store);
 
       // Clear Oisy direct signer agent
@@ -463,6 +464,12 @@ function createAuthStore() {
 
       if (state.walletType === WALLET_TYPES.INTERNET_IDENTITY && authClient) {
         await authClient.logout();
+      } else if (state.walletType === WALLET_TYPES.OISY) {
+        // Retire PNP's account/cache as well as our direct signer. Otherwise a
+        // reconnect (including after reload) can restore oisy_principal without
+        // asking the wallet for accounts. Use PNP itself: the legacy wrapper's
+        // disconnect also disconnects Plug, even when Plug is not active.
+        await getPnpInstance().disconnect();
       } else if (state.walletType === WALLET_TYPES.PLUG) {
         // Clear permission cache on disconnect
         permissionManager.clearCache();
@@ -475,7 +482,9 @@ function createAuthStore() {
           }
         }
       }
-      
+
+      // A delayed logout must not clear an explicitly connected replacement.
+      if (get(walletSessionGeneration) !== disconnectGeneration) return;
       set({ 
         isConnected: false, 
         account: null, 
