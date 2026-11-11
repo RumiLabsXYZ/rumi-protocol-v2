@@ -12,7 +12,7 @@ The approval being asked for is new and narrow: this one XLM withdrawal test exe
 
 - Final implementation commit: `b68748969d655e1c161e31bc3f388baaecff33e0` (on top of `42edb2f3`), branch `codex/native-xlm-collateral`.
 - Purpose: test-build-only partial withdrawal that records a durable XLM claim instead of any token transfer. Owner only, collateral-ratio limit, the same price-freshness guard as production partial withdraw, claim recorded before the vault is debited. No signing or payout.
-- The extended test `xlm_confirm_pic` checks that outsider, ratio-breaking and bad-destination withdrawals are rejected with debt, balance and supply unchanged, and that the owner's withdrawal creates one claim with the right custody owner, nonce, exact testnet network id, amount and fee.
+- The extended test `xlm_confirm_pic` checks that outsider, ratio-breaking and bad-destination withdrawals are rejected with balances and supply unchanged and debt changing only within the bounded accrued-interest allowance, and that the owner's withdrawal creates one claim with the right custody owner, nonce, exact testnet network id, amount and fee.
 - Status: independent source review accepted it as an unbuilt candidate. It has never been compiled or run.
 
 ## Exact commands (run in order, stop at the first failure)
@@ -43,7 +43,7 @@ Revised candidate for review: `/private/tmp/xlm-withdraw-b6874896-docdesc-runner
 - Adds pins for `main.rs` and `vault.rs` alongside the existing test-file, `Cargo.lock`, ledger, XRC and pocket-ic pins.
 - Separate output and lock paths (`/private/tmp/xlm-withdraw-b6874896-docdesc/`, `.lock`), so it cannot collide with the original.
 
-Everything else is identical to the reviewed runners: the three commands, environment, limits, toolchain pins, localhost bind preflight, step 1 test Wasm hash kept unchanged through steps 2 and 3, exclusive lock and output directory, and owned process-group closure. The runner never switches branches or changes files.
+Everything else is identical to the reviewed runners: the three commands, environment, limits, toolchain pins, localhost bind preflight, step 1 test Wasm hash kept unchanged through steps 2 and 3, exclusive lock and output directory, and owned process-group closure. The runner never changes repository source or switches branches; build outputs and logs are written only by the allocated batch.
 
 Input pins (SHA-256 at `b6874896`):
 
