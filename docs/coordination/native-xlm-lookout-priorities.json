@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Test-build borrowing is proven in PocketIC. Next: test-only repay and withdraw on the same vault, then the full XLM debt lifecycle (liquidation, payout) before any production admission.",
+      "nextAction": "Test-build confirm, borrow and repay are accepted (f26c10d6). Next: test-only withdrawal as a durable XLM claim on the same vault, following XRP's claim pattern, with no signing or payout.",
       "cardIds": [
         "WP3"
       ]

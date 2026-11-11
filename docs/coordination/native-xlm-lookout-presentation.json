@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production borrow guard unchanged. Local PocketIC (mocked Horizon and price) now proves the test-build path end to end: verified deposit to owned vault, then a 5 icUSD borrow records debt and mints icUSD, and a 50 icUSD over-limit borrow is rejected with no change. Production Wasm check clean; test-only items compiled out. Next: test-only repay/withdraw, then the full debt lifecycle.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. In local tests, a verified deposit now becomes a vault that can borrow icUSD, and borrowing too much is refused. Next is paying back and withdrawing in tests; Rob does not need to act.",
+  "summary": "XLM remains Frozen; production guards unchanged. Accepted in mocked PocketIC at f26c10d6 (runner receipt ff11bfa4, 2026-11-11): verified deposit to owned vault, test-only 5 icUSD borrow, owner 2 icUSD repay burning icUSD and cutting debt, outsider and zero repays rejected unchanged; production check clean. Next: test-only withdrawal as a durable XLM claim, no signing or payout.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. In local tests, a verified deposit becomes a vault that can borrow icUSD and pay it back, and other people cannot pay or change it. Next is recording a withdrawal request; Rob does not need to act.",
   "glossary": [
     {
       "term": "Stellar",
