@@ -36,8 +36,14 @@ Rob directly asked to fix the recurrence and make recovery clear. Firstsource
 cbcfdabc/codeef5b6506 built once in17.84seconds,740files frozen, native0 and
 owned closure. Before any publication, Ellis reproduced Review/background-read
 coordination failure that can hide recovery controls. Candidatef48bf8d6 is HELD;
-no asset or financial write was dispatched. Corrected source/regression acceptance
-and a fresh scoped build allocation precede the replacement candidate. The deployed
+no asset or financial write was dispatched. Corrected source25e1441f/code0aea04e1 now has21targeted tests/4suites, two focused
+reviews and actual-component pending-read mock acceptance. A fresh replacement
+allocation was not delivered: automatic approval review rejected Cody-to-Dorian
+allocation messaging for missing explicit destination/payload permission; the
+unused slot was released. Cody's already-posted [decision A](https://github.com/RobRipley/delegated-vault/blob/0513d5c424fc04d1dcdff2bf2a9b568f983007ad/docs/coordination/one-offline-build-decisions-20261111.md)
+awaits the human answer. No second build, publication or denied-message relay.
+The exact corrected source and runner remain frozen; no generic readiness work
+or additional product scope is pending. The deployed
 1794415826220 OISY/ckSOL software is unchanged; actual customer request phase and
 outcome remain unknown. No customer retry, storage clear, cancellation or wallet
 action is inferred. [Held packet](../operations/sec12-recurrence-frontend-publication-20261111.md).
