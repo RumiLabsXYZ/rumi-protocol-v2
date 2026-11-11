@@ -5,7 +5,7 @@
       "title": "Repair OISY stablecoin swap signer ownership",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Dorian performs one corrective frontend build and exact additive artifact/publication checks for accepted80ae6ecc/handoff606eb896; Ellis independently verifies artifacts and served output before ready-to-try notice.91tests/two reviews/mockedUI pass. Actual user account/earlier allowance remain unknown; no financialretry or owneradoption.",
+      "nextAction": "Dorian executes the single queued corrective frontend build on finalcb1701ee/handoff801d60aa after active host test releases capacity, then exact additive publication checks. Ellis independently verifies artifacts/served output. Fresh-page read-only account check is tested; actual user account/allowance unknown. No financialretry.",
       "cardIds": [
         "SEC-14"
       ]

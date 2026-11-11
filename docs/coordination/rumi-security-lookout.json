@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis source/case; Dorian release",
       "scope": "Bind direct OISY 3pool swaps to the intended signer owner and wallet session",
-      "evidenceText": "OWNER ACCEPTANCE FAILED on published1794386914589 after disconnect/hardrefresh/reconnect. Actual prior permissions/allowance/failedbranch remain unknown; no repeat-refresh or financialretry requested. Confirmed defect reproduced with installedOISYadapter: oldauth leavescache acrossreload, reconnectswrongsyntheticowner with0accountsRPC. Corrective code80ae6ecc/handoff606eb896 is pushed;91tests7suites, baseline30errors/66warnings, desktop390mockQA and two freshindependentreviewsPASS. It retires actualPNP session and positivelyverifies cacheabsence, fences actualwalletUIcleanup acrossreplacement/awaits, preservesjournals/unrelatedPlug and exactmoney/owner/sessionguards. Explicitaccounts-onlydiagnostic distinguisheslocalcheck fromexactremote502, noowneradoption/mutation. Realwalletstore/auth/PNPmanager plus installedadapter reloadintegration passes. Dorian advances solecorrectivefrontendartifact/release lane; backend730f5471 is independentlycurrent and compatible. Oldpublicationproof remains true; correctivebuild/livewalletproof pending. No signing/replay/reserve/financialaction.",
+      "evidenceText": "OWNER ACCEPTANCE FAILED on published1794386914589 after disconnect/hardrefresh/reconnect. Actual prior permissions/allowance/failedbranch remain unknown; no repeat-refresh or financialretry requested. Confirmed defect reproduced with installedOISYadapter: oldauth leavescache acrossreload, reconnectswrongsyntheticowner with0accountsRPC. Final corrective codecb1701ee/handoff801d60aa is pushed;91tests7suites, baseline30errors/66warnings, desktop390mockQA and two freshindependentreviewsPASS. It retires actualPNP session and positivelyverifies cacheabsence, fences actualwalletUIcleanup acrossreplacement/awaits, preservesjournals/unrelatedPlug and exactmoney/owner/sessionguards. Explicitaccounts-onlydiagnostic distinguisheslocalcheck fromexactremote502, noowneradoption/mutation. Realwalletstore/auth/PNPmanager plus installedadapter reloadintegration passes. Fresh-page parent regression additionally passes18 targeted checks/two focused confirmations: read-only diagnostic is reachable before any financial attempt and makes0mountRPC. No productionbuild wasted; Dorian solecorrectivebuild is queued behind the active host test batch; backend730f5471 is independentlycurrent and compatible. Oldpublicationproof remains true; correctivebuild/livewalletproof pending. No signing/replay/reserve/financialaction.",
       "evidenceLinks": [
         {
           "title": "Accepted source, tests and submission boundary",
@@ -26,6 +26,10 @@
         {
           "title": "Corrective source, actual installed-connector regression and dual acceptance",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/606eb896f239bd65aef2cc8f83ce9be20f862352/docs/operations/oisy-owner-reconnect-source-20261111.md"
+        },
+        {
+          "title": "Final fresh-page reachable diagnostic and release handoff",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/801d60aa2b99e16cf555af54ba5f8840ab79d284/docs/operations/oisy-owner-reconnect-source-20261111.md"
         }
       ]
     },
