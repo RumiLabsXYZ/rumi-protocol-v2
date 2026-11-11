@@ -378,3 +378,22 @@ describe('numbered mint steps and bounded automatic checks', () => {
     expect(fx.submitPaid).toHaveBeenCalledOnce(); expect(button('Mint ckSOL').disabled).toBe(true);
   });
 });
+
+describe('external ICP receipt progress', () => {
+  it('resets a backed-off page timer when a different deposit arrives from the payment panel', async () => {
+    vi.useFakeTimers(); fx.wallet.set({isConnected:true,principal:ownerA});
+    const paid=(id:bigint)=>({owner:ownerA.toText(),sequence:'4',createdAt:1,phase:'Receipt',receipt:{sequence:4n,phase:'Funded',deposit_id:[id]}});
+    fx.icpRecover.mockResolvedValue(paid(30n));
+    instance=mount(Page,{target:host}); await settle();
+    await vi.advanceTimersByTimeAsync(15_000);await settle();
+    let resolve!: (value:any)=>void;
+    fx.icpRecover.mockImplementationOnce(()=>new Promise(r=>resolve=r));
+    await vi.advanceTimersByTimeAsync(30_000);await settle();
+    await vi.advanceTimersByTimeAsync(5_000);await settle();
+    const reads=fx.recoverPaid.mock.calls.length;
+    resolve(paid(31n));await settle();
+    await vi.advanceTimersByTimeAsync(14_999);await settle();expect(fx.recoverPaid).toHaveBeenCalledTimes(reads);
+    await vi.advanceTimersByTimeAsync(1);await settle();expect(fx.recoverPaid).toHaveBeenCalledTimes(reads+1);
+    expect(fx.icpSubmit).not.toHaveBeenCalled();expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+});

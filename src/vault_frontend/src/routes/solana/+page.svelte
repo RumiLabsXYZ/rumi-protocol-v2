@@ -118,10 +118,11 @@
     pendingPayment ? 'Processing your request. This page checks its progress automatically.' : '';
   $: complete = !!depositStatus?.success && !pendingPayment && !icpPending && !depositBlocked && !blockingLegacy;
   $: autoPolling = !!owner && !busy && !icpBusy && (pendingPayment || icpPending || minterPending || blockingLegacy || depositBlocked || fundsReceived || newDeposit || (!complete && addressReady));
-  $: if (polling) { autoPolling; polling.sync(); }
+  $: pollingFingerprint = [ownerText, paymentIntent?.sequence, paidPhase, icpReceipt?.sequence, icpReceipt?.phase, depositId, depositStatus?.label, mintedAmount, solBalance, balanceUnavailable, legacyBlocked, depositBlocked].join('|');
+  $: if (polling) { autoPolling; pollingFingerprint; polling.sync(); }
   const formatIcp = (value: bigint) => `${value / 100_000_000n}.${(value % 100_000_000n).toString().padStart(8, '0')} ICP`;
   function pollFingerprint() {
-    return [ownerText, paymentIntent?.sequence, paidPhase, icpReceipt?.sequence, icpReceipt?.phase, depositId, depositStatus?.label, mintedAmount, solBalance, balanceUnavailable, legacyBlocked, depositBlocked].join('|');
+    return pollingFingerprint;
   }
   async function checkAgain() {
     if (busy || icpBusy) return;
