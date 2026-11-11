@@ -1,6 +1,6 @@
 {
-  "summary": "ckSOL guided-mint/polling source94ffd5d5 passed126 focused tests and two final reviews after three reproduced fixes. Mocked desktop/mobile QA passed; global typecheck remains30 existingerrors/66warnings. Numbered actions, explicit detection, historical receipts and bounded active-only reads are ready for release integration. No productionbuild/merge/deploy or customer action. Existing saved-request fix remains live; Dorian holds frontend reservation; Season2 retains product priority.",
-  "plainSummary": "The clearer Solana minting page passed its tests and final independent reviews. It now explains each action and limits automatic checking to active requests, while keeping uncertain payments protected. This is reviewed source, not a live release; the release owner must integrate it when the shared frontend slot is available.",
+  "summary": "OISY 3pool signer-owner repair6e6f32fa is pushed:62 tests and two independent reviews pass, with30 existing typecheck errors/66 warnings unchanged. Fresh action-owned signer/session checks preserve exact approval and swap arguments. Dorian reports the composed frontend build passed with accepted ckSOL94ffd5d5; artifact/inventory checks and exact frontend-only decision follow. Live SEC12 still serves the old swap path; actual wallet outcome remains unverified. No publication, backend or financial action claimed.",
+  "plainSummary": "The wallet signing repair passed its focused tests and two independent reviews. The release owner has built it together with the clearer Solana minting page and is checking the exact release files before publication. The old swap page is still live; no wallet transaction has been retried.",
   "glossary": [
     {
       "term": "Stability Pool",

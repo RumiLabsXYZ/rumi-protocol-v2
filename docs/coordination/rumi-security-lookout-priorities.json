@@ -1,6 +1,16 @@
 {
   "items": [
     {
+      "id": "oisy-stable-swap-owner",
+      "title": "Repair OISY stablecoin swap signer ownership",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Dorian completes the reserved composed frontend artifact, inventory checks and exact frontend-only publication decision. Ellis independently verifies the packet; source passed 62 tests and two reviews. Live wallet history and retry remain unverified; no backend or financial authority inferred.",
+      "cardIds": [
+        "SEC-14"
+      ]
+    },
+    {
       "id": "customer-cksol-collateral-recovery",
       "title": "Customer impact: restore or safely cancel saved borrowing request",
       "status": "in_progress",
@@ -15,7 +25,7 @@
       "title": "Clear ckSOL mint steps and bounded status checks",
       "status": "ready",
       "blockedReason": "",
-      "nextAction": "Dorian integrates exact reviewed source94ffd5d5 with the reserved frontend lineage and prepares source-matched release artifacts when the existing slot is available.126 tests and two final source reviews pass; no productionbuild/deployment or financial authority is inferred. Season2 remains higher product priority.",
+      "nextAction": "Dorian reports the composed frontend build passed with accepted ckSOL source94ffd5d5 and OISY repair6e6f32fa. Complete artifact/inventory checks and a distinct frontend-only decision. Existing126 tests, two reviews and mock-page evidence remain valid; no publication, reserve or customer action is claimed.",
       "cardIds": [
         "SEC-13"
       ]
@@ -87,7 +97,7 @@
       "title": "Vault 51 nICP recovery",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Merritt: assess exact preparation receipt38b675d3/source42478174. Dorian owns any separately authorized release; install/automatic activation/financial operations remain held. No duplicate build or new owner preference.",
+      "nextAction": "Preserve installed backend43bbbca9 and the separately held guard correction312ebe03/packet097bf775. Dorian owns release handling. Its compatible API does not automatically block the bounded OISY/ckSOL frontend-only repair; no new backend install or financial authority is inferred.",
       "cardIds": [
         "SEC-08"
       ]
