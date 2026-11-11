@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "blocked",
-      "blockedReason": "Test-only withdrawal source (b6874896) is complete and source-reviewed but unbuilt. Its one focused local build was stopped by an automatic review because separate XLM build execution was not explicitly approved.",
-      "nextAction": "Rob or the coordinator grants scoped authority for one focused local test-only build of b6874896 with runner 47c84a57 (no install, signing or live actions). Then validate; next slice is test-only close-to-claim.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Test-only withdrawal to a durable XLM claim passed (approval answered, receipt 4db74cac). Backlog, source only: test-only close-to-claim. No build allocation requested. Production stays Frozen; settlement and payout not built.",
       "cardIds": [
         "WP3"
       ]
