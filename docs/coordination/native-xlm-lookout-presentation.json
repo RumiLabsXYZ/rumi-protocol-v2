@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production guards unchanged. Accepted in mocked PocketIC at f26c10d6 (runner receipt ff11bfa4, 2026-11-11): verified deposit to owned vault, test-only 5 icUSD borrow, owner 2 icUSD repay burning icUSD and cutting debt, outsider and zero repays rejected unchanged; production check clean. Next: test-only withdrawal as a durable XLM claim, no signing or payout.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. In local tests, a verified deposit becomes a vault that can borrow icUSD and pay it back, and other people cannot pay or change it. Next is recording a withdrawal request; Rob does not need to act.",
+  "summary": "XLM remains Frozen; production guards unchanged. Accepted in mocked PocketIC: deposit to vault, test-only borrow and repay (f26c10d6, PASS). Test-only withdrawal as a durable XLM claim is written and source-reviewed (b6874896, unbuilt). Its focused local build (runner 47c84a57) is blocked: an automatic review stopped the build request because separate XLM build execution was not explicitly approved. Needs scoped build authority.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests already show deposit, borrow and repay working, and the code for withdrawing is written but not yet tested. Testing it needs Rob's explicit go-ahead for one local build.",
   "glossary": [
     {
       "term": "Stellar",
