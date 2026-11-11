@@ -661,10 +661,9 @@
         </svg>
         {error}
       </div>
-      {#if error.includes('OISY_LOCAL_OWNER_MISMATCH') || error.includes('OISY_REMOTE_SENDER_REJECTED')}
-        <OisyAccountCheck />
-      {/if}
     {/if}
+    <!-- Available before a financial attempt; the child only renders for connected OISY. -->
+    <OisyAccountCheck />
     {#if notice}
       <div class="notice-bar">{notice}</div>
     {/if}
