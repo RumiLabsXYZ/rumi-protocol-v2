@@ -3,6 +3,25 @@
 Accountable orchestrator: **Dorian**, reporting to Merritt. Established 2026-11-04.
 Lookout project ID: `rumi-release-operations`. This scoped lane owns portfolio items #13 and #15 and custodianship of parked #11. Existing release implementers, Cycle Sentinel cards CS-00 through CS-68, source branches and protected worktrees retain their ownership and history. No duplicate implementation team is created.
 
+## Frontend reservation — November 11, 2026
+
+The next focused frontend production-build/preparation slot is reserved for
+Ellis's active OISY `/swap` signer-owner fix, composed with accepted ckSOL source
+`94ffd5d5` and Vault51 lineage `097bf775`. Ellis owns diagnosis/source/regressions;
+Dorian owns serial build, artifact/inventory preservation and the exact release
+packet. No wallet retry is required to finish source/mock checks tonight.
+
+Frozen Vault51 artifacts, stage686 and its unexecuted entry-point activation
+remain preserved. The corrected backend packet097bf775 retains its separate
+approval hold. Do not make that backend correction an automatic prerequisite
+for an API-compatible frontend-only swap fix: verify current served backend
+compatibility and prepare the distinct exact frontend decision. A new composed
+bundle is not silently substituted under the old publication approval. No new
+deployment, signing, allowance, swap, customer retry or financial authority is
+inferred. Usable-flow incident work takes precedence over optional polish;
+Season2 remains the independent product priority and its Points-only release
+uses no frontend publisher slot.
+
 ## Release and operations queue
 
 | ID | State | Accountable owner | Scope | Evidence / next action |
