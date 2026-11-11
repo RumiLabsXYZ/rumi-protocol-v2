@@ -15,7 +15,7 @@
       "title": "Customer impact: restore or safely cancel saved borrowing request",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Investigate the later ICP borrowing screenshot showing saved-argument mismatch. Preserve the earlier successful cancellation/new-loan acceptance as history. Establish the held request phase and available recovery controls before advising exact restore or backend-fenced cancellation. No storage clear, blind retry or agent financial action; no new release yet.",
+      "nextAction": "Dorian coordinates one frontend build/publication for accepted ef5b6506/cbcfdabc. Ellis independently verifies frozen artifacts and served recovery UI. Exact-intent persistence/recurrence and hidden recovery layout were reproduced; bounded source/tests/dual reviews/mock desktop-mobile QA passed. Customer phase and actual recovery remain unknown; no agent wallet action. Keep case open through deployment and owner acceptance.",
       "cardIds": [
         "SEC-12"
       ]

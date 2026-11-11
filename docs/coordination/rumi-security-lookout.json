@@ -63,7 +63,7 @@
       "state": "In progress",
       "owner": "Ellis case; Miles source; Dorian release",
       "scope": "Restore or safely cancel saved borrowing requests across collateral flows",
-      "evidenceText": "REOPENED after a later November 11 customer screenshot: a new ICP-collateral borrowing attempt is blocked because its operation remains bound to different saved arguments. The displayed message says no approval or dispatch was made for that action. This does not establish the previous operation phase, a transfer outcome or fund loss. Earlier customer-reported cancellation/new-loan success remains valid historical evidence, but does not resolve this later report. Source confirms the exact saved-intent comparison rejects changed arguments before approval/dispatch. Recovery banner is mounted globally; the cropped screenshot alone cannot establish whether its controls were absent or outside the view. Next: inspect the held request/phase and recovery controls, retain exact intent and backend-fenced cancellation protections. No guessed retry, storage clear, cancellation, approval or financial action. Same case owner; no new build/release yet. Rob\u2019s separate successful OISY swap remains Done.",
+      "evidenceText": "REOPENED customer recurrence; exact tested correction ef5b6506/producer cbcfdabc is pushed. Journal regression reproduces an interrupted new request after earlier completion, then changed-term refusal before another approval; actual customer interruption/phase/outcome still unknown. Confirmed UX gap: form error had no direct recovery action, and actual layout fixture placed saved amounts under fixed header/strip. Fix adds owner-scoped read-only Review saved request, focuses existing guarded panel inside main offsets, clarifies original saved terms, and preserves separate Continue/backend-fenced confirmed cancellation. Unknown/submitted transfers remain on receipt recovery. Initial56 tests/4 suites plus final18 overlapping targeted checks/3 suites pass; baseline30errors/66warnings, no new changed-line diagnostics. Two source reviews plus focused final confirmations pass. Desktop1280/mobile390 mock actual-component QA passed; no financial calls. Dorian owns single coordinated frontend build/artifact/publication lane; Ellis verifies artifacts and live output. Not deployed by this source handoff; keep case open. No backend, storage clear, auto-retry, reserve or agent financial action.",
       "evidenceLinks": [
         {
           "title": "Reviewed revision and queue-race evidence",
@@ -76,6 +76,10 @@
         {
           "title": "November 9 independent recheck and customer-guidance boundary",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/sec12-customer-recheck-20261109.md"
+        },
+        {
+          "title": "Recurrence reproduction, guarded navigation correction and reviewed source handoff",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/cbcfdabc0c7f76e2309a3576fe283356786f2276/docs/operations/sec12-recurrence-recovery-navigation-20261111.md"
         }
       ]
     },
