@@ -1,0 +1,14 @@
+{
+  "observedAt": "2026-11-11T17:14:21.305081+00:00",
+  "status": "NEW_AUTOMATIC_XLM_BUILD_ADMISSION_MESSAGE_REJECTION_BEFORE_DELIVERY",
+  "allocationId": "fd31b869-61d2-470e-a4ba-71538ce142e1",
+  "destination": "01a17f0e-495a-7df1-b590-8ef1bf5dc4d5",
+  "source": "b68748969d655e1c161e31bc3f388baaecff33e0",
+  "reason": "The message authorizes a new heavy XLM local build for Mara, but the trusted user instructions authorize the NEAR/Cody work and do not explicitly approve this separate XLM execution or destination.",
+  "delivery": false,
+  "attemptConsumed": false,
+  "runtimeStarted": false,
+  "reservationReleased": true,
+  "noRetryRelayAlternateSenderOrExecution": true,
+  "oldF26PassNotAuthorityForThisPayload": true
+}
