@@ -6,6 +6,8 @@ import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import { beginSwapOisyAction, OisySwapOwnerMismatchError, isOisySenderMismatch } from './swapOisySigner';
+import { currentWalletType, walletSessionGeneration } from './auth';
 import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
 import {
   callWithOisyFalseNegativeGuard,
@@ -495,42 +497,63 @@ class ThreePoolService {
 
   async swap(fromIndex: number, toIndex: number, dxRaw: bigint, minDyRaw: bigint): Promise<bigint> {
     const wallet = get(walletStore);
-    if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.isConnected || wallet.loading || !wallet.principal) throw new Error('Wallet not connected');
 
     const fromToken = POOL_TOKENS[fromIndex];
     const oisyDetected = isOisyWallet();
-    const approveAmt = await approvalAmount(dxRaw, fromToken);
-
-    if (oisyDetected && wallet.principal) {
-      // ─── Oisy sequential path (v5: no batch concept) ───
-      console.log(`[Oisy] Sequential approve + 3pool swap via @icp-sdk/signer v5`);
-      const signerAgent = await getOisySignerAgent(wallet.principal);
-
-      const ledgerActor = createOisyActor(
-        fromToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent
-      );
-      const poolActor = createOisyActor(
-        THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent
-      );
-
-      // 1) Approve (first Oisy consent screen, Tier 1 native).
-      const approveResult = await ledgerActor.icrc2_approve({
-        amount: approveAmt,
-        spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
-        expires_at: [], expected_allowance: [], memo: [], fee: [],
-        from_subaccount: [], created_at_time: []
-      });
-      if (approveResult && 'Err' in approveResult) {
-        throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+    if (oisyDetected) {
+      const owner = wallet.principal, ownerText = owner.toText();
+      const generation = get(walletSessionGeneration), provider = get(currentWalletType);
+      let approvalConfirmed = false, swapStarted = false;
+      const current = () => {
+        const live = get(walletStore);
+        return live.isConnected && !live.loading && live.principal?.toText() === ownerText
+          && get(walletSessionGeneration) === generation && get(currentWalletType) === provider && provider === 'oisy';
+      };
+      const assertCurrent = () => {
+        if (!current()) throw new Error(approvalConfirmed
+          ? 'Wallet session changed. Approval already succeeded; no swap was submitted. Check the original account before retrying.'
+          : 'Wallet session changed. No approval or swap was submitted by this action. Reconnect the same account and refresh the quote.');
+      };
+      const action = beginSwapOisyAction(owner, assertCurrent);
+      try {
+        await action.ready;
+        assertCurrent();
+        const approveAmt = await approvalAmount(dxRaw, fromToken);
+        assertCurrent();
+        await action.verifyOwner();
+        assertCurrent();
+        const ledgerActor = createOisyActor(fromToken.ledgerId, CONFIG.icusd_ledgerIDL, action.agent);
+        const poolActor = createOisyActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, action.agent);
+        const approveResult = await ledgerActor.icrc2_approve({
+          amount: approveAmt,
+          spender: { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] },
+          expires_at: [], expected_allowance: [], memo: [], fee: [], from_subaccount: [], created_at_time: [],
+        });
+        if (approveResult && 'Err' in approveResult) throw new Error(`Approval failed: ${JSON.stringify(approveResult.Err)}`);
+        if (!approveResult || !('Ok' in approveResult)) throw new Error('Approval result is unconfirmed. Check the original wallet before retrying; no swap was requested.');
+        approvalConfirmed = true;
+        assertCurrent();
+        await action.verifyOwner();
+        assertCurrent();
+        swapStarted = true;
+        const result = await poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw);
+        if ('Err' in result) throw new Error(this.formatError(result.Err));
+        if (!current()) throw new Error('The swap completed for the original wallet, but the connected session changed. Do not repeat it; check the original wallet.');
+        return result.Ok;
+      } catch (error) {
+        if (error instanceof OisySwapOwnerMismatchError || isOisySenderMismatch(error)) {
+          throw new Error(approvalConfirmed
+            ? `OISY account mismatch. Approval already succeeded. ${swapStarted ? 'The wallet rejected the swap before submission.' : 'No swap was requested.'} Check the original account and approval before retrying; do not repeat the payment.`
+            : 'OISY account mismatch. This approval and swap were not submitted. Reconnect the same OISY account and refresh the quote.');
+        }
+        throw error;
+      } finally {
+        // Popup cleanup must never replace an accepted result or its original error.
+        await action.close().catch(() => {});
       }
-
-      // 2) Swap (second Oisy consent screen).
-      const swapResult = await poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw);
-      if ('Err' in swapResult) {
-        throw new Error(this.formatError(swapResult.Err));
-      }
-      return swapResult.Ok;
     } else {
+      const approveAmt = await approvalAmount(dxRaw, fromToken);
       // ─── Non-Oisy path (Plug, II, etc.) ───
       const ledgerActor = await walletStore.getActor(
         fromToken.ledgerId, CONFIG.icusd_ledgerIDL

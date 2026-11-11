@@ -59,6 +59,8 @@ vi.mock('../config', () => ({
   },
 }));
 
+vi.mock('./auth', () => ({ currentWalletType: { subscribe(fn: any) { fn(mocks.isOisy ? 'oisy' : 'plug'); return () => {}; } }, walletSessionGeneration: { subscribe(fn: any) { fn(0); return () => {}; } } }));
+
 vi.mock('./pnp', () => ({ canisterIDLs: { three_pool: {} } }));
 
 vi.mock('../stores/wallet', () => ({
