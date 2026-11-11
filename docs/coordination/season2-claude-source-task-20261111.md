@@ -30,3 +30,13 @@ If a correction is supported, Codex privately runs one frozen endpoint compariso
 The host native CLI is authenticated with Claude.ai, firstParty, max; the shared read-only receipt records included allowance available, zero usage credits and auto-reload off. Use only this included subscription route through the five-day instruction expiry 2026-11-16T07:49:45Z. No bare/API/key-helper/alternate provider, paid context or fallback, credits purchase or settings change. Stop on auth, limit, billing or unknown-route prompts.
 
 Two actual launch requests were rejected before process creation by automatic approval review. Its latest reason: authorization read from another chat/tool result cannot establish the trusted approval it requires for sending private source to Claude and allowing isolated edits. No PID/session exists, no source was sent and no code change was made by Claude. This source-scope approval request is separate from the already pending live prospective release approval.
+
+## Direct approval and completed source-only work
+
+Rob directly approved these same six files and synthetic-test edits in this chat on November11, superseding the dispatch blocker for this exact scope. The native Claude.ai/firstParty subscription worker launched at16:11:28UTC and completed S2-R8-01 at16:16:54UTC (sessionf64f5147-7467-4eed-92a0-3dbe6c726b3c, PID72409, actual modelclaude-sonnet-5-5). Codex independently inspected the267-line test-only diff and ran all six focused tests successfully; accepted local commitbc6510a8.
+
+After that acceptance, the same source-restricted session completed a small dust-forgiveness follow-up (S2-R8-02, PID3171, launched16:44:13UTC). Codex inspected the53-line test-only addition and ran both focused tests successfully; accepted local commit2893db49. No additional source file, raw participant evidence, production edit, API/paid fallback or live action was included. Provider usage metadata reported included weekly access allowed, not using overage, with overage rejected/out-of-credits. A CLI list-price estimate is not an actual billing receipt.
+
+The synthetic work demonstrates specific replay/source gaps and a ledger-memo route for checking operation clocks. It does not certify historical awards. Codex is separately checking recovered clocks against private source events and a frozen endpoint. Prospective packetbf27c8e3/module2ffde290 remains unchanged and separately held.
+
+Codex's corrected private memo-clock comparison then completed: global debt residuals8→7 and current validated-cohort residuals2→1 at the same frozen holdout. No private record was sent to Claude. The next private investigation is the retained redemption-claim timeline; historical awards and live release remain unexecuted.
