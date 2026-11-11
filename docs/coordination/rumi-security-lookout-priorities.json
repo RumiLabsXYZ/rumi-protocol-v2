@@ -5,9 +5,19 @@
       "title": "Customer impact: restore or safely cancel saved borrowing request",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Both fresh reviews accept f1d2e77e. Dorian builds exact backend/frontend artifacts once, verifies exported API and retained state/assets/auth, then deploys the backend before frontend activation and independently reads back. Customer borrowing/cancellation is not executed by agents.",
+      "nextAction": "Saved-request repair is deployed and served-byte verified. Await the customer\u2019s same-wallet authenticated restore/continue or confirmed retirement; agents do not execute a loan, cancellation, approval or storage clear.",
       "cardIds": [
         "SEC-12"
+      ]
+    },
+    {
+      "id": "cksol-minting-guidance",
+      "title": "Clear ckSOL mint steps and bounded status checks",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Dorian integrates exact reviewed source94ffd5d5 with the reserved frontend lineage and prepares source-matched release artifacts when the existing slot is available.126 tests and two final source reviews pass; no productionbuild/deployment or financial authority is inferred. Season2 remains higher product priority.",
+      "cardIds": [
+        "SEC-13"
       ]
     },
     {

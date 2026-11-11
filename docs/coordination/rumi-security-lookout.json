@@ -1,6 +1,23 @@
 {
   "cards": [
     {
+      "id": "SEC-13",
+      "state": "Review",
+      "owner": "Ellis source/case; Dorian release",
+      "scope": "Make ckSOL mint steps explicit and bound read-only polling to active flows",
+      "evidenceText": "Corrected frontend-only source 94ffd5d5 is pushed on the existing Vault51 candidate lineage. Four numbered costs/send-and-detect/explicit-mint/wallet steps distinguish previous success from a new deposit and collapse receipts. Active read checks back off 15/30/60 seconds, reset on progress/manual/new flow, pause hidden/disconnected, and stop only after mint plus known payment/refund completion; Check again remains one-shot. Background reads cannot submit payments or repeatedly disable a ready CTA. Three review issues were reproduced and fixed: external receipt progress now resets the timer, a terminal mint refreshes the wallet balance with session/error guards, and unavailable payment status stays held/retrying rather than becoming empty settlement proof. All 126 focused tests and both final independent reviews pass. Mocked real-page desktop/mobile interaction QA passed. Typecheck retains 30 existing errors/66 warnings, none in changed source. No production build, merge, deployment, customer action or reserve activation. Dorian retains publication reservation; Season 2 remains higher product priority.",
+      "evidenceLinks": [
+        {
+          "title": "Corrected six-file source candidate",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/94ffd5d51b7d12c79f7432e0361bc1654ef6bb5c"
+        },
+        {
+          "title": "Bounded UX, polling and verification handoff",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-minter-steps-source-20261110.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-12",
       "state": "Review",
       "owner": "Ellis case; Miles source; Dorian release",
