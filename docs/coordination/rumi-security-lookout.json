@@ -60,10 +60,10 @@
     },
     {
       "id": "SEC-12",
-      "state": "Done",
+      "state": "In progress",
       "owner": "Ellis case; Miles source; Dorian release",
-      "scope": "Restore or safely cancel a saved borrowing request and unblock ckSOL collateral",
-      "evidenceText": "Customer-confirmed recovery on November 11: the customer reports cancelling the saved request and successfully creating a new one. The first screenshot shows the original operation protected with no backend status; the second shows vault creation and borrowing success. This closes the customer cancellation/new-loan acceptance scope based on the customer report and screenshots read directly in the existing support chat. No independent backend cancellation tombstone, ledger settlement or original-request restoration proof was collected in this check. Previously verified deployed software, protected unknown/post-pull phases and exact-intent safeguards remain unchanged. No customer operation, signing, storage clear or financial action was executed by agents. XRP withdrawal acceptance, OISY swap acceptance and reserve activation remain separate.",
+      "scope": "Restore or safely cancel saved borrowing requests across collateral flows",
+      "evidenceText": "REOPENED after a later November 11 customer screenshot: a new ICP-collateral borrowing attempt is blocked because its operation remains bound to different saved arguments. The displayed message says no approval or dispatch was made for that action. This does not establish the previous operation phase, a transfer outcome or fund loss. Earlier customer-reported cancellation/new-loan success remains valid historical evidence, but does not resolve this later report. Source confirms the exact saved-intent comparison rejects changed arguments before approval/dispatch. Recovery banner is mounted globally; the cropped screenshot alone cannot establish whether its controls were absent or outside the view. Next: inspect the held request/phase and recovery controls, retain exact intent and backend-fenced cancellation protections. No guessed retry, storage clear, cancellation, approval or financial action. Same case owner; no new build/release yet. Rob\u2019s separate successful OISY swap remains Done.",
       "evidenceLinks": [
         {
           "title": "Reviewed revision and queue-race evidence",

@@ -13,9 +13,9 @@
     {
       "id": "customer-cksol-collateral-recovery",
       "title": "Customer impact: restore or safely cancel saved borrowing request",
-      "status": "done",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Customer reports successful cancellation of the saved request followed by a new vault and loan, with a success screenshot. Customer acceptance is complete for this path; retain the recovery protections. Independent ledger settlement and original-request restoration were not rechecked. No customer retry or further engineering is requested by this report.",
+      "nextAction": "Investigate the later ICP borrowing screenshot showing saved-argument mismatch. Preserve the earlier successful cancellation/new-loan acceptance as history. Establish the held request phase and available recovery controls before advising exact restore or backend-fenced cancellation. No storage clear, blind retry or agent financial action; no new release yet.",
       "cardIds": [
         "SEC-12"
       ]
