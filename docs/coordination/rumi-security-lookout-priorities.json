@@ -13,9 +13,9 @@
     {
       "id": "customer-cksol-collateral-recovery",
       "title": "Customer impact: restore or safely cancel saved borrowing request",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Dorian takes a fresh slot for one replacement frontend build on final0aea04e1/25e1441f. Earlier CBC build is held/superseded after a reproduced read-contention race, before asset writes. Final21 targeted checks, fresh baseline30/66, dual delta reviews and pending-read browser mock QA pass. Ellis verifies new artifacts/live output. Customer actual phase/outcome unknown; no agent financial action.",
+      "status": "blocked",
+      "blockedReason": "Automatic approval review rejected the exact replacement-allocation message to Dorian because explicit destination/payload authorization was missing. The unused slot was released; no corrected build/publication started. Existing Decision A is pending.",
+      "nextAction": "Rob answers existing Decision A in the pushed DV0513d5c4 packet. Do not ask a duplicate question, relay/use the rejected allocation or bypass review. After authorization, Cody issues a fresh slot to Dorian for frozen25e1441f/code0aea04e1, followed by independent artifact/publication checks. XLM Decision B remains separate.",
       "cardIds": [
         "SEC-12"
       ]

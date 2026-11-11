@@ -1,6 +1,6 @@
 {
-  "summary": "SEC12 final0aea04e1/25e1441f accepted: visible direct recovery plus exact-session read coordination. First CBC build held before asset writes after a reproduced background-read/Review race. Final21 targeted checks, baseline30/66, two fresh delta reviews and actual-component pending-read mock QA pass; prior56/18/layout evidence retained. Dorian coordinates one replacement build; Ellis verifies artifacts/live output. Not deployed, customer outcome unknown. No backend/reserve/financial action.",
-  "plainSummary": "The recovery update makes the saved request visible and reachable from the error. A final timing check caught conflicting status reads, which are now coordinated and verified by tests and independent reviews. The first build was held before publication; a corrected build is being prepared, and the customer\u2019s case remains open.",
+  "summary": "SEC12 source25e1441f/code0aea04e1 accepted with final21 targeted tests, baseline30/66, dual delta reviews and mock pending-read proof. First build held before writes. Corrected build is blocked only because automatic approval review rejected Cody\u2019s allocation message to Dorian for missing exact destination/payload authorization. Existing Decision A DV0513d5c4 pending; no duplicate ask/bypass. No corrected build/publication or financial action; customer outcome unknown.",
+  "plainSummary": "The recovery correction is implemented and tested, but it is not live. Automatic review blocked the scheduler\u2019s message needed to deliver the fresh build allocation. Rob needs to answer the existing Decision A for that one-time step; the customer\u2019s actual saved request remains unresolved.",
   "glossary": [
     {
       "term": "Stability Pool",
