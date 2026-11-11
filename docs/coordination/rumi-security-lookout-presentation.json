@@ -1,6 +1,6 @@
 {
-  "summary": "SEC12 customer cancellation/new-loan acceptance complete from direct report and success screenshot. SEC14 corrective frontend1794415826220 remains independently verified; actual owner account/allowance/swap unverified. Latest Rob clarification: keep optional diagnostic temporarily, defer UI relocation; normal Swap retains internal owner/session checks without requiring the diagnostic. No new production source/build/publication or financial action. XRP acceptance and disabled reserve separate.",
-  "plainSummary": "The customer confirmed that cancelling the saved request and creating a new one worked. The separate wallet swap correction is live, but a successful swap is still unconfirmed. The account check is optional troubleshooting help; Rob is comfortable keeping it temporarily, so moving it is deferred.",
+  "summary": "SEC12 customer cancellation/new-loan acceptance complete. SEC14 corrective frontend1794415826220 independently verified; Rob now reports matching authenticated signing/connected accounts after reconnect. Actual swap, prior allowance and original cause remain unverified, so SEC14 stays Review. Diagnostic optional/temporary; relocation deferred and normal Swap checks unchanged. No agent financial action or new production change. XRP acceptance/reserve separate.",
+  "plainSummary": "The customer\u2019s saved-request recovery worked, and Rob now reports that the wallet\u2019s signing account matches his Rumi connection. A successful swap is still unconfirmed. The account check remains optional; moving it is deferred, and the next useful evidence is the result of Rob\u2019s intended swap through the normal flow.",
   "glossary": [
     {
       "term": "Stability Pool",

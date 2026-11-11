@@ -5,7 +5,7 @@
       "title": "Repair OISY stablecoin swap signer ownership",
       "status": "ready",
       "blockedReason": "",
-      "nextAction": "Keep the live corrective release and normal Swap action with its internal owner/session checks. The read-only diagnostic is an optional temporary aid, not a required workflow. Per latest Rob clarification, defer relocating it; do not make polish a release gate. Actual wallet account, prior allowance and successful swap remain unverified. No agent financial action or duplicate build.",
+      "nextAction": "Rob reports matching signing and connected account identities after reconnecting with the corrective release. Await the result of his deliberate intended direct stablecoin swap through normal Swap; no repeat refresh requirement. Diagnostic is optional, relocation deferred. Prior allowance, original failure cause and successful swap remain unverified; no agent financial action or duplicate build.",
       "cardIds": [
         "SEC-14"
       ]
