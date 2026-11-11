@@ -105,9 +105,8 @@
   </div>
 </header>
 {#if !isBitcoinRoute}<PositionStrip /><XrpPendingDepositBanner />{/if}
-<VaultPullRecoveryBanner />
 <ToastContainer />
-<main class="main-content">{#if POINTS_ENABLED && !isBitcoinRoute && !currentPath.startsWith('/points')}<SeasonBar />{/if}<slot /></main>
+<main class="main-content"><VaultPullRecoveryBanner />{#if POINTS_ENABLED && !isBitcoinRoute && !currentPath.startsWith('/points')}<SeasonBar />{/if}<slot /></main>
 <footer class="app-footer">
   <div class="footer-inner">
     <div class="footer-links">

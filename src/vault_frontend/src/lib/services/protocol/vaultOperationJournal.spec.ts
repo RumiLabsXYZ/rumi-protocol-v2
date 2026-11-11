@@ -99,6 +99,32 @@ describe('runVaultPullOperation', () => {
 		Object.defineProperty(navigator, 'locks', { configurable: true, value: lockManager() });
 	});
 
+
+  it('holds a new interrupted request after an earlier completion, then permits changed terms only after fenced cancellation', async () => {
+    const exact: VaultPullRequest = { OpenVaultAndBorrow: { amount_e8s: 140_000_000n, borrow_amount_e8s: 240_000_000n, collateral_type: 'ryjl3-tyaaa-aaaaa-aaaba-cai' } };
+    const changed: VaultPullRequest = { OpenVaultAndBorrow: { ...exact.OpenVaultAndBorrow, amount_e8s: 143_000_000n, borrow_amount_e8s: 246_000_000n } };
+    const setup = adapter({ acknowledged_through: 2n, active: [] });
+    vi.mocked(setup.adapter.approve).mockResolvedValueOnce({ success: false, error: 'Approval interrupted' });
+    await expect(runVaultPullOperation({owner, request: exact, adapter: setup.adapter})).rejects.toThrow('Approval interrupted');
+    const raw = localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)!;
+    expect(parseVaultPullIntent(raw)?.operationId).toBe('3');
+    await expect(runVaultPullOperation({owner, request: changed, adapter: setup.adapter})).rejects.toThrow('still bound to different arguments');
+    expect(setup.adapter.approve).toHaveBeenCalledTimes(1);
+    expect(setup.adapter.dispatch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toBe(raw);
+    const reviewed = await inspectVaultPullRecovery({owner, adapter: setup.adapter});
+    setup.adapter.cancel = vi.fn(async id => { setup.setStatus({acknowledged_through:id, active:[]}); return id; });
+    await cancelSavedVaultPullOperation({owner, intent: reviewed.intent!, adapter: setup.adapter});
+    expect(setup.adapter.cancel).toHaveBeenCalledWith(3n, exact);
+    expect(localStorage.getItem(`rumi:vault-pull-operation:v1:${owner}`)).toBeNull();
+    vi.mocked(setup.adapter.dispatch).mockImplementationOnce(async (id, request) => {
+      setup.setStatus({acknowledged_through:3n, active:[view(id, request, {Completed:{result:{OpenVault:{vault_id:77n}}}})]});
+      return null;
+    });
+    await expect(runVaultPullOperation({owner, request: changed, adapter: setup.adapter})).resolves.toEqual({vaultId:77});
+    expect(setup.adapter.dispatch).toHaveBeenCalledWith(4n, changed);
+  });
+
 	it('compares exact typed requests independently of object field ordering', () => {
 		expect(
 			sameVaultPullRequest(openRequest, {

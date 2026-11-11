@@ -32,6 +32,7 @@ vi.mock('$lib/stores/wallet', async () => {
   return { walletStore: Object.assign(writable({ isConnected: true, loading: false, principal: null }), { refreshBalance: vi.fn() }) };
 });
 import Banner from './VaultPullRecoveryBanner.svelte';
+import { openOisySignerChannel } from '$lib/services/oisySigner';
 import { walletStore } from '$lib/stores/wallet';
 const mockWalletStore = walletStore as unknown as Writable<{ isConnected: boolean; loading: boolean; principal: Principal | null }>;
 import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
@@ -109,4 +110,84 @@ describe('saved vault request recovery', () => {
     await vi.waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(intent));
     expect(mocks.resume).not.toHaveBeenCalled();
   });
+});
+
+
+it('opens read-only recovery from the form action without continuing or cancelling', async () => {
+  component = mount(Banner, {target});
+  await vi.waitFor(() => expect(button('Restore saved request')).toBeTruthy());
+  mocks.inspect.mockClear();
+  window.dispatchEvent(new CustomEvent('rumi:vault-pull-recovery-review', {detail:{owner: owner.toText()}}));
+  await vi.waitFor(() => expect(mocks.inspect).toHaveBeenCalledOnce());
+  expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(document.activeElement?.id).toBe('vault-pull-recovery'));
+});
+
+it('does not inspect another owner when a form recovery action arrives', async () => {
+  component = mount(Banner, {target});
+  await vi.waitFor(() => expect(button('Restore saved request')).toBeTruthy());
+  mocks.inspect.mockClear();
+  window.dispatchEvent(new CustomEvent('rumi:vault-pull-recovery-review', {detail:{owner:'2vxsx-fae'}}));
+  await tick(); expect(mocks.inspect).not.toHaveBeenCalled();
+});
+
+
+it('keeps the OISY read explicit and deduplicates recovery clicks without financial actions', async () => {
+  currentWalletType.set('oisy');
+  let resolve!: (value: unknown) => void;
+  mocks.inspect.mockImplementationOnce(() => new Promise(done => {resolve=done;}));
+  component=mount(Banner,{target}); await tick();
+  expect(mocks.inspect).not.toHaveBeenCalled();
+  const event=()=>new CustomEvent('rumi:vault-pull-recovery-review',{detail:{owner:owner.toText()}});
+  window.dispatchEvent(event());
+  expect(openOisySignerChannel).toHaveBeenCalledWith(owner);
+  await vi.waitFor(()=>expect(mocks.inspect).toHaveBeenCalledOnce());
+  window.dispatchEvent(event()); await tick();
+  expect(mocks.inspect).toHaveBeenCalledOnce();
+  resolve({intent,status:{active:[],acknowledged_through:0n}});
+  await vi.waitFor(()=>expect(button('Restore saved request')).toBeTruthy());
+  expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
+});
+
+it('discards a delayed read and focus after the owner or signer session changes', async () => {
+  currentWalletType.set('oisy');
+  let resolve!: (value: unknown) => void;
+  mocks.inspect.mockImplementationOnce(()=>new Promise(done=>{resolve=done;}));
+  component=mount(Banner,{target}); await tick();
+  window.dispatchEvent(new CustomEvent('rumi:vault-pull-recovery-review',{detail:{owner:owner.toText()}}));
+  await vi.waitFor(()=>expect(mocks.inspect).toHaveBeenCalledOnce());
+  walletSessionGeneration.set(1); await tick();
+  resolve({intent,status:{active:[],acknowledged_through:0n}}); await tick(); await tick();
+  expect(button('Restore saved request')).toBeUndefined();
+  expect(target.textContent).not.toContain('0.03 ckSOL');
+  expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
+});
+
+it('shows a truthful empty-read result without inviting an automatic replacement', async () => {
+  component=mount(Banner,{target}); await vi.waitFor(()=>expect(button('Restore saved request')).toBeTruthy());
+  mocks.inspect.mockResolvedValue({intent:null,status:{active:[],acknowledged_through:1n}});
+  window.dispatchEvent(new CustomEvent('rumi:vault-pull-recovery-review',{detail:{owner:owner.toText()}}));
+  await vi.waitFor(()=>expect(target.textContent).toContain('No saved request is pending'));
+  expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
+});
+
+it('keeps a submitted transfer in receipt recovery instead of offering cancellation', async () => {
+  component=mount(Banner,{target}); await vi.waitFor(()=>expect(button('Restore saved request')).toBeTruthy());
+  mocks.inspect.mockResolvedValue({intent,status:{active:[{operation_id:1n,request:intent.request,vault_id:0n,phase:{Submitted:null},confirmed_wide_block_index:[]}],acknowledged_through:0n}});
+  window.dispatchEvent(new CustomEvent('rumi:vault-pull-recovery-review',{detail:{owner:owner.toText()}}));
+  await vi.waitFor(()=>expect(button('Verify block and resume')).toBeTruthy());
+  expect(button('Cancel saved request')).toBeUndefined(); expect(button('Continue saved request')).toBeUndefined();
+  expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
+});
+
+
+it('retains the empty-read notice after repeated review clicks during the same read', async () => {
+  component=mount(Banner,{target}); await vi.waitFor(()=>expect(button('Restore saved request')).toBeTruthy());
+  let resolve!: (value: unknown) => void;
+  mocks.inspect.mockImplementationOnce(()=>new Promise(done=>{resolve=done;}));
+  const review=()=>window.dispatchEvent(new CustomEvent('rumi:vault-pull-recovery-review',{detail:{owner:owner.toText()}}));
+  review(); await tick(); review(); await tick();
+  resolve({intent:null,status:{active:[],acknowledged_through:1n}});
+  await vi.waitFor(()=>expect(target.textContent).toContain('No saved request is pending'));
+  expect(mocks.resume).not.toHaveBeenCalled(); expect(mocks.cancel).not.toHaveBeenCalled();
 });

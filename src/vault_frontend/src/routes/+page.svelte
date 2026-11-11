@@ -21,11 +21,13 @@
     xrpCreditedCollateral,
     XRPL_BASE_RESERVE_XRP,
   } from '$lib/utils/nativeXrpBorrowFlow';
+  import { isVaultPullRecoveryError, requestSavedVaultReview } from '$lib/services/protocol/vaultPullRecoveryNavigation';
   import type { CollateralInfo } from '$lib/services/types';
 
   let collateralAmount = 1;
   let icusdAmount = 5;
   let errorMessage = '';
+  let recoveryOwner = '';
   let successMessage = '';
   let actionInProgress = false;
   let showDevInput = false;
@@ -256,6 +258,7 @@
       return;
     }
     actionInProgress = true; errorMessage = ''; successMessage = '';
+    recoveryOwner = $principal?.toText() ?? '';
     try {
       // Compound: open vault + borrow in one backend call.
       // Oisy shows separate consent screens in its signer window for approval and the V2 call.
@@ -403,7 +406,15 @@
               </div>
             {/if}
 
-            {#if errorMessage}<div class="msg-error">{errorMessage}</div>{/if}
+            {#if errorMessage}
+              <div class="msg-error" role="alert">
+                {errorMessage}
+                {#if isVaultPullRecoveryError(errorMessage) && recoveryOwner && $principal?.toText() === recoveryOwner && $isConnected && !$walletStore.loading}
+                  <p>Open your saved request to see the available recovery options.</p>
+                  <button type="button" class="saved-request-link" on:click={() => requestSavedVaultReview(recoveryOwner)}>Review saved request</button>
+                {/if}
+              </div>
+            {/if}
             {#if successMessage}<div class="msg-success">{successMessage}</div>{/if}
 
             {#if $earningActive}
@@ -436,6 +447,8 @@
 </div>
 
 <style>
+  .saved-request-link { margin-top: .5rem; padding: .6rem .8rem; border: 1px solid currentColor; border-radius: .5rem; color: inherit; background: transparent; cursor: pointer; }
+
   .page-container { max-width: 820px; margin: 0 auto; }
   .page-layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.5rem; align-items: start; }
 

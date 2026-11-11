@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '$lib/services/auth';
   import { openOisySignerChannel } from '$lib/services/oisySigner';
   import { ApiClient } from '$lib/services/protocol/apiClient';
@@ -11,6 +11,11 @@
   import { toastStore } from '$lib/stores/toast';
   import { isCurrentVaultPullStatusRead } from '$lib/services/protocol/vaultPullRecoveryViewState';
 
+  import { VAULT_PULL_REVIEW_EVENT } from '$lib/services/protocol/vaultPullRecoveryNavigation';
+
+  let recoveryRegion: HTMLDivElement;
+  let reviewRequested = false;
+  let reviewEpoch = 0;
   let submitted: { operationId: bigint; request: VaultPullRequest; confirmedWideBlockIndex: bigint | null } | null = null;
   let recovery: VaultPullRecoverySnapshot | null = null;
   let restored = false;
@@ -33,6 +38,8 @@
     checkedWalletType = $currentWalletType;
     checkedSession = $walletSessionGeneration;
     actionEpoch++;
+    reviewEpoch++;
+    reviewRequested = false;
     recovery = null;
     restored = false;
     confirmingCancel = false;
@@ -49,6 +56,8 @@
     checkedWalletType = null;
     checkedSession = -1;
     actionEpoch++;
+    reviewEpoch++;
+    reviewRequested = false;
     recovery = null;
     restored = false;
     confirmingCancel = false;
@@ -57,6 +66,30 @@
     manualCheckPending = false;
     submitted = null;
     statusReadError = '';
+  }
+
+  async function onReviewRequest(event: Event) {
+    if (!(event instanceof CustomEvent) || !owner || event.detail?.owner !== owner) return;
+    const ownerAtClick = owner;
+    const walletAtClick = $currentWalletType;
+    const sessionAtClick = $walletSessionGeneration;
+    const review = busy ? reviewEpoch : ++reviewEpoch;
+    const current = () => review === reviewEpoch && owner === ownerAtClick
+      && $currentWalletType === walletAtClick && $walletSessionGeneration === sessionAtClick;
+    reviewRequested = true;
+    const alreadyBusy = busy;
+    // Calling before any await preserves OISY's user-click popup boundary.
+    const reading = requestRefresh();
+    await tick();
+    if (current()) {
+      recoveryRegion?.scrollIntoView?.({block: 'start', behavior: 'smooth'});
+      recoveryRegion?.focus({preventScroll: true});
+    }
+    await reading;
+    if (!current() || alreadyBusy || statusReadError || recovery?.intent) return;
+    actionNotice = recovery?.status.active[0]
+      ? 'A vault operation is pending, but its saved request is not available in this browser. Keep the current browser data and contact support before another attempt.'
+      : 'No saved request is pending in this wallet. Refresh your vaults and balance before creating another request.';
   }
 
   async function requestRefresh() {
@@ -193,6 +226,7 @@
 
   onMount(() => {
     window.addEventListener(VAULT_PULL_STATUS_EVENT, onRecoverySignal);
+    window.addEventListener(VAULT_PULL_REVIEW_EVENT, onReviewRequest);
     window.addEventListener('storage', onRecoverySignal);
     const channel = typeof BroadcastChannel !== 'undefined'
       ? new BroadcastChannel(VAULT_PULL_STATUS_EVENT)
@@ -200,6 +234,7 @@
     channel?.addEventListener('message', onRecoverySignal);
     return () => {
       window.removeEventListener(VAULT_PULL_STATUS_EVENT, onRecoverySignal);
+      window.removeEventListener(VAULT_PULL_REVIEW_EVENT, onReviewRequest);
       window.removeEventListener('storage', onRecoverySignal);
       channel?.removeEventListener('message', onRecoverySignal);
       channel?.close();
@@ -236,7 +271,10 @@
   }
 </script>
 
-{#if owner && submitted}
+<div id="vault-pull-recovery" class="recovery-region" bind:this={recoveryRegion} tabindex="-1" role="region" aria-label="Saved vault request recovery">
+{#if owner && reviewRequested && busy && !recovery}
+  <section class="recovery" role="status"><p>Checking your saved request…</p></section>
+{:else if owner && submitted}
   <section class="recovery" aria-label="Recover submitted vault collateral pull">
     {#if submitted.confirmedWideBlockIndex !== null}
     <p>
@@ -289,7 +327,7 @@
     {:else}
       {#if actions.canRestore}
         {#if restored}
-          <p>Exact saved request restored above. Continuing may ask for token approval and submit this request; its amounts will not be replaced by the current form.</p>
+          <p>Review the saved amounts shown here. Continue uses this exact request, including its original collateral and borrow amounts; edits in the borrow form do not change it. Continuing may ask for token approval and submit this request.</p>
           <button on:click={() => savedAction('resume')} disabled={busy || manualCheckPending || !!statusReadError}>Continue saved request</button>
         {:else}
           <button on:click={() => { restored = true; }} disabled={busy || manualCheckPending || !!statusReadError}>Restore saved request</button>
@@ -314,7 +352,11 @@
   </section>
 {/if}
 
+</div>
 <style>
+  .recovery-region { scroll-margin-top: calc(4.75rem + var(--rumi-xrp-recovery-height, 0px) + var(--rumi-strip-height, 0px)); }
+  .recovery-region:focus { outline: 2px solid #2dd4bf; outline-offset: 3px; border-radius: .75rem; }
+
   .recovery {
     min-width: 0;
     max-width: 70rem;
