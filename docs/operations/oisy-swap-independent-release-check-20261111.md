@@ -37,3 +37,18 @@ Independent offline Candid encoding/decoding checked stage **822 operations** (4
 ## Remaining boundary
 
 Dorian must finish and push the readable exact frontend-only decision, preserve the frozen output, and obtain any publication authority required by that packet. After any authorized publication, independently verify the final authoritative inventory, retained properties/encodings, primary-domain root/version/auth files and new swap/ckSOL bundles. A real OISY approval and successful swap still require the owner's deliberate action. No automatic replay or financial canary is included.
+
+## Final reusable-source portability amendment
+
+Dorian subsequently removed literal private checkout paths from the reusable publisher and verification scripts. A focused independent reverse-substitution check recovered **all three original reviewed script hashes exactly**, proving only import/path construction changed. Node syntax checks pass; the manifest, comparison, payload bytes and mutation guards are unchanged. This supersedes only the earlier script/pins hashes above:
+
+- Final publication pins: `d9be01ed676c629a692edaea229d67cec654b1d2473209955e823493b28bf232`.
+- Final publisher: `8067226a1d02aec4f3b02b0855870bb381b02fc46ef5d33b2ca56ecd22ca672c`.
+- Final publication verifier: `c8487f872f83351964433a6c7d6a4ac7589a50d2ae63d6d4cb9751ed17d78bff`.
+- Final primary-domain verifier: `199c721dbcbd4f53a67d84e8b0bd37416c21971da358853587e0dac4d8d5b9e8`.
+
+The pins also distinguish the raw served Candid hash from the canonical hash with the final-newline comparison stated explicitly. No additional build, source-suite rerun, publication or financial action followed this amendment.
+
+Final input-binding amendment: publication pins are now `786ea7a8b761fcd5eaeaeada52bcad9517abbd8a203eb8c1ba90bd80dee2ed60`, publisher `b5d3d599dcb5baabc5666a71f06cfa55eb554d9fec06f343fee43d849d484092`. Independent removal of exactly six added input-hash comparisons recovers the previously reviewed publisher hash `8067226a`; no other byte changed. These checks additionally bind consumed status/permission baselines and readback scripts before calls. The reduced status record retains the identical compared id/status/module/settings fields; public module/controllers still match the independent read. Syntax and new baseline hashes pass. No application artifact, payload, mutation scope or phase-order change.
+
+Final readable packet: [exact held frontend-only decision](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/57ba7206036ec5dc1c463bfeeeb904b378ffea08/docs/operations/oisy-cksol-frontend-publication-20261111.md), SHA256 `06017038c3c422a9de69437029164eb2aa6bac61f53ee6d35b11e28f62ad98f3`. Its final sequence/pins and existing hold boundaries were read and checked. Preparation passes; exact publication remains unapproved and unexecuted.

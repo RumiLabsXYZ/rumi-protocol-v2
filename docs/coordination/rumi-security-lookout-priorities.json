@@ -3,9 +3,9 @@
     {
       "id": "oisy-stable-swap-owner",
       "title": "Repair OISY stablecoin swap signer ownership",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Dorian completes the reserved composed frontend artifact, inventory checks and exact frontend-only publication decision. Ellis independently verifies the packet; source passed 62 tests and two reviews. Live wallet history and retry remain unverified; no backend or financial authority inferred.",
+      "status": "blocked",
+      "blockedReason": "Exact composed frontend-only publication decision57ba7206 is prepared and independently checked; publication approval for this new frozen bundle remains ungranted.",
+      "nextAction": "After approval of exact packet57ba7206/documentSHA06017038, Dorian stages and activates once, then verifies authoritative inventory and served bytes; Ellis independently checks. Preserve backend/reserve/financial holds. Owner wallet retry remains separate; no automatic replay.",
       "cardIds": [
         "SEC-14"
       ]
@@ -23,9 +23,9 @@
     {
       "id": "cksol-minting-guidance",
       "title": "Clear ckSOL mint steps and bounded status checks",
-      "status": "ready",
-      "blockedReason": "",
-      "nextAction": "Dorian reports the composed frontend build passed with accepted ckSOL source94ffd5d5 and OISY repair6e6f32fa. Complete artifact/inventory checks and a distinct frontend-only decision. Existing126 tests, two reviews and mock-page evidence remain valid; no publication, reserve or customer action is claimed.",
+      "status": "blocked",
+      "blockedReason": "Exact composed frontend-only publication decision57ba7206 is prepared and independently checked; publication approval for this new frozen bundle remains ungranted.",
+      "nextAction": "After approval of exact packet57ba7206/documentSHA06017038, Dorian stages and activates once, then verifies authoritative inventory and served bytes; Ellis independently checks. Preserve backend/reserve/financial holds. Owner wallet retry remains separate; no automatic replay.",
       "cardIds": [
         "SEC-13"
       ]

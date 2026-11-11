@@ -2,14 +2,22 @@
   "cards": [
     {
       "id": "SEC-14",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Ellis source/case; Dorian release",
       "scope": "Bind direct OISY 3pool swaps to the intended signer owner and wallet session",
-      "evidenceText": "Accepted frontend source 6e6f32fa and readable handoff d54ac7b7 are pushed. The old path borrowed a cached signer after an awaited fee lookup without checking the live owner or session. A fresh action-owned popup opens synchronously; the expected owner and session are verified before approval and swap. Exact amounts, allowance cap and minimum output are preserved; no automatic retry. All 62 focused tests and two independent reviews pass; global typecheck remains 30 existing errors/66 warnings. Exact OISY owner rejection is distinguished at approval versus swap, preserving the possibility of an earlier successful approval. Actual initiating wallet state, prior approval and swap outcome remain unverified. The live old service bundle was independently matched. Dorian reports the composed frontend build passed; exact artifact/inventory and frontend-only publication decision remain in preparation against the compatible installed API. No publication, backend install or financial action is claimed.",
+      "evidenceText": "Accepted OISY frontend code6e6f32fa is pushed; 62 focused tests and two independent reviews pass, with existing typecheck30errors/66warnings unchanged. A fresh click-owned signer pins and verifies owner/provider/session before approval and swap; exact monetary arguments remain unchanged and no retry occurs. The particular owner-rejected request is pre-execution; an earlier approval may exist if swap failed. Actual initiating state, prior allowance and swap outcome remain unknown. Dorian built composed sourced54ac7b7/version1794386914589 once, including accepted ckSOL94ffd5d5. Ellis independently verified all740 files and compression pairs, reviewed bundle content, unchanged auth files,411 newkeys/418sets with only7 existing index/version changes and preserved old3987 keys/properties. Fresh live modules/root/version/auth/oldswap match baseline. Exact publisher guards and offline typed operation sizes pass; its final portable-source path-only amendment preserves all guard semantics. Exact held frontend-only decision57ba7206 is pushed; document SHA06017038, final pins786ea7a8. Only exact assets-only publication approval remains before staging/activation; no backend/financial scope included. No publication, backend mutation or wallet action.",
       "evidenceLinks": [
         {
           "title": "Accepted source, tests and submission boundary",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/d54ac7b7235d27cf4aca52416a854d5cfab6240d/docs/operations/oisy-3pool-swap-owner-source-20261111.md"
+        },
+        {
+          "title": "Independent artifact and publisher verification",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/oisy-swap-independent-release-check-20261111.md"
+        },
+        {
+          "title": "Exact held frontend-only publication decision",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/57ba7206036ec5dc1c463bfeeeb904b378ffea08/docs/operations/oisy-cksol-frontend-publication-20261111.md"
         }
       ]
     },
@@ -18,7 +26,7 @@
       "state": "Review",
       "owner": "Ellis source/case; Dorian release",
       "scope": "Make ckSOL mint steps explicit and bound read-only polling to active flows",
-      "evidenceText": "Corrected frontend-only source 94ffd5d5 is pushed on the existing Vault51 candidate lineage. Four numbered costs/send-and-detect/explicit-mint/wallet steps distinguish previous success from a new deposit and collapse receipts. Active read checks back off 15/30/60 seconds, reset on progress/manual/new flow, pause hidden/disconnected, and stop only after mint plus known payment/refund completion; Check again remains one-shot. Background reads cannot submit payments or repeatedly disable a ready CTA. Three review issues were reproduced and fixed: external receipt progress now resets the timer, a terminal mint refreshes the wallet balance with session/error guards, and unavailable payment status stays held/retrying rather than becoming empty settlement proof. All 126 focused tests and both final independent reviews pass. Mocked real-page desktop/mobile interaction QA passed. Typecheck retains 30 existing errors/66 warnings, none in changed source. November 11: source is preserved in the accepted OISY composition; Dorian reports its serial frontend build passed. Exact artifact verification and a distinct frontend-only decision follow. No publication, customer action or reserve activation is claimed.",
+      "evidenceText": "Corrected frontend-only source 94ffd5d5 is pushed on the existing Vault51 candidate lineage. Four numbered costs/send-and-detect/explicit-mint/wallet steps distinguish previous success from a new deposit and collapse receipts. Active read checks back off 15/30/60 seconds, reset on progress/manual/new flow, pause hidden/disconnected, and stop only after mint plus known payment/refund completion; Check again remains one-shot. Background reads cannot submit payments or repeatedly disable a ready CTA. Three review issues were reproduced and fixed: external receipt progress now resets the timer, a terminal mint refreshes the wallet balance with session/error guards, and unavailable payment status stays held/retrying rather than becoming empty settlement proof. All 126 focused tests and both final independent reviews pass. Mocked real-page desktop/mobile interaction QA passed. Typecheck retains 30 existing errors/66 warnings, none in changed source. November 11: source is preserved in the accepted OISY composition; Its serial composed frontend build passed; Ellis independently verified all740 manifest files, compression pairs, unchanged auth and the additive publication plan. Exact held frontend-only decision57ba7206 is complete; publication requires its separate approval. No publication, customer action or reserve activation is claimed.",
       "evidenceLinks": [
         {
           "title": "Corrected six-file source candidate",
