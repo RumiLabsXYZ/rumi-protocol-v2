@@ -1,0 +1,12 @@
+{
+  "action": "SEC12 corrected frontend additive stage",
+  "reviewResult": "rejected before process creation",
+  "reason": "This command performs live production canister writes for the stage, while the trusted approval only covers Decision A\u2019s replacement build and allocation; explicit authorization for publication is not established.",
+  "publicationCommandStarted": false,
+  "publicationJournalExists": false,
+  "batchCreated": false,
+  "source": "25e1441fd4688f0a8fa3748f9eccf77fb57fb0ff",
+  "version": "1794442789073",
+  "publicationPinsSha256": "9410545ec9c3bcd67fb3f2e90c1f1b7bb78ad0e2db13a702558ae298e8180a30",
+  "next": "Explicit exact frontend publication decision; no retry or alternate route"
+}
