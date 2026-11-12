@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Full-withdrawal approval answered and consumed; test PASS (receipt 1caaefde). The test-only vault lifecycle is locally proven through full withdrawal to claim. Not built: claim settlement, signing and payout, liquidation, production exposure, frontend. Production stays Frozen.",
+      "nextAction": "Full withdrawal PASS retained. Next: dormant prepared settlement intent is source-complete but unbuilt (98b35c9a); its focused unit test and production check have not run. Settlement, signing, payout and live behaviour remain unproven; production stays Frozen.",
       "cardIds": [
         "WP3"
       ]
