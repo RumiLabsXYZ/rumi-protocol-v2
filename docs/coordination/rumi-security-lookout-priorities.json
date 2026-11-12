@@ -3,9 +3,9 @@
     {
       "id": "swap-wallet-support-ux",
       "title": "Optional wallet help and visible recovery panel",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Approvedbuild240/version1794522798107 completed19.97s; Ellis independent740file/476compression/13pins/fullplanPASS. Dorianfreshguards/publishes123immutable+7entrysets once; Ellis independently checks4824keys/5018encodings, publicrecovery/help/repay/OISY/ckSOL/authbytes, modules/controllers and layout. No repeatedapproval/sourcecheck/build/customerwalletaction. Actualcustomerrecovery/repayment remainsunverified.",
+      "nextAction": "Softwaredeployed/independentlyverified at1794522798107: source/build/artifact/fullinventory/primarybytes/certifiedmodules and actualdesktop/mobilelayout pass. Preserve guards and receipt. No additionalbuild/test/financialcanary required for this UXscope; actualcustomerrecovery/repayment remains tracked in SEC12.",
       "cardIds": [
         "SEC-15"
       ]
@@ -13,9 +13,9 @@
     {
       "id": "repayment-max-refresh-ux",
       "title": "Recover repayment Max after live refresh",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Approvedbuild240/version1794522798107 completed19.97s; Ellis independent740file/476compression/13pins/fullplanPASS. Dorianfreshguards/publishes123immutable+7entrysets once; Ellis independently checks4824keys/5018encodings, publicrecovery/help/repay/OISY/ckSOL/authbytes, modules/controllers and layout. No repeatedapproval/sourcecheck/build/customerwalletaction. Actualcustomerrecovery/repayment remainsunverified.",
+      "nextAction": "Softwaredeployed/independentlyverified at1794522798107: source/build/artifact/fullinventory/primarybytes/certifiedmodules and actualdesktop/mobilelayout pass. Preserve guards and receipt. No additionalbuild/test/financialcanary required for this UXscope; actualcustomerrecovery/repayment remains tracked in SEC12.",
       "cardIds": [
         "SEC-16"
       ]
@@ -33,9 +33,9 @@
     {
       "id": "customer-cksol-collateral-recovery",
       "title": "Customer impact: restore or safely cancel saved borrowing request",
-      "status": "in_progress",
+      "status": "ready",
       "blockedReason": "",
-      "nextAction": "Approvedbuild240/version1794522798107 completed19.97s; Ellis independent740file/476compression/13pins/fullplanPASS. Dorianfreshguards/publishes123immutable+7entrysets once; Ellis independently checks4824keys/5018encodings, publicrecovery/help/repay/OISY/ckSOL/authbytes, modules/controllers and layout. No repeatedapproval/sourcecheck/build/customerwalletaction. Actualcustomerrecovery/repayment remainsunverified.",
+      "nextAction": "Corrected recovery/help/Max UI is deployed and independently verified at1794522798107. Rob can relay owner instructions: samewallet/browser, Review saved request, Restore reviews exactsavedterms; Continue is explicit. Cancel only via separate confirmation/backendfence whenavailable; unknown/submitted staysreceipt-recovery. Awaitcustomeractualrecovery confirmation; no storageclear/agentfinancialaction or unnecessaryretry.",
       "cardIds": [
         "SEC-12"
       ]

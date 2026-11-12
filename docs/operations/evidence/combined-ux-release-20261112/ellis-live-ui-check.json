@@ -1,0 +1,37 @@
+{
+  "scope": "Actual deployed swap page, separate agent-created Chrome tab; no original user tab reload or financial action",
+  "version": "1794522798107",
+  "pageIdentityVerified": true,
+  "frameworkOverlayObserved": false,
+  "desktop": {
+    "requestedViewport": [
+      1280,
+      800
+    ],
+    "observedCssWidth": 1422,
+    "browserZoomPercent": 90,
+    "recoveryInsideMain": true,
+    "stripBottom": 95.04340744018556,
+    "recoveryTop": 125.98958587646484,
+    "helpInitiallyCollapsed": true
+  },
+  "mobile": {
+    "requestedViewport": [
+      390,
+      844
+    ],
+    "observedCssWidth": 433,
+    "scrollWidth": 433,
+    "recoveryInsideMain": true,
+    "stripBottom": 92.55208969116212,
+    "recoveryTop": 115.98958587646484,
+    "seasonTop": 258.7934265136719,
+    "helpCollapsed": true
+  },
+  "interaction": "Native wallet-help disclosure opened, exposed separate read-only inspection button, then collapsed. Inspection button and pending-vault-action button were not clicked.",
+  "console": "One extension-origin ethereum property injection TypeError; no Rumi UI exception or framework overlay observed.",
+  "cleanup": "Temporary viewport reset; agent-created tab closed. Existing user tabs unchanged.",
+  "financialActionExecuted": false,
+  "customerRecoveryVerified": false,
+  "repaymentExecuted": false
+}
