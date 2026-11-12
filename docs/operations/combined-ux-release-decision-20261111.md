@@ -35,6 +35,7 @@ producer intentionally remains at25e with old dist untouched.
    It executes only `npm run build --workspace=src/vault_frontend` with installed
    offline dependencies. RunnerSHA256
    **b23ef65416b2bbdb88ae331f036b3a1d3035018fc2c1a9cb01763f71d6004f6c**.
+   [Readable pinned runner](evidence/combined-ux-release-20261111/build-once.py).
    Bounds:15minutes including60seconds closure,20GiB free floor,8GiB physical
    growth/ownedRSS; no competing heavy build, new worker or dependency install.
 3. Freeze and push actual source-bound manifest/version, additive comparison and
