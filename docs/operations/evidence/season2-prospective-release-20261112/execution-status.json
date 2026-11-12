@@ -1,20 +1,13 @@
 {
-  "checked_at_utc": "2026-11-12T22:44:09.642264+00:00",
+  "status": "RUNNING",
   "canister_id": "2cvsh-3aaaa-aaaaj-qspga-cai",
-  "module_uploaded_gzip_sha256": "d301b54c5c2db14fa26baff7435f8152bbb8623866d3bf2fd703ae2b2c039d9c",
-  "decompressed_module_sha256": "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603",
-  "management_module_hash_matches_uploaded_gzip": true,
-  "source_debit_cycles": 900100000000,
-  "source_balance_after": 3400550044313,
   "cutoff_utc": "2026-11-12T23:45:00Z",
-  "zero_credit_bootstrap_begun": true,
+  "poll_enabled": true,
+  "driver_enabled": true,
   "historical_points_imported": 0,
-  "poll_enabled": false,
-  "driver_enabled": false,
-  "scoring_started": false,
-  "source_tail_preparation_complete": true,
-  "eligible_registration_rows_in_preparation": 15,
-  "preparation_is_final_cutoff_capture": false,
-  "participant_addressed_operator_queries": false,
-  "next": "At fixed T0 capture global source tails, seal eligible cohort and exact cursors, finish zero-credit bootstrap, then poll/start and read back. No retiming."
+  "bootstrap_complete": true,
+  "receipt": "running-receipt.json",
+  "first_capture_observed": false,
+  "weekly_awards_observed": false,
+  "next": "Observe first actual capture when due; continue historical reconciliation separately. No historical credit batch is authorized."
 }
