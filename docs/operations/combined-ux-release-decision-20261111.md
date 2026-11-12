@@ -14,7 +14,16 @@ panel placement/read coordination, collapsed optional wallet help and repayment
 Max refresh fix. No new binary or new manifest exists yet. The existing clean
 producer intentionally remains at25e with old dist untouched.
 
-1. After fresh capacity checks, Cody may issue ONE new exclusive allocation and
+1. Dorian may send Cody, chat01a0eeee-d768-71b1-8090-0ca4e680e5b3, one exact
+   source/runner/build-resource request and the resulting own build start/native
+   exit/manifest/resource/owned-closure receipt. Cody may reply directly to
+   original Dorian chat01a1a800-7fde-71b2-a128-2b2325c4b232 with its one fresh
+   exact allocation. This explicitly authorizes both directions for this one
+   combined240db4cd lifecycle, excluding unrelated usage/process/status payloads.
+   The preparation message to Cody was automatically rejected before delivery
+   for missing explicit destination permission; it is preserved and not rerouted.
+   No fresh allocation exists yet. After approval and fresh capacity checks,
+   Cody may issue ONE new exclusive allocation and
    send its exact packet directly to original Dorian chat
    01a1a800-7fde-71b2-a128-2b2325c4b232 for this source/runner. No earlier grant or
    rejected payload is reused. The only fresh fields are allocationUUID, absolute
@@ -50,7 +59,7 @@ The build-version timestamp, derived hashes/new immutable-key count, comparison,
 and returned batch/chunk IDs are mechanical outputs of this exact source and
 existing build environment. They must be frozen and pushed before publication;
 they cannot substitute source, change existing properties or expand mutation scope.
-This approval explicitly covers the build allocation message AND subsequent
+This approval explicitly covers Dorian–Cody build coordination in both directions AND subsequent
 bounded production asset staging/entry-point activation/verification above.
 No second approval is requested merely because those mechanical output pins are
 produced; an actual new review rejection or material source/scope change stops.
