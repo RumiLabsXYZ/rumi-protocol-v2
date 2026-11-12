@@ -78,6 +78,7 @@
     if (!expanded) {
       activeAction = 'repay';
       addCollateralAmount = ''; borrowAmount = ''; repayAmount = ''; withdrawAmount = '';
+      repayMaxSelected = false; repayMaxAdjusted = false;
       // Fetch per-vault dynamic interest rate (CR-dependent)
       ApiClient.getVaultInterestRate(vault.vaultId).then(rate => {
         if (rate !== null) dynamicInterestRate = rate;
@@ -156,8 +157,11 @@
   $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
     : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
   $: walletIcusdRaw = $walletStore.tokenBalances?.ICUSD?.raw ?? 0n;
-  // Deduct the repay token's ledger fee: icUSD = 0.001, ckUSDT/ckUSDC = 0.01
-  $: repayLedgerFee = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC') ? 0.01 : 0.001;
+  // icUSD repayment burns to the ledger minting account (no transfer fee).
+  // Reserve one approval fee: OISY always approves; others may need approval.
+  const ICUSD_REPAY_APPROVAL_RESERVE_E8S = 100_000n;
+  // Keep the existing ckStable fee reserve unchanged.
+  $: repayLedgerFee = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC') ? 0.01 : Number(ICUSD_REPAY_APPROVAL_RESERVE_E8S) / E8S;
   $: effectiveRepayBalance = Math.max(0, activeRepayBalance - repayLedgerFee);
   // For ckStables, the backend tacks on a protocol fee (e.g. 1%) on top of the base amount.
   // Divide by (1 + feeRate) so user's wallet can cover base + fee.
@@ -167,12 +171,12 @@
     : Number(computeSafeIcusdRepayMax(
         walletIcusdRaw,
         BigInt(Math.max(0, Math.ceil(tickingDebt * E8S))),
-        100_000n,
+        ICUSD_REPAY_APPROVAL_RESERVE_E8S,
         BigInt(Math.max(0, Math.round(vaultCollateralInfo?.minVaultDebt ?? 10_000_000))),
       )) / E8S;
   $: claimSpendable = isCkStableRepay
     ? effectiveRepayBalance / (1 + ckstableRepayFee)
-    : Number(walletIcusdRaw > 100_000n ? walletIcusdRaw - 100_000n : 0n) / E8S;
+    : Number(walletIcusdRaw > ICUSD_REPAY_APPROVAL_RESERVE_E8S ? walletIcusdRaw - ICUSD_REPAY_APPROVAL_RESERVE_E8S : 0n) / E8S;
   $: maxRepayable = isRedemptionClaim ? claimRepayMaximum(tickingDebt, claimSpendable, maxRepayBase) : Math.min(maxRepayBase, tickingDebt);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
@@ -407,6 +411,8 @@
   let withdrawAmount = '';
   let borrowAmount = '';
   let repayAmount = '';
+  let repayMaxSelected = false;
+  let repayMaxAdjusted = false;
   let isProcessing = false;
   let isWithdrawingAndClosing = false;
   let showTokenDropdown = false;
@@ -421,11 +427,12 @@
     if (activeAction === action) return; // already selected — do nothing
     clearMessages();
     addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
+    repayMaxSelected = false; repayMaxAdjusted = false;
     closeOnFullRepay = true; // reset full-repay choice to the default (close)
     activeAction = action;
   }
 
-  function onTokenChange() { repayAmount = ''; clearMessages(); }
+  function onTokenChange() { repayAmount = ''; repayMaxSelected = false; repayMaxAdjusted = false; clearMessages(); }
 
   $: repayTokenLabel = repayTokenType === 'icUSD' ? 'icUSD'
     : repayTokenType === 'CKUSDT' ? 'ckUSDT' : 'ckUSDC';
@@ -532,7 +539,7 @@
 
   $: repayOverMax = (() => {
     const v = parseFloat(repayAmount);
-    return v > 0 && maxRepayable > 0 && v > maxRepayable;
+    return v > 0 && v > maxRepayable;
   })();
 
   $: canWithdraw = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
@@ -602,13 +609,26 @@
     if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 4);
   }
   function setMaxRepay() {
-    if (maxRepayable > 0) repayAmount = floorTo(maxRepayable, 8);
+    if (isProcessing) return;
+    if (maxRepayable > 0) {
+      repayAmount = floorTo(maxRepayable, 8);
+      repayMaxSelected = true;
+      repayMaxAdjusted = false;
+    }
   }
 
   // icUSD is an 8-decimal token. Keep the native number input's constraint at
   // token precision so a Max value such as 1.995 remains a valid entry, while
   // the max attribute reflects the same floored amount passed to the API.
   $: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, 8) : undefined;
+
+  // A backend refresh can lower the interpolated debt and its partial-repay cap.
+  // Only lower an untouched Max selection; never rewrite typed amounts, raise
+  // a selected amount, or change the request while a wallet action is pending.
+  $: if (repayMaxSelected && !isProcessing && Number(repayAmount) > Number(repayInputMax ?? 0)) {
+    repayAmount = repayInputMax ?? '';
+    repayMaxAdjusted = true;
+  }
 
   function clampInput(field: 'add' | 'withdraw' | 'borrow' | 'repay') {
     if (field === 'add') {
@@ -776,6 +796,7 @@
           ? `${actionLabel} (wallet glitch ignored — operation confirmed on-chain).`
           : actionLabel;
         toastStore.success(msg, 8000); repayAmount = '';
+        repayMaxSelected = false; repayMaxAdjusted = false;
         await new Promise(r => setTimeout(r, 1000));
         // For non-XRP repay-and-close, refresh the full vault list because the
         // vault is gone. Native-XRP vaults remain open.
@@ -1125,11 +1146,12 @@
               <div class="input-header">
                 <span class="input-label">Repay Debt {#if $earningActive}<MultiplierBadge multiplier={5} comingSoon label="5× soon" />{/if}</span>
                 {#if maxRepayable > 0}
-                  <button class="max-text" on:click={setMaxRepay}>Max: {repayInputMax}</button>
+                  <button class="max-text" on:click={setMaxRepay} disabled={isProcessing}>Max: {repayInputMax}</button>
                 {/if}
               </div>
               <div class="action-input-row">
                 <input type="number" class="action-input action-input-repay" bind:value={repayAmount}
+                  on:input={() => { repayMaxSelected = false; repayMaxAdjusted = false; }}
                   on:blur={() => clampInput('repay')}
                   placeholder="0.00" min="0" max={repayInputMax} step="0.00000001" inputmode="decimal" disabled={isProcessing} />
                 {#if bitcoinOnly}
@@ -1164,6 +1186,18 @@
                   {/if}
                 {/if}
               </div>
+              {#if repayTokenType === 'icUSD'}
+                <p class="repay-close-hint">Max reserves 0.001 icUSD for token approval. Repayment burns icUSD without a separate transfer fee. An existing allowance may avoid the approval fee.</p>
+                {#if !isRedemptionClaim && maxRepayable > 0 && maxRepayable < tickingDebt}
+                  <p class="repay-close-hint">Max is a safe partial repayment because your balance cannot cover the full debt plus fees. Near-full repayments are charged as full repayment, so Max leaves about {formatStableTx(tickingDebt - maxRepayable)} icUSD of debt to stay outside that boundary.</p>
+                {/if}
+              {/if}
+              {#if repayMaxAdjusted}
+                <p class="repay-close-hint" role="status">Max was reduced to the refreshed safe limit. Review the amount before repaying.</p>
+              {/if}
+              {#if repayOverMax}
+                <p class="repay-close-hint" role="status">The safe repayment limit changed. Choose Max again or enter a lower amount.</p>
+              {/if}
               {#if canKeepVaultOpenOnFullRepay && !isNativeXrp}
                 <div class="repay-close-toggle" role="radiogroup" aria-label="After repaying full debt">
                   <button type="button" class="repay-close-option" class:repay-close-option-active={closeOnFullRepay}
