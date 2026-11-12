@@ -1,5 +1,10 @@
 # Exact SEC12 corrected frontend publication decision — HELD
 
+**SUPERSEDED before approval/execution by the combined240db4cd decision.** This
+historical decision still describes only frozen25e/version1794442789073 and must
+not be treated as approval of newer cleanup/Max source. See
+[the replacement decision](combined-ux-release-decision-20261111.md).
+
 Decision A's one replacement build and allocation message were approved and
 completed. The exact source-bound artifact is ready. Automatic approval review
 rejected the attempted additive stage before process creation because it found
