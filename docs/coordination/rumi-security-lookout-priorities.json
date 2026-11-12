@@ -3,9 +3,9 @@
     {
       "id": "swap-wallet-support-ux",
       "title": "Optional wallet help and visible recovery panel",
-      "status": "ready",
-      "blockedReason": "Sole replacement decision137e8e71 awaits Rob only in Dorian chat; old4ea is superseded. Direct Dorian-to-Cody preparation message was automatically rejected beforedelivery for destinationpermission. No freshallocation/build/publication.",
-      "nextAction": "Use the one combined replacement decision137e8e71 for accepted source240db4cd and runnerb23ef654. Afterapproval Dorian/Cody coordinate onefreshallocation and offlinebuild; Dorian freezes/pushes actualpins, Ellis independently checks, then boundedadditivepublication/readback. Preserve alloldartifacts/settings/auth; no duplicatequestion/grantreuse/sourcechange/financialaction. Customerlaterrecovery/repayment remain unverified.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Rob directly approved combined137e8e71 on November12; originalapproval independentlyread. Dorian/Cody coordinate onefreshallocation/offlinebuild for exact240db4cd/runnerb23ef654, thenfreeze/pushoutputpins. Ellis independently checks artifacts and publicbaseline; Dorian publishes additiveassets once and Ellis verifieslivebytes/layout/inventory/modules. No duplicateapproval/build/tests/customerwalletactions. Actualcustomerlaterrecovery/repayment remainsunverified.",
       "cardIds": [
         "SEC-15"
       ]
@@ -13,9 +13,9 @@
     {
       "id": "repayment-max-refresh-ux",
       "title": "Recover repayment Max after live refresh",
-      "status": "ready",
-      "blockedReason": "Sole replacement decision137e8e71 awaits Rob only in Dorian chat; old4ea is superseded. Direct Dorian-to-Cody preparation message was automatically rejected beforedelivery for destinationpermission. No freshallocation/build/publication.",
-      "nextAction": "Use the one combined replacement decision137e8e71 for accepted source240db4cd and runnerb23ef654. Afterapproval Dorian/Cody coordinate onefreshallocation and offlinebuild; Dorian freezes/pushes actualpins, Ellis independently checks, then boundedadditivepublication/readback. Preserve alloldartifacts/settings/auth; no duplicatequestion/grantreuse/sourcechange/financialaction. Customerlaterrecovery/repayment remain unverified.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Rob directly approved combined137e8e71 on November12; originalapproval independentlyread. Dorian/Cody coordinate onefreshallocation/offlinebuild for exact240db4cd/runnerb23ef654, thenfreeze/pushoutputpins. Ellis independently checks artifacts and publicbaseline; Dorian publishes additiveassets once and Ellis verifieslivebytes/layout/inventory/modules. No duplicateapproval/build/tests/customerwalletactions. Actualcustomerlaterrecovery/repayment remainsunverified.",
       "cardIds": [
         "SEC-16"
       ]
@@ -34,8 +34,8 @@
       "id": "customer-cksol-collateral-recovery",
       "title": "Customer impact: restore or safely cancel saved borrowing request",
       "status": "in_progress",
-      "blockedReason": "Sole replacement decision137e8e71 awaits Rob only in Dorian chat; old4ea is superseded. Direct Dorian-to-Cody preparation message was automatically rejected beforedelivery for destinationpermission. No freshallocation/build/publication.",
-      "nextAction": "Use the one combined replacement decision137e8e71 for accepted source240db4cd and runnerb23ef654. Afterapproval Dorian/Cody coordinate onefreshallocation and offlinebuild; Dorian freezes/pushes actualpins, Ellis independently checks, then boundedadditivepublication/readback. Preserve alloldartifacts/settings/auth; no duplicatequestion/grantreuse/sourcechange/financialaction. Customerlaterrecovery/repayment remain unverified.",
+      "blockedReason": "",
+      "nextAction": "Rob directly approved combined137e8e71 on November12; originalapproval independentlyread. Dorian/Cody coordinate onefreshallocation/offlinebuild for exact240db4cd/runnerb23ef654, thenfreeze/pushoutputpins. Ellis independently checks artifacts and publicbaseline; Dorian publishes additiveassets once and Ellis verifieslivebytes/layout/inventory/modules. No duplicateapproval/build/tests/customerwalletactions. Actualcustomerlaterrecovery/repayment remainsunverified.",
       "cardIds": [
         "SEC-12"
       ]
