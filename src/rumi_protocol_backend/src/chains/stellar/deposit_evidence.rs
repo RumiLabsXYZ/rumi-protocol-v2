@@ -591,6 +591,7 @@ mod tests {
                 created_at_ns: 1,
                 status: XlmClaimStatus::InFlight,
                 settlement_intent: None,
+                prepared_intent: None,
             },
         );
         let receipt = receipt(DepositKind::NativePayment, "op-3", 15_000_000);

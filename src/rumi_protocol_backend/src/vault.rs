@@ -4127,6 +4127,7 @@ pub(crate) fn record_xlm_claim(
             created_at_ns: now_ns,
             status: crate::state::XlmClaimStatus::Pending,
             settlement_intent: None,
+            prepared_intent: None,
         },
     );
     s.next_xlm_claim_id = next_claim_id;

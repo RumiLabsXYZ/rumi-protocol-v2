@@ -2105,6 +2105,11 @@ pub struct XlmClaim {
     /// before considering a replacement.
     #[serde(default)]
     pub settlement_intent: Option<XlmSettlementIntent>,
+    /// Unsigned, fully-bound transaction preparation. Distinct from the signed
+    /// `settlement_intent`; status stays `Pending` until signing. A `Pending`
+    /// claim with this set must not be prepared again.
+    #[serde(default)]
+    pub prepared_intent: Option<XlmPreparedIntent>,
 }
 
 /// Persisted native-XLM claim lifecycle; no transitions are implemented yet.
@@ -2128,6 +2133,169 @@ pub struct XlmSettlementIntent {
     pub sequence: i64,
     pub min_time: u64,
     pub max_time: u64,
+}
+
+/// Unsigned preparation record binding every field of the one-operation Stellar
+/// payment that will later be signed. It is not a signed envelope and carries
+/// no signature material.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XlmPreparedIntent {
+    pub claim_id: u64,
+    pub vault_id: u64,
+    pub custody_owner: Principal,
+    pub custody_nonce: u64,
+    pub network_id: [u8; 32],
+    /// Ed25519 key of the custody account that will sign and pay the fee.
+    pub source_public_key: [u8; 32],
+    /// Classic `G...` form of `source_public_key` (equals the stored custody address).
+    pub source_address: String,
+    pub destination: String,
+    pub destination_public_key: [u8; 32],
+    pub gross_stroops: u64,
+    /// TOTAL transaction fee for the single-operation payment, in stroops.
+    pub fee_stroops: u32,
+    /// `gross_stroops - fee_stroops`; the amount the Payment operation sends.
+    pub net_stroops: u64,
+    /// Source account sequence observed in the snapshot.
+    pub observed_sequence: i64,
+    /// `observed_sequence + 1`; the transaction sequence number.
+    pub next_sequence: i64,
+    pub min_time: u64,
+    pub max_time: u64,
+    /// `codec::signing_payload_hash` of the exact bound Payment.
+    pub payload_hash: [u8; 32],
+}
+
+/// Reasons `State::prepare_xlm_settlement_intent` refuses; none mutate state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlmPrepareError {
+    MissingClaim,
+    NotPending,
+    AlreadyPrepared,
+    AlreadySigned,
+    NetworkMismatch,
+    CustodyAddressNotFound,
+    SourceKeyMismatch,
+    SnapshotAccountMismatch,
+    InvalidDestination,
+    InvalidFee,
+    SequenceOverflow,
+    InvalidPayment(crate::chains::stellar::CodecError),
+}
+
+impl State {
+    /// Bind and persist an unsigned payment preparation for a Pending claim.
+    ///
+    /// Dormant and test-only: compiled only for unit tests and `test_endpoints`
+    /// builds, wired to no endpoint, and NOT production admission.
+    ///
+    /// `snapshot` is plain parsed account data treated as an UNTRUSTED FIXTURE
+    /// input. Its type does not prove that any provider quorum, freshness or
+    /// finality check ran, and this function performs none. `source_pubkey` is
+    /// an input proven against the custody address attributed to the claim's
+    /// (owner, nonce). Everything is computed before the single mutation.
+    #[cfg(any(test, feature = "test_endpoints"))]
+    pub fn prepare_xlm_settlement_intent(
+        &mut self,
+        claim_id: u64,
+        source_pubkey: [u8; 32],
+        snapshot: &crate::chains::stellar::horizon_parse::AccountSnapshot,
+        fee_stroops: u64,
+        min_time: u64,
+        max_time: u64,
+    ) -> Result<XlmPreparedIntent, XlmPrepareError> {
+        use crate::chains::stellar as stellar;
+        let claim = self
+            .xlm_claims
+            .get(&claim_id)
+            .ok_or(XlmPrepareError::MissingClaim)?;
+        if claim.status != XlmClaimStatus::Pending {
+            return Err(XlmPrepareError::NotPending);
+        }
+        if claim.prepared_intent.is_some() {
+            return Err(XlmPrepareError::AlreadyPrepared);
+        }
+        if claim.settlement_intent.is_some() {
+            return Err(XlmPrepareError::AlreadySigned);
+        }
+        let selected = stellar::config::selection_from_state(self)
+            .map_err(|_| XlmPrepareError::NetworkMismatch)?
+            .network;
+        if selected.network_id() != claim.network_id {
+            return Err(XlmPrepareError::NetworkMismatch);
+        }
+        // Custody address for this (owner, nonce, network): the permanent attribution.
+        let mut matches = self.xlm_custody_attributions.iter().filter(|(_, a)| {
+            a.owner == claim.custody_owner
+                && a.derivation_nonce == claim.custody_nonce
+                && a.network_id == claim.network_id
+        });
+        let (custody_address, _) = matches
+            .next()
+            .ok_or(XlmPrepareError::CustodyAddressNotFound)?;
+        if matches.next().is_some() {
+            return Err(XlmPrepareError::CustodyAddressNotFound);
+        }
+        let source_address = stellar::classic_address_from_ed25519_pubkey(&source_pubkey);
+        if &source_address != custody_address {
+            return Err(XlmPrepareError::SourceKeyMismatch);
+        }
+        if snapshot.account_id != *custody_address {
+            return Err(XlmPrepareError::SnapshotAccountMismatch);
+        }
+        let destination_public_key = stellar::ed25519_pubkey_from_classic_address(&claim.destination)
+            .map_err(|_| XlmPrepareError::InvalidDestination)?;
+        if fee_stroops == 0
+            || fee_stroops > claim.reserved_fee_stroops
+            || fee_stroops >= claim.gross_stroops
+        {
+            return Err(XlmPrepareError::InvalidFee);
+        }
+        let fee = u32::try_from(fee_stroops).map_err(|_| XlmPrepareError::InvalidFee)?;
+        let net_stroops = claim.gross_stroops - fee_stroops;
+        let observed_sequence =
+            i64::try_from(snapshot.sequence).map_err(|_| XlmPrepareError::SequenceOverflow)?;
+        let next_sequence = observed_sequence
+            .checked_add(1)
+            .ok_or(XlmPrepareError::SequenceOverflow)?;
+        let payment = stellar::Payment {
+            source: source_pubkey,
+            destination: destination_public_key,
+            amount_stroops: net_stroops,
+            sequence: next_sequence,
+            fee,
+            min_time,
+            max_time,
+        };
+        // Also enforces nonzero amount, positive sequence, fee, min_time < max_time.
+        let payload_hash = stellar::signing_payload_hash(selected, payment)
+            .map_err(XlmPrepareError::InvalidPayment)?;
+        let prepared = XlmPreparedIntent {
+            claim_id,
+            vault_id: claim.vault_id,
+            custody_owner: claim.custody_owner,
+            custody_nonce: claim.custody_nonce,
+            network_id: claim.network_id,
+            source_public_key: source_pubkey,
+            source_address,
+            destination: claim.destination.clone(),
+            destination_public_key,
+            gross_stroops: claim.gross_stroops,
+            fee_stroops: fee,
+            net_stroops,
+            observed_sequence,
+            next_sequence,
+            min_time,
+            max_time,
+            payload_hash,
+        };
+        // Single atomic mutation; status and settlement_intent untouched.
+        self.xlm_claims
+            .get_mut(&claim_id)
+            .ok_or(XlmPrepareError::MissingClaim)?
+            .prepared_intent = Some(prepared.clone());
+        Ok(prepared)
+    }
 }
 
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
@@ -15176,6 +15344,7 @@ mod tests {
                 min_time: 500,
                 max_time: 600,
             }),
+            prepared_intent: None,
         };
         state.xlm_claims.insert(8, claim.clone());
         state.next_xlm_claim_id = 9;
@@ -17175,5 +17344,225 @@ mod xlm_deposit_credit_tests {
         assert!(s
             .apply_verified_xlm_deposit_credit(id, owner(), &r, net, XLM_MIN_CREDIT_STROOPS, NOW)
             .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod xlm_prepare_intent_tests {
+    use super::*;
+    use crate::chains::stellar::{self, horizon_parse::AccountSnapshot, CodecError, Payment};
+
+    const SRC: [u8; 32] = [7; 32];
+    const DST: [u8; 32] = [9; 32];
+
+    fn owner() -> Principal {
+        Principal::from_slice(&[1])
+    }
+
+    /// Untrusted parsed-data fixture; `AccountSnapshot` carries no quorum proof.
+    fn snapshot(sequence: u64) -> AccountSnapshot {
+        AccountSnapshot {
+            account_id: stellar::classic_address_from_ed25519_pubkey(&SRC),
+            sequence,
+            account_last_modified_ledger: 10,
+            native_balance_stroops: 1_000_000_000,
+            native_selling_liabilities_stroops: 0,
+            subentry_count: 0,
+            num_sponsoring: 0,
+            num_sponsored: 0,
+        }
+    }
+
+    fn setup() -> (State, u64) {
+        let mut state = State::default();
+        let vault = state.increment_vault_id();
+        let net = stellar::config::selection_from_state(&state).unwrap().network;
+        state
+            .reserve_xlm_pending_deposit(
+                vault,
+                owner(),
+                stellar::classic_address_from_ed25519_pubkey(&SRC),
+                net.network_id(),
+                1_000_000_000,
+                3_600_000_000_000,
+            )
+            .unwrap();
+        state.xlm_claims.insert(
+            5,
+            XlmClaim {
+                vault_id: vault,
+                custody_owner: owner(),
+                custody_nonce: vault,
+                claimant: owner(),
+                gross_stroops: 10_000_000,
+                destination: stellar::classic_address_from_ed25519_pubkey(&DST),
+                network_id: net.network_id(),
+                reserved_fee_stroops: 1_000,
+                created_at_ns: 1,
+                status: XlmClaimStatus::Pending,
+                settlement_intent: None,
+                prepared_intent: None,
+            },
+        );
+        (state, 5)
+    }
+
+    fn bytes(state: &State) -> Vec<u8> {
+        let mut b = Vec::new();
+        ciborium::ser::into_writer(&state.xlm_claims, &mut b).unwrap();
+        b
+    }
+
+    fn assert_rejected(
+        mut state: State,
+        id: u64,
+        key: [u8; 32],
+        snap: AccountSnapshot,
+        fee: u64,
+        min: u64,
+        max: u64,
+        want: XlmPrepareError,
+    ) {
+        let before = bytes(&state);
+        assert_eq!(
+            state.prepare_xlm_settlement_intent(id, key, &snap, fee, min, max),
+            Err(want)
+        );
+        assert_eq!(bytes(&state), before);
+    }
+
+    #[test]
+    fn happy_path_binds_every_field() {
+        let (mut state, id) = setup();
+        let p = state
+            .prepare_xlm_settlement_intent(id, SRC, &snapshot(41), 100, 1_000, 2_000)
+            .unwrap();
+        let net = stellar::Network::Test;
+        assert_eq!(p.claim_id, id);
+        assert_eq!(p.custody_owner, owner());
+        assert_eq!(p.custody_nonce, p.vault_id);
+        assert_eq!(p.network_id, net.network_id());
+        assert_eq!(p.source_public_key, SRC);
+        assert_eq!(p.source_address, stellar::classic_address_from_ed25519_pubkey(&SRC));
+        assert_eq!(p.destination, stellar::classic_address_from_ed25519_pubkey(&DST));
+        assert_eq!(p.destination_public_key, DST);
+        assert_eq!(p.gross_stroops, 10_000_000);
+        assert_eq!(p.fee_stroops, 100);
+        assert_eq!(p.net_stroops, 10_000_000 - 100);
+        assert_eq!(p.observed_sequence, 41);
+        assert_eq!(p.next_sequence, 42);
+        assert_eq!((p.min_time, p.max_time), (1_000, 2_000));
+        let expected = stellar::signing_payload_hash(
+            net,
+            Payment {
+                source: SRC,
+                destination: DST,
+                amount_stroops: 10_000_000 - 100,
+                sequence: 42,
+                fee: 100,
+                min_time: 1_000,
+                max_time: 2_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(p.payload_hash, expected);
+        let claim = &state.xlm_claims[&id];
+        assert_eq!(claim.prepared_intent, Some(p));
+        assert_eq!(claim.status, XlmClaimStatus::Pending);
+        assert!(claim.settlement_intent.is_none());
+    }
+
+    #[test]
+    fn rejections_leave_claim_byte_identical() {
+        use XlmPrepareError as E;
+        let (_, id) = setup();
+        let s = || setup().0;
+        let ok = || snapshot(41);
+        assert_rejected(s(), 99, SRC, ok(), 100, 1, 2, E::MissingClaim);
+        let mut st = s();
+        st.xlm_claims.get_mut(&id).unwrap().status = XlmClaimStatus::InFlight;
+        assert_rejected(st, id, SRC, ok(), 100, 1, 2, E::NotPending);
+        let mut st = s();
+        st.xlm_claims.get_mut(&id).unwrap().settlement_intent = Some(XlmSettlementIntent {
+            envelope_xdr: vec![1],
+            transaction_hash: [1; 32],
+            sequence: 1,
+            min_time: 1,
+            max_time: 2,
+        });
+        assert_rejected(st, id, SRC, ok(), 100, 1, 2, E::AlreadySigned);
+        assert_rejected(s(), id, [8; 32], ok(), 100, 1, 2, E::SourceKeyMismatch);
+        let mut st = s();
+        st.xlm_claims.get_mut(&id).unwrap().network_id = stellar::Network::Public.network_id();
+        assert_rejected(st, id, SRC, ok(), 100, 1, 2, E::NetworkMismatch);
+        let mut other = ok();
+        other.account_id = stellar::classic_address_from_ed25519_pubkey(&[3; 32]);
+        assert_rejected(s(), id, SRC, other, 100, 1, 2, E::SnapshotAccountMismatch);
+        assert_rejected(s(), id, SRC, ok(), 0, 1, 2, E::InvalidFee);
+        assert_rejected(s(), id, SRC, ok(), 1_001, 1, 2, E::InvalidFee);
+        let mut st = s();
+        st.xlm_claims.get_mut(&id).unwrap().reserved_fee_stroops = 20_000_000;
+        assert_rejected(st, id, SRC, ok(), 10_000_000, 1, 2, E::InvalidFee);
+        assert_rejected(s(), id, SRC, snapshot(i64::MAX as u64), 100, 1, 2, E::SequenceOverflow);
+        assert_rejected(s(), id, SRC, snapshot(u64::MAX), 100, 1, 2, E::SequenceOverflow);
+        let bad = E::InvalidPayment(CodecError::InvalidTimeBounds);
+        assert_rejected(s(), id, SRC, ok(), 100, 5, 5, bad);
+        assert_rejected(s(), id, SRC, ok(), 100, 9, 5, bad);
+        assert_rejected(s(), id, SRC, ok(), 100, 0, 0, bad);
+        let mut st = s();
+        st.xlm_claims.get_mut(&id).unwrap().destination = "not-an-address".into();
+        assert_rejected(st, id, SRC, ok(), 100, 1, 2, E::InvalidDestination);
+    }
+
+    #[test]
+    fn fee_above_u32_with_large_reserve_and_gross_is_rejected() {
+        let (mut state, id) = setup();
+        let c = state.xlm_claims.get_mut(&id).unwrap();
+        c.gross_stroops = 100_000_000_000;
+        c.reserved_fee_stroops = 100_000_000_000;
+        assert_rejected(
+            state,
+            id,
+            SRC,
+            snapshot(1),
+            u64::from(u32::MAX) + 1,
+            1,
+            2,
+            XlmPrepareError::InvalidFee,
+        );
+    }
+
+    #[test]
+    fn double_prepare_is_rejected_and_first_preserved() {
+        let (mut state, id) = setup();
+        let first = state
+            .prepare_xlm_settlement_intent(id, SRC, &snapshot(41), 100, 1_000, 2_000)
+            .unwrap();
+        let before = bytes(&state);
+        assert_eq!(
+            state.prepare_xlm_settlement_intent(id, SRC, &snapshot(50), 200, 3_000, 4_000),
+            Err(XlmPrepareError::AlreadyPrepared)
+        );
+        assert_eq!(bytes(&state), before);
+        assert_eq!(state.xlm_claims[&id].prepared_intent, Some(first));
+    }
+
+    #[test]
+    fn old_claim_without_prepared_intent_decodes_as_none() {
+        let (state, id) = setup();
+        let value = ciborium::Value::serialized(&state.xlm_claims[&id]).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(|(k, _)| {
+                    !matches!(k, ciborium::Value::Text(s) if s == "prepared_intent")
+                });
+                e
+            }
+            other => panic!("expected map, got {other:?}"),
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut buf).unwrap();
+        let old: XlmClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert!(old.prepared_intent.is_none());
     }
 }
