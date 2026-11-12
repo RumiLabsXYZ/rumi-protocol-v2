@@ -1,6 +1,6 @@
 {
-  "summary": "SEC12 source25e1441f/code0aea04e1 accepted with final21 targeted tests, baseline30/66, dual delta reviews and mock pending-read proof. First build held before writes. Corrected build is blocked only because automatic approval review rejected Cody\u2019s allocation message to Dorian for missing exact destination/payload authorization. Existing Decision A DV0513d5c4 pending; no duplicate ask/bypass. No corrected build/publication or financial action; customer outcome unknown.",
-  "plainSummary": "The recovery correction is implemented and tested, but it is not live. Automatic review blocked the scheduler\u2019s message needed to deliver the fresh build allocation. Rob needs to answer the existing Decision A for that one-time step; the customer\u2019s actual saved request remains unresolved.",
+  "summary": "SEC12 final25e1441f/code0aea04e1 remains accepted with final21 targeted checks, baseline30/66, dual delta reviews and mock timing proof. Rob directly approved existing Decision A, clearing the exact allocation-message block for one fresh corrected UI build. Cody verifies and issues fresh allocation to Dorian; rejected/consumed slots not reused. Root verifies artifacts/live release. Not deployed yet, actual customer recovery unknown. XLM B/reserve/financial holds separate.",
+  "plainSummary": "Rob approved the existing one-time build and scheduler-message decision, so the recovery update can proceed. The corrected source is tested and reviewed; the build owner will receive a fresh allocation, then the new files and live site will be checked. The customer\u2019s actual saved-request recovery is still unconfirmed.",
   "glossary": [
     {
       "term": "Stability Pool",
