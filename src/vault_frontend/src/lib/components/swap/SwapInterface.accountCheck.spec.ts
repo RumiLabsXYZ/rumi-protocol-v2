@@ -56,7 +56,7 @@ afterEach(async () => {
 	fx.inspect.mockReset();
 	fx.execute.mockReset();
 });
-it('exposes accounts-only inspection on a fresh connected OISY swap page without a failed financial attempt', async () => {
+it('keeps inspection collapsed on a healthy OISY swap page and available through optional help', async () => {
 	const owner = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');
 	(walletStore as any).set({
 		isConnected: true,
@@ -77,9 +77,18 @@ it('exposes accounts-only inspection on a fresh connected OISY swap page without
 	const check = [...target.querySelectorAll('button')].find((b) =>
 		b.textContent?.includes('Check signing account (read only)')
 	);
+	const help = target.querySelector('details');
+	expect(help).not.toBeNull();
+	expect(help!.open).toBe(false);
+	expect(help!.querySelector('summary')?.textContent).toContain('Wallet connection help');
+	expect(help!.contains(check!)).toBe(true);
 	expect(check).toBeDefined();
 	expect(fx.inspect).not.toHaveBeenCalled();
 	expect(fx.execute).not.toHaveBeenCalled();
+	help!.querySelector('summary')!.click();
+	await tick();
+	expect(help!.open).toBe(true);
+	expect(fx.inspect).not.toHaveBeenCalled();
 	check!.click();
 	await vi.waitFor(() => expect(fx.inspect).toHaveBeenCalledOnce());
 	await tick();

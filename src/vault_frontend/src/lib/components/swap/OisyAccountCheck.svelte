@@ -49,25 +49,30 @@
 </script>
 
 {#if $currentWalletType === 'oisy' && $walletStore.isConnected}
-  <section class="account-check" aria-label="OISY signing account check">
-    <button type="button" on:click={check} disabled={busy || $walletStore.loading}>
-      {busy ? 'Checking signing account…' : 'Check signing account (read only)'}
-    </button>
-    <p>Opens OISY to read its account identity. This check does not approve tokens or submit a swap.</p>
-    {#if result}
-      <div role="status">
-        <p>{result.matches ? 'The signing account matches this Rumi connection.' : 'The signing account does not match this Rumi connection.'}</p>
-        <p>Connected Rumi account: <code>{result.connectedOwner}</code></p>
-        <p>OISY signing account{result.signerOwners.length === 1 ? '' : 's'}: <code>{result.signerOwners.join(', ') || 'None returned'}</code></p>
-        <p>This does not verify earlier approvals or swaps. No account was changed.</p>
-      </div>
-    {/if}
-    {#if message}<p role="alert">{message}</p>{/if}
-  </section>
+  <details class="account-support">
+    <summary>Wallet connection help</summary>
+    <section class="account-check" aria-label="OISY signing account check">
+      <button type="button" on:click={check} disabled={busy || $walletStore.loading}>
+        {busy ? 'Checking signing account…' : 'Check signing account (read only)'}
+      </button>
+      <p>Opens OISY to read its account identity. This check does not approve tokens or submit a swap.</p>
+      {#if result}
+        <div role="status">
+          <p>{result.matches ? 'The signing account matches this Rumi connection.' : 'The signing account does not match this Rumi connection.'}</p>
+          <p>Connected Rumi account: <code>{result.connectedOwner}</code></p>
+          <p>OISY signing account{result.signerOwners.length === 1 ? '' : 's'}: <code>{result.signerOwners.join(', ') || 'None returned'}</code></p>
+          <p>This does not verify earlier approvals or swaps. No account was changed.</p>
+        </div>
+      {/if}
+      {#if message}<p role="alert">{message}</p>{/if}
+    </section>
+  </details>
 {/if}
 
 <style>
-  .account-check { margin-top: 0.75rem; padding: 0.85rem; border: 1px solid #475569; border-radius: 0.5rem; font-size: 0.8rem; line-height: 1.5; }
+  .account-support { margin-top: 0.75rem; font-size: 0.8rem; color: var(--rumi-text-muted); }
+  summary { cursor: pointer; }
+  .account-check { color: var(--rumi-text-primary); margin-top: 0.75rem; padding: 0.85rem; border: 1px solid #475569; border-radius: 0.5rem; font-size: 0.8rem; line-height: 1.5; }
   button { padding: 0.5rem 0.75rem; border: 1px solid #64748b; border-radius: 0.4rem; color: inherit; background: transparent; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
   p { margin: 0.5rem 0 0; }

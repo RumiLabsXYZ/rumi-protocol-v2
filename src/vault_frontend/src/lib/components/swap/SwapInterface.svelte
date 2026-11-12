@@ -662,7 +662,7 @@
         {error}
       </div>
     {/if}
-    <!-- Available before a financial attempt; the child only renders for connected OISY. -->
+    <!-- Optional collapsed wallet help; account inspection still requires its own click. -->
     <OisyAccountCheck />
     {#if notice}
       <div class="notice-bar">{notice}</div>
