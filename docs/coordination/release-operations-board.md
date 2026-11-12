@@ -17,7 +17,7 @@ The prior1794386914589 publication and failed owner acceptance stay recorded in
 [its historical receipt](../operations/oisy-cksol-frontend-publication-result-20261111.md).
 SEC14 is Done based on Rob’s direct account-match and successful-swap reports;
 independent ledger receipt/finality, prior allowance and all-route compatibility
-are not inferred. Optional diagnostic relocation stays deferred. Existing financial
+are not inferred. The subsequent combined release below delivers optional diagnostic relocation. Existing financial
 and reserve holds remain; Vault51 corrective backend is separately deployed.
 
 Scoped Cody/Mara/Thayer coordination messages were delivered under the same
@@ -29,28 +29,28 @@ accepted logs/receipts and verified all owned process groups empty; local slot
 released. Step3 is a production-target cargo check, not a production Wasm build.
 No retry, CI, production installation or financial action was included.
 
-## Reopened SEC12 recovery navigation — November 11
+## Combined UI publication — November 12, 2026
 
-Ellis owns the customer case/source; Dorian owns the single frontend release.
-Rob directly asked to fix the recurrence and make recovery clear. Firstsource
-cbcfdabc/codeef5b6506 built once in17.84seconds,740files frozen, native0 and
-owned closure. Before any publication, Ellis reproduced Review/background-read
-coordination failure that can hide recovery controls. Candidatef48bf8d6 is HELD;
-no asset or financial write was dispatched. Corrected source25e1441f/code0aea04e1 now has21targeted tests/4suites, two focused
-reviews and actual-component pending-read mock acceptance. Rob directly approved DecisionA in user01a1cd1d-da50-7a32-9187-5bfc9cfeb5d6.
-Newallocation8b7f3f65 delivered; corrected25e1441f build passed once18.93seconds,
-native0/740files/ownedclosure, version1794442789073. Ellis independently verified
-all740files/476compressionpairs/13pins and the105new+7content additive plan.
-Publication is now HELD at a different explicit boundary: automatic approval review
-rejected staging before process creation because DecisionA covers build/message,
-not explicit production publication. No assetwrite/batch/journal exists. One exact
-[pushed publication decision4ea7146a](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/4ea7146a8733d20072f60870b3ade3d8c8877e65/docs/operations/sec12-recovery-frontend-publication-decision-20261111.md)
-SHAa56937abbd4cfbec6eca40c2173fcfaafece2ec5a6ccf7679f8c41e0e7870bd7
-awaits Rob's answer here; no duplicate question, source work or build is needed.
-The deployed
-1794415826220 OISY/ckSOL software is unchanged; actual customer request phase and
-outcome remain unknown. No customer retry, storage clear, cancellation or wallet
-action is inferred. [Held packet](../operations/sec12-recurrence-frontend-publication-20261111.md).
+Rob approved exact137e8e71 combined decision in human message
+01a1d1e1-225e-7df2-af76-c4887c4c9e8d, superseding held4ea.
+Exact240db4cd source built once under fresh Cody allocation8067e5cb:
+19.97seconds/native0/740files/ownedclosure. Ellis independently accepted the
+frozen output and123new+7set additive plan before publication.
+Version **1794522798107** activated in batches691/692. Own stable final inventory
+4824keys/5018encodings preserves all4701prior keys/properties/untouched encodings;
+125stage+9final+5primary served checks pass. Frontend/backend modules,
+settings/controllers and both permissions remain unchanged.
+Ellis independent stable inventory,15critical public responses, modules/controllers
+and live desktop/mobile layout checks PASS. Software delivery is verified live;
+customer recovery and actual repayment acceptance remain open.
+[Release result](../operations/combined-ux-release-result-20261112.md).
+
+This ships recovery panel placement/read coordination, collapsed optional wallet
+help and repayment Max refresh/fee explanation. SEC12 actual customer recovery or
+repayment acceptance remains unknown, Ellis-owned. No customer wallet operation,
+financial retry or saved-state clearing occurred. SEC14 retains Rob's prior
+successful-swap acceptance. Earlier cbc/25e bundles/grants remain preserved and
+were never published. Existing reserve/financial holds remain.
 
 ## Release and operations queue
 

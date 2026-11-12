@@ -1,0 +1,103 @@
+{
+  "phase": "activate",
+  "verifiedUtc": "2026-11-12T22:46:06.842Z",
+  "liveKeys": 4824,
+  "liveEncodings": 5018,
+  "allRetainedKeysPropertiesAndUntouchedEncodingsPreserved": true,
+  "newAssetsVerified": 123,
+  "approvedChangedEncodingsVerified": 7,
+  "servedReadbacks": 9,
+  "servedFailures": [],
+  "results": [
+    {
+      "key": "/_app/version.json.br",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 31,
+      "sha256": "82f445406b8be973ea6025135bd618613378ae2bf392606549c33c9afd5e5817",
+      "expectedSha256": "82f445406b8be973ea6025135bd618613378ae2bf392606549c33c9afd5e5817",
+      "pass": true
+    },
+    {
+      "key": "/_app/version.json.gz",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 47,
+      "sha256": "7eedb1047f29a163e5fa017d2dba0421f858810ce02454b045725f76c14e0d84",
+      "expectedSha256": "7eedb1047f29a163e5fa017d2dba0421f858810ce02454b045725f76c14e0d84",
+      "pass": true
+    },
+    {
+      "key": "/_app/version.json",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 27,
+      "sha256": "7f41a4b3de335633c917e2b36239ec3b36d2c0dc7750fae60029d8ec626f2bed",
+      "expectedSha256": "7f41a4b3de335633c917e2b36239ec3b36d2c0dc7750fae60029d8ec626f2bed",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ic-domains",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 58,
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "expectedSha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ii-alternative-origins",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 385,
+      "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "expectedSha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "pass": true
+    },
+    {
+      "key": "/index.html.br",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 501,
+      "sha256": "39426b2608d01335364e4777660b835ed29292390c96a9e6d8d55198fdcaea22",
+      "expectedSha256": "39426b2608d01335364e4777660b835ed29292390c96a9e6d8d55198fdcaea22",
+      "pass": true
+    },
+    {
+      "key": "/index.html.gz",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 648,
+      "sha256": "f66686810b24663483df3ee8ad0987ce389d699823aaf981e6f9da236c060a61",
+      "expectedSha256": "f66686810b24663483df3ee8ad0987ce389d699823aaf981e6f9da236c060a61",
+      "pass": true
+    },
+    {
+      "key": "/index.html",
+      "requestedEncoding": "gzip",
+      "status": 200,
+      "servedEncoding": "gzip",
+      "bytes": 648,
+      "sha256": "f66686810b24663483df3ee8ad0987ce389d699823aaf981e6f9da236c060a61",
+      "expectedSha256": "f66686810b24663483df3ee8ad0987ce389d699823aaf981e6f9da236c060a61",
+      "pass": true
+    },
+    {
+      "key": "/index.html",
+      "requestedEncoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "091d663f427e4bca08528c1406f31c344dd0ec0acca370250f048ccbfd1ebd7e",
+      "expectedSha256": "091d663f427e4bca08528c1406f31c344dd0ec0acca370250f048ccbfd1ebd7e",
+      "pass": true
+    }
+  ]
+}

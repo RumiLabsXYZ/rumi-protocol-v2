@@ -1,0 +1,121 @@
+{
+  "checkedUtc": "2026-11-12T22:47:30.070155+00:00",
+  "source": "240db4cd15647a1871dba5e4774ff7d791963b88",
+  "version": "1794522798107",
+  "stableDoubleRead": true,
+  "keys": 4824,
+  "encodings": 5018,
+  "priorKeysPreserved": 4701,
+  "newKeysVerified": 123,
+  "existingEncodingChangesVerified": 7,
+  "allOldPropertiesUntouchedEncodingsPreserved": true,
+  "primaryDomainReadbacks": [
+    {
+      "key": "/",
+      "encoding": "identity",
+      "sha256": "091d663f427e4bca08528c1406f31c344dd0ec0acca370250f048ccbfd1ebd7e",
+      "bytes": 1821,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/",
+      "encoding": "gzip",
+      "sha256": "f66686810b24663483df3ee8ad0987ce389d699823aaf981e6f9da236c060a61",
+      "bytes": 648,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/version.json",
+      "encoding": "identity",
+      "sha256": "7f41a4b3de335633c917e2b36239ec3b36d2c0dc7750fae60029d8ec626f2bed",
+      "bytes": 27,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/.well-known/ii-alternative-origins",
+      "encoding": "identity",
+      "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "bytes": 385,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/.well-known/ic-domains",
+      "encoding": "identity",
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "bytes": 58,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/chunks/DJKyx7uB.js",
+      "encoding": "identity",
+      "sha256": "2926e838f72466ea65bd5d2dc65a54ce349ee6b29979d521585cb8ac02be8988",
+      "bytes": 861,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/chunks/Pm_RtMYh.js",
+      "encoding": "identity",
+      "sha256": "48b40955fe94c1fa256317ee29b55cb3caa8186e2783e9d5ea3cb1ff89532c5a",
+      "bytes": 65904,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/chunks/hmFKXzdA.js",
+      "encoding": "identity",
+      "sha256": "cae5107e71d4883833a4c9ba9d8f8f40a6e91ef3a3d8ba90792e5f1560b6c1d5",
+      "bytes": 733884,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/nodes/0.D8OkPICX.js",
+      "encoding": "identity",
+      "sha256": "83109f1960220e021379a97356eef7ef8afa5e039610586ab72b192b1bc34a36",
+      "bytes": 80587,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/nodes/4.B1moQxFu.js",
+      "encoding": "identity",
+      "sha256": "05331b8db31af0f84ae1fc8e5daaefd3f607de92ff19fb85eeb0d1c13d668f0a",
+      "bytes": 24390,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/nodes/55.BjiQHkGX.js",
+      "encoding": "identity",
+      "sha256": "9d415d9aa67fb5c7680cef89ab947acc6b571cf60cc677167d388ba249daabaf",
+      "bytes": 92341,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/_app/immutable/nodes/57.BejeXNs0.js",
+      "encoding": "identity",
+      "sha256": "6f2eddc4cf1c3a9272edb9d262345fc952454b1fd90572ca76c050fae8d7042d",
+      "bytes": 48408,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/vaults",
+      "encoding": "identity",
+      "sha256": "091d663f427e4bca08528c1406f31c344dd0ec0acca370250f048ccbfd1ebd7e",
+      "bytes": 1821,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/swap",
+      "encoding": "identity",
+      "sha256": "091d663f427e4bca08528c1406f31c344dd0ec0acca370250f048ccbfd1ebd7e",
+      "bytes": 1821,
+      "matchesFrozenBuild": true
+    },
+    {
+      "key": "/solana",
+      "encoding": "identity",
+      "sha256": "091d663f427e4bca08528c1406f31c344dd0ec0acca370250f048ccbfd1ebd7e",
+      "bytes": 1821,
+      "matchesFrozenBuild": true
+    }
+  ],
+  "walletExecutionVerified": false,
+  "priorAllowanceVerified": false
+}
