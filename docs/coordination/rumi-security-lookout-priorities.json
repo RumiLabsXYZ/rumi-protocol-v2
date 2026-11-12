@@ -14,8 +14,8 @@
       "id": "customer-cksol-collateral-recovery",
       "title": "Customer impact: restore or safely cancel saved borrowing request",
       "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Rob approved existing Decision A. Cody verifies this direct human answer and issues a fresh allocation directly to Dorian for frozen25e1441f/code0aea04e1. Then one corrected build, independent artifact checks, existing authorized additive publication and live verification. Rejected/released allocation is not reused; XLM B remains separate. Customer recovery remains unverified.",
+      "blockedReason": "Automatic approval review rejected staging before process creation; exact frontend-publication decision4ea7146a awaits Rob in Dorian chat. Decision A build is complete; no production write.",
+      "nextAction": "Use the single pending publication decision in Dorian chat. After exact approval, Dorian fresh-preflights/publishes frozen version1794442789073; Ellis independently checks4806keys/5000encodings, primary-domain files and preserved modules/controllers. No new build or duplicate approval question. Customer actual recovery remains unverified; no agent financial action.",
       "cardIds": [
         "SEC-12"
       ]
