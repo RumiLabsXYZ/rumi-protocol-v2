@@ -5,11 +5,15 @@
       "state": "Review",
       "owner": "Ellis source/case; Dorian release",
       "scope": "Keep signing diagnostics optional and recovery clear of fixed portfolio header",
-      "evidenceText": "Rob requested normal swap cleanup. Separate6c668e7f on frozen25e is reviewed by Dorian: native closed Wallet connection help hides diagnostic until opened; entire inspection script/session guards unchanged. Opening help calls nothing; explicit Check remains accounts-only.31focusedtests/4suites PASS, then retained in final46/7 run. Actual layout/PositionStrip/SeasonBar/swap route/recovery composition passed1280desktop/390mobile, expandedstrip/scroll/nooverflow; mockedtransport only. Live DOM confirms hidden panel is Check pending vault action outside main; existing frozen25e layout covers placement, no duplicate patch. Candidate240db4cd also includes separate SEC16. No productionbuild/deploy/new financial action; old4ea frozen publication hold unchanged.",
+      "evidenceText": "Rob requested normal swap cleanup. Separate6c668e7f on frozen25e is reviewed by Dorian: native closed Wallet connection help hides diagnostic until opened; entire inspection script/session guards unchanged. Opening help calls nothing; explicit Check remains accounts-only.31focusedtests/4suites PASS, then retained in final46/7 run. Actual layout/PositionStrip/SeasonBar/swap route/recovery composition passed1280desktop/390mobile, expandedstrip/scroll/nooverflow; mockedtransport only. Live DOM confirms hidden panel is Check pending vault action outside main; existing frozen25e layout covers placement, no duplicate patch. Candidate240db4cd also includes separate SEC16. No productionbuild/deploy/new financial action; old4ea frozen publication hold unchanged. Solecombineddecision137e8e71 pending in Dorian supersedes old4ea. Directbuildcoordination message was rejected beforedelivery for destinationauthorization; noallocation/build/publish beforeanswer. No newsourcecheckcampaign.",
       "evidenceLinks": [
         {
           "title": "Swap cleanup and composed layout evidence",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/240db4cd15647a1871dba5e4774ff7d791963b88/docs/operations/swap-support-cleanup-source-20261111.md"
+        },
+        {
+          "title": "Sole combined build, coordination and publication decision; supersedes old request",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/137e8e7124ca3f974696ed870f39f0f1117e9cfa/docs/operations/combined-ux-release-decision-20261111.md"
         }
       ]
     },
@@ -18,11 +22,15 @@
       "state": "Review",
       "owner": "Ellis source/case; Dorian release",
       "scope": "Keep repayment Max usable after refresh and explain safe partial repayments",
-      "evidenceText": "Separate candidate240db4cd reproduces selectedMax exceeding refresheddebtcap in actual mountedCard. UntouchedMax only lowers whileidle; typed amounts preserved with ChooseMaxagain guidance; pendingrequest/Max frozen, zeroMax refused and tracking resets. Backend near-full snap rules unchanged; partiallimit explained. Liveledger defaultfee0.001 and mintingaccount=backend/default plus transferdestination prove repayment burns with0transferfee. Existingonefee reserve retained for optionalapproval; initialtwofee hypothesis corrected beforecommit/build. Final46tests/7suites PASS; existingtypecheck30/66; two focused final reviews PASS. ActualCard+layout desktop/mobile syntheticQA passed lowercap/manualrecovery/noautomaticfinancialcalls. Original screenshot exact refresh trigger unknown. Dorian independent release-source review accepted exact240db4cd, independently rechecked livefee/mintingaccount/burnsource and unchanged frozen740files. Merritt owns coordinated combined build/allocation/publication scope; old4ea cannot silently authorize this candidate; no build/deploy/backend/customer repayment claimed.",
+      "evidenceText": "Separate candidate240db4cd reproduces selectedMax exceeding refresheddebtcap in actual mountedCard. UntouchedMax only lowers whileidle; typed amounts preserved with ChooseMaxagain guidance; pendingrequest/Max frozen, zeroMax refused and tracking resets. Backend near-full snap rules unchanged; partiallimit explained. Liveledger defaultfee0.001 and mintingaccount=backend/default plus transferdestination prove repayment burns with0transferfee. Existingonefee reserve retained for optionalapproval; initialtwofee hypothesis corrected beforecommit/build. Final46tests/7suites PASS; existingtypecheck30/66; two focused final reviews PASS. ActualCard+layout desktop/mobile syntheticQA passed lowercap/manualrecovery/noautomaticfinancialcalls. Original screenshot exact refresh trigger unknown. Dorian independent release-source review accepted exact240db4cd, independently rechecked livefee/mintingaccount/burnsource and unchanged frozen740files. Merritt owns coordinated combined build/allocation/publication scope; old4ea cannot silently authorize this candidate; no build/deploy/backend/customer repayment claimed. Solecombineddecision137e8e71 pending in Dorian supersedes old4ea. Directbuildcoordination message was rejected beforedelivery for destinationauthorization; noallocation/build/publish beforeanswer. No newsourcecheckcampaign.",
       "evidenceLinks": [
         {
           "title": "Repayment Max reproduction, fee proof and final candidate",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/240db4cd15647a1871dba5e4774ff7d791963b88/docs/operations/repayment-max-refresh-source-20261111.md"
+        },
+        {
+          "title": "Sole combined build, coordination and publication decision; supersedes old request",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/137e8e7124ca3f974696ed870f39f0f1117e9cfa/docs/operations/combined-ux-release-decision-20261111.md"
         }
       ]
     },
@@ -89,7 +97,7 @@
       "state": "In progress",
       "owner": "Ellis case/source; Dorian release",
       "scope": "Restore or safely cancel saved borrowing requests across collateral flows",
-      "evidenceText": "Corrected source25e1441f/code0aea04e1 is built and independently artifact-verified after Rob approved existing Decision A. Fresh one-shot build passed18.93s/native0/owned closure;740 frozen files. First CBC build remains held and never uploaded. Exact version1794442789073/pins9410545e: own740file/476compression/13input checks, independent4701key baseline equality, complete manifest coverage and105new+7mutable-content plan pass. Old properties/auth/untouched assets are preserved; publisher namespace-only. Focused packet1b797f2a read passed. Source proof retains interrupted-request recurrence, visible direct recovery and exact-session read coordination;56initial/18followup/21final checks overlap, baseline30/66, dual source/fresh delta reviews and desktop/mobile/pending-read mock QA pass. Automatic approval review rejected staging before process creation because explicit production-publication authority was not established by Decision A. No batch/chunks/journal or production write occurred. Exact pushed publication decision4ea7146a is pending only in Dorian chat; no duplicate question or alternative publication route. After that answer, Dorian runs fresh preflight/additive publication and Ellis independently checks final4806keys/5000encodings, primary-domain recovery/home/layout/OISY/ckSOL/auth and modules/controllers. Publication not yet claimed; customer actual request phase/recovery unknown. No backend/reserve, storage clear, automatic retry or agent financial action. Later live DOM positively identifies the teal panel as pending-vault-action UI outside padded main; frozen25e already relocates it. Separate SEC15/16 source240db4cd is not substituted into the old publication packet.",
+      "evidenceText": "Combined exact source240db4cd is accepted for recovery placement/read coordination plus separate SEC15 optionalwallethelp and SEC16 repaymentMax. Prior frozen25e corrected build/artifact PASS and740files remain preserved; no productionwrite occurred. Sole pushed replacement decision137e8e71 explicitly supersedes unanswered old4ea request. It covers exact source/runner, Dorian-to-Cody request/results and Cody-to-Dorian freshallocation, oneofflinebuild, then pushed independently verified additivepublication with sevenexistingentry/versioncontentsets only. Preparation message toCody was automatically rejected beforedelivery for missing explicitdestinationpermission; no relay/retry, allocation or newbinary exists. Onequestion pending onlyinDorian; no duplicates/reusedgrant/sourcechange. Essential source46tests/7suites, finaldualreviews/composedQA and Dorianreview pass; globaltypecheckbaseline30/66. Afterapproval Dorian owns build/freeze/publication, Ellis independentartifact/livechecks. Customeractual laterrequestphase/recoveryunknown; no customerfinancialaction/backend/reserve.",
       "evidenceLinks": [
         {
           "title": "Reviewed revision and queue-race evidence",
@@ -122,6 +130,10 @@
         {
           "title": "Pending exact frontend publication decision; build already verified",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/4ea7146a8733d20072f60870b3ade3d8c8877e65/docs/operations/sec12-recovery-frontend-publication-decision-20261111.md"
+        },
+        {
+          "title": "Sole combined build, coordination and publication decision; supersedes old request",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/137e8e7124ca3f974696ed870f39f0f1117e9cfa/docs/operations/combined-ux-release-decision-20261111.md"
         }
       ]
     },
