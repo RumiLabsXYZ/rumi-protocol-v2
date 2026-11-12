@@ -58,5 +58,14 @@
   "post_start_cycles": 388659128995,
   "post_start_idle_cycles_per_day": 4137071211,
   "within_256mib_reserve_envelope": true,
-  "independent_readback_at_utc": "2026-11-12T23:48:12.236583+00:00"
+  "independent_readback_at_utc": "2026-11-12T23:48:12.236583+00:00",
+  "first_automatic_poll_observed": true,
+  "first_automatic_poll_readback_utc": "2026-11-12T23:52:41.732803Z",
+  "manual_poll_after_start": false,
+  "automatic_backend_cursor_before": "562874",
+  "automatic_backend_cursor_after": "562885",
+  "fresh_backend_source_tail": "562885",
+  "automatic_backend_cursor_matches_fresh_tail": true,
+  "poll_enabled_after_automatic_tick": true,
+  "driver_enabled_after_automatic_tick": true
 }
