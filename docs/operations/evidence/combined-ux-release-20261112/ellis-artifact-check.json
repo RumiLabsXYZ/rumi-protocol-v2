@@ -1,0 +1,81 @@
+{
+  "checkedUtc": "2026-11-12T22:36:48.786Z",
+  "source": "240db4cd15647a1871dba5e4774ff7d791963b88",
+  "code": "240db4cd15647a1871dba5e4774ff7d791963b88",
+  "version": "1794522798107",
+  "pinsSha256": "b5b4b7b00f29904d5b748d77030f72096377f1917784910b58b1b7fc2398ef4f",
+  "manifestSha256": "cb55272f2e766e2a061537d4baf0e6f2c1ba58c261e73835cde3aa56254662b7",
+  "comparisonSha256": "93d15929e2e17f445aa6ffe370b3c5e2ae63c9ec8e1b6336beffc149a8d53ae4",
+  "publisherSha256": "5c330e2fb5da7fe44aa5db61470cab79f2b52ff5bcd6a6f24a25ced41769ae35",
+  "filesVerified": 740,
+  "compressedPairsVerified": 476,
+  "inputPinsVerified": 13,
+  "baselineKeys": 4701,
+  "newKeys": 123,
+  "sets": 130,
+  "oldPropertiesPreservedInPlan": true,
+  "authUnchanged": true,
+  "publisherOnlyNamespaceChanged": true,
+  "phases": [
+    {
+      "phase": "stage",
+      "creates": 123,
+      "sets": 123,
+      "operations": 246,
+      "encodedBytes": 172427
+    },
+    {
+      "phase": "activate",
+      "creates": 0,
+      "sets": 7,
+      "operations": 7,
+      "encodedBytes": 652
+    }
+  ],
+  "bundles": {
+    "Wallet connection help": [
+      "_app/immutable/nodes/57.BejeXNs0.js"
+    ],
+    "Max was reduced to the refreshed safe limit. Review the amount before repaying.": [
+      "_app/immutable/chunks/Pm_RtMYh.js"
+    ],
+    "Choose Max again": [
+      "_app/immutable/chunks/Pm_RtMYh.js"
+    ],
+    "Repayment burns icUSD without a separate transfer fee.": [
+      "_app/immutable/chunks/Pm_RtMYh.js"
+    ],
+    "Review saved request": [
+      "_app/immutable/nodes/4.B1moQxFu.js"
+    ],
+    "rumi:vault-pull-recovery-review": [
+      "_app/immutable/chunks/DJKyx7uB.js"
+    ],
+    "No saved request is pending in this wallet.": [
+      "_app/immutable/nodes/0.D8OkPICX.js"
+    ],
+    "Continue uses this exact request": [
+      "_app/immutable/nodes/0.D8OkPICX.js"
+    ],
+    "OISY principal cache retirement could not be confirmed": [
+      "_app/immutable/chunks/hmFKXzdA.js"
+    ],
+    "OISY_LOCAL_OWNER_MISMATCH": [
+      "_app/immutable/chunks/hmFKXzdA.js"
+    ],
+    "OISY_REMOTE_SENDER_REJECTED": [
+      "_app/immutable/chunks/hmFKXzdA.js"
+    ],
+    "Check signing account (read only)": [
+      "_app/immutable/nodes/57.BejeXNs0.js"
+    ],
+    "This does not verify earlier approvals or swaps. No account was changed.": [
+      "_app/immutable/nodes/57.BejeXNs0.js"
+    ],
+    "Last completed deposit": [
+      "_app/immutable/nodes/55.BjiQHkGX.js"
+    ]
+  },
+  "publicationExecuted": false,
+  "walletOperation": false
+}
