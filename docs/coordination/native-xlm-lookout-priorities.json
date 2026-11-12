@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Test-only full withdrawal to claim is source-complete and reviewed but unbuilt (0aa0e623). Next: one focused local check with runner cb1c89da once a fresh admission is granted. Partial withdrawal PASS unchanged; production stays Frozen; no settlement or payout.",
+      "nextAction": "Full-withdrawal approval answered and consumed; test PASS (receipt 1caaefde). The test-only vault lifecycle is locally proven through full withdrawal to claim. Not built: claim settlement, signing and payout, liquidation, production exposure, frontend. Production stays Frozen.",
       "cardIds": [
         "WP3"
       ]
