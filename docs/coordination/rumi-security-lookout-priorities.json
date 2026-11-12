@@ -1,11 +1,31 @@
 {
   "items": [
     {
+      "id": "swap-wallet-support-ux",
+      "title": "Optional wallet help and visible recovery panel",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Dorian accepted6c668e7f source; compose only through coordinated new candidate240db4cd. Preserve frozen25e and old exactpublication decision. Existing recoverylayout fixes greenpanel; no second layoutpatch. Source/realcompositionmockQA passed; no newbuild/deploy.",
+      "cardIds": [
+        "SEC-15"
+      ]
+    },
+    {
+      "id": "repayment-max-refresh-ux",
+      "title": "Recover repayment Max after live refresh",
+      "status": "ready",
+      "blockedReason": "",
+      "nextAction": "Dorian reviews pushed240db4cd source and final46tests/7suites/twofocusedPASS + desktop/mobileproof before coordinated buildscope. Preserve oneapprovalfee reserve and fee-freeburn semantics, no backendchanges/financialreplay. Actualcustomer repayment unverified.",
+      "cardIds": [
+        "SEC-16"
+      ]
+    },
+    {
       "id": "oisy-stable-swap-owner",
       "title": "Repair OISY stablecoin swap signer ownership",
       "status": "done",
       "blockedReason": "",
-      "nextAction": "Rob directly reports his intended swap worked perfectly after the corrective release and matching account check. Customer-reported acceptance is complete; no further diagnostic, retry or release is requested. Preserve current safeguards and evidence. Optional diagnostic relocation stays deferred. Do not infer all-route compatibility, independent ledger settlement or prior allowance status.",
+      "nextAction": "Rob directly reports his intended swap worked perfectly after the corrective release and matching account check. Customer-reported acceptance is complete; no further diagnostic, retry or release is requested. Preserve current safeguards and evidence. New requested diagnostic cleanup is tracked separately in SEC15; prior acceptance stays complete. Do not infer all-route compatibility, independent ledger settlement or prior allowance status.",
       "cardIds": [
         "SEC-14"
       ]
