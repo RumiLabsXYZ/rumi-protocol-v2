@@ -37,13 +37,17 @@ cbcfdabc/codeef5b6506 built once in17.84seconds,740files frozen, native0 and
 owned closure. Before any publication, Ellis reproduced Review/background-read
 coordination failure that can hide recovery controls. Candidatef48bf8d6 is HELD;
 no asset or financial write was dispatched. Corrected source25e1441f/code0aea04e1 now has21targeted tests/4suites, two focused
-reviews and actual-component pending-read mock acceptance. A fresh replacement
-allocation was not delivered: automatic approval review rejected Cody-to-Dorian
-allocation messaging for missing explicit destination/payload permission; the
-unused slot was released. Cody's already-posted [decision A](https://github.com/RobRipley/delegated-vault/blob/0513d5c424fc04d1dcdff2bf2a9b568f983007ad/docs/coordination/one-offline-build-decisions-20261111.md)
-awaits the human answer. No second build, publication or denied-message relay.
-The exact corrected source and runner remain frozen; no generic readiness work
-or additional product scope is pending. The deployed
+reviews and actual-component pending-read mock acceptance. Rob directly approved DecisionA in user01a1cd1d-da50-7a32-9187-5bfc9cfeb5d6.
+Newallocation8b7f3f65 delivered; corrected25e1441f build passed once18.93seconds,
+native0/740files/ownedclosure, version1794442789073. Ellis independently verified
+all740files/476compressionpairs/13pins and the105new+7content additive plan.
+Publication is now HELD at a different explicit boundary: automatic approval review
+rejected staging before process creation because DecisionA covers build/message,
+not explicit production publication. No assetwrite/batch/journal exists. One exact
+[pushed publication decision4ea7146a](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/4ea7146a8733d20072f60870b3ade3d8c8877e65/docs/operations/sec12-recovery-frontend-publication-decision-20261111.md)
+SHAa56937abbd4cfbec6eca40c2173fcfaafece2ec5a6ccf7679f8c41e0e7870bd7
+awaits Rob's answer here; no duplicate question, source work or build is needed.
+The deployed
 1794415826220 OISY/ckSOL software is unchanged; actual customer request phase and
 outcome remain unknown. No customer retry, storage clear, cancellation or wallet
 action is inferred. [Held packet](../operations/sec12-recurrence-frontend-publication-20261111.md).
