@@ -1,11 +1,21 @@
 {
   "items": [
     {
+      "id": "safe-vault-collateral-top-ups",
+      "title": "Restore safe collateral top-ups to existing vaults",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Rowan implements smallest journal-compatible exact-receipt credit/recovery-liability source remedy; Ellis integrates and obtains accounting/security review. Prep essential replay/liquidation/lostreply tests; no heavy compile until SEC18 lane is closed or separately coordinated. No live guard relaxation or financial action.",
+      "cardIds": [
+        "SEC-19"
+      ]
+    },
+    {
       "id": "cksol-mint-progress-ux",
       "title": "Make ckSOL progress and completion unmistakable",
-      "status": "ready",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Merritt presents single pushed frontend-only release decision6e3fdaa7/SHA2cd75e9e for central human approval. Exactab44413d retains88tests/reviews/mockQA; no fresh allocation, build or publication before that approval. Preserve live repayment/backend and all existing assets.",
+      "nextAction": "Dorian executes approved exact6e3fdaa7 publication plan after fresh Cody allocation; Ellis independently verifies frozen artifacts and live inventory/bytes/UI. Original human approval read directly. No source repin or SEC19 bundling.",
       "cardIds": [
         "SEC-18"
       ]

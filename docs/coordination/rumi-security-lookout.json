@@ -1,11 +1,24 @@
 {
   "cards": [
     {
+      "id": "SEC-19",
+      "state": "In progress",
+      "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
+      "scope": "Restore safe collateral top-ups to existing ICRC vaults",
+      "evidenceText": "New user blocked by intentional accepted#508 hold from3b9e3787, retained in released00cf and approvedab. UI hardcodedfalse/APIearlyreject and backendlegacy+V2 unconditionalreject; state forbids AddMargin completion. Exact missing condition: confirmed pull may outlive callback and target may be liquidated before reconciliation; no safe recovery credit/liability path exists. Fresh certified6428/Candid match installed source linkage. Rowan actually started bounded source prep in reused isolated branch, no compile while SEC18 lane pending. Acceptance: exact owner/operation-bound atomic surviving-vault credit or durable accounted recovery/refund liability if removed; lostreply/replay/liquidation/auth/accounting/compatibility tests and independent review, then paired source enablement. No flagflip/bypass/financial/release action.",
+      "evidenceLinks": [
+        {
+          "title": "Source-bound cause, required recovery invariant and bounded remedy",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-recovery-diagnosis-20261113.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-18",
-      "state": "Review",
+      "state": "In progress",
       "owner": "Ellis integration/visual QA; Iris UI implementation; independent frontend evidence review",
       "scope": "Reassuring request-bound ckSOL progress and persistent mint confirmation",
-      "evidenceText": "Reviewed source candidateab44413d pushed with report05ec4221;88focused tests PASS (page67/panel17/poll4). Prominent truthful processing/action-needed/status-check/error-resume panel and persistent exact-ID Minted confirmation, explicit Start another deposit, separate historical receipt. Both independent blockers closed: evidence reset on ID changes; authoritative cross-mode terminal arbitration preserving active holds. Final visual correction hides new-SOL prompt during queue. Actual local component desktop/mobile mocks PASS, zero financial calls/errors/overflow. No backend/generated/dependency/payment-service changes or production build/deployment/reserve/wallet action. Separate frontend release authority remains required; SEC17 excludes it. Single frontend-only release decision6e3fdaa7 is pushed and independently hash-verified; names fresh capacity and explicit two-way coordination, one bounded offline frontend/auth build and additive publication. Central human approval pending; no allocation/build/publication has started.",
+      "evidenceText": "Reviewed source candidateab44413d pushed with report05ec4221;88focused tests PASS (page67/panel17/poll4). Prominent truthful processing/action-needed/status-check/error-resume panel and persistent exact-ID Minted confirmation, explicit Start another deposit, separate historical receipt. Both independent blockers closed: evidence reset on ID changes; authoritative cross-mode terminal arbitration preserving active holds. Final visual correction hides new-SOL prompt during queue. Actual local component desktop/mobile mocks PASS, zero financial calls/errors/overflow. No backend/generated/dependency/payment-service changes or production build/deployment/reserve/wallet action. Separate frontend release authority remains required; SEC17 excludes it. Single frontend-only release decision6e3fdaa7 is pushed and independently hash-verified; names fresh capacity and explicit two-way coordination, one bounded offline frontend/auth build and additive publication. Central human approval pending; no allocation/build/publication has started. Original human approval01a1d57e-43c7-7a02-8cf2-0794a179689c independently read in CTO chat; Dorian requested fresh Cody slot. Approved build/publication now in progress, no build started at last report. Ellis independent baseline reads running; SEC19 remedy source stays separate.",
       "evidenceLinks": [
         {
           "title": "Scoped ckSOL progress contract",

@@ -4,7 +4,8 @@ Updated: 2026-11-12. Coordinator: Bram. This board tracks the security review, r
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
-| SEC-18 | Review | Ellis integration/QA / Iris UI / independent mapping review | Clear ckSOL mint progress and persistent success | Actual owner/request/minter evidence; payment settlement separate; essential delayed/stale/network/resume mocks and desktop/mobile; no financial or deployment action. Separate from frozen SEC17. |
+| SEC-19 | In progress | Ellis case/integration / Rowan backend / independent accounting review | Restore safe existing-vault top-ups | Accepted508 missing liquidation-compatible confirmed-pull recovery; bounded source prep, exact credit or accounted liability, essential lostreply/replay/liquidation tests; no live action. |
+| SEC-18 | In progress | Ellis integration/QA / Iris UI / independent mapping review | Clear ckSOL mint progress and persistent success | Actual owner/request/minter evidence; payment settlement separate; essential delayed/stale/network/resume mocks and desktop/mobile; no financial or deployment action. Separate from frozen SEC17. |
 | SEC-17 | Done | Ellis integration / Rowan backend / Iris review | Correct successful-repayment residual forgiveness | Ordinarymin0.1; forgive residualstrictlybelow0.1 onlyaftersuccessfulauthorizeddebit; exact0.1retained/noauto-close. Essentialfailed/unknown/replay/interest/fees/Max checks. Source/prep only; newbackendinstallheld. |
 | SEC-15 | Done | Ellis source/case / Dorian release | Optional wallet help and visible recovery panel | Deployed1794522798107; independent fullinventory/bytes/modules and live desktop/mobile layout/disclosure PASS. No wallet inspection or financial action. |
 | SEC-16 | Done | Ellis source/case / Dorian release | Keep repayment Max usable after refresh | Deployed1794522798107; mountedregressions/46focusedtests/reviews and exactpublicbytes PASS. UntouchedMax lowers whileidle; manual/pending amounts protected; partial/approval/burn copy clear. Actual repayment unexecuted. |
@@ -203,3 +204,7 @@ SEC17 release completed exact00cf/backend6428/UI1794555990015, actualstage693/ac
 ### SEC18 release decision prepared, approval pending
 
 Dorian pushed the single frontend-only release decision6e3fdaa7, SHA2562cd75e9e33be545b842a22218ae375cce7c8ffae588c3245ee17206e5b12d658. Ellis independently read it and verified the decision and bounded runner hashes, then sent it to Merritt for one central presentation. Existing88tests/reviews/mockQA retained; exactab44413d, fresh capacity, explicit two-way coordination, additive assets and only7entrysets; no backend or financial action. No allocation/build/publication started.
+
+### SEC18 approved; SEC19 existing-vault deposit hold diagnosis and source work
+
+Original human approval01a1d57e-43c7-7a02-8cf2-0794a179689c read directly. Dorian requests fresh Cody allocation for exact6e3fdaa7 plan; Ellis takes independent baseline then frozen/live checks. Separate newly reported deposit pause is accepted508 global AddMargin hold, not a user balance/cycles issue. Exact backend and state completion invariant remains unimplemented. Rowan actually claimed bounded source/accounting work on reused source isolate branchcodex/add-margin-recovery-20261113; no compile until approved SEC18 capacity closes/coordinated, no guard bypass or financial action. [Cause and acceptance](../operations/add-margin-recovery-diagnosis-20261113.md).
