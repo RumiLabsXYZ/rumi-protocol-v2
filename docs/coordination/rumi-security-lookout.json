@@ -2,23 +2,27 @@
   "cards": [
     {
       "id": "SEC-18",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Ellis integration/visual QA; Iris UI implementation; independent frontend evidence review",
       "scope": "Reassuring request-bound ckSOL progress and persistent mint confirmation",
-      "evidenceText": "Separate UI candidate14df2e96 passed81focused page/panel/polling tests. Independent final reviews found two concrete blockers: stale prior Minted evidence when the legacy deposit ID changes, and terminal cross-mode receipt ordering hiding current completion. Iris is fixing both with delayed/failed status and both-mode restore regressions; final mock browser recapture and independent recheck follow. No backend/generated/dependency changes, real mint, wallet action or deployment. Excluded from frozen SEC17.",
+      "evidenceText": "Reviewed source candidateab44413d pushed with report05ec4221;88focused tests PASS (page67/panel17/poll4). Prominent truthful processing/action-needed/status-check/error-resume panel and persistent exact-ID Minted confirmation, explicit Start another deposit, separate historical receipt. Both independent blockers closed: evidence reset on ID changes; authoritative cross-mode terminal arbitration preserving active holds. Final visual correction hides new-SOL prompt during queue. Actual local component desktop/mobile mocks PASS, zero financial calls/errors/overflow. No backend/generated/dependency/payment-service changes or production build/deployment/reserve/wallet action. Separate frontend release authority remains required; SEC17 excludes it.",
       "evidenceLinks": [
         {
           "title": "Scoped ckSOL progress contract",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-progress-ux-contract-20261112.md"
+        },
+        {
+          "title": "Reviewed source and mock verification result",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/05ec4221/docs/operations/cksol-progress-ux-result-20261113.md"
         }
       ]
     },
     {
       "id": "SEC-17",
-      "state": "In progress",
+      "state": "Done",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
       "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
-      "evidenceText": "Approved exactsource00cf: sole bounded offline build exited0; Ellis independently verified frozen backend, Candid,206inputs,740frontendfiles/476compressedpairs,300newimmutablekeys and7entrysets. Dorian staged693 successfully, preserved stopped-state backup/client data, then installed backend6428d103 once. Ellis independently certified new module/Candid and unchanged controllers/frontend module. Private preservation comparison accepted with only independently reconciled automatic-check timestamp changes; final UI activation/readback pending. No customer financial action. SEC18 excluded.",
+      "evidenceText": "LIVE and independently verified: exact00cf source, backend6428d103/canonical Candid, UI1794555990015, stage693/activate694. Single offline build native0;206inputs/740files/476pairs verified. Full stable5124keys/5318encodings preserves all4824prior keys/properties/untouched encodings plus300new/7sets. Dorian302stage+9final+5primary and Ellis13public-byte/certified-module/controller/anonymous desktop-mobile checks PASS. Stopped backup/settings/other9snapshots/captured state preserved; only automatic claim-check timestamp changed. No customer transaction; actual repayment/claim settlement/SEC12 recovery remain unverified. SEC18 excluded.",
       "evidenceLinks": [
         {
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/repayment-residual-forgiveness-20261112/docs/operations/repayment-residual-correction-result-20261112.md",
@@ -31,6 +35,14 @@
         {
           "title": "Independent frozen artifact verification",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0baae372/docs/operations/repayment-release-independent-check-20261112.md"
+        },
+        {
+          "title": "Final independent live receipt",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/98cf99aa/docs/operations/repayment-release-independent-check-20261112.md"
+        },
+        {
+          "title": "Sole-publisher live release result",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/086fbcc02ab6bf478f72188fdeaf118bb2538be1/docs/operations/repayment-residual-live-result-20261113.md"
         }
       ]
     },

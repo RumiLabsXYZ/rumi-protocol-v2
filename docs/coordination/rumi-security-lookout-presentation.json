@@ -1,6 +1,6 @@
 {
-  "summary": "SEC17 approved backend6428 installed and independently certificate-verified with canonical Candid/controllers; sole build/artifacts and stage693 passed. Preservation comparison accepted; final UI activation/readback pending. SEC18 separate81-test candidate failed final reviews on stale mint evidence and cross-mode history arbitration; fixes/regressions in progress. No customer financial action or SEC18 deployment.",
-  "plainSummary": "The repayment backend update is installed and independently verified; the matching website update is completing its final release checks. Review caught two history and status bugs in the separate ckSOL display improvement, which we are fixing before release. Rob does not need to take action.",
+  "summary": "SEC17 software LIVE: exact00cf, backend6428, UI1794555990015, actual693/694; full5124/5318 preserved old4824+300new/7sets, public/certified/layout/preservation checks PASS. SEC18 reviewed sourceab44413d/report05ec4221:88focusedtests, dual correction reviews and local desktop/mobile synthetic QA PASS, zero financial calls. Separate unreleased candidate; no customer financial acceptance claim.",
+  "plainSummary": "The repayment fix is live, and independent checks confirm the new software and preserved data. The ckSOL progress display is also implemented and reviewed, with clearer processing, recovery and completion messages, but has not been released. No further payment or retry has been made for the customer.",
   "glossary": [
     {
       "term": "Stability Pool",

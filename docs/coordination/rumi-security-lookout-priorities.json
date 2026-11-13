@@ -3,9 +3,9 @@
     {
       "id": "cksol-mint-progress-ux",
       "title": "Make ckSOL progress and completion unmistakable",
-      "status": "in_progress",
+      "status": "ready",
       "blockedReason": "",
-      "nextAction": "Iris fixes stale evidence on deposit-ID changes and terminal cross-mode restore arbitration, adds focused regressions, then Ellis recaptures mock desktop/mobile UI and obtains independent rechecks. Source only; keep frozen SEC17 separate.",
+      "nextAction": "Merritt reviews pushed sourceab44413d/report05ec4221 for a separately authorized frontend release.88focused tests, both blocker rechecks and final synthetic desktop/mobile QA pass; no SEC17 bundling, build, deployment or financial action authorized by this source handoff.",
       "cardIds": [
         "SEC-18"
       ]
@@ -13,9 +13,9 @@
     {
       "id": "repayment-residual-forgiveness",
       "title": "Fix repayment residual forgiveness and accounting",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Dorian completes the approved seven entry content activation after accepted preservation comparisons. Ellis independently checks final certified module/API/controllers, full stable inventory and primary-domain bytes/layout. No customer financial canary or SEC18 bundling.",
+      "nextAction": "Software delivery complete, exact00cf/6428/UI1794555990015 independently live-verified. Preserve receipts and release boundaries. Actual customer repayment and existing unresolved claim/recovery are separate outcomes; do not run a financial canary without its own authorization.",
       "cardIds": [
         "SEC-17"
       ]
