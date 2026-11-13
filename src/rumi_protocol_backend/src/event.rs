@@ -266,6 +266,16 @@ pub enum DeficitSource {
     Redemption { redeemer: Principal },
 }
 
+/// Live pre-settlement values pin the debt and interest that repayment observed.
+/// Optional on the event so historical records retain their original replay semantics.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepaymentSettlement {
+    pub debt_before: ICUSD,
+    pub interest_before: ICUSD,
+    pub last_accrual_time: u64,
+    pub forgiven: ICUSD,
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     #[serde(rename = "open_vault")]
@@ -463,6 +473,8 @@ pub enum Event {
         vault_id: u64,
         repayed_amount: ICUSD,
         block_index: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settlement: Option<RepaymentSettlement>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<Principal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2748,13 +2760,23 @@ fn replay_with_nonce_time_and_payout_events(
             Event::RepayToVault {
                 vault_id,
                 repayed_amount,
+                settlement,
                 ..
             } => {
-                // Cap repayment at current debt to survive replay drift
-                let capped = if let Some(vault) = state.vault_id_to_vaults.get(&vault_id) {
-                    ICUSD::new(repayed_amount.0.min(vault.borrowed_icusd_amount.0))
-                } else { repayed_amount };
-                let _ = state.repay_to_vault(vault_id, capped);
+                if let Some(settlement) = settlement {
+                    if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                        vault.borrowed_icusd_amount = settlement.debt_before;
+                        vault.accrued_interest = settlement.interest_before;
+                        vault.last_accrual_time = settlement.last_accrual_time;
+                    }
+                    let _ = apply_repayment_settlement(&mut state, vault_id, repayed_amount, settlement.forgiven);
+                } else {
+                    // Preserve the historical replay behavior for old records.
+                    let capped = if let Some(vault) = state.vault_id_to_vaults.get(&vault_id) {
+                        ICUSD::new(repayed_amount.0.min(vault.borrowed_icusd_amount.0))
+                    } else { repayed_amount };
+                    let _ = state.repay_to_vault(vault_id, capped);
+                }
             }
             Event::ProvideLiquidity { amount, caller, .. } => {
                 state.provide_liquidity(amount, caller);
@@ -4001,23 +4023,48 @@ pub fn record_borrow_from_vault_at(
     // Fee is now minted to treasury in the async caller — no longer credited to liquidity pool.
 }
 
-/// Record a repayment event and update vault state.
-/// Returns the interest share of the repayment (for treasury routing).
+/// Apply the paid and forgiven portions separately; only paid interest is
+/// returned for distribution. The event pins the exact pre-settlement state.
+fn apply_repayment_settlement(
+    state: &mut State, vault_id: u64, paid: ICUSD, forgiven: ICUSD,
+) -> ICUSD {
+    let (interest_share, _) = state.repay_to_vault(vault_id, paid);
+    if forgiven.0 > 0 {
+        let _ = state.repay_to_vault(vault_id, forgiven);
+        state.dust_forgiven_total = ICUSD::new(state.dust_forgiven_total.0.saturating_add(forgiven.0));
+    }
+    interest_share
+}
+
+fn repayment_residual_forgiven(debt: ICUSD, paid: ICUSD) -> ICUSD {
+    let remaining = debt.0.saturating_sub(paid.0);
+    ICUSD::new(if paid.0 > 0 && remaining > 0
+        && remaining < crate::vault::REPAY_RESIDUAL_THRESHOLD_E8S { remaining } else { 0 })
+}
+
+/// Record a successful repayment and any eligible residual forgiveness.
 pub fn record_repayed_to_vault(
     state: &mut State,
     vault_id: u64,
     repayed_amount: ICUSD,
     block_index: u64,
 ) -> ICUSD {
+    let timestamp = now();
+    // Interest may accrue while the ledger call is in flight.
+    state.accrue_single_vault(vault_id, timestamp);
+    let vault = state.vault_id_to_vaults.get(&vault_id).expect("repayment vault exists");
+    let forgiven = repayment_residual_forgiven(vault.borrowed_icusd_amount, repayed_amount);
+    let settlement = RepaymentSettlement {
+        debt_before: vault.borrowed_icusd_amount,
+        interest_before: vault.accrued_interest,
+        last_accrual_time: vault.last_accrual_time,
+        forgiven,
+    };
     record_event(&Event::RepayToVault {
-        vault_id,
-        block_index,
-        repayed_amount,
-        caller: Some(ic_cdk::caller()),
-        timestamp: Some(now()),
+        vault_id, block_index, repayed_amount, settlement: Some(settlement),
+        caller: Some(ic_cdk::caller()), timestamp: Some(timestamp),
     });
-    let (interest_share, _) = state.repay_to_vault(vault_id, repayed_amount);
-    interest_share
+    apply_repayment_settlement(state, vault_id, repayed_amount, forgiven)
 }
 
 pub fn record_add_margin_to_vault(
@@ -5327,10 +5374,128 @@ mod filter_tests {
         Event::RepayToVault {
             vault_id,
             repayed_amount: ICUSD::new(amount_e8s),
+            settlement: None,
             block_index: 0,
             caller: Some(caller),
             timestamp: Some(ts),
         }
+    }
+
+    #[test]
+    fn sec17_old_repayment_event_decodes_without_settlement() {
+        let old = repay_event(1, caller_a(), 100_000_000, 1000);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&old, &mut encoded).unwrap();
+        assert!(!encoded.windows(b"settlement".len()).any(|w| w == b"settlement"));
+        let decoded: Event = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(decoded, old);
+        let owner = caller_a();
+        let collateral = icp_token();
+        let prefix = || vec![Event::Init(payout_init_args(collateral)),
+            open_vault_event(1, owner, collateral), borrow_event(1, owner, 110_000_000, 1000)];
+        let mut original = prefix(); original.push(old);
+        let mut roundtripped = prefix(); roundtripped.push(decoded);
+        let a = replay_with_nonce_time(original.into_iter(), || 2).unwrap();
+        let b = replay_with_nonce_time(roundtripped.into_iter(), || 2).unwrap();
+        assert_eq!(a.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount.0, 10_000_000);
+        assert_eq!(a.vault_id_to_vaults.get(&1), b.vault_id_to_vaults.get(&1));
+        assert_eq!(b.dust_forgiven_total.0, 0);
+    }
+
+    #[test]
+    fn sec17_strict_residual_boundary_requires_paid_amount() {
+        assert_eq!(repayment_residual_forgiven(ICUSD::new(109_999_999), ICUSD::new(100_000_000)).0, 9_999_999);
+        assert_eq!(repayment_residual_forgiven(ICUSD::new(110_000_000), ICUSD::new(100_000_000)).0, 0);
+        assert_eq!(repayment_residual_forgiven(ICUSD::new(1), ICUSD::new(0)).0, 0);
+        assert_eq!(repayment_residual_forgiven(ICUSD::new(100_000_000), ICUSD::new(100_000_000)).0, 0);
+    }
+
+    #[test]
+    fn sec17_only_paid_interest_is_distributed() {
+        let owner = caller_a();
+        let collateral = icp_token();
+        let events = vec![Event::Init(payout_init_args(collateral)),
+            open_vault_event(1, owner, collateral),
+            borrow_event(1, owner, 109_999_999, 1000)];
+        let mut state = replay_with_nonce_time(events.into_iter(), || 2).unwrap();
+        state.vault_id_to_vaults.get_mut(&1).unwrap().accrued_interest = ICUSD::new(10_000_000);
+        let paid_interest = apply_repayment_settlement(&mut state, 1, ICUSD::new(100_000_000), ICUSD::new(9_999_999));
+        let vault = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(paid_interest.0, 9_090_909);
+        assert_eq!(vault.borrowed_icusd_amount.0, 0);
+        assert_eq!(vault.accrued_interest.0, 0);
+        assert_eq!(vault.collateral_amount, 1_000_000_000);
+        assert_eq!(state.dust_forgiven_total.0, 9_999_999);
+    }
+
+    #[test]
+    fn sec17_accrual_during_pull_crosses_strict_boundary_and_replays() {
+        let owner = caller_a();
+        let collateral = icp_token();
+        let prefix = || vec![Event::Init(payout_init_args(collateral)),
+            open_vault_event(1, owner, collateral), borrow_event(1, owner, 109_999_999, 1000)];
+        let mut live = replay_with_nonce_time(prefix().into_iter(), || 2).unwrap();
+        live.last_icp_rate = Some(UsdIcp::from(rust_decimal_macros::dec!(10)));
+        let config = live.collateral_configs.get_mut(&collateral).unwrap();
+        config.last_price = Some(10.0);
+        config.interest_rate_apr = Ratio::from_f64(0.05);
+        // The pre-pull residual is one e8 below the forgiveness boundary.
+        assert_eq!(repayment_residual_forgiven(ICUSD::new(109_999_999), ICUSD::new(100_000_000)).0, 9_999_999);
+        // A positive accrual over this synthetic in-flight interval rounds up.
+        live.accrue_single_vault(1, 1);
+        let vault = live.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount.0, 110_000_000);
+        let forgiven = repayment_residual_forgiven(vault.borrowed_icusd_amount, ICUSD::new(100_000_000));
+        assert_eq!(forgiven.0, 0);
+        let settlement = RepaymentSettlement { debt_before: vault.borrowed_icusd_amount,
+            interest_before: vault.accrued_interest, last_accrual_time: vault.last_accrual_time, forgiven };
+        let _ = apply_repayment_settlement(&mut live, 1, ICUSD::new(100_000_000), forgiven);
+        let mut events = prefix();
+        events.push(Event::RepayToVault { vault_id: 1, repayed_amount: ICUSD::new(100_000_000),
+            block_index: 1, settlement: Some(settlement), caller: Some(owner), timestamp: Some(1) });
+        let replayed = replay_with_nonce_time(events.into_iter(), || 2).unwrap();
+        assert_eq!(live.vault_id_to_vaults.get(&1), replayed.vault_id_to_vaults.get(&1));
+        assert_eq!(replayed.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount.0, 10_000_000);
+        assert_eq!(replayed.dust_forgiven_total.0, 0);
+    }
+
+    #[test]
+    fn sec17_sequential_settlements_only_forgive_final_residual_once() {
+        let owner = caller_a(); let collateral = icp_token();
+        let mut events = vec![Event::Init(payout_init_args(collateral)), open_vault_event(1, owner, collateral),
+            borrow_event(1, owner, 209_999_999, 1000)];
+        for (debt, forgiven, block) in [(209_999_999, 0, 1), (109_999_999, 9_999_999, 2)] {
+            events.push(Event::RepayToVault { vault_id: 1, repayed_amount: ICUSD::new(100_000_000), block_index: block,
+                settlement: Some(RepaymentSettlement { debt_before: ICUSD::new(debt), interest_before: ICUSD::new(0),
+                    last_accrual_time: 0, forgiven: ICUSD::new(forgiven) }), caller: Some(owner), timestamp: Some(1000) });
+        }
+        let state = replay_with_nonce_time(events.into_iter(), || 2).unwrap();
+        assert_eq!(state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount.0, 0);
+        assert_eq!(state.dust_forgiven_total.0, 9_999_999);
+    }
+
+    #[test]
+    fn sec17_replay_uses_settlement_snapshot_and_preserves_collateral() {
+        let owner = caller_a();
+        let collateral = icp_token();
+        let settlement = RepaymentSettlement {
+            debt_before: ICUSD::new(109_999_999),
+            interest_before: ICUSD::new(10_000_000),
+            last_accrual_time: 1200,
+            forgiven: ICUSD::new(9_999_999),
+        };
+        let events = vec![Event::Init(payout_init_args(collateral)),
+            open_vault_event(1, owner, collateral),
+            borrow_event(1, owner, 100_000_000, 1000),
+            Event::RepayToVault { vault_id: 1, repayed_amount: ICUSD::new(100_000_000),
+                block_index: 1, settlement: Some(settlement), caller: Some(owner), timestamp: Some(1200) }];
+        let state = replay_with_nonce_time(events.into_iter(), || 2).unwrap();
+        let vault = state.vault_id_to_vaults.get(&1).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount.0, 0);
+        assert_eq!(vault.accrued_interest.0, 0);
+        assert_eq!(vault.collateral_amount, 1_000_000_000);
+        assert_eq!(vault.last_accrual_time, 1200);
+        assert_eq!(state.dust_forgiven_total.0, 9_999_999);
     }
 
     fn liquidate_event(vault_id: u64, liquidator: Principal, ts: u64) -> Event {

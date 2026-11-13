@@ -1770,29 +1770,8 @@ pub fn clamp_borrow_fee(amount: ICUSD, raw_fee: ICUSD) -> ICUSD {
     raw_fee.min(amount.saturating_sub(ICUSD::new(1)))
 }
 
-/// Checks that a partial repayment won't leave the vault with dust debt below `min_vault_debt`.
-/// Returns Ok(()) if remaining debt is zero or >= min_vault_debt, Err otherwise.
-fn check_min_vault_debt_after_repay(
-    vault: &Vault,
-    repay_amount: ICUSD,
-) -> Result<(), ProtocolError> {
-    let remaining_debt = vault.borrowed_icusd_amount - repay_amount;
-    if remaining_debt > ICUSD::new(0) {
-        let min_vault_debt = read_state(|s| {
-            s.get_collateral_config(&vault.collateral_type)
-                .map(|c| c.min_vault_debt)
-                .unwrap_or(ICUSD::new(0))
-        });
-        if remaining_debt < min_vault_debt {
-            return Err(ProtocolError::GenericError(format!(
-                "Partial repayment would leave {} icUSD debt, below the minimum of {}. \
-                 Repay the full amount or leave at least {} icUSD.",
-                remaining_debt, min_vault_debt, min_vault_debt
-            )));
-        }
-    }
-    Ok(())
-}
+/// Residual debt strictly below 0.1 icUSD may be forgiven after payment.
+pub(crate) const REPAY_RESIDUAL_THRESHOLD_E8S: u64 = 10_000_000;
 
 /// Compute the ckStable pull for a finalized icUSD debt reduction. Since
 /// icUSD uses 8 decimals and ckStable uses 6, round the base pull upward so
@@ -1822,24 +1801,14 @@ mod stable_repay_rounding_tests {
     use rust_decimal_macros::dec;
 
     #[test]
-    fn rounded_base_covers_final_debt_after_near_full_repay_snap() {
-        let requested_e8s = 10_000_000_000u64;
-        let debt_e8s = 10_050_000_000u64;
-        let snap_threshold = std::cmp::max(debt_e8s / 100, 1_000_000);
-        assert!(debt_e8s - requested_e8s <= snap_threshold);
-
-        // Current full-repay policy retires all of debt when the remainder is
-        // inside the dust threshold. A base computed from the request alone
-        // would cover only 10,000,000,000 e8s and underfund that retirement.
-        assert!(u128::from(requested_e8s / 100) * 100 < u128::from(debt_e8s));
-        let (base_e6s, fee_e6s, total_e6s) =
-            stable_repay_pull_e6s(ICUSD::new(debt_e8s), Ratio::new(dec!(0.01))).unwrap();
-        assert_eq!(base_e6s, 100_500_000);
-        assert_eq!(fee_e6s, 1_005_000);
-        assert_eq!(total_e6s, 101_505_000);
-        assert!(u128::from(base_e6s) * 100 >= u128::from(debt_e8s));
-        assert!(u128::from(base_e6s - 1) * 100 < u128::from(debt_e8s));
-        assert_eq!(base_e6s.checked_add(fee_e6s), Some(total_e6s));
+    fn stable_repayment_never_snaps_principal_above_request() {
+        let requested = ICUSD::new(10_000_000_000);
+        let debt = ICUSD::new(10_050_000_000);
+        let retired = super::cap_claim_repay(requested, debt);
+        assert_eq!(retired, requested);
+        let (base, fee, total) = stable_repay_pull_e6s(retired, Ratio::new(dec!(0.01))).unwrap();
+        assert_eq!((base, fee, total), (100_000_000, 1_000_000, 101_000_000));
+        assert_eq!(super::cap_claim_repay(ICUSD::new(u64::MAX), ICUSD::new(10_000_000_001)).0, 10_000_000_001);
     }
 
     #[test]
@@ -1895,13 +1864,9 @@ mod stable_repay_rounding_tests {
 }
 
 /// LIQ-003: round a partial-liquidation amount up to the vault's full debt if
-/// the residual would land in the open interval `(0, min_vault_debt)`. Mirrors
-/// the dust-forgiveness pattern in `repay_to_vault`. The repay path enforces
-/// `residual == 0 || residual >= min_vault_debt` via
-/// `check_min_vault_debt_after_repay`; partial-liquidation endpoints must
-/// enforce the same invariant on the residual after their cap math, otherwise
-/// a liquidator could leave a vault with debt below `min_vault_debt` and bypass
-/// the repay-side guarantee.
+/// the residual would land in the open interval `(0, min_vault_debt)`.
+/// Liquidation retains this collateral-specific rule independently of the
+/// ordinary repayment residual policy.
 ///
 /// Returns the (possibly-rounded-up) amount the liquidator will actually
 /// consume. The caller is responsible for pulling the corresponding icUSD
@@ -9312,30 +9277,15 @@ async fn repay_to_vault_internal(
     let is_claim_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id));
     let claim_full_repayment = is_claim_repayment
         && claim_repay_near_full(amount.to_u64(), vault.borrowed_icusd_amount.to_u64());
-    if !is_full_close && !claim_full_repayment && amount < read_state(|s| s.min_icusd_amount) {
+    if !is_full_close && !claim_full_repayment && amount < ICUSD::new(REPAY_RESIDUAL_THRESHOLD_E8S) {
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+            minimum_amount: ICUSD::new(REPAY_RESIDUAL_THRESHOLD_E8S).to_u64(),
         });
     }
 
-    // Cap repay amount to actual debt. Interest accrued between when the
-    // frontend read the balance and now can push debt slightly above what
-    // the user entered. If the requested amount exceeds or nearly matches
-    // the current debt (within 1% or 0.01 icUSD — whichever is larger),
-    // treat it as a full repayment to avoid leaving un-repayable dust.
+    // Never pull more than the authorized amount or current debt.
     let debt = vault.borrowed_icusd_amount;
-    let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
-    let amount = if is_claim_repayment {
-        cap_claim_repay(amount, debt)
-    } else if amount > debt {
-        debt
-    } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
-        debt
-    } else {
-        amount
-    };
-
-    check_min_vault_debt_after_repay(&vault, amount)?;
+    let amount = cap_claim_repay(amount, debt);
 
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
@@ -9464,38 +9414,19 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     let is_claim_repayment = read_state(|s| s.has_pending_nicp_claim(arg.vault_id));
     let claim_full_repayment = is_claim_repayment
         && claim_repay_near_full(amount.to_u64(), vault.borrowed_icusd_amount.to_u64());
-    if !claim_full_repayment && amount < read_state(|s| s.min_icusd_amount) {
+    if !claim_full_repayment && amount < ICUSD::new(REPAY_RESIDUAL_THRESHOLD_E8S) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+            minimum_amount: ICUSD::new(REPAY_RESIDUAL_THRESHOLD_E8S).to_u64(),
         });
     }
 
-    // Cap repay amount to actual debt. Interest accrued between when the
-    // frontend read the balance and now can push debt slightly above what
-    // the user entered. If the requested amount exceeds or nearly matches
-    // the current debt (within 1% or 0.01 icUSD — whichever is larger),
-    // treat it as a full repayment to avoid leaving un-repayable dust.
+    // Never pull more than the authorized amount or current debt.
     let debt = vault.borrowed_icusd_amount;
-    let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
-    let amount = if is_claim_repayment {
-        cap_claim_repay(amount, debt)
-    } else if amount > debt {
-        debt
-    } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
-        debt
-    } else {
-        amount
-    };
+    let amount = cap_claim_repay(amount, debt);
 
-    if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
-        guard_principal.fail();
-        return Err(e);
-    }
-
-    // Derive the stable pull from finalized retired debt, including any
-    // near-full-debt snap. Ceiling the conversion prevents retiring more
-    // icUSD debt than the stable principal can cover.
+    // Ceiling the conversion prevents retiring more icUSD debt than the
+    // stable principal can cover; the surcharge remains separately calculated.
     let fee_rate = read_state(|s| s.ckstable_repay_fee);
     let (_base_stable_e6s, fee_e6s, total_pull_e6s) = match stable_repay_pull_e6s(amount, fee_rate)
     {
@@ -11061,9 +10992,9 @@ pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Prot
 /// when calling the separate methods sequentially.
 ///
 /// `arg.amount` is the icUSD amount to repay. Per `repay_to_vault_internal`,
-/// the amount is capped to actual debt and snaps to full-repayment if within
-/// 1% / 0.01 icUSD dust. If repay leaves any debt, the close phase fails
-/// and the vault stays open (but the partial repay is preserved on-chain).
+/// the amount is capped to actual debt; after a successful payment a positive
+/// residual below 0.1 icUSD is forgiven. If debt remains, the existing close
+/// rules apply and a failed close leaves the repayment in place.
 ///
 /// Returns the icUSD repay block index and the optional collateral-return
 /// block index (None if the vault had no collateral, e.g. due to liquidation).
@@ -13425,32 +13356,16 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
         return Err(ProtocolError::CallerNotOwner);
     }
 
-    if amount < read_state(|s| s.min_icusd_amount) {
+    if amount < ICUSD::new(REPAY_RESIDUAL_THRESHOLD_E8S) {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
-            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+            minimum_amount: ICUSD::new(REPAY_RESIDUAL_THRESHOLD_E8S).to_u64(),
         });
     }
 
-    // Cap repay amount to actual debt. Interest accrued between when the
-    // frontend read the balance and now can push debt slightly above what
-    // the user entered. If the requested amount exceeds or nearly matches
-    // the current debt (within 1% or 0.01 icUSD — whichever is larger),
-    // treat it as a full repayment to avoid leaving un-repayable dust.
+    // Never pull more than the authorized amount or current debt.
     let debt = vault.borrowed_icusd_amount;
-    let dust_threshold = std::cmp::max(debt.0 / 100, 1_000_000); // 1% or 0.01 icUSD
-    let amount = if amount > debt {
-        debt
-    } else if debt.0.saturating_sub(amount.0) <= dust_threshold {
-        debt
-    } else {
-        amount
-    };
-
-    if let Err(e) = check_min_vault_debt_after_repay(&vault, amount) {
-        guard_principal.fail();
-        return Err(e);
-    }
+    let amount = amount.min(debt);
 
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {

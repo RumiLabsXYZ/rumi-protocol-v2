@@ -1,38 +1,35 @@
 import { describe, expect, it } from 'vitest';
-import { computeSafeIcusdRepayMax } from './repayLimits';
+import { computeSafeIcusdRepayMax, repaymentPreview } from './repayLimits';
 
-describe('computeSafeIcusdRepayMax', () => {
-  it('caps a 2 icUSD debt below the old 1.995 Max boundary', () => {
-    const max = computeSafeIcusdRepayMax(199_600_000n, 200_000_000n, 100_000n, 10_000_000n);
-
-    expect(max).toBe(190_000_000n); // 1.9 icUSD, leaving the 0.1 icUSD minimum debt
-    expect(199_500_000n).toBeGreaterThan(max); // old displayed Max: 1.995
+describe('repayment authorization and settlement estimates', () => {
+  it('uses the spendable balance without increasing a near-full payment', () => {
+    const max = computeSafeIcusdRepayMax(199_600_000n, 200_000_259n, 100_000n);
+    expect(max).toBe(199_500_000n);
+    expect(repaymentPreview(200_000_259n, max)).toEqual({
+      paidE8s: 199_500_000n, forgivenE8s: 500_259n, remainingE8s: 0n,
+    });
   });
 
-  it('does not advertise a near-full repayment that the backend upgrades to full debt', () => {
-    const debt = 200_000_259n; // 2 icUSD plus accrued interest from vault #205
-    const balance = 199_600_000n; // 1.996 icUSD, observed on the live ledger
-    const fee = 100_000n; // live icUSD icrc1_fee()
-
-    expect(computeSafeIcusdRepayMax(balance, debt, fee, 10_000_000n)).toBe(190_000_259n);
+  it('caps payment at debt and reserves one approval fee', () => {
+    expect(computeSafeIcusdRepayMax(200_100_000n, 200_000_000n, 100_000n)).toBe(200_000_000n);
+    expect(computeSafeIcusdRepayMax(100_000n, 200_000_000n, 100_000n)).toBe(0n);
+    expect(computeSafeIcusdRepayMax(500_000n, 0n, 100_000n)).toBe(0n);
   });
 
-  it('allows the exact debt only when balance also covers the transfer fee', () => {
-    expect(computeSafeIcusdRepayMax(200_100_000n, 200_000_000n, 100_000n, 10_000_000n)).toBe(200_000_000n);
+  it('forgives strictly below 0.1, retaining exactly 0.1 and above', () => {
+    expect(repaymentPreview(109_999_999n, 100_000_000n).forgivenE8s).toBe(9_999_999n);
+    expect(repaymentPreview(110_000_000n, 100_000_000n)).toEqual({
+      paidE8s: 100_000_000n, forgivenE8s: 0n, remainingE8s: 10_000_000n,
+    });
+    expect(repaymentPreview(110_000_001n, 100_000_000n).remainingE8s).toBe(10_000_001n);
   });
 
-  it('returns zero when the balance cannot cover the transfer fee', () => {
-    expect(computeSafeIcusdRepayMax(100_000n, 200_000_000n, 100_000n, 10_000_000n)).toBe(0n);
-  });
-
-  it('leaves the exact minimum debt when it is larger than the snap threshold', () => {
-    const max = computeSafeIcusdRepayMax(199_600_000n, 200_000_259n, 100_000n, 10_000_000n);
-
-    expect(max).toBe(190_000_259n);
-    expect(200_000_259n - max).toBe(10_000_000n);
+  it('does not project forgiveness without a positive payment', () => {
+    expect(repaymentPreview(1n, 0n)).toEqual({ paidE8s: 0n, forgivenE8s: 0n, remainingE8s: 1n });
+    expect(repaymentPreview(1n, -1n).remainingE8s).toBe(1n);
+    expect(repaymentPreview(1n, 10n)).toEqual({ paidE8s: 1n, forgivenE8s: 0n, remainingE8s: 0n });
   });
 });
-
 
 describe('claim repayment maximum', () => {
   it('includes a bounded cushion without exceeding spendable funds', async () => {

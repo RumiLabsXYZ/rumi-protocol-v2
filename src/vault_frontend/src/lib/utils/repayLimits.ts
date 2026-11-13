@@ -1,37 +1,25 @@
-/**
- * Return the largest icUSD amount that can be pulled without the backend's
- * near-full repayment rule upgrading it to the entire debt.
- *
- * `repay_to_vault` and `repay_and_close_vault` snap a repayment to the full
- * debt when the remaining debt is at most max(1% of debt, 0.01 icUSD). A
- * wallet that cannot cover full debt plus the ledger fee must therefore leave
- * at least the configured minimum vault debt, and strictly more than that
- * snap threshold when the threshold is larger.
- */
+/** Fixed ordinary repayment minimum and strict post-payment forgiveness boundary. */
+export const MIN_REPAY_E8S = 10_000_000n;
+
+/** Largest authorized icUSD payment after reserving the approval fee. */
 export function computeSafeIcusdRepayMax(
   balanceE8s: bigint,
   debtE8s: bigint,
-  ledgerFeeE8s: bigint,
-  minVaultDebtE8s: bigint,
+  approvalFeeE8s: bigint,
 ): bigint {
-  if (balanceE8s <= ledgerFeeE8s || debtE8s <= 0n) return 0n;
+  if (balanceE8s <= approvalFeeE8s || debtE8s <= 0n) return 0n;
+  const spendableE8s = balanceE8s - approvalFeeE8s;
+  return spendableE8s < debtE8s ? spendableE8s : debtE8s;
+}
 
-  const spendableE8s = balanceE8s - ledgerFeeE8s;
-  if (spendableE8s >= debtE8s) return debtE8s;
-
-  const snapThresholdE8s = debtE8s / 100n > 1_000_000n
-    ? debtE8s / 100n
-    : 1_000_000n;
-  // A partial repayment must also leave at least the collateral's configured
-  // minimum vault debt. The strict +1 only applies to the backend's <= dust
-  // snap rule; equality with min_vault_debt is accepted.
-  const requiredResidualE8s = snapThresholdE8s + 1n > minVaultDebtE8s
-    ? snapThresholdE8s + 1n
-    : minVaultDebtE8s;
-  if (debtE8s <= requiredResidualE8s) return 0n;
-
-  const largestSafePartialE8s = debtE8s - requiredResidualE8s;
-  return spendableE8s < largestSafePartialE8s ? spendableE8s : largestSafePartialE8s;
+/** Estimate settlement after a successful payment; accrued interest can change it. */
+export function repaymentPreview(debtE8s: bigint, authorizedE8s: bigint) {
+  const debt = debtE8s > 0n ? debtE8s : 0n;
+  const authorized = authorizedE8s > 0n ? authorizedE8s : 0n;
+  const paidE8s = authorized < debt ? authorized : debt;
+  const residual = debt - paidE8s;
+  const forgivenE8s = paidE8s > 0n && residual < MIN_REPAY_E8S ? residual : 0n;
+  return { paidE8s, forgivenE8s, remainingE8s: residual - forgivenE8s };
 }
 
 /** Maximum signed amount for a full claim repayment, bounded by spendable balance. */
