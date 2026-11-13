@@ -28,3 +28,22 @@ Prepare a readable pushed implementation/test/review receipt and exact build/ins
 ## Candidate checkpoint
 
 Implementation source: `9662fbe73c0356ddaecd180a8d4f03229e383bd8`, branch `codex/repayment-residual-forgiveness-20261112`. Rowan completed backend edits and six focused test sources; Iris found no confirmed accounting defect in the bounded changed-source review. Ellis coupled frontend Max, fixed repayment minimum and settlement projections without enabling automatic close for wallet-limited payments. Tests and generated-interface proof are pending a fresh coordinated local lane; source review is not test or deployment proof.
+
+
+## Focused verification rubric
+
+- Three payment routes cap to the authorized amount and current debt. Fixed ordinary floor is 0.1 icUSD; exactly 0.1 residual remains payable even if collateral borrowing minimum is higher.
+- At successful callback, accrue through current settlement time before deciding strict residual forgiveness. Record paid and forgiven amounts separately; only paid interest funds treasury/pool distributions. Forgiveness reduces recorded debt without claiming a ledger burn, stable reserve receipt or revenue for that amount.
+- Replay new optional settlement checkpoints exactly (debt, interest, accrual clock, forgiveness counter), retain old omitted-field CBOR/replay behavior, preserve collateral and explicit close/claim/native-XRP rules.
+- Source-check all three transfer-result branches: failed/rejected/unknown results return errors without invoking settlement. Synthetic tests do not prove a real ledger transport-uncertainty lifecycle. A distinct authorized retry is not claimed to be the same ingress; no new journal/idempotency guarantee.
+- Frontend Max reserves one approval fee and never increases an entered debit. Wallet-limited near-full payment remains ordinary repayment; previews distinguish residual/forgiveness and warn that settlement-time interest can change estimates. Stable-token precision must be reflected in estimates.
+- Essential deterministic scope is six backend tests, the existing stable-rounding tests, canonical generated Candid/declarations and old-service compatibility, and the three focused repayment frontend suites. Source review, test execution, production build, merge, deployment and actual customer outcome are separate proof grades.
+
+Fresh Cody allocation `02436e59-f97a-46d1-9cae-9a8d0a8db253` pins test input `3a4ff44f229d02481629a5455a4d886d08e88534`. One sequential offline local batch started; no paid CI, PocketIC, installation or financial action. The resource coordinator owns independent closure/release confirmation. Test outcomes will be appended only after reading native exits and counts.
+
+
+## Executed checkpoint and review corrections
+
+Backend content at `38b3983a29fecf7084899dadc389a8da933f3398` is unchanged from the six-test passing candidate. Native result: six passed, zero failed, zero ignored. The runner then failed in its own regular-expression result parser (`Match` slicing); it stopped before subsequent commands, with no owned processes or tracked changes remaining. Parser corrected for a fresh continuation; no backend retest is needed absent further backend changes.
+
+Iris identified stable-token authorization truncation could change the exact0.1 preview boundary, and the API client still used the configurable borrowing minimum for repayment while also blocking explicit subminimum repay-and-close. Candidate38b3983a corrects all three coupled frontend points and adds four-suite focused coverage, including real API-method dispatch with mocked actors and higher borrowing minimum. Those new checks are not yet executed. No production build, merge, deployment or customer transaction is implied.
