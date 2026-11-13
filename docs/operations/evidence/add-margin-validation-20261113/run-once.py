@@ -1,5 +1,5 @@
 import pathlib,subprocess,hashlib,json,datetime,os,time,signal,sys,shutil
-src=pathlib.Path('/private/tmp/rumi-swap-support-cleanup-20261111');expected='5c23d82ab64b5d6c7d4595952ec5a43dd6cf7324';out=pathlib.Path('/private/tmp/rumi-sec19-validation-20261113')
+src=pathlib.Path('/private/tmp/rumi-swap-support-cleanup-20261111');expected='e2a0122a9a35393e2c0509540551594a403695ab';out=pathlib.Path('/private/tmp/rumi-sec19-validation-20261113')
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
 def census():
  rows=subprocess.check_output(['ps','-axo','pgid=,pid=,rss='],text=True,timeout=10).splitlines();parsed=[]
@@ -10,7 +10,7 @@ def own(pgid):return [x for x in census() if x[0]==pgid]
 def same_source():
  assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip()==expected
  assert not subprocess.check_output(['git','diff',expected,'--','Cargo.toml','Cargo.lock','src/rumi_protocol_backend','src/rumi_cycle_manager','src/flaky_ledger','src/xrc_demo/xrc/xrc.wasm'],cwd=src), 'backend source changed'
-grant=pathlib.Path(sys.argv[1]);assert hashlib.sha256(grant.read_bytes()).hexdigest()==sys.argv[2];allocation=json.loads(grant.read_text());assert allocation['source']==expected;deadline=datetime.datetime.fromisoformat(allocation['startBeforeUtc'].replace('Z','+00:00'));assert datetime.datetime.now(datetime.timezone.utc)<deadline;assert hashlib.sha256((out/'steps.py').read_bytes()).hexdigest()=='b9d99572c11e9c1b51d1f750fbe7421fc2f3e9828dce5dd71b9062e8857e0d6a';assert hashlib.sha256((out/'tool-pins.json').read_bytes()).hexdigest()=='779c774111c53233705c334563894249cc2559bde4ffda28ba27076b498b6899';same_source();census();free0=shutil.disk_usage(src).free;assert free0>=20*1024**3
+grant=pathlib.Path(sys.argv[1]);assert hashlib.sha256(grant.read_bytes()).hexdigest()==sys.argv[2];allocation=json.loads(grant.read_text());assert allocation['source']==expected;deadline=datetime.datetime.fromisoformat(allocation['startBeforeUtc'].replace('Z','+00:00'));assert datetime.datetime.now(datetime.timezone.utc)<deadline;assert hashlib.sha256((out/'steps.py').read_bytes()).hexdigest()=='9f678e3aa29ac22ced7b8e78ef43dc41e9b4c54761cba26f9a26dae7731d6064';assert hashlib.sha256((out/'tool-pins.json').read_bytes()).hexdigest()=='779c774111c53233705c334563894249cc2559bde4ffda28ba27076b498b6899';same_source();census();free0=shutil.disk_usage(src).free;assert free0>=20*1024**3
 with (out/'build-dispatched').open('x') as f:f.write(now());f.flush();os.fsync(f.fileno())
 start=time.monotonic();record={'source':expected,'command':['python3','-I',str(out/'steps.py')],'start':now(),'allocationSha256':sys.argv[2],'allocationId':allocation['allocationId'],'initialFreeBytes':free0};peak=0;minfree=free0;reason=None;proc=None;code=None;closed=False;exception=None
 try:

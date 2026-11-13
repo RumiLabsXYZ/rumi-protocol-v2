@@ -1,5 +1,5 @@
 import os,pathlib,subprocess,json,hashlib,shutil,datetime,re
-src=pathlib.Path('/private/tmp/rumi-swap-support-cleanup-20261111');out=pathlib.Path('/private/tmp/rumi-sec19-validation-20261113');expected='5c23d82ab64b5d6c7d4595952ec5a43dd6cf7324';target=pathlib.Path('/private/tmp/rumi-cksol-icp-target')
+src=pathlib.Path('/private/tmp/rumi-swap-support-cleanup-20261111');out=pathlib.Path('/private/tmp/rumi-sec19-validation-20261113');expected='e2a0122a9a35393e2c0509540551594a403695ab';target=pathlib.Path('/private/tmp/rumi-cksol-icp-target')
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
 def git(*args):return subprocess.check_output(['git',*args],cwd=src)
 assert git('rev-parse','HEAD').decode().strip()==expected
