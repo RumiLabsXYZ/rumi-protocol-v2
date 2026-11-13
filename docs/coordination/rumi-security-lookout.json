@@ -2,17 +2,20 @@
   "cards": [
     {
       "id": "SEC-17",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
       "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
-      "evidenceText": "Implementation00cf550d; receipt2c217622. PASS:6backend residual/accounting/accrual/CBOR/replay tests,4stable rounding,20frontend/4suites, canonicalDID/bindings and source/prior-service compatibility. Two independent bounded reviews PASS; Cody independently verified both process closures and released slots. Stable preview/API floor/explicit-close mismatches corrected. Preservelegacy<=0.0005withdrawalexceptions/XRPguard. Failedunknown sourceproof only; no generalretryjournal. Requestedforgiveness is repeatable debtwriteoff<0.1 per eligible settlement; no aggregatecap. Dorian preparing one exact backend+frontend release decision; no new build/install/financialaction.",
+      "evidenceText": "Implementation00cf550d; receipt2c217622. PASS:6backend residual/accounting/accrual/CBOR/replay tests,4stable rounding,20frontend/4suites, canonicalDID/bindings and source/prior-service compatibility. Two independent bounded reviews PASS; Cody independently verified both process closures and released slots. Stable preview/API floor/explicit-close mismatches corrected. Preservelegacy<=0.0005withdrawalexceptions/XRPguard. Failedunknown sourceproof only; no generalretryjournal. Requestedforgiveness is repeatable debtwriteoff<0.1 per eligible settlement; no aggregatecap. Dorian pushed single exact backend+frontend release decision2d0ad23c; human decision pending; no new build/install/financialaction.",
       "evidenceLinks": [
         {
-          "label": "Verified source and release handoff",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/repayment-residual-forgiveness-20261112/docs/operations/repayment-residual-correction-result-20261112.md"
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/repayment-residual-forgiveness-20261112/docs/operations/repayment-residual-correction-result-20261112.md",
+          "title": "Verified source and release handoff"
+        },
+        {
+          "title": "Single backend and frontend release decision",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/2d0ad23c84e4be3728286d5aad048fcce295b4fa/docs/operations/repayment-residual-release-decision-20261112.md"
         }
-      ],
-      "status": "Review"
+      ]
     },
     {
       "id": "SEC-15",

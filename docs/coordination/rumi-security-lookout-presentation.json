@@ -1,6 +1,6 @@
 {
-  "summary": "SEC17 implementation00cf550d:6backend+4stable+20frontend tests PASS; canonical generation/source+prior Candid compatibility PASS; two bounded independent reviews PASS. Resource slots released. Legacy tiny-debt recovery preserved. Forgiveness<0.1 is repeatable writeoff without aggregatecap; release decision discloses cost. Dorian preparing one backend+frontend proposal. No new build/install/financialaction; live240 UI unchanged.",
-  "plainSummary": "The repayment correction passed focused tests and two independent reviews. It keeps payments within the approved amount and preserves collateral and recovery choices. The release coordinator is preparing one deployment decision, including the cost of repeated debt forgiveness. The live app is unchanged; Rob has no action until that proposal is ready.",
+  "summary": "SEC17 implementation00cf550d:6backend+4stable+20frontend tests PASS; canonical generation/source+prior Candid compatibility PASS; two bounded independent reviews PASS. Resource slots released. Legacy tiny-debt recovery preserved. Forgiveness<0.1 is repeatable writeoff without aggregatecap; release decision discloses cost. Dorian single release decision2d0ad23c pushed; human approval pending. No new build/install/financialaction; live240 UI unchanged.",
+  "plainSummary": "The repayment correction passed focused tests and two independent reviews. It keeps payments within the approved amount and preserves collateral and recovery choices. One deployment proposal is ready, including the cost of repeated debt forgiveness; it needs Rob\u2019s approval before the new backend and frontend are built and deployed.",
   "glossary": [
     {
       "term": "Stability Pool",
