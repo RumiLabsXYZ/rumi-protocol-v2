@@ -977,6 +977,8 @@ mod vault_collateral_pull_receipt_tests {
             request: VaultCollateralPullRequest::OpenVault { collateral_type: ledger, amount_e8s: 500 },
             vault_id: 9,
             ledger,
+            collateral_type: Some(ledger),
+            recovery: None,
             from: from.clone(),
             to: to.clone(),
             amount_e8s: 500,

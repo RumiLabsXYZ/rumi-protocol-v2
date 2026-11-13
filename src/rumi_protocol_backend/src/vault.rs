@@ -3417,15 +3417,101 @@ pub async fn open_vault_v2(args: OpenVaultV2Args) -> Result<OpenVaultSuccess, Pr
     Ok(OpenVaultSuccess { vault_id, block_index })
 }
 
-pub async fn add_margin_to_vault_v2(_args: AddMarginV2Args) -> Result<u64, ProtocolError> {
-    // A submitted ICRC-2 pull can outlive its callback. Unlike opening a
-    // vault, add-margin has no safe terminal destination if liquidation
-    // removes the target vault before the exact pull receipt is reconciled.
-    // Keep this endpoint fail-closed until a liquidation-compatible recovery
-    // liability/refund path exists; do not create an intent or call a ledger.
-    Err(ProtocolError::TemporarilyUnavailable(
-        "operation-ID add-margin is held pending a safe recovery path; no collateral was pulled".into(),
-    ))
+pub async fn add_margin_to_vault_v2(args: AddMarginV2Args) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard = GuardPrincipal::new(caller, &format!("add_margin_vault_v2_{}", args.vault_id))?;
+    let request = VaultCollateralPullRequest::AddMargin { vault_id: args.vault_id, amount_e8s: args.amount };
+    if args.amount == 0 { guard.fail(); return Err(ProtocolError::GenericError("collateral amount must be positive".into())); }
+    let saved = read_state(|s| s.vault_collateral_pull_journals.get(&caller).cloned());
+    if let Some(journal) = &saved {
+        if journal.operation_id != args.operation_id || journal.request != request {
+            guard.fail();
+            return Err(ProtocolError::TemporarilyUnavailable("another operation is active or this ID is bound to a different request".into()));
+        }
+        if let Some(recovery) = journal.recovery {
+            guard.complete();
+            return Err(add_margin_recovery_error(recovery));
+        }
+        if let VaultCollateralPullPhase::Completed { result } = &journal.phase {
+            let response = add_margin_operation_response(result);
+            guard.complete();
+            return response;
+        }
+    }
+    let resuming = saved.as_ref().is_some_and(|journal| !matches!(journal.phase,
+        VaultCollateralPullPhase::Prepared | VaultCollateralPullPhase::SafeNoEffect { .. }));
+    // Serialize a surviving ordinary vault against liquidation and withdrawal,
+    // including exact retries. A vanished or protocol-controlled target can
+    // only produce a separate recovery liability and needs no vault mutation.
+    let recovery_only = resuming && read_state(|s| {
+        s.vault_id_to_vaults.get(&args.vault_id).is_none_or(|vault| vault.bot_processing)
+            || s.bot_claims.contains_key(&args.vault_id) || s.has_pending_nicp_claim(args.vault_id)
+    });
+    let _vault_guard = if recovery_only { None } else {
+        match VaultLiquidationGuard::new(args.vault_id) {
+            Ok(g) => Some(g), Err(e) => { guard.fail(); return Err(e); }
+        }
+    };
+    let ledger = if resuming { saved.as_ref().expect("resuming journal").ledger } else {
+        let vault = read_state(|s| s.vault_id_to_vaults.get(&args.vault_id).cloned())
+            .ok_or_else(|| ProtocolError::GenericError("Vault not found".into()))?;
+        if vault.owner != caller { guard.fail(); return Err(ProtocolError::CallerNotOwner); }
+        require_vault_not_processing(&vault)?;
+        reject_active_xrp_sp_absorb_preflight(args.vault_id, ic_cdk::api::time())?;
+        read_state(|s| s.get_collateral_config(&vault.collateral_type).map(|c| c.ledger_canister_id))
+            .ok_or_else(|| ProtocolError::GenericError("Collateral type not configured".into()))?
+    };
+    let journal = match prepare_or_resume_vault_operation(caller, args.operation_id, request, ledger).await {
+        Ok(journal) => journal, Err(e) => { guard.fail(); return Err(e); }
+    };
+    let journal = match dispatch_vault_collateral_operation(caller, journal).await {
+        Ok(journal) => journal, Err(e) => { guard.fail(); return Err(e); }
+    };
+    let block_index = match &journal.phase {
+        VaultCollateralPullPhase::PullConfirmed { block_index } => *block_index,
+        _ => { guard.fail(); return Err(ProtocolError::TemporarilyUnavailable("collateral pull is not confirmed".into())); }
+    };
+    let result = mutate_state(|s| {
+        let collateral_type = journal.collateral_type.ok_or("confirmed pull lacks pinned collateral identity")?;
+        let eligible = !recovery_only && !s.bot_claims.contains_key(&args.vault_id)
+            && s.vault_id_to_vaults.get(&args.vault_id).is_some_and(|vault|
+            vault.owner == caller && vault.collateral_type == collateral_type && !vault.bot_processing
+                && !s.has_pending_nicp_claim(args.vault_id)
+                && s.get_collateral_config(&collateral_type).is_some_and(|c| c.ledger_canister_id == journal.ledger)
+                && State::checked_margin_total(vault.collateral_amount, ICP::new(args.amount)).is_ok());
+        let recovery = if eligible { None } else {
+            let mut nonce = s.next_op_nonce();
+            while s.pending_payout_index.contains_key(&nonce)
+                || s.three_usd_reserve_payout_operation_keys.contains_key(&nonce) { nonce = s.next_op_nonce(); }
+            Some(PendingMarginTransfer {
+                vault_id: args.vault_id, operation_id: nonce, payout_kind: crate::state::PendingPayoutKind::Margin,
+                owner: caller, margin: ICP::new(args.amount), collateral_type, retry_count: 0, op_nonce: nonce,
+                ledger: Some(journal.ledger), transfer_amount_raw: None, held_for_manual_retry: true,
+                reconciliation_required: true, in_flight: false, too_old_confirmed: false,
+                history_start_index: None, rearm_schema_version: 0, history_scan: None,
+                history_candidate_seen: false, no_effect_proof: None, history_log_length: None,
+                history_cursor: 0, min_net_collateral_raw: None,
+            })
+        };
+        crate::event::record_vault_add_margin_settlement(s, journal, recovery)
+    }).map_err(ProtocolError::TemporarilyUnavailable);
+    match result {
+        Ok(Some(recovery)) => { guard.complete(); Err(add_margin_recovery_error(recovery)) }
+        Ok(None) => { guard.complete(); Ok(block_index) }
+        Err(e) => { guard.fail(); Err(e) }
+    }
+}
+
+fn add_margin_recovery_error(recovery: crate::state::AddMarginRecovery) -> ProtocolError {
+    ProtocolError::TemporarilyUnavailable(format!(
+        "collateral pull confirmed but not added to the vault; recovery liability {} is held for reconciliation", recovery.payout_operation_id))
+}
+
+fn add_margin_operation_response(result: &VaultOperationResult) -> Result<u64, ProtocolError> {
+    match result {
+        VaultOperationResult::AddMargin { block_index, .. } => Ok(*block_index),
+        _ => Err(ProtocolError::GenericError("operation receipt does not match add-margin".into())),
+    }
 }
 
 /// Compound open-vault-and-borrow in a single canister call.
@@ -7605,19 +7691,12 @@ mod borrow_mint_journal_tests {
     use std::rc::Rc;
 
     #[test]
-    fn v2_add_margin_is_held_without_reserving_or_dispatching_a_pull() {
-        replace_state(State::default());
-        let result = futures::executor::block_on(add_margin_to_vault_v2(AddMarginV2Args {
-            operation_id: 1,
-            vault_id: 99,
-            amount: 100,
-        }));
-        assert!(matches!(result, Err(ProtocolError::TemporarilyUnavailable(message))
-            if message.contains("no collateral was pulled")));
-        crate::state::read_state(|state| {
-            assert!(state.vault_collateral_pull_journals.is_empty());
-            assert_eq!(state.op_nonce_counter, 0);
-        });
+    fn sec19_recovery_receipt_is_not_reported_as_a_vault_credit() {
+        let recovery = crate::state::AddMarginRecovery { vault_id: 99, block_index: 42, amount: 100,
+            ledger: Principal::from_slice(&[42]), payout_operation_id: 123 };
+        assert!(matches!(add_margin_recovery_error(recovery), ProtocolError::TemporarilyUnavailable(message)
+            if message.contains("not added") && message.contains("123")));
+        assert_eq!(add_margin_operation_response(&VaultOperationResult::AddMargin { vault_id: 99, block_index: 42 }).unwrap(), 42);
     }
 
     #[test]

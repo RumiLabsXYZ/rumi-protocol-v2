@@ -12,7 +12,8 @@ use rumi_protocol_backend::state::{
     VaultOperationStatus,
 };
 use rumi_protocol_backend::vault::{
-    CandidVault, OpenVaultAndBorrowV2Args, OpenVaultSuccess, OpenVaultV2Args,
+    AddMarginV2Args, CandidVault, OpenVaultAndBorrowV2Args, OpenVaultSuccess, OpenVaultV2Args,
+    VaultOperationIdArg,
 };
 use rumi_protocol_backend::{ProtocolError, SuccessWithFee};
 use serde::Deserialize;
@@ -631,4 +632,121 @@ fn compound_borrow_mint_receipt_reconciliation_completes_bound_operation() {
 #[test]
 fn compound_borrow_mint_receipt_scan_completes_bound_operation() {
     assert_compound_borrow_mint_receipt_recovery_completes_bound_operation(true);
+}
+
+
+#[derive(CandidType, Deserialize)]
+struct Sec19PayoutView {
+    operation_id: u128,
+    amount_gross: rumi_protocol_backend::numeric::ICP,
+    ledger: Option<Principal>,
+    held_for_manual_retry: bool,
+    reconciliation_required: bool,
+}
+#[derive(CandidType, Deserialize)]
+struct Sec19PayoutPage { items: Vec<Sec19PayoutView> }
+
+fn sec19_payouts(pic: &PocketIc, backend: Principal, owner: Principal) -> Sec19PayoutPage {
+    reply(pic.query_call(backend, owner, "get_pending_payouts",
+        encode_args((None::<u128>, Some(50u16))).unwrap()).unwrap(), "get_pending_payouts")
+}
+
+fn sec19_open_and_fund() -> (PocketIc, Principal, Principal, Principal, u64, u64) {
+    let (pic, backend, ledger, _, owner, original) = install_fixture();
+    let opened: Result<OpenVaultSuccess, ProtocolError> = reply(call(&pic, backend, owner,
+        "open_vault_v2", encode_one(OpenVaultV2Args { operation_id: 1, collateral_amount: original,
+            collateral_type: None }).unwrap()), "open_vault_v2");
+    let vault = opened.expect("open original vault").vault_id;
+    let ack: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "ack_vault_operation",
+        encode_one(VaultOperationIdArg { operation_id: 1 }).unwrap()), "ack_vault_operation");
+    assert_eq!(ack.unwrap(), 1);
+    let topup = 1_301_909_000u64;
+    call(&pic, ledger, Principal::anonymous(), "mint", encode_args((Account { owner, subaccount: None },
+        Nat::from(topup + 30_000))).unwrap());
+    call(&pic, ledger, owner, "icrc2_approve", encode_one(ApproveArgs {
+        from_subaccount: None, spender: Account { owner: backend, subaccount: None },
+        amount: Nat::from(topup + 10_000), expected_allowance: None, expires_at: None,
+        fee: None, memo: None, created_at_time: None }).unwrap());
+    (pic, backend, ledger, owner, vault, topup)
+}
+
+fn sec19_topup_args(vault_id: u64, amount: u64) -> Vec<u8> {
+    encode_one(AddMarginV2Args { operation_id: 2, vault_id, amount }).unwrap()
+}
+
+fn sec19_vaults(pic: &PocketIc, backend: Principal, owner: Principal) -> Vec<CandidVault> {
+    reply(pic.query_call(backend, owner, "get_vaults", encode_args((Some(owner),)).unwrap()).unwrap(), "get_vaults")
+}
+
+#[test]
+fn sec19_topup_lost_reply_exact_retry_credits_once() {
+    let (pic, backend, ledger, owner, vault_id, topup) = sec19_open_and_fund();
+    let original = sec19_vaults(&pic, backend, owner).into_iter().find(|v| v.vault_id == vault_id).unwrap().collateral_amount;
+    let owner_before = balance(&pic, ledger, owner);
+    let backend_before = balance(&pic, ledger, backend);
+    let blocks = block_count(&pic, ledger);
+    call(&pic, ledger, Principal::anonymous(), "set_phantom_transfer_from_failures", encode_one(1u32).unwrap());
+    let args = sec19_topup_args(vault_id, topup);
+    let first: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args.clone()), "add_margin_to_vault_v2");
+    assert!(first.is_err());
+    assert_eq!(status(&pic, backend, owner).active.unwrap().phase, VaultCollateralPullPhase::Submitted);
+    assert_eq!(sec19_vaults(&pic, backend, owner).into_iter().find(|v| v.vault_id == vault_id).unwrap().collateral_amount, original);
+    assert_eq!(balance(&pic, ledger, owner), owner_before - topup - 10_000);
+    assert_eq!(balance(&pic, ledger, backend), backend_before + topup);
+    assert_eq!(block_count(&pic, ledger), blocks + 1);
+    let retry: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args.clone()), "add_margin_to_vault_v2");
+    let block = retry.expect("exact retry recovers Duplicate receipt");
+    let repeated: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args), "add_margin_to_vault_v2");
+    assert_eq!(repeated.unwrap(), block);
+    assert_eq!(block_count(&pic, ledger), blocks + 1);
+    assert_eq!(sec19_vaults(&pic, backend, owner).into_iter().find(|v| v.vault_id == vault_id).unwrap().collateral_amount, original + topup);
+    assert!(sec19_payouts(&pic, backend, owner).items.is_empty());
+}
+
+#[test]
+fn sec19_lost_pull_then_target_closed_creates_one_held_recovery() {
+    let (pic, backend, ledger, owner, vault_id, topup) = sec19_open_and_fund();
+    let args = sec19_topup_args(vault_id, topup);
+    let blocks = block_count(&pic, ledger);
+    call(&pic, ledger, Principal::anonymous(), "set_phantom_transfer_from_failures", encode_one(1u32).unwrap());
+    let first: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args.clone()), "add_margin_to_vault_v2");
+    assert!(first.is_err());
+    assert_eq!(block_count(&pic, ledger), blocks + 1);
+    let other = Principal::self_authenticating(b"sec19-other-owner");
+    let wrong: Result<(), ProtocolError> = reply(call(&pic, backend, other, "reconcile_vault_collateral_pull_from_block",
+        encode_args((VaultOperationIdArg { operation_id: 2 }, blocks)).unwrap()), "reconcile_vault_collateral_pull_from_block");
+    assert!(wrong.is_err());
+    let closed: Result<Option<u64>, ProtocolError> = reply(call(&pic, backend, owner, "withdraw_and_close_vault",
+        encode_one(vault_id).unwrap()), "withdraw_and_close_vault");
+    closed.expect("the separate zero-debt vault can be closed while the pull reply is unknown");
+    assert!(sec19_vaults(&pic, backend, owner).iter().all(|v| v.vault_id != vault_id));
+    let blocks_after_close = block_count(&pic, ledger);
+    let owner_after_close = balance(&pic, ledger, owner);
+    let backend_after_close = balance(&pic, ledger, backend);
+    let reconciled: Result<(), ProtocolError> = reply(call(&pic, backend, owner, "reconcile_vault_collateral_pull_from_block",
+        encode_args((VaultOperationIdArg { operation_id: 2 }, blocks)).unwrap()), "reconcile_vault_collateral_pull_from_block");
+    reconciled.expect("the direct exact block proves the original pinned pull");
+    let retry: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args.clone()), "add_margin_to_vault_v2");
+    assert!(retry.is_err(), "held liability is not a vault credit");
+    let active = status(&pic, backend, owner).active.unwrap();
+    let recovery = active.recovery.expect("owner sees held recovery detail");
+    assert_eq!((recovery.vault_id, recovery.block_index, recovery.amount, recovery.ledger), (vault_id, blocks, topup, ledger));
+    let page = sec19_payouts(&pic, backend, owner);
+    assert_eq!(page.items.len(), 1);
+    let row = &page.items[0];
+    assert_eq!(row.operation_id, recovery.payout_operation_id);
+    assert_eq!(row.amount_gross.to_u64(), topup);
+    assert_eq!(row.ledger, Some(ledger));
+    assert!(row.held_for_manual_retry && row.reconciliation_required);
+    assert!(sec19_payouts(&pic, backend, other).items.is_empty());
+    let again: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args), "add_margin_to_vault_v2");
+    assert!(again.is_err());
+    assert_eq!(block_count(&pic, ledger), blocks_after_close, "reconcile and exact retry never dispatch a second pull");
+    assert_eq!(balance(&pic, ledger, owner), owner_after_close);
+    assert_eq!(balance(&pic, ledger, backend), backend_after_close);
+    assert_eq!(sec19_payouts(&pic, backend, owner).items.len(), 1);
+    let ack: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "ack_vault_operation",
+        encode_one(VaultOperationIdArg { operation_id: 2 }).unwrap()), "ack_vault_operation");
+    assert_eq!(ack.unwrap(), 2);
+    assert_eq!(sec19_payouts(&pic, backend, owner).items.len(), 1, "ACK preserves the held liability");
 }

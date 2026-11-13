@@ -408,10 +408,12 @@ fn generate_consent_message_for_caller(
         "add_margin_to_vault_v2" => {
             match Decode!(arg, AddMarginV2Args) {
                 Ok(request) => {
+                    let (symbol, decimals) = resolve_collateral_for_vault(request.vault_id);
                     Ok(format!(
-                        "## Add Collateral (operation {})\n\nOperation-ID add-margin request **{}** is currently held pending a safe recovery path. This request will not pull collateral or change vault #{}. Refresh Rumi after this route is enabled.",
+                        "## Add Collateral (operation {})\n\nAuthorize adding **{}** ({} smallest units) to vault #{}. A confirmed pull that cannot be applied to the vault is held for recovery; it is not an added collateral balance.",
                         request.operation_id,
-                        request.operation_id,
+                        format_collateral_amount(request.amount, decimals, &symbol),
+                        request.amount,
                         request.vault_id,
                     ))
                 }
@@ -1090,9 +1092,10 @@ mod tests {
 
         let margin = AddMarginV2Args { operation_id: 43, vault_id: 9, amount: 25_000_000 };
         let margin_message = generate_consent_message("add_margin_to_vault_v2", &Encode!(&margin).unwrap()).unwrap();
-        assert!(margin_message.contains("request **43**"));
+        assert!(margin_message.contains("operation 43"));
         assert!(margin_message.contains("vault #9"));
-        assert!(margin_message.contains("will not pull collateral"));
+        assert!(margin_message.contains("25000000 smallest units"));
+        assert!(margin_message.contains("held for recovery"));
 
         let legacy = generate_consent_message("open_vault", &Encode!(&100_000_000u64, &None::<Principal>).unwrap()).unwrap();
         assert!(legacy.contains("disabled"));

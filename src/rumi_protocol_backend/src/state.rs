@@ -626,6 +626,12 @@ mod three_usd_reserve_ingress_state_tests {
         ciborium::ser::into_writer(&old, &mut legacy_bytes).unwrap();
         let legacy: super::VaultCollateralPullJournal = ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
         assert_eq!(legacy, submitted);
+        let ciborium::value::Value::Map(fields) = &mut old else { panic!("journal must encode as a map") };
+        fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "collateral_type"));
+        let mut legacy_identity_bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut legacy_identity_bytes).unwrap();
+        let legacy_identity: super::VaultCollateralPullJournal = ciborium::de::from_reader(legacy_identity_bytes.as_slice()).unwrap();
+        assert_eq!(legacy_identity.collateral_type, None);
     }
 
     #[test]
@@ -797,6 +803,8 @@ mod three_usd_reserve_ingress_state_tests {
             request: VaultCollateralPullRequest::AddMargin { vault_id: 7, amount_e8s: 200 },
             vault_id: 7,
             ledger,
+            collateral_type: Some(ledger),
+            recovery: None,
             from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
             to: icrc_ledger_types::icrc1::account::Account {
                 owner: Principal::management_canister(),
@@ -3274,6 +3282,15 @@ pub enum VaultCollateralPullPhase {
     Completed { result: VaultOperationResult },
 }
 
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct AddMarginRecovery {
+    pub vault_id: u64,
+    pub block_index: u64,
+    pub amount: u64,
+    pub ledger: Principal,
+    pub payout_operation_id: u128,
+}
+
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct VaultCollateralPullJournal {
     pub owner: Principal,
@@ -3282,6 +3299,13 @@ pub struct VaultCollateralPullJournal {
     /// Newly reserved for open operations; the existing vault for add-margin.
     pub vault_id: u64,
     pub ledger: Principal,
+    /// Original collateral identity, pinned before a pull can be dispatched.
+    /// Missing on older journals; never infer it for an already submitted pull.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_type: Option<Principal>,
+    /// Owner-visible held obligation; never interpreted as credited collateral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<AddMarginRecovery>,
     pub from: icrc_ledger_types::icrc1::account::Account,
     pub to: icrc_ledger_types::icrc1::account::Account,
     pub amount_e8s: u64,
@@ -3323,6 +3347,7 @@ pub struct VaultOperationView {
     /// Present only when the ledger confirmed an index that the existing
     /// u64-bound vault APIs cannot represent. The operation remains held.
     pub confirmed_wide_block_index: Option<candid::Nat>,
+    pub recovery: Option<AddMarginRecovery>,
 }
 
 /// The result is available until explicit ACK. After ACK only the watermark
@@ -5983,6 +6008,7 @@ impl State {
                 vault_id: journal.vault_id,
                 phase: journal.phase.clone(),
                 confirmed_wide_block_index: journal.confirmed_wide_block_index.clone(),
+                recovery: journal.recovery,
             }),
         }
     }
@@ -6020,6 +6046,7 @@ impl State {
                     return Err("collateral no longer accepts ICRC-2 margin additions".into());
                 }
                 if config.min_collateral_deposit > *amount_e8s { return Err("collateral amount is below the current minimum".into()); }
+                Self::checked_margin_total(vault.collateral_amount, ICP::new(*amount_e8s)).map_err(|e| format!("{e:?}"))?;
             }
         }
         Ok(())
@@ -6044,8 +6071,15 @@ impl State {
                 return Ok(saved);
             }
             self.validate_vault_pull_admission(owner, &request, ledger)?;
+            let collateral_type = match &request {
+                VaultCollateralPullRequest::OpenVault { collateral_type, .. }
+                | VaultCollateralPullRequest::OpenVaultAndBorrow { collateral_type, .. } => *collateral_type,
+                VaultCollateralPullRequest::AddMargin { vault_id, .. } => self.vault_id_to_vaults
+                    .get(vault_id).ok_or("vault no longer exists")?.collateral_type,
+            };
             let mut retry = saved;
             retry.ledger = ledger;
+            retry.collateral_type = Some(collateral_type);
             retry.amount_e8s = match request {
                 VaultCollateralPullRequest::OpenVault { amount_e8s, .. }
                 | VaultCollateralPullRequest::OpenVaultAndBorrow { amount_e8s, .. }
@@ -6075,6 +6109,12 @@ impl State {
                 (self.increment_vault_id(), *amount_e8s),
             VaultCollateralPullRequest::AddMargin { vault_id, amount_e8s } => (*vault_id, *amount_e8s),
         };
+        let collateral_type = match &request {
+            VaultCollateralPullRequest::OpenVault { collateral_type, .. }
+            | VaultCollateralPullRequest::OpenVaultAndBorrow { collateral_type, .. } => *collateral_type,
+            VaultCollateralPullRequest::AddMargin { vault_id, .. } => self.vault_id_to_vaults
+                .get(vault_id).ok_or("vault no longer exists")?.collateral_type,
+        };
         let op_nonce = self.next_op_nonce_at(now_ns);
         let journal = VaultCollateralPullJournal {
             owner,
@@ -6082,6 +6122,8 @@ impl State {
             request,
             vault_id,
             ledger,
+            collateral_type: Some(collateral_type),
+            recovery: None,
             from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
             to: icrc_ledger_types::icrc1::account::Account { owner: protocol, subaccount: None },
             amount_e8s,
@@ -6382,8 +6424,15 @@ impl State {
         let acknowledged = self.vault_operation_acknowledged_through.get(&owner).copied().unwrap_or(0);
         if operation_id <= acknowledged { return Ok(acknowledged); }
         let Some(journal) = self.vault_collateral_pull_journals.get(&owner) else { return Err("no terminal vault operation receipt to ACK".into()); };
-        if journal.operation_id != operation_id || !matches!(journal.phase, VaultCollateralPullPhase::SafeNoEffect { .. } | VaultCollateralPullPhase::Completed { .. }) {
+        if journal.operation_id != operation_id || !(matches!(journal.phase, VaultCollateralPullPhase::SafeNoEffect { .. } | VaultCollateralPullPhase::Completed { .. })
+            || (matches!(journal.phase, VaultCollateralPullPhase::PullConfirmed { .. }) && journal.recovery.is_some())) {
             return Err("vault operation is not terminal and cannot be ACKed".into());
+        }
+        if let Some(recovery) = journal.recovery {
+            let retained = self.get_pending_payout(recovery.payout_operation_id).is_some_and(|(_, row)|
+                row.owner == owner && row.vault_id == recovery.vault_id && row.margin.to_u64() == recovery.amount
+                    && row.ledger == Some(recovery.ledger) && row.held_for_manual_retry && row.reconciliation_required);
+            if !retained { return Err("held add-margin recovery liability is missing or changed".into()); }
         }
         self.vault_collateral_pull_journals.remove(&owner);
         self.vault_operation_acknowledged_through.insert(owner, operation_id);

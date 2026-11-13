@@ -1234,6 +1234,9 @@ pub enum BotProofAuditEvent {
 /// adding public Event variants would break older clients of `get_events`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
+    /// One confirmed pull produces exactly one vault credit or held owner liability.
+    VaultAddMarginSettled { journal: crate::state::VaultCollateralPullJournal, recovery: Option<PendingMarginTransfer> },
+    VaultAddMarginAcknowledged { owner: Principal, operation_id: u64 },
     VaultPullCancelled { owner: Principal, operation_id: u64, request: crate::state::VaultCollateralPullRequest },
     XrpVaultOriginReconciled { vault_id: u64, origin: crate::xrp_vault_deposit::XrpVaultOrigin },
     XrpVaultTopupCredited { receipt: crate::xrp_vault_deposit::XrpTopupReceipt },
@@ -1934,6 +1937,14 @@ fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
 
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
+        PendingPayoutEvent::VaultAddMarginSettled { journal, recovery } => {
+            apply_vault_add_margin_settlement(state, journal, recovery, true)
+                .expect("inconsistent add-margin settlement journal");
+        }
+        PendingPayoutEvent::VaultAddMarginAcknowledged { owner, operation_id } => {
+            state.acknowledge_vault_operation(owner, operation_id)
+                .expect("inconsistent add-margin ACK journal");
+        }
         PendingPayoutEvent::VaultPullCancelled { owner, operation_id, request } => {
             state.apply_vault_operation_cancellation(owner, operation_id, &request)
                 .expect("inconsistent vault cancellation journal");
@@ -3418,6 +3429,119 @@ pub fn record_open_vault(state: &mut State, vault: Vault, block_index: u64) {
         timestamp: Some(now()),
     });
     state.open_vault(vault);
+}
+
+/// Apply the single ordered add-margin settlement. In fallback replay the
+/// operation journal may be absent, so the event carries its full pinned tuple.
+fn apply_vault_add_margin_settlement(
+    state: &mut State,
+    mut journal: crate::state::VaultCollateralPullJournal,
+    recovery: Option<PendingMarginTransfer>,
+    public_credit_already_applied: bool,
+) -> Result<Option<crate::state::AddMarginRecovery>, String> {
+    use crate::state::{VaultCollateralPullPhase as Phase, VaultCollateralPullRequest as Request, VaultOperationResult as ResultKind};
+    let block_index = match &journal.phase { Phase::PullConfirmed { block_index } => *block_index,
+        _ => return Err("add-margin pull is not confirmed".into()) };
+    let (vault_id, amount) = match &journal.request { Request::AddMargin { vault_id, amount_e8s } => (*vault_id, *amount_e8s),
+        _ => return Err("not an add-margin pull".into()) };
+    let collateral_type = journal.collateral_type.ok_or("add-margin collateral identity is not pinned")?;
+    if vault_id != journal.vault_id || amount != journal.amount_e8s || amount == 0
+        || journal.owner != journal.from.owner || journal.from.subaccount.is_some() || journal.to.subaccount.is_some()
+        || journal.memo != journal.op_nonce.to_be_bytes() || journal.created_at_time_ns != (journal.op_nonce >> 64) as u64
+        || journal.dispatch_attempts == 0 || journal.confirmed_wide_block_index.is_some() {
+        return Err("add-margin pull tuple is inconsistent".into());
+    }
+    let receipt = match recovery {
+        Some(transfer) => Some(crate::state::AddMarginRecovery { vault_id, block_index, amount, ledger: journal.ledger, payout_operation_id: transfer.operation_id }),
+        None => None,
+    };
+    // A replayed or delayed event after ACK can never resurrect a retired
+    // operation or replace a newer one. The existing payout, if any, remains.
+    if state.vault_operation_acknowledged_through.get(&journal.owner).copied().unwrap_or(0) >= journal.operation_id {
+        return Ok(receipt);
+    }
+    if let Some(existing) = state.vault_collateral_pull_journals.get(&journal.owner) {
+        if existing.operation_id != journal.operation_id {
+            return Err("another vault operation superseded add-margin settlement".into());
+        }
+        let mut expected = journal.clone();
+        if let Some(detail) = receipt {
+            expected.recovery = Some(detail);
+        } else {
+            expected.phase = Phase::Completed { result: ResultKind::AddMargin { vault_id, block_index } };
+        }
+        if existing == &expected { return Ok(receipt); }
+        if existing != &journal { return Err("add-margin pull tuple changed".into()); }
+    }
+    let result = if let Some(transfer) = recovery {
+        if transfer.owner != journal.owner || transfer.vault_id != vault_id || transfer.margin.to_u64() != amount
+            || transfer.payout_kind != PendingPayoutKind::Margin || transfer.op_nonce != transfer.operation_id
+            || transfer.ledger != Some(journal.ledger) || transfer.collateral_type != collateral_type
+            || !transfer.held_for_manual_retry || !transfer.reconciliation_required || transfer.in_flight
+            || transfer.too_old_confirmed || transfer.transfer_amount_raw.is_some() || transfer.operation_id == 0
+            || state.pending_payout_index.contains_key(&transfer.operation_id) {
+            return Err("invalid add-margin recovery liability".into());
+        }
+        let payout_operation_id = transfer.operation_id;
+        state.insert_pending_payout(transfer);
+        Some(crate::state::AddMarginRecovery { vault_id, block_index, amount, ledger: journal.ledger, payout_operation_id })
+    } else {
+        let vault = state.vault_id_to_vaults.get(&vault_id).ok_or("add-margin target disappeared")?;
+        if vault.owner != journal.owner || vault.collateral_type != collateral_type
+            || state.get_collateral_config(&collateral_type).map(|c| c.ledger_canister_id) != Some(journal.ledger)
+            || vault.bot_processing || state.bot_claims.contains_key(&vault_id) || state.has_pending_nicp_claim(vault_id) {
+            return Err("add-margin target no longer matches its pinned pull".into());
+        }
+        if !public_credit_already_applied {
+            state.try_add_margin_to_vault(vault_id, ICP::new(amount)).map_err(|e| format!("{e:?}"))?;
+        }
+        None
+    };
+    // Counter must never reuse the payout attempt identity after fallback replay.
+    if let Some(transfer) = recovery {
+        state.op_nonce_counter = state.op_nonce_counter.max((transfer.op_nonce as u64).wrapping_add(1));
+    }
+    if let Some(detail) = result { journal.recovery = Some(detail); }
+    else { journal.phase = Phase::Completed { result: ResultKind::AddMargin { vault_id, block_index } }; }
+    state.vault_collateral_pull_journals.insert(journal.owner, journal);
+    Ok(result)
+}
+
+/// Apply and persist the credit or recovery decision in one atomic message.
+pub fn record_vault_add_margin_settlement(
+    state: &mut State, journal: crate::state::VaultCollateralPullJournal,
+    recovery: Option<PendingMarginTransfer>,
+) -> Result<Option<crate::state::AddMarginRecovery>, String> {
+    if state.vault_collateral_pull_journals.get(&journal.owner) != Some(&journal) {
+        return Err("add-margin journal changed before settlement".into());
+    }
+    let result = apply_vault_add_margin_settlement(state, journal.clone(), recovery, false)?;
+    // Public history remains visible. Replay applies this credit before the
+    // private receipt; neither is emitted for a held recovery liability.
+    if result.is_none() {
+        let block_index = match &journal.phase {
+            crate::state::VaultCollateralPullPhase::PullConfirmed { block_index } => *block_index,
+            _ => unreachable!("settlement requires a confirmed pull"),
+        };
+        record_event(&Event::AddMarginToVault { vault_id: journal.vault_id,
+            margin_added: ICP::new(journal.amount_e8s), block_index,
+            caller: Some(journal.owner), timestamp: Some(now()) });
+    }
+    // No await separates mutation and durable events; a trap rolls back both.
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::VaultAddMarginSettled { journal, recovery });
+    Ok(result)
+}
+
+pub fn record_vault_add_margin_acknowledged(state: &mut State, owner: Principal, operation_id: u64) -> Result<u64, String> {
+    let journal = state.vault_collateral_pull_journals.get(&owner).ok_or("vault journal missing")?;
+    if journal.operation_id != operation_id || !matches!(journal.request, crate::state::VaultCollateralPullRequest::AddMargin { .. })
+        || !(matches!(journal.phase, crate::state::VaultCollateralPullPhase::Completed { .. })
+            || (matches!(journal.phase, crate::state::VaultCollateralPullPhase::PullConfirmed { .. }) && journal.recovery.is_some())) {
+        return Err("add-margin operation is not terminal".into());
+    }
+    let acknowledged = state.acknowledge_vault_operation(owner, operation_id)?;
+    crate::storage::record_pending_payout_event(&PendingPayoutEvent::VaultAddMarginAcknowledged { owner, operation_id });
+    Ok(acknowledged)
 }
 
 /// One ordered private journal entry applies collateral and permanent receipt
@@ -5496,6 +5620,112 @@ mod filter_tests {
         assert_eq!(vault.collateral_amount, 1_000_000_000);
         assert_eq!(vault.last_accrual_time, 1200);
         assert_eq!(state.dust_forgiven_total.0, 9_999_999);
+    }
+
+    fn sec19_confirmed_pull(owner: Principal, ledger: Principal) -> crate::state::VaultCollateralPullJournal {
+        use crate::state::{VaultCollateralPullJournal, VaultCollateralPullPhase, VaultCollateralPullRequest};
+        VaultCollateralPullJournal {
+            owner, operation_id: 1, request: VaultCollateralPullRequest::AddMargin { vault_id: 1, amount_e8s: 200 },
+            vault_id: 1, ledger, collateral_type: Some(ledger), recovery: None,
+            from: icrc_ledger_types::icrc1::account::Account { owner, subaccount: None },
+            to: icrc_ledger_types::icrc1::account::Account { owner: p(30), subaccount: None },
+            amount_e8s: 200, fee_e8s: 10, memo: 42u128.to_be_bytes(), created_at_time_ns: 0,
+            op_nonce: 42, dispatch_attempts: 1, confirmed_wide_block_index: None,
+            receipt_recovery_cooldown_until_ns: 0, phase: VaultCollateralPullPhase::PullConfirmed { block_index: 55 },
+        }
+    }
+
+    fn sec19_recovery_row(owner: Principal, ledger: Principal) -> PendingMarginTransfer {
+        PendingMarginTransfer {
+            vault_id: 1, operation_id: 99, payout_kind: PendingPayoutKind::Margin, owner,
+            margin: ICP::new(200), collateral_type: ledger, retry_count: 0, op_nonce: 99,
+            ledger: Some(ledger), transfer_amount_raw: None, held_for_manual_retry: true,
+            reconciliation_required: true, in_flight: false, too_old_confirmed: false,
+            history_start_index: None, rearm_schema_version: 0, history_scan: None,
+            history_candidate_seen: false, no_effect_proof: None, history_log_length: None,
+            history_cursor: 0, min_net_collateral_raw: None,
+        }
+    }
+
+    #[test]
+    fn sec19_confirmed_credit_and_duplicate_settlement_are_single_effect() {
+        let owner = caller_a(); let ledger = icp_token();
+        let mut state = State::from(payout_init_args(ledger));
+        state.open_vault(vault_with(1, owner, ledger, 1_000_000_000));
+        let journal = sec19_confirmed_pull(owner, ledger);
+        state.vault_collateral_pull_journals.insert(owner, journal.clone());
+        let first = apply_vault_add_margin_settlement(&mut state, journal.clone(), None, false).unwrap();
+        let second = apply_vault_add_margin_settlement(&mut state, journal, None, false).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(state.vault_id_to_vaults[&1].collateral_amount, 1_000_000_200);
+        assert!(state.pending_payout_index.is_empty());
+        let journal = sec19_confirmed_pull(owner, ledger);
+        let public = vec![Event::Init(payout_init_args(ledger)), open_vault_event(1, owner, ledger),
+            Event::AddMarginToVault { vault_id: 1, margin_added: ICP::new(200), block_index: 55,
+                caller: Some(owner), timestamp: Some(1000) }];
+        let private = vec![crate::storage::PendingPayoutJournalEntry { after_event_count: 3,
+            event: PendingPayoutEvent::VaultAddMarginSettled { journal, recovery: None } }];
+        let replayed = replay_with_nonce_time_and_payout_events(public.into_iter(), private.into_iter(), || 2).unwrap();
+        assert_eq!(replayed.vault_id_to_vaults[&1].collateral_amount, 1_000_000_200);
+        assert!(matches!(replayed.vault_operation_status(owner).active.unwrap().phase,
+            crate::state::VaultCollateralPullPhase::Completed { result: crate::state::VaultOperationResult::AddMargin { block_index: 55, .. } }));
+    }
+
+    #[test]
+    fn sec19_missing_target_liability_survives_ack_and_ordered_replay() {
+        let owner = caller_a(); let ledger = icp_token();
+        let journal = sec19_confirmed_pull(owner, ledger);
+        let row = sec19_recovery_row(owner, ledger);
+        let mut live = State::from(payout_init_args(ledger));
+        live.vault_collateral_pull_journals.insert(owner, journal.clone());
+        let result = apply_vault_add_margin_settlement(&mut live, journal.clone(), Some(row), false).unwrap();
+        assert!(matches!(result, Some(crate::state::AddMarginRecovery { payout_operation_id: 99, .. })));
+        assert_eq!(apply_vault_add_margin_settlement(&mut live, journal.clone(), Some(row), false).unwrap(), result);
+        assert!(live.acknowledge_vault_operation(owner, 1).is_ok());
+        assert_eq!(live.get_pending_payout(99).unwrap().1, row);
+        assert!(!crate::pending_payout_is_dispatchable(&row));
+        assert!(live.acknowledge_vault_operation(caller_b(), 1).is_err());
+        let mut later = journal.clone(); later.operation_id = 2;
+        later.phase = crate::state::VaultCollateralPullPhase::Prepared;
+        live.vault_collateral_pull_journals.insert(owner, later.clone());
+        assert_eq!(apply_vault_add_margin_settlement(&mut live, journal.clone(), Some(row), false).unwrap(), result);
+        assert_eq!(live.vault_collateral_pull_journals.get(&owner), Some(&later));
+        assert_eq!(live.pending_payout_index.len(), 1);
+        let events = vec![Event::Init(payout_init_args(ledger))];
+        let entries = vec![crate::storage::PendingPayoutJournalEntry { after_event_count: 1,
+            event: PendingPayoutEvent::VaultAddMarginSettled { journal, recovery: Some(row) } },
+            crate::storage::PendingPayoutJournalEntry { after_event_count: 1,
+                event: PendingPayoutEvent::VaultAddMarginAcknowledged { owner, operation_id: 1 } }];
+        let restored = replay_with_nonce_time_and_payout_events(events.into_iter(), entries.into_iter(), || 2).unwrap();
+        assert_eq!(restored.get_pending_payout(99).unwrap().1, row);
+        assert_eq!(restored.vault_operation_status(owner).acknowledged_through, 1);
+        assert!(restored.vault_collateral_pull_journals.get(&owner).is_none());
+        assert_eq!(restored.total_collateral_for(&ledger), 0);
+    }
+
+    #[test]
+    fn sec19_changed_owner_cannot_receive_credit_but_pull_can_be_held() {
+        let owner = caller_a(); let ledger = icp_token();
+        let mut state = State::from(payout_init_args(ledger));
+        state.open_vault(vault_with(1, caller_b(), ledger, 1000));
+        let journal = sec19_confirmed_pull(owner, ledger);
+        state.vault_collateral_pull_journals.insert(owner, journal.clone());
+        assert!(apply_vault_add_margin_settlement(&mut state, journal.clone(), None, false).is_err());
+        assert_eq!(state.vault_id_to_vaults[&1].collateral_amount, 1000);
+        let row = sec19_recovery_row(owner, ledger);
+        assert_eq!(apply_vault_add_margin_settlement(&mut state, journal, Some(row), false).unwrap().unwrap().payout_operation_id, 99);
+        assert_eq!(state.vault_id_to_vaults[&1].collateral_amount, 1000);
+        assert_eq!(state.get_pending_payout(99).unwrap().1.owner, owner);
+    }
+
+    #[test]
+    fn sec19_mismatched_recovery_cannot_create_a_liability() {
+        let owner = caller_a(); let ledger = icp_token();
+        let mut state = State::from(payout_init_args(ledger));
+        let journal = sec19_confirmed_pull(owner, ledger);
+        let mut row = sec19_recovery_row(owner, ledger); row.owner = caller_b();
+        assert!(apply_vault_add_margin_settlement(&mut state, journal, Some(row), false).is_err());
+        assert!(state.pending_payout_index.is_empty());
     }
 
     fn liquidate_event(vault_id: u64, liquidator: Principal, ts: u64) -> Event {
