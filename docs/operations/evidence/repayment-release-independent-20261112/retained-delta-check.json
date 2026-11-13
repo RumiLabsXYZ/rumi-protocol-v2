@@ -1,0 +1,18 @@
+{
+  "checkedUtc": "2026-11-13T08:07:51.197524+00:00",
+  "onlySameTimestampChanged": true,
+  "differences": [
+    {
+      "label": "get_nicp_redemption_claim",
+      "changedPath": "[0].updated_at_ns",
+      "timestampBefore": "1794554293079206883",
+      "timestampAfter": "1794556837635465232"
+    },
+    {
+      "label": "vault51-158",
+      "changedPath": "[0].nicp_redemption_claim[0].updated_at_ns",
+      "timestampBefore": "1794554293079206883",
+      "timestampAfter": "1794556837635465232"
+    }
+  ]
+}
