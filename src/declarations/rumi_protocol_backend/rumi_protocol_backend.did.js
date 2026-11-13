@@ -699,6 +699,12 @@ export const idlFactory = ({ IDL }) => {
     'min_size_e8s' : IDL.Opt(IDL.Nat64),
     'admin_labels' : IDL.Opt(IDL.Vec(IDL.Text)),
   });
+  const RepaymentSettlement = IDL.Record({
+    'interest_before' : IDL.Nat64,
+    'last_accrual_time' : IDL.Nat64,
+    'debt_before' : IDL.Nat64,
+    'forgiven' : IDL.Nat64,
+  });
   const StableTokenType = IDL.Variant({
     'CKUSDC' : IDL.Null,
     'CKUSDT' : IDL.Null,
@@ -764,6 +770,7 @@ export const idlFactory = ({ IDL }) => {
       'repayed_amount' : IDL.Nat64,
       'timestamp' : IDL.Opt(IDL.Nat64),
       'caller' : IDL.Opt(IDL.Principal),
+      'settlement' : IDL.Opt(RepaymentSettlement),
     }),
     'withdrawal_signed' : IDL.Record({
       'op_id' : IDL.Nat64,

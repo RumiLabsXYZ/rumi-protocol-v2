@@ -571,6 +571,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'repayed_amount' : bigint,
       'timestamp' : [] | [bigint],
       'caller' : [] | [Principal],
+      'settlement' : [] | [RepaymentSettlement],
     }
   } |
   {
@@ -1662,6 +1663,12 @@ export interface RegisterChainArg {
 export interface RepayAndCloseSuccess {
   'collateral_return_block_index' : [] | [bigint],
   'repay_block_index' : bigint,
+}
+export interface RepaymentSettlement {
+  'interest_before' : bigint,
+  'last_accrual_time' : bigint,
+  'debt_before' : bigint,
+  'forgiven' : bigint,
 }
 export interface ReserveBalance {
   'balance' : bigint,

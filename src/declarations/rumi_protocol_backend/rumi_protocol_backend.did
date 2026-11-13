@@ -559,6 +559,7 @@ type Event = variant {
     repayed_amount : nat64;
     timestamp : opt nat64;
     caller : opt principal;
+    settlement : opt RepaymentSettlement;
   };
   withdrawal_signed : record {
     op_id : nat64;
@@ -1479,6 +1480,12 @@ type RegisterChainArg = record {
 type RepayAndCloseSuccess = record {
   collateral_return_block_index : opt nat64;
   repay_block_index : nat64;
+};
+type RepaymentSettlement = record {
+  interest_before : nat64;
+  last_accrual_time : nat64;
+  debt_before : nat64;
+  forgiven : nat64;
 };
 type ReserveBalance = record {
   balance : nat64;
