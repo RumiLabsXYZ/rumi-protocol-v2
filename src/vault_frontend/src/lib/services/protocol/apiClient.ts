@@ -1375,10 +1375,14 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         ctPrincipal = vault?.collateralType || CANISTER_IDS.ICP_LEDGER;
       }
       const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
-      const factor = Math.pow(10, collateralInfo?.decimals ?? 8);
-      const symbol = collateralInfo?.symbol ?? 'ICP';
+      if (!collateralInfo || !Number.isInteger(collateralInfo.decimals)
+          || collateralInfo.decimals < 0 || collateralInfo.decimals > 255) {
+        return { success: false, error: 'Collateral details could not be verified. Refresh and try again. No approval or transfer was started.' };
+      }
+      const factor = Math.pow(10, collateralInfo.decimals);
+      const symbol = collateralInfo.symbol;
       const amountRaw = BigInt(Math.floor(collateralAmount * factor));
-      const minimum = BigInt(collateralInfo?.minCollateralDeposit ?? 0);
+      const minimum = BigInt(collateralInfo.minCollateralDeposit ?? 0);
       if (minimum > 0n && amountRaw < minimum) {
         return { success: false, error: 'Amount too low. Minimum required: ' + Number(minimum) / factor + ' ' + symbol };
       }

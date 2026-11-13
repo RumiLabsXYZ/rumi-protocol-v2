@@ -983,6 +983,40 @@ describe('ApiClient.addMarginToVault V2 collateral verification', () => {
     expect(ledgerActor.icrc2_approve).toHaveBeenCalledWith(expect.objectContaining({amount:13_019_110_000n}));
   });
 
+  it('rejects unavailable ckSOL metadata before approval even when nine-decimal metadata arrives later', async () => {
+    const ledgerId = CANISTER_IDS.CKSOL_LEDGER;
+    vi.spyOn(ApiClient, 'getVaultById').mockResolvedValue({ vaultId: 5, collateralType: ledgerId } as any);
+    vi.spyOn(ApiClient as any, 'refreshVaultData').mockResolvedValue(undefined);
+    vi.mocked(collateralStore.getCollateralInfo)
+      .mockReturnValue({ ledgerCanisterId: ledgerId, symbol: 'ckSOL', decimals: 9, ledgerFee: 10000, minCollateralDeposit: 0 } as any)
+      .mockReturnValueOnce(undefined);
+    mocks.getActor.mockImplementation(async id => id === BACKEND_ID ? backendActor : ledgerActor);
+    backendActor.add_margin_to_vault_v2.mockImplementation(async args => {
+      vaultStatusOverride = { Ok: { acknowledged_through: 0n, active: [{
+        operation_id: args.operation_id, request: { AddMargin: { vault_id: args.vault_id, amount_e8s: args.amount } }, vault_id: 5n,
+        phase: { Completed: { result: { AddMargin: { vault_id: 5n, block_index: 42n } } } },
+      }] } };
+      return { Ok: 42n };
+    });
+    const result = await ApiClient.addMarginToVault(5, 1, ledgerId);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Collateral details could not be verified');
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+  });
+
+  it.each([-1, 9.5, 256, NaN])('rejects invalid collateral decimals %s before approval', async decimals => {
+    vi.spyOn(ApiClient as any, 'refreshVaultData').mockResolvedValue(undefined);
+    vi.mocked(collateralStore.getCollateralInfo).mockReturnValue({
+      ledgerCanisterId: CANISTER_IDS.CKSOL_LEDGER, symbol: 'ckSOL', decimals, ledgerFee: 10000, minCollateralDeposit: 0,
+    } as any);
+    const result = await ApiClient.addMarginToVault(5, 1, CANISTER_IDS.CKSOL_LEDGER);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Collateral details could not be verified');
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+  });
+
   it('stops before approval if the target ledger cannot be verified',async()=>{
     vi.spyOn(ApiClient,'getVaultById').mockResolvedValue(undefined as any);
     vi.spyOn(ApiClient as any,'refreshVaultData').mockResolvedValue(undefined);
