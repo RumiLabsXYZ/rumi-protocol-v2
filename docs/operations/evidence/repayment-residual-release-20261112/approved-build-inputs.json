@@ -1,0 +1,11 @@
+{
+  "approvedDecisionCommit": "2d0ad23c84e4be3728286d5aad048fcce295b4fa",
+  "approvedDecisionSha256": "ddd4fe41d9f99ab2b9707da0034760ff6802eac2acb907d1ea226b55260459ec",
+  "humanApprovalThread": "01a1a48c-240e-77f0-8205-91e3120e76c0",
+  "humanApprovalMessage": "01a1d3ba-ec02-75d1-a53f-7e0c6df0b64a",
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "runnerSha256": "74fbab06965c8c7d41f8e1588af5ac01bc6da54ae925b9701266fcd613dfbe07",
+  "stepsSha256": "314ba63bfc0c2e4f33a489719f47cf2c19f55ac3f541ff70dea26b64b6f5a1a7",
+  "buildExecuted": false,
+  "productionExecuted": false
+}
