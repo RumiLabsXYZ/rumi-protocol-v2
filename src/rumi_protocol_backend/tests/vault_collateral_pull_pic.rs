@@ -203,7 +203,8 @@ fn install_fixture() -> (PocketIc, Principal, Principal, Principal, Principal, u
     }
 
     let amount = 5_000_000_000u64;
-    let user_balance = amount + 10_000;
+    // Approval and the subsequent ICRC-2 pull each charge one ledger fee.
+    let user_balance = amount + 20_000;
     call(
         &pic,
         icp_ledger,
