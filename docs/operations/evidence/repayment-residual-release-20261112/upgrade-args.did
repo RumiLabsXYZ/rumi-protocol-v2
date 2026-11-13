@@ -1,0 +1,1 @@
+(variant { Upgrade = record { mode = null; description = opt "SEC17 repayment residual correction; source 00cf550d; preserve Vault51 automatic adoption, SEC11 receipts and SEC12 journals; additive optional repayment settlement event" } })

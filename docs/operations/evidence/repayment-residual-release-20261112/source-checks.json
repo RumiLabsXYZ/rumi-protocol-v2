@@ -1,0 +1,63 @@
+{
+  "sourceCommit": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "baseCommit": "240db4cd15647a1871dba5e4774ff7d791963b88",
+  "checks": [
+    {
+      "check": "sec17_backend",
+      "nativeExit": 0,
+      "logSha256": "b15dff148aec711f4c1077b293c5dcc11f2aedd61c69e877f1f16ff8ed34c380",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "check": "stable_rounding",
+      "nativeExit": 0,
+      "logSha256": "eed700686928e68cb2e37dbbffde02220a196f2bf9a63cf886834809d378a298",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "check": "canonical_candid_generation",
+      "nativeExit": 0,
+      "logSha256": "5a2b7158f008e4a77e870b392f6f3b99ec5db2e23149849093157499cc2983b6",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "check": "canonical_declarations_generation",
+      "nativeExit": 0,
+      "logSha256": "96bba8692c8283c2927c8f4da7ed74e172bb6f379050ff46ce82b1dd8921e698"
+    },
+    {
+      "check": "source_candid_compatibility",
+      "nativeExit": 0,
+      "logSha256": "80b5e56003502c1b17ff0756a149df3953a9d4302896aa08675e37baf8968ef9",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "check": "prior_service_compatibility",
+      "nativeExit": 0,
+      "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "check": "frontend_repayment",
+      "nativeExit": 0,
+      "logSha256": "c26ba15ca32fc98ca76fa299f830804231b9725745a123eaf1c4e5c526674fcb",
+      "passed": 20,
+      "failed": 0,
+      "suites": 4
+    }
+  ],
+  "generatedTrackedFiles": 4,
+  "generatedChanges": "only optional RepaymentSettlement event record and field",
+  "failedUnknownRepaymentProof": "source call-path inspection only; no real ledger uncertainty lifecycle tested",
+  "unchangedLegacyRecovery": "existing <=0.0005 withdrawal/close exceptions and native-XRP zero-debt guard",
+  "productionBuild": false,
+  "deployed": false,
+  "financialAction": false
+}

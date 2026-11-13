@@ -1,0 +1,61 @@
+{
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "base": "240db4cd15647a1871dba5e4774ff7d791963b88",
+  "changedFiles": [
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did",
+      "sha256": "f0b0fcc2480788b93b4707f707e7dbc8bf9b77c39df0a4ddf3594f54bdf44b6d"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.d.ts",
+      "sha256": "c991eda6d2df50471bd64c8f419acae72c4401d23553b8cfbadd75db8653be04"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.js",
+      "sha256": "b8f7d6f28f335820a812f2a7c62509e7fb0554ab2d32f4a828620a056d499b81"
+    },
+    {
+      "path": "src/rumi_protocol_backend/rumi_protocol_backend.did",
+      "sha256": "f0b0fcc2480788b93b4707f707e7dbc8bf9b77c39df0a4ddf3594f54bdf44b6d"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/event.rs",
+      "sha256": "0b78a536b4f445d26da9ab43ab9b52e3e229bea30b1e44464b4b75343b692115"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "sha256": "8e203c13b4d11b3fde719deeb7376ca68300d3e470ee7ff08bc06ffe8a5e6025"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultCard.repayRefresh.spec.ts",
+      "sha256": "27b7dbeb1cd2e5b5e718c764a31f4372f2855bd0fdc1bf67c0e6931a1c4e8aa8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultCard.svelte",
+      "sha256": "662640c51429e8c5d66574a2b5bf032ebe4cd3fe4afa2fc882962615b839e077"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/apiClient.repay.spec.ts",
+      "sha256": "d324cd7d14bcbad232daf6993e95054f8200f7ee95b8032735be0f4e92c3d6b3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/apiClient.ts",
+      "sha256": "d11625eb6cb6170e95cec7f8de11be3382c116f63d31ea323455e3d1cc1da47f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/repayLimits.spec.ts",
+      "sha256": "63259f3a796fc3c957dd9b25dcec9795175939d10733cd3a0bc7f9a7b9ce65c8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/repayLimits.ts",
+      "sha256": "3e09b5d63b45616a5d124b8e0b592617e25a0e9cef48c5edb5eacee470b7a88b"
+    }
+  ],
+  "backendChangesFromReleased312ebe03": [
+    "src/rumi_protocol_backend/src/event.rs",
+    "src/rumi_protocol_backend/src/vault.rs",
+    "src/rumi_protocol_backend/rumi_protocol_backend.did"
+  ],
+  "vault51AdoptionSourceUnchanged": true,
+  "upgradeArgsSha256": "bfcf7fa35ea8c3dafbce6b5a8bd6dfc3b775cbcf1760c83d73ce12130461a7d5"
+}
