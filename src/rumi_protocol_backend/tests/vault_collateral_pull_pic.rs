@@ -750,3 +750,28 @@ fn sec19_lost_pull_then_target_closed_creates_one_held_recovery() {
     assert_eq!(ack.unwrap(), 2);
     assert_eq!(sec19_payouts(&pic, backend, owner).items.len(), 1, "ACK preserves the held liability");
 }
+
+#[test]
+fn sec19_typed_no_effect_ack_retires_operation_without_a_pull() {
+    let (pic, backend, ledger, owner, vault_id, topup) = sec19_open_and_fund();
+    let args = sec19_topup_args(vault_id, topup);
+    let blocks = block_count(&pic, ledger);
+    let balance_before = balance(&pic, ledger, owner);
+    let vault_before = sec19_vaults(&pic, backend, owner).into_iter()
+        .find(|vault| vault.vault_id == vault_id).unwrap().collateral_amount;
+    call(&pic, ledger, Principal::anonymous(), "set_bad_fee_failures", encode_one(1u32).unwrap());
+    let failed: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args.clone()), "add_margin_to_vault_v2");
+    assert!(matches!(failed, Err(ProtocolError::TransferFromError(_, _))));
+    assert!(matches!(status(&pic, backend, owner).active.unwrap().phase, VaultCollateralPullPhase::SafeNoEffect { .. }));
+    assert_eq!(block_count(&pic, ledger), blocks);
+    assert_eq!(balance(&pic, ledger, owner), balance_before);
+    let ack: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "ack_vault_operation",
+        encode_one(VaultOperationIdArg { operation_id: 2 }).unwrap()), "ack_vault_operation");
+    assert_eq!(ack.unwrap(), 2);
+    assert_eq!(status(&pic, backend, owner).acknowledged_through, 2);
+    let stale: Result<u64, ProtocolError> = reply(call(&pic, backend, owner, "add_margin_to_vault_v2", args), "add_margin_to_vault_v2");
+    assert!(stale.is_err());
+    assert_eq!(block_count(&pic, ledger), blocks);
+    assert_eq!(sec19_vaults(&pic, backend, owner).into_iter()
+        .find(|vault| vault.vault_id == vault_id).unwrap().collateral_amount, vault_before);
+}

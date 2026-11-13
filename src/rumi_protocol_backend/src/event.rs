@@ -3534,6 +3534,15 @@ pub fn record_vault_add_margin_settlement(
 
 pub fn record_vault_add_margin_acknowledged(state: &mut State, owner: Principal, operation_id: u64) -> Result<u64, String> {
     let journal = state.vault_collateral_pull_journals.get(&owner).ok_or("vault journal missing")?;
+    if journal.operation_id == operation_id
+        && matches!(journal.request, crate::state::VaultCollateralPullRequest::AddMargin { .. })
+        && matches!(journal.phase, crate::state::VaultCollateralPullPhase::SafeNoEffect { .. }) {
+        // This phase has no replayable settlement event. Reuse the ordered
+        // no-effect cancellation tombstone so fallback replay retains the ACK.
+        let request = journal.request.clone();
+        return record_vault_operation_cancelled(state, owner, operation_id, request)
+            .map_err(|error| format!("{error:?}"));
+    }
     if journal.operation_id != operation_id || !matches!(journal.request, crate::state::VaultCollateralPullRequest::AddMargin { .. })
         || !(matches!(journal.phase, crate::state::VaultCollateralPullPhase::Completed { .. })
             || (matches!(journal.phase, crate::state::VaultCollateralPullPhase::PullConfirmed { .. }) && journal.recovery.is_some())) {
@@ -5716,6 +5725,24 @@ mod filter_tests {
         assert_eq!(apply_vault_add_margin_settlement(&mut state, journal, Some(row), false).unwrap().unwrap().payout_operation_id, 99);
         assert_eq!(state.vault_id_to_vaults[&1].collateral_amount, 1000);
         assert_eq!(state.get_pending_payout(99).unwrap().1.owner, owner);
+    }
+
+    #[test]
+    fn sec19_no_effect_ack_tombstone_replays_without_the_ephemeral_journal() {
+        let owner = caller_a(); let ledger = icp_token();
+        let mut journal = sec19_confirmed_pull(owner, ledger);
+        journal.phase = crate::state::VaultCollateralPullPhase::SafeNoEffect { message: "typed no effect".into() };
+        let mut live = State::from(payout_init_args(ledger));
+        live.vault_collateral_pull_journals.insert(owner, journal.clone());
+        live.validate_vault_operation_cancellation(owner, 1, &journal.request).unwrap();
+        assert_eq!(live.apply_vault_operation_cancellation(owner, 1, &journal.request).unwrap(), 1);
+        let entry = crate::storage::PendingPayoutJournalEntry { after_event_count: 1,
+            event: PendingPayoutEvent::VaultPullCancelled { owner, operation_id: 1, request: journal.request.clone() } };
+        let mut replayed = replay_with_nonce_time_and_payout_events(
+            [Event::Init(payout_init_args(ledger))].into_iter(), [entry].into_iter(), || 2).unwrap();
+        assert_eq!(replayed.vault_operation_status(owner).acknowledged_through, 1);
+        assert!(replayed.vault_collateral_pull_journals.get(&owner).is_none());
+        assert!(replayed.prepare_vault_collateral_pull(owner, 1, journal.request, ledger, p(30), 10, 2).is_err());
     }
 
     #[test]
