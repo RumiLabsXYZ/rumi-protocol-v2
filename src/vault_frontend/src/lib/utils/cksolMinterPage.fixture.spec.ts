@@ -501,6 +501,15 @@ describe('prominent mint request status', () => {
     expect(fx.submitPaid).not.toHaveBeenCalled();
   });
 
+  it('does not ask for new SOL while an ICP-funded mint is queued', async () => {
+    restore(); fx.recoverPaid.mockResolvedValue(null);
+    fx.icpRecover.mockResolvedValue(paid('8','Complete',32n));
+    instance=mount(Page,{target:host}); await settle();
+    expect(progress().textContent).toContain('Mint request submitted');
+    expect(host.textContent).not.toContain('mint action is waiting for a new SOL deposit');
+    expect(fx.icpSubmit).not.toHaveBeenCalled(); expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+
   it('does not use a previous Minted receipt for a new request without a deposit ID', async () => {
     restore(); fx.solBalance.mockResolvedValue(1_920_000_000n);
     fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
