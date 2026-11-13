@@ -1,6 +1,6 @@
 {
-  "summary": "SEC17 implementation00cf550d:6backend+4stable+20frontend tests PASS; canonical generation/source+prior Candid compatibility PASS; two bounded independent reviews PASS. Resource slots released. Legacy tiny-debt recovery preserved. Forgiveness<0.1 is repeatable writeoff without aggregatecap; release decision discloses cost. Dorian single release decision2d0ad23c pushed; human approval pending. No new build/install/financialaction; live240 UI unchanged.",
-  "plainSummary": "The repayment correction passed focused tests and two independent reviews. It keeps payments within the approved amount and preserves collateral and recovery choices. One deployment proposal is ready, including the cost of repeated debt forgiveness; it needs Rob\u2019s approval before the new backend and frontend are built and deployed.",
+  "summary": "SEC17 decision2d0ad23c approved for exact00cf550d. Dorian owns fresh Cody allocation, one bounded offline backend/frontend build, frozen output pins, stopped-state preservation, upgrade and additive UI publication; Ellis independently checks artifacts and live state/bytes/layout. Prior6backend+4stable+20frontend/Candid/two reviews PASS. No parallel build, customer financial action or reserve activation. Build/deployment not yet reported complete.",
+  "plainSummary": "Rob approved the repayment release. The release coordinator is preparing one controlled build and deployment, with independent checks of the artifacts, preserved balances and live interface. The code has passed focused tests and two reviews; deployment is not yet complete. No customer transaction is part of this work.",
   "glossary": [
     {
       "term": "Stability Pool",

@@ -3,9 +3,9 @@
     {
       "id": "repayment-residual-forgiveness",
       "title": "Fix repayment residual forgiveness and accounting",
-      "status": "blocked",
-      "blockedReason": "Awaiting the single exact backend and frontend release approval at decision2d0ad23c; earlier UI-only approval does not cover this new backend.",
-      "nextAction": "Merritt presents the single pushed decision and its economic cost disclosure. On approval Dorian coordinates the bounded source-pinned build, derived artifacts and production release. No new build/deploy or financial action yet.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Approval answered. Dorian coordinates one fresh bounded build with Cody, freezes source-bound outputs, then executes preserved-state backend upgrade and additive frontend publication. Ellis independently verifies artifacts and live readbacks. No customer financial action.",
       "cardIds": [
         "SEC-17"
       ]
