@@ -5,20 +5,24 @@
       "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "New user blocked by intentional accepted#508 hold from3b9e3787, retained in released00cf and approvedab. UI hardcodedfalse/APIearlyreject and backendlegacy+V2 unconditionalreject; state forbids AddMargin completion. Exact missing condition: confirmed pull may outlive callback and target may be liquidated before reconciliation; no safe recovery credit/liability path exists. Fresh certified6428/Candid match installed source linkage. Rowan actually started bounded source prep in reused isolated branch, no compile while SEC18 lane pending. Acceptance: exact owner/operation-bound atomic surviving-vault credit or durable accounted recovery/refund liability if removed; lostreply/replay/liquidation/auth/accounting/compatibility tests and independent review, then paired source enablement. No flagflip/bypass/financial/release action.",
+      "evidenceText": "New user blocked by intentional accepted#508 hold from3b9e3787, retained in released00cf and approvedab. UI hardcodedfalse/APIearlyreject and backendlegacy+V2 unconditionalreject; state forbids AddMargin completion. Exact missing condition: confirmed pull may outlive callback and target may be liquidated before reconciliation; no safe recovery credit/liability path exists. Fresh certified6428/Candid match installed source linkage. Rowan actually started bounded source prep in reused isolated branch, no compile while SEC18 lane pending. Acceptance: exact owner/operation-bound atomic surviving-vault credit or durable accounted recovery/refund liability if removed; lostreply/replay/liquidation/auth/accounting/compatibility tests and independent review, then paired source enablement. No flagflip/bypass/financial/release action. Backend sourcecheckpoint5c23d82a pushed with exactretry/atomiccredit-or-heldliability, orderedsettlement+ACK and two new existing-harness PocketICcases (lostreply/dedup and targetclosure/exactreceipt/heldACKsurvival), allunrun. Optionalrecoveryview preservesolderclientsheldphase; no widenedresultvariant. Rootfrontendnotice/explicitACK/sessionguardintegration in progress. Fresh30min validation manifest6ded78e3 sentMerritt for ownCodygrant; no Rustcompile yet. Not live; no guardbypass or transaction.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-recovery-diagnosis-20261113.md"
+        },
+        {
+          "title": "Exact source validation package for fresh capacity",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/6ded78e3/docs/operations/add-margin-validation-plan-20261113.md"
         }
       ]
     },
     {
       "id": "SEC-18",
-      "state": "In progress",
+      "state": "Done",
       "owner": "Ellis integration/visual QA; Iris UI implementation; independent frontend evidence review",
       "scope": "Reassuring request-bound ckSOL progress and persistent mint confirmation",
-      "evidenceText": "Reviewed source candidateab44413d pushed with report05ec4221;88focused tests PASS (page67/panel17/poll4). Prominent truthful processing/action-needed/status-check/error-resume panel and persistent exact-ID Minted confirmation, explicit Start another deposit, separate historical receipt. Both independent blockers closed: evidence reset on ID changes; authoritative cross-mode terminal arbitration preserving active holds. Final visual correction hides new-SOL prompt during queue. Actual local component desktop/mobile mocks PASS, zero financial calls/errors/overflow. No backend/generated/dependency/payment-service changes or production build/deployment/reserve/wallet action. Separate frontend release authority remains required; SEC17 excludes it. Single frontend-only release decision6e3fdaa7 is pushed and independently hash-verified; names fresh capacity and explicit two-way coordination, one bounded offline frontend/auth build and additive publication. Central human approval pending; no allocation/build/publication has started. Original human approval01a1d57e-43c7-7a02-8cf2-0794a179689c independently read in CTO chat; Dorian requested fresh Cody slot. Approved build/publication now in progress, no build started at last report. Ellis independent baseline reads running; SEC19 remedy source stays separate.",
+      "evidenceText": "LIVE exactab/UI1794583637373, actualstage695/activate696 knownonce. Onefresh4e737700 frontend/authbatch native0/22.35s; Cody independentlyverifiedownedclosure. Ellis verified740files/476pairs and finalstable5220keys/5414encodings preservingall5124priorprops/untouchedencodings +96new/7entrysets;13publicresponses/certifiedunchanged6428backend/API/04efront/controllers and actualanonymous desktop/mobileMintstatuspanel PASS. Dorian98stage+9final+5primary/settings/permissions PASS. Accepted88synthetic sourcecases/twoindependentreviews retained. DNSreadfailurebeforepublisher/journal had no write; freshreadrecovered, no mutationretry. No backend/financial/customerstate action. SEC19addcollateralhold unchanged and separate.",
       "evidenceLinks": [
         {
           "title": "Scoped ckSOL progress contract",
@@ -31,6 +35,10 @@
         {
           "title": "Single frontend-only release decision awaiting approval",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/6e3fdaa7/docs/operations/cksol-progress-frontend-release-decision-20261113.md"
+        },
+        {
+          "title": "Independent frozen and final live verification",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/06a85749/docs/operations/cksol-progress-independent-check-20261113.md"
         }
       ]
     },

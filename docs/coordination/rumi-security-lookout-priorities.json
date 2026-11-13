@@ -5,7 +5,7 @@
       "title": "Restore safe collateral top-ups to existing vaults",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Rowan implements smallest journal-compatible exact-receipt credit/recovery-liability source remedy; Ellis integrates and obtains accounting/security review. Prep essential replay/liquidation/lostreply tests; no heavy compile until SEC18 lane is closed or separately coordinated. No live guard relaxation or financial action.",
+      "nextAction": "Merritt/Cody issue fresh validation slot for pushed6ded78e3 runner4b65e55e at backendcheckpoint5c23d82a; run scopedunit/olddecode/Candidgenerated+subtype/twoexisting-harnessPocketIC cases. Ellis finishes frontendexplicitrecovery/ACK/sessiontests, then independentaccounting/securityreview and exactreleaseproposal. No production authority inferred.",
       "cardIds": [
         "SEC-19"
       ]
@@ -13,9 +13,9 @@
     {
       "id": "cksol-mint-progress-ux",
       "title": "Make ckSOL progress and completion unmistakable",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Dorian executes approved exact6e3fdaa7 publication plan after fresh Cody allocation; Ellis independently verifies frozen artifacts and live inventory/bytes/UI. Original human approval read directly. No source repin or SEC19 bundling.",
+      "nextAction": "Softwarelive1794583637373 and independentlyverified06a85749; preserve source/artifact/live receipts. No newmint/customerstateaction or backendmutation. Existing-vault deposit restoration remains separateSEC19.",
       "cardIds": [
         "SEC-18"
       ]
