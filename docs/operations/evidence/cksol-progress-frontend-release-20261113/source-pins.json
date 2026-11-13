@@ -1,0 +1,30 @@
+{
+  "source": "ab44413da1a8b394245cd7734da4124a2335621b",
+  "base": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "sourceReportCommit": "05ec4221",
+  "changedFiles": [
+    {
+      "path": "src/vault_frontend/src/lib/components/minters/CksolIcpPaymentPanel.spec.ts",
+      "sha256": "0b4e73052e2958be938a80078e5dad7ffdc1cd028facd8e008468fcea8b81686"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/minters/CksolIcpPaymentPanel.svelte",
+      "sha256": "6485ea98a41ef6a8bea1123bc3bc085e3a0b46f121f618ddd0ab610921f52acb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/cksolMinterPage.fixture.spec.ts",
+      "sha256": "3e6fb52741b14693e5d6a8722794d658ee2899ca0cebcec5bd74a8bebed37389"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/solana/+page.svelte",
+      "sha256": "2ac79796a4583eee7a61b9e4d2c082e4e9d0bc8e9c83bb1cc064a201d06c247b"
+    }
+  ],
+  "backendGeneratedInterfacesAndDependenciesUnchanged": true,
+  "expectedBackendModule": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7",
+  "expectedFrontendModule": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+  "lastVerifiedFrontendVersion": "1794555990015",
+  "runnerSha256": "9200f67c24b2ec1698596e5813b8887c902a3c83bf54e084b9501ccaa178da7a",
+  "buildExecuted": false,
+  "publicationExecuted": false
+}
