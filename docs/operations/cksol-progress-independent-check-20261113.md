@@ -13,3 +13,15 @@ All740frozenfiles match both manifest and producer copies;476compressed pairs de
 Publisher/readers/verifiers/comparator match accepted SEC17 code after output-namespace substitution and the descriptive frontend-only backend comment; both stage and activation require the same installed backend. Independent max-u64 representative Candid encode/decode validates192stage operations135395bytes and7activation operations724bytes. This does not assert actual returned batch/chunk IDs. [Encoding check](evidence/cksol-progress-independent-20261113/plan-encoding-check.json).
 
 No production write or wallet/financial action by Ellis. Frozen artifact PASS permits Dorian to continue under the approved plan after frozen metadata is pushed and fresh guards pass. Final independent full stable inventory, served bytes, certificate-bound modules/API/controllers and actual production desktop/mobile layout remain pending; no live-completion claim yet.
+
+## Final independent live verification: PASS
+
+Actual stage695 and activation696 completed once, activation timestamp2026-11-13T15:42:03.537Z. New version1794583637373 is served. Root independently certificate-verifies unchanged6428backend, canonicalCandidf0b0fcc2,04efrontend and both ordered controller arrays. [Certified after](evidence/cksol-progress-independent-20261113/certified-after.json).
+
+The complete stable final inventory is5220keys/5414encodings. Every prior5124key/property/untouched encoding is preserved; exactly96approved immutable keys and7entry/version content encodings changed. Thirteen independent primary-domain reads match frozen bytes: rootidentity/gzip,version,auth/domain,repayment/recovery/OISY/ckSOLcompiled assets and HTTP shell fallbacks. [Final inventory/public evidence](evidence/cksol-progress-independent-20261113/final-live-check.json).
+
+Actual public /solana at1280×900 and390×844 shows the new Mint status panel and truthful disconnected guidance without horizontal overflow or Rumi error overlay. Accepted88synthetic tests and local actual-component mockQA cover connected progress/completion; no new mint or customer wallet/state action was used to manufacture those states. Existing token-logo console errors remain recorded. [Layout limits](evidence/cksol-progress-independent-20261113/live-layout-check.json).
+
+Dorian reports full98stage/9final/5primary served checks and unchanged settings/controllers/Prepare/Commit permission lists; no backend lifecycle, reserve, guard or financial mutation. A DNS failure occurred in a read-only preflight before any publisher invocation/journal/batch existed. A fresh read-only preflight recovered, then known writes ran once; no mutation retry or route bypass.
+
+Software delivery is live and independently verified. SEC19 collateral top-up restoration remains a separate unverified source repair. Existing customer mint, repayment and recovery acceptance remain distinct from this delivery.
