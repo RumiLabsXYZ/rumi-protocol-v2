@@ -26,6 +26,12 @@ All three repayment recorder calls are confined to successful ledger-result bran
 
 No automatic collateral withdrawal or closure follows forgiveness. Explicit compound actions keep their established intent and failure recovery. Actual customer recovery, repayment, backend installation, frontend publication and reserve activation are unexecuted for this candidate. The previous approved frontend release remains unchanged.
 
+## Independent review
+
+Iris and a separate final reviewer independently returned PASS on exact implementation00cf550d after reading the actual changed source and native check evidence. No confirmed blocker remains in the accepted source/preparation scope. Both retained the lifecycle/build proof limits above; neither reran the tests. The resource coordinator independently verified owned-process closure and released both consumed test allocations.
+
+Economic scope is unchanged: the policy writes off up to0.09999999 icUSD of debt per eligible settlement. No matching burn/backing deposit is attributed to forgiveness, and no aggregate cap prevents distinct eligible repayments or vaults from repeating it. Depending on fees, the subsidy can exceed transaction revenue. The single release decision must state this implication of the requested policy; no unrequested cap is silently introduced.
+
 ## Release handoff
 
 Dorian is the sole release coordinator. Prepare one exact backend-plus-frontend build/install decision from this pinned candidate, with the additive event schema and all preserved exceptions stated. Earlier approval for source240 frontend assets is not extended to a new backend artifact. No production action is authorized by this receipt.
