@@ -1,0 +1,43 @@
+{
+  "checkedUtc": "2026-11-13T07:51:51.864Z",
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "version": "1794555990015",
+  "pinsSha256": "51f2a2ea27903cb43dc839cbe40473e7b589c386f198b843a13d3ba40b0b551d",
+  "manifestSha256": "716723f9597eaf605de937733a4431d8af306e1f6250673db99a53b67a871c09",
+  "filesVerified": 740,
+  "compressedPairsVerified": 476,
+  "independentBaselineKeys": 4824,
+  "independentBaselineEncodings": 5018,
+  "newKeys": 300,
+  "existingEncodingChanges": 7,
+  "allPriorPropertiesPreservedInPlan": true,
+  "allFrozenPublishFilesCovered": true,
+  "authUnchanged": true,
+  "expectedKeys": 5124,
+  "expectedEncodings": 5318,
+  "sec18Excluded": true,
+  "bundles": {
+    "After a successful repayment": [
+      "_app/immutable/chunks/CJvt2AYq.js"
+    ],
+    "Estimated forgiveness:": [
+      "_app/immutable/chunks/CJvt2AYq.js"
+    ],
+    "Review saved request": [
+      "_app/immutable/nodes/4.210vKbHp.js"
+    ],
+    "OISY_LOCAL_OWNER_MISMATCH": [
+      "_app/immutable/chunks/D0hpIMTJ.js"
+    ],
+    "Last completed deposit": [
+      "_app/immutable/nodes/55.C29QyXHd.js"
+    ]
+  },
+  "productionMutation": false,
+  "publisherAndVerifiersNamespaceOrCommentOnly": {
+    "publish-frontend.mjs": true,
+    "verify-publication.mjs": true,
+    "read-frontend-inventory.mjs": true,
+    "verify-primary-domain.mjs": true
+  }
+}
