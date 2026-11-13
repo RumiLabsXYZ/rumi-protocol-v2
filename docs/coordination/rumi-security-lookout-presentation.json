@@ -1,6 +1,6 @@
 {
-  "summary": "SEC17 candidate38b3983a: six backend residual/accounting/accrual/CBOR/replay tests PASS. Runner parser stopped before remaining checks. Review caught stable precision and API minimum/explicit-close mismatches; corrected with regressions. Stable-rounding/Candid/four-suite frontend checks pending fresh continuation. Legacy tiny-debt recovery unchanged. Live240 UI/version1794522798107 unchanged; no new deployment.",
-  "plainSummary": "The repayment correction passed six backend tests. Review also caught two frontend mismatches, which are now corrected with regression tests prepared. Interface and frontend checks remain before release preparation; the live app is unchanged. No action is needed from Rob yet.",
+  "summary": "SEC17 implementation00cf550d:6backend+4stable+20frontend tests PASS; canonical generation/source+prior Candid compatibility PASS; two bounded independent reviews PASS. Resource slots released. Legacy tiny-debt recovery preserved. Forgiveness<0.1 is repeatable writeoff without aggregatecap; release decision discloses cost. Dorian preparing one backend+frontend proposal. No new build/install/financialaction; live240 UI unchanged.",
+  "plainSummary": "The repayment correction passed focused tests and two independent reviews. It keeps payments within the approved amount and preserves collateral and recovery choices. The release coordinator is preparing one deployment decision, including the cost of repeated debt forgiveness. The live app is unchanged; Rob has no action until that proposal is ready.",
   "glossary": [
     {
       "term": "Stability Pool",

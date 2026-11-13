@@ -5,13 +5,14 @@
       "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
       "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
-      "evidenceText": "Candidate38b3983a: backend six residual/accounting/accrual/CBOR/replay tests PASS (6/0/0). Runner result parser then stopped batch; no later check inferred. Independent review found stable precision and API repayment-minimum/explicit-close mismatches; corrected and regressions added. Remaining stable-rounding, generated-interface compatibility and four-suite frontend execution pending fresh bounded continuation. Existing <=0.0005 legacy withdrawal exceptions/native-XRP guard preserved per CTO. No production build/install or financial action.",
+      "evidenceText": "Implementation00cf550d; receipt2c217622. PASS:6backend residual/accounting/accrual/CBOR/replay tests,4stable rounding,20frontend/4suites, canonicalDID/bindings and source/prior-service compatibility. Two independent bounded reviews PASS; Cody independently verified both process closures and released slots. Stable preview/API floor/explicit-close mismatches corrected. Preservelegacy<=0.0005withdrawalexceptions/XRPguard. Failedunknown sourceproof only; no generalretryjournal. Requestedforgiveness is repeatable debtwriteoff<0.1 per eligible settlement; no aggregatecap. Dorian preparing one exact backend+frontend release decision; no new build/install/financialaction.",
       "evidenceLinks": [
         {
-          "title": "Accepted correction contract, specialists, essential checks and exact release boundary",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/repayment-residual-correction-contract-20261112.md"
+          "label": "Verified source and release handoff",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/repayment-residual-forgiveness-20261112/docs/operations/repayment-residual-correction-result-20261112.md"
         }
-      ]
+      ],
+      "status": "Review"
     },
     {
       "id": "SEC-15",

@@ -3,9 +3,9 @@
     {
       "id": "repayment-residual-forgiveness",
       "title": "Fix repayment residual forgiveness and accounting",
-      "status": "in_progress",
+      "status": "Review",
       "blockedReason": "",
-      "nextAction": "Rowan prepares scopedbackend/tests, Iris independently tracesaccounting/replay, Ellis integratesfrontend/minimum/close semantics. Demo exactauthorizedpayment thenstrictresidual<0.1 forgiven, exact0.1retained; failure/unknowncannotforgive. Coordinate onefocusedtesttranche and Dorianreleasepacket. Newbackenddeployment remains separate; existingUI/Season2unchanged.",
+      "nextAction": "Focused source checks and two independent reviews passed. Dorian prepares one exact backend+frontend build/install proposal, explicitly disclosing repeatable <0.1 debt writeoff. No new build/deploy/funds/reserve authority; keep current live release unchanged.",
       "cardIds": [
         "SEC-17"
       ]

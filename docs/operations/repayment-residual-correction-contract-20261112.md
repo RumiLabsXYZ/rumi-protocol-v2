@@ -47,3 +47,8 @@ Fresh Cody allocation `02436e59-f97a-46d1-9cae-9a8d0a8db253` pins test input `3a
 Backend content at `38b3983a29fecf7084899dadc389a8da933f3398` is unchanged from the six-test passing candidate. Native result: six passed, zero failed, zero ignored. The runner then failed in its own regular-expression result parser (`Match` slicing); it stopped before subsequent commands, with no owned processes or tracked changes remaining. Parser corrected for a fresh continuation; no backend retest is needed absent further backend changes.
 
 Iris identified stable-token authorization truncation could change the exact0.1 preview boundary, and the API client still used the configurable borrowing minimum for repayment while also blocking explicit subminimum repay-and-close. Candidate38b3983a corrects all three coupled frontend points and adds four-suite focused coverage, including real API-method dispatch with mocked actors and higher borrowing minimum. Those new checks are not yet executed. No production build, merge, deployment or customer transaction is implied.
+
+
+## Final source/preparation outcome
+
+Implementation00cf550d, receipt2c217622: six backend plus four stable tests passed; twenty frontend tests/four suites passed; canonical generated interfaces and source/prior service compatibility passed. Both independent reviewers returned PASS, and both consumed local allocations were independently released. Production build/merge/install, financial action and reserve enablement remain unexecuted. Dorian owns the one concrete release proposal, including the repeatable per-settlement economic writeoff implied by the requested policy.
