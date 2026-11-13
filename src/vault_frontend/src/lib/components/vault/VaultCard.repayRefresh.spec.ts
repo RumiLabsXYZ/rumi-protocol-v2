@@ -18,7 +18,7 @@ vi.mock('../../stores/seasonStore', async () => {
   const {writable}=await import('svelte/store');
   return {seasonStore:{ensureLoaded:()=>{}},earningActive:writable(false)};
 });
-vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:10000000})}}));
+vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:500000000})}}));
 vi.mock('../../services/ProtocolManager', () => ({protocolManager:{repayToVault:fx.repay,repayAndCloseVault:fx.close}}));
 vi.mock('../../services/protocol/apiClient', () => ({ApiClient:{getVaultInterestRate:async()=>0}}));
 vi.mock('../../services/tokenService', () => ({TokenService:{getTokenBalance:async()=>0n}}));
@@ -41,13 +41,13 @@ async function show(balance=30393000000n){
 }
 beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();});
 afterEach(async()=>{if(component)await unmount(component);component=null;target.remove();});
-it('keeps an untouched Max selection valid when a refreshed debt lowers the safe partial cap',async()=>{
+it('keeps an untouched Max selection valid when refreshed debt lowers the cap',async()=>{
  await show();max().click();await tick();const previous=input().valueAsNumber;
- vaultInput.set({...base,borrowedIcusd:303.938398});await tick();
+ vaultInput.set({...base,borrowedIcusd:300});await tick();
  expect(Number(input().max)).toBeLessThan(previous);
  expect(input().valueAsNumber).toBeLessThanOrEqual(Number(input().max));
  expect(submit().disabled).toBe(false);
- expect(target.textContent).toContain('partial repayment');
+ expect(target.textContent).toContain('Max was reduced');
  expect(fx.repay).not.toHaveBeenCalled();expect(fx.close).not.toHaveBeenCalled();
 });
 it('does not rewrite a manually entered amount after a cap decrease',async()=>{
@@ -88,4 +88,25 @@ it('keeps manual repayment disabled when the safe maximum falls to zero',async()
  (walletStore as any).update((w:any)=>({...w,tokenBalances:{ICUSD:{raw:0n,formatted:'0'}}}));await tick();
  expect(input().value).toBe('1');expect(submit().disabled).toBe(true);
  expect(fx.repay).not.toHaveBeenCalled();
+});
+
+it('uses a wallet-limited near-full payment without closing and previews forgiveness',async()=>{
+ vaultInput.set({...base,borrowedIcusd:2});
+ fx.repay.mockReturnValue(new Promise(()=>{}));
+ await show(199600000n);max().click();await tick();
+ expect(input().valueAsNumber).toBe(1.995);
+ expect(submit().textContent?.trim()).toBe('Repay');
+ expect(target.textContent).toContain('Estimated debt after payment: 0');
+ expect(target.textContent).toContain('Estimated forgiveness: 0.005');
+ submit().click();await tick();
+ expect(fx.repay).toHaveBeenCalledWith(33,1.995);
+ expect(fx.close).not.toHaveBeenCalled();
+});
+it('shows exactly 0.1 as remaining debt rather than forgiven',async()=>{
+ vaultInput.set({...base,borrowedIcusd:2});
+ await show(190100000n);max().click();await tick();
+ expect(input().valueAsNumber).toBe(1.9);
+ expect(target.textContent).toContain('Estimated debt after payment: 0.1');
+ expect(target.textContent).not.toContain('Estimated forgiveness:');
+ expect(submit().textContent?.trim()).toBe('Repay');
 });
