@@ -243,7 +243,8 @@ describe('ICP-paid mint controls', () => {
 		render();
 		await settle();
 		expect(host.textContent).toContain('ICP refund confirmed');
-		expect(host.textContent).toContain('Mint progress is shown separately');
+		expect(host.textContent).toContain('Processing payment settled');
+		expect(host.textContent).toMatch(/Payment settlement does\s+not mean ckSOL has finished minting/);
 		expect(host.textContent).not.toContain('ckSOL received');
 	});
 	it('opens the OISY channel on the action and closes it after the known result', async () => {

@@ -446,7 +446,8 @@ describe('mint completion with unavailable ICP payment status', () => {
     fx.attempt.mockResolvedValue([{status:{Queued:32n}}]);fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});fx.solBalance.mockResolvedValue(890_880n);
     fx.icpRecover.mockRejectedValue(new Error('payment status unavailable'));fx.icpLoad.mockReturnValue(null);fx.recoverPaid.mockResolvedValue(null);
     instance=mount(Page,{target:host});await settle();
-    expect(host.textContent).toContain('processing payment or refund is still pending');
+    expect(host.textContent).toContain('Processing payment status is still being checked');
+    expect(host.textContent).not.toContain('processing payment or refund is still pending');
     const reads=fx.icpRecover.mock.calls.length;
     await vi.advanceTimersByTimeAsync(15_000);await settle();expect(fx.icpRecover.mock.calls.length).toBeGreaterThan(reads);
     expect(fx.icpSubmit).not.toHaveBeenCalled();
@@ -473,7 +474,7 @@ describe('prominent mint request status', () => {
     expect(progress().textContent).not.toContain('Mint complete');
     expect(progress().querySelector('.animate-spin')).not.toBeNull();
     expect(progress().textContent).toContain('Last successful mint check');
-    expect(progress().textContent).toContain('Checking this request automatically');
+    expect(progress().textContent).toMatch(/Checking (this request automatically|the saved request now)/);
     fx.depositStatus.mockResolvedValue({Finalized:{signature:'synthetic-finalized'}});
     await vi.advanceTimersByTimeAsync(15_000); await settle();
     expect(progress().textContent).toContain('ckSOL mint pending');
@@ -551,7 +552,9 @@ describe('prominent mint request status', () => {
     fx.generation.set(1); fx.wallet.set({isConnected:true,principal:ownerB}); await settle();
     expect(progress().getAttribute('data-request')).toContain(ownerB.toText());
     expect(progress().getAttribute('data-request')).toContain('|cycles|7');
-    expect(progress().textContent).toContain('Submitting request');
+    expect(progress().textContent).toContain('Confirming submission');
+    expect(progress().textContent).toContain('Checking whether the saved submission was accepted');
+    expect(progress().textContent).not.toContain('The request is being submitted');
     expect(progress().textContent).not.toContain('1.919996001');
     expect(progress().textContent).not.toContain('Mint complete');
     expect(fx.submitPaid).not.toHaveBeenCalled();
@@ -565,6 +568,18 @@ describe('prominent mint request status', () => {
     expect(progress().textContent).toContain('processing payment or refund is still pending');
     expect(button('Start another deposit').disabled).toBe(true);
     expect(button('Return unused cycles')).toBeTruthy();
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+
+  it('does not let an older Minted ID override an unknown legacy submission', async () => {
+    restore();
+    fx.attempt.mockResolvedValue([{status:{SubmittedOrUnknown:null}}]);
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    render(); await settle();
+    expect(progress().textContent).toContain('Checking mint status');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(host.textContent).toContain('This is the previous receipt, not confirmation of a new request');
+    expect(button('Mint ckSOL').disabled).toBe(true);
     expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
   });
 });
