@@ -1,6 +1,16 @@
 {
   "items": [
     {
+      "id": "repayment-residual-forgiveness",
+      "title": "Fix repayment residual forgiveness and accounting",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Rowan prepares scopedbackend/tests, Iris independently tracesaccounting/replay, Ellis integratesfrontend/minimum/close semantics. Demo exactauthorizedpayment thenstrictresidual<0.1 forgiven, exact0.1retained; failure/unknowncannotforgive. Coordinate onefocusedtesttranche and Dorianreleasepacket. Newbackenddeployment remains separate; existingUI/Season2unchanged.",
+      "cardIds": [
+        "SEC-17"
+      ]
+    },
+    {
       "id": "swap-wallet-support-ux",
       "title": "Optional wallet help and visible recovery panel",
       "status": "done",

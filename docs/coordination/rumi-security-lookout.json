@@ -1,6 +1,19 @@
 {
   "cards": [
     {
+      "id": "SEC-17",
+      "state": "In progress",
+      "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
+      "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
+      "evidenceText": "Rob requests correction and independent double-check. Ordinarymin0.1, exact0.1 staysdebt; successful authorizeddebit only, no percent-based debitincrease or auto-close/collateralwithdrawal. Rowan backendwrite and Iris readonly accountingreview start on isolated240base; released312backendcontentequal. Essentialriskchecks cover failure/unknown/once-onlyreplay/accounting/interestacrossawait/stablefees and frontendMax. Sonnet5.5 probeplan-only/auth-envelopeunknown; no sourceexport. Terra backendfallback justifiedRustfinancialasync/replaycomplexity; Sol readonlyreview. Source/prep only, no backendinstall/livefinancialactions; existingUI/Season2 unchanged.",
+      "evidenceLinks": [
+        {
+          "title": "Accepted correction contract, specialists, essential checks and exact release boundary",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/repayment-residual-correction-contract-20261112.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-15",
       "state": "Done",
       "owner": "Ellis source/case; Dorian release",

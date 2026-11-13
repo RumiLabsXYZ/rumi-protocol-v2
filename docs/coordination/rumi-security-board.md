@@ -4,6 +4,7 @@ Updated: 2026-11-12. Coordinator: Bram. This board tracks the security review, r
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
+| SEC-17 | In progress | Ellis integration / Rowan backend / Iris review | Correct successful-repayment residual forgiveness | Ordinarymin0.1; forgive residualstrictlybelow0.1 onlyaftersuccessfulauthorizeddebit; exact0.1retained/noauto-close. Essentialfailed/unknown/replay/interest/fees/Max checks. Source/prep only; newbackendinstallheld. |
 | SEC-15 | Done | Ellis source/case / Dorian release | Optional wallet help and visible recovery panel | Deployed1794522798107; independent fullinventory/bytes/modules and live desktop/mobile layout/disclosure PASS. No wallet inspection or financial action. |
 | SEC-16 | Done | Ellis source/case / Dorian release | Keep repayment Max usable after refresh | Deployed1794522798107; mountedregressions/46focusedtests/reviews and exactpublicbytes PASS. UntouchedMax lowers whileidle; manual/pending amounts protected; partial/approval/burn copy clear. Actual repayment unexecuted. |
 | SEC-14 | Done | Ellis source/case / Dorian release | Customer reported intended OISY swap success | Rob directly confirmed a successful swap after the corrective release and matching account check. Acceptance closes on that report; no independent ledger receipt, amount or all-route proof. Existing source/build/live verification retained. Separate requested wallet-help cleanup SEC15 is now deployed; prior swap acceptance remains complete. |
@@ -161,3 +162,7 @@ Rob directly approved all four consolidated scopes in the CTO chat. Ellis indepe
 ## Combined UI live and independently verified — November 12
 
 [Final independent receipt](../operations/combined-ux-independent-check-20261112.md): source240/version1794522798107 is live via once-only batches691/692. Independent final4824keys/5018encodings preserves4701oldkeys/properties/untouchedencodings and all123new+7sets match;15primaryresponses, certifiedmodules/controllers and actualconnecteddesktop/mobile recovery/help layout pass. Dorian verifies125stage/9final/5primary plus settings/status/permissions. SEC15/16 softwareDone at22:47:30.070Z; SEC12 remainsReview for actualcustomerlaterrecovery. No financialacceptance, walletoperation, inspectionapproval, backend/reserve action or storageclear is inferred. Original customer success reports remain historical, separate from this later case. No additionalbuild/test campaign or transactioncanary was required.
+
+## SEC17 accepted correction — November12
+
+[Contract](../operations/repayment-residual-correction-contract-20261112.md) pins behavior, namedworkers/ownership, economicalfallback and essential checks. Isolated240source is runtime-equal to released312backend; currentliveUI/Season2 untouched. Sonnetprobe was read-only/plan-only; no private source sent. Automaticreview rejected cleanup for missing disk evidence; refreshed inventory shows8percentfree,0eligible/72blocked, so no removal was performed. Newbackendrelease remains separate from earlier240frontend approval.
