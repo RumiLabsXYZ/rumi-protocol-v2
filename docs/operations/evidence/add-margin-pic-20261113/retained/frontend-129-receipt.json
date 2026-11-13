@@ -1,0 +1,21 @@
+{
+  "backendCheckpoint": "7dd8cb29b878cec9d01f256457a631ff2b27f08a",
+  "frontendStatus": "separate uncommitted source lane",
+  "nativeExit": 0,
+  "testsPassed": 129,
+  "suitesPassed": 6,
+  "seconds": 6.27,
+  "logSha256": "cc52a5ba300119459b8d2cbdcec9e3c1809e8a7bc8b019cae888b50f9d7d1f55",
+  "sourceFiles": {
+    "src/vault_frontend/src/lib/components/vault/VaultCard.repayRefresh.spec.ts": "a10a7781f94b9c23948588235949686bf7373b5e20e023e8deba4748487fbe6a",
+    "src/vault_frontend/src/lib/components/vault/VaultCard.svelte": "5b6f58a6c42e00028a23ea55aa3dcbc124d9c83be39f8c3658f14e56007f16e4",
+    "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.spec.ts": "141f48dc07cb76f8a9b913b1d4d7ebd685035110a6fcba5a752a3051b35b10d3",
+    "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.svelte": "fb2004ab4bff8cc0a39b5e3305a71932ea7cf4506a219fb9b5893a6eead01b20",
+    "src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts": "76da46538fe0836875e07fc7b4d69a65df0597917e7eec1e3a23608434aed07c",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.ts": "09b4e216848e497f54977f08f0c7e498cd156dc0fc2f050f23343ecf2121a213",
+    "src/vault_frontend/src/lib/services/protocol/vaultOperationJournal.ts": "1dff539334aee00476719152ee234e9be22da11ae3fd93cbdb74f4eef5d4168e",
+    "src/vault_frontend/src/lib/services/protocol/vaultPullRecoveryDetails.ts": "5aff417b58db06e76c7a41411d09756c6577d89d3573364a3d8d29760d587c07",
+    "src/vault_frontend/src/lib/services/types.ts": "821e29c5422296ff7177486cc0249b619fea438c1dc8ca935993920d14de9704",
+    "src/vault_frontend/src/lib/services/protocol/vaultMarginRecovery.spec.ts": "dec676106d2625c8aef0384ae5931aced2580139631d3c3d256292d1c20fedb5"
+  }
+}
