@@ -1,0 +1,20 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "releasedSource": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "prePostUpgradeBodiesUnchanged": true,
+  "prePostUpgradeBodySha256": "b80f3301121b9caa36dd0c4362452568dff6e36b8596c0f935e3ae09943eecc8",
+  "storageCodecEntireFileUnchanged": true,
+  "storageSha256": "90bc579a9a5cd6637ae51d121f9cd60456aa88f02cf7a8eaafc78390d7d86225",
+  "wholeStateCodec": "memory4 length-prefixed CBOR, present decode failure traps",
+  "privateEventStoreMemoryIds": [
+    7,
+    8
+  ],
+  "ownerScope": {
+    "get_pending_payouts": "caller only",
+    "get_vault_operation_status": "caller only"
+  },
+  "globalPrivateWarmRowEnumerationAvailable": false,
+  "directComparisonCoverage": "captured read-only public/developer/config/custody and owner-scoped projections only",
+  "globalPreservationArgument": "unchanged whole-State upgrade codec plus full stopped heap/stable backup; no new projection or test gate"
+}

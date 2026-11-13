@@ -236,3 +236,7 @@ Corrected PIC3 passed under fresh5c1087d7, native/outer0,47.147s, expected owned
 ### SEC19 approved release started
 
 Original human message01a1d642-b358-77b1-9a3a-35d395677da5 and preceding explicit5db235e8/3571 question read directly. Dorian owns the authorized single frontend build and paired publication with fresh Cody capacity; Ellis owns independent baseline/artifact/state/live checks. Certified baseline still matches backend6428/API f0b/frontend04e. Full asset baseline is in progress. Existing134/3/9 checks and final dual PASS retained without another campaign. Worktree pressure helper removed0:0eligible/72blocked. No production write or user financial action by Ellis.
+
+### SEC19 allocation-message restriction; independent baseline ready
+
+Automatic review rejected the SEC19 Cody-to-Dorian allocation message before delivery, recognizing only a prior SEC17 confirmation. The unused grant was released; no retry or relay occurred. Merritt requested one exact confirmation directly in Cody chat. Source134/3/9 and dualPASS retained. Ellis captured certified modules/API/controllers and stable5220/5414 inventory, plus active9decimalckSOL vault213 balance covering the requested top-up and fees. Source checks confirm whole-State pre/post-upgrade and storage codec unchanged; private global row enumeration is unavailable, so comparison coverage is explicitly scoped to observable projections alongside full stopped backup. No additional endpoint/harness gate or production mutation.

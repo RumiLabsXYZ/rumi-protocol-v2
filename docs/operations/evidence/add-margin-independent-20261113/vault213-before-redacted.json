@@ -1,0 +1,27 @@
+{
+  "started": "2026-11-13T19:02:30.881Z",
+  "checkedUtc": "2026-11-13T19:02:32.885Z",
+  "readOnly": true,
+  "vault": {
+    "id": "213",
+    "collateralType": "ls5lp-lqaaa-aaaar-qb5oa-cai",
+    "collateralRaw": "2000000000",
+    "borrowedIcusdRaw": "10008102124",
+    "accruedInterestRaw": "0",
+    "hasNicpClaim": false
+  },
+  "collateral": {
+    "ledger": "ls5lp-lqaaa-aaaar-qb5oa-cai",
+    "status": "Active",
+    "configDecimals": 9,
+    "ledgerDecimals": 9,
+    "symbol": "ckSOL",
+    "ledgerFeeRaw": "500",
+    "minimumDepositRaw": "1000000",
+    "ownerDefaultAccountBalanceRaw": "13019095121",
+    "requestedTopupRaw": "13019090000",
+    "coversRequestedAmountAndTwoFees": true
+  },
+  "financialAction": false,
+  "ownerRedacted": true
+}

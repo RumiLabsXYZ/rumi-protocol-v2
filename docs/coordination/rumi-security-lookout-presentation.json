@@ -1,6 +1,6 @@
 {
-  "summary": "SEC19 exact5db235e8/3571 plan is human-approved. Dorian coordinates fresh frontend build/paired release with Cody; Ellis verifies exact baselines, artifacts and live readback. Final source4d8322a7 and134/3/9checks+dualPASS retained. Production deposits still paused pending completion; no customerfinancialaction.",
-  "plainSummary": "The collateral-deposit repair is approved for release after passing source and lifecycle checks. Dorian is coordinating the build and deployment, and Ellis is independently verifying the result. Deposits remain paused until the backend and frontend are confirmed live; Rob does not need to submit a test transaction.",
+  "summary": "SEC19 deployment approved but allocation delivery is blocked by automatic messaging review (oldSEC17 confirmation does not coverSEC19). Unused grant released; exact confirmation pending in Codychat. Sourcechecks accepted; Ellis baseline and vault213 funding/metadata pass. No production build/publication or financialaction.",
+  "plainSummary": "The deposit repair is approved and its checks pass, but automatic review blocked delivery of the build allocation. Merritt has requested one exact messaging confirmation in Cody\u2019s chat. Vault213\u2019s ckSOL metadata and balance check out; deposits remain paused until the release is completed.",
   "glossary": [
     {
       "term": "Stability Pool",
