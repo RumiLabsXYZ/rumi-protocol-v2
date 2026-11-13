@@ -48,6 +48,7 @@
 
   let copied = false;
   let depositId: bigint | null = null;
+  let relayDepositId: bigint | null = null;
   let depositStatus: StatusView | null = null;
   let mintedAmount: bigint | null = null;
   let mintBlock: bigint | null = null;
@@ -94,12 +95,48 @@
   function paidIntentSettled(value: CksolPaymentIntent | null) {
     return value?.phase === 'NotStarted' || (value?.phase === 'Receipt' && ['Complete', 'FundingRejected'].includes(value.receipt?.phase));
   }
+  function trackDepositId(id: bigint) {
+    if (depositId === id) return false;
+    // Invalidate the old ID's evidence before awaiting the new status read.
+    statusGeneration++; stopPoll();
+    newDeposit=false; mintActionStarted=false; depositId=id; depositStatus=null;
+    mintedAmount=null; mintBlock=null; lastMintCheck=null; mintCheckFailed=false;
+    statusChecking=false; depositBlocked=false; solBalance=null; balanceUnavailable=false; pollCount=0;
+    return true;
+  }
+  function terminalPhase(phase?: string) {
+    return !!phase && ['NotStarted','Complete','FundingRejected'].includes(phase);
+  }
+  function reconcileMintRequestMode() {
+    if (busy || icpBusy) return;
+    const cyclesPhase = paymentIntent?.receipt?.phase ?? paymentIntent?.phase;
+    const cyclesId = paymentIntent?.receipt?.deposit_id?.[0];
+    // An unbound Complete receipt cannot establish a SOL outcome. Retain its
+    // existing hold rather than replacing it with another mode's history.
+    const cyclesActive = !!paymentIntent && (!paidIntentSettled(paymentIntent)
+      || (cyclesPhase === 'Complete' && cyclesId === undefined));
+    const icpActive = !!icpProgress?.sequence && (!terminalPhase(icpProgress.phase)
+      || icpPending || icpProgress.unavailable || (icpProgress.phase === 'Complete' && icpProgress.depositId === null));
+    if (cyclesActive || icpActive) {
+      if ((mintRequestMode === 'cycles' && cyclesActive) || (mintRequestMode === 'icp' && icpActive)) return;
+      mintRequestMode = cyclesActive ? 'cycles' : 'icp';
+      return;
+    }
+    if (mintActionStarted || newDeposit) return;
+    const currentId = relayDepositId ?? depositId;
+    if (currentId === null) return;
+    const cyclesMatches = cyclesId !== undefined && BigInt(cyclesId) === currentId;
+    const icpMatches = !!icpProgress?.sequence && icpProgress.depositId === currentId;
+    if (cyclesMatches && !icpMatches) mintRequestMode = 'cycles';
+    else if (icpMatches && !cyclesMatches) mintRequestMode = 'icp';
+  }
   function adoptPaidIntent(value: CksolPaymentIntent) {
     paymentIntent = value;
     if (!mintRequestMode || (!paidIntentSettled(value) && !icpBusy)) mintRequestMode = 'cycles';
     const id = value.receipt?.deposit_id?.[0];
-    if (id !== undefined && depositId !== BigInt(id)) { newDeposit=false; mintActionStarted=false; depositId=BigInt(id); depositStatus=null; mintedAmount=null; mintBlock=null; lastMintCheck=null; mintCheckFailed=false; solBalance=null; balanceUnavailable=false; pollCount=0; }
+    if (id !== undefined && (!paidIntentSettled(value) || relayDepositId === null || relayDepositId === BigInt(id))) trackDepositId(BigInt(id));
   }
+  $: { paymentIntent; icpProgress; icpPending; relayDepositId; depositId; busy; icpBusy; mintActionStarted; newDeposit; reconcileMintRequestMode(); }
   $: paidPhase = paymentIntent?.receipt?.phase ?? paymentIntent?.phase;
   $: minterPending = depositId !== null && (!depositStatus || !depositStatus.terminal);
   $: uncertainPayment = ['Approving','ApprovalUnknown','Starting','StartUnknown','FundingUnknown','RefundUnknown'].includes(paidPhase ?? '');
@@ -264,12 +301,13 @@
       balance = BigInt(funds); loadSaved();
       if (attempt[0]) {
         legacyAttempt=attempt[0]; legacyBlocked=true;
-        if ('Queued' in attempt[0].status) depositId = BigInt(attempt[0].status.Queued);
+        relayDepositId = 'Queued' in attempt[0].status ? BigInt(attempt[0].status.Queued) : null;
+        if (relayDepositId !== null) trackDepositId(relayDepositId);
         else if ('SubmittedOrUnknown' in attempt[0].status) notice = 'A previous deposit notification has an unknown outcome. Keep its record for reconciliation; paid processing is blocked.';
         else if ('Rejected' in attempt[0].status) { legacyBlocked=false; notice='The previous processing attempt was rejected. You can try minting again.'; }
         else notice='A previous deposit attempt has an unrecognized status. Paid processing is blocked.';
       } else {
-        legacyAttempt=null; legacyBlocked=false;
+        legacyAttempt=null; legacyBlocked=false; relayDepositId=null;
       }
       await checkStatus(false);
       if (!currentRead()) return;
@@ -292,9 +330,8 @@
     icpReceipt=receipt;
     if (!mintRequestMode) mintRequestMode = 'icp';
     const id = receipt.deposit_id?.[0];
-    if (id !== undefined && depositId !== BigInt(id)) {
-      newDeposit=false;mintActionStarted=false;depositId=BigInt(id);depositStatus=null;mintedAmount=null;mintBlock=null;lastMintCheck=null;mintCheckFailed=false;solBalance=null;balanceUnavailable=false;pollCount=0;
-      void checkStatus(false);
+    if (id !== undefined && (!terminalPhase(receipt.phase) || relayDepositId === null || relayDepositId === BigInt(id))) {
+      if (trackDepositId(BigInt(id))) void checkStatus(false);
     }
   }
   async function processPaidDeposit() {
@@ -430,7 +467,7 @@
     epoch++; refreshGeneration++; statusGeneration++; stopPoll(); polling?.destroy(); polling = null; pollCount = 0; newDeposit = false; initialized = false; refreshing = false; icpCost = null;
     const wallet = get(walletStore);
     owner = wallet.isConnected && !wallet.loading ? wallet.principal : null; ownerText = owner?.toText() ?? '';
-    busy = false; error = ''; notice = ''; depositAddress = ''; depositId = null; solBalance=null; balanceUnavailable=false; copied=false; mintedAmount=null; mintBlock=null;
+    busy = false; error = ''; notice = ''; depositAddress = ''; depositId = null; relayDepositId=null; solBalance=null; balanceUnavailable=false; copied=false; mintedAmount=null; mintBlock=null;
     depositStatus = null; depositBlocked = false; legacyAttempt=null;legacyBlocked=false;legacyReadFailed=false;withdrawalStatus = null; withdrawalStatusFor = null; intent = null; invalidSavedIntent = false;
     balance = null; quote = null; amount = ''; destination = ''; oisy = isCksolOisyWallet(); paymentQuote=null;cyclesBalance=null;paymentIntent=null;
     icpReady=false;icpBusy=false;icpPending=false;icpReceipt=null;paymentMethod='icp';

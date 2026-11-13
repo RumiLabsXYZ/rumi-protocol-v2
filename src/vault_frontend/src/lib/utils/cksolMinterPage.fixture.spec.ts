@@ -662,4 +662,59 @@ describe('prominent mint request status', () => {
     expect(progress().textContent).not.toContain('Mint complete');
     expect(fx.submitPaid).toHaveBeenCalledOnce(); expect(fx.icpSubmit).not.toHaveBeenCalled();
   });
+
+  it.each(['delayed','failed'])('clears old mint evidence before a changed relay ID has a %s status result', async outcome => {
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.attempt.mockResolvedValue([{status:{Queued:31n}}]);
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:1_234_567_891n,block_index:201n}});
+    fx.solBalance.mockResolvedValue(890_880n);
+    render(); await settle(); expect(progress().textContent).toContain('1.234567891 ckSOL minted');
+    let resolve!: (value:any)=>void, reject!: (reason:Error)=>void;
+    fx.attempt.mockResolvedValue([{status:{Queued:32n}}]);
+    fx.depositStatus.mockImplementationOnce(()=>new Promise((yes,no)=>{resolve=yes;reject=no;}));
+    button('Check again').click(); await settle();
+    expect(fx.depositStatus).toHaveBeenLastCalledWith(32n);
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(host.textContent).not.toContain('1.234567891');
+    expect(progress().textContent).not.toContain('Last successful mint check');
+    if(outcome==='delayed') resolve({Queued:{sweepable_amount:99n}});
+    else reject(new Error('synthetic new-ID status unavailable'));
+    await settle();
+    expect(progress().textContent).toContain(outcome==='delayed'?'Mint request submitted':'Checking mint status');
+    expect(host.textContent).not.toContain('1.234567891');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['cycles','cycles'],['cycles','icp'],['icp','cycles'],['icp','icp'],
+  ])('matches terminal %s history to the current relay deposit when %s responds first', async (current,first) => {
+    // Keep the ICP panel mounted: both terminal modes must be observed even
+    // when the page's current mint ultimately belongs to cycles.
+    const flushOnly=async()=>{for(let i=0;i<80;i++){await Promise.resolve();flushSync();}};
+    const cycles=paid('4','Complete',current==='cycles'?32n:31n);
+    const icp=paid('8','Complete',current==='icp'?32n:31n);
+    let resolveCycles!: (value:any)=>void, resolveIcp!: (value:any)=>void;
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.recoverPaid.mockResolvedValue(cycles).mockImplementationOnce(()=>new Promise(r=>resolveCycles=r));
+    fx.icpRecover.mockResolvedValue(icp).mockImplementationOnce(()=>new Promise(r=>resolveIcp=r));
+    fx.attempt.mockResolvedValue([{status:{Queued:32n}}]);
+    fx.solBalance.mockResolvedValue(890_880n);
+    fx.depositStatus.mockImplementation(async id=>({Minted:{minted_amount:id===32n?1_919_996_001n:99n,block_index:id===32n?232n:231n}}));
+    instance=mount(Page,{target:host}); await flushOnly();
+    if(first==='cycles'){resolveCycles(cycles);await flushOnly();resolveIcp(icp);}
+    else {resolveIcp(icp);await flushOnly();resolveCycles(cycles);}
+    await flushOnly();
+    expect(progress().getAttribute('data-request')).toContain(`|${current}|`);
+    expect(progress().textContent).toContain('Mint complete');
+    expect(progress().textContent).toContain('1.919996001 ckSOL minted');
+    expect(progress().textContent).toContain('deposit #32');
+    expect(progress().textContent).toContain('232');
+    expect(button('Start another deposit').disabled).toBe(false);
+    button('Check again').click(); await flushOnly();
+    expect(progress().textContent).toContain('Mint complete');
+    expect(progress().textContent).toContain('deposit #32');
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+    expect(fx.resumePaid).not.toHaveBeenCalled(); expect(fx.icpResume).not.toHaveBeenCalled();
+  });
 });
