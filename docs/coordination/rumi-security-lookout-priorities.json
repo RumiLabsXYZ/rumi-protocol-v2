@@ -5,7 +5,7 @@
       "title": "Make ckSOL progress and completion unmistakable",
       "status": "ready",
       "blockedReason": "",
-      "nextAction": "Merritt reviews pushed sourceab44413d/report05ec4221 for a separately authorized frontend release.88focused tests, both blocker rechecks and final synthetic desktop/mobile QA pass; no SEC17 bundling, build, deployment or financial action authorized by this source handoff.",
+      "nextAction": "Merritt presents single pushed frontend-only release decision6e3fdaa7/SHA2cd75e9e for central human approval. Exactab44413d retains88tests/reviews/mockQA; no fresh allocation, build or publication before that approval. Preserve live repayment/backend and all existing assets.",
       "cardIds": [
         "SEC-18"
       ]

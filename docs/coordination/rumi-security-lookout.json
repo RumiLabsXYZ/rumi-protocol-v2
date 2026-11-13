@@ -5,7 +5,7 @@
       "state": "Review",
       "owner": "Ellis integration/visual QA; Iris UI implementation; independent frontend evidence review",
       "scope": "Reassuring request-bound ckSOL progress and persistent mint confirmation",
-      "evidenceText": "Reviewed source candidateab44413d pushed with report05ec4221;88focused tests PASS (page67/panel17/poll4). Prominent truthful processing/action-needed/status-check/error-resume panel and persistent exact-ID Minted confirmation, explicit Start another deposit, separate historical receipt. Both independent blockers closed: evidence reset on ID changes; authoritative cross-mode terminal arbitration preserving active holds. Final visual correction hides new-SOL prompt during queue. Actual local component desktop/mobile mocks PASS, zero financial calls/errors/overflow. No backend/generated/dependency/payment-service changes or production build/deployment/reserve/wallet action. Separate frontend release authority remains required; SEC17 excludes it.",
+      "evidenceText": "Reviewed source candidateab44413d pushed with report05ec4221;88focused tests PASS (page67/panel17/poll4). Prominent truthful processing/action-needed/status-check/error-resume panel and persistent exact-ID Minted confirmation, explicit Start another deposit, separate historical receipt. Both independent blockers closed: evidence reset on ID changes; authoritative cross-mode terminal arbitration preserving active holds. Final visual correction hides new-SOL prompt during queue. Actual local component desktop/mobile mocks PASS, zero financial calls/errors/overflow. No backend/generated/dependency/payment-service changes or production build/deployment/reserve/wallet action. Separate frontend release authority remains required; SEC17 excludes it. Single frontend-only release decision6e3fdaa7 is pushed and independently hash-verified; names fresh capacity and explicit two-way coordination, one bounded offline frontend/auth build and additive publication. Central human approval pending; no allocation/build/publication has started.",
       "evidenceLinks": [
         {
           "title": "Scoped ckSOL progress contract",
@@ -14,6 +14,10 @@
         {
           "title": "Reviewed source and mock verification result",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/05ec4221/docs/operations/cksol-progress-ux-result-20261113.md"
+        },
+        {
+          "title": "Single frontend-only release decision awaiting approval",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/6e3fdaa7/docs/operations/cksol-progress-frontend-release-decision-20261113.md"
         }
       ]
     },

@@ -1,6 +1,6 @@
 {
-  "summary": "SEC17 software LIVE: exact00cf, backend6428, UI1794555990015, actual693/694; full5124/5318 preserved old4824+300new/7sets, public/certified/layout/preservation checks PASS. SEC18 reviewed sourceab44413d/report05ec4221:88focusedtests, dual correction reviews and local desktop/mobile synthetic QA PASS, zero financial calls. Separate unreleased candidate; no customer financial acceptance claim.",
-  "plainSummary": "The repayment fix is live, and independent checks confirm the new software and preserved data. The ckSOL progress display is also implemented and reviewed, with clearer processing, recovery and completion messages, but has not been released. No further payment or retry has been made for the customer.",
+  "summary": "SEC17 software LIVE: exact00cf, backend6428, UI1794555990015, actual693/694; full5124/5318 preserved old4824+300new/7sets, public/certified/layout/preservation checks PASS. SEC18 reviewed sourceab44413d/report05ec4221:88focusedtests, dual correction reviews and local desktop/mobile synthetic QA PASS, zero financial calls. Separate unreleased candidate; no customer financial acceptance claim. Single SEC18 release decision6e3fdaa7/hash independently checked and sent to Merritt for central approval; no build/publication.",
+  "plainSummary": "The repayment fix is live and independently verified. The ckSOL progress display is implemented and reviewed, and its separate release plan is ready for approval in the CTO chat. No build or publication of that display update has started, and no customer payment or retry was made.",
   "glossary": [
     {
       "term": "Stability Pool",

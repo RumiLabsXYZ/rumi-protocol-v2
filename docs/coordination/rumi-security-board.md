@@ -199,3 +199,7 @@ The approved single build exited0 and its frozen outputs passed independent arti
 ### SEC17 live verified; SEC18 separate source candidate ready
 
 SEC17 release completed exact00cf/backend6428/UI1794555990015, actualstage693/activation694. Dorian's final receipt086fbcc0 and Ellis independent receipt98cf99aa verify complete preservation, served bytes, certificate-bound module/API/controllers and anonymous desktop/mobile layout. No customer repayment or claim settlement was performed. SEC18 sourceab44413d/report05ec4221 is pushed for review:88focusedtests, two independent blocker rechecks and final synthetic desktop/mobile checks pass with zero financial calls. Corrected stale deposit evidence, cross-mode terminal history arbitration, and contradictory new-deposit copy. Remains unreleased and excluded from SEC17; Merritt owns separate frontend release decision.
+
+### SEC18 release decision prepared, approval pending
+
+Dorian pushed the single frontend-only release decision6e3fdaa7, SHA2562cd75e9e33be545b842a22218ae375cce7c8ffae588c3245ee17206e5b12d658. Ellis independently read it and verified the decision and bounded runner hashes, then sent it to Merritt for one central presentation. Existing88tests/reviews/mockQA retained; exactab44413d, fresh capacity, explicit two-way coordination, additive assets and only7entrysets; no backend or financial action. No allocation/build/publication started.
