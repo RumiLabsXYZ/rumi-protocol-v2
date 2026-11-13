@@ -1,6 +1,6 @@
 {
-  "summary": "SEC17 release2d0ad23c/source00cf approved. Runner3db3a87a/producer ready, old740files preserved. Automaticreview rejected direct Dorian-Cody messaging despite originalhuman evidence; one coordination-only confirmation pending in Dorian chat. No build started. Ellis certifiedbefore730f/04e/controllers and stable4824keys/5018encodings verified. Source30focused tests/Candid/two reviews PASS. Approval answered; no rejected-route workaround or production change.",
-  "plainSummary": "The release is approved and prepared, but automatic approval review blocked the messages needed to coordinate the build. One messaging-only confirmation is waiting in the release chat. The live app is unchanged, and its existing files and controller settings have been verified and preserved.",
+  "summary": "SEC18 source UX: clear request-bound ckSOL progress + persistent Minted confirmation. Iris implementation; Ellis integration/mock desktop-mobile QA; independent mapping review. Paymentsettled != mintconfirmed; preserve owner/request guards, polling/backoff/hiddenpause and no duplicatefinancialretry. Sourcebranch separate from frozen00cf SEC17 release, which remains approved but coordination-message-held. No newmint/wallet/deployment action.",
+  "plainSummary": "We are improving ckSOL\u2019s progress display so users can see whether a request is being processed, needs attention, or has completed. Success will remain prominent until they choose another deposit. This work is separate from the approved repayment release, whose build coordination is still blocked.",
   "glossary": [
     {
       "term": "Stability Pool",

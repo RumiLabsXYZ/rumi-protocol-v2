@@ -4,6 +4,7 @@ Updated: 2026-11-12. Coordinator: Bram. This board tracks the security review, r
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
+| SEC-18 | In progress | Ellis integration/QA / Iris UI / independent mapping review | Clear ckSOL mint progress and persistent success | Actual owner/request/minter evidence; payment settlement separate; essential delayed/stale/network/resume mocks and desktop/mobile; no financial or deployment action. Separate from frozen SEC17. |
 | SEC-17 | Blocked | Ellis integration / Rowan backend / Iris review | Correct successful-repayment residual forgiveness | Ordinarymin0.1; forgive residualstrictlybelow0.1 onlyaftersuccessfulauthorizeddebit; exact0.1retained/noauto-close. Essentialfailed/unknown/replay/interest/fees/Max checks. Source/prep only; newbackendinstallheld. |
 | SEC-15 | Done | Ellis source/case / Dorian release | Optional wallet help and visible recovery panel | Deployed1794522798107; independent fullinventory/bytes/modules and live desktop/mobile layout/disclosure PASS. No wallet inspection or financial action. |
 | SEC-16 | Done | Ellis source/case / Dorian release | Keep repayment Max usable after refresh | Deployed1794522798107; mountedregressions/46focusedtests/reviews and exactpublicbytes PASS. UntouchedMax lowers whileidle; manual/pending amounts protected; partial/approval/burn copy clear. Actual repayment unexecuted. |
@@ -182,3 +183,7 @@ Rob directly approved Dorian building and deploying under the single pushed deci
 ### SEC17 coordination restriction; release approval retained
 
 Automatic approval review rejected direct Dorian-Cody coordination even after both read the original human approval. No build started and no rejected-payload retry or alternate delivery route was used. Dorian has one coordination-only permission prompt in the existing release chat; do not duplicate the release approval question. Independent certified baseline matches backend730f5471/frontend04e565b3 and original controller arrays; full double-read inventory is stable at4824keys/5018encodings. Runner3db3a87a and prepared source00cf remain frozen; production unchanged. Other resource work is independently owned; no allocation is inferred for this release.
+
+### SEC18 ckSOL progress UX
+
+Rob requested reassuring mint progress and clearer completion. Existing screenshot shows a successful mint, not proof of a currently stuck request. Reuse the existing case team and board: Iris owns bounded frontend implementation, Ellis owns integration and visual QA, independent source tracing supplies the actual service/minter-state mapping. Work starts from00cf on separate branchcodex/cksol-mint-status-20261112 in the reused isolated source checkout; SEC17 producer and release pins stay untouched. No real mint, wallet action, backend change, reserve action or silent release bundling. [Contract](../operations/cksol-progress-ux-contract-20261112.md).

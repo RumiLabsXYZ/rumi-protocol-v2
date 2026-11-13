@@ -1,6 +1,16 @@
 {
   "items": [
     {
+      "id": "cksol-mint-progress-ux",
+      "title": "Make ckSOL progress and completion unmistakable",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Iris implements truthful owner/request-bound progress and persistent terminal success. Ellis runs essential synthetic delayed/settled-payment/stale-receipt/network-resume cases and desktop/mobile rendering; retain SEC17 frozen release separately.",
+      "cardIds": [
+        "SEC-18"
+      ]
+    },
+    {
       "id": "repayment-residual-forgiveness",
       "title": "Fix repayment residual forgiveness and accounting",
       "status": "blocked",

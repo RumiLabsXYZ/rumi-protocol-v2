@@ -1,6 +1,19 @@
 {
   "cards": [
     {
+      "id": "SEC-18",
+      "state": "In progress",
+      "owner": "Ellis integration/visual QA; Iris UI implementation; independent frontend evidence review",
+      "scope": "Reassuring request-bound ckSOL progress and persistent mint confirmation",
+      "evidenceText": "New source-only UX work, separate from frozen SEC17. Current screenshot shows completed mint with waiting-for-new-deposit copy dominating; no new stuck mint inferred. Trace confirms Approving=wallet authorization, Starting=submission pending, DepositPending=backend dispatch, exact-ID Queued/Swept/Finalized=minter processing, exact-ID Minted=confirmation. Complete/RefundReady are payment evidence only. Iris implements scoped status panel/synthetic regressions; Ellis integrates and verifies desktop/mobile with mocked services. Preserve owner/request guards, polling/backoff/background pause and no financial retry. No mint/wallet/reserve/deployment action.",
+      "evidenceLinks": [
+        {
+          "title": "Scoped ckSOL progress contract",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/cksol-progress-ux-contract-20261112.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-17",
       "state": "Blocked",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
