@@ -4,10 +4,12 @@ Owner: Ellis, with Rowan backend implementation and Iris independent accounting 
 
 ## Accepted behavior
 
-- Ordinary repayment minimum is0.1icUSD (10000000e8s). Only after a successful authorized repayment may a strictly positive residual below0.1 be forgiven. Exactly0.1 remains debt. No percentage-based threshold and no increase above the authorized debit.
+- Ordinary repayment minimum is0.1icUSD (10000000e8s). The new repayment rule forgives a strictly positive residual below0.1 only after a successful authorized repayment. Exactly0.1 remains debt. No percentage-based threshold and no increase above the authorized debit.
 - Clearing debt does not automatically withdraw collateral or close a vault. Preserve explicit repay-and-close intent, claim/native-XRP/collateral semantics and existing authorization/unknown-outcome safeguards.
 - Check all three ordinary repayment paths, explicit close, min-vault-debt configuration, interest accrued across awaits, stable-token decimals/fee rounding, frontend Max/projection/close detection and withdrawal dust clearing. Resolve coupled conflicts without stranding debt.
-- Failed, rejected or unknown transfers cannot trigger forgiveness. Successful debit, debt reduction, forgiven principal/interest, supply/reserve effect and replay must be coherent and exactly-once. Additive event/state compatibility and Candid/declarations discipline apply if touched.
+- Failed, rejected or unknown repayment transfers cannot trigger the new forgiveness rule. Successful debit, debt reduction, forgiven principal/interest, supply/reserve effect and replay must be coherent and exactly-once. Additive event/state compatibility and Candid/declarations discipline apply if touched.
+
+Scope clarification accepted by Merritt: preserve the existing <=0.0005 icUSD withdrawal/close exceptions verbatim, including the native-XRP zero-debt guard. Removing those exceptions could strand historical tiny balances. They do not become a new unpaid <0.1 exception. Their pre-existing withdrawal/replay asymmetry is separate backlog; SEC17 does not claim every forgiveness path requires a successful payment.
 
 Historicalc37639e1 introduced near-full upward debit to tolerate interest between UI read and execution; this rationale does not authorize exceeding today's approved amount. Current withdrawal dust and replay behavior require source verification. Prior memory is only an investigation lead, not proof about historical customer outcomes.
 
@@ -22,3 +24,7 @@ Use demo-first: demonstrate one synthetic repayment crossing the residual bounda
 ## Release boundary
 
 Prepare a readable pushed implementation/test/review receipt and exact build/install proposal through Dorian. Existing137 frontend approval covers only240assets; it does not authorize a new backend module, migration, live repayment, config change or funds movement. Any genuinely needed new release decision is pushed once and centrally coordinated. Source, tests, build, merge, install/readback and financial acceptance remain distinct.
+
+## Candidate checkpoint
+
+Implementation source: `9662fbe73c0356ddaecd180a8d4f03229e383bd8`, branch `codex/repayment-residual-forgiveness-20261112`. Rowan completed backend edits and six focused test sources; Iris found no confirmed accounting defect in the bounded changed-source review. Ellis coupled frontend Max, fixed repayment minimum and settlement projections without enabling automatic close for wallet-limited payments. Tests and generated-interface proof are pending a fresh coordinated local lane; source review is not test or deployment proof.

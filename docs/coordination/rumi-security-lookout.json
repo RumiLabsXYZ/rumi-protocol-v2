@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
       "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
-      "evidenceText": "Rob requests correction and independent double-check. Ordinarymin0.1, exact0.1 staysdebt; successful authorizeddebit only, no percent-based debitincrease or auto-close/collateralwithdrawal. Rowan backendwrite and Iris readonly accountingreview start on isolated240base; released312backendcontentequal. Essentialriskchecks cover failure/unknown/once-onlyreplay/accounting/interestacrossawait/stablefees and frontendMax. Sonnet5.5 probeplan-only/auth-envelopeunknown; no sourceexport. Terra backendfallback justifiedRustfinancialasync/replaycomplexity; Sol readonlyreview. Source/prep only, no backendinstall/livefinancialactions; existingUI/Season2 unchanged.",
+      "evidenceText": "Candidate9662fbe7: backend and coupled frontend source prepared. Independent changed-source accounting review found no confirmed defect; six backend tests prepared, not run. Paid versus forgiven debt and interest are recorded separately in an additive optional event snapshot; exact0.1 retained, no upward debit. Existing <=0.0005 legacy withdrawal exceptions/native-XRP guard preserved per CTO to avoid stranding tiny debt. Test and generated-interface execution awaiting fresh bounded local allocation; no new build/install or financial action.",
       "evidenceLinks": [
         {
           "title": "Accepted correction contract, specialists, essential checks and exact release boundary",

@@ -166,3 +166,7 @@ Rob directly approved all four consolidated scopes in the CTO chat. Ellis indepe
 ## SEC17 accepted correction — November12
 
 [Contract](../operations/repayment-residual-correction-contract-20261112.md) pins behavior, namedworkers/ownership, economicalfallback and essential checks. Isolated240source is runtime-equal to released312backend; currentliveUI/Season2 untouched. Sonnetprobe was read-only/plan-only; no private source sent. Automaticreview rejected cleanup for missing disk evidence; refreshed inventory shows8percentfree,0eligible/72blocked, so no removal was performed. Newbackendrelease remains separate from earlier240frontend approval.
+
+### SEC17 candidate and scope clarification
+
+Candidate `9662fbe73c0356ddaecd180a8d4f03229e383bd8` couples backend residual accounting with frontend Max/minimum/projections. Six synthetic backend tests are prepared but unrun; independent source review found no confirmed accounting defect. Merritt accepted preserving existing <=0.0005 withdrawal/close exceptions and the native-XRP zero-debt guard verbatim; legacy withdrawal replay cleanup is deferred separately. Fresh bounded local check allocation requested with pinned commands. No new production action or customer financial acceptance.
