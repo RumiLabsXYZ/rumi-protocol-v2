@@ -1,0 +1,21 @@
+{
+  "phases": [
+    {
+      "phase": "stage",
+      "creates": 96,
+      "sets": 96,
+      "operations": 192,
+      "representativeMaxU64EncodedBytes": 135395
+    },
+    {
+      "phase": "activate",
+      "creates": 0,
+      "sets": 7,
+      "operations": 7,
+      "representativeMaxU64EncodedBytes": 724
+    }
+  ],
+  "onlyCreateAndSetOperations": true,
+  "productionMutation": false,
+  "actualReturnedIdsNotAsserted": true
+}

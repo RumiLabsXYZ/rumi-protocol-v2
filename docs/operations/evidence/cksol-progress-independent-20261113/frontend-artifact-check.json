@@ -1,0 +1,38 @@
+{
+  "checkedUtc": "2026-11-13T15:29:33.702Z",
+  "source": "ab44413da1a8b394245cd7734da4124a2335621b",
+  "version": "1794583637373",
+  "pinsSha256": "19a7321d2c4ac2c8f2b17c0a49d87ef0d1534506e1283684cbd1a0983e9a8435",
+  "manifestSha256": "431c4ad6bedc5701209d1b0e7d929fa7eaa70806457c2125109e79e2aadb1de4",
+  "filesVerified": 740,
+  "compressedPairsVerified": 476,
+  "independentBaselineKeys": 5124,
+  "independentBaselineEncodings": 5318,
+  "newKeys": 96,
+  "existingEncodingChanges": 7,
+  "allPriorPropertiesPreservedInPlan": true,
+  "allFrozenPublishFilesCovered": true,
+  "authUnchanged": true,
+  "expectedKeys": 5220,
+  "expectedEncodings": 5414,
+  "sec18Included": true,
+  "sec19HoldPreserved": true,
+  "bundles": {
+    "After a successful repayment": [
+      "_app/immutable/chunks/CJvt2AYq.js"
+    ],
+    "Estimated forgiveness:": [
+      "_app/immutable/chunks/CJvt2AYq.js"
+    ],
+    "Review saved request": [
+      "_app/immutable/nodes/4.210vKbHp.js"
+    ],
+    "OISY_LOCAL_OWNER_MISMATCH": [
+      "_app/immutable/chunks/D0hpIMTJ.js"
+    ],
+    "Last successful mint check:": [
+      "_app/immutable/nodes/55.CMDvpRwo.js"
+    ]
+  },
+  "productionMutation": false
+}

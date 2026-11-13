@@ -1,0 +1,29 @@
+{
+  "checkedUtc": "2026-11-13T15:22:51.561Z",
+  "certificateVerifiedByAgent": true,
+  "canisters": [
+    {
+      "name": "backend",
+      "canister": "tfesu-vyaaa-aaaap-qrd7a-cai",
+      "moduleHash": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7",
+      "controllers": [
+        "cpbhu-5iaaa-aaaad-aalta-cai",
+        "mi66c-zqlu4-4kxd6-2gtp7-szg5v-6a62a-geoty-fahu5-4trje-xyfby-wqe",
+        "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
+      ],
+      "candidSha256": "f0b0fcc2480788b93b4707f707e7dbc8bf9b77c39df0a4ddf3594f54bdf44b6d"
+    },
+    {
+      "name": "frontend",
+      "canister": "tcfua-yaaaa-aaaap-qrd7q-cai",
+      "moduleHash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+      "controllers": [
+        "cpbhu-5iaaa-aaaad-aalta-cai",
+        "e3mmv-5qaaa-aaaah-aadma-cai",
+        "m66jx-eiaaa-aaaap-quumq-cai",
+        "mi66c-zqlu4-4kxd6-2gtp7-szg5v-6a62a-geoty-fahu5-4trje-xyfby-wqe",
+        "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
+      ]
+    }
+  ]
+}
