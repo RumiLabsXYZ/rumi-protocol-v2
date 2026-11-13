@@ -1,6 +1,6 @@
 {
-  "summary": "SEC18 is live and verified. SEC19 final4d8322a7 passed9backend/3PIC/134frontend checks, canonical compatibility and Wasm/exports; two final reviewers PASS after metadata-race correction. One exact paired release decision is ready for central approval. Production deposits remain paused; no live213 or financial acceptance.",
-  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair now passes its source and lifecycle checks, including a corrected amount-conversion race, and both independent reviewers accept it. One paired release proposal is ready for approval; deposits remain paused until that release is completed and verified.",
+  "summary": "SEC19 exact5db235e8/3571 plan is human-approved. Dorian coordinates fresh frontend build/paired release with Cody; Ellis verifies exact baselines, artifacts and live readback. Final source4d8322a7 and134/3/9checks+dualPASS retained. Production deposits still paused pending completion; no customerfinancialaction.",
+  "plainSummary": "The collateral-deposit repair is approved for release after passing source and lifecycle checks. Dorian is coordinating the build and deployment, and Ellis is independently verifying the result. Deposits remain paused until the backend and frontend are confirmed live; Rob does not need to submit a test transaction.",
   "glossary": [
     {
       "term": "Stability Pool",

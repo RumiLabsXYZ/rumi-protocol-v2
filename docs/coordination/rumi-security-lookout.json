@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-19",
-      "state": "Review",
+      "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "Final source4d8322a7 is pushed and independently accepted by both reviewers. Nine backend tests, canonical Candid/bindings and old+declared compatibility, verified Wasm/size/exports, three corrected PocketIC scenarios and134 frontend tests pass. Review found missing-metadata scaling: reproduced old wrong-scale success, then fixed pre-approval rejection with five regressions and dual closure recheck. Exact four live SEC18 files preserved. Removed-target test uses closure; liquidation ordering is source-verified only. Fresh resource grants closed/released; earlier resource stop/fixture failures retained. Single paired backend/frontend release decision prepared for central approval; frontend production build and deployment remain held. No live vault213/customer financial action.",
+      "evidenceText": "Rob explicitly approved exact paired release plan5db235e8/SHA3571aa0a; original human message and preceding question read directly. Final source4d8322a7 accepted by both reviewers;9backend/3PIC/134frontend checks, canonical compatibility and Wasm/exports pass. Dorian owns the single frontend build and paired publication; Cody checks fresh capacity; Ellis independently captures baselines/artifacts/state/live readback. Fresh certified baseline matches expected6428 backend/f0b API/04e frontend. All SEC18 files and protected state remain preserved. Production deposits remain paused until deployment and readback finish; no user deposit/canary authorized.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",

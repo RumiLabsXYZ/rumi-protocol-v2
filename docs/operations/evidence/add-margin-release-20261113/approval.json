@@ -1,0 +1,12 @@
+{
+  "sourceThread": "01a1a48c-240e-77f0-8205-91e3120e76c0",
+  "originalUserMessageId": "01a1d642-b358-77b1-9a3a-35d395677da5",
+  "originalUserText": "Approved. Have Dorian deploy the collateral deposit fix under that plan, coordinate with Cody, and have Ellis verify it. Let me know when I can add my ckSOL to vault 213.",
+  "precedingQuestionMessageId": "msg_0d6133795f824192016af7443cae6887d1ae76abdc7c24efac",
+  "approvedPlanCommit": "5db235e87c89db01411b8dfcc559b930cfd3a0e5",
+  "approvedPlanPath": "docs/operations/add-margin-release-decision-20261113.md",
+  "approvedPlanSha256": "3571aa0a2e23ce09826bd750bbe20f49f4ffd0ee212aa226c60fb096322824d6",
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "directOriginalRead": true,
+  "customerFinancialActionAuthorized": false
+}

@@ -232,3 +232,7 @@ Continuation6714 passed canonical generation/bindings, old-service and declared 
 ### SEC19 source accepted; one paired release decision
 
 Corrected PIC3 passed under fresh5c1087d7, native/outer0,47.147s, expected owned PocketIC cleanup and independent empty groups/runner/server; Cody released LOCAL. Final review then found a concrete missing-metadata amount-scale race; red regression reproduced old success and4d8322a7 rejects before conversion/approval. Full134frontend checks pass; both reviewers close the finding and return PASS. Exact SEC18 files retained, backend runtime unchanged from verifiede2artifact. [Source result](../operations/add-margin-source-result-20261113.md) and [single paired release decision](../operations/add-margin-release-decision-20261113.md) are prepared. Production build/install/publication remain held for central approval; no live vault213 deposit.
+
+### SEC19 approved release started
+
+Original human message01a1d642-b358-77b1-9a3a-35d395677da5 and preceding explicit5db235e8/3571 question read directly. Dorian owns the authorized single frontend build and paired publication with fresh Cody capacity; Ellis owns independent baseline/artifact/state/live checks. Certified baseline still matches backend6428/API f0b/frontend04e. Full asset baseline is in progress. Existing134/3/9 checks and final dual PASS retained without another campaign. Worktree pressure helper removed0:0eligible/72blocked. No production write or user financial action by Ellis.
