@@ -546,6 +546,7 @@ describe('prominent mint request status', () => {
     expect(progress().textContent).toContain('Checking mint status');
     expect(progress().textContent).toContain(lastChecked!);
     expect(progress().textContent).toContain('latest check failed');
+    expect(progress().textContent).toContain('. The latest check failed');
     fx.depositStatus.mockResolvedValue({Swept:{signature:'synthetic-sweep'}});
     await vi.advanceTimersByTimeAsync(15_000); await settle();
     expect(progress().textContent).toContain('Processing SOL deposit');
@@ -644,5 +645,21 @@ describe('prominent mint request status', () => {
     expect(progress().textContent).not.toContain('Action needed:');
     expect(button('Continue minting').disabled).toBe(true);
     expect(fx.resumePaid).not.toHaveBeenCalled(); expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+
+  it.each(['NotStarted','FundingRejected'])('labels the old Minted receipt as history after a new %s result', async phase => {
+    restore(); fx.solBalance.mockResolvedValue(1_920_000_000n);
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    render(); await settle();
+    button('Start another deposit').click(); await settle();
+    fx.submitPaid.mockResolvedValue(phase==='NotStarted'
+      ? {...paid('4',phase),phase:'NotStarted',receipt:undefined}
+      : paid('4',phase));
+    button('Mint ckSOL').click(); await settle();
+    expect(progress().textContent).toContain('Previous completed deposit #32');
+    expect(progress().textContent).toContain('history, not confirmation of the current request');
+    expect(progress().textContent).not.toContain('ckSOL minted to your ICP account.');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(fx.submitPaid).toHaveBeenCalledOnce(); expect(fx.icpSubmit).not.toHaveBeenCalled();
   });
 });

@@ -549,6 +549,8 @@
               <p class="mt-3 text-sm text-gray-300">Your previous mint receipt is retained below. Check processing costs and deposit detection before authorizing another mint.</p>
             {:else if cyclesRequestUnmatched || icpRequestUnmatched}
               <p class="mt-3 text-sm text-gray-300">{displayedPaymentPhase === 'Complete' ? 'Processing payment settled, but no matching ckSOL mint has been confirmed for this request.' : displayedPaymentPhase === 'Approving' ? 'The saved request is awaiting its wallet approval result.' : displayedPaymentPhase === 'Starting' ? 'Checking whether the saved submission was accepted. Acceptance by the official minter is not confirmed yet.' : 'Checking the current processing request. Payment progress does not confirm that ckSOL was minted.'} Do not pay again.</p>
+            {:else if depositStatus?.success}
+              <p class="mt-3 text-sm text-gray-300">Previous completed deposit #{depositId?.toString()}: {mintedAmount !== null ? `${formatSol(mintedAmount)} ckSOL minted` : 'ckSOL minted to this ICP account'}. This receipt is history, not confirmation of the current request.</p>
             {:else if depositId !== null && depositStatus}
               <p class="mt-3 text-sm text-gray-300">{depositStatus.label} {#if !depositStatus.terminal}This request is still in progress; do not send or pay again.{/if}</p>
             {:else if depositId !== null}
@@ -557,7 +559,7 @@
               <p class="mt-3 text-sm text-gray-300">Authorize the mint action after checking your deposit and processing costs. A detected SOL balance alone does not confirm a mint.</p>
             {/if}
             {#if lastMintCheck !== null && !newDeposit && !mintActionStarted && !cyclesRequestUnmatched && !icpRequestUnmatched}
-              <p class="mt-3 text-xs text-gray-400">Last successful mint check: {new Date(lastMintCheck).toLocaleTimeString()}.{#if mintCheckFailed} The latest check failed; the last known result is retained.{/if}</p>
+              <p class="mt-3 text-xs text-gray-400">Last successful mint check: {new Date(lastMintCheck).toLocaleTimeString()}.{#if mintCheckFailed}{' '}The latest check failed; the last known result is retained.{/if}</p>
             {:else if lastRequestPaymentCheck && !busy && !icpBusy}
               <p class="mt-3 text-xs text-gray-400">Last successful payment check: {new Date(lastRequestPaymentCheck).toLocaleTimeString()}. This is not confirmation of a mint.</p>
             {/if}
