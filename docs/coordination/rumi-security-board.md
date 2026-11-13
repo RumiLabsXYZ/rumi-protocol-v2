@@ -191,3 +191,7 @@ Rob requested reassuring mint progress and clearer completion. Existing screensh
 ### SEC17 build started; SEC18 local checks
 
 Dorian received a fresh independently admitted allocation and started the exact00cf bounded offline backend/frontend batch; no production write or SEC18 inclusion. Previously rejected outgoing coordination messages remain held and were not replayed; incoming allocation delivery has separate authorization. Ellis waits for actual native completion/frozen artifacts before artifact verification. Separately, SEC18 candidate0ca passed73focused tests and local actual-page mocked desktop/mobile completion/queue/network-resume/receipt/start-another checks with zero financial calls. Final action-required guidance and independent review remain before source handoff.
+
+### SEC17 backend installed; SEC18 final review corrections
+
+The approved single build exited0 and its frozen outputs passed independent artifact verification. Stage693 completed and backend6428d103 was installed once after stopped-state backup; Ellis independently certified module/Candid/controllers. Preservation comparison accepted with reconciled automatic-check timestamp changes; final UI activation and readback remain. Separately, candidate14df2e96 passed81focused tests but both final reviewers found blockers: stale mint evidence on deposit-ID change, and terminal cross-mode history suppressing current completion. Iris is correcting both with focused regressions before final visual QA and independent recheck. No customer financial action or SEC18 deployment.

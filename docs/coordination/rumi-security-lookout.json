@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis integration/visual QA; Iris UI implementation; independent frontend evidence review",
       "scope": "Reassuring request-bound ckSOL progress and persistent mint confirmation",
-      "evidenceText": "Separate UI candidate0ca671f5 passed73focused page/panel/polling tests. Actual local compiled page with synthetic services verified desktop confirmation, mobile queued progress, receipt opening, Startanotherdeposit, networkfailure/resume\u2192Minted, zero financial calls and no overflow/overlay. Review found queued-versus-unknown display mismatch and corrected it without weakening holds; refining explicit Approved/Funded continuation guidance before final check/review. Source-only4UI/testfiles; no backend/generated/dependency changes, realmint, walletaction or deployment. Not bundled into frozen SEC17.",
+      "evidenceText": "Separate UI candidate14df2e96 passed81focused page/panel/polling tests. Independent final reviews found two concrete blockers: stale prior Minted evidence when the legacy deposit ID changes, and terminal cross-mode receipt ordering hiding current completion. Iris is fixing both with delayed/failed status and both-mode restore regressions; final mock browser recapture and independent recheck follow. No backend/generated/dependency changes, real mint, wallet action or deployment. Excluded from frozen SEC17.",
       "evidenceLinks": [
         {
           "title": "Scoped ckSOL progress contract",
@@ -18,7 +18,7 @@
       "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
       "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
-      "evidenceText": "Approved SEC17 exactsource00cf/decision2d0ad23c: Dorian received one fresh Cody allocation and STARTED the bounded sequential offline backend/frontend/auth build. No production write yet. Rejected outgoing coordination payloads remain held, not replayed; incoming allocation delivery separately authorized. Ellis independent baseline certified730f/04e/controllers and stable4824keys/5018encodings retained; frozen output verification follows native completion. Prior30focused tests/Candid/two reviews PASS. SEC18 UI changes explicitly excluded.",
+      "evidenceText": "Approved exactsource00cf: sole bounded offline build exited0; Ellis independently verified frozen backend, Candid,206inputs,740frontendfiles/476compressedpairs,300newimmutablekeys and7entrysets. Dorian staged693 successfully, preserved stopped-state backup/client data, then installed backend6428d103 once. Ellis independently certified new module/Candid and unchanged controllers/frontend module. Private preservation comparison accepted with only independently reconciled automatic-check timestamp changes; final UI activation/readback pending. No customer financial action. SEC18 excluded.",
       "evidenceLinks": [
         {
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/repayment-residual-forgiveness-20261112/docs/operations/repayment-residual-correction-result-20261112.md",
@@ -27,6 +27,10 @@
         {
           "title": "Single backend and frontend release decision",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/2d0ad23c84e4be3728286d5aad048fcce295b4fa/docs/operations/repayment-residual-release-decision-20261112.md"
+        },
+        {
+          "title": "Independent frozen artifact verification",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0baae372/docs/operations/repayment-release-independent-check-20261112.md"
         }
       ]
     },

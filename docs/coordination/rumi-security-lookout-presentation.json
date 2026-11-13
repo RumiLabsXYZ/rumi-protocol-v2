@@ -1,6 +1,6 @@
 {
-  "summary": "SEC18 UI candidate0ca:73focused tests PASS; actual mocked desktop/mobile success/queue/error-resume/receipt/start-another QA with zero financial calls. Final continuation guidance/review pending. SEC17 separately received fresh authorized allocation and started exact00cf bounded build; frozen artifacts/live checks next, no production write yet. Rejected outgoing messages unreplayed. No real mint or SEC18 bundling.",
-  "plainSummary": "The ckSOL status improvement passed focused tests and local desktop/mobile checks, with final guidance and review in progress. Separately, the approved repayment release has received its build slot and started building. The two changes remain separate, and neither update is being claimed live yet.",
+  "summary": "SEC17 approved backend6428 installed and independently certificate-verified with canonical Candid/controllers; sole build/artifacts and stage693 passed. Preservation comparison accepted; final UI activation/readback pending. SEC18 separate81-test candidate failed final reviews on stale mint evidence and cross-mode history arbitration; fixes/regressions in progress. No customer financial action or SEC18 deployment.",
+  "plainSummary": "The repayment backend update is installed and independently verified; the matching website update is completing its final release checks. Review caught two history and status bugs in the separate ckSOL display improvement, which we are fixing before release. Rob does not need to take action.",
   "glossary": [
     {
       "term": "Stability Pool",
