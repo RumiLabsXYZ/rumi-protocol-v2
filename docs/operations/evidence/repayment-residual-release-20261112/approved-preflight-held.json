@@ -1,0 +1,46 @@
+{
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "approvedHumanMessage": "01a1d3ba-ec02-75d1-a53f-7e0c6df0b64a",
+  "releaseApproved": true,
+  "buildStarted": false,
+  "allocationReceived": false,
+  "productionMutation": false,
+  "backend": {
+    "status": "Running",
+    "module": "0x730f54713dca1938c40b661ef6bd6ddc23555d92ca4c8e1feca282e3a33f8cf9"
+  },
+  "frontend": {
+    "status": "Running",
+    "module": "0x04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+    "keys": 4824,
+    "encodings": 5018,
+    "stableDoubleRead": true
+  },
+  "oldestSnapshotArchive": {
+    "snapshotId": "00000000000000120000000001f088fe0101",
+    "downloadedUtc": "2026-11-13T07:12:52.270240+00:00",
+    "takenAt": 1792556762079204819,
+    "allNamedLengthsVerified": true,
+    "files": [
+      {
+        "name": "wasm_module.bin",
+        "bytes": 3069494,
+        "sha256": "3b51aca404bb8da8994b55273114571a33486b99c3275547c809746254128566"
+      },
+      {
+        "name": "wasm_memory.bin",
+        "bytes": 2752512,
+        "sha256": "bdd0db3c52a7620b38f75ad5b87529c418bc5689f2dcdd98b3c8b5fd461922a5"
+      },
+      {
+        "name": "stable_memory.bin",
+        "bytes": 100728832,
+        "sha256": "331673b8f5d9be7fa3b60b56f9b7b800327bc9cacb0faa7f37554ec331225f98"
+      }
+    ],
+    "chunkStore": [],
+    "snapshotMutation": false
+  },
+  "privatePreservationQueries": "13baseline +3custody +3extra queries successful; private raw values retained locally",
+  "coordinationBlock": "Automatic approval review rejected Dorian/Cody messaging despite original Merritt approval; no alternative route used; direct same-scope permission question pending"
+}
