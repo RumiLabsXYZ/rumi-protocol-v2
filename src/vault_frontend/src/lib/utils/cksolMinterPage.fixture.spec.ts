@@ -176,7 +176,10 @@ describe('ckSOL real page', () => {
     fx.loadPaid.mockReturnValue(approved); fx.recoverPaid.mockResolvedValue(approved);
     fx.continuePaid.mockResolvedValue({...approved,phase:'Receipt',receipt:{phase:'FundingPending'}});
     Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async (_key:any,_opts:any,fn:any)=>{await Promise.resolve();return fn({});}}});
-    render(); await settle(); button('Continue minting').click();
+    render(); await settle();
+    expect(host.querySelector('[aria-label="Mint progress"]')?.textContent).toContain('Action needed: approval recorded');
+    expect(host.querySelector('[aria-label="Mint progress"]')?.textContent).toContain('does not mean a processing payment was collected');
+    button('Continue minting').click();
     expect(fx.openSigner).toHaveBeenCalledWith(ownerA);
     await settle(); expect(host.textContent).toContain('FundingPending'); expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.closeSigner).toHaveBeenCalledOnce();
   });
@@ -212,6 +215,10 @@ describe('ckSOL real page', () => {
     render(); await settle();
     expect(fx.recoverPaid).toHaveBeenCalled();expect(host.textContent).toContain('Paid payment sequence: 12');
     expect(host.textContent).toContain('without another cycles approval');expect(button('Continue minting')).toBeTruthy();
+    expect(host.querySelector('[aria-label="Mint progress"]')?.textContent).toContain('Action needed: processing funds recorded');
+    expect(host.querySelector('[aria-label="Mint progress"]')?.textContent).toContain('Select Continue minting below');
+    expect(host.querySelector('[aria-label="Mint progress"]')?.textContent).toContain('Status checks will not submit this request automatically');
+    expect(host.textContent).not.toContain('Click the mint action below');
   });
   it('allows a known rejected attempt to be reconciled by the next mint action', async () => {
     fx.attempt.mockResolvedValue([{status:{Rejected:'minter rejected'},started_at_ns:1n}]);
@@ -471,6 +478,7 @@ describe('prominent mint request status', () => {
     vi.useFakeTimers(); restore();
     render(); await settle();
     expect(progress().textContent).toContain('Mint request submitted');
+    expect(host.textContent).not.toContain('Click the mint action below');
     expect(progress().textContent).not.toContain('Mint complete');
     expect(progress().querySelector('.animate-spin')).not.toBeNull();
     expect(progress().textContent).toContain('Last successful mint check');
@@ -581,5 +589,60 @@ describe('prominent mint request status', () => {
     expect(host.textContent).toContain('This is the previous receipt, not confirmation of a new request');
     expect(button('Mint ckSOL').disabled).toBe(true);
     expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+
+  it('shows the explicit continuation for a funded ICP reservation without calling it an unknown mint', async () => {
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.attempt.mockResolvedValue([{status:{SubmittedOrUnknown:null}}]);
+    fx.icpRecover.mockResolvedValue(paid('8','Funded'));
+    instance=mount(Page,{target:host}); await settle();
+    expect(progress().textContent).toContain('Action needed: processing funds recorded');
+    expect(progress().textContent).toContain('Select Continue funded mint below');
+    expect(progress().textContent).toContain('Status checks will not submit this request automatically');
+    expect(progress().textContent).not.toContain('latest mint result could not be confirmed');
+    expect(button('Continue funded mint').disabled).toBe(false);
+    expect(host.textContent).not.toContain('Click the mint action below');
+    expect(fx.icpSubmit).not.toHaveBeenCalled(); expect(fx.icpResume).not.toHaveBeenCalled();
+  });
+
+  it.each(['Approved','Funded'])('keeps the existing cycles %s continuation enabled beside a historical Minted ID', async phase => {
+    restore();
+    const current=phase==='Approved'
+      ? {...paid('4',phase),phase:'Approved',receipt:undefined,approvalBlock:'7'}
+      : paid('4',phase);
+    fx.recoverPaid.mockResolvedValue(current);
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    render(); await settle();
+    expect(progress().textContent).toContain('Action needed:');
+    expect(progress().textContent).toContain('Select Continue minting below');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(button('Continue minting').disabled).toBe(false);
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.continuePaid).not.toHaveBeenCalled();
+    expect(fx.resumePaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(['Approved','Funded'])('keeps the existing ICP %s continuation enabled beside a historical Minted ID', async phase => {
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.attempt.mockResolvedValue([{status:{Queued:32n}}]);
+    fx.icpRecover.mockResolvedValue(phase==='Approved'
+      ? {...paid('4',phase),phase:'Approved',receipt:undefined,approvalBlock:'7'}
+      : paid('4',phase));
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    instance=mount(Page,{target:host}); await settle();
+    const label=phase==='Approved'?'Continue approved mint':'Continue funded mint';
+    expect(progress().textContent).toContain('Action needed:');
+    expect(progress().textContent).toContain(`Select ${label} below`);
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(button(label).disabled).toBe(false);
+    expect(fx.icpSubmit).not.toHaveBeenCalled(); expect(fx.icpResume).not.toHaveBeenCalled();
+    expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+
+  it('retains the minter-pending hold even when the payment is Funded', async () => {
+    restore(32n,'Funded'); render(); await settle();
+    expect(progress().textContent).toContain('Mint request submitted');
+    expect(progress().textContent).not.toContain('Action needed:');
+    expect(button('Continue minting').disabled).toBe(true);
+    expect(fx.resumePaid).not.toHaveBeenCalled(); expect(fx.submitPaid).not.toHaveBeenCalled();
   });
 });

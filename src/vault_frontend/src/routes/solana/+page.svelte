@@ -117,13 +117,13 @@
   // Keep that hold unchanged while distinguishing its known minter progress.
   $: matchedLegacyDeposit = depositId !== null && legacyAttempt?.status && 'Queued' in legacyAttempt.status
     && BigInt(legacyAttempt.status.Queued) === depositId;
-  $: legacyNeedsAttention = legacyReadFailed || (legacyBlocked && !(matchedLegacyDeposit
+  $: legacyNeedsAttention = legacyReadFailed || (blockingLegacy && !(matchedLegacyDeposit
     && ['Queued','Swept','Finalized','Minted'].includes(depositStatus?.kind ?? '')));
   // A positive balance may be only the address's rent reserve or dust. Reveal
   // a new-send address only after processing is ready; a deposit at the
   // minter's minimum remains visible so its owner can finish processing it.
   $: addressReady = fundsReceived || (paymentMethod === 'icp' ? icpReady : cyclesReady);
-  $: mintEnabled = !!owner && initialized && !busy && !icpBusy && !icpPending && (refundReady || (!unmatchedMintRequest && !depositBlocked && !blockingLegacy && !minterPending &&
+  $: mintEnabled = !!owner && initialized && !busy && !icpBusy && !icpPending && (refundReady || ((!unmatchedMintRequest || resumeApproval || resumeFunding) && !depositBlocked && !blockingLegacy && !minterPending &&
     (resumeApproval || resumeFunding || (cyclesReady && !pendingPayment && (fundsReceived || balanceUnavailable)))));
   $: primaryLabel = resumeApproval || resumeFunding ? 'Continue minting' : refundReady ? 'Return unused cycles' : 'Mint ckSOL';
   $: paymentMessage = paidPhase === 'Complete' ? 'Processing payment settled. Any unused cycles have been returned.' :
@@ -145,6 +145,12 @@
   $: showMintSuccess = !!depositStatus?.success && mintedAmount !== null && mintBlock !== null
     && !newDeposit && !mintActionStarted && !cyclesRequestUnmatched && !icpRequestUnmatched && !legacyNeedsAttention;
   $: displayedPaymentPhase = mintRequestMode === 'icp' ? icpProgress?.phase : paidPhase;
+  $: resumeIcpRequest = mintRequestMode === 'icp' && ['Approved','Funded'].includes(icpProgress?.phase ?? '');
+  $: continuationNeeded = !showMintSuccess && !busy && !icpBusy && !legacyNeedsAttention && !depositBlocked
+    && !minterPending && ['Approved','Funded'].includes(displayedPaymentPhase ?? '');
+  $: continuationLabel = mintRequestMode === 'icp'
+    ? displayedPaymentPhase === 'Approved' ? 'Continue approved mint' : 'Continue funded mint'
+    : 'Continue minting';
   $: preparingAnotherDeposit = newDeposit && !mintActionStarted && !pendingPayment && !icpPending && !unmatchedMintRequest;
   $: mintRequestKey = `${ownerText}|${mintRequestMode ?? 'minter'}|${mintRequestMode === 'icp' ? icpProgress?.sequence ?? '' : paymentIntent?.sequence ?? ''}`;
   $: lastRequestPaymentCheck = mintRequestMode === 'icp' ? icpProgress?.lastChecked
@@ -154,6 +160,7 @@
     : mintCheckFailed || legacyNeedsAttention || depositBlocked ? 'Checking mint status'
     : minterPending && !newDeposit && !cyclesRequestUnmatched && !icpRequestUnmatched ? depositStatus?.kind === 'Finalized' ? 'ckSOL mint pending'
       : depositStatus?.kind === 'Swept' ? 'Processing SOL deposit' : 'Mint request submitted'
+    : continuationNeeded ? displayedPaymentPhase === 'Approved' ? 'Action needed: approval recorded' : 'Action needed: processing funds recorded'
     : displayedPaymentPhase === 'Starting' ? 'Confirming submission'
     : uncertainPayment || (mintRequestMode === 'icp' && icpProgress?.unavailable) ? 'Checking mint status'
     : preparingAnotherDeposit ? 'Ready for another deposit'
@@ -517,7 +524,7 @@
           <section aria-label="Mint progress" aria-live="polite" aria-atomic="true" data-request={mintRequestKey}
             class={`mt-4 rounded-xl border p-5 ${showMintSuccess ? 'border-emerald-500 bg-emerald-950/30' : 'border-gray-600'}`}>
             <div class="flex items-center gap-3">
-              {#if (mintStatusActive || mintStatusChecking) && !showMintSuccess}<span aria-hidden="true" class="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-gray-600 border-t-emerald-400 motion-reduce:animate-none"></span>{/if}
+              {#if ((mintStatusActive && !continuationNeeded) || mintStatusChecking) && !showMintSuccess}<span aria-hidden="true" class="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-gray-600 border-t-emerald-400 motion-reduce:animate-none"></span>{/if}
               <h4 class="text-lg font-semibold" class:text-emerald-300={showMintSuccess}>{mintStatusTitle}</h4>
             </div>
             {#if showMintSuccess}
@@ -535,6 +542,9 @@
               <p class="mt-3 text-sm text-gray-300">Follow any wallet confirmations. We are waiting for this action’s result; do not submit another payment.</p>
             {:else if mintCheckFailed || legacyNeedsAttention || depositBlocked}
               <p class="mt-3 text-sm text-amber-300">The latest mint result could not be confirmed. Keep this request and its receipt. Check again reads its status; it does not submit a mint or payment.</p>
+            {:else if continuationNeeded}
+              <p class="mt-3 text-sm text-gray-300">{displayedPaymentPhase === 'Approved' ? 'Your wallet allowance is approved. This does not mean a processing payment was collected or ckSOL was minted.' : 'Your processing payment is funded. Continue this existing request without another payment; ckSOL mint completion is not confirmed.'}</p>
+              <p class="mt-2 text-sm font-medium text-amber-300">Select {continuationLabel} below. Status checks will not submit this request automatically.</p>
             {:else if preparingAnotherDeposit}
               <p class="mt-3 text-sm text-gray-300">Your previous mint receipt is retained below. Check processing costs and deposit detection before authorizing another mint.</p>
             {:else if cyclesRequestUnmatched || icpRequestUnmatched}
@@ -557,11 +567,11 @@
             <button class="mt-4 rounded-lg border border-gray-500 px-3 py-2 text-sm disabled:opacity-40" disabled={!owner || busy || icpBusy || refreshing || statusChecking} onclick={checkAgain}>Check again</button>
             <p class="mt-2 text-xs text-gray-400">Status checks never start a new payment or mint.</p>
           </section>
-          {#if !showMintSuccess}
+          {#if !showMintSuccess && !mintStatusActive && !continuationNeeded}
           <p class="mt-2 text-sm text-gray-300">Click the mint action below and follow any wallet confirmations. This is a deliberate action; sending SOL or checking its balance never starts a payment.</p>
           {/if}
           {#if owner && paymentMethod === 'icp'}
-            {#key epoch}<CksolIcpPaymentPanel bind:this={icpPanel} {owner} compact mintComplete={showMintSuccess} pollingActive={autoPolling} canMint={initialized && (fundsReceived||balanceUnavailable)} blocked={depositBlocked||blockingLegacy||minterPending||pendingPayment||unmatchedMintRequest}
+            {#key epoch}<CksolIcpPaymentPanel bind:this={icpPanel} {owner} compact mintComplete={showMintSuccess} pollingActive={autoPolling} canMint={initialized && (fundsReceived||balanceUnavailable)} blocked={depositBlocked||blockingLegacy||minterPending||pendingPayment||(unmatchedMintRequest&&!resumeIcpRequest)}
               onQuote={(q)=>icpCost=q} onReady={(ready)=>icpReady=ready} onBusy={icpBusyChanged} onActive={(active)=>icpPending=active} onReceipt={adoptIcpReceipt}
               onMintStart={()=>{mintActionStarted=true;mintRequestMode='icp';}} onProgress={observeIcpProgress}/>{/key}
             {#if !showMintSuccess && !icpPending && !fundsReceived && !balanceUnavailable}<p class="mt-3 text-sm text-gray-400">The mint action is waiting for a new SOL deposit meeting the minimum in step 2.</p>{/if}
