@@ -1,6 +1,6 @@
 {
-  "summary": "SEC18 liveverified695/696/1794583637373, unchangedbackend6428. SEC19correctedsourcee2a0122a/source-validationpacketf08aef77 queuednextfreshCodyslot; SafeNoEffectACKfindingclosedin source.128unique frontendchecks andboundedfrontend/accountingsourcechecks pass; nativeRust/Candid/PIC3unrun. No213deposit/liveguardchange.",
-  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair passed frontend checks and source review, including a corrected acknowledgement issue, and is next for a fresh backend validation slot. Deposits remain paused while those tests run and the separate release is prepared.",
+  "summary": "SEC18 progress UI is live and independently verified. SEC19 backend e2a0122a entered its first bounded offline native/Candid/PocketIC validation at 16:08:48Z under fresh allocation174c2752. Frontend128 focused checks and early source reviews pass. Native results are pending; production deposits remain paused, with no vault213 transaction.",
+  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair passed frontend checks and source review and is now running backend and recovery lifecycle tests. Deposits remain paused until validation passes and a separate release is approved and verified.",
   "glossary": [
     {
       "term": "Stability Pool",

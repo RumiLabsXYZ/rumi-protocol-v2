@@ -216,3 +216,7 @@ Exactab/version1794583637373 is live via known695/696, independentlyverified06a8
 ### SEC19 first-review correction and validation queue
 
 Accounting review found a SafeNoEffect ACK regression before any native validation; e2a0122a corrects it through the existing replayable cancellation fence, with unit andthirdexistingPocketICcase. Findingclosure source recheckPASS; frontendindependentreview no sourceblocker,128unique focusedchecks pass inclOisyclick/session. Correctedpushedf08aef77 runner17f2e07c supersedesoldunconsumed5c23/6dedpacket. Cody retainsnextslotpriorityaftercurrentownedclosure. Nativeunit/DID+bindings/oldservice/PIC3stillunrun; no live213deposit.
+
+### SEC19 first native validation started
+
+Fresh allocation 174c2752-147f-4475-99b0-f86aafcc1816 admitted the corrected e2a0122a source and f08aef77 packet. Ellis verified the exact pins and started the runner once at 2026-11-13T16:08:48Z. Scoped Rust, canonical Candid/bindings, old-service compatibility, source-matched Wasm and three PocketIC cases are pending; no retry, production mutation or financial action is authorized. Revision97 readback was a complete no-op before this start update.
