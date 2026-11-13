@@ -5,15 +5,15 @@
       "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "New user blocked by intentional accepted#508 hold from3b9e3787, retained in released00cf and approvedab. UI hardcodedfalse/APIearlyreject and backendlegacy+V2 unconditionalreject; state forbids AddMargin completion. Exact missing condition: confirmed pull may outlive callback and target may be liquidated before reconciliation; no safe recovery credit/liability path exists. Fresh certified6428/Candid match installed source linkage. Rowan actually started bounded source prep in reused isolated branch, no compile while SEC18 lane pending. Acceptance: exact owner/operation-bound atomic surviving-vault credit or durable accounted recovery/refund liability if removed; lostreply/replay/liquidation/auth/accounting/compatibility tests and independent review, then paired source enablement. No flagflip/bypass/financial/release action. Backend sourcecheckpoint5c23d82a pushed with exactretry/atomiccredit-or-heldliability, orderedsettlement+ACK and two new existing-harness PocketICcases (lostreply/dedup and targetclosure/exactreceipt/heldACKsurvival), allunrun. Optionalrecoveryview preservesolderclientsheldphase; no widenedresultvariant. Rootfrontendnotice/explicitACK/sessionguardintegration in progress. Fresh30min validation manifest6ded78e3 sentMerritt for ownCodygrant; no Rustcompile yet. Not live; no guardbypass or transaction.",
+      "evidenceText": "Accepted508 recovery gap restoration at pushed backendsourcee2a0122a. Confirmed exact pull credits matching livevault once or records owner/ledger-bound held liability; explicitACK preserves unpaidliability and orderedreplay. Early accountingreview foundSafeNoEffectACKregression; correctedwith existingcancellationfence andsource-recheckedPASS. Frontend128unique focusedchecks pass incl9decimalckSOLamount, no automaticrecoverypay/ACK, explicitnoticeACK andOisyclick/sessionguard; independentfrontendsourcereview no blocker. Nativeunit/Candidgeneration+oldservicesubtype and3filteredexistingPocketICcases UNRUN. Correctedfreshvalidationpacketf08aef77 supersedesunconsumed5c23/6ded; Codyqueuednextslot. No Rustcompile, liveguardchange or213transaction. Source target-removal integration useszero-debtclosure, not actualliquidation.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-recovery-diagnosis-20261113.md"
         },
         {
-          "title": "Exact source validation package for fresh capacity",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/6ded78e3/docs/operations/add-margin-validation-plan-20261113.md"
+          "title": "Corrected exact validation package for fresh capacity",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/f08aef77/docs/operations/add-margin-validation-plan-20261113.md"
         }
       ]
     },

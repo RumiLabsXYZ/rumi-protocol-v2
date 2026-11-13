@@ -1,6 +1,6 @@
 {
-  "summary": "SEC18 LIVE695/696/version1794583637373; full5220/5414 preserves5124old+96new/7sets, independent13public/certified/API/controllers/actualanonymouslayoutPASS, unchangedbackend6428/AddMarginhold. SEC19backend5c23pushed and optionalrecovery/ACKfrontendintegration underway; freshvalidationmanifest6ded78e3 submitted, Rusttests/Candid/PocketICunrun. No customerfinancialaction.",
-  "plainSummary": "The clearer ckSOL progress display is live and independently verified. The separate deposit repair now has a pushed backend candidate and focused recovery tests, with validation awaiting a fresh build slot. Collateral deposits remain paused until that repair passes checks and receives its own release approval.",
+  "summary": "SEC18 liveverified695/696/1794583637373, unchangedbackend6428. SEC19correctedsourcee2a0122a/source-validationpacketf08aef77 queuednextfreshCodyslot; SafeNoEffectACKfindingclosedin source.128unique frontendchecks andboundedfrontend/accountingsourcechecks pass; nativeRust/Candid/PIC3unrun. No213deposit/liveguardchange.",
+  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair passed frontend checks and source review, including a corrected acknowledgement issue, and is next for a fresh backend validation slot. Deposits remain paused while those tests run and the separate release is prepared.",
   "glossary": [
     {
       "term": "Stability Pool",

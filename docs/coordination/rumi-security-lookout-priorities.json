@@ -5,7 +5,7 @@
       "title": "Restore safe collateral top-ups to existing vaults",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Merritt/Cody issue fresh validation slot for pushed6ded78e3 runner4b65e55e at backendcheckpoint5c23d82a; run scopedunit/olddecode/Candidgenerated+subtype/twoexisting-harnessPocketIC cases. Ellis finishes frontendexplicitrecovery/ACK/sessiontests, then independentaccounting/securityreview and exactreleaseproposal. No production authority inferred.",
+      "nextAction": "Consume one fresh Cody allocation for correctedf08aef77 runner17f2e07c/backende2a0122a. Old5c23/6dedpacket staysunconsumed/superseded. Run essentialunit/Candid+oldservicecompat/source-matchedWasm/3PocketICcases;128frontendchecks andboundedsourcefindingclosure pass. Then integrationreview and exactreleaseproposal; no liveaction untilapproved.",
       "cardIds": [
         "SEC-19"
       ]
