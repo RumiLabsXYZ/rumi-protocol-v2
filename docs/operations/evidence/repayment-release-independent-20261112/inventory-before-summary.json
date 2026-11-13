@@ -1,0 +1,9 @@
+{
+  "checkedUtc": "2026-11-13T07:11:30.211Z",
+  "canister": "tcfua-yaaaa-aaaap-qrd7q-cai",
+  "stableDoubleRead": true,
+  "keys": 4824,
+  "encodings": 5018,
+  "fullInventorySha256": "46a45a509bde5e5d28fbf280b8c2136cf6b12c28f4100d7f25e49b2556c964a5",
+  "productionMutation": false
+}

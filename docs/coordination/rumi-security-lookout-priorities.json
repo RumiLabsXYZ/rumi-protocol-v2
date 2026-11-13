@@ -3,9 +3,9 @@
     {
       "id": "repayment-residual-forgiveness",
       "title": "Fix repayment residual forgiveness and accounting",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Approval answered. Dorian coordinates one fresh bounded build with Cody, freezes source-bound outputs, then executes preserved-state backend upgrade and additive frontend publication. Ellis independently verifies artifacts and live readbacks. No customer financial action.",
+      "status": "blocked",
+      "blockedReason": "Automatic approval review rejected Dorian-Cody coordination messages despite the original human release approval. One coordination-only confirmation is pending in Dorian\u2019s release chat; no build started.",
+      "nextAction": "Resolve only the direct-message permission rejection in the existing release chat, then obtain one fresh Cody allocation and execute the already-approved plan. Ellis retains independent frozen-artifact and live-verification ownership; do not retry or relay the rejected messages.",
       "cardIds": [
         "SEC-17"
       ]

@@ -1,6 +1,6 @@
 {
-  "summary": "SEC17 decision2d0ad23c approved for exact00cf550d. Dorian owns fresh Cody allocation, one bounded offline backend/frontend build, frozen output pins, stopped-state preservation, upgrade and additive UI publication; Ellis independently checks artifacts and live state/bytes/layout. Prior6backend+4stable+20frontend/Candid/two reviews PASS. No parallel build, customer financial action or reserve activation. Build/deployment not yet reported complete.",
-  "plainSummary": "Rob approved the repayment release. The release coordinator is preparing one controlled build and deployment, with independent checks of the artifacts, preserved balances and live interface. The code has passed focused tests and two reviews; deployment is not yet complete. No customer transaction is part of this work.",
+  "summary": "SEC17 release2d0ad23c/source00cf approved. Runner3db3a87a/producer ready, old740files preserved. Automaticreview rejected direct Dorian-Cody messaging despite originalhuman evidence; one coordination-only confirmation pending in Dorian chat. No build started. Ellis certifiedbefore730f/04e/controllers and stable4824keys/5018encodings verified. Source30focused tests/Candid/two reviews PASS. Approval answered; no rejected-route workaround or production change.",
+  "plainSummary": "The release is approved and prepared, but automatic approval review blocked the messages needed to coordinate the build. One messaging-only confirmation is waiting in the release chat. The live app is unchanged, and its existing files and controller settings have been verified and preserved.",
   "glossary": [
     {
       "term": "Stability Pool",

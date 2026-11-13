@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-17",
-      "state": "In progress",
+      "state": "Blocked",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
       "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
-      "evidenceText": "Implementation00cf550d; receipt2c217622. PASS:6backend residual/accounting/accrual/CBOR/replay tests,4stable rounding,20frontend/4suites, canonicalDID/bindings and source/prior-service compatibility. Two independent bounded reviews PASS; Cody independently verified both process closures and released slots. Stable preview/API floor/explicit-close mismatches corrected. Preservelegacy<=0.0005withdrawalexceptions/XRPguard. Failedunknown sourceproof only; no generalretryjournal. Requestedforgiveness is repeatable debtwriteoff<0.1 per eligible settlement; no aggregatecap. Rob approved exact decision2d0ad23c in CTO chat; Dorian owns fresh Cody-coordinated bounded build, preservation, backend upgrade and additive UI publication; Ellis independently verifies frozen artifacts and final production; no new build/install/financialaction.",
+      "evidenceText": "Rob approved exact release decision2d0ad23c/source00cf550d; approval remains answered. Dorian prepared and pushed runner3db3a87a and preserved all740old frontend files. Build NOT started: automatic approval review rejected direct Dorian-Cody coordination despite original human evidence; no retry or alternate route. Dorian has ONE coordination-only confirmation pending in release chat. Ellis independently verified certified backend730f/frontend04e/controllers and stable double-read4824keys/5018encodings. Source30focused tests/Candid/two reviews PASS. No build/deploy/customer financial action; existing production unchanged.",
       "evidenceLinks": [
         {
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/repayment-residual-forgiveness-20261112/docs/operations/repayment-residual-correction-result-20261112.md",
