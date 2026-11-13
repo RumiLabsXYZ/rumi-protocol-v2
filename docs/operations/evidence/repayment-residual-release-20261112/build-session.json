@@ -1,0 +1,22 @@
+{
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "command": [
+    "python3",
+    "-I",
+    "/private/tmp/rumi-sec17-release-20261112/build-steps.py"
+  ],
+  "start": "2026-11-13T07:43:39.004547+00:00",
+  "allocationSha256": "203b07efc67dd89512ae30700e0d6b7ce70cd8345b68bd34ea1aae3070d132f4",
+  "allocationId": "dadf21c0-c017-4256-b1d9-e238effc58c1",
+  "initialFreeBytes": 67895070720,
+  "pgid": 69427,
+  "end": "2026-11-13T07:46:46.342601+00:00",
+  "exit": 0,
+  "stopReason": null,
+  "exception": null,
+  "peakOwnedRssBytes": 2359361536,
+  "minFreeBytes": 67182686208,
+  "physicalGrowthBytes": 712384512,
+  "allOwnedClosed": true,
+  "seconds": 187.336608374957
+}

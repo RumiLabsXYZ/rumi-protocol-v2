@@ -1,0 +1,23 @@
+{
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "deployed_base": "312ebe036a7651365c293294bedc8cb3a6585179",
+  "code_section_bytes": 8889183,
+  "project_guard_bytes": 10223616,
+  "files": [
+    {
+      "name": "backend-raw.wasm",
+      "bytes": 14139812,
+      "sha256": "118c2011a00db7b09b893e56da3e65a16f3c8b7a889a7a11b4c1f7f4998717b0"
+    },
+    {
+      "name": "backend-optimized.wasm",
+      "bytes": 9824619,
+      "sha256": "cd582d70078e0591cd14c5207f587aa6bcb674f633ea3e364c9c5950e2c9fe60"
+    },
+    {
+      "name": "backend-optimized.wasm.gz",
+      "bytes": 2380549,
+      "sha256": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+from pathlib import Path
+import subprocess,json,shutil,hashlib
+p=Path('/private/tmp/rumi-sec17-release-20261112');src=Path('/Users/robertripley/coding/rumi-protocol-v2/.worktrees/xrp-customer-withdrawal-address-20261106');expected='00cf550d3fcb97870cd4643883d5abd8900fa1a2'
+def sha(f):return hashlib.sha256(f.read_bytes()).hexdigest()
+b=json.loads((p/'build-session.json').read_text());assert b['exit']==0 and b['allOwnedClosed'] and not b['exception'] and not b['stopReason'];assert b['source']==expected
+assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=src).decode().strip()==expected
+assert not (p/'frozen-dist').exists();shutil.copytree(src/'src/vault_frontend/dist',p/'frozen-dist')
+shutil.copy2(p/'frontend-live-inventory.json',p/'frontend-inventory-before.json')
+subprocess.run(['python3',str(p/'verify-code-size.py')],cwd=src,check=True)
+subprocess.run(['node',str(p/'verify-artifact.mjs')],cwd=src,check=True)
+subprocess.run(['node',str(p/'compare-frontend.mjs')],cwd=src,check=True)
+c=json.loads((p/'frontend-comparison.json').read_text());v=json.loads((p/'frozen-dist/_app/version.json').read_text())['version'];a=json.loads((p/'artifact-verification.json').read_text());summary=c['summary']
+assert summary['deletes']==summary['clears']==summary['unsets']==summary['existingPropertyChanges']==summary['propertyTemplateAmbiguities']==0
+assert all(x['key'].startswith('/_app/immutable/') for x in c['create'])
+existing=[x for x in c['setEncodings'] if x['reason']!='new key'];assert len(existing)==7;assert {x['key'] for x in existing}=={'/index.html','/index.html.br','/index.html.gz','/_app/version.json','/_app/version.json.br','/_app/version.json.gz'}
+pins={'buildSource':expected,'acceptedCode':expected,'cksolSource':'94ffd5d51b7d12c79f7432e0361bc1654ef6bb5c','vault51Lineage':'097bf775d3181de5936058ef01e21704d8cfc0ab','backendModule':sha(p/'backend-optimized.wasm.gz'),'previousBackendModule':'730f54713dca1938c40b661ef6bd6ddc23555d92ca4c8e1feca282e3a33f8cf9','backendCandidSha256':a['canonicalCandidSha256'],'frontendModule':'04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62','identityPrincipal':'fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae','newKeys':summary['newKeys'],'totalSets':summary['plannedSetEncodings'],'payloadBytes':summary['plannedPayloadBytes'],'frontendVersion':str(v),'publicationApprovedByThisPreparation':True,'publicationExecuted':False,'backendMutationIncluded':True,'walletOrFinancialActionIncluded':False,'scope':'Exact00cf SEC17 paired backend upgrade and additive frontend publication under2d0ad23c; preserve existing Vault51 automatic authority; no manual customer or financial transaction','humanInstructionMessage':'01a1d3ba-ec02-75d1-a53f-7e0c6df0b64a','buildApprovalMessage':'01a1d3ba-ec02-75d1-a53f-7e0c6df0b64a','buildDecisionArtifact':'2d0ad23c84e4be3728286d5aad048fcce295b4fa','buildDecisionSha256':'ddd4fe41d9f99ab2b9707da0034760ff6802eac2acb907d1ea226b55260459ec','backendApiComparison':'embedded exact canonical, all methods exported; prior-service compatibility source check retained'}
+for field,name in [('manifestSha256','frontend-manifest.json'),('comparisonSha256','frontend-comparison.json'),('inventorySha256','frontend-inventory-before.json'),('publisherSha256','publish-frontend.mjs'),('readerSha256','read-frontend-inventory.mjs'),('verifierSha256','verify-publication.mjs'),('domainVerifierSha256','verify-primary-domain.mjs'),('idlSha256','frontend-live-idl.mjs'),('frontendCandidSha256','frontend-live.did'),('comparatorSha256','compare-frontend.mjs'),('frontendStatusBaselineSha256','frontend-status-before.json'),('commitPermissionBaselineSha256','permissions-commit-before.json'),('preparePermissionBaselineSha256','permissions-prepare-before.json')]:pins[field]=sha(p/name)
+(p/'publication-pins.json').write_text(json.dumps(pins,indent=2)+'\n')
+subprocess.run(['node',str(p/'verify-plan.mjs')],cwd=src,check=True)
+print(json.dumps({'version':v,'newKeys':pins['newKeys'],'existingSets':7,'newBackend':pins['backendModule'],'pinsSha256':sha(p/'publication-pins.json')}))
