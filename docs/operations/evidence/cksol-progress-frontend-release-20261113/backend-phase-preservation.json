@@ -1,0 +1,17 @@
+{
+  "guards": [
+    {
+      "phase": "stage",
+      "module": "0x6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7",
+      "status": "Running",
+      "settingsAndControllersMatchBaseline": true
+    },
+    {
+      "phase": "activate",
+      "module": "0x6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7",
+      "status": "Running",
+      "settingsAndControllersMatchBaseline": true
+    }
+  ],
+  "backendMutation": false
+}

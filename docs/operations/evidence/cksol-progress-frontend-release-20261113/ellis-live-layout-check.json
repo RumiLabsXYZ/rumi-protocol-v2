@@ -1,0 +1,23 @@
+{
+  "checkedUtc": "2026-11-13T15:45:20Z",
+  "environment": "Actual anonymous public /solana in existing Playwright runtime",
+  "viewports": [
+    {
+      "width": 1280,
+      "height": 900
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "mintStatusPanelVisible": true,
+  "horizontalOverflow": false,
+  "rumiErrorOverlay": false,
+  "walletOrFinancialAction": false,
+  "limits": [
+    "Production anonymous composition only; approved88 synthetic tests/mockQA cover request/completion states without a new live mint.",
+    "Pre-existing token-logo canister_not_found console errors retained; not a clean console claim.",
+    "No customer stored state was reset or acknowledged."
+  ]
+}

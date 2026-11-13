@@ -1,0 +1,27 @@
+{
+  "source": "ab44413da1a8b394245cd7734da4124a2335621b",
+  "frontendVersion": "1794583637373",
+  "backendModuleUnchanged": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7",
+  "buildSeconds": 22.347923875087872,
+  "nativeExit": 0,
+  "ownedClosureVerified": true,
+  "stageBatch": "695",
+  "activationBatch": "696",
+  "finalKeys": 5220,
+  "finalEncodings": 5414,
+  "priorKeysPreserved": 5124,
+  "newImmutableKeys": 96,
+  "existingContentSets": 7,
+  "ownServedChecks": {
+    "stage": 98,
+    "final": 9,
+    "primary": 5
+  },
+  "readOnlyPreflightFailure": "ENOTFOUND icp-api.io before publisher launch; journal absent, no batch/write",
+  "readOnlyPreflightRetry": 1,
+  "mutationRetries": 0,
+  "backendLifecycleOrGuardChange": false,
+  "manualFinancialAction": false,
+  "actualCustomerMintVerified": false,
+  "independentFinal": "PASS06a85749:13primaryresponses/fullstableinventory/certifiedmodulesAPIcontrollers/anonymous1280desktop390mobile"
+}
