@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeSafeIcusdRepayMax, repaymentPreview } from './repayLimits';
+import { computeSafeIcusdRepayMax, repaymentPreview, normalizedRepaymentE8s } from './repayLimits';
 
 describe('repayment authorization and settlement estimates', () => {
   it('uses the spendable balance without increasing a near-full payment', () => {
@@ -38,5 +38,13 @@ describe('claim repayment maximum', () => {
     expect(claimRepayMaximum(0.05, 0.055, 0.05)).toBe(0.055);
     expect(claimRepayMaximum(0.05, 0.03, 0.02)).toBe(0.02);
     expect(claimRepayMaximum(0, 1, 0)).toBe(0);
+  });
+});
+
+describe('stable repayment precision', () => {
+  it('retains the exact threshold after stable truncation, unlike icUSD', () => {
+    expect(repaymentPreview(110_000_000n, normalizedRepaymentE8s(100_000_001n, true)).remainingE8s).toBe(10_000_000n);
+    expect(repaymentPreview(110_000_000n, normalizedRepaymentE8s(100_000_001n)).forgivenE8s).toBe(9_999_999n);
+    expect(normalizedRepaymentE8s(5_000_001n, true)).toBeLessThan(5_000_001n);
   });
 });

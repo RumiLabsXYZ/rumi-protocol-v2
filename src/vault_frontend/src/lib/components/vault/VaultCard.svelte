@@ -19,7 +19,7 @@
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
-  import { computeSafeIcusdRepayMax, claimRepayMaximum, MIN_REPAY_E8S, repaymentPreview } from '$lib/utils/repayLimits';
+  import { computeSafeIcusdRepayMax, claimRepayMaximum, MIN_REPAY_E8S, repaymentPreview, normalizedRepaymentE8s } from '$lib/utils/repayLimits';
   import { getVaultCrTextColor, VAULT_CR_DANGER } from '$lib/utils/vaultHealth';
   import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
@@ -553,9 +553,13 @@
   $: isWithdrawAndClose = canClose && isMaxWithdraw;
 
   const MIN_REPAY = Number(MIN_REPAY_E8S) / E8S;
+  $: repayAuthorizedE8s = normalizedRepaymentE8s(
+    BigInt(Math.max(0, Math.floor((Number(repayAmount) || 0) * E8S))), isCkStableRepay,
+  );
+  $: claimFullRepaySelected = isRedemptionClaim && repayAuthorizedE8s >= BigInt(Math.max(0, Math.ceil(tickingDebt * E8S)));
   $: repaySettlementEstimate = repaymentPreview(
     BigInt(Math.max(0, Math.ceil(tickingDebt * E8S))),
-    BigInt(Math.max(0, Math.floor((Number(repayAmount) || 0) * E8S))),
+    repayAuthorizedE8s,
   );
 
   // Detect if repay amount is the full debt (max). Only icUSD-denominated
@@ -591,7 +595,7 @@
       fullIcusdRepayWithCollateral
       && (isNativeXrp || closeOnFullRepay || !canKeepVaultOpenOnFullRepay);
 
-  $: repayPreviewEligible = !repayOverMax && (Number(repayAmount) >= MIN_REPAY || isRepayAndClose || (isRedemptionClaim && Number(repayAmount) >= tickingDebt));
+  $: repayPreviewEligible = !repayOverMax && (Number(repayAmount) >= MIN_REPAY || isRepayAndClose || claimFullRepaySelected);
 
   function clearMessages() { /* toasts auto-dismiss */ }
 
@@ -779,7 +783,7 @@
     // The fixed 0.1 icUSD floor still applies to partial repays (anti-spam guarantee on
     // the backend). The compound `repay_and_close_vault` path bypasses it so
     // stuck-zone vaults can be cleared — match that here.
-    if (!isRepayAndClose && !(isRedemptionClaim && amount >= tickingDebt) && amount < MIN_REPAY) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
+    if (!isRepayAndClose && !claimFullRepaySelected && amount < MIN_REPAY) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
     if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {

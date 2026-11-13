@@ -1,3 +1,4 @@
+import { MIN_REPAY_E8S } from '../../utils/repayLimits';
 import { decodeNicpClaim } from '../../utils/nicpClaim';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
@@ -1378,10 +1379,10 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         };
       }
 
-      if (vaultId !== 51 && icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
+      if (vaultId !== 51 && Math.floor(icusdAmount * E8S) < Number(MIN_REPAY_E8S)) {
         return {
           success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
+          error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S} icUSD`
         };
       }
 
@@ -1513,11 +1514,9 @@ static async repayAndCloseVault(vaultId: number, icusdAmount: number): Promise<V
         };
       }
 
-      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
-        return {
-          success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
-        };
+      // Explicit close retains the backend's subminimum-debt recovery path.
+      if (Math.floor(icusdAmount * E8S) < 1) {
+        return { success: false, error: 'Repayment must be at least one icUSD e8.' };
       }
 
       const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
@@ -1643,10 +1642,10 @@ static async repayToVaultWithStable(
         };
       }
 
-      if (vaultId !== 51 && amount * E8S < MIN_ICUSD_AMOUNT) {
+      if (vaultId !== 51 && Math.floor(amount * E8S) < Number(MIN_REPAY_E8S)) {
         return {
           success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S}`
+          error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S}`
         };
       }
 

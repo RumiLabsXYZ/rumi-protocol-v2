@@ -12,6 +12,12 @@ export function computeSafeIcusdRepayMax(
   return spendableE8s < debtE8s ? spendableE8s : debtE8s;
 }
 
+/** Match the backend's stable-token authorization precision before debt capping. */
+export function normalizedRepaymentE8s(authorizedE8s: bigint, stable = false): bigint {
+  const amount = authorizedE8s > 0n ? authorizedE8s : 0n;
+  return stable ? amount - amount % 100n : amount;
+}
+
 /** Estimate settlement after a successful payment; accrued interest can change it. */
 export function repaymentPreview(debtE8s: bigint, authorizedE8s: bigint) {
   const debt = debtE8s > 0n ? debtE8s : 0n;
