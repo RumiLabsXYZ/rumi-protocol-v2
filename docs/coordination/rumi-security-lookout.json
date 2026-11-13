@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis integration/visual QA; Iris UI implementation; independent frontend evidence review",
       "scope": "Reassuring request-bound ckSOL progress and persistent mint confirmation",
-      "evidenceText": "New source-only UX work, separate from frozen SEC17. Current screenshot shows completed mint with waiting-for-new-deposit copy dominating; no new stuck mint inferred. Trace confirms Approving=wallet authorization, Starting=submission pending, DepositPending=backend dispatch, exact-ID Queued/Swept/Finalized=minter processing, exact-ID Minted=confirmation. Complete/RefundReady are payment evidence only. Iris implements scoped status panel/synthetic regressions; Ellis integrates and verifies desktop/mobile with mocked services. Preserve owner/request guards, polling/backoff/background pause and no financial retry. No mint/wallet/reserve/deployment action.",
+      "evidenceText": "Separate UI candidate0ca671f5 passed73focused page/panel/polling tests. Actual local compiled page with synthetic services verified desktop confirmation, mobile queued progress, receipt opening, Startanotherdeposit, networkfailure/resume\u2192Minted, zero financial calls and no overflow/overlay. Review found queued-versus-unknown display mismatch and corrected it without weakening holds; refining explicit Approved/Funded continuation guidance before final check/review. Source-only4UI/testfiles; no backend/generated/dependency changes, realmint, walletaction or deployment. Not bundled into frozen SEC17.",
       "evidenceLinks": [
         {
           "title": "Scoped ckSOL progress contract",
@@ -15,10 +15,10 @@
     },
     {
       "id": "SEC-17",
-      "state": "Blocked",
+      "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend; Iris independent accounting",
       "scope": "Forgive residual debt strictly below0.1 only after successful authorized repayment",
-      "evidenceText": "Rob approved exact release decision2d0ad23c/source00cf550d; approval remains answered. Dorian prepared and pushed runner3db3a87a and preserved all740old frontend files. Build NOT started: automatic approval review rejected direct Dorian-Cody coordination despite original human evidence; no retry or alternate route. Dorian has ONE coordination-only confirmation pending in release chat. Ellis independently verified certified backend730f/frontend04e/controllers and stable double-read4824keys/5018encodings. Source30focused tests/Candid/two reviews PASS. No build/deploy/customer financial action; existing production unchanged.",
+      "evidenceText": "Approved SEC17 exactsource00cf/decision2d0ad23c: Dorian received one fresh Cody allocation and STARTED the bounded sequential offline backend/frontend/auth build. No production write yet. Rejected outgoing coordination payloads remain held, not replayed; incoming allocation delivery separately authorized. Ellis independent baseline certified730f/04e/controllers and stable4824keys/5018encodings retained; frozen output verification follows native completion. Prior30focused tests/Candid/two reviews PASS. SEC18 UI changes explicitly excluded.",
       "evidenceLinks": [
         {
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/repayment-residual-forgiveness-20261112/docs/operations/repayment-residual-correction-result-20261112.md",
