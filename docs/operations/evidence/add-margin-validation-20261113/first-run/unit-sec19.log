@@ -1,0 +1,1001 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-swap-support-cleanup-20261111/src/xrc_demo/xrc_mock/Cargo.toml
+workspace: /private/tmp/rumi-swap-support-cleanup-20261111/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-swap-support-cleanup-20261111/src/monad_rpc_mock/Cargo.toml
+workspace: /private/tmp/rumi-swap-support-cleanup-20261111/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-swap-support-cleanup-20261111/src/sol_rpc_mock/Cargo.toml
+workspace: /private/tmp/rumi-swap-support-cleanup-20261111/Cargo.toml
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.14
+   Compiling quote v1.0.45
+   Compiling syn v2.0.117
+   Compiling libc v0.2.169
+   Compiling cfg-if v1.0.0
+   Compiling serde_derive v1.0.217
+   Compiling serde v1.0.217
+   Compiling autocfg v1.4.0
+   Compiling version_check v0.9.5
+   Compiling memchr v2.7.4
+   Compiling typenum v1.17.0
+   Compiling byteorder v1.5.0
+   Compiling libm v0.2.11
+   Compiling zeroize_derive v1.4.2
+   Compiling zeroize v1.8.1
+   Compiling either v1.13.0
+   Compiling num-traits v0.2.19
+   Compiling spin v0.9.8
+   Compiling subtle v2.6.1
+   Compiling shlex v1.3.0
+   Compiling jobserver v0.1.32
+   Compiling cc v1.2.9
+   Compiling generic-array v0.14.7
+   Compiling const-oid v0.9.6
+   Compiling lazy_static v1.5.0
+   Compiling cpufeatures v0.2.16
+   Compiling crypto-common v0.1.6
+   Compiling block-buffer v0.10.4
+   Compiling anyhow v1.0.95
+   Compiling digest v0.10.7
+   Compiling getrandom v0.2.15
+   Compiling thiserror v1.0.69
+   Compiling thiserror-impl v1.0.69
+   Compiling itoa v1.0.14
+   Compiling once_cell v1.20.2
+   Compiling syn v1.0.109
+   Compiling sha2 v0.10.8
+   Compiling num-integer v0.1.46
+   Compiling rustversion v1.0.19
+   Compiling crc32fast v1.4.2
+   Compiling bytes v1.9.0
+   Compiling leb128 v0.2.5
+   Compiling paste v1.0.15
+   Compiling data-encoding v2.7.0
+   Compiling psm v0.1.24
+   Compiling hex v0.4.3
+   Compiling arbitrary v1.4.1
+   Compiling stacker v0.1.17
+   Compiling unicode-width v0.1.14
+   Compiling binread_derive v2.1.0
+   Compiling typed-arena v2.0.2
+   Compiling arrayvec v0.5.2
+   Compiling pretty v0.12.3
+   Compiling binread v2.2.0
+   Compiling num-bigint v0.4.6
+   Compiling candid_derive v0.6.6
+   Compiling heck v0.5.0
+   Compiling serde_bytes v0.11.15
+   Compiling ryu v1.0.18
+   Compiling serde_json v1.0.135
+   Compiling ic_principal v0.1.1
+   Compiling candid v0.10.12
+   Compiling itertools v0.13.0
+   Compiling prost-derive v0.13.4
+   Compiling rand_core v0.6.4
+   Compiling zerocopy-derive v0.7.35
+   Compiling slog v2.7.0
+   Compiling zerocopy v0.7.35
+   Compiling erased-serde v0.3.31
+   Compiling fnv v1.0.7
+   Compiling prost v0.13.4
+   Compiling strum_macros v0.26.4
+   Compiling strum v0.26.3
+   Compiling smallvec v1.13.2
+   Compiling bincode v1.3.3
+   Compiling ic-protobuf v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-sha2 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling thiserror v2.0.18
+   Compiling utf8-width v0.1.7
+   Compiling byte-unit v4.0.19
+   Compiling ic-crypto-sha2 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling phantom_newtype v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling thiserror-impl v2.0.18
+   Compiling unicode-segmentation v1.12.0
+   Compiling convert_case v0.6.0
+   Compiling parking_lot_core v0.9.10
+   Compiling ppv-lite86 v0.2.20
+   Compiling lock_api v0.4.12
+   Compiling yansi v1.0.1
+   Compiling convert_case v0.4.0
+   Compiling diff v0.1.13
+   Compiling pretty_assertions v1.4.1
+   Compiling comparable_derive v0.5.5
+   Compiling comparable_helper v0.5.5
+   Compiling scopeguard v1.2.0
+   Compiling comparable v0.5.5
+   Compiling pin-project-lite v0.2.16
+   Compiling ic-base-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling half v1.8.3
+   Compiling equivalent v1.0.1
+   Compiling arrayvec v0.7.6
+   Compiling serde_cbor v0.11.2
+   Compiling scoped_threadpool v0.1.9
+   Compiling core-foundation-sys v0.8.7
+   Compiling ic-utils v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling base64 v0.13.1
+   Compiling ic-error-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling parking_lot v0.12.3
+   Compiling ic-btc-interface v0.2.2
+   Compiling bitflags v2.8.0
+   Compiling ic-btc-replica-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling time-core v0.1.2
+   Compiling num-conv v0.1.0
+   Compiling powerfmt v0.2.0
+   Compiling ident_case v1.0.1
+   Compiling strsim v0.10.0
+   Compiling darling_core v0.13.4
+   Compiling deranged v0.3.11
+   Compiling time-macros v0.2.19
+   Compiling ic-management-canister-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-tree-hash v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling time v0.3.37
+   Compiling darling_macro v0.13.4
+   Compiling ic-limits v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling darling v0.13.4
+   Compiling futures-core v0.3.31
+   Compiling log v0.4.25
+   Compiling serde_with_macros v1.5.2
+   Compiling iana-time-zone v0.1.61
+   Compiling ic-validate-eq-derive v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling aho-corasick v1.1.3
+   Compiling maplit v1.0.2
+   Compiling ic-validate-eq v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling chrono v0.4.39
+   Compiling serde_with v1.14.0
+   Compiling thousands v0.2.0
+   Compiling ic-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling slab v0.4.9
+   Compiling foldhash v0.1.4
+   Compiling futures-sink v0.3.31
+   Compiling hashbrown v0.15.2
+   Compiling futures-channel v0.3.31
+   Compiling mio v1.0.3
+   Compiling signal-hook-registry v1.4.2
+   Compiling socket2 v0.5.8
+   Compiling futures-macro v0.3.31
+   Compiling tokio-macros v2.5.0
+   Compiling futures-task v0.3.31
+   Compiling pin-utils v0.1.0
+   Compiling futures-io v0.3.31
+   Compiling futures-util v0.3.31
+   Compiling tokio v1.43.0
+   Compiling indexmap v2.7.1
+   Compiling regex-syntax v0.8.5
+   Compiling regex-automata v0.4.9
+   Compiling tracing-core v0.1.33
+   Compiling regex v1.11.1
+   Compiling errno v0.3.10
+   Compiling tracing-attributes v0.1.28
+   Compiling tracing v0.1.41
+   Compiling fastrand v2.3.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling tokio-util v0.7.13
+   Compiling http v1.2.0
+   Compiling ff v0.13.0
+   Compiling fixedbitset v0.4.2
+   Compiling petgraph v0.6.5
+   Compiling group v0.13.0
+   Compiling async-trait v0.1.85
+   Compiling tower-service v0.3.3
+   Compiling rustix v0.38.43
+   Compiling http-body v1.0.1
+   Compiling percent-encoding v2.3.1
+   Compiling prettyplease v0.2.29
+   Compiling itertools v0.12.1
+   Compiling tower-layer v0.3.3
+   Compiling httparse v1.9.5
+   Compiling tempfile v3.15.0
+   Compiling sync_wrapper v1.0.2
+   Compiling atomic-waker v1.1.2
+   Compiling try-lock v0.2.5
+   Compiling bitflags v1.3.2
+   Compiling multimap v0.10.0
+   Compiling want v0.3.1
+   Compiling h2 v0.4.7
+   Compiling hdrhistogram v7.5.4
+   Compiling indexmap v1.9.3
+   Compiling httpdate v1.0.3
+   Compiling mime v0.3.17
+   Compiling hyper v1.5.2
+   Compiling tower v0.5.2
+   Compiling hashbrown v0.12.3
+   Compiling hyper-util v0.1.10
+   Compiling futures-executor v0.3.31
+   Compiling base64 v0.22.1
+   Compiling form_urlencoded v1.2.1
+   Compiling http-body-util v0.1.2
+   Compiling prost-types v0.13.4
+   Compiling crossbeam-channel v0.5.14
+   Compiling pin-project-internal v1.1.8
+   Compiling base64ct v1.6.0
+   Compiling pem-rfc7468 v0.7.0
+   Compiling pin-project v1.1.8
+   Compiling prost-build v0.13.4
+   Compiling serde_urlencoded v0.7.1
+   Compiling thread_local v1.1.8
+   Compiling memoffset v0.6.5
+   Compiling tonic-build v0.12.3
+   Compiling der v0.7.9
+   Compiling futures v0.3.31
+   Compiling dirs-sys-next v0.1.2
+   Compiling dirs-next v2.0.0
+   Compiling spki v0.7.3
+   Compiling axum-core v0.4.5
+   Compiling tokio-stream v0.1.17
+   Compiling serde_path_to_error v0.1.16
+   Compiling ahash v0.8.11
+   Compiling async-stream-impl v0.3.6
+   Compiling matchit v0.7.3
+   Compiling axum v0.7.9
+   Compiling async-stream v0.3.6
+   Compiling nix v0.24.3
+   Compiling pkcs8 v0.10.2
+   Compiling term v0.7.0
+   Compiling tower v0.4.13
+   Compiling hyper-timeout v0.5.2
+   Compiling ucd-trie v0.1.7
+   Compiling allocator-api2 v0.2.21
+   Compiling wsl v0.1.0
+   Compiling ic-sys v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling pest v2.7.15
+   Compiling tonic v0.12.3
+   Compiling is-terminal v0.4.13
+   Compiling protobuf v2.28.0
+   Compiling pest_meta v2.7.15
+   Compiling ic-adapter-metrics-service v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling synstructure v0.13.1
+   Compiling prometheus v0.13.4
+   Compiling semver v1.0.25
+   Compiling pest_generator v2.7.15
+   Compiling crossbeam-epoch v0.9.18
+   Compiling ic-registry-subnet-type v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling minimal-lexical v0.2.1
+   Compiling crossbeam-deque v0.8.6
+   Compiling pest_derive v2.7.15
+   Compiling ic-http-endpoints-async-utils v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling signature v2.2.0
+   Compiling slog-async v2.8.0
+   Compiling rayon-core v1.12.1
+   Compiling ic-adapter-metrics-client v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rustc_version v0.4.1
+   Compiling json5 v0.4.1
+   Compiling hashbrown v0.14.5
+   Compiling tokio-metrics v0.4.0
+   Compiling take_mut v0.2.2
+   Compiling arc-swap v1.7.1
+   Compiling slog-scope v4.4.0
+   Compiling ic-metrics v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-config v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling curve25519-dalek v4.1.3
+   Compiling slog-term v2.9.1
+   Compiling slog-json v2.6.1
+   Compiling hmac v0.12.1
+   Compiling ic-logger v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rayon v1.10.0
+   Compiling ic-crypto-interfaces-sig-verification v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-registry-provisional-whitelist v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-wasm-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-interfaces-state-manager v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-interfaces v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling displaydoc v0.2.5
+   Compiling simple_asn1 v0.6.3
+   Compiling static_assertions v1.1.0
+   Compiling base16ct v0.2.0
+   Compiling sec1 v0.7.3
+   Compiling crypto-bigint v0.5.5
+   Compiling keccak v0.1.5
+   Compiling ic-crypto-secrets-containers v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling elliptic-curve v0.13.8
+   Compiling ic-registry-subnet-features v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-registry-routing-table v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rfc6979 v0.4.0
+   Compiling pem v1.1.1
+   Compiling uuid v1.12.0
+   Compiling ecdsa v0.16.9
+   Compiling pairing v0.23.0
+   Compiling ic-crypto-internal-seed v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rustls-pki-types v1.10.1
+   Compiling ic_bls12_381 v0.10.0
+   Compiling ring v0.17.8
+   Compiling ic-crypto-internal-bls12-381-type v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling merlin v3.0.0
+   Compiling ic-crypto-internal-basic-sig-der-utils v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ed25519 v2.2.3
+   Compiling num-iter v0.1.45
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling regex-syntax v0.6.29
+   Compiling alloc-stdlib v0.2.2
+   Compiling ed25519-dalek v2.1.1
+   Compiling hkdf v0.12.4
+   Compiling untrusted v0.9.0
+   Compiling anstyle v1.0.10
+   Compiling ic-crypto-ed25519 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling brotli-decompressor v4.0.1
+   Compiling k256 v0.13.4
+   Compiling primeorder v0.13.6
+   Compiling nom v7.1.3
+   Compiling ic-certification-version v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling cvt v0.1.2
+   Compiling bit-vec v0.6.3
+   Compiling ic-replicated-state v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rusticata-macros v4.1.0
+   Compiling p256 v0.13.2
+   Compiling brotli v7.0.0
+   Compiling asn1-rs-derive v0.5.1
+   Compiling instant v0.1.13
+   Compiling asn1-rs-impl v0.2.0
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v0.2.6
+   Compiling asn1-rs v0.6.2
+   Compiling cached v0.49.3
+   Compiling oid-registry v0.7.1
+   Compiling rustls v0.23.21
+   Compiling colorchoice v1.0.3
+   Compiling anstyle-query v1.1.2
+   Compiling is_terminal_polyfill v1.70.1
+   Compiling anstream v0.6.18
+   Compiling ic-crypto-internal-threshold-sig-bls12381 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rustls-webpki v0.102.8
+   Compiling regex-automata v0.1.10
+   Compiling stable_deref_trait v1.2.0
+   Compiling clap_lex v0.7.4
+   Compiling overload v0.1.1
+   Compiling num-bigint-dig v0.8.4
+   Compiling strsim v0.11.1
+   Compiling clap_builder v4.5.27
+   Compiling nu-ansi-term v0.46.0
+   Compiling matchers v0.1.0
+   Compiling der-parser v9.0.0
+   Compiling ic-crypto-utils-threshold-sig-der v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling tracing-serde v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling ic-interfaces-registry v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling tree-deserializer v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling clap_derive v4.5.24
+   Compiling sharded-slab v0.1.7
+   Compiling tracing-subscriber v0.3.19
+   Compiling clap v4.5.27
+   Compiling x509-parser v0.16.0
+   Compiling ic-crypto-utils-threshold-sig v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-secp256k1 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-basic-sig-ed25519 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling pkcs1 v0.7.5
+   Compiling ic-registry-common-proto v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rsa v0.9.7
+   Compiling ic-certification v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-ecdsa-secp256r1 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-registry-keys v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-registry-client-helpers v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-basic-sig-ecdsa-secp256r1 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-basic-sig-iccsa v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-basic-sig-rsa-pkcs1 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling gimli v0.31.1
+   Compiling glob v0.3.2
+   Compiling clang-sys v1.8.1
+   Compiling fe-derive v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-basic-sig-cose v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-iccsa v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-basic-sig-ecdsa-secp256k1 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling sha3 v0.10.8
+   Compiling zerofrom-derive v0.1.6
+   Compiling opentelemetry_api v0.18.0
+   Compiling ic-crypto-internal-hmac v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling hex-literal v0.4.1
+   Compiling ic-crypto-internal-threshold-sig-canister-threshold-sig v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling opentelemetry_sdk v0.18.0
+   Compiling zerofrom v0.1.6
+   Compiling ic-sha3 v1.0.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-standalone-sig-verifier v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-tls-interfaces v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling enum-ordinalize v3.1.15
+   Compiling yoke-derive v0.8.0
+   Compiling object v0.36.7
+   Compiling cranelift-isle v0.115.1
+   Compiling pkg-config v0.3.31
+   Compiling yoke v0.8.0
+   Compiling educe v0.4.23
+   Compiling ic-crypto-internal-bls12-381-vetkd v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling opentelemetry v0.18.0
+   Compiling bumpalo v3.16.0
+   Compiling pem v3.0.4
+   Compiling yasna v0.5.2
+   Compiling cranelift-bitset v0.115.1
+   Compiling cranelift-codegen-shared v0.115.1
+   Compiling target-lexicon v0.12.16
+   Compiling cranelift-codegen-meta v0.115.1
+   Compiling cranelift-entity v0.115.1
+   Compiling rcgen v0.13.2
+   Compiling tracing-opentelemetry v0.18.0
+   Compiling tokio-serde v0.8.0
+   Compiling ic-crypto-tls-cert-validation v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-internal-multi-sig-bls12381 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling tarpc-plugins v0.13.1
+   Compiling libloading v0.8.6
+   Compiling zerovec-derive v0.11.1
+   Compiling humantime v2.1.0
+   Compiling tarpc v0.34.0
+   Compiling zerovec v0.11.4
+   Compiling ic-crypto-node-key-validation v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling cranelift-codegen v0.115.1
+   Compiling ic-crypto-internal-tls v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling cexpr v0.6.0
+   Compiling ic-crypto-internal-logmon v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling stubborn-io v0.3.5
+   Compiling ic-crypto-internal-test-vectors v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rustc-hash v2.1.0
+   Compiling termcolor v1.4.1
+   Compiling minicbor v0.19.1
+   Compiling lazycell v1.3.0
+   Compiling rustc-hash v1.1.0
+   Compiling unicase v2.8.1
+   Compiling wasmparser v0.221.2
+   Compiling five8_core v1.0.0
+   Compiling regalloc2 v0.11.1
+   Compiling ic-crypto-internal-csp v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling cranelift-bforest v0.115.1
+   Compiling cranelift-control v0.115.1
+   Compiling minicbor-derive v0.13.0
+   Compiling half v2.4.1
+   Compiling ciborium-io v0.2.2
+   Compiling solana-sanitize v3.0.1
+   Compiling rustc-demangle v0.1.24
+   Compiling ciborium-ll v0.2.2
+   Compiling five8 v1.0.0
+   Compiling prost-derive v0.12.6
+   Compiling ic-crypto-utils-basic-sig v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling serde_tokenstream v0.1.7
+   Compiling ic-nns-constants v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling wasmtime-versioned-export-macros v28.0.1
+   Compiling same-file v1.0.6
+   Compiling cobs v0.2.3
+   Compiling postcard v1.1.1
+   Compiling walkdir v2.5.0
+   Compiling ic-cycles-account-manager v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling wasmprinter v0.221.2
+   Compiling ciborium v0.2.2
+   Compiling tinystr v0.8.1
+   Compiling zstd-sys v2.0.13+zstd.1.5.6
+   Compiling ic-crypto-utils-tls v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-adapter-metrics-server v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-registry-transport v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-stable-structures v0.6.7
+   Compiling wasm-encoder v0.221.2
+   Compiling litemap v0.8.0
+   Compiling solana-program-error v3.0.1
+   Compiling adler2 v2.0.0
+   Compiling writeable v0.6.1
+   Compiling icu_locale_core v2.0.0
+   Compiling miniz_oxide v0.8.3
+   Compiling wasmtime-environ v28.0.1
+   Compiling ic-registry-proto-data-provider v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling wasmtime v28.0.1
+   Compiling ic-crypto-node-key-generation v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling prost v0.12.6
+   Compiling solana-hash v4.3.0
+   Compiling cranelift-frontend v0.115.1
+   Compiling cranelift-native v0.115.1
+   Compiling ic-crypto-temp-crypto-vault v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling potential_utf v0.1.2
+   Compiling wasmparser v0.217.0
+   Compiling zerotrie v0.2.2
+   Compiling ic-registry-client-fake v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling core-foundation v0.10.0
+   Compiling security-framework-sys v2.14.0
+   Compiling core2 v0.4.0
+   Compiling bindgen v0.69.5
+   Compiling ic0 v0.23.0
+   Compiling bindgen v0.59.2
+   Compiling icu_normalizer_data v2.0.0
+   Compiling rle-decode-fast v1.0.3
+   Compiling icu_properties_data v2.0.1
+   Compiling libflate_lz77 v2.1.0
+   Compiling security-framework v3.2.0
+   Compiling ic-crypto-temp-crypto v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling icu_provider v2.0.0
+   Compiling wasm-encoder v0.217.0
+   Compiling icu_collections v2.0.0
+   Compiling wasmtime-cranelift v28.0.1
+   Compiling solana-sha256-hasher v3.1.0
+   Compiling prost-types v0.12.6
+   Compiling five8_const v1.0.0
+   Compiling tokio-rustls v0.26.1
+   Compiling webpki-roots v1.0.2
+   Compiling serde_tokenstream v0.2.2
+   Compiling wasmtime-jit-icache-coherence v28.0.1
+   Compiling wasmtime-asm-macros v28.0.1
+   Compiling wait-timeout v0.2.0
+   Compiling mach2 v0.4.2
+   Compiling crunchy v0.2.2
+   Compiling wasmtime-slab v28.0.1
+   Compiling zstd-safe v7.2.1
+   Compiling dary_heap v0.3.7
+   Compiling quick-error v1.2.3
+   Compiling bytemuck v1.25.0
+   Compiling plotters-backend v0.3.7
+   Compiling lru v0.7.8
+   Compiling adler32 v1.2.0
+   Compiling sha2-const-stable v0.1.0
+   Compiling mockall_derive v0.13.1
+   Compiling peeking_take_while v0.1.2
+   Compiling sptr v0.3.2
+   Compiling bit-vec v0.8.0
+   Compiling predicates-core v1.0.9
+   Compiling bit-set v0.8.0
+   Compiling solana-address v2.6.0
+   Compiling libflate v2.1.0
+   Compiling ic-utils-lru-cache v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling plotters-svg v0.3.7
+   Compiling rgb v0.8.50
+   Compiling rusty-fork v0.3.0
+   Compiling ic-cdk-macros v0.16.0
+   Compiling webpki-roots v0.26.11
+   Compiling prost-build v0.12.6
+   Compiling ic-wasm-transform v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rustls-native-certs v0.8.1
+   Compiling ic-system-api v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling icrc-cbor v0.1.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling mime_guess v2.0.5
+   Compiling memory_tracker v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling debugid v0.8.0
+   Compiling ic-crypto-prng v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling num-format v0.4.4
+   Compiling rand_xorshift v0.3.0
+   Compiling findshlibs v0.10.2
+   Compiling itertools v0.10.5
+   Compiling slotmap v1.0.7
+   Compiling memmap2 v0.9.5
+   Compiling equator-macro v0.2.1
+   Compiling termtree v0.5.1
+   Compiling siphasher v1.0.1
+   Compiling cast v0.3.0
+   Compiling symbolic-demangle v12.13.3
+   Compiling base32 v0.4.0
+   Compiling tiny-keccak v2.0.2
+   Compiling unarray v0.1.4
+   Compiling wasm-encoder v0.223.0
+   Compiling str_stack v0.1.0
+   Compiling wee_alloc v0.4.5
+   Compiling proptest v1.6.0
+   Compiling icrc-ledger-types v0.1.8 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling criterion-plot v0.5.0
+   Compiling phf_shared v0.11.3
+   Compiling predicates-tree v1.0.12
+   Compiling equator v0.2.2
+   Compiling symbolic-common v12.13.3
+   Compiling ic-embedders v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling icu_properties v2.0.1
+   Compiling icu_normalizer v2.0.0
+   Compiling librocksdb-sys v0.16.0+8.10.0
+   Compiling hyper-rustls v0.27.5
+   Compiling pprof v0.14.0
+   Compiling ic-cdk v0.16.0
+   Compiling plotters v0.3.7
+   Compiling lmdb-rkv-sys v0.11.99 (https://github.com/dfinity-lab/lmdb-rs?rev=f62018b2deb79ea0d53914d5502389433fc3e6da#f62018b2)
+   Compiling predicates v3.1.3
+   Compiling addr2line v0.24.2
+   Compiling ic-interfaces-certified-stream-store v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-interfaces-adapter-client v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-ledger-hash-of v0.1.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling tinytemplate v1.2.1
+   Compiling quick-xml v0.26.0
+   Compiling num-bigint v0.2.6
+   Compiling fragile v2.0.0
+   Compiling cfg-if v0.1.10
+   Compiling memory_units v0.4.0
+   Compiling anes v0.1.6
+   Compiling ic-cdk-executor v0.1.0
+   Compiling downcast v0.11.0
+   Compiling ic0 v0.21.1
+   Compiling oorandom v11.1.4
+   Compiling precomputed-hash v0.1.1
+   Compiling new_debug_unreachable v1.0.6
+   Compiling string_cache v0.8.9
+   Compiling criterion v0.5.1
+   Compiling bit-set v0.5.3
+   Compiling mockall v0.13.1
+   Compiling inferno v0.11.21
+   Compiling ic-ledger-core v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling backtrace v0.3.74
+   Compiling idna_adapter v1.2.1
+   Compiling zstd v0.13.2
+   Compiling aligned-vec v0.6.1
+   Compiling ic-types-test-utils v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-consensus-utils v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-crypto-test-utils-ni-dkg v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling flate2 v1.0.35
+   Compiling solana-instruction-error v2.3.0
+   Compiling askama_parser v0.2.1
+   Compiling ic-canister-client-sender v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-test-utilities-in-memory-logger v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ascii-canvas v3.0.0
+   Compiling ic-btc-service v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling basic-toml v0.1.9
+   Compiling ic-utils-thread v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling nix v0.26.4
+   Compiling ic-canonical-state-tree-hash v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ena v0.14.3
+   Compiling lalrpop-util v0.20.2
+   Compiling env_filter v0.1.3
+   Compiling ic-canister-sandbox-backend-lib v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling itertools v0.11.0
+   Compiling num-rational v0.2.4
+   Compiling ic-canister-log v0.2.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling num_cpus v1.16.0
+   Compiling utf8_iter v1.0.4
+   Compiling home v0.5.11
+   Compiling on_wire v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling pico-args v0.5.0
+   Compiling unicode-xid v0.2.6
+   Compiling unicode-width v0.2.0
+   Compiling beef v0.5.2
+   Compiling logos-codegen v0.13.0
+   Compiling wast v223.0.0
+   Compiling lalrpop v0.20.2
+   Compiling dfn_core v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling which v4.4.2
+   Compiling idna v1.0.3
+   Compiling threadpool v1.8.1
+   Compiling env_logger v0.11.6
+   Compiling ic-canonical-state v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling askama_derive v0.12.5
+   Compiling ic-crypto-test-utils-canister-threshold-sigs v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-test-utilities-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling async-compression v0.4.18
+   Compiling universal-canister v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling solana-pubkey v4.2.0
+   Compiling ic-cdk-macros v0.13.2
+   Compiling ic-cdk-macros v0.8.4
+   Compiling ic-validator v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-state-layout v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-query-stats v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling dashmap v6.1.0
+   Compiling ic-xnet-uri v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling crossbeam-queue v0.3.12
+   Compiling humansize v2.1.3
+   Compiling quick-xml v0.37.2
+   Compiling serde_derive_internals v0.29.1
+   Compiling ic-http-endpoints-public v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling rust_decimal v1.36.0
+   Compiling askama_escape v0.10.3
+   Compiling schemars v0.8.22
+   Compiling askama v0.12.1
+   Compiling schemars_derive v0.8.22
+   Compiling inferno v0.12.1
+   Compiling crossbeam v0.8.4
+   Compiling ic-xnet-hyper v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-cdk v0.12.2
+   Compiling ic-cdk v0.13.6
+   Compiling solana-instruction v3.4.0
+   Compiling ic-universal-canister v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling lmdb-rkv v0.14.99 (https://github.com/dfinity-lab/lmdb-rs?rev=f62018b2deb79ea0d53914d5502389433fc3e6da#f62018b2)
+   Compiling rocksdb v0.22.0
+   Compiling tower-http v0.6.2
+   Compiling ic-pprof v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling url v2.5.4
+   Compiling dfn_candid v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling candid_parser v0.1.4
+   Compiling wat v1.223.0
+   Compiling logos-derive v0.13.0
+   Compiling ic-ledger-canister-core v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling solana-transaction-error v3.2.0
+   Compiling ic-https-outcalls-consensus v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-consensus-dkg v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-icrc1-tokens-u64 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-interfaces-state-manager-mocks v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling icrc-ledger-client v0.1.2 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling solana-sdk-ids v3.1.0
+   Compiling ic-cdk-macros v0.9.0
+   Compiling ic-crypto-utils-canister-threshold-sig v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-tracing v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling tracing-flame v0.2.0
+   Compiling rustls-pemfile v2.2.0
+   Compiling tokio-socks v0.5.2
+   Compiling tokio-io-timeout v1.2.0
+   Compiling serde-bytes-repr v0.1.5
+   Compiling ic-certification v2.6.0
+   Compiling serde_repr v0.1.20
+   Compiling ic-icrc1-ledger v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ipnet v2.11.0
+   Compiling more-asserts v0.3.1
+   Compiling dyn-clone v1.0.20
+   Compiling ic-execution-environment v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling reqwest v0.12.15
+   Compiling ic-transport-types v0.37.1
+   Compiling ic-artifact-pool v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling solana-message v4.2.0
+   Compiling icrc-ledger-client-cdk v0.1.2 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-test-utilities v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-icrc1 v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-consensus v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling logos v0.13.0
+   Compiling ic-canisters-http-types v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-btc-adapter-client v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-cdk-timers v0.7.0
+   Compiling rumi_cycle_manager v0.1.0 (/private/tmp/rumi-swap-support-cleanup-20261111/src/rumi_cycle_manager)
+   Compiling ic-xnet-payload-builder v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-messaging v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-state-manager v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-ingress-manager v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-test-utilities-consensus v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-test-utilities-registry v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-cdk-timers v0.10.0
+   Compiling ic-btc-consensus v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-test-state-machine-client v3.0.1
+   Compiling solana-signature v3.4.0
+   Compiling codespan-reporting v0.11.1
+   Compiling tracing-appender v0.2.3
+   Compiling ic-test-utilities-time v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-test-utilities-metrics v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-xrc-types v1.2.0
+   Compiling ic-certification v3.0.3
+   Compiling ic-metrics-encoder v1.1.1
+   Compiling ethnum v1.5.2
+   Compiling solana-msg v3.1.0
+   Compiling solana-system-interface v3.2.0
+   Compiling rumi_3pool v0.1.0 (/private/tmp/rumi-swap-support-cleanup-20261111/src/rumi_3pool)
+warning: variable does not need to be mutable
+    --> src/rumi_3pool/src/lib.rs:2344:10
+     |
+2344 |     let (mut receipt, fresh) = if trusted_client {
+     |          ----^^^^^^^
+     |          |
+     |          help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/rumi_3pool/src/transfers.rs:390:9
+    |
+390 |     let mut entitlement = crate::payouts::get(id).ok_or_else(|| PayoutFailure {
+    |         ----^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `balance_after`
+    --> src/rumi_3pool/src/lib.rs:3680:9
+     |
+3680 |     let balance_after = balance_before
+     |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_balance_after`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Empty` is never constructed
+   --> src/rumi_3pool/src/certification.rs:148:5
+    |
+147 | enum HashTree {
+    |      -------- variant in this enum
+148 |     Empty,
+    |     ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DEBUG` is never used
+ --> src/rumi_3pool/src/logs.rs:7:11
+  |
+7 | pub const DEBUG: PrintProxySink = PrintProxySink("DEBUG", &DEBUG_BUF);
+  |           ^^^^^
+
+warning: `rumi_3pool` (lib) generated 5 warnings (run `cargo fix --lib -p rumi_3pool` to apply 3 suggestions)
+   Compiling xrc-mock v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling ic-state-machine-tests v0.9.0 (https://github.com/Rumi-Protocol/ic?rev=fc278709#fc278709)
+   Compiling pocket-ic v6.0.0
+   Compiling solana-transaction v4.1.2
+   Compiling rust_decimal_macros v1.36.0
+   Compiling alloy-rlp v0.3.15
+   Compiling bs58 v0.5.1
+   Compiling ripemd v0.1.3
+   Compiling assert_matches v1.5.0
+   Compiling ic0 v0.18.11
+   Compiling rumi_protocol_backend v0.1.0 (/private/tmp/rumi-swap-support-cleanup-20261111/src/rumi_protocol_backend)
+warning: unused import: `signature::hazmat::PrehashSigner`
+  --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:72:23
+   |
+72 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey, VerifyingKey};
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `signature::hazmat::PrehashSigner`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:112:23
+    |
+112 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `signature::hazmat::PrehashSigner`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:160:23
+    |
+160 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `signature::hazmat::PrehashSigner`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_tx.rs:343:23
+    |
+343 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DEFAULT_MIN_QUORUM_PROVIDERS` and `effective_min_quorum_providers`
+ --> src/rumi_protocol_backend/src/chains/tests_admin.rs:6:5
+  |
+6 |     effective_min_quorum_providers, ChainAdminError, ChainConfigV3, ChainId, ChainStatus,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+7 |     GasStrategy, RegisterChainArg, UpdateChainConfigArg, DEFAULT_MIN_QUORUM_PROVIDERS,
+  |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rust_decimal::prelude::FromPrimitive`
+    --> src/rumi_protocol_backend/src/event.rs:7083:9
+     |
+7083 |     use rust_decimal::prelude::FromPrimitive;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `FromPrimitive`
+  --> src/rumi_protocol_backend/src/sp_liquidation.rs:14:29
+   |
+14 | use rust_decimal::prelude::{FromPrimitive, ToPrimitive as DecimalToPrimitive};
+   |                             ^^^^^^^^^^^^^
+
+warning: unused import: `rust_decimal::prelude::FromPrimitive`
+    --> src/rumi_protocol_backend/src/management.rs:1721:9
+     |
+1721 |     use rust_decimal::prelude::FromPrimitive;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> src/rumi_protocol_backend/src/vault.rs:7140:5
+     |
+7140 |     mut journal: crate::state::BorrowMintJournal,
+     |     ----^^^^^^^
+     |     |
+     |     help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `k256::elliptic_curve::sec1::ToEncodedPoint`
+  --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:73:9
+   |
+73 |     use k256::elliptic_curve::sec1::ToEncodedPoint;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `k256::elliptic_curve::sec1::ToEncodedPoint`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_tx.rs:356:13
+    |
+356 |         use k256::elliptic_curve::sec1::ToEncodedPoint;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `k256::elliptic_curve::sec1::ToEncodedPoint`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_tx.rs:396:13
+    |
+396 |         use k256::elliptic_curve::sec1::ToEncodedPoint;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rust_decimal::prelude::ToPrimitive`
+  --> src/rumi_protocol_backend/src/event.rs:11:5
+   |
+11 | use rust_decimal::prelude::ToPrimitive;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ToPrimitive`
+  --> src/rumi_protocol_backend/src/sp_liquidation.rs:14:44
+   |
+14 | use rust_decimal::prelude::{FromPrimitive, ToPrimitive as DecimalToPrimitive};
+   |                                            ^^^^^^^^^^^
+
+warning: unused variable: `outcome`
+    --> src/rumi_protocol_backend/src/vault.rs:2924:23
+     |
+2924 |             let (fee, outcome, net, symbol, decimals) = match mutation_result {
+     |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_outcome`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `journal`
+    --> src/rumi_protocol_backend/src/vault.rs:3365:52
+     |
+3365 |     if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+     |                                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_journal`
+
+warning: unused variable: `journal`
+    --> src/rumi_protocol_backend/src/vault.rs:6652:52
+     |
+6652 |     if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+     |                                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_journal`
+
+warning: unused variable: `xaut`
+     --> src/rumi_protocol_backend/src/vault.rs:15221:30
+      |
+15221 |         let (mut state, icp, xaut) = redemption_state(0);
+      |                              ^^^^ help: if this is intentional, prefix it with an underscore: `_xaut`
+
+warning: unused variable: `icp`
+     --> src/rumi_protocol_backend/src/vault.rs:15271:21
+      |
+15271 |         let (state, icp, xaut) = redemption_state(120_000_000);
+      |                     ^^^ help: if this is intentional, prefix it with an underscore: `_icp`
+
+warning: function `retain_unknown` is never used
+   --> src/rumi_protocol_backend/src/cksol.rs:213:4
+    |
+213 | fn retain_unknown(owner: Principal, started_at_ns: u64) {
+    |    ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple fields are never read
+   --> src/rumi_protocol_backend/src/sp_liquidation.rs:119:9
+    |
+118 | pub(crate) struct SpLiquidationApplied {
+    |                   -------------------- fields in this struct
+119 |     pub debt_e8s: u64,
+    |         ^^^^^^^^
+120 |     pub interest_share_e8s: u64,
+121 |     pub collateral_gross_raw: u64,
+    |         ^^^^^^^^^^^^^^^^^^^^
+122 |     pub collateral_net_raw: u64,
+    |         ^^^^^^^^^^^^^^^^^^
+123 |     pub protocol_cut_raw: u64,
+    |         ^^^^^^^^^^^^^^^^
+124 |     pub payout: Option<(u128, Principal, u64, u64, u64, u128)>,
+125 |     pub xrp_claim_id: Option<u64>,
+    |         ^^^^^^^^^^^^
+126 |     pub drained: bool,
+    |         ^^^^^^^
+127 |     pub payment_block_index: u64,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: field `pending` is never read
+     --> src/rumi_protocol_backend/src/state.rs:14450:13
+      |
+14448 |         struct CurrentState {
+      |                ------------ field in this struct
+14449 |             #[serde(deserialize_with = "deserialize_pending_keyed")]
+14450 |             pending: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
+      |             ^^^^^^^
+
+warning: variants `BorrowingFee` and `RedemptionFee` are never constructed
+   --> src/rumi_protocol_backend/src/treasury.rs:253:32
+    |
+253 |     enum ReceiverDepositType { BorrowingFee, RedemptionFee, LiquidationFee, InterestRevenue }
+    |          -------------------   ^^^^^^^^^^^^  ^^^^^^^^^^^^^
+    |          |
+    |          variants in this enum
+
+warning: variants `ICUSD`, `ICP`, and `CKBTC` are never constructed
+   --> src/rumi_protocol_backend/src/treasury.rs:255:30
+    |
+255 |     enum ReceiverAssetType { ICUSD, ICP, CKBTC, CKUSDT, CKUSDC }
+    |          -----------------   ^^^^^  ^^^  ^^^^^
+    |          |
+    |          variants in this enum
+
+warning: function `max_effective_icusd_for_u64_payout` is never used
+    --> src/rumi_protocol_backend/src/vault.rs:1557:4
+     |
+1557 | fn max_effective_icusd_for_u64_payout(price_usd: Decimal, decimals: u8) -> u64 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `arb_usd_amount` is never used
+   --> src/rumi_protocol_backend/src/tests.rs:175:4
+    |
+175 | fn arb_usd_amount() -> impl Strategy<Value = ICUSD> {
+    |    ^^^^^^^^^^^^^^
+
+warning: `rumi_protocol_backend` (lib test) generated 26 warnings (run `cargo fix --lib -p rumi_protocol_backend --tests` to apply 14 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20m 24s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (/private/tmp/rumi-cksol-icp-target/debug/deps/rumi_protocol_backend-c7e2025a737ea388)
+
+running 6 tests
+test event::filter_tests::sec19_changed_owner_cannot_receive_credit_but_pull_can_be_held ... ok
+test event::filter_tests::sec19_confirmed_credit_and_duplicate_settlement_are_single_effect ... ok
+test event::filter_tests::sec19_mismatched_recovery_cannot_create_a_liability ... ok
+test event::filter_tests::sec19_missing_target_liability_survives_ack_and_ordered_replay ... ok
+test event::filter_tests::sec19_no_effect_ack_tombstone_replays_without_the_ephemeral_journal ... ok
+test vault::borrow_mint_journal_tests::sec19_recovery_receipt_is_not_reported_as_a_vault_credit ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1418 filtered out; finished in 0.01s
+

@@ -1,0 +1,254 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-swap-support-cleanup-20261111/src/xrc_demo/xrc_mock/Cargo.toml
+workspace: /private/tmp/rumi-swap-support-cleanup-20261111/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-swap-support-cleanup-20261111/src/monad_rpc_mock/Cargo.toml
+workspace: /private/tmp/rumi-swap-support-cleanup-20261111/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-swap-support-cleanup-20261111/src/sol_rpc_mock/Cargo.toml
+workspace: /private/tmp/rumi-swap-support-cleanup-20261111/Cargo.toml
+warning: variable does not need to be mutable
+    --> src/rumi_3pool/src/lib.rs:2344:10
+     |
+2344 |     let (mut receipt, fresh) = if trusted_client {
+     |          ----^^^^^^^
+     |          |
+     |          help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/rumi_3pool/src/transfers.rs:390:9
+    |
+390 |     let mut entitlement = crate::payouts::get(id).ok_or_else(|| PayoutFailure {
+    |         ----^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `balance_after`
+    --> src/rumi_3pool/src/lib.rs:3680:9
+     |
+3680 |     let balance_after = balance_before
+     |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_balance_after`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Empty` is never constructed
+   --> src/rumi_3pool/src/certification.rs:148:5
+    |
+147 | enum HashTree {
+    |      -------- variant in this enum
+148 |     Empty,
+    |     ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DEBUG` is never used
+ --> src/rumi_3pool/src/logs.rs:7:11
+  |
+7 | pub const DEBUG: PrintProxySink = PrintProxySink("DEBUG", &DEBUG_BUF);
+  |           ^^^^^
+
+warning: `rumi_3pool` (lib) generated 5 warnings (run `cargo fix --lib -p rumi_3pool` to apply 3 suggestions)
+warning: unused import: `signature::hazmat::PrehashSigner`
+  --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:72:23
+   |
+72 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey, VerifyingKey};
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `signature::hazmat::PrehashSigner`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:112:23
+    |
+112 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `signature::hazmat::PrehashSigner`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:160:23
+    |
+160 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `signature::hazmat::PrehashSigner`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_tx.rs:343:23
+    |
+343 |     use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey, VerifyingKey};
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DEFAULT_MIN_QUORUM_PROVIDERS` and `effective_min_quorum_providers`
+ --> src/rumi_protocol_backend/src/chains/tests_admin.rs:6:5
+  |
+6 |     effective_min_quorum_providers, ChainAdminError, ChainConfigV3, ChainId, ChainStatus,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+7 |     GasStrategy, RegisterChainArg, UpdateChainConfigArg, DEFAULT_MIN_QUORUM_PROVIDERS,
+  |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rust_decimal::prelude::FromPrimitive`
+    --> src/rumi_protocol_backend/src/event.rs:7083:9
+     |
+7083 |     use rust_decimal::prelude::FromPrimitive;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `FromPrimitive`
+  --> src/rumi_protocol_backend/src/sp_liquidation.rs:14:29
+   |
+14 | use rust_decimal::prelude::{FromPrimitive, ToPrimitive as DecimalToPrimitive};
+   |                             ^^^^^^^^^^^^^
+
+warning: unused import: `rust_decimal::prelude::FromPrimitive`
+    --> src/rumi_protocol_backend/src/management.rs:1721:9
+     |
+1721 |     use rust_decimal::prelude::FromPrimitive;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> src/rumi_protocol_backend/src/vault.rs:7140:5
+     |
+7140 |     mut journal: crate::state::BorrowMintJournal,
+     |     ----^^^^^^^
+     |     |
+     |     help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `k256::elliptic_curve::sec1::ToEncodedPoint`
+  --> src/rumi_protocol_backend/src/chains/evm/tests_eip712.rs:73:9
+   |
+73 |     use k256::elliptic_curve::sec1::ToEncodedPoint;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `k256::elliptic_curve::sec1::ToEncodedPoint`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_tx.rs:356:13
+    |
+356 |         use k256::elliptic_curve::sec1::ToEncodedPoint;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `k256::elliptic_curve::sec1::ToEncodedPoint`
+   --> src/rumi_protocol_backend/src/chains/evm/tests_tx.rs:396:13
+    |
+396 |         use k256::elliptic_curve::sec1::ToEncodedPoint;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rust_decimal::prelude::ToPrimitive`
+  --> src/rumi_protocol_backend/src/event.rs:11:5
+   |
+11 | use rust_decimal::prelude::ToPrimitive;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ToPrimitive`
+  --> src/rumi_protocol_backend/src/sp_liquidation.rs:14:44
+   |
+14 | use rust_decimal::prelude::{FromPrimitive, ToPrimitive as DecimalToPrimitive};
+   |                                            ^^^^^^^^^^^
+
+warning: unused variable: `outcome`
+    --> src/rumi_protocol_backend/src/vault.rs:2924:23
+     |
+2924 |             let (fee, outcome, net, symbol, decimals) = match mutation_result {
+     |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_outcome`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `journal`
+    --> src/rumi_protocol_backend/src/vault.rs:3365:52
+     |
+3365 |     if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+     |                                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_journal`
+
+warning: unused variable: `journal`
+    --> src/rumi_protocol_backend/src/vault.rs:6652:52
+     |
+6652 |     if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+     |                                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_journal`
+
+warning: unused variable: `xaut`
+     --> src/rumi_protocol_backend/src/vault.rs:15221:30
+      |
+15221 |         let (mut state, icp, xaut) = redemption_state(0);
+      |                              ^^^^ help: if this is intentional, prefix it with an underscore: `_xaut`
+
+warning: unused variable: `icp`
+     --> src/rumi_protocol_backend/src/vault.rs:15271:21
+      |
+15271 |         let (state, icp, xaut) = redemption_state(120_000_000);
+      |                     ^^^ help: if this is intentional, prefix it with an underscore: `_icp`
+
+warning: function `retain_unknown` is never used
+   --> src/rumi_protocol_backend/src/cksol.rs:213:4
+    |
+213 | fn retain_unknown(owner: Principal, started_at_ns: u64) {
+    |    ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple fields are never read
+   --> src/rumi_protocol_backend/src/sp_liquidation.rs:119:9
+    |
+118 | pub(crate) struct SpLiquidationApplied {
+    |                   -------------------- fields in this struct
+119 |     pub debt_e8s: u64,
+    |         ^^^^^^^^
+120 |     pub interest_share_e8s: u64,
+121 |     pub collateral_gross_raw: u64,
+    |         ^^^^^^^^^^^^^^^^^^^^
+122 |     pub collateral_net_raw: u64,
+    |         ^^^^^^^^^^^^^^^^^^
+123 |     pub protocol_cut_raw: u64,
+    |         ^^^^^^^^^^^^^^^^
+124 |     pub payout: Option<(u128, Principal, u64, u64, u64, u128)>,
+125 |     pub xrp_claim_id: Option<u64>,
+    |         ^^^^^^^^^^^^
+126 |     pub drained: bool,
+    |         ^^^^^^^
+127 |     pub payment_block_index: u64,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: field `pending` is never read
+     --> src/rumi_protocol_backend/src/state.rs:14450:13
+      |
+14448 |         struct CurrentState {
+      |                ------------ field in this struct
+14449 |             #[serde(deserialize_with = "deserialize_pending_keyed")]
+14450 |             pending: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
+      |             ^^^^^^^
+
+warning: variants `BorrowingFee` and `RedemptionFee` are never constructed
+   --> src/rumi_protocol_backend/src/treasury.rs:253:32
+    |
+253 |     enum ReceiverDepositType { BorrowingFee, RedemptionFee, LiquidationFee, InterestRevenue }
+    |          -------------------   ^^^^^^^^^^^^  ^^^^^^^^^^^^^
+    |          |
+    |          variants in this enum
+
+warning: variants `ICUSD`, `ICP`, and `CKBTC` are never constructed
+   --> src/rumi_protocol_backend/src/treasury.rs:255:30
+    |
+255 |     enum ReceiverAssetType { ICUSD, ICP, CKBTC, CKUSDT, CKUSDC }
+    |          -----------------   ^^^^^  ^^^  ^^^^^
+    |          |
+    |          variants in this enum
+
+warning: function `max_effective_icusd_for_u64_payout` is never used
+    --> src/rumi_protocol_backend/src/vault.rs:1557:4
+     |
+1557 | fn max_effective_icusd_for_u64_payout(price_usd: Decimal, decimals: u8) -> u64 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `arb_usd_amount` is never used
+   --> src/rumi_protocol_backend/src/tests.rs:175:4
+    |
+175 | fn arb_usd_amount() -> impl Strategy<Value = ICUSD> {
+    |    ^^^^^^^^^^^^^^
+
+warning: `rumi_protocol_backend` (lib test) generated 26 warnings (run `cargo fix --lib -p rumi_protocol_backend --tests` to apply 14 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.80s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (/private/tmp/rumi-cksol-icp-target/debug/deps/rumi_protocol_backend-c7e2025a737ea388)
+
+running 1 test
+test state::three_usd_reserve_ingress_state_tests::wide_confirmed_collateral_pull_keeps_receipt_and_cannot_dispatch_again ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1423 filtered out; finished in 0.01s
+

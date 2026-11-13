@@ -1,0 +1,21 @@
+{
+  "source": "e2a0122a9a35393e2c0509540551594a403695ab",
+  "allocationId": "174c2752-147f-4475-99b0-f86aafcc1816",
+  "completedTests": {
+    "unit-sec19": 6,
+    "journal-compat": 1,
+    "dispatch-classification": 2
+  },
+  "stop": "physical growth bound during unfinished Candid generation",
+  "files": {
+    "validation-session.json": "27fe2bbf8407def44ccf26412bd6060b5c873ac48f74ec05bc18f2dac58fec8d",
+    "steps.json": "3c2a7233e65fb23e53c22650bbeb0370f9a23844cb8c6712b55a41136fb0d721",
+    "inputs.json": "d7e11e79b653e3caaf5cf626e220559a516f50db36d058f8faa1164917deb273",
+    "unit-sec19.log": "31ee920fb91d55515b3fae655d6e76517cc23f805f0568070fedfc152d6a3053",
+    "journal-compat.log": "edfc2c4bf465988c4d3a14d81c0226faba3bc7cc143f04a94577153d8dca65b4",
+    "dispatch-classification.log": "d38b8857f44d36f6942f90d453a332912955ede95c466fe8951901a621af0dd6",
+    "candid-generate.log": "2f67cfa52fffbb0b12b07d2caedcb13d36cd029bcec92f170ca17a0a4e3bcbbd",
+    "independent-group-closure.json": "752aac94f207736624502beabdde4717b40dcdd013993ce4b99633ee72fc72e4"
+  },
+  "productionMutation": false
+}

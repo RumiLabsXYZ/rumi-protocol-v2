@@ -1,6 +1,6 @@
 {
-  "summary": "SEC18 progress UI is live and independently verified. SEC19 backend e2a0122a entered its first bounded offline native/Candid/PocketIC validation at 16:08:48Z under fresh allocation174c2752. Frontend128 focused checks and early source reviews pass. Native results are pending; production deposits remain paused, with no vault213 transaction.",
-  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair passed frontend checks and source review and is now running backend and recovery lifecycle tests. Deposits remain paused until validation passes and a separate release is approved and verified.",
+  "summary": "SEC18 is live and verified. SEC19 source e2a0122a passed9 backend tests plus128 unique frontend checks. First native batch stopped at its filesystem-growth guard; owned group closed, no source error. Candid/Wasm/PocketIC remain pending under a fresh continuation request. Deposits are still paused; no vault213 transaction.",
+  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair passed frontend checks and nine backend tests, but its validation run stopped at a disk-growth limit before the remaining checks. The results are preserved; a fresh bounded continuation is being arranged, and deposits remain paused.",
   "glossary": [
     {
       "term": "Stability Pool",

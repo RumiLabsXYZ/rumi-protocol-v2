@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "Corrected backend e2a0122a is undergoing its first bounded native validation under fresh allocation 174c2752-147f-4475-99b0-f86aafcc1816, started once at 16:08:48Z. Scoped units, canonical Candid and bindings, old-service compatibility, matched Wasm and three existing-harness PocketIC cases remain pending. Frontend 128 unique focused checks pass; early independent source reviews found no remaining blocker after the SafeNoEffect ACK correction. Confirmed exact pulls credit the matching surviving vault once or become an owner/ledger-bound held liability; explicit receipt ACK preserves that liability. Removed-target integration uses zero-debt closure, not actual liquidation. Production deposits remain paused; no live vault213 transaction or production change.",
+      "evidenceText": "Nine backend tests passed at exact e2a0122a: six SEC19 units, old-journal compatibility and two transfer-outcome cases. First allocation stopped on its filesystem-growth guard during unfinished Candid compilation; owned processes closed and evidence is preserved. No source error was reported, but Candid/bindings/compatibility, matched Wasm and three PocketIC cases remain unverified. A fresh bounded continuation packet retains the nine results and existing warm cache, without rerunning completed tests or reusing the old grant. Frontend128 focused checks and early independent source reviews pass. Production deposits remain paused; no vault213 transaction.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",
@@ -14,6 +14,10 @@
         {
           "title": "Corrected exact validation package for fresh capacity",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/f08aef77/docs/operations/add-margin-validation-plan-20261113.md"
+        },
+        {
+          "title": "Retained first-run results and bounded remaining validation",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-continuation-plan-20261113.md"
         }
       ]
     },

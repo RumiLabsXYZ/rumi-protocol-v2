@@ -220,3 +220,7 @@ Accounting review found a SafeNoEffect ACK regression before any native validati
 ### SEC19 first native validation started
 
 Fresh allocation 174c2752-147f-4475-99b0-f86aafcc1816 admitted the corrected e2a0122a source and f08aef77 packet. Ellis verified the exact pins and started the runner once at 2026-11-13T16:08:48Z. Scoped Rust, canonical Candid/bindings, old-service compatibility, source-matched Wasm and three PocketIC cases are pending; no retry, production mutation or financial action is authorized. Revision97 readback was a complete no-op before this start update.
+
+### SEC19 nine backend tests passed; resource stop preserved
+
+Exact e2a0122a passed six SEC19 units, one old-journal test and two transfer-outcome tests. Allocation174c2752 stopped during Candid compilation on the filesystem-growth guard after1286.65s; driver-15/outer1, owned group73091 independently empty. No source error or generated writes were observed. The [fresh continuation plan](../operations/add-margin-continuation-plan-20261113.md) preserves all nine results, unchanged source and existing cache; only remaining Candid/bindings/compatibility, matched Wasm and three PocketIC cases will run after independent old-slot closure and a fresh grant. No old-grant reuse, automatic retry, production action or vault213 transaction.

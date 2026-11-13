@@ -1,0 +1,56 @@
+[
+  {
+    "name": "unit-sec19",
+    "args": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "rumi_protocol_backend",
+      "--lib",
+      "sec19_",
+      "--",
+      "--test-threads=1"
+    ],
+    "start": "2026-11-13T16:08:53.589817+00:00",
+    "end": "2026-11-13T16:29:19.510386+00:00",
+    "exit": 0
+  },
+  {
+    "name": "journal-compat",
+    "args": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "rumi_protocol_backend",
+      "--lib",
+      "wide_confirmed_collateral_pull_keeps_receipt_and_cannot_dispatch_again",
+      "--",
+      "--test-threads=1"
+    ],
+    "start": "2026-11-13T16:29:19.512000+00:00",
+    "end": "2026-11-13T16:29:21.403967+00:00",
+    "exit": 0
+  },
+  {
+    "name": "dispatch-classification",
+    "args": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "rumi_protocol_backend",
+      "--lib",
+      "management::vault_collateral_pull_error_tests",
+      "--",
+      "--test-threads=1"
+    ],
+    "start": "2026-11-13T16:29:21.404659+00:00",
+    "end": "2026-11-13T16:29:22.085175+00:00",
+    "exit": 0
+  }
+]

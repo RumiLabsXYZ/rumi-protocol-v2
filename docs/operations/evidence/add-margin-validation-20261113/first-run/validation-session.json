@@ -1,0 +1,22 @@
+{
+  "source": "e2a0122a9a35393e2c0509540551594a403695ab",
+  "command": [
+    "python3",
+    "-I",
+    "/private/tmp/rumi-sec19-validation-20261113/steps.py"
+  ],
+  "start": "2026-11-13T16:08:48.511202+00:00",
+  "allocationSha256": "3a1abc506267d4a8f24d2df6febe57946dca0a34462b0efb8de365b1468b620a",
+  "allocationId": "174c2752-147f-4475-99b0-f86aafcc1816",
+  "initialFreeBytes": 44857323520,
+  "pgid": 73091,
+  "end": "2026-11-13T16:30:15.128753+00:00",
+  "exit": -15,
+  "stopReason": "physical growth bound",
+  "exception": null,
+  "peakOwnedRssBytes": 2506981376,
+  "minFreeBytes": 36212932608,
+  "physicalGrowthBytes": 8644390912,
+  "allOwnedClosed": true,
+  "seconds": 1286.6499635409564
+}
