@@ -1,0 +1,19 @@
+{
+  "source": "7dd8cb29b878cec9d01f256457a631ff2b27f08a",
+  "files": {
+    "run-once.py": "49ff98499d60463e5f96ed2611f91fdd61b57af13529813f5b6f59f883c30589",
+    "steps.py": "34f845a7dfd0d150b11581974fb1c213dd7cc5fc35de2b96ef8f7c3a6fb3b524",
+    "tool-pins.json": "779c774111c53233705c334563894249cc2559bde4ffda28ba27076b498b6899"
+  },
+  "totalSeconds": 900,
+  "closureSeconds": 60,
+  "maxOwnedRssBytes": 8589934592,
+  "maxPhysicalGrowthBytes": 8589934592,
+  "minFreeBytes": 21474836480,
+  "cargoJobs": 1,
+  "binaryenCores": 1,
+  "scope": "only three corrected existing PocketIC tests; no Wasm rebuild or earlier test rerun",
+  "productionRuntimeSourceEquals": "e2a0122a9a35393e2c0509540551594a403695ab",
+  "retainedBackendSha256": "2961d2d84008e43756c25c3361b59717676ea92d68eb82951648dc5a4703ea08",
+  "executionStarted": false
+}

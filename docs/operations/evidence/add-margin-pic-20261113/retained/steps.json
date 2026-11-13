@@ -1,0 +1,150 @@
+[
+  {
+    "name": "candid-generate",
+    "args": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "rumi_protocol_backend",
+      "--bin",
+      "rumi_protocol_backend",
+      "check_candid_interface_compatibility",
+      "--",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "start": "2026-11-13T16:36:52.105000+00:00",
+    "end": "2026-11-13T16:37:52.190424+00:00",
+    "exit": 0
+  },
+  {
+    "name": "bindings",
+    "args": [
+      "bash",
+      "scripts/regenerate-declarations.sh",
+      "rumi_protocol_backend"
+    ],
+    "start": "2026-11-13T16:37:52.191262+00:00",
+    "end": "2026-11-13T16:37:52.295597+00:00",
+    "exit": 0
+  },
+  {
+    "name": "candid-live-compat",
+    "args": [
+      "didc",
+      "check",
+      "src/rumi_protocol_backend/rumi_protocol_backend.did",
+      "/private/tmp/rumi-sec19-continuation-20261113/prior.did"
+    ],
+    "start": "2026-11-13T16:37:52.296007+00:00",
+    "end": "2026-11-13T16:37:52.314895+00:00",
+    "exit": 0
+  },
+  {
+    "name": "candid-declared",
+    "args": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "rumi_protocol_backend",
+      "--bin",
+      "rumi_protocol_backend",
+      "check_candid_interface_compatibility",
+      "--",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "start": "2026-11-13T16:37:52.315334+00:00",
+    "end": "2026-11-13T16:37:53.813309+00:00",
+    "exit": 0
+  },
+  {
+    "name": "wasm",
+    "args": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "--release",
+      "--target",
+      "wasm32-unknown-unknown",
+      "-p",
+      "rumi_protocol_backend",
+      "-p",
+      "flaky_ledger"
+    ],
+    "start": "2026-11-13T16:37:53.813960+00:00",
+    "end": "2026-11-13T16:39:55.552681+00:00",
+    "exit": 0
+  },
+  {
+    "name": "wasm-metadata",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/rumi-sec19-continuation-20261113/backend-test.wasm",
+      "-o",
+      "/private/tmp/rumi-sec19-continuation-20261113/backend-test.wasm",
+      "metadata",
+      "candid:service",
+      "-f",
+      "src/rumi_protocol_backend/rumi_protocol_backend.did",
+      "-v",
+      "public"
+    ],
+    "start": "2026-11-13T16:39:55.566352+00:00",
+    "end": "2026-11-13T16:39:56.432727+00:00",
+    "exit": 0
+  },
+  {
+    "name": "wasm-shrink",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/rumi-sec19-continuation-20261113/backend-test.wasm",
+      "-o",
+      "/private/tmp/rumi-sec19-continuation-20261113/backend-test.wasm",
+      "shrink",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-13T16:39:56.433300+00:00",
+    "end": "2026-11-13T16:39:57.312294+00:00",
+    "exit": 0
+  },
+  {
+    "name": "wasm-optimize",
+    "args": [
+      "ic-wasm",
+      "/private/tmp/rumi-sec19-continuation-20261113/backend-test.wasm",
+      "-o",
+      "/private/tmp/rumi-sec19-continuation-20261113/backend-test.wasm",
+      "optimize",
+      "O1",
+      "--keep-name-section"
+    ],
+    "start": "2026-11-13T16:39:57.312888+00:00",
+    "end": "2026-11-13T16:40:11.734564+00:00",
+    "exit": 0
+  },
+  {
+    "name": "pic-sec19",
+    "args": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "rumi_protocol_backend",
+      "--test",
+      "vault_collateral_pull_pic",
+      "sec19_",
+      "--",
+      "--test-threads=1"
+    ],
+    "start": "2026-11-13T16:40:11.742700+00:00",
+    "end": "2026-11-13T16:40:50.543659+00:00",
+    "exit": 101
+  }
+]

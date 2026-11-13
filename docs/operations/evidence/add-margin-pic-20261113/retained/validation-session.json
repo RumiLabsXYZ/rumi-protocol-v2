@@ -1,0 +1,22 @@
+{
+  "source": "e2a0122a9a35393e2c0509540551594a403695ab",
+  "command": [
+    "python3",
+    "-I",
+    "/private/tmp/rumi-sec19-continuation-20261113/steps.py"
+  ],
+  "start": "2026-11-13T16:36:47.477066+00:00",
+  "allocationSha256": "5a918adfd0e64cdfdaddf0fe9d5a2defc5420185d8044056b3063da6d1db5918",
+  "allocationId": "6714e939-83b4-487f-9b81-486082135dc6",
+  "initialFreeBytes": 36157259776,
+  "pgid": 84778,
+  "end": "2026-11-13T16:40:51.046487+00:00",
+  "exit": 1,
+  "stopReason": "surviving owned children after native exit",
+  "exception": null,
+  "peakOwnedRssBytes": 2173583360,
+  "minFreeBytes": 35470196736,
+  "physicalGrowthBytes": 687063040,
+  "allOwnedClosed": true,
+  "seconds": 243.57026579184458
+}

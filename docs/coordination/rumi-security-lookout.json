@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "Nine backend tests passed at exact e2a0122a: six SEC19 units, old-journal compatibility and two transfer-outcome cases. First allocation stopped on its filesystem-growth guard during unfinished Candid compilation; owned processes closed and evidence is preserved. No source error was reported, but Candid/bindings/compatibility, matched Wasm and three PocketIC cases remain unverified. A fresh bounded continuation packet retains the nine results and existing warm cache, without rerunning completed tests or reusing the old grant. Frontend128 focused checks and early independent source reviews pass. Production deposits remain paused; no vault213 transaction.",
+      "evidenceText": "Nine backend tests, canonical Candid/bindings, old+declared interface compatibility and source-matched Wasm/size checks passed. All three PocketIC cases failed in shared setup before top-up: fixture approval consumed the fee needed for the original deposit. Fixture-only correction9e8a5f5a funds both fees without weakening exact balance assertions; canonical interfaces committed7dd8cb29, production Rust unchanged from e2a0122a. Fresh PIC-only packet prepared to reuse verified artifacts and rerun only the three scenarios after new capacity. Both prior allocations stopped/closed with evidence retained. Frontend128 checks passed; new real generated-schema test awaits its run. Production deposits remain paused; no vault213 transaction.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",
@@ -18,6 +18,10 @@
         {
           "title": "Retained first-run results and bounded remaining validation",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-continuation-plan-20261113.md"
+        },
+        {
+          "title": "Corrected fixture and final three-scenario validation plan",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-pic-plan-20261113.md"
         }
       ]
     },

@@ -1,6 +1,6 @@
 {
-  "summary": "SEC18 is live and verified. SEC19 source e2a0122a passed9 backend tests plus128 unique frontend checks. First native batch stopped at its filesystem-growth guard; owned group closed, no source error. Candid/Wasm/PocketIC remain pending under a fresh continuation request. Deposits are still paused; no vault213 transaction.",
-  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair passed frontend checks and nine backend tests, but its validation run stopped at a disk-growth limit before the remaining checks. The results are preserved; a fresh bounded continuation is being arranged, and deposits remain paused.",
+  "summary": "SEC18 live verified. SEC19 backend9tests/interfaces/Wasm pass; PIC3 failed before top-up because fixture lacked fee funding. Fixture-only correction and canonical bindings pushed7dd8cb29; final PIC-only packet awaits fresh allocation. Production deposits remain paused; no vault213 transaction.",
+  "plainSummary": "The ckSOL progress display is live and verified. The deposit repair passed backend, frontend and interface checks, but its lifecycle tests found a fee shortfall in test setup. That fixture is corrected; the three scenarios still need a fresh run before a release can be proposed.",
   "glossary": [
     {
       "term": "Stability Pool",

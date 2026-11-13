@@ -224,3 +224,7 @@ Fresh allocation 174c2752-147f-4475-99b0-f86aafcc1816 admitted the corrected e2a
 ### SEC19 nine backend tests passed; resource stop preserved
 
 Exact e2a0122a passed six SEC19 units, one old-journal test and two transfer-outcome tests. Allocation174c2752 stopped during Candid compilation on the filesystem-growth guard after1286.65s; driver-15/outer1, owned group73091 independently empty. No source error or generated writes were observed. The [fresh continuation plan](../operations/add-margin-continuation-plan-20261113.md) preserves all nine results, unchanged source and existing cache; only remaining Candid/bindings/compatibility, matched Wasm and three PocketIC cases will run after independent old-slot closure and a fresh grant. No old-grant reuse, automatic retry, production action or vault213 transaction.
+
+### SEC19 interfaces and Wasm passed; fixture correction pushed
+
+Continuation6714 passed canonical generation/bindings, old-service and declared compatibility, release Wasm/metadata/shrink/O1; executable code8,957,230bytes. PIC3 failed only at initial fixture funding, before target top-up scenarios. Rowan pushed fixture-only9e8a5f5a;7dd8cb29 commits canonical generated files, with production Rust unchanged. Existing exact debit/credit and recovery assertions remain. The [PIC-only plan](../operations/add-margin-pic-plan-20261113.md) reuses verified artifacts and runs only those three corrected tests under a fresh allocation; previous group84778 independently empty, all results retained. No production or financial action.
