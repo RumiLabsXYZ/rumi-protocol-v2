@@ -1,0 +1,28 @@
+{
+  "verifiedUtc": "2026-11-13T08:09:00Z",
+  "environment": "Actual public app in existing Playwright browser, anonymous session; no wallet action",
+  "paths": [
+    "/",
+    "/solana"
+  ],
+  "viewports": [
+    {
+      "width": 1280,
+      "height": 900
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "bothPagesRendered": true,
+  "horizontalOverflow": false,
+  "rumiErrorOverlay": false,
+  "recoveryRegionPresent": true,
+  "walletOrFinancialAction": false,
+  "limitations": [
+    "Anonymous layout only; connected repayment transaction not exercised.",
+    "Existing token-logo canister_not_found requests produce console errors; no clean-console claim.",
+    "HTTP SPA fallback bytes do not establish that every arbitrary route is a valid client route."
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "knownTimestampOnlyDifferences": {
+    "get_nicp_redemption_claim": "[0].updated_at_ns",
+    "vault51-158": "[0].nicp_redemption_claim[0].updated_at_ns"
+  },
+  "sameClaimAndVaultProjectionTimestamp": true,
+  "automaticReconciliationUtc": "2026-11-13T08:00:37.635465+00:00",
+  "allOtherCapturedRetainedFieldsPreserved": true,
+  "debtAndAccruedInterestMatchStoppedActiveRecords": true,
+  "fixedConfigurationPreserved": true,
+  "custodyAndFeeBytesUnchanged": [
+    "escrow",
+    "backend-default-icp",
+    "native-icp-fee"
+  ],
+  "claimStage": "ClaimConfirmed",
+  "settlementReceived": false,
+  "sweepOrAdoption": false,
+  "manualFinancialAction": false,
+  "rawComparisonRetained": true,
+  "accepted": true
+}

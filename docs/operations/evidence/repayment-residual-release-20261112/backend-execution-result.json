@@ -1,0 +1,128 @@
+{
+  "source": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "fresh_snapshot_id": "000000000000001c0000000001f088fe0101",
+  "outcome": "installed-and-running",
+  "completed": "2026-11-13T08:00:37.639048+00:00",
+  "old_module": "730f54713dca1938c40b661ef6bd6ddc23555d92ca4c8e1feca282e3a33f8cf9",
+  "new_module": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7",
+  "settings_preserved": true,
+  "candidate_candid_matches": true,
+  "previous_api_compatible": true,
+  "other_nine_snapshots_preserved": true,
+  "dispatches": [
+    {
+      "name": "identity",
+      "start": "2026-11-13T07:58:57.941420+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "status-prestop",
+      "start": "2026-11-13T07:58:58.006330+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "snapshots-prestop",
+      "start": "2026-11-13T07:58:59.469516+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "stop",
+      "start": "2026-11-13T07:59:01.289805+00:00",
+      "exit": 0,
+      "write": true
+    },
+    {
+      "name": "status-stopped",
+      "start": "2026-11-13T07:59:29.890136+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "snapshots-stopped",
+      "start": "2026-11-13T07:59:31.538095+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "snapshot-replace",
+      "start": "2026-11-13T07:59:33.267080+00:00",
+      "exit": 0,
+      "write": true
+    },
+    {
+      "name": "snapshots-after-replace",
+      "start": "2026-11-13T07:59:36.042589+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "snapshot-download",
+      "start": "2026-11-13T07:59:37.378598+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "status-before-install",
+      "start": "2026-11-13T08:00:07.585482+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "install",
+      "start": "2026-11-13T08:00:09.114692+00:00",
+      "exit": 0,
+      "write": true
+    },
+    {
+      "name": "status-installed",
+      "start": "2026-11-13T08:00:30.835530+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "candid-installed",
+      "start": "2026-11-13T08:00:32.563693+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "start",
+      "start": "2026-11-13T08:00:33.194626+00:00",
+      "exit": 0,
+      "write": true
+    },
+    {
+      "name": "status-running",
+      "start": "2026-11-13T08:00:34.658978+00:00",
+      "exit": 0,
+      "write": false
+    },
+    {
+      "name": "snapshots-final",
+      "start": "2026-11-13T08:00:35.908348+00:00",
+      "exit": 0,
+      "write": false
+    }
+  ],
+  "freshSnapshotFilesVerified": [
+    {
+      "name": "wasm_module.bin",
+      "bytes": 2378535,
+      "sha256": "730f54713dca1938c40b661ef6bd6ddc23555d92ca4c8e1feca282e3a33f8cf9"
+    },
+    {
+      "name": "wasm_memory.bin",
+      "bytes": 2490368,
+      "sha256": "fff376c63225c475d155b23b78eb44636dba082f4fa31a53d532f76a438a059f"
+    },
+    {
+      "name": "stable_memory.bin",
+      "bytes": 109117440,
+      "sha256": "9e4f3dd862028b81c326c163f2b5c67ae9b1a04ceecc003d397995c8037a3d3a"
+    }
+  ]
+}
