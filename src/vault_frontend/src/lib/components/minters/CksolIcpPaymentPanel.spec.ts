@@ -243,7 +243,8 @@ describe('ICP-paid mint controls', () => {
 		render();
 		await settle();
 		expect(host.textContent).toContain('ICP refund confirmed');
-		expect(host.textContent).toContain('Mint progress is shown separately');
+		expect(host.textContent).toContain('Processing payment settled');
+		expect(host.textContent).toMatch(/Payment settlement does\s+not mean ckSOL has finished minting/);
 		expect(host.textContent).not.toContain('ckSOL received');
 	});
 	it('opens the OISY channel on the action and closes it after the known result', async () => {
@@ -295,5 +296,40 @@ describe('unavailable receipt is not settlement proof', () => {
     const reads=fx.recover.mock.calls.length;
     await vi.advanceTimersByTimeAsync(15_000);await settle();expect(fx.recover.mock.calls.length).toBeGreaterThan(reads);
     expect(fx.submit).not.toHaveBeenCalled();vi.useRealTimers();
+  });
+});
+
+describe('observational mint status callbacks', () => {
+  it('reports the saved request identity and successful check without changing payment behavior', async () => {
+    const observed = vi.fn(); fx.recover.mockResolvedValue(payment('DepositPending'));
+    render({onProgress:observed}); await settle();
+    expect(observed).toHaveBeenLastCalledWith(expect.objectContaining({
+      sequence:'1', phase:'DepositPending', depositId:3n, checking:false,
+      lastChecked:expect.any(Number), unavailable:false,
+    }));
+    expect(fx.submit).not.toHaveBeenCalled(); expect(fx.resume).not.toHaveBeenCalled();
+    fx.recover.mockRejectedValueOnce(new Error('synthetic receipt unavailable'));
+    await instance.checkAgain(); await settle();
+    expect(observed).toHaveBeenLastCalledWith(expect.objectContaining({unavailable:true}));
+    expect(fx.submit).not.toHaveBeenCalled();
+  });
+  it('announces a user mint action before its result, and hides new-mint controls after verified success', async () => {
+    const started = vi.fn(); let resolve!: (p:any)=>void;
+    fx.submit.mockImplementationOnce(()=>new Promise(r=>resolve=r));
+    render({onMintStart:started}); await settle();
+    button('Mint with ICP').click(); await settle();
+    expect(started).toHaveBeenCalledOnce(); expect(fx.submit).toHaveBeenCalledOnce();
+    const result=payment('Complete'); fx.recover.mockResolvedValue(result); resolve(result); await settle();
+    unmount(instance); instance=null;
+    render({mintComplete:true}); await settle();
+    expect(button('Mint with ICP')).toBeUndefined();
+  });
+  it('retains a refund action after verified mint success without announcing another mint', async () => {
+    const started=vi.fn(); fx.recover.mockResolvedValue(payment('RefundReady'));
+    fx.resume.mockResolvedValue(payment('Complete'));
+    render({mintComplete:true,onMintStart:started}); await settle();
+    button('Return unused ICP').click(); await settle();
+    expect(fx.resume).toHaveBeenCalledOnce(); expect(started).not.toHaveBeenCalled();
+    expect(fx.submit).not.toHaveBeenCalled();
   });
 });

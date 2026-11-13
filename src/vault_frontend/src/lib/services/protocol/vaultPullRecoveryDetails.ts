@@ -1,4 +1,4 @@
-import { sameVaultPullRequest, type VaultPullRecoverySnapshot, type VaultPullRequest } from './vaultOperationJournal';
+import { sameVaultPullRequest, heldVaultPullRecovery, type VaultPullRecoverySnapshot, type VaultPullRequest } from './vaultOperationJournal';
 
 export function exactTokenAmount(raw: bigint, decimals: number): string {
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 30) return `${raw} base units`;
@@ -31,6 +31,7 @@ export function savedVaultRequestActions(snapshot: VaultPullRecoverySnapshot) {
   if (!active) return id === snapshot.status.acknowledged_through + 1n
     ? { canRestore: true, canCancel: true, retired: false, message: 'Review the saved amounts. Restore to continue this exact request, or ask the backend to retire it safely.' }
     : held('This saved request does not match the backend sequence. Keep it for support; do not start another transfer.');
+  if (heldVaultPullRecovery(active)) return held('The transfer is confirmed and recorded for collateral recovery. Do not restore, cancel or send again; review the recovery notice.');
   if (active.confirmed_wide_block_index?.[0] !== undefined || 'Submitted' in active.phase) {
     return held('A transfer may already have happened. Verify its exact receipt instead of cancelling or sending again.');
   }

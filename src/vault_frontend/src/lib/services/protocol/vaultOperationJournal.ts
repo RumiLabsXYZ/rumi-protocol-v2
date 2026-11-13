@@ -27,6 +27,11 @@ export type VaultPullPhase =
 	| { SafeNoEffect: { message: string } }
 	| { Completed: { result: unknown } };
 
+export interface VaultPullRecoveryLiability {
+  vault_id: bigint; block_index: bigint; amount: bigint;
+  ledger: string; payout_operation_id: bigint;
+}
+
 export interface VaultPullView {
 	operation_id: bigint;
 	request: VaultPullRequest;
@@ -34,6 +39,8 @@ export interface VaultPullView {
 	phase: VaultPullPhase;
 	/** Exact positive ledger receipt when the existing u64 recovery API cannot represent it. */
 	confirmed_wide_block_index?: [] | [bigint];
+  /** Confirmed pull retained separately; never credited vault collateral. */
+  recovery?: [] | [VaultPullRecoveryLiability];
 }
 
 export interface VaultPullStatus {
@@ -65,7 +72,8 @@ export function normalizeVaultPullStatus(status: VaultPullStatus): VaultPullStat
 	return {
 		...status,
 		active: [
-			{ ...view, request, confirmed_wide_block_index: view.confirmed_wide_block_index ?? [] }
+			{ ...view, request, confirmed_wide_block_index: view.confirmed_wide_block_index ?? [],
+        recovery: (view.recovery?.map(row => ({ ...row, ledger: principalText(row.ledger) })) ?? []) as VaultPullView['recovery'] }
 		]
 	};
 }
@@ -331,6 +339,19 @@ function validateActive(view: VaultPullView, intent: VaultPullIntent): void {
 	}
 }
 
+export function heldVaultPullRecovery(view: VaultPullView): VaultPullRecoveryLiability | null {
+  const held = view.recovery?.[0];
+  if (!held) return null;
+  if (!('AddMargin' in view.request) || !('PullConfirmed' in view.phase)
+    || held.vault_id !== view.vault_id || held.vault_id !== view.request.AddMargin.vault_id
+    || held.amount !== view.request.AddMargin.amount_e8s || held.amount <= 0n
+    || held.block_index !== view.phase.PullConfirmed.block_index || held.payout_operation_id <= 0n) {
+    throw new Error('Collateral recovery details do not match the saved transfer. Keep the request for support; do not send again.');
+  }
+  principalText(held.ledger);
+  return held;
+}
+
 function terminal(view: VaultPullView): boolean {
 	return 'Completed' in view.phase || 'SafeNoEffect' in view.phase;
 }
@@ -509,6 +530,7 @@ async function runVaultPullOperationLocked<T>(
 		);
 	}
 
+  if (currentView && heldVaultPullRecovery(currentView)) return adapter.completed(currentView);
 	if (currentView && terminal(currentView)) {
 		if ('Completed' in currentView.phase) {
 			const result = adapter.completed(currentView);
@@ -582,6 +604,7 @@ async function runVaultPullOperationLocked<T>(
 	validateActive(currentView, intent);
 
 	if ('Submitted' in currentView.phase) notifySubmittedVaultPull(owner);
+  if (heldVaultPullRecovery(currentView)) return adapter.completed(currentView);
 	if (!terminal(currentView)) throw new Error(heldMessage(currentView));
 	if ('SafeNoEffect' in currentView.phase) {
 		const message = currentView.phase.SafeNoEffect.message;
@@ -770,4 +793,53 @@ export async function resumeSavedVaultPullOperation<T>(args: {
 		assertReviewedIntent(owner, intent);
 		return runVaultPullOperationLocked(owner, intent.request, adapter, undefined, intent);
 	});
+}
+
+/** Explicitly acknowledge the reviewed notice; never dispatch or approve a transfer. */
+export async function acknowledgeHeldVaultPullRecovery(args: {
+  owner: string; view: VaultPullView;
+  adapter: Pick<VaultPullAdapter<unknown>, 'currentOwner' | 'assertCurrent' | 'getStatus' | 'acknowledge'>;
+}): Promise<bigint> {
+  const { owner, view, adapter } = args;
+  return withCrossTabLock(owner, async () => {
+    const held = heldVaultPullRecovery(view);
+    if (!held) throw new Error('No confirmed collateral recovery notice is available to acknowledge.');
+    const raw = globalThis.localStorage.getItem(vaultPullIntentKey(owner));
+    const intent = readIntent(owner);
+    if (intent) validateActive(view, intent);
+    const assertCurrent = () => {
+      assertRecoveryOwner(owner, adapter);
+      if (globalThis.localStorage.getItem(vaultPullIntentKey(owner)) !== raw)
+        throw new Error('The saved request changed. Refresh before acknowledging its notice.');
+    };
+    assertCurrent();
+    let status = await adapter.getStatus();
+    assertCurrent();
+    if (status.acknowledged_through < view.operation_id) {
+      const active = status.active[0];
+      if (!active || active.operation_id !== view.operation_id || !sameVaultPullRequest(active.request, view.request))
+        throw new Error('The recovery request changed. Refresh its status before acknowledging.');
+      const latest = heldVaultPullRecovery(active);
+      if (!latest || latest.vault_id !== held.vault_id || latest.block_index !== held.block_index
+        || latest.amount !== held.amount || latest.ledger !== held.ledger || latest.payout_operation_id !== held.payout_operation_id)
+        throw new Error('The recovery notice changed. Keep the request for support.');
+      try {
+        const acknowledged = await adapter.acknowledge(view.operation_id);
+        assertCurrent();
+        status = isNat64(acknowledged)
+          ? { active: [], acknowledged_through: acknowledged }
+          : await adapter.getStatus();
+      } catch (error) {
+        assertCurrent();
+        status = await adapter.getStatus();
+        assertCurrent();
+        if (status.acknowledged_through < view.operation_id) throw error;
+      }
+      assertCurrent();
+    }
+    if (!isNat64(status.acknowledged_through) || status.acknowledged_through < view.operation_id)
+      throw new Error('Acknowledgement is not confirmed. The recovery notice remains saved.');
+    if (intent) clearIntent(owner, intent);
+    return status.acknowledged_through;
+  });
 }

@@ -9,6 +9,8 @@
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { interpolateMultiplier, computeProjectedRate } from '../../utils/interpolate';
   import { walletStore } from '../../stores/wallet';
+  import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '$lib/services/auth';
+  import { openOisySignerChannel } from '$lib/services/oisySigner';
   import { MINIMUM_CR, LIQUIDATION_CR, E8S, getMinimumCR, getLiquidationCR } from '$lib/protocol';
   import { collateralStore } from '../../stores/collateralStore';
   import { TokenService } from '../../services/tokenService';
@@ -28,9 +30,8 @@
   export let expandedVaultId: number | null = null;
   export let bitcoinOnly: boolean = false;
 
-  // The backend keeps AddMargin V2 as an explicit rejecting method until its
-  // journal can safely compensate a pull if liquidation removes the vault.
-  const ADD_MARGIN_V2_ENABLED: boolean = false;
+  // Paired with the backend's exact-receipt credit or held-recovery journal.
+  const ADD_MARGIN_V2_ENABLED: boolean = true;
 
   $: redemptionClaim = vault.nicpRedemptionClaim;
   $: isRedemptionClaim = !!redemptionClaim;
@@ -687,8 +688,18 @@
     if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
     if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
+    const principalAtClick = $walletStore.principal;
+    const ownerAtClick = principalAtClick?.toText();
+    const walletAtClick = $currentWalletType, sessionAtClick = $walletSessionGeneration;
+    const current = () => $walletStore.isConnected && !$walletStore.loading
+      && $walletStore.principal?.toText() === ownerAtClick
+      && $currentWalletType === walletAtClick && $walletSessionGeneration === sessionAtClick;
     try {
+      // Open the existing signer channel in the click before any query/queue wait.
+      if (walletAtClick === WALLET_TYPES.OISY && principalAtClick) await openOisySignerChannel(principalAtClick);
+      if (!current()) throw new Error('Wallet session changed. No new top-up was submitted.');
       const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
+      if (!current()) return;
       if (result.success) {
         const msg = result.oisyResilient
           ? `Added ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`

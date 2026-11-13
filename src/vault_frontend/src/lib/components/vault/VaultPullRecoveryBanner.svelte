@@ -3,7 +3,7 @@
   import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '$lib/services/auth';
   import { openOisySignerChannel } from '$lib/services/oisySigner';
   import { ApiClient } from '$lib/services/protocol/apiClient';
-  import { VAULT_PULL_STATUS_EVENT, sameVaultPullRequest, type VaultPullRequest, type VaultPullRecoverySnapshot } from '$lib/services/protocol/vaultOperationJournal';
+  import { VAULT_PULL_STATUS_EVENT, sameVaultPullRequest, heldVaultPullRecovery, type VaultPullRequest, type VaultPullRecoverySnapshot } from '$lib/services/protocol/vaultOperationJournal';
   import { walletStore } from '$lib/stores/wallet';
   import { vaultStore } from '$lib/stores/vaultStore';
   import { collateralStore } from '$lib/stores/collateralStore';
@@ -187,6 +187,8 @@
     }
   }
 
+  $: recoveryView = recovery?.status.active[0] ?? null;
+  $: collateralRecovery = recoveryView ? heldVaultPullRecovery(recoveryView) : null;
   $: savedIntent = recovery?.intent ?? null;
   $: actions = recovery ? savedVaultRequestActions(recovery) : null;
   $: targetVaultId = savedIntent && 'AddMargin' in savedIntent.request ? savedIntent.request.AddMargin.vault_id : null;
@@ -259,6 +261,26 @@
     };
   });
 
+  async function acknowledgeRecovery() {
+    if (!recoveryView || !collateralRecovery || busy || manualCheckPending || statusReadError) return;
+    const view = recoveryView;
+    const capturedOwner = owner, capturedWallet = $currentWalletType, capturedSession = $walletSessionGeneration;
+    const action = ++actionEpoch;
+    const current = () => action === actionEpoch && owner === capturedOwner
+      && $currentWalletType === capturedWallet && $walletSessionGeneration === capturedSession;
+    busy = true;
+    try {
+      if (requiresUserCheck && $walletStore.principal) await openOisySignerChannel($walletStore.principal);
+      if (!current()) return;
+      await ApiClient.acknowledgeCollateralRecovery(view);
+      if (!current()) return;
+      toastStore.info('Recovery notice acknowledged. The collateral remains held for reconciliation; this did not refund or transfer it.', 12000);
+      await refresh();
+    } catch (error) {
+      if (current()) statusReadError = error instanceof Error ? error.message : 'Could not confirm acknowledgement. Keep this recovery notice.';
+    } finally { if (current()) busy = false; }
+  }
+
   async function recover() {
     if (submitted && submitted.confirmedWideBlockIndex !== null) {
       toastStore.error('This transfer is already confirmed and held. Do not submit another block or retry it.', 8000);
@@ -292,6 +314,17 @@
 <div id="vault-pull-recovery" class="recovery-region" bind:this={recoveryRegion} tabindex="-1" role="region" aria-label="Saved vault request recovery">
 {#if owner && reviewRequested && busy && !recovery}
   <section class="recovery" role="status"><p>Checking your saved request…</p></section>
+{:else if owner && collateralRecovery}
+  <section class="recovery" aria-label="Collateral recovery notice">
+    <p><strong>Collateral transfer confirmed; top-up not applied</strong></p>
+    <p>Your transfer could not be added to the target vault. It is recorded separately for reconciliation. Do not send the collateral again.</p>
+    <p class="operation-details">{collateralRecovery.amount.toString()} base units · ledger {collateralRecovery.ledger} · block {collateralRecovery.block_index.toString()}</p>
+    <p class="operation-details">Recovery reference {collateralRecovery.payout_operation_id.toString()} · vault #{collateralRecovery.vault_id.toString()}</p>
+    <p>Save this reference and contact Rumi support. Acknowledging this notice only retires the request receipt; it does not refund or remove the held collateral.</p>
+    {#if statusReadError}<p class="status-error" role="status">{statusReadError} Keep this notice for support.</p>{/if}
+    <button on:click={requestRefresh} disabled={busy}>Refresh status</button>
+    <button on:click={acknowledgeRecovery} disabled={busy || manualCheckPending || !!statusReadError}>Acknowledge recovery notice</button>
+  </section>
 {:else if owner && submitted}
   <section class="recovery" aria-label="Recover submitted vault collateral pull">
     {#if submitted.confirmedWideBlockIndex !== null}

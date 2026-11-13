@@ -74,6 +74,8 @@ import {
   recoverSubmittedVaultPullFromBlock,
   hasCompatibleVaultPullIntent,
   normalizeVaultPullStatus,
+  heldVaultPullRecovery,
+  acknowledgeHeldVaultPullRecovery,
   inspectVaultPullRecovery,
   cancelSavedVaultPullOperation,
   resumeSavedVaultPullOperation,
@@ -88,9 +90,8 @@ import {
 
 // Constants from backend
 export const E8S = 100_000_000;
-// Backend retains the V2 endpoint but rejects AddMargin until its in-flight
-// collateral recovery path can safely handle concurrent vault liquidation.
-const isVaultAddMarginV2Enabled = (): boolean => false;
+// Paired with backend exact-receipt credit or held collateral recovery.
+const isVaultAddMarginV2Enabled = (): boolean => true;
 const NAT64_MAX = 18_446_744_073_709_551_615n;
 
 /** Parse an icUSD decimal string into exact e8s without passing through Number. */
@@ -432,6 +433,16 @@ private static async refreshVaultData(): Promise<void> {
       };
 
       const completed = (view: VaultPullView): VaultOperationResult => {
+        const held = heldVaultPullRecovery(view);
+        if (held) return {
+          success: false,
+          error: `Your collateral transfer was confirmed at ledger block ${held.block_index}, but it was not added to the vault. ${held.amount} base units on ledger ${held.ledger} are recorded for recovery under reference ${held.payout_operation_id}. Do not send again. Review the collateral recovery notice or contact Rumi support with this reference.`,
+          collateralRecovery: {
+            vaultId: held.vault_id.toString(), blockIndex: held.block_index.toString(),
+            amountRaw: held.amount.toString(), ledger: held.ledger,
+            payoutOperationId: held.payout_operation_id.toString(),
+          },
+        };
         const result = ('Completed' in view.phase ? view.phase.Completed.result : {}) as any;
         if (result.OpenVault) {
           return {
@@ -610,6 +621,29 @@ private static async refreshVaultData(): Promise<void> {
         assertActionBoundContextCurrent(ctx);
         return ApiClient.runVaultCollateralPull(intent.request, ctx, undefined, undefined, intent);
       }, undefined, { refreshBefore: false, refreshAfter: false });
+    }
+
+    /** Receipt ACK only; the separate held collateral liability remains recorded. */
+    static async acknowledgeCollateralRecovery(view: VaultPullView): Promise<bigint> {
+      const { owner, ctx } = ApiClient.vaultPullRecoveryContext();
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      return acknowledgeHeldVaultPullRecovery({ owner, view, adapter: {
+        currentOwner: () => ApiClient.currentPrincipalText(),
+        assertCurrent: () => assertActionBoundContextCurrent(ctx),
+        getStatus: async () => {
+          const response = await actor.get_vault_operation_status();
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return normalizeVaultPullStatus(response.Ok as any);
+        },
+        acknowledge: async (operation_id) => {
+          const response = await actor.ack_vault_operation({ operation_id });
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return response.Ok;
+        },
+      } });
     }
 
     /** Retire only an authoritative no-dispatch/no-effect operation; never an approval or transfer. */
@@ -1325,8 +1359,12 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
     };
   }
 
+  let ctx: ActionBoundContext;
+  try { ctx = ApiClient.vaultPullRecoveryContext().ctx; }
+  catch (error) { return { success: false, error: error instanceof Error ? error.message : 'Connect the vault owner wallet.' }; }
   return ApiClient.executeSequentialOperation(async () => {
     try {
+      assertActionBoundContextCurrent(ctx);
       if (!Number.isSafeInteger(vaultId) || vaultId < 0 ||
           !Number.isFinite(collateralAmount) || collateralAmount <= 0) {
         return { success: false, error: 'Vault ID and collateral amount must be valid positive values.' };
@@ -1351,7 +1389,8 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       const request: VaultPullRequest = {
         AddMargin: { vault_id: BigInt(vaultId), amount_e8s: amountRaw },
       };
-      return await ApiClient.runVaultCollateralPull(request);
+      assertActionBoundContextCurrent(ctx);
+      return await ApiClient.runVaultCollateralPull(request, ctx);
     } catch (error) {
       console.error('Error adding margin to vault:', error);
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error adding margin' };
