@@ -66,6 +66,9 @@ describe('guided ckSOL mint', () => {
     fx.wallet.set({isConnected:true,principal:ownerA}); render(); await settle();
     expect(button('Acknowledge completed deposit')).toBeUndefined();
     expect(host.textContent).not.toContain('processing has not started');
+    expect(host.querySelector('[aria-label="Mint progress"]')?.textContent).toContain('Mint complete');
+    expect(button('Mint ckSOL')).toBeUndefined();
+    button('Start another deposit').click(); await settle();
     expect(button('Mint ckSOL').disabled).toBe(false);
   });
   it('checks receipts automatically after a long absence and stops when unmounted', async () => {
@@ -98,7 +101,8 @@ describe('post-submit mint state', () => {
     fx.submitPaid.mockResolvedValue({owner:ownerA.toText(),sequence:'3',phase:'Receipt',createdAt:1,receipt:{phase:'Complete',deposit_id:[32n]}});
     fx.depositStatus.mockResolvedValue(state==='Queued'?{Queued:{sweepable_amount:1920000000n}}:{Minted:{minted_amount:1919999999n,block_index:202n}});
     render();await settle();button('Mint ckSOL').click();await settle();
-    expect(button('Mint ckSOL').disabled).toBe(true);
+    if(state==='Minted') expect(button('Mint ckSOL')).toBeUndefined();
+    else expect(button('Mint ckSOL').disabled).toBe(true);
     expect(host.textContent).not.toContain('1.92 SOL received');
     if(state==='Minted')expect(host.textContent).toContain('1.919999999 ckSOL received');
   });
@@ -446,5 +450,121 @@ describe('mint completion with unavailable ICP payment status', () => {
     const reads=fx.icpRecover.mock.calls.length;
     await vi.advanceTimersByTimeAsync(15_000);await settle();expect(fx.icpRecover.mock.calls.length).toBeGreaterThan(reads);
     expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('prominent mint request status', () => {
+  const paid = (sequence: string, phase: string, id?: bigint) => ({
+    owner: ownerA.toText(), sequence, phase: 'Receipt', createdAt: Number(sequence),
+    receipt: { phase, deposit_id: id === undefined ? [] : [id] },
+  });
+  const progress = () => host.querySelector('[aria-label="Mint progress"]')!;
+  function restore(id = 32n, phase = 'Complete') {
+    fx.wallet.set({isConnected:true,principal:ownerA});
+    fx.recoverPaid.mockResolvedValue(paid('3', phase, id));
+    fx.attempt.mockResolvedValue([{status:{Queued:id}}]);
+    fx.solBalance.mockResolvedValue(890_880n);
+  }
+
+  it('keeps delayed mint progress visible after payment settles and confirms only Minted', async () => {
+    vi.useFakeTimers(); restore();
+    render(); await settle();
+    expect(progress().textContent).toContain('Mint request submitted');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(progress().querySelector('.animate-spin')).not.toBeNull();
+    expect(progress().textContent).toContain('Last successful mint check');
+    expect(progress().textContent).toContain('Checking this request automatically');
+    fx.depositStatus.mockResolvedValue({Finalized:{signature:'synthetic-finalized'}});
+    await vi.advanceTimersByTimeAsync(15_000); await settle();
+    expect(progress().textContent).toContain('ckSOL mint pending');
+    expect(progress().textContent).not.toContain('Mint complete');
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:1_919_996_001n,block_index:203n}});
+    button('Check again').click(); await settle();
+    expect(progress().textContent).toContain('Mint complete');
+    expect(progress().textContent).toContain('1.919996001 ckSOL minted');
+    expect(progress().textContent).toContain(ownerA.toText());
+    expect(progress().textContent).toContain('203');
+    const receiptLink=progress().querySelector('a[href="#cksol-mint-receipt"]') as HTMLAnchorElement;
+    receiptLink.click(); await settle();
+    expect((host.querySelector('#cksol-mint-receipt') as HTMLDetailsElement).open).toBe(true);
+    expect(button('Mint ckSOL')).toBeUndefined();
+    expect(host.textContent).not.toContain('mint action is waiting for a new SOL deposit');
+    expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+
+  it('does not use a previous Minted receipt for a new request without a deposit ID', async () => {
+    restore(); fx.solBalance.mockResolvedValue(1_920_000_000n);
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    render(); await settle();
+    expect(progress().textContent).toContain('Mint complete');
+    button('Start another deposit').click(); await settle();
+    let resolve!: (value: any) => void;
+    fx.submitPaid.mockImplementationOnce(() => new Promise(r => resolve=r));
+    button('Mint ckSOL').click(); await settle();
+    expect(progress().textContent).toContain('Mint action in progress');
+    expect(progress().textContent).not.toContain('Awaiting wallet confirmation');
+    resolve(paid('4','FundingPending')); await settle();
+    expect(progress().textContent).toContain('Processing request');
+    expect(progress().textContent).not.toContain('Mint complete');
+    fx.recoverPaid.mockResolvedValue(paid('4','Complete'));
+    button('Check again').click(); await settle();
+    expect(progress().textContent).toContain('no matching ckSOL mint has been confirmed');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(button('Mint ckSOL').disabled).toBe(true);
+    expect(fx.submitPaid).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an unmatched settled request checking after restoration instead of reusing old success', async () => {
+    vi.useFakeTimers(); restore(); fx.solBalance.mockResolvedValue(1_920_000_000n);
+    fx.recoverPaid.mockResolvedValue(paid('4','Complete'));
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:99n,block_index:202n}});
+    render(); await settle();
+    expect(progress().textContent).toContain('no matching ckSOL mint has been confirmed');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(progress().querySelector('.animate-spin')).not.toBeNull();
+    expect(button('Mint ckSOL').disabled).toBe(true);
+    const checks=fx.recoverPaid.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(15_000); await settle();
+    expect(fx.recoverPaid.mock.calls.length).toBeGreaterThan(checks);
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the last successful check separate from a failed read and resumes by checking', async () => {
+    vi.useFakeTimers(); restore(); render(); await settle();
+    const lastChecked = [...progress().querySelectorAll('p')].find(p => p.textContent?.includes('Last successful mint check'))!.textContent;
+    fx.depositStatus.mockRejectedValueOnce(new Error('synthetic network unavailable'));
+    button('Check again').click(); await settle();
+    expect(progress().textContent).toContain('Checking mint status');
+    expect(progress().textContent).toContain(lastChecked!);
+    expect(progress().textContent).toContain('latest check failed');
+    fx.depositStatus.mockResolvedValue({Swept:{signature:'synthetic-sweep'}});
+    await vi.advanceTimersByTimeAsync(15_000); await settle();
+    expect(progress().textContent).toContain('Processing SOL deposit');
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
+  });
+
+  it('restores the current owner/request without importing another owner’s completed mint', async () => {
+    restore(); fx.depositStatus.mockResolvedValue({Minted:{minted_amount:1_919_996_001n,block_index:202n}});
+    render(); await settle(); expect(progress().textContent).toContain('Mint complete');
+    fx.recoverPaid.mockResolvedValue({...paid('7','Starting'),owner:ownerB.toText(),phase:'Starting',receipt:undefined});
+    fx.attempt.mockResolvedValue([]);
+    fx.generation.set(1); fx.wallet.set({isConnected:true,principal:ownerB}); await settle();
+    expect(progress().getAttribute('data-request')).toContain(ownerB.toText());
+    expect(progress().getAttribute('data-request')).toContain('|cycles|7');
+    expect(progress().textContent).toContain('Submitting request');
+    expect(progress().textContent).not.toContain('1.919996001');
+    expect(progress().textContent).not.toContain('Mint complete');
+    expect(fx.submitPaid).not.toHaveBeenCalled();
+  });
+
+  it('keeps confirmed mint success dominant while a matching refund remains pending', async () => {
+    restore(32n,'RefundReady');
+    fx.depositStatus.mockResolvedValue({Minted:{minted_amount:1_919_996_001n,block_index:202n}});
+    render(); await settle();
+    expect(progress().textContent).toContain('Mint complete');
+    expect(progress().textContent).toContain('processing payment or refund is still pending');
+    expect(button('Start another deposit').disabled).toBe(true);
+    expect(button('Return unused cycles')).toBeTruthy();
+    expect(fx.submitPaid).not.toHaveBeenCalled(); expect(fx.icpSubmit).not.toHaveBeenCalled();
   });
 });

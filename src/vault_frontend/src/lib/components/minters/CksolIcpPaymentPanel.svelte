@@ -29,6 +29,11 @@
 	export let onReceipt: (receipt: any) => void = () => {};
 	export let onBusy: (busy: boolean) => void = () => {};
 	export let onActive: (active: boolean) => void = () => {};
+	// Observational UI callbacks only; payment and polling decisions stay below.
+	export let onMintStart: () => void = () => {};
+	export let onProgress: (progress: { phase?: string; sequence?: string; depositId: bigint | null; checking: boolean; lastChecked: number | null; unavailable: boolean }) => void = () => {};
+	export let mintComplete = false;
+	let lastChecked: number | null = null;
 	let quote: CksolIcpQuote | null = null,
 		payment: CksolIcpIntent | null = null;
 	let busy = false,
@@ -46,6 +51,7 @@
 	const icp = (amount: bigint) =>
 		`${amount / 100_000_000n}.${(amount % 100_000_000n).toString().padStart(8, '0')} ICP`;
 	$: phase = payment?.receipt?.phase ?? payment?.phase;
+	$: onProgress({ phase, sequence: payment?.sequence, depositId: payment?.receipt?.deposit_id?.[0] === undefined ? null : BigInt(payment.receipt.deposit_id[0]), checking: refreshing, lastChecked, unavailable: receiptUnknown || !!unavailable });
 	$: interrupted = cksolIcpNeedsReconciliation(payment?.receipt);
 	$: pending = interrupted || !icpPaymentSettled(payment);
 	$: onActive(pending || damaged || receiptUnknown);
@@ -83,7 +89,7 @@
 		phase === 'Complete'
 			? interrupted
 				? 'ICP payment settled. SOL outcome remains unknown; the minting hold stays in place.'
-				: 'Processing payment settled. Mint progress is shown separately below.'
+				: 'Processing payment settled. Mint progress is shown in the mint status panel.'
 			: phase === 'FundingRejected'
 				? 'No ICP deposit was collected. Review the cost before trying again.'
 				: phase === 'Approved'
@@ -120,6 +126,7 @@
 			);
 			if (!currentRead()) return;
 			receiptUnknown = !checkedReceipt;
+			if (checkedReceipt) lastChecked = Date.now();
 			payment = recovered;
 			if (!candidateBlock && payment?.fundingCandidateBlock) candidateBlock = payment.fundingCandidateBlock;
 			if (payment?.receipt) onReceipt(payment.receipt);
@@ -148,6 +155,7 @@
 	}
 	async function mint() {
 		if (!enabled) return;
+		if (!checkingRefund) onMintStart();
 		refreshGeneration++;
 		busy = true;
 		onBusy(true);
@@ -308,7 +316,7 @@
 				You do not need to buy cycles. If you already sent SOL, finish that deposit here; do not send
 				more SOL.
 			</p>
-		{:else if !canMint && !pending}<p class="text-sm text-gray-300">
+		{:else if !canMint && !pending && !mintComplete}<p class="text-sm text-gray-300">
 				Your ICP balance covers the maximum. Send SOL using the address below, then select Mint with
 				ICP.
 			</p>{/if}
@@ -341,11 +349,13 @@
 		</p>
 	{/if}
 	{#if error}<p role="alert" class="break-words text-sm text-red-300">{error}</p>{/if}
+	{#if !mintComplete || checkingRefund}
 	<button
 		class="w-full rounded-lg bg-emerald-600 px-5 py-3 font-semibold disabled:opacity-40"
 		disabled={!enabled}
 		onclick={mint}>{busy ? 'Checking payment…' : label}</button
 	>
+	{/if}
 	<p class="text-xs text-gray-400">
 			{#if fundingHeld}
 				The collection block check only verifies an existing debit. It does not approve an allowance,
