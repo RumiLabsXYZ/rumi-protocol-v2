@@ -22,6 +22,13 @@ export interface AddCollateralArg {
   'interest_rate_apr' : number,
   'liquidation_ratio' : number,
 }
+export interface AddMarginRecovery {
+  'payout_operation_id' : bigint,
+  'block_index' : bigint,
+  'vault_id' : bigint,
+  'ledger' : Principal,
+  'amount' : bigint,
+}
 export interface AddMarginV2Args {
   'operation_id' : bigint,
   'vault_id' : bigint,
@@ -2367,6 +2374,7 @@ export interface VaultOperationView {
   'request' : VaultCollateralPullRequest,
   'operation_id' : bigint,
   'vault_id' : bigint,
+  'recovery' : [] | [AddMarginRecovery],
   'phase' : VaultCollateralPullPhase,
   'confirmed_wide_block_index' : [] | [bigint],
 }

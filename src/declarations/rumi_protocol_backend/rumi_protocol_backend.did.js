@@ -2018,6 +2018,13 @@ export const idlFactory = ({ IDL }) => {
     'pending_interest_for_pools_total' : IDL.Nat64,
   });
   const Result_22 = IDL.Variant({ 'Ok' : IDL.Float64, 'Err' : ProtocolError });
+  const AddMarginRecovery = IDL.Record({
+    'payout_operation_id' : IDL.Nat,
+    'block_index' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'amount' : IDL.Nat64,
+  });
   const VaultOperationResult = IDL.Variant({
     'AddMargin' : IDL.Record({
       'block_index' : IDL.Nat64,
@@ -2046,6 +2053,7 @@ export const idlFactory = ({ IDL }) => {
     'request' : VaultCollateralPullRequest,
     'operation_id' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
+    'recovery' : IDL.Opt(AddMarginRecovery),
     'phase' : VaultCollateralPullPhase,
     'confirmed_wide_block_index' : IDL.Opt(IDL.Nat),
   });
