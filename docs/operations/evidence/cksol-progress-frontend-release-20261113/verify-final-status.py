@@ -1,0 +1,8 @@
+from pathlib import Path
+import subprocess,json
+p=Path('/private/tmp/rumi-sec18-frontend-release-20261113');report={};pins=json.loads((p/'publication-pins.json').read_text())
+for label,target,baseline in [('frontend','tcfua-yaaaa-aaaap-qrd7q-cai','frontend-status-before.json'),('backend','tfesu-vyaaa-aaaap-qrd7a-cai','backend-status.json')]:
+ r=subprocess.run(['icp','canister','status',target,'--network','ic','--identity','rumi_identity','--json'],capture_output=True,timeout=90);assert r.returncode==0;now=json.loads(r.stdout);old=json.loads((p/baseline).read_text());assert now['status']=='Running' and now['module_hash'].removeprefix('0x')==(pins['backendModule'] if label=='backend' else old['module_hash'].removeprefix('0x')) and now['settings']==old['settings'];(p/(label+'-status-final.json')).write_bytes(r.stdout);report[label]={'id':target,'status':now['status'],'module_hash':now['module_hash'],'settings':now['settings'],'expectedModuleVerified':True,'settingsPreserved':True,'moduleChangedAsApproved':False}
+for perm in ['Commit','Prepare']:
+ label=perm.lower();r=subprocess.run(['icp','canister','call','tcfua-yaaaa-aaaap-qrd7q-cai','list_permitted','(record {permission=variant {'+perm+'}})','--candid',str(p/'frontend-live.did'),'--network','ic','--identity','rumi_identity','--json'],capture_output=True,timeout=90);assert r.returncode==0;(p/('permissions-'+label+'-final.json')).write_bytes(r.stdout);assert json.loads(r.stdout)['response_bytes']==json.loads((p/('permissions-'+label+'-before.json')).read_text())['response_bytes'];report[label+'PermissionPreserved']=True
+(p/'final-unaffected-readbacks.json').write_text(json.dumps(report,indent=2));print('Final expected modules verified; settings/controllers and both permission lists preserved')
