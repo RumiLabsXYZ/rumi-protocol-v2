@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-19",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "Nine backend tests, canonical Candid/bindings, old+declared interface compatibility and source-matched Wasm/size checks passed. All three PocketIC cases failed in shared setup before top-up: fixture approval consumed the fee needed for the original deposit. Fixture-only correction9e8a5f5a funds both fees without weakening exact balance assertions; canonical interfaces committed7dd8cb29, production Rust unchanged from e2a0122a. Fresh PIC-only packet prepared to reuse verified artifacts and rerun only the three scenarios after new capacity. Both prior allocations stopped/closed with evidence retained. Frontend129 checks across six suites pass, including real generated-schema decoding with exact amounts and wide payout references. Production deposits remain paused; no vault213 transaction.",
+      "evidenceText": "Final source4d8322a7 is pushed and independently accepted by both reviewers. Nine backend tests, canonical Candid/bindings and old+declared compatibility, verified Wasm/size/exports, three corrected PocketIC scenarios and134 frontend tests pass. Review found missing-metadata scaling: reproduced old wrong-scale success, then fixed pre-approval rejection with five regressions and dual closure recheck. Exact four live SEC18 files preserved. Removed-target test uses closure; liquidation ordering is source-verified only. Fresh resource grants closed/released; earlier resource stop/fixture failures retained. Single paired backend/frontend release decision prepared for central approval; frontend production build and deployment remain held. No live vault213/customer financial action.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",
@@ -22,6 +22,10 @@
         {
           "title": "Corrected fixture and final three-scenario validation plan",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-pic-plan-20261113.md"
+        },
+        {
+          "title": "Final source verification and exact paired release decision",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-release-decision-20261113.md"
         }
       ]
     },

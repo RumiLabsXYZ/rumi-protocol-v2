@@ -1,0 +1,32 @@
+{
+  "backendCheckpoint": "7dd8cb29b878cec9d01f256457a631ff2b27f08a",
+  "comparisonBase": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "status": "backend committed, frontend separate working source; no edits during review",
+  "files": {
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did": "d8b0142e705e860640557b7ea6253a2a6027d7e96f3b15cfee9ba51fff0d2c97",
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.d.ts": "875aa4c64b18c05cf016968b13c40ba37b905a27911fb16ad4e6de0a627dffb4",
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.js": "3aa1e647fac3d0e64fe4f3b5e89c9e17039fda4e1fb2ec36bda591ab451c9688",
+    "src/rumi_protocol_backend/rumi_protocol_backend.did": "d8b0142e705e860640557b7ea6253a2a6027d7e96f3b15cfee9ba51fff0d2c97",
+    "src/rumi_protocol_backend/src/event.rs": "9152e7cf18c6ccf8f10ef6634295e9a8348f34a11b347b3d95addd5b6c36b614",
+    "src/rumi_protocol_backend/src/icrc21.rs": "7171775105057882d96a12b23d93a4c76c2b2b9b62d85a9125cd6d2b2d7b97bd",
+    "src/rumi_protocol_backend/src/icrc3_proof.rs": "3328d6045c911939bc98c02042f65b3ee64d6128d654535571a8ef53f68e271c",
+    "src/rumi_protocol_backend/src/main.rs": "5fa930f444a2eab8a1666437fb10a6a004d92f63787c966e10ff0b86132153da",
+    "src/rumi_protocol_backend/src/state.rs": "1cab9ef4dd5b1b1900277218d69b90cd97c7d61260a36c844e5180662476404e",
+    "src/rumi_protocol_backend/src/vault.rs": "733c1b70cfaeadb44c7cf0a0a1adbf48432e2c78a3871e187b3008727990a1a5",
+    "src/rumi_protocol_backend/tests/vault_collateral_pull_pic.rs": "93f86b2af86b04b2c1faf1e9d244a35462085ed880d8086c6ab312d695d5bf36",
+    "src/vault_frontend/src/lib/components/minters/CksolIcpPaymentPanel.spec.ts": "0b4e73052e2958be938a80078e5dad7ffdc1cd028facd8e008468fcea8b81686",
+    "src/vault_frontend/src/lib/components/minters/CksolIcpPaymentPanel.svelte": "6485ea98a41ef6a8bea1123bc3bc085e3a0b46f121f618ddd0ab610921f52acb",
+    "src/vault_frontend/src/lib/components/vault/VaultCard.repayRefresh.spec.ts": "a10a7781f94b9c23948588235949686bf7373b5e20e023e8deba4748487fbe6a",
+    "src/vault_frontend/src/lib/components/vault/VaultCard.svelte": "5b6f58a6c42e00028a23ea55aa3dcbc124d9c83be39f8c3658f14e56007f16e4",
+    "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.spec.ts": "141f48dc07cb76f8a9b913b1d4d7ebd685035110a6fcba5a752a3051b35b10d3",
+    "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.svelte": "fb2004ab4bff8cc0a39b5e3305a71932ea7cf4506a219fb9b5893a6eead01b20",
+    "src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts": "76da46538fe0836875e07fc7b4d69a65df0597917e7eec1e3a23608434aed07c",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.ts": "09b4e216848e497f54977f08f0c7e498cd156dc0fc2f050f23343ecf2121a213",
+    "src/vault_frontend/src/lib/services/protocol/vaultOperationJournal.ts": "1dff539334aee00476719152ee234e9be22da11ae3fd93cbdb74f4eef5d4168e",
+    "src/vault_frontend/src/lib/services/protocol/vaultPullRecoveryDetails.ts": "5aff417b58db06e76c7a41411d09756c6577d89d3573364a3d8d29760d587c07",
+    "src/vault_frontend/src/lib/services/types.ts": "821e29c5422296ff7177486cc0249b619fea438c1dc8ca935993920d14de9704",
+    "src/vault_frontend/src/lib/utils/cksolMinterPage.fixture.spec.ts": "3e6fb52741b14693e5d6a8722794d658ee2899ca0cebcec5bd74a8bebed37389",
+    "src/vault_frontend/src/routes/solana/+page.svelte": "2ac79796a4583eee7a61b9e4d2c082e4e9d0bc8e9c83bb1cc064a201d06c247b",
+    "src/vault_frontend/src/lib/services/protocol/vaultMarginRecovery.spec.ts": "dec676106d2625c8aef0384ae5931aced2580139631d3c3d256292d1c20fedb5"
+  }
+}

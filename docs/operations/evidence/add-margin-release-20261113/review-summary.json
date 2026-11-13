@@ -1,0 +1,35 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "reviewers": [
+    {
+      "name": "Iris",
+      "verdict": "PASS",
+      "specificFinding": "Missing metadata used eight-decimal fallback; closed after guard and reproduced red/green regression."
+    },
+    {
+      "name": "Independent final reviewer",
+      "verdict": "PASS",
+      "scope": "All25 pinned files and actual native logs, followed by bounded two-file metadata correction recheck."
+    }
+  ],
+  "sourceFileHashesVerifiedInPushedCommit": 25,
+  "backendRuntimeByteEqualsBuiltE2": true,
+  "frontendTests": {
+    "suites": 6,
+    "passed": 134,
+    "nativeExit": 0
+  },
+  "backendChecks": {
+    "newUnits": 6,
+    "journalCompatibility": 1,
+    "outcomeClassification": 2,
+    "pocketIc": 3,
+    "canonicalAndOldServiceCompatibility": "PASS"
+  },
+  "sec18FilesExactAb": 4,
+  "limits": [
+    "No actual liquidation execution; shared deletion and liquidation ordering source-verified.",
+    "No production build/publication or live user/Rob top-up.",
+    "Held recovery is a recorded liability, not an automatic refund delivery."
+  ]
+}

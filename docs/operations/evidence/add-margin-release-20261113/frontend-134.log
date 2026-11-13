@@ -1,0 +1,22 @@
+
+ RUN  v2.1.9 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+ ✓ src/lib/services/protocol/actionBoundary.spec.ts (70 tests) 159ms
+ ✓ src/lib/services/protocol/vaultOperationJournal.spec.ts (39 tests) 76ms
+Browserslist: browsers data (caniuse-lite) is 8 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+8:58:30 AM [vite-plugin-svelte] src/lib/components/vault/VaultCard.svelte:1685:2 Unused CSS selector ".theme-bob .input-hint"
+https://svelte.dev/e/css_unused_selector
+8:58:30 AM [vite-plugin-svelte] src/lib/components/vault/VaultCard.svelte:1715:2 Unused CSS selector ".theme-bob .interest-accrued"
+https://svelte.dev/e/css_unused_selector
+ ✓ src/lib/components/vault/VaultCard.repayRefresh.spec.ts (11 tests) 208ms
+ ✓ src/lib/components/vault/VaultPullRecoveryBanner.spec.ts (5 tests) 134ms
+ ✓ src/lib/services/protocol/vaultMarginRecovery.spec.ts (7 tests) 17ms
+ ✓ src/lib/components/vault/VaultCard.repay.spec.ts (2 tests) 2ms
+
+ Test Files  6 passed (6)
+      Tests  134 passed (134)
+   Start at  08:58:26
+   Duration  6.25s (transform 1.42s, setup 25ms, collect 2.32s, tests 595ms, environment 2.38s, prepare 227ms)
+

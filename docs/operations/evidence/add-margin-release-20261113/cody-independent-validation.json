@@ -1,0 +1,115 @@
+{
+  "at": "2026-11-13T16:54:12.481665+00:00",
+  "allocationId": "5c1087d7-8533-4fb6-93cb-469770bbd89b",
+  "allocationSha256": "bba6d1068edb07368db883161e768bbac5684a2c729d2c90403e71bde3f62223",
+  "status": "CONSUMED_CORRECTED_THREE_PIC_PASS_ALL_OWNED_CLOSED",
+  "source": "7dd8cb29b878cec9d01f256457a631ff2b27f08a",
+  "sourceTree": "3be50c8157618f686d66f3ef0d0e237a80c202fb",
+  "sourceAll220InputsUnchanged": true,
+  "productionSourceByteEqualE2": true,
+  "exactFixtureFeeOnlyFixAssertionsUnchanged": true,
+  "oneNativeCommand": {
+    "name": "pic-sec19",
+    "args": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "rumi_protocol_backend",
+      "--test",
+      "vault_collateral_pull_pic",
+      "sec19_",
+      "--",
+      "--test-threads=1"
+    ],
+    "start": "2026-11-13T16:51:23.487755+00:00",
+    "end": "2026-11-13T16:52:04.566749+00:00",
+    "exit": 0
+  },
+  "picCounts": {
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0,
+    "filtered": 4
+  },
+  "namedCases": [
+    "sec19_lost_pull_then_target_closed_creates_one_held_recovery",
+    "sec19_topup_lost_reply_exact_retry_credits_once",
+    "sec19_typed_no_effect_ack_retires_operation_without_a_pull"
+  ],
+  "priorNineTestsAndEightNonPicStagesRetainedNotRerun": true,
+  "retainedBackendSha256": "2961d2d84008e43756c25c3361b59717676ea92d68eb82951648dc5a4703ea08",
+  "retainedLedgerSha256": "e7f4ebb3b53f5239a6922ad6df836cc09a4d20fa6efc7ef7ba049b8c61a0eaf2",
+  "canonicalDidSha256": "d8b0142e705e860640557b7ea6253a2a6027d7e96f3b15cfee9ba51fff0d2c97",
+  "artifactCodeSectionBytes": 8957230,
+  "preservedProjectCodeGuardBytes": 10223616,
+  "session": {
+    "source": "7dd8cb29b878cec9d01f256457a631ff2b27f08a",
+    "command": [
+      "python3",
+      "-I",
+      "/private/tmp/rumi-sec19-pic-20261113/steps.py"
+    ],
+    "start": "2026-11-13T16:51:18.511450+00:00",
+    "allocationSha256": "bba6d1068edb07368db883161e768bbac5684a2c729d2c90403e71bde3f62223",
+    "allocationId": "5c1087d7-8533-4fb6-93cb-469770bbd89b",
+    "initialFreeBytes": 35691589632,
+    "pgid": 87992,
+    "expectedPocketIcCleanup": true,
+    "end": "2026-11-13T16:52:05.658480+00:00",
+    "exit": 0,
+    "stopReason": null,
+    "exception": null,
+    "peakOwnedRssBytes": 1538494464,
+    "minFreeBytes": 35504451584,
+    "physicalGrowthBytes": 187138048,
+    "allOwnedClosed": true,
+    "seconds": 47.14725400018506
+  },
+  "ownedClosureSha256": "a117eac8845766b202f94211ed83640cc0de2f1592380d9935120a49aa546385",
+  "logsAndReceipts": {
+    "validation.log": {
+      "sha256": "20b2fdd2700ffdb9693ba4c3fc7dfc0de1841817be30ebd7799f4841b4d44d45",
+      "bytes": 80
+    },
+    "pic-sec19.log": {
+      "sha256": "1121014e05097f27476a844b0bae4a6ba64bb3b5bb25569b6241d0cd685dc74a",
+      "bytes": 23486
+    },
+    "tool-pins.json": {
+      "sha256": "779c774111c53233705c334563894249cc2559bde4ffda28ba27076b498b6899",
+      "bytes": 138
+    },
+    "steps.json": {
+      "sha256": "752a78e6aefd751f73967766536d0b275451a1d37c0dcfa5322d412acba36fc8",
+      "bytes": 381
+    },
+    "build-dispatched": {
+      "sha256": "ef6cc04d1026367c3031c6538b729c8b0e4d74d0bf951fa99cb8caedafb6fa96",
+      "bytes": 32
+    },
+    "manifest.json": {
+      "sha256": "3ed0e74556d0e6a658e6396ac16b0ea7b34728d8826c4e229b129594ac783c6f",
+      "bytes": 830
+    },
+    "independent-group-closure.json": {
+      "sha256": "b0450d93865282311eb8f2b411b5f26ec48ab9dc7abb69cb28f57c38336ce78a",
+      "bytes": 107
+    },
+    "validation-session.json": {
+      "sha256": "b00bfbd8919274b7d085571ae2570464fc9aeb0612cff70ce683eb82e2f9763b",
+      "bytes": 699
+    }
+  },
+  "proofLimits": [
+    "Removed target used zero-debt vault closure, not an actual liquidation.",
+    "Local source validation only; no live vault213 deposit, production release, signer or financial proof.",
+    "Independent frontend work remains outside this backend batch."
+  ],
+  "priorFailuresPreserved": [
+    "174c physical-growth guard stop",
+    "6714 three shared-fixture setup failures"
+  ],
+  "nextAction": "Release LOCAL; originalEllis/Merritt own finalintegration and separate exact release proposal. No newallocation/rebuild/test replay/productionaction from this consumed grant."
+}

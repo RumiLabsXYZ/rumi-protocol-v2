@@ -1,0 +1,10 @@
+{
+  "at": "2026-11-13T16:54:12.477655+00:00",
+  "allocationId": "5c1087d7-8533-4fb6-93cb-469770bbd89b",
+  "ownedPgid": 87992,
+  "ownedRows": [],
+  "matchingOuterRunnerCommands": [],
+  "exactPinnedRumiPocketIcServerRows": [],
+  "allIndependentClosureChecksEmpty": true,
+  "noRootKillOrCleanup": true
+}

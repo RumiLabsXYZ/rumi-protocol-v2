@@ -1,0 +1,90 @@
+
+ RUN  v2.1.9 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+ ❯ src/lib/services/protocol/actionBoundary.spec.ts (70 tests | 5 failed) 151ms
+   × ApiClient.addMarginToVault V2 collateral verification > rejects unavailable ckSOL metadata before approval even when nine-decimal metadata arrives later 6ms
+     → expected true to be false // Object.is equality
+   × ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals -1 before approval 3ms
+     → expected 'Could not verify the collateral ledge…' to contain 'Collateral details could not be verif…'
+   × ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals 9.5 before approval 2ms
+     → expected 'Could not verify the collateral ledge…' to contain 'Collateral details could not be verif…'
+   × ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals 256 before approval 1ms
+     → expected 'A saved vault operation could not be …' to contain 'Collateral details could not be verif…'
+   × ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals NaN before approval 1ms
+     → expected 'The number NaN cannot be converted to…' to contain 'Collateral details could not be verif…'
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/services/protocol/actionBoundary.spec.ts > ApiClient.addMarginToVault V2 collateral verification > rejects unavailable ckSOL metadata before approval even when nine-decimal metadata arrives later
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ src/lib/services/protocol/actionBoundary.spec.ts:1002:28
+    1000|     });
+    1001|     const result = await ApiClient.addMarginToVault(5, 1, ledgerId);
+    1002|     expect(result.success).toBe(false);
+       |                            ^
+    1003|     expect(result.error).toContain('Collateral details could not be ve…
+    1004|     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  src/lib/services/protocol/actionBoundary.spec.ts > ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals -1 before approval
+ FAIL  src/lib/services/protocol/actionBoundary.spec.ts > ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals 9.5 before approval
+AssertionError: expected 'Could not verify the collateral ledge…' to contain 'Collateral details could not be verif…'
+
+Expected: "Collateral details could not be verified"
+Received: "Could not verify the collateral ledger for vault 5. The operation remains held without requesting approval."
+
+ ❯ src/lib/services/protocol/actionBoundary.spec.ts:1015:26
+    1013|     const result = await ApiClient.addMarginToVault(5, 1, CANISTER_IDS…
+    1014|     expect(result.success).toBe(false);
+    1015|     expect(result.error).toContain('Collateral details could not be ve…
+       |                          ^
+    1016|     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    1017|     expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  src/lib/services/protocol/actionBoundary.spec.ts > ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals 256 before approval
+AssertionError: expected 'A saved vault operation could not be …' to contain 'Collateral details could not be verif…'
+
+Expected: "Collateral details could not be verified"
+Received: "A saved vault operation could not be verified. Keep this wallet connected and contact support before retrying."
+
+ ❯ src/lib/services/protocol/actionBoundary.spec.ts:1015:26
+    1013|     const result = await ApiClient.addMarginToVault(5, 1, CANISTER_IDS…
+    1014|     expect(result.success).toBe(false);
+    1015|     expect(result.error).toContain('Collateral details could not be ve…
+       |                          ^
+    1016|     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    1017|     expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+ FAIL  src/lib/services/protocol/actionBoundary.spec.ts > ApiClient.addMarginToVault V2 collateral verification > rejects invalid collateral decimals NaN before approval
+AssertionError: expected 'The number NaN cannot be converted to…' to contain 'Collateral details could not be verif…'
+
+Expected: "Collateral details could not be verified"
+Received: "The number NaN cannot be converted to a BigInt because it is not an integer"
+
+ ❯ src/lib/services/protocol/actionBoundary.spec.ts:1015:26
+    1013|     const result = await ApiClient.addMarginToVault(5, 1, CANISTER_IDS…
+    1014|     expect(result.success).toBe(false);
+    1015|     expect(result.error).toContain('Collateral details could not be ve…
+       |                          ^
+    1016|     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    1017|     expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯
+
+ Test Files  1 failed (1)
+      Tests  5 failed | 65 passed (70)
+   Start at  08:58:08
+   Duration  1.67s (transform 536ms, setup 10ms, collect 874ms, tests 151ms, environment 466ms, prepare 40ms)
+

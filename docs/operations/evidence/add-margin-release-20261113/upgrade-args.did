@@ -1,0 +1,1 @@
+(variant { Upgrade = record { mode = null; description = opt "SEC19 receipt-bound ICRC collateral top-ups; source 4d8322a7; credit once or held recovery liability; preserve SEC11/SEC12 receipts, repayment and Vault51 automatic state" } })
