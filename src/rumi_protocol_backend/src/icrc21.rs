@@ -6,6 +6,22 @@ use crate::vault::{
     AddMarginV2Args, OpenVaultAndBorrowV2Args, OpenVaultV2Args, VaultArg, VaultOperationIdArg,
 };
 
+/// Bound secondary Candid decoding and consent-message formatting work below
+/// the IC ingress limit. Current Rumi call arguments are tiny; 64 KiB leaves
+/// ample wallet compatibility headroom while preventing oversized anonymous
+/// requests from driving avoidable decode and allocation work.
+const MAX_CONSENT_ARG_BYTES: usize = 64 * 1024;
+const MAX_CONSENT_METHOD_BYTES: usize = 256;
+const MAX_CONSENT_LANGUAGE_BYTES: usize = 64;
+/// The outer Candid request includes the nested argument plus method, metadata,
+/// and encoding overhead.  Keep this larger than the nested argument ceiling
+/// so a legitimate 64 KiB argument is not rejected by the ingress pre-filter.
+pub const MAX_CONSENT_INGRESS_BYTES: usize = 128 * 1024;
+
+pub fn consent_ingress_allowed(method: &str, raw_size: usize) -> bool {
+    method != "icrc21_canister_call_consent_message" || raw_size <= MAX_CONSENT_INGRESS_BYTES
+}
+
 /// Metadata about the consent message request
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct ConsentMessageMetadata {
@@ -99,6 +115,39 @@ pub enum Icrc21Error {
     UnsupportedCanisterCall(ErrorInfo),
     /// Consent message unavailable
     ConsentMessageUnavailable(ErrorInfo),
+}
+
+fn consent_unavailable(description: impl Into<String>) -> Icrc21Error {
+    Icrc21Error::ConsentMessageUnavailable(ErrorInfo {
+        description: description.into(),
+    })
+}
+
+fn validate_consent_request(request: &ConsentMessageRequest) -> Result<(), Icrc21Error> {
+    if request.arg.len() > MAX_CONSENT_ARG_BYTES {
+        return Err(consent_unavailable(format!(
+            "Encoded call arguments exceed the {} byte consent preview limit",
+            MAX_CONSENT_ARG_BYTES
+        )));
+    }
+    if request.method.len() > MAX_CONSENT_METHOD_BYTES {
+        return Err(consent_unavailable("Canister method name is too long"));
+    }
+    if request.user_preferences.metadata.language.len() > MAX_CONSENT_LANGUAGE_BYTES {
+        return Err(consent_unavailable("Language tag is too long"));
+    }
+    if let Some(DeviceSpec::LineDisplay {
+        characters_per_line,
+        lines_per_page,
+    }) = &request.user_preferences.device_spec
+    {
+        if *characters_per_line == 0 || *lines_per_page == 0 {
+            return Err(consent_unavailable(
+                "Line display dimensions must both be greater than zero",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Helper to format icUSD amount from e8s
@@ -848,6 +897,7 @@ fn generate_consent_message_for_caller(
 pub fn icrc21_canister_call_consent_message(
     request: ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResult {
+    validate_consent_request(&request)?;
     let message = match generate_consent_message(&request.method, &request.arg) {
         Ok(msg) => {
             ic_cdk::println!("[ICRC21] Generated message successfully for method: {}", request.method);
@@ -975,6 +1025,66 @@ mod tests {
     // A stand-in ledger principal for decode round-trip tests (ckBTC ledger).
     fn sample_ct() -> Principal {
         Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap()
+    }
+
+    fn request(arg_len: usize) -> ConsentMessageRequest {
+        ConsentMessageRequest {
+            method: "borrow".to_string(),
+            arg: vec![0; arg_len],
+            user_preferences: ConsentMessageSpec {
+                metadata: ConsentMessageMetadata {
+                    language: "en".to_string(),
+                    utc_offset_minutes: None,
+                },
+                device_spec: None,
+            },
+        }
+    }
+
+    #[test]
+    fn consent_argument_limit_accepts_boundary_and_rejects_oversize() {
+        assert!(validate_consent_request(&request(MAX_CONSENT_ARG_BYTES)).is_ok());
+        assert!(matches!(
+            validate_consent_request(&request(MAX_CONSENT_ARG_BYTES + 1)),
+            Err(Icrc21Error::ConsentMessageUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn consent_ingress_filter_is_method_scoped_and_inclusive_at_boundary() {
+        assert!(consent_ingress_allowed(
+            "icrc21_canister_call_consent_message",
+            MAX_CONSENT_INGRESS_BYTES
+        ));
+        assert!(!consent_ingress_allowed(
+            "icrc21_canister_call_consent_message",
+            MAX_CONSENT_INGRESS_BYTES + 1
+        ));
+        assert!(consent_ingress_allowed(
+            "open_vault",
+            MAX_CONSENT_INGRESS_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn consent_request_rejects_unbounded_strings_and_zero_line_dimensions() {
+        let mut oversized_method = request(0);
+        oversized_method.method = "m".repeat(MAX_CONSENT_METHOD_BYTES + 1);
+        assert!(validate_consent_request(&oversized_method).is_err());
+
+        let mut oversized_language = request(0);
+        oversized_language.user_preferences.metadata.language =
+            "l".repeat(MAX_CONSENT_LANGUAGE_BYTES + 1);
+        assert!(validate_consent_request(&oversized_language).is_err());
+
+        for (characters_per_line, lines_per_page) in [(0, 1), (1, 0)] {
+            let mut invalid_display = request(0);
+            invalid_display.user_preferences.device_spec = Some(DeviceSpec::LineDisplay {
+                characters_per_line,
+                lines_per_page,
+            });
+            assert!(validate_consent_request(&invalid_display).is_err());
+        }
     }
 
     #[test]
