@@ -10210,6 +10210,23 @@ fn native_xrp_reserve_locked_message() -> String {
         .to_string()
 }
 
+/// Releases the global close-vault concurrency slot on every non-trapping
+/// return path. The slot is acquired immediately before this guard is created,
+/// and `close_vault` performs no awaits afterward.
+struct CloseVaultRequestGuard;
+
+impl CloseVaultRequestGuard {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl Drop for CloseVaultRequestGuard {
+    fn drop(&mut self) {
+        mutate_state(|state| state.complete_close_vault_request());
+    }
+}
+
 pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("close_vault_{}", vault_id))?;
@@ -10222,6 +10239,10 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 
     // Record the close request for rate limiting
     mutate_state(|s| s.record_close_vault_request(caller));
+    // P01-F09: every return after the global concurrency increment must release
+    // the slot. A prior direct `?` on `require_vault_not_processing` leaked one
+    // slot per rejected bot-owned vault and could exhaust all 200 slots.
+    let _close_request_guard = CloseVaultRequestGuard::new();
 
     // Accrue interest before closing so the full repayment amount is accurate.
     let now = ic_cdk::api::time();
@@ -10231,7 +10252,6 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let vault_exists = read_state(|s| s.vault_id_to_vaults.contains_key(&vault_id));
 
     if !vault_exists {
-        mutate_state(|s| s.complete_close_vault_request());
         log!(
             INFO,
             "[close_vault] Vault #{} not found for principal {}",
@@ -10258,7 +10278,6 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let collateral_status = read_state(|s| s.get_collateral_status(&vault.collateral_type));
     if let Some(status) = collateral_status {
         if !status.allows_close() {
-            mutate_state(|s| s.complete_close_vault_request());
             return Err(ProtocolError::GenericError(
                 "Closing vaults is not allowed for this collateral type.".to_string(),
             ));
@@ -10267,7 +10286,6 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 
     // Verify caller is the owner
     if caller != vault.owner {
-        mutate_state(|s| s.complete_close_vault_request());
         log!(
             INFO,
             "[close_vault] Principal {} is not the owner of vault #{}",
@@ -10299,7 +10317,6 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             timestamp: Some(ic_cdk::api::time()),
         });
     } else if vault.borrowed_icusd_amount > ICUSD::new(0) {
-        mutate_state(|s| s.complete_close_vault_request());
         log!(
             INFO,
             "[close_vault] Cannot close vault #{} with outstanding debt: {}",
@@ -10313,7 +10330,6 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 
     // Verify there's no remaining collateral
     if vault.collateral_amount > 0 {
-        mutate_state(|s| s.complete_close_vault_request());
         log!(
             INFO,
             "[close_vault] Cannot close vault #{} with remaining collateral: {}",
@@ -10333,7 +10349,6 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     if withdraw_close_completion_policy(is_native_xrp)
         == WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
     {
-        mutate_state(|s| s.complete_close_vault_request());
         log!(
             INFO,
             "[close_vault] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
@@ -10356,9 +10371,6 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             // call back — the endpoint could never succeed.
             crate::event::record_close_vault(s, vault_id, None);
 
-            // Complete the close request
-            s.complete_close_vault_request();
-
             log!(
                 INFO,
                 "[close_vault] Successfully closed vault #{} for principal {}",
@@ -10372,12 +10384,84 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
                 "[close_vault] Attempted to close vault #{} that was already removed",
                 vault_id
             );
-            s.complete_close_vault_request();
         }
     });
 
     // Return success with no block index (since no transfer was made)
     Ok(None)
+}
+
+#[cfg(test)]
+mod close_vault_request_guard_tests {
+    use super::*;
+    use crate::state::{replace_state, State};
+
+    #[test]
+    fn close_vault_wires_cleanup_guard_immediately_after_slot_acquisition() {
+        // Host-side unit tests cannot call the public endpoint because
+        // `ic_cdk::caller()` and `ic_cdk::api::time()` require a canister
+        // runtime. Pin the endpoint wiring structurally, alongside the
+        // behavioral Drop test below, as other audit PoCs in this crate do.
+        let source = include_str!("vault.rs");
+        let close_start = source
+            .find("pub async fn close_vault(vault_id: u64)")
+            .expect("close_vault endpoint must exist");
+        let close_end = source[close_start..]
+            .find("pub async fn withdraw_collateral(vault_id: u64)")
+            .map(|offset| close_start + offset)
+            .expect("withdraw_collateral must follow close_vault");
+        let close_body = &source[close_start..close_end];
+
+        let acquire = close_body
+            .find("mutate_state(|s| s.record_close_vault_request(caller));")
+            .expect("close_vault must acquire the global close slot");
+        let guard = close_body
+            .find("let _close_request_guard = CloseVaultRequestGuard::new();")
+            .expect("close_vault must install the cleanup guard");
+
+        assert!(guard > acquire, "cleanup guard must follow slot acquisition");
+        assert!(
+            !close_body[acquire..guard]
+                .lines()
+                .any(|line| line.trim_start().starts_with("return")),
+            "no return may occur between slot acquisition and guard installation"
+        );
+    }
+
+    #[test]
+    fn bot_processing_rejection_releases_close_concurrency_slot() {
+        let mut state = State::default();
+        // Simulate the slot acquired by `record_close_vault_request` without
+        // depending on canister time in this host-side regression.
+        state.concurrent_close_operations = 1;
+        replace_state(state);
+
+        let vault = Vault {
+            owner: Principal::from_slice(&[1]),
+            vault_id: 77,
+            collateral_type: Principal::from_slice(&[2]),
+            collateral_amount: 0,
+            borrowed_icusd_amount: ICUSD::new(0),
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: true,
+        };
+
+        let rejection = {
+            let _guard = CloseVaultRequestGuard::new();
+            require_vault_not_processing(&vault)
+        };
+        assert!(matches!(
+            rejection,
+            Err(ProtocolError::GenericError(message))
+                if message == "Vault #77 is locked — bot liquidation in progress"
+        ));
+        assert_eq!(
+            read_state(|state| state.concurrent_close_operations),
+            0,
+            "a rejected bot-processing vault must not retain a global close slot"
+        );
+    }
 }
 
 pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
