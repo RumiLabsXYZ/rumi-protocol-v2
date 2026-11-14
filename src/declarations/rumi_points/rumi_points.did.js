@@ -81,6 +81,28 @@ export const idlFactory = ({ IDL }) => {
     'evidence_digest' : IDL.Vec(IDL.Nat8),
   });
   const Result_6 = IDL.Variant({ 'Ok' : Status, 'Err' : IDL.Text });
+  const Season2Receipt = IDL.Record({
+    'principal' : IDL.Principal,
+    'category_points' : IDL.Vec(IDL.Nat),
+  });
+  const Season2ImportStatus = IDL.Record({
+    'unresolved_categories' : IDL.Nat8,
+    'batch_digests' : IDL.Vec(IDL.Vec(IDL.Nat8)),
+    'source_canisters' : IDL.Vec(IDL.Tuple(IDL.Nat8, IDL.Principal)),
+    'credited_points' : IDL.Nat,
+    'expected_rows' : IDL.Nat32,
+    'logical_start_ns' : IDL.Nat64,
+    'complete' : IDL.Bool,
+    'imported_rows' : IDL.Nat32,
+    'source_cursors' : IDL.Vec(IDL.Nat64),
+    'provenance_digest' : IDL.Vec(IDL.Nat8),
+    'receipts' : IDL.Vec(Season2Receipt),
+    'cutoff_ns' : IDL.Nat64,
+  });
+  const Result_7 = IDL.Variant({
+    'Ok' : Season2ImportStatus,
+    'Err' : IDL.Text,
+  });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -302,7 +324,12 @@ export const idlFactory = ({ IDL }) => {
     'snapshot_time_a_ns' : IDL.Nat64,
     'snapshot_time_b_ns' : IDL.Nat64,
   });
-  const Result_7 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
+  const Result_8 = IDL.Variant({ 'Ok' : IDL.Vec(IDL.Nat8), 'Err' : IDL.Text });
+  const Season2ImportRow = IDL.Record({
+    'principal_state' : PrincipalState,
+    'category_points' : IDL.Vec(IDL.Nat),
+  });
+  const Result_9 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
   return IDL.Service({
     'activate_fiat_stable_4x' : IDL.Func([], [Result], []),
     'add_excluded_principal' : IDL.Func([IDL.Principal], [Result_1], []),
@@ -318,12 +345,20 @@ export const idlFactory = ({ IDL }) => {
       ),
     'apply_fiat_stable_topups' : IDL.Func([IDL.Nat32], [Result_5], []),
     'apply_season1_final_supplement' : IDL.Func([], [Result_6], []),
+    'begin_season2_backfill' : IDL.Func([IDL.Nat32], [Result_7], []),
+    'begin_season2_import' : IDL.Func([IDL.Nat32], [Result_7], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
+    'finish_season2_backfill' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_7], []),
+    'finish_season2_import' : IDL.Func(
+        [IDL.Vec(IDL.Nat64), IDL.Vec(IDL.Nat8), IDL.Nat8],
+        [Result_7],
+        [],
+      ),
     'force_epoch_tick' : IDL.Func([], [Result_1], []),
     'get_asset_ledgers' : IDL.Func(
         [],
@@ -408,6 +443,32 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_season1_final_supplement' : IDL.Func([], [Status], ['query']),
+    'get_season2_backfill_manifest_hash' : IDL.Func([], [Result_8], ['query']),
+    'get_season2_backfill_status' : IDL.Func(
+        [],
+        [IDL.Opt(Season2ImportStatus)],
+        ['query'],
+      ),
+    'get_season2_import_manifest_hash' : IDL.Func(
+        [IDL.Vec(IDL.Nat64), IDL.Nat8],
+        [Result_8],
+        ['query'],
+      ),
+    'get_season2_import_status' : IDL.Func(
+        [],
+        [IDL.Opt(Season2ImportStatus)],
+        ['query'],
+      ),
+    'import_season2_backfill_batch' : IDL.Func(
+        [IDL.Nat32, IDL.Vec(Season2ImportRow)],
+        [Result_7],
+        [],
+      ),
+    'import_season2_batch' : IDL.Func(
+        [IDL.Nat32, IDL.Vec(Season2ImportRow)],
+        [Result_7],
+        [],
+      ),
     'is_excluded' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
     'is_registered' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
     'register_test_principal' : IDL.Func([IDL.Principal], [Result_1], []),
@@ -425,7 +486,7 @@ export const idlFactory = ({ IDL }) => {
     'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_4], []),
     'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result_1], []),
     'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_4], []),
-    'trigger_poll' : IDL.Func([], [Result_7], []),
+    'trigger_poll' : IDL.Func([], [Result_9], []),
   });
 };
 export const init = ({ IDL }) => {

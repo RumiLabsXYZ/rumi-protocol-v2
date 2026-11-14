@@ -270,7 +270,11 @@ export type Result_5 = { 'Ok' : FiatStableTopupProgress } |
   { 'Err' : string };
 export type Result_6 = { 'Ok' : Status } |
   { 'Err' : string };
-export type Result_7 = { 'Ok' : bigint } |
+export type Result_7 = { 'Ok' : Season2ImportStatus } |
+  { 'Err' : string };
+export type Result_8 = { 'Ok' : Uint8Array | number[] } |
+  { 'Err' : string };
+export type Result_9 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
@@ -279,6 +283,28 @@ export interface RevealedSeed {
   'seed' : Uint8Array | number[],
   'snapshot_time_a_ns' : bigint,
   'snapshot_time_b_ns' : bigint,
+}
+export interface Season2ImportRow {
+  'principal_state' : PrincipalState,
+  'category_points' : Array<bigint>,
+}
+export interface Season2ImportStatus {
+  'unresolved_categories' : number,
+  'batch_digests' : Array<Uint8Array | number[]>,
+  'source_canisters' : Array<[number, Principal]>,
+  'credited_points' : bigint,
+  'expected_rows' : number,
+  'logical_start_ns' : bigint,
+  'complete' : boolean,
+  'imported_rows' : number,
+  'source_cursors' : BigUint64Array | bigint[],
+  'provenance_digest' : Uint8Array | number[],
+  'receipts' : Array<Season2Receipt>,
+  'cutoff_ns' : bigint,
+}
+export interface Season2Receipt {
+  'principal' : Principal,
+  'category_points' : Array<bigint>,
 }
 export interface SourceStatus {
   'tag' : number,
@@ -306,8 +332,15 @@ export interface _SERVICE {
   'admin_stage_outage_allocation' : ActorMethod<[OutageAllocation], Result_2>,
   'apply_fiat_stable_topups' : ActorMethod<[number], Result_5>,
   'apply_season1_final_supplement' : ActorMethod<[], Result_6>,
+  'begin_season2_backfill' : ActorMethod<[number], Result_7>,
+  'begin_season2_import' : ActorMethod<[number], Result_7>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
+  'finish_season2_backfill' : ActorMethod<[Uint8Array | number[]], Result_7>,
+  'finish_season2_import' : ActorMethod<
+    [BigUint64Array | bigint[], Uint8Array | number[], number],
+    Result_7
+  >,
   'force_epoch_tick' : ActorMethod<[], Result_1>,
   'get_asset_ledgers' : ActorMethod<[], Array<[number, Principal]>>,
   'get_epoch_history' : ActorMethod<[number, number], Array<EpochSummary>>,
@@ -344,6 +377,21 @@ export interface _SERVICE {
   'get_registration_info' : ActorMethod<[Principal], [] | [RegistrationInfo]>,
   'get_revealed_seed' : ActorMethod<[bigint], [] | [RevealedSeed]>,
   'get_season1_final_supplement' : ActorMethod<[], Status>,
+  'get_season2_backfill_manifest_hash' : ActorMethod<[], Result_8>,
+  'get_season2_backfill_status' : ActorMethod<[], [] | [Season2ImportStatus]>,
+  'get_season2_import_manifest_hash' : ActorMethod<
+    [BigUint64Array | bigint[], number],
+    Result_8
+  >,
+  'get_season2_import_status' : ActorMethod<[], [] | [Season2ImportStatus]>,
+  'import_season2_backfill_batch' : ActorMethod<
+    [number, Array<Season2ImportRow>],
+    Result_7
+  >,
+  'import_season2_batch' : ActorMethod<
+    [number, Array<Season2ImportRow>],
+    Result_7
+  >,
   'is_excluded' : ActorMethod<[Principal], boolean>,
   'is_registered' : ActorMethod<[Principal], boolean>,
   'register_test_principal' : ActorMethod<[Principal], Result_1>,
@@ -357,7 +405,7 @@ export interface _SERVICE {
   'set_season_end_ns' : ActorMethod<[bigint], Result_4>,
   'set_source_canister' : ActorMethod<[number, Principal], Result_1>,
   'start_season' : ActorMethod<[Uint8Array | number[]], Result_4>,
-  'trigger_poll' : ActorMethod<[], Result_7>,
+  'trigger_poll' : ActorMethod<[], Result_9>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

@@ -1,0 +1,14 @@
+{
+  "optimized_sha256": "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603",
+  "module_bytes": 3044642,
+  "code_section_bytes": 2479311,
+  "gzip_sha256": "d301b54c5c2db14fa26baff7435f8152bbb8623866d3bf2fd703ae2b2c039d9c",
+  "gzip_bytes": 753351,
+  "raw_target_sha256": "2d22cae99adfaf5ff39649f7df2740685acf25703f89e03dc86855e23978848e",
+  "source_commit": "719a1c0b",
+  "zero_credit_bootstrap_baseline_sha256": "62c6fe981fbb93350233e79b2661d78d4b7dd43b3a96d4b626c9b2885ecc24e6",
+  "zero_credit_bootstrap_baseline_rows": 15,
+  "zero_credit_bootstrap_baseline_bytes": 1465,
+  "bootstrap_historical_points": 0,
+  "must_validate_all_eligible_global_tails_at_T0": true
+}

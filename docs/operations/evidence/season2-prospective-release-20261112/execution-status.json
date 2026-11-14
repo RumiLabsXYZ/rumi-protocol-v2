@@ -1,0 +1,14 @@
+{
+  "status": "RUNNING",
+  "canister_id": "2cvsh-3aaaa-aaaaj-qspga-cai",
+  "cutoff_utc": "2026-11-12T23:45:00Z",
+  "poll_enabled": true,
+  "driver_enabled": true,
+  "historical_points_imported": 0,
+  "bootstrap_complete": true,
+  "receipt": "running-receipt.json",
+  "first_capture_observed": true,
+  "weekly_awards_observed": false,
+  "next": "Observe scheduled B capture and weekly close separately; continue local historical evidence audit without fitted amounts or new credit authority.",
+  "first_capture_receipt": "first-capture-receipt-20261113.json"
+}

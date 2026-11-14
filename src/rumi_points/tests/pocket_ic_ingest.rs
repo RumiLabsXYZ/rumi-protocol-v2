@@ -1088,3 +1088,124 @@ fn chunked_close_completes_over_many_principals_end_to_end() {
     // iterate all 130 principals to finalize, so this is implied by closure).
     assert_eq!(total_points(&pic, rp, who(0)), 0);
 }
+
+#[test]
+fn season2_import_upgrade_and_first_epoch() {
+    use rumi_points::state::{Season2ImportRow, Season2ImportStatus};
+    use rumi_points::types::{PrincipalState, QualifyingAction};
+
+    fn update(pic: &pocket_ic::PocketIc, canister: Principal, method: &str, args: Vec<u8>) -> Vec<u8> {
+        match pic.update_call(canister, admin(), method, args).expect(method) {
+            WasmResult::Reply(bytes) => bytes,
+            WasmResult::Reject(msg) => panic!("{method}: {msg}"),
+        }
+    }
+    fn query(pic: &pocket_ic::PocketIc, canister: Principal, method: &str, args: Vec<u8>) -> Vec<u8> {
+        match pic.query_call(canister, admin(), method, args).expect(method) {
+            WasmResult::Reply(bytes) => bytes,
+            WasmResult::Reject(msg) => panic!("{method}: {msg}"),
+        }
+    }
+    fn footprint(pic: &pocket_ic::PocketIc, canister: Principal, stage: &str) {
+        let status = pic.canister_status(canister, None).expect("canister status");
+        let bytes = query(pic, canister, "cycles_status", Encode!().unwrap());
+        let cycles = Decode!(&bytes, rumi_cycle_manager::CycleManagerCyclesStatus).unwrap();
+        println!("SEASON2_FOOTPRINT {stage}: management={status:?} cycles_status={cycles:?}");
+    }
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let cutoff = 1_793_491_200_000_000_000u64 + 10 * rumi_points::NANOS_PER_DAY;
+    set_time_ns(&pic, cutoff - 60_000_000_000);
+    let mock = install_mock(&pic);
+    let rp = install_legacy_points(&pic, RUMI_POINTS_WASM, cutoff, u64::MAX);
+    footprint(&pic, rp, "installed");
+    set_all_sources(&pic, rp, mock);
+    let participant = Principal::from_slice(&[7; 5]);
+    let count: u32 = std::env::var("SEASON2_TEST_PARTICIPANTS").unwrap_or_else(|_| "1".into()).parse().unwrap();
+    assert!((1..=50).contains(&count));
+    set_vault_debt(&pic, mock, participant, 100_000_000);
+    let begun = update(&pic, rp, "begin_season2_import", Encode!(&0u32).unwrap());
+    let begun: Result<Season2ImportStatus, String> = Decode!(&begun, Result<Season2ImportStatus, String>).unwrap();
+    assert!(!begun.unwrap().complete);
+    set_time_ns(&pic, cutoff);
+    let sealed = update(&pic, rp, "begin_season2_import", Encode!(&count).unwrap());
+    assert_eq!(Decode!(&sealed, Result<Season2ImportStatus, String>).unwrap().unwrap().expected_rows, count);
+    let rows: Vec<_> = (0..count).map(|i| {
+        let principal = if i == 0 { participant } else { Principal::from_slice(&[i as u8; 6]) };
+        Season2ImportRow { principal_state: PrincipalState::new(principal, cutoff - 1, QualifyingAction::MintIcUsd),
+            category_points: vec![0; 7] }
+    }).collect();
+    let imported = update(&pic, rp, "import_season2_batch", Encode!(&0u32, &rows).unwrap());
+    let imported: Result<Season2ImportStatus, String> = Decode!(&imported, Result<Season2ImportStatus, String>).unwrap();
+    let imported = imported.unwrap();
+    assert_eq!(imported.credited_points, 0);
+    assert_eq!(total_points(&pic, rp, participant), 0);
+    let ordinary_before = query(&pic, rp, "get_point_ledger_len", Encode!().unwrap());
+    assert_eq!(Decode!(&ordinary_before, u64).unwrap(), 0);
+    footprint(&pic, rp, "imported");
+    let cursors = vec![0u64; 4];
+    let hash = query(&pic, rp, "get_season2_import_manifest_hash", Encode!(&cursors, &0u8).unwrap());
+    let hash: Result<Vec<u8>, String> = Decode!(&hash, Result<Vec<u8>, String>).unwrap();
+    let hash = hash.unwrap();
+    let changed = update(&pic, rp, "finish_season2_import", Encode!(&vec![1u64, 0, 0, 0], &hash, &0u8).unwrap());
+    let changed: Result<Season2ImportStatus, String> = Decode!(&changed, Result<Season2ImportStatus, String>).unwrap();
+    assert!(changed.is_err());
+    let finished = update(&pic, rp, "finish_season2_import", Encode!(&cursors, &hash, &0u8).unwrap());
+    let finished: Result<Season2ImportStatus, String> = Decode!(&finished, Result<Season2ImportStatus, String>).unwrap();
+    let finished = finished.unwrap();
+    assert!(finished.complete);
+    assert_eq!(finished.receipts.len(), count as usize);
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None).expect("upgrade Season 2 candidate");
+    let status = query(&pic, rp, "get_season2_import_status", Encode!().unwrap());
+    let status: Option<Season2ImportStatus> = Decode!(&status, Option<Season2ImportStatus>).unwrap();
+    assert_eq!(status.unwrap(), finished);
+    assert_eq!(total_points(&pic, rp, participant), 0);
+    let retry = update(&pic, rp, "import_season2_batch", Encode!(&0u32, &rows).unwrap());
+    let retry: Result<Season2ImportStatus, String> = Decode!(&retry, Result<Season2ImportStatus, String>).unwrap();
+    assert_eq!(retry.unwrap(), finished);
+    footprint(&pic, rp, "upgraded");
+    // The existing mock only implements backend event polling. Other event
+    // endpoints fail, so this is a partial-poll measurement, not a full poll.
+    let polled = update(&pic, rp, "trigger_poll", Encode!().unwrap());
+    let polled: Result<u64, PointsError> = Decode!(&polled, Result<u64, PointsError>).unwrap();
+    assert!(polled.is_ok());
+    footprint(&pic, rp, "partial_poll");
+    start_season_ok(&pic, rp, SEASON_SEED);
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    let epoch = epoch_status(&pic, rp).open_epoch.unwrap();
+    set_time_ns(&pic, epoch.snapshot_a_ns); force_tick(&pic, rp);
+    assert!(epoch_status(&pic, rp).open_epoch.unwrap().a_complete);
+    set_time_ns(&pic, epoch.snapshot_b_ns); force_tick(&pic, rp);
+    assert!(epoch_status(&pic, rp).open_epoch.unwrap().b_complete);
+    set_time_ns(&pic, epoch.epoch_end_ns); force_tick(&pic, rp);
+    assert_eq!(epoch_status(&pic, rp).current_epoch_index, 1);
+    assert_eq!(total_points(&pic, rp, participant), 700_000_000);
+    let ordinary_after = query(&pic, rp, "get_point_ledger_len", Encode!().unwrap());
+    assert_eq!(Decode!(&ordinary_after, u64).unwrap(), 1);
+    let status = query(&pic, rp, "get_season2_import_status", Encode!().unwrap());
+    let status: Option<Season2ImportStatus> = Decode!(&status, Option<Season2ImportStatus>).unwrap();
+    assert_eq!(status.unwrap(), finished);
+    footprint(&pic, rp, "epoch_closed");
+    // History remains pending through a real prospective close. Apply it later
+    // without rewriting the ordinary ledger, epoch state or position metadata.
+    let epoch_before = query(&pic, rp, "get_epoch_status", Encode!().unwrap());
+    let begun = update(&pic, rp, "begin_season2_backfill", Encode!(&count).unwrap());
+    assert!(Decode!(&begun, Result<Season2ImportStatus, String>).unwrap().is_ok());
+    let historical: Vec<_> = rows.iter().cloned().map(|mut row| {
+        row.category_points = vec![1,2,3,4,5,6,7]; row
+    }).collect();
+    let credited = update(&pic, rp, "import_season2_backfill_batch", Encode!(&0u32, &historical).unwrap());
+    let credited = Decode!(&credited, Result<Season2ImportStatus, String>).unwrap().unwrap();
+    assert_eq!(credited.credited_points, 28 * count as u128);
+    assert_eq!(total_points(&pic, rp, participant), 700_000_000 + 28);
+    assert_eq!(query(&pic, rp, "get_epoch_status", Encode!().unwrap()), epoch_before);
+    assert_eq!(query(&pic, rp, "get_point_ledger_len", Encode!().unwrap()), ordinary_after);
+    let digest = query(&pic, rp, "get_season2_backfill_manifest_hash", Encode!().unwrap());
+    let digest = Decode!(&digest, Result<Vec<u8>, String>).unwrap().unwrap();
+    let sealed = update(&pic, rp, "finish_season2_backfill", Encode!(&digest).unwrap());
+    let sealed = Decode!(&sealed, Result<Season2ImportStatus, String>).unwrap().unwrap();
+    assert!(sealed.complete);
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None).expect("upgrade after historical credit");
+    let retry = update(&pic, rp, "import_season2_backfill_batch", Encode!(&0u32, &historical).unwrap());
+    assert_eq!(Decode!(&retry, Result<Season2ImportStatus, String>).unwrap().unwrap(), sealed);
+    assert_eq!(total_points(&pic, rp, participant), 700_000_000 + 28);
+}

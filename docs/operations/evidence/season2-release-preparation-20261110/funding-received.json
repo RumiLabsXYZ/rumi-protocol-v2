@@ -1,0 +1,21 @@
+{
+  "checkedLocal": "2026-11-10T09:45:21.011623-08:00",
+  "identity": "rumi_identity",
+  "owner": "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+  "ledger": "um5iw-rqaaa-aaaaq-qaaba-cai",
+  "subaccount": null,
+  "previousObservedBalance": 300650044313,
+  "currentIndependentlyObservedBalance": 4300650044313,
+  "balanceIncrease": 4000000000000,
+  "payer": "Rob (user-reported; sender transaction not independently attributed by this read)",
+  "separateEarlierLedgerCanisterTopupExcluded": 1000000000000,
+  "earlierTopupQualification": "Orin relays that earlier 1T topped up the ledger canister itself; it is not included in this deploy-account delta",
+  "independentCheck": "icp cycles balance --network ic --identity rumi_identity --json",
+  "creationAmountUnchanged": 900000000000,
+  "ledgerCreationFee": 100000000,
+  "remainingAfterProposedCreation": 3400550044313,
+  "newCanisterBeforeInstall": 400000000000,
+  "creationInstallImportActivationExecutedByThisLane": false,
+  "fundingExecutionByThisLane": false,
+  "additionalFundsExpandAuthority": false
+}
