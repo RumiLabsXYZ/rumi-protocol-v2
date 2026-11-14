@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production guards unchanged. Mocked PocketIC proves deposit, test-only borrow, repay, partial and full withdrawal to durable claims. The dormant unsigned settlement preparation is now locally validated (98b35c9a: 5 unit tests and production check PASS, receipt 5f7f2a1d); it stays test-only with untrusted fixture input and no endpoint. Signing, quorum freshness, reconciliation, payout and live behaviour are unproven.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests cover the whole vault cycle, and the first step toward paying out a withdrawal now passes its tests too. Actually sending payouts on Stellar is still to be built; Rob does not need to act now.",
+  "summary": "XLM remains Frozen; production guards unchanged. Proven locally: deposit, test-only borrow, repay, partial and full withdrawal to claims, and unsigned settlement preparation (PASS, receipt 5f7f2a1d). New test-only funding and sequencing preflight is source-complete but unbuilt (d38b6e46). Signing, submission, reconciliation, payout and live behaviour remain unproven.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests cover the vault cycle and preparing a payout; a new check that the custody account can afford each payout is written but not yet tested. Sending payouts on Stellar is still to be built; Rob does not need to act now.",
   "glossary": [
     {
       "term": "Stellar",

@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Prepared settlement intent is locally validated (5 unit tests and production check PASS, receipt 5f7f2a1d), still test-only with untrusted fixture input and no endpoint. Not built: signing, account quorum and freshness, reconciliation, payout and live proof. Production stays Frozen.",
+      "nextAction": "Settlement funding and sequencing preflight is source-complete but unbuilt (d38b6e46); its focused check (15 unit tests plus production check, runner 9bc4624c) needs a fresh slot. Then: signing and signed-intent persistence, submission and reconciliation driver. Testnet readiness packet tracks what remains.",
       "cardIds": [
         "WP3"
       ]
