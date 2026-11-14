@@ -4,7 +4,7 @@ Updated: 2026-11-14. Coordinator: Bram. This board tracks the security review, r
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
-| SEC-20 | In progress | Ellis source/verification / Dorian release | Compact secondary wallet recovery discovery | Reviewed dc4b8f52;23 mounted tests/two final reviews/desktop-mobile fixture PASS. Authorized frontend-only build/publication next; no backend or financial action. |
+| SEC-20 | Done | Ellis source/independent verification / Dorian release | Compact secondary wallet recovery discovery | Live dc4b8f52/UI1794685142389 via699/700;740files/476pairs/full5619-5813inventory/15servedresponses/certifiedmodules/controllers/live desktop-mobile PASS. Recovery protections retained; no financial action. |
 | SEC-19 | Done | Ellis case/independent verification / Dorian release | Restore safe existing-vault top-ups | Live4d/backend8f6/UI1794674286427; final assets/certified API/state/layout verified. Rob can use vault213 deposit flow; actual deposit not submitted. |
 | SEC-18 | Done | Ellis integration/QA / Iris UI / independent mapping review | Clear ckSOL mint progress and persistent success | Actual owner/request/minter evidence; payment settlement separate; essential delayed/stale/network/resume mocks and desktop/mobile; no financial or deployment action. Separate from frozen SEC17. |
 | SEC-17 | Done | Ellis integration / Rowan backend / Iris review | Correct successful-repayment residual forgiveness | Ordinarymin0.1; forgive residualstrictlybelow0.1 onlyaftersuccessfulauthorizeddebit; exact0.1retained/noauto-close. Essentialfailed/unknown/replay/interest/fees/Max checks. Source/prep only; newbackendinstallheld. |
@@ -249,3 +249,7 @@ Exact4d/backend8f6/API d8b/UI1794674286427 is live, actualstage697/activate698. 
 ## 2026-11-14 — focused recovery-menu follow-up
 
 Rob requested and authorized publication of the compact recovery entry after verification. SEC20 removes the generic unchecked OISY card and places optional recovery in the wallet menu, preserving real request/error guidance. Reviewed source dc4b8f52 passes23 mounted tests, two independent final reviews and desktop/mobile fixture checks. Dorian owns the frontend-only build/publication; Ellis independently verifies served bytes and layout. SEC19 remains complete; no backend or financial action.
+
+## 2026-11-14 — recovery-menu publication verified
+
+SEC20 is live at frontend1794685142389, source dc4b8f52. Dorian staged99 immutable keys in699 and activated seven entry encoding updates in700. Ellis independently verified all frozen files, full final inventory preservation,15 public responses, unchanged certified backend/API/frontend/controllers and actual anonymous desktop/mobile layout. Connected recovery has23 mounted tests and inspected mock-render screenshots; no real signing or financial action. No further campaign is needed for this focused presentation fix.

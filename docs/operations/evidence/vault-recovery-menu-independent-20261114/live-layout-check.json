@@ -1,0 +1,54 @@
+{
+  "observations": [
+    {
+      "url": "https://app.rumiprotocol.com/vaults",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scrollWidth": 1280,
+      "overflow": false,
+      "overlay": false,
+      "genericPrompt": false,
+      "version": {
+        "version": "1794685142389"
+      }
+    },
+    {
+      "url": "https://app.rumiprotocol.com/vaults",
+      "viewport": [
+        390,
+        844
+      ],
+      "scrollWidth": 390,
+      "overflow": false,
+      "overlay": false,
+      "genericPrompt": false
+    },
+    {
+      "url": "https://app.rumiprotocol.com/solana",
+      "viewport": [
+        390,
+        844
+      ],
+      "scrollWidth": 390,
+      "overflow": false,
+      "overlay": false,
+      "mintStatus": true
+    },
+    {
+      "url": "https://app.rumiprotocol.com/solana",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scrollWidth": 1280,
+      "overflow": false,
+      "overlay": false,
+      "mintStatus": true
+    }
+  ],
+  "walletConnected": false,
+  "financialAction": false,
+  "limitations": "Connected wallet flow verified with mocked source components and23mountedtests, not live signing. Unrelated synthetic XRP ledger logo400s and metadata warnings remain; no clean-console claim."
+}

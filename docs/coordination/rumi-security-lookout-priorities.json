@@ -3,9 +3,9 @@
     {
       "id": "vault-recovery-menu-ux",
       "title": "Make optional vault recovery a secondary wallet-menu action",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Dorian builds and publishes reviewed dc4b8f52 frontend only under direct authorization; Ellis verifies served bytes, retained assets/modules and desktop/mobile layout. No backend or financial actions.",
+      "nextAction": "Verified live at version1794685142389. Refresh Rumi; optional discovery is Wallet > Recover a vault action, with genuine request recovery retained. Preserve release receipts; no further build, review or financial canary needed.",
       "cardIds": [
         "SEC-20"
       ]

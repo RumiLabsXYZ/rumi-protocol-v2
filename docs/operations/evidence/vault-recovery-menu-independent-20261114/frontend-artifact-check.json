@@ -1,0 +1,50 @@
+{
+  "checkedUtc": "2026-11-14T19:43:04.201Z",
+  "source": "dc4b8f52a1e76a36791defb5f66005276d00d4a5",
+  "version": "1794685142389",
+  "pinsSha256": "59e33b5a6c1ae45d959fbf1c021c60ccfdaee1621f25f93e8bd70edecea56028",
+  "manifestSha256": "c10d3fae4d1b130150d9e030687e17783a34f61aab1c1a46015e69807c1745ad",
+  "filesVerified": 740,
+  "compressedPairsVerified": 476,
+  "independentBaselineKeys": 5520,
+  "independentBaselineEncodings": 5714,
+  "newKeys": 99,
+  "existingEncodingChanges": 7,
+  "allPriorPropertiesPreservedInPlan": true,
+  "allFrozenPublishFilesCovered": true,
+  "authUnchanged": true,
+  "expectedKeys": 5619,
+  "expectedEncodings": 5813,
+  "sec18Included": true,
+  "sec19EnabledSourceIncluded": true,
+  "bundles": {
+    "Recover a vault action": [
+      "_app/immutable/nodes/0.DsLc8lRM.js"
+    ],
+    "After a successful repayment": [
+      "_app/immutable/chunks/CuuXK9qw.js"
+    ],
+    "Estimated forgiveness:": [
+      "_app/immutable/chunks/CuuXK9qw.js"
+    ],
+    "Review saved request": [
+      "_app/immutable/nodes/4.Dyd1oPVg.js"
+    ],
+    "OISY_LOCAL_OWNER_MISMATCH": [
+      "_app/immutable/chunks/FeJTkgka.js"
+    ],
+    "Last successful mint check:": [
+      "_app/immutable/nodes/55.DMVlcnGY.js"
+    ],
+    "Collateral details could not be verified": [
+      "_app/immutable/chunks/xJxdecE9.js"
+    ],
+    "Acknowledge recovery notice": [
+      "_app/immutable/nodes/0.DsLc8lRM.js"
+    ],
+    "Wallet session changed. No new top-up was submitted.": [
+      "_app/immutable/chunks/CuuXK9qw.js"
+    ]
+  },
+  "productionMutation": false
+}
