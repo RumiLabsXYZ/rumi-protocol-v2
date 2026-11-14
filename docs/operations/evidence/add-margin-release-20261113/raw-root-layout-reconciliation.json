@@ -1,0 +1,16 @@
+{
+  "utc": "2026-11-14T17:00:51.665824+00:00",
+  "cause": "Vault51 is an active root entry rather than a leaf entry",
+  "originalVerifierPreserved": true,
+  "newVerifierSha256": "4e7cd88ba9a7c4a084aa7e16d2c5bd2c0b437f59755d3cd22ee3158129fb95f7",
+  "continuationSha256": "3985235ab2d53e9e4129c7c31b4cf47e58cdbe210dce7793686a7acce9d65acd",
+  "structuralProof": {
+    "activeTreeStructurallyLinked": true,
+    "totalVaults": 50,
+    "rootOffset": 1726488,
+    "matchedNodeKind": "root",
+    "allMatchingCopiesRetainOriginalCollateral": true
+  },
+  "sameSnapshotReused": true,
+  "stopSnapshotNotRepeated": true
+}
