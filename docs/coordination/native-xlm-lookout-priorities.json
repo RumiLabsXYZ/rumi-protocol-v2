@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Funding and sequencing preflight PASS (receipt 0aa05cb5). Next: test-only recording of the exact signed intent before any submission, then the submission and reconciliation driver. Inputs remain untrusted test data; signing and live actions are held.",
+      "nextAction": "Signed-intent recording is source-complete but unbuilt (a1760abb): test-only, fixture signature, no real signing. Its focused check (20 unit tests plus production check, runner 370e949d) needs a fresh slot. Then: real signing and the submission and reconciliation driver. No testnet action yet.",
       "cardIds": [
         "WP3"
       ]

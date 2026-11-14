@@ -1,6 +1,6 @@
 # Native XLM: testnet readiness packet
 
-Living document, first written 2026-11-14 at source commit `d38b6e46`; last updated after the preflight validation PASS. Updated as code progresses. Three columns matter: what exists in source, what is proven locally (mocked tests or unit tests with recorded receipts), and what has never run on a live network. Nothing here is live-proven.
+Living document, first written 2026-11-14 at source commit `d38b6e46`; last updated after the signed-intent recording source (`a1760abb`, unbuilt). Updated as code progresses. Three columns matter: what exists in source, what is proven locally (mocked tests or unit tests with recorded receipts), and what has never run on a live network. Nothing here is live-proven.
 
 ## Where things stand
 
@@ -14,7 +14,8 @@ Living document, first written 2026-11-14 at source commit `d38b6e46`; last upda
 | Unsigned settlement preparation | dormant test-only method | unit PASS (receipt `5f7f2a1d`) | not applicable |
 | Settlement funding and sequencing preflight | dormant test-only method (`d38b6e46`) | unit PASS (receipt `0aa05cb5`, 15 tests incl. prepare regression) | not applicable |
 | Signing the payment (threshold Ed25519) | `sign_payload_hash` exists, never called | none | not run |
-| Persisting the signed intent, submission to Horizon | absent | none | not run |
+| Recording the exact signed intent before submission | dormant test-only method (`a1760abb`) taking an untrusted fixture signature (no verifier available), marks claim InFlight | written, not run (runner `370e949d`, 20 tests) | not run |
+| Submission to Horizon | absent | none | not run |
 | Transaction status, replacement, reconciliation | pure helpers only, no driver | none for a driver | not run |
 | Claim status transitions and payout | absent (claims stay Pending) | none | not run |
 | Production quorum and freshness binding for account input | absent (inputs are untrusted test data) | none | not run |
@@ -28,7 +29,7 @@ Production XLM stays Frozen; route guards are unchanged.
 
 ## Smallest code still needed before a testnet trial of deposit through payout
 
-1. Signing: call the existing threshold Ed25519 signer on the prepared payload hash and persist the signed envelope against the claim (one in-progress payment per custody account).
+1. Signing: call the existing threshold Ed25519 signer on the prepared payload hash and feed the real signature into the signed-intent recording step (the recording step itself is written; real signing and signature verification are not).
 2. Submission driver: send the signed envelope to Horizon and record the outcome without inventing finality.
 3. Status and reconciliation: drive the existing transaction-status helpers to move a claim to Settled, or to a retry or quarantine path, including unknown and expired transactions.
 4. Account input binding: feed preflight and preparation from the existing 2-of-3 account and reserve quorum instead of test inputs.
