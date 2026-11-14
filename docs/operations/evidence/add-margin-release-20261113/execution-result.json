@@ -1,0 +1,171 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "steps": [
+    {
+      "name": "identity",
+      "start": "2026-11-14T16:58:33.171961+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:33.237727+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-prestop",
+      "start": "2026-11-14T16:58:33.237968+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:34.907333+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-prestop",
+      "start": "2026-11-14T16:58:34.907856+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:36.244164+00:00",
+      "exit": 0
+    },
+    {
+      "name": "stop",
+      "start": "2026-11-14T16:58:36.326494+00:00",
+      "write": true,
+      "end": "2026-11-14T16:58:37.827396+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-stopped",
+      "start": "2026-11-14T16:58:37.827672+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:39.176196+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-stopped",
+      "start": "2026-11-14T16:58:39.176613+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:40.910739+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-replace",
+      "start": "2026-11-14T16:58:40.911129+00:00",
+      "write": true,
+      "end": "2026-11-14T16:58:43.790283+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-after-replace",
+      "start": "2026-11-14T16:58:43.790678+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:45.580184+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-download",
+      "start": "2026-11-14T16:58:45.580523+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:56.029950+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-before-continuation",
+      "start": "2026-11-14T17:03:54.775607+00:00",
+      "write": false,
+      "end": "2026-11-14T17:03:56.595275+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-before-continuation",
+      "start": "2026-11-14T17:03:56.596529+00:00",
+      "write": false,
+      "end": "2026-11-14T17:03:58.840719+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-before-install",
+      "start": "2026-11-14T17:03:59.007184+00:00",
+      "write": false,
+      "end": "2026-11-14T17:04:01.063566+00:00",
+      "exit": 0
+    },
+    {
+      "name": "install",
+      "start": "2026-11-14T17:04:01.064175+00:00",
+      "write": true,
+      "end": "2026-11-14T17:04:26.027455+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-installed",
+      "start": "2026-11-14T17:04:26.027810+00:00",
+      "write": false,
+      "end": "2026-11-14T17:04:28.883418+00:00",
+      "exit": 0
+    },
+    {
+      "name": "candid-installed",
+      "start": "2026-11-14T17:04:28.883772+00:00",
+      "write": false,
+      "end": "2026-11-14T17:04:29.614337+00:00",
+      "exit": 0
+    },
+    {
+      "name": "start",
+      "start": "2026-11-14T17:04:29.615818+00:00",
+      "write": true,
+      "end": "2026-11-14T17:04:31.360214+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-running",
+      "start": "2026-11-14T17:04:31.360800+00:00",
+      "write": false,
+      "end": "2026-11-14T17:04:33.072674+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-final",
+      "start": "2026-11-14T17:04:33.073173+00:00",
+      "write": false,
+      "end": "2026-11-14T17:04:34.723706+00:00",
+      "exit": 0
+    }
+  ],
+  "fresh_snapshot_id": "000000000000001d0000000001f088fe0101",
+  "fresh_snapshot_verification": {
+    "timestamp_ns": 1794675523069840035,
+    "files": [
+      {
+        "file": "wasm_module.bin",
+        "bytes": 2380549,
+        "sha256": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7"
+      },
+      {
+        "file": "wasm_memory.bin",
+        "bytes": 2490368,
+        "sha256": "a6adca4b54032c59834526004f9324af91c3fddf8f4de559edef15bf7aeb9edd"
+      },
+      {
+        "file": "stable_memory.bin",
+        "bytes": 109117440,
+        "sha256": "6d36b25a81d417bbfa224832a6039d9cca7f6a3e28038207962dc47d5fbf4ea9"
+      }
+    ],
+    "all_named_lengths_match": true,
+    "chunk_store_empty": true
+  },
+  "outcome": "installed-and-running",
+  "rawStateReconciliation": {
+    "cause": "Vault51 promoted to BTree root; original verifier only accepted leaf entries",
+    "verifierSha256": "4e7cd88ba9a7c4a084aa7e16d2c5bd2c0b437f59755d3cd22ee3158129fb95f7",
+    "fullTreeVerified": true,
+    "expectedVaultCount": 50,
+    "sameStoppedSnapshotReused": true,
+    "managementWritesRepeated": false
+  },
+  "completed": "2026-11-14T17:04:34.724227+00:00",
+  "old_module": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7",
+  "new_module": "8f6f5933e54fa44205760b9a8d1c3869135df43825eadfee70b20c62d0a0bd16",
+  "settings_preserved": true,
+  "candidate_candid_matches": true,
+  "previous_api_compatible": true,
+  "other_nine_snapshots_preserved": true
+}

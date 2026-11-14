@@ -1,0 +1,95 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "steps": [
+    {
+      "name": "identity",
+      "start": "2026-11-14T16:58:33.171961+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:33.237727+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-prestop",
+      "start": "2026-11-14T16:58:33.237968+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:34.907333+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-prestop",
+      "start": "2026-11-14T16:58:34.907856+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:36.244164+00:00",
+      "exit": 0
+    },
+    {
+      "name": "stop",
+      "start": "2026-11-14T16:58:36.326494+00:00",
+      "write": true,
+      "end": "2026-11-14T16:58:37.827396+00:00",
+      "exit": 0
+    },
+    {
+      "name": "status-stopped",
+      "start": "2026-11-14T16:58:37.827672+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:39.176196+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-stopped",
+      "start": "2026-11-14T16:58:39.176613+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:40.910739+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-replace",
+      "start": "2026-11-14T16:58:40.911129+00:00",
+      "write": true,
+      "end": "2026-11-14T16:58:43.790283+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshots-after-replace",
+      "start": "2026-11-14T16:58:43.790678+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:45.580184+00:00",
+      "exit": 0
+    },
+    {
+      "name": "snapshot-download",
+      "start": "2026-11-14T16:58:45.580523+00:00",
+      "write": false,
+      "end": "2026-11-14T16:58:56.029950+00:00",
+      "exit": 0
+    }
+  ],
+  "fresh_snapshot_id": "000000000000001d0000000001f088fe0101",
+  "fresh_snapshot_verification": {
+    "timestamp_ns": 1794675523069840035,
+    "files": [
+      {
+        "file": "wasm_module.bin",
+        "bytes": 2380549,
+        "sha256": "6428d1039a9f54e691acfb8cd6c8d5c4cdba8d675b7350f3ad5913815d5575f7"
+      },
+      {
+        "file": "wasm_memory.bin",
+        "bytes": 2490368,
+        "sha256": "a6adca4b54032c59834526004f9324af91c3fddf8f4de559edef15bf7aeb9edd"
+      },
+      {
+        "file": "stable_memory.bin",
+        "bytes": 109117440,
+        "sha256": "6d36b25a81d417bbfa224832a6039d9cca7f6a3e28038207962dc47d5fbf4ea9"
+      }
+    ],
+    "all_named_lengths_match": true,
+    "chunk_store_empty": true
+  },
+  "outcome": "held-for-reconciliation",
+  "error": "raw vault snapshot check failed",
+  "held_at": "2026-11-14T16:58:56.147359+00:00"
+}

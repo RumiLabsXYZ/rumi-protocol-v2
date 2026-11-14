@@ -1,0 +1,11 @@
+{
+  "fixedConfigurationPreserved": true,
+  "excludedDynamicFields": [
+    "collateral last_price",
+    "collateral last_price_timestamp",
+    "derived recovery_mode_threshold",
+    "derived borrowing_fee_curve"
+  ],
+  "beforeSha256": "a94c5d59ce4734db83f2cbadb3c3f0be93632d3d1a415d2d08996d4b6962d796",
+  "afterSha256": "a94c5d59ce4734db83f2cbadb3c3f0be93632d3d1a415d2d08996d4b6962d796"
+}

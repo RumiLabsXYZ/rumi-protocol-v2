@@ -1,0 +1,31 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "frontendVersion": "1794674286427",
+  "buildNativeExit": 0,
+  "frontendBuildCount": 1,
+  "backendBuildCount": 0,
+  "managementWriteNativeExits": {
+    "stop": 0,
+    "snapshot-replace": 0,
+    "install": 0,
+    "start": 0
+  },
+  "stageBatch": "697",
+  "activationBatch": "698",
+  "stageServed": 302,
+  "finalServed": 9,
+  "primaryDomainReadbacks": 5,
+  "allFinalChecksPassed": true,
+  "freshSnapshotId": "000000000000001d0000000001f088fe0101",
+  "otherNineSnapshotsPreserved": true,
+  "rawReaderRootReconciliationAccepted": true,
+  "failedOriginalReaderProofRetained": true,
+  "privateReadFailuresRetained": true,
+  "initialFinalServedDnsFailureRetained": true,
+  "productionWritesRepeated": false,
+  "customerFinancialAction": false,
+  "independentFinal": "PASS",
+  "independentPublicReadbacks": 15,
+  "independentAnonymousDesktopMobileLayout": "PASS",
+  "vault213MetadataAndBalanceReadOnlyReadiness": "PASS"
+}

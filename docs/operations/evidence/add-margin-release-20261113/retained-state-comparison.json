@@ -1,0 +1,67 @@
+{
+  "comparisons": [
+    {
+      "label": "get_cksol_relay_budget",
+      "equal": true
+    },
+    {
+      "label": "get_cksol_payment_quote",
+      "equal": true
+    },
+    {
+      "label": "get_pending_payouts",
+      "equal": true
+    },
+    {
+      "label": "get_vault_operation_status",
+      "equal": true
+    },
+    {
+      "label": "get_cksol_deposit",
+      "equal": true
+    },
+    {
+      "label": "get_cksol_payment",
+      "equal": true
+    },
+    {
+      "label": "get_cksol_icp_terms",
+      "equal": true
+    },
+    {
+      "label": "get_nicp_redemption_claim",
+      "equal": false
+    },
+    {
+      "label": "get_xrp_claims",
+      "equal": true
+    },
+    {
+      "label": "customer-get_cksol_deposit",
+      "equal": true
+    },
+    {
+      "label": "customer-get_cksol_payment",
+      "equal": true
+    },
+    {
+      "label": "bot-vault158",
+      "equal": true
+    },
+    {
+      "label": "bot-recovery-config",
+      "equal": true
+    },
+    {
+      "label": "vault51-158",
+      "equal": false
+    }
+  ],
+  "allEqual": false,
+  "claimStage": [
+    "ClaimConfirmed"
+  ],
+  "adoption": [],
+  "receivedIcp": [],
+  "settlementBlock": []
+}
