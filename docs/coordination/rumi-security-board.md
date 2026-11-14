@@ -4,6 +4,7 @@ Updated: 2026-11-14. Coordinator: Bram. This board tracks the security review, r
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
+| SEC-21 | Review | Adrian incident/claim / Ellis UI source | Vault202 claim and manual availability | Live202claim+queue/231TransferFailed confirmed. Frontend-onlye7b736c9/11checks/twofinalreviews/mockdesktop-mobilePASS; no build/deploy/financialaction. Adrian prepares proof-backed remedy; lock retained. |
 | SEC-20 | Done | Ellis source/independent verification / Dorian release | Compact secondary wallet recovery discovery | Live dc4b8f52/UI1794685142389 via699/700;740files/476pairs/full5619-5813inventory/15servedresponses/certifiedmodules/controllers/live desktop-mobile PASS. Recovery protections retained; no financial action. |
 | SEC-19 | Done | Ellis case/independent verification / Dorian release | Restore safe existing-vault top-ups | Live4d/backend8f6/UI1794674286427; final assets/certified API/state/layout verified. Rob can use vault213 deposit flow; actual deposit not submitted. |
 | SEC-18 | Done | Ellis integration/QA / Iris UI / independent mapping review | Clear ckSOL mint progress and persistent success | Actual owner/request/minter evidence; payment settlement separate; essential delayed/stale/network/resume mocks and desktop/mobile; no financial or deployment action. Separate from frozen SEC17. |
@@ -253,3 +254,7 @@ Rob requested and authorized publication of the compact recovery entry after ver
 ## 2026-11-14 — recovery-menu publication verified
 
 SEC20 is live at frontend1794685142389, source dc4b8f52. Dorian staged99 immutable keys in699 and activated seven entry encoding updates in700. Ellis independently verified all frozen files, full final inventory preservation,15 public responses, unchanged certified backend/API/frontend/controllers and actual anonymous desktop/mobile layout. Connected recovery has23 mounted tests and inspected mock-render screenshots; no real signing or financial action. No further campaign is needed for this focused presentation fix.
+
+## 2026-11-14 — vault202 protected claim and manual queue
+
+Adrian is accountable for the financial incident. Fresh records show202stillreserved while the manual ratio queue offers it. Ellis prepared reviewed frontend-only candidatee7b736c9 using the existing public claim-ID query: reserved/unknown/loading actions are disabled, later lock rejections cannot be cleared by older reads, XRP settlement and OISY gesture remain intact.11checks/twofinalreviews/mockdesktop-mobilePASS after correcting processing-label precedence. No release or recovery authority inferred; no liquidation/allowance/forceunlock/financialaction. SEC20 remains complete.

@@ -1,6 +1,6 @@
 {
-  "summary": "SEC20 recovery-menu UI is live at1794685142389/source dc4b8f52/stage699+activation700. Independent740files/476pairs/full5619keys-5813encodings/15primaryresponses/certifiedunchanged8f6-d8b-04e/controllers/anonymousdesktop-mobilePASS; connectedflow23mountedtests+mockrenderPASS. SEC19 collateral fix retained; no backend orfinancialaction.",
-  "plainSummary": "The compact vault-recovery control is live in the wallet menu. Real pending requests still show recovery guidance, and the existing collateral-deposit repair remains in place. The build, published files and desktop/mobile layouts passed verification; no further approval is needed.",
+  "summary": "SEC21:202listedmanualqueueandprotocolclaimIDs; bot231TransferFailed/shortgrosspayment/0paid, lockprotected. Ellisfrontend-onlye7b736c9candidate usesexistingpublicclaimquery;11checks/twofinalreviews/mockdesktopmobilePASS. Adrianownsasset/proof-backedrecovery; no deploy/financialauthority. SEC20remainslive1794685142389 andcomplete.",
+  "plainSummary": "Vault202\u2019s bot liquidation stalled after a swap left repayment short; its safety lock remains. A tested frontend change marks reserved vaults and disables manual execution when availability is unknown. The recovery owner is preparing the claim-specific remedy; neither a force unlock nor deployment has been authorized.",
   "glossary": [
     {
       "term": "Stability Pool",

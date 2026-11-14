@@ -1,6 +1,16 @@
 {
   "items": [
     {
+      "id": "vault202-claim-and-manual-availability",
+      "title": "Reconcile vault202 claim and show truthful manual availability",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Adrian completes claim-specific asset/proof-backed recovery proposal. Ellis reviewed frontend candidate e7b736c9 is ready for scoped publication decision. Preserve bot lock; no deployment, liquidation, claim retry or funds movement authorized by the report.",
+      "cardIds": [
+        "SEC-21"
+      ]
+    },
+    {
       "id": "vault-recovery-menu-ux",
       "title": "Make optional vault recovery a secondary wallet-menu action",
       "status": "done",

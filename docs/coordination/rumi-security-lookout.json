@@ -1,6 +1,19 @@
 {
   "cards": [
     {
+      "id": "SEC-21",
+      "state": "Review",
+      "owner": "Adrian incident/claim recovery; Ellis manual-queue source and verification",
+      "scope": "Vault202 protected bot claim and truthful manual-liquidation availability",
+      "evidenceText": "Fresh publicrecords show202 inbothprotocolclaimIDs andmanualqueue; botrecord231TransferFailed, swapoutputshortofrepaymentplusfee,0paid. Queuefiltersratio/pendingnICPbutnotbotlock, publicvaultprojectionomitslock; existingget_bot_claim_vault_ids supportsfrontend-onlyfix. Candidatee7b736c9 basedliveSEC20dc4b marksreservedrows/unknown-loadingunavailable, guardsbeforeapproval, rememberslockrejectionagainstolderreads, preservesOISYgesture/backendlocks/XRPsettlement.11checks/twofinalreviews/actualmockdesktopmobilePASS; processing-labelreviewfindingfixed/regressed. No build/deployment/financialaction. Adrian ownsclaimassets/proof-backedremedy; frontendpublicationrequiresseparatescopeddecision. No forceunlock.",
+      "evidenceLinks": [
+        {
+          "title": "Confirmed queue diagnosis, reviewed source and evidence",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e7b736c9/docs/operations/manual-liquidation-availability-20261114.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-20",
       "state": "Done",
       "owner": "Ellis case/source/independent verification; Dorian frontend publication",
