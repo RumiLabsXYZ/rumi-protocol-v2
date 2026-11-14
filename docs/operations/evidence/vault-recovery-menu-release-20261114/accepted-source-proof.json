@@ -1,0 +1,14 @@
+{
+  "source": "dc4b8f52a1e76a36791defb5f66005276d00d4a5",
+  "code": "8a64f8188422d1e7692fca67531782fb2f04d241",
+  "base": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "humanInstructionMessage": "01a1db85-3658-7c01-8637-73e787fa6eb4",
+  "decisionPath": "docs/operations/vault-recovery-menu-decision-20261114.md",
+  "decisionSha256": "5b598bc1e2db7dc253f93dc7dbaef4aa7ca92c44555d62bc0ab3231487e88a86",
+  "focusedMountedTests": 23,
+  "independentSourceReviews": "two final PASS",
+  "connectedMockedDesktopMobile": "PASS",
+  "realWalletOrFinancialAction": false,
+  "sourceProofsReused": true,
+  "backendCandidDependenciesAmountsAndJournalsUnchanged": true
+}

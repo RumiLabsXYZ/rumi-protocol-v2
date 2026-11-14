@@ -1,0 +1,15 @@
+{
+  "source": "dc4b8f52a1e76a36791defb5f66005276d00d4a5",
+  "base": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "sourceChangedPaths": [
+    "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.spec.ts",
+    "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.svelte",
+    "src/vault_frontend/src/lib/components/wallet/WalletConnector.svelte",
+    "src/vault_frontend/src/lib/components/wallet/WalletRecoveryNavigation.spec.ts"
+  ],
+  "producerTrackedClean": true,
+  "prior740ProducerAndFrozenFilesPreserved": true,
+  "backendCandidAndDependenciesUnchanged": true,
+  "runnerSha256": "9d19b015d7259e7cef818d92cae4b8cc4aa783aac5a6a68f720ba1be66c532c7",
+  "buildDispatched": false
+}
