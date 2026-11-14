@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Horizon submission request builder and advisory parser are source-complete but unbuilt (843e4e1c): test-only, no main.rs export, no outcall. Its focused check (22 horizon_rpc tests plus production check, runner 67e9d11c) needs a fresh slot. Then: a test-build driver wiring signing, recording, submission and reconciliation, which needs separate signing and outcall authorization.",
+      "status": "blocked",
+      "blockedReason": "The Horizon submission source is written but its focused check has not run: the shared build machine is below the 30 GiB free-space startup floor, and an existing coordination question about this work is still open.",
+      "nextAction": "Wait for shared-machine capacity and the existing coordination answer, then run the prepared focused check (22 horizon_rpc tests plus production check, runner 67e9d11c) under a fresh slot. No floors lowered; source stays frozen.",
       "cardIds": [
         "WP3"
       ]

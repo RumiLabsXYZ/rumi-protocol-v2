@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production guards unchanged. Proven locally through applying payment outcomes to in-flight claims (receipt a65c3d4b, fixture decisions). New test-only Horizon submission request builder and advisory response parser are source-complete but unbuilt (843e4e1c), with no endpoint, export or outcall. No real signing, submission, payout or testnet activity.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. The code that would format a payout for sending to Stellar, and read the reply without trusting it blindly, is written but not yet tested. Nothing is actually sent yet; Rob does not need to act now.",
+  "summary": "XLM remains Frozen; production guards unchanged. Proven locally through applying payment outcomes to in-flight claims (receipt a65c3d4b). Horizon submission builder and parser source is written (843e4e1c) but its focused check is waiting: shared-machine free space is below the 30 GiB startup floor, and an existing coordination question is open. No real signing, submission or testnet activity.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. The latest code is written, but testing it is waiting for space on the shared build machine and an answer to an existing coordination question. Rob may be asked through that existing question; nothing new is needed from him here.",
   "glossary": [
     {
       "term": "Stellar",
