@@ -1,6 +1,19 @@
 {
   "cards": [
     {
+      "id": "SEC-20",
+      "state": "In progress",
+      "owner": "Ellis case/source/independent verification; Dorian frontend publication",
+      "scope": "Move optional vault recovery discovery into the wallet menu",
+      "evidenceText": "Reviewed source dc4b8f52 based exactly on live SEC19 4d. Unknown OISY state no longer renders a generic global card; Wallet > Recover a vault action invokes the unchanged explicit owner/session-bound status check. Genuine saved/submitted/held/error guidance retained. Red regression,23mountedtests/foursuites,two independent final reviews and actual component desktop/mobile screenshots/measurements PASS. Rob explicitly authorized publication after verification. Dorian preparing one fresh coordinated frontend-only build, staged asset preservation and independent final served/layout readback. Not live yet; backend and financial actions out of scope.",
+      "evidenceLinks": [
+        {
+          "title": "Reviewed frontend-only release decision and evidence",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/dc4b8f52a1e76a36791defb5f66005276d00d4a5/docs/operations/vault-recovery-menu-decision-20261114.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-19",
       "state": "Done",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",

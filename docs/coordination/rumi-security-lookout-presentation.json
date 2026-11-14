@@ -1,6 +1,6 @@
 {
-  "summary": "SEC19 pairedrelease is live:4d/backend8f6/UI1794674286427/stage697/activate698. Ellisfullinventory15publicbytes/certifiedAPIcontrollers/desktopmobilePASS, backup1d/other9+capturedstate preserved withexplicitrawreaderreconciliation. Rob can use depositflowforvault213; actualusertransaction remainsunverified.",
-  "plainSummary": "The collateral-deposit repair is live and independently verified. The backend, frontend, preserved assets and captured state checks pass, and vault213\u2019s ckSOL metadata and balance support the requested deposit. Rob can refresh Rumi and add collateral; no deposit was submitted on his behalf.",
+  "summary": "SEC19 collateral deposits remain live and independently verified. SEC20 focused recovery-menu source dc4b8f52 passes23mountedtests, two final reviews and desktop/mobile fixture checks; Dorian is preparing the authorized frontend-only publication. Actual served verification remains pending; no backend or financial action.",
+  "plainSummary": "Collateral deposits are working through the repaired flow. The oversized recovery card has a verified replacement in the wallet menu, and the release owner is preparing to publish it. We will confirm the live page after publication; Rob does not need to approve anything else.",
   "glossary": [
     {
       "term": "Stability Pool",

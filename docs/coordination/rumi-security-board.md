@@ -1,10 +1,11 @@
 # Rumi security and recovery board
 
-Updated: 2026-11-12. Coordinator: Bram. This board tracks the security review, recovery subprojects, and the current customer-impact incident queue; the separate incident and release records remain evidence, not a second task queue. A source diagnosis, merged PR, installed module, active feature, executed recovery, and settled obligation are different outcomes.
+Updated: 2026-11-14. Coordinator: Bram. This board tracks the security review, recovery subprojects, and the current customer-impact incident queue; the separate incident and release records remain evidence, not a second task queue. A source diagnosis, merged PR, installed module, active feature, executed recovery, and settled obligation are different outcomes.
 
 | ID | State | Owner | Task | Evidence and next check |
 | --- | --- | --- | --- | --- |
-| SEC-19 | In progress | Ellis case/integration / Rowan backend / independent accounting review | Restore safe existing-vault top-ups | Accepted508 missing liquidation-compatible confirmed-pull recovery; bounded source prep, exact credit or accounted liability, essential lostreply/replay/liquidation tests; no live action. |
+| SEC-20 | In progress | Ellis source/verification / Dorian release | Compact secondary wallet recovery discovery | Reviewed dc4b8f52;23 mounted tests/two final reviews/desktop-mobile fixture PASS. Authorized frontend-only build/publication next; no backend or financial action. |
+| SEC-19 | Done | Ellis case/independent verification / Dorian release | Restore safe existing-vault top-ups | Live4d/backend8f6/UI1794674286427; final assets/certified API/state/layout verified. Rob can use vault213 deposit flow; actual deposit not submitted. |
 | SEC-18 | Done | Ellis integration/QA / Iris UI / independent mapping review | Clear ckSOL mint progress and persistent success | Actual owner/request/minter evidence; payment settlement separate; essential delayed/stale/network/resume mocks and desktop/mobile; no financial or deployment action. Separate from frozen SEC17. |
 | SEC-17 | Done | Ellis integration / Rowan backend / Iris review | Correct successful-repayment residual forgiveness | Ordinarymin0.1; forgive residualstrictlybelow0.1 onlyaftersuccessfulauthorizeddebit; exact0.1retained/noauto-close. Essentialfailed/unknown/replay/interest/fees/Max checks. Source/prep only; newbackendinstallheld. |
 | SEC-15 | Done | Ellis source/case / Dorian release | Optional wallet help and visible recovery panel | Deployed1794522798107; independent fullinventory/bytes/modules and live desktop/mobile layout/disclosure PASS. No wallet inspection or financial action. |
@@ -244,3 +245,7 @@ Automatic review rejected the SEC19 Cody-to-Dorian allocation message before del
 ### SEC19 live and independently verified
 
 Exact4d/backend8f6/API d8b/UI1794674286427 is live, actualstage697/activate698. Ellis independently verifies5520keys/5714encodings preservingall5220priorprops/untouchedencodings+300new/7sets,15primarybytes/certifiedmodulesAPIcontrollers andanonymousdesktop/mobilePASS. Backup1d/other9retained. Rawreaderroot-entryassumption corrected withall50IDs/backlinks/range/owner/type/collateral/debtguards; remainingonlyinstall/start didnotrepeatstop/snapshot. Capturedstate changedonlymatchingforwardclaimtimestamps; globalprivateobservationlimits explicit. Source134/3/9+dualPASS retained. Vault213active9decmetadata/balance coversrequested13.01909+fees; usermayrefreshanddepositseparately. No signeddeposit/financialcanary performed.
+
+## 2026-11-14 — focused recovery-menu follow-up
+
+Rob requested and authorized publication of the compact recovery entry after verification. SEC20 removes the generic unchecked OISY card and places optional recovery in the wallet menu, preserving real request/error guidance. Reviewed source dc4b8f52 passes23 mounted tests, two independent final reviews and desktop/mobile fixture checks. Dorian owns the frontend-only build/publication; Ellis independently verifies served bytes and layout. SEC19 remains complete; no backend or financial action.

@@ -1,11 +1,21 @@
 {
   "items": [
     {
-      "id": "safe-vault-collateral-top-ups",
-      "title": "Restore safe collateral top-ups to existing vaults",
+      "id": "vault-recovery-menu-ux",
+      "title": "Make optional vault recovery a secondary wallet-menu action",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Consume one fresh Cody allocation for correctedf08aef77 runner17f2e07c/backende2a0122a. Old5c23/6dedpacket staysunconsumed/superseded. Run essentialunit/Candid+oldservicecompat/source-matchedWasm/3PocketICcases;128frontendchecks andboundedsourcefindingclosure pass. Then integrationreview and exactreleaseproposal; no liveaction untilapproved.",
+      "nextAction": "Dorian builds and publishes reviewed dc4b8f52 frontend only under direct authorization; Ellis verifies served bytes, retained assets/modules and desktop/mobile layout. No backend or financial actions.",
+      "cardIds": [
+        "SEC-20"
+      ]
+    },
+    {
+      "id": "safe-vault-collateral-top-ups",
+      "title": "Restore safe collateral top-ups to existing vaults",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "Software is live and independently verified at frontend1794674286427/backend8f6. Preserve final release and independent receipts; Rob can use the deposit flow for vault213. No deposit was submitted on his behalf.",
       "cardIds": [
         "SEC-19"
       ]
