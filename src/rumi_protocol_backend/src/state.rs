@@ -3702,6 +3702,49 @@ pub struct CkSolRelayAttempt {
 // later upgrade, serde fills those fields from Default::default() instead of
 // failing. This prevents fallback to event replay (which causes interest drift).
 // The Default impl below is ONLY for this purpose, never for actual construction.
+#[derive(
+    candid::CandidType,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum UnsupportedIcrcOperation {
+    Transfer,
+    TransferFrom,
+    Approve,
+}
+
+/// Exact receipt and dispatch identity for the practically unreachable case
+/// where an ICRC ledger confirms an operation at a block index above u64::MAX.
+/// The protocol's historical event schemas use u64 block indexes, so silently
+/// narrowing that Nat would corrupt the receipt. Keeping the full tuple here
+/// places every generic ICRC dispatch on hold until an upgrade can reconcile
+/// the ledger-contract violation without retrying under a new identity.
+#[derive(
+    candid::CandidType,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct UnsupportedIcrcReceipt {
+    pub operation_id: u128,
+    pub operation: UnsupportedIcrcOperation,
+    pub ledger: Principal,
+    pub source: Option<icrc_ledger_types::icrc1::account::Account>,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount: candid::Nat,
+    pub fee: Option<candid::Nat>,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub block_index: candid::Nat,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -3712,6 +3755,13 @@ pub struct State {
     #[serde(deserialize_with = "deserialize_pending_keyed")]
     pub pending_excess_transfers: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Fail-closed receipts that cannot fit legacy u64 event fields. Any row
+    /// blocks generic ICRC dispatches that begin after the receipt is recorded
+    /// so a caller cannot retry a confirmed transfer under a fresh nonce and
+    /// debit twice. Calls already awaiting a ledger reply retain their own
+    /// immutable tuple and may add further rows before they return.
+    #[serde(default)]
+    pub unsupported_icrc_receipts: BTreeMap<u128, UnsupportedIcrcReceipt>,
     /// Caller-owned ordinary stability-pool liquidation journals. Rows are
     /// retained until the incoming payment and collateral payout both have
     /// definitive receipts or the request is explicitly cancelled/no-effect.
@@ -4523,6 +4573,15 @@ pub struct State {
     #[serde(default)]
     pub xrp_pending_deposits: BTreeMap<u64, XrpPendingDeposit>,
 
+    /// SEC-11 immutable original custody binding and opening ledger cutoff.
+    #[serde(default)]
+    pub xrp_vault_origins: BTreeMap<u64, crate::xrp_vault_deposit::XrpVaultOrigin>,
+    /// Permanent receipt tombstones: never remove these when a vault closes.
+    #[serde(default)]
+    pub xrp_topup_receipts: BTreeMap<(String, String), crate::xrp_vault_deposit::XrpTopupReceipt>,
+    #[serde(default)]
+    pub xrp_topup_receipt_counts: BTreeMap<u64, u64>,
+
     /// P4: native-XRP collateral that has left a vault and is owed to a claimant
     /// (owner withdrawal, liquidation payout, or redemption payout), settled later
     /// via `settle_xrp_claim` (a threshold-signed XRPL Payment from the vault's
@@ -4709,6 +4768,7 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            unsupported_icrc_receipts: BTreeMap::new(),
             sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
@@ -4892,6 +4952,9 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_vault_origins: BTreeMap::new(),
+            xrp_topup_receipts: BTreeMap::new(),
+            xrp_topup_receipt_counts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -4915,6 +4978,7 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            unsupported_icrc_receipts: BTreeMap::new(),
             sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
@@ -5219,6 +5283,9 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_vault_origins: BTreeMap::new(),
+            xrp_topup_receipts: BTreeMap::new(),
+            xrp_topup_receipt_counts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -8243,14 +8310,20 @@ impl State {
         result
     }
 
-    pub fn provide_liquidity(&mut self, amount: ICUSD, caller: Principal) {
+    pub fn try_provide_liquidity(&mut self, amount: ICUSD, caller: Principal) -> Result<(), String> {
         if amount == 0 {
-            return;
+            return Ok(());
         }
-        self.liquidity_pool
-            .entry(caller)
-            .and_modify(|curr| *curr += amount)
-            .or_insert(amount);
+        let current = self.liquidity_pool.get(&caller).copied().unwrap_or_default();
+        let updated = crate::numeric::checked_icusd_add(current, amount)
+            .ok_or_else(|| "liquidity balance exceeds the u64 icUSD range".to_string())?;
+        self.liquidity_pool.insert(caller, updated);
+        Ok(())
+    }
+
+    pub fn provide_liquidity(&mut self, amount: ICUSD, caller: Principal) {
+        self.try_provide_liquidity(amount, caller)
+            .unwrap_or_else(|message| ic_cdk::trap(&message));
     }
 
     pub fn withdraw_liquidity(&mut self, amount: ICUSD, caller: Principal) {
@@ -8817,21 +8890,37 @@ impl State {
         }
     }
 
-    pub fn redistribute_vault(&mut self, vault_id: u64) {
+    pub fn try_redistribute_vault(&mut self, vault_id: u64) -> Result<(), String> {
         let vault = self
             .vault_id_to_vaults
             .get(&vault_id)
-            .expect("bug: vault not found");
-        let entries = distribute_across_vaults(&self.vault_id_to_vaults, vault.clone());
+            .cloned()
+            .ok_or_else(|| "redistributed vault not found".to_string())?;
+        let entries = try_distribute_across_vaults(&self.vault_id_to_vaults, vault.clone())?;
         let touched_ids: Vec<u64> = entries.iter().map(|e| e.vault_id).collect();
-        for entry in entries {
-            match self.vault_id_to_vaults.entry(entry.vault_id) {
-                Occupied(mut vault_entry) => {
-                    vault_entry.get_mut().collateral_amount += entry.icp_share_amount.to_u64();
-                    vault_entry.get_mut().borrowed_icusd_amount += entry.icusd_share_amount;
-                }
-                Vacant(_) => panic!("bug: vault not found"),
-            }
+        let mut updates = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let recipient = self.vault_id_to_vaults.get(&entry.vault_id).ok_or_else(|| {
+                format!("redistribution recipient vault {} not found", entry.vault_id)
+            })?;
+            let collateral_amount = recipient
+                .collateral_amount
+                .checked_add(entry.icp_share_amount.to_u64())
+                .ok_or_else(|| format!("redistribution collateral overflow for vault {}", entry.vault_id))?;
+            let borrowed_icusd_amount = crate::numeric::checked_icusd_add(
+                recipient.borrowed_icusd_amount,
+                entry.icusd_share_amount,
+            )
+            .ok_or_else(|| format!("redistribution debt overflow for vault {}", entry.vault_id))?;
+            updates.push((entry.vault_id, collateral_amount, borrowed_icusd_amount));
+        }
+        for (recipient_id, collateral_amount, borrowed_icusd_amount) in updates {
+            let recipient = self
+                .vault_id_to_vaults
+                .get_mut(&recipient_id)
+                .expect("preflighted redistribution recipient must remain present");
+            recipient.collateral_amount = collateral_amount;
+            recipient.borrowed_icusd_amount = borrowed_icusd_amount;
         }
         self.remove_vault_and_unindex(vault_id);
         // Wave-8b LIQ-002: re-key every vault that received a share.
@@ -8840,6 +8929,12 @@ impl State {
         for tid in touched_ids {
             self.reindex_vault_cr(tid);
         }
+        Ok(())
+    }
+
+    pub fn redistribute_vault(&mut self, vault_id: u64) {
+        self.try_redistribute_vault(vault_id)
+            .unwrap_or_else(|message| ic_cdk::trap(&message));
     }
 
     /// Historical replay compatibility only. Keep this body identical to the pre-queue
@@ -10277,17 +10372,28 @@ pub(crate) fn distribute_across_vaults(
     vaults: &BTreeMap<u64, Vault>,
     target_vault: Vault,
 ) -> Vec<DistributeToVaultEntry> {
-    assert!(!vaults.is_empty());
+    try_distribute_across_vaults(vaults, target_vault)
+        .unwrap_or_else(|message| ic_cdk::trap(&message))
+}
+
+pub(crate) fn try_distribute_across_vaults(
+    vaults: &BTreeMap<u64, Vault>,
+    target_vault: Vault,
+) -> Result<Vec<DistributeToVaultEntry>, String> {
+    if vaults.is_empty() {
+        return Err("cannot redistribute across an empty vault set".to_string());
+    }
 
     let target_vault_id = target_vault.vault_id;
-    let total_icp_margin: ICP = ICP::from(
-        vaults
-            .iter()
-            .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
-            .map(|(_vault_id, vault)| vault.collateral_amount)
-            .sum::<u64>(),
-    );
-    assert_ne!(total_icp_margin, ICP::new(0));
+    let total_icp_margin_raw = vaults
+        .iter()
+        .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
+        .try_fold(0u64, |total, (_vault_id, vault)| total.checked_add(vault.collateral_amount))
+        .ok_or_else(|| "redistribution collateral denominator exceeds the u64 range".to_string())?;
+    if total_icp_margin_raw == 0 {
+        return Err("cannot redistribute across zero collateral".to_string());
+    }
+    let total_icp_margin = ICP::from(total_icp_margin_raw);
 
     let target_collateral = ICP::from(target_vault.collateral_amount);
     let mut result = vec![];
@@ -10299,8 +10405,10 @@ pub(crate) fn distribute_across_vaults(
             let share: Ratio = ICP::from(vault.collateral_amount) / total_icp_margin;
             let icp_share = target_collateral * share;
             let icusd_share = target_vault.borrowed_icusd_amount * share;
-            distributed_icp += icp_share;
-            distributed_icusd += icusd_share;
+            distributed_icp = ICP::new(distributed_icp.to_u64().checked_add(icp_share.to_u64())
+                .ok_or_else(|| "redistributed collateral total exceeds the u64 range".to_string())?);
+            distributed_icusd = crate::numeric::checked_icusd_add(distributed_icusd, icusd_share)
+                .ok_or_else(|| "redistributed debt total exceeds the u64 range".to_string())?;
             result.push(DistributeToVaultEntry {
                 vault_id: *vault_id,
                 icp_share_amount: icp_share,
@@ -10310,11 +10418,19 @@ pub(crate) fn distribute_across_vaults(
     }
 
     if !result.is_empty() {
-        result[0].icusd_share_amount += target_vault.borrowed_icusd_amount - distributed_icusd;
-        result[0].icp_share_amount += target_collateral - distributed_icp;
+        let debt_remainder = target_vault.borrowed_icusd_amount - distributed_icusd;
+        result[0].icusd_share_amount = crate::numeric::checked_icusd_add(
+            result[0].icusd_share_amount,
+            debt_remainder,
+        ).ok_or_else(|| "redistribution debt remainder exceeds the u64 range".to_string())?;
+        result[0].icp_share_amount = ICP::new(
+            result[0].icp_share_amount.to_u64()
+                .checked_add((target_collateral - distributed_icp).to_u64())
+                .ok_or_else(|| "redistribution collateral remainder exceeds the u64 range".to_string())?,
+        );
     }
 
-    result
+    Ok(result)
 }
 
 pub fn compute_redemption_fee(
@@ -10814,6 +10930,62 @@ mod tests {
             ICUSD::new(u64::MAX),
             "the failed addition must leave vault debt unchanged"
         );
+    }
+
+    #[test]
+    fn liquidity_overflow_is_rejected_without_mutating_balance() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[91]);
+        state.liquidity_pool.insert(owner, ICUSD::new(u64::MAX));
+
+        assert!(state.try_provide_liquidity(ICUSD::new(1), owner).is_err());
+        assert_eq!(state.liquidity_pool[&owner], ICUSD::new(u64::MAX));
+    }
+
+    #[test]
+    fn redistribution_overflow_is_rejected_before_any_vault_mutation() {
+        let mut state = test_state();
+        let collateral_type = state.icp_ledger_principal;
+        let recipient = crate::vault::Vault {
+            owner: Principal::from_slice(&[92]), vault_id: 1,
+            collateral_amount: u64::MAX, borrowed_icusd_amount: ICUSD::new(u64::MAX),
+            collateral_type, last_accrual_time: 0, accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        let target = crate::vault::Vault {
+            owner: Principal::from_slice(&[93]), vault_id: 2,
+            collateral_amount: 1, borrowed_icusd_amount: ICUSD::new(1),
+            collateral_type, last_accrual_time: 0, accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        state.vault_id_to_vaults.insert(1, recipient.clone());
+        state.vault_id_to_vaults.insert(2, target.clone());
+
+        assert!(state.try_redistribute_vault(2).is_err());
+        assert_eq!(state.vault_id_to_vaults.get(&1), Some(&recipient));
+        assert_eq!(state.vault_id_to_vaults.get(&2), Some(&target));
+    }
+
+    #[test]
+    fn later_redistribution_recipient_overflow_keeps_all_recipients_unchanged() {
+        let mut state = test_state();
+        let collateral_type = state.icp_ledger_principal;
+        let vault = |owner, vault_id, collateral_amount, debt| crate::vault::Vault {
+            owner: Principal::from_slice(&[owner]), vault_id, collateral_amount,
+            borrowed_icusd_amount: ICUSD::new(debt), collateral_type,
+            last_accrual_time: 0, accrued_interest: ICUSD::new(0), bot_processing: false,
+        };
+        let first = vault(95, 1, 1, 0);
+        let later = vault(96, 2, u64::MAX - 100, u64::MAX - 100);
+        let target = vault(97, 3, 200, 200);
+        state.vault_id_to_vaults.insert(1, first.clone());
+        state.vault_id_to_vaults.insert(2, later.clone());
+        state.vault_id_to_vaults.insert(3, target.clone());
+
+        assert!(state.try_redistribute_vault(3).is_err());
+        assert_eq!(state.vault_id_to_vaults.get(&1), Some(&first));
+        assert_eq!(state.vault_id_to_vaults.get(&2), Some(&later));
+        assert_eq!(state.vault_id_to_vaults.get(&3), Some(&target));
     }
 
     #[test]

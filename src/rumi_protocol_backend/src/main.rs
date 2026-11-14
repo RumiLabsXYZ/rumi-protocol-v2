@@ -239,14 +239,17 @@ fn ok_or_die(result: Result<(), String>) {
 /// Checks that Elliptic Core Canister state is internally consistent.
 #[cfg(feature = "self_check")]
 fn check_invariants() -> Result<(), String> {
-    use rumi_protocol_backend::event::replay;
+    use rumi_protocol_backend::event::replay_with_pending_payout_events;
 
     read_state(|s| {
         s.check_invariants()?;
 
         let events: Vec<_> = rumi_protocol_backend::storage::events().collect();
-        let recovered_state = replay(events.clone().into_iter())
-            .unwrap_or_else(|e| panic!("failed to replay log {:?}: {:?}", events, e));
+        let recovered_state = replay_with_pending_payout_events(
+            events.clone().into_iter(),
+            rumi_protocol_backend::storage::pending_payout_events(),
+        )
+        .unwrap_or_else(|e| panic!("failed to replay log {:?}: {:?}", events, e));
 
         recovered_state.check_invariants()?;
 
@@ -10198,6 +10201,38 @@ async fn open_xrp_vault() -> Result<rumi_protocol_backend::vault::XrpVaultOpenIn
 async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::confirm_xrp_deposit(vault_id).await)
+}
+
+/// SEC-11: authenticated existing-owner custody address and bounded origin bootstrap.
+#[update]
+async fn get_xrp_vault_deposit_address(
+    vault_id: u64,
+    opening_event_index: Option<u64>,
+) -> Result<rumi_protocol_backend::xrp_vault_deposit::XrpVaultDepositAddress, ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::xrp_vault_deposit::get_xrp_vault_deposit_address(vault_id, opening_event_index).await,
+    )
+}
+
+/// SEC-11: credit exactly one validated direct native Payment, never a balance delta.
+#[update]
+async fn confirm_xrp_vault_topup(
+    vault_id: u64,
+    tx_hash: String,
+    opening_event_index: Option<u64>,
+) -> Result<u64, ProtocolError> {
+    validate_authenticated_not_frozen()?;
+    check_postcondition(
+        rumi_protocol_backend::xrp_vault_deposit::confirm_xrp_vault_topup(vault_id, tx_hash, opening_event_index).await,
+    )
+}
+
+#[query]
+fn xrp_transform_deposit_receipt(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    rumi_protocol_backend::chains::xrp::deposit_rpc::transform(args)
 }
 
 /// P4 (native-XRP collateral): settle an XRP collateral claim by signing +
@@ -20614,6 +20649,32 @@ async fn withdraw_vault51_settled_icp() -> Result<rumi_protocol_backend::nicp_re
 #[update]
 async fn reconcile_vault51_icp_payout(block_index: u64) -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
     rumi_protocol_backend::nicp_redemption::reconcile_owner_payout(block_index).await
+}
+
+/// Developer-only visibility into ledger receipts whose block indexes cannot
+/// be represented by Rumi's historical `u64` event schemas. The presence of
+/// any row intentionally holds all generic ICRC dispatches. There is no clear
+/// endpoint: reconciliation requires an operation-specific source upgrade so
+/// a confirmed transfer can never be discarded or retried as if it had no
+/// effect.
+#[candid_method(query)]
+#[query]
+fn get_unsupported_icrc_receipts(
+) -> Result<Vec<rumi_protocol_backend::state::UnsupportedIcrcReceipt>, String> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous()
+        || !read_state(|state| state.developer_principal == caller)
+    {
+        return Err("Unauthorized: developer only".to_string());
+    }
+
+    Ok(read_state(|state| {
+        state
+            .unsupported_icrc_receipts
+            .values()
+            .cloned()
+            .collect()
+    }))
 }
 
 // Keep last: export_service! only collects #[candid_method]s declared above it.

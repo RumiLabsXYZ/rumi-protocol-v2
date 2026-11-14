@@ -15,6 +15,7 @@
   import { toastStore } from '../../stores/toast';
   import { ApiClient } from '../../services/protocol/apiClient';
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
+  import XrpExistingDeposit from './XrpExistingDeposit.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
@@ -40,7 +41,7 @@
   $: collateralSymbol = vault.collateralSymbol || vaultCollateralInfo?.symbol || 'ICP';
   $: collateralColor = vaultCollateralInfo?.color ?? '#94A3B8';
   // Native-XRP collateral lives off-chain on the XRP Ledger: there is no IC ledger to
-  // top up from (add-margin is backend-rejected) and withdraw/close produce a
+  // top up from (XRP uses verified Payment receipts) and withdraw/close produce a
   // settle-able XrpClaim rather than a wallet transfer — so the deposit/withdraw UX
   // differs from an ICRC vault. (Borrow/repay are pure icUSD and unchanged.)
   $: isNativeXrp = vaultCollateralInfo?.custodyKind === 'NativeXrp';
@@ -917,13 +918,8 @@
         <div class="pill-groups">
           {#if !isRedemptionClaim}
           <div class="pill-group pill-group-collateral">
-            {#if !isNativeXrp}
-              <!-- Native-XRP has no IC-side top-up: add_margin is backend-rejected
-                   ("uses the XRP deposit flow"), so don't offer a Deposit that errors.
-                   New XRP collateral is funded via the Native XRP panel's open flow. -->
-              <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'add'}
-                on:click={() => selectAction('add')} disabled={isProcessing}>Deposit</button>
-            {/if}
+            <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'add'}
+              on:click={() => selectAction('add')} disabled={isProcessing}>Deposit</button>
             <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'withdraw'}
               class:pill-disabled={maxWithdrawable <= 0 && tickingDebt > 0}
               on:click={() => selectAction('withdraw')} disabled={isProcessing || (maxWithdrawable <= 0 && tickingDebt > 0)}>Withdraw</button>
@@ -1024,6 +1020,14 @@
             class:input-panel-debt={activeAction === 'borrow' || activeAction === 'repay'}>
 
             {#if activeAction === 'add'}
+              {#if isNativeXrp}
+                <XrpExistingDeposit vaultId={vault.vaultId} on:credited={() => {
+                  vaultStore.refreshVault(vault.vaultId).catch(() => {
+                    toastStore.info('Deposit verified. Refresh your vault to see its latest collateral.');
+                  });
+                  dispatch('updated');
+                }} />
+              {:else}
               <div class="input-header">
                 <span class="input-label">Deposit Collateral</span>
                 {#if maxAddCollateral > 0}
@@ -1049,6 +1053,7 @@
                 </button>
               </div>
 
+              {/if}
             {:else if activeAction === 'withdraw'}
               <div class="input-header">
                 <span class="input-label">Withdraw Collateral</span>
