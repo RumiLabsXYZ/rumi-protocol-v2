@@ -1,6 +1,6 @@
 # Native XLM: testnet readiness packet
 
-Living document, first written 2026-11-14 at source commit `d38b6e46`; last updated after the settlement decision application source (`f1f0ed82`, unbuilt). Updated as code progresses. Three columns matter: what exists in source, what is proven locally (mocked tests or unit tests with recorded receipts), and what has never run on a live network. Nothing here is live-proven.
+Living document, first written 2026-11-14 at source commit `d38b6e46`; last updated after the settlement decision application validation PASS (`f1f0ed82`, fixture decisions). Updated as code progresses. Three columns matter: what exists in source, what is proven locally (mocked tests or unit tests with recorded receipts), and what has never run on a live network. Nothing here is live-proven.
 
 ## Where things stand
 
@@ -16,7 +16,7 @@ Living document, first written 2026-11-14 at source commit `d38b6e46`; last upda
 | Signing the payment (threshold Ed25519) | `sign_payload_hash` exists, never called | none | not run |
 | Recording the exact signed intent before submission | dormant test-only method (`a1760abb`) taking an untrusted fixture signature (no verifier available), marks claim InFlight | unit PASS with fixture signature (receipt `4e2ae10e`, 20 tests incl. regression) | not run |
 | Submission to Horizon | absent | none | not run |
-| Transaction status, replacement, reconciliation | pure helpers plus dormant test-only `apply_xlm_settlement_decision` (`f1f0ed82`) applying a fixture decision to an in-flight claim (settled, hold, quarantine, replace, failed fee charged once); no driver | written, not run (runner `81fed101`, 27 tests) | not run |
+| Transaction status, replacement, reconciliation | pure helpers plus dormant test-only `apply_xlm_settlement_decision` (`f1f0ed82`) applying a fixture decision to an in-flight claim (settled, hold, quarantine, replace, failed fee charged once); no driver | unit PASS with fixture decisions (receipt `a65c3d4b`, 27 tests incl. regression) | not run |
 | Claim payout | absent (no submission, so nothing is paid) | none | not run |
 | Production quorum and freshness binding for account input | absent (inputs are untrusted test data) | none | not run |
 | XLM price feed | absent (test price only) | none | not run |

@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Settlement decision application is source-complete but unbuilt (f1f0ed82): test-only, fixture decisions, failed fee charged once from gross. Its focused check (27 unit tests plus production check, runner 81fed101) needs a fresh slot after the current holder. Then: Horizon submission request builder. No real signing or testnet action.",
+      "nextAction": "Settlement decision application PASS with fixture decisions (receipt a65c3d4b). Next source step: a pure Horizon submission request builder, response reduction and advisory parser (test-only, no outcall). No real quorum, fee charging, signing, submission or testnet action yet.",
       "cardIds": [
         "WP3"
       ]
