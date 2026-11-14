@@ -2,8 +2,9 @@
 //!
 //! Requests are bounded and use deterministic response transforms so IC HTTPS
 //! outcall consensus is computed over only stable fields consumed by
-//! `horizon_parse`. This module deliberately has no transaction submission API
-//! and does not credit deposits.
+//! `horizon_parse`. Apart from the dormant, test-gated submission builder and
+//! reducer below (no endpoint or main.rs export), it has no transaction
+//! submission API and does not credit deposits.
 
 use ic_cdk::api::management_canister::http_request::{
     CanisterHttpRequestArgument, HttpMethod, HttpResponse, TransformArgs, TransformContext,
@@ -528,6 +529,203 @@ pub fn transform_operations(args: TransformArgs) -> HttpResponse {
     reduced_response(candid::Nat::from(200u16), reduced.to_string().into_bytes())
 }
 
+/// Cap on the raw envelope accepted by `submit_transaction_request_at`. A
+/// one-operation native payment envelope with one signature is a few hundred
+/// bytes, so 4 KiB is conservative and keeps the POST body small.
+#[cfg(any(test, feature = "test_endpoints"))]
+pub const MAX_SUBMIT_ENVELOPE_BYTES: usize = 4_096;
+
+/// Build a Horizon `POST {base}/transactions` request with form body
+/// `tx=<percent-encoded standard base64 envelope XDR>`.
+///
+/// Sources:
+/// - https://developers.stellar.org/docs/data/apis/horizon/api-reference/submit-a-transaction
+/// - https://developers.stellar.org/docs/data/apis/horizon/api-reference/errors/http-status-codes/horizon-specific/transaction-failed
+/// - https://stellar.org/blog/developers/transaction-submission-timeouts-and-dynamic-fees-faq
+///
+/// Dormant and test-gated: the transform name `stellar_transform_submit`
+/// refers to `transform_submit`, which has NO main.rs export yet, so this must
+/// not be used for a real outcall until one is added. Response size reuses
+/// `MAX_TRANSACTION_RESPONSE_BYTES`; a larger response fails the outcall.
+/// Same origin validation as the other `_at` builders.
+#[cfg(any(test, feature = "test_endpoints"))]
+pub fn submit_transaction_request_at(
+    base_url: &str,
+    envelope_xdr: &[u8],
+) -> Option<CanisterHttpRequestArgument> {
+    use base64::Engine;
+    use ic_cdk::api::management_canister::http_request::HttpHeader;
+    if !is_https_origin(base_url)
+        || envelope_xdr.is_empty()
+        || envelope_xdr.len() > MAX_SUBMIT_ENVELOPE_BYTES
+    {
+        return None;
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(envelope_xdr);
+    // Only `+`, `/` and `=` are outside the unreserved set in standard base64.
+    let mut body = String::with_capacity(3 + encoded.len() + 8);
+    body.push_str("tx=");
+    for ch in encoded.chars() {
+        match ch {
+            '+' => body.push_str("%2B"),
+            '/' => body.push_str("%2F"),
+            '=' => body.push_str("%3D"),
+            other => body.push(other),
+        }
+    }
+    Some(CanisterHttpRequestArgument {
+        url: format!("{}/transactions", base_url.trim_end_matches('/')),
+        method: HttpMethod::POST,
+        body: Some(body.into_bytes()),
+        max_response_bytes: Some(MAX_TRANSACTION_RESPONSE_BYTES),
+        headers: vec![HttpHeader {
+            name: "Content-Type".to_string(),
+            value: "application/x-www-form-urlencoded".to_string(),
+        }],
+        transform: Some(transform_context("stellar_transform_submit")),
+    })
+}
+
+/// Deterministically reduce a Horizon submission response to one canonical
+/// JSON object (fixed key order). 200 -> accepted (hash/successful/ledger only
+/// when valid), 400 -> rejected (optional short `[a-z_]` transaction code),
+/// 504 -> timeout, other statuses -> http_error, unparseable -> parse_error.
+/// Every other field (envelope, result XDR, links, other extras) is dropped.
+#[cfg(any(test, feature = "test_endpoints"))]
+pub fn transform_submit(args: TransformArgs) -> HttpResponse {
+    let status = args.response.status.clone();
+    let out = |text: String| reduced_response(status.clone(), text.into_bytes());
+    let Some(code) = status.to_string().parse::<u64>().ok() else {
+        return out("{\"class\":\"parse_error\"}".to_string());
+    };
+    match code {
+        200 => {
+            let Ok(value) = serde_json::from_slice::<Value>(&args.response.body) else {
+                return out("{\"class\":\"parse_error\"}".to_string());
+            };
+            let Some(object) = value.as_object() else {
+                return out("{\"class\":\"parse_error\"}".to_string());
+            };
+            let mut text = String::from("{\"class\":\"accepted\"");
+            if let Some(hash) = object
+                .get("hash")
+                .and_then(Value::as_str)
+                .filter(|hash| is_valid_transaction_hash(hash))
+            {
+                text.push_str(&format!(",\"hash\":\"{}\"", hash.to_ascii_lowercase()));
+            }
+            if let Some(successful) = object.get("successful").and_then(Value::as_bool) {
+                text.push_str(&format!(",\"successful\":{successful}"));
+            }
+            if let Some(ledger) = object
+                .get("ledger")
+                .and_then(Value::as_u64)
+                .and_then(|ledger| u32::try_from(ledger).ok())
+                .filter(|ledger| *ledger >= 1)
+            {
+                text.push_str(&format!(",\"ledger\":{ledger}"));
+            }
+            text.push('}');
+            out(text)
+        }
+        400 => {
+            let transaction_code = serde_json::from_slice::<Value>(&args.response.body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/extras/result_codes/transaction")
+                        .and_then(Value::as_str)
+                        .filter(|code| {
+                            !code.is_empty()
+                                && code.len() <= 64
+                                && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                        })
+                        .map(str::to_string)
+                });
+            match transaction_code {
+                Some(code) => out(format!(
+                    "{{\"class\":\"rejected\",\"transaction_code\":\"{code}\"}}"
+                )),
+                None => out("{\"class\":\"rejected\"}".to_string()),
+            }
+        }
+        504 => out("{\"class\":\"timeout\"}".to_string()),
+        other => out(format!("{{\"class\":\"http_error\",\"status\":{other}}}")),
+    }
+}
+
+/// Advisory reading of a reduced submission response. It NEVER changes claim
+/// status or retry rights: only the status quorum plus
+/// `apply_xlm_settlement_decision` may do that. Even `Accepted` (a 200 whose
+/// hash matches) is advisory, not quorum proof, and every variant (including
+/// `Rejected` and `Timeout`) is non-final: status reconciliation decides.
+/// Malformed OPTIONAL fields (`ledger`, `transaction_code`) become `None`;
+/// malformed REQUIRED fields (`class`, and for accepted `hash`/`successful`)
+/// give `Unknown`.
+#[cfg(any(test, feature = "test_endpoints"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubmitAdvisory {
+    Accepted { ledger: Option<u32> },
+    AcceptedUnsuccessful { ledger: Option<u32> },
+    Rejected { transaction_code: Option<String> },
+    Timeout,
+    /// Mismatched or missing hash, malformed body, http_error, parse_error.
+    Unknown,
+}
+
+/// Interpret the output of `transform_submit` against the stored transaction
+/// hash. Hash parsing is strict (`transaction_status::parse_transaction_hash`).
+/// Public, so it re-applies its own bounds: bodies over
+/// `MAX_TRANSACTION_RESPONSE_BYTES` are `Unknown` before parsing, a
+/// transaction code is kept only if 1..=64 bytes of `[a-z_]`, and a ledger
+/// only if an integer in 1..=`u32::MAX`.
+#[cfg(any(test, feature = "test_endpoints"))]
+pub fn parse_submit_response(body: &[u8], expected_hash: &[u8; 32]) -> SubmitAdvisory {
+    if u64::try_from(body.len()).map_or(true, |len| len > MAX_TRANSACTION_RESPONSE_BYTES) {
+        return SubmitAdvisory::Unknown;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return SubmitAdvisory::Unknown;
+    };
+    let Some(object) = value.as_object() else {
+        return SubmitAdvisory::Unknown;
+    };
+    let ledger = object
+        .get("ledger")
+        .and_then(Value::as_u64)
+        .and_then(|ledger| u32::try_from(ledger).ok())
+        .filter(|ledger| *ledger >= 1);
+    match object.get("class").and_then(Value::as_str) {
+        Some("accepted") => {
+            let hash_matches = object
+                .get("hash")
+                .and_then(Value::as_str)
+                .and_then(super::transaction_status::parse_transaction_hash)
+                .is_some_and(|hash| &hash == expected_hash);
+            if !hash_matches {
+                return SubmitAdvisory::Unknown;
+            }
+            match object.get("successful").and_then(Value::as_bool) {
+                Some(true) => SubmitAdvisory::Accepted { ledger },
+                Some(false) => SubmitAdvisory::AcceptedUnsuccessful { ledger },
+                None => SubmitAdvisory::Unknown,
+            }
+        }
+        Some("rejected") => SubmitAdvisory::Rejected {
+            transaction_code: object
+                .get("transaction_code")
+                .and_then(Value::as_str)
+                .filter(|code| {
+                    (1..=64).contains(&code.len())
+                        && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                })
+                .map(str::to_string),
+        },
+        Some("timeout") => SubmitAdvisory::Timeout,
+        _ => SubmitAdvisory::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,5 +1119,202 @@ mod tests {
         let body = String::from_utf8(transformed.body).unwrap();
         assert!(body.contains("http_error"));
         assert!(!body.contains("volatile detail"));
+    }
+
+    const SUBMIT_BASE: &str = "https://rpc.ankr.com/http/stellar_testnet_horizon";
+
+    #[test]
+    fn submit_request_is_exact_post_form() {
+        let envelope = [0xfb_u8, 0xef, 0xbe, 0xff, 0xff, 0xff, 0xfb];
+        let request = submit_transaction_request_at(SUBMIT_BASE, &envelope).unwrap();
+        assert_eq!(
+            request.url,
+            "https://rpc.ankr.com/http/stellar_testnet_horizon/transactions"
+        );
+        assert!(matches!(request.method, HttpMethod::POST));
+        assert_eq!(request.headers.len(), 1);
+        assert_eq!(request.headers[0].name, "Content-Type");
+        assert_eq!(request.headers[0].value, "application/x-www-form-urlencoded");
+        assert_eq!(request.max_response_bytes, Some(MAX_TRANSACTION_RESPONSE_BYTES));
+        let transform = request.transform.as_ref().expect("transform is set");
+        assert_eq!(transform.function.0.method, "stellar_transform_submit");
+        let body = request.body.clone().unwrap();
+        assert_eq!(
+            String::from_utf8(body.clone()).unwrap(),
+            "tx=%2B%2B%2B%2B%2F%2F%2F%2F%2Bw%3D%3D"
+        );
+        let text = String::from_utf8(body).unwrap();
+        let decoded = text
+            .strip_prefix("tx=")
+            .unwrap()
+            .replace("%2B", "+")
+            .replace("%2F", "/")
+            .replace("%3D", "=");
+        use base64::Engine;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.decode(decoded).unwrap(),
+            envelope
+        );
+        let with_slash = submit_transaction_request_at(&format!("{SUBMIT_BASE}/"), &envelope);
+        assert_eq!(with_slash.unwrap().url, request.url);
+    }
+
+    #[test]
+    fn submit_request_rejects_bad_base_and_envelope_sizes() {
+        let envelope = [1_u8; 8];
+        assert!(submit_transaction_request_at("http://horizon.example", &envelope).is_none());
+        assert!(submit_transaction_request_at("https://h.example/a/../b", &envelope).is_none());
+        assert!(submit_transaction_request_at("https://h.example?x=1", &envelope).is_none());
+        assert!(submit_transaction_request_at(SUBMIT_BASE, &[]).is_none());
+        assert!(submit_transaction_request_at(
+            SUBMIT_BASE,
+            &vec![0_u8; MAX_SUBMIT_ENVELOPE_BYTES + 1]
+        )
+        .is_none());
+        assert!(submit_transaction_request_at(
+            SUBMIT_BASE,
+            &vec![0_u8; MAX_SUBMIT_ENVELOPE_BYTES]
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn submit_transform_is_canonical_and_strips_variable_fields() {
+        let h = "AB".repeat(32);
+        let lower = "ab".repeat(32);
+        let a = format!(
+            "{{\"hash\":\"{h}\",\"successful\":true,\"ledger\":77,\"envelope_xdr\":\"AAAA\",\"x\":1}}"
+        );
+        let b = format!(
+            "{{\"links\":{{}},\"ledger\":77,\"result_xdr\":\"BBBB\",\"successful\":true,\"hash\":\"{h}\"}}"
+        );
+        let expected = format!(
+            "{{\"class\":\"accepted\",\"hash\":\"{lower}\",\"successful\":true,\"ledger\":77}}"
+        );
+        assert_eq!(transform_submit(args(200, a.as_bytes())).body, expected.as_bytes());
+        assert_eq!(transform_submit(args(200, b.as_bytes())).body, expected.as_bytes());
+        let bad = br#"{"hash":"short","successful":"yes","ledger":0}"#;
+        assert_eq!(transform_submit(args(200, bad)).body, br#"{"class":"accepted"}"#);
+        let rejected = br#"{"title":"Transaction Failed","extras":{"envelope_xdr":"A","result_codes":{"transaction":"tx_bad_seq","operations":["op_x"]}}}"#;
+        assert_eq!(
+            transform_submit(args(400, rejected)).body,
+            br#"{"class":"rejected","transaction_code":"tx_bad_seq"}"#
+        );
+        let bad_code = br#"{"extras":{"result_codes":{"transaction":"TX Bad"}}}"#;
+        assert_eq!(transform_submit(args(400, bad_code)).body, br#"{"class":"rejected"}"#);
+        assert_eq!(transform_submit(args(400, b"nope")).body, br#"{"class":"rejected"}"#);
+        assert_eq!(transform_submit(args(504, b"<html>")).body, br#"{"class":"timeout"}"#);
+        assert_eq!(
+            transform_submit(args(500, b"boom")).body,
+            br#"{"class":"http_error","status":500}"#
+        );
+        assert_eq!(
+            transform_submit(args(200, b"garbage")).body,
+            br#"{"class":"parse_error"}"#
+        );
+        assert_eq!(
+            transform_submit(args(200, b"[1]")).body,
+            br#"{"class":"parse_error"}"#
+        );
+    }
+
+    #[test]
+    fn submit_advisory_parser_cases() {
+        let expected = [0xab_u8; 32];
+        let lower = "ab".repeat(32);
+        let upper = "AB".repeat(32);
+        let other = "cd".repeat(32);
+        let acc = |h: &str, ok: bool| {
+            format!("{{\"class\":\"accepted\",\"hash\":\"{h}\",\"successful\":{ok},\"ledger\":9}}")
+        };
+        assert_eq!(
+            parse_submit_response(acc(&lower, true).as_bytes(), &expected),
+            SubmitAdvisory::Accepted { ledger: Some(9) }
+        );
+        assert_eq!(
+            parse_submit_response(acc(&upper, true).as_bytes(), &expected),
+            SubmitAdvisory::Accepted { ledger: Some(9) }
+        );
+        assert_eq!(
+            parse_submit_response(acc(&lower, false).as_bytes(), &expected),
+            SubmitAdvisory::AcceptedUnsuccessful { ledger: Some(9) }
+        );
+        assert_eq!(
+            parse_submit_response(acc(&other, true).as_bytes(), &expected),
+            SubmitAdvisory::Unknown
+        );
+        assert_eq!(
+            parse_submit_response(br#"{"class":"accepted","successful":true}"#, &expected),
+            SubmitAdvisory::Unknown
+        );
+        assert_eq!(
+            parse_submit_response(
+                format!("{{\"class\":\"accepted\",\"hash\":\"{lower}\"}}").as_bytes(),
+                &expected
+            ),
+            SubmitAdvisory::Unknown
+        );
+        assert_eq!(
+            parse_submit_response(
+                br#"{"class":"rejected","transaction_code":"tx_bad_seq"}"#,
+                &expected
+            ),
+            SubmitAdvisory::Rejected {
+                transaction_code: Some("tx_bad_seq".to_string())
+            }
+        );
+        assert_eq!(
+            parse_submit_response(br#"{"class":"timeout"}"#, &expected),
+            SubmitAdvisory::Timeout
+        );
+        // Oversized but valid-looking JSON is Unknown before parsing.
+        let mut big = acc(&lower, true).into_bytes();
+        big.pop();
+        big.extend_from_slice(b",\"pad\":\"");
+        let target = usize::try_from(MAX_TRANSACTION_RESPONSE_BYTES).unwrap() + 1;
+        while big.len() < target - 2 {
+            big.push(b'a');
+        }
+        big.extend_from_slice(b"\"}");
+        assert_eq!(big.len(), target);
+        assert_eq!(parse_submit_response(&big, &expected), SubmitAdvisory::Unknown);
+        // Transaction code revalidation.
+        let code_of = |raw: &str| {
+            let body = format!("{{\"class\":\"rejected\",\"transaction_code\":{raw}}}");
+            match parse_submit_response(body.as_bytes(), &expected) {
+                SubmitAdvisory::Rejected { transaction_code } => transaction_code,
+                other => panic!("expected Rejected, got {other:?}"),
+            }
+        };
+        let c64 = "a".repeat(63) + "_";
+        assert_eq!(code_of(&format!("\"{c64}\"")), Some(c64.clone()));
+        assert_eq!(code_of(&format!("\"{c64}a\"")), None);
+        for bad in ["\"\"", "\"TX_BAD\"", "\"tx1\"", "\"tx bad\"", "\"tx-bad\"", "5", "null", "[\"tx\"]"] {
+            assert_eq!(code_of(bad), None, "{bad}");
+        }
+        // Ledger revalidation: malformed optional field becomes None.
+        let ledger_of = |raw: &str| {
+            let body = format!(
+                "{{\"class\":\"accepted\",\"hash\":\"{lower}\",\"successful\":true,\"ledger\":{raw}}}"
+            );
+            match parse_submit_response(body.as_bytes(), &expected) {
+                SubmitAdvisory::Accepted { ledger } => ledger,
+                other => panic!("expected Accepted, got {other:?}"),
+            }
+        };
+        assert_eq!(ledger_of("1"), Some(1));
+        assert_eq!(ledger_of("4294967295"), Some(u32::MAX));
+        for bad in ["0", "4294967296", "-1", "1.5", "\"9\"", "null"] {
+            assert_eq!(ledger_of(bad), None, "{bad}");
+        }
+        let unknowns: Vec<&[u8]> = vec![
+            br#"{"class":"http_error","status":500}"#,
+            br#"{"class":"parse_error"}"#,
+            b"not json",
+            b"[]",
+        ];
+        for body in unknowns {
+            assert_eq!(parse_submit_response(body, &expected), SubmitAdvisory::Unknown);
+        }
     }
 }
