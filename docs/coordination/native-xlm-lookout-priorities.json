@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Signed-intent recording PASS with a fixture signature (receipt 4e2ae10e). Next source step: apply the existing transaction-status decision to an in-flight claim (settled, failed fee, hold, quarantine, replace), then a Horizon submission request builder. No real signing or testnet action yet.",
+      "nextAction": "Settlement decision application is source-complete but unbuilt (f1f0ed82): test-only, fixture decisions, failed fee charged once from gross. Its focused check (27 unit tests plus production check, runner 81fed101) needs a fresh slot after the current holder. Then: Horizon submission request builder. No real signing or testnet action.",
       "cardIds": [
         "WP3"
       ]
