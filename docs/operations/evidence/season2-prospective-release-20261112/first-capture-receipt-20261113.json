@@ -1,0 +1,40 @@
+{
+  "canister_id": "2cvsh-3aaaa-aaaaj-qspga-cai",
+  "observed_at_utc": "2026-11-14T02:18:29.598Z",
+  "evidence": "fresh live admin query; old local observer process unavailable and had no saved completion receipt",
+  "installed_uploaded_module_hash": "0xd301b54c5c2db14fa26baff7435f8152bbb8623866d3bf2fd703ae2b2c039d9c",
+  "epoch_index": "0",
+  "epoch0_open": true,
+  "a_capture_phase_complete": true,
+  "b_capture_phase_complete": false,
+  "weekly_close_started": false,
+  "driver_enabled": true,
+  "poll_enabled": true,
+  "legacy_transition_held": false,
+  "registered_count": "15",
+  "source_cursors": [
+    {
+      "tag": 0,
+      "cursor": "564923"
+    },
+    {
+      "tag": 1,
+      "cursor": "110"
+    },
+    {
+      "tag": 2,
+      "cursor": "2622"
+    },
+    {
+      "tag": 3,
+      "cursor": "5"
+    }
+  ],
+  "ordinary_point_ledger_entries": "0",
+  "zero_credit_bootstrap_complete": true,
+  "historical_points_imported": "0",
+  "deferred_backfill_started": false,
+  "weekly_awards_proved": false,
+  "raw_query_participant_or_future_capture_schedule_published": false,
+  "operator_queries_participant_addressed": false
+}

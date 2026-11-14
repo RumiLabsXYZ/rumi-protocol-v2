@@ -7,7 +7,8 @@
   "historical_points_imported": 0,
   "bootstrap_complete": true,
   "receipt": "running-receipt.json",
-  "first_capture_observed": false,
+  "first_capture_observed": true,
   "weekly_awards_observed": false,
-  "next": "Observe first actual capture when due; continue historical reconciliation separately. No historical credit batch is authorized."
+  "next": "Observe scheduled B capture and weekly close separately; continue local historical evidence audit without fitted amounts or new credit authority.",
+  "first_capture_receipt": "first-capture-receipt-20261113.json"
 }
