@@ -2298,6 +2298,198 @@ impl State {
     }
 }
 
+/// Reasons `State::admit_xlm_settlement_preflight` refuses; none mutate state.
+#[cfg(any(test, feature = "test_endpoints"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlmAdmitError {
+    MissingClaim,
+    NotPending,
+    AlreadyPrepared,
+    AlreadySigned,
+    NetworkMismatch,
+    CustodyAddressNotFound,
+    SnapshotAccountMismatch,
+    /// No latest-ledger reserve evidence was supplied; nothing is assumed.
+    MissingReserveEvidence,
+    /// Existing `decide_evidence_freshness` refused the evidence.
+    Evidence(crate::chains::stellar::deposit_evidence::EvidenceDeferReason),
+    /// Another unresolved claim for the same custody account has a prepared
+    /// intent, a signed intent, or is `InFlight`.
+    SiblingPaymentInProgress { claim_id: u64 },
+    InvalidReserve(crate::chains::stellar::AmountError),
+    ArithmeticOverflow,
+    InsufficientSpendable,
+}
+
+/// Failure of `admit_and_prepare_xlm_settlement_intent`.
+#[cfg(any(test, feature = "test_endpoints"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlmAdmitPrepareError {
+    Admit(XlmAdmitError),
+    Prepare(XlmPrepareError),
+}
+
+#[cfg(any(test, feature = "test_endpoints"))]
+impl State {
+    /// Pure read-only admission/preflight for preparing a claim payment.
+    ///
+    /// Dormant and test-only: wired to no endpoint. `account` and `reserve`
+    /// are plain parsed types; the types themselves carry NO proof that any
+    /// provider quorum ran. The caller must pass the output of
+    /// `account_snapshot_quorum` / `latest_ledger_reserve_quorum`; nothing here
+    /// checks that. `min_account_ledger` plays the role `receipt_ledger` plays
+    /// in `decide_evidence_freshness` (the ledger the account evidence must
+    /// have reached). Nothing is mutated.
+    ///
+    /// Funding: `balance - minimum_reserve - selling_liabilities -
+    /// sum(unresolved sibling gross)` must cover this claim's `gross`. A
+    /// prepared payment debits net + fee == gross, so the fee is already inside
+    /// gross and is not reserved again (the actual fee is bounded by the
+    /// reserved budget in `prepare_xlm_settlement_intent`). "Unresolved" uses
+    /// the same status rule as `decide_initial_funding_credit`: any status
+    /// other than `Settled` (so `Failed` and `Quarantined` still reserve funds).
+    pub fn admit_xlm_settlement_preflight(
+        &self,
+        claim_id: u64,
+        account: &crate::chains::stellar::horizon_parse::AccountSnapshot,
+        reserve: Option<&crate::chains::stellar::horizon_parse::LatestLedgerReserve>,
+        min_account_ledger: u32,
+        now_unix_ns: u128,
+        max_reserve_age_secs: u64,
+    ) -> Result<(), XlmAdmitError> {
+        use crate::chains::stellar as stellar;
+        use stellar::AmountError;
+        let claim = self
+            .xlm_claims
+            .get(&claim_id)
+            .ok_or(XlmAdmitError::MissingClaim)?;
+        if claim.status != XlmClaimStatus::Pending {
+            return Err(XlmAdmitError::NotPending);
+        }
+        if claim.prepared_intent.is_some() {
+            return Err(XlmAdmitError::AlreadyPrepared);
+        }
+        if claim.settlement_intent.is_some() {
+            return Err(XlmAdmitError::AlreadySigned);
+        }
+        let selected = stellar::config::selection_from_state(self)
+            .map_err(|_| XlmAdmitError::NetworkMismatch)?
+            .network;
+        if selected.network_id() != claim.network_id {
+            return Err(XlmAdmitError::NetworkMismatch);
+        }
+        // Same custody binding lookup as `prepare_xlm_settlement_intent`.
+        let mut matches = self.xlm_custody_attributions.iter().filter(|(_, a)| {
+            a.owner == claim.custody_owner
+                && a.derivation_nonce == claim.custody_nonce
+                && a.network_id == claim.network_id
+        });
+        let (custody_address, _) = matches
+            .next()
+            .ok_or(XlmAdmitError::CustodyAddressNotFound)?;
+        if matches.next().is_some() {
+            return Err(XlmAdmitError::CustodyAddressNotFound);
+        }
+        if account.account_id != *custody_address {
+            return Err(XlmAdmitError::SnapshotAccountMismatch);
+        }
+        let reserve = reserve.ok_or(XlmAdmitError::MissingReserveEvidence)?;
+        stellar::deposit_evidence::decide_evidence_freshness(
+            min_account_ledger,
+            account,
+            reserve,
+            now_unix_ns,
+            max_reserve_age_secs,
+        )
+        .map_err(XlmAdmitError::Evidence)?;
+
+        // Siblings: same custody owner + nonce + network, other claim ids.
+        let mut sibling_obligations = 0_u64;
+        for (id, sibling) in self.xlm_claims.iter().filter(|(id, s)| {
+            **id != claim_id
+                && s.custody_owner == claim.custody_owner
+                && s.custody_nonce == claim.custody_nonce
+                && s.network_id == claim.network_id
+        }) {
+            if sibling.status == XlmClaimStatus::Settled {
+                continue;
+            }
+            if sibling.prepared_intent.is_some()
+                || sibling.settlement_intent.is_some()
+                || sibling.status == XlmClaimStatus::InFlight
+            {
+                return Err(XlmAdmitError::SiblingPaymentInProgress { claim_id: *id });
+            }
+            sibling_obligations = sibling_obligations
+                .checked_add(sibling.gross_stroops)
+                .ok_or(XlmAdmitError::ArithmeticOverflow)?;
+        }
+        let minimum = stellar::minimum_balance_stroops(
+            reserve.reserve.base_reserve_in_stroops,
+            account.subentry_count,
+            account.num_sponsoring,
+            account.num_sponsored,
+        )
+        .map_err(|e| match e {
+            AmountError::Overflow => XlmAdmitError::ArithmeticOverflow,
+            other => XlmAdmitError::InvalidReserve(other),
+        })?;
+        let obligations = account
+            .native_selling_liabilities_stroops
+            .checked_add(sibling_obligations)
+            .ok_or(XlmAdmitError::ArithmeticOverflow)?;
+        // The account debit is net + actual fee == gross; the fee is inside gross.
+        let need = claim.gross_stroops;
+        // Ok(remaining >= 0) exactly when balance >= minimum + obligations + need.
+        stellar::spendable_stroops(account.native_balance_stroops, minimum, &[obligations], need)
+            .map(|_| ())
+            .map_err(|e| match e {
+                AmountError::Overflow => XlmAdmitError::ArithmeticOverflow,
+                AmountError::InsufficientBalance => XlmAdmitError::InsufficientSpendable,
+                other => XlmAdmitError::InvalidReserve(other),
+            })
+    }
+
+    /// Recommended test-only admission wrapper: runs
+    /// `admit_xlm_settlement_preflight`, then the unchanged
+    /// `prepare_xlm_settlement_intent` (which remains public and callable
+    /// directly; this wrapper does not claim exclusivity). Inputs stay plain
+    /// parsed, untrusted data. Admission failures leave state untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_and_prepare_xlm_settlement_intent(
+        &mut self,
+        claim_id: u64,
+        source_pubkey: [u8; 32],
+        account: &crate::chains::stellar::horizon_parse::AccountSnapshot,
+        reserve: Option<&crate::chains::stellar::horizon_parse::LatestLedgerReserve>,
+        min_account_ledger: u32,
+        now_unix_ns: u128,
+        max_reserve_age_secs: u64,
+        fee_stroops: u64,
+        min_time: u64,
+        max_time: u64,
+    ) -> Result<XlmPreparedIntent, XlmAdmitPrepareError> {
+        self.admit_xlm_settlement_preflight(
+            claim_id,
+            account,
+            reserve,
+            min_account_ledger,
+            now_unix_ns,
+            max_reserve_age_secs,
+        )
+        .map_err(XlmAdmitPrepareError::Admit)?;
+        self.prepare_xlm_settlement_intent(
+            claim_id,
+            source_pubkey,
+            account,
+            fee_stroops,
+            min_time,
+            max_time,
+        )
+        .map_err(XlmAdmitPrepareError::Prepare)
+    }
+}
+
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
 /// no IC ledger, so this reserved principal is only an opaque key (15 bytes — not a
 /// valid 10-byte canister id, so it cannot collide with a real canister). The XRP
@@ -17564,5 +17756,377 @@ mod xlm_prepare_intent_tests {
         ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut buf).unwrap();
         let old: XlmClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert!(old.prepared_intent.is_none());
+    }
+}
+
+#[cfg(test)]
+mod xlm_admission_tests {
+    use super::*;
+    use crate::chains::stellar::{
+        self,
+        deposit_evidence::EvidenceDeferReason,
+        horizon_parse::{AccountSnapshot, LatestLedgerReserve, LedgerReserve},
+    };
+
+    const SRC: [u8; 32] = [7; 32];
+    const DST: [u8; 32] = [9; 32];
+    const BASE: u64 = 5_000_000;
+    // 2026-10-27T12:00:00Z in unix seconds, plus 5s.
+    const NOW_NS: u128 = 1_793_102_400_000_000_000 + 5_000_000_000;
+    // Claim: gross 10_000_000 (fee inside gross); minimum reserve (0 subentries) 2 * BASE.
+    const EXACT: u64 = 2 * BASE + 10_000_000;
+
+    fn owner() -> Principal {
+        Principal::from_slice(&[1])
+    }
+
+    fn snapshot(balance: u64) -> AccountSnapshot {
+        AccountSnapshot {
+            account_id: stellar::classic_address_from_ed25519_pubkey(&SRC),
+            sequence: 41,
+            account_last_modified_ledger: 10,
+            native_balance_stroops: balance,
+            native_selling_liabilities_stroops: 0,
+            subentry_count: 0,
+            num_sponsoring: 0,
+            num_sponsored: 0,
+        }
+    }
+
+    fn reserve(base: u64) -> LatestLedgerReserve {
+        LatestLedgerReserve {
+            reserve: LedgerReserve {
+                sequence: 42,
+                base_reserve_in_stroops: base,
+            },
+            closed_at: "2026-10-27T12:00:00.000000000Z".into(),
+        }
+    }
+
+    fn setup() -> (State, u64) {
+        let mut state = State::default();
+        let vault = state.increment_vault_id();
+        let net = stellar::config::selection_from_state(&state).unwrap().network;
+        state
+            .reserve_xlm_pending_deposit(
+                vault,
+                owner(),
+                stellar::classic_address_from_ed25519_pubkey(&SRC),
+                net.network_id(),
+                1_000_000_000,
+                3_600_000_000_000,
+            )
+            .unwrap();
+        state.xlm_claims.insert(5, claim(vault, 10_000_000, 1_000, XlmClaimStatus::Pending));
+        (state, 5)
+    }
+
+    fn claim(vault: u64, gross: u64, fee: u64, status: XlmClaimStatus) -> XlmClaim {
+        XlmClaim {
+            vault_id: vault,
+            custody_owner: owner(),
+            custody_nonce: vault,
+            claimant: owner(),
+            gross_stroops: gross,
+            destination: stellar::classic_address_from_ed25519_pubkey(&DST),
+            network_id: stellar::Network::Test.network_id(),
+            reserved_fee_stroops: fee,
+            created_at_ns: 1,
+            status,
+            settlement_intent: None,
+            prepared_intent: None,
+        }
+    }
+
+    fn add_sibling(state: &mut State, id: u64, gross: u64, fee: u64, status: XlmClaimStatus) {
+        let vault = state.xlm_claims[&5].vault_id;
+        state.xlm_claims.insert(id, claim(vault, gross, fee, status));
+    }
+
+    fn bytes(state: &State) -> Vec<u8> {
+        let mut b = Vec::new();
+        ciborium::ser::into_writer(&state.xlm_claims, &mut b).unwrap();
+        b
+    }
+
+    fn admit(
+        state: &State,
+        snap: &AccountSnapshot,
+        res: Option<&LatestLedgerReserve>,
+    ) -> Result<(), XlmAdmitError> {
+        state.admit_xlm_settlement_preflight(5, snap, res, 10, NOW_NS, 30)
+    }
+
+    /// Run admit+prepare; any denial must leave stored claims byte-identical.
+    fn denied(
+        mut state: State,
+        snap: AccountSnapshot,
+        res: Option<LatestLedgerReserve>,
+        want: XlmAdmitError,
+    ) {
+        let before = bytes(&state);
+        assert_eq!(admit(&state, &snap, res.as_ref()), Err(want));
+        assert_eq!(bytes(&state), before);
+        assert_eq!(
+            state.admit_and_prepare_xlm_settlement_intent(
+                5, SRC, &snap, res.as_ref(), 10, NOW_NS, 30, 100, 1_000, 2_000
+            ),
+            Err(XlmAdmitPrepareError::Admit(want))
+        );
+        assert_eq!(bytes(&state), before);
+    }
+
+    #[test]
+    fn exact_boundary_passes_and_one_stroop_short_denies() {
+        let (state, _) = setup();
+        assert_eq!(admit(&state, &snapshot(EXACT), Some(&reserve(BASE))), Ok(()));
+        denied(state, snapshot(EXACT - 1), Some(reserve(BASE)), XlmAdmitError::InsufficientSpendable);
+    }
+
+    #[test]
+    fn reserve_changes_shift_the_boundary() {
+        let (state, _) = setup();
+        // One more subentry adds one base reserve unit.
+        let mut more = snapshot(EXACT);
+        more.subentry_count = 1;
+        assert_eq!(
+            admit(&state, &more, Some(&reserve(BASE))),
+            Err(XlmAdmitError::InsufficientSpendable)
+        );
+        more.native_balance_stroops = EXACT + BASE;
+        assert_eq!(admit(&state, &more, Some(&reserve(BASE))), Ok(()));
+        // Higher base reserve: 2 units * +1 stroop.
+        assert_eq!(
+            admit(&state, &snapshot(EXACT), Some(&reserve(BASE + 1))),
+            Err(XlmAdmitError::InsufficientSpendable)
+        );
+        assert_eq!(admit(&state, &snapshot(EXACT + 2), Some(&reserve(BASE + 1))), Ok(()));
+        // Sponsorship changes reserve units too.
+        let mut sponsored = snapshot(EXACT - BASE);
+        sponsored.num_sponsored = 1;
+        assert_eq!(admit(&state, &sponsored, Some(&reserve(BASE))), Ok(()));
+        // Selling liabilities reduce spendable.
+        let mut liab = snapshot(EXACT);
+        liab.native_selling_liabilities_stroops = 1;
+        assert_eq!(
+            admit(&state, &liab, Some(&reserve(BASE))),
+            Err(XlmAdmitError::InsufficientSpendable)
+        );
+    }
+
+    #[test]
+    fn unresolved_siblings_reduce_spendable_by_gross_only() {
+        let (mut state, _) = setup();
+        // Failed and Quarantined still reserve funds (existing "not Settled" semantics).
+        add_sibling(&mut state, 6, 3_000, 70, XlmClaimStatus::Failed);
+        add_sibling(&mut state, 7, 500, 30, XlmClaimStatus::Quarantined);
+        add_sibling(&mut state, 8, 1_000, 100, XlmClaimStatus::Pending);
+        // Sibling reserved fees (70, 30, 100) are NOT added: fee is inside gross.
+        let extra = 3_000 + 500 + 1_000;
+        assert_eq!(
+            admit(&state, &snapshot(EXACT + extra), Some(&reserve(BASE))),
+            Ok(())
+        );
+        denied(
+            state,
+            snapshot(EXACT + extra - 1),
+            Some(reserve(BASE)),
+            XlmAdmitError::InsufficientSpendable,
+        );
+    }
+
+    #[test]
+    fn settled_siblings_and_other_custody_are_excluded() {
+        let (mut state, _) = setup();
+        let mut settled = claim(1, 9_000_000, 9_000, XlmClaimStatus::Settled);
+        settled.settlement_intent = Some(XlmSettlementIntent {
+            envelope_xdr: vec![1],
+            transaction_hash: [1; 32],
+            sequence: 1,
+            min_time: 1,
+            max_time: 2,
+        });
+        state.xlm_claims.insert(6, settled);
+        let mut other_nonce = claim(1, 9_000_000, 9_000, XlmClaimStatus::Pending);
+        other_nonce.custody_nonce = 999;
+        state.xlm_claims.insert(7, other_nonce);
+        assert_eq!(admit(&state, &snapshot(EXACT), Some(&reserve(BASE))), Ok(()));
+    }
+
+    #[test]
+    fn sibling_prepared_signed_or_in_flight_denies() {
+        let signed = Some(XlmSettlementIntent {
+            envelope_xdr: vec![1],
+            transaction_hash: [1; 32],
+            sequence: 1,
+            min_time: 1,
+            max_time: 2,
+        });
+        let (mut state, _) = setup();
+        add_sibling(&mut state, 6, 1, 1, XlmClaimStatus::InFlight);
+        denied(
+            state,
+            snapshot(u64::MAX / 2),
+            Some(reserve(BASE)),
+            XlmAdmitError::SiblingPaymentInProgress { claim_id: 6 },
+        );
+        let (mut state, _) = setup();
+        add_sibling(&mut state, 6, 1, 1, XlmClaimStatus::Pending);
+        state.xlm_claims.get_mut(&6).unwrap().settlement_intent = signed;
+        denied(
+            state,
+            snapshot(u64::MAX / 2),
+            Some(reserve(BASE)),
+            XlmAdmitError::SiblingPaymentInProgress { claim_id: 6 },
+        );
+        // A sibling prepared through the real path also blocks this claim.
+        let (mut state, _) = setup();
+        add_sibling(&mut state, 6, 1_000_000, 1_000, XlmClaimStatus::Pending);
+        let big = snapshot(u64::MAX / 2);
+        state
+            .prepare_xlm_settlement_intent(6, SRC, &big, 100, 1_000, 2_000)
+            .unwrap();
+        denied(
+            state,
+            big,
+            Some(reserve(BASE)),
+            XlmAdmitError::SiblingPaymentInProgress { claim_id: 6 },
+        );
+    }
+
+    #[test]
+    fn stale_missing_or_mismatched_evidence_denies() {
+        let (state, _) = setup();
+        let ok = snapshot(EXACT);
+        denied(setup().0, ok.clone(), None, XlmAdmitError::MissingReserveEvidence);
+        let mut stale = reserve(BASE);
+        stale.closed_at = "2026-10-27T11:00:00.000000000Z".into();
+        denied(
+            setup().0,
+            ok.clone(),
+            Some(stale),
+            XlmAdmitError::Evidence(EvidenceDeferReason::ReserveTooOld),
+        );
+        let mut behind = reserve(BASE);
+        behind.reserve.sequence = 9;
+        denied(
+            setup().0,
+            ok.clone(),
+            Some(behind),
+            XlmAdmitError::Evidence(EvidenceDeferReason::ReserveBehindEvidence),
+        );
+        let mut zero = reserve(BASE);
+        zero.reserve.base_reserve_in_stroops = 0;
+        denied(
+            setup().0,
+            ok.clone(),
+            Some(zero),
+            XlmAdmitError::Evidence(EvidenceDeferReason::ReserveBehindEvidence),
+        );
+        let mut other = ok.clone();
+        other.account_id = stellar::classic_address_from_ed25519_pubkey(&[3; 32]);
+        denied(
+            setup().0,
+            other,
+            Some(reserve(BASE)),
+            XlmAdmitError::SnapshotAccountMismatch,
+        );
+        // Account evidence older than the ledger the caller requires.
+        assert_eq!(
+            state.admit_xlm_settlement_preflight(5, &ok, Some(&reserve(BASE)), 11, NOW_NS, 30),
+            Err(XlmAdmitError::Evidence(EvidenceDeferReason::AccountBehindReceipt))
+        );
+    }
+
+    #[test]
+    fn claim_state_preconditions_deny() {
+        let ok = || snapshot(EXACT);
+        let (state, _) = setup();
+        assert_eq!(
+            state.admit_xlm_settlement_preflight(99, &ok(), Some(&reserve(BASE)), 10, NOW_NS, 30),
+            Err(XlmAdmitError::MissingClaim)
+        );
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&5).unwrap().status = XlmClaimStatus::InFlight;
+        denied(st, ok(), Some(reserve(BASE)), XlmAdmitError::NotPending);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&5).unwrap().network_id = stellar::Network::Public.network_id();
+        denied(st, ok(), Some(reserve(BASE)), XlmAdmitError::NetworkMismatch);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&5).unwrap().custody_nonce = 999;
+        denied(st, ok(), Some(reserve(BASE)), XlmAdmitError::CustodyAddressNotFound);
+    }
+
+    #[test]
+    fn overflow_inputs_deny() {
+        let (mut state, _) = setup();
+        state.xlm_claims.get_mut(&5).unwrap().gross_stroops = u64::MAX;
+        denied(
+            state,
+            snapshot(u64::MAX),
+            Some(reserve(BASE)),
+            XlmAdmitError::ArithmeticOverflow,
+        );
+        let (mut state2, _) = setup();
+        add_sibling(&mut state2, 6, u64::MAX, 1, XlmClaimStatus::Pending);
+        // gross-only sums: MAX sibling + minimum reserve overflows.
+        denied(state2, snapshot(u64::MAX), Some(reserve(BASE)), XlmAdmitError::ArithmeticOverflow);
+        // Reserve multiplication overflow.
+        let (state3, _) = setup();
+        denied(state3, snapshot(u64::MAX), Some(reserve(u64::MAX)), XlmAdmitError::ArithmeticOverflow);
+        // Selling liabilities + siblings overflow.
+        let (mut state4, _) = setup();
+        add_sibling(&mut state4, 6, u64::MAX - 5, 0, XlmClaimStatus::Pending);
+        let mut liab = snapshot(u64::MAX);
+        liab.native_selling_liabilities_stroops = 10;
+        denied(state4, liab, Some(reserve(BASE)), XlmAdmitError::ArithmeticOverflow);
+    }
+
+    #[test]
+    fn sponsored_underflow_is_invalid_reserve_not_zero() {
+        let (state, _) = setup();
+        let mut bad = snapshot(u64::MAX);
+        bad.num_sponsored = 10;
+        denied(
+            state,
+            bad,
+            Some(reserve(BASE)),
+            XlmAdmitError::InvalidReserve(stellar::AmountError::InvalidReserveInputs),
+        );
+    }
+
+    #[test]
+    fn successful_admit_and_prepare_stores_prepared_intent() {
+        let (mut state, id) = setup();
+        let p = state
+            .admit_and_prepare_xlm_settlement_intent(
+                id,
+                SRC,
+                &snapshot(EXACT),
+                Some(&reserve(BASE)),
+                10,
+                NOW_NS,
+                30,
+                100,
+                1_000,
+                2_000,
+            )
+            .unwrap();
+        let c = &state.xlm_claims[&id];
+        assert_eq!(u64::from(p.fee_stroops) + p.net_stroops, p.gross_stroops);
+        assert_eq!(p.gross_stroops, c.gross_stroops);
+        assert_eq!(c.prepared_intent, Some(p));
+        assert_eq!(c.status, XlmClaimStatus::Pending);
+        assert!(c.settlement_intent.is_none());
+        // Prepare-level errors surface through the wrapper without mutation.
+        let (mut state, id) = setup();
+        let before = bytes(&state);
+        assert_eq!(
+            state.admit_and_prepare_xlm_settlement_intent(
+                id, [8; 32], &snapshot(EXACT), Some(&reserve(BASE)), 10, NOW_NS, 30, 100, 1_000, 2_000
+            ),
+            Err(XlmAdmitPrepareError::Prepare(XlmPrepareError::SourceKeyMismatch))
+        );
+        assert_eq!(bytes(&state), before);
     }
 }
