@@ -1,0 +1,31 @@
+
+> vault_frontend@0.0.0 test:unit
+> vitest --run src/lib/components/liquidations/ManualLiquidations.availability.spec.ts src/lib/components/liquidations/ManualLiquidations.xrp.spec.ts
+
+
+ RUN  v2.1.9 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+ ✓ src/lib/components/liquidations/ManualLiquidations.xrp.spec.ts (6 tests) 2ms
+Browserslist: browsers data (caniuse-lite) is 8 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+stderr | src/lib/components/liquidations/ManualLiquidations.availability.spec.ts > fails closed when public claim availability cannot be read
+Error loading liquidation availability: Error: offline
+    at /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.availability.spec.ts:46:31
+    at file:///Users/robertripley/coding/rumi-protocol-v2/.worktrees/base-icusd-bridge-20261024/node_modules/@vitest/runner/dist/index.js:146:14
+    at file:///Users/robertripley/coding/rumi-protocol-v2/.worktrees/base-icusd-bridge-20261024/node_modules/@vitest/runner/dist/index.js:533:11
+    at runWithTimeout (file:///Users/robertripley/coding/rumi-protocol-v2/.worktrees/base-icusd-bridge-20261024/node_modules/@vitest/runner/dist/index.js:39:7)
+    at runTest (file:///Users/robertripley/coding/rumi-protocol-v2/.worktrees/base-icusd-bridge-20261024/node_modules/@vitest/runner/dist/index.js:1056:17)
+    at runNextTicks (node:internal/process/task_queues:64:5)
+    at processTimers (node:internal/timers:538:9)
+    at runSuite (file:///Users/robertripley/coding/rumi-protocol-v2/.worktrees/base-icusd-bridge-20261024/node_modules/@vitest/runner/dist/index.js:1205:15)
+    at runFiles (file:///Users/robertripley/coding/rumi-protocol-v2/.worktrees/base-icusd-bridge-20261024/node_modules/@vitest/runner/dist/index.js:1262:5)
+    at startTests (file:///Users/robertripley/coding/rumi-protocol-v2/.worktrees/base-icusd-bridge-20261024/node_modules/@vitest/runner/dist/index.js:1271:3)
+
+ ✓ src/lib/components/liquidations/ManualLiquidations.availability.spec.ts (5 tests) 516ms
+
+ Test Files  2 passed (2)
+      Tests  11 passed (11)
+   Start at  13:41:50
+   Duration  2.93s (transform 961ms, setup 14ms, collect 1.31s, tests 518ms, environment 1.81s, prepare 95ms)
+

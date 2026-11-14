@@ -1,0 +1,13 @@
+{
+  "text": "2 at-risk vaults · 0 total\n·\nICP\n$2.00\n·\nRefresh\nCould not verify liquidation availability. Refresh before attempting a liquidation.\n#202\n100%\nDebt\n100.0000 icUSD\n·\nCollateral\n50 ICP\nAmount to liquidate\nMax: 100\nicUSD\nckUSDT\nckUSDC\nLiquidate\n#203\n100%\nDebt\n100.0000 icUSD\n·\nCollateral\n50 ICP\nAmount to liquidate\nMax: 100\nicUSD\nckUSDT\nckUSDC\nLiquidate",
+  "viewport": [
+    390,
+    844
+  ],
+  "overflow": false,
+  "qa": {
+    "financial": 0,
+    "reads": 1
+  },
+  "allDisabled": true
+}

@@ -1,0 +1,21 @@
+(
+  opt variant {
+    V1 = record {
+      id = 231 : nat64;
+      status = variant { TransferFailed };
+      ckusdc_transferred_e6 = 0 : nat64;
+      oracle_price_e8s = 215_409_896 : nat64;
+      ckusdc_received_e6 = 95_482 : nat64;
+      error_message = opt "ckUSDC output is short; no payment sent (available gross 95482, required gross 110908, net debt minimum 100908)";
+      icp_to_treasury_e8s = 0 : nat64;
+      collateral_claimed_e8s = 5_152_859 : nat64;
+      vault_id = 202 : nat64;
+      slippage_bps = 44 : int32;
+      timestamp = 1_794_690_295_949_286_243 : nat64;
+      confirm_retry_count = 0 : nat8;
+      debt_to_cover_e8s = 10_090_702 : nat64;
+      effective_price_e8s = 214_453_675 : nat64;
+      icp_swapped_e8s = 4_918_638 : nat64;
+    }
+  },
+)

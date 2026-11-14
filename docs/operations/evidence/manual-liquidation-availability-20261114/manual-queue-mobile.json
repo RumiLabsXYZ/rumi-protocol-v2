@@ -1,0 +1,14 @@
+{
+  "viewport": [
+    390,
+    844
+  ],
+  "overflow": false,
+  "qa": {
+    "financial": 0,
+    "reads": 1
+  },
+  "reserved": "Reserved for bot liquidation. Refresh to check manual availability.",
+  "disabled": true,
+  "label": "Reserved"
+}

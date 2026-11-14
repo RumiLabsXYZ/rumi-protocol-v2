@@ -1,0 +1,27 @@
+{
+  "viewport": [
+    1280,
+    900
+  ],
+  "overflow": false,
+  "qa": {
+    "financial": 0,
+    "reads": 1
+  },
+  "cards": [
+    {
+      "id": "#202",
+      "reserved": true,
+      "inputDisabled": true,
+      "buttonDisabled": true,
+      "buttonLabel": "Reserved"
+    },
+    {
+      "id": "#203",
+      "reserved": false,
+      "inputDisabled": false,
+      "buttonDisabled": true,
+      "buttonLabel": "Liquidate"
+    }
+  ]
+}
