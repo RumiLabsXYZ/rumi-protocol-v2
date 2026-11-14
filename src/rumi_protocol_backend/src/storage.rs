@@ -260,6 +260,12 @@ pub fn events() -> impl Iterator<Item = Event> {
     }
 }
 
+/// Direct, bounded stable-log lookup for an authenticated legacy-origin hint.
+pub fn get_event_at(index: u64) -> Option<Event> {
+    let index = usize::try_from(index).ok()?;
+    events().nth(index)
+}
+
 /// Returns the current number of events in the log.
 pub fn count_events() -> u64 {
     EVENTS.with(|events| events.borrow().len())
