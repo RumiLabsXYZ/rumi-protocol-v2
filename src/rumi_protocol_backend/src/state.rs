@@ -8310,14 +8310,20 @@ impl State {
         result
     }
 
-    pub fn provide_liquidity(&mut self, amount: ICUSD, caller: Principal) {
+    pub fn try_provide_liquidity(&mut self, amount: ICUSD, caller: Principal) -> Result<(), String> {
         if amount == 0 {
-            return;
+            return Ok(());
         }
-        self.liquidity_pool
-            .entry(caller)
-            .and_modify(|curr| *curr += amount)
-            .or_insert(amount);
+        let current = self.liquidity_pool.get(&caller).copied().unwrap_or_default();
+        let updated = crate::numeric::checked_icusd_add(current, amount)
+            .ok_or_else(|| "liquidity balance exceeds the u64 icUSD range".to_string())?;
+        self.liquidity_pool.insert(caller, updated);
+        Ok(())
+    }
+
+    pub fn provide_liquidity(&mut self, amount: ICUSD, caller: Principal) {
+        self.try_provide_liquidity(amount, caller)
+            .unwrap_or_else(|message| ic_cdk::trap(&message));
     }
 
     pub fn withdraw_liquidity(&mut self, amount: ICUSD, caller: Principal) {
@@ -8884,21 +8890,37 @@ impl State {
         }
     }
 
-    pub fn redistribute_vault(&mut self, vault_id: u64) {
+    pub fn try_redistribute_vault(&mut self, vault_id: u64) -> Result<(), String> {
         let vault = self
             .vault_id_to_vaults
             .get(&vault_id)
-            .expect("bug: vault not found");
-        let entries = distribute_across_vaults(&self.vault_id_to_vaults, vault.clone());
+            .cloned()
+            .ok_or_else(|| "redistributed vault not found".to_string())?;
+        let entries = try_distribute_across_vaults(&self.vault_id_to_vaults, vault.clone())?;
         let touched_ids: Vec<u64> = entries.iter().map(|e| e.vault_id).collect();
-        for entry in entries {
-            match self.vault_id_to_vaults.entry(entry.vault_id) {
-                Occupied(mut vault_entry) => {
-                    vault_entry.get_mut().collateral_amount += entry.icp_share_amount.to_u64();
-                    vault_entry.get_mut().borrowed_icusd_amount += entry.icusd_share_amount;
-                }
-                Vacant(_) => panic!("bug: vault not found"),
-            }
+        let mut updates = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let recipient = self.vault_id_to_vaults.get(&entry.vault_id).ok_or_else(|| {
+                format!("redistribution recipient vault {} not found", entry.vault_id)
+            })?;
+            let collateral_amount = recipient
+                .collateral_amount
+                .checked_add(entry.icp_share_amount.to_u64())
+                .ok_or_else(|| format!("redistribution collateral overflow for vault {}", entry.vault_id))?;
+            let borrowed_icusd_amount = crate::numeric::checked_icusd_add(
+                recipient.borrowed_icusd_amount,
+                entry.icusd_share_amount,
+            )
+            .ok_or_else(|| format!("redistribution debt overflow for vault {}", entry.vault_id))?;
+            updates.push((entry.vault_id, collateral_amount, borrowed_icusd_amount));
+        }
+        for (recipient_id, collateral_amount, borrowed_icusd_amount) in updates {
+            let recipient = self
+                .vault_id_to_vaults
+                .get_mut(&recipient_id)
+                .expect("preflighted redistribution recipient must remain present");
+            recipient.collateral_amount = collateral_amount;
+            recipient.borrowed_icusd_amount = borrowed_icusd_amount;
         }
         self.remove_vault_and_unindex(vault_id);
         // Wave-8b LIQ-002: re-key every vault that received a share.
@@ -8907,6 +8929,12 @@ impl State {
         for tid in touched_ids {
             self.reindex_vault_cr(tid);
         }
+        Ok(())
+    }
+
+    pub fn redistribute_vault(&mut self, vault_id: u64) {
+        self.try_redistribute_vault(vault_id)
+            .unwrap_or_else(|message| ic_cdk::trap(&message));
     }
 
     /// Historical replay compatibility only. Keep this body identical to the pre-queue
@@ -10344,17 +10372,28 @@ pub(crate) fn distribute_across_vaults(
     vaults: &BTreeMap<u64, Vault>,
     target_vault: Vault,
 ) -> Vec<DistributeToVaultEntry> {
-    assert!(!vaults.is_empty());
+    try_distribute_across_vaults(vaults, target_vault)
+        .unwrap_or_else(|message| ic_cdk::trap(&message))
+}
+
+pub(crate) fn try_distribute_across_vaults(
+    vaults: &BTreeMap<u64, Vault>,
+    target_vault: Vault,
+) -> Result<Vec<DistributeToVaultEntry>, String> {
+    if vaults.is_empty() {
+        return Err("cannot redistribute across an empty vault set".to_string());
+    }
 
     let target_vault_id = target_vault.vault_id;
-    let total_icp_margin: ICP = ICP::from(
-        vaults
-            .iter()
-            .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
-            .map(|(_vault_id, vault)| vault.collateral_amount)
-            .sum::<u64>(),
-    );
-    assert_ne!(total_icp_margin, ICP::new(0));
+    let total_icp_margin_raw = vaults
+        .iter()
+        .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
+        .try_fold(0u64, |total, (_vault_id, vault)| total.checked_add(vault.collateral_amount))
+        .ok_or_else(|| "redistribution collateral denominator exceeds the u64 range".to_string())?;
+    if total_icp_margin_raw == 0 {
+        return Err("cannot redistribute across zero collateral".to_string());
+    }
+    let total_icp_margin = ICP::from(total_icp_margin_raw);
 
     let target_collateral = ICP::from(target_vault.collateral_amount);
     let mut result = vec![];
@@ -10366,8 +10405,10 @@ pub(crate) fn distribute_across_vaults(
             let share: Ratio = ICP::from(vault.collateral_amount) / total_icp_margin;
             let icp_share = target_collateral * share;
             let icusd_share = target_vault.borrowed_icusd_amount * share;
-            distributed_icp += icp_share;
-            distributed_icusd += icusd_share;
+            distributed_icp = ICP::new(distributed_icp.to_u64().checked_add(icp_share.to_u64())
+                .ok_or_else(|| "redistributed collateral total exceeds the u64 range".to_string())?);
+            distributed_icusd = crate::numeric::checked_icusd_add(distributed_icusd, icusd_share)
+                .ok_or_else(|| "redistributed debt total exceeds the u64 range".to_string())?;
             result.push(DistributeToVaultEntry {
                 vault_id: *vault_id,
                 icp_share_amount: icp_share,
@@ -10377,11 +10418,19 @@ pub(crate) fn distribute_across_vaults(
     }
 
     if !result.is_empty() {
-        result[0].icusd_share_amount += target_vault.borrowed_icusd_amount - distributed_icusd;
-        result[0].icp_share_amount += target_collateral - distributed_icp;
+        let debt_remainder = target_vault.borrowed_icusd_amount - distributed_icusd;
+        result[0].icusd_share_amount = crate::numeric::checked_icusd_add(
+            result[0].icusd_share_amount,
+            debt_remainder,
+        ).ok_or_else(|| "redistribution debt remainder exceeds the u64 range".to_string())?;
+        result[0].icp_share_amount = ICP::new(
+            result[0].icp_share_amount.to_u64()
+                .checked_add((target_collateral - distributed_icp).to_u64())
+                .ok_or_else(|| "redistribution collateral remainder exceeds the u64 range".to_string())?,
+        );
     }
 
-    result
+    Ok(result)
 }
 
 pub fn compute_redemption_fee(
@@ -10881,6 +10930,62 @@ mod tests {
             ICUSD::new(u64::MAX),
             "the failed addition must leave vault debt unchanged"
         );
+    }
+
+    #[test]
+    fn liquidity_overflow_is_rejected_without_mutating_balance() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[91]);
+        state.liquidity_pool.insert(owner, ICUSD::new(u64::MAX));
+
+        assert!(state.try_provide_liquidity(ICUSD::new(1), owner).is_err());
+        assert_eq!(state.liquidity_pool[&owner], ICUSD::new(u64::MAX));
+    }
+
+    #[test]
+    fn redistribution_overflow_is_rejected_before_any_vault_mutation() {
+        let mut state = test_state();
+        let collateral_type = state.icp_ledger_principal;
+        let recipient = crate::vault::Vault {
+            owner: Principal::from_slice(&[92]), vault_id: 1,
+            collateral_amount: u64::MAX, borrowed_icusd_amount: ICUSD::new(u64::MAX),
+            collateral_type, last_accrual_time: 0, accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        let target = crate::vault::Vault {
+            owner: Principal::from_slice(&[93]), vault_id: 2,
+            collateral_amount: 1, borrowed_icusd_amount: ICUSD::new(1),
+            collateral_type, last_accrual_time: 0, accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        state.vault_id_to_vaults.insert(1, recipient.clone());
+        state.vault_id_to_vaults.insert(2, target.clone());
+
+        assert!(state.try_redistribute_vault(2).is_err());
+        assert_eq!(state.vault_id_to_vaults.get(&1), Some(&recipient));
+        assert_eq!(state.vault_id_to_vaults.get(&2), Some(&target));
+    }
+
+    #[test]
+    fn later_redistribution_recipient_overflow_keeps_all_recipients_unchanged() {
+        let mut state = test_state();
+        let collateral_type = state.icp_ledger_principal;
+        let vault = |owner, vault_id, collateral_amount, debt| crate::vault::Vault {
+            owner: Principal::from_slice(&[owner]), vault_id, collateral_amount,
+            borrowed_icusd_amount: ICUSD::new(debt), collateral_type,
+            last_accrual_time: 0, accrued_interest: ICUSD::new(0), bot_processing: false,
+        };
+        let first = vault(95, 1, 1, 0);
+        let later = vault(96, 2, u64::MAX - 100, u64::MAX - 100);
+        let target = vault(97, 3, 200, 200);
+        state.vault_id_to_vaults.insert(1, first.clone());
+        state.vault_id_to_vaults.insert(2, later.clone());
+        state.vault_id_to_vaults.insert(3, target.clone());
+
+        assert!(state.try_redistribute_vault(3).is_err());
+        assert_eq!(state.vault_id_to_vaults.get(&1), Some(&first));
+        assert_eq!(state.vault_id_to_vaults.get(&2), Some(&later));
+        assert_eq!(state.vault_id_to_vaults.get(&3), Some(&target));
     }
 
     #[test]

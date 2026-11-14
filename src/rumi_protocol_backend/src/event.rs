@@ -2643,10 +2643,16 @@ fn replay_with_nonce_time_and_payout_events(
                 state.cleanup_if_drained(vault_id);
                 // Track 3USD reserves from stability pool liquidations
                 if let Some(reserves_e8s) = three_usd_reserves_e8s {
-                    state.protocol_3usd_reserves += reserves_e8s;
+                    state.protocol_3usd_reserves = state.protocol_3usd_reserves
+                        .checked_add(reserves_e8s)
+                        .ok_or_else(|| ReplayLogError::InconsistentLog(
+                            "3USD reserve total exceeds the u64 range".to_string()
+                        ))?;
                 }
             },
-            Event::RedistributeVault { vault_id, .. } => state.redistribute_vault(vault_id),
+            Event::RedistributeVault { vault_id, .. } => state
+                .try_redistribute_vault(vault_id)
+                .map_err(ReplayLogError::InconsistentLog)?,
             Event::BorrowFromVault {
                 vault_id,
                 borrowed_amount,
@@ -2671,7 +2677,8 @@ fn replay_with_nonce_time_and_payout_events(
                 min_net_collateral_raw,
                 ..
             } => {
-                state.provide_liquidity(fee_amount, state.developer_principal);
+                state.try_provide_liquidity(fee_amount, state.developer_principal)
+                    .map_err(ReplayLogError::InconsistentLog)?;
                 let redeem_ct = collateral_type
                     .unwrap_or_else(|| state.icp_collateral_type());
                 // AR-B-001/RED-001 (audit 2026-06-09): events that recorded
@@ -2768,7 +2775,8 @@ fn replay_with_nonce_time_and_payout_events(
                 let _ = state.repay_to_vault(vault_id, capped);
             }
             Event::ProvideLiquidity { amount, caller, .. } => {
-                state.provide_liquidity(amount, caller);
+                state.try_provide_liquidity(amount, caller)
+                    .map_err(ReplayLogError::InconsistentLog)?;
             }
             Event::WithdrawLiquidity { amount, caller, .. } => {
                 state.withdraw_liquidity(amount, caller);
@@ -3341,12 +3349,17 @@ pub fn record_liquidate_vault(
     let _ = state.liquidate_vault(vault_id, mode, collateral_price, repay_amount);
 }
 
-pub fn record_redistribute_vault(state: &mut State, vault_id: u64) {
+pub fn record_redistribute_vault(state: &mut State, vault_id: u64) -> Result<(), String> {
+    // This legacy helper has no live caller. Apply the fully preflighted,
+    // synchronous transition before appending its event so an arithmetic
+    // rejection cannot leave a replay-invalid durable record. A trap while
+    // appending rolls the whole replicated message back.
+    state.try_redistribute_vault(vault_id)?;
     record_event(&Event::RedistributeVault {
         vault_id,
         timestamp: Some(now()),
     });
-    state.redistribute_vault(vault_id);
+    Ok(())
 }
 
 pub fn record_provide_liquidity(
@@ -3354,14 +3367,15 @@ pub fn record_provide_liquidity(
     amount: ICUSD,
     caller: Principal,
     block_index: u64,
-) {
+) -> Result<(), String> {
+    state.try_provide_liquidity(amount, caller)?;
     record_event(&Event::ProvideLiquidity {
         amount,
         block_index,
         caller,
         timestamp: Some(now()),
     });
-    state.provide_liquidity(amount, caller);
+    Ok(())
 }
 
 pub fn record_withdraw_liquidity(
@@ -5241,6 +5255,34 @@ mod filter_tests {
         let replayed = super::replay([init, legacy_partial].into_iter())
             .expect("legacy reserve event must replay without reinterpretation");
         assert_eq!(replayed.protocol_3usd_reserves, 100);
+    }
+
+    #[test]
+    fn reserve_replay_overflow_returns_an_inconsistent_log_error() {
+        let init = Event::Init(payout_init_args(icp_token()));
+        let partial = |amount| Event::PartialLiquidateVault {
+            vault_id: 1, liquidator_payment: ICUSD::new(0),
+            icp_to_liquidator: ICP::new(0), liquidator: None, icp_rate: None,
+            protocol_fee_collateral: None, ledger_fee_collateral: None,
+            timestamp: None, three_usd_reserves_e8s: Some(amount),
+        };
+        assert!(matches!(
+            super::replay([init, partial(u64::MAX), partial(1)].into_iter()),
+            Err(ReplayLogError::InconsistentLog(_))
+        ));
+    }
+
+    #[test]
+    fn liquidity_replay_overflow_returns_an_inconsistent_log_error() {
+        let init = Event::Init(payout_init_args(icp_token()));
+        let caller = Principal::from_slice(&[94]);
+        let deposit = |amount| Event::ProvideLiquidity {
+            amount: ICUSD::new(amount), block_index: 0, caller, timestamp: None,
+        };
+        assert!(matches!(
+            super::replay([init, deposit(u64::MAX), deposit(1)].into_iter()),
+            Err(ReplayLogError::InconsistentLog(_))
+        ));
     }
 
     fn p(seed: u8) -> Principal {
