@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Settlement funding and sequencing preflight is source-complete but unbuilt (d38b6e46); its focused check (15 unit tests plus production check, runner 9bc4624c) needs a fresh slot. Then: signing and signed-intent persistence, submission and reconciliation driver. Testnet readiness packet tracks what remains.",
+      "nextAction": "Funding and sequencing preflight PASS (receipt 0aa05cb5). Next: test-only recording of the exact signed intent before any submission, then the submission and reconciliation driver. Inputs remain untrusted test data; signing and live actions are held.",
       "cardIds": [
         "WP3"
       ]
