@@ -1,0 +1,9 @@
+{
+  "text": "Vault operation 7 has an unknown collateral transfer result. Enter the exact ledger-global block index shown for its matching transfer. A block that does not prove this transfer leaves the operation held.\n\nAdd margin · vault 213 · 100 collateral base units\n\nCollateral ledger block index\nVerify block and resume\nRefresh status",
+  "qa": {
+    "reads": 1,
+    "channels": 1,
+    "financial": 0
+  },
+  "overflow": false
+}

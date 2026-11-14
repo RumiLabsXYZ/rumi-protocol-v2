@@ -1,0 +1,26 @@
+{
+  "viewport": [
+    1280,
+    900
+  ],
+  "overflow": false,
+  "regionSections": 0,
+  "qa": {
+    "reads": 0,
+    "channels": 0,
+    "financial": 0
+  },
+  "row": {
+    "x": 953,
+    "y": 324,
+    "width": 302,
+    "height": 35.1953125
+  },
+  "menu": {
+    "x": 944,
+    "y": 63.5,
+    "width": 320,
+    "height": 343.890625
+  },
+  "color": "rgba(255, 255, 255, 0.65)"
+}

@@ -1,0 +1,40 @@
+
+> vault_frontend@0.0.0 test:unit
+> vitest --run src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/vault/VaultPullSavedRequest.spec.ts src/lib/components/vault/BorrowSavedRequestNavigation.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts
+
+
+ RUN  v2.1.9 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+Browserslist: browsers data (caniuse-lite) is 8 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+11:30:35 AM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:503:8 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+11:30:35 AM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:503:8 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+11:30:35 AM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:746:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+11:30:35 AM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:757:18 A form label must be associated with a control
+https://svelte.dev/e/a11y_label_has_associated_control
+11:30:35 AM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:859:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+11:30:35 AM [vite-plugin-svelte] src/routes/+page.svelte:333:18 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+11:30:35 AM [vite-plugin-svelte] src/routes/+page.svelte:333:18 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+stdout | src/lib/components/wallet/WalletRecoveryNavigation.spec.ts > keeps unchecked recovery in the wallet menu and reads only on its explicit action
+[3USD] LP balance for 5pljz-srzc6-vkvjq-5qhpl-spxry-j7mmr-7re35-zgkeu-w7fkt-xzimg-jqe : 0
+
+stdout | src/lib/components/wallet/WalletRecoveryNavigation.spec.ts > discovers a submitted action from another browser without allowing a replacement or cancellation
+[3USD] LP balance for 5pljz-srzc6-vkvjq-5qhpl-spxry-j7mmr-7re35-zgkeu-w7fkt-xzimg-jqe : 0
+
+ ✓ src/lib/components/vault/BorrowSavedRequestNavigation.spec.ts (3 tests) 336ms
+ ✓ src/lib/components/wallet/WalletRecoveryNavigation.spec.ts (2 tests) 140ms
+ ✓ src/lib/components/vault/VaultPullRecoveryBanner.spec.ts (5 tests) 125ms
+ ✓ src/lib/components/vault/VaultPullSavedRequest.spec.ts (13 tests) 1039ms
+
+ Test Files  4 passed (4)
+      Tests  23 passed (23)
+   Start at  11:30:34
+   Duration  2.88s (transform 2.05s, setup 26ms, collect 4.63s, tests 1.64s, environment 2.51s, prepare 191ms)
+

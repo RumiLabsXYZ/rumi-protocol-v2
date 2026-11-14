@@ -1,0 +1,24 @@
+{
+  "viewport": [
+    390,
+    844
+  ],
+  "overflow": false,
+  "qa": {
+    "reads": 0,
+    "channels": 0,
+    "financial": 0
+  },
+  "row": {
+    "x": 63,
+    "y": 324,
+    "width": 302,
+    "height": 35.1953125
+  },
+  "menu": {
+    "x": 54,
+    "y": 63.5,
+    "width": 320,
+    "height": 343.890625
+  }
+}
