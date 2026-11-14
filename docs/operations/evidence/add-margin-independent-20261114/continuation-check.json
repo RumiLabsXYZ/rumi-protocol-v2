@@ -1,0 +1,14 @@
+{
+  "readOnlyCorrectionReviewed": true,
+  "sameSnapshot": "000000000000001d0000000001f088fe0101",
+  "rootCauseIndependentlyVerified": true,
+  "structuralGuardsPreserved": true,
+  "continuationOnlyInstallAndStart": true,
+  "exclusiveDispatchAndUnknownStopVerified": true,
+  "sourceAndPayloadUnchanged": true,
+  "pushedRef": "d692c37cd4e28e57d5a8c49095d83b246ee67739",
+  "pins": {
+    "verify-active-raw-vault-reconciled.mjs": "4e7cd88ba9a7c4a084aa7e16d2c5bd2c0b437f59755d3cd22ee3158129fb95f7",
+    "continue-after-raw-reconciliation.py": "3985235ab2d53e9e4129c7c31b4cf47e58cdbe210dce7793686a7acce9d65acd"
+  }
+}

@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-19",
-      "state": "In progress",
+      "state": "Done",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "Direct SEC19 messaging confirmation read in Cody originalhuman01a1dae8-f347-7083-b1a3-cf96fa39b81d. Fresh delivered allocationf3f83b12 consumed once by Dorian for exact4d frontend/auth build; rejected priorgrant stays released. Ellis refreshed certified6428/API f0b/04e baseline and vault213 active9decimalckSOL balance covering requestedamount+fees. Fullstableinventory refresh in progress. Retain134/3/9 checks and dualPASS; no repeatedtest/backendrebuild. Await actualnative/frozenartifact, preservation/upgrade/frontendpublication and independentlivechecks. No financialcanary.",
+      "evidenceText": "LIVE exact4d source/backend8f6/API d8b/UI1794674286427, stage697/activation698 knownonce. Singlefreshf3 frontendbuild native0/21.375s; Ellis verifies740files/476pairs, finalstable5520/5714 preserves5220priorprops/untouchedencodings+300new/7sets,15publicresponses, certifiedmodules/API/controllers andactualanonymousdesktop/mobilelayouts PASS. Backup1d/other9preserved; rawVault51root-vs-leaf verifier corrected/read-onlyindependentlychecked, remaininginstall/start only without repeatedmanagementwrites. Capturedstate preserved except matchingforwardclaimtimestamp; globalprivatecodec+backup versus scopedquerycoverage explicit.134frontend/3PIC/9backend checks+dualPASS retained. Vault213read-onlybalance/Active9dec metadata coversrequested13.01909+fees. No live signeddeposit/customerfinancialacceptance.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",
@@ -26,6 +26,10 @@
         {
           "title": "Final source verification and exact paired release decision",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-release-decision-20261113.md"
+        },
+        {
+          "title": "Independent final live verification",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/add-margin-independent-check-20261114.md"
         }
       ]
     },

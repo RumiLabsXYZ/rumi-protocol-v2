@@ -1,6 +1,6 @@
 {
-  "summary": "SEC19 messaging block cleared by direct confirmation. Fresh frontend/authbuild started underf3f83b12; Dorian publishes, Ellis verifies. Today baseline/ckSOLmetadata/balance checks pass. Production deposit route awaits paired deployment and readback.",
-  "plainSummary": "The messaging block is resolved and the approved frontend build has started. Dorian is handling the paired deployment while Ellis independently verifies artifacts, preserved state and the live interface. Deposits remain paused until those release checks finish.",
+  "summary": "SEC19 pairedrelease is live:4d/backend8f6/UI1794674286427/stage697/activate698. Ellisfullinventory15publicbytes/certifiedAPIcontrollers/desktopmobilePASS, backup1d/other9+capturedstate preserved withexplicitrawreaderreconciliation. Rob can use depositflowforvault213; actualusertransaction remainsunverified.",
+  "plainSummary": "The collateral-deposit repair is live and independently verified. The backend, frontend, preserved assets and captured state checks pass, and vault213\u2019s ckSOL metadata and balance support the requested deposit. Rob can refresh Rumi and add collateral; no deposit was submitted on his behalf.",
   "glossary": [
     {
       "term": "Stability Pool",

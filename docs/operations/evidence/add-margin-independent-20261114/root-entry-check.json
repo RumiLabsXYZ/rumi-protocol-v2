@@ -1,0 +1,23 @@
+{
+  "independentReadOnly": true,
+  "rootOffset": 1726488,
+  "rootKeys": [
+    "51",
+    "67",
+    "127",
+    "134",
+    "189",
+    "202"
+  ],
+  "rootVault51": {
+    "id": "51",
+    "debt": "287983439964",
+    "collateral": "150000000000",
+    "offset": 1726576,
+    "bot": 0
+  },
+  "all50ExpectedIdsAndBacklinksVerified": true,
+  "stale51OutsideActiveLeafLength": true,
+  "guardsPreserved": true,
+  "productionMutation": false
+}

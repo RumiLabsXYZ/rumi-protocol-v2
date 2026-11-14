@@ -1,0 +1,45 @@
+{
+  "anonymousActualBrowser": true,
+  "checks": [
+    {
+      "url": "https://app.rumiprotocol.com/solana",
+      "width": 390,
+      "scrollWidth": 390,
+      "noHorizontalOverflow": true,
+      "title": "ckSOL Minter | Rumi",
+      "mintStatusVisible": true,
+      "errorOverlay": false
+    },
+    {
+      "url": "https://app.rumiprotocol.com/solana",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "noHorizontalOverflow": true,
+      "title": "ckSOL Minter | Rumi",
+      "mintStatusVisible": true,
+      "errorOverlay": false
+    },
+    {
+      "url": "https://app.rumiprotocol.com/vaults",
+      "width": 1280,
+      "scrollWidth": 1280,
+      "noHorizontalOverflow": true,
+      "title": "Vaults | Rumi Protocol",
+      "heading": "My Vaults",
+      "errorOverlay": false,
+      "walletConnected": false
+    },
+    {
+      "url": "https://app.rumiprotocol.com/vaults",
+      "width": 390,
+      "scrollWidth": 390,
+      "noHorizontalOverflow": true,
+      "title": "Vaults | Rumi Protocol",
+      "heading": "My Vaults",
+      "errorOverlay": false
+    }
+  ],
+  "authenticatedFlowProof": "existing134focused tests, not a live signed deposit",
+  "consoleLimitation": "existing synthetic XRP token-logo canister_not_found; not clean-console proof",
+  "financialAction": false
+}

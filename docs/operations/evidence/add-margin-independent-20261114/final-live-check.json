@@ -1,0 +1,164 @@
+{
+  "checkedUtc": "2026-11-14T17:09:36.888Z",
+  "allPriorPropertiesAndUntouchedEncodingsPreserved": true,
+  "keys": 5520,
+  "encodings": 5714,
+  "newKeys": 300,
+  "changedExistingEncodings": 7,
+  "backendAndCandidAndControllersVerified": true,
+  "frontendModuleUnchanged": true,
+  "publicReadbacks": 15,
+  "allPassed": true,
+  "results": [
+    {
+      "key": "/",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1820,
+      "sha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "expectedSha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "pass": true
+    },
+    {
+      "key": "/",
+      "encoding": "gzip",
+      "status": 200,
+      "servedEncoding": "gzip",
+      "bytes": 649,
+      "sha256": "96ac36136617f373523c04bd643d8ab72f71b1921629c31ce94d4875ed470134",
+      "expectedSha256": "96ac36136617f373523c04bd643d8ab72f71b1921629c31ce94d4875ed470134",
+      "pass": true
+    },
+    {
+      "key": "/_app/version.json",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 27,
+      "sha256": "c3275774ced8d5821729f46ffad7beeabd0f9b53b0ee8b420cf7a04500808a55",
+      "expectedSha256": "c3275774ced8d5821729f46ffad7beeabd0f9b53b0ee8b420cf7a04500808a55",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ii-alternative-origins",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 385,
+      "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "expectedSha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ic-domains",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 58,
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "expectedSha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/CuuXK9qw.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 67370,
+      "sha256": "4b38b2706b4b924915980d50766b34ab6b1753ffdd7c0fd28b86ad8f6d03dbaf",
+      "expectedSha256": "4b38b2706b4b924915980d50766b34ab6b1753ffdd7c0fd28b86ad8f6d03dbaf",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/nodes/4.BkIxPUvf.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 24390,
+      "sha256": "4c41785acb94cdab3651469fa160223c6a159a0d23bb347ba407adb313169ae0",
+      "expectedSha256": "4c41785acb94cdab3651469fa160223c6a159a0d23bb347ba407adb313169ae0",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/FeJTkgka.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 733884,
+      "sha256": "60de1f5ca8ecf44288b75da4b0777699b882488406856b03d368bf04e3ec04c4",
+      "expectedSha256": "60de1f5ca8ecf44288b75da4b0777699b882488406856b03d368bf04e3ec04c4",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/nodes/55.DMVlcnGY.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 105398,
+      "sha256": "6f518e616e646006acf73d2d81fa35a90c7355fe59566d4853e92ff6bd991e3b",
+      "expectedSha256": "6f518e616e646006acf73d2d81fa35a90c7355fe59566d4853e92ff6bd991e3b",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/xJxdecE9.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 102333,
+      "sha256": "b69b2fd322eb463a67761ef45357283516b61290fd9d264d18f394b1aa241583",
+      "expectedSha256": "b69b2fd322eb463a67761ef45357283516b61290fd9d264d18f394b1aa241583",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/nodes/0.Cu_JZYDc.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 82976,
+      "sha256": "c244065556e31e1d31b4b23db85f6a438c56d6b17cbaaec2f00e8212060bec0b",
+      "expectedSha256": "c244065556e31e1d31b4b23db85f6a438c56d6b17cbaaec2f00e8212060bec0b",
+      "pass": true
+    },
+    {
+      "key": "/borrow",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1820,
+      "sha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "expectedSha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "pass": true
+    },
+    {
+      "key": "/vaults",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1820,
+      "sha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "expectedSha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "pass": true
+    },
+    {
+      "key": "/solana",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1820,
+      "sha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "expectedSha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "pass": true
+    },
+    {
+      "key": "/help",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1820,
+      "sha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "expectedSha256": "1e1be8151f0b8daf02131b91b4446e112d3ec3f35bb69a77f8384a4892cff6eb",
+      "pass": true
+    }
+  ]
+}
