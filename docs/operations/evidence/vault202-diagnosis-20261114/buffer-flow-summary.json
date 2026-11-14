@@ -1,0 +1,16 @@
+{
+  "coveredSinceFundingBlock": 630116,
+  "fundingE6": 20000000,
+  "subsequentIncomingE6": 85855264,
+  "subsequentOutgoingGrossE6": 83591703,
+  "impliedBalanceAfterFundingE6": 24453159,
+  "currentBalanceE6": 26716720,
+  "additionalExternalCreditsSinceFunding": [],
+  "fundingReceiptFollowedExactLedgerArchive": true,
+  "fundsAreFungibleNotIndividuallyTagged": true,
+  "oldGlobalHeldClaimsStillRequireProtection": [
+    69,
+    89,
+    169
+  ]
+}

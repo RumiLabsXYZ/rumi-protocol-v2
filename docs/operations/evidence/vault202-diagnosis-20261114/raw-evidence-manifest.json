@@ -1,0 +1,125 @@
+{
+  "privateRawEvidenceNotPublished": true,
+  "files": [
+    {
+      "name": "backend.did",
+      "sha256": "c1866e1c00b7024b0f3df53ef0083765669b7700007ef53504c09fab0451725f",
+      "bytes": 88265
+    },
+    {
+      "name": "backend.status",
+      "sha256": "ea6009650befd1b0393c2097714be4d4f55812aa90bfac19d9d2e888d3ed2490",
+      "bytes": 1917
+    },
+    {
+      "name": "bot.status",
+      "sha256": "8c84ccf0d2628ab1db57bd530217a4d7af91d086990ffefc53de19d1e77d4222",
+      "bytes": 1982
+    },
+    {
+      "name": "bot-source.did",
+      "sha256": "ae612cd3e3a14061261bd5d4401acc2dc64d065cea42f0f1fec75dc870b0461b",
+      "bytes": 9317
+    },
+    {
+      "name": "bot-get_liquidation.txt",
+      "sha256": "1a75a5910147583f5193e5eae37e14817c3d1d0f83954579ddf44069879ad57e",
+      "bytes": 768
+    },
+    {
+      "name": "bot-get_pending_claim_journals.txt",
+      "sha256": "6e1f60e3b5bf5767ffa525daf1300c0d3332abd40c63c6b95b5478ccf6d77c12",
+      "bytes": 1386
+    },
+    {
+      "name": "claim-second-read.txt",
+      "sha256": "6e1f60e3b5bf5767ffa525daf1300c0d3332abd40c63c6b95b5478ccf6d77c12",
+      "bytes": 1386
+    },
+    {
+      "name": "bot-get_pending_payment_journals.txt",
+      "sha256": "7030e16794186bf0a7049fc18decfa305307496460df5fef36ee5622e1b2c4d1",
+      "bytes": 9
+    },
+    {
+      "name": "bot-get_pending_treasury_intent.txt",
+      "sha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f",
+      "bytes": 7
+    },
+    {
+      "name": "backend-get_bot_claim_vault_ids.txt",
+      "sha256": "2a564d2b335cdb19e649fc1b11aa58522f2c112bf3273eb8301d41a2f5b2aae0",
+      "bytes": 22
+    },
+    {
+      "name": "backend-get_liquidatable_vaults.txt",
+      "sha256": "2d86e2db14ad483fba295cd7457343a4dac2581772e595f3d66000daa51c41e7",
+      "bytes": 435
+    },
+    {
+      "name": "icp-claim40431390.txt",
+      "sha256": "734fb4c25d5b045c0052703952617be03bd12a37ecad24961b68da2e20101482",
+      "bytes": 2959
+    },
+    {
+      "name": "icp-swap40431407.txt",
+      "sha256": "03f8063c0f74f419390048d15ac906243488161fc2ca95f74c7228eb8ad9ff9a",
+      "bytes": 3038
+    },
+    {
+      "name": "ckusdc-receipt815252.txt",
+      "sha256": "773b663d2c59320ab7294ba3cadc17c4aba0e8e7cda5dd7ba5aa2462e9637105",
+      "bytes": 841
+    },
+    {
+      "name": "proof-audit-tail.txt",
+      "sha256": "501f49f1ed565c14410bc4a4a07cf788f70352678123ac6c34b15e77c0ea16af",
+      "bytes": 1068
+    },
+    {
+      "name": "ckusdc-account-transactions.txt",
+      "sha256": "1e893a0e8d7fe0cfe59e997be72e876a2eec5016877a22e604b4e280c8dba1cc",
+      "bytes": 10690
+    },
+    {
+      "name": "icp-account-transactions.txt",
+      "sha256": "0c70b84248756a8f821bfe312d11c70f9d2f26d73c0d6f11d5015aeab0f95809",
+      "bytes": 12110
+    },
+    {
+      "name": "bot-logs.txt",
+      "sha256": "7676c6fbdf89458009af11626f6b2bb027b81493bcc576800581eed22a715a02",
+      "bytes": 3685
+    },
+    {
+      "name": "backend-logs.txt",
+      "sha256": "e3ef62f045c43b848fce032ad5664fc064431997b5446af903d7bf539826c2ae",
+      "bytes": 5138
+    },
+    {
+      "name": "ckusdc-older-account-transactions.txt",
+      "bytes": 52063,
+      "sha256": "049d784ecc27880ac244f111630e42b1beb5723c547367e0d010b67b6a9dc39d"
+    },
+    {
+      "name": "buffer-funding630116.txt",
+      "bytes": 306,
+      "sha256": "27b422ed6b66c9ced7f7f80a4a7b3775c10040927e29b9619a1671c3b06b9a4f"
+    },
+    {
+      "name": "buffer-funding630116-archive.txt",
+      "bytes": 566,
+      "sha256": "434bd84ca9e1f2dc583641f3492f32753c54b9d6ec9b6af4cf4c064a5e67059f"
+    },
+    {
+      "name": "bot-state.rs",
+      "bytes": 50063,
+      "sha256": "b670853bb245a7c16dc0e468973d243166d329b71d2f2e9846ec16fad9869302"
+    },
+    {
+      "name": "bot-process.rs",
+      "bytes": 218711,
+      "sha256": "88bf54de4ac0b25b6b6aa466f357434c9e63e77d6f6004b0eb5eccc06597fbe3"
+    }
+  ]
+}
