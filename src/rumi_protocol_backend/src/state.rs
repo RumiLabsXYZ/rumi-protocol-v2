@@ -2112,7 +2112,9 @@ pub struct XlmClaim {
     pub prepared_intent: Option<XlmPreparedIntent>,
 }
 
-/// Persisted native-XLM claim lifecycle; no transitions are implemented yet.
+/// Persisted native-XLM claim lifecycle. Transitions exist only in dormant
+/// test-only helpers (signed-intent recording and settlement-decision
+/// application, driven by fixture inputs); no production path changes status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum XlmClaimStatus {
     Pending,
@@ -2628,6 +2630,158 @@ impl State {
         claim.settlement_intent = Some(intent.clone());
         claim.status = XlmClaimStatus::InFlight;
         Ok(intent)
+    }
+}
+
+/// What `State::apply_xlm_settlement_decision` did.
+#[cfg(any(test, feature = "test_endpoints"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlmApplyOutcome {
+    Settled,
+    /// `Hold(_)`: nothing was changed.
+    Held,
+    Quarantined,
+    /// Both intents cleared and the claim is `Pending` again.
+    ReplacementPermitted,
+    /// The failed transaction's fee was charged to the claim once; both intents
+    /// cleared and the claim is `Pending` again with `remaining_gross`.
+    FailedFeeCharged {
+        charged: u64,
+        remaining_gross: u64,
+    },
+}
+
+/// Reasons `State::apply_xlm_settlement_decision` refuses; none mutate state.
+#[cfg(any(test, feature = "test_endpoints"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlmApplyDecisionError {
+    MissingClaim,
+    NotInFlight,
+    NoSettlementIntent,
+    MalformedSuppliedHash,
+    SuppliedHashMismatch,
+    MalformedDecisionHash,
+    DecisionHashMismatch,
+    NoPreparedIntent,
+    FailedFeeZero,
+    FailedFeeAbovePreparedFee,
+    FailedFeeAboveReservedBudget,
+    FailedFeeNotBelowGross,
+    FailedFeeUnderflow,
+}
+
+#[cfg(any(test, feature = "test_endpoints"))]
+impl State {
+    /// Apply a reconciliation decision to an `InFlight` claim.
+    ///
+    /// Dormant and test-only: no endpoint. `decision` is a caller-supplied
+    /// UNTRUSTED FIXTURE; its type is not quorum proof (it would normally be the
+    /// output of `replacement_decision` over `transaction_status_quorum`), and
+    /// nothing here verifies that. A charged failed-transaction fee is borne by
+    /// the claimant exactly once (gross reduced, as in the XRP reconciler); the
+    /// per-payment `reserved_fee_stroops` cap is left unchanged. Hashes are parsed strictly and compared as
+    /// 32 raw bytes against the stored `settlement_intent.transaction_hash`.
+    /// All checks precede the single mutation.
+    pub fn apply_xlm_settlement_decision(
+        &mut self,
+        claim_id: u64,
+        tx_hash: &str,
+        decision: &crate::chains::stellar::transaction_status::ReplacementDecision,
+    ) -> Result<XlmApplyOutcome, XlmApplyDecisionError> {
+        use crate::chains::stellar::transaction_status::{
+            parse_transaction_hash, ReplacementDecision as D,
+        };
+        use XlmApplyDecisionError as E;
+        let claim = self.xlm_claims.get(&claim_id).ok_or(E::MissingClaim)?;
+        if claim.status != XlmClaimStatus::InFlight {
+            return Err(E::NotInFlight);
+        }
+        let stored = claim
+            .settlement_intent
+            .as_ref()
+            .ok_or(E::NoSettlementIntent)?
+            .transaction_hash;
+        let supplied = parse_transaction_hash(tx_hash).ok_or(E::MalformedSuppliedHash)?;
+        if supplied != stored {
+            return Err(E::SuppliedHashMismatch);
+        }
+        if let D::Settled { hash, .. } | D::ChargeFailedFee { hash, .. } = decision {
+            let embedded = parse_transaction_hash(hash).ok_or(E::MalformedDecisionHash)?;
+            if embedded != stored {
+                return Err(E::DecisionHashMismatch);
+            }
+        }
+        let mut new_gross = None;
+        if let D::ChargeFailedFee {
+            fee_charged_stroops: charged,
+            ..
+        } = decision
+        {
+            let prepared_fee = u64::from(
+                claim
+                    .prepared_intent
+                    .as_ref()
+                    .ok_or(E::NoPreparedIntent)?
+                    .fee_stroops,
+            );
+            if *charged == 0 {
+                return Err(E::FailedFeeZero);
+            }
+            if *charged > prepared_fee {
+                return Err(E::FailedFeeAbovePreparedFee);
+            }
+            if *charged > claim.reserved_fee_stroops {
+                return Err(E::FailedFeeAboveReservedBudget);
+            }
+            if *charged >= claim.gross_stroops {
+                return Err(E::FailedFeeNotBelowGross);
+            }
+            new_gross = Some(
+                claim
+                    .gross_stroops
+                    .checked_sub(*charged)
+                    .ok_or(E::FailedFeeUnderflow)?,
+            );
+        }
+        if matches!(decision, D::Hold(_)) {
+            return Ok(XlmApplyOutcome::Held);
+        }
+        let claim = self
+            .xlm_claims
+            .get_mut(&claim_id)
+            .ok_or(E::MissingClaim)?;
+        match decision {
+            D::Settled { .. } => {
+                claim.status = XlmClaimStatus::Settled;
+                Ok(XlmApplyOutcome::Settled)
+            }
+            D::Quarantine(_) => {
+                claim.status = XlmClaimStatus::Quarantined;
+                Ok(XlmApplyOutcome::Quarantined)
+            }
+            D::PermitReplacement => {
+                claim.prepared_intent = None;
+                claim.settlement_intent = None;
+                claim.status = XlmClaimStatus::Pending;
+                Ok(XlmApplyOutcome::ReplacementPermitted)
+            }
+            D::Hold(_) => Ok(XlmApplyOutcome::Held),
+            D::ChargeFailedFee {
+                fee_charged_stroops,
+                ..
+            } => {
+                let remaining_gross = new_gross.ok_or(E::FailedFeeUnderflow)?;
+                claim.gross_stroops = remaining_gross;
+                // reserved_fee_stroops intentionally unchanged (per-payment cap).
+                claim.prepared_intent = None;
+                claim.settlement_intent = None;
+                claim.status = XlmClaimStatus::Pending;
+                Ok(XlmApplyOutcome::FailedFeeCharged {
+                    charged: *fee_charged_stroops,
+                    remaining_gross,
+                })
+            }
+        }
     }
 }
 
@@ -18285,7 +18439,7 @@ mod xlm_signed_intent_tests {
         Principal::from_slice(&[1])
     }
 
-    fn snapshot() -> AccountSnapshot {
+    pub(super) fn snapshot() -> AccountSnapshot {
         AccountSnapshot {
             account_id: stellar::classic_address_from_ed25519_pubkey(&SRC),
             sequence: 41,
@@ -18316,7 +18470,7 @@ mod xlm_signed_intent_tests {
     }
 
     /// Prepared (not signed) claim 5.
-    fn setup() -> (State, u64) {
+    pub(super) fn setup() -> (State, u64) {
         let mut state = State::default();
         let vault = state.increment_vault_id();
         let net = stellar::config::selection_from_state(&state).unwrap().network;
@@ -18337,7 +18491,7 @@ mod xlm_signed_intent_tests {
         (state, 5)
     }
 
-    fn bytes(state: &State) -> Vec<u8> {
+    pub(super) fn bytes(state: &State) -> Vec<u8> {
         let mut b = Vec::new();
         ciborium::ser::into_writer(&state.xlm_claims, &mut b).unwrap();
         b
@@ -18517,5 +18671,210 @@ mod xlm_signed_intent_tests {
         done.settlement_intent = Some(signed);
         st.xlm_claims.insert(6, done);
         assert!(st.record_xlm_signed_intent(5, SIG).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod xlm_apply_decision_tests {
+    use super::xlm_signed_intent_tests::{bytes, setup, snapshot};
+    use super::*;
+    use crate::chains::stellar::transaction_status::{
+        ConflictReason, HoldReason, QuarantineReason, ReplacementDecision as D,
+    };
+
+    /// InFlight claim 5 with a signed (fixture-signature) intent, plus its hex hash.
+    fn in_flight() -> (State, u64, String) {
+        let (mut state, id) = setup();
+        let intent = state.record_xlm_signed_intent(id, [0xAB; 64]).unwrap();
+        (state, id, hex::encode(intent.transaction_hash))
+    }
+
+    fn settled(hash: &str) -> D {
+        D::Settled {
+            hash: hash.to_string(),
+            ledger: 7,
+            fee_charged_stroops: 100,
+        }
+    }
+
+    fn failed(hash: &str) -> D {
+        D::ChargeFailedFee {
+            hash: hash.to_string(),
+            ledger: 7,
+            fee_charged_stroops: 100,
+        }
+    }
+
+    fn rejected(mut state: State, id: u64, hash: &str, d: &D, want: XlmApplyDecisionError) {
+        let before = bytes(&state);
+        assert_eq!(state.apply_xlm_settlement_decision(id, hash, d), Err(want));
+        assert_eq!(bytes(&state), before);
+    }
+
+    #[test]
+    fn settled_keeps_both_intents() {
+        let (mut state, id, h) = in_flight();
+        let before = state.xlm_claims[&id].clone();
+        // The strict parser accepts either hex case: an upper-case supplied and
+        // embedded hash still matches the stored digest.
+        let upper = h.to_uppercase();
+        assert_ne!(upper, h);
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &upper, &settled(&upper)),
+            Ok(XlmApplyOutcome::Settled)
+        );
+        let c = &state.xlm_claims[&id];
+        assert_eq!(c.status, XlmClaimStatus::Settled);
+        assert_eq!(c.prepared_intent, before.prepared_intent);
+        assert_eq!(c.settlement_intent, before.settlement_intent);
+        assert_eq!(c.gross_stroops, before.gross_stroops);
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &settled(&h)),
+            Err(XlmApplyDecisionError::NotInFlight)
+        );
+    }
+
+    #[test]
+    fn hold_is_a_no_op_and_quarantine_keeps_intents() {
+        let (mut state, id, h) = in_flight();
+        let before = bytes(&state);
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &D::Hold(HoldReason::NotExpired)),
+            Ok(XlmApplyOutcome::Held)
+        );
+        assert_eq!(bytes(&state), before);
+        let intents = (
+            state.xlm_claims[&id].prepared_intent.clone(),
+            state.xlm_claims[&id].settlement_intent.clone(),
+        );
+        let q = D::Quarantine(QuarantineReason::StatusConflict(ConflictReason::FeeMismatch));
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &q),
+            Ok(XlmApplyOutcome::Quarantined)
+        );
+        let c = &state.xlm_claims[&id];
+        assert_eq!(c.status, XlmClaimStatus::Quarantined);
+        assert_eq!((c.prepared_intent.clone(), c.settlement_intent.clone()), intents);
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &q),
+            Err(XlmApplyDecisionError::NotInFlight)
+        );
+    }
+
+    #[test]
+    fn permit_replacement_clears_intents_and_returns_to_pending_once() {
+        let (mut state, id, h) = in_flight();
+        let gross = state.xlm_claims[&id].gross_stroops;
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &D::PermitReplacement),
+            Ok(XlmApplyOutcome::ReplacementPermitted)
+        );
+        let c = &state.xlm_claims[&id];
+        assert_eq!(c.status, XlmClaimStatus::Pending);
+        assert!(c.prepared_intent.is_none() && c.settlement_intent.is_none());
+        assert_eq!(c.gross_stroops, gross);
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &D::PermitReplacement),
+            Err(XlmApplyDecisionError::NotInFlight)
+        );
+    }
+
+    fn failed_with(hash: &str, charged: u64) -> D {
+        D::ChargeFailedFee {
+            hash: hash.to_string(),
+            ledger: 7,
+            fee_charged_stroops: charged,
+        }
+    }
+
+    #[test]
+    fn failed_fee_is_charged_exactly_once_and_claim_can_be_prepared_again() {
+        let (mut state, id, h) = in_flight();
+        let before = state.xlm_claims[&id].clone();
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &failed_with(&h, 100)),
+            Ok(XlmApplyOutcome::FailedFeeCharged {
+                charged: 100,
+                remaining_gross: before.gross_stroops - 100
+            })
+        );
+        let c = &state.xlm_claims[&id];
+        assert_eq!(c.gross_stroops, before.gross_stroops - 100);
+        assert_eq!(c.reserved_fee_stroops, before.reserved_fee_stroops);
+        assert!(c.prepared_intent.is_none() && c.settlement_intent.is_none());
+        assert_eq!(c.status, XlmClaimStatus::Pending);
+        // A second application must not charge again.
+        let after = bytes(&state);
+        assert_eq!(
+            state.apply_xlm_settlement_decision(id, &h, &failed_with(&h, 100)),
+            Err(XlmApplyDecisionError::NotInFlight)
+        );
+        assert_eq!(bytes(&state), after);
+        // Re-prepare uses the remaining gross.
+        let p = state
+            .prepare_xlm_settlement_intent(id, [7; 32], &snapshot(), 100, 1_000, 2_000)
+            .unwrap();
+        assert_eq!(p.gross_stroops, before.gross_stroops - 100);
+        assert_eq!(p.net_stroops, before.gross_stroops - 100 - 100);
+    }
+
+    #[test]
+    fn failed_fee_bounds_reject_without_mutation() {
+        use XlmApplyDecisionError as E;
+        let (_, id, h) = in_flight();
+        // Prepared fee is 100, reserved budget 1_000, gross 10_000_000.
+        rejected(in_flight().0, id, &h, &failed_with(&h, 0), E::FailedFeeZero);
+        rejected(in_flight().0, id, &h, &failed_with(&h, 101), E::FailedFeeAbovePreparedFee);
+        let mut st = in_flight().0;
+        st.xlm_claims.get_mut(&id).unwrap().reserved_fee_stroops = 50;
+        rejected(st, id, &h, &failed_with(&h, 60), E::FailedFeeAboveReservedBudget);
+        let mut st = in_flight().0;
+        st.xlm_claims.get_mut(&id).unwrap().gross_stroops = 100;
+        rejected(st, id, &h, &failed_with(&h, 100), E::FailedFeeNotBelowGross);
+        let mut st = in_flight().0;
+        st.xlm_claims.get_mut(&id).unwrap().prepared_intent = None;
+        rejected(st, id, &h, &failed_with(&h, 100), E::NoPreparedIntent);
+    }
+
+    #[test]
+    fn hash_mismatch_and_malformed_hashes_reject() {
+        use XlmApplyDecisionError as E;
+        let (_, id, h) = in_flight();
+        let other = "cd".repeat(32);
+        rejected(in_flight().0, id, &other, &D::PermitReplacement, E::SuppliedHashMismatch);
+        rejected(in_flight().0, id, &h, &settled(&other), E::DecisionHashMismatch);
+        rejected(in_flight().0, id, &h, &failed(&other), E::DecisionHashMismatch);
+        let bads: Vec<String> = vec![
+            String::new(),
+            "abc".to_string(),
+            h[..63].to_string(),
+            format!("{h}0"),
+            "zz".repeat(32),
+            format!(" {}", &h[1..]),
+        ];
+        for bad in &bads {
+            rejected(in_flight().0, id, bad, &D::PermitReplacement, E::MalformedSuppliedHash);
+            rejected(in_flight().0, id, &h, &settled(bad), E::MalformedDecisionHash);
+            rejected(in_flight().0, id, &h, &failed(bad), E::MalformedDecisionHash);
+        }
+    }
+
+    #[test]
+    fn missing_not_in_flight_and_no_intent_reject() {
+        use XlmApplyDecisionError as E;
+        let (_, id, h) = in_flight();
+        rejected(in_flight().0, 99, &h, &settled(&h), E::MissingClaim);
+        // Prepared but never signed: still Pending.
+        let (unsigned, uid) = setup();
+        rejected(unsigned, uid, &h, &settled(&h), E::NotInFlight);
+        // InFlight status but no stored signed intent.
+        let mut st = in_flight().0;
+        st.xlm_claims.get_mut(&id).unwrap().settlement_intent = None;
+        rejected(st, id, &h, &settled(&h), E::NoSettlementIntent);
+        for status in [XlmClaimStatus::Settled, XlmClaimStatus::Quarantined, XlmClaimStatus::Failed] {
+            let mut st = in_flight().0;
+            st.xlm_claims.get_mut(&id).unwrap().status = status;
+            rejected(st, id, &h, &settled(&h), E::NotInFlight);
+        }
     }
 }

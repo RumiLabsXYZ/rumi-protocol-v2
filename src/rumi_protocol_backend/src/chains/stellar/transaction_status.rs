@@ -120,6 +120,17 @@ fn normalize_hash(hash: &str) -> Option<String> {
     }
 }
 
+/// Strictly parse a transaction hash (exactly 64 ASCII hex digits, either case,
+/// the same rule as `normalize_hash`) to its 32 raw bytes. No trimming, no
+/// prefixes, no length leniency.
+#[cfg(any(test, feature = "test_endpoints"))]
+pub(crate) fn parse_transaction_hash(hash: &str) -> Option<[u8; 32]> {
+    let normalized = normalize_hash(hash)?;
+    let mut out = [0_u8; 32];
+    hex::decode_to_slice(normalized, &mut out).ok()?;
+    Some(out)
+}
+
 /// Parse a canonical non-zero stroop amount no larger than `i64::MAX`.
 /// Accepts digits only, no sign, no leading zeros, no whitespace.
 fn parse_canonical_fee_str(text: &str) -> Option<u64> {
