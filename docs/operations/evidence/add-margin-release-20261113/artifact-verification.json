@@ -1,0 +1,15 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "gzipExactlyMatchesOptimized": true,
+  "embeddedCandidMatchesCanonical": true,
+  "canonicalCandidSha256": "d8b0142e705e860640557b7ea6253a2a6027d7e96f3b15cfee9ba51fff0d2c97",
+  "publicMethodCount": 397,
+  "allPublicMethodsExported": true,
+  "extraExistingInternalMethods": [
+    "<ic-cdk internal> timer_executor"
+  ],
+  "frontendFilesBuiltAndVerified": 740,
+  "deployment": false,
+  "activation": false,
+  "financialAction": false
+}

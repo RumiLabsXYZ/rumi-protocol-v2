@@ -1,0 +1,18 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "deployed_base": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "code_section_bytes": 8957230,
+  "project_guard_bytes": 10223616,
+  "files": [
+    {
+      "name": "rumi_protocol_backend.wasm",
+      "bytes": 9894334,
+      "sha256": "2961d2d84008e43756c25c3361b59717676ea92d68eb82951648dc5a4703ea08"
+    },
+    {
+      "name": "rumi_protocol_backend.wasm.gz",
+      "bytes": 2405092,
+      "sha256": "8f6f5933e54fa44205760b9a8d1c3869135df43825eadfee70b20c62d0a0bd16"
+    }
+  ]
+}

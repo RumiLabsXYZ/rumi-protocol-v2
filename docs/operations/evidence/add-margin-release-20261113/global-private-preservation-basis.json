@@ -1,0 +1,37 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "releasedSource": "00cf550d3fcb97870cd4643883d5abd8900fa1a2",
+  "functions": [
+    {
+      "path": "src/rumi_protocol_backend/src/main.rs",
+      "function": "pre_upgrade",
+      "releasedAndCandidateBodiesIdentical": true,
+      "sha256": "7ce0ebedd429ea33c7ced033d71b96603a5e9e9082aa411ca65848abcd6f15a8"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/main.rs",
+      "function": "post_upgrade",
+      "releasedAndCandidateBodiesIdentical": true,
+      "sha256": "85312ae36677a5bfcd088ea742491a6ec67d7594062ea67d704ef045380136d5"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/storage.rs",
+      "function": "save_state_to_stable",
+      "releasedAndCandidateBodiesIdentical": true,
+      "sha256": "c1d433acd60cb17679e6cc78ae71182fa23faee77878df02ccf2c8c908e28f10"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/storage.rs",
+      "function": "load_state_from_stable",
+      "releasedAndCandidateBodiesIdentical": true,
+      "sha256": "83331a9df8182133db4808197df2845c968fba34ac0320406bcb9b7c17c4bf0c"
+    }
+  ],
+  "fullStateCborMemoryId": 4,
+  "privatePayoutEventMemoryIds": [
+    7,
+    8
+  ],
+  "globalWarmPrivateRowsEnumerated": false,
+  "observationGap": "Existing payout and operation queries are caller-filtered; direct comparisons cover captured projections only. Global private preservation uses unchanged whole-State fail-closed codec, source/compatibility proofs and complete stopped heap/stable backup."
+}

@@ -1,0 +1,23 @@
+{
+  "snapshotId": "00000000000000130000000001f088fe0101",
+  "timestamp_ns": 1792770870369723995,
+  "files": [
+    {
+      "file": "wasm_module.bin",
+      "bytes": 3069976,
+      "sha256": "aad0b7e133a27938ed25ebebbd5d4de5d7bb1793cf0d5ccbad5210c4644da259"
+    },
+    {
+      "file": "wasm_memory.bin",
+      "bytes": 2555904,
+      "sha256": "e8137f5f6aaf499c0a5bcf815ee85b43a78ebbfdaa790b1c128e50d3e9019a68"
+    },
+    {
+      "file": "stable_memory.bin",
+      "bytes": 100728832,
+      "sha256": "df445dc7fa80eb8f7d9f6977a9eb5675e35016e49240b973d656d6ab76b12bf4"
+    }
+  ],
+  "allNamedLengthsVerified": true,
+  "downloadOnlyNoSnapshotMutation": true
+}

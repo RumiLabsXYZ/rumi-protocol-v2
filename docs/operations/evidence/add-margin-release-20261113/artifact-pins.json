@@ -1,0 +1,19 @@
+{
+  "source": "4d8322a71059f146f6ec44c95add49789be2b6f8",
+  "backendRuntimeSource": "e2a0122a9a35393e2c0509540551594a403695ab",
+  "backendValidationCheckpoint": "7dd8cb29b878cec9d01f256457a631ff2b27f08a",
+  "optimizedSha256": "2961d2d84008e43756c25c3361b59717676ea92d68eb82951648dc5a4703ea08",
+  "gzipSha256": "8f6f5933e54fa44205760b9a8d1c3869135df43825eadfee70b20c62d0a0bd16",
+  "gzipExpandsToOptimized": true,
+  "optimizedBytes": 9894334,
+  "gzipBytes": 2405092,
+  "codeSectionBytes": 8957230,
+  "projectGuardBytes": 10223616,
+  "embeddedCanonicalDidSha256": "d8b0142e705e860640557b7ea6253a2a6027d7e96f3b15cfee9ba51fff0d2c97",
+  "buildRunnerSha256": "074eb4c7b9e919b62cfe18e72088ca58a8cbffbe1a01c20505b6aca89d3c47e5",
+  "upgradeArgsSha256": "522cf980fc7d90c91859c051f2ce726107d1a02adc1cb35ef4c083e9dc6de824",
+  "frontendBuildExecuted": false,
+  "productionMutation": false,
+  "expectedInstalledModuleSha256": "8f6f5933e54fa44205760b9a8d1c3869135df43825eadfee70b20c62d0a0bd16",
+  "installationArtifact": "deterministic gzip bytes, same installed-byte hashing convention as accepted SEC17 executor"
+}
