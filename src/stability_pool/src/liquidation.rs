@@ -748,6 +748,12 @@ fn chain_absorb_result_from_backend(
             reason: "backend returned zero chain collateral".to_string(),
         });
     }
+    if result.claim_id != plan.vault_id {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "backend chain claim id does not match requested vault".to_string(),
+        });
+    }
 
     Ok(ChainSpAbsorbResult {
         success: true,
@@ -2546,6 +2552,25 @@ pub(crate) fn prepare_chain_absorb_plan_in_state(
         return Err(StabilityPoolError::InsufficientPoolBalance);
     }
 
+    // Reject the locally knowable accounting failures before the icUSD burn
+    // and backend absorb, using the currently observed vault collateral. The
+    // backend state can still change across awaits, so the exact result is
+    // planned and committed atomically again after it is durably journaled.
+    state.plan_chain_liquidation_gains_at(
+        vault.vault_id,
+        vault.chain_collateral_sentinel,
+        &stables_consumed,
+        vault.collateral_native,
+    )?;
+    // The backend contract binds the chain claim id to the vault id. A legacy
+    // or conflicting source must be reconciled rather than overwritten after
+    // the burn has already crossed the ledger boundary.
+    state.ensure_chain_claim_source_available(
+        vault.vault_id,
+        vault.chain_collateral_sentinel,
+        vault.vault_id,
+    )?;
+
     Ok(ChainAbsorbPlan {
         vault_id: vault.vault_id,
         chain_id: vault.chain_id,
@@ -2581,19 +2606,16 @@ pub(crate) fn apply_chain_absorb_success_in_state_at(
         });
     }
 
-    state.record_chain_claim_source(
-        plan.chain_sentinel,
-        absorbed.claim_id,
-        absorbed.collateral_received_native,
-    );
-    state.process_chain_liquidation_gains_at(
+    let accounting_plan = state.plan_chain_liquidation_gains_at(
         plan.vault_id,
         plan.chain_sentinel,
         &plan.stables_consumed,
         absorbed.collateral_received_native,
-        absorbed.collateral_price_e8s,
-        timestamp,
-    );
+    )?;
+    state.commit_chain_absorb_gains(
+        accounting_plan,
+        Some((absorbed.claim_id, absorbed.collateral_received_native)),
+    )?;
     state.take_pending_chain_absorb(plan.vault_id);
     state.record_completed_chain_absorb(ChainSpAbsorbCompletion {
         vault_id: plan.vault_id,
@@ -2684,15 +2706,14 @@ pub(crate) fn prepare_cfx_claim_payout_in_state(
 pub(crate) fn rollback_cfx_claim_payout_in_state(
     state: &mut StabilityPoolState,
     plan: &CfxClaimPayoutPlan,
-) {
-    state.record_chain_claim_source(plan.chain_sentinel, plan.claim_id, plan.amount_wei);
-    let position = state
-        .deposits
-        .entry(plan.claimant)
-        .or_insert_with(|| DepositPosition::new(0));
-    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
-    let entry = claims.entry(plan.chain_sentinel).or_insert(0);
-    *entry = entry.saturating_add(plan.amount_wei);
+) -> Result<(), StabilityPoolError> {
+    state.restore_chain_claim_and_depositor_claim(
+        plan.claim_id,
+        plan.chain_sentinel,
+        plan.claim_id,
+        plan.claimant,
+        plan.amount_wei,
+    )
 }
 
 pub(crate) fn recredit_failed_cfx_claim_payout_in_state(
@@ -2736,18 +2757,13 @@ pub(crate) fn recredit_failed_cfx_claim_payout_in_state_at(
         return Ok(false);
     }
 
-    state.record_chain_claim_source(
+    state.restore_chain_claim_and_depositor_claim(
+        recovery.claim_id,
         recovery.chain_sentinel,
         recovery.claim_id,
+        recovery.claimant,
         recovery.amount_wei,
-    );
-    let position = state
-        .deposits
-        .entry(recovery.claimant)
-        .or_insert_with(|| DepositPosition::new(0));
-    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
-    let entry = claims.entry(recovery.chain_sentinel).or_insert(0);
-    *entry = entry.saturating_add(recovery.amount_wei);
+    )?;
 
     state.record_completed_cfx_claim_payout_recovery(CfxClaimPayoutRecoveryRecord {
         key,
@@ -3456,14 +3472,24 @@ pub async fn claim_cfx(
         Ok((Ok(_op_id),)) => Ok(plan.amount_wei),
         Ok((Err(error),)) if is_duplicate_chain_claim_error(&error) => Ok(plan.amount_wei),
         Ok((Err(error),)) => {
-            mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan));
+            if let Err(rollback_error) = mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan)) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id: plan.claim_id,
+                    reason: format!("backend rejected CFX claim ({:?}); atomic claim/source restore failed ({:?})", error, rollback_error),
+                });
+            }
             Err(StabilityPoolError::LiquidationFailed {
                 vault_id: plan.claim_id,
                 reason: format!("backend rejected CFX claim: {:?}", error),
             })
         }
         Err(_) => {
-            mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan));
+            if let Err(rollback_error) = mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan)) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id: plan.claim_id,
+                    reason: format!("claim call outcome is unknown and atomic claim/source restore failed ({:?})", rollback_error),
+                });
+            }
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", protocol_id),
                 method: "claim_chain_collateral".to_string(),
@@ -9863,6 +9889,57 @@ mod tests {
     }
 
     #[test]
+    fn chain_absorb_preflight_rejects_exhausted_counter_before_burn() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        state.total_liquidations_executed = u64::MAX;
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+
+        let error =
+            prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+                .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.total_liquidations_executed, u64::MAX);
+        assert!(!state.has_pending_chain_absorbs());
+    }
+
+    #[test]
+    fn chain_absorb_preflight_rejects_existing_claim_source_before_burn() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state.opt_in_cfx(&user_a(), sentinel).unwrap();
+        state
+            .record_chain_claim_source(77, sentinel, 77, 9)
+            .expect("legacy source");
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let sources_before = state.chain_claim_sources.clone();
+
+        let error =
+            prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+                .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.chain_claim_sources, sources_before);
+        assert!(!state.has_pending_chain_absorbs());
+    }
+
+    #[test]
     fn chain_absorb_intent_reuses_timestamp_and_rejects_conflicting_recompute() {
         let mut state = test_state();
         state
@@ -10549,6 +10626,35 @@ mod tests {
     }
 
     #[test]
+    fn chain_absorb_rejects_mismatched_backend_claim_id_without_mutation() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered");
+        let mut mismatched = backend_chain_result();
+        mismatched.claim_id = 78;
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let sources_before = state.chain_claim_sources.clone();
+
+        let error =
+            apply_chain_absorb_success_in_state_at(&mut state, &plan, mismatched, 123)
+                .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.chain_claim_sources, sources_before);
+        assert!(state.completed_chain_absorb(77).is_none());
+    }
+
+    #[test]
     fn chain_absorb_success_credits_cfx_claims_and_deducts_burned_icusd() {
         let mut state = test_state();
         state
@@ -10656,7 +10762,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 12);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
 
         let invalid = prepare_cfx_claim_payout_in_state(
             &mut state,
@@ -10706,7 +10812,7 @@ mod tests {
             "depleted source is pruned before await",
         );
 
-        rollback_cfx_claim_payout_in_state(&mut state, &plan);
+        rollback_cfx_claim_payout_in_state(&mut state, &plan).expect("restore claim and source");
         assert_eq!(
             state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
             12,
@@ -10730,7 +10836,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 12);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
         let plan = prepare_cfx_claim_payout_in_state(
             &mut state,
             user_a(),
@@ -10805,7 +10911,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 10);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
         let plan = prepare_cfx_claim_payout_in_state(
             &mut state,
             user_a(),
@@ -10913,7 +11019,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 10);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
         let plan = prepare_cfx_claim_payout_in_state(
             &mut state,
             user_a(),
@@ -10976,7 +11082,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 20);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 20);
+        state.record_chain_claim_source(0, sentinel, 77, 20).expect("initial chain claim source");
 
         let first = prepare_cfx_claim_payout_in_state(
             &mut state,
@@ -11050,7 +11156,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 5);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 5);
+        state.record_chain_claim_source(0, sentinel, 77, 5).expect("initial chain claim source");
         let before_claims = state.deposits[&user_a()].cfx_claims.clone();
         let before_sources = state.chain_claim_sources.clone();
 
