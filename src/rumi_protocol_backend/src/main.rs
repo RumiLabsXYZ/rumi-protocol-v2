@@ -441,9 +441,15 @@ fn inspect_message() {
     match method.as_str() {
         // Query-like reads exposed as update for certification: accept all callers
         // and the read-only offer preparation endpoint never transfers funds.
-        "icrc21_canister_call_consent_message"
-        | "icrc10_supported_standards"
-        | "prepare_redemption_offer" => {
+        "icrc21_canister_call_consent_message" => {
+            if rumi_protocol_backend::icrc21::consent_ingress_allowed(
+                &method,
+                ic_cdk::api::call::arg_data_raw_size(),
+            ) {
+                ic_cdk::api::call::accept_message();
+            }
+        }
+        "icrc10_supported_standards" | "prepare_redemption_offer" => {
             ic_cdk::api::call::accept_message();
         }
         // M2 EVM-native self-serve: authority is the EIP-712 signature, so the IC

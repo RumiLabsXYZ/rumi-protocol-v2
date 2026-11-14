@@ -38,6 +38,22 @@ const ORDINARY_LIQUIDATION_RECOVERY_POLL_SECONDS: u64 = 30;
 /// negligible cycle cost, while still surfacing drift long before it can trip a
 /// depositor's withdrawal.
 const LEDGER_RECONCILIATION_CHECK_SECONDS: u64 = 3600;
+/// Bound secondary Candid decoding and consent-message construction work.
+/// Legitimate Stability Pool calls are far smaller than this compatibility
+/// ceiling, including native payout destinations and conversion requests.
+const MAX_ICRC21_CONSENT_ARG_BYTES: usize = 64 * 1024;
+const MAX_ICRC21_CONSENT_METHOD_BYTES: usize = 256;
+const MAX_ICRC21_CONSENT_LANGUAGE_BYTES: usize = 64;
+const MAX_ICRC21_CONSENT_INGRESS_BYTES: usize = 128 * 1024;
+
+fn icrc21_ingress_allowed(method: &str, raw_size: usize) -> bool {
+    method != "icrc21_canister_call_consent_message"
+        || raw_size <= MAX_ICRC21_CONSENT_INGRESS_BYTES
+}
+
+fn icrc21_consent_arg_allowed(arg: &[u8]) -> bool {
+    arg.len() <= MAX_ICRC21_CONSENT_ARG_BYTES
+}
 
 pub(crate) fn pool_balance_mutation_blocked() -> bool {
     crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_pool_absorbs())
@@ -1671,10 +1687,45 @@ pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), St
 
 // ─── ICRC-21: Canister Call Consent Messages ───
 
+/// Reject oversized anonymous consent-preview ingress before outer Candid
+/// decoding.  This is only a single-replica cycle-cost filter; the replicated
+/// handler below independently bounds every attacker-controlled variable field.
+#[ic_cdk_macros::inspect_message]
+fn inspect_message() {
+    let method = ic_cdk::api::call::method_name();
+    if icrc21_ingress_allowed(&method, ic_cdk::api::call::arg_data_raw_size()) {
+        ic_cdk::api::call::accept_message();
+    }
+}
+
 #[update]
 pub fn icrc21_canister_call_consent_message(
     request: Icrc21ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResponse {
+    if !icrc21_consent_arg_allowed(&request.arg) {
+        return Icrc21ConsentMessageResponse::Err(Icrc21Error::ConsentMessageUnavailable(
+            Icrc21ErrorInfo {
+                description: format!(
+                    "Encoded call arguments exceed the {} byte consent preview limit",
+                    MAX_ICRC21_CONSENT_ARG_BYTES
+                ),
+            },
+        ));
+    }
+    if request.method.len() > MAX_ICRC21_CONSENT_METHOD_BYTES {
+        return Icrc21ConsentMessageResponse::Err(Icrc21Error::ConsentMessageUnavailable(
+            Icrc21ErrorInfo {
+                description: "Canister method name is too long".to_string(),
+            },
+        ));
+    }
+    if request.user_preferences.metadata.language.len() > MAX_ICRC21_CONSENT_LANGUAGE_BYTES {
+        return Icrc21ConsentMessageResponse::Err(Icrc21Error::ConsentMessageUnavailable(
+            Icrc21ErrorInfo {
+                description: "Language tag is too long".to_string(),
+            },
+        ));
+    }
     interest_recovery::ensure_unlocked();
     let message_text = match request.method.as_str() {
         "deposit" => {
@@ -2355,6 +2406,81 @@ mod tests {
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn consent_argument_limit_rejects_oversize_before_method_decode() {
+        let response = icrc21_canister_call_consent_message(Icrc21ConsentMessageRequest {
+            method: "opt_in_native_collateral".to_string(),
+            arg: vec![0; MAX_ICRC21_CONSENT_ARG_BYTES + 1],
+            user_preferences: Icrc21ConsentMessageSpec {
+                metadata: Icrc21ConsentMessageMetadata {
+                    language: "en".to_string(),
+                    utc_offset_minutes: None,
+                },
+                device_spec: None,
+            },
+        });
+
+        assert!(matches!(
+            response,
+            Icrc21ConsentMessageResponse::Err(Icrc21Error::ConsentMessageUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn consent_ingress_and_nested_argument_boundaries_are_inclusive() {
+        assert!(icrc21_ingress_allowed(
+            "icrc21_canister_call_consent_message",
+            MAX_ICRC21_CONSENT_INGRESS_BYTES
+        ));
+        assert!(!icrc21_ingress_allowed(
+            "icrc21_canister_call_consent_message",
+            MAX_ICRC21_CONSENT_INGRESS_BYTES + 1
+        ));
+        assert!(icrc21_ingress_allowed(
+            "deposit",
+            MAX_ICRC21_CONSENT_INGRESS_BYTES + 1
+        ));
+        assert!(icrc21_consent_arg_allowed(&vec![
+            0;
+            MAX_ICRC21_CONSENT_ARG_BYTES
+        ]));
+        assert!(!icrc21_consent_arg_allowed(&vec![
+            0;
+            MAX_ICRC21_CONSENT_ARG_BYTES + 1
+        ]));
+    }
+
+    #[test]
+    fn consent_request_rejects_oversized_method_and_language() {
+        let request = |method: String, language: String| Icrc21ConsentMessageRequest {
+            method,
+            arg: vec![],
+            user_preferences: Icrc21ConsentMessageSpec {
+                metadata: Icrc21ConsentMessageMetadata {
+                    language,
+                    utc_offset_minutes: None,
+                },
+                device_spec: None,
+            },
+        };
+
+        for invalid in [
+            request(
+                "m".repeat(MAX_ICRC21_CONSENT_METHOD_BYTES + 1),
+                "en".to_string(),
+            ),
+            request(
+                "deposit".to_string(),
+                "l".repeat(MAX_ICRC21_CONSENT_LANGUAGE_BYTES + 1),
+            ),
+        ] {
+            assert!(matches!(
+                icrc21_canister_call_consent_message(invalid),
+                Icrc21ConsentMessageResponse::Err(Icrc21Error::ConsentMessageUnavailable(_))
+            ));
+        }
     }
 
     #[test]
