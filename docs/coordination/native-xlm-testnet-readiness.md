@@ -1,6 +1,6 @@
 # Native XLM: testnet readiness packet
 
-Living document, first written 2026-11-14 at source commit `d38b6e46`; last updated after the signed-intent recording source (`a1760abb`, unbuilt). Updated as code progresses. Three columns matter: what exists in source, what is proven locally (mocked tests or unit tests with recorded receipts), and what has never run on a live network. Nothing here is live-proven.
+Living document, first written 2026-11-14 at source commit `d38b6e46`; last updated after the signed-intent recording validation PASS (`a1760abb`, fixture signature). Updated as code progresses. Three columns matter: what exists in source, what is proven locally (mocked tests or unit tests with recorded receipts), and what has never run on a live network. Nothing here is live-proven.
 
 ## Where things stand
 
@@ -14,7 +14,7 @@ Living document, first written 2026-11-14 at source commit `d38b6e46`; last upda
 | Unsigned settlement preparation | dormant test-only method | unit PASS (receipt `5f7f2a1d`) | not applicable |
 | Settlement funding and sequencing preflight | dormant test-only method (`d38b6e46`) | unit PASS (receipt `0aa05cb5`, 15 tests incl. prepare regression) | not applicable |
 | Signing the payment (threshold Ed25519) | `sign_payload_hash` exists, never called | none | not run |
-| Recording the exact signed intent before submission | dormant test-only method (`a1760abb`) taking an untrusted fixture signature (no verifier available), marks claim InFlight | written, not run (runner `370e949d`, 20 tests) | not run |
+| Recording the exact signed intent before submission | dormant test-only method (`a1760abb`) taking an untrusted fixture signature (no verifier available), marks claim InFlight | unit PASS with fixture signature (receipt `4e2ae10e`, 20 tests incl. regression) | not run |
 | Submission to Horizon | absent | none | not run |
 | Transaction status, replacement, reconciliation | pure helpers only, no driver | none for a driver | not run |
 | Claim status transitions and payout | absent (claims stay Pending) | none | not run |

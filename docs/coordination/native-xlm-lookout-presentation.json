@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production guards unchanged. Proven locally through the funding preflight (receipt 0aa05cb5). New test-only step that records the exact signed payment before submission and marks the claim in flight is source-complete but unbuilt (a1760abb); it uses an untrusted fixture signature. No real signing, submission, payout or testnet activity.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Code that records a signed payout before it is sent is written but not yet tested, and it uses a stand-in signature, not a real one. Real signing and sending on Stellar are still to be built; Rob does not need to act now.",
+  "summary": "XLM remains Frozen; production guards unchanged. Proven locally through the funding preflight and now the test-only step that records the exact signed payment before submission and marks the claim in flight (20 unit tests PASS, receipt 4e2ae10e), using an untrusted fixture signature. No real signing, submission, reconciliation, payout or testnet activity.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests now show a signed payout is recorded safely before it would be sent, using a stand-in signature rather than a real one. Real signing and sending on Stellar are still to be built; Rob does not need to act now.",
   "glossary": [
     {
       "term": "Stellar",

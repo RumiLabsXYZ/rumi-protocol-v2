@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Signed-intent recording is source-complete but unbuilt (a1760abb): test-only, fixture signature, no real signing. Its focused check (20 unit tests plus production check, runner 370e949d) needs a fresh slot. Then: real signing and the submission and reconciliation driver. No testnet action yet.",
+      "nextAction": "Signed-intent recording PASS with a fixture signature (receipt 4e2ae10e). Next source step: apply the existing transaction-status decision to an in-flight claim (settled, failed fee, hold, quarantine, replace), then a Horizon submission request builder. No real signing or testnet action yet.",
       "cardIds": [
         "WP3"
       ]
