@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Full withdrawal PASS retained. Next: dormant prepared settlement intent is source-complete but unbuilt (98b35c9a); its focused unit test and production check have not run. Settlement, signing, payout and live behaviour remain unproven; production stays Frozen.",
+      "status": "blocked",
+      "blockedReason": "The prepared-intent focused test is approved but has not started: writable disk is about 19.3 GiB, below the 30 GiB startup floor, and no safe cleanup was found.",
+      "nextAction": "Restore disk capacity, then request a fresh exclusive local slot to run the approved focused check of 98b35c9a (five unit tests plus production check). Floors are not lowered.",
       "cardIds": [
         "WP3"
       ]

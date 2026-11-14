@@ -1,6 +1,6 @@
 {
-  "summary": "XLM remains Frozen; production guards unchanged. Mocked PocketIC proves deposit, test-only borrow, repay, partial and full withdrawal to durable claims (full PASS, receipt 1caaefde). Next step, a dormant test-only unsigned settlement preparation for a claim, is source-complete but unbuilt (98b35c9a); its tests are written, not run. Settlement, signing, payout and live behaviour remain unproven.",
-  "plainSummary": "XLM still cannot be used as collateral in Rumi. Local tests cover deposit, borrow, repay and withdrawing everything; the first step toward actually paying out a withdrawal is written but not yet tested. Real payouts are still to be built; Rob does not need to act now.",
+  "summary": "XLM remains Frozen; production guards unchanged. Mocked PocketIC proves deposit, test-only borrow, repay, partial and full withdrawal to durable claims (full PASS, receipt 1caaefde). The dormant prepared settlement intent (98b35c9a) is unbuilt; its focused test is approved but not started because writable disk (~19.3 GiB) is below the 30 GiB startup floor and no safe cleanup was found. Next: capacity, then a fresh slot.",
+  "plainSummary": "XLM still cannot be used as collateral in Rumi. The next test is approved but cannot start because the build machine is short on disk space and nothing could be safely cleared. Once space is freed it will run; Rob does not need to act on the test itself.",
   "glossary": [
     {
       "term": "Stellar",
