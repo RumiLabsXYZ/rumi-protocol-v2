@@ -186,7 +186,17 @@ pub struct StabilityPoolState {
     // Admin / operational
     pub configuration: PoolConfiguration,
     pub liquidation_history: Vec<PoolLiquidationRecord>,
+    /// Legacy heap-style liquidation markers restored from a predecessor
+    /// snapshot. New code no longer writes this set: the pool-wide RAII guard
+    /// owns runtime exclusion, while the durable per-rail journals own retry.
+    /// `post_upgrade` consumes every restored entry exactly once.
     pub in_flight_liquidations: BTreeSet<u64>,
+    /// Restored liquidation markers that could not be matched to a durable
+    /// ordinary, 3USD, native-XRP, or chain absorb journal. Their external
+    /// effect is unknown, so the affected vault remains fail-closed until an
+    /// authorized operator reconciles the books and explicitly releases it.
+    #[serde(default)]
+    pub legacy_ambiguous_liquidation_vaults: Option<BTreeSet<u64>>,
     /// Durable identity for 3USD reserve absorbs. The row is written before
     /// the backend call so an ambiguous reply retries the same backend request.
     #[serde(default)]
@@ -357,6 +367,7 @@ impl Default for StabilityPoolState {
             },
             liquidation_history: Vec::new(),
             in_flight_liquidations: BTreeSet::new(),
+            legacy_ambiguous_liquidation_vaults: Some(BTreeSet::new()),
             pending_three_usd_absorbs: Some(BTreeMap::new()),
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
@@ -5194,6 +5205,69 @@ impl StabilityPoolState {
         }
         Ok(())
     }
+
+    /// Whether a durable journal can resume the exact economic operation for
+    /// this vault after an upgrade. A restored runtime marker that has no such
+    /// journal must never be interpreted as proof that the call had no effect.
+    pub fn has_durable_liquidation_intent_for_vault(&self, vault_id: u64) -> bool {
+        self.get_pending_ordinary_liquidation_for_vault(vault_id)
+            .is_some()
+            || self.get_pending_three_usd_absorb(vault_id).is_some()
+            || self.get_pending_native_xrp_absorb(vault_id).is_some()
+            || self.get_pending_chain_absorb(vault_id).is_some()
+    }
+
+    pub fn is_legacy_liquidation_quarantined(&self, vault_id: u64) -> bool {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_ref()
+            .is_some_and(|vaults| vaults.contains(&vault_id))
+    }
+
+    pub fn has_legacy_ambiguous_liquidation_quarantine(&self) -> bool {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_ref()
+            .is_some_and(|vaults| !vaults.is_empty())
+    }
+
+    pub fn legacy_ambiguous_liquidation_vaults(&self) -> Vec<u64> {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_ref()
+            .map(|vaults| vaults.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Classify every predecessor runtime marker before timers restart.
+    /// Journal-backed operations retain their durable row and become eligible
+    /// for their existing exact-identity recovery path. Unmatched operations
+    /// are moved to an explicit durable quarantine instead of being cleared or
+    /// retried on an unproved assumption.
+    pub fn reconcile_legacy_in_flight_liquidations_after_upgrade(
+        &mut self,
+    ) -> (usize, usize) {
+        let restored = std::mem::take(&mut self.in_flight_liquidations);
+        let mut recoverable = 0usize;
+        let mut ambiguous = 0usize;
+        for vault_id in restored {
+            if self.has_durable_liquidation_intent_for_vault(vault_id) {
+                recoverable += 1;
+            } else {
+                self.legacy_ambiguous_liquidation_vaults
+                    .get_or_insert_with(BTreeSet::new)
+                    .insert(vault_id);
+                ambiguous += 1;
+            }
+        }
+        (recoverable, ambiguous)
+    }
+
+    /// Release only the quarantine marker. The caller-facing admin endpoint
+    /// requires an emergency pause and no concurrent pool operation; any
+    /// necessary balance correction must be completed separately first.
+    pub fn release_legacy_liquidation_quarantine(&mut self, vault_id: u64) -> bool {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_mut()
+            .is_some_and(|vaults| vaults.remove(&vault_id))
+    }
 }
 
 // ─── Thread-local state + accessors ───
@@ -5280,6 +5354,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
             in_flight_liquidations: v1.in_flight_liquidations,
+            legacy_ambiguous_liquidation_vaults: Some(BTreeSet::new()),
             pending_three_usd_absorbs: Some(BTreeMap::new()),
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
@@ -7646,6 +7721,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_in_flight_migration_releases_journaled_and_quarantines_ambiguous() {
+        let mut state = test_state();
+        let journaled_vault = 4_101;
+        let ambiguous_vault = 4_102;
+        state
+            .prepare_three_usd_absorb(
+                journaled_vault,
+                100_000_000,
+                50_000_000,
+                ckusdc_ledger(),
+                icp_ledger(),
+                700_000_000,
+            )
+            .expect("journaled legacy vault");
+        state.in_flight_liquidations =
+            BTreeSet::from([journaled_vault, ambiguous_vault]);
+
+        assert_eq!(
+            state.reconcile_legacy_in_flight_liquidations_after_upgrade(),
+            (1, 1)
+        );
+        assert!(state.in_flight_liquidations.is_empty());
+        assert!(!state.is_legacy_liquidation_quarantined(journaled_vault));
+        assert!(state.is_legacy_liquidation_quarantined(ambiguous_vault));
+        assert!(state.has_legacy_ambiguous_liquidation_quarantine());
+        assert!(state.has_durable_liquidation_intent_for_vault(journaled_vault));
+
+        let bytes = Encode!(&state).expect("encode migrated liquidation state");
+        let mut restored = Decode!(&bytes, StabilityPoolState)
+            .expect("quarantine survives stable-state round trip");
+        assert!(restored.is_legacy_liquidation_quarantined(ambiguous_vault));
+        assert!(restored.release_legacy_liquidation_quarantine(ambiguous_vault));
+        assert!(!restored.is_legacy_liquidation_quarantined(ambiguous_vault));
+        assert!(!restored.has_legacy_ambiguous_liquidation_quarantine());
+        assert!(!restored.release_legacy_liquidation_quarantine(ambiguous_vault));
+    }
+
+    #[test]
     fn unallocated_interest_receipt_deduplicates_and_batches_fee_dust() {
         let mut state = test_state();
         state.interest_treasury = Some(Principal::from_slice(&[91]));
@@ -9522,6 +9635,7 @@ mod tests {
         // must decode without losing positions; pending refunds start empty.
         let mut current = test_state();
         add_deposit_direct(&mut current, user_a(), icusd_ledger(), 42_00000000);
+        current.in_flight_liquidations.insert(9_901);
         let v1 = StabilityPoolStateV1 {
             deposits: current.deposits.clone(),
             total_stablecoin_balances: current.total_stablecoin_balances.clone(),
@@ -9544,6 +9658,16 @@ mod tests {
         let bytes = Encode!(&v1).expect("encode v1 snapshot");
 
         let mut decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
+        assert!(decoded.in_flight_liquidations.contains(&9_901));
+        assert!(decoded
+            .legacy_ambiguous_liquidation_vaults()
+            .is_empty());
+        assert_eq!(
+            decoded.reconcile_legacy_in_flight_liquidations_after_upgrade(),
+            (0, 1)
+        );
+        assert!(decoded.in_flight_liquidations.is_empty());
+        assert!(decoded.is_legacy_liquidation_quarantined(9_901));
         assert!(decoded.pending_outbound_payouts.is_none());
         assert!(decoded.pending_withdrawals.is_none());
         decoded.reconcile_pending_withdrawals_after_upgrade();

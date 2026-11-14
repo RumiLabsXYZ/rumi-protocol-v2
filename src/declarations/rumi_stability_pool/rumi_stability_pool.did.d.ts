@@ -911,6 +911,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'admin_release_legacy_liquidation_quarantine' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'cancel_3usd_conversion' : ActorMethod<[bigint], SpRailWire_Result_4>,
   'cancel_ordinary_liquidation' : ActorMethod<
     [Uint8Array | number[]],
@@ -1010,6 +1015,11 @@ export interface _SERVICE {
   'get_ledger_reconciliation' : ActorMethod<
     [],
     { 'Ok' : Array<LedgerReconciliationEntry> } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'get_legacy_ambiguous_liquidation_vaults' : ActorMethod<
+    [],
+    { 'Ok' : BigUint64Array | bigint[] } |
       { 'Err' : StabilityPoolError }
   >,
   'get_liquidation_history' : ActorMethod<

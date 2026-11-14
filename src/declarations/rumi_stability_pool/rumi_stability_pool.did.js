@@ -964,6 +964,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'admin_release_legacy_liquidation_quarantine' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'cancel_3usd_conversion' : IDL.Func([IDL.Nat64], [SpRailWire_Result_4], []),
     'cancel_ordinary_liquidation' : IDL.Func(
         [IDL.Vec(IDL.Nat8)],
@@ -1121,6 +1126,16 @@ export const idlFactory = ({ IDL }) => {
           }),
         ],
         [],
+      ),
+    'get_legacy_ambiguous_liquidation_vaults' : IDL.Func(
+        [],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Vec(IDL.Nat64),
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        ['query'],
       ),
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
