@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-19",
-      "state": "Blocked",
+      "state": "In progress",
       "owner": "Ellis case/integration; Rowan backend accounting; independent safety review; Dorian later release",
       "scope": "Restore safe collateral top-ups to existing ICRC vaults",
-      "evidenceText": "Deployment approval5db235e8/SHA3571 is verified directly. Source4d8322a7 retains dualPASS and9backend/3PIC/134frontend checks. Automatic review rejected Cody-to-Dorian SEC19 allocation message before delivery because prior messaging confirmation coveredSEC17; unused grant released without retry or relay. Merritt requested the exact SEC19 confirmation in Cody chat. Build/publication not started. Ellis baseline: certified6428/API f0b/04e and fullstable5220/5414 unchanged; vault213 activeckSOL9decimals and owner balance covers requested amount+fees. Fullbackup/unchangedcodec preservation scope distinguished from owner-filtered queries; no false all-owner projection claim. No user financial action.",
+      "evidenceText": "Direct SEC19 messaging confirmation read in Cody originalhuman01a1dae8-f347-7083-b1a3-cf96fa39b81d. Fresh delivered allocationf3f83b12 consumed once by Dorian for exact4d frontend/auth build; rejected priorgrant stays released. Ellis refreshed certified6428/API f0b/04e baseline and vault213 active9decimalckSOL balance covering requestedamount+fees. Fullstableinventory refresh in progress. Retain134/3/9 checks and dualPASS; no repeatedtest/backendrebuild. Await actualnative/frozenartifact, preservation/upgrade/frontendpublication and independentlivechecks. No financialcanary.",
       "evidenceLinks": [
         {
           "title": "Source-bound cause, required recovery invariant and bounded remedy",

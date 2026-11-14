@@ -1,6 +1,6 @@
 {
-  "summary": "SEC19 deployment approved but allocation delivery is blocked by automatic messaging review (oldSEC17 confirmation does not coverSEC19). Unused grant released; exact confirmation pending in Codychat. Sourcechecks accepted; Ellis baseline and vault213 funding/metadata pass. No production build/publication or financialaction.",
-  "plainSummary": "The deposit repair is approved and its checks pass, but automatic review blocked delivery of the build allocation. Merritt has requested one exact messaging confirmation in Cody\u2019s chat. Vault213\u2019s ckSOL metadata and balance check out; deposits remain paused until the release is completed.",
+  "summary": "SEC19 messaging block cleared by direct confirmation. Fresh frontend/authbuild started underf3f83b12; Dorian publishes, Ellis verifies. Today baseline/ckSOLmetadata/balance checks pass. Production deposit route awaits paired deployment and readback.",
+  "plainSummary": "The messaging block is resolved and the approved frontend build has started. Dorian is handling the paired deployment while Ellis independently verifies artifacts, preserved state and the live interface. Deposits remain paused until those release checks finish.",
   "glossary": [
     {
       "term": "Stability Pool",
