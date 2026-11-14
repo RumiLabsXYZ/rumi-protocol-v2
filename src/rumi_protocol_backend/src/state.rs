@@ -8834,10 +8834,14 @@ impl State {
                 Some(c) => c,
                 None => return ICUSD::new(0), // unknown collateral — cannot liquidate
             };
-            let price = match config.last_price.and_then(Decimal::from_f64) {
-                Some(p) => p,
-                None => return ICUSD::new(0), // no price — cannot compute
-            };
+            // P01-F12 / P02-F08: use the price quoted before the caller's
+            // ledger await. `vault::liquidate_vault` calculates both the
+            // liquidator payout and the debt amount from this value, and the
+            // corresponding event persists it as `icp_rate`. Re-reading
+            // `config.last_price` here allowed an oracle update during the
+            // await to debit a different amount of collateral from the vault
+            // than the amount queued for payout.
+            let price = collateral_price.0;
             let decimals = config.decimals;
             let liq_bonus = self.get_liquidation_bonus_for(&ct);
 
@@ -15862,6 +15866,70 @@ mod tests {
             debt - pinned,
             "the amount APPLIED must equal the PINNED amount, not a re-evaluation against \
              the drifted dust_liquidation_threshold — icUSD pulled must always equal debt reduced"
+        );
+    }
+
+    #[test]
+    fn liq001_partial_collateral_debit_uses_pre_await_price() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq001-price-race");
+        let debt = ICUSD::new(500_000_000); // 5 icUSD
+        let collateral_amount = 670_000_000u64;
+        let liq_ratio = Ratio::from(dec!(1.3400));
+        let target_cr = Ratio::from(dec!(1.5000));
+        let bonus = Ratio::from(dec!(1.15));
+        liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
+
+        let vault = liq0xx_vault(902, ct, collateral_amount, debt.to_u64());
+        state.open_vault(vault.clone());
+        let pinned_price = UsdIcp::from(Decimal::ONE);
+        let pinned_debt = state.effective_liquidation_amount(&vault, pinned_price, None);
+        assert!(pinned_debt > ICUSD::new(0) && pinned_debt < debt);
+
+        let decimals = state.get_collateral_config(&ct).unwrap().decimals;
+        let expected_seizure = crate::numeric::try_icusd_to_collateral_amount_with_bonus(
+            pinned_debt,
+            pinned_price.0,
+            decimals,
+            bonus,
+        )
+        .unwrap()
+        .min(collateral_amount);
+
+        // Simulate an oracle update landing while the icUSD transfer is
+        // awaiting its ledger reply. A post-await read of this lower live
+        // price would seize more collateral than the pre-await payout quote.
+        state.collateral_configs.get_mut(&ct).unwrap().last_price = Some(0.5);
+        let drifted_seizure = crate::numeric::try_icusd_to_collateral_amount_with_bonus(
+            pinned_debt,
+            dec!(0.5),
+            decimals,
+            bonus,
+        )
+        .unwrap()
+        .min(collateral_amount);
+        assert_ne!(expected_seizure, drifted_seizure);
+
+        state.liquidate_vault(
+            902,
+            Mode::GeneralAvailability,
+            pinned_price,
+            Some(pinned_debt),
+        );
+
+        let remaining = state
+            .vault_id_to_vaults
+            .get(&902)
+            .expect("pinned partial liquidation must leave the vault open");
+        assert_eq!(
+            remaining.collateral_amount,
+            collateral_amount - expected_seizure,
+            "vault collateral debit must use the same pre-await price as the liquidator payout"
+        );
+        assert_ne!(
+            remaining.collateral_amount,
+            collateral_amount - drifted_seizure,
+            "a live oracle update must not change the committed liquidation terms"
         );
     }
 
