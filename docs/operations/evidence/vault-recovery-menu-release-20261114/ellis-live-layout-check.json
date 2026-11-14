@@ -1,0 +1,64 @@
+{
+  "actualAnonymousBrowser": true,
+  "allPassed": true,
+  "checks": [
+    {
+      "sourceFile": "recovery-live-vaults-desktop.json",
+      "sourceSha256": "76fa0fec89006acebb2abe771f7ab6f3b22b31bf564eb69e7ac0ec46906f3a68",
+      "url": "https://app.rumiprotocol.com/vaults",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scrollWidth": 1280,
+      "overflow": false,
+      "overlay": false,
+      "genericPrompt": false,
+      "version": {
+        "version": "1794685142389"
+      }
+    },
+    {
+      "sourceFile": "recovery-live-vaults-mobile.json",
+      "sourceSha256": "8b435170742b39fb5fcc12c46ae54bc6a1544a141ba8a8839f60a32da12728f9",
+      "url": "https://app.rumiprotocol.com/vaults",
+      "viewport": [
+        390,
+        844
+      ],
+      "scrollWidth": 390,
+      "overflow": false,
+      "overlay": false,
+      "genericPrompt": false
+    },
+    {
+      "sourceFile": "recovery-live-solana-mobile.json",
+      "sourceSha256": "613af5dade760bd0cb749603eafa6a2e35d142d734c26bfdda3d5562bc0a2f1f",
+      "url": "https://app.rumiprotocol.com/solana",
+      "viewport": [
+        390,
+        844
+      ],
+      "scrollWidth": 390,
+      "overflow": false,
+      "overlay": false,
+      "mintStatus": true
+    },
+    {
+      "sourceFile": "recovery-live-solana-desktop.json",
+      "sourceSha256": "c406f77f7855afa3a024fa8ec926d761794511734e338b5782afeab418d54320",
+      "url": "https://app.rumiprotocol.com/solana",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scrollWidth": 1280,
+      "overflow": false,
+      "overlay": false,
+      "mintStatus": true
+    }
+  ],
+  "connectedFlowEvidence": "23 mounted tests and mocked source fixture, not a real wallet signature",
+  "consoleLimitation": "Existing synthetic XRP logo 400s and unrelated metadata warnings",
+  "financialAction": false
+}

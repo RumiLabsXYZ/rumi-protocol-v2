@@ -3,6 +3,22 @@
 Accountable orchestrator: **Dorian**, reporting to Merritt. Established 2026-11-04.
 Lookout project ID: `rumi-release-operations`. This scoped lane owns portfolio items #13 and #15 and custodianship of parked #11. Existing release implementers, Cycle Sentinel cards CS-00 through CS-68, source branches and protected worktrees retain their ownership and history. No duplicate implementation team is created.
 
+## Recovery-menu frontend release — November 14, 2026
+
+The compact recovery menu is live in version **1794685142389**, exact reviewed
+source dc4b8f52/code8a64f818 under Rob's direct finish/verify/publish instruction.
+Stage699/activation700 add99immutable keys and update seven entry content sets;
+final5619keys/5813encodings preserves all5520prior properties and untouched
+encodings. Own101+9+5 and Ellis15public/certified/layout checks pass.
+[Live receipt](../operations/vault-recovery-menu-live-result-20261114.md).
+
+Unknown recovery state no longer creates the page-top card. Wallet → Recover a
+vault action provides secondary discovery; known saved/pending/error guidance
+remains prominent. Connected behavior is verified by23mounted tests and a mocked
+source fixture; anonymous live desktop/mobile layouts pass. Backend8f6/API d8b,
+frontendmodule04e, settings/controllers/permissions, SEC19 and financial holds
+remain unchanged. No customer signing or financial action was performed.
+
 ## Collateral-deposit release — November 14, 2026
 
 Exact source4d8322a7 is installed as backend8f6f5933 with frontend1794674286427
@@ -118,6 +134,7 @@ were never published. Existing reserve/financial holds remain.
 | ROPS-10 | Done — software live | Ellis source/case; Dorian release | SEC17 strict repayment residual forgiveness | Exact00cf550d/6428backend +1794555990015UI released under2d0ad23c. One187.34s batch/native0/CodyclosurePASS; stoppedbackup1c and other9snapshots preserved.693/694 known once;5124/5318 inventory preserves4824prior+300new/7sets;own302+9+5+Ellis13/public/certified/layoutPASS. [Live result](../operations/repayment-residual-live-result-20261113.md). Actual customer repayment acceptance remains unverified;SEC18excluded, no financial action or new approval needed for this completed software scope. |
 | ROPS-11 | Done — software live | Ellis source/case; Dorian release | SEC18 ckSOL mint progress and persistent completion UI | Exactab44413d/1794583637373 deployed under6e3fdaa7. One22.3479s batch/native0/CodyclosurePASS;695/696 known once;5220/5414 preserves5124prior+96new/7sets,98+9+5own/Ellis13public+certified+layoutPASS. [Live result](../operations/cksol-progress-frontend-live-result-20261113.md). Backend6428/repayment/AddMarginhold preserved; actual customer mint remains unverified, separate AddMarginrepair Ellis-owned. |
 | ROPS-12 | Done — software live | Ellis source/case; Dorian release | SEC19 receipt-bound collateral deposits and recovery | Exact4d/8f6 backend +1794674286427 UI installed under5db235e8. One21.375s frontend build/native0/Cody closure; no backend rebuild. Stage697/activation698 known once;5520/5714 preserves5220prior+300new/7sets; own302+9+5/public/module/API/settings/permissionsPASS. Stoppedbackup1d/other9retained; root-entry reader correction independently verified and pushed before remaining-only install/start. Captured liabilities/holds/config/custody preserved, known automatic timestamp reconciled. [Live receipt](../operations/add-margin-live-result-20261114.md). Ellis15public/certified/layoutPASS and fresh read-only vault213 metadata/balance coverage. Actual customer deposit/signing remains unverified; no financial canary. |
+| ROPS-13 | Done — software live | Ellis source/case; Dorian release | SEC20 focused recovery-control UX | Exact dc4b8f52/code8a64f818, version1794685142389, authorized by Rob01a1db85. One17.894s frontend/auth build under fresh931f allocation; Cody verified source/740files/476pairs/owned closure and released. Pushed pins3b7fc171/59e33b5; batches699/700 known once. Final5619/5813 preserves5520prior+99new/7sets; own101+9+5 and Ellis15public/certified/anonymous desktop-mobile PASS. Backend8f6/API d8b/frontend04e/settings/controllers/permissions and SEC19 preserved; no signing/financial action. [Live receipt](../operations/vault-recovery-menu-live-result-20261114.md). |
 | ROPS-03 | Ready | Dorian | Reconcile stale Cycle Sentinel operation cards | Existing CS-66/CS-68 records leave signer-screen proof and proposal 17 activation unresolved; [#416](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/416) is open/unmerged and source-only. Acceptance: timestamped read-only current policy/proposal/status evidence, with stale versus current facts separated and old card owners preserved. Next: one bounded read-only inspection at the next operations allocation. No maintenance-now, proposal execution, activation, funding or controller changes. |
 | ROPS-04 | Ready | Dorian | Produce a small operational-cost baseline | Acceptance: observation date, available cycle-burn/runway coverage, gaps and concrete cost drivers; no fabricated zeroes or savings claims. Next: reuse current Sentinel telemetry and available existing billing evidence, label unavailable inputs, and recommend only evidence-supported upkeep. Lower priority than release closeout and the portfolio's recovery work. |
 | COMMS-01 | Paused | Dorian | Preserve communications, X workflow and introductory video | Rob parked portfolio item #11. Acceptance: retain existing drafts and workflow history without drafting, publishing, scheduling or restarting workers. Next: resume only if Rob changes the parking decision. Blocker owner: Rob; this is deliberate parking, not a technical failure. |

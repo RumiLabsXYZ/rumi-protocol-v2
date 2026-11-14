@@ -1,0 +1,77 @@
+{
+  "source": "dc4b8f52a1e76a36791defb5f66005276d00d4a5",
+  "frontendVersion": "1794685142389",
+  "buildNativeExit": 0,
+  "buildCount": 1,
+  "allocationConsumedAndReleased": true,
+  "stageBatch": "699",
+  "activationBatch": "700",
+  "keys": 5619,
+  "encodings": 5813,
+  "all5520PriorKeysPropertiesAndUntouchedEncodingsPreserved": true,
+  "newKeys": 99,
+  "changedExistingEncodings": 7,
+  "stageServed": 101,
+  "finalServed": 9,
+  "primaryDomainReadbacks": 5,
+  "allOwnFinalChecksPass": true,
+  "modulesSettingsControllersAndPermissionsPreserved": true,
+  "productionWriteReceipts": [
+    {
+      "label": "stage-chunks-0",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-chunks-1",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-chunks-0",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "stage-chunks-1",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-create",
+      "method": "create_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "stage-create",
+      "method": "create_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "stage-commit",
+      "method": "commit_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-commit",
+      "method": "commit_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    }
+  ],
+  "productionWritesRepeated": false,
+  "backendLifecycleOrSnapshotOperation": false,
+  "walletOrFinancialAction": false,
+  "independentFinal": "PASS",
+  "independentPublicReadbacks": 15,
+  "independentCertifiedModuleApiAndControllers": "PASS",
+  "independentAnonymousDesktopMobile": "PASS",
+  "connectedWalletFlowEvidence": "23 mounted tests and mocked source fixture; no real signing"
+}
