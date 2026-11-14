@@ -55,7 +55,7 @@
       "title": "Verified deposits and borrowing",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Settlement decision application PASS with fixture decisions (receipt a65c3d4b). Next source step: a pure Horizon submission request builder, response reduction and advisory parser (test-only, no outcall). No real quorum, fee charging, signing, submission or testnet action yet.",
+      "nextAction": "Horizon submission request builder and advisory parser are source-complete but unbuilt (843e4e1c): test-only, no main.rs export, no outcall. Its focused check (22 horizon_rpc tests plus production check, runner 67e9d11c) needs a fresh slot. Then: a test-build driver wiring signing, recording, submission and reconciliation, which needs separate signing and outcall authorization.",
       "cardIds": [
         "WP3"
       ]
