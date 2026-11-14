@@ -53,9 +53,9 @@
     {
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
-      "status": "blocked",
-      "blockedReason": "The prepared-intent focused test is approved but has not started: writable disk is about 19.3 GiB, below the 30 GiB startup floor, and no safe cleanup was found.",
-      "nextAction": "Restore disk capacity, then request a fresh exclusive local slot to run the approved focused check of 98b35c9a (five unit tests plus production check). Floors are not lowered.",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Prepared settlement intent is locally validated (5 unit tests and production check PASS, receipt 5f7f2a1d), still test-only with untrusted fixture input and no endpoint. Not built: signing, account quorum and freshness, reconciliation, payout and live proof. Production stays Frozen.",
       "cardIds": [
         "WP3"
       ]
