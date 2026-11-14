@@ -3702,6 +3702,49 @@ pub struct CkSolRelayAttempt {
 // later upgrade, serde fills those fields from Default::default() instead of
 // failing. This prevents fallback to event replay (which causes interest drift).
 // The Default impl below is ONLY for this purpose, never for actual construction.
+#[derive(
+    candid::CandidType,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum UnsupportedIcrcOperation {
+    Transfer,
+    TransferFrom,
+    Approve,
+}
+
+/// Exact receipt and dispatch identity for the practically unreachable case
+/// where an ICRC ledger confirms an operation at a block index above u64::MAX.
+/// The protocol's historical event schemas use u64 block indexes, so silently
+/// narrowing that Nat would corrupt the receipt. Keeping the full tuple here
+/// places every generic ICRC dispatch on hold until an upgrade can reconcile
+/// the ledger-contract violation without retrying under a new identity.
+#[derive(
+    candid::CandidType,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct UnsupportedIcrcReceipt {
+    pub operation_id: u128,
+    pub operation: UnsupportedIcrcOperation,
+    pub ledger: Principal,
+    pub source: Option<icrc_ledger_types::icrc1::account::Account>,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount: candid::Nat,
+    pub fee: Option<candid::Nat>,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub block_index: candid::Nat,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -3712,6 +3755,13 @@ pub struct State {
     #[serde(deserialize_with = "deserialize_pending_keyed")]
     pub pending_excess_transfers: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Fail-closed receipts that cannot fit legacy u64 event fields. Any row
+    /// blocks generic ICRC dispatches that begin after the receipt is recorded
+    /// so a caller cannot retry a confirmed transfer under a fresh nonce and
+    /// debit twice. Calls already awaiting a ledger reply retain their own
+    /// immutable tuple and may add further rows before they return.
+    #[serde(default)]
+    pub unsupported_icrc_receipts: BTreeMap<u128, UnsupportedIcrcReceipt>,
     /// Caller-owned ordinary stability-pool liquidation journals. Rows are
     /// retained until the incoming payment and collateral payout both have
     /// definitive receipts or the request is explicitly cancelled/no-effect.
@@ -4709,6 +4759,7 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            unsupported_icrc_receipts: BTreeMap::new(),
             sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
@@ -4915,6 +4966,7 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            unsupported_icrc_receipts: BTreeMap::new(),
             sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,

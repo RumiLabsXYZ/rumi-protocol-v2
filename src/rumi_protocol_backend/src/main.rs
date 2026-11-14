@@ -20616,6 +20616,32 @@ async fn reconcile_vault51_icp_payout(block_index: u64) -> Result<rumi_protocol_
     rumi_protocol_backend::nicp_redemption::reconcile_owner_payout(block_index).await
 }
 
+/// Developer-only visibility into ledger receipts whose block indexes cannot
+/// be represented by Rumi's historical `u64` event schemas. The presence of
+/// any row intentionally holds all generic ICRC dispatches. There is no clear
+/// endpoint: reconciliation requires an operation-specific source upgrade so
+/// a confirmed transfer can never be discarded or retried as if it had no
+/// effect.
+#[candid_method(query)]
+#[query]
+fn get_unsupported_icrc_receipts(
+) -> Result<Vec<rumi_protocol_backend::state::UnsupportedIcrcReceipt>, String> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous()
+        || !read_state(|state| state.developer_principal == caller)
+    {
+        return Err("Unauthorized: developer only".to_string());
+    }
+
+    Ok(read_state(|state| {
+        state
+            .unsupported_icrc_receipts
+            .values()
+            .cloned()
+            .collect()
+    }))
+}
+
 // Keep last: export_service! only collects #[candid_method]s declared above it.
 #[cfg(test)]
 candid::export_service!();

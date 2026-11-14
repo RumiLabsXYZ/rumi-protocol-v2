@@ -389,6 +389,29 @@ pub fn set_cached_fee(ledger: Principal, fee: u64) {
     });
 }
 
+fn generic_icrc_dispatch_is_held() -> bool {
+    crate::state::read_state(|state| !state.unsupported_icrc_receipts.is_empty())
+}
+
+fn record_unsupported_icrc_receipt(
+    mut receipt: crate::state::UnsupportedIcrcReceipt,
+    block_index: Nat,
+) {
+    receipt.block_index = block_index;
+    crate::state::mutate_state(|state| {
+        state
+            .unsupported_icrc_receipts
+            .entry(receipt.operation_id)
+            .or_insert(receipt);
+    });
+}
+
+fn unsupported_icrc_receipt_message(operation: &str) -> String {
+    format!(
+        "ledger confirmed {operation} at a block index outside the supported u64 range; the exact receipt was quarantined and generic ICRC dispatch is held for operator reconciliation"
+    )
+}
+
 /// Query `icrc1_fee()` and update the cache. Returns the freshly-fetched fee.
 pub async fn refresh_fee_cache(ledger: Principal) -> Result<u64, String> {
     let fee = get_ledger_fee(ledger).await?;
@@ -476,9 +499,31 @@ pub async fn transfer_idempotent(
     op_nonce: u128,
     memo: Option<Memo>,
 ) -> Result<u64, TransferError> {
+    if generic_icrc_dispatch_is_held() {
+        return Err(TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "generic ICRC dispatch is held by an unrepresentable confirmed receipt"
+                .into(),
+        });
+    }
     let _default_account_guard = try_acquire_three_usd_default_account_guard(ledger, from_subaccount)?;
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
+    let receipt = crate::state::UnsupportedIcrcReceipt {
+        operation_id: op_nonce,
+        operation: crate::state::UnsupportedIcrcOperation::Transfer,
+        ledger,
+        source: Some(Account {
+            owner: ic_cdk::id(),
+            subaccount: from_subaccount,
+        }),
+        destination: to.clone(),
+        amount: Nat::from(amount),
+        fee: None,
+        created_at_time,
+        memo: memo.0.as_slice().to_vec(),
+        block_index: Nat::from(0u8),
+    };
 
     let client = ICRC1Client {
         runtime: CdkRuntime,
@@ -495,7 +540,7 @@ pub async fn transfer_idempotent(
         })
         .await;
 
-    handle_transfer_outcome(ledger, outer)
+    handle_transfer_outcome(ledger, outer, Some(receipt))
 }
 
 /// Idempotent transfer with an explicit, durable fee pin. Use for protocol
@@ -509,8 +554,30 @@ pub async fn transfer_idempotent_pinned_fee(
     op_nonce: u128,
     fee_e8s: u64,
 ) -> Result<u64, TransferError> {
+    if generic_icrc_dispatch_is_held() {
+        return Err(TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "generic ICRC dispatch is held by an unrepresentable confirmed receipt"
+                .into(),
+        });
+    }
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = nonce_to_memo(op_nonce);
+    let receipt = crate::state::UnsupportedIcrcReceipt {
+        operation_id: op_nonce,
+        operation: crate::state::UnsupportedIcrcOperation::Transfer,
+        ledger,
+        source: Some(Account {
+            owner: ic_cdk::id(),
+            subaccount: from_subaccount,
+        }),
+        destination: to.clone(),
+        amount: Nat::from(amount),
+        fee: Some(Nat::from(fee_e8s)),
+        created_at_time,
+        memo: memo.0.as_slice().to_vec(),
+        block_index: Nat::from(0u8),
+    };
     let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
     let outer = client.transfer(TransferArg {
         from_subaccount,
@@ -520,7 +587,7 @@ pub async fn transfer_idempotent_pinned_fee(
         memo: Some(memo),
         amount: Nat::from(amount),
     }).await;
-    handle_transfer_outcome(ledger, outer)
+    handle_transfer_outcome(ledger, outer, Some(receipt))
 }
 
 /// Idempotent ICRC-2 transfer_from. Same semantics as `transfer_idempotent`
@@ -533,8 +600,27 @@ pub async fn transfer_from_idempotent(
     op_nonce: u128,
     memo: Option<Memo>,
 ) -> Result<u64, TransferFromError> {
+    if generic_icrc_dispatch_is_held() {
+        return Err(TransferFromError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "generic ICRC dispatch is held by an unrepresentable confirmed receipt"
+                .into(),
+        });
+    }
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
+    let receipt = crate::state::UnsupportedIcrcReceipt {
+        operation_id: op_nonce,
+        operation: crate::state::UnsupportedIcrcOperation::TransferFrom,
+        ledger,
+        source: Some(from.clone()),
+        destination: to.clone(),
+        amount: Nat::from(amount),
+        fee: None,
+        created_at_time,
+        memo: memo.0.as_slice().to_vec(),
+        block_index: Nat::from(0u8),
+    };
 
     let client = ICRC1Client {
         runtime: CdkRuntime,
@@ -552,7 +638,7 @@ pub async fn transfer_from_idempotent(
         })
         .await;
 
-    handle_transfer_from_outcome(ledger, outer)
+    handle_transfer_from_outcome(ledger, outer, Some(receipt))
 }
 
 /// Submit the exact ICRC-2 arguments durably recorded by a V2 reserve ingress.
@@ -1400,11 +1486,34 @@ impl Drop for ThreeUsdReserveIngressGuard {
 fn handle_transfer_outcome(
     ledger: Principal,
     outer: Result<Result<Nat, TransferError>, (i32, String)>,
+    receipt: Option<crate::state::UnsupportedIcrcReceipt>,
 ) -> Result<u64, TransferError> {
     match outer {
-        Ok(Ok(block)) => Ok(block.0.to_u64().unwrap_or(0)),
+        Ok(Ok(block)) => match block.0.to_u64() {
+            Some(block) => Ok(block),
+            None => {
+                if let Some(receipt) = receipt {
+                    record_unsupported_icrc_receipt(receipt, block);
+                }
+                Err(TransferError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: unsupported_icrc_receipt_message("transfer"),
+                })
+            }
+        },
         Ok(Err(TransferError::Duplicate { duplicate_of })) => {
-            let block = duplicate_of.0.to_u64().unwrap_or(0);
+            let block = match duplicate_of.0.to_u64() {
+                Some(block) => block,
+                None => {
+                    if let Some(receipt) = receipt {
+                        record_unsupported_icrc_receipt(receipt, duplicate_of);
+                    }
+                    return Err(TransferError::GenericError {
+                        error_code: Nat::from(0u8),
+                        message: unsupported_icrc_receipt_message("duplicate transfer"),
+                    });
+                }
+            };
             log!(DEBUG,
                 "[transfer_idempotent] ledger {} reported Duplicate; treating as success (block {})",
                 ledger, block
@@ -1412,12 +1521,18 @@ fn handle_transfer_outcome(
             Ok(block)
         }
         Ok(Err(TransferError::BadFee { expected_fee })) => {
-            let fee = expected_fee.0.to_u64().unwrap_or(0);
-            log!(DEBUG,
-                "[transfer_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
-                ledger, fee
-            );
-            set_cached_fee(ledger, fee);
+            if let Some(fee) = expected_fee.0.to_u64() {
+                log!(DEBUG,
+                    "[transfer_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
+                    ledger, fee
+                );
+                set_cached_fee(ledger, fee);
+            } else {
+                log!(DEBUG,
+                    "[transfer_idempotent] ledger {} returned an out-of-range BadFee; leaving the fee cache unchanged",
+                    ledger
+                );
+            }
             Err(TransferError::BadFee { expected_fee })
         }
         Ok(Err(other)) => Err(other),
@@ -1431,11 +1546,34 @@ fn handle_transfer_outcome(
 fn handle_transfer_from_outcome(
     ledger: Principal,
     outer: Result<Result<Nat, TransferFromError>, (i32, String)>,
+    receipt: Option<crate::state::UnsupportedIcrcReceipt>,
 ) -> Result<u64, TransferFromError> {
     match outer {
-        Ok(Ok(block)) => Ok(block.0.to_u64().unwrap_or(0)),
+        Ok(Ok(block)) => match block.0.to_u64() {
+            Some(block) => Ok(block),
+            None => {
+                if let Some(receipt) = receipt {
+                    record_unsupported_icrc_receipt(receipt, block);
+                }
+                Err(TransferFromError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: unsupported_icrc_receipt_message("transfer_from"),
+                })
+            }
+        },
         Ok(Err(TransferFromError::Duplicate { duplicate_of })) => {
-            let block = duplicate_of.0.to_u64().unwrap_or(0);
+            let block = match duplicate_of.0.to_u64() {
+                Some(block) => block,
+                None => {
+                    if let Some(receipt) = receipt {
+                        record_unsupported_icrc_receipt(receipt, duplicate_of);
+                    }
+                    return Err(TransferFromError::GenericError {
+                        error_code: Nat::from(0u8),
+                        message: unsupported_icrc_receipt_message("duplicate transfer_from"),
+                    });
+                }
+            };
             log!(DEBUG,
                 "[transfer_from_idempotent] ledger {} reported Duplicate; treating as success (block {})",
                 ledger, block
@@ -1443,12 +1581,18 @@ fn handle_transfer_from_outcome(
             Ok(block)
         }
         Ok(Err(TransferFromError::BadFee { expected_fee })) => {
-            let fee = expected_fee.0.to_u64().unwrap_or(0);
-            log!(DEBUG,
-                "[transfer_from_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
-                ledger, fee
-            );
-            set_cached_fee(ledger, fee);
+            if let Some(fee) = expected_fee.0.to_u64() {
+                log!(DEBUG,
+                    "[transfer_from_idempotent] ledger {} returned BadFee (expected {}), refreshing cache",
+                    ledger, fee
+                );
+                set_cached_fee(ledger, fee);
+            } else {
+                log!(DEBUG,
+                    "[transfer_from_idempotent] ledger {} returned an out-of-range BadFee; leaving the fee cache unchanged",
+                    ledger
+                );
+            }
             Err(TransferFromError::BadFee { expected_fee })
         }
         Ok(Err(other)) => Err(other),
@@ -2485,7 +2629,7 @@ pub async fn mint_icusd_with_tuple(
     if confirmed.is_some_and(|block| block.0.to_u64().is_none()) {
         return DurableMintOutcome::ConfirmedBlockOutOfRange;
     }
-    match handle_transfer_outcome(tuple.ledger, outer) {
+    match handle_transfer_outcome(tuple.ledger, outer, None) {
         Ok(block) => DurableMintOutcome::Confirmed(block),
         Err(error) => DurableMintOutcome::Rejected(error),
     }
@@ -2510,7 +2654,7 @@ fn handle_borrow_mint_outcome(
             message: "borrow mint was confirmed at a block index outside the journal's supported range; operator reconciliation is required".to_string(),
         });
     }
-    handle_transfer_outcome(ledger, outer)
+    handle_transfer_outcome(ledger, outer, None)
 }
 
 #[cfg(test)]
@@ -3807,16 +3951,36 @@ fn ensure_sweep_amount_within_bounds(
 /// treats `ApproveError::Duplicate { duplicate_of }` as success (the approve
 /// already landed at that block — same effective allowance).
 pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, ApproveError> {
+    if generic_icrc_dispatch_is_held() {
+        return Err(ApproveError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "generic ICRC dispatch is held by an unrepresentable confirmed receipt"
+                .into(),
+        });
+    }
     let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = nonce_to_memo(op_nonce);
+    let spender_account = Account { owner: spender, subaccount: None };
+    let receipt = crate::state::UnsupportedIcrcReceipt {
+        operation_id: op_nonce,
+        operation: crate::state::UnsupportedIcrcOperation::Approve,
+        ledger,
+        source: Some(Account { owner: ic_cdk::id(), subaccount: None }),
+        destination: spender_account.clone(),
+        amount: Nat::from(amount),
+        fee: None,
+        created_at_time,
+        memo: memo.0.as_slice().to_vec(),
+        block_index: Nat::from(0u8),
+    };
 
     let result: Result<(Result<Nat, ApproveError>,), _> = ic_cdk::call(
         ledger,
         "icrc2_approve",
         (ApproveArgs {
             from_subaccount: None,
-            spender: Account { owner: spender, subaccount: None },
+            spender: spender_account,
             amount: Nat::from(amount),
             expected_allowance: None,
             expires_at: None,
@@ -3825,25 +3989,276 @@ pub async fn approve_icusd(spender: Principal, amount: u64) -> Result<u64, Appro
             memo: Some(memo),
         },),
     ).await;
-    match result {
-        Ok((Ok(block_index),)) => Ok(block_index.0.to_u64().unwrap_or(0)),
-        Ok((Err(ApproveError::Duplicate { duplicate_of }),)) => {
+    handle_approve_outcome(ledger, result.map(|(outcome,)| outcome), Some(receipt))
+}
+
+fn handle_approve_outcome(
+    ledger: Principal,
+    outer: Result<
+        Result<Nat, ApproveError>,
+        (ic_cdk::api::call::RejectionCode, String),
+    >,
+    receipt: Option<crate::state::UnsupportedIcrcReceipt>,
+) -> Result<u64, ApproveError> {
+    match outer {
+        Ok(Ok(block_index)) => match block_index.0.to_u64() {
+            Some(block) => Ok(block),
+            None => {
+                if let Some(receipt) = receipt {
+                    record_unsupported_icrc_receipt(receipt, block_index);
+                }
+                Err(ApproveError::GenericError {
+                    error_code: Nat::from(0u8),
+                    message: unsupported_icrc_receipt_message("approval"),
+                })
+            }
+        },
+        Ok(Err(ApproveError::Duplicate { duplicate_of })) => {
+            let block = match duplicate_of.0.to_u64() {
+                Some(block) => block,
+                None => {
+                    if let Some(receipt) = receipt {
+                        record_unsupported_icrc_receipt(receipt, duplicate_of);
+                    }
+                    return Err(ApproveError::GenericError {
+                        error_code: Nat::from(0u8),
+                        message: unsupported_icrc_receipt_message("duplicate approval"),
+                    });
+                }
+            };
             log!(DEBUG,
                 "[approve_icusd] ledger {} reported Duplicate; treating as success (block {})",
-                ledger, duplicate_of
+                ledger, block
             );
-            Ok(duplicate_of.0.to_u64().unwrap_or(0))
+            Ok(block)
         }
-        Ok((Err(ApproveError::BadFee { expected_fee }),)) => {
-            let fee = expected_fee.0.to_u64().unwrap_or(0);
-            set_cached_fee(ledger, fee);
+        Ok(Err(ApproveError::BadFee { expected_fee })) => {
+            if let Some(fee) = expected_fee.0.to_u64() {
+                set_cached_fee(ledger, fee);
+            } else {
+                log!(DEBUG,
+                    "[approve_icusd] ledger {} returned an out-of-range BadFee; leaving the fee cache unchanged",
+                    ledger
+                );
+            }
             Err(ApproveError::BadFee { expected_fee })
         }
-        Ok((Err(e),)) => Err(e),
+        Ok(Err(e)) => Err(e),
         Err((code, msg)) => Err(ApproveError::GenericError {
             error_code: Nat::from(code as u64),
             message: msg,
         }),
+    }
+}
+
+#[cfg(test)]
+mod generic_icrc_nat_boundary_tests {
+    use super::{
+        generic_icrc_dispatch_is_held, handle_approve_outcome, handle_transfer_from_outcome,
+        handle_transfer_outcome, LEDGER_FEE_CACHE,
+    };
+    use candid::{Nat, Principal};
+    use icrc_ledger_types::icrc1::account::Account;
+    use icrc_ledger_types::icrc1::transfer::TransferError;
+    use icrc_ledger_types::icrc2::approve::ApproveError;
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
+
+    fn wide() -> Nat {
+        Nat::from(u128::from(u64::MAX) + 1)
+    }
+
+    fn receipt(
+        operation_id: u128,
+        operation: crate::state::UnsupportedIcrcOperation,
+    ) -> crate::state::UnsupportedIcrcReceipt {
+        crate::state::UnsupportedIcrcReceipt {
+            operation_id,
+            operation,
+            ledger: Principal::from_slice(&[91]),
+            source: Some(Account {
+                owner: Principal::from_slice(&[1]),
+                subaccount: None,
+            }),
+            destination: Account {
+                owner: Principal::from_slice(&[2]),
+                subaccount: None,
+            },
+            amount: Nat::from(5u8),
+            fee: None,
+            created_at_time: 7,
+            memo: vec![8],
+            block_index: Nat::from(0u8),
+        }
+    }
+
+    fn assert_quarantined(operation_id: u128) {
+        let stored = crate::state::read_state(|state| {
+            state.unsupported_icrc_receipts.get(&operation_id).cloned()
+        })
+        .expect("wide confirmed receipt must be durable");
+        assert_eq!(stored.block_index, wide());
+        assert!(generic_icrc_dispatch_is_held());
+    }
+
+    #[test]
+    fn confirmed_wide_block_indexes_are_quarantined_and_hold_future_dispatch() {
+        let ledger = Principal::from_slice(&[91]);
+        crate::state::replace_state(crate::state::State::default());
+        assert!(matches!(
+            handle_transfer_outcome(
+                ledger,
+                Ok(Ok(wide())),
+                Some(receipt(1, crate::state::UnsupportedIcrcOperation::Transfer)),
+            ),
+            Err(TransferError::GenericError { .. })
+        ));
+        assert_quarantined(1);
+
+        crate::state::replace_state(crate::state::State::default());
+        assert!(matches!(
+            handle_transfer_from_outcome(
+                ledger,
+                Ok(Err(TransferFromError::Duplicate { duplicate_of: wide() })),
+                Some(receipt(
+                    2,
+                    crate::state::UnsupportedIcrcOperation::TransferFrom,
+                )),
+            ),
+            Err(TransferFromError::GenericError { .. })
+        ));
+        assert_quarantined(2);
+        let blocked_retry = futures::executor::block_on(super::transfer_from_idempotent(
+            ledger,
+            Account {
+                owner: Principal::from_slice(&[1]),
+                subaccount: None,
+            },
+            Account {
+                owner: Principal::from_slice(&[2]),
+                subaccount: None,
+            },
+            5,
+            99,
+            None,
+        ));
+        assert!(matches!(
+            blocked_retry,
+            Err(TransferFromError::GenericError { .. })
+        ));
+
+        crate::state::replace_state(crate::state::State::default());
+        assert!(matches!(
+            handle_approve_outcome(
+                ledger,
+                Ok(Ok(wide())),
+                Some(receipt(3, crate::state::UnsupportedIcrcOperation::Approve)),
+            ),
+            Err(ApproveError::GenericError { .. })
+        ));
+        assert_quarantined(3);
+    }
+
+    #[test]
+    fn wide_bad_fee_never_overwrites_the_cache_with_zero() {
+        let ledger = Principal::from_slice(&[92]);
+        LEDGER_FEE_CACHE.with(|cache| {
+            cache.borrow_mut().insert(ledger, (77, 1));
+        });
+
+        assert!(matches!(
+            handle_transfer_outcome(
+                ledger,
+                Ok(Err(TransferError::BadFee { expected_fee: wide() })),
+                None,
+            ),
+            Err(TransferError::BadFee { .. })
+        ));
+        assert!(matches!(
+            handle_transfer_from_outcome(
+                ledger,
+                Ok(Err(TransferFromError::BadFee { expected_fee: wide() })),
+                None,
+            ),
+            Err(TransferFromError::BadFee { .. })
+        ));
+        assert!(matches!(
+            handle_approve_outcome(
+                ledger,
+                Ok(Err(ApproveError::BadFee { expected_fee: wide() })),
+                None,
+            ),
+            Err(ApproveError::BadFee { .. })
+        ));
+
+        LEDGER_FEE_CACHE.with(|cache| {
+            assert_eq!(cache.borrow().get(&ledger).map(|(fee, _)| *fee), Some(77));
+            cache.borrow_mut().remove(&ledger);
+        });
+    }
+
+    #[test]
+    fn representable_blocks_keep_existing_success_semantics() {
+        let ledger = Principal::from_slice(&[93]);
+        assert_eq!(
+            handle_transfer_outcome(ledger, Ok(Ok(Nat::from(7u64))), None),
+            Ok(7)
+        );
+        assert_eq!(
+            handle_transfer_from_outcome(
+                ledger,
+                Ok(Err(TransferFromError::Duplicate { duplicate_of: Nat::from(8u64) })),
+                None,
+            ),
+            Ok(8)
+        );
+        assert_eq!(
+            handle_approve_outcome(ledger, Ok(Ok(Nat::from(9u64))), None),
+            Ok(9)
+        );
+    }
+
+    #[test]
+    fn legacy_state_without_quarantine_map_decodes_empty() {
+        let state = crate::state::State::default();
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let mut value: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let ciborium::value::Value::Map(fields) = &mut value else {
+            panic!("State CBOR must be a map")
+        };
+        fields.retain(|(key, _)| {
+            !matches!(key, ciborium::value::Value::Text(text) if text == "unsupported_icrc_receipts")
+        });
+        let mut legacy = Vec::new();
+        ciborium::ser::into_writer(&value, &mut legacy).unwrap();
+        let restored: crate::state::State =
+            ciborium::de::from_reader(legacy.as_slice()).unwrap();
+        assert!(restored.unsupported_icrc_receipts.is_empty());
+    }
+
+    #[test]
+    fn populated_wide_receipt_survives_state_cbor_round_trip() {
+        let mut state = crate::state::State::default();
+        let mut wide_receipt = receipt(44, crate::state::UnsupportedIcrcOperation::Transfer);
+        wide_receipt.block_index = wide();
+        state
+            .unsupported_icrc_receipts
+            .insert(wide_receipt.operation_id, wide_receipt.clone());
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let restored: crate::state::State =
+            ciborium::de::from_reader(encoded.as_slice()).unwrap();
+
+        assert_eq!(
+            restored.unsupported_icrc_receipts.get(&44),
+            Some(&wide_receipt)
+        );
+        assert_eq!(
+            restored.unsupported_icrc_receipts[&44].block_index,
+            wide()
+        );
     }
 }
 
