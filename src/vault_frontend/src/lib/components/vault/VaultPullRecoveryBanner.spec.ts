@@ -25,6 +25,7 @@ import Banner from './VaultPullRecoveryBanner.svelte';
 import { walletStore } from '$lib/stores/wallet';
 const mockWalletStore = walletStore as unknown as Writable<{ isConnected: boolean; loading: boolean; principal: Principal | null }>;
 import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
+import { VAULT_PULL_REVIEW_EVENT } from '$lib/services/protocol/vaultPullRecoveryNavigation';
 import { VAULT_PULL_STATUS_EVENT } from '$lib/services/protocol/vaultOperationJournal';
 let component: ReturnType<typeof mount>;
 let target: HTMLElement;
@@ -47,9 +48,8 @@ describe('Oisy vault recovery status consent', () => {
     expect(mocks.getSubmitted).not.toHaveBeenCalled();
     window.dispatchEvent(new CustomEvent(VAULT_PULL_STATUS_EVENT, { detail: { owner: owner.toText() } }));
     await tick(); expect(mocks.getSubmitted).not.toHaveBeenCalled();
-    const button = target.querySelector('button')!;
-    expect(button.textContent).toContain('Check pending vault action');
-    button.click(); await vi.waitFor(() => expect(mocks.getSubmitted).toHaveBeenCalledTimes(1)); await tick();
+    expect(target.querySelector('section')).toBeNull();
+    window.dispatchEvent(new CustomEvent(VAULT_PULL_REVIEW_EVENT, { detail: { owner: owner.toText() } })); await vi.waitFor(() => expect(mocks.getSubmitted).toHaveBeenCalledTimes(1)); await tick();
     expect(mocks.openChannel).toHaveBeenCalledWith(owner);
     expect(target.textContent).not.toContain('Check pending vault action');
   });
@@ -58,7 +58,7 @@ describe('Oisy vault recovery status consent', () => {
     let opened!: () => void;
     mocks.openChannel.mockImplementation(() => new Promise<void>(resolve => { opened = resolve; }));
     component = mount(Banner, { target }); await tick();
-    target.querySelector('button')!.click();
+    window.dispatchEvent(new CustomEvent(VAULT_PULL_REVIEW_EVENT, { detail: { owner: owner.toText() } }));
     mockWalletStore.set({ isConnected: true, loading: false, principal: Principal.selfAuthenticating(new Uint8Array([4, 5, 6])) } as any);
     await tick(); opened(); await tick();
     expect(mocks.getSubmitted).not.toHaveBeenCalled();
@@ -68,7 +68,7 @@ describe('Oisy vault recovery status consent', () => {
     let opened!: () => void;
     mocks.openChannel.mockImplementation(() => new Promise<void>(resolve => { opened = resolve; }));
     component = mount(Banner, { target }); await tick();
-    target.querySelector('button')!.click();
+    window.dispatchEvent(new CustomEvent(VAULT_PULL_REVIEW_EVENT, { detail: { owner: owner.toText() } }));
     walletSessionGeneration.set(1);
     await tick(); opened(); await tick();
     expect(mocks.getSubmitted).not.toHaveBeenCalled();

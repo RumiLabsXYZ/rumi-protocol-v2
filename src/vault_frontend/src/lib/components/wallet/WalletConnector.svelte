@@ -15,6 +15,7 @@
   import { threePoolService } from '../../services/threePoolService';
   import { formatTokenAmount } from '../../services/threePoolService';
   import QRCode from 'qrcode';
+  import { requestSavedVaultReview } from '../../services/protocol/vaultPullRecoveryNavigation';
 
   export let bitcoinOnly = false;
 
@@ -190,6 +191,11 @@
     } finally {
       connecting = false;
     }
+  }
+
+  function reviewVaultAction() {
+    showWalletDialog = false;
+    requestSavedVaultReview(account ?? '');
   }
 
   async function disconnectWallet() {
@@ -709,6 +715,18 @@
               </button>
 
               <button
+                class="dropdown-action-row dropdown-action-recovery"
+                on:click|stopPropagation={reviewVaultAction}
+                title={isInternetIdentity ? 'Check for a saved or interrupted vault action.' : 'Check for a saved request. Your wallet may ask you to confirm the status check.'}
+              >
+                <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 11a9 9 0 1 1 2.7 7M3 4v7h7" />
+                  <path d="M12 7v5l3 2" />
+                </svg>
+                <span>Recover a vault action</span>
+              </button>
+
+              <button
                 class="dropdown-action-row dropdown-action-disconnect"
                 on:click|stopPropagation={disconnectWallet}
               >
@@ -1177,6 +1195,8 @@
   .dropdown-action-refresh:hover {
     background: rgba(139, 92, 246, 0.08);
   }
+  .dropdown-action-recovery { color: rgba(255, 255, 255, 0.65); }
+  .dropdown-action-recovery:hover { background: rgba(255, 255, 255, 0.05); }
   .dropdown-action-disconnect {
     color: rgba(255, 255, 255, 0.4);
   }
