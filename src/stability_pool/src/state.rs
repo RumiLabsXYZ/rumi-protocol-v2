@@ -3104,21 +3104,32 @@ impl StabilityPoolState {
                 .ok_or(StabilityPoolError::NoPositionFound)?;
             let removed = position
                 .native_payout_addresses
-                .get_or_insert_with(BTreeMap::new)
-                .remove(&collateral_type);
-            position
-                .native_payout_destination_tags
-                .get_or_insert_with(BTreeMap::new)
-                .remove(&collateral_type);
+                .as_mut()
+                .and_then(|addresses| addresses.remove(&collateral_type));
             if removed.is_none() {
                 return Err(StabilityPoolError::AlreadyOptedOut {
                     collateral: collateral_type,
                 });
             }
+            if let Some(tags) = position.native_payout_destination_tags.as_mut() {
+                tags.remove(&collateral_type);
+            }
             return Ok(());
         }
         if self.is_chain_collateral_sentinel(&collateral_type) {
             return self.opt_out_cfx(user, collateral_type);
+        }
+        // A position is opted in by default, so retaining arbitrary opt-out
+        // keys lets any depositor grow the upgrade-encoded state without
+        // bound. Only admin-registered collateral and the fixed legacy sunset
+        // set are meaningful here. Legacy sunset participants must still be
+        // able to leave even when that collateral is no longer registered.
+        if !self.collateral_registry.contains_key(&collateral_type)
+            && !sunset_collaterals().contains(&collateral_type)
+        {
+            return Err(StabilityPoolError::CollateralNotFound {
+                ledger: collateral_type,
+            });
         }
         let position = self
             .deposits
@@ -3200,10 +3211,11 @@ impl StabilityPoolState {
             .deposits
             .get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
-        let opted_in = position
+        let removed = position
             .opted_in_chain_collateral
-            .get_or_insert_with(BTreeSet::new);
-        if !opted_in.remove(&sentinel) {
+            .as_mut()
+            .is_some_and(|opted_in| opted_in.remove(&sentinel));
+        if !removed {
             return Err(StabilityPoolError::AlreadyOptedOut {
                 collateral: sentinel,
             });
@@ -6599,6 +6611,57 @@ mod tests {
             .opt_in_collateral(&user_a(), icp_ledger())
             .unwrap_err();
         assert!(matches!(err, StabilityPoolError::AlreadyOptedIn { .. }));
+    }
+
+    #[test]
+    fn opt_out_rejects_unregistered_collateral_without_growing_state() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        let unknown = Principal::self_authenticating(b"unregistered collateral");
+        let before = state.deposits[&user_a()].opted_out_collateral.clone();
+
+        let err = state
+            .opt_out_collateral(&user_a(), unknown)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, StabilityPoolError::CollateralNotFound { ledger } if ledger == unknown)
+        );
+        assert_eq!(state.deposits[&user_a()].opted_out_collateral, before);
+    }
+
+    #[test]
+    fn failed_native_and_chain_opt_outs_do_not_initialize_legacy_fields() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        let position = state.deposits.get_mut(&user_a()).unwrap();
+        position.native_payout_addresses = None;
+        position.native_payout_destination_tags = None;
+        position.opted_in_chain_collateral = None;
+
+        let xrp_error = state
+            .opt_out_collateral(&user_a(), xrp_ledger())
+            .unwrap_err();
+        assert!(matches!(
+            xrp_error,
+            StabilityPoolError::AlreadyOptedOut { collateral } if collateral == xrp_ledger()
+        ));
+        assert!(state.deposits[&user_a()].native_payout_addresses.is_none());
+        assert!(state.deposits[&user_a()]
+            .native_payout_destination_tags
+            .is_none());
+
+        let chain_error = state
+            .opt_out_collateral(&user_a(), cfx_sentinel())
+            .unwrap_err();
+        assert!(matches!(
+            chain_error,
+            StabilityPoolError::AlreadyOptedOut { collateral } if collateral == cfx_sentinel()
+        ));
+        assert!(state.deposits[&user_a()]
+            .opted_in_chain_collateral
+            .is_none());
     }
 
     #[test]
