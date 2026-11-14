@@ -911,6 +911,7 @@ service : (StabilityPoolInitArgs) -> {
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   admin_recover_ambiguous_chain_burn : (nat64, opt nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   admin_recover_ambiguous_native_xrp_burn : (nat64, opt nat64) -> (variant { Ok; Err : StabilityPoolError });
+  admin_release_legacy_liquidation_quarantine : (nat64) -> (variant { Ok; Err : StabilityPoolError });
   scan_chain_absorb_candidates : (opt nat64) -> (variant { Ok : vec ChainSpAbsorbCandidate; Err : StabilityPoolError });
   set_chain_absorb_auto_config : (ChainAbsorbAutoConfig) -> (variant { Ok; Err : StabilityPoolError });
 
@@ -946,6 +947,7 @@ service : (StabilityPoolInitArgs) -> {
   get_interest_mint_receipt_capacity : () -> (InterestMintReceiptCapacity) query;
   get_user_position : (opt principal) -> (opt UserStabilityPosition) query;
   get_liquidation_history : (opt nat64) -> (vec PoolLiquidationRecord) query;
+  get_legacy_ambiguous_liquidation_vaults : () -> (variant { Ok : vec nat64; Err : StabilityPoolError }) query;
   check_pool_capacity : (principal, nat64) -> (bool) query;
   check_chain_absorb_capacity : (principal, nat64) -> (bool) query;
   validate_pool_state : () -> (variant { Ok : text; Err : text }) query;

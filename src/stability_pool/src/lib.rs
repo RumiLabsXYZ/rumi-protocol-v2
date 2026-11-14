@@ -55,8 +55,13 @@ fn icrc21_consent_arg_allowed(arg: &[u8]) -> bool {
     arg.len() <= MAX_ICRC21_CONSENT_ARG_BYTES
 }
 
-pub(crate) fn pool_balance_mutation_blocked() -> bool {
+fn pool_balance_mutation_blocked_without_legacy_quarantine() -> bool {
     crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_pool_absorbs())
+}
+
+pub(crate) fn pool_balance_mutation_blocked() -> bool {
+    pool_balance_mutation_blocked_without_legacy_quarantine()
+        || read_state(|s| s.has_legacy_ambiguous_liquidation_quarantine())
 }
 
 pub(crate) fn ensure_pool_balance_mutation_allowed() -> Result<(), StabilityPoolError> {
@@ -90,6 +95,9 @@ fn cache_virtual_price(
 pub(crate) fn pool_token_balance_mutation_blocked(ledgers: &[Principal]) -> bool {
     crate::pool_guard::liquidation_in_progress()
         || read_state(|state| {
+            if state.has_legacy_ambiguous_liquidation_quarantine() {
+                return true;
+            }
             let chain_intersects = state.pending_chain_absorbs().iter().any(|intent| {
                 ledgers
                     .iter()
@@ -190,6 +198,17 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    let (journal_backed, quarantined) = mutate_state(|state| {
+        state.reconcile_legacy_in_flight_liquidations_after_upgrade()
+    });
+    if journal_backed > 0 || quarantined > 0 {
+        log!(
+            INFO,
+            "SP liquidation migration: released {} journal-backed runtime markers for exact recovery; quarantined {} unmatched legacy markers",
+            journal_backed,
+            quarantined
+        );
+    }
     let conversion_reconciled = conversion::reconcile_after_upgrade();
     if conversion_reconciled > 0 {
         log!(
@@ -1685,6 +1704,57 @@ pub fn update_pool_configuration(new_config: PoolConfiguration) -> Result<(), St
     Ok(())
 }
 
+/// Admin-only inventory of legacy liquidation markers whose external outcome
+/// could not be bound to a durable journal during upgrade migration.
+#[query]
+pub fn get_legacy_ambiguous_liquidation_vaults(
+) -> Result<Vec<u64>, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    Ok(read_state(|state| {
+        state.legacy_ambiguous_liquidation_vaults()
+    }))
+}
+
+/// Release a reconciled legacy quarantine while the pool is paused. This does
+/// not alter balances or claim that the predecessor call succeeded; operators
+/// must first reconcile any external effect and use the existing correction
+/// endpoints when required.
+#[update]
+pub fn admin_release_legacy_liquidation_quarantine(
+    vault_id: u64,
+) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if !read_state(|state| state.configuration.emergency_pause)
+        || crate::pool_guard::liquidation_in_progress()
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    ensure_no_pool_balance_async_in_flight()?;
+    if read_state(|state| state.has_durable_liquidation_intent_for_vault(vault_id)) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    if !mutate_state(|state| state.release_legacy_liquidation_quarantine(vault_id)) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "vault is not in the legacy ambiguous liquidation quarantine".to_string(),
+        });
+    }
+    log!(
+        INFO,
+        "Legacy ambiguous liquidation quarantine released for vault {} by {} after operator reconciliation",
+        vault_id,
+        caller
+    );
+    Ok(())
+}
+
 // ─── ICRC-21: Canister Call Consent Messages ───
 
 /// Reject oversized anonymous consent-preview ingress before outer Candid
@@ -2280,6 +2350,9 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
+    if read_state(|s| s.has_legacy_ambiguous_liquidation_quarantine()) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     mutate_state(|s| {
         s.configuration.emergency_pause = false;
         s.push_event(caller, PoolEventType::OperationsResumed);
@@ -2349,7 +2422,17 @@ pub fn admin_correct_balance(
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    ensure_pool_balance_mutation_allowed()?;
+    let legacy_reconciliation_window = read_state(|s| {
+        s.configuration.emergency_pause && s.has_legacy_ambiguous_liquidation_quarantine()
+    });
+    if legacy_reconciliation_window {
+        if pool_balance_mutation_blocked_without_legacy_quarantine() {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        ensure_no_pool_balance_async_in_flight()?;
+    } else {
+        ensure_pool_balance_mutation_allowed()?;
+    }
     let msg = mutate_state(|s| {
         let result = s.correct_balance(user, token_ledger, correct_amount);
         s.push_event(
@@ -2543,6 +2626,28 @@ mod tests {
                 Err(StabilityPoolError::SystemBusy)
             ),
             "interest revenue and admin balance correction must not mutate live denominator while pending",
+        );
+
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn legacy_ambiguous_liquidation_holds_all_pool_mutations() {
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+        mutate_state(|state| {
+            state.configuration.emergency_pause = true;
+            state
+                .legacy_ambiguous_liquidation_vaults
+                .get_or_insert_with(std::collections::BTreeSet::new)
+                .insert(8_801);
+        });
+
+        assert!(pool_balance_mutation_blocked());
+        assert!(pool_token_balance_mutation_blocked(&[principal(10)]));
+        assert!(pool_token_balance_mutation_blocked(&[principal(99)]));
+        assert!(
+            !pool_balance_mutation_blocked_without_legacy_quarantine(),
+            "the paused admin reconciliation window remains reachable when no exact intent is pending",
         );
 
         crate::state::replace_state(crate::state::StabilityPoolState::default());

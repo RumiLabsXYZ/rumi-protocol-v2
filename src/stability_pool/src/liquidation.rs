@@ -902,6 +902,18 @@ fn ensure_no_other_pending_pool_absorb_for_chain(
     Ok(())
 }
 
+fn ensure_legacy_quarantine_allows_chain_absorb(
+    state: &StabilityPoolState,
+    vault_id: u64,
+) -> Result<(), StabilityPoolError> {
+    if state.has_legacy_ambiguous_liquidation_quarantine()
+        && state.get_pending_chain_absorb(vault_id).is_none()
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
 fn ensure_no_other_pending_pool_absorb_for_native_xrp(
     state: &StabilityPoolState,
     vault_id: u64,
@@ -1762,9 +1774,6 @@ pub(crate) async fn reconcile_pending_native_xrp_absorb_from_status(
     vault_id: u64,
 ) -> Result<(), StabilityPoolError> {
     let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
-    if read_state(|state| !state.in_flight_liquidations.is_empty()) {
-        return Err(StabilityPoolError::SystemBusy);
-    }
     let intent =
         read_state(|state| state.get_pending_native_xrp_absorb(vault_id)).ok_or_else(|| {
             StabilityPoolError::LiquidationFailed {
@@ -1787,10 +1796,6 @@ pub(crate) async fn reconcile_pending_native_xrp_absorb_from_status(
     {
         return Err(StabilityPoolError::SystemBusy);
     }
-    mutate_state(|state| {
-        state.in_flight_liquidations.insert(vault_id);
-    });
-
     let recovery = async {
         let protocol_id = read_state(|state| state.protocol_canister_id);
         let status = if let Some(result) = intent.backend_result.clone() {
@@ -1922,10 +1927,6 @@ pub(crate) async fn reconcile_pending_native_xrp_absorb_from_status(
         }
     }
     .await;
-
-    mutate_state(|state| {
-        state.in_flight_liquidations.remove(&vault_id);
-    });
     recovery
 }
 
@@ -2785,6 +2786,15 @@ pub async fn notify_liquidatable_vaults(
         return vec![];
     }
 
+    if read_state(|s| s.has_legacy_ambiguous_liquidation_quarantine()) {
+        log!(
+            INFO,
+            "Pool has an unresolved legacy liquidation outcome — ignoring {} liquidatable vaults",
+            vaults.len()
+        );
+        return vec![];
+    }
+
     if crate::ensure_no_pool_balance_async_in_flight().is_err() {
         log!(INFO, "notify_liquidatable_vaults: a stablecoin balance operation is still in flight; skipping this batch");
         return vec![];
@@ -2813,11 +2823,13 @@ pub async fn notify_liquidatable_vaults(
 
     let mut results = Vec::new();
     for vault_info in vaults.into_iter().take(max_batch) {
-        // Skip if already in-flight
-        if read_state(|s| s.in_flight_liquidations.contains(&vault_info.vault_id)) {
+        // A predecessor runtime marker without a durable journal has an
+        // unknown external outcome. Keep only that vault fail-closed until an
+        // operator reconciles and explicitly releases its quarantine.
+        if read_state(|s| s.is_legacy_liquidation_quarantined(vault_info.vault_id)) {
             log!(
                 INFO,
-                "Vault {} already in-flight, skipping",
+                "Vault {} has an unresolved legacy liquidation outcome, skipping",
                 vault_info.vault_id
             );
             continue;
@@ -2839,17 +2851,7 @@ pub async fn notify_liquidatable_vaults(
             continue;
         }
 
-        // Mark as in-flight
-        mutate_state(|s| {
-            s.in_flight_liquidations.insert(vault_info.vault_id);
-        });
-
         let result = execute_single_liquidation(&vault_info).await;
-
-        // Clear in-flight
-        mutate_state(|s| {
-            s.in_flight_liquidations.remove(&vault_info.vault_id);
-        });
 
         if result.success {
             log!(
@@ -2890,9 +2892,13 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
+    if read_state(|s| s.has_legacy_ambiguous_liquidation_quarantine()) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+
     crate::ensure_no_pool_balance_async_in_flight()?;
 
-    if read_state(|s| s.in_flight_liquidations.contains(&vault_id)) {
+    if read_state(|s| s.is_legacy_liquidation_quarantined(vault_id)) {
         return Err(StabilityPoolError::SystemBusy);
     }
 
@@ -2939,13 +2945,7 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
         return Err(StabilityPoolError::InsufficientPoolBalance);
     }
 
-    mutate_state(|s| {
-        s.in_flight_liquidations.insert(vault_id);
-    });
     let result = execute_single_liquidation(&vault_info).await;
-    mutate_state(|s| {
-        s.in_flight_liquidations.remove(&vault_id);
-    });
 
     Ok(result)
 }
@@ -3121,7 +3121,10 @@ async fn sp_absorb_chain_vault_core(
 
     crate::ensure_no_pool_balance_async_in_flight()?;
     let _liq_guard = crate::pool_guard::SpLiquidationGuard::new()?;
-    read_state(|s| ensure_no_other_pending_pool_absorb_for_chain(s, vault_id))?;
+    read_state(|s| {
+        ensure_no_other_pending_pool_absorb_for_chain(s, vault_id)?;
+        ensure_legacy_quarantine_allows_chain_absorb(s, vault_id)
+    })?;
     if let Some(intent) = read_state(|s| s.get_pending_chain_absorb(vault_id)) {
         let plan = chain_absorb_plan_from_intent(&intent);
         if let Some(result) = intent.backend_result.clone() {
@@ -7034,6 +7037,35 @@ mod tests {
     use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
     use icrc_ledger_types::icrc1::transfer::Memo;
     use serde_bytes::ByteBuf;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn notification_holds_pool_for_legacy_ambiguous_liquidation() {
+        let mut state = test_state();
+        let quarantined_vault_id = 8_801;
+        let candidate_vault_id = 8_802;
+        state
+            .legacy_ambiguous_liquidation_vaults
+            .get_or_insert_with(BTreeSet::new)
+            .insert(quarantined_vault_id);
+        replace_state(state);
+
+        let results = futures::executor::block_on(notify_liquidatable_vaults(vec![
+            LiquidatableVaultInfo {
+                vault_id: candidate_vault_id,
+                collateral_type: xrp_ledger(),
+                debt_amount: 100_000_000,
+                collateral_amount: 1_000_000,
+                recommended_liquidation_amount: 100_000_000,
+                collateral_price_e8s: 50_000_000,
+            },
+        ]));
+
+        assert!(results.is_empty());
+        assert!(read_state(|state| state
+            .is_legacy_liquidation_quarantined(quarantined_vault_id)));
+        replace_state(StabilityPoolState::default());
+    }
 
     fn ambiguous_chain_burn_fixture() -> (StabilityPoolState, ChainSpAbsorbIntent) {
         let mut state = test_state();
@@ -8831,6 +8863,10 @@ mod tests {
         let mut state = test_state();
         // Intentionally leave the liquidatable list empty: recovery is driven
         // by durable burn intents, not by the live liquidation discovery view.
+        state
+            .legacy_ambiguous_liquidation_vaults
+            .get_or_insert_with(BTreeSet::new)
+            .insert(99);
         for vault_id in [12, 24, 36] {
             let intent = prepare_or_reuse_native_xrp_absorb_intent_in_state(
                 &mut state,
@@ -8858,6 +8894,8 @@ mod tests {
         }
         replace_state(state);
 
+        // An unrelated unmatched predecessor marker must not starve exact,
+        // proof-bearing recovery for journaled native-XRP absorbs.
         assert_eq!(pending_native_xrp_recovery_vault_ids(None, 2), vec![12, 36]);
         assert_eq!(pending_native_xrp_recovery_vault_ids(Some(12), 1), vec![36]);
         assert!(pending_native_xrp_recovery_vault_ids(None, 0).is_empty());
@@ -9555,6 +9593,39 @@ mod tests {
             ensure_no_other_pending_pool_absorb_for_chain(&state, 77),
             Err(StabilityPoolError::SystemBusy)
         ));
+    }
+
+    #[test]
+    fn legacy_quarantine_blocks_new_chain_absorb_but_allows_exact_recovery() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        state
+            .legacy_ambiguous_liquidation_vaults
+            .get_or_insert_with(BTreeSet::new)
+            .insert(999);
+
+        assert!(matches!(
+            ensure_legacy_quarantine_allows_chain_absorb(&state, 77),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+
+        let plan =
+            prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true)).unwrap();
+        prepare_or_reuse_chain_absorb_intent_in_state(
+            &mut state,
+            &plan,
+            minting_account(),
+            123,
+        )
+        .expect("existing durable chain intent");
+
+        assert!(ensure_legacy_quarantine_allows_chain_absorb(&state, 77).is_ok());
     }
 
     #[test]
