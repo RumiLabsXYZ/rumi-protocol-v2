@@ -2490,6 +2490,147 @@ impl State {
     }
 }
 
+/// Reasons `State::record_xlm_signed_intent` refuses; none mutate state.
+#[cfg(any(test, feature = "test_endpoints"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XlmRecordSignedError {
+    MissingClaim,
+    NotPending,
+    NotPrepared,
+    AlreadySigned,
+    NetworkMismatch,
+    CustodyAddressNotFound,
+    /// The claim (gross, fee budget, destination, custody, ids) or the prepared
+    /// record's internal arithmetic no longer matches what was prepared.
+    PreparedBindingDrift,
+    /// The recomputed signing payload hash differs from `prepared.payload_hash`.
+    PayloadHashMismatch,
+    /// Another unresolved (not Settled) claim for the same custody owner, nonce
+    /// and network is InFlight or holds a prepared or signed intent.
+    SiblingPaymentInProgress { claim_id: u64 },
+    InvalidPayment(crate::chains::stellar::CodecError),
+}
+
+#[cfg(any(test, feature = "test_endpoints"))]
+impl State {
+    /// Persist the exact signed settlement intent BEFORE any submission, and
+    /// conservatively mark the claim `InFlight` in the same single mutation.
+    ///
+    /// Dormant and test-only: no endpoint, no signer or key call, no network
+    /// activity. `signature` is a caller-supplied FIXTURE: it is untrusted and
+    /// is NOT verified here (the crate has no Ed25519 verifier available to
+    /// non-test builds: `ed25519-dalek` is a dev-dependency only), so storing
+    /// it is not cryptographic proof of anything. Everything is recomputed from
+    /// the CURRENT claim and the prepared record first; `prepared_intent` is
+    /// kept as is. No submission, finality, clearing or retry happens here.
+    pub fn record_xlm_signed_intent(
+        &mut self,
+        claim_id: u64,
+        signature: [u8; 64],
+    ) -> Result<XlmSettlementIntent, XlmRecordSignedError> {
+        use crate::chains::stellar as stellar;
+        use XlmRecordSignedError as E;
+        let claim = self.xlm_claims.get(&claim_id).ok_or(E::MissingClaim)?;
+        if claim.status != XlmClaimStatus::Pending {
+            return Err(E::NotPending);
+        }
+        let prepared = claim.prepared_intent.as_ref().ok_or(E::NotPrepared)?;
+        if claim.settlement_intent.is_some() {
+            return Err(E::AlreadySigned);
+        }
+        let network = stellar::config::selection_from_state(self)
+            .map_err(|_| E::NetworkMismatch)?
+            .network;
+        if network.network_id() != claim.network_id {
+            return Err(E::NetworkMismatch);
+        }
+        let mut matches = self.xlm_custody_attributions.iter().filter(|(_, a)| {
+            a.owner == claim.custody_owner
+                && a.derivation_nonce == claim.custody_nonce
+                && a.network_id == claim.network_id
+        });
+        let (custody_address, _) = matches.next().ok_or(E::CustodyAddressNotFound)?;
+        if matches.next().is_some() {
+            return Err(E::CustodyAddressNotFound);
+        }
+        // Drift: every binding persisted at preparation must still hold.
+        let destination_key = stellar::ed25519_pubkey_from_classic_address(&claim.destination)
+            .map_err(|_| E::PreparedBindingDrift)?;
+        let fee = u64::from(prepared.fee_stroops);
+        let net = claim
+            .gross_stroops
+            .checked_sub(fee)
+            .ok_or(E::PreparedBindingDrift)?;
+        let drifted = prepared.claim_id != claim_id
+            || prepared.vault_id != claim.vault_id
+            || prepared.custody_owner != claim.custody_owner
+            || prepared.custody_nonce != claim.custody_nonce
+            || prepared.network_id != claim.network_id
+            || prepared.gross_stroops != claim.gross_stroops
+            || prepared.destination != claim.destination
+            || prepared.destination_public_key != destination_key
+            || prepared.source_address != *custody_address
+            || stellar::classic_address_from_ed25519_pubkey(&prepared.source_public_key)
+                != *custody_address
+            || fee == 0
+            || fee > claim.reserved_fee_stroops
+            || fee >= claim.gross_stroops
+            || prepared.net_stroops != net
+            || prepared.observed_sequence.checked_add(1) != Some(prepared.next_sequence);
+        if drifted {
+            return Err(E::PreparedBindingDrift);
+        }
+        let payment = stellar::Payment {
+            source: prepared.source_public_key,
+            destination: prepared.destination_public_key,
+            amount_stroops: prepared.net_stroops,
+            sequence: prepared.next_sequence,
+            fee: prepared.fee_stroops,
+            min_time: prepared.min_time,
+            max_time: prepared.max_time,
+        };
+        let payload_hash =
+            stellar::signing_payload_hash(network, payment).map_err(E::InvalidPayment)?;
+        if payload_hash != prepared.payload_hash {
+            return Err(E::PayloadHashMismatch);
+        }
+        for (id, sibling) in self.xlm_claims.iter().filter(|(id, s)| {
+            **id != claim_id
+                && s.custody_owner == claim.custody_owner
+                && s.custody_nonce == claim.custody_nonce
+                && s.network_id == claim.network_id
+        }) {
+            if sibling.status != XlmClaimStatus::Settled
+                && (sibling.status == XlmClaimStatus::InFlight
+                    || sibling.prepared_intent.is_some()
+                    || sibling.settlement_intent.is_some())
+            {
+                return Err(E::SiblingPaymentInProgress { claim_id: *id });
+            }
+        }
+        let material =
+            stellar::encode_signed_envelope(network, payment, &signature, &payment.source)
+                .map_err(E::InvalidPayment)?;
+        let intent = XlmSettlementIntent {
+            envelope_xdr: material.envelope_xdr,
+            // The Stellar transaction hash is SHA-256(TransactionSignaturePayload),
+            // which is exactly `SigningMaterial::payload_hash`.
+            transaction_hash: material.payload_hash,
+            sequence: prepared.next_sequence,
+            min_time: prepared.min_time,
+            max_time: prepared.max_time,
+        };
+        // Single atomic mutation; `prepared_intent` is kept as is.
+        let claim = self
+            .xlm_claims
+            .get_mut(&claim_id)
+            .ok_or(E::MissingClaim)?;
+        claim.settlement_intent = Some(intent.clone());
+        claim.status = XlmClaimStatus::InFlight;
+        Ok(intent)
+    }
+}
+
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
 /// no IC ledger, so this reserved principal is only an opaque key (15 bytes — not a
 /// valid 10-byte canister id, so it cannot collide with a real canister). The XRP
@@ -18128,5 +18269,253 @@ mod xlm_admission_tests {
             Err(XlmAdmitPrepareError::Prepare(XlmPrepareError::SourceKeyMismatch))
         );
         assert_eq!(bytes(&state), before);
+    }
+}
+
+#[cfg(test)]
+mod xlm_signed_intent_tests {
+    use super::*;
+    use crate::chains::stellar::{self, horizon_parse::AccountSnapshot, Payment};
+
+    const SRC: [u8; 32] = [7; 32];
+    const DST: [u8; 32] = [9; 32];
+    const SIG: [u8; 64] = [0xAB; 64];
+
+    fn owner() -> Principal {
+        Principal::from_slice(&[1])
+    }
+
+    fn snapshot() -> AccountSnapshot {
+        AccountSnapshot {
+            account_id: stellar::classic_address_from_ed25519_pubkey(&SRC),
+            sequence: 41,
+            account_last_modified_ledger: 10,
+            native_balance_stroops: 1_000_000_000,
+            native_selling_liabilities_stroops: 0,
+            subentry_count: 0,
+            num_sponsoring: 0,
+            num_sponsored: 0,
+        }
+    }
+
+    fn claim(vault: u64, status: XlmClaimStatus) -> XlmClaim {
+        XlmClaim {
+            vault_id: vault,
+            custody_owner: owner(),
+            custody_nonce: vault,
+            claimant: owner(),
+            gross_stroops: 10_000_000,
+            destination: stellar::classic_address_from_ed25519_pubkey(&DST),
+            network_id: stellar::Network::Test.network_id(),
+            reserved_fee_stroops: 1_000,
+            created_at_ns: 1,
+            status,
+            settlement_intent: None,
+            prepared_intent: None,
+        }
+    }
+
+    /// Prepared (not signed) claim 5.
+    fn setup() -> (State, u64) {
+        let mut state = State::default();
+        let vault = state.increment_vault_id();
+        let net = stellar::config::selection_from_state(&state).unwrap().network;
+        state
+            .reserve_xlm_pending_deposit(
+                vault,
+                owner(),
+                stellar::classic_address_from_ed25519_pubkey(&SRC),
+                net.network_id(),
+                1_000_000_000,
+                3_600_000_000_000,
+            )
+            .unwrap();
+        state.xlm_claims.insert(5, claim(vault, XlmClaimStatus::Pending));
+        state
+            .prepare_xlm_settlement_intent(5, SRC, &snapshot(), 100, 1_000, 2_000)
+            .unwrap();
+        (state, 5)
+    }
+
+    fn bytes(state: &State) -> Vec<u8> {
+        let mut b = Vec::new();
+        ciborium::ser::into_writer(&state.xlm_claims, &mut b).unwrap();
+        b
+    }
+
+    fn rejected(mut state: State, id: u64, sig: [u8; 64], want: XlmRecordSignedError) {
+        let before = bytes(&state);
+        assert_eq!(state.record_xlm_signed_intent(id, sig), Err(want));
+        assert_eq!(bytes(&state), before);
+    }
+
+    #[test]
+    fn happy_path_stores_exact_envelope_and_marks_in_flight() {
+        let (mut state, id) = setup();
+        let prepared_before = state.xlm_claims[&id].prepared_intent.clone();
+        let intent = state.record_xlm_signed_intent(id, SIG).unwrap();
+        let payment = Payment {
+            source: SRC,
+            destination: DST,
+            amount_stroops: 10_000_000 - 100,
+            sequence: 42,
+            fee: 100,
+            min_time: 1_000,
+            max_time: 2_000,
+        };
+        let material =
+            stellar::encode_signed_envelope(stellar::Network::Test, payment, &SIG, &SRC).unwrap();
+        assert_eq!(intent.envelope_xdr, material.envelope_xdr);
+        assert_eq!(intent.transaction_hash, material.payload_hash);
+        assert_eq!(
+            intent.transaction_hash,
+            stellar::signing_payload_hash(stellar::Network::Test, payment).unwrap()
+        );
+        assert_eq!((intent.sequence, intent.min_time, intent.max_time), (42, 1_000, 2_000));
+        let c = &state.xlm_claims[&id];
+        assert_eq!(c.settlement_intent, Some(intent));
+        assert_eq!(c.status, XlmClaimStatus::InFlight);
+        assert_eq!(c.prepared_intent, prepared_before);
+    }
+
+    #[test]
+    fn missing_unprepared_and_non_pending_claims_reject() {
+        use XlmRecordSignedError as E;
+        let (state, id) = setup();
+        rejected(setup().0, 99, SIG, E::MissingClaim);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().status = XlmClaimStatus::InFlight;
+        rejected(st, id, SIG, E::NotPending);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().prepared_intent = None;
+        rejected(st, id, SIG, E::NotPrepared);
+        drop(state);
+    }
+
+    #[test]
+    fn repeat_and_conflicting_second_signature_reject_and_keep_first() {
+        let (mut state, id) = setup();
+        let first = state.record_xlm_signed_intent(id, SIG).unwrap();
+        let before = bytes(&state);
+        // Status is now InFlight so a repeat is NotPending; same for a different signature.
+        assert_eq!(
+            state.record_xlm_signed_intent(id, SIG),
+            Err(XlmRecordSignedError::NotPending)
+        );
+        assert_eq!(
+            state.record_xlm_signed_intent(id, [0xCD; 64]),
+            Err(XlmRecordSignedError::NotPending)
+        );
+        assert_eq!(bytes(&state), before);
+        assert_eq!(state.xlm_claims[&id].settlement_intent, Some(first));
+        // A Pending claim that somehow holds a signed intent is AlreadySigned.
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().settlement_intent = Some(XlmSettlementIntent {
+            envelope_xdr: vec![1],
+            transaction_hash: [1; 32],
+            sequence: 1,
+            min_time: 1,
+            max_time: 2,
+        });
+        rejected(st, id, [0xCD; 64], XlmRecordSignedError::AlreadySigned);
+    }
+
+    #[test]
+    fn drift_after_prepare_rejects() {
+        use XlmRecordSignedError as E;
+        let id = 5;
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().gross_stroops = 11_000_000;
+        rejected(st, id, SIG, E::PreparedBindingDrift);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().reserved_fee_stroops = 99;
+        rejected(st, id, SIG, E::PreparedBindingDrift);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().destination =
+            stellar::classic_address_from_ed25519_pubkey(&[3; 32]);
+        rejected(st, id, SIG, E::PreparedBindingDrift);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().network_id = stellar::Network::Public.network_id();
+        rejected(st, id, SIG, E::NetworkMismatch);
+        let mut st = setup().0;
+        st.xlm_claims.get_mut(&id).unwrap().custody_nonce = 999;
+        rejected(st, id, SIG, E::CustodyAddressNotFound);
+        // Tampered prepared payload hash.
+        let mut st = setup().0;
+        st.xlm_claims
+            .get_mut(&id)
+            .unwrap()
+            .prepared_intent
+            .as_mut()
+            .unwrap()
+            .payload_hash = [0; 32];
+        rejected(st, id, SIG, E::PayloadHashMismatch);
+        // Tampered prepared time bound changes the recomputed hash.
+        let mut st = setup().0;
+        st.xlm_claims
+            .get_mut(&id)
+            .unwrap()
+            .prepared_intent
+            .as_mut()
+            .unwrap()
+            .max_time = 3_000;
+        rejected(st, id, SIG, E::PayloadHashMismatch);
+    }
+
+    #[test]
+    fn in_flight_or_signed_sibling_rejects_but_settled_does_not() {
+        use XlmRecordSignedError as E;
+        let vault = setup().0.xlm_claims[&5].vault_id;
+        let signed = XlmSettlementIntent {
+            envelope_xdr: vec![1],
+            transaction_hash: [1; 32],
+            sequence: 1,
+            min_time: 1,
+            max_time: 2,
+        };
+        let mut st = setup().0;
+        st.xlm_claims.insert(6, claim(vault, XlmClaimStatus::InFlight));
+        rejected(st, 5, SIG, E::SiblingPaymentInProgress { claim_id: 6 });
+        let mut st = setup().0;
+        let mut sib = claim(vault, XlmClaimStatus::Pending);
+        sib.settlement_intent = Some(signed.clone());
+        st.xlm_claims.insert(6, sib);
+        rejected(st, 5, SIG, E::SiblingPaymentInProgress { claim_id: 6 });
+        // A sibling that is only prepared (Pending, no signed intent) blocks.
+        let prepared = setup().0.xlm_claims[&5].prepared_intent.clone();
+        assert!(prepared.is_some());
+        let mut st = setup().0;
+        let mut sib = claim(vault, XlmClaimStatus::Pending);
+        sib.prepared_intent = prepared.clone();
+        st.xlm_claims.insert(6, sib);
+        rejected(st, 5, SIG, E::SiblingPaymentInProgress { claim_id: 6 });
+        // Failed and Quarantined are unresolved: a prepared or signed intent blocks.
+        for status in [XlmClaimStatus::Failed, XlmClaimStatus::Quarantined] {
+            let mut st = setup().0;
+            let mut sib = claim(vault, status);
+            sib.prepared_intent = prepared.clone();
+            st.xlm_claims.insert(6, sib);
+            rejected(st, 5, SIG, E::SiblingPaymentInProgress { claim_id: 6 });
+            let mut st = setup().0;
+            let mut sib = claim(vault, status);
+            sib.settlement_intent = Some(signed.clone());
+            st.xlm_claims.insert(6, sib);
+            rejected(st, 5, SIG, E::SiblingPaymentInProgress { claim_id: 6 });
+        }
+        // A claim for a different custody nonce is unrelated and does not block.
+        let mut st = setup().0;
+        let mut other = claim(vault, XlmClaimStatus::InFlight);
+        other.custody_nonce = vault + 1;
+        other.prepared_intent = prepared.clone();
+        other.settlement_intent = Some(signed.clone());
+        st.xlm_claims.insert(6, other);
+        assert!(st.record_xlm_signed_intent(5, SIG).is_ok());
+        // A Settled sibling keeps its intents but no longer blocks.
+        let mut st = setup().0;
+        let mut done = claim(vault, XlmClaimStatus::Settled);
+        done.prepared_intent = prepared;
+        done.settlement_intent = Some(signed);
+        st.xlm_claims.insert(6, done);
+        assert!(st.record_xlm_signed_intent(5, SIG).is_ok());
     }
 }
