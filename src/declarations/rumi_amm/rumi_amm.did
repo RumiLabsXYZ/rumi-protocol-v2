@@ -134,6 +134,11 @@ type AmmSwapEvent = record {
   fee : nat;
   timestamp : nat64;
 };
+type AmmSwapEventWindow = record {
+  oldest_available_id : nat64;
+  next_event_id : nat64;
+  events : vec AmmSwapEvent;
+};
 
 // ── ICRC-21 Consent Messages ──
 
@@ -449,6 +454,7 @@ service : (AmmInitArgs) -> {
 
   // ── Swap Event History ──
   get_amm_swap_events : (nat64, nat64) -> (vec AmmSwapEvent) query;
+  get_amm_swap_events_from_id : (nat64, nat64) -> (AmmSwapEventWindow) query;
   get_amm_swap_event_count : () -> (nat64) query;
 
   // ── Liquidity Event History ──

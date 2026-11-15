@@ -145,6 +145,16 @@ pub struct AmmSwapEvent {
     pub timestamp: u64,
 }
 
+/// Bounded monotonic-ID page over the retained swap-event window.
+/// `oldest_available_id` is the first retained event ID, or `next_event_id`
+/// when the retained log is empty. `next_event_id` is the source high-water mark.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmSwapEventWindow {
+    pub oldest_available_id: u64,
+    pub next_event_id: u64,
+    pub events: Vec<AmmSwapEvent>,
+}
+
 // ─── Liquidity Events ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

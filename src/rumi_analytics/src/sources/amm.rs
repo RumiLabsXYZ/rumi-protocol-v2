@@ -16,6 +16,27 @@ pub struct AmmSwapEvent {
     pub timestamp: u64,
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct AmmSwapEventWindow {
+    pub oldest_available_id: u64,
+    pub next_event_id: u64,
+    pub events: Vec<AmmSwapEvent>,
+}
+
+pub async fn get_amm_swap_events_from_id(
+    amm: Principal,
+    start_id: u64,
+    length: u64,
+) -> Result<AmmSwapEventWindow, String> {
+    let (window,): (AmmSwapEventWindow,) =
+        ic_cdk::call(amm, "get_amm_swap_events_from_id", (start_id, length))
+            .await
+            .map_err(|(code, msg)| {
+                format!("get_amm_swap_events_from_id: {:?} {}", code, msg)
+            })?;
+    Ok(window)
+}
+
 pub async fn get_amm_swap_events(
     amm: Principal,
     start: u64,
