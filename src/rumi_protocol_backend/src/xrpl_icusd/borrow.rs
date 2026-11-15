@@ -371,10 +371,7 @@ pub fn advance_borrow(
             // this holds in practice. If it does not, retain everything (no debt, no
             // release) rather than guess.
             let applicable = state.vault_id_to_vaults.get(&vault_id).is_some_and(|v| {
-                v.owner == owner
-                    && v.collateral_type == collateral_type
-                    && crate::numeric::checked_icusd_add(v.borrowed_icusd_amount, ICUSD::new(gross))
-                        .is_some()
+                v.owner == owner && v.collateral_type == collateral_type
             });
             if !applicable {
                 let op = state.xrpl_icusd.op_mut(op_id)?;
@@ -384,10 +381,67 @@ pub fn advance_borrow(
                 return Ok(BorrowAdvance::Held);
             }
             // ---- the commit: frozen terms, once, in this synchronous block ----
-            // Bring the vault's interest up to date BEFORE the new principal lands,
-            // exactly as the legacy borrow does, so the new debt never inherits (or
-            // skips) accrual for the time the mint was pending.
-            state.accrue_single_vault(vault_id, now_ns);
+            // The shared borrow recorder accrues existing principal at this
+            // commit timestamp before adding the new amount. Admission-time
+            // accrual boundaries were journaled separately by `admit_borrow`.
+            if !crate::event::record_borrow_interest_checkpoint(
+                state,
+                crate::event::BorrowInterestCheckpointKey::Xrpl {
+                    operation_id: op_id,
+                },
+                vault_id,
+            ) {
+                let op = state.xrpl_icusd.op_mut(op_id)?;
+                op.push_note(
+                    "escrow mint proven but the pre-commit debt checkpoint could not be recorded; held for reconciliation",
+                );
+                return Ok(BorrowAdvance::Held);
+            }
+            // A retry cannot make an already-unrepresentable debt addition
+            // fit by accruing more interest. Stop before journaling another
+            // accrual; the post-accrual check remains necessary for the first
+            // pass where interest itself consumes the available headroom.
+            let fits_before_accrual = state
+                .vault_id_to_vaults
+                .get(&vault_id)
+                .is_some_and(|vault| {
+                    crate::numeric::checked_icusd_add(
+                        vault.borrowed_icusd_amount,
+                        ICUSD::new(gross),
+                    )
+                    .is_some()
+                });
+            if !fits_before_accrual {
+                let op = state.xrpl_icusd.op_mut(op_id)?;
+                op.push_note(
+                    "escrow mint proven but existing debt leaves no representable room; held for reconciliation",
+                );
+                return Ok(BorrowAdvance::Held);
+            }
+            if !crate::event::record_borrow_interest_accrual(state, vault_id, now_ns) {
+                let op = state.xrpl_icusd.op_mut(op_id)?;
+                op.push_note(
+                    "escrow mint proven but existing debt could not be accrued safely; held for reconciliation",
+                );
+                return Ok(BorrowAdvance::Held);
+            }
+            let debt_is_representable = state
+                .vault_id_to_vaults
+                .get(&vault_id)
+                .is_some_and(|vault| {
+                    crate::numeric::checked_icusd_add(
+                        vault.borrowed_icusd_amount,
+                        ICUSD::new(gross),
+                    )
+                    .is_some()
+                });
+            if !debt_is_representable {
+                let op = state.xrpl_icusd.op_mut(op_id)?;
+                op.push_note(
+                    "escrow mint proven but accrued debt leaves no representable room; held for reconciliation",
+                );
+                return Ok(BorrowAdvance::Held);
+            }
             // Owner attribution is the SAVED owner, never a timer/resume caller.
             crate::event::record_borrow_from_vault_at(
                 state,
@@ -452,6 +506,12 @@ pub fn advance_borrow(
             let op = state.xrpl_icusd.op_mut(op_id)?;
             op.phase = Phase::IssuePrepared;
             op.updated_at_ns = now_ns;
+            crate::event::complete_borrow_interest_checkpoint(
+                state,
+                crate::event::BorrowInterestCheckpointKey::Xrpl {
+                    operation_id: op_id,
+                },
+            );
             Ok(BorrowAdvance::Committed)
         }
         Phase::DebtCommitted => {

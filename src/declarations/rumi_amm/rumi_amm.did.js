@@ -141,6 +141,11 @@ export const idlFactory = ({ IDL }) => {
     'start' : IDL.Nat64,
     'length' : IDL.Nat64,
   });
+  const AmmLiquidityEventWindow = IDL.Record({
+    'next_event_id' : IDL.Nat64,
+    'events' : IDL.Vec(AmmLiquidityEvent),
+    'oldest_available_id' : IDL.Nat64,
+  });
   const AmmStatsQuery = IDL.Record({
     'pool' : IDL.Text,
     'window' : AmmStatsWindow,
@@ -419,6 +424,11 @@ export const idlFactory = ({ IDL }) => {
     'get_amm_liquidity_events_by_principal' : IDL.Func(
         [AmmEventsByPrincipalQuery],
         [IDL.Vec(AmmLiquidityEvent)],
+        ['query'],
+      ),
+    'get_amm_liquidity_events_from_id' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [AmmLiquidityEventWindow],
         ['query'],
       ),
     'get_amm_pool_stats' : IDL.Func([AmmStatsQuery], [AmmPoolStats], ['query']),

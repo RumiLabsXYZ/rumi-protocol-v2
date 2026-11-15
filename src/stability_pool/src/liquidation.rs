@@ -748,6 +748,12 @@ fn chain_absorb_result_from_backend(
             reason: "backend returned zero chain collateral".to_string(),
         });
     }
+    if result.claim_id != plan.vault_id {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "backend chain claim id does not match requested vault".to_string(),
+        });
+    }
 
     Ok(ChainSpAbsorbResult {
         success: true,
@@ -897,6 +903,18 @@ fn ensure_no_other_pending_pool_absorb_for_chain(
 ) -> Result<(), StabilityPoolError> {
     ensure_no_other_pending_chain_absorb(state, vault_id)?;
     if state.has_pending_native_xrp_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+fn ensure_legacy_quarantine_allows_chain_absorb(
+    state: &StabilityPoolState,
+    vault_id: u64,
+) -> Result<(), StabilityPoolError> {
+    if state.has_legacy_ambiguous_liquidation_quarantine()
+        && state.get_pending_chain_absorb(vault_id).is_none()
+    {
         return Err(StabilityPoolError::SystemBusy);
     }
     Ok(())
@@ -1762,9 +1780,6 @@ pub(crate) async fn reconcile_pending_native_xrp_absorb_from_status(
     vault_id: u64,
 ) -> Result<(), StabilityPoolError> {
     let _liquidation_guard = crate::pool_guard::SpLiquidationGuard::new()?;
-    if read_state(|state| !state.in_flight_liquidations.is_empty()) {
-        return Err(StabilityPoolError::SystemBusy);
-    }
     let intent =
         read_state(|state| state.get_pending_native_xrp_absorb(vault_id)).ok_or_else(|| {
             StabilityPoolError::LiquidationFailed {
@@ -1787,10 +1802,6 @@ pub(crate) async fn reconcile_pending_native_xrp_absorb_from_status(
     {
         return Err(StabilityPoolError::SystemBusy);
     }
-    mutate_state(|state| {
-        state.in_flight_liquidations.insert(vault_id);
-    });
-
     let recovery = async {
         let protocol_id = read_state(|state| state.protocol_canister_id);
         let status = if let Some(result) = intent.backend_result.clone() {
@@ -1922,10 +1933,6 @@ pub(crate) async fn reconcile_pending_native_xrp_absorb_from_status(
         }
     }
     .await;
-
-    mutate_state(|state| {
-        state.in_flight_liquidations.remove(&vault_id);
-    });
     recovery
 }
 
@@ -2545,6 +2552,25 @@ pub(crate) fn prepare_chain_absorb_plan_in_state(
         return Err(StabilityPoolError::InsufficientPoolBalance);
     }
 
+    // Reject the locally knowable accounting failures before the icUSD burn
+    // and backend absorb, using the currently observed vault collateral. The
+    // backend state can still change across awaits, so the exact result is
+    // planned and committed atomically again after it is durably journaled.
+    state.plan_chain_liquidation_gains_at(
+        vault.vault_id,
+        vault.chain_collateral_sentinel,
+        &stables_consumed,
+        vault.collateral_native,
+    )?;
+    // The backend contract binds the chain claim id to the vault id. A legacy
+    // or conflicting source must be reconciled rather than overwritten after
+    // the burn has already crossed the ledger boundary.
+    state.ensure_chain_claim_source_available(
+        vault.vault_id,
+        vault.chain_collateral_sentinel,
+        vault.vault_id,
+    )?;
+
     Ok(ChainAbsorbPlan {
         vault_id: vault.vault_id,
         chain_id: vault.chain_id,
@@ -2580,19 +2606,16 @@ pub(crate) fn apply_chain_absorb_success_in_state_at(
         });
     }
 
-    state.record_chain_claim_source(
-        plan.chain_sentinel,
-        absorbed.claim_id,
-        absorbed.collateral_received_native,
-    );
-    state.process_chain_liquidation_gains_at(
+    let accounting_plan = state.plan_chain_liquidation_gains_at(
         plan.vault_id,
         plan.chain_sentinel,
         &plan.stables_consumed,
         absorbed.collateral_received_native,
-        absorbed.collateral_price_e8s,
-        timestamp,
-    );
+    )?;
+    state.commit_chain_absorb_gains(
+        accounting_plan,
+        Some((absorbed.claim_id, absorbed.collateral_received_native)),
+    )?;
     state.take_pending_chain_absorb(plan.vault_id);
     state.record_completed_chain_absorb(ChainSpAbsorbCompletion {
         vault_id: plan.vault_id,
@@ -2683,15 +2706,14 @@ pub(crate) fn prepare_cfx_claim_payout_in_state(
 pub(crate) fn rollback_cfx_claim_payout_in_state(
     state: &mut StabilityPoolState,
     plan: &CfxClaimPayoutPlan,
-) {
-    state.record_chain_claim_source(plan.chain_sentinel, plan.claim_id, plan.amount_wei);
-    let position = state
-        .deposits
-        .entry(plan.claimant)
-        .or_insert_with(|| DepositPosition::new(0));
-    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
-    let entry = claims.entry(plan.chain_sentinel).or_insert(0);
-    *entry = entry.saturating_add(plan.amount_wei);
+) -> Result<(), StabilityPoolError> {
+    state.restore_chain_claim_and_depositor_claim(
+        plan.claim_id,
+        plan.chain_sentinel,
+        plan.claim_id,
+        plan.claimant,
+        plan.amount_wei,
+    )
 }
 
 pub(crate) fn recredit_failed_cfx_claim_payout_in_state(
@@ -2735,18 +2757,13 @@ pub(crate) fn recredit_failed_cfx_claim_payout_in_state_at(
         return Ok(false);
     }
 
-    state.record_chain_claim_source(
+    state.restore_chain_claim_and_depositor_claim(
+        recovery.claim_id,
         recovery.chain_sentinel,
         recovery.claim_id,
+        recovery.claimant,
         recovery.amount_wei,
-    );
-    let position = state
-        .deposits
-        .entry(recovery.claimant)
-        .or_insert_with(|| DepositPosition::new(0));
-    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
-    let entry = claims.entry(recovery.chain_sentinel).or_insert(0);
-    *entry = entry.saturating_add(recovery.amount_wei);
+    )?;
 
     state.record_completed_cfx_claim_payout_recovery(CfxClaimPayoutRecoveryRecord {
         key,
@@ -2785,6 +2802,15 @@ pub async fn notify_liquidatable_vaults(
         return vec![];
     }
 
+    if read_state(|s| s.has_legacy_ambiguous_liquidation_quarantine()) {
+        log!(
+            INFO,
+            "Pool has an unresolved legacy liquidation outcome — ignoring {} liquidatable vaults",
+            vaults.len()
+        );
+        return vec![];
+    }
+
     if crate::ensure_no_pool_balance_async_in_flight().is_err() {
         log!(INFO, "notify_liquidatable_vaults: a stablecoin balance operation is still in flight; skipping this batch");
         return vec![];
@@ -2813,11 +2839,13 @@ pub async fn notify_liquidatable_vaults(
 
     let mut results = Vec::new();
     for vault_info in vaults.into_iter().take(max_batch) {
-        // Skip if already in-flight
-        if read_state(|s| s.in_flight_liquidations.contains(&vault_info.vault_id)) {
+        // A predecessor runtime marker without a durable journal has an
+        // unknown external outcome. Keep only that vault fail-closed until an
+        // operator reconciles and explicitly releases its quarantine.
+        if read_state(|s| s.is_legacy_liquidation_quarantined(vault_info.vault_id)) {
             log!(
                 INFO,
-                "Vault {} already in-flight, skipping",
+                "Vault {} has an unresolved legacy liquidation outcome, skipping",
                 vault_info.vault_id
             );
             continue;
@@ -2839,17 +2867,7 @@ pub async fn notify_liquidatable_vaults(
             continue;
         }
 
-        // Mark as in-flight
-        mutate_state(|s| {
-            s.in_flight_liquidations.insert(vault_info.vault_id);
-        });
-
         let result = execute_single_liquidation(&vault_info).await;
-
-        // Clear in-flight
-        mutate_state(|s| {
-            s.in_flight_liquidations.remove(&vault_info.vault_id);
-        });
 
         if result.success {
             log!(
@@ -2890,9 +2908,13 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
+    if read_state(|s| s.has_legacy_ambiguous_liquidation_quarantine()) {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+
     crate::ensure_no_pool_balance_async_in_flight()?;
 
-    if read_state(|s| s.in_flight_liquidations.contains(&vault_id)) {
+    if read_state(|s| s.is_legacy_liquidation_quarantined(vault_id)) {
         return Err(StabilityPoolError::SystemBusy);
     }
 
@@ -2939,13 +2961,7 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
         return Err(StabilityPoolError::InsufficientPoolBalance);
     }
 
-    mutate_state(|s| {
-        s.in_flight_liquidations.insert(vault_id);
-    });
     let result = execute_single_liquidation(&vault_info).await;
-    mutate_state(|s| {
-        s.in_flight_liquidations.remove(&vault_id);
-    });
 
     Ok(result)
 }
@@ -3121,7 +3137,10 @@ async fn sp_absorb_chain_vault_core(
 
     crate::ensure_no_pool_balance_async_in_flight()?;
     let _liq_guard = crate::pool_guard::SpLiquidationGuard::new()?;
-    read_state(|s| ensure_no_other_pending_pool_absorb_for_chain(s, vault_id))?;
+    read_state(|s| {
+        ensure_no_other_pending_pool_absorb_for_chain(s, vault_id)?;
+        ensure_legacy_quarantine_allows_chain_absorb(s, vault_id)
+    })?;
     if let Some(intent) = read_state(|s| s.get_pending_chain_absorb(vault_id)) {
         let plan = chain_absorb_plan_from_intent(&intent);
         if let Some(result) = intent.backend_result.clone() {
@@ -3453,14 +3472,24 @@ pub async fn claim_cfx(
         Ok((Ok(_op_id),)) => Ok(plan.amount_wei),
         Ok((Err(error),)) if is_duplicate_chain_claim_error(&error) => Ok(plan.amount_wei),
         Ok((Err(error),)) => {
-            mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan));
+            if let Err(rollback_error) = mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan)) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id: plan.claim_id,
+                    reason: format!("backend rejected CFX claim ({:?}); atomic claim/source restore failed ({:?})", error, rollback_error),
+                });
+            }
             Err(StabilityPoolError::LiquidationFailed {
                 vault_id: plan.claim_id,
                 reason: format!("backend rejected CFX claim: {:?}", error),
             })
         }
         Err(_) => {
-            mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan));
+            if let Err(rollback_error) = mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan)) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id: plan.claim_id,
+                    reason: format!("claim call outcome is unknown and atomic claim/source restore failed ({:?})", rollback_error),
+                });
+            }
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", protocol_id),
                 method: "claim_chain_collateral".to_string(),
@@ -3971,6 +4000,44 @@ async fn prepare_new_three_usd_absorb_with_io(
     })
 }
 
+async fn recover_held_three_usd_reserve_payout(
+    protocol_id: Principal,
+    intent: &ThreeUsdReserveAbsorbIntent,
+) -> Result<bool, String> {
+    let (operation_id,): (Option<u128>,) = call(
+        protocol_id,
+        "get_stability_pool_liquidate_with_reserves_v2_payout_operation_id",
+        (intent.vault_id, intent.absorb_id),
+    )
+    .await
+    .map_err(|error| format!("backend payout operation lookup failed: {error:?}"))?;
+    let operation_id = operation_id
+        .ok_or_else(|| "backend has no linked held payout operation".to_string())?;
+    let (recovery,): (Result<bool, rumi_protocol_backend::ProtocolError>,) = call(
+        protocol_id,
+        "recover_pending_payout",
+        (operation_id,),
+    )
+    .await
+    .map_err(|error| format!("owner-bound payout recovery call failed: {error:?}"))?;
+    recovery.map_err(|error| format!("owner-bound payout recovery remains held: {error:?}"))
+}
+
+fn reserve_payout_recovery_is_terminal(
+    recovery_completed: bool,
+    status_rechecked_same_absorb: bool,
+    candidate_verified: bool,
+) -> bool {
+    recovery_completed && status_rechecked_same_absorb && candidate_verified
+}
+
+fn reserve_absorb_status_rechecked_same_request(
+    before: &rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView,
+    after: &rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView,
+) -> bool {
+    before == after
+}
+
 async fn resolve_three_usd_absorb_status(
     protocol_id: Principal,
     intent: &ThreeUsdReserveAbsorbIntent,
@@ -4000,6 +4067,7 @@ async fn resolve_three_usd_absorb_status(
             "backend status identity did not match the persisted request".into(),
         );
     }
+    let status_snapshot = view.clone();
 
     match view.status {
         Status::Unseen => ThreeUsdReserveAbsorbStatusResolution::Unseen,
@@ -4037,6 +4105,42 @@ async fn resolve_three_usd_absorb_status(
             {
                 let verified_payout = match verify_three_usd_collateral_payout(protocol_id, intent, &result).await {
                     Ok(receipt) => receipt,
+                    Err(reason) if reason == "backend has no unique payout candidate" => {
+                        let recovery = recover_held_three_usd_reserve_payout(protocol_id, intent).await;
+                        // Recovery can advance only a bounded ledger-history page. Always
+                        // re-read the saga status and require it to remain the exact same
+                        // absorbed request before accepting a newly discovered candidate.
+                        let refreshed: Result<(rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView,), _> = call(
+                            protocol_id,
+                            "get_stability_pool_liquidate_with_reserves_v2_status",
+                            (intent.vault_id, intent.absorb_id),
+                        )
+                        .await;
+                        let same_status = refreshed.is_ok_and(|(fresh,)| {
+                            reserve_absorb_status_rechecked_same_request(&status_snapshot, &fresh)
+                        });
+                        let candidate = if same_status {
+                            verify_three_usd_collateral_payout(protocol_id, intent, &result).await
+                        } else {
+                            Err("backend status changed or could not be re-read after payout recovery".into())
+                        };
+                        match (recovery, candidate) {
+                            (Ok(recovered), Ok(receipt))
+                                if reserve_payout_recovery_is_terminal(recovered, same_status, true) => receipt,
+                            (recovery, candidate) => {
+                                let progress = match &recovery {
+                                    Ok(true) => "recovery completed",
+                                    Ok(false) => "recovery is scanning or remains held",
+                                    Err(_) => "recovery remains ambiguous",
+                                };
+                                let detail = candidate.err().or_else(|| recovery.err())
+                                    .unwrap_or_else(|| "no independently verified payout candidate".into());
+                                return ThreeUsdReserveAbsorbStatusResolution::Pending(
+                                    format!("collateral payout remains held ({progress}): {detail}"),
+                                );
+                            }
+                        }
+                    }
                     Err(reason) => return ThreeUsdReserveAbsorbStatusResolution::Pending(
                         format!("collateral payout remains held: {reason}"),
                     ),
@@ -7034,6 +7138,63 @@ mod tests {
     use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
     use icrc_ledger_types::icrc1::transfer::Memo;
     use serde_bytes::ByteBuf;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn held_payout_scan_progress_and_changed_status_keep_absorb_ambiguous() {
+        use rumi_protocol_backend::{
+            ThreeUsdReserveIngressV2Status,
+            ThreeUsdReserveIngressV2StatusView,
+        };
+
+        let pool = Principal::self_authenticating([1; 32]);
+        let before = ThreeUsdReserveIngressV2StatusView {
+            stability_pool: pool,
+            vault_id: 7,
+            absorb_id: 8,
+            status: ThreeUsdReserveIngressV2Status::Unseen,
+        };
+        let same = before.clone();
+        assert!(reserve_absorb_status_rechecked_same_request(&before, &same));
+        assert!(!reserve_payout_recovery_is_terminal(false, true, false));
+        assert!(!reserve_payout_recovery_is_terminal(true, false, true));
+        assert!(!reserve_payout_recovery_is_terminal(true, true, false));
+        assert!(reserve_payout_recovery_is_terminal(true, true, true));
+
+        let changed = ThreeUsdReserveIngressV2StatusView {
+            absorb_id: 9,
+            ..before.clone()
+        };
+        assert!(!reserve_absorb_status_rechecked_same_request(&before, &changed));
+    }
+
+    #[test]
+    fn notification_holds_pool_for_legacy_ambiguous_liquidation() {
+        let mut state = test_state();
+        let quarantined_vault_id = 8_801;
+        let candidate_vault_id = 8_802;
+        state
+            .legacy_ambiguous_liquidation_vaults
+            .get_or_insert_with(BTreeSet::new)
+            .insert(quarantined_vault_id);
+        replace_state(state);
+
+        let results = futures::executor::block_on(notify_liquidatable_vaults(vec![
+            LiquidatableVaultInfo {
+                vault_id: candidate_vault_id,
+                collateral_type: xrp_ledger(),
+                debt_amount: 100_000_000,
+                collateral_amount: 1_000_000,
+                recommended_liquidation_amount: 100_000_000,
+                collateral_price_e8s: 50_000_000,
+            },
+        ]));
+
+        assert!(results.is_empty());
+        assert!(read_state(|state| state
+            .is_legacy_liquidation_quarantined(quarantined_vault_id)));
+        replace_state(StabilityPoolState::default());
+    }
 
     fn ambiguous_chain_burn_fixture() -> (StabilityPoolState, ChainSpAbsorbIntent) {
         let mut state = test_state();
@@ -8831,6 +8992,10 @@ mod tests {
         let mut state = test_state();
         // Intentionally leave the liquidatable list empty: recovery is driven
         // by durable burn intents, not by the live liquidation discovery view.
+        state
+            .legacy_ambiguous_liquidation_vaults
+            .get_or_insert_with(BTreeSet::new)
+            .insert(99);
         for vault_id in [12, 24, 36] {
             let intent = prepare_or_reuse_native_xrp_absorb_intent_in_state(
                 &mut state,
@@ -8858,6 +9023,8 @@ mod tests {
         }
         replace_state(state);
 
+        // An unrelated unmatched predecessor marker must not starve exact,
+        // proof-bearing recovery for journaled native-XRP absorbs.
         assert_eq!(pending_native_xrp_recovery_vault_ids(None, 2), vec![12, 36]);
         assert_eq!(pending_native_xrp_recovery_vault_ids(Some(12), 1), vec![36]);
         assert!(pending_native_xrp_recovery_vault_ids(None, 0).is_empty());
@@ -9558,6 +9725,39 @@ mod tests {
     }
 
     #[test]
+    fn legacy_quarantine_blocks_new_chain_absorb_but_allows_exact_recovery() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        state
+            .legacy_ambiguous_liquidation_vaults
+            .get_or_insert_with(BTreeSet::new)
+            .insert(999);
+
+        assert!(matches!(
+            ensure_legacy_quarantine_allows_chain_absorb(&state, 77),
+            Err(StabilityPoolError::SystemBusy)
+        ));
+
+        let plan =
+            prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true)).unwrap();
+        prepare_or_reuse_chain_absorb_intent_in_state(
+            &mut state,
+            &plan,
+            minting_account(),
+            123,
+        )
+        .expect("existing durable chain intent");
+
+        assert!(ensure_legacy_quarantine_allows_chain_absorb(&state, 77).is_ok());
+    }
+
+    #[test]
     fn pending_chain_absorb_blocks_new_native_xrp_absorb_start() {
         let mut state = test_state();
         state
@@ -9789,6 +9989,57 @@ mod tests {
             Some(70_00000000)
         );
         assert_eq!(plan.stables_consumed.len(), 1);
+    }
+
+    #[test]
+    fn chain_absorb_preflight_rejects_exhausted_counter_before_burn() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        state.total_liquidations_executed = u64::MAX;
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+
+        let error =
+            prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+                .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.total_liquidations_executed, u64::MAX);
+        assert!(!state.has_pending_chain_absorbs());
+    }
+
+    #[test]
+    fn chain_absorb_preflight_rejects_existing_claim_source_before_burn() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state.opt_in_cfx(&user_a(), sentinel).unwrap();
+        state
+            .record_chain_claim_source(77, sentinel, 77, 9)
+            .expect("legacy source");
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let sources_before = state.chain_claim_sources.clone();
+
+        let error =
+            prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+                .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.chain_claim_sources, sources_before);
+        assert!(!state.has_pending_chain_absorbs());
     }
 
     #[test]
@@ -10478,6 +10729,35 @@ mod tests {
     }
 
     #[test]
+    fn chain_absorb_rejects_mismatched_backend_claim_id_without_mutation() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered");
+        let mut mismatched = backend_chain_result();
+        mismatched.claim_id = 78;
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let sources_before = state.chain_claim_sources.clone();
+
+        let error =
+            apply_chain_absorb_success_in_state_at(&mut state, &plan, mismatched, 123)
+                .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.chain_claim_sources, sources_before);
+        assert!(state.completed_chain_absorb(77).is_none());
+    }
+
+    #[test]
     fn chain_absorb_success_credits_cfx_claims_and_deducts_burned_icusd() {
         let mut state = test_state();
         state
@@ -10585,7 +10865,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 12);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
 
         let invalid = prepare_cfx_claim_payout_in_state(
             &mut state,
@@ -10635,7 +10915,7 @@ mod tests {
             "depleted source is pruned before await",
         );
 
-        rollback_cfx_claim_payout_in_state(&mut state, &plan);
+        rollback_cfx_claim_payout_in_state(&mut state, &plan).expect("restore claim and source");
         assert_eq!(
             state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
             12,
@@ -10659,7 +10939,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 12);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
         let plan = prepare_cfx_claim_payout_in_state(
             &mut state,
             user_a(),
@@ -10734,7 +11014,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 10);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
         let plan = prepare_cfx_claim_payout_in_state(
             &mut state,
             user_a(),
@@ -10842,7 +11122,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 10);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 10);
+        state.record_chain_claim_source(0, sentinel, 77, 10).expect("initial chain claim source");
         let plan = prepare_cfx_claim_payout_in_state(
             &mut state,
             user_a(),
@@ -10905,7 +11185,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 20);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 20);
+        state.record_chain_claim_source(0, sentinel, 77, 20).expect("initial chain claim source");
 
         let first = prepare_cfx_claim_payout_in_state(
             &mut state,
@@ -10979,7 +11259,7 @@ mod tests {
             .get_or_insert_with(BTreeMap::new)
             .insert(sentinel, 5);
         state.deposits.insert(user_a(), pos);
-        state.record_chain_claim_source(sentinel, 77, 5);
+        state.record_chain_claim_source(0, sentinel, 77, 5).expect("initial chain claim source");
         let before_claims = state.deposits[&user_a()].cfx_claims.clone();
         let before_sources = state.chain_claim_sources.clone();
 

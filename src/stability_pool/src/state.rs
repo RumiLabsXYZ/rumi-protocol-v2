@@ -132,6 +132,19 @@ pub fn chain_collateral_sentinel(chain_id: u32) -> Principal {
     Principal::from_slice(&bytes)
 }
 
+/// Fully validated, allocation-bounded plan for one generic chain absorb.
+/// Planning is read-only; commit performs no fallible arithmetic or lookup.
+#[derive(Clone, Debug)]
+pub(crate) struct ChainLiquidationGainsPlan {
+    vault_id: u64,
+    chain_sentinel: Principal,
+    debits: BTreeMap<Principal, BTreeMap<Principal, u64>>,
+    aggregate_after: BTreeMap<Principal, u64>,
+    claim_credits: BTreeMap<Principal, u128>,
+    collateral_native: u128,
+    next_liquidations_executed: u64,
+}
+
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct StabilityPoolState {
     // Depositor positions
@@ -186,7 +199,17 @@ pub struct StabilityPoolState {
     // Admin / operational
     pub configuration: PoolConfiguration,
     pub liquidation_history: Vec<PoolLiquidationRecord>,
+    /// Legacy heap-style liquidation markers restored from a predecessor
+    /// snapshot. New code no longer writes this set: the pool-wide RAII guard
+    /// owns runtime exclusion, while the durable per-rail journals own retry.
+    /// `post_upgrade` consumes every restored entry exactly once.
     pub in_flight_liquidations: BTreeSet<u64>,
+    /// Restored liquidation markers that could not be matched to a durable
+    /// ordinary, 3USD, native-XRP, or chain absorb journal. Their external
+    /// effect is unknown, so the affected vault remains fail-closed until an
+    /// authorized operator reconciles the books and explicitly releases it.
+    #[serde(default)]
+    pub legacy_ambiguous_liquidation_vaults: Option<BTreeSet<u64>>,
     /// Durable identity for 3USD reserve absorbs. The row is written before
     /// the backend call so an ambiguous reply retries the same backend request.
     #[serde(default)]
@@ -357,6 +380,7 @@ impl Default for StabilityPoolState {
             },
             liquidation_history: Vec::new(),
             in_flight_liquidations: BTreeSet::new(),
+            legacy_ambiguous_liquidation_vaults: Some(BTreeSet::new()),
             pending_three_usd_absorbs: Some(BTreeMap::new()),
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
@@ -2075,26 +2099,98 @@ impl StabilityPoolState {
 
     pub fn record_chain_claim_source(
         &mut self,
+        vault_id: u64,
         chain_sentinel: Principal,
         claim_id: u64,
         amount_native: u128,
-    ) {
+    ) -> Result<(), StabilityPoolError> {
         if amount_native == 0 {
-            return;
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "invalid zero backend chain claim source".to_string(),
+            });
         }
-        let sources = self
+        self.ensure_chain_claim_source_available(vault_id, chain_sentinel, claim_id)?;
+        self.chain_claim_sources.get_or_insert_with(BTreeMap::new)
+            .entry(chain_sentinel).or_default()
+            .push(ChainClaimSource { claim_id, remaining_native: amount_native });
+        Ok(())
+    }
+
+    pub(crate) fn ensure_chain_claim_source_available(
+        &self,
+        vault_id: u64,
+        chain_sentinel: Principal,
+        claim_id: u64,
+    ) -> Result<(), StabilityPoolError> {
+        let duplicate = self
             .chain_claim_sources
-            .get_or_insert_with(BTreeMap::new)
-            .entry(chain_sentinel)
-            .or_default();
-        if let Some(existing) = sources.iter_mut().find(|s| s.claim_id == claim_id) {
-            existing.remaining_native = existing.remaining_native.saturating_add(amount_native);
+            .as_ref()
+            .and_then(|sources| sources.get(&chain_sentinel))
+            .is_some_and(|sources| sources.iter().any(|source| source.claim_id == claim_id));
+        if duplicate {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "duplicate backend chain claim source".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Restore a consumed backend source and the matching depositor claim as
+    /// one checked operation. Existing sources are incremented; absent sources
+    /// are recreated for rollback/recovery. Both additions are preflighted.
+    pub fn restore_chain_claim_and_depositor_claim(
+        &mut self,
+        vault_id: u64,
+        chain_sentinel: Principal,
+        claim_id: u64,
+        claimant: Principal,
+        amount_native: u128,
+    ) -> Result<(), StabilityPoolError> {
+        let fail = |reason: &str| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: reason.to_string(),
+        };
+        if amount_native == 0 || !self.is_chain_collateral_sentinel(&chain_sentinel) {
+            return Err(fail("invalid CFX claim source restore"));
+        }
+        let matching: Vec<(usize, u128)> = self.chain_claim_sources.as_ref()
+            .and_then(|sources| sources.get(&chain_sentinel))
+            .map(|sources| sources.iter().enumerate()
+                .filter(|(_, source)| source.claim_id == claim_id)
+                .map(|(index, source)| (index, source.remaining_native))
+                .collect())
+            .unwrap_or_default();
+        if matching.len() > 1 {
+            return Err(fail("duplicate CFX claim sources already exist"));
+        }
+        let restored_source_amount = matching.first()
+            .map(|(_, remaining)| remaining.checked_add(amount_native))
+            .unwrap_or(Some(amount_native))
+            .ok_or_else(|| fail("CFX claim source restore overflow"))?;
+        let current_claim = self.deposits.get(&claimant)
+            .and_then(|position| position.cfx_claims.as_ref())
+            .and_then(|claims| claims.get(&chain_sentinel)).copied().unwrap_or(0);
+        let restored_claim = current_claim.checked_add(amount_native)
+            .ok_or_else(|| fail("depositor CFX claim restore overflow"))?;
+
+        // All validation and checked arithmetic is complete before either side
+        // of the source/claim pair changes.
+        let sources = self.chain_claim_sources.get_or_insert_with(BTreeMap::new)
+            .entry(chain_sentinel).or_default();
+        if let Some((index, _)) = matching.first() {
+            sources[*index].remaining_native = restored_source_amount;
         } else {
             sources.push(ChainClaimSource {
                 claim_id,
-                remaining_native: amount_native,
+                remaining_native: restored_source_amount,
             });
         }
+        self.deposits.entry(claimant).or_insert_with(|| DepositPosition::new(0))
+            .cfx_claims.get_or_insert_with(BTreeMap::new)
+            .insert(chain_sentinel, restored_claim);
+        Ok(())
     }
 
     pub fn pending_chain_absorb_count(&self) -> usize {
@@ -3104,21 +3200,32 @@ impl StabilityPoolState {
                 .ok_or(StabilityPoolError::NoPositionFound)?;
             let removed = position
                 .native_payout_addresses
-                .get_or_insert_with(BTreeMap::new)
-                .remove(&collateral_type);
-            position
-                .native_payout_destination_tags
-                .get_or_insert_with(BTreeMap::new)
-                .remove(&collateral_type);
+                .as_mut()
+                .and_then(|addresses| addresses.remove(&collateral_type));
             if removed.is_none() {
                 return Err(StabilityPoolError::AlreadyOptedOut {
                     collateral: collateral_type,
                 });
             }
+            if let Some(tags) = position.native_payout_destination_tags.as_mut() {
+                tags.remove(&collateral_type);
+            }
             return Ok(());
         }
         if self.is_chain_collateral_sentinel(&collateral_type) {
             return self.opt_out_cfx(user, collateral_type);
+        }
+        // A position is opted in by default, so retaining arbitrary opt-out
+        // keys lets any depositor grow the upgrade-encoded state without
+        // bound. Only admin-registered collateral and the fixed legacy sunset
+        // set are meaningful here. Legacy sunset participants must still be
+        // able to leave even when that collateral is no longer registered.
+        if !self.collateral_registry.contains_key(&collateral_type)
+            && !sunset_collaterals().contains(&collateral_type)
+        {
+            return Err(StabilityPoolError::CollateralNotFound {
+                ledger: collateral_type,
+            });
         }
         let position = self
             .deposits
@@ -3200,10 +3307,11 @@ impl StabilityPoolState {
             .deposits
             .get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
-        let opted_in = position
+        let removed = position
             .opted_in_chain_collateral
-            .get_or_insert_with(BTreeSet::new);
-        if !opted_in.remove(&sentinel) {
+            .as_mut()
+            .is_some_and(|opted_in| opted_in.remove(&sentinel));
+        if !removed {
             return Err(StabilityPoolError::AlreadyOptedOut {
                 collateral: sentinel,
             });
@@ -3989,7 +4097,7 @@ impl StabilityPoolState {
         stables_consumed: &BTreeMap<Principal, u64>,
         cfx_gained_native: u128,
         collateral_price_e8s: u64,
-    ) {
+    ) -> Result<(), StabilityPoolError> {
         self.process_chain_liquidation_gains_at(
             vault_id,
             chain_sentinel,
@@ -3997,7 +4105,7 @@ impl StabilityPoolState {
             cfx_gained_native,
             collateral_price_e8s,
             ic_cdk::api::time(),
-        );
+        )
     }
 
     /// Append an audit record for a completed liquidation and advance
@@ -4009,8 +4117,12 @@ impl StabilityPoolState {
     /// never pushed a record, so a real absorb advanced the count while leaving
     /// the Earn page's history list unchanged.
     fn record_liquidation_in_history(&mut self, record: PoolLiquidationRecord) {
+        let next_count = self
+            .total_liquidations_executed
+            .checked_add(1)
+            .expect("total liquidation counter exhausted");
         self.liquidation_history.push(record);
-        self.total_liquidations_executed += 1;
+        self.total_liquidations_executed = next_count;
 
         // Cap history to prevent unbounded memory growth
         if self.liquidation_history.len() > MAX_LIQUIDATION_HISTORY {
@@ -4079,7 +4191,27 @@ impl StabilityPoolState {
                         .to_string(),
                 });
             }
-            payout_sum = payout_sum.saturating_add(claim.drops);
+            payout_sum = payout_sum.checked_add(claim.drops).ok_or_else(|| {
+                StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native XRP payout sum overflowed".to_string(),
+                }
+            })?;
+
+            // Backend claim ids are global identities. Never overwrite an
+            // older unpaid reminder if a stale or replayed backend result
+            // reuses one.
+            if self.deposits.values().any(|position| {
+                position
+                    .pending_native_xrp_payouts
+                    .as_ref()
+                    .is_some_and(|payouts| payouts.contains_key(&claim.claim_id))
+            }) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "backend reused an existing native XRP payout claim id".to_string(),
+                });
+            }
         }
         if payout_sum != collateral_received_drops {
             return Err(StabilityPoolError::LiquidationFailed {
@@ -4105,19 +4237,123 @@ impl StabilityPoolState {
             return Err(StabilityPoolError::InsufficientPoolBalance);
         }
 
-        let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
-        for token_ledger in stables_consumed.keys() {
-            let total: u64 = opted_in_principals
-                .iter()
-                .filter_map(|principal| self.deposits.get(principal))
-                .map(|pos| {
-                    pos.stablecoin_balances
+        // Build the complete stablecoin-debit plan before touching any state.
+        // A prior version debited floor shares first and only discovered an
+        // uncovered remainder afterward, returning Err with partially-mutated
+        // depositor balances. This plan makes every rejection atomic.
+        let mut planned_deductions: BTreeMap<Principal, BTreeMap<Principal, u64>> =
+            BTreeMap::new();
+        for (token_ledger, &total_consumed) in stables_consumed {
+            if total_consumed == 0 {
+                continue;
+            }
+
+            let aggregate = self
+                .total_stablecoin_balances
+                .get(token_ledger)
+                .copied()
+                .unwrap_or(0);
+            let position_total = self.deposits.values().try_fold(0u64, |sum, position| {
+                sum.checked_add(
+                    position
+                        .stablecoin_balances
                         .get(token_ledger)
                         .copied()
-                        .unwrap_or(0)
-                })
-                .sum();
-            per_token_opted_in_totals.insert(*token_ledger, total);
+                        .unwrap_or(0),
+                )
+            });
+            if position_total != Some(aggregate) || aggregate < total_consumed {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native XRP absorb exceeds tracked stablecoin backing".to_string(),
+                });
+            }
+
+            let opted_in_total = opted_in_principals.iter().try_fold(0u64, |sum, principal| {
+                sum.checked_add(
+                    self.deposits
+                        .get(principal)
+                        .and_then(|position| position.stablecoin_balances.get(token_ledger))
+                        .copied()
+                        .unwrap_or(0),
+                )
+            });
+            let Some(opted_in_total) = opted_in_total else {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native XRP opted-in balance sum overflowed".to_string(),
+                });
+            };
+            if opted_in_total < total_consumed {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native XRP absorb exceeds opted-in stablecoin backing".to_string(),
+                });
+            }
+
+            let mut token_plan = BTreeMap::new();
+            let mut planned_total = 0u64;
+            for principal in &opted_in_principals {
+                let balance = self
+                    .deposits
+                    .get(principal)
+                    .and_then(|position| position.stablecoin_balances.get(token_ledger))
+                    .copied()
+                    .unwrap_or(0);
+                if balance == 0 {
+                    continue;
+                }
+                let share = u64::try_from(
+                    u128::from(total_consumed) * u128::from(balance)
+                        / u128::from(opted_in_total),
+                )
+                .map_err(|_| StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native XRP stablecoin share overflowed".to_string(),
+                })?;
+                if share > 0 {
+                    token_plan.insert(*principal, share);
+                    planned_total = planned_total.checked_add(share).ok_or_else(|| {
+                        StabilityPoolError::LiquidationFailed {
+                            vault_id,
+                            reason: "native XRP stablecoin debit sum overflowed".to_string(),
+                        }
+                    })?;
+                }
+            }
+
+            let mut remainder = total_consumed.checked_sub(planned_total).ok_or_else(|| {
+                StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native XRP stablecoin debit exceeds burn".to_string(),
+                }
+            })?;
+            for principal in &opted_in_principals {
+                if remainder == 0 {
+                    break;
+                }
+                let balance = self
+                    .deposits
+                    .get(principal)
+                    .and_then(|position| position.stablecoin_balances.get(token_ledger))
+                    .copied()
+                    .unwrap_or(0);
+                let already_planned = token_plan.get(principal).copied().unwrap_or(0);
+                let available = balance.saturating_sub(already_planned);
+                let extra = remainder.min(available);
+                if extra > 0 {
+                    *token_plan.entry(*principal).or_insert(0) += extra;
+                    remainder -= extra;
+                }
+            }
+            if remainder != 0 {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native XRP absorb could not plan the full stablecoin debit"
+                        .to_string(),
+                });
+            }
+            planned_deductions.insert(*token_ledger, token_plan);
         }
 
         let vps = self.virtual_prices().clone();
@@ -4129,117 +4365,76 @@ impl StabilityPoolState {
                     .map(|c| (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false))))
             })
             .collect();
-        let total_consumed_e8s: u64 = stables_consumed
+        let total_consumed_e8s = stables_consumed
             .iter()
-            .map(|(ledger, &amount)| {
+            .try_fold(0u64, |total, (ledger, &amount)| {
                 let (decimals, is_lp) =
                     registry_snapshot.get(ledger).copied().unwrap_or((8, false));
-                if is_lp {
+                let value = if is_lp {
                     vps.get(ledger)
                         .map(|&vp| lp_to_usd_e8s(amount, vp))
                         .unwrap_or(0)
                 } else {
                     normalize_to_e8s(amount, decimals)
-                }
+                };
+                total.checked_add(value)
             })
-            .sum();
+            .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "native XRP consumed stablecoin value overflowed".to_string(),
+            })?;
         if total_consumed_e8s == 0 {
             return Err(StabilityPoolError::InsufficientPoolBalance);
         }
-
-        let mut actual_deductions_per_token: BTreeMap<Principal, u64> = BTreeMap::new();
-        for principal in &opted_in_principals {
-            if let Some(position) = self.deposits.get_mut(principal) {
-                for (token_ledger, &total_consumed) in stables_consumed {
-                    let total_opted_in = per_token_opted_in_totals
-                        .get(token_ledger)
-                        .copied()
-                        .unwrap_or(0);
-                    if total_opted_in == 0 {
-                        continue;
-                    }
-                    let user_balance = position
-                        .stablecoin_balances
-                        .get(token_ledger)
-                        .copied()
-                        .unwrap_or(0);
-                    if user_balance == 0 {
-                        continue;
-                    }
-
-                    let user_share_native = (total_consumed as u128 * user_balance as u128
-                        / total_opted_in as u128)
-                        as u64;
-                    let user_share_native = user_share_native.min(user_balance);
-                    if let Some(balance) = position.stablecoin_balances.get_mut(token_ledger) {
-                        *balance = balance.saturating_sub(user_share_native);
-                    }
-                    *actual_deductions_per_token
-                        .entry(*token_ledger)
-                        .or_insert(0) += user_share_native;
-                }
-            }
+        if self.total_liquidations_executed == u64::MAX {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "total liquidation counter exhausted".to_string(),
+            });
         }
 
-        for (token_ledger, &total_consumed) in stables_consumed {
-            let actual_deducted = actual_deductions_per_token
-                .get(token_ledger)
-                .copied()
-                .unwrap_or(0);
-            let mut remaining = total_consumed.saturating_sub(actual_deducted);
-            if remaining == 0 {
-                continue;
+        // Every fallible validation is complete. Apply the staged debit plan
+        // and exact aggregate reductions without another possible Err.
+        for (token_ledger, token_plan) in &planned_deductions {
+            for (principal, debit) in token_plan {
+                let position = self
+                    .deposits
+                    .get_mut(principal)
+                    .expect("native XRP debit plan principal was prevalidated");
+                let balance = position
+                    .stablecoin_balances
+                    .get_mut(token_ledger)
+                    .expect("native XRP debit plan balance was prevalidated");
+                *balance -= *debit;
             }
-
-            for principal in &opted_in_principals {
-                if remaining == 0 {
-                    break;
-                }
-                let Some(position) = self.deposits.get_mut(principal) else {
-                    continue;
-                };
-                let Some(balance) = position.stablecoin_balances.get_mut(token_ledger) else {
-                    continue;
-                };
-                if *balance == 0 {
-                    continue;
-                }
-                let extra = remaining.min(*balance);
-                *balance = balance.saturating_sub(extra);
-                *actual_deductions_per_token
-                    .entry(*token_ledger)
-                    .or_insert(0) += extra;
-                remaining -= extra;
-            }
-
-            if remaining > 0 {
-                return Err(StabilityPoolError::LiquidationFailed {
-                    vault_id,
-                    reason: "native XRP absorb could not deduct full burned stablecoin amount"
-                        .to_string(),
-                });
-            }
-        }
-
-        for (token_ledger, actual_deducted) in &actual_deductions_per_token {
-            if let Some(total) = self.total_stablecoin_balances.get_mut(token_ledger) {
-                *total = total.saturating_sub(*actual_deducted);
-            }
+            let aggregate = self
+                .total_stablecoin_balances
+                .get_mut(token_ledger)
+                .expect("native XRP aggregate was prevalidated");
+            *aggregate -= stables_consumed[token_ledger];
         }
 
         for claim in payout_claims {
-            self.record_native_xrp_pending_payout(
-                claim.claimant,
-                NativeXrpPendingPayout {
-                    claim_id: claim.claim_id,
-                    collateral_type,
-                    vault_id,
-                    drops: claim.drops,
-                    payout_address: claim.payout_address.clone(),
-                    destination_tag: claim.destination_tag,
-                    created_at_ns: timestamp,
-                },
-            )?;
+            let position = self
+                .deposits
+                .get_mut(&claim.claimant)
+                .expect("native XRP payout claimant was prevalidated");
+            let replaced = position
+                .pending_native_xrp_payouts
+                .get_or_insert_with(BTreeMap::new)
+                .insert(
+                    claim.claim_id,
+                    NativeXrpPendingPayout {
+                        claim_id: claim.claim_id,
+                        collateral_type,
+                        vault_id,
+                        drops: claim.drops,
+                        payout_address: claim.payout_address.clone(),
+                        destination_tag: claim.destination_tag,
+                        created_at_ns: timestamp,
+                    },
+                );
+            debug_assert!(replaced.is_none(), "prevalidated XRP claim id was replaced");
         }
 
         // `collateral_gained` is the seized amount in drops (XRP is 6-decimal);
@@ -4612,158 +4807,261 @@ impl StabilityPoolState {
         );
     }
 
-    /// CFX/native-chain sibling of `process_liquidation_gains_at`. Stablecoin
-    /// draw and rounding are identical, but collateral claims are u128 wei and
-    /// live in `DepositPosition::cfx_claims` instead of the u64 ICRC gains map.
+    /// Build the complete chain-liquidation debit and claim plan without
+    /// mutating state. Integer remainders are assigned in principal order.
+    pub(crate) fn plan_chain_liquidation_gains_at(
+        &self,
+        vault_id: u64,
+        chain_sentinel: Principal,
+        stables_consumed: &BTreeMap<Principal, u64>,
+        cfx_gained_native: u128,
+    ) -> Result<ChainLiquidationGainsPlan, StabilityPoolError> {
+        let fail = |reason: &str| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: reason.to_string(),
+        };
+        if !self.is_chain_collateral_sentinel(&chain_sentinel)
+            || cfx_gained_native == 0
+            || stables_consumed.is_empty()
+            || stables_consumed.values().any(|amount| *amount == 0)
+        {
+            return Err(fail("invalid chain collateral absorb accounting input"));
+        }
+        let opted_in: Vec<Principal> = self
+            .deposits
+            .iter()
+            .filter(|(_, position)| position.is_opted_in_for_chain(&chain_sentinel))
+            .map(|(principal, _)| *principal)
+            .collect();
+        if opted_in.is_empty() {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+
+        let mut debits: BTreeMap<Principal, BTreeMap<Principal, u64>> = BTreeMap::new();
+        let mut aggregate_after = BTreeMap::new();
+        let mut owner_value_e8s: BTreeMap<Principal, u64> = BTreeMap::new();
+        let vps = self.virtual_prices();
+        let mut total_value_e8s = 0u64;
+
+        for (ledger, &amount) in stables_consumed {
+            let aggregate = self.total_stablecoin_balances.get(ledger).copied().unwrap_or(0);
+            let all_positions = self.deposits.values().try_fold(0u64, |sum, position| {
+                sum.checked_add(position.stablecoin_balances.get(ledger).copied().unwrap_or(0))
+            });
+            if all_positions != Some(aggregate) || aggregate < amount {
+                return Err(fail("chain absorb stablecoin aggregate does not cover the full burn"));
+            }
+            let opted_total = opted_in.iter().try_fold(0u64, |sum, principal| {
+                sum.checked_add(
+                    self.deposits
+                        .get(principal)
+                        .and_then(|position| position.stablecoin_balances.get(ledger))
+                        .copied()
+                        .unwrap_or(0),
+                )
+            }).ok_or_else(|| fail("chain opted-in stablecoin total overflow"))?;
+            if opted_total < amount {
+                return Err(fail("chain absorb exceeds opted-in stablecoin backing"));
+            }
+
+            let mut ledger_debits = BTreeMap::new();
+            let mut planned = 0u64;
+            for principal in &opted_in {
+                let balance = self.deposits[principal]
+                    .stablecoin_balances.get(ledger).copied().unwrap_or(0);
+                if balance == 0 { continue; }
+                let share = u64::try_from(u128::from(amount) * u128::from(balance)
+                    / u128::from(opted_total))
+                    .map_err(|_| fail("chain stablecoin share overflow"))?;
+                if share > 0 {
+                    ledger_debits.insert(*principal, share);
+                    planned = planned.checked_add(share)
+                        .ok_or_else(|| fail("chain stablecoin debit sum overflow"))?;
+                }
+            }
+            let mut remainder = amount.checked_sub(planned)
+                .ok_or_else(|| fail("chain proportional debit exceeded burn"))?;
+            for principal in &opted_in {
+                if remainder == 0 { break; }
+                let balance = self.deposits[principal]
+                    .stablecoin_balances.get(ledger).copied().unwrap_or(0);
+                let assigned = ledger_debits.get(principal).copied().unwrap_or(0);
+                let available = balance.checked_sub(assigned)
+                    .ok_or_else(|| fail("chain debit exceeds owner balance"))?;
+                let extra = remainder.min(available);
+                if extra > 0 {
+                    ledger_debits.insert(*principal, assigned.checked_add(extra)
+                        .ok_or_else(|| fail("chain owner debit overflow"))?);
+                    remainder -= extra;
+                }
+            }
+            if remainder != 0 || ledger_debits.values().try_fold(0u64, |sum, debit| sum.checked_add(*debit)) != Some(amount) {
+                return Err(fail("chain absorb could not plan the exact stablecoin debit"));
+            }
+            aggregate_after.insert(*ledger, aggregate.checked_sub(amount)
+                .ok_or_else(|| fail("chain aggregate underflow"))?);
+
+            let (decimals, is_lp) = self.stablecoin_registry.get(ledger)
+                .map(|config| (config.decimals, config.is_lp_token.unwrap_or(false)))
+                .unwrap_or((8, false));
+            let total_value = if is_lp {
+                vps.get(ledger).map(|vp| lp_to_usd_e8s(amount, *vp)).unwrap_or(0)
+            } else { normalize_to_e8s(amount, decimals) };
+            total_value_e8s = total_value_e8s.checked_add(total_value)
+                .ok_or_else(|| fail("chain consumed stablecoin value overflow"))?;
+            for (principal, debit) in &ledger_debits {
+                let value = if is_lp {
+                    vps.get(ledger).map(|vp| lp_to_usd_e8s(*debit, *vp)).unwrap_or(0)
+                } else { normalize_to_e8s(*debit, decimals) };
+                let owner_total = owner_value_e8s.entry(*principal).or_insert(0);
+                *owner_total = owner_total.checked_add(value)
+                    .ok_or_else(|| fail("chain owner consumed value overflow"))?;
+            }
+            debits.insert(*ledger, ledger_debits);
+        }
+        if total_value_e8s == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let owner_weight = owner_value_e8s.values().try_fold(0u64, |sum, value| sum.checked_add(*value))
+            .ok_or_else(|| fail("chain owner value total overflow"))?;
+        if owner_weight == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+
+        let mut claim_credits = BTreeMap::new();
+        let mut claims_planned = 0u128;
+        for (principal, &weight) in &owner_value_e8s {
+            if weight == 0 { continue; }
+            let quotient = cfx_gained_native / u128::from(owner_weight);
+            let remainder = cfx_gained_native % u128::from(owner_weight);
+            let base = quotient.checked_mul(u128::from(weight))
+                .ok_or_else(|| fail("chain native claim multiplication overflow"))?;
+            let fraction = remainder.checked_mul(u128::from(weight))
+                .ok_or_else(|| fail("chain native claim remainder overflow"))?
+                / u128::from(owner_weight);
+            let credit = base.checked_add(fraction)
+                .ok_or_else(|| fail("chain native claim credit overflow"))?;
+            claims_planned = claims_planned.checked_add(credit)
+                .ok_or_else(|| fail("chain native claim total overflow"))?;
+            if credit > 0 {
+                let current = self.deposits[principal].cfx_claims.as_ref()
+                    .and_then(|claims| claims.get(&chain_sentinel)).copied().unwrap_or(0);
+                current.checked_add(credit)
+                    .ok_or_else(|| fail("chain depositor native claim overflow"))?;
+                claim_credits.insert(*principal, credit);
+            }
+        }
+        let dust = cfx_gained_native.checked_sub(claims_planned)
+            .ok_or_else(|| fail("chain native claims exceed collateral"))?;
+        if dust > 0 {
+            let first = owner_value_e8s.iter().find(|(_, weight)| **weight > 0)
+                .map(|(principal, _)| *principal)
+                .ok_or_else(|| fail("chain collateral has no eligible claimant"))?;
+            let current = self.deposits[&first].cfx_claims.as_ref()
+                .and_then(|claims| claims.get(&chain_sentinel)).copied().unwrap_or(0);
+            let prior_credit = claim_credits.get(&first).copied().unwrap_or(0);
+            current.checked_add(prior_credit)
+                .and_then(|value| value.checked_add(dust))
+                .ok_or_else(|| fail("chain dust claim overflow"))?;
+            claim_credits.insert(first, prior_credit.checked_add(dust)
+                .ok_or_else(|| fail("chain dust credit overflow"))?);
+        }
+        let next_liquidations_executed = self.total_liquidations_executed.checked_add(1)
+            .ok_or_else(|| fail("total liquidation counter exhausted"))?;
+
+        Ok(ChainLiquidationGainsPlan {
+            vault_id,
+            chain_sentinel,
+            debits,
+            aggregate_after,
+            claim_credits,
+            collateral_native: cfx_gained_native,
+            next_liquidations_executed,
+        })
+    }
+
+    /// Commit a fully checked plan and its unique backend source. Every
+    /// fallible check runs before the first write.
+    pub(crate) fn commit_chain_absorb_gains(
+        &mut self,
+        plan: ChainLiquidationGainsPlan,
+        claim_source: Option<(u64, u128)>,
+    ) -> Result<(), StabilityPoolError> {
+        let fail = |reason: &str| StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: reason.to_string(),
+        };
+        if let Some((claim_id, claim_amount_native)) = claim_source {
+            if claim_amount_native == 0 || claim_amount_native != plan.collateral_native {
+                return Err(fail("backend chain claim amount differs from planned collateral"));
+            }
+        }
+        for (ledger, owners) in &plan.debits {
+            let amount = owners.values().try_fold(0u64, |sum, debit| sum.checked_add(*debit))
+                .ok_or_else(|| fail("planned chain debit sum overflow"))?;
+            let aggregate = self.total_stablecoin_balances.get(ledger).copied().unwrap_or(0);
+            if aggregate.checked_sub(amount) != plan.aggregate_after.get(ledger).copied() {
+                return Err(fail("chain aggregate changed after accounting was planned"));
+            }
+            for (principal, debit) in owners {
+                let balance = self.deposits.get(principal)
+                    .and_then(|position| position.stablecoin_balances.get(ledger)).copied().unwrap_or(0);
+                if balance < *debit {
+                    return Err(fail("chain depositor balance changed after accounting was planned"));
+                }
+            }
+        }
+        let planned_claim_total = plan.claim_credits.values().try_fold(0u128, |sum, credit| sum.checked_add(*credit))
+            .ok_or_else(|| fail("planned chain claim total overflow"))?;
+        if planned_claim_total != plan.collateral_native {
+            return Err(fail("planned owner claims do not equal confirmed collateral"));
+        }
+        for (principal, credit) in &plan.claim_credits {
+            let current = self.deposits.get(principal)
+                .and_then(|position| position.cfx_claims.as_ref())
+                .and_then(|claims| claims.get(&plan.chain_sentinel)).copied().unwrap_or(0);
+            current.checked_add(*credit)
+                .ok_or_else(|| fail("chain depositor claim changed or overflowed after planning"))?;
+        }
+        if self.total_liquidations_executed.checked_add(1)
+            != Some(plan.next_liquidations_executed)
+        {
+            return Err(fail("liquidation counter changed after accounting was planned"));
+        }
+
+        // This checked insert is the first mutation. It validates amount and
+        // uniqueness before writing; no fallible work follows it.
+        if let Some((claim_id, claim_amount_native)) = claim_source {
+            self.record_chain_claim_source(plan.vault_id, plan.chain_sentinel, claim_id, claim_amount_native)?;
+        }
+        for (ledger, owners) in plan.debits {
+            for (principal, debit) in owners {
+                *self.deposits.get_mut(&principal).unwrap().stablecoin_balances.get_mut(&ledger).unwrap() -= debit;
+            }
+            self.total_stablecoin_balances.insert(ledger, plan.aggregate_after[&ledger]);
+        }
+        for (principal, credit) in plan.claim_credits {
+            let claim = self.deposits.get_mut(&principal).unwrap().cfx_claims
+                .get_or_insert_with(BTreeMap::new).entry(plan.chain_sentinel).or_insert(0);
+            *claim += credit;
+        }
+        self.total_liquidations_executed = plan.next_liquidations_executed;
+        Ok(())
+    }
+
     pub fn process_chain_liquidation_gains_at(
         &mut self,
-        _vault_id: u64,
+        vault_id: u64,
         chain_sentinel: Principal,
         stables_consumed: &BTreeMap<Principal, u64>,
         cfx_gained_native: u128,
         _collateral_price_e8s: u64,
         _timestamp: u64,
-    ) {
-        if !self.is_chain_collateral_sentinel(&chain_sentinel) || cfx_gained_native == 0 {
-            return;
-        }
-
-        let opted_in_principals: Vec<Principal> = self
-            .deposits
-            .iter()
-            .filter(|(_, pos)| pos.is_opted_in_for_chain(&chain_sentinel))
-            .map(|(p, _)| *p)
-            .collect();
-        if opted_in_principals.is_empty() {
-            return;
-        }
-
-        let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
-        for token_ledger in stables_consumed.keys() {
-            let total: u64 = opted_in_principals
-                .iter()
-                .filter_map(|p| self.deposits.get(p))
-                .map(|pos| {
-                    pos.stablecoin_balances
-                        .get(token_ledger)
-                        .copied()
-                        .unwrap_or(0)
-                })
-                .sum();
-            per_token_opted_in_totals.insert(*token_ledger, total);
-        }
-
-        let vps = self.virtual_prices().clone();
-        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed
-            .keys()
-            .filter_map(|ledger| {
-                self.stablecoin_registry
-                    .get(ledger)
-                    .map(|c| (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false))))
-            })
-            .collect();
-        let total_consumed_e8s: u64 = stables_consumed
-            .iter()
-            .map(|(ledger, &amount)| {
-                let (decimals, is_lp) =
-                    registry_snapshot.get(ledger).copied().unwrap_or((8, false));
-                if is_lp {
-                    vps.get(ledger)
-                        .map(|&vp| lp_to_usd_e8s(amount, vp))
-                        .unwrap_or(0)
-                } else {
-                    normalize_to_e8s(amount, decimals)
-                }
-            })
-            .sum();
-        if total_consumed_e8s == 0 {
-            return;
-        }
-
-        let mut actual_deductions_per_token: BTreeMap<Principal, u64> = BTreeMap::new();
-        let mut total_cfx_distributed: u128 = 0;
-
-        for principal in &opted_in_principals {
-            let mut user_consumed_e8s: u64 = 0;
-
-            if let Some(position) = self.deposits.get_mut(principal) {
-                for (token_ledger, &total_consumed) in stables_consumed {
-                    let total_opted_in = per_token_opted_in_totals
-                        .get(token_ledger)
-                        .copied()
-                        .unwrap_or(0);
-                    if total_opted_in == 0 {
-                        continue;
-                    }
-                    let user_balance = position
-                        .stablecoin_balances
-                        .get(token_ledger)
-                        .copied()
-                        .unwrap_or(0);
-                    if user_balance == 0 {
-                        continue;
-                    }
-
-                    let user_share_native = (total_consumed as u128 * user_balance as u128
-                        / total_opted_in as u128)
-                        as u64;
-                    let user_share_native = user_share_native.min(user_balance);
-                    if let Some(bal) = position.stablecoin_balances.get_mut(token_ledger) {
-                        *bal = bal.saturating_sub(user_share_native);
-                    }
-                    *actual_deductions_per_token
-                        .entry(*token_ledger)
-                        .or_insert(0) += user_share_native;
-
-                    let (decimals, is_lp) = registry_snapshot
-                        .get(token_ledger)
-                        .copied()
-                        .unwrap_or((8, false));
-                    let share_e8s = if is_lp {
-                        vps.get(token_ledger)
-                            .map(|&vp| lp_to_usd_e8s(user_share_native, vp))
-                            .unwrap_or(0)
-                    } else {
-                        normalize_to_e8s(user_share_native, decimals)
-                    };
-                    user_consumed_e8s = user_consumed_e8s.saturating_add(share_e8s);
-                }
-
-                if user_consumed_e8s > 0 {
-                    let user_cfx = cfx_gained_native.saturating_mul(user_consumed_e8s as u128)
-                        / total_consumed_e8s as u128;
-                    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
-                    let entry = claims.entry(chain_sentinel).or_insert(0);
-                    *entry = entry.saturating_add(user_cfx);
-                    total_cfx_distributed = total_cfx_distributed.saturating_add(user_cfx);
-                }
-            }
-        }
-
-        let cfx_dust = cfx_gained_native.saturating_sub(total_cfx_distributed);
-        if cfx_dust > 0 {
-            if let Some(first) = opted_in_principals.first() {
-                if let Some(pos) = self.deposits.get_mut(first) {
-                    let claims = pos.cfx_claims.get_or_insert_with(BTreeMap::new);
-                    let entry = claims.entry(chain_sentinel).or_insert(0);
-                    *entry = entry.saturating_add(cfx_dust);
-                }
-            }
-        }
-
-        for (token_ledger, &actual_deducted) in &actual_deductions_per_token {
-            if let Some(total) = self.total_stablecoin_balances.get_mut(token_ledger) {
-                *total = total.saturating_sub(actual_deducted);
-            }
-        }
-
-        self.total_liquidations_executed += 1;
-        self.deposits.retain(|_, pos| !pos.is_empty());
-        debug_assert!(
-            self.validate_state().is_ok(),
-            "stability pool aggregate/per-depositor invariant violated after \
-             process_chain_liquidation_gains_at"
-        );
+    ) -> Result<(), StabilityPoolError> {
+        let plan = self.plan_chain_liquidation_gains_at(
+            vault_id, chain_sentinel, stables_consumed, cfx_gained_native,
+        )?;
+        self.commit_chain_absorb_gains(plan, None)
     }
 
     // ─── Query Helpers ───
@@ -5095,6 +5393,69 @@ impl StabilityPoolState {
         }
         Ok(())
     }
+
+    /// Whether a durable journal can resume the exact economic operation for
+    /// this vault after an upgrade. A restored runtime marker that has no such
+    /// journal must never be interpreted as proof that the call had no effect.
+    pub fn has_durable_liquidation_intent_for_vault(&self, vault_id: u64) -> bool {
+        self.get_pending_ordinary_liquidation_for_vault(vault_id)
+            .is_some()
+            || self.get_pending_three_usd_absorb(vault_id).is_some()
+            || self.get_pending_native_xrp_absorb(vault_id).is_some()
+            || self.get_pending_chain_absorb(vault_id).is_some()
+    }
+
+    pub fn is_legacy_liquidation_quarantined(&self, vault_id: u64) -> bool {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_ref()
+            .is_some_and(|vaults| vaults.contains(&vault_id))
+    }
+
+    pub fn has_legacy_ambiguous_liquidation_quarantine(&self) -> bool {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_ref()
+            .is_some_and(|vaults| !vaults.is_empty())
+    }
+
+    pub fn legacy_ambiguous_liquidation_vaults(&self) -> Vec<u64> {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_ref()
+            .map(|vaults| vaults.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Classify every predecessor runtime marker before timers restart.
+    /// Journal-backed operations retain their durable row and become eligible
+    /// for their existing exact-identity recovery path. Unmatched operations
+    /// are moved to an explicit durable quarantine instead of being cleared or
+    /// retried on an unproved assumption.
+    pub fn reconcile_legacy_in_flight_liquidations_after_upgrade(
+        &mut self,
+    ) -> (usize, usize) {
+        let restored = std::mem::take(&mut self.in_flight_liquidations);
+        let mut recoverable = 0usize;
+        let mut ambiguous = 0usize;
+        for vault_id in restored {
+            if self.has_durable_liquidation_intent_for_vault(vault_id) {
+                recoverable += 1;
+            } else {
+                self.legacy_ambiguous_liquidation_vaults
+                    .get_or_insert_with(BTreeSet::new)
+                    .insert(vault_id);
+                ambiguous += 1;
+            }
+        }
+        (recoverable, ambiguous)
+    }
+
+    /// Release only the quarantine marker. The caller-facing admin endpoint
+    /// requires an emergency pause and no concurrent pool operation; any
+    /// necessary balance correction must be completed separately first.
+    pub fn release_legacy_liquidation_quarantine(&mut self, vault_id: u64) -> bool {
+        self.legacy_ambiguous_liquidation_vaults
+            .as_mut()
+            .is_some_and(|vaults| vaults.remove(&vault_id))
+    }
 }
 
 // ─── Thread-local state + accessors ───
@@ -5181,6 +5542,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
             in_flight_liquidations: v1.in_flight_liquidations,
+            legacy_ambiguous_liquidation_vaults: Some(BTreeSet::new()),
             pending_three_usd_absorbs: Some(BTreeMap::new()),
             next_three_usd_absorb_id: Some(1),
             three_usd_absorb_recovery_cursor: None,
@@ -6515,6 +6877,57 @@ mod tests {
     }
 
     #[test]
+    fn opt_out_rejects_unregistered_collateral_without_growing_state() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        let unknown = Principal::self_authenticating(b"unregistered collateral");
+        let before = state.deposits[&user_a()].opted_out_collateral.clone();
+
+        let err = state
+            .opt_out_collateral(&user_a(), unknown)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, StabilityPoolError::CollateralNotFound { ledger } if ledger == unknown)
+        );
+        assert_eq!(state.deposits[&user_a()].opted_out_collateral, before);
+    }
+
+    #[test]
+    fn failed_native_and_chain_opt_outs_do_not_initialize_legacy_fields() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        let position = state.deposits.get_mut(&user_a()).unwrap();
+        position.native_payout_addresses = None;
+        position.native_payout_destination_tags = None;
+        position.opted_in_chain_collateral = None;
+
+        let xrp_error = state
+            .opt_out_collateral(&user_a(), xrp_ledger())
+            .unwrap_err();
+        assert!(matches!(
+            xrp_error,
+            StabilityPoolError::AlreadyOptedOut { collateral } if collateral == xrp_ledger()
+        ));
+        assert!(state.deposits[&user_a()].native_payout_addresses.is_none());
+        assert!(state.deposits[&user_a()]
+            .native_payout_destination_tags
+            .is_none());
+
+        let chain_error = state
+            .opt_out_collateral(&user_a(), cfx_sentinel())
+            .unwrap_err();
+        assert!(matches!(
+            chain_error,
+            StabilityPoolError::AlreadyOptedOut { collateral } if collateral == cfx_sentinel()
+        ));
+        assert!(state.deposits[&user_a()]
+            .opted_in_chain_collateral
+            .is_none());
+    }
+
+    #[test]
     fn legacy_bob_participant_can_exit_but_cannot_reenter() {
         let mut state = test_state();
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
@@ -7038,6 +7451,168 @@ mod tests {
     }
 
     #[test]
+    fn native_xrp_absorb_overdraw_rejection_is_atomic() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1);
+        state
+            .opt_in_native_collateral_with_tag(
+                &user_a(),
+                xrp_ledger(),
+                valid_xrp_address(),
+                Some(1),
+            )
+            .unwrap();
+        state
+            .opt_in_native_collateral_with_tag(
+                &user_b(),
+                xrp_ledger(),
+                valid_xrp_address(),
+                Some(2),
+            )
+            .unwrap();
+
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let history_before = state.liquidation_history.clone();
+        let counter_before = state.total_liquidations_executed;
+
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 3);
+        let payout_claims = vec![XrpSpPayoutClaim {
+            claimant: user_a(),
+            claim_id: 78,
+            payout_address: valid_xrp_address(),
+            destination_tag: Some(1),
+            drops: 1,
+        }];
+
+        let err = state
+            .process_native_xrp_absorb_success_at(
+                43,
+                xrp_ledger(),
+                &consumed,
+                1,
+                &payout_claims,
+                124,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.liquidation_history, history_before);
+        assert_eq!(state.total_liquidations_executed, counter_before);
+        assert!(state.native_xrp_pending_payouts_for(&user_a()).is_empty());
+    }
+
+    #[test]
+    fn native_xrp_absorb_rejects_reused_claim_id_without_mutation() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 2);
+        state
+            .opt_in_native_collateral_with_tag(
+                &user_a(),
+                xrp_ledger(),
+                valid_xrp_address(),
+                Some(1),
+            )
+            .unwrap();
+        state
+            .record_native_xrp_pending_payout(
+                user_a(),
+                NativeXrpPendingPayout {
+                    claim_id: 79,
+                    collateral_type: xrp_ledger(),
+                    vault_id: 41,
+                    drops: 1,
+                    payout_address: valid_xrp_address(),
+                    destination_tag: Some(1),
+                    created_at_ns: 122,
+                },
+            )
+            .unwrap();
+
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let history_before = state.liquidation_history.clone();
+        let counter_before = state.total_liquidations_executed;
+
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 1);
+        let payout_claims = vec![XrpSpPayoutClaim {
+            claimant: user_a(),
+            claim_id: 79,
+            payout_address: valid_xrp_address(),
+            destination_tag: Some(1),
+            drops: 1,
+        }];
+
+        let err = state
+            .process_native_xrp_absorb_success_at(
+                44,
+                xrp_ledger(),
+                &consumed,
+                1,
+                &payout_claims,
+                125,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.liquidation_history, history_before);
+        assert_eq!(state.total_liquidations_executed, counter_before);
+    }
+
+    #[test]
+    fn native_xrp_absorb_counter_exhaustion_rejects_before_mutation() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1);
+        state
+            .opt_in_native_collateral_with_tag(
+                &user_a(),
+                xrp_ledger(),
+                valid_xrp_address(),
+                Some(1),
+            )
+            .unwrap();
+        state.total_liquidations_executed = u64::MAX;
+
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let history_before = state.liquidation_history.clone();
+
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 1);
+        let payout_claims = vec![XrpSpPayoutClaim {
+            claimant: user_a(),
+            claim_id: 80,
+            payout_address: valid_xrp_address(),
+            destination_tag: Some(1),
+            drops: 1,
+        }];
+
+        let err = state
+            .process_native_xrp_absorb_success_at(
+                45,
+                xrp_ledger(),
+                &consumed,
+                1,
+                &payout_claims,
+                126,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.liquidation_history, history_before);
+        assert_eq!(state.total_liquidations_executed, u64::MAX);
+    }
+
+    #[test]
     #[ignore = "KNOWN GAP: PoolLiquidationRecord.collateral_gained is u64, which cannot hold \
                 18-decimal wei (u64 max is only ~18.4 CFX). Fixing this needs a record-shape \
                 decision (widen the field, or normalize to e8s and teach every consumer that \
@@ -7073,7 +7648,7 @@ mod tests {
             20_000 * 1_000_000_000_000_000_000u128,
             5_000_000,
             123,
-        );
+        ).expect("chain liquidation accounting");
 
         assert_eq!(
             state.liquidation_history.len(),
@@ -7145,6 +7720,30 @@ mod tests {
             "depositors_count is the number of payout claimants"
         );
         assert_eq!(record.timestamp, 4_242);
+    }
+
+    #[test]
+    fn liquidation_history_counter_overflow_traps_before_mutation() {
+        let mut state = test_state();
+        state.total_liquidations_executed = u64::MAX;
+        let history_before = state.liquidation_history.clone();
+        let record = PoolLiquidationRecord {
+            vault_id: 196,
+            timestamp: 4_243,
+            stables_consumed: BTreeMap::new(),
+            collateral_gained: 1,
+            collateral_type: xrp_ledger(),
+            depositors_count: 1,
+            collateral_price_e8s: None,
+        };
+
+        let trapped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.record_liquidation_in_history(record);
+        }));
+
+        assert!(trapped.is_err());
+        assert_eq!(state.total_liquidations_executed, u64::MAX);
+        assert_eq!(state.liquidation_history, history_before);
     }
 
     #[test]
@@ -7307,6 +7906,44 @@ mod tests {
         let state = test_state();
         // Empty state with zero totals should pass
         assert!(state.validate_state().is_ok());
+    }
+
+    #[test]
+    fn legacy_in_flight_migration_releases_journaled_and_quarantines_ambiguous() {
+        let mut state = test_state();
+        let journaled_vault = 4_101;
+        let ambiguous_vault = 4_102;
+        state
+            .prepare_three_usd_absorb(
+                journaled_vault,
+                100_000_000,
+                50_000_000,
+                ckusdc_ledger(),
+                icp_ledger(),
+                700_000_000,
+            )
+            .expect("journaled legacy vault");
+        state.in_flight_liquidations =
+            BTreeSet::from([journaled_vault, ambiguous_vault]);
+
+        assert_eq!(
+            state.reconcile_legacy_in_flight_liquidations_after_upgrade(),
+            (1, 1)
+        );
+        assert!(state.in_flight_liquidations.is_empty());
+        assert!(!state.is_legacy_liquidation_quarantined(journaled_vault));
+        assert!(state.is_legacy_liquidation_quarantined(ambiguous_vault));
+        assert!(state.has_legacy_ambiguous_liquidation_quarantine());
+        assert!(state.has_durable_liquidation_intent_for_vault(journaled_vault));
+
+        let bytes = Encode!(&state).expect("encode migrated liquidation state");
+        let mut restored = Decode!(&bytes, StabilityPoolState)
+            .expect("quarantine survives stable-state round trip");
+        assert!(restored.is_legacy_liquidation_quarantined(ambiguous_vault));
+        assert!(restored.release_legacy_liquidation_quarantine(ambiguous_vault));
+        assert!(!restored.is_legacy_liquidation_quarantined(ambiguous_vault));
+        assert!(!restored.has_legacy_ambiguous_liquidation_quarantine());
+        assert!(!restored.release_legacy_liquidation_quarantine(ambiguous_vault));
     }
 
     #[test]
@@ -7858,7 +8495,7 @@ mod tests {
             20_000 * E18 + 1,
             5_000_000,
             123,
-        );
+        ).expect("chain liquidation accounting");
 
         let claim_a = state
             .deposits
@@ -7924,6 +8561,225 @@ mod tests {
             .unwrap()
             .get(&cfx_sentinel())
             .is_none());
+    }
+
+    #[test]
+    fn chain_absorb_debits_non_divisible_burn_exactly() {
+        let mut state = test_state();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 4);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 7);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 3);
+        for principal in [user_a(), user_b(), user_c()] {
+            state.opt_in_cfx(&principal, cfx_sentinel()).unwrap();
+        }
+        let before = [user_a(), user_b(), user_c()]
+            .map(|principal| state.deposits[&principal].stablecoin_balances[&icusd_ledger()]);
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 5);
+
+        state
+            .process_chain_liquidation_gains_at(
+                101,
+                cfx_sentinel(),
+                &consumed,
+                5,
+                100_000_000,
+                123,
+            )
+            .expect("exact chain accounting");
+
+        let after = [user_a(), user_b(), user_c()]
+            .map(|principal| state.deposits[&principal].stablecoin_balances[&icusd_ledger()]);
+        let debits = [
+            before[0] - after[0],
+            before[1] - after[1],
+            before[2] - after[2],
+        ];
+        assert_eq!(debits, [2, 2, 1], "principal order receives the one-unit remainder");
+        assert_eq!(debits.into_iter().sum::<u64>(), 5);
+        assert_eq!(
+            state.total_stablecoin_balances.get(&icusd_ledger()),
+            Some(&9),
+        );
+        assert_eq!(
+            [user_a(), user_b(), user_c()].map(|principal| {
+                state.deposits[&principal]
+                    .cfx_claims
+                    .as_ref()
+                    .and_then(|claims| claims.get(&cfx_sentinel()))
+                    .copied()
+                    .unwrap_or(0)
+            }),
+            [2, 2, 1],
+        );
+        assert!(state.validate_state().is_ok());
+    }
+
+    #[test]
+    fn chain_absorb_short_opted_backing_rejects_without_mutation() {
+        let mut state = test_state();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 3);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 7);
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).unwrap();
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let sources_before = state.chain_claim_sources.clone();
+        let counter_before = state.total_liquidations_executed;
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 4);
+
+        let error = state
+            .process_chain_liquidation_gains_at(
+                102,
+                cfx_sentinel(),
+                &consumed,
+                4,
+                100_000_000,
+                124,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.chain_claim_sources, sources_before);
+        assert_eq!(state.total_liquidations_executed, counter_before);
+    }
+
+    #[test]
+    fn stale_chain_absorb_plan_rejects_without_further_mutation() {
+        let mut state = test_state();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 4);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 6);
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).unwrap();
+        state.opt_in_cfx(&user_b(), cfx_sentinel()).unwrap();
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 5);
+        let plan = state
+            .plan_chain_liquidation_gains_at(103, cfx_sentinel(), &consumed, 5)
+            .expect("initial plan");
+
+        // Simulate another state transition before commit. The aggregate is
+        // adjusted consistently, but the planned debit can no longer be paid.
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .stablecoin_balances
+            .insert(icusd_ledger(), 1);
+        state.total_stablecoin_balances.insert(icusd_ledger(), 7);
+        let deposits_before_commit = state.deposits.clone();
+        let totals_before_commit = state.total_stablecoin_balances.clone();
+        let sources_before_commit = state.chain_claim_sources.clone();
+        let counter_before_commit = state.total_liquidations_executed;
+
+        let error = state.commit_chain_absorb_gains(plan, Some((77, 5))).unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before_commit);
+        assert_eq!(state.total_stablecoin_balances, totals_before_commit);
+        assert_eq!(state.chain_claim_sources, sources_before_commit);
+        assert_eq!(state.total_liquidations_executed, counter_before_commit);
+    }
+
+    #[test]
+    fn chain_absorb_claim_overflow_rejects_without_mutation() {
+        let mut state = test_state();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1);
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).unwrap();
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cfx_sentinel(), u128::MAX);
+        let deposits_before = state.deposits.clone();
+        let totals_before = state.total_stablecoin_balances.clone();
+        let sources_before = state.chain_claim_sources.clone();
+        let counter_before = state.total_liquidations_executed;
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 1);
+
+        let error = state
+            .process_chain_liquidation_gains_at(
+                104,
+                cfx_sentinel(),
+                &consumed,
+                1,
+                100_000_000,
+                125,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(state.deposits, deposits_before);
+        assert_eq!(state.total_stablecoin_balances, totals_before);
+        assert_eq!(state.chain_claim_sources, sources_before);
+        assert_eq!(state.total_liquidations_executed, counter_before);
+    }
+
+    #[test]
+    fn chain_claim_restore_overflows_reject_without_partial_write() {
+        let mut source_overflow = test_state();
+        source_overflow.register_chain_collateral_sentinel(cfx_sentinel());
+        source_overflow
+            .record_chain_claim_source(105, cfx_sentinel(), 88, u128::MAX)
+            .expect("initial source");
+        let mut position = DepositPosition::new(0);
+        position
+            .cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cfx_sentinel(), 12);
+        source_overflow.deposits.insert(user_a(), position);
+        let deposits_before = source_overflow.deposits.clone();
+        let sources_before = source_overflow.chain_claim_sources.clone();
+
+        let error = source_overflow
+            .restore_chain_claim_and_depositor_claim(
+                105,
+                cfx_sentinel(),
+                88,
+                user_a(),
+                1,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(source_overflow.deposits, deposits_before);
+        assert_eq!(source_overflow.chain_claim_sources, sources_before);
+
+        let mut claim_overflow = test_state();
+        claim_overflow.register_chain_collateral_sentinel(cfx_sentinel());
+        claim_overflow
+            .record_chain_claim_source(106, cfx_sentinel(), 89, 12)
+            .expect("initial source");
+        let mut position = DepositPosition::new(0);
+        position
+            .cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cfx_sentinel(), u128::MAX);
+        claim_overflow.deposits.insert(user_a(), position);
+        let deposits_before = claim_overflow.deposits.clone();
+        let sources_before = claim_overflow.chain_claim_sources.clone();
+
+        let error = claim_overflow
+            .restore_chain_claim_and_depositor_claim(
+                106,
+                cfx_sentinel(),
+                89,
+                user_a(),
+                1,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(claim_overflow.deposits, deposits_before);
+        assert_eq!(claim_overflow.chain_claim_sources, sources_before);
     }
 
     #[test]
@@ -9186,6 +10042,7 @@ mod tests {
         // must decode without losing positions; pending refunds start empty.
         let mut current = test_state();
         add_deposit_direct(&mut current, user_a(), icusd_ledger(), 42_00000000);
+        current.in_flight_liquidations.insert(9_901);
         let v1 = StabilityPoolStateV1 {
             deposits: current.deposits.clone(),
             total_stablecoin_balances: current.total_stablecoin_balances.clone(),
@@ -9208,6 +10065,16 @@ mod tests {
         let bytes = Encode!(&v1).expect("encode v1 snapshot");
 
         let mut decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
+        assert!(decoded.in_flight_liquidations.contains(&9_901));
+        assert!(decoded
+            .legacy_ambiguous_liquidation_vaults()
+            .is_empty());
+        assert_eq!(
+            decoded.reconcile_legacy_in_flight_liquidations_after_upgrade(),
+            (0, 1)
+        );
+        assert!(decoded.in_flight_liquidations.is_empty());
+        assert!(decoded.is_legacy_liquidation_quarantined(9_901));
         assert!(decoded.pending_outbound_payouts.is_none());
         assert!(decoded.pending_withdrawals.is_none());
         decoded.reconcile_pending_withdrawals_after_upgrade();

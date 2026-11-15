@@ -1925,73 +1925,77 @@ export type Result_22 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
 export type Result_23 = { 'Ok' : ThreeUsdReserveInventoryPage } |
   { 'Err' : ProtocolError };
-export type Result_24 = { 'Ok' : number } |
+export type Result_24 = { 'Ok' : Array<UnsupportedIcrcReceipt> } |
+  { 'Err' : string };
+export type Result_25 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
-export type Result_25 = { 'Ok' : VaultOperationStatus } |
+export type Result_26 = { 'Ok' : VaultOperationStatus } |
   { 'Err' : ProtocolError };
-export type Result_26 = { 'Ok' : CoverageReport } |
+export type Result_27 = { 'Ok' : XrpVaultDepositAddress } |
+  { 'Err' : ProtocolError };
+export type Result_28 = { 'Ok' : CoverageReport } |
   { 'Err' : XrplIcusdError };
-export type Result_27 = { 'Ok' : Array<QuarantinedReceiptView> } |
+export type Result_29 = { 'Ok' : Array<QuarantinedReceiptView> } |
   { 'Err' : XrplIcusdError };
-export type Result_28 = { 'Ok' : ConsentInfo } |
-  { 'Err' : Icrc21Error };
-export type Result_29 = { 'Ok' : ChainVaultV1 } |
-  { 'Err' : ProtocolError };
 export type Result_3 = { 'Ok' : ReserveRedemptionAdminStatus } |
   { 'Err' : ProtocolError };
-export type Result_30 = { 'Ok' : OpenVaultSuccess } |
+export type Result_30 = { 'Ok' : ConsentInfo } |
+  { 'Err' : Icrc21Error };
+export type Result_31 = { 'Ok' : ChainVaultV1 } |
   { 'Err' : ProtocolError };
-export type Result_31 = { 'Ok' : XrpVaultOpenInfo } |
+export type Result_32 = { 'Ok' : OpenVaultSuccess } |
   { 'Err' : ProtocolError };
-export type Result_32 = { 'Ok' : PreparedRedemptionOffer } |
+export type Result_33 = { 'Ok' : XrpVaultOpenInfo } |
+  { 'Err' : ProtocolError };
+export type Result_34 = { 'Ok' : PreparedRedemptionOffer } |
   { 'Err' : RedemptionOfferRefreshError };
-export type Result_33 = { 'Ok' : RepaymentIntentView } |
+export type Result_35 = { 'Ok' : RepaymentIntentView } |
   { 'Err' : XrplIcusdError };
-export type Result_34 = { 'Ok' : ChainSupplyReconciliation } |
+export type Result_36 = { 'Ok' : ChainSupplyReconciliation } |
   { 'Err' : ProtocolError };
-export type Result_35 = { 'Ok' : CkSolIcpPayment } |
+export type Result_37 = { 'Ok' : CkSolIcpPayment } |
   { 'Err' : string };
-export type Result_36 = { 'Ok' : boolean } |
+export type Result_38 = { 'Ok' : boolean } |
   { 'Err' : ProtocolError };
-export type Result_37 = { 'Ok' : QuarantinedReceiptView } |
+export type Result_39 = { 'Ok' : QuarantinedReceiptView } |
   { 'Err' : XrplIcusdError };
-export type Result_38 = { 'Ok' : RedemptionResult } |
-  { 'Err' : RedemptionError };
-export type Result_39 = { 'Ok' : ReserveRedemptionResult } |
-  { 'Err' : ProtocolError };
 export type Result_4 = { 'Ok' : NicpRedemptionClaim } |
   { 'Err' : string };
-export type Result_40 = { 'Ok' : ChainHotWalletBalanceRefresh } |
+export type Result_40 = { 'Ok' : RedemptionResult } |
+  { 'Err' : RedemptionError };
+export type Result_41 = { 'Ok' : ReserveRedemptionResult } |
   { 'Err' : ProtocolError };
-export type Result_41 = { 'Ok' : SpBurnRefundReceipt } |
+export type Result_42 = { 'Ok' : ChainHotWalletBalanceRefresh } |
   { 'Err' : ProtocolError };
-export type Result_42 = { 'Ok' : RepayAndCloseSuccess } |
+export type Result_43 = { 'Ok' : SpBurnRefundReceipt } |
   { 'Err' : ProtocolError };
-export type Result_43 = { 'Ok' : ThreeUsdReserveIngressV2StatusView } |
+export type Result_44 = { 'Ok' : RepayAndCloseSuccess } |
   { 'Err' : ProtocolError };
-export type Result_44 = { 'Ok' : IssuerSetupStatus } |
+export type Result_45 = { 'Ok' : ThreeUsdReserveIngressV2StatusView } |
+  { 'Err' : ProtocolError };
+export type Result_46 = { 'Ok' : IssuerSetupStatus } |
   { 'Err' : XrplIcusdError };
-export type Result_45 = { 'Ok' : Uint8Array | number[] } |
+export type Result_47 = { 'Ok' : Uint8Array | number[] } |
   { 'Err' : ProtocolError };
-export type Result_46 = { 'Ok' : SpLiquidationReceipt } |
+export type Result_48 = { 'Ok' : SpLiquidationReceipt } |
   { 'Err' : ProtocolError };
-export type Result_47 = { 'Ok' : StabilityPoolLiquidationResult } |
-  { 'Err' : ProtocolError };
-export type Result_48 = { 'Ok' : ChainStabilityPoolLiquidationResult } |
-  { 'Err' : ProtocolError };
-export type Result_49 = { 'Ok' : XrpSpAbsorbResult } |
+export type Result_49 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
 export type Result_5 = { 'Ok' : Array<[Principal, string]> } |
   { 'Err' : ProtocolError };
-export type Result_50 = { 'Ok' : XrpSpAbsorbPreflight } |
+export type Result_50 = { 'Ok' : ChainStabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
-export type Result_51 = { 'Ok' : XrpSpAbsorbStatus } |
+export type Result_51 = { 'Ok' : XrpSpAbsorbResult } |
   { 'Err' : ProtocolError };
-export type Result_52 = { 'Ok' : bigint } |
+export type Result_52 = { 'Ok' : XrpSpAbsorbPreflight } |
+  { 'Err' : ProtocolError };
+export type Result_53 = { 'Ok' : XrpSpAbsorbStatus } |
+  { 'Err' : ProtocolError };
+export type Result_54 = { 'Ok' : bigint } |
   { 'Err' : string };
-export type Result_53 = { 'Ok' : number } |
+export type Result_55 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
-export type Result_54 = { 'Ok' : Account } |
+export type Result_56 = { 'Ok' : Account } |
   { 'Err' : XrplIcusdError };
 export type Result_6 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
@@ -2470,6 +2474,21 @@ export interface TreasuryStats {
   'total_accrued_interest_system' : bigint,
   'pending_interest_for_pools_total' : bigint,
 }
+export type UnsupportedIcrcOperation = { 'Approve' : null } |
+  { 'Transfer' : null } |
+  { 'TransferFrom' : null };
+export interface UnsupportedIcrcReceipt {
+  'fee' : [] | [bigint],
+  'destination' : Account,
+  'block_index' : bigint,
+  'source' : [] | [Account],
+  'memo' : Uint8Array | number[],
+  'operation_id' : bigint,
+  'ledger' : Principal,
+  'operation' : UnsupportedIcrcOperation,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
 export interface UpdateChainConfigArg {
   'rpc_endpoints' : [] | [Array<string>],
   'gas_strategy' : [] | [GasStrategy],
@@ -2630,6 +2649,13 @@ export interface XrpSpPayoutClaim {
   'destination_tag' : [] | [number],
   'payout_address' : string,
   'drops' : bigint,
+}
+export interface XrpVaultDepositAddress {
+  'custody_address' : string,
+  'network' : string,
+  'receipt_count' : bigint,
+  'opening_ledger_index' : bigint,
+  'receipt_limit' : bigint,
 }
 export interface XrpVaultOpenInfo {
   'reserve_base_drops' : bigint,
@@ -2805,6 +2831,10 @@ export interface _SERVICE {
   'coingecko_transform' : ActorMethod<[TransformArgs], HttpResponse>,
   'configure_xrpl_icusd' : ActorMethod<[ConfigureXrplIcusdArg], Result_12>,
   'confirm_xrp_deposit' : ActorMethod<[bigint], Result>,
+  'confirm_xrp_vault_topup' : ActorMethod<
+    [bigint, string, [] | [bigint]],
+    Result
+  >,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'delete_chain' : ActorMethod<[number], Result_1>,
@@ -3012,6 +3042,10 @@ export interface _SERVICE {
     [bigint, bigint],
     [] | [ThreeUsdReserveCollateralPayout]
   >,
+  'get_stability_pool_liquidate_with_reserves_v2_payout_operation_id' : ActorMethod<
+    [bigint, bigint],
+    [] | [bigint]
+  >,
   'get_stability_pool_liquidate_with_reserves_v2_status' : ActorMethod<
     [bigint, bigint],
     ThreeUsdReserveIngressV2StatusView
@@ -3035,14 +3069,15 @@ export interface _SERVICE {
   >,
   'get_treasury_principal' : ActorMethod<[], [] | [Principal]>,
   'get_treasury_stats' : ActorMethod<[], TreasuryStats>,
+  'get_unsupported_icrc_receipts' : ActorMethod<[], Result_24>,
   'get_vault_count' : ActorMethod<[], bigint>,
   'get_vault_history' : ActorMethod<[bigint], Array<[bigint, Event]>>,
   'get_vault_history_paged' : ActorMethod<
     [bigint, bigint, bigint],
     GetEventsFilteredResponse
   >,
-  'get_vault_interest_rate' : ActorMethod<[bigint], Result_24>,
-  'get_vault_operation_status' : ActorMethod<[], Result_25>,
+  'get_vault_interest_rate' : ActorMethod<[bigint], Result_25>,
+  'get_vault_operation_status' : ActorMethod<[], Result_26>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
   'get_vaults_page' : ActorMethod<[bigint, bigint], VaultsPageResponse>,
   'get_xrp_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
@@ -3052,16 +3087,20 @@ export interface _SERVICE {
   >,
   'get_xrp_quarantined_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
   'get_xrp_schnorr_key_name' : ActorMethod<[], string>,
+  'get_xrp_vault_deposit_address' : ActorMethod<
+    [bigint, [] | [bigint]],
+    Result_27
+  >,
   'get_xrpl_icusd_config' : ActorMethod<[], PublicXrplIcusdConfig>,
-  'get_xrpl_icusd_coverage' : ActorMethod<[], Result_26>,
-  'get_xrpl_overflow_evidence' : ActorMethod<[], Result_27>,
-  'get_xrpl_quarantined_receipts' : ActorMethod<[], Result_27>,
+  'get_xrpl_icusd_coverage' : ActorMethod<[], Result_28>,
+  'get_xrpl_overflow_evidence' : ActorMethod<[], Result_29>,
+  'get_xrpl_quarantined_receipts' : ActorMethod<[], Result_29>,
   'harvest_chain_interest' : ActorMethod<[number], Result>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
   'icrc21_canister_call_consent_message' : ActorMethod<
     [ConsentMessageRequest],
-    Result_28
+    Result_30
   >,
   'icrc28_trusted_origins' : ActorMethod<[], Icrc28TrustedOriginsResponse>,
   'issue_xrpl_from_canonical' : ActorMethod<[IssueFromCanonicalArg], Result_7>,
@@ -3083,30 +3122,30 @@ export interface _SERVICE {
     [VaultIntent, Uint8Array | number[]],
     Result
   >,
-  'open_solana_vault' : ActorMethod<[bigint, bigint, string], Result_29>,
-  'open_vault' : ActorMethod<[bigint, [] | [Principal]], Result_30>,
+  'open_solana_vault' : ActorMethod<[bigint, bigint, string], Result_31>,
+  'open_vault' : ActorMethod<[bigint, [] | [Principal]], Result_32>,
   'open_vault_and_borrow' : ActorMethod<
     [bigint, bigint, [] | [Principal]],
-    Result_30
+    Result_32
   >,
   'open_vault_and_borrow_v2' : ActorMethod<
     [OpenVaultAndBorrowV2Args],
-    Result_30
+    Result_32
   >,
-  'open_vault_v2' : ActorMethod<[OpenVaultV2Args], Result_30>,
+  'open_vault_v2' : ActorMethod<[OpenVaultV2Args], Result_32>,
   'open_vault_with_deposit' : ActorMethod<
     [bigint, [] | [Principal]],
-    Result_30
+    Result_32
   >,
-  'open_xrp_vault' : ActorMethod<[], Result_31>,
+  'open_xrp_vault' : ActorMethod<[], Result_33>,
   'partial_liquidate_vault' : ActorMethod<[VaultArg], Result_6>,
   'partial_repay_to_vault' : ActorMethod<[VaultArg], Result>,
-  'prepare_redemption_offer' : ActorMethod<[bigint], Result_32>,
+  'prepare_redemption_offer' : ActorMethod<[bigint], Result_34>,
   'prepare_vault51_nicp_redemption' : ActorMethod<
     [PrepareNicpRedemption],
     Result_4
   >,
-  'prepare_xrpl_repayment' : ActorMethod<[PrepareRepaymentArg], Result_33>,
+  'prepare_xrpl_repayment' : ActorMethod<[PrepareRepaymentArg], Result_35>,
   'provide_liquidity' : ActorMethod<[bigint], Result>,
   'rearm_unsent_legacy_three_usd_refund' : ActorMethod<[bigint], Result_1>,
   'rearm_unsent_v2_default_account_refund' : ActorMethod<[bigint], Result_1>,
@@ -3114,14 +3153,14 @@ export interface _SERVICE {
     [bigint, bigint],
     Result_1
   >,
-  'reconcile_chain_supply' : ActorMethod<[number], Result_34>,
+  'reconcile_chain_supply' : ActorMethod<[number], Result_36>,
   'reconcile_cksol_icp_funding_from_block' : ActorMethod<
     [bigint, bigint],
-    Result_35
+    Result_37
   >,
   'reconcile_held_sp_interest_receipt' : ActorMethod<
     [PendingStabilityPoolInterestNotification, Uint8Array | number[]],
-    Result_36
+    Result_38
   >,
   'reconcile_legacy_three_usd_refund_candidate_block' : ActorMethod<
     [bigint, bigint],
@@ -3162,42 +3201,42 @@ export interface _SERVICE {
     Result_1
   >,
   'reconcile_xrpl_borrow_mint' : ActorMethod<[bigint, bigint], Result_7>,
-  'reconcile_xrpl_overflow_receipt' : ActorMethod<[string], Result_37>,
-  'reconcile_xrpl_quarantined_receipt' : ActorMethod<[string], Result_37>,
+  'reconcile_xrpl_overflow_receipt' : ActorMethod<[string], Result_39>,
+  'reconcile_xrpl_quarantined_receipt' : ActorMethod<[string], Result_39>,
   'recover_cksol_deposit_id' : ActorMethod<[Principal, bigint], Result_10>,
-  'recover_pending_payout' : ActorMethod<[bigint], Result_36>,
-  'recover_pending_transfer' : ActorMethod<[bigint], Result_36>,
+  'recover_pending_payout' : ActorMethod<[bigint], Result_38>,
+  'recover_pending_transfer' : ActorMethod<[bigint], Result_38>,
   'recover_stuck_chain_vault' : ActorMethod<[number, bigint], Result_1>,
   'redeem_collateral' : ActorMethod<[Principal, bigint], Result_6>,
   'redeem_icp' : ActorMethod<[bigint], Result_6>,
-  'redeem_quoted' : ActorMethod<[RedeemQuotedRequest], Result_38>,
-  'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_39>,
-  'refresh_chain_hot_wallet_balance' : ActorMethod<[number], Result_40>,
+  'redeem_quoted' : ActorMethod<[RedeemQuotedRequest], Result_40>,
+  'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_41>,
+  'refresh_chain_hot_wallet_balance' : ActorMethod<[number], Result_42>,
   'refresh_vault51_redemption_claim' : ActorMethod<[], Result_4>,
   'refund_stability_pool_burn' : ActorMethod<
     [bigint, bigint, SpWritedownProof],
-    Result_41
+    Result_43
   >,
   'register_chain' : ActorMethod<[RegisterChainArg], Result_1>,
   'register_ckdoge_collateral' : ActorMethod<[], Result_1>,
   'register_cksol_collateral' : ActorMethod<[], Result_1>,
   'register_xrp_collateral' : ActorMethod<[], Result_1>,
-  'repay_and_close_vault' : ActorMethod<[VaultArg], Result_42>,
+  'repay_and_close_vault' : ActorMethod<[VaultArg], Result_44>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result>,
   'reset_bot_budget' : ActorMethod<[bigint], Result_1>,
   'resolve_pending_treasury_stable_transfer' : ActorMethod<[bigint], Result_1>,
   'resolve_stuck_settlement_op' : ActorMethod<[number, bigint], Result_1>,
   'resolve_xrpl_claim' : ActorMethod<[ResolveClaimArg], Result_7>,
-  'resume_cksol_icp_payment' : ActorMethod<[bigint], Result_35>,
+  'resume_cksol_icp_payment' : ActorMethod<[bigint], Result_37>,
   'resume_xrpl_operation' : ActorMethod<[bigint], Result_7>,
   'retire_stability_pool_liquidate_with_reserves_v2' : ActorMethod<
     [bigint, bigint, bigint, bigint, Principal],
-    Result_43
+    Result_45
   >,
   'retry_pending_borrow_fee_mint' : ActorMethod<[bigint], Result_1>,
   'retry_xrpl_fee_mint' : ActorMethod<[bigint], Result_7>,
-  'run_xrpl_issuer_setup_step' : ActorMethod<[], Result_44>,
+  'run_xrpl_issuer_setup_step' : ActorMethod<[], Result_46>,
   'set_amm1_canister' : ActorMethod<[Principal], Result_1>,
   'set_amm1_pool_id' : ActorMethod<[string], Result_1>,
   'set_borrowing_fee' : ActorMethod<[number], Result_1>,
@@ -3356,43 +3395,43 @@ export interface _SERVICE {
   'solana_get_balance' : ActorMethod<[string], Result>,
   'solana_get_mint_supply' : ActorMethod<[], Result>,
   'solana_settlement_address' : ActorMethod<[], Result_2>,
-  'solana_sign_test_transfer' : ActorMethod<[string, bigint], Result_45>,
+  'solana_sign_test_transfer' : ActorMethod<[string, bigint], Result_47>,
   'stability_pool_cancel_liquidation' : ActorMethod<
     [Uint8Array | number[]],
-    Result_46
+    Result_48
   >,
   'stability_pool_cancel_liquidation_bound' : ActorMethod<
     [SpLiquidationRequest, Principal],
-    Result_46
+    Result_48
   >,
   'stability_pool_execute_liquidation' : ActorMethod<
     [Uint8Array | number[]],
-    Result_46
+    Result_48
   >,
-  'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_47>,
+  'stability_pool_liquidate' : ActorMethod<[bigint, bigint], Result_49>,
   'stability_pool_liquidate_chain_vault' : ActorMethod<
     [bigint, bigint, SpWritedownProof],
-    Result_48
+    Result_50
   >,
   'stability_pool_liquidate_debt_burned' : ActorMethod<
     [bigint, bigint, SpWritedownProof],
-    Result_47
+    Result_49
   >,
   'stability_pool_liquidate_with_reserves' : ActorMethod<
     [bigint, bigint, bigint, Principal],
-    Result_47
+    Result_49
   >,
   'stability_pool_liquidate_with_reserves_v2' : ActorMethod<
     [bigint, bigint, bigint, bigint, Principal],
-    Result_47
+    Result_49
   >,
   'stability_pool_liquidate_xrp_vault' : ActorMethod<
     [XrpSpAbsorbRequest],
-    Result_49
+    Result_51
   >,
   'stability_pool_liquidation_status' : ActorMethod<
     [Uint8Array | number[]],
-    Result_46
+    Result_48
   >,
   'stability_pool_preflight_chain_absorb' : ActorMethod<
     [bigint, bigint],
@@ -3400,27 +3439,27 @@ export interface _SERVICE {
   >,
   'stability_pool_preflight_xrp_absorb' : ActorMethod<
     [bigint, bigint],
-    Result_50
+    Result_52
   >,
   'stability_pool_prepare_liquidation' : ActorMethod<
     [SpLiquidationRequest],
-    Result_46
+    Result_48
   >,
   'stability_pool_reconcile_liquidation_payment' : ActorMethod<
     [Uint8Array | number[], bigint],
-    Result_46
+    Result_48
   >,
   'stability_pool_reconcile_liquidation_payout' : ActorMethod<
     [Uint8Array | number[], bigint],
-    Result_46
+    Result_48
   >,
   'stability_pool_reconcile_liquidation_protocol_fee' : ActorMethod<
     [Uint8Array | number[], bigint],
-    Result_46
+    Result_48
   >,
   'stability_pool_release_xrp_absorb_preflight' : ActorMethod<
     [bigint, bigint],
-    Result_36
+    Result_38
   >,
   'stability_pool_settle_xrp_claim' : ActorMethod<
     [bigint, Principal, string, [] | [number]],
@@ -3428,26 +3467,26 @@ export interface _SERVICE {
   >,
   'stability_pool_xrp_absorb_status' : ActorMethod<
     [XrpSpAbsorbRequest],
-    Result_51
+    Result_53
   >,
   'stability_pool_xrp_claim_outstanding' : ActorMethod<
     [bigint, Principal],
-    Result_36
+    Result_38
   >,
-  'start_cksol_deposit' : ActorMethod<[], Result_52>,
+  'start_cksol_deposit' : ActorMethod<[], Result_54>,
   'start_cksol_deposit_paid' : ActorMethod<[bigint, bigint], Result_9>,
   'start_cksol_deposit_with_icp' : ActorMethod<
     [bigint, bigint, bigint, bigint, bigint],
-    Result_35
+    Result_37
   >,
-  'submit_burn_proof' : ActorMethod<[number, string], Result_53>,
+  'submit_burn_proof' : ActorMethod<[number, string], Result_55>,
   'sweep_xrp_pending_open' : ActorMethod<[bigint], Result_1>,
   'unfreeze_protocol' : ActorMethod<[], Result_1>,
   'update_collateral_config' : ActorMethod<
     [Principal, CollateralConfig],
     Result_1
   >,
-  'verify_xrpl_icusd_minting_account' : ActorMethod<[], Result_54>,
+  'verify_xrpl_icusd_minting_account' : ActorMethod<[], Result_56>,
   'withdraw_and_close_vault' : ActorMethod<[bigint], Result_11>,
   'withdraw_chain_collateral' : ActorMethod<[bigint, bigint, string], Result_1>,
   'withdraw_chain_collateral_evm' : ActorMethod<
@@ -3468,6 +3507,7 @@ export interface _SERVICE {
   'xrp_settlement_address' : ActorMethod<[], Result_2>,
   'xrp_transform_account' : ActorMethod<[TransformArgs], HttpResponse>,
   'xrp_transform_account_tx' : ActorMethod<[TransformArgs], HttpResponse>,
+  'xrp_transform_deposit_receipt' : ActorMethod<[TransformArgs], HttpResponse>,
   'xrp_transform_fee' : ActorMethod<[TransformArgs], HttpResponse>,
   'xrp_transform_issued_tx' : ActorMethod<[TransformArgs], HttpResponse>,
   'xrp_transform_issuer_account' : ActorMethod<[TransformArgs], HttpResponse>,

@@ -45,8 +45,10 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('@dfinity/agent', () => ({
   Actor: { createActor: vi.fn(() => mocks.queryActor) },
-  HttpAgent: vi.fn(() => ({ fetchRootKey: vi.fn() })),
-  AnonymousIdentity: vi.fn(),
+  HttpAgent: vi.fn(function HttpAgentMock() {
+    return { fetchRootKey: vi.fn() };
+  }),
+  AnonymousIdentity: vi.fn(function AnonymousIdentityMock() {}),
 }));
 
 vi.mock('../config', () => ({

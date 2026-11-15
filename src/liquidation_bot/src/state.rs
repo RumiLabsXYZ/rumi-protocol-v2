@@ -207,6 +207,26 @@ pub struct BotPaymentTopUpJournal {
     pub receipt: Option<crate::swap::TransferReceipt>,
 }
 
+/// Durable identity for a claim shortfall where the bot's source path stopped
+/// before constructing or dispatching any ckUSDC payment tuple. This lets an
+/// administrator authorize one exact full-debt payment without inventing an
+/// original receipt.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotNoDispatchPaymentRecovery {
+    pub record_id: u64,
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub backend_principal: Principal,
+    pub ledger_principal: Principal,
+    pub debt_covered_e8s: u64,
+    pub collateral_amount_e8s: u64,
+    pub collateral_received_amount_e8s: u64,
+    pub collateral_price_e8s: u64,
+    pub icp_swapped_e8s: u64,
+    pub ckusdc_received_e6: u64,
+    pub memo: Vec<u8>,
+}
+
 /// Durable, one-time receipt-consumption tombstone for the narrowly pinned
 /// vault-158 recovery. It remains after the ordinary pending payment journal
 /// is consumed so the same swap receipts cannot be reallocated later.
@@ -444,6 +464,10 @@ pub struct BotState {
     pub pending_payments: BTreeMap<u64, BotPaymentJournal>,
     #[serde(default)]
     pub pending_claims: BTreeMap<u64, BotClaimJournal>,
+    /// Generation-bound evidence that a held short claim has no payment
+    /// journal or dispatched tuple. Old states decode to an empty map.
+    #[serde(default)]
+    pub no_dispatch_payment_recoveries: BTreeMap<u64, BotNoDispatchPaymentRecovery>,
     /// ICP treasury bonus transfers keyed by durable liquidation history ID.
     /// Missing on older snapshots; those snapshots decode with no new work.
     #[serde(default)]
@@ -679,6 +703,7 @@ mod tests {
         assert_eq!(state.stats.events_count, 99, "stats preserved");
         assert!(state.pending_payments.is_empty());
         assert!(state.pending_claims.is_empty());
+        assert!(state.no_dispatch_payment_recoveries.is_empty());
         assert!(state.pending_treasury.is_empty(), "new treasury journal defaults empty on legacy snapshots");
         assert_eq!(state.treasury_resume_cursor, None, "new fairness cursor defaults empty on legacy snapshots");
         assert!(
@@ -717,6 +742,30 @@ mod tests {
         assert_eq!(journal.amount_e8s + journal.fee_e8s, journal.gross_amount_e8s);
         assert_eq!(journal.status, BotTreasuryStatus::Ambiguous);
         assert!(!journal.paid_total_applied);
+    }
+
+    #[test]
+    fn no_dispatch_identity_round_trips_and_is_generation_bound() {
+        let mut state = BotState::default();
+        let identity = BotNoDispatchPaymentRecovery {
+            record_id: 229,
+            vault_id: 202,
+            claim_generation: 3,
+            backend_principal: Principal::management_canister(),
+            ledger_principal: Principal::anonymous(),
+            debt_covered_e8s: 513_841_815,
+            collateral_amount_e8s: 236_783_835,
+            collateral_received_amount_e8s: 236_773_835,
+            collateral_price_e8s: 100_000_000,
+            icp_swapped_e8s: 226_020_933,
+            ckusdc_received_e6: 5_000_000,
+            memo: b"claim-202-3".to_vec(),
+        };
+        state.no_dispatch_payment_recoveries.insert(202, identity.clone());
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let decoded: BotState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.no_dispatch_payment_recoveries.get(&202), Some(&identity));
+        assert_eq!(decoded.no_dispatch_payment_recoveries[&202].claim_generation, 3);
     }
 
     #[test]

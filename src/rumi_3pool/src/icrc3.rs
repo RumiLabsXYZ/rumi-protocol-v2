@@ -298,10 +298,16 @@ pub fn icrc3_get_blocks(args: Vec<GetBlocksArgs>) -> GetBlocksResult {
         if remaining == 0 {
             break;
         }
-        let start = nat_to_u64(&arg.start);
+        // A start outside this canister's u64-backed log is necessarily past
+        // the end. Never narrow it to zero and replay the first page.
+        let Some(start) = nat_to_u64(&arg.start) else {
+            continue;
+        };
         // Cap this range's length to the global response budget so the total
         // number of blocks (and SHA-256 hashes) stays bounded across all args.
-        let length = nat_to_u64(&arg.length).min(remaining);
+        // An oversized Nat length means "at least the response budget", not
+        // zero records.
+        let length = nat_to_u64(&arg.length).unwrap_or(u64::MAX).min(remaining);
 
         if start >= log_length {
             continue;
@@ -388,9 +394,22 @@ pub fn icrc3_supported_block_types() -> Vec<SupportedBlockType> {
 
 // ─── Helpers ───
 
-fn nat_to_u64(n: &Nat) -> u64 {
+fn nat_to_u64(n: &Nat) -> Option<u64> {
     use num_traits::cast::ToPrimitive;
-    n.0.to_u64().unwrap_or(0)
+    n.0.to_u64()
+}
+
+#[cfg(test)]
+mod pagination_nat_boundary_tests {
+    use super::nat_to_u64;
+    use candid::Nat;
+
+    #[test]
+    fn oversized_pagination_nat_never_collapses_to_zero() {
+        assert_eq!(nat_to_u64(&Nat::from(0u64)), Some(0));
+        assert_eq!(nat_to_u64(&Nat::from(u64::MAX)), Some(u64::MAX));
+        assert_eq!(nat_to_u64(&Nat::from(u128::from(u64::MAX) + 1)), None);
+    }
 }
 
 #[cfg(test)]

@@ -159,6 +159,12 @@ pub async fn swap_icp_for_ckusdc(
     dispatch_prepared_swap(config, &prepared).await
 }
 
+/// ICP ledger fee ICPSwap charges on top of a swap's input amount. This is the
+/// single source for both pre-sizing a swap and the fee frozen into `PreparedSwap`.
+pub fn swap_input_fee_e8s(config: &BotConfig) -> u64 {
+    config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE)
+}
+
 /// Query the pool and freeze every call argument without dispatching a swap.
 /// Claim processing persists this tuple before calling `dispatch_prepared_swap`.
 pub async fn prepare_icp_for_ckusdc(
@@ -194,7 +200,7 @@ pub async fn prepare_icp_for_ckusdc(
         min_output
     );
 
-    let icp_fee = config.icp_fee_e8s.unwrap_or(FALLBACK_LEDGER_FEE);
+    let icp_fee = swap_input_fee_e8s(config);
     let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(FALLBACK_LEDGER_FEE);
 
     Ok(PreparedSwap {

@@ -55,23 +55,25 @@ pub struct AmmLiquidityEvent {
     pub timestamp: u64,
 }
 
-pub async fn get_amm_liquidity_events(
-    amm: Principal,
-    start: u64,
-    length: u64,
-) -> Result<Vec<AmmLiquidityEvent>, String> {
-    let (events,): (Vec<AmmLiquidityEvent>,) =
-        ic_cdk::call(amm, "get_amm_liquidity_events", (start, length))
-            .await
-            .map_err(|(code, msg)| format!("get_amm_liquidity_events: {:?} {}", code, msg))?;
-    Ok(events)
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct AmmLiquidityEventWindow {
+    pub oldest_available_id: u64,
+    pub next_event_id: u64,
+    pub events: Vec<AmmLiquidityEvent>,
 }
 
-pub async fn get_amm_liquidity_event_count(amm: Principal) -> Result<u64, String> {
-    let (count,): (u64,) = ic_cdk::call(amm, "get_amm_liquidity_event_count", ())
-        .await
-        .map_err(|(code, msg)| format!("get_amm_liquidity_event_count: {:?} {}", code, msg))?;
-    Ok(count)
+pub async fn get_amm_liquidity_events_from_id(
+    amm: Principal,
+    start_id: u64,
+    length: u64,
+) -> Result<AmmLiquidityEventWindow, String> {
+    let (window,): (AmmLiquidityEventWindow,) =
+        ic_cdk::call(amm, "get_amm_liquidity_events_from_id", (start_id, length))
+            .await
+            .map_err(|(code, msg)| {
+                format!("get_amm_liquidity_events_from_id: {:?} {}", code, msg)
+            })?;
+    Ok(window)
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]

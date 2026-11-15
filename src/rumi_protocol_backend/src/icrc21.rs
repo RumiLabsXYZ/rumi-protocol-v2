@@ -6,6 +6,22 @@ use crate::vault::{
     AddMarginV2Args, OpenVaultAndBorrowV2Args, OpenVaultV2Args, VaultArg, VaultOperationIdArg,
 };
 
+/// Bound secondary Candid decoding and consent-message formatting work below
+/// the IC ingress limit. Current Rumi call arguments are tiny; 64 KiB leaves
+/// ample wallet compatibility headroom while preventing oversized anonymous
+/// requests from driving avoidable decode and allocation work.
+const MAX_CONSENT_ARG_BYTES: usize = 64 * 1024;
+const MAX_CONSENT_METHOD_BYTES: usize = 256;
+const MAX_CONSENT_LANGUAGE_BYTES: usize = 64;
+/// The outer Candid request includes the nested argument plus method, metadata,
+/// and encoding overhead.  Keep this larger than the nested argument ceiling
+/// so a legitimate 64 KiB argument is not rejected by the ingress pre-filter.
+pub const MAX_CONSENT_INGRESS_BYTES: usize = 128 * 1024;
+
+pub fn consent_ingress_allowed(method: &str, raw_size: usize) -> bool {
+    method != "icrc21_canister_call_consent_message" || raw_size <= MAX_CONSENT_INGRESS_BYTES
+}
+
 /// Metadata about the consent message request
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct ConsentMessageMetadata {
@@ -99,6 +115,39 @@ pub enum Icrc21Error {
     UnsupportedCanisterCall(ErrorInfo),
     /// Consent message unavailable
     ConsentMessageUnavailable(ErrorInfo),
+}
+
+fn consent_unavailable(description: impl Into<String>) -> Icrc21Error {
+    Icrc21Error::ConsentMessageUnavailable(ErrorInfo {
+        description: description.into(),
+    })
+}
+
+fn validate_consent_request(request: &ConsentMessageRequest) -> Result<(), Icrc21Error> {
+    if request.arg.len() > MAX_CONSENT_ARG_BYTES {
+        return Err(consent_unavailable(format!(
+            "Encoded call arguments exceed the {} byte consent preview limit",
+            MAX_CONSENT_ARG_BYTES
+        )));
+    }
+    if request.method.len() > MAX_CONSENT_METHOD_BYTES {
+        return Err(consent_unavailable("Canister method name is too long"));
+    }
+    if request.user_preferences.metadata.language.len() > MAX_CONSENT_LANGUAGE_BYTES {
+        return Err(consent_unavailable("Language tag is too long"));
+    }
+    if let Some(DeviceSpec::LineDisplay {
+        characters_per_line,
+        lines_per_page,
+    }) = &request.user_preferences.device_spec
+    {
+        if *characters_per_line == 0 || *lines_per_page == 0 {
+            return Err(consent_unavailable(
+                "Line display dimensions must both be greater than zero",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Helper to format icUSD amount from e8s
@@ -227,13 +276,23 @@ fn resolve_collateral_for_vault(vault_id: u64) -> (String, u8) {
 /// 400_000 drops of XRP (6 decimals) renders "0.4 XRP" and 4_000_000_000_000_000
 /// wei of ckETH (18 decimals) renders "0.004 ckETH".
 fn format_collateral_amount(raw: u64, decimals: u8, symbol: &str) -> String {
-    let amount = raw as f64 / 10f64.powi(decimals as i32);
-    // Show up to 8 fractional digits, then trim trailing zeros (and a bare dot).
-    let mut s = format!("{:.8}", amount);
-    if s.contains('.') {
-        s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    let digits = raw.to_string();
+    let decimals = decimals as usize;
+    let mut amount = if decimals == 0 {
+        digits
+    } else if digits.len() <= decimals {
+        format!("0.{}{}", "0".repeat(decimals - digits.len()), digits)
+    } else {
+        let split = digits.len() - decimals;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if amount.contains('.') {
+        amount = amount
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
     }
-    format!("{} {}", s, symbol)
+    format!("{} {}", amount, symbol)
 }
 
 /// Try to decode a u64 from Candid bytes, handling empty args gracefully
@@ -717,6 +776,92 @@ fn generate_consent_message_for_caller(
             }
         }
 
+        "redeem_quoted" => {
+            let request = Decode!(arg, crate::RedeemQuotedRequest)
+                .map_err(|_| "Invalid quoted redemption arguments; consent preview unavailable".to_string())?;
+            let (symbol, decimals) = resolve_collateral_display(Some(request.expected_collateral_type));
+            Ok(format!(
+                "## Redeem icUSD for {}\n\nYou authorize pulling **{} icUSD** from your wallet for redemption into **{} (collateral type {})**. The requested minimum is **{} net collateral in that asset**. The live quote, collateral fee, and ledger transfer fee determine the final payout; this preview cannot promise a dynamic amount. The call burns the pulled icUSD and queues the collateral payout only if the fresh quote still selects this asset and meets your minimum.",
+                symbol,
+                format_icusd_exact_amount(request.amount_e8s),
+                symbol,
+                request.expected_collateral_type,
+                format_collateral_amount(request.min_net_collateral_raw, decimals, &symbol),
+            ))
+        }
+
+        "redeem_reserves" => {
+            let (amount, preferred_token) = candid::decode_args::<(u64, Option<Principal>)>(arg)
+                .map_err(|_| "Invalid reserve redemption arguments; consent preview unavailable".to_string())?;
+            let (selected_ledger, symbol) = crate::state::read_state(|state| {
+                let selected = match preferred_token {
+                    Some(token)
+                        if Some(token) == state.ckusdt_ledger_principal
+                            || Some(token) == state.ckusdc_ledger_principal => token,
+                    Some(_) => return None,
+                    None => state
+                        .ckusdt_ledger_principal
+                        .or(state.ckusdc_ledger_principal)?,
+                };
+                let symbol = if Some(selected) == state.ckusdt_ledger_principal {
+                    "ckUSDT"
+                } else {
+                    "ckUSDC"
+                };
+                Some((selected, symbol))
+            })
+            .ok_or_else(|| {
+                "Preferred reserve token is unsupported or no reserve ledger is configured; consent preview refused".to_string()
+            })?;
+            Ok(format!(
+                "## Redeem icUSD from reserves\n\nYou authorize pulling **{} icUSD** from your wallet for payout from the selected **{}** reserve ledger **{}**. The redemption fee, redemption-margin ratio, and reserve-ledger transfer fees determine the net payout, so this preview cannot promise a fixed net amount. If this selected reserve lacks enough liquidity, the action is held before any icUSD is pulled; it does not switch assets or use vault collateral. If the pull later succeeds, the operation follows its durable payout, refund, or recovery record until resolved.",
+                format_icusd_exact_amount(amount), symbol, selected_ledger
+            ))
+        }
+
+        "withdraw_partial_collateral" => {
+            let request = Decode!(arg, VaultArg)
+                .map_err(|_| "Invalid partial collateral withdrawal arguments; consent preview unavailable".to_string())?;
+            let (symbol, decimals, native_xrp) = crate::state::read_state(|state| {
+                let vault = state.vault_id_to_vaults.get(&request.vault_id)?;
+                let config = state.get_collateral_config(&vault.collateral_type)?;
+                Some((
+                    config
+                        .symbol
+                        .clone()
+                        .unwrap_or_else(|| UNKNOWN_COLLATERAL_LABEL.to_string()),
+                    config.decimals,
+                    config.is_native_xrp(),
+                ))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Vault #{} or its collateral configuration is unavailable; consent preview refused",
+                    request.vault_id,
+                )
+            })?;
+            let payout = if native_xrp {
+                format!("The requested {} is recorded as an XRP claim for the calling wallet; it is not an immediate ledger payout. The claim must be settled to its chosen XRPL destination later, and the claimant-paid XRPL network fee is deducted at settlement.", format_collateral_amount(request.amount, decimals, &symbol))
+            } else {
+                format!("The requested {} is debited from vault #{} and paid to the calling wallet less the collateral ledger fee. The exact net payout depends on that ledger's current fee.", format_collateral_amount(request.amount, decimals, &symbol), request.vault_id)
+            };
+            Ok(format!(
+                "## Withdraw Partial Collateral\n\n{} This reduces vault #{} collateral and may lower its collateral ratio; the withdrawal is accepted only if the resulting vault remains within protocol risk limits. The amount shown is the requested gross amount, not a promise of the net amount received.",
+                payout, request.vault_id
+            ))
+        }
+
+        "borrow_to_xrpl" => {
+            let request = Decode!(arg, crate::xrpl_icusd::types::BorrowToXrplArg)
+                .map_err(|_| "Invalid XRPL borrowing arguments; consent preview unavailable".to_string())?;
+            let network = request.network.name();
+            Ok(format!(
+                "## Borrow icUSD to XRPL\n\nYou request a gross borrow of **{} icUSD** from vault #{} to XRPL {} recipient **{}**. The current borrowing fee is deducted from the gross amount, so the net issued icUSD delivered is determined by the live fee quote and is not shown as a fixed amount here. Vault debt increases by the gross borrow and its collateral ratio decreases; the request nonce binds retries to the same operation. The recipient must have the required icUSD trust line.",
+                format_icusd_exact_amount(request.gross_e8s), request.vault_id, network,
+                request.recipient
+            ))
+        }
+
         "redeem_icp" => {
             match try_decode_u64(arg, "redeem_icp")? {
                 Some(amount) => Ok(format!(
@@ -848,6 +993,7 @@ fn generate_consent_message_for_caller(
 pub fn icrc21_canister_call_consent_message(
     request: ConsentMessageRequest,
 ) -> Icrc21ConsentMessageResult {
+    validate_consent_request(&request)?;
     let message = match generate_consent_message(&request.method, &request.arg) {
         Ok(msg) => {
             ic_cdk::println!("[ICRC21] Generated message successfully for method: {}", request.method);
@@ -977,6 +1123,66 @@ mod tests {
         Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap()
     }
 
+    fn request(arg_len: usize) -> ConsentMessageRequest {
+        ConsentMessageRequest {
+            method: "borrow".to_string(),
+            arg: vec![0; arg_len],
+            user_preferences: ConsentMessageSpec {
+                metadata: ConsentMessageMetadata {
+                    language: "en".to_string(),
+                    utc_offset_minutes: None,
+                },
+                device_spec: None,
+            },
+        }
+    }
+
+    #[test]
+    fn consent_argument_limit_accepts_boundary_and_rejects_oversize() {
+        assert!(validate_consent_request(&request(MAX_CONSENT_ARG_BYTES)).is_ok());
+        assert!(matches!(
+            validate_consent_request(&request(MAX_CONSENT_ARG_BYTES + 1)),
+            Err(Icrc21Error::ConsentMessageUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn consent_ingress_filter_is_method_scoped_and_inclusive_at_boundary() {
+        assert!(consent_ingress_allowed(
+            "icrc21_canister_call_consent_message",
+            MAX_CONSENT_INGRESS_BYTES
+        ));
+        assert!(!consent_ingress_allowed(
+            "icrc21_canister_call_consent_message",
+            MAX_CONSENT_INGRESS_BYTES + 1
+        ));
+        assert!(consent_ingress_allowed(
+            "open_vault",
+            MAX_CONSENT_INGRESS_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn consent_request_rejects_unbounded_strings_and_zero_line_dimensions() {
+        let mut oversized_method = request(0);
+        oversized_method.method = "m".repeat(MAX_CONSENT_METHOD_BYTES + 1);
+        assert!(validate_consent_request(&oversized_method).is_err());
+
+        let mut oversized_language = request(0);
+        oversized_language.user_preferences.metadata.language =
+            "l".repeat(MAX_CONSENT_LANGUAGE_BYTES + 1);
+        assert!(validate_consent_request(&oversized_language).is_err());
+
+        for (characters_per_line, lines_per_page) in [(0, 1), (1, 0)] {
+            let mut invalid_display = request(0);
+            invalid_display.user_preferences.device_spec = Some(DeviceSpec::LineDisplay {
+                characters_per_line,
+                lines_per_page,
+            });
+            assert!(validate_consent_request(&invalid_display).is_err());
+        }
+    }
+
     #[test]
     fn format_collateral_amount_respects_decimals_and_symbol() {
         // 8-decimal ICP
@@ -988,6 +1194,10 @@ mod tests {
         assert_eq!(
             format_collateral_amount(4_000_000_000_000_000, 18, "ckETH"),
             "0.004 ckETH"
+        );
+        assert_eq!(
+            format_collateral_amount(1, 18, "ckETH"),
+            "0.000000000000000001 ckETH"
         );
         // Whole number trims the trailing dot.
         assert_eq!(format_collateral_amount(500_000_000, 8, "ICP"), "5 ICP");
@@ -1242,6 +1452,67 @@ mod tests {
             assert!(
                 !msg.contains("ICP"),
                 "generic {method} consent message must not hardcode ICP: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_redemption_and_withdrawal_previews_decode_exact_arguments() {
+        crate::state::replace_state(crate::state::State::default());
+        let collateral = sample_ct();
+        let quoted = crate::RedeemQuotedRequest {
+            amount_e8s: 123_456_789,
+            expected_collateral_type: collateral,
+            min_net_collateral_raw: 765_432,
+        };
+        let quoted_text = generate_consent_message("redeem_quoted", &Encode!(&quoted).unwrap()).unwrap();
+        assert!(quoted_text.contains("1.23456789 icUSD"));
+        assert!(quoted_text.contains("765432"));
+        assert!(quoted_text.contains(&collateral.to_text()));
+        assert!(quoted_text.contains("cannot promise a dynamic amount"));
+
+        let preferred = sample_ct();
+        crate::state::mutate_state(|state| {
+            state.ckusdt_ledger_principal = Some(preferred);
+        });
+        let reserves = generate_consent_message(
+            "redeem_reserves", &Encode!(&987_654_321u64, &Some(preferred)).unwrap()
+        ).unwrap();
+        assert!(reserves.contains("9.87654321 icUSD"));
+        assert!(reserves.contains(&preferred.to_text()));
+        assert!(reserves.contains("held before any icUSD is pulled"));
+        assert!(reserves.contains("does not switch assets"));
+        assert!(reserves.contains("reserve-ledger transfer fees"));
+
+        assert!(generate_consent_message(
+            "withdraw_partial_collateral", &Encode!(&VaultArg { vault_id: 23, amount: 45_000_000 }).unwrap()
+        ).is_err());
+    }
+
+    #[test]
+    fn xrpl_borrow_consent_names_gross_amount_network_and_destination() {
+        let request = crate::xrpl_icusd::types::BorrowToXrplArg {
+            vault_id: 19,
+            gross_e8s: 250_000_000,
+            recipient: "rExampleDestination".into(),
+            network: crate::chains::xrp::XrplNetwork::Testnet,
+            request_nonce: vec![1; 32],
+        };
+        let text = generate_consent_message("borrow_to_xrpl", &Encode!(&request).unwrap()).unwrap();
+        assert!(text.contains("2.50000000 icUSD"));
+        assert!(text.contains("vault #19"));
+        assert!(text.contains("testnet"));
+        assert!(text.contains("rExampleDestination"));
+        assert!(text.contains("borrowing fee"));
+        assert!(text.contains("collateral ratio decreases"));
+    }
+
+    #[test]
+    fn active_money_call_previews_fail_closed_on_malformed_arguments() {
+        for method in ["redeem_quoted", "redeem_reserves", "withdraw_partial_collateral", "borrow_to_xrpl"] {
+            assert!(
+                generate_consent_message(method, &[]).is_err(),
+                "{method} must not return generic consent for missing arguments"
             );
         }
     }

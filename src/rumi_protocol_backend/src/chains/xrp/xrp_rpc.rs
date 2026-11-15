@@ -86,7 +86,7 @@ pub fn rpc_url(chain_key_name: &str) -> &'static str {
     read_provider_urls(chain_key_name)[0]
 }
 
-fn read_provider_urls(chain_key_name: &str) -> &'static [&'static str] {
+pub(super) fn read_provider_urls(chain_key_name: &str) -> &'static [&'static str] {
     provider_urls_unchecked(collateral_network_for_key(chain_key_name))
 }
 
@@ -612,7 +612,7 @@ where
     outcall_read_provider_bodies_with_min(provider_urls, build, READ_QUORUM).await
 }
 
-async fn outcall_read_quorum<F, T, Q>(
+pub(super) async fn outcall_read_quorum<F, T, Q>(
     provider_urls: &[&str],
     mut build: F,
     quorum: Q,

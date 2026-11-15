@@ -1238,6 +1238,10 @@ fn default_deficit_repayment_fraction() -> Ratio {
     DEFAULT_DEFICIT_REPAYMENT_FRACTION
 }
 
+fn default_deficit_readonly_latch_armed() -> bool {
+    true
+}
+
 /// Wave-10 LIQ-008: default rolling-window length for the mass-liquidation
 /// circuit breaker. 30 minutes (in nanoseconds). Pre-Wave-10 CBOR snapshots
 /// get this value via `serde(default)`.
@@ -2428,6 +2432,10 @@ pub struct SpLiquidationJournal {
     pub protocol_fee_attempted: bool,
     #[serde(default)]
     pub protocol_fee_block_index: Option<u64>,
+    /// Exact hold record created for this request's unsupported protocol cut.
+    /// Older journals had no request-bound hold identity.
+    #[serde(default)]
+    pub unsupported_protocol_fee_hold_id: Option<u128>,
     #[serde(default)]
     pub interest_dispatch_started: bool,
     #[serde(default)]
@@ -2885,6 +2893,20 @@ pub struct TreasuryStableTransferJournal {
     pub created_at_time_ns: u64,
     pub op_nonce: u128,
     pub phase: TreasuryStableTransferPhase,
+}
+
+/// Protocol-fee collateral that cannot be classified by the current Treasury
+/// interface. These rows are intentionally not dispatched by the legacy
+/// pending-collateral timer, whose transfer identity is not durable.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct HeldUnsupportedTreasuryCollateral {
+    pub hold_id: u128,
+    pub amount_raw: u64,
+    pub ledger: Principal,
+    pub created_at_ns: u64,
+    /// SP request that owns this hold, when it came from the durable SP rail.
+    #[serde(default)]
+    pub source_sp_liquidation_request_id: Option<[u8; 32]>,
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -3702,6 +3724,49 @@ pub struct CkSolRelayAttempt {
 // later upgrade, serde fills those fields from Default::default() instead of
 // failing. This prevents fallback to event replay (which causes interest drift).
 // The Default impl below is ONLY for this purpose, never for actual construction.
+#[derive(
+    candid::CandidType,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum UnsupportedIcrcOperation {
+    Transfer,
+    TransferFrom,
+    Approve,
+}
+
+/// Exact receipt and dispatch identity for the practically unreachable case
+/// where an ICRC ledger confirms an operation at a block index above u64::MAX.
+/// The protocol's historical event schemas use u64 block indexes, so silently
+/// narrowing that Nat would corrupt the receipt. Keeping the full tuple here
+/// places every generic ICRC dispatch on hold until an upgrade can reconcile
+/// the ledger-contract violation without retrying under a new identity.
+#[derive(
+    candid::CandidType,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct UnsupportedIcrcReceipt {
+    pub operation_id: u128,
+    pub operation: UnsupportedIcrcOperation,
+    pub ledger: Principal,
+    pub source: Option<icrc_ledger_types::icrc1::account::Account>,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount: candid::Nat,
+    pub fee: Option<candid::Nat>,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub block_index: candid::Nat,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -3712,6 +3777,13 @@ pub struct State {
     #[serde(deserialize_with = "deserialize_pending_keyed")]
     pub pending_excess_transfers: BTreeMap<(VaultId, Principal, u128), PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
+    /// Fail-closed receipts that cannot fit legacy u64 event fields. Any row
+    /// blocks generic ICRC dispatches that begin after the receipt is recorded
+    /// so a caller cannot retry a confirmed transfer under a fresh nonce and
+    /// debit twice. Calls already awaiting a ledger reply retain their own
+    /// immutable tuple and may add further rows before they return.
+    #[serde(default)]
+    pub unsupported_icrc_receipts: BTreeMap<u128, UnsupportedIcrcReceipt>,
     /// Caller-owned ordinary stability-pool liquidation journals. Rows are
     /// retained until the incoming payment and collateral payout both have
     /// definitive receipts or the request is explicitly cancelled/no-effect.
@@ -3752,6 +3824,11 @@ pub struct State {
     /// cleared by a ledger response that guarantees no transfer occurred.
     #[serde(default)]
     pub pending_borrow_mints: BTreeMap<u64, BorrowMintJournal>,
+    /// Operation-bound pre-commit debt checkpoints already appended to the
+    /// private replay journal. This makes timer/manual retries idempotent.
+    #[serde(default)]
+    pub borrow_interest_checkpoints:
+        BTreeSet<crate::event::BorrowInterestCheckpointKey>,
     #[serde(default)]
     pub pending_borrow_fee_mints: BTreeMap<u128, BorrowFeeMintJournal>,
     #[serde(default)]
@@ -3803,6 +3880,12 @@ pub struct State {
     /// treated as operator-set, which is the safe default).
     #[serde(default)]
     pub mode_triggered_by_oracle: bool,
+    /// True while ReadOnly is being held by the deficit circuit breaker.
+    /// Kept separate from `mode` so price/TCR refreshes cannot erase the
+    /// reason for the hold. Pre-fix snapshots default to false and are
+    /// conservatively migrated during post-upgrade.
+    #[serde(default)]
+    pub mode_triggered_by_deficit: bool,
     /// Wave-14a CDP-14: minimum number of CEX sources that must contribute
     /// to an XRC `metadata.base_asset_num_received_rates` for the protocol
     /// to accept the resulting price. 0 disables the gate (operator
@@ -4147,6 +4230,11 @@ pub struct State {
     /// Collateral fees from sync liquidations, transferred to treasury in next timer tick.
     /// Each entry is (amount_e8s, collateral_ledger_principal).
     pub pending_treasury_collateral: Vec<(u64, Principal)>,
+    /// Unsupported collateral fees held without dispatch until a reviewed,
+    /// identity-preserving recovery path is installed.
+    #[serde(default)]
+    pub held_unsupported_treasury_collateral:
+        BTreeMap<u128, HeldUnsupportedTreasuryCollateral>,
     /// Global fraction of the liquidation bonus (liquidator's profit) that goes to the protocol treasury.
     /// e.g., 0.03 = protocol gets 3% of the bonus, liquidator keeps 97%.
     pub liquidation_protocol_share: Ratio,
@@ -4208,6 +4296,11 @@ pub struct State {
     /// Vaults with collateral not in this set are rejected by bot_liquidate,
     /// leaving the stability pool to handle them.
     pub bot_allowed_collateral_types: BTreeSet<Principal>,
+    /// Distinguishes an intentionally empty bot allowlist from a legacy
+    /// snapshot that predates configuration tracking and needs the safe ICP
+    /// default applied during upgrade.
+    #[serde(default)]
+    pub bot_allowed_collateral_types_configured: bool,
     /// Tracks vault_id → timestamp (nanos) when notified to bot.
     /// Used by check_vaults() to implement priority cascade:
     /// bot gets one cycle, then stability pool takes over.
@@ -4403,6 +4496,12 @@ pub struct State {
     #[serde(default)]
     pub deficit_readonly_threshold_e8s: u64,
 
+    /// Arms the next below-to-at/above threshold transition. Once a crossing
+    /// trips the latch, an admin clear while the deficit is still high must
+    /// not immediately re-trip it; repayment below the threshold re-arms it.
+    #[serde(default = "default_deficit_readonly_latch_armed")]
+    pub deficit_readonly_latch_armed: bool,
+
     // ─── Wave-10 LIQ-008: mass-liquidation circuit breaker ───
     //
     // Bounds the auto-publishing path (check_vaults → bot / stability pool)
@@ -4522,6 +4621,15 @@ pub struct State {
     /// `#[serde(default)]` (State is ciborium/serde-encoded — storage.rs).
     #[serde(default)]
     pub xrp_pending_deposits: BTreeMap<u64, XrpPendingDeposit>,
+
+    /// SEC-11 immutable original custody binding and opening ledger cutoff.
+    #[serde(default)]
+    pub xrp_vault_origins: BTreeMap<u64, crate::xrp_vault_deposit::XrpVaultOrigin>,
+    /// Permanent receipt tombstones: never remove these when a vault closes.
+    #[serde(default)]
+    pub xrp_topup_receipts: BTreeMap<(String, String), crate::xrp_vault_deposit::XrpTopupReceipt>,
+    #[serde(default)]
+    pub xrp_topup_receipt_counts: BTreeMap<u64, u64>,
 
     /// P4: native-XRP collateral that has left a vault and is owed to a claimant
     /// (owner withdrawal, liquidation payout, or redemption payout), settled later
@@ -4709,6 +4817,7 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            unsupported_icrc_receipts: BTreeMap::new(),
             sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
@@ -4718,6 +4827,7 @@ impl Default for State {
             reserve_redemption_journals: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            borrow_interest_checkpoints: BTreeSet::new(),
             pending_borrow_fee_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
@@ -4731,6 +4841,7 @@ impl Default for State {
             mode: Mode::default(),
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
+            mode_triggered_by_deficit: false,
             min_xrc_sources_used: default_min_xrc_sources_used(),
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
@@ -4830,6 +4941,7 @@ impl Default for State {
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
+            held_unsupported_treasury_collateral: BTreeMap::new(),
             liquidation_protocol_share: Ratio::from(Decimal::ZERO),
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: Vec::new(),
@@ -4848,6 +4960,7 @@ impl Default for State {
             bot_total_debt_covered_e8s: 0,
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
+            bot_allowed_collateral_types_configured: false,
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
@@ -4878,6 +4991,7 @@ impl Default for State {
             total_deficit_repaid_icusd: ICUSD::new(0),
             deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
             deficit_readonly_threshold_e8s: 0,
+            deficit_readonly_latch_armed: true,
             recent_liquidations: Vec::new(),
             breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
             breaker_window_debt_ceiling_e8s: 0,
@@ -4892,6 +5006,9 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_vault_origins: BTreeMap::new(),
+            xrp_topup_receipts: BTreeMap::new(),
+            xrp_topup_receipt_counts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -4915,6 +5032,7 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            unsupported_icrc_receipts: BTreeMap::new(),
             sp_liquidation_journals: BTreeMap::new(),
             pending_payout_index: BTreeMap::new(),
             pending_payout_scan_cursor: None,
@@ -4924,6 +5042,7 @@ impl From<InitArg> for State {
             reserve_redemption_journals: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            borrow_interest_checkpoints: BTreeSet::new(),
             pending_borrow_fee_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
@@ -4942,6 +5061,7 @@ impl From<InitArg> for State {
             mode: Mode::GeneralAvailability,
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
+            mode_triggered_by_deficit: false,
             min_xrc_sources_used: default_min_xrc_sources_used(),
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
@@ -5154,6 +5274,7 @@ impl From<InitArg> for State {
             // Treasury fee routing
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
+            held_unsupported_treasury_collateral: BTreeMap::new(),
             liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: default_interest_split(),
@@ -5175,6 +5296,7 @@ impl From<InitArg> for State {
             bot_total_debt_covered_e8s: 0,
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
+            bot_allowed_collateral_types_configured: false,
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
@@ -5205,6 +5327,7 @@ impl From<InitArg> for State {
             total_deficit_repaid_icusd: ICUSD::new(0),
             deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
             deficit_readonly_threshold_e8s: 0,
+            deficit_readonly_latch_armed: true,
             recent_liquidations: Vec::new(),
             breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
             breaker_window_debt_ceiling_e8s: 0,
@@ -5219,6 +5342,9 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_vault_origins: BTreeMap::new(),
+            xrp_topup_receipts: BTreeMap::new(),
+            xrp_topup_receipt_counts: BTreeMap::new(),
             xrp_claims: BTreeMap::new(),
             next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
@@ -5228,6 +5354,41 @@ impl From<InitArg> for State {
             xrpl_icusd: Default::default(),
         }
     }
+}
+
+/// Validate the ordering required by partial-liquidation cap math.
+///
+/// The liquidation target must exceed both the liquidation trigger ratio and
+/// the bonus multiplier. Otherwise a partial liquidation is either
+/// nonsensical or its `target - bonus` denominator is non-positive.
+pub fn validate_liquidation_risk_order(
+    liquidation_ratio: Ratio,
+    borrow_threshold_ratio: Ratio,
+    liquidation_bonus: Ratio,
+) -> Result<(), String> {
+    if borrow_threshold_ratio <= liquidation_ratio {
+        return Err(format!(
+            "borrow_threshold_ratio ({}) must be strictly greater than liquidation_ratio ({})",
+            borrow_threshold_ratio.to_f64(),
+            liquidation_ratio.to_f64()
+        ));
+    }
+    if borrow_threshold_ratio <= liquidation_bonus {
+        return Err(format!(
+            "borrow_threshold_ratio ({}) must be strictly greater than liquidation_bonus ({})",
+            borrow_threshold_ratio.to_f64(),
+            liquidation_bonus.to_f64()
+        ));
+    }
+    Ok(())
+}
+
+fn checked_liquidation_denominator(target: Ratio, bonus: Ratio) -> Option<Ratio> {
+    target
+        .0
+        .checked_sub(bonus.0)
+        .filter(|denominator| *denominator > Decimal::ZERO)
+        .map(Ratio::from)
 }
 
 impl State {
@@ -7094,62 +7255,70 @@ impl State {
     /// Re-keying inside passive accrual would be O(N log N) per timer tick for
     /// zero ordering benefit at the band tolerance scale (default 1% CR).
     pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
-        // XRPL icUSD lane: while a repayment burn is unresolved the vault's accrual
-        // clock is frozen at the saved settlement cutoff (every accrual path, including
-        // `Event::AccrueInterest` replay, defers this vault; others continue normally).
+        let _ = self.try_accrue_single_vault(vault_id, now_nanos);
+    }
+
+    pub(crate) fn plan_single_vault_accrual(
+        &self,
+        vault_id: u64,
+        now_nanos: u64,
+    ) -> Result<Option<(ICUSD, ICUSD)>, ()> {
         if self.xrpl_icusd.accrual_frozen_vaults.contains(&vault_id) {
-            return;
+            return Err(());
         }
-        // Phase 1: compute rate (immutable borrow of self)
-        let rate_and_elapsed = {
-            let s: &State = &*self;
-            match s.vault_id_to_vaults.get(&vault_id) {
-                Some(vault)
-                    if vault.borrowed_icusd_amount.0 > 0 && vault.last_accrual_time < now_nanos =>
-                {
-                    let dummy_rate = s
-                        .last_icp_rate
-                        .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
-                    let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
-                    let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
-                    let elapsed = now_nanos.saturating_sub(vault.last_accrual_time);
-                    Some((rate, elapsed))
-                }
-                _ => None,
+        let Some(vault) = self.vault_id_to_vaults.get(&vault_id) else {
+            return Err(());
+        };
+        if vault.borrowed_icusd_amount.0 == 0 || vault.last_accrual_time >= now_nanos {
+            return Ok(None);
+        }
+        let dummy_rate = self
+            .last_icp_rate
+            .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
+        let cr = crate::compute_collateral_ratio(vault, dummy_rate, self);
+        let rate = self.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
+        let elapsed = now_nanos.saturating_sub(vault.last_accrual_time);
+        let debt = Decimal::from(vault.borrowed_icusd_amount.0);
+        let factor = Decimal::ONE
+            + rate.0 * Decimal::from(elapsed)
+                / Decimal::from(crate::numeric::NANOS_PER_YEAR);
+        let new_debt = (debt * factor).ceil().to_u64().ok_or(())?;
+        let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+        let new_accrued_interest = crate::numeric::checked_icusd_add(
+            vault.accrued_interest,
+            ICUSD::from(interest_delta),
+        )
+        .ok_or(())?;
+        Ok(Some((ICUSD::from(new_debt), new_accrued_interest)))
+    }
+
+    /// The checked form used at a proven external-mint commit. Returns true
+    /// when the vault is already current/has no debt or the clock advanced;
+    /// false when the vault is missing, frozen, or arithmetic prevented the
+    /// required accrual. Callers must hold rather than add new principal on
+    /// false.
+    pub fn try_accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) -> bool {
+        let update = match self.plan_single_vault_accrual(vault_id, now_nanos) {
+            Ok(update) => update,
+            Err(()) => {
+                log!(
+                    crate::INFO,
+                    "[accrue_single_vault] frozen, missing, or unrepresentable accrual for vault #{}; accrual deferred",
+                    vault_id
+                );
+                return false;
             }
         };
-        // Phase 2: apply (mutable borrow)
-        if let Some((rate, elapsed)) = rate_and_elapsed {
-            if elapsed == 0 {
-                return;
-            }
-            if let Some(vault) = self.vault_id_to_vaults.get_mut(&vault_id) {
-                let debt = Decimal::from(vault.borrowed_icusd_amount.0);
-                let factor = Decimal::ONE
-                    + rate.0 * Decimal::from(elapsed)
-                        / Decimal::from(crate::numeric::NANOS_PER_YEAR);
-                // DBT-001 (audit 2026-06-09): interest accrues rounded UP
-                // (protocol favor, CDP convention). INT-102: on a Decimal->u64
-                // overflow (unreachable at real debt scales) do NOT advance the
-                // accrual clock, so the interest is retried instead of being
-                // silently dropped while the clock moves on.
-                match (debt * factor).ceil().to_u64() {
-                    Some(new_debt) => {
-                        let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
-                        vault.accrued_interest += ICUSD::from(interest_delta);
-                        vault.borrowed_icusd_amount = ICUSD::from(new_debt);
-                        vault.last_accrual_time = now_nanos;
-                    }
-                    None => {
-                        log!(
-                            crate::INFO,
-                            "[accrue_single_vault] interest overflow for vault #{}; accrual deferred",
-                            vault_id
-                        );
-                    }
-                }
-            }
-        }
+        let Some((new_debt, new_accrued_interest)) = update else {
+            return true;
+        };
+        let Some(vault) = self.vault_id_to_vaults.get_mut(&vault_id) else {
+            return false;
+        };
+        vault.borrowed_icusd_amount = new_debt;
+        vault.accrued_interest = new_accrued_interest;
+        vault.last_accrual_time = now_nanos;
+        true
     }
 
     /// Accrue interest on ALL vaults with outstanding debt.
@@ -8032,6 +8201,14 @@ impl State {
             return;
         }
 
+        // A deficit-triggered ReadOnly hold is sticky. TCR and price refreshes
+        // may update caches above, but only the explicit controller clear can
+        // release this cause.
+        if self.mode_triggered_by_deficit {
+            self.mode = Mode::ReadOnly;
+            return;
+        }
+
         // If an admin has manually set the mode, don't override it automatically.
         // Exception: if collateral ratio drops below 100%, always go ReadOnly for safety.
         if self.manual_mode_override {
@@ -8048,11 +8225,8 @@ impl State {
         // Wave-14 CDP-01: if the oracle circuit breaker tripped ReadOnly,
         // TCR recalculation must not override it. Only note_xrc_success
         // (a fresh valid price) can clear oracle-triggered ReadOnly.
-        // Exception: TCR < 100% still forces ReadOnly for safety.
         if self.mode_triggered_by_oracle {
-            if new_total_collateral_ratio < Ratio::from(dec!(1.0)) {
-                self.mode = Mode::ReadOnly;
-            }
+            self.mode = Mode::ReadOnly;
             return;
         }
 
@@ -8130,17 +8304,37 @@ impl State {
         }
     }
 
-    pub fn borrow_from_vault(&mut self, vault_id: u64, borrowed_amount: ICUSD) {
+    pub fn borrow_from_vault_at(
+        &mut self,
+        vault_id: u64,
+        borrowed_amount: ICUSD,
+        timestamp_ns: Option<u64>,
+    ) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
+                let debt_was_zero = vault.borrowed_icusd_amount == ICUSD::new(0);
                 vault.borrowed_icusd_amount =
                     crate::numeric::checked_icusd_add(vault.borrowed_icusd_amount, borrowed_amount)
                         .unwrap_or_else(|| ic_cdk::trap("vault debt exceeds the u64 icUSD range"));
+                // A debt-free vault's accrual clock describes no principal. When
+                // debt first becomes positive, start its clock at the committed
+                // borrow timestamp so the new principal cannot inherit idle time.
+                // Positive-debt callers accrue before this transition and retain
+                // that already-advanced clock.
+                if debt_was_zero {
+                    if let Some(timestamp_ns) = timestamp_ns {
+                        vault.last_accrual_time = timestamp_ns;
+                    }
+                }
             }
             None => ic_cdk::trap("borrowing from unknown vault"),
         }
         // Wave-8b LIQ-002: re-key after debt change.
         self.reindex_vault_cr(vault_id);
+    }
+
+    pub fn borrow_from_vault(&mut self, vault_id: u64, borrowed_amount: ICUSD) {
+        self.borrow_from_vault_at(vault_id, borrowed_amount, None);
     }
 
     /// Validate the representable collateral total without changing state.
@@ -8243,14 +8437,20 @@ impl State {
         result
     }
 
-    pub fn provide_liquidity(&mut self, amount: ICUSD, caller: Principal) {
+    pub fn try_provide_liquidity(&mut self, amount: ICUSD, caller: Principal) -> Result<(), String> {
         if amount == 0 {
-            return;
+            return Ok(());
         }
-        self.liquidity_pool
-            .entry(caller)
-            .and_modify(|curr| *curr += amount)
-            .or_insert(amount);
+        let current = self.liquidity_pool.get(&caller).copied().unwrap_or_default();
+        let updated = crate::numeric::checked_icusd_add(current, amount)
+            .ok_or_else(|| "liquidity balance exceeds the u64 icUSD range".to_string())?;
+        self.liquidity_pool.insert(caller, updated);
+        Ok(())
+    }
+
+    pub fn provide_liquidity(&mut self, amount: ICUSD, caller: Principal) {
+        self.try_provide_liquidity(amount, caller)
+            .unwrap_or_else(|message| ic_cdk::trap(&message));
     }
 
     pub fn withdraw_liquidity(&mut self, amount: ICUSD, caller: Principal) {
@@ -8328,7 +8528,9 @@ impl State {
             return None; // already at or above target
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = recovery_target - liq_bonus;
+        let Some(denominator) = checked_liquidation_denominator(recovery_target, liq_bonus) else {
+            return Some(vault.borrowed_icusd_amount);
+        };
         let repay_amount = deficit / denominator;
         Some(repay_amount.min(vault.borrowed_icusd_amount))
     }
@@ -8366,11 +8568,11 @@ impl State {
             return ICUSD::new(0);
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = target_cr - liq_bonus;
-        // If target CR <= bonus (misconfigured or deeply underwater), full liquidation
-        if denominator <= Ratio::from(dec!(0)) {
+        // A persisted or concurrently changed invalid risk tuple must fail
+        // closed to full liquidation rather than panic on Ratio subtraction.
+        let Some(denominator) = checked_liquidation_denominator(target_cr, liq_bonus) else {
             return vault.borrowed_icusd_amount;
-        }
+        };
         let repay_amount = deficit / denominator;
         repay_amount.min(vault.borrowed_icusd_amount)
     }
@@ -8508,21 +8710,105 @@ impl State {
         }
         self.protocol_deficit_icusd = self.protocol_deficit_icusd.saturating_sub(amount);
         self.total_deficit_repaid_icusd = self.total_deficit_repaid_icusd + amount;
+        if self.deficit_readonly_threshold_e8s > 0
+            && self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s
+        {
+            self.deficit_readonly_latch_armed = true;
+        }
     }
 
     /// If `deficit_readonly_threshold_e8s > 0` and the current deficit has
-    /// reached the threshold, force `mode = Mode::ReadOnly` and return
-    /// `true`. Returns `false` otherwise. The latch is one-shot per
-    /// crossing — the admin must call `exit_recovery_mode` to clear it.
+    /// reached the threshold on an armed crossing, persist the cause, force
+    /// `mode = Mode::ReadOnly`, and return `true`. The cause stays active
+    /// until the controller explicitly clears it. A clear above threshold
+    /// does not immediately re-trip; repayment below threshold re-arms the
+    /// next crossing.
     pub fn check_deficit_readonly_latch(&mut self) -> bool {
-        if self.deficit_readonly_threshold_e8s == 0 {
+        if self.deficit_readonly_threshold_e8s > 0
+            && self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s
+        {
+            self.deficit_readonly_latch_armed = true;
+        }
+
+        if self.mode_triggered_by_deficit {
+            self.mode = Mode::ReadOnly;
             return false;
         }
-        if self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s {
+
+        if self.deficit_readonly_threshold_e8s == 0
+            || self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s
+            || !self.deficit_readonly_latch_armed
+        {
             return false;
         }
+
+        self.mode_triggered_by_deficit = true;
+        self.deficit_readonly_latch_armed = false;
         self.mode = Mode::ReadOnly;
         true
+    }
+
+    /// Apply a threshold update and immediately evaluate the deficit already
+    /// on the books. Disabling the threshold prevents future trips but never
+    /// clears a hold that already fired.
+    pub fn set_deficit_readonly_threshold(&mut self, threshold_e8s: u64) -> bool {
+        self.deficit_readonly_threshold_e8s = threshold_e8s;
+        if threshold_e8s == 0 {
+            self.deficit_readonly_latch_armed = false;
+        } else if !self.mode_triggered_by_deficit {
+            self.deficit_readonly_latch_armed = true;
+        }
+        self.check_deficit_readonly_latch()
+    }
+
+    /// Release only the deficit cause and restore automatic mode computation.
+    /// Crossing state is retained: a still-high deficit remains suppressed
+    /// until it first falls below the configured threshold.
+    pub fn clear_deficit_readonly_latch(&mut self) {
+        self.mode_triggered_by_deficit = false;
+        self.manual_mode_override = false;
+        let rate = self.last_icp_rate.unwrap_or(UsdIcp::from(Decimal::ZERO));
+        // Freeze gates every update independently of `mode`. An explicit
+        // controller clear must still recompute the mode cache so unfreezing
+        // cannot expose a stale ReadOnly/GA value. Temporarily bypass only the
+        // recomputation guard; no external operation can interleave here.
+        let was_frozen = self.frozen;
+        self.frozen = false;
+        self.update_total_collateral_ratio_and_mode(rate);
+        self.frozen = was_frozen;
+    }
+
+    /// Enter the controller's manual Recovery hold without weakening a
+    /// stronger deficit- or oracle-driven ReadOnly hold.
+    pub fn enter_manual_recovery_mode(&mut self) {
+        self.manual_mode_override = true;
+        self.mode = if self.mode_triggered_by_deficit || self.mode_triggered_by_oracle {
+            Mode::ReadOnly
+        } else {
+            Mode::Recovery
+        };
+    }
+
+    /// Infer the missing cause bit in pre-fix snapshots, then enforce any
+    /// threshold that is already breached. The unexplained-ReadOnly branch is
+    /// intentionally conservative but excludes manual, oracle, and sub-100%
+    /// TCR causes.
+    pub fn migrate_deficit_readonly_latch(&mut self) -> bool {
+        let unexplained_readonly = self.mode == Mode::ReadOnly
+            && self.deficit_readonly_threshold_e8s > 0
+            && !self.manual_mode_override
+            && !self.mode_triggered_by_oracle
+            && self.total_collateral_ratio >= Ratio::from(dec!(1.0));
+        if !self.mode_triggered_by_deficit
+            && self.deficit_readonly_latch_armed
+            && unexplained_readonly
+        {
+            self.mode_triggered_by_deficit = true;
+            self.deficit_readonly_latch_armed = false;
+        }
+        let inferred = self.mode_triggered_by_deficit;
+        let tripped = self.check_deficit_readonly_latch();
+        inferred || tripped
     }
 
     /// Wave-9b DOS-006: compute the heavy aggregates that
@@ -8690,7 +8976,10 @@ impl State {
             }
 
             let deficit = numerator_icusd - collateral_value;
-            let denominator = recovery_target - liq_bonus;
+            let Some(denominator) = checked_liquidation_denominator(recovery_target, liq_bonus)
+            else {
+                return Some(vault.borrowed_icusd_amount);
+            };
             Some((deficit / denominator).min(vault.borrowed_icusd_amount))
         } else {
             Some(vault.borrowed_icusd_amount) // full liquidation
@@ -8761,10 +9050,14 @@ impl State {
                 Some(c) => c,
                 None => return ICUSD::new(0), // unknown collateral — cannot liquidate
             };
-            let price = match config.last_price.and_then(Decimal::from_f64) {
-                Some(p) => p,
-                None => return ICUSD::new(0), // no price — cannot compute
-            };
+            // P01-F12 / P02-F08: use the price quoted before the caller's
+            // ledger await. `vault::liquidate_vault` calculates both the
+            // liquidator payout and the debt amount from this value, and the
+            // corresponding event persists it as `icp_rate`. Re-reading
+            // `config.last_price` here allowed an oracle update during the
+            // await to debit a different amount of collateral from the vault
+            // than the amount queued for payout.
+            let price = collateral_price.0;
             let decimals = config.decimals;
             let liq_bonus = self.get_liquidation_bonus_for(&ct);
 
@@ -8817,21 +9110,37 @@ impl State {
         }
     }
 
-    pub fn redistribute_vault(&mut self, vault_id: u64) {
+    pub fn try_redistribute_vault(&mut self, vault_id: u64) -> Result<(), String> {
         let vault = self
             .vault_id_to_vaults
             .get(&vault_id)
-            .expect("bug: vault not found");
-        let entries = distribute_across_vaults(&self.vault_id_to_vaults, vault.clone());
+            .cloned()
+            .ok_or_else(|| "redistributed vault not found".to_string())?;
+        let entries = try_distribute_across_vaults(&self.vault_id_to_vaults, vault.clone())?;
         let touched_ids: Vec<u64> = entries.iter().map(|e| e.vault_id).collect();
-        for entry in entries {
-            match self.vault_id_to_vaults.entry(entry.vault_id) {
-                Occupied(mut vault_entry) => {
-                    vault_entry.get_mut().collateral_amount += entry.icp_share_amount.to_u64();
-                    vault_entry.get_mut().borrowed_icusd_amount += entry.icusd_share_amount;
-                }
-                Vacant(_) => panic!("bug: vault not found"),
-            }
+        let mut updates = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let recipient = self.vault_id_to_vaults.get(&entry.vault_id).ok_or_else(|| {
+                format!("redistribution recipient vault {} not found", entry.vault_id)
+            })?;
+            let collateral_amount = recipient
+                .collateral_amount
+                .checked_add(entry.icp_share_amount.to_u64())
+                .ok_or_else(|| format!("redistribution collateral overflow for vault {}", entry.vault_id))?;
+            let borrowed_icusd_amount = crate::numeric::checked_icusd_add(
+                recipient.borrowed_icusd_amount,
+                entry.icusd_share_amount,
+            )
+            .ok_or_else(|| format!("redistribution debt overflow for vault {}", entry.vault_id))?;
+            updates.push((entry.vault_id, collateral_amount, borrowed_icusd_amount));
+        }
+        for (recipient_id, collateral_amount, borrowed_icusd_amount) in updates {
+            let recipient = self
+                .vault_id_to_vaults
+                .get_mut(&recipient_id)
+                .expect("preflighted redistribution recipient must remain present");
+            recipient.collateral_amount = collateral_amount;
+            recipient.borrowed_icusd_amount = borrowed_icusd_amount;
         }
         self.remove_vault_and_unindex(vault_id);
         // Wave-8b LIQ-002: re-key every vault that received a share.
@@ -8840,6 +9149,12 @@ impl State {
         for tid in touched_ids {
             self.reindex_vault_cr(tid);
         }
+        Ok(())
+    }
+
+    pub fn redistribute_vault(&mut self, vault_id: u64) {
+        self.try_redistribute_vault(vault_id)
+            .unwrap_or_else(|message| ic_cdk::trap(&message));
     }
 
     /// Historical replay compatibility only. Keep this body identical to the pre-queue
@@ -10277,17 +10592,28 @@ pub(crate) fn distribute_across_vaults(
     vaults: &BTreeMap<u64, Vault>,
     target_vault: Vault,
 ) -> Vec<DistributeToVaultEntry> {
-    assert!(!vaults.is_empty());
+    try_distribute_across_vaults(vaults, target_vault)
+        .unwrap_or_else(|message| ic_cdk::trap(&message))
+}
+
+pub(crate) fn try_distribute_across_vaults(
+    vaults: &BTreeMap<u64, Vault>,
+    target_vault: Vault,
+) -> Result<Vec<DistributeToVaultEntry>, String> {
+    if vaults.is_empty() {
+        return Err("cannot redistribute across an empty vault set".to_string());
+    }
 
     let target_vault_id = target_vault.vault_id;
-    let total_icp_margin: ICP = ICP::from(
-        vaults
-            .iter()
-            .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
-            .map(|(_vault_id, vault)| vault.collateral_amount)
-            .sum::<u64>(),
-    );
-    assert_ne!(total_icp_margin, ICP::new(0));
+    let total_icp_margin_raw = vaults
+        .iter()
+        .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
+        .try_fold(0u64, |total, (_vault_id, vault)| total.checked_add(vault.collateral_amount))
+        .ok_or_else(|| "redistribution collateral denominator exceeds the u64 range".to_string())?;
+    if total_icp_margin_raw == 0 {
+        return Err("cannot redistribute across zero collateral".to_string());
+    }
+    let total_icp_margin = ICP::from(total_icp_margin_raw);
 
     let target_collateral = ICP::from(target_vault.collateral_amount);
     let mut result = vec![];
@@ -10299,8 +10625,10 @@ pub(crate) fn distribute_across_vaults(
             let share: Ratio = ICP::from(vault.collateral_amount) / total_icp_margin;
             let icp_share = target_collateral * share;
             let icusd_share = target_vault.borrowed_icusd_amount * share;
-            distributed_icp += icp_share;
-            distributed_icusd += icusd_share;
+            distributed_icp = ICP::new(distributed_icp.to_u64().checked_add(icp_share.to_u64())
+                .ok_or_else(|| "redistributed collateral total exceeds the u64 range".to_string())?);
+            distributed_icusd = crate::numeric::checked_icusd_add(distributed_icusd, icusd_share)
+                .ok_or_else(|| "redistributed debt total exceeds the u64 range".to_string())?;
             result.push(DistributeToVaultEntry {
                 vault_id: *vault_id,
                 icp_share_amount: icp_share,
@@ -10310,11 +10638,19 @@ pub(crate) fn distribute_across_vaults(
     }
 
     if !result.is_empty() {
-        result[0].icusd_share_amount += target_vault.borrowed_icusd_amount - distributed_icusd;
-        result[0].icp_share_amount += target_collateral - distributed_icp;
+        let debt_remainder = target_vault.borrowed_icusd_amount - distributed_icusd;
+        result[0].icusd_share_amount = crate::numeric::checked_icusd_add(
+            result[0].icusd_share_amount,
+            debt_remainder,
+        ).ok_or_else(|| "redistribution debt remainder exceeds the u64 range".to_string())?;
+        result[0].icp_share_amount = ICP::new(
+            result[0].icp_share_amount.to_u64()
+                .checked_add((target_collateral - distributed_icp).to_u64())
+                .ok_or_else(|| "redistribution collateral remainder exceeds the u64 range".to_string())?,
+        );
     }
 
-    result
+    Ok(result)
 }
 
 pub fn compute_redemption_fee(
@@ -10515,6 +10851,115 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deficit_threshold_evaluates_existing_deficit_and_survives_tcr_refresh() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+
+        assert!(state.set_deficit_readonly_threshold(100));
+        assert!(state.mode_triggered_by_deficit);
+        assert_eq!(state.mode, Mode::ReadOnly);
+
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(Decimal::ONE));
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.mode_triggered_by_deficit);
+    }
+
+    #[test]
+    fn deficit_latch_clear_requires_a_new_below_to_above_crossing() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        assert!(state.set_deficit_readonly_threshold(100));
+
+        state.clear_deficit_readonly_latch();
+        assert!(!state.mode_triggered_by_deficit);
+        assert!(!state.deficit_readonly_latch_armed);
+        assert!(!state.check_deficit_readonly_latch());
+
+        state.apply_deficit_repayment(ICUSD::new(51));
+        assert!(state.deficit_readonly_latch_armed);
+        state.accrue_deficit_shortfall(ICUSD::new(1));
+        assert!(state.check_deficit_readonly_latch());
+        assert_eq!(state.mode, Mode::ReadOnly);
+    }
+
+    #[test]
+    fn deficit_clear_recomputes_mode_even_while_protocol_is_frozen() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        assert!(state.set_deficit_readonly_threshold(100));
+        state.frozen = true;
+
+        state.clear_deficit_readonly_latch();
+
+        assert!(state.frozen);
+        assert!(!state.mode_triggered_by_deficit);
+        assert_eq!(state.mode, Mode::GeneralAvailability);
+    }
+
+    #[test]
+    fn manual_recovery_request_preserves_deficit_readonly_hold() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        assert!(state.set_deficit_readonly_threshold(100));
+
+        state.enter_manual_recovery_mode();
+
+        assert!(state.manual_mode_override);
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.mode_triggered_by_deficit);
+    }
+
+    #[test]
+    fn manual_recovery_and_exit_preserve_oracle_readonly_hold() {
+        let mut state = State::default();
+        state.mode = Mode::ReadOnly;
+        state.mode_triggered_by_oracle = true;
+
+        state.enter_manual_recovery_mode();
+        assert_eq!(state.mode, Mode::ReadOnly);
+
+        state.clear_deficit_readonly_latch();
+        assert!(!state.manual_mode_override);
+        assert!(state.mode_triggered_by_oracle);
+        assert_eq!(state.mode, Mode::ReadOnly);
+    }
+
+    #[test]
+    fn legacy_snapshot_migration_infers_breached_deficit_latch() {
+        let mut state = State::default();
+        state.mode = Mode::ReadOnly;
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        state.deficit_readonly_threshold_e8s = 100;
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let value: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let mut map = match value {
+            ciborium::value::Value::Map(map) => map,
+            _ => panic!("state must serialize as a map"),
+        };
+        map.retain(|(key, _)| {
+            !matches!(
+                key,
+                ciborium::value::Value::Text(name)
+                    if name == "mode_triggered_by_deficit"
+                        || name == "deficit_readonly_latch_armed"
+            )
+        });
+        let mut legacy = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy).unwrap();
+        let mut restored: State = ciborium::de::from_reader(legacy.as_slice()).unwrap();
+
+        assert!(!restored.mode_triggered_by_deficit);
+        assert!(restored.deficit_readonly_latch_armed);
+        assert!(restored.migrate_deficit_readonly_latch());
+        assert!(restored.mode_triggered_by_deficit);
+        assert!(!restored.deficit_readonly_latch_armed);
+        assert_eq!(restored.mode, Mode::ReadOnly);
+    }
 
     fn test_reserve_redemption_journal() -> ReserveRedemptionJournal {
         use icrc_ledger_types::icrc1::account::Account;
@@ -10814,6 +11259,122 @@ mod tests {
             ICUSD::new(u64::MAX),
             "the failed addition must leave vault debt unchanged"
         );
+    }
+
+    #[test]
+    fn first_borrow_after_debt_free_idle_starts_accrual_at_borrow_time() {
+        let mut state = test_state();
+        let vault_id = 74;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            crate::vault::Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: state.icp_ledger_principal,
+                last_accrual_time: 10,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        state.borrow_from_vault_at(vault_id, ICUSD::new(100), Some(1_000));
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100));
+        assert_eq!(vault.last_accrual_time, 1_000);
+
+        state.borrow_from_vault_at(vault_id, ICUSD::new(50), Some(2_000));
+        assert_eq!(
+            state.vault_id_to_vaults[&vault_id].last_accrual_time,
+            1_000,
+            "positive-debt callers retain the clock advanced by their pre-borrow accrual"
+        );
+    }
+
+    #[test]
+    fn legacy_borrow_without_timestamp_preserves_existing_accrual_clock() {
+        let mut state = test_state();
+        let vault_id = 75;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            crate::vault::Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: state.icp_ledger_principal,
+                last_accrual_time: 10,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        state.borrow_from_vault(vault_id, ICUSD::new(100));
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100));
+        assert_eq!(
+            vault.last_accrual_time, 10,
+            "legacy events without a timestamp retain their historical replay semantics"
+        );
+    }
+
+    #[test]
+    fn liquidity_overflow_is_rejected_without_mutating_balance() {
+        let mut state = test_state();
+        let owner = Principal::from_slice(&[91]);
+        state.liquidity_pool.insert(owner, ICUSD::new(u64::MAX));
+
+        assert!(state.try_provide_liquidity(ICUSD::new(1), owner).is_err());
+        assert_eq!(state.liquidity_pool[&owner], ICUSD::new(u64::MAX));
+    }
+
+    #[test]
+    fn redistribution_overflow_is_rejected_before_any_vault_mutation() {
+        let mut state = test_state();
+        let collateral_type = state.icp_ledger_principal;
+        let recipient = crate::vault::Vault {
+            owner: Principal::from_slice(&[92]), vault_id: 1,
+            collateral_amount: u64::MAX, borrowed_icusd_amount: ICUSD::new(u64::MAX),
+            collateral_type, last_accrual_time: 0, accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        let target = crate::vault::Vault {
+            owner: Principal::from_slice(&[93]), vault_id: 2,
+            collateral_amount: 1, borrowed_icusd_amount: ICUSD::new(1),
+            collateral_type, last_accrual_time: 0, accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        state.vault_id_to_vaults.insert(1, recipient.clone());
+        state.vault_id_to_vaults.insert(2, target.clone());
+
+        assert!(state.try_redistribute_vault(2).is_err());
+        assert_eq!(state.vault_id_to_vaults.get(&1), Some(&recipient));
+        assert_eq!(state.vault_id_to_vaults.get(&2), Some(&target));
+    }
+
+    #[test]
+    fn later_redistribution_recipient_overflow_keeps_all_recipients_unchanged() {
+        let mut state = test_state();
+        let collateral_type = state.icp_ledger_principal;
+        let vault = |owner, vault_id, collateral_amount, debt| crate::vault::Vault {
+            owner: Principal::from_slice(&[owner]), vault_id, collateral_amount,
+            borrowed_icusd_amount: ICUSD::new(debt), collateral_type,
+            last_accrual_time: 0, accrued_interest: ICUSD::new(0), bot_processing: false,
+        };
+        let first = vault(95, 1, 1, 0);
+        let later = vault(96, 2, u64::MAX - 100, u64::MAX - 100);
+        let target = vault(97, 3, 200, 200);
+        state.vault_id_to_vaults.insert(1, first.clone());
+        state.vault_id_to_vaults.insert(2, later.clone());
+        state.vault_id_to_vaults.insert(3, target.clone());
+
+        assert!(state.try_redistribute_vault(3).is_err());
+        assert_eq!(state.vault_id_to_vaults.get(&1), Some(&first));
+        assert_eq!(state.vault_id_to_vaults.get(&2), Some(&later));
+        assert_eq!(state.vault_id_to_vaults.get(&3), Some(&target));
     }
 
     #[test]
@@ -11759,6 +12320,31 @@ mod tests {
 
         let vault_after = state.vault_id_to_vaults.get(&1).unwrap();
         assert_eq!(vault_after.borrowed_icusd_amount.0, 500_000_000);
+    }
+
+    #[test]
+    fn checked_single_vault_accrual_reports_overflow_without_advancing_clock() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(u64::MAX),
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        assert!(!state.try_accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR));
+        let vault = &state.vault_id_to_vaults[&1];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(u64::MAX));
+        assert_eq!(vault.last_accrual_time, 0);
+        assert_eq!(vault.accrued_interest, ICUSD::new(0));
     }
 
     #[test]
@@ -14377,6 +14963,7 @@ mod tests {
             protocol_fee_ledger_fee_raw: Some(10),
             protocol_fee_attempted: true,
             protocol_fee_block_index: Some(43),
+            unsupported_protocol_fee_hold_id: None,
             interest_dispatch_started: true,
             post_accounting_done: false,
             applied_interest_share_e8s: Some(10),
@@ -14428,6 +15015,29 @@ mod tests {
             restored.sp_liquidation_journals[&[56; 32]].phase,
             SpLiquidationPhase::PayoutSubmitted
         );
+    }
+
+    #[test]
+    fn legacy_sp_journal_defaults_unsupported_fee_hold_id_to_none() {
+        let journal = pending_sp_journal_test_row(
+            [57; 32],
+            SpLiquidationPhase::DebtCommitted,
+        );
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&journal, &mut bytes).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut map = match value {
+            ciborium::value::Value::Map(map) => map,
+            _ => panic!("SP journal must serialize as a map"),
+        };
+        map.retain(|(key, _)| {
+            !matches!(key, ciborium::value::Value::Text(name) if name == "unsupported_protocol_fee_hold_id")
+        });
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy_bytes).unwrap();
+        let restored: SpLiquidationJournal =
+            ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert_eq!(restored.unsupported_protocol_fee_hold_id, None);
     }
 
     #[test]
@@ -15335,9 +15945,8 @@ mod tests {
         let debt = ICUSD::new(200_000_000); // 2.0 icUSD — above the dust threshold
         let collateral_amount = 100_000_000u64; // deeply underwater
         let liq_ratio = Ratio::from(dec!(1.10));
-        // `Ratio::sub` panics on a negative result, so `target_cr` can only
-        // reach the `denominator <= 0` saturate-to-full-debt branch via
-        // EQUALITY with `bonus` (denominator == 0), not by going below it.
+        // Equality is one invalid-denominator case; the checked helper also
+        // covers target_cr below bonus without panicking.
         let target_cr = Ratio::from(dec!(1.15));
         let bonus = Ratio::from(dec!(1.15)); // target_cr == bonus -> cap saturates to full debt
         liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
@@ -15358,6 +15967,74 @@ mod tests {
         assert_eq!(
             result, debt,
             "a residual inside the dust band must round the amount up to the full debt"
+        );
+    }
+
+    #[test]
+    fn liquidation_risk_order_rejects_non_positive_cap_denominators() {
+        assert!(super::validate_liquidation_risk_order(
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.50)),
+            Ratio::from(dec!(1.15)),
+        )
+        .is_ok());
+        assert!(super::validate_liquidation_risk_order(
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.05)),
+        )
+        .is_err());
+        assert!(super::validate_liquidation_risk_order(
+            Ratio::from(dec!(1.05)),
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.15)),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn partial_liquidation_cap_underflow_fails_closed_to_full_debt() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq-cap-underflow");
+        let debt = ICUSD::new(1_000_000_000);
+        liq0xx_collateral(
+            &mut state,
+            ct,
+            Ratio::from(dec!(1.05)),
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.15)),
+            1.0,
+        );
+        let vault = liq0xx_vault(76, ct, 900_000_000, debt.to_u64());
+        assert_eq!(
+            state.compute_partial_liquidation_cap(&vault, UsdIcp::from(Decimal::ONE)),
+            debt
+        );
+    }
+
+    #[test]
+    fn recovery_and_legacy_caps_underflow_fail_closed_to_full_debt() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"recovery-cap-underflow");
+        let debt = ICUSD::new(1_000_000_000);
+        liq0xx_collateral(
+            &mut state,
+            ct,
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.50)),
+            Ratio::from(dec!(1.45)),
+            1.0,
+        );
+        state.mode = Mode::Recovery;
+        state.recovery_mode_threshold = Ratio::from(dec!(1.40));
+        state.recovery_cr_multiplier = Ratio::from(Decimal::ONE);
+
+        let vault = liq0xx_vault(77, ct, 1_350_000_000, debt.to_u64());
+        let price = UsdIcp::from(Decimal::ONE);
+        assert_eq!(state.compute_recovery_repay_cap(&vault, price), Some(debt));
+        assert_eq!(
+            state.legacy_recovery_or_full_repay_amount(&vault, Mode::Recovery, price),
+            Some(debt)
         );
     }
 
@@ -15690,6 +16367,70 @@ mod tests {
             debt - pinned,
             "the amount APPLIED must equal the PINNED amount, not a re-evaluation against \
              the drifted dust_liquidation_threshold — icUSD pulled must always equal debt reduced"
+        );
+    }
+
+    #[test]
+    fn liq001_partial_collateral_debit_uses_pre_await_price() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq001-price-race");
+        let debt = ICUSD::new(500_000_000); // 5 icUSD
+        let collateral_amount = 670_000_000u64;
+        let liq_ratio = Ratio::from(dec!(1.3400));
+        let target_cr = Ratio::from(dec!(1.5000));
+        let bonus = Ratio::from(dec!(1.15));
+        liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
+
+        let vault = liq0xx_vault(902, ct, collateral_amount, debt.to_u64());
+        state.open_vault(vault.clone());
+        let pinned_price = UsdIcp::from(Decimal::ONE);
+        let pinned_debt = state.effective_liquidation_amount(&vault, pinned_price, None);
+        assert!(pinned_debt > ICUSD::new(0) && pinned_debt < debt);
+
+        let decimals = state.get_collateral_config(&ct).unwrap().decimals;
+        let expected_seizure = crate::numeric::try_icusd_to_collateral_amount_with_bonus(
+            pinned_debt,
+            pinned_price.0,
+            decimals,
+            bonus,
+        )
+        .unwrap()
+        .min(collateral_amount);
+
+        // Simulate an oracle update landing while the icUSD transfer is
+        // awaiting its ledger reply. A post-await read of this lower live
+        // price would seize more collateral than the pre-await payout quote.
+        state.collateral_configs.get_mut(&ct).unwrap().last_price = Some(0.5);
+        let drifted_seizure = crate::numeric::try_icusd_to_collateral_amount_with_bonus(
+            pinned_debt,
+            dec!(0.5),
+            decimals,
+            bonus,
+        )
+        .unwrap()
+        .min(collateral_amount);
+        assert_ne!(expected_seizure, drifted_seizure);
+
+        state.liquidate_vault(
+            902,
+            Mode::GeneralAvailability,
+            pinned_price,
+            Some(pinned_debt),
+        );
+
+        let remaining = state
+            .vault_id_to_vaults
+            .get(&902)
+            .expect("pinned partial liquidation must leave the vault open");
+        assert_eq!(
+            remaining.collateral_amount,
+            collateral_amount - expected_seizure,
+            "vault collateral debit must use the same pre-await price as the liquidator payout"
+        );
+        assert_ne!(
+            remaining.collateral_amount,
+            collateral_amount - drifted_seizure,
+            "a live oracle update must not change the committed liquidation terms"
         );
     }
 

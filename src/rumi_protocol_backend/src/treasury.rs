@@ -500,28 +500,68 @@ pub fn plan_fee_routing(
 // Helper: map collateral ledger principal → AssetType
 // ---------------------------------------------------------------------------
 
-/// Map a collateral ledger principal to the treasury's AssetType enum.
-/// Uses known ckStable ledger principals from state config, plus ICP ledger.
-pub fn collateral_to_asset_type(ct: &Principal) -> AssetType {
+fn collateral_to_asset_type_from_config(
+    ct: &Principal,
+    icp: Principal,
+    ckusdt: Option<Principal>,
+    ckusdc: Option<Principal>,
+) -> Option<AssetType> {
+    if *ct == icp {
+        Some(AssetType::ICP)
+    } else if ckusdt == Some(*ct) {
+        Some(AssetType::CKUSDT)
+    } else if ckusdc == Some(*ct) {
+        Some(AssetType::CKUSDC)
+    } else {
+        None
+    }
+}
+
+/// Map a configured collateral ledger principal to the Treasury AssetType.
+/// Unknown principals must remain unsupported: defaulting them to ICP would
+/// transfer non-ICP collateral and then corrupt Treasury's ICP bookkeeping.
+pub fn collateral_to_asset_type(ct: &Principal) -> Option<AssetType> {
     read_state(|s| {
-        if *ct == s.icp_ledger_principal {
-            return AssetType::ICP;
-        }
-        if let Some(ckusdt) = s.ckusdt_ledger_principal {
-            if *ct == ckusdt {
-                return AssetType::CKUSDT;
-            }
-        }
-        if let Some(ckusdc) = s.ckusdc_ledger_principal {
-            if *ct == ckusdc {
-                return AssetType::CKUSDC;
-            }
-        }
-        // For any other collateral (ckBTC, ckETH, etc.), default to ICP
-        // since treasury AssetType only has ICP/CKBTC/CKUSDT/CKUSDC.
-        // TODO: Expand AssetType when new collaterals are added.
-        AssetType::ICP
+        collateral_to_asset_type_from_config(
+            ct,
+            s.icp_ledger_principal,
+            s.ckusdt_ledger_principal,
+            s.ckusdc_ledger_principal,
+        )
     })
+}
+
+#[cfg(test)]
+mod collateral_asset_mapping_tests {
+    use super::{collateral_to_asset_type_from_config, AssetType};
+    use candid::Principal;
+
+    fn principal(seed: u8) -> Principal {
+        Principal::self_authenticating(&[seed; 32])
+    }
+
+    #[test]
+    fn maps_only_explicitly_configured_collateral_ledgers() {
+        let icp = principal(1);
+        let ckusdt = principal(2);
+        let ckusdc = principal(3);
+        assert_eq!(
+            collateral_to_asset_type_from_config(&icp, icp, Some(ckusdt), Some(ckusdc)),
+            Some(AssetType::ICP),
+        );
+        assert_eq!(
+            collateral_to_asset_type_from_config(&ckusdt, icp, Some(ckusdt), Some(ckusdc)),
+            Some(AssetType::CKUSDT),
+        );
+        assert_eq!(
+            collateral_to_asset_type_from_config(&ckusdc, icp, Some(ckusdt), Some(ckusdc)),
+            Some(AssetType::CKUSDC),
+        );
+        assert_eq!(
+            collateral_to_asset_type_from_config(&principal(4), icp, Some(ckusdt), Some(ckusdc)),
+            None,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +604,42 @@ pub async fn notify_treasury_deposit(
             );
             Err(msg)
         }
+    }
+}
+
+/// Record a configured ckUSDT/ckUSDC collateral receipt exactly once in
+/// Treasury. The receiver binds idempotency to `(ledger, block_index)` and
+/// rejects conflicting tuples.
+pub async fn notify_external_collateral_deposit_once(
+    treasury: Principal,
+    ledger: Principal,
+    asset_type: AssetType,
+    amount: u64,
+    block_index: u64,
+    memo: Option<String>,
+) -> Result<u64, String> {
+    if !matches!(asset_type, AssetType::CKUSDT | AssetType::CKUSDC) {
+        return Err("exact external collateral receipts support only ckUSDT/ckUSDC".into());
+    }
+    let args = ExternalTokenDepositArgs {
+        ledger,
+        deposit_type: DepositType::LiquidationFee,
+        asset_type,
+        amount,
+        block_index,
+        memo,
+    };
+    let result: Result<(Result<u64, String>,), _> = ic_cdk::call(
+        treasury,
+        "record_external_token_deposit_once",
+        (args,),
+    )
+    .await;
+    match result {
+        Ok((result,)) => result,
+        Err((code, message)) => Err(format!(
+            "Treasury external receipt call failed: {code:?} {message}"
+        )),
     }
 }
 
@@ -3144,6 +3220,56 @@ pub async fn send_liquidation_fee_to_treasury(
     }
 }
 
+/// Synchronously journal an unsupported collateral fee before a liquidation
+/// path reaches its first post-commit await. Returning `true` tells the caller
+/// that no transfer may be attempted for this fee.
+pub fn hold_unsupported_liquidation_fee_if_needed(
+    amount: u64,
+    collateral_ledger: Principal,
+) -> bool {
+    if amount == 0 || collateral_to_asset_type(&collateral_ledger).is_some() {
+        return false;
+    }
+    crate::state::mutate_state(|state| {
+        let created_at_ns = ic_cdk::api::time();
+        let hold_id = state.next_op_nonce_at(created_at_ns);
+        let hold = crate::state::HeldUnsupportedTreasuryCollateral {
+            hold_id,
+            amount_raw: amount,
+            ledger: collateral_ledger,
+            created_at_ns,
+            source_sp_liquidation_request_id: None,
+        };
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::UnsupportedTreasuryCollateralFeeHeld {
+                hold: hold.clone(),
+            },
+        );
+        state
+            .held_unsupported_treasury_collateral
+            .insert(hold_id, hold);
+    });
+    log!(
+        INFO,
+        "[treasury] HOLD: journaled {} units from unsupported collateral ledger {}; no Treasury transfer or deposit record was attempted",
+        amount,
+        collateral_ledger,
+    );
+    true
+}
+
+/// Route a liquidation fee only when the collateral ledger has an explicit
+/// Treasury bookkeeping classification. Unsupported collateral stays in the
+/// backend rather than being transferred and falsely recorded as ICP.
+pub async fn route_liquidation_fee_to_treasury(amount: u64, collateral_ledger: Principal) {
+    if hold_unsupported_liquidation_fee_if_needed(amount, collateral_ledger) {
+        return;
+    }
+    let asset_type = collateral_to_asset_type(&collateral_ledger)
+        .expect("supported collateral classification disappeared without an await");
+    send_liquidation_fee_to_treasury(amount, collateral_ledger, asset_type).await;
+}
+
 /// Flush accumulated interest from periodic harvesting to pools/treasury.
 /// For each collateral bucket that has reached the threshold, calls
 /// `distribute_interest` which handles the N-way split (3pool, stability pool, treasury).
@@ -3342,7 +3468,14 @@ pub async fn drain_pending_treasury_collateral() {
     if let Some(tp) = treasury {
         let mut drained = Vec::new();
         for (amount, ledger) in &pending {
-            let asset_type = collateral_to_asset_type(ledger);
+            let Some(asset_type) = collateral_to_asset_type(ledger) else {
+                log!(
+                    INFO,
+                    "[treasury] HOLD: unsupported collateral ledger {}; refusing to book it as ICP",
+                    ledger
+                );
+                continue;
+            };
             match management::transfer_collateral(*amount, tp, *ledger).await {
                 Ok(block_index) => {
                     log!(
@@ -3370,10 +3503,12 @@ pub async fn drain_pending_treasury_collateral() {
                 ),
             }
         }
-        // Remove successfully drained entries
+        // Preserve the legacy queue's behavior. New unsupported fees never
+        // enter this timer; they use held_unsupported_treasury_collateral.
         if !drained.is_empty() {
-            crate::state::mutate_state(|s| {
-                s.pending_treasury_collateral
+            crate::state::mutate_state(|state| {
+                state
+                    .pending_treasury_collateral
                     .retain(|entry| !drained.contains(entry));
             });
         }

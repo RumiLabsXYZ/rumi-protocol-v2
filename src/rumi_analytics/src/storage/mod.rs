@@ -38,7 +38,9 @@ pub type Memory = VirtualMemory<DefaultMemoryImpl>;
 //   52-55   reserved
 //   56-57   BalanceTracker maps (StableBTreeMap)
 //   58-59   FirstSeen maps (StableBTreeMap)
-//   60-63   reserved
+//   60-62   AMM liquidity log + legacy positional cursor
+//   63      AddMargin source-event dedupe index (StableBTreeMap)
+//   64      AMM liquidity monotonic event-ID cursor
 
 pub const MEM_SLIM_STATE: MemoryId = MemoryId::new(0);
 
@@ -110,6 +112,8 @@ pub const MEM_FIRSTSEEN_3USD: MemoryId = MemoryId::new(59);
 pub const MEM_EVT_AMM_LIQUIDITY_IDX: MemoryId = MemoryId::new(60);
 pub const MEM_EVT_AMM_LIQUIDITY_DATA: MemoryId = MemoryId::new(61);
 pub const MEM_CURSOR_AMM_LIQUIDITY: MemoryId = MemoryId::new(62);
+pub const MEM_ADD_MARGIN_EVENT_IDS: MemoryId = MemoryId::new(63);
+pub const MEM_CURSOR_AMM_LIQUIDITY_ID: MemoryId = MemoryId::new(64);
 
 // --- SlimState ---
 // Bounded residual heap state. Written to MemoryId 0 via StableCell. Holds
@@ -157,6 +161,13 @@ pub struct SlimState {
     /// backfill has not run yet on this canister.
     #[serde(default)]
     pub add_margin_backfill_cursor: Option<u64>,
+    /// Bounded migration cursor for rebuilding the AddMargin dedupe index
+    /// from existing vault-event rows after an upgrade.
+    #[serde(default)]
+    pub add_margin_dedupe_index_cursor: Option<u64>,
+    /// Whether the existing vault-event log has been indexed for AddMargin.
+    #[serde(default)]
+    pub add_margin_dedupe_index_ready: Option<bool>,
     /// Latest AMM pool composition (reserves + LP supply + token pair),
     /// refreshed every fast-collector cycle. Used by `address_value` to
     /// price each LP position as `(lp_shares / total_lp_shares) ×
@@ -254,6 +265,8 @@ impl Default for SlimState {
             last_pull_cycle_ns: None,
             collateral_decimals: None,
             add_margin_backfill_cursor: None,
+            add_margin_dedupe_index_cursor: None,
+            add_margin_dedupe_index_ready: None,
             amm_pools: None,
             source_next_pull_ns: None,
             pull_period_secs_override: None,
@@ -644,6 +657,8 @@ mod slim_state_upgrade_tests {
         assert_eq!(decoded.pull_period_secs_override, None);
         assert_eq!(decoded.pull_tick_secs_override, None);
         assert_eq!(decoded.schedule_layout_version, None);
+        assert_eq!(decoded.add_margin_dedupe_index_cursor, None);
+        assert_eq!(decoded.add_margin_dedupe_index_ready, None);
         assert_eq!(decoded.bridge_escrow_accounts, None);
     }
 
@@ -667,6 +682,8 @@ mod slim_state_upgrade_tests {
         last_pull_cycle_ns: Option<u64>,
         collateral_decimals: Option<std::collections::HashMap<Principal, u8>>,
         add_margin_backfill_cursor: Option<u64>,
+        add_margin_dedupe_index_cursor: Option<u64>,
+        add_margin_dedupe_index_ready: Option<bool>,
         amm_pools: Option<Vec<AmmPoolSnapshot>>,
         source_next_pull_ns: Option<std::collections::HashMap<u8, u64>>,
         pull_period_secs_override: Option<u64>,
@@ -697,6 +714,8 @@ mod slim_state_upgrade_tests {
             last_pull_cycle_ns: Some(555),
             collateral_decimals: None,
             add_margin_backfill_cursor: Some(10),
+            add_margin_dedupe_index_cursor: Some(11),
+            add_margin_dedupe_index_ready: Some(true),
             amm_pools: None,
             source_next_pull_ns: None,
             pull_period_secs_override: Some(300),
@@ -713,6 +732,8 @@ mod slim_state_upgrade_tests {
         assert_eq!(decoded.circulating_supply_3usd_e8s, Some(456));
         assert_eq!(decoded.pull_period_secs_override, Some(300));
         assert_eq!(decoded.schedule_layout_version, Some(2));
+        assert_eq!(decoded.add_margin_dedupe_index_cursor, Some(11));
+        assert_eq!(decoded.add_margin_dedupe_index_ready, Some(true));
         assert_eq!(decoded.bridge_escrow_accounts, None);
     }
 
@@ -751,6 +772,8 @@ mod slim_state_upgrade_tests {
         s.pull_period_secs_override = Some(600);
         s.pull_tick_secs_override = Some(20);
         s.schedule_layout_version = Some(2);
+        s.add_margin_dedupe_index_cursor = Some(123);
+        s.add_margin_dedupe_index_ready = Some(true);
 
         let bytes = <SlimState as Storable>::to_bytes(&s);
         let decoded = <SlimState as Storable>::from_bytes(bytes);
@@ -758,5 +781,7 @@ mod slim_state_upgrade_tests {
         assert_eq!(decoded.pull_period_secs_override, Some(600));
         assert_eq!(decoded.pull_tick_secs_override, Some(20));
         assert_eq!(decoded.schedule_layout_version, Some(2));
+        assert_eq!(decoded.add_margin_dedupe_index_cursor, Some(123));
+        assert_eq!(decoded.add_margin_dedupe_index_ready, Some(true));
     }
 }

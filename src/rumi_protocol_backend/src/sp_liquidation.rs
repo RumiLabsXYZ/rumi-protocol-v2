@@ -236,6 +236,7 @@ fn cancellation_tombstone(
         protocol_fee_ledger_fee_raw: None,
         protocol_fee_attempted: false,
         protocol_fee_block_index: None,
+        unsupported_protocol_fee_hold_id: None,
         interest_dispatch_started: false,
         post_accounting_done: false,
         applied_interest_share_e8s: None,
@@ -469,6 +470,11 @@ fn payout_reconciliation_phase_allowed(
 ) -> bool {
     block_index.is_none()
         && matches!(phase, SpLiquidationPhase::PayoutSubmitted | SpLiquidationPhase::PayoutNoEffect(_))
+}
+
+fn payout_reconciliation_admissible(journal: &SpLiquidationJournal) -> bool {
+    journal.post_accounting_done
+        && payout_reconciliation_phase_allowed(&journal.phase, journal.payout_block_index)
 }
 
 fn payout_first_dispatch_required(phase: &SpLiquidationPhase) -> bool {
@@ -1039,6 +1045,7 @@ pub async fn prepare(request: SpLiquidationRequest) -> Result<SpLiquidationRecei
             .then_some(actual_payout_fee_raw),
         protocol_fee_attempted: false,
         protocol_fee_block_index: None,
+        unsupported_protocol_fee_hold_id: None,
         interest_dispatch_started: false,
         post_accounting_done: false,
         applied_interest_share_e8s: None,
@@ -1285,6 +1292,12 @@ async fn settle_post_accounting(
         }
     }
     if journal.quote_protocol_cut_raw > 0 {
+        let treasury_asset_type =
+            crate::treasury::collateral_to_asset_type(&journal.collateral_ledger);
+        if treasury_asset_type.is_none() {
+            hold_unsupported_sp_protocol_fee(key, journal)?;
+            return Ok(());
+        }
         // The protocol-fee tuple is created immediately before its first
         // ledger await, after any interest-distribution await. Once the
         // attempted fence is set, every retry reuses that exact nonce and
@@ -1324,6 +1337,7 @@ async fn settle_post_accounting(
             };
             Ok(Some((treasury, fee, op_nonce)))
         })?;
+        let dispatched_now = tuple.is_some();
         if let Some((treasury, fee, op_nonce)) = tuple {
             let protocol_fee_net_raw = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
             match crate::management::transfer_collateral_with_nonce_and_fee_status(
@@ -1332,43 +1346,98 @@ async fn settle_post_accounting(
                 treasury,
                 journal.collateral_ledger,
                 op_nonce,
-            ).await {
-            Ok(block_index) => {
-                let should_notify = mutate_state(|state| {
-                    if let Some(current) = state.sp_liquidation_journals.get_mut(&key) {
-                        // A concurrent positive-proof reconciliation may have
-                        // committed this same tuple while the transfer reply
-                        // was in flight. Never overwrite a different durable
-                        // proof and never clear a proof on a retry.
-                        let should_notify = current.protocol_fee_block_index.is_none();
-                        if should_notify {
-                            current.protocol_fee_block_index = Some(block_index);
+            )
+            .await
+            {
+                Ok(block_index) => {
+                    mutate_state(|state| {
+                        if let Some(current) = state.sp_liquidation_journals.get_mut(&key) {
+                            // A concurrent positive-proof reconciliation may have
+                            // committed this same tuple while the transfer reply
+                            // was in flight. Never overwrite a different durable
+                            // proof and never clear a proof on a retry.
+                            if current.protocol_fee_block_index.is_none() {
+                                current.protocol_fee_block_index = Some(block_index);
+                            }
+                            current.updated_at_ns = ic_cdk::api::time();
                         }
-                        current.updated_at_ns = ic_cdk::api::time();
-                        should_notify
-                    } else {
-                        false
-                    }
-                });
-                // Preserve the existing treasury bookkeeping callback. Its
-                // failure is non-critical; the exact ledger receipt above is
-                // the durable proof of the fee transfer.
-                if should_notify {
-                    let _ = crate::treasury::notify_treasury_deposit(
-                        treasury,
-                        crate::treasury::DepositType::LiquidationFee,
-                        crate::treasury::collateral_to_asset_type(&journal.collateral_type),
-                        protocol_fee_net_raw,
-                        block_index,
-                    ).await;
+                    });
+                }
+                Err(error) => {
+                    return Err(ProtocolError::TemporarilyUnavailable(format!(
+                        "SP treasury fee remains unresolved; retry the same request: {error:?}"
+                    )));
                 }
             }
-            Err(error) => {
-                return Err(ProtocolError::TemporarilyUnavailable(format!(
-                    "SP treasury fee remains unresolved; retry the same request: {error:?}"
-                )));
-            }
         }
+        let block_index = read_state(|state| {
+            state
+                .sp_liquidation_journals
+                .get(&key)
+                .and_then(|current| current.protocol_fee_block_index)
+        });
+        if let Some(block_index) = block_index {
+            let Some(asset_type) = treasury_asset_type else {
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "SP treasury fee transfer is positively reconciled but held: collateral {} has no Treasury asset classification",
+                    journal.collateral_type,
+                )));
+            };
+            let treasury = journal.protocol_fee_treasury.ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable(
+                    "SP liquidation treasury destination is missing".into(),
+                )
+            })?;
+            let fee = journal.protocol_fee_ledger_fee_raw.ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable(
+                    "SP liquidation treasury fee tuple is missing".into(),
+                )
+            })?;
+            let amount = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
+            match asset_type {
+                asset_type @ (crate::treasury::AssetType::CKUSDT
+                | crate::treasury::AssetType::CKUSDC) => {
+                    crate::treasury::notify_external_collateral_deposit_once(
+                        treasury,
+                        journal.collateral_ledger,
+                        asset_type,
+                        amount,
+                        block_index,
+                        Some(format!("sp-liquidation-v1:{}", journal.vault_id)),
+                    )
+                    .await
+                    .map_err(|error| {
+                        ProtocolError::TemporarilyUnavailable(format!(
+                            "SP Treasury receipt remains held: {error}"
+                        ))
+                    })?;
+                }
+                crate::treasury::AssetType::ICP if dispatched_now => {
+                    crate::treasury::notify_treasury_deposit(
+                        treasury,
+                        crate::treasury::DepositType::LiquidationFee,
+                        crate::treasury::AssetType::ICP,
+                        amount,
+                        block_index,
+                    )
+                    .await
+                    .map_err(|error| {
+                        ProtocolError::TemporarilyUnavailable(format!(
+                            "SP Treasury ICP notification outcome is unresolved: {error}"
+                        ))
+                    })?;
+                }
+                crate::treasury::AssetType::ICP => {
+                    return Err(ProtocolError::TemporarilyUnavailable(
+                        "SP Treasury ICP transfer is proven, but its legacy notification outcome requires operator reconciliation".into(),
+                    ));
+                }
+                _ => {
+                    return Err(ProtocolError::TemporarilyUnavailable(
+                        "SP Treasury fee asset is not supported by an idempotent receipt path".into(),
+                    ));
+                }
+            }
         }
     }
     mutate_state(|state| {
@@ -1380,6 +1449,87 @@ async fn settle_post_accounting(
         current.updated_at_ns = ic_cdk::api::time();
         true
     });
+    Ok(())
+}
+
+/// Retain an unsupported SP liquidation fee and finish post-accounting in one
+/// synchronous state transition. The journal stores the exact generic hold ID
+/// and retries validate the row's request, ledger, and amount binding.
+fn hold_unsupported_sp_protocol_fee(
+    key: [u8; 32],
+    journal: &SpLiquidationJournal,
+) -> Result<(), ProtocolError> {
+    let now = ic_cdk::api::time();
+    mutate_state(|state| hold_unsupported_sp_protocol_fee_at(state, key, journal, now))
+}
+
+fn hold_unsupported_sp_protocol_fee_at(
+    state: &mut crate::state::State,
+    key: [u8; 32],
+    journal: &SpLiquidationJournal,
+    now: u64,
+) -> Result<(), ProtocolError> {
+    let Some(current) = state.sp_liquidation_journals.get(&key).cloned() else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP liquidation journal disappeared while holding unsupported fee".into(),
+        ));
+    };
+    if current.caller != journal.caller
+        || current.quote_protocol_cut_raw != journal.quote_protocol_cut_raw
+        || current.collateral_ledger != journal.collateral_ledger
+        || current.phase != SpLiquidationPhase::DebtCommitted
+    {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP liquidation journal changed while holding unsupported fee".into(),
+        ));
+    }
+    if current.protocol_fee_attempted || current.protocol_fee_block_index.is_some() {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP protocol-fee attempt or proof exists; unsupported fee hold is not admissible".into(),
+        ));
+    }
+    if let Some(hold_id) = current.unsupported_protocol_fee_hold_id {
+        let Some(hold) = state.held_unsupported_treasury_collateral.get(&hold_id) else {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP unsupported-fee hold record is missing".into(),
+            ));
+        };
+        if hold.hold_id != hold_id
+            || hold.ledger != current.collateral_ledger
+            || hold.amount_raw != current.quote_protocol_cut_raw
+            || hold.source_sp_liquidation_request_id != Some(key)
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP unsupported-fee hold record does not match its request binding".into(),
+            ));
+        }
+    } else {
+        let hold_id = state.next_op_nonce_at(now);
+        let hold = crate::state::HeldUnsupportedTreasuryCollateral {
+            hold_id,
+            amount_raw: current.quote_protocol_cut_raw,
+            ledger: current.collateral_ledger,
+            created_at_ns: now,
+            source_sp_liquidation_request_id: Some(key),
+        };
+        crate::storage::record_pending_payout_event(
+            &crate::event::PendingPayoutEvent::UnsupportedTreasuryCollateralFeeHeld {
+                hold: hold.clone(),
+            },
+        );
+        state.held_unsupported_treasury_collateral.insert(hold_id, hold);
+        state
+            .sp_liquidation_journals
+            .get_mut(&key)
+            .expect("SP liquidation journal was checked above")
+            .unsupported_protocol_fee_hold_id = Some(hold_id);
+    }
+    let current = state
+        .sp_liquidation_journals
+        .get_mut(&key)
+        .expect("SP liquidation journal was checked above");
+    current.post_accounting_done = true;
+    current.updated_at_ns = now;
     Ok(())
 }
 
@@ -1800,9 +1950,7 @@ pub async fn reconcile_payout(
     if reconcile_existing_block(journal.payout_block_index, candidate_block_index, "payout")? {
         return Ok(receipt(&journal));
     }
-    if !journal.post_accounting_done
-        || !payout_reconciliation_phase_allowed(&journal.phase, journal.payout_block_index)
-    {
+    if !payout_reconciliation_admissible(&journal) {
         return Err(ProtocolError::TemporarilyUnavailable(
             "SP payout proof is not admissible before post-accounting is committed".into(),
         ));
@@ -2340,6 +2488,141 @@ mod tests {
             .expect_err("bounded cancellation tombstones must fail closed at capacity");
         assert!(matches!(error, ProtocolError::TemporarilyUnavailable(_)));
         assert_eq!(state.sp_liquidation_journals.len(), MAX_SP_LIQUIDATION_JOURNALS);
+    }
+
+    #[test]
+    fn unsupported_protocol_fee_is_held_once_and_unblocks_payout_continuation() {
+        let caller = Principal::from_slice(&[91]);
+        let unsupported_ledger = Principal::from_slice(&[92]);
+        let request = request(SpLiquidationPayment::Icusd);
+        let key = request_id(&request.request_id).unwrap();
+        let mut journal = cancellation_tombstone(
+            key,
+            caller,
+            &request,
+            Principal::from_slice(&[93]),
+            1,
+        );
+        journal.phase = SpLiquidationPhase::DebtCommitted;
+        journal.collateral_ledger = unsupported_ledger;
+        journal.quote_protocol_cut_raw = 25;
+        journal.post_accounting_done = false;
+        journal.unsupported_protocol_fee_hold_id = None;
+        journal.protocol_fee_attempted = false;
+        journal.protocol_fee_block_index = None;
+        journal.payout_block_index = None;
+
+        let mut state = crate::state::State::default();
+        state.sp_liquidation_journals.insert(key, journal.clone());
+        crate::state::replace_state(state);
+        let mut premature_payout_proof = journal.clone();
+        premature_payout_proof.phase = SpLiquidationPhase::PayoutSubmitted;
+        assert!(!payout_reconciliation_admissible(&premature_payout_proof));
+
+        crate::state::mutate_state(|state| {
+            hold_unsupported_sp_protocol_fee_at(state, key, &journal, 100)
+        })
+        .expect("unsupported fee should be held without blocking post-accounting");
+        let first = crate::state::read_state(|state| {
+            (
+                state.sp_liquidation_journals[&key].clone(),
+                state.held_unsupported_treasury_collateral.clone(),
+            )
+        });
+        assert!(first.0.post_accounting_done);
+        let hold_id = first.0.unsupported_protocol_fee_hold_id.unwrap();
+        assert!(payout_first_dispatch_required(&first.0.phase));
+        let mut payout_proof_journal = first.0.clone();
+        payout_proof_journal.phase = SpLiquidationPhase::PayoutSubmitted;
+        assert!(payout_reconciliation_admissible(&payout_proof_journal));
+        assert!(!first.0.protocol_fee_attempted);
+        assert_eq!(first.0.protocol_fee_block_index, None);
+        assert_eq!(first.1.len(), 1);
+        let hold = first.1.values().next().unwrap();
+        assert_eq!(hold.hold_id, hold_id);
+        assert_eq!(hold.amount_raw, 25);
+        assert_eq!(hold.ledger, unsupported_ledger);
+        assert_eq!(hold.source_sp_liquidation_request_id, Some(key));
+
+        crate::state::mutate_state(|state| {
+            hold_unsupported_sp_protocol_fee_at(state, key, &journal, 101)
+        })
+        .expect("retry should replay the completed unsupported-fee hold");
+        let second = crate::state::read_state(|state| {
+            (
+                state.sp_liquidation_journals[&key].clone(),
+                state.held_unsupported_treasury_collateral.len(),
+            )
+        });
+        assert!(second.0.post_accounting_done);
+        assert_eq!(second.0.unsupported_protocol_fee_hold_id, Some(hold_id));
+        assert_eq!(second.1, 1, "retry must not allocate another hold");
+        assert!(!second.0.protocol_fee_attempted);
+    }
+
+    #[test]
+    fn unsupported_fee_attempt_or_proof_rejects_hold_admission() {
+        let caller = Principal::from_slice(&[94]);
+        let ledger = Principal::from_slice(&[95]);
+        let request = request(SpLiquidationPayment::Icusd);
+        let key = request_id(&request.request_id).unwrap();
+        for (attempted, block_index) in [(true, None), (false, Some(17))] {
+            let mut journal = cancellation_tombstone(
+                key,
+                caller,
+                &request,
+                Principal::from_slice(&[96]),
+                1,
+            );
+            journal.phase = SpLiquidationPhase::DebtCommitted;
+            journal.collateral_ledger = ledger;
+            journal.quote_protocol_cut_raw = 25;
+            journal.protocol_fee_attempted = attempted;
+            journal.protocol_fee_block_index = block_index;
+
+            let mut state = crate::state::State::default();
+            state.sp_liquidation_journals.insert(key, journal.clone());
+            let result = hold_unsupported_sp_protocol_fee_at(&mut state, key, &journal, 100);
+            assert!(result.is_err(), "attempted or proven fees must stay fail-closed");
+            assert!(!state.sp_liquidation_journals[&key].post_accounting_done);
+            assert_eq!(state.sp_liquidation_journals[&key].unsupported_protocol_fee_hold_id, None);
+            assert!(state.held_unsupported_treasury_collateral.is_empty());
+        }
+    }
+
+    #[test]
+    fn existing_unsupported_fee_hold_must_match_source_ledger_and_amount() {
+        let caller = Principal::from_slice(&[97]);
+        let ledger = Principal::from_slice(&[98]);
+        let request = request(SpLiquidationPayment::Icusd);
+        let key = request_id(&request.request_id).unwrap();
+        let mut journal = cancellation_tombstone(
+            key,
+            caller,
+            &request,
+            Principal::from_slice(&[99]),
+            1,
+        );
+        journal.phase = SpLiquidationPhase::DebtCommitted;
+        journal.collateral_ledger = ledger;
+        journal.quote_protocol_cut_raw = 25;
+        journal.unsupported_protocol_fee_hold_id = Some(77);
+
+        let mismatched_hold = crate::state::HeldUnsupportedTreasuryCollateral {
+            hold_id: 77,
+            amount_raw: 25,
+            ledger,
+            created_at_ns: 100,
+            source_sp_liquidation_request_id: Some([0xaa; 32]),
+        };
+        let mut state = crate::state::State::default();
+        state.sp_liquidation_journals.insert(key, journal.clone());
+        state
+            .held_unsupported_treasury_collateral
+            .insert(77, mismatched_hold);
+        let result = hold_unsupported_sp_protocol_fee_at(&mut state, key, &journal, 101);
+        assert!(result.is_err(), "a hold from another SP request is not reusable");
+        assert!(!state.sp_liquidation_journals[&key].post_accounting_done);
     }
 
     #[test]

@@ -253,9 +253,7 @@ static async executeSequentialOperation<T>(
   while (ApiClient.operationInProgress) {
     waitCount++;
     if (waitCount >= maxWaitAttempts) {
-      console.warn('Operation wait timeout exceeded, proceeding with new operation');
-      // Don't force reset - just continue with new operation
-      break;
+      throw new Error('Another transaction is still processing. Wait for it to finish, then refresh before trying again.');
     }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
@@ -1677,7 +1675,11 @@ static async repayToVaultWithStable(
         if (isOisyWallet()) {
           const snap = ApiClient.getCachedRawSnapshot(vaultId);
           if (!snap) {
-            return { success: true, message: `Vault #${vaultId} is already closed.`, vaultId };
+            return {
+              success: false,
+              error: 'Vault state is unavailable. Refresh vault data and try again.',
+              vaultId
+            };
           }
           actor = await ApiClient.getAuthenticatedActor();
           isEmpty = snap.icpMargin === 0n && snap.borrowedIcusd === 0n;
@@ -3307,8 +3309,15 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
       let borrowedIcusdHuman: number;
       if (isOisyWallet()) {
         const snap = ApiClient.getCachedRawSnapshot(vaultId);
-        vaultExists = !!snap;
-        borrowedIcusdHuman = snap ? Number(snap.borrowedIcusd) / E8S : 0;
+        if (!snap) {
+          return {
+            success: false,
+            error: 'Vault state is unavailable. Refresh vault data and try again.',
+            vaultId
+          };
+        }
+        vaultExists = true;
+        borrowedIcusdHuman = Number(snap.borrowedIcusd) / E8S;
       } else {
         const vault = await ApiClient.getVaultById(vaultId);
         vaultExists = !!vault;
@@ -3857,11 +3866,19 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
   private static clearAllStaleOperations() {
     const now = Date.now();
     let clearedCount = 0;
-      // Clear operation flags on page load to avoid stuck operations between sessions
-      ApiClient.operationInProgress = false;
-      ApiClient.operationTimestamps.clear();
-       console.log(`Cleared ${clearedCount} stale vault operations`);
+    for (const [operationId, startedAt] of ApiClient.operationTimestamps) {
+      if (now - startedAt > ApiClient.STALE_OPERATION_TIMEOUT) {
+        ApiClient.operationTimestamps.delete(operationId);
+        clearedCount++;
+      }
     }
+    // The active-operation lock is released only by executeSequentialOperation's
+    // finally block. A periodic timeout must never admit a second mutation while
+    // the first operation is still unresolved.
+    if (clearedCount > 0) {
+      console.log(`Cleared ${clearedCount} stale vault operation timestamps`);
+    }
+  }
   
 
 

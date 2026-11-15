@@ -75,13 +75,16 @@ pub enum IngestKind {
     VaultBorrow { vault_id: u64, amount_e8s: u64 },
     /// Repaid vault debt. `repayment_asset` is the ledger the debt was repaid with,
     /// needed to tell a qualifying ckUSDC/ckUSDT repayment (5x window, spec Section
-    /// 6) from an icUSD burn or collateral closure. The upstream backend field is
-    /// not live yet, so the normalizer sets it `None` and the 5x window is skipped
-    /// (logged) until it lands.
+    /// 6) from an icUSD burn or collateral closure. `amount_unit` describes the
+    /// backend event's `repayed_amount` denomination. The backend records debt
+    /// applied in ICUSD e8s even when ckUSDC/ckUSDT funded it, so it is already in
+    /// `usd_e8s` and must not receive the native six-decimal scale factor. Missing
+    /// asset or unit metadata fails closed and opens no window.
     VaultRepay {
         vault_id: u64,
         amount_e8s: u64,
         repayment_asset: Option<candid::Principal>,
+        amount_unit: Option<valuation::RepaymentAmountUnit>,
     },
     VaultClose { vault_id: u64 },
     VaultLiquidated { vault_id: u64 },
@@ -150,8 +153,8 @@ pub fn apply_ingested_event(ev: &IngestedEvent) {
         IngestKind::ThreePoolRemove { amounts } => {
             apply_3pool(caller, amounts, false, ev.timestamp_ns)
         }
-        IngestKind::VaultRepay { repayment_asset, amount_e8s, .. } => {
-            apply_repayment(caller, *repayment_asset, *amount_e8s, ev.timestamp_ns)
+        IngestKind::VaultRepay { repayment_asset, amount_unit, amount_e8s, .. } => {
+            apply_repayment(caller, *repayment_asset, *amount_unit, *amount_e8s, ev.timestamp_ns)
         }
         // Vault debt, SP, and AMM positions are read live at each snapshot (the
         // hybrid model), so their events only register; they are not tracked here.
@@ -241,6 +244,7 @@ pub fn rebuild_3pool_recorded(events: &[IngestedEvent]) -> usize {
 fn apply_repayment(
     caller: Principal,
     repayment_asset: Option<Principal>,
+    amount_unit: Option<valuation::RepaymentAmountUnit>,
     amount_e8s: u64,
     now_ns: u64,
 ) {
@@ -252,8 +256,15 @@ fn apply_repayment(
         }
     };
     if let Some(asset @ (AssetType::CkUsdc | AssetType::CkUsdt)) = state::classify_ledger(&ledger) {
-        let usd = valuation::value_stable_usd_e8s(asset, amount_e8s as u128);
-        state::record_repayment(caller, asset, usd, now_ns);
+        if let Some(usd) = valuation::value_repayment_usd_e8s(
+            asset,
+            amount_unit,
+            amount_e8s as u128,
+        ) {
+            state::record_repayment(caller, asset, usd, now_ns);
+        } else {
+            log_ingest("vault repay with unknown amount unit; skipping 5x window");
+        }
     }
 }
 
@@ -301,6 +312,9 @@ mod tests {
 
     fn ckusdc() -> Principal {
         Principal::from_text("xevnm-gaaaa-aaaar-qafnq-cai").unwrap()
+    }
+    fn ckusdt() -> Principal {
+        Principal::from_text("cngnf-vqaaa-aaaar-qag4q-cai").unwrap()
     }
     fn icusd() -> Principal {
         Principal::from_text("t6bor-paaaa-aaaap-qrd5q-cai").unwrap()
@@ -356,7 +370,7 @@ mod tests {
             None
         );
         assert_eq!(
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 5, repayment_asset: None }.qualifying_action(),
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 5, repayment_asset: None, amount_unit: None }.qualifying_action(),
             Some(QualifyingAction::RepayVault)
         );
         assert_eq!(
@@ -694,12 +708,54 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: Some(ckusdc()) },
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 100_000_000, repayment_asset: Some(ckusdc()), amount_unit: Some(valuation::RepaymentAmountUnit::IcusdE8) },
         ));
         let st = state::get_principal_state(&p).unwrap();
         assert_eq!(st.repayment_events.len(), 1);
         assert_eq!(st.repayment_events[0].asset, AssetType::CkUsdc);
-        assert_eq!(st.repayment_events[0].amount_usd, 100_000_000); // $1, 6-dec x100
+        assert_eq!(st.repayment_events[0].amount_usd, 100_000_000); // $1: backend amount is already ICUSD e8s.
+    }
+
+    #[test]
+    fn vault_repay_with_ckusdt_uses_backend_icusd_e8_amount_directly() {
+        init();
+        let p = tp(48);
+        apply_ingested_event(&ev(
+            SourceId::Backend,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::VaultRepay {
+                vault_id: 1,
+                amount_e8s: 100_000_000,
+                repayment_asset: Some(ckusdt()),
+                amount_unit: Some(valuation::RepaymentAmountUnit::IcusdE8),
+            },
+        ));
+        let st = state::get_principal_state(&p).unwrap();
+        assert_eq!(st.repayment_events.len(), 1);
+        assert_eq!(st.repayment_events[0].asset, AssetType::CkUsdt);
+        assert_eq!(st.repayment_events[0].amount_usd, 100_000_000);
+    }
+
+    #[test]
+    fn vault_repay_with_unknown_amount_unit_fails_closed() {
+        init();
+        let p = tp(49);
+        apply_ingested_event(&ev(
+            SourceId::Backend,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::VaultRepay {
+                vault_id: 1,
+                amount_e8s: 100_000_000,
+                repayment_asset: Some(ckusdc()),
+                amount_unit: None,
+            },
+        ));
+        assert!(state::is_registered(&p));
+        assert!(state::get_principal_state(&p).unwrap().repayment_events.is_empty());
     }
 
     #[test]
@@ -711,7 +767,7 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: None },
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 100_000_000, repayment_asset: None, amount_unit: Some(valuation::RepaymentAmountUnit::IcusdE8) },
         ));
         assert!(state::is_registered(&p)); // repay is a qualifying action
         assert!(state::get_principal_state(&p).unwrap().repayment_events.is_empty());
@@ -726,7 +782,7 @@ mod tests {
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 1_000_000, repayment_asset: Some(icusd()) },
+            IngestKind::VaultRepay { vault_id: 1, amount_e8s: 100_000_000, repayment_asset: Some(icusd()), amount_unit: Some(valuation::RepaymentAmountUnit::IcusdE8) },
         ));
         assert!(state::is_registered(&p));
         // An icUSD-burn repayment does not qualify for the 5x window (spec Section 6).

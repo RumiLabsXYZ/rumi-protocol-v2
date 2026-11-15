@@ -678,6 +678,42 @@ pub async fn notify_reward_received(
 /// Claim accumulated reward icUSD for the caller. Settles pending into
 /// claimable, persists a payout identity, then debits claimable before
 /// dispatch. Ambiguous results stay held and are not automatically rearmed.
+fn settle_reward_claim_amount(pool: &mut Pool, caller: Principal) -> Result<u128, AmmError> {
+    let shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+
+    // Unknown zero-share callers have no pending reward to settle. Reject
+    // before `entry` so permissionless claim attempts cannot grow stable state
+    // with one empty reward row per principal.
+    if shares == 0 && !pool.lp_rewards.contains_key(&caller) {
+        return Err(AmmError::BelowMinClaim {
+            claimable: 0,
+            min: crate::state::MIN_CLAIM_E8S,
+        });
+    }
+
+    let acc = pool.acc_reward_per_share;
+    let claimable = {
+        let entry = pool.lp_rewards.entry(caller).or_default();
+        crate::rewards::settle(entry, shares, acc);
+        crate::rewards::reset_debt(entry, shares, acc);
+        entry.claimable
+    };
+
+    if claimable < crate::state::MIN_CLAIM_E8S {
+        // Remove legacy empty rows created by the old ordering, but preserve
+        // every positive sub-minimum balance for a future claim.
+        if shares == 0 && claimable == 0 {
+            pool.lp_rewards.remove(&caller);
+        }
+        return Err(AmmError::BelowMinClaim {
+            claimable,
+            min: crate::state::MIN_CLAIM_E8S,
+        });
+    }
+
+    Ok(claimable)
+}
+
 #[update]
 pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
     let caller = ic_cdk::caller();
@@ -697,21 +733,7 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
     // Phase 1: settle pending into claimable, snapshot the amount, persist.
     let amount = mutate_state(|s| -> Result<u128, AmmError> {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
-        let shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
-        let acc = pool.acc_reward_per_share;
-        let entry = pool.lp_rewards.entry(caller).or_default();
-
-        crate::rewards::settle(entry, shares, acc);
-        crate::rewards::reset_debt(entry, shares, acc);
-
-        let claimable = entry.claimable;
-        if claimable < crate::state::MIN_CLAIM_E8S {
-            return Err(AmmError::BelowMinClaim {
-                claimable,
-                min: crate::state::MIN_CLAIM_E8S,
-            });
-        }
-        Ok(claimable)
+        settle_reward_claim_amount(pool, caller)
     })?;
 
     // Persist the immutable reward payout identity before debiting claimable.
@@ -2595,6 +2617,44 @@ fn get_amm_liquidity_events(start: u64, length: u64) -> Vec<AmmLiquidityEvent> {
     })
 }
 
+/// Page the retained liquidity event window using monotonic event IDs.
+/// The position-based endpoint above remains available for existing clients.
+#[query]
+fn get_amm_liquidity_events_from_id(start_id: u64, length: u64) -> AmmLiquidityEventWindow {
+    read_state(|s| {
+        liquidity_event_window(
+            &s.liquidity_events,
+            s.next_liquidity_event_id,
+            start_id,
+            length,
+        )
+    })
+}
+
+fn liquidity_event_window(
+    events: &[AmmLiquidityEvent],
+    next_event_id: u64,
+    start_id: u64,
+    length: u64,
+) -> AmmLiquidityEventWindow {
+    let oldest_available_id = events
+        .first()
+        .map(|event| event.id)
+        .unwrap_or(next_event_id);
+    // IDs are assigned once per append and the retained vector is only
+    // front-pruned, so retained event IDs are contiguous and indexable.
+    let start = start_id
+        .saturating_sub(oldest_available_id)
+        .min(events.len() as u64) as usize;
+    let length = length.min(MAX_EVENT_PAGE) as usize;
+    let end = start.saturating_add(length).min(events.len());
+    AmmLiquidityEventWindow {
+        oldest_available_id,
+        next_event_id,
+        events: events[start..end].to_vec(),
+    }
+}
+
 #[query]
 fn get_amm_liquidity_event_count() -> u64 {
     read_state(|s| s.liquidity_events.len() as u64)
@@ -2826,6 +2886,21 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 mod dos_001_tests {
     use super::*;
 
+    fn dummy_liquidity_event(i: u64) -> AmmLiquidityEvent {
+        AmmLiquidityEvent {
+            id: i,
+            caller: Principal::anonymous(),
+            pool_id: "pool".to_string(),
+            action: AmmLiquidityAction::AddLiquidity,
+            token_a: Principal::anonymous(),
+            amount_a: 1,
+            token_b: Principal::anonymous(),
+            amount_b: 1,
+            lp_shares: 1,
+            timestamp: i,
+        }
+    }
+
     fn dummy_swap_event(i: u64, pool: &str, who: Principal) -> AmmSwapEvent {
         AmmSwapEvent {
             id: i,
@@ -2876,5 +2951,120 @@ mod dos_001_tests {
             limit: u64::MAX,
         });
         assert_eq!(by_time.len() as u64, MAX_EVENT_PAGE);
+    }
+
+    #[test]
+    fn monotonic_liquidity_page_covers_retention_gap_and_empty_window() {
+        let retained = vec![
+            dummy_liquidity_event(50_001),
+            dummy_liquidity_event(50_002),
+            dummy_liquidity_event(50_003),
+        ];
+        let page = liquidity_event_window(&retained, 50_004, 50_000, 2);
+        assert_eq!(page.oldest_available_id, 50_001);
+        assert_eq!(page.next_event_id, 50_004);
+        assert_eq!(
+            page.events.iter().map(|event| event.id).collect::<Vec<_>>(),
+            [50_001, 50_002]
+        );
+
+        let page = liquidity_event_window(&retained, 50_004, 50_003, 2);
+        assert_eq!(
+            page.events.iter().map(|event| event.id).collect::<Vec<_>>(),
+            [50_003]
+        );
+
+        let empty = liquidity_event_window(&[], 50_004, 50_000, 2);
+        assert_eq!(empty.oldest_available_id, 50_004);
+        assert!(empty.events.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod reward_claim_admission_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn empty_pool() -> Pool {
+        Pool {
+            token_a: Principal::anonymous(),
+            token_b: Principal::management_canister(),
+            reserve_a: 0,
+            reserve_b: 0,
+            fee_bps: 0,
+            protocol_fee_bps: 0,
+            curve: CurveType::ConstantProduct,
+            lp_shares: BTreeMap::new(),
+            total_lp_shares: 0,
+            protocol_fees_a: 0,
+            protocol_fees_b: 0,
+            paused: false,
+            subaccount_a: [0; 32],
+            subaccount_b: [1; 32],
+            lp_rewards: BTreeMap::new(),
+            acc_reward_per_share: 0,
+            pending_no_lp: 0,
+            total_rewards_distributed: 0,
+            processed_donation_nonces: VecDeque::new(),
+            reward_balance_snapshot: 0,
+        }
+    }
+
+    #[test]
+    fn zero_share_unknown_callers_do_not_create_reward_rows() {
+        let mut pool = empty_pool();
+        for seed in 1..=32u8 {
+            let caller = Principal::self_authenticating(&[seed; 32]);
+            assert!(matches!(
+                settle_reward_claim_amount(&mut pool, caller),
+                Err(AmmError::BelowMinClaim { claimable: 0, min })
+                    if min == crate::state::MIN_CLAIM_E8S
+            ));
+        }
+        assert!(pool.lp_rewards.is_empty());
+    }
+
+    #[test]
+    fn zero_share_former_lp_can_claim_carried_rewards() {
+        let mut pool = empty_pool();
+        let caller = Principal::self_authenticating(&[77; 32]);
+        pool.lp_rewards.insert(
+            caller,
+            RewardState {
+                reward_debt: 0,
+                claimable: crate::state::MIN_CLAIM_E8S,
+            },
+        );
+
+        assert_eq!(
+            settle_reward_claim_amount(&mut pool, caller)
+                .expect("former LP carried rewards must be claimable"),
+            crate::state::MIN_CLAIM_E8S
+        );
+        assert_eq!(
+            pool.lp_rewards[&caller].claimable,
+            crate::state::MIN_CLAIM_E8S,
+            "the async payout path, not admission, debits claimable"
+        );
+    }
+
+    #[test]
+    fn legacy_zero_row_is_removed_but_positive_dust_is_preserved() {
+        let mut pool = empty_pool();
+        let empty = Principal::self_authenticating(&[78; 32]);
+        let dust = Principal::self_authenticating(&[79; 32]);
+        pool.lp_rewards.insert(empty, RewardState::default());
+        pool.lp_rewards.insert(
+            dust,
+            RewardState {
+                reward_debt: 0,
+                claimable: 1,
+            },
+        );
+
+        assert!(settle_reward_claim_amount(&mut pool, empty).is_err());
+        assert!(!pool.lp_rewards.contains_key(&empty));
+        assert!(settle_reward_claim_amount(&mut pool, dust).is_err());
+        assert_eq!(pool.lp_rewards[&dust].claimable, 1);
     }
 }

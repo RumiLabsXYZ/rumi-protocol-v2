@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Principal } from '@dfinity/principal';
 import { get } from 'svelte/store';
 
@@ -92,6 +92,7 @@ import {
 } from './apiClient';
 import type { AcceptedRedemptionOffer } from '$lib/utils/redemptionPreview';
 import { walletOperations, StaleActionSessionError, type ActionBoundContext } from './walletOperations';
+import { clearRawSnapshots } from './rawSnapshotCache';
 
 const CKDOGE_LEDGER_ID = CANISTER_IDS.CKDOGE_LEDGER;
 const BACKEND_ID = CONFIG.currentCanisterId;
@@ -101,6 +102,10 @@ if (CKDOGE_LEDGER_ID !== mocks.ckdogeLedgerId) {
     `Test fixture drift: mocks.ckdogeLedgerId ('${mocks.ckdogeLedgerId}') no longer matches CANISTER_IDS.CKDOGE_LEDGER ('${CKDOGE_LEDGER_ID}') — update the hoisted literal.`
   );
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const PRINCIPAL_A = Principal.fromUint8Array(new Uint8Array([1, 1, 1, 1])).toText();
 const PRINCIPAL_B = Principal.fromUint8Array(new Uint8Array([2, 2, 2, 2])).toText();
@@ -1077,5 +1082,99 @@ describe('walletOperations.approveCollateralTransferBound', () => {
     expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
     expect(ledgerActor.icrc2_approve.mock.calls[0][0].amount).toBe(1_234_567n);
     expect(result).toEqual({ success: true });
+  });
+});
+
+describe('ApiClient sequential mutation admission', () => {
+  it('rejects a second mutation after the wait bound instead of overlapping it', async () => {
+    vi.useFakeTimers();
+    (ApiClient as any).operationInProgress = false;
+    let releaseFirst!: () => void;
+    const firstOperation = vi.fn(() => new Promise<void>((resolve) => { releaseFirst = resolve; }));
+    const secondOperation = vi.fn().mockResolvedValue('second');
+
+    const first = ApiClient.executeSequentialOperation(firstOperation, undefined, {
+      refreshBefore: false,
+      refreshAfter: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstOperation).toHaveBeenCalledOnce();
+
+    const second = ApiClient.executeSequentialOperation(secondOperation, undefined, {
+      refreshBefore: false,
+      refreshAfter: false,
+    });
+    const rejected = expect(second).rejects.toThrow('Another transaction is still processing');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+    expect(secondOperation).not.toHaveBeenCalled();
+
+    releaseFirst();
+    await first;
+    await expect(ApiClient.executeSequentialOperation(secondOperation, undefined, {
+      refreshBefore: false,
+      refreshAfter: false,
+    })).resolves.toBe('second');
+  });
+
+  it('keeps the active mutation locked when periodic cleanup runs after 120 seconds', async () => {
+    vi.useFakeTimers();
+    (ApiClient as any).operationInProgress = false;
+    (ApiClient as any).startCleanupInterval();
+    let releaseFirst!: () => void;
+    const firstOperation = vi.fn(() => new Promise<void>((resolve) => { releaseFirst = resolve; }));
+    const secondOperation = vi.fn().mockResolvedValue('second');
+
+    const first = ApiClient.executeSequentialOperation(firstOperation, undefined, {
+      refreshBefore: false,
+      refreshAfter: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstOperation).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    const second = ApiClient.executeSequentialOperation(secondOperation, undefined, {
+      refreshBefore: false,
+      refreshAfter: false,
+    });
+    const rejected = expect(second).rejects.toThrow('Another transaction is still processing');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+    expect(secondOperation).not.toHaveBeenCalled();
+
+    releaseFirst();
+    await first;
+    (ApiClient as any).stopCleanupInterval();
+  });
+});
+
+describe('Oisy vault-close cache admission', () => {
+  beforeEach(() => {
+    (ApiClient as any).operationInProgress = false;
+    currentWalletType.set(WALLET_TYPES.OISY);
+    localStorage.setItem('rumi_last_wallet', WALLET_TYPES.OISY);
+    setLivePrincipal(PRINCIPAL_A);
+    clearRawSnapshots();
+    vi.spyOn(ApiClient as any, 'refreshVaultData').mockResolvedValue(undefined);
+  });
+
+  it('fails closed on an unwarmed closeVault cache without fetching an actor', async () => {
+    const result = await ApiClient.closeVault(41);
+    expect(result).toMatchObject({
+      success: false,
+      vaultId: 41,
+      error: 'Vault state is unavailable. Refresh vault data and try again.',
+    });
+    expect(mocks.getActor).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on an unwarmed withdraw-and-close cache without fetching an actor', async () => {
+    const result = await ApiClient.withdrawCollateralAndCloseVault(42);
+    expect(result).toMatchObject({
+      success: false,
+      vaultId: 42,
+      error: 'Vault state is unavailable. Refresh vault data and try again.',
+    });
+    expect(mocks.getActor).not.toHaveBeenCalled();
   });
 });

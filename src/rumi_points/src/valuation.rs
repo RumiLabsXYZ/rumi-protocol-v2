@@ -18,6 +18,14 @@
 
 use crate::types::AssetType;
 
+/// Denomination contract for backend repayment event amounts. The backend's
+/// `Event::RepayToVault.repayed_amount` is an ICUSD-denominated debt reduction,
+/// regardless of the ledger used to fund it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepaymentAmountUnit {
+    IcusdE8,
+}
+
 /// `1e18`, the scale of the 3pool's `virtual_price` (pinned: `vp = D_18dec * 1e8 /
 /// lp_supply_8dec`, so 1 whole LP = `virtual_price / 1e18` USD).
 pub const VIRTUAL_PRICE_SCALE: u128 = 1_000_000_000_000_000_000;
@@ -71,6 +79,23 @@ pub fn value_stable_usd_e8s(asset: AssetType, native_amount: u128) -> u128 {
         native_amount,
         &SnapshotPrices { icp_rate: 0.0, virtual_price: 0 },
     )
+}
+
+/// Value a backend vault-repayment event from its explicit amount unit. The
+/// repayment amount is debt applied in ICUSD e8s, not the native ck-stable
+/// transfer amount; converting it as a six-decimal asset would overstate it by
+/// 100x. Unknown units and non-qualifying assets fail closed.
+pub fn value_repayment_usd_e8s(
+    asset: AssetType,
+    unit: Option<RepaymentAmountUnit>,
+    amount: u128,
+) -> Option<u128> {
+    match (asset, unit) {
+        (AssetType::CkUsdc | AssetType::CkUsdt, Some(RepaymentAmountUnit::IcusdE8)) => {
+            Some(amount)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +169,39 @@ mod tests {
         assert_eq!(value_stable_usd_e8s(AssetType::ThreeUsd, 5), 5);
         assert_eq!(value_stable_usd_e8s(AssetType::CkUsdc, 1_000_000), 100_000_000);
         assert_eq!(value_stable_usd_e8s(AssetType::CkUsdt, 2_000_000), 200_000_000);
+    }
+
+    #[test]
+    fn repayment_icusd_e8_values_one_dollar_directly_for_both_ck_stables() {
+        let one_dollar_e8s = 100_000_000;
+        assert_eq!(
+            value_repayment_usd_e8s(
+                AssetType::CkUsdc,
+                Some(RepaymentAmountUnit::IcusdE8),
+                one_dollar_e8s,
+            ),
+            Some(one_dollar_e8s),
+        );
+        assert_eq!(
+            value_repayment_usd_e8s(
+                AssetType::CkUsdt,
+                Some(RepaymentAmountUnit::IcusdE8),
+                one_dollar_e8s,
+            ),
+            Some(one_dollar_e8s),
+        );
+    }
+
+    #[test]
+    fn repayment_valuation_fails_closed_for_unknown_unit_or_non_ck_stable() {
+        assert_eq!(value_repayment_usd_e8s(AssetType::CkUsdc, None, 100_000_000), None);
+        assert_eq!(
+            value_repayment_usd_e8s(
+                AssetType::IcUsd,
+                Some(RepaymentAmountUnit::IcusdE8),
+                100_000_000,
+            ),
+            None,
+        );
     }
 }
