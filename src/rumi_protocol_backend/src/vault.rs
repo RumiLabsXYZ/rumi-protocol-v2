@@ -6886,7 +6886,15 @@ pub fn admit_borrow(
 
     // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
     reject_active_xrp_sp_absorb_preflight(vault_id, now_ns)?;
-    mutate_state(|s| s.accrue_single_vault(vault_id, now_ns));
+    let accrual_ready = mutate_state(|s| {
+        crate::event::record_borrow_interest_accrual(s, vault_id, now_ns)
+    });
+    if !accrual_ready {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "vault interest could not be advanced safely; retry after the unresolved accrual hold is cleared"
+                .into(),
+        ));
+    }
 
     let (vault, collateral_price, config_decimals, is_native_xrp) =
         read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
@@ -7627,21 +7635,24 @@ where
         }
     };
 
-            let debt_can_be_applied = read_state(|s| {
+            // Once the ledger mint is proven, establish only that the held
+            // journal still names the same vault here.  Do not check debt
+            // representability until after the exact pre-commit checkpoint
+            // is journaled below: a predecessor canister may have accrued
+            // interest at admission without persisting that accrual for
+            // fallback replay.  Even when the final debt addition must stay
+            // held, the checkpoint is required to preserve that legitimate
+            // predecessor state.
+            let debt_target_matches = read_state(|s| {
                 s.pending_borrow_mints.get(&confirmed_journal.vault_id) == Some(&confirmed_journal)
                     && s.vault_id_to_vaults.get(&journal.vault_id).is_some_and(|vault| {
                         vault.owner == journal.owner
                             && vault.collateral_type == journal.collateral_type
-                            && crate::numeric::checked_icusd_add(
-                                vault.borrowed_icusd_amount,
-                                ICUSD::new(journal.borrowed_amount_e8s),
-                            )
-                            .is_some()
                     })
             });
-            if !debt_can_be_applied {
+            if !debt_target_matches {
                 return Err(ProtocolError::GenericError(format!(
-                    "icUSD mint for vault #{} was confirmed at block {}, but debt cannot be applied safely; the journal remains held for reconciliation",
+                    "icUSD mint for vault #{} was confirmed at block {}, but the held debt target no longer matches; the journal remains held for reconciliation",
                     journal.vault_id, block_index
                 )));
             }
@@ -7652,19 +7663,38 @@ where
                 {
                     return false;
                 }
-                if s.pending_borrow_fee_mints.contains_key(&journal.tuple.op_nonce) {
-                    return false;
-                }
                 let vault_matches = s.vault_id_to_vaults.get(&journal.vault_id).is_some_and(|vault| {
                     vault.owner == journal.owner
                         && vault.collateral_type == journal.collateral_type
-                        && crate::numeric::checked_icusd_add(
-                            vault.borrowed_icusd_amount,
-                            ICUSD::new(journal.borrowed_amount_e8s),
-                        )
-                        .is_some()
                 });
                 if !vault_matches {
+                    return false;
+                }
+                if !crate::event::record_borrow_interest_checkpoint(
+                    s,
+                    crate::event::BorrowInterestCheckpointKey::Legacy {
+                        vault_id: journal.vault_id,
+                        op_nonce: journal.tuple.op_nonce,
+                    },
+                    journal.vault_id,
+                ) {
+                    return false;
+                }
+                // If the existing debt cannot hold the proven principal even
+                // before commit-time interest, no later retry can repair that
+                // by accruing more debt. Hold without appending an accrual on
+                // every retry; retain the post-accrual check below because the
+                // first accrual can consume otherwise available headroom.
+                if !s.vault_id_to_vaults.get(&journal.vault_id).is_some_and(|vault| {
+                    crate::numeric::checked_icusd_add(
+                        vault.borrowed_icusd_amount,
+                        ICUSD::new(journal.borrowed_amount_e8s),
+                    )
+                    .is_some()
+                }) {
+                    return false;
+                }
+                if s.pending_borrow_fee_mints.contains_key(&journal.tuple.op_nonce) {
                     return false;
                 }
                 let collateral_completion = if let Some(operation_id) = compound_operation_id {
@@ -7689,6 +7719,31 @@ where
                     None
                 };
                 let timestamp_ns = now();
+                // The mint is proven. Persist and apply the commit-time accrual
+                // before checking the final debt addition so runtime and replay
+                // share the same rounding boundary. If the addition is no longer
+                // representable, retain the mint journal for reconciliation
+                // rather than trapping after an irreversible mint.
+                if !crate::event::record_borrow_interest_accrual(
+                    s,
+                    journal.vault_id,
+                    timestamp_ns,
+                ) {
+                    return false;
+                }
+                let debt_is_representable = s
+                    .vault_id_to_vaults
+                    .get(&journal.vault_id)
+                    .is_some_and(|vault| {
+                        crate::numeric::checked_icusd_add(
+                            vault.borrowed_icusd_amount,
+                            ICUSD::new(journal.borrowed_amount_e8s),
+                        )
+                        .is_some()
+                    });
+                if !debt_is_representable {
+                    return false;
+                }
                 crate::event::record_borrow_from_vault_at(
                     s,
                     journal.vault_id,
@@ -7752,6 +7807,13 @@ where
                         },
                     ).expect("validated compound journal completes with confirmed borrow debt");
                 }
+                crate::event::complete_borrow_interest_checkpoint(
+                    s,
+                    crate::event::BorrowInterestCheckpointKey::Legacy {
+                        vault_id: journal.vault_id,
+                        op_nonce: journal.tuple.op_nonce,
+                    },
+                );
                 true
             });
             if !committed {

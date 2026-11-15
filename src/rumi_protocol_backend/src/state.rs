@@ -3802,6 +3802,11 @@ pub struct State {
     /// cleared by a ledger response that guarantees no transfer occurred.
     #[serde(default)]
     pub pending_borrow_mints: BTreeMap<u64, BorrowMintJournal>,
+    /// Operation-bound pre-commit debt checkpoints already appended to the
+    /// private replay journal. This makes timer/manual retries idempotent.
+    #[serde(default)]
+    pub borrow_interest_checkpoints:
+        BTreeSet<crate::event::BorrowInterestCheckpointKey>,
     #[serde(default)]
     pub pending_borrow_fee_mints: BTreeMap<u128, BorrowFeeMintJournal>,
     #[serde(default)]
@@ -4778,6 +4783,7 @@ impl Default for State {
             reserve_redemption_journals: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            borrow_interest_checkpoints: BTreeSet::new(),
             pending_borrow_fee_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
@@ -4988,6 +4994,7 @@ impl From<InitArg> for State {
             reserve_redemption_journals: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             pending_borrow_mints: BTreeMap::new(),
+            borrow_interest_checkpoints: BTreeSet::new(),
             pending_borrow_fee_mints: BTreeMap::new(),
             liquidity_withdraw_journals: BTreeMap::new(),
             three_usd_reserve_ingress_journals: BTreeMap::new(),
@@ -7161,62 +7168,75 @@ impl State {
     /// Re-keying inside passive accrual would be O(N log N) per timer tick for
     /// zero ordering benefit at the band tolerance scale (default 1% CR).
     pub fn accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) {
-        // XRPL icUSD lane: while a repayment burn is unresolved the vault's accrual
-        // clock is frozen at the saved settlement cutoff (every accrual path, including
-        // `Event::AccrueInterest` replay, defers this vault; others continue normally).
+        let _ = self.try_accrue_single_vault(vault_id, now_nanos);
+    }
+
+    fn preview_single_vault_accrual(
+        &self,
+        vault_id: u64,
+        now_nanos: u64,
+    ) -> Result<Option<(ICUSD, ICUSD)>, ()> {
         if self.xrpl_icusd.accrual_frozen_vaults.contains(&vault_id) {
-            return;
+            return Err(());
         }
-        // Phase 1: compute rate (immutable borrow of self)
-        let rate_and_elapsed = {
-            let s: &State = &*self;
-            match s.vault_id_to_vaults.get(&vault_id) {
-                Some(vault)
-                    if vault.borrowed_icusd_amount.0 > 0 && vault.last_accrual_time < now_nanos =>
-                {
-                    let dummy_rate = s
-                        .last_icp_rate
-                        .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
-                    let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
-                    let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
-                    let elapsed = now_nanos.saturating_sub(vault.last_accrual_time);
-                    Some((rate, elapsed))
-                }
-                _ => None,
+        let Some(vault) = self.vault_id_to_vaults.get(&vault_id) else {
+            return Err(());
+        };
+        if vault.borrowed_icusd_amount.0 == 0 || vault.last_accrual_time >= now_nanos {
+            return Ok(None);
+        }
+        let dummy_rate = self
+            .last_icp_rate
+            .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
+        let cr = crate::compute_collateral_ratio(vault, dummy_rate, self);
+        let rate = self.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
+        let elapsed = now_nanos.saturating_sub(vault.last_accrual_time);
+        let debt = Decimal::from(vault.borrowed_icusd_amount.0);
+        let factor = Decimal::ONE
+            + rate.0 * Decimal::from(elapsed)
+                / Decimal::from(crate::numeric::NANOS_PER_YEAR);
+        let new_debt = (debt * factor).ceil().to_u64().ok_or(())?;
+        let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
+        let new_accrued_interest = crate::numeric::checked_icusd_add(
+            vault.accrued_interest,
+            ICUSD::from(interest_delta),
+        )
+        .ok_or(())?;
+        Ok(Some((ICUSD::from(new_debt), new_accrued_interest)))
+    }
+
+    pub fn can_accrue_single_vault(&self, vault_id: u64, now_nanos: u64) -> bool {
+        self.preview_single_vault_accrual(vault_id, now_nanos)
+            .is_ok()
+    }
+
+    /// The checked form used at a proven external-mint commit. Returns true
+    /// when the vault is already current/has no debt or the clock advanced;
+    /// false when the vault is missing, frozen, or arithmetic prevented the
+    /// required accrual. Callers must hold rather than add new principal on
+    /// false.
+    pub fn try_accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) -> bool {
+        let update = match self.preview_single_vault_accrual(vault_id, now_nanos) {
+            Ok(update) => update,
+            Err(()) => {
+                log!(
+                    crate::INFO,
+                    "[accrue_single_vault] frozen, missing, or unrepresentable accrual for vault #{}; accrual deferred",
+                    vault_id
+                );
+                return false;
             }
         };
-        // Phase 2: apply (mutable borrow)
-        if let Some((rate, elapsed)) = rate_and_elapsed {
-            if elapsed == 0 {
-                return;
-            }
-            if let Some(vault) = self.vault_id_to_vaults.get_mut(&vault_id) {
-                let debt = Decimal::from(vault.borrowed_icusd_amount.0);
-                let factor = Decimal::ONE
-                    + rate.0 * Decimal::from(elapsed)
-                        / Decimal::from(crate::numeric::NANOS_PER_YEAR);
-                // DBT-001 (audit 2026-06-09): interest accrues rounded UP
-                // (protocol favor, CDP convention). INT-102: on a Decimal->u64
-                // overflow (unreachable at real debt scales) do NOT advance the
-                // accrual clock, so the interest is retried instead of being
-                // silently dropped while the clock moves on.
-                match (debt * factor).ceil().to_u64() {
-                    Some(new_debt) => {
-                        let interest_delta = new_debt.saturating_sub(vault.borrowed_icusd_amount.0);
-                        vault.accrued_interest += ICUSD::from(interest_delta);
-                        vault.borrowed_icusd_amount = ICUSD::from(new_debt);
-                        vault.last_accrual_time = now_nanos;
-                    }
-                    None => {
-                        log!(
-                            crate::INFO,
-                            "[accrue_single_vault] interest overflow for vault #{}; accrual deferred",
-                            vault_id
-                        );
-                    }
-                }
-            }
-        }
+        let Some((new_debt, new_accrued_interest)) = update else {
+            return true;
+        };
+        let Some(vault) = self.vault_id_to_vaults.get_mut(&vault_id) else {
+            return false;
+        };
+        vault.borrowed_icusd_amount = new_debt;
+        vault.accrued_interest = new_accrued_interest;
+        vault.last_accrual_time = now_nanos;
+        true
     }
 
     /// Accrue interest on ALL vaults with outstanding debt.
@@ -12015,6 +12035,31 @@ mod tests {
 
         let vault_after = state.vault_id_to_vaults.get(&1).unwrap();
         assert_eq!(vault_after.borrowed_icusd_amount.0, 500_000_000);
+    }
+
+    #[test]
+    fn checked_single_vault_accrual_reports_overflow_without_advancing_clock() {
+        let mut state = accrual_test_state();
+        let icp = state.icp_ledger_principal;
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(u64::MAX),
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        assert!(!state.try_accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR));
+        let vault = &state.vault_id_to_vaults[&1];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(u64::MAX));
+        assert_eq!(vault.last_accrual_time, 0);
+        assert_eq!(vault.accrued_interest, ICUSD::new(0));
     }
 
     #[test]
