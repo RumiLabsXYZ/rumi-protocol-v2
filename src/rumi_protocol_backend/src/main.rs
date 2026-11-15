@@ -11031,15 +11031,66 @@ mod operator_payout_recovery_status_tests {
     #[test]
     fn operator_endpoint_rejects_non_developer_and_anonymous_callers() {
         let developer = Principal::from_slice(&[9]);
-        assert!(is_configured_payout_recovery_operator(developer, developer));
+        let pool = Principal::from_slice(&[2]);
+        let bot = Principal::from_slice(&[3]);
+        let user = Principal::from_slice(&[5]);
+        assert!(is_configured_payout_recovery_operator(
+            developer, pool, developer, Some(pool), Some(bot),
+        ));
+        assert!(is_configured_payout_recovery_operator(
+            developer, bot, developer, Some(pool), Some(bot),
+        ));
+        assert!(!is_configured_payout_recovery_operator(
+            developer, user, developer, Some(pool), Some(bot),
+        ));
         assert!(!is_configured_payout_recovery_operator(
             Principal::from_slice(&[10]),
+            pool,
             developer,
+            Some(pool),
+            Some(bot),
         ));
         assert!(!is_configured_payout_recovery_operator(
             Principal::anonymous(),
+            pool,
             developer,
+            Some(pool),
+            Some(bot),
         ));
+    }
+
+    #[test]
+    fn operator_authorization_uses_current_canister_and_developer_configuration() {
+        let developer = Principal::from_slice(&[9]);
+        let pool = Principal::from_slice(&[2]);
+        let bot = Principal::from_slice(&[3]);
+        assert!(is_configured_payout_recovery_operator(
+            developer, pool, developer, Some(pool), Some(bot),
+        ));
+        assert!(is_configured_payout_recovery_operator(
+            developer, bot, developer, Some(pool), Some(bot),
+        ));
+        assert!(!is_configured_payout_recovery_operator(
+            developer,
+            pool,
+            developer,
+            Some(Principal::from_slice(&[6])),
+            Some(bot),
+        ), "a changed Stability Pool registration revokes recovery");
+        assert!(!is_configured_payout_recovery_operator(
+            developer,
+            bot,
+            developer,
+            Some(pool),
+            Some(Principal::from_slice(&[6])),
+        ), "a changed bot registration revokes recovery");
+        assert!(!is_configured_payout_recovery_operator(
+            developer,
+            pool,
+            Principal::from_slice(&[8]),
+            Some(pool),
+            Some(bot),
+        ), "a changed developer registration revokes recovery");
     }
 }
 
@@ -11063,8 +11114,16 @@ fn operator_payout_recovery_status(
     }
 }
 
-fn is_configured_payout_recovery_operator(caller: Principal, developer: Principal) -> bool {
-    caller != Principal::anonymous() && caller == developer
+fn is_configured_payout_recovery_operator(
+    caller: Principal,
+    owner: Principal,
+    developer: Principal,
+    stability_pool: Option<Principal>,
+    liquidation_bot: Option<Principal>,
+) -> bool {
+    rumi_protocol_backend::payout_history::recovery_actor_authorized(
+        owner, caller, developer, stability_pool, liquidation_bot,
+    ) && caller == developer
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -11204,14 +11263,6 @@ async fn operator_recover_pending_payout(
     operation_id: u128,
 ) -> Result<OperatorPayoutRecoveryStatus, ProtocolError> {
     let caller = ic_cdk::caller();
-    if !is_configured_payout_recovery_operator(
-        caller,
-        read_state(|state| state.developer_principal),
-    ) {
-        return Err(ProtocolError::GenericError(
-            "Only the configured developer can operate held payout recovery".into(),
-        ));
-    }
     let transfer = read_state(|state| {
         state
             .get_pending_payout(operation_id)
@@ -11220,6 +11271,21 @@ async fn operator_recover_pending_payout(
     .ok_or_else(|| {
         ProtocolError::GenericError("No pending payout with this operation ID".into())
     })?;
+    let (developer, stability_pool, liquidation_bot) = read_state(|state| {
+        (
+            state.developer_principal,
+            state.stability_pool_canister,
+            state.liquidation_bot_principal,
+        )
+    });
+    if !is_configured_payout_recovery_operator(
+        caller, transfer.owner, developer, stability_pool, liquidation_bot,
+    ) {
+        return Err(ProtocolError::GenericError(
+            "Only the configured developer may recover a payout owned by the registered Stability Pool or liquidation bot; user-owned rows must use the owner endpoint"
+                .into(),
+        ));
+    }
     if !transfer.held_for_manual_retry && !transfer.reconciliation_required {
         return Ok(OperatorPayoutRecoveryStatus::NotHeld);
     }

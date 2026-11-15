@@ -44,10 +44,55 @@ pub enum ReserveCandidateDiscoveryProgress {
 }
 
 /// The payout owner may recover their own row. The configured developer may
-/// drive the same proof-only recovery for canister-owned rows whose registered
-/// canister does not expose a recovery call into this backend.
-pub fn recovery_actor_authorized(owner: Principal, caller: Principal, developer: Principal) -> bool {
-    caller != Principal::anonymous() && (caller == owner || caller == developer)
+/// drive the same proof-only recovery only for rows owned by a currently
+/// registered protocol canister that has no recovery call into this backend.
+/// Keep ordinary user-owned rows owner-only even when the caller is developer.
+pub fn recovery_actor_authorized(
+    owner: Principal,
+    caller: Principal,
+    developer: Principal,
+    stability_pool: Option<Principal>,
+    liquidation_bot: Option<Principal>,
+) -> bool {
+    caller != Principal::anonymous()
+        && (caller == owner
+            || (caller == developer
+                && [stability_pool, liquidation_bot]
+                    .into_iter()
+                    .flatten()
+                    .any(|registered_owner| registered_owner == owner)))
+}
+
+/// Recheck authorization and the exact reserve-payout ownership binding at a
+/// mutation boundary. Reserve candidate recovery is only for the currently
+/// registered Stability Pool; this prevents stale developer/canister
+/// configuration captured before an inter-canister await from committing a
+/// candidate or settlement afterward.
+pub(crate) fn reserve_candidate_recovery_authorized(
+    state: &crate::state::State,
+    key: &crate::state::ThreeUsdReserveIngressKey,
+    operation_id: u128,
+    caller: Principal,
+) -> bool {
+    let Some((_, row)) = state.get_pending_payout(operation_id) else {
+        return false;
+    };
+    let Some(payout) = state.three_usd_reserve_collateral_payouts.get(key) else {
+        return false;
+    };
+    state.three_usd_reserve_payout_operation_keys.get(&operation_id) == Some(key)
+        && row.operation_id == operation_id
+        && row.owner == key.stability_pool
+        && state.stability_pool_canister == Some(row.owner)
+        && payout.operation_id == operation_id
+        && payout.destination.owner == row.owner
+        && recovery_actor_authorized(
+            row.owner,
+            caller,
+            state.developer_principal,
+            state.stability_pool_canister,
+            state.liquidation_bot_principal,
+        )
 }
 
 /// Discover a lost-reply 3USD reserve payout candidate from the exact
@@ -66,9 +111,10 @@ pub async fn advance_owner_reserve_candidate_discovery(
     }) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
     };
-    let developer = crate::state::read_state(|state| state.developer_principal);
-    if !recovery_actor_authorized(row.owner, caller, developer) {
-        return Err("caller is neither the payout owner nor configured developer".into());
+    if !crate::state::read_state(|state| {
+        reserve_candidate_recovery_authorized(state, &key, operation_id, caller)
+    }) {
+        return Err("caller is neither the payout owner nor an authorized canister-recovery operator".into());
     }
     let Some(attempt) = reserve_attempt(&payout, row.op_nonce) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
@@ -165,7 +211,9 @@ pub async fn advance_owner_reserve_candidate_discovery(
                     .is_some_and(|(_, current)| current == row);
                 let same_payout = state.three_usd_reserve_collateral_payouts.get(&key)
                     .is_some_and(|current| current == &payout);
-                same_row && same_payout && crate::event::record_three_usd_reserve_payout_candidate_scan(
+                same_row && same_payout
+                    && reserve_candidate_recovery_authorized(state, &key, operation_id, caller)
+                    && crate::event::record_three_usd_reserve_payout_candidate_scan(
                     state, key.clone(), operation_id, row.op_nonce, scan.clone(),
                 )
             });
@@ -177,7 +225,7 @@ pub async fn advance_owner_reserve_candidate_discovery(
     };
 
     if scan.next_index == scan.snapshot_log_length {
-        return finish_reserve_candidate_scan(&key, &payout, &row, scan);
+        return finish_reserve_candidate_scan(&key, &payout, &row, scan, caller);
     }
     let Some(end) = next_page_end(scan.next_index, scan.snapshot_log_length) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
@@ -215,7 +263,11 @@ pub async fn advance_owner_reserve_candidate_discovery(
     let stored = crate::state::mutate_state(|state| {
         let same_row = state.get_pending_payout(operation_id)
             .is_some_and(|(_, current)| current == row);
-        same_row && crate::event::record_three_usd_reserve_payout_candidate_scan(
+        same_row
+            && state.three_usd_reserve_collateral_payouts.get(&key)
+                .is_some_and(|current| current == &payout)
+            && reserve_candidate_recovery_authorized(state, &key, operation_id, caller)
+            && crate::event::record_three_usd_reserve_payout_candidate_scan(
             state, key.clone(), operation_id, row.op_nonce, advanced.clone(),
         )
     });
@@ -223,7 +275,7 @@ pub async fn advance_owner_reserve_candidate_discovery(
         return Ok(ReserveCandidateDiscoveryProgress::Held);
     }
     if end == scan.snapshot_log_length {
-        finish_reserve_candidate_scan(&key, &payout, &row, advanced)
+        finish_reserve_candidate_scan(&key, &payout, &row, advanced, caller)
     } else {
         Ok(ReserveCandidateDiscoveryProgress::Scanning)
     }
@@ -252,6 +304,7 @@ fn finish_reserve_candidate_scan(
     payout: &crate::state::ThreeUsdReserveCollateralPayout,
     row: &crate::state::PendingMarginTransfer,
     scan: crate::state::ThreeUsdReservePayoutCandidateScan,
+    caller: Principal,
 ) -> Result<ReserveCandidateDiscoveryProgress, String> {
     if scan.next_index != scan.snapshot_log_length || scan.multiple_candidates {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
@@ -262,10 +315,10 @@ fn finish_reserve_candidate_scan(
     let stored = crate::state::mutate_state(|state| {
         if !state.get_pending_payout(scan.operation_id).is_some_and(|(_, current)| current == *row)
             || !state.three_usd_reserve_collateral_payouts.get(key).is_some_and(|current| {
-                current.operation_id == payout.operation_id
-                    && current.ledger == payout.ledger
+                current == payout
             })
             || state.three_usd_reserve_payout_candidate_scans.get(key) != Some(&scan)
+            || !reserve_candidate_recovery_authorized(state, key, scan.operation_id, caller)
         {
             return false;
         }
@@ -559,9 +612,21 @@ pub async fn advance_owner_rearm(
     let Some((_, row)) = initial else {
         return Err("pending payout no longer exists".into());
     };
-    let developer = crate::state::read_state(|state| state.developer_principal);
-    if !recovery_actor_authorized(row.owner, caller, developer) {
-        return Err("caller is neither the payout owner nor configured developer".into());
+    let (developer, stability_pool, liquidation_bot) = crate::state::read_state(|state| {
+        (
+            state.developer_principal,
+            state.stability_pool_canister,
+            state.liquidation_bot_principal,
+        )
+    });
+    if !recovery_actor_authorized(
+        row.owner,
+        caller,
+        developer,
+        stability_pool,
+        liquidation_bot,
+    ) {
+        return Err("caller is neither the payout owner nor an authorized canister-recovery operator".into());
     }
     if row.history_candidate_seen {
         return Ok(PayoutRearmProgress::CandidateHeld);
@@ -774,7 +839,13 @@ fn commit_rearm(
             return false;
         };
         if !eligible(&row)
-            || !recovery_actor_authorized(row.owner, caller, state.developer_principal)
+            || !recovery_actor_authorized(
+                row.owner,
+                caller,
+                state.developer_principal,
+                state.stability_pool_canister,
+                state.liquidation_bot_principal,
+            )
             || !scan_matches_row(&scan, operation_id, &row)
             || scan.next_index != scan.snapshot_log_length
             || row.history_scan.as_ref() != Some(&scan)
@@ -1258,14 +1329,32 @@ mod tests {
         let unrelated = Principal::from_slice(&[10]);
         let stability_pool = Principal::from_slice(&[2]);
         let liquidation_bot = Principal::from_slice(&[3]);
-        assert!(recovery_actor_authorized(stability_pool, developer, developer));
-        assert!(recovery_actor_authorized(liquidation_bot, developer, developer));
-        assert!(!recovery_actor_authorized(stability_pool, unrelated, developer));
+        let ordinary_user = Principal::from_slice(&[5]);
+        assert!(recovery_actor_authorized(
+            stability_pool, developer, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
+        assert!(recovery_actor_authorized(
+            liquidation_bot, developer, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
+        assert!(recovery_actor_authorized(
+            ordinary_user, ordinary_user, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
+        assert!(!recovery_actor_authorized(
+            ordinary_user, developer, developer, Some(stability_pool), Some(liquidation_bot),
+        ), "developer cannot recover an ordinary user's payout");
+        assert!(!recovery_actor_authorized(
+            stability_pool, unrelated, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
         assert!(!recovery_actor_authorized(
             stability_pool,
             Principal::anonymous(),
             developer,
+            Some(stability_pool),
+            Some(liquidation_bot),
         ));
+        assert!(!recovery_actor_authorized(
+            ordinary_user, developer, developer, None, None,
+        ), "unconfigured canister owners do not receive operator recovery");
     }
 
     #[test]
