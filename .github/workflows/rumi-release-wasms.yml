@@ -12,6 +12,7 @@ on:
       - src/liquidation_bot/**
       - src/rumi_protocol_backend/**
       - src/rumi_points/**
+      - src/rumi_treasury/**
 
 permissions:
   contents: read
@@ -42,7 +43,8 @@ jobs:
             -p rumi_analytics \
             -p liquidation_bot \
             -p rumi_protocol_backend \
-            -p rumi_points
+            -p rumi_points \
+            -p rumi_treasury
 
       - name: Stage Wasms and provenance
         env:
@@ -57,7 +59,8 @@ jobs:
             rumi_analytics \
             liquidation_bot \
             rumi_protocol_backend \
-            rumi_points
+            rumi_points \
+            rumi_treasury
           do
             wasm="target/wasm32-unknown-unknown/release/$name.wasm"
             test -s "$wasm"
@@ -71,7 +74,7 @@ jobs:
             printf 'rustc=%s\n' "$(rustc +1.92.0 --version)"
             printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | cut -d ' ' -f 1)"
             printf '%s\n' 'target=wasm32-unknown-unknown' 'profile=release'
-            printf '%s\n' 'cargo build --release --target wasm32-unknown-unknown --locked --jobs 1 -p stability_pool -p rumi_amm -p rumi_analytics -p liquidation_bot -p rumi_protocol_backend -p rumi_points'
+            printf '%s\n' 'cargo build --release --target wasm32-unknown-unknown --locked --jobs 1 -p stability_pool -p rumi_amm -p rumi_analytics -p liquidation_bot -p rumi_protocol_backend -p rumi_points -p rumi_treasury'
           } > dist/PROVENANCE.txt
 
           (
@@ -83,6 +86,7 @@ jobs:
               liquidation_bot.wasm \
               rumi_protocol_backend.wasm \
               rumi_points.wasm \
+              rumi_treasury.wasm \
               > SHA256SUMS
           )
 
