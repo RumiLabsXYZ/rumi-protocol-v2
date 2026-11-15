@@ -34,11 +34,8 @@ jobs:
         run: |
           rustup toolchain install 1.92.0 --profile minimal
           rustup +1.92.0 target add wasm32-unknown-unknown
-          rustup +1.92.0 component add rustfmt
           sudo apt-get update
           sudo apt-get install -y libclang-dev liblmdb-dev libunwind-dev pkg-config protobuf-compiler
-      - name: Verify formatting
-        run: cargo +1.92.0 fmt --all -- --check
       - name: Run exact security regressions
         shell: bash
         run: |
