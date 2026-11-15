@@ -480,13 +480,19 @@ pub struct BorrowReservationGuard {
 }
 
 /// In-flight (heap) reservations: `(this collateral, all collaterals)`.
-pub fn heap_borrow_reserved(collateral: Principal) -> (u64, u64) {
+pub fn heap_borrow_reserved(collateral: Principal) -> Result<(u64, u64), String> {
     BORROW_RESERVATIONS.with(|r| {
         let map = r.borrow();
-        (
+        Ok((
             map.get(&collateral).copied().unwrap_or(0),
-            map.values().copied().sum(),
-        )
+            map.values()
+                .copied()
+                .try_fold(0u64, u64::checked_add)
+                .ok_or_else(|| {
+                    "Borrow reservation aggregate exceeds the representable icUSD range"
+                        .to_string()
+                })?,
+        ))
     })
 }
 
@@ -503,21 +509,27 @@ fn headroom_rule(
     current_global_borrowed: u64,
     global_cap: u64,
 ) -> Result<(), String> {
-    if current_collateral_debt
-        .saturating_add(coll_reserved)
-        .saturating_add(amount)
-        > debt_ceiling
-    {
+    let projected_collateral = current_collateral_debt
+        .checked_add(coll_reserved)
+        .and_then(|value| value.checked_add(amount))
+        .ok_or_else(|| {
+            "Borrow collateral debt plus reservations exceeds the representable icUSD range"
+                .to_string()
+        })?;
+    if projected_collateral > debt_ceiling {
         return Err(format!(
             "Borrow would exceed debt ceiling incl in-flight ({} + {} + {} > {})",
             current_collateral_debt, coll_reserved, amount, debt_ceiling
         ));
     }
-    if current_global_borrowed
-        .saturating_add(total_reserved)
-        .saturating_add(amount)
-        > global_cap
-    {
+    let projected_global = current_global_borrowed
+        .checked_add(total_reserved)
+        .and_then(|value| value.checked_add(amount))
+        .ok_or_else(|| {
+            "Borrow global debt plus reservations exceeds the representable icUSD range"
+                .to_string()
+        })?;
+    if projected_global > global_cap {
         return Err(format!(
             "Borrow would exceed global icUSD mint cap incl in-flight ({} + {} + {} > {})",
             current_global_borrowed, total_reserved, amount, global_cap
@@ -540,10 +552,16 @@ pub fn check_borrow_headroom(
     durable_collateral: u64,
     durable_total: u64,
 ) -> Result<(), String> {
-    let (heap_coll, heap_total) = heap_borrow_reserved(collateral);
+    let (heap_coll, heap_total) = heap_borrow_reserved(collateral)?;
+    let collateral_reserved = heap_coll.checked_add(durable_collateral).ok_or_else(|| {
+        "Borrow collateral reservation buckets exceed the representable icUSD range".to_string()
+    })?;
+    let total_reserved = heap_total.checked_add(durable_total).ok_or_else(|| {
+        "Borrow global reservation buckets exceed the representable icUSD range".to_string()
+    })?;
     headroom_rule(
-        heap_coll.saturating_add(durable_collateral),
-        heap_total.saturating_add(durable_total),
+        collateral_reserved,
+        total_reserved,
         amount,
         current_collateral_debt,
         debt_ceiling,
@@ -597,17 +615,36 @@ impl BorrowReservationGuard {
         BORROW_RESERVATIONS.with(|r| {
             let mut map = r.borrow_mut();
             let coll_reserved: u64 = map.get(&collateral).copied().unwrap_or(0);
-            let total_reserved: u64 = map.values().copied().sum();
+            let total_reserved = map
+                .values()
+                .copied()
+                .try_fold(0u64, u64::checked_add)
+                .ok_or_else(|| {
+                    "Borrow reservation aggregate exceeds the representable icUSD range"
+                        .to_string()
+                })?;
+            let collateral_reserved =
+                coll_reserved.checked_add(durable_collateral).ok_or_else(|| {
+                    "Borrow collateral reservation buckets exceed the representable icUSD range"
+                        .to_string()
+                })?;
+            let all_reserved = total_reserved.checked_add(durable_total).ok_or_else(|| {
+                "Borrow global reservation buckets exceed the representable icUSD range"
+                    .to_string()
+            })?;
             headroom_rule(
-                coll_reserved.saturating_add(durable_collateral),
-                total_reserved.saturating_add(durable_total),
+                collateral_reserved,
+                all_reserved,
                 amount,
                 current_collateral_debt,
                 debt_ceiling,
                 current_global_borrowed,
                 global_cap,
             )?;
-            *map.entry(collateral).or_insert(0) += amount;
+            let next_collateral_reservation = coll_reserved.checked_add(amount).ok_or_else(|| {
+                "Borrow collateral reservation exceeds the representable icUSD range".to_string()
+            })?;
+            map.insert(collateral, next_collateral_reservation);
             Ok(Self { collateral, amount })
         })
     }
@@ -887,6 +924,67 @@ mod vault_liquidation_guard_tests {
             "second collateral's borrow must respect the shared global cap (0+700+400>1000)",
         );
         drop(g1);
+    }
+
+    #[test]
+    fn borrow_headroom_rejects_u64_overflow_with_uncapped_limits() {
+        let uncapped = u64::MAX;
+
+        assert!(
+            headroom_rule(0, 0, 1, u64::MAX, uncapped, 0, uncapped).is_err(),
+            "collateral debt overflow must fail closed even when the ceiling is u64::MAX"
+        );
+        assert!(
+            headroom_rule(0, 0, 1, 0, uncapped, u64::MAX, uncapped).is_err(),
+            "global debt overflow must fail closed even when the cap is u64::MAX"
+        );
+        assert!(
+            headroom_rule(
+                0,
+                0,
+                1,
+                u64::MAX - 1,
+                uncapped,
+                u64::MAX - 1,
+                uncapped,
+            )
+            .is_ok(),
+            "the exact representable boundary remains admissible"
+        );
+    }
+
+    #[test]
+    fn borrow_reservation_aggregate_overflow_fails_closed() {
+        let c1 = Principal::from_slice(&[21]);
+        let c2 = Principal::from_slice(&[22]);
+        let c3 = Principal::from_slice(&[23]);
+        BORROW_RESERVATIONS.with(|reservations| {
+            let mut reservations = reservations.borrow_mut();
+            reservations.clear();
+            reservations.insert(c1, u64::MAX);
+            reservations.insert(c2, 1);
+        });
+
+        assert!(
+            heap_borrow_reserved(c3).is_err(),
+            "an over-wide heap aggregate must not wrap to zero"
+        );
+        assert!(
+            BorrowReservationGuard::try_reserve_with_durable(
+                c3,
+                1,
+                0,
+                u64::MAX,
+                0,
+                u64::MAX,
+                0,
+                0,
+            )
+            .is_err(),
+            "an invalid aggregate must reject admission without inserting another reservation"
+        );
+
+        BORROW_RESERVATIONS.with(|reservations| reservations.borrow_mut().clear());
     }
 }
 

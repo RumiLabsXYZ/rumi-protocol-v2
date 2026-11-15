@@ -7004,36 +7004,71 @@ pub fn admit_borrow(
     // The durable XRPL-lane reservations count too (read inside the guard, or
     // explicitly for the check-only mode), so a legacy and an XRPL borrow can
     // never jointly exceed a cap.
-    let (current_debt, pending_collateral_debt, pending_global_debt, durable_coll, durable_total) =
-        read_state(|s| {
+    let (
+        current_debt,
+        total_borrowed,
+        pending_collateral_debt,
+        pending_global_debt,
+        durable_coll,
+        durable_total,
+    ) = read_state(|s| {
             let mut pending_collateral = 0u64;
             let mut pending_global = 0u64;
             for journal in s.pending_borrow_mints.values() {
-                pending_global = pending_global.saturating_add(journal.borrowed_amount_e8s);
+                pending_global = pending_global
+                    .checked_add(journal.borrowed_amount_e8s)
+                    .ok_or_else(|| {
+                        "Pending borrow debt exceeds the representable icUSD range".to_string()
+                    })?;
                 if journal.collateral_type == vault.collateral_type {
-                    pending_collateral =
-                        pending_collateral.saturating_add(journal.borrowed_amount_e8s);
+                    pending_collateral = pending_collateral
+                        .checked_add(journal.borrowed_amount_e8s)
+                        .ok_or_else(|| {
+                            "Pending collateral debt exceeds the representable icUSD range"
+                                .to_string()
+                        })?;
                 }
             }
-            (
-                s.total_debt_for_collateral(&vault.collateral_type),
+            let current_debt = s
+                .checked_total_debt_for_collateral(&vault.collateral_type)
+                .ok_or_else(|| {
+                    "Collateral debt aggregate exceeds the representable icUSD range".to_string()
+                })?;
+            let total_borrowed = s.checked_total_borrowed_icusd_amount().ok_or_else(|| {
+                "Global debt aggregate exceeds the representable icUSD range".to_string()
+            })?;
+            Ok::<_, String>((
+                current_debt,
+                total_borrowed,
                 pending_collateral,
                 pending_global,
                 s.xrpl_icusd.durable_reserved_for(vault.collateral_type),
                 s.xrpl_icusd.durable_reserved_total(),
-            )
-        });
+            ))
+        })
+        .map_err(ProtocolError::GenericError)?;
     let debt_ceiling = read_state(|s| {
         s.get_collateral_config(&vault.collateral_type)
             .map(|c| c.debt_ceiling)
             .unwrap_or(u64::MAX)
     });
-    let (global_cap, total_borrowed) =
-        read_state(|s| (s.global_icusd_mint_cap, s.total_borrowed_icusd_amount()));
+    let global_cap = read_state(|s| s.global_icusd_mint_cap);
     let committed_collateral = current_debt
         .to_u64()
-        .saturating_add(pending_collateral_debt);
-    let committed_global = total_borrowed.to_u64().saturating_add(pending_global_debt);
+        .checked_add(pending_collateral_debt)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Committed collateral debt exceeds the representable icUSD range".to_string(),
+            )
+        })?;
+    let committed_global = total_borrowed
+        .to_u64()
+        .checked_add(pending_global_debt)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Committed global debt exceeds the representable icUSD range".to_string(),
+            )
+        })?;
     let reservation = match reserve {
         BorrowReserve::Transient => Some(
             crate::guard::BorrowReservationGuard::try_reserve_with_durable(
