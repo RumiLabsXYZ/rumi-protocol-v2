@@ -6403,6 +6403,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
     // Step 2: Process each token in the draw
     let mut total_collateral_gained: u64 = 0;
     let mut actual_consumed: BTreeMap<Principal, u64> = BTreeMap::new();
+    let mut successful_pull_fees: BTreeMap<Principal, u64> = BTreeMap::new();
     let mut non_lp_outcome_unknown = false;
     let mut held_absorb = false;
 
@@ -6451,7 +6452,18 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
         // the `from`/approver account). Use the live `icrc1_fee` rather than the
         // (possibly stale) registry `transfer_fee` so the book decrement matches
         // exactly what the ledger charges.
-        let ledger_fee = crate::deposits::ledger_transfer_fee(*token_ledger).await;
+        let ledger_fee = match crate::deposits::current_ledger_transfer_fee(*token_ledger).await {
+            Ok(fee) => fee,
+            Err(error) => {
+                log!(
+                    INFO,
+                    "Skipping token {}: current ledger fee is unavailable: {:?}",
+                    token_ledger,
+                    error
+                );
+                continue;
+            }
+        };
 
         // Approve backend to spend this token
         let approve_args = ApproveArgs {
@@ -6463,7 +6475,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             amount: candid::Nat::from(*amount as u128 * 2), // 2x buffer for fees
             expected_allowance: None,
             expires_at: Some(ic_cdk::api::time() + 300_000_000_000), // 5 min
-            fee: None,
+            fee: Some(candid::Nat::from(ledger_fee)),
             memo: None,
             created_at_time: Some(ic_cdk::api::time()),
         };
@@ -6477,7 +6489,29 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 // transfer_from fee is deducted only on a successful pull below
                 // (a failed backend call charges no transfer_from fee).
                 if ledger_fee > 0 {
-                    mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, ledger_fee));
+                    let accounted = mutate_state(|s| {
+                        s.deduct_exact_fee_from_pool(*token_ledger, ledger_fee)
+                    });
+                    if let Err(error) = accounted {
+                        log!(
+                            INFO,
+                            "Exact approval-fee accounting failed for token {} after ledger receipt: {:?}",
+                            token_ledger,
+                            error
+                        );
+                        return LiquidationResult {
+                            vault_id: vault_info.vault_id,
+                            stables_consumed: BTreeMap::new(),
+                            collateral_gained: 0,
+                            collateral_type: vault_info.collateral_type,
+                            success: false,
+                            error_message: Some(
+                                "Exact approval-fee accounting failed; reconciliation required"
+                                    .to_string(),
+                            ),
+                            admitted: None,
+                        };
+                    }
                 }
             }
             Ok((Err(e),)) => {
@@ -6594,7 +6628,7 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                 // trips the withdraw guard for non-sole holders (SP live-vs-ledger
                 // drift, 2026-07-16).
                 if ledger_fee > 0 {
-                    mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, ledger_fee));
+                    successful_pull_fees.insert(*token_ledger, ledger_fee);
                 }
                 total_collateral_gained += collateral;
                 // Bug 7: one token per vault per round — vault state changed, remaining draws are stale
@@ -7022,13 +7056,16 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
         let accounting = mutate_state(|state| {
             let mut next = state.clone();
+            for (ledger, fee) in &successful_pull_fees {
+                next.deduct_exact_fee_from_pool(*ledger, *fee)?;
+            }
             next.process_liquidation_gains(
                 vault_info.vault_id,
                 vault_info.collateral_type,
                 &actual_consumed,
                 net_collateral,
                 vault_info.collateral_price_e8s,
-            );
+            )?;
             *state = next;
             Ok::<(), StabilityPoolError>(())
         });
