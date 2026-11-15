@@ -1,0 +1,61 @@
+{
+  "checkedUtc": "2026-11-15T03:48:49.953Z",
+  "source": "e7b736c92de4749a204da3bb0dd7da809fa7c6fe",
+  "version": "1794714390164",
+  "pinsSha256": "a9e5f0b122eb8bc467afc371e71f05a0cffe8e5be449e813504b557f2f96f135",
+  "manifestSha256": "51efa9de2041a5c2846f905196e31d6c5f255d36542866a4a9236b0b93373f88",
+  "filesVerified": 740,
+  "compressedPairsVerified": 476,
+  "independentBaselineKeys": 5619,
+  "independentBaselineEncodings": 5813,
+  "newKeys": 93,
+  "existingEncodingChanges": 7,
+  "allPriorPropertiesPreservedInPlan": true,
+  "allFrozenPublishFilesCovered": true,
+  "authUnchanged": true,
+  "expectedKeys": 5712,
+  "expectedEncodings": 5906,
+  "sec18Included": true,
+  "sec19EnabledSourceIncluded": true,
+  "bundles": {
+    "Reserved for bot liquidation": [
+      "_app/immutable/nodes/49.BjWUpA8t.js"
+    ],
+    "Could not verify liquidation availability": [
+      "_app/immutable/nodes/49.BjWUpA8t.js"
+    ],
+    "get_bot_claim_vault_ids": [
+      "_app/immutable/chunks/DDvU7sq6.js",
+      "_app/immutable/chunks/DesmTAI5.js",
+      "_app/immutable/nodes/49.BjWUpA8t.js"
+    ],
+    "Recover a vault action": [
+      "_app/immutable/nodes/0.gyjCkZPN.js"
+    ],
+    "After a successful repayment": [
+      "_app/immutable/chunks/CuuXK9qw.js"
+    ],
+    "Estimated forgiveness:": [
+      "_app/immutable/chunks/CuuXK9qw.js"
+    ],
+    "Review saved request": [
+      "_app/immutable/nodes/4.Dyd1oPVg.js"
+    ],
+    "OISY_LOCAL_OWNER_MISMATCH": [
+      "_app/immutable/chunks/FeJTkgka.js"
+    ],
+    "Last successful mint check:": [
+      "_app/immutable/nodes/55.DMVlcnGY.js"
+    ],
+    "Collateral details could not be verified": [
+      "_app/immutable/chunks/xJxdecE9.js"
+    ],
+    "Acknowledge recovery notice": [
+      "_app/immutable/nodes/0.gyjCkZPN.js"
+    ],
+    "Wallet session changed. No new top-up was submitted.": [
+      "_app/immutable/chunks/CuuXK9qw.js"
+    ]
+  },
+  "productionMutation": false
+}

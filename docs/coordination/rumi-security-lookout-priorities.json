@@ -5,7 +5,7 @@
       "title": "Reconcile vault202 claim and show truthful manual availability",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Publish reviewed e7b736c9 frontend under fresh direct authority with Dorian/Cody and Ellis independent served verification. Adrian separately brings the exact vault202 remedy and safe bot-buffer change; do not force unlock or move claim funds under UI authority.",
+      "nextAction": "Queue UI publication is complete and independently verified at1794714390164. Adrian brings the exact proof-backed vault202 remedy and safe funded-USDC-buffer change. Keep claim lock, funds and custody actions separate from completed UI authority; no new queue build/review/canary needed. Existing mobile liquidation-tab overflow is deferred scope.",
       "cardIds": [
         "SEC-21"
       ]

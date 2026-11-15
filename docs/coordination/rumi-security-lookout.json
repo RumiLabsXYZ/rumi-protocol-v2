@@ -2,14 +2,18 @@
   "cards": [
     {
       "id": "SEC-21",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Adrian incident/claim recovery; Ellis manual-queue source and verification",
       "scope": "Vault202 protected bot claim and truthful manual-liquidation availability",
-      "evidenceText": "Fresh publicrecords show202 inbothprotocolclaimIDs andmanualqueue; botrecord231TransferFailed, swapoutputshortofrepaymentplusfee,0paid. Queuefiltersratio/pendingnICPbutnotbotlock, publicvaultprojectionomitslock; existingget_bot_claim_vault_ids supportsfrontend-onlyfix. Candidatee7b736c9 basedliveSEC20dc4b marksreservedrows/unknown-loadingunavailable, guardsbeforeapproval, rememberslockrejectionagainstolderreads, preservesOISYgesture/backendlocks/XRPsettlement.11checks/twofinalreviews/actualmockdesktopmobilePASS; processing-labelreviewfindingfixed/regressed. No build/deployment/financialaction. Adrian ownsclaimassets/proof-backedremedy; frontendpublicationrequiresseparatescopeddecision. No forceunlock. Rob now explicitly authorizes frontend-only publication of exacte7b736c9. Dorian coordinates a fresh Cody build, Ellis independently verifies assets and live layout. Financial remedy and bot-buffer change remain Adrian-owned and separately reviewed; no fund action is included in UI publication.",
+      "evidenceText": "QUEUE UI LIVE: exacte7source/version1794714390164 via701/702, single fresh605a runner/native0/19.047486s/authPASS and Cody independent closure. Ellis740files/476pairs/fullstable5712keys-5906encodings preservesall5619priorprops/untouchedencodings+93new/7updates;19primaryresponses/certifiedunchanged8f6-d8b-04e/controllers PASS. Dorian95stage+9final+5domain/settings/permissions PASS. Actual anonymous manual page shows emptyqueue/noactions/202OtherVaults; publicAPI claimIDs[202]/queue[] boundcurrentobservation. ConditionalReserved state provenby11mountedtests/mocklayouts/servedcode, notactualcurrentlivecard/signing. Vaults/Solana desktop-mobile retained. Existingmanualmobiletabs452document/437tabsat390 predateandunchanged; defer, no wholepagenoverflowclaim. UIpublicationcomplete; financialclaim remainsprotected/open withAdrian exact remedy and safe funded-bufferchange pending. No backend/bot/funds/unlock/claimretry action.",
       "evidenceLinks": [
         {
           "title": "Confirmed queue diagnosis, reviewed source and evidence",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e7b736c9/docs/operations/manual-liquidation-availability-20261114.md"
+        },
+        {
+          "title": "Independent final queue publication and live-state verification",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/cksol-release-decision-20261104/docs/operations/manual-queue-independent-check-20261114.md"
         }
       ]
     },

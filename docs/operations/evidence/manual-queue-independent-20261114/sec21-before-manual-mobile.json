@@ -1,0 +1,14 @@
+{
+  "url": "https://app.rumiprotocol.com/liquidations?tab=manual",
+  "version": {
+    "version": "1794685142389"
+  },
+  "viewport": [
+    390,
+    844
+  ],
+  "scrollWidth": 452,
+  "overflow": true,
+  "tabWidth": 437,
+  "text": "RUMI\nBeta\nConnect Wallet\nSeason 1\n·\nSeason 1 has ended — allocations are being finalized\nView →\nLiquidate\nLiquidation Bot\nStability Pool\nManual Liquidations\n0 liquidatable vaults · 0 total\n·\nICP\n$2.21\n·\nLoading…\nConnect wallet to liquidate. You'll need icUSD to pay vault debt.\nRedeem\nckSOL Minter\nckDOGE Minter\nBitcoin Minter\nBorrow with Bitcoin\nckERC20 Minter\nBorrow with DOGE\nLiquidate\nTransparency\nDocs\nContact\nGitHub\nWhitepaper\nSecurity\n© 2026 Rumi Labs LLC\nBorrow\nEarn\nSwap\nVaults\nExplorer\nPoints"
+}

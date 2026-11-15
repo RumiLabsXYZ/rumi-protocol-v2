@@ -1,0 +1,14 @@
+{
+  "url": "https://app.rumiprotocol.com/liquidations?tab=manual",
+  "viewport": [
+    1280,
+    900
+  ],
+  "scrollWidth": 1280,
+  "overlay": false,
+  "queueEmpty": true,
+  "queueCardCount": 0,
+  "manualActionCount": 0,
+  "vault202TextVisible": true,
+  "statusReadError": false
+}

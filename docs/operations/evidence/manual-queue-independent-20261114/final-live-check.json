@@ -1,0 +1,204 @@
+{
+  "checkedUtc": "2026-11-15T04:01:28.497Z",
+  "allPriorPropertiesAndUntouchedEncodingsPreserved": true,
+  "keys": 5712,
+  "encodings": 5906,
+  "newKeys": 93,
+  "changedExistingEncodings": 7,
+  "backendAndCandidAndControllersVerified": true,
+  "frontendModuleUnchanged": true,
+  "publicReadbacks": 19,
+  "allPassed": true,
+  "results": [
+    {
+      "key": "/",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "expectedSha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "pass": true
+    },
+    {
+      "key": "/",
+      "encoding": "gzip",
+      "status": 200,
+      "servedEncoding": "gzip",
+      "bytes": 649,
+      "sha256": "d72f4cb51821757e7a099d2de834bda0fd89ac4815b2ac24c446d31aef233866",
+      "expectedSha256": "d72f4cb51821757e7a099d2de834bda0fd89ac4815b2ac24c446d31aef233866",
+      "pass": true
+    },
+    {
+      "key": "/_app/version.json",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 27,
+      "sha256": "8c2ba006458f43c4e4d13ec9e97db78c502e22eddce6c39a98762d7472c33127",
+      "expectedSha256": "8c2ba006458f43c4e4d13ec9e97db78c502e22eddce6c39a98762d7472c33127",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ii-alternative-origins",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 385,
+      "sha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "expectedSha256": "01d37f58e287d02a74d7767b81d8d214de14d14f062654d660b2b5da3aadd8fd",
+      "pass": true
+    },
+    {
+      "key": "/.well-known/ic-domains",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 58,
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "expectedSha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/nodes/49.BjWUpA8t.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 38623,
+      "sha256": "7b265e8d00ccc355e712175abdb87f946ae29b3d4d03bd1523f136b7d900b7bf",
+      "expectedSha256": "7b265e8d00ccc355e712175abdb87f946ae29b3d4d03bd1523f136b7d900b7bf",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/DDvU7sq6.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 441667,
+      "sha256": "ccd84381c01a3ffcda8448f995b8aad282cae5a93f4e8dae9fa745e5c3a1c138",
+      "expectedSha256": "ccd84381c01a3ffcda8448f995b8aad282cae5a93f4e8dae9fa745e5c3a1c138",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/DesmTAI5.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 35155,
+      "sha256": "34dca8dc3233f2b27e38e20a05376644d8a40d7cd2e03cd21802d1c13ebc5ff0",
+      "expectedSha256": "34dca8dc3233f2b27e38e20a05376644d8a40d7cd2e03cd21802d1c13ebc5ff0",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/nodes/0.gyjCkZPN.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 83193,
+      "sha256": "a4cb8e45b9b9448c91c3f893882916e567c9a6ae774b691ffcceb99315197c77",
+      "expectedSha256": "a4cb8e45b9b9448c91c3f893882916e567c9a6ae774b691ffcceb99315197c77",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/CuuXK9qw.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 67370,
+      "sha256": "4b38b2706b4b924915980d50766b34ab6b1753ffdd7c0fd28b86ad8f6d03dbaf",
+      "expectedSha256": "4b38b2706b4b924915980d50766b34ab6b1753ffdd7c0fd28b86ad8f6d03dbaf",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/nodes/4.Dyd1oPVg.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 24390,
+      "sha256": "4b313433b52664651adbf1703c28f762ffc1f5bd58379407eab6e3019c42d214",
+      "expectedSha256": "4b313433b52664651adbf1703c28f762ffc1f5bd58379407eab6e3019c42d214",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/FeJTkgka.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 733884,
+      "sha256": "60de1f5ca8ecf44288b75da4b0777699b882488406856b03d368bf04e3ec04c4",
+      "expectedSha256": "60de1f5ca8ecf44288b75da4b0777699b882488406856b03d368bf04e3ec04c4",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/nodes/55.DMVlcnGY.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 105398,
+      "sha256": "6f518e616e646006acf73d2d81fa35a90c7355fe59566d4853e92ff6bd991e3b",
+      "expectedSha256": "6f518e616e646006acf73d2d81fa35a90c7355fe59566d4853e92ff6bd991e3b",
+      "pass": true
+    },
+    {
+      "key": "/_app/immutable/chunks/xJxdecE9.js",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 102333,
+      "sha256": "b69b2fd322eb463a67761ef45357283516b61290fd9d264d18f394b1aa241583",
+      "expectedSha256": "b69b2fd322eb463a67761ef45357283516b61290fd9d264d18f394b1aa241583",
+      "pass": true
+    },
+    {
+      "key": "/borrow",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "expectedSha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "pass": true
+    },
+    {
+      "key": "/vaults",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "expectedSha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "pass": true
+    },
+    {
+      "key": "/solana",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "expectedSha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "pass": true
+    },
+    {
+      "key": "/help",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "expectedSha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "pass": true
+    },
+    {
+      "key": "/liquidations?tab=manual",
+      "encoding": "identity",
+      "status": 200,
+      "servedEncoding": "identity",
+      "bytes": 1821,
+      "sha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "expectedSha256": "c43e40425e6d65730702fbcb4836d181cfec31e6a11ba687251eeaf8d1bf3571",
+      "pass": true
+    }
+  ]
+}

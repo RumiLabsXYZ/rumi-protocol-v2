@@ -1,0 +1,15 @@
+{
+  "url": "https://app.rumiprotocol.com/liquidations?tab=manual",
+  "version": {
+    "version": "1794714390164"
+  },
+  "viewport": [
+    1280,
+    900
+  ],
+  "scrollWidth": 1280,
+  "overflow": false,
+  "overlay": false,
+  "walletConnected": false,
+  "cards": []
+}

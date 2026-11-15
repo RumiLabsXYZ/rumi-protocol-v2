@@ -1,0 +1,10 @@
+{
+  "url": "https://app.rumiprotocol.com/solana",
+  "viewport": [
+    390,
+    844
+  ],
+  "scrollWidth": 390,
+  "overlay": false,
+  "mintStatus": true
+}
