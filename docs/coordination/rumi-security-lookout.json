@@ -39,7 +39,7 @@
       "state": "Review",
       "owner": "Bram",
       "scope": "Reconcile accepted security findings",
-      "evidenceText": "A private row-level matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 are merged and all six exact reviewed candidates are installed and running. Cycle Sentinel now has an exact source, production-artifact, and live-hash chain. The closure branch updates vulnerable bytes 1.9.0 to 1.11.1 and passes affected Wasm checks, but rebuilt installation and readback remain. Its wallet-session and exact-amount frontend fixes pass all 1,728 frontend tests and the production build, but are not yet merged or published. Other evidence work is the partial Points source-to-build chain, the held legacy archive-proof case, and 60 preserved Treasury tombstones.",
+      "evidenceText": "A private row-level matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 and #666 are merged. Backend, bot, AMM and Analytics run the PR #666 dependency-refresh candidates with preserved state readbacks. The wallet-session frontend is published after 1,740 tests and the production build. Stability Pool remains on its prior healthy remediated module after two interrupted refresh requests; its candidate is built and hash-pinned, with no retry in flight. Remaining evidence work is the partial Points source-to-build chain, the held legacy archive-proof case, and 60 preserved Treasury tombstones.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
@@ -73,7 +73,7 @@
       "state": "Done",
       "owner": "Bram",
       "scope": "Refresh release and public security status",
-      "evidenceText": "PR #663 merged at 9da6444e and an assets-only sync published the dated closure page. PR #665 merged at fd39518d; its live readback records the completed six-canister rollout, exact installed hashes, bounded recovery evidence, 60 fail-closed Treasury tombstones, and the remaining historical proof limits.",
+      "evidenceText": "PR #667 merged at 855958a4 and an asset-only sync published the current PR #666 rollout evidence. The custom-domain version token and both security-route bundle hashes exactly match the merged build. The page records four installed dependency refreshes, the published wallet-session frontend, the held Stability Pool refresh, bounded recovery evidence, 60 fail-closed Treasury tombstones, and remaining historical proof limits.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
@@ -84,8 +84,8 @@
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/663"
         },
         {
-          "title": "Completed rollout correction PR #665",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/665"
+          "title": "Current rollout status PR #667",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/667"
         }
       ]
     },

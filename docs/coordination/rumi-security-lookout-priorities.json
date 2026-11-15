@@ -5,7 +5,7 @@
       "title": "Close the remaining security evidence gaps",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Merge the bytes 1.11.1 and wallet-session fixes, publish and verify the frontend assets, then build source-bound candidates and complete state-preserving installation/readback for the five affected canisters. Finish the Points source-to-build chain while preserving the archive-proof hold and Treasury tombstones. Cycle Sentinel provenance is complete.",
+      "nextAction": "Resolve the interrupted Stability Pool refresh through its original approval path before any retry. Then finish the Points source-to-build chain and older-finding evidence reconciliation while preserving the archive-proof hold and Treasury tombstones.",
       "cardIds": ["SEC-02", "SEC-04"]
     },
     {
@@ -45,7 +45,7 @@
       "title": "Release and public status",
       "status": "done",
       "blockedReason": "",
-      "nextAction": "PR #665 is merged and the completed-rollout correction is live and verified. Refresh only when material evidence changes.",
+      "nextAction": "PR #667 is merged and the current rollout report is live with exact bundle readback. Refresh only when material evidence changes.",
       "cardIds": ["SEC-05"]
     },
     {
