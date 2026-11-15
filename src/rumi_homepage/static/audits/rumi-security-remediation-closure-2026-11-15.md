@@ -3,15 +3,15 @@
 - **Report date:** November 15, 2026
 - **Canonical source:** `dbcc69bcda00c34721f3b3ffb809d887ff93e175`
 - **Release input tree:** `baba52eb113ed5c53f9a74cb99204fc3a111f29d`
-- **Status:** remediation source merged; production rollout partially complete
+- **Status:** remediation source merged; six-canister production rollout installed and verified
 
 ## Executive verdict
 
-The accepted active-path remediations listed in the PR #652–#662 tranche below are merged into the canonical repository. The broader review program is **not yet closed**, because the complete finding inventory is still being reconciled and merge and test evidence do not prove that every production canister is running the remediated code.
+The accepted active-path remediations listed in the PR #652–#662 tranche below are merged into the canonical repository. All six reviewed production candidates are now installed and their exact module hashes have been read back. The active-path release is complete; historical proof gaps remain held or fail-closed rather than being treated as settled without evidence.
 
-The AMM upgrade is installed and was verified against an exact pre-upgrade snapshot and state baseline. Analytics remains healthy on its preceding module after its upgrade command was interrupted before installation. The Stability Pool, Treasury, protocol backend, and liquidation bot also still require their coordinated production upgrades and post-upgrade readbacks.
+The AMM, Analytics, Stability Pool, Treasury, protocol backend, and liquidation bot upgrades are installed. State baselines, operating modes, recovery queues, reporter authorization, and pause/resume state were checked before and after the coordinated rollout.
 
-Historical recovery state is materially cleaner than older status reports described: the Stability Pool reports all 237 staged interest packets credited, its state invariant passes, and its pending chain-absorb and unallocated-interest inventories are empty. Current backend payout and Treasury-stable recovery pages are empty, the bot's claim and payment journals are empty, and Treasury's legacy external-deposit backfill reports complete. These are bounded query results, not substitutes for installing the remaining fixes.
+Historical recovery state is materially cleaner than older status reports described: the Stability Pool reports all 237 staged interest packets credited, its state invariant passes, and its pending chain-absorb and unallocated-interest inventories are empty. Current backend payout and Treasury-stable recovery pages are empty, the bot's claim and payment journals are empty, and Treasury's legacy external-deposit backfill reports complete. These are bounded query results, not proof that every possible historical obligation has been indexed.
 
 ## Evidence model
 
@@ -29,16 +29,16 @@ Evidence at one stage does not establish a later stage.
 
 ## Current production snapshot
 
-The following hashes were read through the authenticated management interface between 16:30 and 16:47 UTC on November 15, 2026. This observation supersedes older board snapshots where the values differ.
+The following hashes were read through the authenticated management interface during the coordinated November 15, 2026 rollout. This observation supersedes older board snapshots where the values differ.
 
 | Component | Installed module SHA-256 | Current result |
 | --- | --- | --- |
 | AMM | `66aa67b3be40f27c4471bfbbf99d8bd8c3cd8f189669a89943c7a3ae934d9085` | Remediation installed; pre/post pool values, flags, event counts, pending claims, and unresolved payouts matched. |
-| Analytics | `cbb3654eea3f6e5d7c4ae8fdd958319ecc7ba5a26b2ebcdb526247417b7234db` | Running and answering health queries on the preceding module; upgrade still pending. |
-| Stability Pool | `ff4988d75e7e97c24130691187ec49ca0304c54505d65cab98c46bb72024f47f` | Running and unpaused on the preceding module; state invariant passed and recovery inventories queried empty. |
-| Treasury | `0d7a7cf1f4701af0f8e3c9f661d2f671f59422c68350181dc3d9db4666b8d840` | Running on the preceding module; external-deposit backfill complete, but the new reporter interface is not installed. |
-| Protocol backend | `75d2cdc48fdcd444b117d0b1cb3a4630a69cc3a38e9daa90792553aea4a44d29` | Running in General Availability on the preceding module; current payout and Treasury-stable recovery pages queried empty. |
-| Liquidation bot | `f27db02758f4f6bbf61659347cea38a45984ac2aa700c9191bd4ad0d45aa9669` | Running and processing on the preceding module; current claim and payment journals queried empty. |
+| Analytics | `d6c59e870590964c4be3c950e460d1fee83abf610d12f6b79f627847a499f398` | Exact candidate installed; collector state and retained-event cursors preserved. |
+| Stability Pool | `32cf7dac324e97d8a6d6ddef93902c89dee2bec93c5b51521cf10e260ba83cce` | Exact candidate installed; state invariant, all 237 credited recovery packets, and empty pending recovery queues preserved. |
+| Treasury | `785adb02c314d49244a1f2db5f1923ec9a24440dbe5a7698525b0dce1a0c3832` | Exact candidate installed; deposit count and balances preserved, backfill complete, exact backend and bot reporter set installed, and ingress resumed. |
+| Protocol backend | `caaf7398c04d2f71a75115f4199fa5e429c30a6c8563c874e25d884b28703bd1` | Exact candidate installed; General Availability mode preserved and payout, Treasury-interest, and Treasury-stable recovery pages queried empty. |
+| Liquidation bot | `dadce6c52a79d815a46fbaf2f1c954495d07edf5f8a4f2ef7662cac20bd6cbb2` | Exact candidate installed; processing held during verification, journals empty, Vault 158 recovery settled, configuration read back, and processing resumed. |
 
 The AMM's pre-upgrade snapshot and fuller baseline showed the same pool values later observed after installation. Its pool values, operational flags, event counts, pending claims, and unresolved payouts matched across the accepted upgrade.
 
@@ -94,26 +94,23 @@ The backend candidate passed the mainnet XRPL-environment marker check. A candid
 The November 15 production queries established the following bounded facts:
 
 - Stability Pool interest recovery: every one of the 237 staged packets is credited; the pool reports no pending chain absorbs or unallocated interest forwards and returns `Pool state is consistent`.
-- Treasury external-token deposit backfill: complete with zero ambiguous legacy blocks.
+- Treasury external-token deposit backfill: complete through deposit 2,829 with 60 fail-closed tombstones for legacy rows that lack exact ledger provenance.
 - Backend held-payout page: empty.
 - Backend Treasury-stable transfer recovery page: empty.
 - Liquidation-bot claim journal: empty.
-- Liquidation-bot payment journal: empty.
+- Liquidation-bot payment journal: empty; the backend reports no active bot claims. Three historical terminal `TransferFailed` history entries remain, but none has a live backend claim and none was retried or erased during this rollout.
 - AMM unresolved outbound payouts: empty.
 
 These results do not prove that no unknown or unindexed historical obligation exists. They establish only the queried durable inventories at the observation time.
 
-## Remaining release follow-through
+## Residual evidence and recovery holds
 
-The following items remain under this program's user-approved objective to deploy the merged remediation tranche and publish a complete, evidence-separated security report. They are not blanket gates for unrelated protocol work.
+The coordinated six-canister release work is complete. The following items remain as explicit evidence limitations or recovery holds, not as hidden claims of settlement and not as blanket gates for unrelated protocol work.
 
-1. install and read back the analytics candidate required to deploy merged PR #652 after its AMM dependency;
-2. deploy the Stability Pool side of merged PR #657 and verify state, recovery inventories, and the 237 interest receipts remain intact;
-3. deploy merged PR #660 to Treasury, preserve its deposit and balance state, confirm its backfill remains complete, configure and read back the exact backend and bot reporters, and only then enable the new receipt-dependent flow;
-4. deploy the backend portions of the merged tranche with a meaningful recorded upgrade description while preserving General Availability mode;
-5. deploy the liquidation-bot portions of merged PRs #654, #656, and #660, inspect its durable journals, and verify processing resumes only after the coordinated Treasury/backend state is ready;
-6. satisfy the program's installation-verification criterion by comparing every installed module hash with its candidate hash and repeating the bounded runtime queries; and
-7. satisfy the requested full-review report by publishing a final finding-by-finding matrix that separates source closure, installation, activation, and historical settlement.
+1. keep the legacy ambiguous Stability Pool burn case held until exact authenticated archive proof exists;
+2. preserve the 60 Treasury tombstones so legacy blocks without exact ledger provenance cannot later be accepted as fresh receipts;
+3. bind the currently installed Points and Cycle Sentinel module hashes to exact reviewed source; and
+4. repeat bounded durable-inventory queries periodically, because an empty queue at one observation time cannot prove that no unknown historical obligation exists.
 
 Disabled or dormant external-chain rails remain separately gated by chain-specific finality, replay-floor, custody, oracle, admission, and queue checks before activation. Their containment is not evidence of permanent safety.
 
