@@ -127,6 +127,11 @@ export interface WithdrawalIntentStatusView {
   'amount' : bigint,
 }
 export interface _SERVICE {
+  'bind_external_token_ledger_once' : ActorMethod<
+    [AssetType, Principal],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
   'continue_external_token_deposit_backfill' : ActorMethod<
     [],
     { 'Ok' : string } |
