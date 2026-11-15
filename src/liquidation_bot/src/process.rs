@@ -1381,6 +1381,31 @@ pub async fn process_pending() {
         prior_retry_count + 1,
         CLAIM_RETRY_LIMIT
     );
+    // Before collateral is seized, reject quotes that cannot cover both
+    // ckUSDC fees and slippage without exceeding the explicit reserve budget.
+    // A refused vault remains unlocked for ordinary manual/SP handling.
+    let preflight = async {
+        let icp_fee = swap::fetch_ledger_fee(config.icp_ledger).await?;
+        let output_fee = swap::fetch_ledger_fee(config.ckusdc_ledger).await?;
+        if icp_fee != swap::swap_input_fee_e8s(&config)
+            || output_fee != config.ckusdc_fee_e6.unwrap_or(10_000)
+            || vault.collateral_type != config.icp_ledger
+            || vault.recommended_liquidation_amount == 0 || vault.collateral_price_e8s == 0 {
+            return Err("fee/config/notification requires fresh reconciliation".to_string());
+        }
+        let net = vault.collateral_amount.saturating_sub(icp_fee);
+        let input = calculate_swap_amount(net, vault.recommended_liquidation_amount, vault.collateral_price_e8s)
+            .min(max_swap_input_for_claim(net, icp_fee));
+        if input == 0 { return Ok(false); }
+        let quote = swap::quote_icp_for_ckusdc(&config, input).await?;
+        let balance = swap::balance_of_self_ckusdc(&config).await?;
+        Ok::<bool, String>(state::read_state(|s| crate::reserve::can_admit_quote(s,
+            vault.recommended_liquidation_amount, output_fee, quote, config.max_slippage_bps, balance)))
+    }.await;
+    if preflight != Ok(true) {
+        log!(crate::INFO, "Deferred vault #{} before claim: fee-inclusive quote/reserve unavailable ({:?}); manual/SP custody remains unlocked", vault.vault_id, preflight);
+        return;
+    }
     let record_id = history::next_id();
     let timestamp = ic_cdk::api::time();
 
@@ -2109,6 +2134,10 @@ pub async fn process_pending() {
     state::save_config_to_stable();
 
     // -- Phase 5: TREASURY (liquidation bonus) --
+    if !state::mutate_state(|s| crate::reserve::settle_once(s, &payment_journal)) {
+        log!(crate::INFO, "STUCK: reserve settlement refused before treasury creation for vault #{}", vault.vault_id);
+        return;
+    }
     let gross_bonus_e8s = claim_icp_residual_after_swap(
         collateral_received_amount, swap_amount, payment_journal.swap_input_fee_e8s,
     );
@@ -2532,6 +2561,10 @@ async fn resume_pending_payment_for_vault(
             if !state::read_state(|s| pending_payment_matches(s, &journal)
                 && crate::reserve::payment_allocation_matches(s, &journal)) {
                 log!(crate::INFO, "STUCK: confirmed payment state changed before treasury reconstruction for vault #{}", journal.vault_id);
+                return true;
+            }
+            if !state::mutate_state(|s| crate::reserve::settle_once(s, &journal)) {
+                log!(crate::INFO, "STUCK: reserve settlement refused before any treasury reconstruction for vault #{}", journal.vault_id);
                 return true;
             }
             journal.status = state::BotPaymentStatus::Confirmed;
