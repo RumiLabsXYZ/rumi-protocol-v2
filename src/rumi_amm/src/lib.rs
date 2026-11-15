@@ -2958,8 +2958,9 @@ mod reward_claim_admission_tests {
         );
 
         assert_eq!(
-            settle_reward_claim_amount(&mut pool, caller),
-            Ok(crate::state::MIN_CLAIM_E8S)
+            settle_reward_claim_amount(&mut pool, caller)
+                .expect("former LP carried rewards must be claimable"),
+            crate::state::MIN_CLAIM_E8S
         );
         assert_eq!(
             pool.lp_rewards[&caller].claimable,
