@@ -4,6 +4,14 @@ on:
   pull_request:
     paths:
       - .github/workflows/rumi-release-wasms.yml
+      - Cargo.toml
+      - Cargo.lock
+      - src/stability_pool/**
+      - src/rumi_amm/**
+      - src/rumi_analytics/**
+      - src/liquidation_bot/**
+      - src/rumi_protocol_backend/**
+      - src/rumi_points/**
 
 permissions:
   contents: read
