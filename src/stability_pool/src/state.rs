@@ -3426,18 +3426,20 @@ impl StabilityPoolState {
             .collect();
         let total_consumed_e8s: u64 = stables_consumed
             .iter()
-            .map(|(ledger, &amount)| {
+            .try_fold(0u64, |total, (ledger, &amount)| {
                 let (decimals, is_lp) =
                     registry_snapshot.get(ledger).copied().unwrap_or((8, false));
-                if is_lp {
+                let value = if is_lp {
                     vps.get(ledger)
                         .map(|&vp| lp_to_usd_e8s(amount, vp))
                         .unwrap_or(0)
                 } else {
                     normalize_to_e8s(amount, decimals)
-                }
-            })
-            .sum();
+                };
+                total
+                    .checked_add(value)
+                    .ok_or(StabilityPoolError::SystemBusy)
+            })?;
         if total_consumed_e8s == 0 {
             return Err(StabilityPoolError::InsufficientPoolBalance);
         }
@@ -4032,7 +4034,7 @@ impl StabilityPoolState {
         stables_consumed: &BTreeMap<Principal, u64>,
         collateral_gained: u64,
         collateral_price_e8s: u64,
-    ) {
+    ) -> Result<(), StabilityPoolError> {
         self.process_liquidation_gains_at(
             vault_id,
             collateral_type,
@@ -4040,7 +4042,7 @@ impl StabilityPoolState {
             collateral_gained,
             collateral_price_e8s,
             ic_cdk::api::time(),
-        );
+        )
     }
 
     /// Guarded recovery precondition for generic liquidation settlement. The
@@ -4625,7 +4627,7 @@ impl StabilityPoolState {
         collateral_gained: u64,
         collateral_price_e8s: u64,
         timestamp: u64,
-    ) {
+    ) -> Result<(), StabilityPoolError> {
         if self.collateral_requires_payout_address(&collateral_type) {
             log!(
                 INFO,
@@ -4634,8 +4636,16 @@ impl StabilityPoolState {
                 collateral_type,
                 vault_id
             );
-            return;
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "generic liquidation settlement cannot credit native collateral".into(),
+            });
         }
+        self.validate_state()
+            .map_err(|_| StabilityPoolError::SystemBusy)?;
+        self.total_liquidations_executed
+            .checked_add(1)
+            .ok_or(StabilityPoolError::SystemBusy)?;
 
         // Phase 1: Compute each opted-in depositor's share of the consumed stables (in e8s)
         let opted_in_principals: Vec<Principal> = self
@@ -4645,20 +4655,38 @@ impl StabilityPoolState {
             .map(|(p, _)| *p)
             .collect();
 
-        // For each consumed token, compute total opted-in balance for that token
-        let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
-        for token_ledger in stables_consumed.keys() {
-            let total: u64 = opted_in_principals
+        // Plan each token debit before mutating. The shared ordinary-liquidation
+        // allocator assigns the proportional floor remainder in principal order,
+        // so depositor debits sum exactly to the ledger amount consumed.
+        let mut exact_debits: BTreeMap<(Principal, Principal), u64> = BTreeMap::new();
+        for (token_ledger, consumed) in stables_consumed {
+            if *consumed == 0 {
+                continue;
+            }
+            let participants: Vec<_> = opted_in_principals
                 .iter()
-                .filter_map(|p| self.deposits.get(p))
-                .map(|pos| {
-                    pos.stablecoin_balances
-                        .get(token_ledger)
+                .map(|principal| crate::ordinary_liquidation::ParticipantBalance {
+                    owner: *principal,
+                    balance_raw: self
+                        .deposits
+                        .get(principal)
+                        .and_then(|position| position.stablecoin_balances.get(token_ledger))
                         .copied()
-                        .unwrap_or(0)
+                        .unwrap_or(0),
+                    opted_in: true,
                 })
-                .sum();
-            per_token_opted_in_totals.insert(*token_ledger, total);
+                .collect();
+            let allocations = crate::ordinary_liquidation::allocate_exact_debit(
+                &participants,
+                *consumed,
+            )
+            .map_err(|error| StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!("exact stable debit allocation failed: {error:?}"),
+            })?;
+            for allocation in allocations {
+                exact_debits.insert((allocation.owner, *token_ledger), allocation.debit_raw);
+            }
         }
 
         // Phase 2: Compute total e8s consumed to determine collateral distribution shares.
@@ -4689,7 +4717,7 @@ impl StabilityPoolState {
             .sum();
 
         if total_consumed_e8s == 0 {
-            return;
+            return Ok(());
         }
 
         // Phase 3: For each opted-in depositor, reduce their token balances and add collateral gains.
@@ -4701,14 +4729,7 @@ impl StabilityPoolState {
             let mut user_consumed_e8s: u64 = 0;
 
             if let Some(position) = self.deposits.get_mut(principal) {
-                for (token_ledger, &total_consumed) in stables_consumed {
-                    let total_opted_in = per_token_opted_in_totals
-                        .get(token_ledger)
-                        .copied()
-                        .unwrap_or(0);
-                    if total_opted_in == 0 {
-                        continue;
-                    }
+                for token_ledger in stables_consumed.keys() {
                     let user_balance = position
                         .stablecoin_balances
                         .get(token_ledger)
@@ -4718,21 +4739,25 @@ impl StabilityPoolState {
                         continue;
                     }
 
-                    // User's share of this token's consumption
-                    let user_share_native = (total_consumed as u128 * user_balance as u128
-                        / total_opted_in as u128)
-                        as u64;
-                    let user_share_native = user_share_native.min(user_balance);
+                    let user_share_native = exact_debits
+                        .get(&(*principal, *token_ledger))
+                        .copied()
+                        .unwrap_or(0);
 
                     // Reduce balance
                     if let Some(bal) = position.stablecoin_balances.get_mut(token_ledger) {
-                        *bal = bal.saturating_sub(user_share_native);
+                        *bal = bal
+                            .checked_sub(user_share_native)
+                            .ok_or(StabilityPoolError::SystemBusy)?;
                     }
 
                     // Track actual deduction for aggregate update
-                    *actual_deductions_per_token
+                    let deducted = actual_deductions_per_token
                         .entry(*token_ledger)
-                        .or_insert(0) += user_share_native;
+                        .or_insert(0);
+                    *deducted = deducted
+                        .checked_add(user_share_native)
+                        .ok_or(StabilityPoolError::SystemBusy)?;
 
                     // Track consumed value in e8s for collateral distribution.
                     // LP tokens valued at virtual price, not face value.
@@ -4747,7 +4772,9 @@ impl StabilityPoolState {
                     } else {
                         normalize_to_e8s(user_share_native, decimals)
                     };
-                    user_consumed_e8s += share_e8s;
+                    user_consumed_e8s = user_consumed_e8s
+                        .checked_add(share_e8s)
+                        .ok_or(StabilityPoolError::SystemBusy)?;
                 }
 
                 // Distribute collateral proportional to e8s consumed
@@ -4755,11 +4782,16 @@ impl StabilityPoolState {
                     let user_collateral = (collateral_gained as u128 * user_consumed_e8s as u128
                         / total_consumed_e8s as u128)
                         as u64;
-                    *position
+                    let gain = position
                         .collateral_gains
                         .entry(collateral_type)
-                        .or_insert(0) += user_collateral;
-                    total_collateral_distributed += user_collateral;
+                        .or_insert(0);
+                    *gain = gain
+                        .checked_add(user_collateral)
+                        .ok_or(StabilityPoolError::SystemBusy)?;
+                    total_collateral_distributed = total_collateral_distributed
+                        .checked_add(user_collateral)
+                        .ok_or(StabilityPoolError::SystemBusy)?;
                 }
             }
         }
@@ -4769,7 +4801,10 @@ impl StabilityPoolState {
         if collateral_dust > 0 {
             if let Some(first) = opted_in_principals.first() {
                 if let Some(pos) = self.deposits.get_mut(first) {
-                    *pos.collateral_gains.entry(collateral_type).or_insert(0) += collateral_dust;
+                    let gain = pos.collateral_gains.entry(collateral_type).or_insert(0);
+                    *gain = gain
+                        .checked_add(collateral_dust)
+                        .ok_or(StabilityPoolError::SystemBusy)?;
                 }
             }
         }
@@ -4778,7 +4813,9 @@ impl StabilityPoolState {
         // to prevent rounding dust drift that would cause validate_state() to fail.
         for (token_ledger, &actual_deducted) in &actual_deductions_per_token {
             if let Some(total) = self.total_stablecoin_balances.get_mut(token_ledger) {
-                *total = total.saturating_sub(actual_deducted);
+                *total = total
+                    .checked_sub(actual_deducted)
+                    .ok_or(StabilityPoolError::SystemBusy)?;
             }
         }
 
@@ -4800,11 +4837,9 @@ impl StabilityPoolState {
         // aggregate total after the full gains pass. Violations indicate a
         // double-deduction or divergent-update bug (debug builds only — the
         // field-level assertions above are already proportional-sound).
-        debug_assert!(
-            self.validate_state().is_ok(),
-            "stability pool aggregate/per-depositor invariant violated after \
-             process_liquidation_gains_at (likely regression of SP-001)"
-        );
+        self.validate_state()
+            .map_err(|_| StabilityPoolError::SystemBusy)?;
+        Ok(())
     }
 
     /// Build the complete chain-liquidation debit and claim plan without
@@ -5177,40 +5212,6 @@ impl StabilityPoolState {
     }
 
     // ─── Fee Accounting ───
-
-    /// Deduct a ledger fee (e.g. approve fee) proportionally from all depositors
-    /// who hold `token_ledger`, then adjust the aggregate total to match.
-    pub fn deduct_fee_from_pool(&mut self, token_ledger: Principal, fee: u64) {
-        let total = match self.total_stablecoin_balances.get(&token_ledger).copied() {
-            Some(t) if t > 0 => t,
-            _ => return,
-        };
-
-        let mut deducted: u64 = 0;
-        let depositor_keys: Vec<Principal> = self.deposits.keys().copied().collect();
-
-        for key in &depositor_keys {
-            if let Some(pos) = self.deposits.get_mut(key) {
-                if let Some(bal) = pos.stablecoin_balances.get_mut(&token_ledger) {
-                    if *bal > 0 {
-                        // Proportional share: fee * bal / total (rounded down)
-                        let share = (fee as u128 * *bal as u128 / total as u128) as u64;
-                        let actual = share.min(*bal);
-                        *bal = bal.saturating_sub(actual);
-                        deducted += actual;
-                        if *bal == 0 {
-                            pos.stablecoin_balances.remove(&token_ledger);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Apply any rounding remainder (at most depositor_count - 1 units) to the aggregate
-        if let Some(agg) = self.total_stablecoin_balances.get_mut(&token_ledger) {
-            *agg = agg.saturating_sub(deducted);
-        }
-    }
 
     /// Deduct an exact backend-verified ledger fee and allocate proportional
     /// shares, assigning floor-rounding remainder deterministically so depositor
@@ -6500,6 +6501,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn two_ledger_fees_consume_exact_dust_across_small_positions() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 1);
+
+        state
+            .deduct_exact_fee_from_pool(icusd_ledger(), 1)
+            .expect("approval fee must be charged exactly");
+        state
+            .deduct_exact_fee_from_pool(icusd_ledger(), 1)
+            .expect("transfer-from fee must be charged exactly");
+
+        let depositor_total: u64 = state
+            .deposits
+            .values()
+            .map(|position| {
+                position
+                    .stablecoin_balances
+                    .get(&icusd_ledger())
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        assert_eq!(depositor_total, 1);
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 1);
+        assert!(state.validate_state().is_ok());
+
+        let before = state.clone();
+        assert!(state
+            .deduct_exact_fee_from_pool(icusd_ledger(), 2)
+            .is_err());
+        assert_eq!(state.deposits, before.deposits);
+        assert_eq!(
+            state.total_stablecoin_balances,
+            before.total_stablecoin_balances
+        );
+    }
+
     // ─── Test: Deposit and Withdrawal ───
 
     #[test]
@@ -6688,7 +6729,7 @@ mod tests {
             5_00000000,    // 5 ICP
             7_50000000,    // collateral price $7.50
             1_000_000_000, // timestamp
-        );
+        ).unwrap();
 
         // Check proportional reduction of icUSD balances:
         // user_a consumed: 10 * (50/100) = 5 icUSD -> remaining: 45
@@ -6811,7 +6852,7 @@ mod tests {
             10_00000000,
             7_50000000,
             2_000_000_000,
-        );
+        ).unwrap();
 
         // user_a should lose all 20 icUSD (only opted-in depositor)
         let pos_a = state.deposits.get(&user_a()).unwrap();
@@ -7155,7 +7196,7 @@ mod tests {
 
         let mut consumed = BTreeMap::new();
         consumed.insert(icusd_ledger(), 20_00000000);
-        state.process_liquidation_gains_at(
+        let rejected = state.process_liquidation_gains_at(
             144,
             xrp_ledger(),
             &consumed,
@@ -7163,6 +7204,10 @@ mod tests {
             50_00000000,
             3_000_000_000,
         );
+        assert!(matches!(
+            rejected,
+            Err(StabilityPoolError::LiquidationFailed { .. })
+        ));
 
         let pos_a = state.deposits.get(&user_a()).unwrap();
         assert_eq!(
@@ -8851,7 +8896,7 @@ mod tests {
             20_00000000,
             7_50000000,
             3_000_000_000,
-        );
+        ).unwrap();
 
         // user_a has all the ckUSDT, so consumes all 20 ckUSDT
         let pos_a = state.deposits.get(&user_a()).unwrap();
@@ -8924,7 +8969,7 @@ mod tests {
             50_00000000,
             7_50000000,
             4_000_000_000,
-        );
+        ).unwrap();
 
         // user_a's stablecoin balance is zero, but they have collateral gains
         // so position should NOT be removed
@@ -9503,10 +9548,10 @@ mod tests {
             500_000,
             7_50000000,
             1_000_000_000,
-        );
+        ).unwrap();
 
-        // The critical assertion: aggregate should match sum of individual balances
-        // even when rounding dust occurs. validate_state() checks this.
+        // The critical assertion: both the aggregate and depositor balances
+        // fall by the full ledger debit, including the one-unit remainder.
         assert!(
             state.validate_state().is_ok(),
             "State must remain consistent after rounding"
@@ -9532,6 +9577,82 @@ mod tests {
             sum, tracked,
             "Sum of individual balances must equal aggregate"
         );
+        assert_eq!(tracked, 9_000_000, "the full debit must be accounted");
+
+        let debits = [user_a(), user_b(), user_c()].map(|owner| {
+            let remaining = state
+                .deposits
+                .get(&owner)
+                .and_then(|position| position.stablecoin_balances.get(&icusd_ledger()))
+                .copied()
+                .unwrap_or(0);
+            let initial = if owner == user_c() { 3_333_334 } else { 3_333_333 };
+            initial - remaining
+        });
+        assert_eq!(debits.iter().sum::<u64>(), 1_000_000);
+        assert_eq!(debits, [333_334, 333_333, 333_333]);
+    }
+
+    #[test]
+    fn exact_liquidation_debit_rejects_insufficient_balance_without_mutation() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 1);
+        let before = state.clone();
+        let consumed = BTreeMap::from([(icusd_ledger(), 4)]);
+
+        let result = state.process_liquidation_gains_at(
+            9,
+            icp_ledger(),
+            &consumed,
+            1,
+            7_50000000,
+            1_000_000_001,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StabilityPoolError::LiquidationFailed { .. })
+        ));
+        assert_eq!(state.deposits, before.deposits);
+        assert_eq!(
+            state.total_stablecoin_balances,
+            before.total_stablecoin_balances
+        );
+        assert_eq!(state.liquidation_history, before.liquidation_history);
+    }
+
+    #[test]
+    fn exact_liquidation_debit_assigns_dust_in_principal_order() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 1);
+        let consumed = BTreeMap::from([(icusd_ledger(), 2)]);
+
+        state
+            .process_liquidation_gains_at(
+                10,
+                icp_ledger(),
+                &consumed,
+                2,
+                7_50000000,
+                1_000_000_002,
+            )
+            .expect("dust liquidation debit must be exact");
+
+        let remaining = [user_a(), user_b(), user_c()].map(|owner| {
+            state
+                .deposits
+                .get(&owner)
+                .and_then(|position| position.stablecoin_balances.get(&icusd_ledger()))
+                .copied()
+                .unwrap_or(0)
+        });
+        assert_eq!(remaining, [0, 0, 1]);
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 1);
+        assert!(state.validate_state().is_ok());
     }
 
     // ─── 3USD / LP Token Tests ───
@@ -10352,7 +10473,7 @@ mod tests {
             10_00000000,
             7_50000000,
             1_000_000_000,
-        );
+        ).unwrap();
 
         // user_b escaped the burn entirely (balance untouched, no gains)...
         let pos_b = state.deposits.get(&user_b()).unwrap();
