@@ -1,6 +1,6 @@
 {
-  "summary": "SEC21:202listedmanualqueueandprotocolclaimIDs; bot231TransferFailed/shortgrosspayment/0paid, lockprotected. Ellisfrontend-onlye7b736c9candidate usesexistingpublicclaimquery;11checks/twofinalreviews/mockdesktopmobilePASS. Adrianownsasset/proof-backedrecovery; no deploy/financialauthority. SEC20remainslive1794685142389 andcomplete.",
-  "plainSummary": "Vault202\u2019s bot liquidation stalled after a swap left repayment short; its safety lock remains. A tested frontend change marks reserved vaults and disables manual execution when availability is unknown. The recovery owner is preparing the claim-specific remedy; neither a force unlock nor deployment has been authorized.",
+  "summary": "SEC21 queue UI candidatee7b736c9 is authorized for frontend-only publication; Dorian/Cody build and Ellis independent served verification next. Source11checks/twofinalreviews/mockdesktopmobilePASS. Adrian separately owns vault202 exact remedy and safe bot-buffer use; no financial action under UI authority. SEC19/20 remain live.",
+  "plainSummary": "The queue correction is approved for publication, with checks that preserve the existing collateral and recovery fixes. Vault202 remains protected by its claim lock. The recovery owner is preparing its exact remedy and safe use of the bot\u2019s funded buffer; the interface release does not move funds.",
   "glossary": [
     {
       "term": "Stability Pool",
