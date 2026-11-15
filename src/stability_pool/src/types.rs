@@ -476,6 +476,32 @@ pub struct ChainSpAbsorbCompletion {
     pub completed_at_ns: u64,
 }
 
+/// Exact protocol-minted compensation identity for one legacy ambiguous
+/// chain burn. The row is persisted in the pool before the backend is allowed
+/// to fund it. A positive compensation receipt quarantines the original burn
+/// intent without asserting whether that earlier burn happened.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyChainBurnCompensation {
+    pub vault_id: u64,
+    pub original_intent: ChainSpAbsorbIntent,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+    /// Index is set only after the exact direct ICRC-3 block is validated.
+    pub compensation_block_index: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyChainBurnCompensationPage {
+    pub items: Vec<LegacyChainBurnCompensation>,
+    pub next_cursor: Option<u64>,
+}
+
+pub const MAX_LEGACY_CHAIN_BURN_COMPENSATION_PAGE: u16 = 50;
+
 /// Exact backend request tuple for a 3USD reserve absorb. The SP persists this
 /// before dispatch so an inter-canister timeout retries with the same
 /// idempotency key and arguments, even if the next liquidation scan changes.
@@ -1464,8 +1490,7 @@ mod three_pool_error_compatibility_tests {
 
     #[test]
     fn still_decodes_successful_three_pool_mint() {
-        let remote: Result<u128, rumi_3pool::types::ThreePoolError> = Ok(123_456);
-        let bytes = candid::encode_one(remote).unwrap();
+        let bytes = candid::encode_one::<Result<u128, ThreePoolErrorRemote>>(Ok(123_456)).unwrap();
         let decoded: Result<u128, ThreePoolErrorRemote> = candid::decode_one(&bytes).unwrap();
         assert!(matches!(decoded, Ok(123_456)));
     }

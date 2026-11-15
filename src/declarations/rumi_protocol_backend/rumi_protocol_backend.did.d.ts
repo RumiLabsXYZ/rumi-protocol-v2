@@ -1371,6 +1371,16 @@ export interface LegacyPendingThreeUsdRefund {
   'op_nonce' : bigint,
   'stability_pool' : Principal,
 }
+export interface LegacySpBurnCompensationIdentity {
+  'destination' : Account,
+  'source' : Account,
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+}
 export type LegacySpProofLedger = { 'IcusdBurn' : null } |
   { 'ThreePoolTransfer' : null };
 export interface LineDisplayPage { 'lines' : Array<string> }
@@ -2810,6 +2820,7 @@ export interface _SERVICE {
   'enable_bot_confirm_proof_requirement' : ActorMethod<[], Result_1>,
   'enable_chain' : ActorMethod<[number], Result_1>,
   'enter_recovery_mode' : ActorMethod<[], Result_1>,
+  'execute_legacy_sp_burn_compensation' : ActorMethod<[bigint], { 'Ok' : bigint } | { 'Err' : ProtocolError }>,
   'exit_recovery_mode' : ActorMethod<[], Result_1>,
   'freeze_protocol' : ActorMethod<[], Result_1>,
   'get_all_vaults' : ActorMethod<[], Array<CandidVault>>,
@@ -3108,6 +3119,7 @@ export interface _SERVICE {
   'open_xrp_vault' : ActorMethod<[], Result_33>,
   'partial_liquidate_vault' : ActorMethod<[VaultArg], Result_6>,
   'partial_repay_to_vault' : ActorMethod<[VaultArg], Result>,
+  'prepare_legacy_sp_burn_compensation' : ActorMethod<[bigint], { 'Ok' : LegacySpBurnCompensationIdentity } | { 'Err' : ProtocolError }>,
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_34>,
   'prepare_vault51_nicp_redemption' : ActorMethod<
     [PrepareNicpRedemption],

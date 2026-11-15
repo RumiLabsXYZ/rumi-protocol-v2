@@ -7731,6 +7731,26 @@ async fn refund_stability_pool_burn(
         .await
 }
 
+/// Persist the exact protocol-funded compensation identity for one eligible
+/// legacy SP intent. The configured pool and its saved intent determine the
+/// ledger, destination, and amount; callers cannot select a funding tuple.
+#[update]
+#[candid_method(update)]
+async fn prepare_legacy_sp_burn_compensation(
+    vault_id: u64,
+) -> Result<rumi_protocol_backend::state::LegacySpBurnCompensationIdentity, ProtocolError> {
+    rumi_protocol_backend::sp_legacy_burn_compensation::prepare(vault_id).await
+}
+
+/// Make the one exact protocol mint attempt saved by
+/// `prepare_legacy_sp_burn_compensation`. Unresolved outcomes remain held and
+/// are never resent under a new identity.
+#[update]
+#[candid_method(update)]
+async fn execute_legacy_sp_burn_compensation(vault_id: u64) -> Result<u64, ProtocolError> {
+    rumi_protocol_backend::sp_legacy_burn_compensation::execute(vault_id).await
+}
+
 /// Read the exact persisted result for a native-XRP absorb recovery attempt.
 #[update]
 #[candid_method(update)]

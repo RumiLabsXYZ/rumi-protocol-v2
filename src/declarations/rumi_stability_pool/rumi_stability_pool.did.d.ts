@@ -70,6 +70,21 @@ export interface ChainSpAbsorbIntent {
   'icusd_ledger' : Principal,
   'icusd_minting_account' : IcrcAccount,
 }
+export interface LegacyChainBurnCompensation {
+  'destination' : IcrcAccount,
+  'source' : IcrcAccount,
+  'created_at_time_ns' : bigint,
+  'memo' : Uint8Array | number[],
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'ledger' : Principal,
+  'compensation_block_index' : [] | [bigint],
+  'original_intent' : ChainSpAbsorbIntent,
+}
+export interface LegacyChainBurnCompensationPage {
+  'next_cursor' : [] | [bigint],
+  'items' : Array<LegacyChainBurnCompensation>,
+}
 export type ChainSpAbsorbIntentStatus = { 'BackendRejected' : null } |
   { 'Burned' : null } |
   { 'BackendAccepted' : null } |
@@ -906,6 +921,9 @@ export interface _SERVICE {
     { 'Ok' : ChainSpAbsorbResult } |
       { 'Err' : StabilityPoolError }
   >,
+  'admin_compensate_legacy_ambiguous_chain_burn' : ActorMethod<[bigint], { 'Ok' : bigint } | { 'Err' : StabilityPoolError }>,
+  'admin_reconcile_legacy_chain_burn_compensation' : ActorMethod<[bigint, bigint], { 'Ok' : bigint } | { 'Err' : StabilityPoolError }>,
+  'admin_reconcile_quarantined_legacy_chain_burn' : ActorMethod<[bigint, bigint], { 'Ok' : null } | { 'Err' : StabilityPoolError }>,
   'admin_recover_ambiguous_native_xrp_burn' : ActorMethod<
     [bigint, [] | [bigint]],
     { 'Ok' : null } |
@@ -1021,6 +1039,14 @@ export interface _SERVICE {
     [],
     { 'Ok' : BigUint64Array | bigint[] } |
       { 'Err' : StabilityPoolError }
+  >,
+  'get_legacy_chain_burn_compensation_page' : ActorMethod<
+    [[] | [bigint], number],
+    { 'Ok' : LegacyChainBurnCompensationPage } | { 'Err' : StabilityPoolError }
+  >,
+  'legacy_chain_burn_compensation_source' : ActorMethod<
+    [bigint],
+    [] | [[Principal, bigint]]
   >,
   'get_liquidation_history' : ActorMethod<
     [[] | [bigint]],

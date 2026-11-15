@@ -1524,6 +1524,7 @@ pub mod guard;
 pub mod icrc21;
 pub mod icrc3_proof;
 pub mod sp_burn_refund;
+pub mod sp_legacy_burn_compensation;
 pub mod sp_liquidation;
 pub mod liquidity_pool;
 pub mod logs;

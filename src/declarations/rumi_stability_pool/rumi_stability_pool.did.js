@@ -569,6 +569,21 @@ export const idlFactory = ({ IDL }) => {
     'icusd_ledger' : IDL.Principal,
     'icusd_minting_account' : IcrcAccount,
   });
+  const LegacyChainBurnCompensation = IDL.Record({
+    'destination' : IcrcAccount,
+    'source' : IcrcAccount,
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'compensation_block_index' : IDL.Opt(IDL.Nat64),
+    'original_intent' : ChainSpAbsorbIntent,
+  });
+  const LegacyChainBurnCompensationPage = IDL.Record({
+    'next_cursor' : IDL.Opt(IDL.Nat64),
+    'items' : IDL.Vec(LegacyChainBurnCompensation),
+  });
   const PendingRefund = IDL.Record({
     'id' : IDL.Nat64,
     'user' : IDL.Principal,
@@ -959,6 +974,21 @@ export const idlFactory = ({ IDL }) => {
         ],
         [],
       ),
+    'admin_compensate_legacy_ambiguous_chain_burn' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'admin_reconcile_legacy_chain_burn_compensation' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'admin_reconcile_quarantined_legacy_chain_burn' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'admin_recover_ambiguous_native_xrp_burn' : IDL.Func(
         [IDL.Nat64, IDL.Opt(IDL.Nat64)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
@@ -1135,6 +1165,16 @@ export const idlFactory = ({ IDL }) => {
             'Err' : StabilityPoolError,
           }),
         ],
+        ['query'],
+      ),
+    'get_legacy_chain_burn_compensation_page' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Nat16],
+        [IDL.Variant({ 'Ok' : LegacyChainBurnCompensationPage, 'Err' : StabilityPoolError })],
+        ['query'],
+      ),
+    'legacy_chain_burn_compensation_source' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Opt(IDL.Tuple(IDL.Principal, IDL.Nat64))],
         ['query'],
       ),
     'get_liquidation_history' : IDL.Func(

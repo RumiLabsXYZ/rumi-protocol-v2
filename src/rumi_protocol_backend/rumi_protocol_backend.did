@@ -1,4 +1,14 @@
 type Account = record { owner : principal; subaccount : opt blob };
+type LegacySpBurnCompensationIdentity = record {
+  vault_id : nat64;
+  op_nonce : nat;
+  ledger : principal;
+  source : Account;
+  destination : Account;
+  amount_e8s : nat64;
+  memo : blob;
+  created_at_time_ns : nat64;
+};
 type AddCollateralArg = record {
   redemption_fee_ceiling : opt float64;
   debt_ceiling : nat64;
@@ -2798,6 +2808,8 @@ service : (ProtocolArg) -> {
   refresh_chain_hot_wallet_balance : (nat32) -> (Result_42);
   refresh_vault51_redemption_claim : () -> (Result_4);
   refund_stability_pool_burn : (nat64, nat64, SpWritedownProof) -> (Result_43);
+  prepare_legacy_sp_burn_compensation : (nat64) -> (variant { Ok : LegacySpBurnCompensationIdentity; Err : ProtocolError });
+  execute_legacy_sp_burn_compensation : (nat64) -> (variant { Ok : nat64; Err : ProtocolError });
   register_chain : (RegisterChainArg) -> (Result_1);
   register_ckdoge_collateral : () -> (Result_1);
   register_cksol_collateral : () -> (Result_1);
