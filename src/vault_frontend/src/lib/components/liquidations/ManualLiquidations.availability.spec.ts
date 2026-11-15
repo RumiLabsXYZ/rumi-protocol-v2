@@ -92,3 +92,10 @@ it('shows a redemption claim as suspended rather than zero nICP and a liquidatio
  expect(card.textContent).not.toContain('0.0%');
  expect(fx.approve).not.toHaveBeenCalled();expect(fx.partial).not.toHaveBeenCalled();
 });
+
+it('does not present a rejected all-vault read as a confirmed zero total',async()=>{
+ fx.all.mockRejectedValue(new Error('offline'));
+ component=mount(Page,{target});
+ await vi.waitFor(()=>expect(target.querySelector('.summary-stat')?.textContent).toContain('Total unavailable'));
+ expect(target.querySelector('.summary-stat')?.textContent).not.toContain('0 total');
+});

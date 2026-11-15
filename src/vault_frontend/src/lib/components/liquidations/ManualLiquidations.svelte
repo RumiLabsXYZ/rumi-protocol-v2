@@ -125,6 +125,7 @@
   let isRecoveryMode = false;
   let isLoading = true;
   let allVaultsLoading = true;
+  let allVaultsReadError = false;
   let isPriceLoading = true;
   let availabilityReadError = '';
   let botClaimedVaultIds = new Set<string>();
@@ -465,7 +466,9 @@
     try {
       const vaults = await protocolService.getAllVaults();
       allVaults = vaults.map(normalizeVault);
+      allVaultsReadError = false;
     } catch (error) {
+      allVaultsReadError = true;
       console.error("Error loading all vaults:", error);
     } finally {
       allVaultsLoading = false;
@@ -659,6 +662,7 @@
     }).catch(() => {
       isLoading = false;
       allVaultsLoading = false;
+      allVaultsReadError = true;
       availabilityReadError = 'Could not load collateral parameters. Reload this page to try again.';
     });
     refreshIcpPrice();
@@ -681,7 +685,7 @@
     <span class="summary-stat">
       {#if isLoading}…{:else if availabilityReadError}Unavailable{:else}{sortedVaults.length} at-risk vault{sortedVaults.length !== 1 ? 's' : ''}{/if}
       ·
-      {#if allVaultsLoading}…{:else}{allVaults.length} total{/if}
+      {#if allVaultsLoading}…{:else if allVaultsReadError}Total unavailable{:else}{allVaults.length} total{/if}
     </span>
     <span class="summary-sep">·</span>
     <span class="price-pill">
