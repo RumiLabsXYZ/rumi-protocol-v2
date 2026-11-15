@@ -1,6 +1,6 @@
 {
-  "summary": "The full finding matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652–#662 are merged and all six reviewed production candidates are installed with exact hash readback. Stability Pool preserved all 237 credited recovery packets; Treasury completed its backfill with 60 fail-closed legacy tombstones; backend and bot recovery queues are empty and normal processing resumed.",
-  "plainSummary": "The coordinated security rollout is complete: all six reviewed protocol updates are installed and running, and the Stability Pool kept every credited recovery entry. A few historical proof questions remain safely held or blocked from reuse; Rob does not need to act right now.",
+  "summary": "The finding matrix covers CL-01 through CL-17 and all 25 September IDs. PR #666 is merged; backend, bot, AMM, and Analytics run its reviewed builds, and the wallet-session frontend is published. Stability Pool remains healthy on its prior remediated build after two interrupted refresh requests. Points provenance, one legacy archive-proof case, and 60 Treasury tombstones remain bounded evidence gaps.",
+  "plainSummary": "The main security fixes are merged, and four protocol services plus the wallet frontend now run their reviewed updates. The Stability Pool is healthy but its dependency refresh remains on hold after interrupted requests; the next step is to resolve that hold and finish the remaining historical evidence checks. Rob does not need to act right now.",
   "glossary": [
     {
       "term": "Stability Pool",
