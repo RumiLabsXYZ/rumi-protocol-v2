@@ -27,7 +27,7 @@
     {
       label: 'Activated',
       title: 'Route activation remains separate',
-      detail: 'EVM/public-open and native-XRP fanout remain activation-gated.',
+      detail: 'This snapshot includes no activation evidence for EVM/public-open or native-XRP fanout.',
       tone: 'held'
     },
     {
@@ -189,8 +189,8 @@
         <p>
           The closure tranche still requires remaining production artifacts, exact installation
           readbacks, and operation-specific Vault-202 recovery evidence. EVM/public-open and
-          native-XRP fanout remain activation-gated; those holds apply to their respective routes
-          and are not blockers for unrelated flows.
+          this snapshot includes no activation evidence for EVM/public-open or native-XRP fanout.
+          Those route-specific evidence gaps are not blockers for unrelated flows.
         </p>
         <p>
           This snapshot does not claim that a PR #641 artifact was installed, that an activation
