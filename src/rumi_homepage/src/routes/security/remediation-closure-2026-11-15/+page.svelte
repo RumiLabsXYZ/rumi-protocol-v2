@@ -2,14 +2,14 @@
   const stages = [
     { label: 'Source', value: 'Merged', detail: 'PRs #652–#662 and #666 are in canonical main.', tone: 'done' },
     { label: 'Artifacts', value: 'Verified', detail: 'The five dependency-refresh candidates are hash-pinned.', tone: 'done' },
-    { label: 'Installed', value: '4 of 5 refreshed', detail: 'Backend, bot, AMM, and Analytics match; Stability Pool remains held.', tone: 'partial' },
+    { label: 'Installed', value: '5 of 5 refreshed', detail: 'Backend, bot, Stability Pool, AMM, and Analytics match.', tone: 'done' },
     { label: 'Recovery', value: 'Bounded', detail: 'Named durable inventories were queried and reconciled.', tone: 'partial' }
   ];
 
   const releaseRows = [
     { component: 'AMM', state: 'Refreshed', tone: 'installed', hash: '3a59c167…185e6', detail: 'PR #666 candidate installed; pool values and empty payout inventory preserved.' },
     { component: 'Analytics', state: 'Refreshed', tone: 'installed', hash: '704f6548…1f290', detail: 'PR #666 candidate installed; collector cursors and schedule preserved.' },
-    { component: 'Stability Pool', state: 'Held', tone: 'held', hash: '32cf7dac…cce', detail: 'The prior remediated build remains installed and healthy. Candidate d8385398…329e9 was not installed after two interrupted requests.' },
+    { component: 'Stability Pool', state: 'Refreshed', tone: 'installed', hash: 'd8385398…329e9', detail: 'PR #666 candidate installed after prior requests expired; depositor totals, credited recovery packets, invariants, and empty queried recovery queues were preserved.' },
     { component: 'Treasury', state: 'Installed', tone: 'installed', hash: '785adb02…c3832', detail: 'Exact candidate installed; balances preserved, backfill complete, and reporter set bound.' },
     { component: 'Protocol backend', state: 'Refreshed', tone: 'installed', hash: '59a64f78…44111', detail: 'PR #666 candidate installed; General Availability mode and zero protocol deficit preserved.' },
     { component: 'Liquidation bot', state: 'Refreshed', tone: 'installed', hash: '941cd13a…ab17a', detail: 'PR #666 candidate installed; journals and backend claim inventory were empty before processing resumed.' }
@@ -40,8 +40,7 @@
   const followThrough = [
     'Keep the legacy Stability Pool burn case held until exact authenticated archive proof exists.',
     'Preserve the 60 fail-closed Treasury tombstones for legacy rows that lack exact ledger provenance.',
-    'Complete the remaining Points source-to-build provenance record.',
-    'Install and read back the held Stability Pool dependency-refresh candidate only after the interrupted install path has an authoritative disposition.',
+    'Retain the partial Points source-to-build provenance classification unless stronger historical evidence is recovered.',
     'Exercise the published wallet-session protections with real extension account changes and multi-tab behavior.',
     'Continue periodic bounded inventory checks; an empty current queue is not proof that no unknown historical obligation exists.'
   ];
@@ -62,15 +61,15 @@
           <h1 id="report-title">Remediation merged.<br /><em>Rollout verified.</em></h1>
           <p class="lede">
             The accepted active-path remediation tranche and PR #666 are merged. The latest
-            dependency refresh is installed on the backend, bot, AMM, and Analytics, and the
-            wallet-session frontend is published. The Stability Pool refresh remains explicitly
-            held after interrupted install requests.
+            dependency refresh is installed and hash-matched on the backend, bot, Stability Pool,
+            AMM, and Analytics, and the wallet-session frontend is published. Historical cases
+            without exact proof remain explicitly held or fail-closed.
           </p>
         </div>
         <aside class="verdict">
           <span>Executive verdict</span>
-          <strong>Core remediation is live; one dependency refresh remains held.</strong>
-          <p>The prior remediated Stability Pool build remains healthy. Historical proof gaps remain held or fail-closed, and empty inventories are bounded evidence rather than proof that unknown obligations never existed.</p>
+          <strong>Core remediation and the dependency closure are live.</strong>
+          <p>All five refreshed canisters match their reviewed upload hashes. Historical proof gaps remain held or fail-closed, and empty inventories are bounded evidence rather than proof that unknown obligations never existed.</p>
           <a href="/security">Security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
@@ -99,7 +98,7 @@
     <div class="page-width section">
       <header class="section-heading wide">
         <p class="section-label">Production snapshot</p>
-        <h2 id="release-title">The merged tranche is live; PR #666 is four-fifths installed</h2>
+        <h2 id="release-title">The merged tranche and all five PR #666 refreshes are live</h2>
         <p>Module hashes were read through the management interface. Candidate hashes remain build evidence until the same bytes are observed in production.</p>
       </header>
       <ul class="release-table" aria-label="Production module status">

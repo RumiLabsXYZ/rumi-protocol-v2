@@ -89,14 +89,13 @@
           <div class="status-card-top">
             <span class="status-dot" aria-hidden="true"></span>
             <span>Release status</span>
-            <span class="status-label">One hold</span>
+            <span class="status-label">Installed</span>
           </div>
-          <h2 id="release-status-title">Core remediation live; one refresh held</h2>
+          <h2 id="release-status-title">Core remediation and dependency closure are live</h2>
           <p>
-            PRs #652–#662 and #666 are merged. The backend, liquidation bot, AMM, and Analytics
-            now run the PR #666 dependency-refresh candidates, and the wallet-session frontend is
-            published. The Stability Pool remains on its prior remediated module after two
-            interrupted refresh requests; its current state is healthy and no retry is being made.
+            PRs #652–#662 and #666 are merged. The backend, liquidation bot, Stability Pool, AMM,
+            and Analytics now run the PR #666 dependency-refresh candidates, and the wallet-session
+            frontend is published. Historical cases without exact proof remain held or fail-closed.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
@@ -119,7 +118,7 @@
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step live">
           <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Installed code</strong><span>Four dependency refreshes live; one held</span></div>
+          <div><strong>Installed code</strong><span>All five dependency refreshes hash-matched</span></div>
         </div>
       </div>
     </div>
@@ -157,11 +156,11 @@
       <article class="state-card state-live">
         <span class="state-icon" aria-hidden="true">⌁</span>
         <p class="state-label">Mainnet</p>
-        <h3>Four refreshed canisters are hash-matched</h3>
+        <h3>All five refreshed canisters are hash-matched</h3>
         <p>
-          Backend, bot, AMM, and Analytics match their verified PR #666 upload hashes. Treasury
-          remains on its installed remediation build, while Stability Pool remains on its prior
-          healthy remediated build pending disposition of interrupted refresh requests.
+          Backend, bot, Stability Pool, AMM, and Analytics match their verified PR #666 upload
+          hashes. Treasury remains on its installed remediation build. The Stability Pool state,
+          credited recovery packets, and queried pending queues were preserved across its refresh.
         </p>
       </article>
     </div>
@@ -176,8 +175,8 @@
       <h2 id="closure-report-title">Security remediation closure status</h2>
       <p class="report-description">
         Review the merged remediation tranche and PR #666, exact production module evidence,
-        bounded recovery inventories, wider 3pool/Points/Sentinel readbacks, and the single held
-        dependency refresh.
+        bounded recovery inventories, wider 3pool/Points/Sentinel readbacks, and the explicit
+        historical proof limitations that remain fail-closed.
       </p>
       <div class="report-links">
         <a href="/security/remediation-closure-2026-11-15">Read the closure status report <span aria-hidden="true">↗</span></a>

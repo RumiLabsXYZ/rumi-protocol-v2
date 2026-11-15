@@ -22,7 +22,7 @@
       "state": "Done",
       "owner": "Bram",
       "scope": "Verify Stability Pool recovery and current rails",
-      "evidenceText": "The reviewed candidate SHA-256 32cf7dac324e97d8a6d6ddef93902c89dee2bec93c5b51521cf10e260ba83cce is installed and running. The pool is open and internally consistent, all 237 staged interest packets remain credited, and the queried pending refund, unallocated-interest, chain-absorb, and active 3USD-conversion inventories are empty.",
+      "evidenceText": "The PR #666 dependency-refresh candidate SHA-256 d8385398e5b92ca26b029b6b76ab78d634f40ced65d1f0af5b991591332329e9 is installed and running. The pool remained open and internally consistent with 13 depositors, preserved deposit and interest totals, all 237 staged interest packets credited, and empty queried recovery queues.",
       "evidenceLinks": [
         {
           "title": "Stability Pool rails PR",
@@ -36,10 +36,10 @@
     },
     {
       "id": "SEC-02",
-      "state": "Review",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Reconcile accepted security findings",
-      "evidenceText": "A private row-level matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 and #666 are merged. Backend, bot, AMM and Analytics run the PR #666 dependency-refresh candidates with preserved state readbacks. The wallet-session frontend is published after 1,740 tests and the production build. Stability Pool remains on its prior healthy remediated module after two interrupted refresh requests; its candidate is built and hash-pinned, with no retry in flight. Remaining evidence work is the partial Points source-to-build chain, the held legacy archive-proof case, and 60 preserved Treasury tombstones.",
+      "evidenceText": "A private row-level matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 and #666 are merged. Backend, bot, Stability Pool, AMM and Analytics run the PR #666 dependency-refresh candidates with preserved state readbacks. The wallet-session frontend is published after 1,740 tests and the production build. Remaining limitations are explicitly classified rather than treated as active-path blockers: partial Points source-to-build provenance, one held legacy archive-proof case, 60 preserved Treasury tombstones, and unexecuted real-provider wallet assurance.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
@@ -62,18 +62,18 @@
     },
     {
       "id": "SEC-04",
-      "state": "Review",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Check 3pool payout and archive recovery",
-      "evidenceText": "A November 15 readback shows the source-bound October 23 3pool release running with zero pending claims and 561 retained donation receipts. No unprivileged path chooses the configured ledger or its advertised archive; the generic helper's residual assumption is trusted-ledger/archive hardening, not an active remote exploit. The separate legacy ambiguity remains held until positive authenticated evidence or a reviewed recovery route exists.",
+      "evidenceText": "A November 15 readback shows the source-bound October 23 3pool release running with zero pending claims and 561 retained donation receipts. No unprivileged path chooses the configured ledger or its advertised archive; the generic helper's residual assumption is trusted-ledger/archive hardening, not an active remote exploit. The safe disposition is to keep the separate legacy ambiguity held until positive authenticated evidence or a reviewed recovery route exists.",
       "evidenceLinks": []
     },
     {
       "id": "SEC-05",
-      "state": "Done",
+      "state": "Review",
       "owner": "Bram",
       "scope": "Refresh release and public security status",
-      "evidenceText": "PR #667 merged at 855958a4 and an asset-only sync published the current PR #666 rollout evidence. The custom-domain version token and both security-route bundle hashes exactly match the merged build. The page records four installed dependency refreshes, the published wallet-session frontend, the held Stability Pool refresh, bounded recovery evidence, 60 fail-closed Treasury tombstones, and remaining historical proof limits.",
+      "evidenceText": "The final November 15 closure update records all five installed PR #666 dependency refreshes, the published wallet-session frontend, bounded recovery evidence, 60 fail-closed Treasury tombstones, and remaining historical proof limits. Its homepage asset publication and exact served-bundle readback are still pending.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
