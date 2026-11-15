@@ -1,0 +1,69 @@
+name: RustSec audit
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "security/rustsec-policy.json"
+      - "scripts/check_rustsec_policy.py"
+      - ".github/workflows/rustsec-audit.yml"
+  schedule:
+    - cron: "23 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit Rust dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.23.0 --locked
+
+      - name: Capture complete RustSec inventory
+        id: inventory
+        shell: bash
+        run: |
+          set +e
+          cargo audit --json --file Cargo.lock > rustsec-audit.json
+          audit_status=$?
+          set -e
+          echo "audit_status=${audit_status}" >> "${GITHUB_OUTPUT}"
+          test -s rustsec-audit.json
+          if [[ "${audit_status}" != "0" && "${audit_status}" != "1" ]]; then
+            echo "cargo-audit failed before producing a usable result" >&2
+            exit "${audit_status}"
+          fi
+
+      - name: Apply reviewed RustSec policy
+        run: |
+          set +e
+          python3 scripts/check_rustsec_policy.py \
+            --audit rustsec-audit.json \
+            --policy security/rustsec-policy.json \
+            --summary rustsec-summary.md \
+            --report rustsec-policy-report.json
+          policy_status=$?
+          set -e
+          cat rustsec-summary.md >> "${GITHUB_STEP_SUMMARY}"
+          exit "${policy_status}"
+
+      - name: Preserve complete audit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rustsec-audit-${{ github.sha }}
+          path: |
+            rustsec-audit.json
+            rustsec-policy-report.json
+            rustsec-summary.md
+          if-no-files-found: error
+          retention-days: 30

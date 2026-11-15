@@ -8,6 +8,11 @@
   import { appDataStore, protocolStatus, isLoadingProtocol } from '$lib/stores/appDataStore';
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { protocolService } from '$lib/services/protocol';
+  import { captureActionBoundContext } from '$lib/services/protocol/walletOperations';
+  import { parseExactTokenAmount } from '$lib/services/stabilityPoolConversion';
+  import { parseIcusdAmountToE8s } from '$lib/services/protocol/apiClient';
+  import { vaultStore } from '$lib/stores/vaultStore';
+  import { runConfirmedActionRefresh } from '$lib/services/protocol/postActionRefresh';
   import { MINIMUM_CR, LIQUIDATION_CR } from '$lib/protocol';
   import { collateralStore, activeCollateralTypes } from '$lib/stores/collateralStore';
   import { newVaultCollateralTypes, isHiddenForNewVaults } from '$lib/utils/newVaultCollateralPolicy';
@@ -26,9 +31,12 @@
 
   let collateralAmount = 1;
   let icusdAmount = 5;
+  let collateralAmountInput = '1';
+  let icusdAmountInput = '5';
   let errorMessage = '';
   let recoveryOwner = '';
   let successMessage = '';
+  let refreshWarning = '';
   let actionInProgress = false;
   let showDevInput = false;
   let xrpBorrowIntent: {
@@ -151,7 +159,20 @@
   })();
 
   function setMaxCollateral() {
-    if (maxCollateral > 0) collateralAmount = Math.floor(maxCollateral * 10000) / 10000;
+    if (maxCollateral > 0) {
+      collateralAmount = Math.floor(maxCollateral * 10000) / 10000;
+      collateralAmountInput = String(collateralAmount);
+    }
+  }
+
+  function updateCollateralAmountInput(value: string) {
+    collateralAmountInput = value;
+    collateralAmount = value === '' ? 0 : Number(value);
+  }
+
+  function updateIcusdAmountInput(value: string) {
+    icusdAmountInput = value;
+    icusdAmount = value === '' ? 0 : Number(value);
   }
 
   // CR gauge zones (100–300% CR scale → 0–100% gauge)
@@ -201,7 +222,10 @@
   }
 
   function setMaxBorrow() {
-    if (maxBorrow > 0) icusdAmount = maxBorrow;
+    if (maxBorrow > 0) {
+      icusdAmount = maxBorrow;
+      icusdAmountInput = maxBorrow.toFixed(8).replace(/\.?0+$/, '');
+    }
   }
 
   onMount(() => {
@@ -257,23 +281,37 @@
       };
       return;
     }
-    actionInProgress = true; errorMessage = ''; successMessage = '';
+    actionInProgress = true; errorMessage = ''; successMessage = ''; refreshWarning = '';
     recoveryOwner = $principal?.toText() ?? '';
     try {
       // Compound: open vault + borrow in one backend call.
       // Oisy shows separate consent screens in its signer window for approval and the V2 call.
-      const result = await protocolService.openVaultAndBorrow(collateralAmount, icusdAmount, selectedCollateralPrincipal);
-
-      if (result.success) {
-        const vaultLabel = result.vaultId !== undefined ? `vault #${result.vaultId}` : 'vault';
-        successMessage = result.message
-          ? `Created ${vaultLabel}, but borrowing did not complete: ${result.message}`
-          : result.oisyResilient
-          ? `Submitted: created ${vaultLabel} and borrowed ${icusdAmount} icUSD. (Wallet glitch ignored — confirmed on-chain.)`
-          : `Successfully created ${vaultLabel} and borrowed ${icusdAmount} icUSD!`;
-        if ($principal) await appDataStore.refreshAll($principal);
+      const ctx = captureActionBoundContext($principal?.toText());
+      const collateralDecimals = selectedCollateralInfo?.decimals ?? 8;
+      const result = await protocolService.openVaultAndBorrowBound(
+        ctx,
+        parseExactTokenAmount(collateralAmountInput, collateralDecimals),
+        parseIcusdAmountToE8s(icusdAmountInput),
+        selectedCollateralPrincipal,
+      );
+      if (result.kind === 'dispatched_ok') {
+        const vaultLabel = result.vaultId !== null ? `vault #${result.vaultId}` : 'vault';
+        successMessage = `Successfully created ${vaultLabel} and borrowed ${icusdAmount} icUSD!`;
         collateralAmount = 1; icusdAmount = 5;
-      } else { errorMessage = result.error || 'Failed to create vault'; }
+        collateralAmountInput = '1'; icusdAmountInput = '5';
+        await runConfirmedActionRefresh('Vault creation and borrow', ctx, async () => {
+          await vaultStore.loadVaults(true, ctx);
+          if (!ctx.assertCurrent()) throw new Error('wallet session changed');
+          await Promise.all([
+            appDataStore.fetchProtocolStatus(true),
+            appDataStore.fetchCollateralTotals(true),
+          ]);
+        }, (message) => { refreshWarning = message; });
+      } else if (!ctx.assertCurrent()) {
+        errorMessage = result.kind === 'ambiguous_transport'
+          ? 'Vault creation may have been submitted, but this wallet session changed. Reconnect the submitting wallet and check vault status before considering another submission.'
+          : 'The vault action did not report success and the wallet session changed. Reconnect the submitting wallet and check status before trying again.';
+      } else { errorMessage = result.errorMessage || 'Failed to create vault'; }
     } catch (error) {
       console.error('Error creating vault:', error);
       errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -287,9 +325,15 @@
       ? `Submitted: created ${vaultLabel} and borrowed ${intent?.icusdAmount ?? icusdAmount} icUSD. (Wallet glitch ignored — confirmed on-chain.)`
       : `Successfully created ${vaultLabel} and borrowed ${intent?.icusdAmount ?? icusdAmount} icUSD!`;
     xrpBorrowIntent = null;
-    if ($principal) await appDataStore.refreshAll($principal);
+    try {
+      const ctx = captureActionBoundContext($principal?.toText());
+      await vaultStore.loadVaults(true, ctx);
+    } catch (error) {
+      console.warn('Skipping stale post-XRP vault refresh:', error);
+    }
     collateralAmount = 1;
     icusdAmount = 5;
+    collateralAmountInput = '1'; icusdAmountInput = '5';
   }
 </script>
 
@@ -320,7 +364,8 @@
                 {/if}
               </div>
               <div class="input-wrap">
-                <input id="collateral-amount" type="number" bind:value={collateralAmount} min="0" step="0.01"
+                <input id="collateral-amount" type="text" inputmode="decimal" value={collateralAmountInput}
+                  on:input={(event) => updateCollateralAmountInput((event.currentTarget as HTMLInputElement).value)}
                   class="icp-input form-input" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
                 <button class="token-selector"
                   disabled={xrpBorrowFlowActive}
@@ -350,7 +395,8 @@
             <div class="form-field">
               <label for="icusd-amount" class="form-label">icUSD to Borrow</label>
               <div class="input-wrap">
-                <input id="icusd-amount" type="number" bind:value={icusdAmount} min="0" step="0.01"
+                <input id="icusd-amount" type="text" inputmode="decimal" value={icusdAmountInput}
+                  on:input={(event) => updateIcusdAmountInput((event.currentTarget as HTMLInputElement).value)}
                   class="icp-input form-input form-input-with-max" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
                 <div class="input-suffix-group">
                   {#if maxBorrow > 0}
@@ -416,6 +462,7 @@
               </div>
             {/if}
             {#if successMessage}<div class="msg-success">{successMessage}</div>{/if}
+            {#if refreshWarning}<div class="msg-info" role="status">{refreshWarning}</div>{/if}
 
             {#if $earningActive}
               <div class="points-hint">
@@ -576,6 +623,7 @@
   /* Messages */
   .msg-error { padding: 0.625rem; background: rgba(224,107,159,0.1); border: 1px solid rgba(224,107,159,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #e881a8; }
   .msg-success { padding: 0.625rem; background: rgba(45,212,191,0.1); border: 1px solid rgba(45,212,191,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #5eead4; }
+  .msg-info { padding: 0.625rem; background: rgba(96,165,250,0.1); border: 1px solid rgba(96,165,250,0.2); border-radius: 0.5rem; font-size: 0.8125rem; color: #93c5fd; }
 
   /* CTA */
   .cta-button { width: 100%; padding: 0.75rem; }

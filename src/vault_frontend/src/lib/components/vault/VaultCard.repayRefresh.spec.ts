@@ -20,11 +20,14 @@ vi.mock('../../stores/seasonStore', async () => {
   const {writable}=await import('svelte/store');
   return {seasonStore:{ensureLoaded:()=>{}},earningActive:writable(false)};
 });
-vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:500000000}),addMarginToVault:fx.add}}));
+vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:500000000}),addMarginToVaultBound:fx.add}}));
 vi.mock('../../services/ProtocolManager', () => ({protocolManager:{repayToVault:fx.repay,repayAndCloseVault:fx.close}}));
 vi.mock('../../services/protocol/apiClient', () => ({ApiClient:{getVaultInterestRate:async()=>0}}));
 vi.mock('../../services/tokenService', () => ({TokenService:{getTokenBalance:async()=>0n}}));
-vi.mock('../../config', () => ({CANISTER_IDS:{ICP_LEDGER:'ryjl3-tyaaa-aaaaa-aaaba-cai'}}));
+vi.mock('../../config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../config')>();
+  return { ...actual, CANISTER_IDS: { ...actual.CANISTER_IDS, ICP_LEDGER: 'ryjl3-tyaaa-aaaaa-aaaba-cai' } };
+});
 vi.mock('$lib/protocol', () => ({MINIMUM_CR:1.5,LIQUIDATION_CR:1.33,E8S:100000000,getMinimumCR:()=>1.5,getLiquidationCR:()=>1.33}));
 vi.mock('../points/MultiplierBadge.svelte',async()=>({default:(await import('../../../tests/vault-recovery-fixtures/Quiet.svelte')).default}));
 vi.mock('./XrpExistingDeposit.svelte',async()=>({default:(await import('../../../tests/vault-recovery-fixtures/Quiet.svelte')).default}));
@@ -122,7 +125,7 @@ async function deposit(){
 it('opens the Oisy channel in the top-up click before starting the requested deposit',async()=>{
  currentWalletType.set('oisy');await show();const button=await deposit();expect(button.disabled).toBe(false);
  button.click();await tick();await tick();
- expect(fx.openChannel).toHaveBeenCalledOnce();expect(fx.add).toHaveBeenCalledWith(33,13.01909,base.collateralType);
+ expect(fx.openChannel).toHaveBeenCalledOnce();expect(fx.add).toHaveBeenCalledWith(expect.objectContaining({expectedPrincipalText:expect.any(String),assertCurrent:expect.any(Function)}),33,1_301_909_000n,base.collateralType);
  expect(fx.openChannel.mock.invocationCallOrder[0]).toBeLessThan(fx.add.mock.invocationCallOrder[0]);
  expect(target.textContent).not.toContain('Depositing collateral is temporarily paused');
 });

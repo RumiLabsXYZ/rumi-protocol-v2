@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { Principal } from '@dfinity/principal';
   import QRCode from 'qrcode';
   import { walletStore, isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
@@ -9,7 +10,7 @@
   import type { ActionBoundContext } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { CANISTER_IDS, CONFIG } from '$lib/config';
-  import { WALLET_TYPES } from '$lib/services/auth';
+  import { WALLET_TYPES, walletSessionGeneration } from '$lib/services/auth';
   import { getPublicMinterActor, updateDogeBalanceForOwner } from '$lib/services/ckdogeMinterActors';
   import { formatNumber, formatAddress } from '$lib/utils/format';
   import {
@@ -99,8 +100,9 @@
   let destroyed = false;
 
   // Bumped on EVERY principal-store transition (handlePrincipalChanged), including a
-  // disconnect-then-reconnect of the SAME account. A mutating action captures this
-  // alongside the principal text at entry; if either changes before its post-await
+  // disconnect-then-reconnect of the SAME account. Each action also captures the shared
+  // auth walletSessionGeneration, which can change while principal text stays identical.
+  // If either generation or the principal changes before its post-await
   // continuation runs, the continuation must not write into the (now different) live
   // intent/outcome — it preserves its own captured account's record directly in storage.
   let sessionGeneration = 0;
@@ -109,15 +111,16 @@
     return p ? p.toText() : null;
   }
 
-  function captureSession(): { principalText: string | null; generation: number } {
-    return { principalText: ownerPrincipalText, generation: sessionGeneration };
+  function captureSession(): { principalText: string | null; generation: number; walletGeneration: number } {
+    return { principalText: ownerPrincipalText, generation: sessionGeneration, walletGeneration: get(walletSessionGeneration) };
   }
 
-  function isSessionStillLive(captured: { principalText: string | null; generation: number }): boolean {
-    return isStillLiveSession(captured, { principalText: ownerPrincipalText, generation: sessionGeneration });
+  function isSessionStillLive(captured: { principalText: string | null; generation: number; walletGeneration: number }): boolean {
+    return captured.walletGeneration === get(walletSessionGeneration) &&
+      isStillLiveSession(captured, { principalText: ownerPrincipalText, generation: sessionGeneration });
   }
 
-  function isLiveIntentSession(captured: { principalText: string | null; generation: number }, lineage: number): boolean {
+  function isLiveIntentSession(captured: { principalText: string | null; generation: number; walletGeneration: number }, lineage: number): boolean {
     return isSessionStillLive(captured) && intent?.createdAt === lineage;
   }
 
@@ -261,7 +264,7 @@
   let pollingStopped = false;
   let pollFatalMessage = '';
   let pollingPrincipal: Principal | null = null;
-  let pollingSession: { principalText: string | null; generation: number } | null = null;
+  let pollingSession: { principalText: string | null; generation: number; walletGeneration: number } | null = null;
   let pollingLineage: number | null = null;
   let useAvailableBalanceOptIn = false;
 
@@ -310,7 +313,7 @@
     const requestPrincipal = ownerPrincipal;
     const requestSession = captureSession();
     const requestLineage = intent?.createdAt ?? null;
-    const isLive = () => !destroyed && isStillLiveSession(requestSession, captureSession()) &&
+    const isLive = () => !destroyed && isSessionStillLive(requestSession) &&
       principalKey(ownerPrincipal) === sessionKey && step === 'send' &&
       (requestLineage === null || intent?.createdAt === requestLineage);
 
@@ -352,10 +355,10 @@
 
   async function generateQr(
     address: string,
-    capturedSession: { principalText: string | null; generation: number },
+    capturedSession: { principalText: string | null; generation: number; walletGeneration: number },
     capturedLineage: number | null
   ) {
-    const isQrLive = () => !destroyed && isStillLiveSession(capturedSession, captureSession()) &&
+    const isQrLive = () => !destroyed && isSessionStillLive(capturedSession) &&
       step === 'send' && (capturedLineage === null || intent?.createdAt === capturedLineage) && depositAddress === address;
     try {
       const dataUrl = await QRCode.toDataURL(address, {
@@ -418,14 +421,14 @@
 
   function isPollSessionLive(
     sessionPrincipal: Principal,
-    capturedSession: { principalText: string | null; generation: number } | null = pollingSession,
+    capturedSession: { principalText: string | null; generation: number; walletGeneration: number } | null = pollingSession,
     capturedLineage: number | null = pollingLineage
   ): boolean {
     return (
       !destroyed &&
       isPolling &&
       !!capturedSession &&
-      isStillLiveSession(capturedSession, captureSession()) &&
+      isSessionStillLive(capturedSession) &&
       (capturedLineage === null || intent?.createdAt === capturedLineage) &&
       pollingPrincipal !== null &&
       pollingPrincipal.toText() === sessionPrincipal.toText() &&
@@ -550,7 +553,7 @@
     const refreshSession = captureSession();
     const refreshLineage = intent?.createdAt ?? null;
     const isCurrentRefresh = () => !destroyed && refreshToken === finalTermsRefreshToken &&
-      isStillLiveSession(refreshSession, captureSession()) && step === 'confirm' &&
+      isSessionStillLive(refreshSession) && step === 'confirm' &&
       intent?.createdAt === refreshLineage;
 
     finalTermsLoaded = false;
@@ -797,7 +800,7 @@
       if (classified.kind === 'success') {
         clearObsoleteTokenFundsError();
         step = 'done';
-        void appDataStore.refreshAll(actionOwner).catch(() => {});
+        void appDataStore.refreshAll(actionOwner, { assertCurrent: () => isSessionStillLive(session) }).catch(() => {});
       } else {
         confirmError = approvalMayHaveMutated
           ? `${classified.message} (A token approval step may have gone through even though nothing was borrowed.)`
@@ -836,7 +839,7 @@
         if (finalOutcome.kind === 'success') {
           clearObsoleteTokenFundsError();
           step = 'done';
-          void appDataStore.refreshAll(actionOwner).catch(() => {});
+          void appDataStore.refreshAll(actionOwner, { assertCurrent: () => isSessionStillLive(session) }).catch(() => {});
         } else {
           confirmError = finalOutcome.message;
         }
@@ -1014,7 +1017,7 @@
         if (reclassified.kind === 'success') {
           clearObsoleteTokenFundsError();
           step = 'done';
-          void appDataStore.refreshAll(actionOwner).catch(() => {});
+          void appDataStore.refreshAll(actionOwner, { assertCurrent: () => isSessionStillLive(session) }).catch(() => {});
         }
       } else {
         saveIntentIfSameLineage(localStorage, resolvedIntent, Date.now(), NETWORK_SCOPE);
@@ -1088,7 +1091,7 @@
   async function reconcileForPrincipal(key: string, capturedSession = captureSession()) {
     const now = Date.now();
     const loaded = loadIntent(localStorage, key, now, NETWORK_SCOPE);
-    if (!isStillLiveSession(capturedSession, captureSession())) return;
+    if (!isSessionStillLive(capturedSession)) return;
     if (!loaded) {
       // A reconcile started before this tab created its first intent must not erase that newer
       // in-memory draft when its empty read finally returns.
@@ -1113,7 +1116,7 @@
     if (needsReconcile && ownerPrincipal) {
       try {
         const vaults = await fetchVaultLites(ownerPrincipal);
-        if (!isStillLiveSession(capturedSession, captureSession()) || !isStillSamePrincipal(key, principalKey(ownerPrincipal))) return;
+        if (!isSessionStillLive(capturedSession) || !isStillSamePrincipal(key, principalKey(ownerPrincipal))) return;
         if (intent && intent.createdAt !== loaded.createdAt) return;
         let classified = classifyRecheckOutcome({
           knownVaultId: loaded.vaultId,
@@ -1298,7 +1301,11 @@
     <PendingBorrowMintRecovery
       principalText={ownerPrincipalText}
       refreshToken={pendingBorrowRefreshToken}
-      onResolved={() => ownerPrincipal && appDataStore.refreshAll(ownerPrincipal).catch(() => {})}
+      onResolved={() => {
+        const owner = ownerPrincipal;
+        const session = captureSession();
+        return owner && appDataStore.refreshAll(owner, { assertCurrent: () => isSessionStillLive(session) }).catch(() => {});
+      }}
     />
     {#if step === 'choose'}
       <div class="dbw-row dbw-row--annotated">

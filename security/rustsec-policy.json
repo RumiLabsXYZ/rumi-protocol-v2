@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "reviewed_at": "2026-11-15",
+  "accepted": [
+    {
+      "kind": "vulnerability",
+      "package": "crypto-bigint",
+      "version": "0.5.5",
+      "advisory_ids": ["RUSTSEC-2026-0387"],
+      "scope": "production-public-key-only",
+      "rationale": "Rumi runtime use is public-key derivation and signature recovery or verification; secret signing is performed by the ICP management canister. The advisory's secret-dependent operations are not used by production source. A k256 major upgrade remains separately tracked.",
+      "evidence": "src/rumi_protocol_backend/src/chains/evm/tx.rs, eip712.rs, and tecdsa.rs",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "vulnerability",
+      "package": "rkyv",
+      "version": "0.7.45",
+      "advisory_ids": ["RUSTSEC-2026-0001", "RUSTSEC-2026-0235"],
+      "scope": "disabled-optional-feature",
+      "rationale": "rkyv is retained in Cargo.lock only as an optional rust_decimal dependency. Rumi does not enable rust_decimal's rkyv or rkyv-safe features, and rkyv is absent from production wasm32 normal/build dependency trees.",
+      "evidence": "rust_decimal 1.36 feature metadata and cargo tree --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "unmaintained",
+      "package": "bincode",
+      "version": "1.3.3",
+      "advisory_ids": ["RUSTSEC-2025-0141"],
+      "scope": "production-transitive",
+      "rationale": "Inherited through pinned ICP types. This is a maintenance notice, not a vulnerability; migration requires coordinated ICP dependency work.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "unmaintained",
+      "package": "paste",
+      "version": "1.0.15",
+      "advisory_ids": ["RUSTSEC-2024-0436"],
+      "scope": "production-build-time",
+      "rationale": "Transitive proc-macro dependency through Candid. This is a maintenance notice, not a runtime vulnerability.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "unmaintained",
+      "package": "pin-utils",
+      "version": "0.1.0",
+      "advisory_ids": ["RUSTSEC-2026-0441"],
+      "scope": "production-transitive",
+      "rationale": "Inherited through futures. This is a maintenance notice with no published vulnerability.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "unmaintained",
+      "package": "rustls-pemfile",
+      "version": "2.2.0",
+      "advisory_ids": ["RUSTSEC-2025-0134"],
+      "scope": "host-dev-only",
+      "rationale": "Absent from production wasm32 normal/build trees. This is a maintenance notice, not a vulnerability.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "unmaintained",
+      "package": "serde_cbor",
+      "version": "0.11.2",
+      "advisory_ids": ["RUSTSEC-2021-0127"],
+      "scope": "production-transitive",
+      "rationale": "Inherited through pinned ICP types. This is a maintenance notice, not a vulnerability; migration requires coordinated ICP dependency work.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "yanked",
+      "package": "ic-cdk",
+      "version": "0.12.2",
+      "advisory_ids": [""],
+      "scope": "production-transitive",
+      "rationale": "Yanked package warning without a RustSec vulnerability. A CDK migration is broad API work and is tracked as dependency debt.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "yanked",
+      "package": "ic-cdk",
+      "version": "0.16.0",
+      "advisory_ids": [""],
+      "scope": "production-direct",
+      "rationale": "Yanked package warning without a RustSec vulnerability. A CDK migration is broad API work and is tracked as dependency debt.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "yanked",
+      "package": "ic-cdk-timers",
+      "version": "0.7.0",
+      "advisory_ids": [""],
+      "scope": "production-transitive",
+      "rationale": "Yanked package warning without a RustSec vulnerability. A CDK migration is broad API work and is tracked as dependency debt.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    },
+    {
+      "kind": "yanked",
+      "package": "ic-cdk-timers",
+      "version": "0.10.0",
+      "advisory_ids": [""],
+      "scope": "production-direct",
+      "rationale": "Yanked package warning without a RustSec vulnerability. A CDK migration is broad API work and is tracked as dependency debt.",
+      "evidence": "cargo tree --workspace --target wasm32-unknown-unknown -e normal,build",
+      "expires": "2027-02-15"
+    }
+  ]
+}

@@ -39,7 +39,7 @@
       "state": "Review",
       "owner": "Bram",
       "scope": "Reconcile accepted security findings",
-      "evidenceText": "A private row-level matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 are merged and all six exact reviewed candidates are installed and running. Remaining evidence work is bounded to exact Points and Cycle Sentinel source-byte provenance, exact mapping for several older September rows, the held archive-proof case, and preservation of 60 Treasury legacy tombstones.",
+      "evidenceText": "A private row-level matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 are merged and all six exact reviewed candidates are installed and running. Cycle Sentinel now has an exact source, production-artifact, and live-hash chain. The closure branch updates vulnerable bytes 1.9.0 to 1.11.1 and passes affected Wasm checks, but rebuilt installation and readback remain. Its wallet-session and exact-amount frontend fixes pass all 1,728 frontend tests and the production build, but are not yet merged or published. Other evidence work is the partial Points source-to-build chain, the held legacy archive-proof case, and 60 preserved Treasury tombstones.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
@@ -65,7 +65,7 @@
       "state": "Review",
       "owner": "Bram",
       "scope": "Check 3pool payout and archive recovery",
-      "evidenceText": "A November 15 readback shows the source-bound October 23 3pool release running with zero pending claims and 561 retained donation receipts. The archive-proof liveness question remains separate: keep ambiguous outcomes held until positive certified evidence or a reviewed recovery route exists.",
+      "evidenceText": "A November 15 readback shows the source-bound October 23 3pool release running with zero pending claims and 561 retained donation receipts. No unprivileged path chooses the configured ledger or its advertised archive; the generic helper's residual assumption is trusted-ledger/archive hardening, not an active remote exploit. The separate legacy ambiguity remains held until positive authenticated evidence or a reviewed recovery route exists.",
       "evidenceLinks": []
     },
     {
@@ -73,7 +73,7 @@
       "state": "Done",
       "owner": "Bram",
       "scope": "Refresh release and public security status",
-      "evidenceText": "PR #663 merged at 9da6444e and an assets-only sync published the dated closure page. A follow-up correction records the completed six-canister rollout, exact installed hashes, bounded recovery evidence, 60 fail-closed Treasury tombstones, and the remaining historical proof limits.",
+      "evidenceText": "PR #663 merged at 9da6444e and an assets-only sync published the dated closure page. PR #665 merged at fd39518d; its live readback records the completed six-canister rollout, exact installed hashes, bounded recovery evidence, 60 fail-closed Treasury tombstones, and the remaining historical proof limits.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
@@ -82,6 +82,10 @@
         {
           "title": "Security closure status PR #663",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/663"
+        },
+        {
+          "title": "Completed rollout correction PR #665",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/665"
         }
       ]
     },

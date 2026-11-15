@@ -6,6 +6,16 @@ import { BigIntUtils } from '../utils/bigintUtils';
 import { collateralStore } from './collateralStore';
 import { CANISTER_IDS } from '../config';
 import type { VaultDTO } from '../services/types';
+import type { ActionBoundContext } from '../services/protocol';
+import { StaleActionSessionError } from '../services/protocol';
+
+function assertBoundSession(ctx?: ActionBoundContext): void {
+  if (!ctx) return;
+  const wallet = get(walletStore);
+  if (!ctx.assertCurrent() || wallet.principal?.toText() !== ctx.expectedPrincipalText) {
+    throw new StaleActionSessionError('Wallet session changed while refreshing vault data. The prior wallet result was discarded.');
+  }
+}
 
 // Define enhanced vault type with additional calculated properties
 export interface EnhancedVault {
@@ -57,6 +67,9 @@ function createVaultStore() {
   let lastFetchTime = 0;
   // Cache time in milliseconds (5 seconds)
   const CACHE_DURATION = 5000;
+  // A stale request may clear only its own loading indicator. A newer load owns
+  // a newer generation and cannot be affected by an older session's finally.
+  let loadGeneration = 0;
 
   return {
     subscribe,
@@ -65,28 +78,42 @@ function createVaultStore() {
      * Refresh all vaults data with the latest from backend
      * This is the primary method to call when you need fresh data
      */
-        async refreshVaults(): Promise<EnhancedVault[]> {
+        async refreshVaults(ctx?: ActionBoundContext): Promise<EnhancedVault[]> {
           // Force a true refresh by ignoring cache
-          return this.loadVaults(true);
+          return this.loadVaults(true, ctx);
         },
     
         /**
          * Update a vault after an operation
          * This method ensures the UI components update properly
          */
-        async refreshVault(vaultId: number): Promise<EnhancedVault | null> {
+        async refreshVault(vaultId: number, ctx?: ActionBoundContext): Promise<EnhancedVault | null> {
           try {
+            assertBoundSession(ctx);
             // Get fresh data from backend for this specific vault
             const vaultData = await protocolService.getVaultById(vaultId);
+            assertBoundSession(ctx);
             
             if (!vaultData) {
               // Vault might have been closed - remove it from the store
-              this.removeVault(vaultId);
+              if (ctx) {
+                update(state => {
+                  assertBoundSession(ctx);
+                  const vaults = state.vaults.filter(v => v.vaultId !== vaultId);
+                  this.saveToLocalStorage(vaults, state.pendingTransfers);
+                  return { ...state, vaults };
+                });
+                assertBoundSession(ctx);
+                this.notifyVaultListChanged();
+              } else {
+                this.removeVault(vaultId);
+              }
               return null;
             }
             
             // Get current ICP price
             const protocolStatus = await protocolService.getProtocolStatus();
+            assertBoundSession(ctx);
             const icpPrice = protocolStatus.lastIcpRate;
             
             // Enhance the vault with derived values
@@ -94,6 +121,7 @@ function createVaultStore() {
             
             // Update the store with this new vault data
             update(state => {
+              assertBoundSession(ctx);
               const index = state.vaults.findIndex(v => v.vaultId === vaultId);
               const updatedVaults = [...state.vaults];
               
@@ -117,15 +145,17 @@ function createVaultStore() {
             
             return enhancedVault;
           } catch (err) {
+            if (err instanceof StaleActionSessionError) throw err;
             console.error(`Error refreshing vault #${vaultId}:`, err);
-            return null;
+            throw err;
           }
         },
     
     /**
      * Load vaults for the currently connected wallet with caching
      */
-    async loadVaults(forceRefresh = false) {
+    async loadVaults(forceRefresh = false, ctx?: ActionBoundContext) {
+      assertBoundSession(ctx);
       const walletState = get(walletStore);
       if (!walletState.isConnected || !walletState.principal) {
         update(state => ({ ...state, error: 'Wallet not connected' }));
@@ -143,13 +173,22 @@ function createVaultStore() {
       }
       
       // Otherwise fetch fresh data
+      const requestGeneration = ++loadGeneration;
+      const assertRequestCurrent = () => {
+        assertBoundSession(ctx);
+        if (requestGeneration !== loadGeneration) {
+          throw new StaleActionSessionError('A newer vault refresh superseded this response.');
+        }
+      };
       update(state => ({ ...state, isLoading: true, error: null }));
       
       try {
         console.log('Fetching fresh vaults data at', new Date().toLocaleTimeString());
         const protocolStatus = await protocolService.getProtocolStatus();
+        assertRequestCurrent();
         // Explicitly exclude empty vaults when loading
         const vaults = await protocolService.getUserVaults(true); // Changed to true to force backend refresh
+        assertRequestCurrent();
         
         const icpPrice = protocolStatus.lastIcpRate;
         
@@ -162,39 +201,67 @@ function createVaultStore() {
           })
           .map(vault => this.enhanceVault(vault, icpPrice));
         
-        update(state => ({
-          ...state,
-          vaults: enhancedVaults,
-          lastUpdated: currentTime,
-          isLoading: false
-        }));
+        update(state => {
+          assertRequestCurrent();
+          return {
+            ...state,
+            vaults: enhancedVaults,
+            lastUpdated: currentTime,
+            isLoading: false
+          };
+        });
         
         // Update successful fetch timestamp
+        assertRequestCurrent();
         lastFetchTime = currentTime;
         
         // Cache data
+        assertRequestCurrent();
         this.saveToLocalStorage(enhancedVaults, get({ subscribe }).pendingTransfers);
         
         // Explicitly notify UI components that vault data has changed
+        assertRequestCurrent();
         this.notifyVaultListChanged();
         
         return enhancedVaults;
       } catch (error) {
+        // An old request's transport error is stale too: it must not publish an
+        // error or cached rows over a newer wallet's in-flight refresh.
+        let stale = error instanceof StaleActionSessionError;
+        if (!stale) {
+          try { assertRequestCurrent(); }
+          catch { stale = true; }
+        }
+        if (stale) {
+          update(state => requestGeneration === loadGeneration
+            ? { ...state, isLoading: false }
+            : state);
+          throw error instanceof StaleActionSessionError
+            ? error
+            : new StaleActionSessionError('The vault refresh ended after its wallet session or request changed.');
+        }
         console.error('Error loading vaults:', error);
-        update(state => ({
-          ...state,
-          error: error instanceof Error ? error.message : 'Failed to load vaults',
-          isLoading: false
-        }));
+        update(state => {
+          assertRequestCurrent();
+          return {
+            ...state,
+            error: error instanceof Error ? error.message : 'Failed to load vaults',
+            isLoading: false
+          };
+        });
         
         // Try to load from cache if available
+        assertRequestCurrent();
         const cachedVaults = this.loadCachedVaults();
         if (cachedVaults.length > 0) {
-          update(state => ({
-            ...state,
-            vaults: cachedVaults,
-            error: 'Using cached data - unable to fetch latest',
-          }));
+          update(state => {
+            assertRequestCurrent();
+            return {
+              ...state,
+              vaults: cachedVaults,
+              error: 'Using cached data - unable to fetch latest',
+            };
+          });
           return cachedVaults;
         }
         
@@ -279,9 +346,9 @@ function createVaultStore() {
     /**
      * Get a specific vault by ID with option to force refresh from backend
      */
-    async getVault(vaultId: number, forceRefresh = false): Promise<EnhancedVault | null> {
+    async getVault(vaultId: number, forceRefresh = false, ctx?: ActionBoundContext): Promise<EnhancedVault | null> {
       if (forceRefresh) {
-        return this.refreshVault(vaultId);
+        return this.refreshVault(vaultId, ctx);
       }
       
       const state = get({ subscribe });
@@ -292,7 +359,7 @@ function createVaultStore() {
       
       // If not found, try to load all vaults
       try {
-        const vaults = await this.loadVaults();
+        const vaults = await this.loadVaults(false, ctx);
         return vaults.find(v => v.vaultId === vaultId) || null;
       } catch (error) {
         console.error(`Failed to get vault #${vaultId}:`, error);

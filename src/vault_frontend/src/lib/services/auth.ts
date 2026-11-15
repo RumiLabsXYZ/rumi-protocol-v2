@@ -10,6 +10,7 @@ import { Principal } from '@dfinity/principal';
 import { AuthClient } from '@dfinity/auth-client';
 import { HttpAgent } from '@dfinity/agent';
 import { clearOisySigner } from './oisySigner';
+import { notifyWalletSessionTransition } from './walletSessionTransitions';
 
 // Storage keys for persistence
 const STORAGE_KEYS = {
@@ -37,7 +38,9 @@ export const currentWalletType = writable<WalletType | null>(null);
 export const walletSessionGeneration = writable(0);
 
 export function beginWalletSessionTransition(): void {
-  walletSessionGeneration.update((generation) => generation + 1);
+  const generation = get(walletSessionGeneration) + 1;
+  walletSessionGeneration.set(generation);
+  notifyWalletSessionTransition(generation);
 }
 
 // Type definition for auth state

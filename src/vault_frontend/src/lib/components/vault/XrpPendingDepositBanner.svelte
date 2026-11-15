@@ -3,6 +3,8 @@
   import { browser } from '$app/environment';
   import { appDataStore } from '$lib/stores/appDataStore';
   import { walletStore } from '$lib/stores/wallet';
+  import { captureActionBoundContext } from '$lib/services/protocol/walletOperations';
+  import type { ActionBoundContext } from '$lib/services/protocol/walletOperations';
   import {
     XRP_PENDING_DEPOSITS_CHANGED,
     XrpVaultService,
@@ -62,6 +64,14 @@
     confirmingVaultId = vaultId;
     lastError = '';
     try {
+      const owner = $walletStore.principal;
+      let refreshContext: ActionBoundContext | null = null;
+      try {
+        if (owner) refreshContext = captureActionBoundContext(owner.toText());
+      } catch {
+        // The confirmation flow may still complete, but without a live wallet
+        // context its user-specific refresh must not write into a later session.
+      }
       const res = await XrpVaultService.confirmXrpDeposit(vaultId);
       if (res.success) {
         const credited = res.data ? dropsToXrp(res.data.creditedDrops) : 0;
@@ -71,7 +81,7 @@
             : 'XRP deposit confirmed'
         );
         await refreshPending();
-        if ($walletStore.principal) await appDataStore.refreshAll($walletStore.principal);
+        if (owner && refreshContext) await appDataStore.refreshAll(owner, refreshContext);
       } else {
         lastError = res.error ?? 'Deposit not confirmed yet. If the XRP just landed, wait a moment and retry.';
       }

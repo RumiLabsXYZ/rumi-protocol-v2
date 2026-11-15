@@ -1259,6 +1259,68 @@ static async borrowFromVaultBound(
   return ApiClient.borrowFromVaultBoundInternal(ctx, vaultId, icusdAmountRaw, false);
 }
 
+  /** Bound legacy partial-withdraw call. The wallet context is checked after actor
+   * creation and immediately before dispatch, so a stale UI cannot submit under a
+   * newly selected session. */
+  static async withdrawPartialCollateralBound(
+    ctx: ActionBoundContext,
+    vaultId: number | bigint,
+    collateralAmountRaw: bigint,
+  ): Promise<VaultOperationResult> {
+    let dispatchAttempted = false;
+    try {
+      if (collateralAmountRaw <= 0n) throw new Error('Withdrawal amount must be positive.');
+      assertActionBoundContextCurrent(ctx);
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      dispatchAttempted = true;
+      const result = await actor.withdraw_partial_collateral({ vault_id: BigInt(vaultId), amount: collateralAmountRaw });
+      if ('Err' in result) return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+      return {
+        success: true,
+        vaultId: Number(vaultId),
+        blockIndex: Number(result.Ok),
+        ...(ctx.assertCurrent() ? {} : { message: 'Withdrawal confirmed for the previous wallet session. Reconnect that wallet to refresh its vault.' }),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: dispatchAttempted
+          ? 'Withdrawal submission outcome is uncertain. Refresh this vault under the initiating wallet before retrying.'
+          : error instanceof Error ? error.message : 'Withdrawal failed.',
+      };
+    }
+  }
+
+  /** Bound legacy withdraw-and-close call, pinned to the vault owner's session. */
+  static async withdrawCollateralAndCloseVaultBound(
+    ctx: ActionBoundContext,
+    vaultId: number | bigint,
+  ): Promise<VaultOperationResult> {
+    let dispatchAttempted = false;
+    try {
+      assertActionBoundContextCurrent(ctx);
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      dispatchAttempted = true;
+      const result = await actor.withdraw_and_close_vault(BigInt(vaultId));
+      if ('Err' in result) return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+      return {
+        success: true,
+        vaultId: Number(vaultId),
+        blockIndex: result.Ok.length > 0 ? Number(result.Ok[0]) : undefined,
+        ...(ctx.assertCurrent() ? {} : { message: 'Vault closure confirmed for the previous wallet session. Reconnect that wallet to refresh its vault.' }),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: dispatchAttempted
+          ? 'Vault close submission outcome is uncertain. Refresh this vault under the initiating wallet before retrying.'
+          : error instanceof Error ? error.message : 'Vault closure failed.',
+      };
+    }
+  }
+
 /** Exact-journal retry: backend owner/amount checks are authoritative, so
  * changed client-side minimums or CR calculations cannot strand a reservation. */
 static async retryPendingBorrowMintBound(
@@ -1398,6 +1460,60 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error adding margin' };
     }
   }, vaultId, { refreshBefore: false, refreshAfter: true });
+}
+
+/**
+ * Exact, session-bound Add Margin path for UI callers. `amountRaw` is already
+ * parsed from the user's original decimal string using the verified token
+ * precision; it must never make a round trip through Number or floor().
+ */
+static async addMarginToVaultBound(
+  ctx: ActionBoundContext,
+  vaultId: number,
+  amountRaw: bigint,
+  collateralTypePrincipal: string,
+): Promise<VaultOperationResult> {
+  if (!isVaultAddMarginV2Enabled()) {
+    return { success: false, error: 'Adding collateral is temporarily paused. No approval or transfer was started.' };
+  }
+
+  return ApiClient.executeSequentialOperation(async () => {
+    try {
+      assertActionBoundContextCurrent(ctx);
+      if (!Number.isSafeInteger(vaultId) || vaultId < 0 || amountRaw <= 0n) {
+        return { success: false, error: 'Vault ID and collateral amount must be valid positive values.' };
+      }
+      if (!collateralTypePrincipal) {
+        return { success: false, error: 'Collateral type could not be verified. No approval or transfer was started.' };
+      }
+      const collateralInfo = collateralStore.getCollateralInfo(collateralTypePrincipal);
+      if (!collateralInfo || collateralInfo.ledgerCanisterId !== collateralTypePrincipal ||
+          !Number.isInteger(collateralInfo.decimals) || collateralInfo.decimals < 0 || collateralInfo.decimals > 255) {
+        return { success: false, error: 'Collateral details could not be verified. Refresh and try again. No approval or transfer was started.' };
+      }
+      const minimum = BigInt(collateralInfo.minCollateralDeposit ?? 0);
+      if (amountRaw < minimum) {
+        return { success: false, error: `Amount too low. Minimum required: ${minimum.toString()} base units.` };
+      }
+
+      if (collateralTypePrincipal === CANISTER_IDS.ICP_LEDGER && !isOisyWallet()) {
+        const rawBalance = get(walletStore).tokenBalances?.ICP?.raw;
+        const required = amountRaw + BigInt(collateralInfo.ledgerFee ?? 0) * 2n;
+        if (typeof rawBalance !== 'bigint' || rawBalance < required) {
+          return { success: false, error: `Insufficient ${collateralInfo.symbol} balance.` };
+        }
+      }
+
+      const request: VaultPullRequest = {
+        AddMargin: { vault_id: BigInt(vaultId), amount_e8s: amountRaw },
+      };
+      assertActionBoundContextCurrent(ctx);
+      return await ApiClient.runVaultCollateralPull(request, ctx);
+    } catch (error) {
+      console.error('Error adding exact margin to vault:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error adding margin' };
+    }
+  }, vaultId, { refreshBefore: false, refreshAfter: false });
 }
 
 

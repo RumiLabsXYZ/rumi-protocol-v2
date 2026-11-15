@@ -58,9 +58,12 @@ export class ProtocolService {
   static getVaultById = ApiClient.getVaultById;
   static borrowFromVault = ApiClient.borrowFromVault;
   static borrowFromVaultBound = ApiClient.borrowFromVaultBound;
+  static withdrawPartialCollateralBound = ApiClient.withdrawPartialCollateralBound;
+  static withdrawCollateralAndCloseVaultBound = ApiClient.withdrawCollateralAndCloseVaultBound;
   static retryPendingBorrowMintBound = ApiClient.retryPendingBorrowMintBound;
   static reconcilePendingBorrowMintFromBlockBound = ApiClient.reconcilePendingBorrowMintFromBlockBound;
   static addMarginToVault = ApiClient.addMarginToVault;
+  static addMarginToVaultBound = ApiClient.addMarginToVaultBound;
   static repayToVault = ApiClient.repayToVault;
   static partialRepayToVault = ApiClient.repayToVault;
   static repayAndCloseVault = ApiClient.repayAndCloseVault;
@@ -131,9 +134,12 @@ export const protocolService = {
   getMyPendingBorrowMintsBound: ProtocolService.getMyPendingBorrowMintsBound,
   borrowFromVault: ProtocolService.borrowFromVault,
   borrowFromVaultBound: ProtocolService.borrowFromVaultBound,
+  withdrawPartialCollateralBound: ProtocolService.withdrawPartialCollateralBound,
+  withdrawCollateralAndCloseVaultBound: ProtocolService.withdrawCollateralAndCloseVaultBound,
   retryPendingBorrowMintBound: ProtocolService.retryPendingBorrowMintBound,
   reconcilePendingBorrowMintFromBlockBound: ProtocolService.reconcilePendingBorrowMintFromBlockBound,
   addMarginToVault: ProtocolService.addMarginToVault,
+  addMarginToVaultBound: ProtocolService.addMarginToVaultBound,
   repayToVault: ProtocolService.repayToVault,
   closeVault: ProtocolService.closeVault,
   getVaultHistory: ProtocolService.getVaultHistory,

@@ -34,6 +34,11 @@ interface WalletState {
   tokenBalances: Record<string, TokenBalance>;
 }
 
+interface ActionBoundBalanceContext {
+  expectedPrincipalText: string;
+  assertCurrent: () => boolean;
+}
+
 // Helper to extract the proper Principal value.
 function getOwner(principal: any): Principal {
   return principal?.owner ? principal.owner : principal;
@@ -48,6 +53,10 @@ async function fetchIcpPrice(): Promise<number | null> {
 async function clearVaultCache(isCurrent = () => true): Promise<void> {
   const { ApiClient } = await import('../services/protocol/apiClient');
   if (isCurrent()) ApiClient.clearVaultCache();
+}
+
+function syncAppDataWalletState(connected: boolean, principal: Principal | null): void {
+  appDataStore.setWalletState(connected, principal, get(walletSessionGeneration));
 }
 
 /**
@@ -102,6 +111,7 @@ function createWalletStore() {
 
   // Add interval tracking
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
+  let balanceRefreshGeneration = 0;
 
   // Add approval tracking to prevent race conditions
   let lastApproval = {
@@ -181,7 +191,12 @@ function createWalletStore() {
     }
   }
 
-  async function refreshBalance(opts?: { skipCache?: boolean }) {
+  async function refreshBalance(
+    opts?: { skipCache?: boolean },
+    ctx?: ActionBoundBalanceContext,
+  ) {
+    let ownsRefresh = () => false;
+    let staleSession = false;
     try {
       const state = get(walletStore);
       if (!state.principal || !state.isConnected) {
@@ -189,8 +204,37 @@ function createWalletStore() {
         return;
       }
 
-      const { icpBalance, icusdBalance } = await appDataStore.fetchBalances(state.principal, true, opts);
+      const ownerText = state.principal.toText();
+      const sessionGeneration = get(walletSessionGeneration);
+      const requestGeneration = ++balanceRefreshGeneration;
+      ownsRefresh = () => {
+        const live = get(walletStore);
+        return requestGeneration === balanceRefreshGeneration &&
+          get(walletSessionGeneration) === sessionGeneration &&
+          live.isConnected && live.principal?.toText() === ownerText &&
+          (!ctx || (ctx.expectedPrincipalText === ownerText && ctx.assertCurrent()));
+      };
+      const appDataRequestIsCurrent = () => {
+        const live = get(walletStore);
+        return get(walletSessionGeneration) === sessionGeneration &&
+          live.isConnected && live.principal?.toText() === ownerText &&
+          (!ctx || (requestGeneration === balanceRefreshGeneration &&
+            ctx.expectedPrincipalText === ownerText && ctx.assertCurrent()));
+      };
+      const assertCurrent = () => {
+        if (!ownsRefresh()) {
+          staleSession = true;
+          throw new Error('Wallet session changed during balance refresh');
+        }
+      };
+
+      const { icpBalance, icusdBalance } = await appDataStore.fetchBalances(
+        state.principal, true, opts, appDataRequestIsCurrent,
+        ctx ? `bound:${sessionGeneration}:${requestGeneration}` : undefined,
+      );
+      assertCurrent();
       const protocolStatus = await appDataStore.fetchProtocolStatus();
+      assertCurrent();
       const icpPriceValue = protocolStatus?.lastIcpRate || 0;
 
       // Fetch ckUSDT/ckUSDC/3USD balances
@@ -204,11 +248,14 @@ function createWalletStore() {
           TokenService.getTokenBalance(CONFIG.threePoolCanisterId, state.principal, opts),
         ]);
       } catch (e) {
+        assertCurrent();
         console.warn('Failed to fetch stablecoin balances:', e);
       }
+      assertCurrent();
 
       // 3USD is the 3pool LP token: its USD value is the pool virtual price, not $1.
       const threeUsdPriceValue = await getThreeUsdPrice();
+      assertCurrent();
 
       const formatStable6 = (raw: bigint) => {
         const value = Number(raw) / 1_000_000;
@@ -220,51 +267,68 @@ function createWalletStore() {
       try {
         collateralBalances = await fetchCollateralBalances(state.principal, {}, opts);
       } catch (e) {
+        assertCurrent();
         console.warn('Failed to fetch collateral balances:', e);
       }
+      assertCurrent();
 
-      update(state => ({
-        ...state,
-        balance: icpBalance,
-        tokenBalances: {
-          ICP: {
-            raw: icpBalance,
-            formatted: TokenService.formatBalance(icpBalance),
-            usdValue: icpPriceValue !== null ? Number(TokenService.formatBalance(icpBalance)) * icpPriceValue : null
+      update(state => {
+        assertCurrent();
+        return {
+          ...state,
+          balance: icpBalance,
+          tokenBalances: {
+            ICP: {
+              raw: icpBalance,
+              formatted: TokenService.formatBalance(icpBalance),
+              usdValue: icpPriceValue !== null ? Number(TokenService.formatBalance(icpBalance)) * icpPriceValue : null
+            },
+            ICUSD: {
+              raw: icusdBalance,
+              formatted: TokenService.formatBalance(icusdBalance),
+              usdValue: Number(TokenService.formatBalance(icusdBalance))
+            },
+            CKUSDT: {
+              raw: ckusdtBalance,
+              formatted: formatStable6(ckusdtBalance),
+              usdValue: Number(formatStable6(ckusdtBalance))
+            },
+            CKUSDC: {
+              raw: ckusdcBalance,
+              formatted: formatStable6(ckusdcBalance),
+              usdValue: Number(formatStable6(ckusdcBalance))
+            },
+            THREEUSD: {
+              raw: threeUsdBalance,
+              formatted: TokenService.formatBalance(threeUsdBalance),
+              usdValue: Number(TokenService.formatBalance(threeUsdBalance)) * threeUsdPriceValue
+            },
+            ...collateralBalances
           },
-          ICUSD: {
-            raw: icusdBalance,
-            formatted: TokenService.formatBalance(icusdBalance),
-            usdValue: Number(TokenService.formatBalance(icusdBalance))
-          },
-          CKUSDT: {
-            raw: ckusdtBalance,
-            formatted: formatStable6(ckusdtBalance),
-            usdValue: Number(formatStable6(ckusdtBalance))
-          },
-          CKUSDC: {
-            raw: ckusdcBalance,
-            formatted: formatStable6(ckusdcBalance),
-            usdValue: Number(formatStable6(ckusdcBalance))
-          },
-          THREEUSD: {
-            raw: threeUsdBalance,
-            formatted: TokenService.formatBalance(threeUsdBalance),
-            usdValue: Number(TokenService.formatBalance(threeUsdBalance)) * threeUsdPriceValue
-          },
-          ...collateralBalances
-        },
-        error: null
-      }));
+          error: null
+        };
+      });
 
       return { icpBalance, icusdBalance };
     } catch (err) {
+      // The request-specific predicate also fences ordinary network failures:
+      // a request that became stale before rejecting must not publish its error
+      // over a newer wallet's state.
+      if (staleSession || !ownsRefresh()) return;
       console.error('Balance refresh failed:', err);
-      update(state => ({
-        ...state,
-        error: err instanceof Error ? err.message : 'Failed to fetch balance'
-      }));
-      throw err;
+      update(current => {
+        if (!ownsRefresh()) return current;
+        return { ...current, error: err instanceof Error ? err.message : 'Failed to fetch balance' };
+      });
+      if (ctx) {
+        // Bound post-action callers must see refresh failure separately from
+        // the already-confirmed mutation, so their refresh classifier can
+        // report a reconnect/refresh issue without suggesting a retry.
+        throw err;
+      }
+      // Preserve the legacy unbound refresh behavior: background refreshes
+      // report through walletStore.error and do not create unhandled rejections.
+      return;
     }
   }
 
@@ -370,7 +434,7 @@ function createWalletStore() {
       console.log('Successfully reconnected to wallet');
 
       const refreshedPrincipal = getOwner(connected.owner);
-      appDataStore.setWalletState(true, refreshedPrincipal);
+      syncAppDataWalletState(true, refreshedPrincipal);
       update(s => ({
         ...s,
         isConnected: true,
@@ -390,7 +454,7 @@ function createWalletStore() {
     } catch (e) {
       authenticatedActor = null;
       stopBalanceRefresh();
-      appDataStore.setWalletState(false, null);
+      syncAppDataWalletState(false, null);
       set({
         isConnected: false,
         principal: null,
@@ -439,7 +503,7 @@ function createWalletStore() {
         if (authState.isConnected && authState.account?.owner) {
           const principal = authState.account.owner;
 
-          appDataStore.setWalletState(true, principal);
+          syncAppDataWalletState(true, principal);
 
           let icon = '';
           if (authState.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
@@ -496,7 +560,7 @@ function createWalletStore() {
         const ownerPrincipal = getOwner(account);
         console.log('Connected principal:', ownerPrincipal.toText());
 
-        appDataStore.setWalletState(true, ownerPrincipal);
+        syncAppDataWalletState(true, ownerPrincipal);
 
         update(s => ({
           ...s,
@@ -516,7 +580,7 @@ function createWalletStore() {
       } catch (err) {
         console.error('Connection failed:', err);
         authenticatedActor = null;
-        appDataStore.setWalletState(false, null);
+        syncAppDataWalletState(false, null);
         update(s => ({
           ...s,
           error: err instanceof Error ? err.message : 'Failed to connect wallet',
@@ -546,7 +610,7 @@ function createWalletStore() {
         await clearVaultCache(current);
         if (!current()) return;
 
-        appDataStore.setWalletState(false, null);
+        syncAppDataWalletState(false, null);
 
         set({
           isConnected: false,

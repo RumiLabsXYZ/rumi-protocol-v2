@@ -12,11 +12,12 @@ const fx = vi.hoisted(() => {
       set(next: T) { value = next; subs.forEach((run) => run(value)); } };
   }
   const wallet = store<any>({ isConnected: false, principal: null, balance: null, error: null, loading: false, icon: '', tokenBalances: {} });
+  const walletGeneration = store(1);
   const collateral = store<any>({ collaterals: [], loading: false, lastFetch: Date.now(), error: null });
   const app = store<any>({ protocolStatus: null, userVaults: [] });
   const derived = (s: any, f: (x: any) => any) => ({ subscribe(run: (v: any) => void) { return s.subscribe((x: any) => run(f(x))); } });
   return {
-    wallet, collateral, app, derived,
+    wallet, walletGeneration, collateral, app, derived,
     connect: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), refreshBalance: vi.fn(async () => {}),
     fetchCollateral: vi.fn(async () => {}), fetchStatus: vi.fn(async () => {}), refreshAll: vi.fn(async () => {}), fetchVaults: vi.fn(async () => []),
     open: vi.fn(async () => ({ kind: 'dispatched_err', vaultId: null, blockIndex: null, partialZeroDebtVaultId: null,
@@ -39,7 +40,7 @@ vi.mock('$lib/services/protocol/apiClient', () => ({ publicActor: { get_vaults: 
 vi.mock('$lib/services/auth', () => ({
   WALLET_TYPES: { INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' },
   currentWalletType: { subscribe: (run: (value: string) => void) => { run('plug'); return () => {}; } },
-  walletSessionGeneration: { subscribe: (run: (value: number) => void) => { run(1); return () => {}; } },
+  walletSessionGeneration: fx.walletGeneration,
 }));
 vi.mock('$lib/services/ckbtcMinterActors', () => ({ getPublicCkbtcMinterActor: fx.getActor, updateBtcBalanceForOwner: fx.update }));
 vi.mock('qrcode', () => ({ default: { toDataURL: fx.qr } }));
@@ -55,6 +56,7 @@ function installLocks() {
   Object.defineProperty(navigator, 'locks', { configurable: true, value: { request: async (_name: string, _opts: unknown, fn: (lock: unknown) => Promise<unknown>) => fn({}) } });
 }
 function reset() {
+  fx.walletGeneration.set(1);
   fx.wallet.set({ isConnected: false, principal: null, balance: null, error: null, loading: false, icon: '', tokenBalances: {} });
   fx.collateral.set({ collaterals: [fakeCollateralInfo()], loading: false, lastFetch: Date.now(), error: null });
   fx.app.set({ protocolStatus: { globalIcusdMintCap: 1_000_000, borrowingFeeCurveResolved: [] }, userVaults: [] });
@@ -114,6 +116,31 @@ describe('/bitcoin/borrow mounted boundary', () => {
     expect(rawDebt).toBe(5_000_000_000n);
     expect(collateralPrincipal).toBe(CKBTC_LEDGER_TEXT);
     expect(host.textContent).toContain('Vault #41');
+  });
+
+  it('does not refresh user data when global wallet session changes during a confirmed borrow', async () => {
+    connect();
+    fx.getActor.mockResolvedValue({ get_btc_address: vi.fn(async () => 'bc1qsessionboundary000000000000000000000000000000'), get_minter_info: vi.fn(async () => fakeMinterInfo()) });
+    fx.update.mockResolvedValue(fakeMinted(1_000_000n, 78n) as any);
+    render(); await settle(); button('Continue with this loan')!.click(); await settle();
+    button('I sent the BTC')!.click(); await settle();
+    button('Continue to confirm borrow')!.click(); await settle();
+
+    const pendingOpen = deferred<any>();
+    fx.open.mockReturnValueOnce(pendingOpen.promise);
+    button('Confirm and borrow')!.click();
+    await settle();
+    expect(fx.open).toHaveBeenCalledOnce();
+
+    // Simulate refreshWallet invalidating the auth session without changing its principal.
+    fx.walletGeneration.set(2);
+    pendingOpen.resolve({
+      kind: 'dispatched_ok', vaultId: 72, blockIndex: 13, partialZeroDebtVaultId: null,
+      errorMessage: null, approvalMayHaveMutated: true,
+      submittedCollateralRaw: 999_980n, submittedIcusdRaw: 5_000_000_000n,
+    });
+    await settle();
+    expect(fx.refreshAll).not.toHaveBeenCalled();
   });
 
   it('does not redispatch after an ambiguous open response and retains its principal-scoped pending intent', async () => {
@@ -212,5 +239,19 @@ describe('/bitcoin/borrow mounted boundary', () => {
     oldAddress.resolve('bc1qstaleaddress0000000000000000000000000000000'); await settle();
     expect(host.textContent).not.toContain('bc1qstaleaddress');
     expect(host.textContent).toContain('bc1qfreshaddress');
+  });
+
+  it('ignores an in-flight address read after auth refresh changes generation but keeps the same principal', async () => {
+    const address = deferred<string>();
+    fx.getActor.mockResolvedValue({ get_btc_address: vi.fn(() => address.promise), get_minter_info: vi.fn(async () => fakeMinterInfo()) });
+    connect(PRINCIPAL_A);
+    render(); await settle();
+    button('Continue with this loan')!.click(); await settle();
+    expect(host.textContent).toContain('Send BTC to your address');
+
+    fx.walletGeneration.set(2);
+    address.resolve('bc1qstaleafterrefresh0000000000000000000000000000');
+    await settle();
+    expect(host.textContent).not.toContain('bc1qstaleafterrefresh');
   });
 });
