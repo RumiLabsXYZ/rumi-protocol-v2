@@ -1482,7 +1482,7 @@ mod tests {
         assert!(reserves.contains(&preferred.to_text()));
         assert!(reserves.contains("held before any icUSD is pulled"));
         assert!(reserves.contains("does not switch assets"));
-        assert!(reserves.contains("ledger fees"));
+        assert!(reserves.contains("reserve-ledger transfer fees"));
 
         assert!(generate_consent_message(
             "withdraw_partial_collateral", &Encode!(&VaultArg { vault_id: 23, amount: 45_000_000 }).unwrap()
