@@ -4151,7 +4151,7 @@ pub(crate) fn apply_sp_liquidation_in_state(
     // the current vault snapshot at the synchronous debt commit and persist
     // this applied share with the journal; post-accounting distributes only
     // this value, so a reply loss cannot mint the frozen preview twice.
-    let interest_share_e8s = sp_current_interest_share(
+    let interest_share_e8s = interest_share_for_debt_reduction(
         quote.debt_e8s,
         vault_snapshot.borrowed_icusd_amount.0,
         vault_snapshot.accrued_interest.0,
@@ -4228,11 +4228,13 @@ pub(crate) fn apply_sp_liquidation_in_state(
     })
 }
 
-/// Compute the interest leg from the current vault snapshot at the debt
-/// commit boundary. This deliberately does not accept the prepared preview:
-/// harvests can move that preview into the pending pool while new interest
-/// accrues on the remaining live debt.
-pub(crate) fn sp_current_interest_share(
+/// Compute the interest share removed when debt is reduced. Callers must use
+/// the current vault snapshot at commit time because accrued interest may
+/// change after a preview is prepared.
+/// Compute the share of accrued interest removed when debt is reduced. The
+/// debt and interest pool must shrink proportionally to preserve
+/// `accrued_interest <= borrowed_icusd_amount` across partial liquidations.
+pub fn interest_share_for_debt_reduction(
     debt_e8s: u64,
     borrowed_e8s: u64,
     accrued_interest_e8s: u64,
@@ -4250,19 +4252,47 @@ pub(crate) fn sp_current_interest_share(
 }
 
 #[cfg(test)]
-mod sp_current_interest_share_tests {
-    use super::sp_current_interest_share;
+mod interest_share_for_debt_reduction_tests {
+    use super::interest_share_for_debt_reduction;
 
     #[test]
     fn harvest_snapshot_is_not_reminted_and_new_accrual_is_proportional() {
         // The prepared quote saw 100 e8s, then harvest moved it to the
         // pending pool and zeroed the vault. A commit against that snapshot
         // must not distribute the old preview again.
-        assert_eq!(sp_current_interest_share(1_000, 1_000, 0), 0);
+        assert_eq!(interest_share_for_debt_reduction(1_000, 1_000, 0), 0);
         // New interest accrued after the harvest is the only amount eligible
         // for this liquidation's treasury leg.
-        assert_eq!(sp_current_interest_share(500, 1_000, 100), 50);
-        assert_eq!(sp_current_interest_share(2_000, 1_000, 100), 100);
+        assert_eq!(interest_share_for_debt_reduction(500, 1_000, 100), 50);
+        assert_eq!(interest_share_for_debt_reduction(2_000, 1_000, 100), 100);
+    }
+
+    #[test]
+    fn bot_claim_interest_reduction_is_proportional_for_partial_and_full_debt() {
+        let borrowed = 10_000;
+        let accrued_interest = 800;
+
+        let partial_debt_reduction = 2_500;
+        let partial_interest_reduction = interest_share_for_debt_reduction(
+            partial_debt_reduction,
+            borrowed,
+            accrued_interest,
+        );
+        let partial_borrowed_after = borrowed - partial_debt_reduction;
+        let partial_interest_after = accrued_interest - partial_interest_reduction;
+        assert_eq!(partial_interest_reduction, 200);
+        assert_eq!(partial_interest_after, 600);
+        assert!(partial_interest_after <= partial_borrowed_after);
+
+        let full_debt_reduction = borrowed;
+        let full_interest_reduction = interest_share_for_debt_reduction(
+            full_debt_reduction,
+            borrowed,
+            accrued_interest,
+        );
+        assert_eq!(full_interest_reduction, accrued_interest);
+        assert_eq!(borrowed - full_debt_reduction, 0);
+        assert_eq!(accrued_interest - full_interest_reduction, 0);
     }
 }
 

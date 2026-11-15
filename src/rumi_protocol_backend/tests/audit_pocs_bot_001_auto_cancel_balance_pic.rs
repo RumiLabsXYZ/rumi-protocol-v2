@@ -726,6 +726,53 @@ fn bot_cancel_liquidation_call(
     }
 }
 
+/// Accrue a small, deterministic amount of interest on the fixture vault
+/// before a bot proof test. Borrowing once after advancing the clock invokes
+/// the same `accrue_single_vault` path used by vault operations.
+fn accrue_fixture_vault_interest(fixture: &Fixture) {
+    let configured = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.developer,
+            "set_interest_rate",
+            encode_args((fixture.icp_ledger, 1.0f64)).unwrap(),
+        )
+        .expect("set test interest rate");
+    match configured {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), ProtocolError>>(&bytes)
+            .expect("decode test interest rate")
+            .expect("test interest rate should be accepted"),
+        WasmResult::Reject(message) => panic!("set test interest rate rejected: {message}"),
+    }
+    fixture.pic.advance_time(Duration::from_secs(86_400));
+
+    let borrowed = fixture
+        .pic
+        .update_call(
+            fixture.protocol_id,
+            fixture.test_user,
+            "borrow_from_vault",
+            encode_args((VaultArg {
+                vault_id: fixture.vault_id,
+                amount: 1_000_000_000,
+            },))
+            .unwrap(),
+        )
+        .expect("borrow to trigger fixture-vault accrual");
+    match borrowed {
+        WasmResult::Reply(bytes) => decode_one::<Result<SuccessWithFee, ProtocolError>>(&bytes)
+            .expect("decode accrual-triggering borrow")
+            .expect("accrual-triggering borrow should succeed"),
+        WasmResult::Reject(message) => panic!("accrual-triggering borrow rejected: {message}"),
+    };
+    assert!(
+        get_vault_snapshot(&fixture.pic, fixture.protocol_id, fixture.vault_id).accrued_interest
+            > 0,
+        "test setup must create accrued interest before claim settlement"
+    );
+}
+
 // ─── Fixture ───
 
 struct Fixture {
@@ -1387,6 +1434,7 @@ fn cl_02_pooled_second_vault_balance_cannot_release_claim_without_exact_proof() 
 #[test]
 fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
     let f = setup_fixture();
+    accrue_fixture_vault_interest(&f);
     let _ = seed_bot_claim(&f);
 
     // A returned collateral receipt must be exact and idempotent before the
@@ -1443,11 +1491,15 @@ fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
     )
     .expect("verified return should allow claim cancellation");
 
+    let vault_before_payment = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
+
     // A second generation receives a different stable memo. Pay the minimum
     // claim-bound ckUSDC amount and reconcile its block from Duplicate, so the
     // proof API sees the same exact block the bot can recover after reply loss.
     let second_claim = bot_claim_call(&f, f.developer, f.vault_id)
         .expect("second generation bot claim should succeed after cancel");
+    assert!(second_claim.debt_covered < vault_before_payment.borrowed_icusd_amount);
+    assert!(vault_before_payment.accrued_interest > 0);
     assert_ne!(first_claim.claim_generation, second_claim.claim_generation);
     let payment_ledger = second_claim
         .payment_ledger_principal
@@ -1514,6 +1566,22 @@ fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
         second_claim.debt_covered,
         "proof confirmation should account the claim exactly once"
     );
+    let vault_after_payment = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
+    let expected_interest_reduction =
+        rumi_protocol_backend::vault::interest_share_for_debt_reduction(
+            second_claim.debt_covered,
+            vault_before_payment.borrowed_icusd_amount,
+            vault_before_payment.accrued_interest,
+        );
+    assert_eq!(
+        vault_after_payment.accrued_interest,
+        vault_before_payment.accrued_interest - expected_interest_reduction,
+        "single proof confirmation must reduce accrued interest proportionally"
+    );
+    assert!(
+        vault_after_payment.accrued_interest <= vault_after_payment.borrowed_icusd_amount,
+        "single proof confirmation must preserve the interest/debt invariant"
+    );
 }
 
 /// A committed short payment stays available for an additive exact-sum batch:
@@ -1522,8 +1590,11 @@ fn bot_claim_payment_and_return_proofs_use_exact_icrc3_ledger_blocks() {
 #[test]
 fn bot_batch_payment_proofs_settle_short_receipt_and_residual_atomically() {
     let f = setup_fixture();
+    accrue_fixture_vault_interest(&f);
     let (_, claim) = seed_bot_claim(&f);
     let vault_before = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
+    assert!(claim.debt_covered < vault_before.borrowed_icusd_amount);
+    assert!(vault_before.accrued_interest > 0);
     let payment_ledger = claim
         .payment_ledger_principal
         .expect("claim must pin configured ckUSDC ledger");
@@ -1701,6 +1772,21 @@ fn bot_batch_payment_proofs_settle_short_receipt_and_residual_atomically() {
         vault_before.collateral_amount - claim.collateral_amount,
         "batch settlement must reduce collateral exactly once"
     );
+    let expected_interest_reduction =
+        rumi_protocol_backend::vault::interest_share_for_debt_reduction(
+            claim.debt_covered,
+            vault_before.borrowed_icusd_amount,
+            vault_before.accrued_interest,
+        );
+    assert_eq!(
+        vault_after.accrued_interest,
+        vault_before.accrued_interest - expected_interest_reduction,
+        "batch proof confirmation must reduce accrued interest proportionally"
+    );
+    assert!(
+        vault_after.accrued_interest <= vault_after.borrowed_icusd_amount,
+        "batch proof confirmation must preserve the interest/debt invariant"
+    );
 
     // The private bot-proof journal is stable across upgrade and remains
     // replayable without adding proof transitions to the public Event enum.
@@ -1718,6 +1804,7 @@ fn bot_batch_payment_proofs_settle_short_receipt_and_residual_atomically() {
     .expect("same-claim batch retry must remain idempotent after upgrade");
     let upgraded_vault = get_vault_snapshot(&f.pic, f.protocol_id, f.vault_id);
     assert_eq!(upgraded_vault.borrowed_icusd_amount, vault_after.borrowed_icusd_amount);
+    assert_eq!(upgraded_vault.accrued_interest, vault_after.accrued_interest);
     assert_eq!(upgraded_vault.collateral_amount, vault_after.collateral_amount);
     let audit = get_bot_proof_audit_events(&f.pic, f.protocol_id, f.developer);
     let consumed = audit
