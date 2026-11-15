@@ -9,7 +9,9 @@ on:
       - src/stability_pool/**
       - src/flaky_ledger/**
       - src/rumi_3pool/**
+      - src/rumi_amm/**
       - src/rumi_protocol_backend/**
+      - src/rumi_treasury/**
       - src/rumi_cycle_manager/**
       - src/ledger/ic-icrc1-ledger.wasm
 
@@ -17,6 +19,92 @@ permissions:
   contents: read
 
 jobs:
+  backend-amm-treasury-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain and native build dependencies
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup +1.92.0 target add wasm32-unknown-unknown
+          rustup +1.92.0 component add rustfmt
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev liblmdb-dev libunwind-dev pkg-config protobuf-compiler
+      - name: Verify formatting
+        run: cargo +1.92.0 fmt --all -- --check
+      - name: Run exact security regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_one() {
+            local package="$1"
+            local target="$2"
+            local filter="$3"
+            local output
+            output="$(mktemp)"
+            if [[ "$target" == "lib" ]]; then
+              cargo +1.92.0 test --locked --jobs 1 -p "$package" --lib "$filter" -- --nocapture 2>&1 | tee "$output"
+            else
+              cargo +1.92.0 test --locked --jobs 1 -p "$package" --bin "$target" "$filter" -- --nocapture 2>&1 | tee "$output"
+            fi
+            grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$output"
+            rm -f "$output"
+          }
+
+          for filter in \
+            replayed_first_borrow_starts_accrual_at_recorded_borrow_time \
+            exact_borrow_accrual_replay_does_not_require_price_or_rate_context \
+            predecessor_pending_borrow_checkpoint_closes_the_unjournaled_admission_gap \
+            deficit_threshold_evaluates_existing_deficit_and_survives_tcr_refresh \
+            liquidation_risk_order_rejects_non_positive_cap_denominators \
+            partial_liquidation_cap_underflow_fails_closed_to_full_debt \
+            unsupported_treasury_collateral_hold_replays_idempotently \
+            ordinary_capacity_preserves_one_authenticated_system_slot \
+            format_collateral_amount_respects_decimals_and_symbol \
+            active_redemption_and_withdrawal_previews_decode_exact_arguments \
+            xrpl_borrow_consent_names_gross_amount_network_and_destination \
+            active_money_call_previews_fail_closed_on_malformed_arguments
+          do
+            run_one rumi_protocol_backend lib "$filter"
+          done
+
+          for filter in \
+            zero_share_unknown_callers_do_not_create_reward_rows \
+            zero_share_former_lp_can_claim_carried_rewards \
+            claim_rewards_has_method_specific_money_movement_consent \
+            remove_liquidity_discloses_burn_assets_gross_preview_and_net_floors \
+            remove_liquidity_consent_fails_closed_for_bad_or_unresolvable_args
+          do
+            run_one rumi_amm lib "$filter"
+          done
+
+          run_one rumi_protocol_backend rumi_protocol_backend check_candid_interface_compatibility
+          run_one rumi_treasury lib rust_candid_service_exports_the_bounded_backfill_endpoint
+      - name: Build production Wasms
+        run: |
+          cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked --jobs 1 \
+            -p rumi_protocol_backend -p rumi_amm -p rumi_treasury
+      - name: Record production Wasm identities
+        run: |
+          set -euo pipefail
+          for wasm in \
+            target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm \
+            target/wasm32-unknown-unknown/release/rumi_amm.wasm \
+            target/wasm32-unknown-unknown/release/rumi_treasury.wasm
+          do
+            test -s "$wasm"
+            stat --printf='%n %s bytes\n' "$wasm"
+            sha256sum "$wasm"
+          done
+
   archived-receipt:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
