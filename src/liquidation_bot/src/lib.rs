@@ -414,7 +414,7 @@ async fn admin_configure_operator_reserve(args: reserve::OperatorReserveConfig) 
 fn admin_set_operator_reserve_enabled(enabled: bool) -> Result<(), String> {
     require_admin();
     let _guard = ProcessingGuard::acquire().map_err(str::to_string)?;
-    state::mutate_state(|s| {
+    state::mutate_state(|s| -> Result<(), String> {
         if !s.processing_paused { return Err("pause processing before changing reserve admission".into()); }
         let r = s.operator_reserve.as_mut().ok_or("reserve is not configured")?;
         r.enabled = enabled;
