@@ -16793,6 +16793,52 @@ mod tests {
     }
 
     #[test]
+    fn liq001_interest_accrued_during_pull_keeps_the_full_quote_as_a_partial_close() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq001-interest-race");
+        liq0xx_collateral(
+            &mut state,
+            ct,
+            Ratio::from(dec!(1.34)),
+            Ratio::from(dec!(1.50)),
+            Ratio::from(dec!(1.15)),
+            1.0,
+        );
+        let debt = ICUSD::new(1_000_000_000);
+        let collateral = 1_300_000_000;
+        let vault = liq0xx_vault(903, ct, collateral, debt.to_u64());
+        state.open_vault(vault.clone());
+        state.dust_liquidation_threshold = debt;
+        let pinned_price = UsdIcp::from(Decimal::ONE);
+        let pinned_repay = state.effective_liquidation_amount(&vault, pinned_price, None);
+        assert_eq!(pinned_repay, debt, "premise: this is a planned full liquidation");
+
+        // Model the interest timer committing while the ledger pull is
+        // awaited: the debt and accrued-interest fields both grow by the
+        // same amount before the liquidation's post-await state commit.
+        let accrued = ICUSD::new(1);
+        {
+            let live = state.vault_id_to_vaults.get_mut(&903).unwrap();
+            live.borrowed_icusd_amount += accrued;
+            live.accrued_interest += accrued;
+        }
+
+        state.liquidate_vault(
+            903,
+            Mode::GeneralAvailability,
+            pinned_price,
+            Some(pinned_repay),
+        );
+        let remaining = state
+            .vault_id_to_vaults
+            .get(&903)
+            .expect("unpaid accrued interest must keep the vault open");
+        assert_eq!(remaining.borrowed_icusd_amount, accrued);
+        assert_eq!(remaining.accrued_interest, accrued);
+        assert_eq!(remaining.collateral_amount, collateral - 1_150_000_000);
+    }
+
+    #[test]
     fn liq001_pinned_amount_is_still_recapped_downward_against_live_debt() {
         // The pinned amount is re-capped downward (never upward) against the
         // LIVE debt, so a concurrent debt reduction during the await can

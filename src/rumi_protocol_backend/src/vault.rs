@@ -12526,6 +12526,57 @@ fn applied_liquidation_protocol_cut(requested: u64, collateral_applied: u64) -> 
     requested.min(collateral_applied)
 }
 
+/// An owner excess payout is valid only when the state transition actually
+/// removed the vault. A liquidation can be planned as full before its ledger
+/// await, then interest can accrue before commit and leave residual debt. In
+/// that case the collateral not seized must stay backing the still-open vault.
+fn liquidation_excess_payout_at_commit(
+    full_liquidation_applied: bool,
+    requested_excess: u64,
+    live_collateral: u64,
+    applied_protocol_cut: u64,
+    liquidator_payout: u64,
+) -> u64 {
+    if !full_liquidation_applied {
+        return 0;
+    }
+    requested_excess.min(
+        live_collateral
+            .saturating_sub(applied_protocol_cut)
+            .saturating_sub(liquidator_payout),
+    )
+}
+
+#[cfg(test)]
+mod liquidation_reprice_regression_tests {
+    use super::liquidation_excess_payout_at_commit;
+
+    #[test]
+    fn planned_full_liquidation_that_is_partial_at_commit_pays_no_owner_excess() {
+        // The user paid the pre-await debt and the state transition leaves new
+        // interest outstanding. That collateral remains the backing for the
+        // open vault, even though the original quote had an excess amount.
+        assert_eq!(
+            liquidation_excess_payout_at_commit(false, 500, 1_000, 50, 200),
+            0
+        );
+    }
+
+    #[test]
+    fn owner_excess_is_limited_to_collateral_after_realized_fees_and_reward() {
+        assert_eq!(
+            liquidation_excess_payout_at_commit(true, 100, 1_000, 50, 200),
+            100,
+            "the planned owner amount is payable when the full close actually commits"
+        );
+        assert_eq!(
+            liquidation_excess_payout_at_commit(true, 900, 1_000, 300, 400),
+            300,
+            "fee, reward, and owner payout together must never exceed live collateral"
+        );
+    }
+}
+
 async fn liquidate_vault_debt_already_burned_inner(
     vault_id: u64,
     icusd_burned_e8s: u64,
@@ -13405,14 +13456,6 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 .to_u64()
                 .min(live_collateral.saturating_sub(cut_applied)),
         );
-        let excess_pay = ICP::from(
-            excess_collateral.to_u64().min(
-                live_collateral
-                    .saturating_sub(cut_applied)
-                    .saturating_sub(liquidator_pay.to_u64()),
-            ),
-        );
-
         // Execute the liquidation in state first (this must happen).
         // LIQ-0XX (review finding 1): pass the PINNED `debt_amount` decided
         // pre-await (Step 2 above, before `transfer_icusd_from(...).await`)
@@ -13422,6 +13465,19 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // liquidate_vault returns the interest share of the debt reduction.
         let interest_share =
             s.liquidate_vault(vault_id, mode, collateral_price_usd, Some(debt_amount));
+        // The pre-await quote can describe a full liquidation while a timer
+        // accrues additional debt during the ledger pull. `liquidate_vault`
+        // correctly leaves that residual debt in an open vault; do not pay
+        // the precomputed owner excess unless the state transition really
+        // removed the vault.
+        let full_liquidation_applied = !s.vault_id_to_vaults.contains_key(&vault_id);
+        let excess_pay = ICP::from(liquidation_excess_payout_at_commit(
+            full_liquidation_applied,
+            excess_collateral.to_u64(),
+            live_collateral,
+            cut_applied,
+            liquidator_pay.to_u64(),
+        ));
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
@@ -13487,7 +13543,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
         // Create pending transfer for excess collateral to vault owner (if any)
         // (only for full liquidations, not partial)
-        if !is_partial_liquidation && excess_pay > ICP::new(0) {
+        if full_liquidation_applied && excess_pay > ICP::new(0) {
             log!(
                 INFO,
                 "[liquidate_vault] Scheduling excess collateral return to vault owner"
@@ -13551,7 +13607,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         log!(
             INFO,
             "[liquidate_vault] Protocol state updated, {} pending transfers created",
-            if !is_partial_liquidation && excess_pay > ICP::new(0) {
+            if full_liquidation_applied && excess_pay > ICP::new(0) {
                 2
             } else {
                 1
