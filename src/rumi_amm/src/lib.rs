@@ -678,6 +678,42 @@ pub async fn notify_reward_received(
 /// Claim accumulated reward icUSD for the caller. Settles pending into
 /// claimable, persists a payout identity, then debits claimable before
 /// dispatch. Ambiguous results stay held and are not automatically rearmed.
+fn settle_reward_claim_amount(pool: &mut Pool, caller: Principal) -> Result<u128, AmmError> {
+    let shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
+
+    // Unknown zero-share callers have no pending reward to settle. Reject
+    // before `entry` so permissionless claim attempts cannot grow stable state
+    // with one empty reward row per principal.
+    if shares == 0 && !pool.lp_rewards.contains_key(&caller) {
+        return Err(AmmError::BelowMinClaim {
+            claimable: 0,
+            min: crate::state::MIN_CLAIM_E8S,
+        });
+    }
+
+    let acc = pool.acc_reward_per_share;
+    let claimable = {
+        let entry = pool.lp_rewards.entry(caller).or_default();
+        crate::rewards::settle(entry, shares, acc);
+        crate::rewards::reset_debt(entry, shares, acc);
+        entry.claimable
+    };
+
+    if claimable < crate::state::MIN_CLAIM_E8S {
+        // Remove legacy empty rows created by the old ordering, but preserve
+        // every positive sub-minimum balance for a future claim.
+        if shares == 0 && claimable == 0 {
+            pool.lp_rewards.remove(&caller);
+        }
+        return Err(AmmError::BelowMinClaim {
+            claimable,
+            min: crate::state::MIN_CLAIM_E8S,
+        });
+    }
+
+    Ok(claimable)
+}
+
 #[update]
 pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
     let caller = ic_cdk::caller();
@@ -697,21 +733,7 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
     // Phase 1: settle pending into claimable, snapshot the amount, persist.
     let amount = mutate_state(|s| -> Result<u128, AmmError> {
         let pool = s.pools.get_mut(&pool_id).ok_or(AmmError::PoolNotFound)?;
-        let shares = pool.lp_shares.get(&caller).copied().unwrap_or(0);
-        let acc = pool.acc_reward_per_share;
-        let entry = pool.lp_rewards.entry(caller).or_default();
-
-        crate::rewards::settle(entry, shares, acc);
-        crate::rewards::reset_debt(entry, shares, acc);
-
-        let claimable = entry.claimable;
-        if claimable < crate::state::MIN_CLAIM_E8S {
-            return Err(AmmError::BelowMinClaim {
-                claimable,
-                min: crate::state::MIN_CLAIM_E8S,
-            });
-        }
-        Ok(claimable)
+        settle_reward_claim_amount(pool, caller)
     })?;
 
     // Persist the immutable reward payout identity before debiting claimable.
@@ -2876,5 +2898,93 @@ mod dos_001_tests {
             limit: u64::MAX,
         });
         assert_eq!(by_time.len() as u64, MAX_EVENT_PAGE);
+    }
+}
+
+#[cfg(test)]
+mod reward_claim_admission_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn empty_pool() -> Pool {
+        Pool {
+            token_a: Principal::anonymous(),
+            token_b: Principal::management_canister(),
+            reserve_a: 0,
+            reserve_b: 0,
+            fee_bps: 0,
+            protocol_fee_bps: 0,
+            curve: CurveType::ConstantProduct,
+            lp_shares: BTreeMap::new(),
+            total_lp_shares: 0,
+            protocol_fees_a: 0,
+            protocol_fees_b: 0,
+            paused: false,
+            subaccount_a: [0; 32],
+            subaccount_b: [1; 32],
+            lp_rewards: BTreeMap::new(),
+            acc_reward_per_share: 0,
+            pending_no_lp: 0,
+            total_rewards_distributed: 0,
+            processed_donation_nonces: VecDeque::new(),
+            reward_balance_snapshot: 0,
+        }
+    }
+
+    #[test]
+    fn zero_share_unknown_callers_do_not_create_reward_rows() {
+        let mut pool = empty_pool();
+        for seed in 1..=32u8 {
+            let caller = Principal::self_authenticating(&[seed; 32]);
+            assert!(matches!(
+                settle_reward_claim_amount(&mut pool, caller),
+                Err(AmmError::BelowMinClaim { claimable: 0, min })
+                    if min == crate::state::MIN_CLAIM_E8S
+            ));
+        }
+        assert!(pool.lp_rewards.is_empty());
+    }
+
+    #[test]
+    fn zero_share_former_lp_can_claim_carried_rewards() {
+        let mut pool = empty_pool();
+        let caller = Principal::self_authenticating(&[77; 32]);
+        pool.lp_rewards.insert(
+            caller,
+            RewardState {
+                reward_debt: 0,
+                claimable: crate::state::MIN_CLAIM_E8S,
+            },
+        );
+
+        assert_eq!(
+            settle_reward_claim_amount(&mut pool, caller),
+            Ok(crate::state::MIN_CLAIM_E8S)
+        );
+        assert_eq!(
+            pool.lp_rewards[&caller].claimable,
+            crate::state::MIN_CLAIM_E8S,
+            "the async payout path, not admission, debits claimable"
+        );
+    }
+
+    #[test]
+    fn legacy_zero_row_is_removed_but_positive_dust_is_preserved() {
+        let mut pool = empty_pool();
+        let empty = Principal::self_authenticating(&[78; 32]);
+        let dust = Principal::self_authenticating(&[79; 32]);
+        pool.lp_rewards.insert(empty, RewardState::default());
+        pool.lp_rewards.insert(
+            dust,
+            RewardState {
+                reward_debt: 0,
+                claimable: 1,
+            },
+        );
+
+        assert!(settle_reward_claim_amount(&mut pool, empty).is_err());
+        assert!(!pool.lp_rewards.contains_key(&empty));
+        assert!(settle_reward_claim_amount(&mut pool, dust).is_err());
+        assert_eq!(pool.lp_rewards[&dust].claimable, 1);
     }
 }
