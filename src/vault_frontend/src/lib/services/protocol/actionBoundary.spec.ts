@@ -1122,6 +1122,7 @@ describe('Oisy vault-close cache admission', () => {
   beforeEach(() => {
     (ApiClient as any).operationInProgress = false;
     currentWalletType.set(WALLET_TYPES.OISY);
+    localStorage.setItem('rumi_last_wallet', WALLET_TYPES.OISY);
     setLivePrincipal(PRINCIPAL_A);
     clearRawSnapshots();
     vi.spyOn(ApiClient as any, 'refreshVaultData').mockResolvedValue(undefined);

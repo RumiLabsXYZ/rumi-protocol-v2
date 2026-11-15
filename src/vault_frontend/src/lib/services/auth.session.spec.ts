@@ -33,7 +33,9 @@ vi.mock('@dfinity/agent', async () => {
   const actual = await vi.importActual<typeof import('@dfinity/agent')>('@dfinity/agent');
   return {
     ...actual,
-    HttpAgent: vi.fn(() => ({ fetchRootKey: mocks.fetchRootKey })),
+    HttpAgent: vi.fn(function HttpAgentMock() {
+      return { fetchRootKey: mocks.fetchRootKey };
+    }),
   };
 });
 
