@@ -1,0 +1,91 @@
+{
+  "actualAnonymousBrowser": true,
+  "checks": [
+    {
+      "sourceFile": "sec21-live-manual-desktop-complete.json",
+      "sourceSha256": "71cceb3c4ffc00c103d98174d889a7fc7317b4038826c29c3de205e0464a108d",
+      "url": "https://app.rumiprotocol.com/liquidations?tab=manual",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scrollWidth": 1280,
+      "overlay": false,
+      "queueEmpty": true,
+      "queueCardCount": 0,
+      "manualActionCount": 0,
+      "vault202TextVisible": true,
+      "statusReadError": false
+    },
+    {
+      "sourceFile": "sec21-live-manual-mobile-complete.json",
+      "sourceSha256": "04b3d7444e68ca07db70e7e525cec1e859ecf145e096dae0529a2eb2d95c4d47",
+      "url": "https://app.rumiprotocol.com/liquidations?tab=manual",
+      "viewport": [
+        390,
+        844
+      ],
+      "scrollWidth": 452,
+      "tabWidth": 437,
+      "overlay": false,
+      "queueEmpty": true,
+      "queueCardCount": 0,
+      "manualActionCount": 0,
+      "vault202TextVisible": true,
+      "statusReadError": false
+    },
+    {
+      "sourceFile": "sec21-live-vaults-desktop.json",
+      "sourceSha256": "5791c25379e65883de7db8f40f3df7ee76e6d687077dd290f49c20ad023b3962",
+      "url": "https://app.rumiprotocol.com/vaults",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scrollWidth": 1280,
+      "overlay": false
+    },
+    {
+      "sourceFile": "sec21-live-vaults-mobile.json",
+      "sourceSha256": "7e5c9b7e7c3eabbd873be93ca9c1ce682f13f0d69fe34d83b2874f6023968ffc",
+      "url": "https://app.rumiprotocol.com/vaults",
+      "viewport": [
+        390,
+        844
+      ],
+      "scrollWidth": 390,
+      "overlay": false
+    },
+    {
+      "sourceFile": "sec21-live-solana-desktop.json",
+      "sourceSha256": "99aae6eeb80f10d891412c83bbbd2a2c12ae865cb730fc2ef2fd98f31c2ecce0",
+      "url": "https://app.rumiprotocol.com/solana",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scrollWidth": 1280,
+      "overlay": false,
+      "mintStatus": true
+    },
+    {
+      "sourceFile": "sec21-live-solana-mobile.json",
+      "sourceSha256": "a4b83f8b7f2b7c780e6f62fca9c84dafeaa3393674726ee2bca2dd5ab9bfe5aa",
+      "url": "https://app.rumiprotocol.com/solana",
+      "viewport": [
+        390,
+        844
+      ],
+      "scrollWidth": 390,
+      "overlay": false,
+      "mintStatus": true
+    }
+  ],
+  "manualMobileTabOverflowPredatesRelease": true,
+  "baselineDocumentWidth": 452,
+  "baselineTabWidth": 437,
+  "viewportWidth": 390,
+  "actualReservedCardObserved": false,
+  "conditionalReservedStateEvidence": "11 mounted checks, source mock rendering and exact served node49",
+  "financialAction": false
+}

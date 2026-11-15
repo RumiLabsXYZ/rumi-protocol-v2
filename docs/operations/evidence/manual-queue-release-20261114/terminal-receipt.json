@@ -1,0 +1,79 @@
+{
+  "source": "e7b736c92de4749a204da3bb0dd7da809fa7c6fe",
+  "frontendVersion": "1794714390164",
+  "buildNativeExit": 0,
+  "buildCount": 1,
+  "allocationConsumedAndReleased": true,
+  "stageBatch": "701",
+  "activationBatch": "702",
+  "keys": 5712,
+  "encodings": 5906,
+  "all5619PriorKeysPropertiesAndUntouchedEncodingsPreserved": true,
+  "newKeys": 93,
+  "changedExistingEncodings": 7,
+  "stageServed": 95,
+  "finalServed": 9,
+  "primaryDomainReadbacks": 5,
+  "allOwnFinalChecksPass": true,
+  "modulesSettingsControllersAndPermissionsPreserved": true,
+  "productionWriteReceipts": [
+    {
+      "label": "stage-chunks-0",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-chunks-1",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-chunks-0",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "stage-chunks-1",
+      "method": "create_chunks",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-create",
+      "method": "create_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "stage-create",
+      "method": "create_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "stage-commit",
+      "method": "commit_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    },
+    {
+      "label": "activate-commit",
+      "method": "commit_batch",
+      "nativeExit": 0,
+      "state": "cli-success"
+    }
+  ],
+  "productionWritesRepeated": false,
+  "backendLifecycleOrSnapshotOperation": false,
+  "unlockOrFinancialAction": false,
+  "independentFinal": "PASS",
+  "independentPublicReadbacks": 19,
+  "independentCertifiedModuleApiAndControllers": "PASS",
+  "actualManualPageEmptyQueue": true,
+  "actualReservedCardObserved": false,
+  "knownMobileTabOverflow": "Pre-existing452document/437tabs at390viewport, unchanged",
+  "financialRemedyOwner": "Adrian"
+}
