@@ -54,8 +54,8 @@
       "id": "verified-deposit-borrow",
       "title": "Verified deposits and borrowing",
       "status": "blocked",
-      "blockedReason": "The Horizon submission source is written but its focused check has not run: the shared build machine is below the 30 GiB free-space startup floor, and an existing coordination question about this work is still open.",
-      "nextAction": "Wait for shared-machine capacity and the existing coordination answer, then run the prepared focused check (22 horizon_rpc tests plus production check, runner 67e9d11c) under a fresh slot. No floors lowered; source stays frozen.",
+      "blockedReason": "The Horizon submission source is written but its focused check has not run: it is waiting for a shared build slot and fresh allocation, and an existing coordination question about this work is still open. Startup disk headroom is currently sufficient.",
+      "nextAction": "When a shared slot and the coordination answer are available, run the prepared focused check (22 horizon_rpc tests plus production check, runner 67e9d11c) under a fresh allocation. Source stays frozen.",
       "cardIds": [
         "WP3"
       ]
