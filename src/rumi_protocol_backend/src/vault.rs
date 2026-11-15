@@ -11727,6 +11727,15 @@ pub async fn liquidate_vault_partial(
         (interest_share, xrp_claim_id)
     });
 
+    // Journal unsupported collateral synchronously before any post-commit
+    // await so the protocol fee obligation cannot disappear on interruption.
+    let unsupported_treasury_fee_held = protocol_cut > 0
+        && vault.collateral_type != crate::state::xrp_collateral_principal()
+        && crate::treasury::hold_unsupported_liquidation_fee_if_needed(
+            protocol_cut,
+            vault.collateral_type,
+        );
+
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
@@ -11757,12 +11766,10 @@ pub async fn liquidate_vault_partial(
                     now_ns,
                 );
             });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
+        } else if !unsupported_treasury_fee_held {
+            crate::treasury::route_liquidation_fee_to_treasury(
                 protocol_cut,
                 vault.collateral_type,
-                asset_type,
             )
             .await;
         }
@@ -12172,6 +12179,15 @@ pub async fn liquidate_vault_partial_with_stable(
         (interest_share, xrp_claim_id, applied_protocol_cut)
     });
 
+    // Journal unsupported collateral synchronously before any post-commit
+    // await so the protocol fee obligation cannot disappear on interruption.
+    let unsupported_treasury_fee_held = applied_stable_protocol_cut > 0
+        && vault.collateral_type != crate::state::xrp_collateral_principal()
+        && crate::treasury::hold_unsupported_liquidation_fee_if_needed(
+            applied_stable_protocol_cut,
+            vault.collateral_type,
+        );
+
     // Route interest via N-way split (stablecoin-denominated)
     if interest_share.to_u64() > 0 {
         crate::treasury::distribute_stablecoin_interest(
@@ -12204,12 +12220,10 @@ pub async fn liquidate_vault_partial_with_stable(
                     now_ns,
                 );
             });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
+        } else if !unsupported_treasury_fee_held {
+            crate::treasury::route_liquidation_fee_to_treasury(
                 applied_stable_protocol_cut,
                 vault.collateral_type,
-                asset_type,
             )
             .await;
         }
@@ -13011,6 +13025,15 @@ async fn liquidate_vault_debt_already_burned_inner(
 
     let (interest_share, applied_protocol_cut) = interest_share;
 
+    // Journal unsupported collateral synchronously before any post-commit
+    // await so the protocol fee obligation cannot disappear on interruption.
+    let unsupported_treasury_fee_held = applied_protocol_cut > 0
+        && vault.collateral_type != crate::state::xrp_collateral_principal()
+        && crate::treasury::hold_unsupported_liquidation_fee_if_needed(
+            applied_protocol_cut,
+            vault.collateral_type,
+        );
+
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
@@ -13041,12 +13064,10 @@ async fn liquidate_vault_debt_already_burned_inner(
                     now_ns,
                 );
             });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
+        } else if !unsupported_treasury_fee_held {
+            crate::treasury::route_liquidation_fee_to_treasury(
                 applied_protocol_cut,
                 vault.collateral_type,
-                asset_type,
             )
             .await;
         }
@@ -13494,6 +13515,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         }
     };
 
+    // Journal unsupported collateral synchronously before any post-commit
+    // await so the protocol fee obligation cannot disappear on interruption.
+    let unsupported_treasury_fee_held = applied_protocol_cut > 0
+        && vault.collateral_type != crate::state::xrp_collateral_principal()
+        && crate::treasury::hold_unsupported_liquidation_fee_if_needed(
+            applied_protocol_cut,
+            vault.collateral_type,
+        );
+
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
@@ -13524,12 +13554,10 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                     now_ns,
                 );
             });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
+        } else if !unsupported_treasury_fee_held {
+            crate::treasury::route_liquidation_fee_to_treasury(
                 applied_protocol_cut,
                 vault.collateral_type,
-                asset_type,
             )
             .await;
         }
@@ -14058,6 +14086,15 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         (interest_share, xrp_claim_id, applied_protocol_cut)
     });
 
+    // Journal unsupported collateral synchronously before any post-commit
+    // await so the protocol fee obligation cannot disappear on interruption.
+    let unsupported_treasury_fee_held = applied_protocol_cut > 0
+        && vault.collateral_type != crate::state::xrp_collateral_principal()
+        && crate::treasury::hold_unsupported_liquidation_fee_if_needed(
+            applied_protocol_cut,
+            vault.collateral_type,
+        );
+
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
@@ -14088,12 +14125,10 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
                     now_ns,
                 );
             });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
+        } else if !unsupported_treasury_fee_held {
+            crate::treasury::route_liquidation_fee_to_treasury(
                 applied_protocol_cut,
                 vault.collateral_type,
-                asset_type,
             )
             .await;
         }

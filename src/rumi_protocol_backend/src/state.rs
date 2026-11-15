@@ -2891,6 +2891,17 @@ pub struct TreasuryStableTransferJournal {
     pub phase: TreasuryStableTransferPhase,
 }
 
+/// Protocol-fee collateral that cannot be classified by the current Treasury
+/// interface. These rows are intentionally not dispatched by the legacy
+/// pending-collateral timer, whose transfer identity is not durable.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct HeldUnsupportedTreasuryCollateral {
+    pub hold_id: u128,
+    pub amount_raw: u64,
+    pub ledger: Principal,
+    pub created_at_ns: u64,
+}
+
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub enum TreasuryStableTransferPhase {
     AwaitingPreflight,
@@ -4212,6 +4223,11 @@ pub struct State {
     /// Collateral fees from sync liquidations, transferred to treasury in next timer tick.
     /// Each entry is (amount_e8s, collateral_ledger_principal).
     pub pending_treasury_collateral: Vec<(u64, Principal)>,
+    /// Unsupported collateral fees held without dispatch until a reviewed,
+    /// identity-preserving recovery path is installed.
+    #[serde(default)]
+    pub held_unsupported_treasury_collateral:
+        BTreeMap<u128, HeldUnsupportedTreasuryCollateral>,
     /// Global fraction of the liquidation bonus (liquidator's profit) that goes to the protocol treasury.
     /// e.g., 0.03 = protocol gets 3% of the bonus, liquidator keeps 97%.
     pub liquidation_protocol_share: Ratio,
@@ -4913,6 +4929,7 @@ impl Default for State {
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
+            held_unsupported_treasury_collateral: BTreeMap::new(),
             liquidation_protocol_share: Ratio::from(Decimal::ZERO),
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: Vec::new(),
@@ -5244,6 +5261,7 @@ impl From<InitArg> for State {
             // Treasury fee routing
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
+            held_unsupported_treasury_collateral: BTreeMap::new(),
             liquidation_protocol_share: crate::DEFAULT_LIQUIDATION_PROTOCOL_SHARE,
             interest_pool_share: DEFAULT_INTEREST_POOL_SHARE,
             interest_split: default_interest_split(),

@@ -1270,6 +1270,12 @@ pub enum PendingPayoutEvent {
     /// deficit ReadOnly cause. Kept out of public `Event` for Candid backward
     /// compatibility.
     DeficitReadonlyLatchCleared,
+    /// A liquidation protocol fee whose collateral ledger has no supported
+    /// Treasury classification. It remains held in backend custody and is not
+    /// fed into the legacy retry timer.
+    UnsupportedTreasuryCollateralFeeHeld {
+        hold: crate::state::HeldUnsupportedTreasuryCollateral,
+    },
     XrpVaultOriginReconciled { vault_id: u64, origin: crate::xrp_vault_deposit::XrpVaultOrigin },
     XrpVaultTopupCredited { receipt: crate::xrp_vault_deposit::XrpTopupReceipt },
     NicpRedemptionClaimUpdated { claim: crate::nicp_redemption::NicpRedemptionClaim },
@@ -2023,6 +2029,16 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
         }
         PendingPayoutEvent::DeficitReadonlyLatchCleared => {
             state.clear_deficit_readonly_latch();
+        }
+        PendingPayoutEvent::UnsupportedTreasuryCollateralFeeHeld { hold } => {
+            let replayed_counter = hold.hold_id as u64;
+            state.op_nonce_counter = state
+                .op_nonce_counter
+                .max(replayed_counter.saturating_add(1));
+            state
+                .held_unsupported_treasury_collateral
+                .entry(hold.hold_id)
+                .or_insert(hold);
         }
         PendingPayoutEvent::XrpVaultOriginReconciled { vault_id, origin } => {
             crate::xrp_vault_deposit::apply_origin(state, vault_id, origin)
@@ -7314,6 +7330,28 @@ mod borrow_replay_tests {
             crate::numeric::NANOS_PER_YEAR,
         ));
         assert_eq!(crate::storage::private_journal_entry_count(), before);
+    }
+
+    #[test]
+    fn unsupported_treasury_collateral_hold_replays_idempotently() {
+        let icp = principal(17);
+        let mut state = replay(std::iter::once(Event::Init(init_args(icp)))).unwrap();
+        let hold = crate::state::HeldUnsupportedTreasuryCollateral {
+            hold_id: 77,
+            amount_raw: 123_456,
+            ledger: principal(18),
+            created_at_ns: 99,
+        };
+        let event = PendingPayoutEvent::UnsupportedTreasuryCollateralFeeHeld {
+            hold: hold.clone(),
+        };
+
+        apply_pending_payout_event(&mut state, event.clone());
+        apply_pending_payout_event(&mut state, event);
+
+        assert_eq!(state.held_unsupported_treasury_collateral.len(), 1);
+        assert_eq!(state.held_unsupported_treasury_collateral[&77], hold);
+        assert!(state.op_nonce_counter >= 78);
     }
 }
 
