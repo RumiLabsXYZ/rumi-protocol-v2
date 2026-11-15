@@ -1,35 +1,9 @@
 //! AMM swap event tailing. Writes to EVT_SWAPS.
 
-use std::cell::Cell;
-
 use crate::{sources, state, storage};
 use storage::cursors;
 use storage::events::*;
 use super::{BATCH_SIZE, update_cursor_success, update_cursor_error, update_cursor_source_count};
-
-thread_local! {
-    static RUN_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
-}
-
-struct RunGuard;
-
-impl RunGuard {
-    fn try_acquire() -> Option<Self> {
-        RUN_IN_PROGRESS.with(|in_progress| {
-            if in_progress.replace(true) {
-                None
-            } else {
-                Some(Self)
-            }
-        })
-    }
-}
-
-impl Drop for RunGuard {
-    fn drop(&mut self) {
-        RUN_IN_PROGRESS.with(|in_progress| in_progress.set(false));
-    }
-}
 
 fn nat_to_u64(n: &candid::Nat) -> u64 {
     use num_traits::ToPrimitive;
@@ -51,13 +25,11 @@ fn select_unseen_events<'a>(
     (unseen, next_cursor, gap)
 }
 
-pub async fn run() {
-    // The scheduler may start another tail pass while this one is awaiting the
-    // source query. Keep the read/fetch/append/commit sequence single-flight.
-    let Some(_run_guard) = RunGuard::try_acquire() else {
-        return;
-    };
+fn monotonic_cursor_commit(current: u64, candidate: u64) -> u64 {
+    current.max(candidate)
+}
 
+pub async fn run() {
     let amm = state::read_state(|s| s.sources.amm);
     let requested_id = cursors::amm_swaps::get();
     let window = match sources::amm::get_amm_swap_events_from_id(amm, requested_id, BATCH_SIZE).await {
@@ -114,11 +86,13 @@ pub async fn run() {
             current_id
         }
     });
-    if cursor_after > cursors::amm_swaps::get() {
-        cursors::amm_swaps::set(cursor_after);
+    let durable_cursor = cursors::amm_swaps::get();
+    let committed_cursor = monotonic_cursor_commit(durable_cursor, cursor_after);
+    if committed_cursor > durable_cursor {
+        cursors::amm_swaps::set(committed_cursor);
     }
 
-    if !unseen.is_empty() {
+    if !unseen.is_empty() || !gap {
         state::mutate_state(|s| {
             update_cursor_success(s, cursors::CURSOR_ID_AMM_SWAPS, ic_cdk::api::time());
             // Preserve the dropped-history diagnostic until a gap-free pass.
@@ -156,25 +130,61 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_tail_runs_are_rejected_and_guard_releases() {
-        let first = RunGuard::try_acquire().expect("first invocation acquires guard");
-        assert!(RunGuard::try_acquire().is_none(), "overlapping invocation must skip");
-        drop(first);
-        assert!(RunGuard::try_acquire().is_some(), "guard releases after completion");
+    fn overlapping_fetched_pages_commit_sequentially_from_reread_cursor() {
+        // Both invocations fetched this page before either callback committed.
+        let first_page = [event(50_000), event(50_001)];
+        let overlapping_page = [event(50_000), event(50_001)];
+        let mut committed_cursor = 50_000;
+        let (first, next, gap) = select_unseen_events(committed_cursor, 1, &first_page);
+        assert!(!gap);
+        assert_eq!(first.iter().map(|event| event.id).collect::<Vec<_>>(), [50_000, 50_001]);
+        committed_cursor = monotonic_cursor_commit(
+            committed_cursor,
+            next.expect("first page advances cursor"),
+        );
+
+        // The second callback rereads the durable cursor after its await, so
+        // its stale fetched payload contributes no rows and cannot rewind it.
+        let (second, second_next, second_gap) =
+            select_unseen_events(committed_cursor, 1, &overlapping_page);
+        assert!(second.is_empty());
+        assert_eq!(second_next, None);
+        assert!(!second_gap);
+        committed_cursor = monotonic_cursor_commit(
+            committed_cursor,
+            second_next.unwrap_or(committed_cursor),
+        );
+        assert_eq!(committed_cursor, 50_002);
     }
 
     #[test]
-    fn retrying_same_page_after_cursor_commit_is_idempotent() {
-        let page = [event(50_000), event(50_001)];
-        let (first, next, gap) = select_unseen_events(50_000, 1, &page);
-        assert!(!gap);
-        assert_eq!(first.iter().map(|event| event.id).collect::<Vec<_>>(), [50_000, 50_001]);
-        let committed = next.expect("page advances cursor");
+    fn gap_free_empty_page_clears_stale_gap_diagnostic() {
+        let mut state = crate::storage::SlimState::default();
+        update_cursor_error(
+            &mut state,
+            cursors::CURSOR_ID_AMM_SWAPS,
+            "AMM swap history gap".to_string(),
+        );
 
-        let (retry, retry_next, retry_gap) = select_unseen_events(committed, 1, &page);
-        assert!(retry.is_empty());
-        assert_eq!(retry_next, None);
-        assert!(!retry_gap);
+        let (unseen, _, gap) = select_unseen_events(50_003, 50_003, &[]);
+        assert!(unseen.is_empty());
+        assert!(!gap);
+
+        // `run` records success for any gap-free page, including an empty
+        // caught-up response, which removes the prior retention warning.
+        update_cursor_success(&mut state, cursors::CURSOR_ID_AMM_SWAPS, 123);
+        assert!(state
+            .cursor_last_error
+            .as_ref()
+            .and_then(|errors| errors.get(&cursors::CURSOR_ID_AMM_SWAPS))
+            .is_none());
+        assert_eq!(
+            state
+                .cursor_last_success
+                .as_ref()
+                .and_then(|success| success.get(&cursors::CURSOR_ID_AMM_SWAPS)),
+            Some(&123)
+        );
     }
 
     #[test]
