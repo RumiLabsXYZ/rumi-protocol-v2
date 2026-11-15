@@ -1,0 +1,20 @@
+{
+  "source": "c4617b771dc40ccaf573ce47bbd48419233ec863",
+  "candidateSha256": "a17457c9ad75e1cf05aa0b0de6c8441f6d7754769e3b62ca24717bfa6ac1fdd3",
+  "priorBuildReceiptSha256": "bb0c3f4124989969081b0bb9e1164e9f56ce468724af280752070cecbd81bd34",
+  "command": [
+    "/Users/robertripley/.cargo/bin/ic-wasm",
+    "/private/tmp/vault202-validation-20261114/build-da7952ba-7075-4f07-ae60-f3ca49a78008/candidate.wasm",
+    "check-endpoints",
+    "--candid",
+    "/private/tmp/rumi-vault202-recovery-20261114/src/liquidation_bot/liquidation_bot.did",
+    "--hidden",
+    "/private/tmp/vault202-validation-20261114/hidden-endpoints-v2.txt"
+  ],
+  "hiddenFileSha256": "b5c3a289ea2b8232c32467615d8741743ca64f6cf38a63f73e6e031b0d953c93",
+  "maxSeconds": 60,
+  "noArtifactMutation": true,
+  "noCompiler": true,
+  "supersedesRequestSha256": "7cdcbd8450b5b4a110816d64fce47f620eb328902ab83d736fd0344e234c9633",
+  "formatEvidence": "Official ic-wasm src/check_endpoints/mod.rs: typed canister_update:NAME, plus explicit observed lifecycle entrypoints. v1 request not invoked."
+}

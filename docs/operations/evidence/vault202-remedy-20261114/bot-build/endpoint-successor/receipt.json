@@ -1,0 +1,22 @@
+{
+  "allocationId": "79574261-a27b-40de-a0f3-5b8643031345",
+  "source": "c4617b771dc40ccaf573ce47bbd48419233ec863",
+  "candidateSha256": "a17457c9ad75e1cf05aa0b0de6c8441f6d7754769e3b62ca24717bfa6ac1fdd3",
+  "hiddenFileSha256": "f030ea87cda78bbf05a76dc89e03780e07d681c6fe05182cbbe079d3e1f6fcc0",
+  "startedUtc": "2026-11-15T06:37:40.802519+00:00",
+  "command": [
+    "/Users/robertripley/.cargo/bin/ic-wasm",
+    "/private/tmp/vault202-validation-20261114/build-da7952ba-7075-4f07-ae60-f3ca49a78008/candidate.wasm",
+    "check-endpoints",
+    "--candid",
+    "/private/tmp/rumi-vault202-recovery-20261114/src/liquidation_bot/liquidation_bot.did",
+    "--hidden",
+    "/private/tmp/vault202-validation-20261114/hidden-endpoints-v3.txt"
+  ],
+  "ownedPgid": 78960,
+  "exit": 0,
+  "ownedGroupClosed": true,
+  "remainingOwnedRows": [],
+  "candidateUnchanged": true,
+  "finishedUtc": "2026-11-15T06:37:41.083550+00:00"
+}

@@ -1,0 +1,2 @@
+ERROR: The following endpoint is unexpected in the WASM exports section: canister_global_timer
+Error: Canister WASM and Candid interface do not match!

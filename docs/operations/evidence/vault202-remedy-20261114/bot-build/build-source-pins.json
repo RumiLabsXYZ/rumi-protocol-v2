@@ -1,0 +1,90 @@
+{
+  "head": "9a9106ad361a665c06bcb40c2c6f8687dc6968b6",
+  "files": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "4d285bc8956821765437e789b74cef7b01260d0a879b2a28610661b6e125fe6a"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "b25c765164b7414004df6f45f21d6f6d3540aa0f0dae3ecdd81c04e5ad438d47"
+    },
+    {
+      "path": "src/liquidation_bot/Cargo.toml",
+      "sha256": "d840f139de32221e1f8fb779b7e3a3b37a7d3222115782254910f402e43f6b3e"
+    },
+    {
+      "path": "src/liquidation_bot/fixtures/claim202.hex",
+      "sha256": "68813664e09cf89c6f2bb07269eec7e17e87099189bb42e2be20159af173d3a9"
+    },
+    {
+      "path": "src/liquidation_bot/fixtures/output815252.hex",
+      "sha256": "bdc881edbd4d45a5449f626e245e99a2d27ff10cd950b5cb20970fc1b386907b"
+    },
+    {
+      "path": "src/liquidation_bot/fixtures/record231.hex",
+      "sha256": "51d914d3a003cd84d8a6ef6529537bc3edb30695f429110ce16ba39b2877ccbb"
+    },
+    {
+      "path": "src/liquidation_bot/liquidation_bot.did",
+      "sha256": "634b119be34632b323884edb6e1f2f98c41a9a5b88b404aca68da366df088d00"
+    },
+    {
+      "path": "src/liquidation_bot/src/history.rs",
+      "sha256": "b0b099271b41b2141c0fd26b744cd8f62b95a22bfb3dad4d0d4efe88f34872f6"
+    },
+    {
+      "path": "src/liquidation_bot/src/icpswap.rs",
+      "sha256": "a1ca7eaed1cbff3809114ed1e4b29c3b22a2ba0d6ebe27cfb9794337db574500"
+    },
+    {
+      "path": "src/liquidation_bot/src/lib.rs",
+      "sha256": "e97066535341ab1d8feabbe6cac0bc15cb239299eefd458792f2902ff78c4ca5"
+    },
+    {
+      "path": "src/liquidation_bot/src/memory.rs",
+      "sha256": "5113eb174ec3214d9d8bd1d34a2f8b8750348903ed5ec30c041d41e070e40f22"
+    },
+    {
+      "path": "src/liquidation_bot/src/native_icp_blocks.rs",
+      "sha256": "df94fd39364874ac9f38d593bfb3323450fa0e420968bc5480496ec911537405"
+    },
+    {
+      "path": "src/liquidation_bot/src/process.rs",
+      "sha256": "030c6f6a633c8cceebdbeb98d41cea63b70453059ea0f55fa368bd790e15084c"
+    },
+    {
+      "path": "src/liquidation_bot/src/process/recovery202.rs",
+      "sha256": "56a3c53e388bc5e62b79d0ec88db86cf205f917a7aa8a11d1abb8d8f8974d577"
+    },
+    {
+      "path": "src/liquidation_bot/src/reserve.rs",
+      "sha256": "019903258b073f017685e675af0e10be3aea79d1d1359f84a776e318966d6601"
+    },
+    {
+      "path": "src/liquidation_bot/src/state.rs",
+      "sha256": "0d16f4895301418776fdf64393892bfbb5950e98b65159c7780e9767ed7ba973"
+    },
+    {
+      "path": "src/liquidation_bot/src/swap.rs",
+      "sha256": "8bdb32aee571a1e5aeb5eb61dba1845996faebac49f53d3ba58316f067740aa8"
+    },
+    {
+      "path": "src/liquidation_bot/tests/fixtures/vault158-ckusdc-output-block-806697.hex",
+      "sha256": "5299c5ef505322fee9012d86ef8ed3859b642d0de7d2c0c93e42ce55a2158b9f"
+    },
+    {
+      "path": "src/liquidation_bot/tests/fixtures/vault158-icp-input-block-39835236.hex",
+      "sha256": "a03076732a36b44a2d0aa5919a5e7d1f3ffffef8e64f66db45b4fbae091e86ad"
+    },
+    {
+      "path": "src/liquidation_bot/tests/native_icp_treasury_archive_pic.rs",
+      "sha256": "dccd3b25d4037c710c8421a2a67aaa243f6dfd18d1744faac4909c3e489d3679"
+    },
+    {
+      "path": "icp.yaml",
+      "sha256": "406b69053fb07da78a70c3d302ebdbcb4de9081b2a78d815886e0f698692069f"
+    }
+  ],
+  "source": "c4617b771dc40ccaf573ce47bbd48419233ec863"
+}

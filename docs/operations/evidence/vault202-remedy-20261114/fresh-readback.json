@@ -1,31 +1,89 @@
 {
+  "observedUtc": "2026-11-15T06:27:11.582488+00:00",
+  "readOnly": true,
+  "queryResponsesUncertified": true,
   "claimStable": true,
-  "botModule": "0x256dc8101b0e0d616bb7c660b17168a8ad11d146869802bb483849c08875359e",
-  "backendModule": "0x8f6f5933e54fa44205760b9a8d1c3869135df43825eadfee70b20c62d0a0bd16",
   "backendOpenClaimIds": [
     202
   ],
+  "botModule": "0x256dc8101b0e0d616bb7c660b17168a8ad11d146869802bb483849c08875359e",
+  "backendModule": "0x8f6f5933e54fa44205760b9a8d1c3869135df43825eadfee70b20c62d0a0bd16",
+  "botStatus": "Running",
+  "processingPaused": false,
   "botSnapshotCount": 3,
+  "icpBalanceE8s": 40884033,
+  "ckUsdcBalanceE6": 26716720,
+  "icpFeeE8s": 10000,
+  "ckUsdcFeeE6": 10000,
+  "pendingPaymentJournals": [],
+  "treasury231": null,
+  "vault158Status": "TreasurySettled",
+  "record231": "TransferFailed / PaymentShortfall",
+  "recipientConfigUnchanged": true,
   "privateReadManifest": [
     {
-      "name": "fresh-claim202.txt",
-      "sha256": "6e1f60e3b5bf5767ffa525daf1300c0d3332abd40c63c6b95b5478ccf6d77c12"
-    },
-    {
-      "name": "fresh-bot-status.json",
-      "sha256": "251a9d79c964fdafc7629356b85a51c14de7103b71fc639aca5d8dccc536dddd"
-    },
-    {
-      "name": "fresh-backend-status.json",
-      "sha256": "c7a714d3e219642f6eaac85061deafde980d0639331d75e54d39e73b5ade39ed"
-    },
-    {
-      "name": "fresh-backend-claims.txt",
+      "name": "backend-claims.txt",
       "sha256": "2a564d2b335cdb19e649fc1b11aa58522f2c112bf3273eb8301d41a2f5b2aae0"
     },
     {
-      "name": "fresh-bot-snapshots.txt",
-      "sha256": "d3f1cb3b033be9e3b0bfa666458ecd9dda7aec2ab061e9bd0cbabb3b78939030"
+      "name": "backend-status.txt",
+      "sha256": "e32e536c74afde582c94940a0fa9cdf6a653dd1f05f1c3aa047561139679502e"
+    },
+    {
+      "name": "bot-status.txt",
+      "sha256": "251122105a730952863d9a32e5211937f35644c14242564e1d9ee7e2c881f5d0"
+    },
+    {
+      "name": "ckusdc-icrc1_balance_of.txt",
+      "sha256": "3921832e7c518a66ce0490442b4223ba69a9b383fe895b080b2610c080b66dd5"
+    },
+    {
+      "name": "ckusdc-icrc1_fee.txt",
+      "sha256": "f8319790ade665b5e57a9ad179d641ca222632d61538d9a4eb25d2794c2dda7a"
+    },
+    {
+      "name": "get_liquidation.txt",
+      "sha256": "1a75a5910147583f5193e5eae37e14817c3d1d0f83954579ddf44069879ad57e"
+    },
+    {
+      "name": "get_pending_claim_journals.txt",
+      "sha256": "6e1f60e3b5bf5767ffa525daf1300c0d3332abd40c63c6b95b5478ccf6d77c12"
+    },
+    {
+      "name": "get_pending_payment_journals.txt",
+      "sha256": "7030e16794186bf0a7049fc18decfa305307496460df5fef36ee5622e1b2c4d1"
+    },
+    {
+      "name": "get_pending_treasury_intent.txt",
+      "sha256": "faa1eacca6a2c61c39f0564cf68d8e950a398fb697c8237c8265cc79d2ca118f"
+    },
+    {
+      "name": "get_processing_paused.txt",
+      "sha256": "b98ee57d9f05f9318b90414b8b0d2a8c53be3834622eee81eab2e9828a0e504c"
+    },
+    {
+      "name": "get_recovery_config.txt",
+      "sha256": "48a59581484308fc022911e839bfb5fe8eb498ec29ac34a7543748a83a21d971"
+    },
+    {
+      "name": "get_stuck_liquidations.txt",
+      "sha256": "529a9624f09b9a0dc696aa3bb85462eb42c5571d7f71fadb70bdde7d3111ca9e"
+    },
+    {
+      "name": "get_vault158_recovery.txt",
+      "sha256": "cacf0e6a4c27b214236c140a6879c5d8f428bf19982d9d728b57d62e478a0c08"
+    },
+    {
+      "name": "icp-icrc1_balance_of.txt",
+      "sha256": "698b04eb7624aaf2fa1703c0bdfeb125061cbb99bc643dfee726bad41c7dd968"
+    },
+    {
+      "name": "icp-icrc1_fee.txt",
+      "sha256": "f8319790ade665b5e57a9ad179d641ca222632d61538d9a4eb25d2794c2dda7a"
+    },
+    {
+      "name": "snapshots.txt",
+      "sha256": "2c3a807af94e838fc7e5e1c9bf53f089c2fe77f15f339596577a52b19f8df7cb"
     }
   ]
 }

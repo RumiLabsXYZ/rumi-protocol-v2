@@ -1,0 +1,89 @@
+Number of types: 72
+Number of globals: 3
+
+Number of data sections: 1
+Size of data sections: 186928 bytes
+
+Number of functions: 3218
+Number of callbacks: 1
+Start function: None
+Exported methods: [
+    "canister_init (func_3137)",
+    "canister_inspect_message (func_3138)",
+    "canister_post_upgrade (func_3139)",
+    "canister_pre_upgrade (func_3140)",
+    "canister_query cycle_manager_metrics (func_3141)",
+    "canister_query cycles_status (func_3142)",
+    "canister_query get_admin_event_count (func_3143)",
+    "canister_query get_admin_events (func_3144)",
+    "canister_query get_bot_stats (func_3145)",
+    "canister_query get_liquidation (func_3146)",
+    "canister_query get_liquidation_count (func_3147)",
+    "canister_query get_liquidation_events (func_3148)",
+    "canister_query get_liquidations (func_3149)",
+    "canister_query get_operator_reserve (func_3150)",
+    "canister_query get_pending_claim_journals (func_3151)",
+    "canister_query get_pending_payment_journals (func_3152)",
+    "canister_query get_pending_treasury_intent (func_3153)",
+    "canister_query get_processing_paused (func_3154)",
+    "canister_query get_recovery_config (func_3155)",
+    "canister_query get_stuck_liquidations (func_3156)",
+    "canister_query get_vault158_recovery (func_3157)",
+    "canister_update admin_approve_pool (func_2587)",
+    "canister_update admin_authorize_shortfall_topup (func_2588)",
+    "canister_update admin_configure_operator_reserve (func_2589)",
+    "canister_update admin_execute_vault158_recovery (func_2590)",
+    "canister_update admin_execute_vault202_recovery (func_2591)",
+    "canister_update admin_prepare_vault158_recovery (func_2592)",
+    "canister_update admin_reconcile_payment_block (func_2572)",
+    "canister_update admin_reconcile_return_block (func_2573)",
+    "canister_update admin_reconcile_shortfall_topup_block (func_2574)",
+    "canister_update admin_reconcile_treasury_block (func_2593)",
+    "canister_update admin_refresh_fees (func_2594)",
+    "canister_update admin_resolve_pool_ordering (func_2595)",
+    "canister_update admin_retry_stuck_claim (func_2596)",
+    "canister_update admin_set_operator_reserve_enabled (func_3158)",
+    "canister_update admin_sweep_ckusdc (func_2597)",
+    "canister_update admin_test_swap (func_2598)",
+    "canister_update notify_liquidatable_vaults (func_3159)",
+    "canister_update set_config (func_3160)",
+    "canister_update set_processing_paused (func_3161)",
+    "canister_global_timer (func_2601)",
+    "canister_update <ic-cdk internal> timer_executor (func_577)",
+]
+
+Imported IC0 System API: [
+    "msg_reply",
+    "stable64_size",
+    "stable64_grow",
+    "stable64_read",
+    "stable64_write",
+    "call_new",
+    "call_data_append",
+    "call_on_cleanup",
+    "call_perform",
+    "debug_print",
+    "global_timer_set",
+    "msg_reply_data_append",
+    "call_cycles_add128",
+    "msg_reject_code",
+    "msg_arg_data_size",
+    "msg_arg_data_copy",
+    "msg_reject_msg_size",
+    "msg_reject_msg_copy",
+    "performance_counter",
+    "canister_self_size",
+    "canister_self_copy",
+    "time",
+    "trap",
+    "msg_caller_size",
+    "msg_caller_copy",
+    "msg_method_name_size",
+    "msg_method_name_copy",
+    "accept_message",
+    "canister_cycle_balance128",
+]
+
+Custom sections with size: [
+    "icp:public candid:service (9384 bytes)",
+]

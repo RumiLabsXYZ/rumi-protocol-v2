@@ -1,16 +1,16 @@
 {
   "preparationOnly": true,
   "executionApproved": false,
-  "source": "7ef1e6940a6b4bd237b394b23832bd19ef3c4046",
+  "source": "c4617b771dc40ccaf573ce47bbd48419233ec863",
   "deployedBotSourcePreserved": "2edd5e01b9501d2349265674ec11f0aaa22add49",
   "target": "nygob-3qaaa-aaaap-qttcq-cai",
   "network": "ic",
   "identity": "rumi_identity",
   "expectedOldModuleSha256": "256dc8101b0e0d616bb7c660b17168a8ad11d146869802bb483849c08875359e",
-  "candidateArtifactSha256": null,
-  "artifactBuilt": false,
-  "nativeTestsExecuted": false,
-  "canonicalCandidRegenerated": false,
+  "candidateArtifactSha256": "a17457c9ad75e1cf05aa0b0de6c8441f6d7754769e3b62ca24717bfa6ac1fdd3",
+  "artifactBuilt": true,
+  "nativeTestsExecuted": true,
+  "canonicalCandidRegenerated": true,
   "sourceReviews": "two focused PASS at same corrected source; prior findings fixed",
   "rawExistingClaimIcpE8s": 5152859,
   "claimNetIcpE8s": 5142859,
@@ -75,11 +75,28 @@
     "resume.did": "b98ee57d9f05f9318b90414b8b0d2a8c53be3834622eee81eab2e9828a0e504c",
     "upgrade.did": "71d200d8ffab1b98ab940769da680c27d48873242f3f141a4910e6e10766e84b"
   },
-  "actualBlocker": "Cody destination/payload scheduling permission rejected; direct human question pending. No heavy allocation delivered.",
-  "pendingValidation": [
-    "one locked/offline native bot test pass with canonical Candid generation",
-    "canonical generated bot declarations and backwards interface compatibility",
-    "one serialized source-matched bot Wasm build and exact export/artifact checks",
-    "final exact source/artifact/plan readback before production decision"
-  ]
+  "actualBlocker": "Exact production packet approval required; preparation and build complete.",
+  "pendingValidation": [],
+  "candidateArtifactBytes": 2013531,
+  "candidateArtifactPath": "docs/operations/evidence/vault202-remedy-20261114/bot-build/candidate.wasm",
+  "nativeTestsPassed": 77,
+  "interfacesBackwardsCompatible": true,
+  "builtExportsMatchCandid": true,
+  "preflightObservedUtc": "2026-11-15T06:27:11.582488+00:00",
+  "historicalNativeAttempts": [
+    {
+      "allocation": "ff74d4e6-6489-4af0-9623-515a6d174ce8",
+      "outcome": "dependency compile deadline; zero tests; owned closure verified"
+    },
+    {
+      "allocation": "68695edd-19a0-4520-b55c-a54fe44b4eec",
+      "outcome": "E0283 compile failure; zero tests; corrected with explicit Result annotation; owned closure verified"
+    },
+    {
+      "allocation": "f187ece1-e9e8-435e-acbe-cefe21fce68f",
+      "outcome": "77 tests pass and all interface checks pass; owned closure verified"
+    }
+  ],
+  "validationReceipt": "native-validation/receipt.json",
+  "buildReceipt": "bot-build/receipt.json"
 }

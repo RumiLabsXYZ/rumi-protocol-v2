@@ -1,0 +1,76 @@
+{
+  "buildSource": "c4617b771dc40ccaf573ce47bbd48419233ec863",
+  "upload": "bot-build/candidate.wasm",
+  "uploadEncoding": "uncompressed Wasm; module hash equals SHA256 of these exact bytes",
+  "artifacts": [
+    {
+      "name": "raw.wasm",
+      "bytes": 2452524,
+      "sha256": "ebf5ad6e447c381f42457de8e37807813cc0ea482b7cdc7c6cf7d75e1f8ec30c"
+    },
+    {
+      "name": "shrunk.wasm",
+      "bytes": 2004118,
+      "sha256": "37bdf58eb8766cd68bda1b9e488c8c65ac4fcaa3c9057bdd8c2f6b4f1917cc3c"
+    },
+    {
+      "name": "candidate.wasm",
+      "bytes": 2013531,
+      "sha256": "a17457c9ad75e1cf05aa0b0de6c8441f6d7754769e3b62ca24717bfa6ac1fdd3"
+    }
+  ],
+  "codeSectionBytes": 1809301,
+  "pipeline": "cargo build --offline --locked --release --target wasm32-unknown-unknown -p liquidation_bot --lib; ic-wasm 0.9.10 shrink; public canonical candid:service metadata",
+  "toolchain": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+  "nativeTests": 77,
+  "apiChecks": "Rust-generated canonical DID; didc backwards compatible; generated declarations equal; built endpoints checked against DID",
+  "sourceReview": "two focused source PASS at7ef1e694; only later Rust change explicit closure error type at9a9106ad; c4617b77 adds generated interfaces/evidence",
+  "codeSections": [
+    {
+      "id": 1,
+      "payloadBytes": 537
+    },
+    {
+      "id": 2,
+      "payloadBytes": 642
+    },
+    {
+      "id": 3,
+      "payloadBytes": 3191
+    },
+    {
+      "id": 4,
+      "payloadBytes": 7
+    },
+    {
+      "id": 5,
+      "payloadBytes": 3
+    },
+    {
+      "id": 6,
+      "payloadBytes": 25
+    },
+    {
+      "id": 7,
+      "payloadBytes": 1743
+    },
+    {
+      "id": 9,
+      "payloadBytes": 1693
+    },
+    {
+      "id": 10,
+      "payloadBytes": 1809301
+    },
+    {
+      "id": 11,
+      "payloadBytes": 186939
+    },
+    {
+      "id": 0,
+      "payloadBytes": 9410
+    }
+  ],
+  "embeddedCandidBytesEqualCanonical": true,
+  "pinsDocumentNote": "build-source-pins retains historical head9a9106ad; explicit source and actual runtime HEAD arec4617b77; all pinned file hashes checked"
+}

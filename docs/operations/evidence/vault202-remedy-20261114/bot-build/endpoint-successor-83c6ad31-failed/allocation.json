@@ -1,0 +1,25 @@
+{
+  "allocationId": "83c6ad31-9167-46c3-9955-9ca20363181b",
+  "owner": "OriginalAdrian_EndpointMechanicalOnly",
+  "request": "/private/tmp/vault202-validation-20261114/endpoint-check-request-v2.json",
+  "requestSha256": "4e8adba8b45407958d205bcd2e458589b9099dc627a4d01e0f9c8ac98e6fcb44",
+  "command": [
+    "/Users/robertripley/.cargo/bin/ic-wasm",
+    "/private/tmp/vault202-validation-20261114/build-da7952ba-7075-4f07-ae60-f3ca49a78008/candidate.wasm",
+    "check-endpoints",
+    "--candid",
+    "/private/tmp/rumi-vault202-recovery-20261114/src/liquidation_bot/liquidation_bot.did",
+    "--hidden",
+    "/private/tmp/vault202-validation-20261114/hidden-endpoints-v2.txt"
+  ],
+  "source": "c4617b771dc40ccaf573ce47bbd48419233ec863",
+  "candidateSha256": "a17457c9ad75e1cf05aa0b0de6c8441f6d7754769e3b62ca24717bfa6ac1fdd3",
+  "hiddenFileSha256": "b5c3a289ea2b8232c32467615d8741743ca64f6cf38a63f73e6e031b0d953c93",
+  "maximumSecondsIncludingClosure": 90,
+  "commandTimeoutSeconds": 60,
+  "closureReserveSeconds": 30,
+  "startBeforeUtc": "2026-11-15T06:44:08.290899+00:00",
+  "noArtifactMutation": true,
+  "noCompilerBuildOrFinancialAction": true,
+  "lightweightOnlyDoesNotConsumeHeavyLocalSlot": true
+}

@@ -1,0 +1,53 @@
+{
+  "allocationId": "da7952ba-7075-4f07-ae60-f3ca49a78008",
+  "head": "c4617b771dc40ccaf573ce47bbd48419233ec863",
+  "target": "/private/tmp/rumi-cksol-icp-target",
+  "command": [
+    "/Users/robertripley/.cargo/bin/cargo",
+    "build",
+    "--offline",
+    "--locked",
+    "--release",
+    "--target",
+    "wasm32-unknown-unknown",
+    "-p",
+    "liquidation_bot",
+    "--lib"
+  ],
+  "startedUtc": "2026-11-15T06:27:54.285822+00:00",
+  "baselineFreeBytes": 31405342720,
+  "peakOwnedRssBytes": 1905934336,
+  "minimumFreeBytes": 31181389824,
+  "maxFsDropBytes": 223952896,
+  "ownedPids": [
+    72222,
+    72229,
+    72231,
+    72662
+  ],
+  "nativeExit": 0,
+  "checks": [
+    {
+      "name": "shrink",
+      "exit": 0
+    },
+    {
+      "name": "candid-metadata",
+      "exit": 0
+    },
+    {
+      "name": "artifact-info",
+      "exit": 0
+    },
+    {
+      "name": "endpoint-check",
+      "exit": 1
+    }
+  ],
+  "outcome": "mechanical-check-failed",
+  "ownedPgid": 72222,
+  "resourceStop": null,
+  "ownedGroupClosed": true,
+  "remainingOwnedPids": [],
+  "elapsedSeconds": 112.900149875
+}

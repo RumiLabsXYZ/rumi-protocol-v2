@@ -1,0 +1,23 @@
+{
+  "source": "c4617b771dc40ccaf573ce47bbd48419233ec863",
+  "target": "/private/tmp/rumi-cksol-icp-target",
+  "runner": "/private/tmp/vault202-validation-20261114/run-build-once.py",
+  "runnerSha256": "4cff709d301000d40c8c978ea4048d6a62aac782b530a67cd682dbef5ea3ac99",
+  "sourcePinsSha256": "2afdde81311a2b3f477d863097e3860ba5afcdfce4be3b0771743af8f256674f",
+  "requested": {
+    "jobs": 1,
+    "timeoutSeconds": 1800,
+    "maxRssBytes": 4294967296,
+    "maxFsDropBytes": 2147483648,
+    "minFreeBytes": 21474836480,
+    "totalSecondsIncludingMechanicalAndClosure": 2400
+  },
+  "nativeTests": {
+    "passed": 77,
+    "source": "9a9106ad361a665c06bcb40c2c6f8687dc6968b6",
+    "receiptSha256": "a0d6d36615ccecb5ed5dd235da16a853efbf1a8237d24f2613c4ccbd88a773e0",
+    "ownedGroupClosed": true
+  },
+  "pipeline": "offline locked release bot only; ic-wasm0.9.10 shrink; public canonical candid:service metadata; endpoint comparison",
+  "noProductionActions": true
+}
