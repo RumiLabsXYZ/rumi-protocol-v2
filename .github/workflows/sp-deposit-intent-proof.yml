@@ -36,6 +36,20 @@ jobs:
           rustup +1.92.0 target add wasm32-unknown-unknown
           sudo apt-get update
           sudo apt-get install -y libclang-dev liblmdb-dev libunwind-dev pkg-config protobuf-compiler
+      - name: Select rlib-only 3pool dependency for host tests
+        run: |
+          # Backend host tests import the 3pool rlib. Linux cannot link the
+          # accompanying native cdylib because ICP export names contain
+          # spaces. Production Wasms below use the restored real manifest.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("src/rumi_3pool/Cargo.toml")
+          source = manifest.read_text()
+          old = 'crate-type = ["cdylib", "rlib"]'
+          assert source.count(old) == 1, "unexpected rumi_3pool crate types"
+          manifest.write_text(source.replace(old, 'crate-type = ["rlib"]'))
+          PY
       - name: Run exact security regressions
         shell: bash
         run: |
@@ -85,6 +99,8 @@ jobs:
 
           run_one rumi_protocol_backend rumi_protocol_backend check_candid_interface_compatibility
           run_one rumi_treasury lib rust_candid_service_exports_the_bounded_backfill_endpoint
+      - name: Restore production 3pool manifest
+        run: git checkout -- src/rumi_3pool/Cargo.toml
       - name: Build production Wasms
         run: |
           cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked --jobs 1 \
