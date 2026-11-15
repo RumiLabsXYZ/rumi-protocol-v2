@@ -1,0 +1,11 @@
+{
+  "source": "e7b736c92de4749a204da3bb0dd7da809fa7c6fe",
+  "files": 740,
+  "compressionPairs": 476,
+  "frontendVersion": "1794714390164",
+  "reservedAndUnavailableGuidancePresent": true,
+  "neutralEmptyQueueMessagePresent": true,
+  "sec20RecoveryMenuRetained": true,
+  "backendMutation": false,
+  "financialAction": false
+}

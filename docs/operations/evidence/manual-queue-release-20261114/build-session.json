@@ -1,0 +1,38 @@
+{
+  "source": "e7b736c92de4749a204da3bb0dd7da809fa7c6fe",
+  "command": [
+    "npm",
+    "run",
+    "build",
+    "--workspace=src/vault_frontend"
+  ],
+  "runnerPid": 17691,
+  "dispatchStarted": true,
+  "activeAllocationCheck": {
+    "registry": "/private/tmp/elias-resource-allocation.json",
+    "allocationId": "cf166f0c-eb2e-4418-a2c3-6e568f1810f1",
+    "sha256": "f7c0df606b961d11ba1eee33c37f3df16b2d6384eeb9257eb27170d97c86edb0",
+    "owner": "OriginalDorian_SEC21FrontendBuild",
+    "ownerChat": "01a1a800-7fde-71b2-a128-2b2325c4b232",
+    "status": "ISSUED_UNCONSUMED",
+    "consumed": false,
+    "released": false,
+    "deliveryState": "ACCEPTED_DELIVERED_ONCE",
+    "verifiedUtc": "2026-11-15T03:46:27.853913+00:00"
+  },
+  "start": "2026-11-15T03:46:27.854020+00:00",
+  "allocationSha256": "f7c0df606b961d11ba1eee33c37f3df16b2d6384eeb9257eb27170d97c86edb0",
+  "allocationId": "cf166f0c-eb2e-4418-a2c3-6e568f1810f1",
+  "initialFreeBytes": 21712347136,
+  "pgid": 17696,
+  "end": "2026-11-15T03:46:46.902078+00:00",
+  "exit": 0,
+  "stopReason": null,
+  "exception": null,
+  "receivedSignal": null,
+  "peakOwnedRssBytes": 2298494976,
+  "minFreeBytes": 21705707520,
+  "physicalGrowthBytes": 6639616,
+  "allOwnedClosed": true,
+  "seconds": 19.04748574993573
+}

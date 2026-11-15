@@ -1,0 +1,11 @@
+{
+  "sourceChat": "01a1a48c-240e-77f0-8205-91e3120e76c0",
+  "humanMessage": "01a1dd32-aece-7ee0-b545-2ddbc605e891",
+  "originalHumanText": "Get the queue fix published, and have Adrian bring me the exact remedy for vault 202. We need the bot to actually use that USDC buffer so this doesn't keep happening.",
+  "originalHumanIndependentlyRead": true,
+  "publicationAuthorized": true,
+  "scope": "SEC21 frontend queue availability only; preserve SEC19/20/XRP",
+  "backendOrBotDeploymentAuthorized": false,
+  "financialActionAuthorized": false,
+  "separateRemedyOwner": "Adrian"
+}

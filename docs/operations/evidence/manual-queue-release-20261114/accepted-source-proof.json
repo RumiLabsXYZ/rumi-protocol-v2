@@ -1,0 +1,16 @@
+{
+  "source": "e7b736c92de4749a204da3bb0dd7da809fa7c6fe",
+  "base": "dc4b8f52a1e76a36791defb5f66005276d00d4a5",
+  "humanInstructionMessage": "01a1dd32-aece-7ee0-b545-2ddbc605e891",
+  "decisionPath": "docs/operations/manual-liquidation-availability-20261114.md",
+  "decisionSha256": "bf2d9c639eb1dfc19193b5660db53ca37e573a4ae32ec31d749c6dbe3c97dd82",
+  "retainedChecks": 11,
+  "newMountedAvailabilityChecks": 5,
+  "retainedXrpPendingClaimChecks": 6,
+  "independentSourceReviews": "two final PASS",
+  "connectedMockedDesktopMobile": "PASS",
+  "sourceProofsReused": true,
+  "backendCandidDependenciesAndFinancialCodeUnchanged": true,
+  "financialRemedyOwner": "Adrian",
+  "financialAction": false
+}

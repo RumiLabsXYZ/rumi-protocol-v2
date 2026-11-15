@@ -1,0 +1,22 @@
+{
+  "source": "e7b736c92de4749a204da3bb0dd7da809fa7c6fe",
+  "base": "dc4b8f52a1e76a36791defb5f66005276d00d4a5",
+  "sourceChangedPaths": [
+    "src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.availability.spec.ts",
+    "src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.svelte"
+  ],
+  "producerTrackedClean": true,
+  "prior740ProducerAndFrozenFilesPreserved": true,
+  "backendCandidAndDependenciesUnchanged": true,
+  "runnerSha256": "605a096cf074f75dbee9915f3ecaa862b0e4cb4cf8c1df62f21f9cc1fd3d4452",
+  "buildDispatched": false,
+  "runnerControlRepair": {
+    "previousRunnerSha256": "0f35fda6fedc922689b782d97df334c7eb29eb0b692fd745ec7576c03107a870",
+    "signalToExceptionWithConstructorDeferralAndNonInterruptibleCleanup": true,
+    "liveOriginalOwnerUnconsumedUnreleasedRegistryBinding": true,
+    "registryReadOnly": true,
+    "buildCommandAndBoundsUnchanged": true,
+    "compileOnlyNoBuildOrStart": true,
+    "acceptedDeliveryStateRequired": true
+  }
+}
