@@ -66,7 +66,7 @@
   <title>Security · Rumi Protocol</title>
   <meta
     name="description"
-    content="Security review history, selected October 14 release and maintenance status, and responsible disclosure for Rumi Protocol."
+    content="Security review history, selected October and November release status, and responsible disclosure for Rumi Protocol."
   />
 </svelte:head>
 
@@ -154,7 +154,8 @@
         <p>
           A later internal review led to changes merged into main. Some targeted tests and
           source checks have passed, while additional finding adjudication and operational
-          evidence remain open. No final public report for that cycle is posted here.
+          evidence remain open. A November status snapshot is posted below; it is not a final
+          finding-by-finding close-out.
         </p>
       </article>
 
@@ -173,11 +174,29 @@
     </div>
   </section>
 
+  <section class="section page-width" aria-labelledby="november-report-title">
+    <article class="report-card featured october-report-card">
+      <div class="report-card-top">
+        <span class="report-kind">Status report · November 14, 2026</span>
+        <span class="latest-tag">Latest status snapshot</span>
+      </div>
+      <h2 id="november-report-title">November security remediation status</h2>
+      <p class="report-description">
+        Read the evidence-separated snapshot of merged source, verified build artifacts,
+        installation status, operational holds, and recovery work that remained open when the
+        report was revised on November 15.
+      </p>
+      <div class="report-links">
+        <a href="/security/november-2026">Read the November status report <span aria-hidden="true">↗</span></a>
+      </div>
+    </article>
+  </section>
+
   <section class="section page-width" aria-labelledby="october-report-title">
     <article class="report-card featured october-report-card">
       <div class="report-card-top">
         <span class="report-kind">Status report · October 14, 2026</span>
-        <span class="latest-tag">Latest status snapshot</span>
+        <span class="latest-tag">Previous status snapshot</span>
       </div>
       <h2 id="october-report-title">October security review status</h2>
       <p class="report-description">
