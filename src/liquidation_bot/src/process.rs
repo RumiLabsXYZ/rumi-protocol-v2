@@ -224,17 +224,23 @@ async fn choose_bounded_topup_amount(
     if remaining_icp == 0 || shortfall_e6 == 0 {
         return Ok(None);
     }
+    let output_fee_e6 = config.ckusdc_fee_e6.unwrap_or(10_000);
     let conservative_output = |quoted: u64, input: u64| {
         let oracle_floor = crate::swap::oracle_bound_minimum_output_e6(
             input,
             collateral_price_e8s,
             crate::swap::swap_input_fee_e8s(config),
-            config.ckusdc_fee_e6.unwrap_or(10_000),
+            output_fee_e6,
             config.max_slippage_bps,
         );
         oracle_floor
             .and_then(|floor| {
-                crate::swap::claim_minimum_output_e6(quoted, floor, config.max_slippage_bps)
+                crate::swap::claim_minimum_net_output_e6(
+                    quoted,
+                    floor,
+                    config.max_slippage_bps,
+                    output_fee_e6,
+                )
             })
             .unwrap_or(0)
     };

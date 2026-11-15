@@ -321,6 +321,21 @@ pub(crate) fn claim_minimum_output_e6(
     Some(quote_minimum.max(oracle_minimum_e6))
 }
 
+pub(crate) fn claim_minimum_net_output_e6(
+    quoted_output_e6: u64,
+    oracle_gross_minimum_e6: u64,
+    allowed_discount_bps: u16,
+    output_fee_e6: u64,
+) -> Option<u64> {
+    let gross_minimum = claim_minimum_output_e6(
+        quoted_output_e6,
+        oracle_gross_minimum_e6,
+        allowed_discount_bps,
+    )?;
+    let net_minimum = gross_minimum.checked_sub(output_fee_e6)?;
+    (net_minimum > 0).then_some(net_minimum)
+}
+
 #[cfg(test)]
 mod oracle_floor_tests {
     use super::*;
@@ -396,6 +411,31 @@ mod oracle_floor_tests {
             Some(1_000_099)
         );
         assert_eq!(1_000_099 - 10_000, 990_099);
+    }
+
+    #[test]
+    fn topup_sizing_compares_net_wallet_output_after_output_fee() {
+        let gross_floor = oracle_bound_minimum_output_e6(
+            100_000_000,
+            100_000_000,
+            10_000,
+            10_000,
+            100,
+        )
+        .unwrap();
+        let gross_minimum = claim_minimum_output_e6(1_005_000, gross_floor, 100).unwrap();
+        let shortfall = 990_100;
+        assert!(gross_minimum >= shortfall);
+
+        let net_minimum = claim_minimum_net_output_e6(
+            1_005_000,
+            gross_floor,
+            100,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(net_minimum, 990_099);
+        assert_eq!(shortfall - net_minimum, 1);
     }
 }
 
