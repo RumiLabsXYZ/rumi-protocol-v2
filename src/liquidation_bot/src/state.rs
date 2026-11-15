@@ -285,9 +285,60 @@ pub struct BotTreasuryJournal {
     pub created_at_time: u64,
     pub status: BotTreasuryStatus,
     pub receipt: Option<crate::swap::TransferReceipt>,
+    /// Generation zero is the original TB1 tuple. Every operator-authorized
+    /// reissue increments this value and uses a distinct TB2 memo.
+    #[serde(default)]
+    pub attempt_generation: u32,
+    /// Immutable prior tuples retained so an upgrade cannot erase the reason
+    /// a new transfer identity was authorized.
+    #[serde(default)]
+    pub prior_attempts: Vec<BotTreasuryAttemptArchive>,
     /// Set with the Paid transition so a restart cannot add the metric twice.
     pub paid_total_applied: bool,
     pub record: crate::history::LiquidationRecordV1,
+}
+
+/// An expired treasury tuple superseded by an exact operator acknowledgement.
+/// This is evidence of an administrative decision, not a ledger-certified
+/// non-inclusion proof. The operator must independently inspect the ledger.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotTreasuryAttemptArchive {
+    pub attempt_generation: u32,
+    pub ledger_principal: Principal,
+    pub sender_principal: Principal,
+    pub treasury_principal: Principal,
+    pub gross_amount_e8s: u64,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub status: BotTreasuryStatus,
+    pub receipt: Option<crate::swap::TransferReceipt>,
+    pub checked_through_block: u64,
+    pub absence_evidence_digest: Vec<u8>,
+    pub authorized_by: Principal,
+    pub authorized_at_time: u64,
+}
+
+/// Exact, tuple-bound operator acknowledgement used to renew an expired
+/// treasury obligation. The digest identifies the operator's external ledger
+/// evidence without placing potentially sensitive evidence in public Candid.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotTreasuryReissueRequest {
+    pub record_id: u64,
+    pub vault_id: u64,
+    pub claim_generation: u64,
+    pub expected_attempt_generation: u32,
+    pub ledger_principal: Principal,
+    pub sender_principal: Principal,
+    pub treasury_principal: Principal,
+    pub gross_amount_e8s: u64,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub checked_through_block: u64,
+    pub absence_evidence_digest: Vec<u8>,
 }
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -317,6 +368,8 @@ pub struct BotTreasuryIntentView {
     pub created_at_time: u64,
     pub status: BotTreasuryStatus,
     pub receipt: Option<crate::swap::TransferReceipt>,
+    pub attempt_generation: u32,
+    pub prior_attempt_count: u32,
 }
 
 impl From<&BotTreasuryJournal> for BotTreasuryIntentView {
@@ -335,6 +388,8 @@ impl From<&BotTreasuryJournal> for BotTreasuryIntentView {
             created_at_time: journal.created_at_time,
             status: journal.status.clone(),
             receipt: journal.receipt.clone(),
+            attempt_generation: journal.attempt_generation,
+            prior_attempt_count: u32::try_from(journal.prior_attempts.len()).unwrap_or(u32::MAX),
         }
     }
 }
@@ -726,6 +781,24 @@ mod tests {
             gross_amount_e8s: 25_000, amount_e8s: 15_000, fee_e8s: 10_000,
             memo: b"RUMI:TB1:record-and-claim".to_vec(), created_at_time: 123,
             status: BotTreasuryStatus::Ambiguous, receipt: None,
+            attempt_generation: 1,
+            prior_attempts: vec![BotTreasuryAttemptArchive {
+                attempt_generation: 0,
+                ledger_principal: Principal::management_canister(),
+                sender_principal: Principal::management_canister(),
+                treasury_principal: Principal::anonymous(),
+                gross_amount_e8s: 25_000,
+                amount_e8s: 15_000,
+                fee_e8s: 10_000,
+                memo: b"RUMI:TB1:prior".to_vec(),
+                created_at_time: 100,
+                status: BotTreasuryStatus::Ambiguous,
+                receipt: None,
+                checked_through_block: 1000,
+                absence_evidence_digest: vec![7; 32],
+                authorized_by: Principal::from_slice(&[9]),
+                authorized_at_time: 122,
+            }],
             paid_total_applied: false,
             record: crate::history::LiquidationRecordV1 {
                 id: 19, vault_id: 8, timestamp: 100,
@@ -745,6 +818,26 @@ mod tests {
         assert_eq!(journal.amount_e8s + journal.fee_e8s, journal.gross_amount_e8s);
         assert_eq!(journal.status, BotTreasuryStatus::Ambiguous);
         assert!(!journal.paid_total_applied);
+        assert_eq!(journal.attempt_generation, 1);
+        assert_eq!(journal.prior_attempts.len(), 1);
+        assert_eq!(journal.prior_attempts[0].absence_evidence_digest, vec![7; 32]);
+
+        // A predecessor snapshot has neither field. Upgrade decode must keep
+        // the original tuple active as generation zero with no invented
+        // authorization history.
+        let mut predecessor = serde_json::to_value(&state).unwrap();
+        let predecessor_journal = predecessor
+            .get_mut("pending_treasury")
+            .and_then(|entries| entries.get_mut("19"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized predecessor treasury journal");
+        predecessor_journal.remove("attempt_generation");
+        predecessor_journal.remove("prior_attempts");
+        let restored: BotState = serde_json::from_value(predecessor).unwrap();
+        let restored_journal = restored.pending_treasury.get(&19).unwrap();
+        assert_eq!(restored_journal.attempt_generation, 0);
+        assert!(restored_journal.prior_attempts.is_empty());
+        assert_eq!(restored_journal.memo, b"RUMI:TB1:record-and-claim");
     }
 
     #[test]

@@ -140,9 +140,27 @@ export interface BotTreasuryIntentView {
   'claim_generation' : bigint,
   'vault_id' : bigint,
   'amount_e8s' : bigint,
+  'prior_attempt_count' : number,
   'treasury_principal' : Principal,
+  'attempt_generation' : number,
   'ledger_principal' : Principal,
   'created_at_time' : bigint,
+  'record_id' : bigint,
+  'sender_principal' : Principal,
+}
+export interface BotTreasuryReissueRequest {
+  'gross_amount_e8s' : bigint,
+  'expected_attempt_generation' : number,
+  'memo' : Uint8Array | number[],
+  'fee_e8s' : bigint,
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'treasury_principal' : Principal,
+  'ledger_principal' : Principal,
+  'checked_through_block' : bigint,
+  'created_at_time' : bigint,
+  'absence_evidence_digest' : Uint8Array | number[],
   'record_id' : bigint,
   'sender_principal' : Principal,
 }
@@ -225,7 +243,9 @@ export interface ReserveAllocation {
 }
 export type Result = { 'Ok' : null } |
   { 'Err' : string };
-export type Result_1 = { 'Ok' : SwapResult } |
+export type Result_1 = { 'Ok' : BotTreasuryIntentView } |
+  { 'Err' : string };
+export type Result_2 = { 'Ok' : SwapResult } |
   { 'Err' : string };
 export interface SwapResult {
   'ckusdc_received_e6' : bigint,
@@ -284,11 +304,15 @@ export interface _SERVICE {
   >,
   'admin_reconcile_treasury_block' : ActorMethod<[bigint, bigint], Result>,
   'admin_refresh_fees' : ActorMethod<[], [bigint, bigint]>,
+  'admin_reissue_expired_treasury_intent' : ActorMethod<
+    [BotTreasuryReissueRequest],
+    Result_1
+  >,
   'admin_resolve_pool_ordering' : ActorMethod<[], undefined>,
   'admin_retry_stuck_claim' : ActorMethod<[bigint], undefined>,
   'admin_set_operator_reserve_enabled' : ActorMethod<[boolean], Result>,
   'admin_sweep_ckusdc' : ActorMethod<[Principal, [] | [bigint]], undefined>,
-  'admin_test_swap' : ActorMethod<[bigint], Result_1>,
+  'admin_test_swap' : ActorMethod<[bigint], Result_2>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'get_admin_event_count' : ActorMethod<[], bigint>,
