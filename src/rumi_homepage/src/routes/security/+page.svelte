@@ -66,7 +66,7 @@
   <title>Security · Rumi Protocol</title>
   <meta
     name="description"
-    content="Security review history, selected October and November release status, and responsible disclosure for Rumi Protocol."
+    content="Security review history, current remediation rollout status, and responsible disclosure for Rumi Protocol."
   />
 </svelte:head>
 
@@ -82,7 +82,7 @@
             code. A passing test, a source change, and an installed canister are different kinds
             of evidence.
           </p>
-          <p class="review-date">Status snapshot <time datetime="2026-10-14">October 14, 2026</time></p>
+          <p class="review-date">Status snapshot <time datetime="2026-11-15">November 15, 2026</time></p>
         </div>
 
         <aside class="status-card" aria-labelledby="release-status-title">
@@ -91,21 +91,18 @@
             <span>Release status</span>
             <span class="status-label">In progress</span>
           </div>
-          <h2 id="release-status-title">Borrowing reopened under a cap</h2>
+          <h2 id="release-status-title">Remediation merged; rollout partial</h2>
           <p>
-            An October 11 readback confirmed the backend and liquidation bot running on their
-            reviewed upgrades, with new borrowing available within a temporary protocol-wide cap.
-            October 14 queries still showed the 22,000 icUSD cap and earlier Treasury and Stability
-            Pool modules. The 3pool donation fix from PR #577 was installed on its reviewed hash
-            and unpaused after matching state readbacks. The Stability Pool remained paused at its
-            latest readback; the AMM was still in maintenance at its October 12 readback. Broader
-            findings and recovery work remain open.
+            PRs #652–#662 are merged and six production candidates are identified. The AMM
+            candidate is installed and matched its state baseline. Analytics, Stability Pool,
+            Treasury, backend, and liquidation bot still run preceding modules for this tranche.
+            Fresh readbacks also cover 3pool, Points, and Cycle Sentinel without treating a live
+            hash as source provenance where that binding is not established.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
-            These readbacks are dated snapshots, not live telemetry. This is a release
-            update, not a finding-by-finding closure statement. See the October report for the
-            scope and limits of these statements.
+            These are dated readbacks, not live telemetry. Source, artifacts, installation,
+            activation, and historical settlement remain separate evidence stages.
           </p>
         </aside>
       </div>
@@ -118,12 +115,12 @@
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step working">
           <span class="step-icon" aria-hidden="true">02</span>
-          <div><strong>Selected source changes</strong><span>Merged; broader findings remain open</span></div>
+          <div><strong>Security remediations</strong><span>PRs #652–#662 merged</span></div>
         </div>
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step live">
           <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Installed code</strong><span>Selected canisters confirmed in dated readbacks</span></div>
+          <div><strong>Installed code</strong><span>AMM complete; five tranche upgrades pending</span></div>
         </div>
       </div>
     </div>
@@ -152,10 +149,9 @@
         <p class="state-label">Source work</p>
         <h3>A newer review is still being closed out</h3>
         <p>
-          A later internal review led to changes merged into main. Some targeted tests and
-          source checks have passed, while additional finding adjudication and operational
-          evidence remain open. A November status snapshot is posted below; it is not a final
-          finding-by-finding close-out.
+          The later review produced a merged remediation tranche and a complete private
+          finding matrix. The public closure report keeps source, artifact, installation,
+          activation, and recovery claims separate.
         </p>
       </article>
 
@@ -164,21 +160,38 @@
         <p class="state-label">Mainnet</p>
         <h3>Source changes do not update canisters</h3>
         <p>
-          The October 11 readback showed the backend and bot running on their reviewed upgrades,
-          with borrowing enabled under a temporary cap. October 12 queries confirmed the cap and
-          unchanged module hashes; remaining capacity was not recalculated. Treasury remains on its
-          earlier module, the Stability Pool is paused, and the AMM is in maintenance mode. A source merge
-          does not prove installation, feature activation, migration, or successful live operation.
+          The November 15 readback confirms the tranche AMM candidate is installed. Analytics,
+          Stability Pool, Treasury, backend, and bot still run earlier modules relative to their
+          new candidates. A source merge does not prove installation, feature activation,
+          migration, or successful live operation.
         </p>
       </article>
     </div>
+  </section>
+
+  <section class="section page-width" aria-labelledby="closure-report-title">
+    <article class="report-card featured october-report-card">
+      <div class="report-card-top">
+        <span class="report-kind">Remediation report · November 15, 2026</span>
+        <span class="latest-tag">Latest status snapshot</span>
+      </div>
+      <h2 id="closure-report-title">Security remediation closure status</h2>
+      <p class="report-description">
+        Review the merged remediation tranche, exact production module evidence, bounded
+        recovery inventories, wider 3pool/Points/Sentinel readbacks, and the remaining coordinated
+        upgrades.
+      </p>
+      <div class="report-links">
+        <a href="/security/remediation-closure-2026-11-15">Read the closure status report <span aria-hidden="true">↗</span></a>
+      </div>
+    </article>
   </section>
 
   <section class="section page-width" aria-labelledby="november-report-title">
     <article class="report-card featured october-report-card">
       <div class="report-card-top">
         <span class="report-kind">Status report · November 14, 2026</span>
-        <span class="latest-tag">Latest status snapshot</span>
+        <span class="latest-tag">Previous snapshot</span>
       </div>
       <h2 id="november-report-title">November security remediation status</h2>
       <p class="report-description">
