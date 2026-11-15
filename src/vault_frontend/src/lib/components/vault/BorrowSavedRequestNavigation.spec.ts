@@ -31,6 +31,13 @@ const owner=Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');
 const error='Vault operation 3 is still bound to different arguments. It remains held; restore the exact saved request before retrying. No approval or dispatch was made for this action.';
 const intent={version:1,owner:owner.toText(),operationId:'3',savedAt:10,request:{OpenVaultAndBorrow:{amount_e8s:140_000_000n,borrow_amount_e8s:240_000_000n,collateral_type:'ryjl3-tyaaa-aaaaa-aaaba-cai'}}};
 let target:HTMLDivElement, instances:ReturnType<typeof mount>[]=[];
+function enterQuote(collateral='1', borrowed='5') {
+ const collateralInput=target.querySelector('#collateral-amount') as HTMLInputElement;
+ const borrowInput=target.querySelector('#icusd-amount') as HTMLInputElement;
+ collateralInput.value=collateral; collateralInput.dispatchEvent(new Event('input',{bubbles:true}));
+ borrowInput.value=borrowed; borrowInput.dispatchEvent(new Event('input',{bubbles:true}));
+ flushSync();
+}
 function button(label:string) {return [...target.querySelectorAll('button')].find(b=>b.textContent?.trim()===label);}
 beforeEach(()=>{
  vi.clearAllMocks();
@@ -45,7 +52,7 @@ it('gives the actual ICP form error a direct read-only route to the exact saved 
  instances.push(mount(Banner,{target}),mount(Page,{target})); flushSync();
  await vi.waitFor(()=>expect(button('Restore saved request')).toBeTruthy());
  expect(button('Review saved request')).toBeUndefined();
- button('Create Vault & Borrow icUSD')!.click();
+ enterQuote(); button('Create Vault & Borrow icUSD')!.click();
  await vi.waitFor(()=>expect(target.textContent).toContain(error));
  const review=button('Review saved request'); expect(review).toBeDefined();
  expect(fx.open).toHaveBeenCalledOnce(); fx.inspect.mockClear(); review!.click();
@@ -56,13 +63,37 @@ it('gives the actual ICP form error a direct read-only route to the exact saved 
 });
 it('keeps healthy successful borrowing free of extra recovery controls',async()=>{
  fx.open.mockResolvedValue({success:true,vaultId:215}); instances.push(mount(Page,{target})); flushSync();
- button('Create Vault & Borrow icUSD')!.click();
+ enterQuote(); button('Create Vault & Borrow icUSD')!.click();
  await vi.waitFor(()=>expect(target.textContent).toContain('Successfully created vault #215'));
  expect(button('Review saved request')).toBeUndefined(); expect(fx.inspect).not.toHaveBeenCalled();
 });
 it('does not offer saved-request navigation for an unrelated validation error',async()=>{
  fx.open.mockResolvedValue({success:false,error:'Service temporarily unavailable'}); instances.push(mount(Page,{target})); flushSync();
- button('Create Vault & Borrow icUSD')!.click();
+ enterQuote(); button('Create Vault & Borrow icUSD')!.click();
  await vi.waitFor(()=>expect(target.textContent).toContain('Service temporarily unavailable'));
  expect(button('Review saved request')).toBeUndefined();
+});
+
+it('explains empty and undercollateralized inputs before any wallet action', async()=>{
+ instances.push(mount(Page,{target})); flushSync();
+ expect(button('Create Vault & Borrow icUSD')!.disabled).toBe(true);
+ expect(target.textContent).toContain('Enter a collateral amount');
+ enterQuote('1','50');
+ expect(button('Create Vault & Borrow icUSD')!.disabled).toBe(true);
+ expect(target.textContent).toContain('needs at least 150% collateralization');
+ button('Create Vault & Borrow icUSD')!.click();
+ expect(fx.open).not.toHaveBeenCalled();
+ enterQuote('1','5');
+ expect(button('Create Vault & Borrow icUSD')!.disabled).toBe(false);
+ enterQuote('','5');
+ expect(button('Create Vault & Borrow icUSD')!.disabled).toBe(true);
+ expect(fx.open).not.toHaveBeenCalled();
+});
+it('waits for a known price before allowing an otherwise valid borrow',async()=>{
+ fx.collateral.set({collaterals:[{principal:'ryjl3-tyaaa-aaaaa-aaaba-cai',symbol:'ICP',price:0,status:'Active',minimumCr:1.5,liquidationCr:1.33}]});
+ fx.app.set({protocolStatus:{lastIcpRate:0}});
+ instances.push(mount(Page,{target})); flushSync(); enterQuote();
+ expect(button('Create Vault & Borrow icUSD')!.disabled).toBe(true);
+ expect(target.textContent).toContain('Waiting for collateral price and parameters');
+ expect(fx.open).not.toHaveBeenCalled();
 });

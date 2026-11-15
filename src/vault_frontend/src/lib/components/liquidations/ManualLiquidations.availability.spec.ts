@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
 
 vi.hoisted(() => { Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }); });
-const fx = vi.hoisted(() => ({ queue: vi.fn(), status: vi.fn(), liquidate: vi.fn(), partial: vi.fn(), stable: vi.fn(), approve: vi.fn(), allowance: vi.fn() }));
+const fx = vi.hoisted(() => ({ queue: vi.fn(), all: vi.fn(), status: vi.fn(), liquidate: vi.fn(), partial: vi.fn(), stable: vi.fn(), approve: vi.fn(), allowance: vi.fn() }));
 vi.mock('$lib/services/protocol', () => ({ protocolService: {
-  getLiquidatableVaults: fx.queue, getAllVaults: vi.fn().mockResolvedValue([]),
+  getLiquidatableVaults: fx.queue, getAllVaults: fx.all,
   getProtocolStatus: vi.fn().mockResolvedValue({ lastIcpRate: 2 }),
   liquidateVault: fx.liquidate, partialLiquidateVault: fx.partial, partialLiquidateVaultWithStable: fx.stable,
 } }));
@@ -28,7 +28,7 @@ const refresh = () => (target.querySelector('.summary-refresh') as HTMLButtonEle
 async function ready() { await vi.waitFor(() => expect(target.querySelector('.liq-card')).toBeTruthy()); await tick(); }
 async function amount() { const input=target.querySelector('.liq-input') as HTMLInputElement; input.value='5';input.dispatchEvent(new Event('input',{bubbles:true}));await tick(); }
 beforeEach(() => {
-  vi.clearAllMocks();fx.queue.mockResolvedValue([vault]);fx.status.mockResolvedValue([]);fx.partial.mockResolvedValue({success:false,error:'Vault #202 is locked — bot liquidation in progress'});
+  vi.clearAllMocks();fx.all.mockResolvedValue([]);fx.queue.mockResolvedValue([vault]);fx.status.mockResolvedValue([]);fx.partial.mockResolvedValue({success:false,error:'Vault #202 is locked — bot liquidation in progress'});
   target=document.createElement('div');document.body.append(target);
 });
 afterEach(async () => { if(component) await unmount(component);target.remove(); });
@@ -79,4 +79,16 @@ it('does not let an older in-flight read clear a newer backend lock rejection', 
   await vi.waitFor(()=>expect(target.textContent).toContain('Reserved for bot liquidation'));
   resolveStatus([]);await tick();await tick();
   expect(liquidate().disabled).toBe(true);expect(target.textContent).toContain('Reserved for bot liquidation');
+});
+
+it('shows a redemption claim as suspended rather than zero nICP and a liquidation gauge',async()=>{
+ fx.all.mockResolvedValue([{...vault,vault_id:51,collateral_amount:0,icp_margin_amount:0,nicp_redemption_claim:[{stage:{ClaimConfirmed:null},icp_due_e8s:190_000_000_000n,received_icp_e8s:[],withdrawal_id:[5n]}]}]);
+ component=mount(Page,{target});
+ await vi.waitFor(()=>expect(target.querySelector('.ov-card')?.textContent).toContain('ICP redemption claim'));
+ const card=target.querySelector('.ov-card')!;
+ expect(card.textContent).toContain('1,900 ICP');
+ expect(card.textContent).toContain('Liquidation suspended');
+ expect(card.querySelector('.ov-gauge-track')).toBeNull();
+ expect(card.textContent).not.toContain('0.0%');
+ expect(fx.approve).not.toHaveBeenCalled();expect(fx.partial).not.toHaveBeenCalled();
 });

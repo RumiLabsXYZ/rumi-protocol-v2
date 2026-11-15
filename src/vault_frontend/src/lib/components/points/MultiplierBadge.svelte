@@ -9,10 +9,12 @@
     variant?: 'compact' | 'full';
     size?: 'sm' | 'md';
     comingSoon?: boolean;
+    /** Marks a multiplier shown as historical evidence, not a current promise. */
+    historical?: boolean;
     /** Override the text after the icon (e.g. "up to 5× points"). */
     label?: string;
   }
-  let { multiplier, variant = 'compact', size = 'sm', comingSoon = false, label }: Props = $props();
+  let { multiplier, variant = 'compact', size = 'sm', comingSoon = false, historical = false, label }: Props = $props();
 
   const pad = $derived(size === 'md' ? 'px-2.5 py-1 text-sm' : 'px-2 py-0.5 text-xs');
   const tone = $derived(
@@ -32,7 +34,13 @@
 
 <span
   class="inline-flex items-center gap-1 rounded-full border font-medium whitespace-nowrap tabular-nums {pad} {tone}"
-  title={comingSoon ? 'Coming soon' : `Earns ${multiplier}× airdrop points`}
+  title={
+    comingSoon
+      ? 'Coming soon'
+      : historical
+        ? `Historical rate: ${multiplier}× airdrop points`
+        : `Earns ${multiplier}× airdrop points`
+  }
 >
   {#if !comingSoon}
     <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true" style="flex-shrink:0">

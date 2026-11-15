@@ -33,7 +33,7 @@
   {:else if phase === 'ended'}
     <div>
       <p class="text-sm font-medium text-gray-200">Season 1 has ended</p>
-      <p class="text-xs text-gray-400">Allocations are being finalized. Claiming is coming soon.</p>
+      <p class="text-xs text-gray-400">View your recorded Season 1 points and earning history.</p>
     </div>
   {:else}
     <div>

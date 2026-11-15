@@ -56,6 +56,7 @@
   $: if (!$isConnected) hasAttemptedLoad = false;
 
   $: summary = aggregatePosition($userVaults, $collateralStore.collaterals);
+  $: hasRedemptionClaim = $userVaults.some(v => !!v.nicpRedemptionClaim);
   $: hasPosition = $userVaults.length > 0;
   // Show skeleton while loading OR while we haven't finished the first fetch
   // for this connection yet. Prevents the CTA from flashing before data arrives.
@@ -164,6 +165,10 @@
               {/if}
             </div>
           {/each}
+          <p class="breakdown-note">Overall CR combines your vaults; liquidation is assessed for each vault separately. <a href="/vaults">Review vault health →</a></p>
+          {#if hasRedemptionClaim}
+            <p class="breakdown-note">Pending ICP redemption claims are not included in this collateral total. Their debt remains included. See the claim status in <a href="/vaults">My Vaults</a>.</p>
+          {/if}
         </div>
       {/if}
     </section>
@@ -171,6 +176,8 @@
 </div>
 
 <style>
+  .breakdown-note { flex-basis: 100%; margin: 0; font-size: 0.75rem; color: var(--rumi-text-secondary); text-align: center; }
+  .breakdown-note a { color: var(--rumi-text-secondary); text-decoration: underline; text-underline-offset: 2px; }
   /* The top bar is position:fixed; height 3.5rem; z-index 100. The pending
      XRP recovery banner, when present, owns the first row below the header; the
      strip sits below that dynamic height. Its height is bound reactively to the
@@ -221,7 +228,7 @@
 
   .cell { display: inline-flex; align-items: baseline; gap: 0.5rem; white-space: nowrap; }
   .cell-label {
-    color: var(--rumi-text-muted);
+    color: var(--rumi-text-secondary);
     font-size: 0.6875rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -235,7 +242,7 @@
     font-weight: 600;
     font-size: 0.9375rem;
   }
-  .cell-unit { color: var(--rumi-text-muted); font-weight: 500; font-size: 0.75rem; }
+  .cell-unit { color: var(--rumi-text-secondary); font-weight: 500; font-size: 0.75rem; }
 
   .divider { width: 1px; height: 1.125rem; background: var(--rumi-border); }
 
@@ -243,7 +250,7 @@
   .health-caution { color: #d9a53c; }
   .health-danger { color: var(--rumi-danger); }
   .health-no-debt { color: var(--rumi-text-secondary); }
-  .health-unknown { color: var(--rumi-text-muted); }
+  .health-unknown { color: var(--rumi-text-secondary); }
 
   .health-label {
     font-size: 0.6875rem;
@@ -255,7 +262,7 @@
   }
 
   .caret {
-    color: var(--rumi-text-muted);
+    color: var(--rumi-text-secondary);
     font-size: 0.75rem;
   }
 
@@ -279,7 +286,7 @@
   }
   .pill-symbol { color: var(--rumi-text-secondary); font-weight: 500; }
   .pill-amount { color: var(--rumi-text-primary); font-weight: 600; }
-  .pill-usd { color: var(--rumi-text-muted); font-size: 0.6875rem; }
+  .pill-usd { color: var(--rumi-text-secondary); font-size: 0.6875rem; }
   .pill-nopx { font-style: italic; }
 
   /* CTA variant */
@@ -288,7 +295,7 @@
     color: var(--rumi-text-secondary);
   }
   .cta-headline { color: var(--rumi-text-primary); font-weight: 600; }
-  .cta-sub { color: var(--rumi-text-muted); font-size: 0.75rem; }
+  .cta-sub { color: var(--rumi-text-secondary); font-size: 0.75rem; }
   .cta-link { color: var(--rumi-action); text-decoration: none; font-weight: 500; }
   .cta-link:hover { text-decoration: underline; }
 

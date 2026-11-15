@@ -301,7 +301,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .icp-input::placeholder {
-  color: var(--rumi-text-muted);
+  color: var(--rumi-text-secondary);
 }
 
 .icp-input:focus {
@@ -434,7 +434,7 @@ h1, h2, h3, h4, h5, h6 {
 .vital-label {
   font-size: 0.6875rem;
   font-weight: 500;
-  color: var(--rumi-text-muted);
+  color: var(--rumi-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }

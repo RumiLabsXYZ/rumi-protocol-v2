@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { decodeNicpClaim, nicpClaimValueUsd } from '$lib/utils/nicpClaim';
   import { onMount } from "svelte";
   import { walletStore as wallet } from "$lib/stores/wallet";
   import { protocolService } from '$lib/services/protocol';
@@ -123,6 +124,7 @@
   let dustLiquidationThresholdIcusd = DEFAULT_DUST_LIQUIDATION_THRESHOLD_ICUSD;
   let isRecoveryMode = false;
   let isLoading = true;
+  let allVaultsLoading = true;
   let isPriceLoading = true;
   let availabilityReadError = '';
   let botClaimedVaultIds = new Set<string>();
@@ -459,11 +461,14 @@
   }
 
   async function loadAllVaults() {
+    allVaultsLoading = true;
     try {
       const vaults = await protocolService.getAllVaults();
       allVaults = vaults.map(normalizeVault);
     } catch (error) {
       console.error("Error loading all vaults:", error);
+    } finally {
+      allVaultsLoading = false;
     }
   }
 
@@ -651,6 +656,10 @@
     collateralStore.fetchSupportedCollateral().then(() => {
       collateralVersion++;
       loadLiquidatableVaults(); loadAllVaults();
+    }).catch(() => {
+      isLoading = false;
+      allVaultsLoading = false;
+      availabilityReadError = 'Could not load collateral parameters. Reload this page to try again.';
     });
     refreshIcpPrice();
     if ($wallet.isConnected) wallet.refreshBalance({ skipCache: true }).catch(() => {});
@@ -669,7 +678,11 @@
 
 <div class="liq-page">
   <div class="liq-summary">
-    <span class="summary-stat">{sortedVaults.length} at-risk vault{sortedVaults.length !== 1 ? 's' : ''} · {allVaults.length} total</span>
+    <span class="summary-stat">
+      {#if isLoading}…{:else if availabilityReadError}Unavailable{:else}{sortedVaults.length} at-risk vault{sortedVaults.length !== 1 ? 's' : ''}{/if}
+      ·
+      {#if allVaultsLoading}…{:else}{allVaults.length} total{/if}
+    </span>
     <span class="summary-sep">·</span>
     <span class="price-pill">
       ICP
@@ -763,7 +776,7 @@
             </div>
 
             <div class="card-center">
-              {#if s && !manualUnavailable}
+              {#if s && !manualUnavailable && ci.price > 0 && !isPriceLoading}
                 <span class="outcome-label">{isXrp ? 'XRP claim' : 'You receive'}</span>
                 <span class="outcome-line">
                   {formatNumber(s.collateralSeized, 4)} {s.symbol}
@@ -874,14 +887,16 @@
       </div>
       {#each pagedVaults as vault (vault.vault_id)}
         {@const g = computeVaultGauge(vault)}
+        {@const claim = decodeNicpClaim(vault.nicp_redemption_claim)}
+        {@const claimValue = claim ? nicpClaimValueUsd(claim, icpPrice, collateralStore.getCollateralInfo(resolveCollateralPrincipal(vault))?.lstHaircut) : 0}
 
-        <div class="ov-card" style={g.railStyle}>
+        <div class="ov-card" style={claim ? '' : g.railStyle}>
           <div class="ov-row">
             <span class="ov-id"><span class="ov-dot" style="background:{g.collateralColor}"></span>#{vault.vault_id}</span>
             <span class="ov-cell">
-              <span class="ov-label">Collateral</span>
-              <span class="ov-value">{g.fmtMargin} {g.symbol}</span>
-              <span class="ov-sub">${g.fmtCollateralUsd}</span>
+              <span class="ov-label">{claim?.releaseBlock ? 'Original ICP claim' : claim ? 'ICP redemption claim' : 'Collateral'}</span>
+              <span class="ov-value">{claim ? `${formatTokenBalance(claim.icpAmount)} ICP` : `${g.fmtMargin} ${g.symbol}`}</span>
+              <span class="ov-sub">${claim ? formatNumber(claimValue, 2) : g.fmtCollateralUsd}</span>
             </span>
             <span class="ov-cell">
               <span class="ov-label">Borrowed</span>
@@ -889,6 +904,10 @@
               <span class="ov-sub">${g.fmtBorrowedUsd}</span>
             </span>
             <span class="ov-cell ov-cell-bar">
+              {#if claim}
+                <span class="ov-sub">Liquidation suspended</span>
+                <a class="ov-sub" href="/transparency">Redemption status →</a>
+              {:else}
               <span class="ov-gauge-track">
                 <span class="ov-gz ov-gz-pink" style="width:{g.liqZonePct}%"></span>
                 <span class="ov-gz ov-gz-pink-purple" style="width:{g.fadeEndPct - g.liqZonePct}%; left:{g.liqZonePct}%"></span>
@@ -901,8 +920,13 @@
                 <span class="ov-gauge-lbl" style="left:{g.liqZonePct}%">liq</span>
                 <span class="ov-gauge-lbl ov-gauge-lbl-end">300%+</span>
               </span>
+              {/if}
             </span>
             <span class="ov-cell ov-cell-ratio">
+              {#if claim}
+                <span class="ov-label">Status</span>
+                <span class="ov-sub">{claim.stage}</span>
+              {:else}
               <span class="ov-label">CR</span>
               <span class="ov-value ov-ratio" style="color:{g.crColor}">
                 {#if g.riskLevel === 'warning' || g.riskLevel === 'danger'}
@@ -910,6 +934,7 @@
                 {/if}
                 {g.fmtRatio}
               </span>
+              {/if}
             </span>
           </div>
         </div>
@@ -940,7 +965,7 @@
 
 <style>
   .btn-liquidate.manual-unavailable { background: var(--rumi-bg-surface2); color: var(--rumi-text-muted); cursor: not-allowed; }
-  .availability-note { max-width: 22rem; margin: 0 0 .5rem; color: var(--rumi-text-muted); font-size: .8rem; }
+  .availability-note { max-width: 22rem; margin: 0 0 .5rem; color: var(--rumi-text-secondary); font-size: .8rem; }
   .liq-page { max-width: 800px; margin: 0 auto; }
 
   .price-pill {
