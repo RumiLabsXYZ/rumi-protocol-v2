@@ -167,7 +167,7 @@ fn full_liquidation_removes_id_from_collateral_index() {
     state.open_vault(make_vault(2, 10_000_000_000, 1_000_000_000));
 
     let price = UsdIcp::from(dec!(5.0));
-    state.liquidate_vault(1, Mode::GeneralAvailability, price);
+    state.liquidate_vault(1, Mode::GeneralAvailability, price, None);
 
     assert!(
         !state.vault_id_to_vaults.contains_key(&1),
@@ -187,7 +187,7 @@ fn full_liquidation_prunes_empty_principal_entry() {
     state.open_vault(make_vault(1, 100_000_000, 1_000_000_000));
 
     let price = UsdIcp::from(dec!(5.0));
-    state.liquidate_vault(1, Mode::GeneralAvailability, price);
+    state.liquidate_vault(1, Mode::GeneralAvailability, price, None);
 
     assert!(
         state.principal_to_vault_ids.get(&owner()).is_none(),
