@@ -5,6 +5,7 @@ use ic_cdk::api::time;
 use ic_canister_log::log;
 
 const MAX_CONCURRENT: usize = 100;
+const SYSTEM_RESERVED_SLOTS: usize = 1;
 
 // Add a timeout duration for guards
 const GUARD_TIMEOUT_NANOS: u64 = 5 * 60 * 1_000_000_000; // 5 minutes in nanoseconds
@@ -40,6 +41,24 @@ impl GuardPrincipal {
     /// already a pending request for the specified principal or if there
     /// are at least [MAX_CONCURRENT] pending requests.
     pub fn new(principal: Principal, operation_name: &str) -> Result<Self, GuardError> {
+        Self::new_with_capacity_class(principal, operation_name, false)
+    }
+
+    /// Admit one authenticated protocol-system operation even when ordinary
+    /// callers occupy all user slots. Callers must authenticate the principal
+    /// against protocol configuration before selecting this constructor.
+    pub(crate) fn new_system(
+        principal: Principal,
+        operation_name: &str,
+    ) -> Result<Self, GuardError> {
+        Self::new_with_capacity_class(principal, operation_name, true)
+    }
+
+    fn new_with_capacity_class(
+        principal: Principal,
+        operation_name: &str,
+        system_caller: bool,
+    ) -> Result<Self, GuardError> {
         mutate_state(|s| {
             let current_time = time();
 
@@ -106,7 +125,7 @@ impl GuardPrincipal {
                 }
             }
 
-            if s.principal_guards.len() >= MAX_CONCURRENT {
+            if guard_capacity_exhausted(s.principal_guards.len(), system_caller) {
                 return Err(GuardError::TooManyConcurrentRequests);
             }
 
@@ -149,6 +168,15 @@ impl GuardPrincipal {
     }
 }
 
+fn guard_capacity_exhausted(current: usize, system_caller: bool) -> bool {
+    let limit = if system_caller {
+        MAX_CONCURRENT.saturating_add(SYSTEM_RESERVED_SLOTS)
+    } else {
+        MAX_CONCURRENT
+    };
+    current >= limit
+}
+
 impl Drop for GuardPrincipal {
     fn drop(&mut self) {
         // Always release the guard when the struct goes out of scope.
@@ -160,6 +188,22 @@ impl Drop for GuardPrincipal {
             s.operation_states.remove(&self.principal);
             s.operation_names.remove(&self.principal);
         });
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::{guard_capacity_exhausted, MAX_CONCURRENT, SYSTEM_RESERVED_SLOTS};
+
+    #[test]
+    fn ordinary_capacity_preserves_one_authenticated_system_slot() {
+        assert!(!guard_capacity_exhausted(MAX_CONCURRENT - 1, false));
+        assert!(guard_capacity_exhausted(MAX_CONCURRENT, false));
+        assert!(!guard_capacity_exhausted(MAX_CONCURRENT, true));
+        assert!(guard_capacity_exhausted(
+            MAX_CONCURRENT + SYSTEM_RESERVED_SLOTS,
+            true,
+        ));
     }
 }
 

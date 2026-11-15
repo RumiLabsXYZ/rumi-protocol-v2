@@ -216,14 +216,21 @@ pub fn note_xrc_failure_at(state: &mut State, now_ns: u64) -> Option<Event> {
 
 /// Wave-14a CDP-01: record an XRC fetch success. Resets the consecutive-
 /// failure counter to 0. If ReadOnly was triggered by the oracle path,
-/// clears it back to `GeneralAvailability`. Operator-set ReadOnly is
-/// preserved.
+/// clears that cause and returns to `GeneralAvailability` only when no
+/// independent deficit hold remains. Operator-set and deficit-triggered
+/// ReadOnly are preserved.
 pub fn note_xrc_success(state: &mut State) {
     state.consecutive_xrc_failures = 0;
 
     if state.mode == Mode::ReadOnly && state.mode_triggered_by_oracle {
-        state.mode = Mode::GeneralAvailability;
         state.mode_triggered_by_oracle = false;
+        if !state.mode_triggered_by_deficit {
+            state.mode = if state.manual_mode_override {
+                Mode::Recovery
+            } else {
+                Mode::GeneralAvailability
+            };
+        }
     }
 }
 
@@ -918,6 +925,38 @@ mod oracle_cache_and_outlier_timestamp_tests {
         assert_eq!(state.mode, crate::Mode::ReadOnly);
         assert!(state.mode_triggered_by_oracle);
         assert_eq!(state.consecutive_xrc_failures, 3);
+    }
+
+    #[test]
+    fn oracle_recovery_does_not_clear_a_deficit_readonly_hold() {
+        let collateral = Principal::from_slice(&[251, 9]);
+        let mut state = state_with_price(collateral, Some(100.0));
+        state.mode = crate::Mode::ReadOnly;
+        state.mode_triggered_by_oracle = true;
+        state.mode_triggered_by_deficit = true;
+        state.consecutive_xrc_failures = 3;
+
+        super::note_xrc_success(&mut state);
+
+        assert_eq!(state.consecutive_xrc_failures, 0);
+        assert!(!state.mode_triggered_by_oracle);
+        assert!(state.mode_triggered_by_deficit);
+        assert_eq!(state.mode, crate::Mode::ReadOnly);
+    }
+
+    #[test]
+    fn oracle_recovery_restores_a_pending_manual_recovery_hold() {
+        let collateral = Principal::from_slice(&[251, 10]);
+        let mut state = state_with_price(collateral, Some(100.0));
+        state.mode = crate::Mode::ReadOnly;
+        state.mode_triggered_by_oracle = true;
+        state.enter_manual_recovery_mode();
+
+        super::note_xrc_success(&mut state);
+
+        assert!(!state.mode_triggered_by_oracle);
+        assert!(state.manual_mode_override);
+        assert_eq!(state.mode, crate::Mode::Recovery);
     }
 
     #[test]

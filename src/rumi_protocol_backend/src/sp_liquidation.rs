@@ -1285,6 +1285,17 @@ async fn settle_post_accounting(
         }
     }
     if journal.quote_protocol_cut_raw > 0 {
+        let treasury_asset_type =
+            crate::treasury::collateral_to_asset_type(&journal.collateral_type);
+        if !journal.protocol_fee_attempted
+            && journal.protocol_fee_block_index.is_none()
+            && treasury_asset_type.is_none()
+        {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "SP treasury fee is held: collateral {} has no Treasury asset classification",
+                journal.collateral_type,
+            )));
+        }
         // The protocol-fee tuple is created immediately before its first
         // ledger await, after any interest-distribution await. Once the
         // attempted fence is set, every retry reuses that exact nonce and
@@ -1324,6 +1335,7 @@ async fn settle_post_accounting(
             };
             Ok(Some((treasury, fee, op_nonce)))
         })?;
+        let dispatched_now = tuple.is_some();
         if let Some((treasury, fee, op_nonce)) = tuple {
             let protocol_fee_net_raw = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
             match crate::management::transfer_collateral_with_nonce_and_fee_status(
@@ -1332,43 +1344,98 @@ async fn settle_post_accounting(
                 treasury,
                 journal.collateral_ledger,
                 op_nonce,
-            ).await {
-            Ok(block_index) => {
-                let should_notify = mutate_state(|state| {
-                    if let Some(current) = state.sp_liquidation_journals.get_mut(&key) {
-                        // A concurrent positive-proof reconciliation may have
-                        // committed this same tuple while the transfer reply
-                        // was in flight. Never overwrite a different durable
-                        // proof and never clear a proof on a retry.
-                        let should_notify = current.protocol_fee_block_index.is_none();
-                        if should_notify {
-                            current.protocol_fee_block_index = Some(block_index);
+            )
+            .await
+            {
+                Ok(block_index) => {
+                    mutate_state(|state| {
+                        if let Some(current) = state.sp_liquidation_journals.get_mut(&key) {
+                            // A concurrent positive-proof reconciliation may have
+                            // committed this same tuple while the transfer reply
+                            // was in flight. Never overwrite a different durable
+                            // proof and never clear a proof on a retry.
+                            if current.protocol_fee_block_index.is_none() {
+                                current.protocol_fee_block_index = Some(block_index);
+                            }
+                            current.updated_at_ns = ic_cdk::api::time();
                         }
-                        current.updated_at_ns = ic_cdk::api::time();
-                        should_notify
-                    } else {
-                        false
-                    }
-                });
-                // Preserve the existing treasury bookkeeping callback. Its
-                // failure is non-critical; the exact ledger receipt above is
-                // the durable proof of the fee transfer.
-                if should_notify {
-                    let _ = crate::treasury::notify_treasury_deposit(
-                        treasury,
-                        crate::treasury::DepositType::LiquidationFee,
-                        crate::treasury::collateral_to_asset_type(&journal.collateral_type),
-                        protocol_fee_net_raw,
-                        block_index,
-                    ).await;
+                    });
+                }
+                Err(error) => {
+                    return Err(ProtocolError::TemporarilyUnavailable(format!(
+                        "SP treasury fee remains unresolved; retry the same request: {error:?}"
+                    )));
                 }
             }
-            Err(error) => {
-                return Err(ProtocolError::TemporarilyUnavailable(format!(
-                    "SP treasury fee remains unresolved; retry the same request: {error:?}"
-                )));
-            }
         }
+        let block_index = read_state(|state| {
+            state
+                .sp_liquidation_journals
+                .get(&key)
+                .and_then(|current| current.protocol_fee_block_index)
+        });
+        if let Some(block_index) = block_index {
+            let Some(asset_type) = treasury_asset_type else {
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "SP treasury fee transfer is positively reconciled but held: collateral {} has no Treasury asset classification",
+                    journal.collateral_type,
+                )));
+            };
+            let treasury = journal.protocol_fee_treasury.ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable(
+                    "SP liquidation treasury destination is missing".into(),
+                )
+            })?;
+            let fee = journal.protocol_fee_ledger_fee_raw.ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable(
+                    "SP liquidation treasury fee tuple is missing".into(),
+                )
+            })?;
+            let amount = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
+            match asset_type {
+                asset_type @ (crate::treasury::AssetType::CKUSDT
+                | crate::treasury::AssetType::CKUSDC) => {
+                    crate::treasury::notify_external_collateral_deposit_once(
+                        treasury,
+                        journal.collateral_ledger,
+                        asset_type,
+                        amount,
+                        block_index,
+                        Some(format!("sp-liquidation-v1:{}", journal.vault_id)),
+                    )
+                    .await
+                    .map_err(|error| {
+                        ProtocolError::TemporarilyUnavailable(format!(
+                            "SP Treasury receipt remains held: {error}"
+                        ))
+                    })?;
+                }
+                crate::treasury::AssetType::ICP if dispatched_now => {
+                    crate::treasury::notify_treasury_deposit(
+                        treasury,
+                        crate::treasury::DepositType::LiquidationFee,
+                        crate::treasury::AssetType::ICP,
+                        amount,
+                        block_index,
+                    )
+                    .await
+                    .map_err(|error| {
+                        ProtocolError::TemporarilyUnavailable(format!(
+                            "SP Treasury ICP notification outcome is unresolved: {error}"
+                        ))
+                    })?;
+                }
+                crate::treasury::AssetType::ICP => {
+                    return Err(ProtocolError::TemporarilyUnavailable(
+                        "SP Treasury ICP transfer is proven, but its legacy notification outcome requires operator reconciliation".into(),
+                    ));
+                }
+                _ => {
+                    return Err(ProtocolError::TemporarilyUnavailable(
+                        "SP Treasury fee asset is not supported by an idempotent receipt path".into(),
+                    ));
+                }
+            }
         }
     }
     mutate_state(|state| {
