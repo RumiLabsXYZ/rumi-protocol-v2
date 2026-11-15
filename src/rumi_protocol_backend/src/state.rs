@@ -1238,6 +1238,10 @@ fn default_deficit_repayment_fraction() -> Ratio {
     DEFAULT_DEFICIT_REPAYMENT_FRACTION
 }
 
+fn default_deficit_readonly_latch_armed() -> bool {
+    true
+}
+
 /// Wave-10 LIQ-008: default rolling-window length for the mass-liquidation
 /// circuit breaker. 30 minutes (in nanoseconds). Pre-Wave-10 CBOR snapshots
 /// get this value via `serde(default)`.
@@ -3858,6 +3862,12 @@ pub struct State {
     /// treated as operator-set, which is the safe default).
     #[serde(default)]
     pub mode_triggered_by_oracle: bool,
+    /// True while ReadOnly is being held by the deficit circuit breaker.
+    /// Kept separate from `mode` so price/TCR refreshes cannot erase the
+    /// reason for the hold. Pre-fix snapshots default to false and are
+    /// conservatively migrated during post-upgrade.
+    #[serde(default)]
+    pub mode_triggered_by_deficit: bool,
     /// Wave-14a CDP-14: minimum number of CEX sources that must contribute
     /// to an XRC `metadata.base_asset_num_received_rates` for the protocol
     /// to accept the resulting price. 0 disables the gate (operator
@@ -4458,6 +4468,12 @@ pub struct State {
     #[serde(default)]
     pub deficit_readonly_threshold_e8s: u64,
 
+    /// Arms the next below-to-at/above threshold transition. Once a crossing
+    /// trips the latch, an admin clear while the deficit is still high must
+    /// not immediately re-trip it; repayment below the threshold re-arms it.
+    #[serde(default = "default_deficit_readonly_latch_armed")]
+    pub deficit_readonly_latch_armed: bool,
+
     // ─── Wave-10 LIQ-008: mass-liquidation circuit breaker ───
     //
     // Bounds the auto-publishing path (check_vaults → bot / stability pool)
@@ -4797,6 +4813,7 @@ impl Default for State {
             mode: Mode::default(),
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
+            mode_triggered_by_deficit: false,
             min_xrc_sources_used: default_min_xrc_sources_used(),
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
@@ -4944,6 +4961,7 @@ impl Default for State {
             total_deficit_repaid_icusd: ICUSD::new(0),
             deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
             deficit_readonly_threshold_e8s: 0,
+            deficit_readonly_latch_armed: true,
             recent_liquidations: Vec::new(),
             breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
             breaker_window_debt_ceiling_e8s: 0,
@@ -5013,6 +5031,7 @@ impl From<InitArg> for State {
             mode: Mode::GeneralAvailability,
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
+            mode_triggered_by_deficit: false,
             min_xrc_sources_used: default_min_xrc_sources_used(),
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
@@ -5276,6 +5295,7 @@ impl From<InitArg> for State {
             total_deficit_repaid_icusd: ICUSD::new(0),
             deficit_repayment_fraction: DEFAULT_DEFICIT_REPAYMENT_FRACTION,
             deficit_readonly_threshold_e8s: 0,
+            deficit_readonly_latch_armed: true,
             recent_liquidations: Vec::new(),
             breaker_window_ns: DEFAULT_BREAKER_WINDOW_NS,
             breaker_window_debt_ceiling_e8s: 0,
@@ -8154,6 +8174,14 @@ impl State {
             return;
         }
 
+        // A deficit-triggered ReadOnly hold is sticky. TCR and price refreshes
+        // may update caches above, but only the explicit controller clear can
+        // release this cause.
+        if self.mode_triggered_by_deficit {
+            self.mode = Mode::ReadOnly;
+            return;
+        }
+
         // If an admin has manually set the mode, don't override it automatically.
         // Exception: if collateral ratio drops below 100%, always go ReadOnly for safety.
         if self.manual_mode_override {
@@ -8170,11 +8198,8 @@ impl State {
         // Wave-14 CDP-01: if the oracle circuit breaker tripped ReadOnly,
         // TCR recalculation must not override it. Only note_xrc_success
         // (a fresh valid price) can clear oracle-triggered ReadOnly.
-        // Exception: TCR < 100% still forces ReadOnly for safety.
         if self.mode_triggered_by_oracle {
-            if new_total_collateral_ratio < Ratio::from(dec!(1.0)) {
-                self.mode = Mode::ReadOnly;
-            }
+            self.mode = Mode::ReadOnly;
             return;
         }
 
@@ -8658,21 +8683,105 @@ impl State {
         }
         self.protocol_deficit_icusd = self.protocol_deficit_icusd.saturating_sub(amount);
         self.total_deficit_repaid_icusd = self.total_deficit_repaid_icusd + amount;
+        if self.deficit_readonly_threshold_e8s > 0
+            && self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s
+        {
+            self.deficit_readonly_latch_armed = true;
+        }
     }
 
     /// If `deficit_readonly_threshold_e8s > 0` and the current deficit has
-    /// reached the threshold, force `mode = Mode::ReadOnly` and return
-    /// `true`. Returns `false` otherwise. The latch is one-shot per
-    /// crossing — the admin must call `exit_recovery_mode` to clear it.
+    /// reached the threshold on an armed crossing, persist the cause, force
+    /// `mode = Mode::ReadOnly`, and return `true`. The cause stays active
+    /// until the controller explicitly clears it. A clear above threshold
+    /// does not immediately re-trip; repayment below threshold re-arms the
+    /// next crossing.
     pub fn check_deficit_readonly_latch(&mut self) -> bool {
-        if self.deficit_readonly_threshold_e8s == 0 {
+        if self.deficit_readonly_threshold_e8s > 0
+            && self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s
+        {
+            self.deficit_readonly_latch_armed = true;
+        }
+
+        if self.mode_triggered_by_deficit {
+            self.mode = Mode::ReadOnly;
             return false;
         }
-        if self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s {
+
+        if self.deficit_readonly_threshold_e8s == 0
+            || self.protocol_deficit_icusd.0 < self.deficit_readonly_threshold_e8s
+            || !self.deficit_readonly_latch_armed
+        {
             return false;
         }
+
+        self.mode_triggered_by_deficit = true;
+        self.deficit_readonly_latch_armed = false;
         self.mode = Mode::ReadOnly;
         true
+    }
+
+    /// Apply a threshold update and immediately evaluate the deficit already
+    /// on the books. Disabling the threshold prevents future trips but never
+    /// clears a hold that already fired.
+    pub fn set_deficit_readonly_threshold(&mut self, threshold_e8s: u64) -> bool {
+        self.deficit_readonly_threshold_e8s = threshold_e8s;
+        if threshold_e8s == 0 {
+            self.deficit_readonly_latch_armed = false;
+        } else if !self.mode_triggered_by_deficit {
+            self.deficit_readonly_latch_armed = true;
+        }
+        self.check_deficit_readonly_latch()
+    }
+
+    /// Release only the deficit cause and restore automatic mode computation.
+    /// Crossing state is retained: a still-high deficit remains suppressed
+    /// until it first falls below the configured threshold.
+    pub fn clear_deficit_readonly_latch(&mut self) {
+        self.mode_triggered_by_deficit = false;
+        self.manual_mode_override = false;
+        let rate = self.last_icp_rate.unwrap_or(UsdIcp::from(Decimal::ZERO));
+        // Freeze gates every update independently of `mode`. An explicit
+        // controller clear must still recompute the mode cache so unfreezing
+        // cannot expose a stale ReadOnly/GA value. Temporarily bypass only the
+        // recomputation guard; no external operation can interleave here.
+        let was_frozen = self.frozen;
+        self.frozen = false;
+        self.update_total_collateral_ratio_and_mode(rate);
+        self.frozen = was_frozen;
+    }
+
+    /// Enter the controller's manual Recovery hold without weakening a
+    /// stronger deficit- or oracle-driven ReadOnly hold.
+    pub fn enter_manual_recovery_mode(&mut self) {
+        self.manual_mode_override = true;
+        self.mode = if self.mode_triggered_by_deficit || self.mode_triggered_by_oracle {
+            Mode::ReadOnly
+        } else {
+            Mode::Recovery
+        };
+    }
+
+    /// Infer the missing cause bit in pre-fix snapshots, then enforce any
+    /// threshold that is already breached. The unexplained-ReadOnly branch is
+    /// intentionally conservative but excludes manual, oracle, and sub-100%
+    /// TCR causes.
+    pub fn migrate_deficit_readonly_latch(&mut self) -> bool {
+        let unexplained_readonly = self.mode == Mode::ReadOnly
+            && self.deficit_readonly_threshold_e8s > 0
+            && !self.manual_mode_override
+            && !self.mode_triggered_by_oracle
+            && self.total_collateral_ratio >= Ratio::from(dec!(1.0));
+        if !self.mode_triggered_by_deficit
+            && self.deficit_readonly_latch_armed
+            && unexplained_readonly
+        {
+            self.mode_triggered_by_deficit = true;
+            self.deficit_readonly_latch_armed = false;
+        }
+        let inferred = self.mode_triggered_by_deficit;
+        let tripped = self.check_deficit_readonly_latch();
+        inferred || tripped
     }
 
     /// Wave-9b DOS-006: compute the heavy aggregates that
@@ -10715,6 +10824,115 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deficit_threshold_evaluates_existing_deficit_and_survives_tcr_refresh() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+
+        assert!(state.set_deficit_readonly_threshold(100));
+        assert!(state.mode_triggered_by_deficit);
+        assert_eq!(state.mode, Mode::ReadOnly);
+
+        state.update_total_collateral_ratio_and_mode(UsdIcp::from(Decimal::ONE));
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.mode_triggered_by_deficit);
+    }
+
+    #[test]
+    fn deficit_latch_clear_requires_a_new_below_to_above_crossing() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        assert!(state.set_deficit_readonly_threshold(100));
+
+        state.clear_deficit_readonly_latch();
+        assert!(!state.mode_triggered_by_deficit);
+        assert!(!state.deficit_readonly_latch_armed);
+        assert!(!state.check_deficit_readonly_latch());
+
+        state.apply_deficit_repayment(ICUSD::new(51));
+        assert!(state.deficit_readonly_latch_armed);
+        state.accrue_deficit_shortfall(ICUSD::new(1));
+        assert!(state.check_deficit_readonly_latch());
+        assert_eq!(state.mode, Mode::ReadOnly);
+    }
+
+    #[test]
+    fn deficit_clear_recomputes_mode_even_while_protocol_is_frozen() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        assert!(state.set_deficit_readonly_threshold(100));
+        state.frozen = true;
+
+        state.clear_deficit_readonly_latch();
+
+        assert!(state.frozen);
+        assert!(!state.mode_triggered_by_deficit);
+        assert_eq!(state.mode, Mode::GeneralAvailability);
+    }
+
+    #[test]
+    fn manual_recovery_request_preserves_deficit_readonly_hold() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        assert!(state.set_deficit_readonly_threshold(100));
+
+        state.enter_manual_recovery_mode();
+
+        assert!(state.manual_mode_override);
+        assert_eq!(state.mode, Mode::ReadOnly);
+        assert!(state.mode_triggered_by_deficit);
+    }
+
+    #[test]
+    fn manual_recovery_and_exit_preserve_oracle_readonly_hold() {
+        let mut state = State::default();
+        state.mode = Mode::ReadOnly;
+        state.mode_triggered_by_oracle = true;
+
+        state.enter_manual_recovery_mode();
+        assert_eq!(state.mode, Mode::ReadOnly);
+
+        state.clear_deficit_readonly_latch();
+        assert!(!state.manual_mode_override);
+        assert!(state.mode_triggered_by_oracle);
+        assert_eq!(state.mode, Mode::ReadOnly);
+    }
+
+    #[test]
+    fn legacy_snapshot_migration_infers_breached_deficit_latch() {
+        let mut state = State::default();
+        state.mode = Mode::ReadOnly;
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        state.deficit_readonly_threshold_e8s = 100;
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let value: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let mut map = match value {
+            ciborium::value::Value::Map(map) => map,
+            _ => panic!("state must serialize as a map"),
+        };
+        map.retain(|(key, _)| {
+            !matches!(
+                key,
+                ciborium::value::Value::Text(name)
+                    if name == "mode_triggered_by_deficit"
+                        || name == "deficit_readonly_latch_armed"
+            )
+        });
+        let mut legacy = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy).unwrap();
+        let mut restored: State = ciborium::de::from_reader(legacy.as_slice()).unwrap();
+
+        assert!(!restored.mode_triggered_by_deficit);
+        assert!(restored.deficit_readonly_latch_armed);
+        assert!(restored.migrate_deficit_readonly_latch());
+        assert!(restored.mode_triggered_by_deficit);
+        assert!(!restored.deficit_readonly_latch_armed);
+        assert_eq!(restored.mode, Mode::ReadOnly);
+    }
 
     fn test_reserve_redemption_journal() -> ReserveRedemptionJournal {
         use icrc_ledger_types::icrc1::account::Account;

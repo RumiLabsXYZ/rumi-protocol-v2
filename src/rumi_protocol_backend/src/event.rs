@@ -1254,6 +1254,10 @@ pub enum PendingPayoutEvent {
     /// The operation committed its public Borrow event; only unresolved
     /// operations need an in-memory dedupe marker.
     BorrowInterestCheckpointCompleted { key: BorrowInterestCheckpointKey },
+    /// Private replay marker for the controller's explicit release of the
+    /// deficit ReadOnly cause. Kept out of public `Event` for Candid backward
+    /// compatibility.
+    DeficitReadonlyLatchCleared,
     XrpVaultOriginReconciled { vault_id: u64, origin: crate::xrp_vault_deposit::XrpVaultOrigin },
     XrpVaultTopupCredited { receipt: crate::xrp_vault_deposit::XrpTopupReceipt },
     NicpRedemptionClaimUpdated { claim: crate::nicp_redemption::NicpRedemptionClaim },
@@ -1988,6 +1992,9 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
         }
         PendingPayoutEvent::BorrowInterestCheckpointCompleted { key } => {
             state.borrow_interest_checkpoints.remove(&key);
+        }
+        PendingPayoutEvent::DeficitReadonlyLatchCleared => {
+            state.clear_deficit_readonly_latch();
         }
         PendingPayoutEvent::XrpVaultOriginReconciled { vault_id, origin } => {
             crate::xrp_vault_deposit::apply_origin(state, vault_id, origin)
@@ -3263,16 +3270,13 @@ fn replay_with_nonce_time_and_payout_events(
                 let _ = state.check_deficit_readonly_latch();
             },
             Event::DeficitRepaid { amount, .. } => {
-                state.protocol_deficit_icusd =
-                    state.protocol_deficit_icusd.saturating_sub(amount);
-                state.total_deficit_repaid_icusd =
-                    state.total_deficit_repaid_icusd + amount;
+                state.apply_deficit_repayment(amount);
             },
             Event::SetDeficitRepaymentFraction { fraction, .. } => {
                 state.deficit_repayment_fraction = fraction;
             },
             Event::SetDeficitReadonlyThresholdE8s { threshold_e8s, .. } => {
-                state.deficit_readonly_threshold_e8s = threshold_e8s;
+                let _ = state.set_deficit_readonly_threshold(threshold_e8s);
             },
             // Wave-10 LIQ-008: rebuild the breaker latch + admin tunables from
             // the event log. `recent_liquidations` is intentionally NOT
@@ -3913,11 +3917,21 @@ pub fn record_set_deficit_repayment_fraction(state: &mut State, fraction: Ratio)
 
 /// Admin: set the deficit-driven ReadOnly auto-latch threshold (0 disables).
 pub fn record_set_deficit_readonly_threshold_e8s(state: &mut State, threshold_e8s: u64) {
-    state.deficit_readonly_threshold_e8s = threshold_e8s;
+    let _ = state.set_deficit_readonly_threshold(threshold_e8s);
     record_event(&Event::SetDeficitReadonlyThresholdE8s {
         threshold_e8s,
         timestamp: now(),
     });
+}
+
+/// Persist and apply the controller's explicit release of the deficit latch.
+/// The private journal preserves replay without expanding the public Event
+/// variant returned by `get_events`.
+pub fn record_deficit_readonly_latch_cleared(state: &mut State) {
+    crate::storage::record_pending_payout_event(
+        &PendingPayoutEvent::DeficitReadonlyLatchCleared,
+    );
+    state.clear_deficit_readonly_latch();
 }
 
 /// Wave-10 LIQ-008: production wrapper called from each vault.rs liquidation
@@ -5447,6 +5461,41 @@ mod filter_tests {
         });
         replay_with_nonce_time_and_payout_events(events.into_iter(), journal, || 2)
             .expect("payout replay fixture should be consistent")
+    }
+
+    #[test]
+    fn private_deficit_clear_event_releases_latch_without_public_event_variant() {
+        let mut state = State::default();
+        state.protocol_deficit_icusd = ICUSD::new(150);
+        assert!(state.set_deficit_readonly_threshold(100));
+
+        apply_pending_payout_event(
+            &mut state,
+            PendingPayoutEvent::DeficitReadonlyLatchCleared,
+        );
+
+        assert!(!state.mode_triggered_by_deficit);
+        assert!(!state.deficit_readonly_latch_armed);
+    }
+
+    #[test]
+    fn replayed_threshold_update_checks_deficit_already_on_the_books() {
+        let init = Event::Init(payout_init_args(icp_token()));
+        let accrued = Event::DeficitAccrued {
+            vault_id: 1,
+            amount: ICUSD::new(150),
+            new_deficit: ICUSD::new(150),
+            timestamp: 10,
+            source: None,
+        };
+        let threshold = Event::SetDeficitReadonlyThresholdE8s {
+            threshold_e8s: 100,
+            timestamp: 11,
+        };
+
+        let state = super::replay([init, accrued, threshold].into_iter()).unwrap();
+        assert!(state.mode_triggered_by_deficit);
+        assert_eq!(state.mode, Mode::ReadOnly);
     }
 
     fn vault_with(id: u64, owner: Principal, ct: Principal, collateral_e8s: u64) -> Vault {

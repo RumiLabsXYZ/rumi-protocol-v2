@@ -1064,6 +1064,13 @@ fn post_upgrade(arg: ProtocolArg) {
         );
     }
 
+    if state.migrate_deficit_readonly_latch() {
+        log!(
+            INFO,
+            "[upgrade]: preserved or activated the deficit-driven ReadOnly latch"
+        );
+    }
+
     // Post-upgrade validation: ensure collateral_configs is consistent
     validate_collateral_state(&state);
 
@@ -14395,11 +14402,10 @@ fn require_controller() -> Result<(), ProtocolError> {
 fn enter_recovery_mode() -> Result<(), ProtocolError> {
     require_controller()?;
     mutate_state(|s| {
-        s.mode = Mode::Recovery;
-        s.manual_mode_override = true;
+        s.enter_manual_recovery_mode();
         log!(
             INFO,
-            "[admin] entered Recovery mode (manual override active)"
+            "[admin] requested Recovery mode (manual override active; deficit ReadOnly hold preserved if set)"
         );
     });
     Ok(())
@@ -14412,11 +14418,10 @@ fn enter_recovery_mode() -> Result<(), ProtocolError> {
 fn exit_recovery_mode() -> Result<(), ProtocolError> {
     require_controller()?;
     mutate_state(|s| {
-        s.mode = Mode::GeneralAvailability;
-        s.manual_mode_override = false;
+        rumi_protocol_backend::event::record_deficit_readonly_latch_cleared(s);
         log!(
             INFO,
-            "[admin] exited Recovery mode, automatic mode management restored"
+            "[admin] exited Recovery mode, cleared any deficit ReadOnly cause, and restored automatic mode management"
         );
     });
     Ok(())
