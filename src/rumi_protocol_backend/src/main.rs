@@ -982,6 +982,25 @@ fn pre_upgrade() {
     log!(INFO, "[pre_upgrade]: state serialized to stable memory");
 }
 
+/// Apply the safe default only when no developer configuration has been
+/// recorded. An empty set with the marker set is an intentional disable.
+fn default_bot_allowlist_if_unconfigured(state: &mut State) -> bool {
+    if state.bot_allowed_collateral_types_configured {
+        return false;
+    }
+    state.bot_allowed_collateral_types.clear();
+    state
+        .bot_allowed_collateral_types
+        .insert(state.icp_ledger_principal);
+    state.bot_allowed_collateral_types_configured = true;
+    true
+}
+
+/// Apply the safe default to a legacy snapshot only when a bot is configured.
+fn migrate_legacy_bot_allowlist(state: &mut State) -> bool {
+    state.liquidation_bot_principal.is_some() && default_bot_allowlist_if_unconfigured(state)
+}
+
 #[post_upgrade]
 fn post_upgrade(arg: ProtocolArg) {
     use rumi_protocol_backend::event::replay_with_pending_payout_events;
@@ -1123,14 +1142,14 @@ fn post_upgrade(arg: ProtocolArg) {
         );
     });
 
-    // Safety net: if bot is configured but allowlist is empty, default to ICP
+    // Legacy snapshots have no marker recording whether the developer ever
+    // configured the bot allowlist. Default those snapshots to ICP once, while
+    // preserving an explicitly configured empty set (bot disabled).
     mutate_state(|s| {
-        if s.liquidation_bot_principal.is_some() && s.bot_allowed_collateral_types.is_empty() {
-            s.bot_allowed_collateral_types
-                .insert(s.icp_ledger_principal);
+        if migrate_legacy_bot_allowlist(s) {
             log!(
                 INFO,
-                "[upgrade]: bot_allowed_collateral_types was empty, defaulted to ICP"
+                "[upgrade]: legacy bot allowlist defaulted to configured ICP ledger"
             );
         }
     });
@@ -12204,10 +12223,15 @@ async fn set_liquidation_bot_config(
             monthly_budget_e8s,
             ic_cdk::api::time(),
         );
-        // Default: allow ICP if the allowlist is empty (first-time setup)
-        if s.bot_allowed_collateral_types.is_empty() {
-            s.bot_allowed_collateral_types
-                .insert(s.icp_ledger_principal);
+        // Default to ICP only before the developer has explicitly configured
+        // the allowlist. Record the default so replay preserves an explicit
+        // empty allowlist set before bot setup.
+        if default_bot_allowlist_if_unconfigured(s) {
+            let icp_ledger = s.icp_ledger_principal;
+            rumi_protocol_backend::event::record_set_bot_allowed_collateral_types(
+                s,
+                vec![icp_ledger],
+            );
         }
     });
     log!(
@@ -12261,6 +12285,19 @@ async fn reset_bot_budget(new_budget_e8s: u64) -> Result<(), ProtocolError> {
 
 /// Set which collateral types the bot is allowed to liquidate (developer only).
 /// Pass an empty vec to disable bot liquidations entirely.
+/// The current bot rail only handles native ICP collateral, so the setter must
+/// not admit another ledger even when that ledger is registered in the backend.
+fn validate_bot_allowed_collateral_types(
+    collateral_types: &[Principal],
+    icp_ledger: Principal,
+) -> Result<(), Principal> {
+    collateral_types
+        .iter()
+        .copied()
+        .find(|collateral| *collateral != icp_ledger)
+        .map_or(Ok(()), Err)
+}
+
 #[candid_method(update)]
 #[update]
 async fn set_bot_allowed_collateral_types(
@@ -12272,6 +12309,13 @@ async fn set_bot_allowed_collateral_types(
         return Err(ProtocolError::GenericError(
             "Only developer can set bot allowed collateral types".to_string(),
         ));
+    }
+    let icp_ledger = read_state(|s| s.icp_ledger_principal);
+    if let Err(collateral) = validate_bot_allowed_collateral_types(&collateral_types, icp_ledger) {
+        return Err(ProtocolError::GenericError(format!(
+            "Bot liquidation currently supports only the configured ICP ledger {}; rejected {}",
+            icp_ledger, collateral
+        )));
     }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_bot_allowed_collateral_types(
@@ -12286,6 +12330,63 @@ async fn set_bot_allowed_collateral_types(
         collateral_types
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod bot_allowed_collateral_types_config_tests {
+    use super::{
+        default_bot_allowlist_if_unconfigured, migrate_legacy_bot_allowlist,
+        validate_bot_allowed_collateral_types,
+    };
+    use candid::Principal;
+    use rumi_protocol_backend::state::State;
+
+    #[test]
+    fn allowlist_accepts_only_configured_icp_ledger_before_update() {
+        let icp = Principal::from_slice(&[1]);
+        let other = Principal::from_slice(&[2]);
+
+        assert_eq!(validate_bot_allowed_collateral_types(&[], icp), Ok(()));
+        assert_eq!(validate_bot_allowed_collateral_types(&[icp], icp), Ok(()));
+        assert_eq!(
+            validate_bot_allowed_collateral_types(&[icp, other], icp),
+            Err(other),
+            "a mixed ICP and non-ICP allowlist must be rejected as a whole"
+        );
+        assert_eq!(validate_bot_allowed_collateral_types(&[other], icp), Err(other));
+    }
+
+    #[test]
+    fn upgrade_defaults_legacy_allowlist_but_preserves_explicit_empty_disable() {
+        let icp = Principal::from_slice(&[1]);
+        let bot = Principal::from_slice(&[3]);
+
+        let mut legacy = State::default();
+        legacy.liquidation_bot_principal = Some(bot);
+        legacy.icp_ledger_principal = icp;
+        let mut legacy_snapshot = serde_json::to_value(&legacy).expect("serialize state");
+        legacy_snapshot
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("bot_allowed_collateral_types_configured");
+        let mut restored_legacy: State =
+            serde_json::from_value(legacy_snapshot).expect("legacy snapshot decodes");
+        assert!(!restored_legacy.bot_allowed_collateral_types_configured);
+        assert!(migrate_legacy_bot_allowlist(&mut restored_legacy));
+        assert_eq!(
+            restored_legacy.bot_allowed_collateral_types,
+            [icp].into_iter().collect()
+        );
+        assert!(restored_legacy.bot_allowed_collateral_types_configured);
+
+        let mut explicitly_disabled = State::default();
+        explicitly_disabled.liquidation_bot_principal = Some(bot);
+        explicitly_disabled.icp_ledger_principal = icp;
+        explicitly_disabled.bot_allowed_collateral_types_configured = true;
+        assert!(!default_bot_allowlist_if_unconfigured(&mut explicitly_disabled));
+        assert!(!migrate_legacy_bot_allowlist(&mut explicitly_disabled));
+        assert!(explicitly_disabled.bot_allowed_collateral_types.is_empty());
+    }
 }
 
 #[candid_method(query)]

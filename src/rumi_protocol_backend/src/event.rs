@@ -2992,6 +2992,7 @@ fn replay_with_nonce_time_and_payout_events(
             },
             Event::SetBotAllowedCollateralTypes { collateral_types } => {
                 state.bot_allowed_collateral_types = collateral_types.iter().copied().collect();
+                state.bot_allowed_collateral_types_configured = true;
             },
             Event::SetBotCrToleranceBps { bps } => {
                 state.bot_cr_tolerance_bps = bps;
@@ -4772,6 +4773,7 @@ pub fn record_set_bot_allowed_collateral_types(
         collateral_types: collateral_types.clone(),
     });
     state.bot_allowed_collateral_types = collateral_types.into_iter().collect();
+    state.bot_allowed_collateral_types_configured = true;
 }
 
 pub fn record_set_bot_cr_tolerance_bps(state: &mut State, bps: u64) {
@@ -7341,6 +7343,7 @@ mod borrow_replay_tests {
             amount_raw: 123_456,
             ledger: principal(18),
             created_at_ns: 99,
+            source_sp_liquidation_request_id: None,
         };
         let event = PendingPayoutEvent::UnsupportedTreasuryCollateralFeeHeld {
             hold: hold.clone(),

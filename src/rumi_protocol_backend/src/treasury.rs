@@ -3238,6 +3238,7 @@ pub fn hold_unsupported_liquidation_fee_if_needed(
             amount_raw: amount,
             ledger: collateral_ledger,
             created_at_ns,
+            source_sp_liquidation_request_id: None,
         };
         crate::storage::record_pending_payout_event(
             &crate::event::PendingPayoutEvent::UnsupportedTreasuryCollateralFeeHeld {
