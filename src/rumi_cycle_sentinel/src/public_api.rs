@@ -22,10 +22,10 @@ pub enum PublicQueryError {
     TooManyItems,
 }
 
-/// Errors returned by signer-only read methods.  Public telemetry queries use
+/// Errors returned by restricted read methods. Public telemetry queries use
 /// `PublicQueryError`; keeping the authorization error in this separate type
 /// makes it impossible for a future public projection to accidentally become
-/// a signer information oracle.
+/// an authority information oracle.
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthenticatedQueryError {
     NotSigner,
@@ -480,7 +480,8 @@ fn governance_proposal_page(
     PublicPage::try_new(proposals, next_cursor).map_err(|_| AuthenticatedQueryError::TooManyItems)
 }
 
-/// Signer-only funding-operation inventory. `resolve_unknown_as_spent` and
+/// Signer- or controller-only funding-operation inventory.
+/// `resolve_unknown_as_spent` and
 /// `attach_block_proof` both require an `operation_id`, but the anonymous
 /// public telemetry projections (`list_public_topups_at`,
 /// `list_public_samples_at`, ...) intentionally omit operation ids and any
@@ -491,21 +492,24 @@ fn governance_proposal_page(
 /// bounded history queries but remains opaque to callers.
 pub fn list_unresolved_funding_operations_at(
     caller: Principal,
+    is_controller: bool,
     cursor: Option<String>,
     limit: u16,
 ) -> Result<PublicPage<FundingOperation>, AuthenticatedQueryError> {
-    if !state::is_signer(caller) {
+    if caller == Principal::anonymous() || (!state::is_signer(caller) && !is_controller) {
         return Err(AuthenticatedQueryError::NotSigner);
     }
     unresolved_funding_operation_page(cursor, limit)
 }
 
-/// Signer-only view of the active self-recovery delivery ambiguity. The
-/// marker is an at-risk tombstone, never proof of a completed top-up.
+/// Signer- or controller-only view of the active self-recovery delivery
+/// ambiguity. The marker is an at-risk tombstone, never proof of a completed
+/// top-up.
 pub fn self_recovery_delivery_risk_at(
     caller: Principal,
+    is_controller: bool,
 ) -> Result<Option<types::SelfRecoveryDeliveryRisk>, AuthenticatedQueryError> {
-    if !state::is_signer(caller) {
+    if caller == Principal::anonymous() || (!state::is_signer(caller) && !is_controller) {
         return Err(AuthenticatedQueryError::NotSigner);
     }
     Ok(state::current_self_recovery_delivery_risk())
@@ -910,7 +914,7 @@ mod tests {
         );
     }
 
-    // ── `list_unresolved_funding_operations_at` (signer-only operation inventory) ──
+    // ── `list_unresolved_funding_operations_at` (signer/controller inventory) ──
 
     fn test_signer(seed: u8) -> Principal {
         Principal::from_slice(&[seed; 10])
@@ -1037,20 +1041,20 @@ mod tests {
     fn list_unresolved_funding_operations_at_rejects_non_signer() {
         set_only_signer(test_signer(1), test_global_policy());
         assert_eq!(
-            list_unresolved_funding_operations_at(test_signer(2), None, 10),
+            list_unresolved_funding_operations_at(test_signer(2), false, None, 10),
             Err(AuthenticatedQueryError::NotSigner)
         );
     }
 
     #[test]
-    fn self_recovery_delivery_risk_at_is_signer_only() {
+    fn self_recovery_delivery_risk_at_enforces_restricted_read_access() {
         set_only_signer(test_signer(1), test_global_policy());
         assert_eq!(
-            self_recovery_delivery_risk_at(test_signer(2)),
+            self_recovery_delivery_risk_at(test_signer(2), false),
             Err(AuthenticatedQueryError::NotSigner)
         );
         assert_eq!(
-            self_recovery_delivery_risk_at(test_signer(1)).unwrap(),
+            self_recovery_delivery_risk_at(test_signer(1), false).unwrap(),
             None
         );
     }
@@ -1059,7 +1063,11 @@ mod tests {
     fn list_unresolved_funding_operations_at_rejects_anonymous_caller() {
         set_only_signer(test_signer(1), test_global_policy());
         assert_eq!(
-            list_unresolved_funding_operations_at(Principal::anonymous(), None, 10),
+            list_unresolved_funding_operations_at(Principal::anonymous(), false, None, 10),
+            Err(AuthenticatedQueryError::NotSigner)
+        );
+        assert_eq!(
+            list_unresolved_funding_operations_at(Principal::anonymous(), true, None, 10),
             Err(AuthenticatedQueryError::NotSigner)
         );
     }
@@ -1073,7 +1081,7 @@ mod tests {
         let op = test_operation(1, target, &global);
         state::insert_operation(op.clone()).unwrap();
 
-        let page = list_unresolved_funding_operations_at(signer, None, 10).unwrap();
+        let page = list_unresolved_funding_operations_at(signer, false, None, 10).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id(), 1);
         assert_eq!(page.items[0].target(), target);
@@ -1091,7 +1099,7 @@ mod tests {
             state::insert_operation(test_operation(id, target, &global)).unwrap();
         }
 
-        let first = list_unresolved_funding_operations_at(signer, None, 1).unwrap();
+        let first = list_unresolved_funding_operations_at(signer, false, None, 1).unwrap();
         assert_eq!(first.items.len(), 1);
         assert_eq!(first.items[0].id(), 1);
         let cursor = first
@@ -1102,7 +1110,7 @@ mod tests {
             "cursor must be opaque, not the raw operation id"
         );
 
-        let second = list_unresolved_funding_operations_at(signer, Some(cursor), 1).unwrap();
+        let second = list_unresolved_funding_operations_at(signer, false, Some(cursor), 1).unwrap();
         assert_eq!(second.items.len(), 1);
         assert_eq!(second.items[0].id(), 2);
         assert_eq!(second.next_cursor, None);
@@ -1113,8 +1121,32 @@ mod tests {
         let signer = test_signer(5);
         set_only_signer(signer, test_global_policy());
         assert_eq!(
-            list_unresolved_funding_operations_at(signer, Some("not-a-cursor".to_string()), 10),
+            list_unresolved_funding_operations_at(
+                signer,
+                false,
+                Some("not-a-cursor".to_string()),
+                10,
+            ),
             Err(AuthenticatedQueryError::InvalidCursor)
         );
+    }
+
+    #[test]
+    fn controller_can_read_recovery_audit_without_becoming_a_signer() {
+        let global = test_global_policy();
+        let signer = test_signer(6);
+        let controller = test_signer(7);
+        set_only_signer(signer, global.clone());
+        let target = register_test_target(3, &global);
+        state::insert_operation(test_operation(1, target, &global)).unwrap();
+
+        let page = list_unresolved_funding_operations_at(controller, true, None, 10).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id(), 1);
+        assert_eq!(
+            self_recovery_delivery_risk_at(controller, true).unwrap(),
+            None
+        );
+        assert!(!state::is_signer(controller));
     }
 }
