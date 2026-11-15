@@ -1,4 +1,4 @@
-use candid::{CandidType, Decode, Principal};
+use candid::{CandidType, Decode, Nat, Principal};
 use ic_canister_log::log;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -168,6 +168,16 @@ pub struct StabilityPoolState {
     /// not yet finalized local depositor accounting.
     #[serde(default)]
     pub pending_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbIntent>>,
+    /// Protocol-funded compensation attempts for legacy ambiguous chain burns.
+    /// Each exact mint identity is admitted before the backend can dispatch it.
+    #[serde(default)]
+    pub pending_legacy_chain_burn_compensations:
+        Option<BTreeMap<u64, LegacyChainBurnCompensation>>,
+    /// Original ambiguous intents retained after exact compensation. These
+    /// rows do not represent backend debt settlement or prove the old burn's
+    /// outcome, and are excluded from active pool-operation guards.
+    #[serde(default)]
+    pub quarantined_legacy_chain_burns: Option<BTreeMap<u64, LegacyChainBurnCompensation>>,
     /// Local idempotency record for completed chain-vault SP absorbs.
     #[serde(default)]
     pub completed_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbCompletion>>,
@@ -365,6 +375,8 @@ impl Default for StabilityPoolState {
             chain_collateral_sentinels: Some(BTreeSet::new()),
             chain_claim_sources: Some(BTreeMap::new()),
             pending_chain_absorbs: Some(BTreeMap::new()),
+            pending_legacy_chain_burn_compensations: Some(BTreeMap::new()),
+            quarantined_legacy_chain_burns: Some(BTreeMap::new()),
             completed_chain_absorbs: Some(BTreeMap::new()),
             pending_native_xrp_absorbs: Some(BTreeMap::new()),
             chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
@@ -3033,6 +3045,204 @@ impl StabilityPoolState {
             .and_then(|m| m.remove(&vault_id))
     }
 
+    pub fn pending_legacy_chain_burn_compensation(
+        &self,
+        vault_id: u64,
+    ) -> Option<LegacyChainBurnCompensation> {
+        self.pending_legacy_chain_burn_compensations
+            .as_ref()
+            .and_then(|rows| rows.get(&vault_id).cloned())
+    }
+
+    pub fn quarantined_legacy_chain_burn(
+        &self,
+        vault_id: u64,
+    ) -> Option<LegacyChainBurnCompensation> {
+        self.quarantined_legacy_chain_burns
+            .as_ref()
+            .and_then(|rows| rows.get(&vault_id).cloned())
+    }
+
+    pub fn put_legacy_chain_burn_compensation(
+        &mut self,
+        row: LegacyChainBurnCompensation,
+    ) -> Result<(), StabilityPoolError> {
+        if self.get_pending_chain_absorb(row.vault_id).as_ref() != Some(&row.original_intent)
+            || row.original_intent.legacy_ambiguous_burn != Some(true)
+            || row.original_intent.burn_proof.is_some()
+            || row.compensation_block_index.is_some()
+        {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: row.vault_id,
+                reason: "legacy compensation no longer matches an unresolved proofless intent".into(),
+            });
+        }
+        let rows = self
+            .pending_legacy_chain_burn_compensations
+            .get_or_insert_with(BTreeMap::new);
+        if let Some(existing) = rows.get(&row.vault_id) {
+            return if existing == &row {
+                Ok(())
+            } else {
+                Err(StabilityPoolError::LiquidationFailed {
+                    vault_id: row.vault_id,
+                    reason: "legacy chain burn compensation identity conflicts with saved row".into(),
+                })
+            };
+        }
+        if rows.len() >= MAX_PENDING_CHAIN_ABSORBS {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        rows.insert(row.vault_id, row);
+        Ok(())
+    }
+
+    /// Atomically remove the original active chain intent and move its full
+    /// immutable record beside the positive compensation receipt. No backend
+    /// accounting, depositor credit, or burn-outcome assertion is performed.
+    pub fn quarantine_legacy_chain_burn_after_compensation(
+        &mut self,
+        expected: &LegacyChainBurnCompensation,
+    ) -> Result<(), StabilityPoolError> {
+        if expected.compensation_block_index.is_none() {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: expected.vault_id,
+                reason: "compensation cannot be quarantined without an exact positive receipt".into(),
+            });
+        }
+        let mut expected_without_receipt = expected.clone();
+        expected_without_receipt.compensation_block_index = None;
+        let current = self
+            .pending_legacy_chain_burn_compensations
+            .as_ref()
+            .and_then(|rows| rows.get(&expected.vault_id));
+        if current != Some(&expected_without_receipt)
+            || self.get_pending_chain_absorb(expected.vault_id).as_ref()
+                != Some(&expected.original_intent)
+            || self
+                .quarantined_legacy_chain_burn(expected.vault_id)
+                .is_some()
+        {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: expected.vault_id,
+                reason: "legacy chain burn or compensation changed before quarantine".into(),
+            });
+        }
+        if self
+            .quarantined_legacy_chain_burns
+            .as_ref()
+            .is_some_and(|rows| rows.len() >= MAX_PENDING_CHAIN_ABSORBS)
+        {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        self.pending_legacy_chain_burn_compensations
+            .as_mut()
+            .expect("validated pending compensation map")
+            .remove(&expected.vault_id);
+        self.pending_chain_absorbs
+            .as_mut()
+            .expect("chain absorb map initialized")
+            .remove(&expected.vault_id);
+        self.legacy_ambiguous_liquidation_vaults
+            .get_or_insert_with(BTreeSet::new)
+            .remove(&expected.vault_id);
+        self.quarantined_legacy_chain_burns
+            .get_or_insert_with(BTreeMap::new)
+            .insert(expected.vault_id, expected.clone());
+        Ok(())
+    }
+
+    pub fn complete_legacy_chain_burn_compensation(
+        &mut self,
+        expected: &LegacyChainBurnCompensation,
+        block_index: u64,
+    ) -> Result<(), StabilityPoolError> {
+        let current = self
+            .pending_legacy_chain_burn_compensations
+            .as_ref()
+            .and_then(|rows| rows.get(&expected.vault_id))
+            .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                vault_id: expected.vault_id,
+                reason: "pending legacy compensation disappeared after receipt verification".into(),
+            })?;
+        if current != expected || current.compensation_block_index.is_some() {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: expected.vault_id,
+                reason: "legacy compensation identity changed after receipt verification".into(),
+            });
+        }
+        let mut completed = expected.clone();
+        completed.compensation_block_index = Some(block_index);
+        self.quarantine_legacy_chain_burn_after_compensation(&completed)
+    }
+
+    pub fn record_quarantined_legacy_chain_burn_proof(
+        &mut self,
+        vault_id: u64,
+        expected: &ChainSpAbsorbIntent,
+        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+    ) -> Result<(), StabilityPoolError> {
+        let row = self
+            .quarantined_legacy_chain_burns
+            .as_mut()
+            .and_then(|rows| rows.get_mut(&vault_id))
+            .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "no quarantined legacy chain burn exists".into(),
+            })?;
+        if row.original_intent != *expected
+            || row.original_intent.burn_proof.is_some()
+            || row.original_intent.legacy_ambiguous_burn != Some(true)
+            || proof.ledger_kind
+                != rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn
+            || proof.vault_id_memo != vault_id
+        {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "quarantined original intent changed or burn proof conflicts".into(),
+            });
+        }
+        row.original_intent.burn_receipt_nat = Some(Nat::from(proof.block_index));
+        row.original_intent.burn_proof = Some(proof);
+        Ok(())
+    }
+
+    pub fn legacy_chain_burn_compensation_page(
+        &self,
+        after_vault_id: Option<u64>,
+        limit: u16,
+    ) -> Result<LegacyChainBurnCompensationPage, StabilityPoolError> {
+        if limit == 0 {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: "page limit must be greater than zero".into(),
+            });
+        }
+        let limit = usize::from(limit.min(MAX_LEGACY_CHAIN_BURN_COMPENSATION_PAGE));
+        let mut all: BTreeMap<u64, LegacyChainBurnCompensation> = self
+            .pending_legacy_chain_burn_compensations
+            .as_ref()
+            .into_iter()
+            .flat_map(|rows| rows.iter())
+            .map(|(&id, row)| (id, row.clone()))
+            .collect();
+        if let Some(rows) = &self.quarantined_legacy_chain_burns {
+            all.extend(rows.iter().map(|(&id, row)| (id, row.clone())));
+        }
+        let start = after_vault_id.map_or(
+            std::ops::Bound::Unbounded,
+            std::ops::Bound::Excluded,
+        );
+        let mut rows = all.range((start, std::ops::Bound::Unbounded));
+        let items: Vec<_> = rows.by_ref().take(limit).map(|(_, row)| row.clone()).collect();
+        let next_cursor = if rows.next().is_some() {
+            items.last().map(|row| row.vault_id)
+        } else {
+            None
+        };
+        Ok(LegacyChainBurnCompensationPage { items, next_cursor })
+    }
+
     pub fn pending_native_xrp_absorbs(&self) -> Vec<NativeXrpAbsorbIntent> {
         self.pending_native_xrp_absorbs
             .as_ref()
@@ -5533,6 +5743,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             chain_collateral_sentinels: Some(BTreeSet::new()),
             chain_claim_sources: Some(BTreeMap::new()),
             pending_chain_absorbs: Some(BTreeMap::new()),
+            pending_legacy_chain_burn_compensations: Some(BTreeMap::new()),
+            quarantined_legacy_chain_burns: Some(BTreeMap::new()),
             completed_chain_absorbs: Some(BTreeMap::new()),
             pending_native_xrp_absorbs: Some(BTreeMap::new()),
             chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),

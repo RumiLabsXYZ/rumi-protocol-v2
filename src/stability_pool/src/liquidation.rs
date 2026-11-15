@@ -383,6 +383,230 @@ pub(crate) async fn recover_ambiguous_chain_burn_proof(
     })
 }
 
+fn validate_legacy_chain_compensation_identity(
+    identity: &rumi_protocol_backend::state::LegacySpBurnCompensationIdentity,
+    intent: &ChainSpAbsorbIntent,
+    protocol_id: Principal,
+    pool: Principal,
+) -> Result<(), String> {
+    if identity.vault_id != intent.vault_id
+        || identity.ledger != intent.icusd_ledger
+        || identity.source != intent.icusd_minting_account
+        || identity.source.owner != protocol_id
+        || identity.source.subaccount.is_some()
+        || identity.destination != (Account { owner: pool, subaccount: None })
+        || identity.amount_e8s != intent.icusd_to_burn_e8s
+        || identity.memo.len() != 16
+        || identity.memo.as_slice() != identity.op_nonce.to_be_bytes()
+        || identity.created_at_time_ns
+            != rumi_protocol_backend::management::nonce_to_created_at_time(identity.op_nonce)
+    {
+        return Err("protocol compensation identity does not match the exact legacy intent".into());
+    }
+    Ok(())
+}
+
+async fn verify_legacy_chain_compensation_receipt(
+    row: &LegacyChainBurnCompensation,
+    block_index: u64,
+) -> Result<(), String> {
+    let minting: Result<(Option<Account>,), _> =
+        call(row.ledger, "icrc1_minting_account", ()).await;
+    let (minting,) = minting.map_err(|(code, message)| {
+        format!("could not verify compensation minting account: {code:?} {message}")
+    })?;
+    if minting.as_ref() != Some(&row.source) {
+        return Err("exact compensation source is not the ledger minting account".into());
+    }
+    let block = rumi_protocol_backend::icrc3_proof::fetch_icrc3_block_direct(
+        row.ledger,
+        block_index,
+    )
+    .await?;
+    rumi_protocol_backend::icrc3_proof::validate_icrc3_transfer_block(
+        &block,
+        None,
+        row.destination.clone(),
+        row.amount_e8s,
+        Some(&row.memo),
+        Some(row.created_at_time_ns),
+    )
+}
+
+fn quarantine_legacy_chain_burn_with_proof(
+    expected: &LegacyChainBurnCompensation,
+    block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    mutate_state(|state| state.complete_legacy_chain_burn_compensation(expected, block_index))
+}
+
+/// Protocol-funded compensation for a proofless legacy chain burn. The
+/// original intent and exact funding tuple are saved before the backend's
+/// execute call. Only a directly served exact mint receipt can make the
+/// original intent nonblocking; no backend absorb or user accounting runs.
+pub(crate) async fn compensate_legacy_ambiguous_chain_burn(
+    vault_id: u64,
+) -> Result<u64, StabilityPoolError> {
+    let intent = read_state(|state| state.get_pending_chain_absorb(vault_id)).ok_or_else(|| {
+        StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending legacy chain burn intent".into(),
+        }
+    })?;
+    if intent.legacy_ambiguous_burn != Some(true)
+        || intent.status != ChainSpAbsorbIntentStatus::Burned
+        || intent.burn_proof.is_some()
+        || intent.backend_result.is_some()
+        || intent.icusd_to_burn_e8s == 0
+    {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "only an unresolved proofless legacy chain burn can be compensated".into(),
+        });
+    }
+    let protocol_id = read_state(|state| state.protocol_canister_id);
+    let pool = ic_cdk::api::id();
+    let existing = read_state(|state| state.pending_legacy_chain_burn_compensation(vault_id));
+    let row = if let Some(row) = existing {
+        if row.original_intent != intent || row.compensation_block_index.is_some() {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "saved legacy compensation conflicts with the pending chain intent".into(),
+            });
+        }
+        row
+    } else {
+        let prepared: Result<(
+            Result<rumi_protocol_backend::state::LegacySpBurnCompensationIdentity,
+                rumi_protocol_backend::ProtocolError>,
+        ), _> = call(
+            protocol_id,
+            "prepare_legacy_sp_burn_compensation",
+            (vault_id,),
+        )
+        .await;
+        let identity = match prepared {
+            Ok((Ok(identity),)) => identity,
+            Ok((Err(error),)) => return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!("protocol compensation preparation failed: {error:?}"),
+            }),
+            Err((code, message)) => return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: protocol_id.to_string(),
+                method: format!("prepare_legacy_sp_burn_compensation: {code:?} {message}"),
+            }),
+        };
+        validate_legacy_chain_compensation_identity(&identity, &intent, protocol_id, pool)
+            .map_err(|reason| StabilityPoolError::LiquidationFailed { vault_id, reason })?;
+        let row = LegacyChainBurnCompensation {
+            vault_id,
+            original_intent: intent.clone(),
+            ledger: identity.ledger,
+            source: identity.source,
+            destination: identity.destination,
+            amount_e8s: identity.amount_e8s,
+            memo: identity.memo,
+            created_at_time_ns: identity.created_at_time_ns,
+            compensation_block_index: None,
+        };
+        mutate_state(|state| state.put_legacy_chain_burn_compensation(row.clone()))?;
+        row
+    };
+
+    let funded: Result<(Result<u64, rumi_protocol_backend::ProtocolError>,), _> = call(
+        protocol_id,
+        "execute_legacy_sp_burn_compensation",
+        (vault_id,),
+    )
+    .await;
+    let block_index = match funded {
+        Ok((Ok(index),)) => index,
+        Ok((Err(error),)) => return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: format!("protocol compensation remains held: {error:?}"),
+        }),
+        Err((code, message)) => return Err(StabilityPoolError::InterCanisterCallFailed {
+            target: protocol_id.to_string(),
+            method: format!("execute_legacy_sp_burn_compensation: {code:?} {message}"),
+        }),
+    };
+    verify_legacy_chain_compensation_receipt(&row, block_index)
+        .await
+        .map_err(|reason| StabilityPoolError::LiquidationFailed { vault_id, reason })?;
+    quarantine_legacy_chain_burn_with_proof(&row, block_index)?;
+    Ok(block_index)
+}
+
+/// Reconcile only a positive direct compensation receipt. The candidate index
+/// is an untrusted pointer; archive callbacks and missing history never prove
+/// the mint.
+pub(crate) async fn reconcile_legacy_chain_burn_compensation(
+    vault_id: u64,
+    candidate_index: u64,
+) -> Result<u64, StabilityPoolError> {
+    if let Some(quarantined) = read_state(|state| state.quarantined_legacy_chain_burn(vault_id)) {
+        if quarantined.compensation_block_index == Some(candidate_index) {
+            return Ok(candidate_index);
+        }
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "legacy compensation is already quarantined at a different receipt".into(),
+        });
+    }
+    let row = read_state(|state| state.pending_legacy_chain_burn_compensation(vault_id))
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "no pending legacy compensation identity exists".into(),
+        })?;
+    verify_legacy_chain_compensation_receipt(&row, candidate_index)
+        .await
+        .map_err(|reason| StabilityPoolError::LiquidationFailed { vault_id, reason })?;
+    quarantine_legacy_chain_burn_with_proof(&row, candidate_index)?;
+    Ok(candidate_index)
+}
+
+/// Record later positive direct evidence for the original burn while leaving
+/// the compensated intent quarantined. This is evidence-only: it never calls
+/// the backend absorb path or credits pool users.
+pub(crate) async fn reconcile_quarantined_legacy_chain_burn(
+    vault_id: u64,
+    candidate_index: u64,
+) -> Result<(), StabilityPoolError> {
+    let row = read_state(|state| state.quarantined_legacy_chain_burn(vault_id)).ok_or_else(|| {
+        StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "no quarantined legacy chain burn exists".into(),
+        }
+    })?;
+    if row.original_intent.burn_proof.as_ref().is_some_and(|proof| {
+        proof.block_index == candidate_index
+            && proof.ledger_kind
+                == rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn
+            && proof.vault_id_memo == vault_id
+    }) {
+        return Ok(());
+    }
+    if row.original_intent.burn_proof.is_some() {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "quarantined original burn already has a different positive receipt".into(),
+        });
+    }
+    let block_index = direct_chain_burn_recovery_candidate(
+        &row.original_intent,
+        Some(candidate_index),
+    )
+    .await?;
+    let proof = build_icusd_burn_proof(block_index, vault_id);
+    mutate_state(|state| {
+        state.record_quarantined_legacy_chain_burn_proof(
+            vault_id,
+            &row.original_intent,
+            proof,
+        )
+    })
+}
+
 fn mark_chain_absorb_recovered_burn_proof_in_state(
     state: &mut StabilityPoolState,
     expected: &ChainSpAbsorbIntent,
@@ -7391,6 +7615,150 @@ mod tests {
         assert!(chain_burn_recovery_has_single_dispatch_provenance(&intent));
         intent.legacy_ambiguous_burn = Some(true);
         assert!(!chain_burn_recovery_has_single_dispatch_provenance(&intent));
+    }
+
+    fn legacy_compensation_identity(
+        intent: &ChainSpAbsorbIntent,
+        protocol: Principal,
+        pool: Principal,
+    ) -> rumi_protocol_backend::state::LegacySpBurnCompensationIdentity {
+        let op_nonce = (987u128 << 64) | 5;
+        rumi_protocol_backend::state::LegacySpBurnCompensationIdentity {
+            vault_id: intent.vault_id,
+            op_nonce,
+            ledger: intent.icusd_ledger,
+            source: intent.icusd_minting_account,
+            destination: Account { owner: pool, subaccount: None },
+            amount_e8s: intent.icusd_to_burn_e8s,
+            memo: op_nonce.to_be_bytes().to_vec(),
+            created_at_time_ns:
+                rumi_protocol_backend::management::nonce_to_created_at_time(op_nonce),
+        }
+    }
+
+    #[test]
+    fn legacy_compensation_identity_binds_every_funding_field() {
+        let (_, mut intent) = ambiguous_chain_burn_fixture();
+        intent.legacy_ambiguous_burn = Some(true);
+        let protocol = intent.icusd_minting_account.owner;
+        let pool = principal(88);
+        let exact = legacy_compensation_identity(&intent, protocol, pool);
+        assert!(validate_legacy_chain_compensation_identity(
+            &exact, &intent, protocol, pool
+        ).is_ok());
+
+        let mut wrong = exact.clone();
+        wrong.ledger = principal(90);
+        assert!(validate_legacy_chain_compensation_identity(
+            &wrong, &intent, protocol, pool
+        ).is_err());
+        let mut wrong = exact.clone();
+        wrong.source.owner = principal(91);
+        assert!(validate_legacy_chain_compensation_identity(
+            &wrong, &intent, protocol, pool
+        ).is_err());
+        let mut wrong = exact.clone();
+        wrong.destination.owner = principal(92);
+        assert!(validate_legacy_chain_compensation_identity(
+            &wrong, &intent, protocol, pool
+        ).is_err());
+        let mut wrong = exact.clone();
+        wrong.amount_e8s += 1;
+        assert!(validate_legacy_chain_compensation_identity(
+            &wrong, &intent, protocol, pool
+        ).is_err());
+        let mut wrong = exact.clone();
+        wrong.memo[0] ^= 1;
+        assert!(validate_legacy_chain_compensation_identity(
+            &wrong, &intent, protocol, pool
+        ).is_err());
+        let mut wrong = exact;
+        wrong.created_at_time_ns += 1;
+        assert!(validate_legacy_chain_compensation_identity(
+            &wrong, &intent, protocol, pool
+        ).is_err());
+    }
+
+    #[test]
+    fn legacy_compensation_upgrade_idempotency_and_quarantine_are_atomic() {
+        let (mut state, mut intent) = ambiguous_chain_burn_fixture();
+        intent.legacy_ambiguous_burn = Some(true);
+        state.put_pending_chain_absorb(intent.clone()).unwrap();
+        let protocol = intent.icusd_minting_account.owner;
+        let pool = principal(88);
+        let identity = legacy_compensation_identity(&intent, protocol, pool);
+        assert!(validate_legacy_chain_compensation_identity(
+            &identity, &intent, protocol, pool
+        ).is_ok());
+        let row = LegacyChainBurnCompensation {
+            vault_id: intent.vault_id,
+            original_intent: intent.clone(),
+            ledger: identity.ledger,
+            source: identity.source.clone(),
+            destination: identity.destination.clone(),
+            amount_e8s: identity.amount_e8s,
+            memo: identity.memo.clone(),
+            created_at_time_ns: identity.created_at_time_ns,
+            compensation_block_index: None,
+        };
+        state.put_legacy_chain_burn_compensation(row.clone()).unwrap();
+        state.put_legacy_chain_burn_compensation(row.clone()).unwrap();
+        let encoded = candid::Encode!(&state).expect("encode pending compensation");
+        let restored = crate::state::try_decode_state(&encoded)
+            .expect("pending exact compensation survives upgrade snapshot");
+        let held = restored
+            .pending_legacy_chain_burn_compensation(intent.vault_id)
+            .expect("pending compensation survives upgrade");
+        assert_eq!(held, row);
+        assert!(restored.get_pending_chain_absorb(intent.vault_id).is_some());
+
+        let before_positions = restored.deposits.clone();
+        let mut wrong = row.clone();
+        wrong.amount_e8s += 1;
+        assert!(state.put_legacy_chain_burn_compensation(wrong).is_err());
+        assert!(state
+            .quarantine_legacy_chain_burn_after_compensation(&row)
+            .is_err(), "an unproved or ambiguous compensation must stay pending");
+        assert!(state
+            .pending_legacy_chain_burn_compensation(intent.vault_id)
+            .is_some());
+        assert!(state
+            .complete_legacy_chain_burn_compensation(&row, 777)
+            .is_ok());
+        assert!(state
+            .get_pending_chain_absorb(intent.vault_id)
+            .is_none());
+        assert!(state
+            .pending_legacy_chain_burn_compensation(intent.vault_id)
+            .is_none());
+        let quarantined = state
+            .quarantined_legacy_chain_burn(intent.vault_id)
+            .expect("positive compensation receipt moves full intent to quarantine");
+        assert_eq!(quarantined.compensation_block_index, Some(777));
+        assert_eq!(quarantined.original_intent, intent);
+        assert!(quarantined.original_intent.burn_proof.is_none());
+        assert!(state.completed_chain_absorb(intent.vault_id).is_none());
+        assert_eq!(state.deposits, before_positions);
+        assert!(state.complete_legacy_chain_burn_compensation(&row, 777).is_err());
+
+        let proof = build_icusd_burn_proof(444, intent.vault_id);
+        state
+            .record_quarantined_legacy_chain_burn_proof(
+                intent.vault_id,
+                &intent,
+                proof.clone(),
+            )
+            .expect("later positive burn receipt is retained without settling debt");
+        let later = state
+            .quarantined_legacy_chain_burn(intent.vault_id)
+            .unwrap();
+        assert_eq!(later.compensation_block_index, Some(777));
+        assert_eq!(later.original_intent.burn_proof, Some(proof));
+        assert_eq!(state.deposits, before_positions);
+        let page = state.legacy_chain_burn_compensation_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0], later);
+        assert_eq!(page.next_cursor, None);
     }
 
     #[test]

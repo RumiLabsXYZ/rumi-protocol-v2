@@ -2390,6 +2390,16 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : XrpVaultOpenInfo,
     'Err' : ProtocolError,
   });
+  const LegacySpBurnCompensationIdentity = IDL.Record({
+    'destination' : Account,
+    'source' : Account,
+    'created_at_time_ns' : IDL.Nat64,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+  });
   const PreparedRedemptionOffer = IDL.Record({
     'queue' : RedemptionQueue,
     'quote' : Result_21,
@@ -2888,6 +2898,11 @@ export const idlFactory = ({ IDL }) => {
     'enable_bot_confirm_proof_requirement' : IDL.Func([], [Result_1], []),
     'enable_chain' : IDL.Func([IDL.Nat32], [Result_1], []),
     'enter_recovery_mode' : IDL.Func([], [Result_1], []),
+    'execute_legacy_sp_burn_compensation' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : ProtocolError })],
+        [],
+      ),
     'exit_recovery_mode' : IDL.Func([], [Result_1], []),
     'freeze_protocol' : IDL.Func([], [Result_1], []),
     'get_all_vaults' : IDL.Func([], [IDL.Vec(CandidVault)], ['query']),
@@ -3399,6 +3414,11 @@ export const idlFactory = ({ IDL }) => {
     'open_xrp_vault' : IDL.Func([], [Result_33], []),
     'partial_liquidate_vault' : IDL.Func([VaultArg], [Result_6], []),
     'partial_repay_to_vault' : IDL.Func([VaultArg], [Result], []),
+    'prepare_legacy_sp_burn_compensation' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : LegacySpBurnCompensationIdentity, 'Err' : ProtocolError })],
+        [],
+      ),
     'prepare_redemption_offer' : IDL.Func([IDL.Nat64], [Result_34], []),
     'prepare_vault51_nicp_redemption' : IDL.Func(
         [PrepareNicpRedemption],

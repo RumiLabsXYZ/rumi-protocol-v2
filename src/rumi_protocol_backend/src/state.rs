@@ -1221,6 +1221,30 @@ pub struct StoredSpBurnRefundNoEffectEvidence {
     pub too_old_rejected: bool,
 }
 
+/// Separate, vault-keyed outbox for protocol-funded compensation of legacy
+/// chain burns that have no attributable block proof. This intentionally does
+/// not consume a writedown proof or touch backend debt state.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct LegacySpBurnCompensationIdentity {
+    pub vault_id: u64,
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time_ns: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StoredLegacySpBurnCompensation {
+    pub identity: LegacySpBurnCompensationIdentity,
+    /// Set before crossing the ledger await. An unresolved dispatch is never
+    /// submitted again; operators may only reconcile a positive direct receipt.
+    pub dispatch_attempted: bool,
+    pub block_index: Option<u64>,
+}
+
 pub const MAX_SP_BURN_REFUND_ATTEMPTS: usize = 4;
 
 /// Wave-8b LIQ-002: default tolerance band (in absolute CR units) above the
@@ -4479,6 +4503,11 @@ pub struct State {
     #[serde(default)]
     pub sp_burn_refunds_by_proof:
         BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredSpBurnRefund>,
+    /// Exact protocol-funded mints for legacy ambiguous SP burns, keyed by
+    /// original vault intent. Distinct from positive-burn refund records.
+    #[serde(default)]
+    pub legacy_sp_burn_compensations_by_vault:
+        BTreeMap<u64, StoredLegacySpBurnCompensation>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -5011,6 +5040,7 @@ impl Default for State {
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
             sp_burn_refunds_by_proof: BTreeMap::new(),
+            legacy_sp_burn_compensations_by_vault: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -5347,6 +5377,7 @@ impl From<InitArg> for State {
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
             sp_burn_refunds_by_proof: BTreeMap::new(),
+            legacy_sp_burn_compensations_by_vault: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -11351,15 +11382,18 @@ mod tests {
             other => panic!("expected state map, got {other:?}"),
         };
         let journal_key = ciborium::value::Value::Text("sp_burn_refunds_by_proof".into());
+        let legacy_compensation_key =
+            ciborium::value::Value::Text("legacy_sp_burn_compensations_by_vault".into());
         let old_len = entries.len();
-        entries.retain(|(key, _)| key != &journal_key);
-        assert_eq!(entries.len() + 1, old_len, "journal field was present");
+        entries.retain(|(key, _)| key != &journal_key && key != &legacy_compensation_key);
+        assert_eq!(entries.len() + 2, old_len, "both journal fields were present");
 
         let mut old_snapshot = Vec::new();
         ciborium::ser::into_writer(&snapshot, &mut old_snapshot).expect("encode old state map");
         let decoded: State =
             ciborium::de::from_reader(old_snapshot.as_slice()).expect("decode pre-CL08 snapshot");
         assert!(decoded.sp_burn_refunds_by_proof.is_empty());
+        assert!(decoded.legacy_sp_burn_compensations_by_vault.is_empty());
     }
 
     #[test]

@@ -1123,6 +1123,103 @@ pub async fn admin_recover_ambiguous_chain_burn(
     crate::liquidation::sp_absorb_chain_vault(vault_id).await
 }
 
+/// Protocol-funded compensation for one legacy proofless chain burn. A
+/// positive exact mint receipt moves the original intent into a durable
+/// nonblocking quarantine without applying backend debt or depositor credits.
+#[update]
+pub async fn admin_compensate_legacy_ambiguous_chain_burn(
+    vault_id: u64,
+) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::ensure_no_pool_balance_async_in_flight()?;
+    let _guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    crate::liquidation::compensate_legacy_ambiguous_chain_burn(vault_id).await
+}
+
+/// Reconcile a pending legacy compensation only from a positive direct ICRC-3
+/// block matching its saved funding identity. The index is only a candidate.
+#[update]
+pub async fn admin_reconcile_legacy_chain_burn_compensation(
+    vault_id: u64,
+    candidate_block_index: u64,
+) -> Result<u64, StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::ensure_no_pool_balance_async_in_flight()?;
+    let _guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    crate::liquidation::reconcile_legacy_chain_burn_compensation(
+        vault_id,
+        candidate_block_index,
+    )
+    .await
+}
+
+/// Record a later positive direct receipt for the original burn retained in
+/// quarantine. This evidence-only transition does not resume backend
+/// accounting or alter depositor balances.
+#[update]
+pub async fn admin_reconcile_quarantined_legacy_chain_burn(
+    vault_id: u64,
+    candidate_block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    interest_recovery::ensure_unlocked();
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    crate::ensure_no_pool_balance_async_in_flight()?;
+    let _guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    crate::liquidation::reconcile_quarantined_legacy_chain_burn(
+        vault_id,
+        candidate_block_index,
+    )
+    .await
+}
+
+/// Admin-only bounded inventory of unresolved legacy compensation and
+/// quarantined original intents.
+#[query]
+pub fn get_legacy_chain_burn_compensation_page(
+    after_vault_id: Option<u64>,
+    limit: u16,
+) -> Result<LegacyChainBurnCompensationPage, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|state| state.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    read_state(|state| state.legacy_chain_burn_compensation_page(after_vault_id, limit))
+}
+
+/// Internal source proof for the configured backend's prepare phase. This
+/// exposes only the saved ledger and amount and only to that backend.
+#[query]
+pub fn legacy_chain_burn_compensation_source(
+    vault_id: u64,
+) -> Option<(Principal, u64)> {
+    if ic_cdk::api::caller() != read_state(|state| state.protocol_canister_id) {
+        return None;
+    }
+    read_state(|state| {
+        let intent = state.get_pending_chain_absorb(vault_id)?;
+        if intent.legacy_ambiguous_burn != Some(true)
+            || intent.status != ChainSpAbsorbIntentStatus::Burned
+            || intent.burn_proof.is_some()
+            || intent.backend_result.is_some()
+            || intent.icusd_to_burn_e8s == 0
+        {
+            return None;
+        }
+        Some((intent.icusd_ledger, intent.icusd_to_burn_e8s))
+    })
+}
+
 #[update]
 pub async fn scan_chain_absorb_candidates(
     max_per_chain: Option<u64>,
