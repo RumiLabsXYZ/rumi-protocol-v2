@@ -87,7 +87,7 @@ fn cdp_03_helper_updates_targeted_collateral_only() {
     assert_eq!(state.collateral_configs[&icp].current_base_rate, new_rate);
     assert_eq!(
         state.collateral_configs[&icp].last_redemption_time,
-        hour_aligned_anchor(TEST_NOW_NS)
+        TEST_NOW_NS
     );
 
     // The OTHER collateral's per-collateral fields are unchanged.
@@ -143,7 +143,7 @@ fn cdp_03_two_redemptions_against_different_collaterals_are_isolated() {
     );
     assert_eq!(
         state.collateral_configs[&icp].last_redemption_time,
-        hour_aligned_anchor(TEST_NOW_NS)
+        TEST_NOW_NS
     );
     assert_eq!(
         state.collateral_configs[&other].current_base_rate,
@@ -151,7 +151,45 @@ fn cdp_03_two_redemptions_against_different_collaterals_are_isolated() {
     );
     assert_eq!(
         state.collateral_configs[&other].last_redemption_time,
-        hour_aligned_anchor(TEST_NOW_NS + 60_000_000_000)
+        TEST_NOW_NS + 60_000_000_000
+    );
+}
+
+#[test]
+fn cdp_03_first_redemption_anchors_partial_hour_exactly() {
+    let (mut state, icp, _other) = fresh_state_with_two_collaterals();
+    let start = hour_aligned_anchor(TEST_NOW_NS);
+    let first_redemption = start + 50 * 60 * 1_000_000_000;
+    let next_redemption = first_redemption + 10 * 60 * 1_000_000_000;
+    let starting_rate = Ratio::from(dec!(0.04));
+
+    // A zero timestamp marks an uninitialized decay clock. The first redeem
+    // anchors it to its actual time, even when that time is at minute :50.
+    record_per_collateral_redemption_fee(&mut state, &icp, starting_rate, first_redemption);
+    assert_eq!(
+        state.collateral_configs[&icp].last_redemption_time,
+        first_redemption
+    );
+
+    // Ten minutes after that first redemption is not a full hourly decay,
+    // even though the wall clock crossed an hour boundary in between.
+    let config = &state.collateral_configs[&icp];
+    let elapsed_hours = (next_redemption - config.last_redemption_time) / DECAY_INTERVAL_NS;
+    assert_eq!(elapsed_hours, 0);
+    let amount = ICUSD::from(100_000_000);
+    let total_debt = ICUSD::from(100_000_000_000);
+    let fee = compute_redemption_fee(
+        elapsed_hours,
+        amount,
+        total_debt,
+        config.current_base_rate,
+        DEFAULT_REDEMPTION_FEE_FLOOR,
+        DEFAULT_REDEMPTION_FEE_CEILING,
+    );
+    record_per_collateral_redemption_fee(&mut state, &icp, fee, next_redemption);
+    assert_eq!(
+        state.collateral_configs[&icp].last_redemption_time,
+        first_redemption
     );
 }
 

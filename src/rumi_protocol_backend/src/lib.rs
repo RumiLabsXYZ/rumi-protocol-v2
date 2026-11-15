@@ -2726,12 +2726,19 @@ pub fn record_per_collateral_redemption_fee(
         // whole periods (rather than setting it to `now_ns`) to preserve the
         // partial-hour remainder across redemptions.
         const DECAY_INTERVAL_NS: u64 = 60 * 60 * 1_000_000_000;
-        let elapsed_ns = now_ns.saturating_sub(config.last_redemption_time);
-        let elapsed_periods = elapsed_ns / DECAY_INTERVAL_NS;
-        if elapsed_periods > 0 {
-            config.last_redemption_time = config
-                .last_redemption_time
-                .saturating_add(elapsed_periods.saturating_mul(DECAY_INTERVAL_NS));
+        if config.last_redemption_time == 0 {
+            // Zero is the never-redeemed sentinel. Establish the initial
+            // anchor at the actual redemption time so a partial first hour
+            // cannot be mistaken for a full decay period.
+            config.last_redemption_time = now_ns;
+        } else {
+            let elapsed_ns = now_ns.saturating_sub(config.last_redemption_time);
+            let elapsed_periods = elapsed_ns / DECAY_INTERVAL_NS;
+            if elapsed_periods > 0 {
+                config.last_redemption_time = config
+                    .last_redemption_time
+                    .saturating_add(elapsed_periods.saturating_mul(DECAY_INTERVAL_NS));
+            }
         }
     }
 }
