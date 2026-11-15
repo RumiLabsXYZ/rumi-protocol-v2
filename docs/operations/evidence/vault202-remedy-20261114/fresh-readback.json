@@ -1,0 +1,31 @@
+{
+  "claimStable": true,
+  "botModule": "0x256dc8101b0e0d616bb7c660b17168a8ad11d146869802bb483849c08875359e",
+  "backendModule": "0x8f6f5933e54fa44205760b9a8d1c3869135df43825eadfee70b20c62d0a0bd16",
+  "backendOpenClaimIds": [
+    202
+  ],
+  "botSnapshotCount": 3,
+  "privateReadManifest": [
+    {
+      "name": "fresh-claim202.txt",
+      "sha256": "6e1f60e3b5bf5767ffa525daf1300c0d3332abd40c63c6b95b5478ccf6d77c12"
+    },
+    {
+      "name": "fresh-bot-status.json",
+      "sha256": "251a9d79c964fdafc7629356b85a51c14de7103b71fc639aca5d8dccc536dddd"
+    },
+    {
+      "name": "fresh-backend-status.json",
+      "sha256": "c7a714d3e219642f6eaac85061deafde980d0639331d75e54d39e73b5ade39ed"
+    },
+    {
+      "name": "fresh-backend-claims.txt",
+      "sha256": "2a564d2b335cdb19e649fc1b11aa58522f2c112bf3273eb8301d41a2f5b2aae0"
+    },
+    {
+      "name": "fresh-bot-snapshots.txt",
+      "sha256": "d3f1cb3b033be9e3b0bfa666458ecd9dda7aec2ab061e9bd0cbabb3b78939030"
+    }
+  ]
+}

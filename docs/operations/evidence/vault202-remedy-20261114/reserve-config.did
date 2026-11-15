@@ -1,0 +1,1 @@
+(record { budget_e6 = 1_000_000 : nat64; per_claim_cap_e6 = 25_000 : nat64; protected_balance_e6 = 25_621_238 : nat64 })

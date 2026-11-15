@@ -1,0 +1,85 @@
+{
+  "preparationOnly": true,
+  "executionApproved": false,
+  "source": "7ef1e6940a6b4bd237b394b23832bd19ef3c4046",
+  "deployedBotSourcePreserved": "2edd5e01b9501d2349265674ec11f0aaa22add49",
+  "target": "nygob-3qaaa-aaaap-qttcq-cai",
+  "network": "ic",
+  "identity": "rumi_identity",
+  "expectedOldModuleSha256": "256dc8101b0e0d616bb7c660b17168a8ad11d146869802bb483849c08875359e",
+  "candidateArtifactSha256": null,
+  "artifactBuilt": false,
+  "nativeTestsExecuted": false,
+  "canonicalCandidRegenerated": false,
+  "sourceReviews": "two focused PASS at same corrected source; prior findings fixed",
+  "rawExistingClaimIcpE8s": 5152859,
+  "claimNetIcpE8s": 5142859,
+  "recordId": 231,
+  "vaultId": 202,
+  "claimGeneration": 3,
+  "paymentNetCkUsdcE6": 100908,
+  "paymentFeeCkUsdcE6": 10000,
+  "paymentGrossCkUsdcE6": 110908,
+  "verifiedClaimOutputE6": 95482,
+  "exactReserveAllocationE6": 15426,
+  "treasuryGrossIcpE8s": 214221,
+  "treasuryFeeIcpE8s": 10000,
+  "treasuryNetIcpE8s": 204221,
+  "initialReserveBudgetE6": 1000000,
+  "perClaimReserveCapE6": 25000,
+  "protectedWalletFloorE6": 25621238,
+  "remainingBudgetAfter202E6": 984574,
+  "treasuryPrincipal": "tlg74-oiaaa-aaaap-qrd6a-cai",
+  "backendPrincipal": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "paymentMemoHex": "52554d492d425041592d56323a00000000000000ca0000000000000003",
+  "newFundingProposed": false,
+  "existingSnapshotCount": 3,
+  "snapshotReplacementsProposed": 0,
+  "calls": [
+    {
+      "method": "set_processing_paused",
+      "argsFile": "pause.did"
+    },
+    {
+      "management": "stop; verify Stopped; create one fourth snapshot; download/verify; preserve existing three"
+    },
+    {
+      "management": "one upgrade with reviewed/built exact bytes and upgrade.did; verify while stopped; start; confirm worker paused and no reserve policy"
+    },
+    {
+      "method": "admin_configure_operator_reserve",
+      "argsFile": "reserve-config.did"
+    },
+    {
+      "method": "admin_set_operator_reserve_enabled",
+      "argsFile": "reserve-enable.did"
+    },
+    {
+      "method": "admin_execute_vault202_recovery",
+      "argsFile": "execute202.did"
+    },
+    {
+      "readback": "exact payment/treasury blocks; claim cleared through proof; record231 Completed; reserveallocated/settled15426; other obligations unchanged"
+    },
+    {
+      "method": "set_processing_paused",
+      "argsFile": "resume.did",
+      "condition": "only after successful202readbacks; enables same capped future policy"
+    }
+  ],
+  "argsSha256": {
+    "reserve-config.did": "29a4b7375b84476ba8168a2e48ec41721a7d994f6f56b4c7923697cc20bc657f",
+    "reserve-enable.did": "b55bd6f53235093f4e352db8c11975a1f49aae17596e78e87f57b4f94498d68a",
+    "execute202.did": "71d200d8ffab1b98ab940769da680c27d48873242f3f141a4910e6e10766e84b",
+    "pause.did": "b55bd6f53235093f4e352db8c11975a1f49aae17596e78e87f57b4f94498d68a",
+    "resume.did": "b98ee57d9f05f9318b90414b8b0d2a8c53be3834622eee81eab2e9828a0e504c",
+    "upgrade.did": "71d200d8ffab1b98ab940769da680c27d48873242f3f141a4910e6e10766e84b"
+  },
+  "actualBlocker": "Cody destination/payload scheduling permission rejected; direct human question pending. No heavy allocation delivered.",
+  "pendingValidation": [
+    "one locked/offline native bot test pass with canonical Candid generation",
+    "canonical generated bot declarations and backwards interface compatibility",
+    "one serialized source-matched bot Wasm build and exact export/artifact checks",
+    "final exact source/artifact/plan readback before production decision"
+  ]
+}

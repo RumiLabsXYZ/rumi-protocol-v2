@@ -1,0 +1,33 @@
+{
+  "source": "7ef1e6940a6b4bd237b394b23832bd19ef3c4046",
+  "deterministicPassed": [
+    "Rust syntax parsing of all changed modules",
+    "rustfmt on new modules",
+    "git diff --check",
+    "direct ledger fixture captures; exact202 claim journal stable on repeated live reads",
+    "deployed2edd ordinary fee delta composed and source-checked"
+  ],
+  "round1": "source FAIL; missing BotState qualification and reserve NoEffect tuple rewrite",
+  "fixes": [
+    "qualified state type",
+    "reserve-backed retries rearm immutable original tuple with fee/window/floor checks",
+    "reserve matching before dispatch and callback completion",
+    "settlement refusal stops before treasury creation",
+    "exact deployed input-fee sizing/accounting/residual preserved"
+  ],
+  "round2": [
+    {
+      "reviewer": "independent reserve-accounting reviewer",
+      "verdict": "SOURCE PASS",
+      "blockingIssues": []
+    },
+    {
+      "reviewer": "independent202lifecycle reviewer",
+      "verdict": "SOURCE PASS",
+      "blockingIssues": []
+    }
+  ],
+  "nativeTestsRun": false,
+  "artifactBuilt": false,
+  "fullReadinessClaimed": false
+}
