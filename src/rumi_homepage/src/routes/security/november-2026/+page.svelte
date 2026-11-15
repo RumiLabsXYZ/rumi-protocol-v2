@@ -188,8 +188,8 @@
       <div class="hold-copy">
         <p>
           The closure tranche still requires remaining production artifacts, exact installation
-          readbacks, and operation-specific Vault-202 recovery evidence. EVM/public-open and
-          this snapshot includes no activation evidence for EVM/public-open or native-XRP fanout.
+          readbacks, and operation-specific Vault-202 recovery evidence. This snapshot includes no
+          activation evidence for EVM/public-open or native-XRP fanout.
           Those route-specific evidence gaps are not blockers for unrelated flows.
         </p>
         <p>
