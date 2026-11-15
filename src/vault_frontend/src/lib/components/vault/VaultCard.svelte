@@ -893,6 +893,21 @@
         dispatch('updated');
       } else if (result.ambiguous) {
         toastStore.info(result.error || 'The repayment outcome is unknown. Check the vault and ledger before retrying.', 12000);
+      } else if (isRepayAndClose && ctx.assertCurrent()) {
+        // The compound backend commits repayment before returning collateral.
+        // A typed close error can therefore leave a debt-free, still-open
+        // vault. Refresh before guiding the user so a retry cannot be based on
+        // the stale pre-repayment card.
+        try {
+          await vaultStore.refreshVaults(ctx);
+          await walletStore.refreshBalance({ skipCache: true }, ctx);
+          appDataStore.fetchCollateralTotals(true).catch(() => {});
+          dispatch('updated');
+        } catch {
+          // Keep the recovery guidance visible even if the best-effort refresh
+          // itself fails; reconnecting and refreshing remains safe.
+        }
+        toastStore.info(`${result.error || 'Repay and close did not complete.'} Refresh the vault. If its debt is now zero, use Withdraw & Close to recover the collateral.`, 12000);
       } else if (result.approvalMayHaveMutated && !ctx.assertCurrent()) {
         toastStore.info(`${result.error || 'The repayment was not confirmed.'} The allowance may have changed; reconnect the submitting wallet and check status before retrying.`, 12000);
       } else { toastStore.error(result.error || 'Failed', 8000); }

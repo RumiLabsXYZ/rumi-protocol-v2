@@ -4,14 +4,14 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Principal } from '@dfinity/principal';
 vi.mock('$lib/services/auth',async()=>{const {writable}=await import('svelte/store');return {currentWalletType:writable('plug'),walletSessionGeneration:writable(0),WALLET_TYPES:{OISY:'oisy'}};});
 vi.mock('$lib/services/oisySigner',()=>({openOisySignerChannel:fx.openChannel}));
-const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), toastError:vi.fn() }));
+const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), toastError:vi.fn(), toastInfo:vi.fn(), refreshVaults:vi.fn() }));
 vi.mock('../../stores/wallet', async () => {
   const { writable } = await import('svelte/store');
   return { walletStore: Object.assign(writable({principal:null,tokenBalances:{}}), {refreshBalance:vi.fn()}) };
 });
 vi.mock('../../stores/collateralStore', () => ({ collateralStore: {getCollateralInfo:()=>({symbol:'ICP',decimals:8,price:10,minVaultDebt:10000000,interestRateApr:0,ledgerFee:10000})} }));
-vi.mock('../../stores/vaultStore', () => ({vaultStore:{refreshVault:vi.fn(),refreshVaults:vi.fn()}}));
-vi.mock('../../stores/toast', () => ({toastStore:{success:vi.fn(),error:fx.toastError,info:vi.fn()}}));
+vi.mock('../../stores/vaultStore', () => ({vaultStore:{refreshVault:vi.fn(),refreshVaults:fx.refreshVaults}}));
+vi.mock('../../stores/toast', () => ({toastStore:{success:vi.fn(),error:fx.toastError,info:fx.toastInfo}}));
 vi.mock('../../stores/appDataStore', async () => {
   const {writable}=await import('svelte/store');
   return {appDataStore:{fetchProtocolStatus:async()=>{},fetchCollateralTotals:async()=>{}},protocolStatus:writable({}),collateralTotals:writable({})};
@@ -52,7 +52,7 @@ async function show(balance=30393000000n){
   component=mount(Harness,{target,props:{vaultInput}});await tick();await tick();
   [...target.querySelectorAll<HTMLButtonElement>('.pill-debt')].find(b=>b.textContent?.trim()==='Repay')!.click();await tick();
 }
-beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.toastError.mockReset();currentWalletType.set('plug');walletSessionGeneration.set(0);});
+beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
 afterEach(async()=>{if(component)await unmount(component);component=null;target.remove();});
 it('keeps an untouched Max selection valid when refreshed debt lowers the cap',async()=>{
  await show();max().click();await tick();const previous=input().valueAsNumber;
@@ -94,6 +94,15 @@ it('offers full repay and close with one approval fee and a fee-free burn',async
  await show(30393940000n);max().click();await tick();
  expect(input().valueAsNumber).toBe(base.borrowedIcusd);
  expect(submit().textContent?.trim()).toBe('Repay & Close');
+});
+it('refreshes and gives recovery guidance when repay succeeds but compound close returns an error',async()=>{
+ fx.close.mockResolvedValue({success:false,error:'Collateral transfer failed'});
+ await show(30393940000n);max().click();await tick();
+ expect(submit().textContent?.trim()).toBe('Repay & Close');
+ submit().click();
+ await vi.waitFor(()=>expect(fx.refreshVaults).toHaveBeenCalledOnce());
+ expect(fx.toastInfo).toHaveBeenCalledWith(expect.stringContaining('If its debt is now zero, use Withdraw & Close'),12000);
+ expect(fx.toastError).not.toHaveBeenCalled();
 });
 
 it('keeps manual repayment disabled when the safe maximum falls to zero',async()=>{

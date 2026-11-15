@@ -42,7 +42,7 @@ describe('legacy vault UI session-bound action wiring', () => {
   it('awaits every bound post-action balance refresh so failures stay in the refresh warning path', () => {
     const cardRefreshes = vaultCard.split('\n').filter(line => line.includes('walletStore.refreshBalance({ skipCache: true }'));
     const recoveryRefreshes = vaultPullRecoveryBanner.split('\n').filter(line => line.includes('walletStore.refreshBalance({ skipCache: true }'));
-    expect(cardRefreshes).toHaveLength(6);
+    expect(cardRefreshes).toHaveLength(7);
     expect(cardRefreshes.every(line => line.includes('await walletStore.refreshBalance('))).toBe(true);
     expect(recoveryRefreshes).toHaveLength(2);
     expect(recoveryRefreshes.every(line => line.includes('await walletStore.refreshBalance('))).toBe(true);
