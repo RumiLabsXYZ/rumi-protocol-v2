@@ -22,7 +22,7 @@
       "state": "Review",
       "owner": "Bram",
       "scope": "Verify Stability Pool recovery and current rails",
-      "evidenceText": "Public read-only production checks show the pool open and consistent, accepting interest receipts, with no public pending refund, unallocated-interest, chain-absorb, or active 3USD-conversion queue. Authorized readback shows recovery at 237 of 237 packets and an empty backend Treasury recovery page. Management status reports the pool running with module SHA-256 a2a042ecff6f934cf25f797fa08d0984d84ab8e28f954e50f3582f54a331298f, superseding the stale October hash in the public dashboard. No examined retained release artifact binds that current hash to source, so PR #623 deployment is unproved either way. Preserve that limitation; do not build or install merely to attribute it.",
+      "evidenceText": "The pool is open and internally consistent, with all 237 staged interest packets credited and no public pending refund, unallocated-interest, chain-absorb, or active 3USD-conversion queue. A November 15 management readback reports the pool running on preceding module SHA-256 ff4988d75e7e97c24130691187ec49ca0304c54505d65cab98c46bb72024f47f; the reviewed remediation candidate is SHA-256 32cf7dac324e97d8a6d6ddef93902c89dee2bec93c5b51521cf10e260ba83cce. Preserve the credited recovery invariant during the pending upgrade and repeat the bounded readbacks afterward.",
       "evidenceLinks": [
         {
           "title": "Stability Pool rails PR",
@@ -39,8 +39,13 @@
       "state": "In progress",
       "owner": "Bram",
       "scope": "Reconcile accepted security findings",
-      "evidenceText": "Compare the prior audits and later fixes with current main and live modules. Track source, deployment, and historical obligations separately.",
-      "evidenceLinks": []
+      "evidenceText": "A private row-level matrix now covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 are merged, their six production candidates are hash-pinned, and the AMM candidate is installed. Analytics, Stability Pool, Treasury, backend, and bot still require coordinated installation and readback; several older September rows still need exact canonical-source mapping rather than an inferred closure claim.",
+      "evidenceLinks": [
+        {
+          "title": "Public security closure status",
+          "url": "https://rumiprotocol.com/security/remediation-closure-2026-11-15"
+        }
+      ]
     },
     {
       "id": "SEC-03",
@@ -60,19 +65,23 @@
       "state": "Review",
       "owner": "Bram",
       "scope": "Check 3pool payout and archive recovery",
-      "evidenceText": "Verify exact receipt proof and pending payout identities. Keep ambiguous outcomes held until positive evidence or a safe recovery route is shown.",
+      "evidenceText": "A November 15 readback shows the source-bound October 23 3pool release running with zero pending claims and 561 retained donation receipts. The archive-proof liveness question remains separate: keep ambiguous outcomes held until positive certified evidence or a reviewed recovery route exists.",
       "evidenceLinks": []
     },
     {
       "id": "SEC-05",
-      "state": "Blocked",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Refresh release and public security status",
-      "evidenceText": "Waiting for current live readback and finding closure evidence. Any public update must state verified production status without private exploit detail.",
+      "evidenceText": "PR #663 merged at 9da6444e. An assets-only sync published the dated closure status page, and live browser verification shows the report and updated security index served from rumiprotocol.com. The homepage asset-canister Wasm and five-controller set were preserved. The page accurately says the protocol rollout remains partial.",
       "evidenceLinks": [
         {
-          "title": "Public security status",
-          "url": "https://rumiprotocol.com/security/october-2026"
+          "title": "Public security closure status",
+          "url": "https://rumiprotocol.com/security/remediation-closure-2026-11-15"
+        },
+        {
+          "title": "Security closure status PR #663",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/663"
         }
       ]
     },
