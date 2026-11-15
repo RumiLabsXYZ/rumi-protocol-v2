@@ -225,7 +225,7 @@ fn list_governance_proposals(
     public_api::list_governance_proposals_at(ic_cdk::caller(), cursor, limit)
 }
 
-/// Signer-only inventory of every live unresolved/quarantined
+/// Signer- or controller-only inventory of every live unresolved/quarantined
 /// `FundingOperation`, with its immutable `operation_id` and full state —
 /// the reconciliation input `resolve_unknown_as_spent`/`attach_block_proof`
 /// need but the anonymous public telemetry projections never expose.
@@ -234,15 +234,23 @@ fn list_unresolved_funding_operations(
     cursor: Option<String>,
     limit: u16,
 ) -> Result<types::PublicPage<types::FundingOperation>, public_api::AuthenticatedQueryError> {
-    public_api::list_unresolved_funding_operations_at(ic_cdk::caller(), cursor, limit)
+    let caller = ic_cdk::caller();
+    public_api::list_unresolved_funding_operations_at(
+        caller,
+        ic_cdk::api::is_controller(&caller),
+        cursor,
+        limit,
+    )
 }
 
-/// Signer-only status for the durable at-risk delivery tombstone. `None`
-/// means no active tombstone; `Some` is still unresolved delivery evidence.
+/// Signer- or controller-only status for the durable at-risk delivery
+/// tombstone. `None` means no active tombstone; `Some` is still unresolved
+/// delivery evidence.
 #[ic_cdk::query]
 fn self_recovery_delivery_risk(
 ) -> Result<Option<types::SelfRecoveryDeliveryRisk>, public_api::AuthenticatedQueryError> {
-    public_api::self_recovery_delivery_risk_at(ic_cdk::caller())
+    let caller = ic_cdk::caller();
+    public_api::self_recovery_delivery_risk_at(caller, ic_cdk::api::is_controller(&caller))
 }
 
 fn require_maintenance_signer(
