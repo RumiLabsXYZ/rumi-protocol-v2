@@ -203,6 +203,64 @@ pub fn settle_once(s: &mut BotState, journal: &BotPaymentJournal) -> bool {
     true
 }
 
+pub fn has_allocation(s: &BotState, j: &BotPaymentJournal) -> bool {
+    j.record_id.is_some_and(|id| {
+        s.operator_reserve
+            .as_ref()
+            .is_some_and(|r| r.allocations.contains_key(&id))
+    })
+}
+
+pub fn payment_allocation_matches(s: &BotState, j: &BotPaymentJournal) -> bool {
+    let Some(id) = j.record_id else { return true };
+    s.operator_reserve
+        .as_ref()
+        .and_then(|r| r.allocations.get(&id))
+        .is_none_or(|a| allocation_matches(a, j))
+}
+
+/// Explicit retry of a definitive no-effect payment keeps the same tuple and
+/// committed budget. A fee change/expired window requires reconciliation.
+pub fn rearm_no_effect(
+    s: &mut BotState,
+    j: &BotPaymentJournal,
+    fee: u64,
+    balance: u64,
+    now: u64,
+) -> Result<(), String> {
+    let id = j.record_id.ok_or("reserve payment lacks record identity")?;
+    let r = s.operator_reserve.as_ref().ok_or("reserve missing")?;
+    let a = r.allocations.get(&id).ok_or("reserve allocation missing")?;
+    let current = s
+        .pending_payments
+        .get(&j.vault_id)
+        .ok_or("payment missing")?;
+    if a.settled
+        || !allocation_matches(a, j)
+        || !allocation_matches(a, current)
+        || current.status != BotPaymentStatus::NoEffect
+        || current.receipt.is_some()
+        || j.status != BotPaymentStatus::NoEffect
+        || j.receipt.is_some()
+        || fee != j.fee_e6
+        || now < j.created_at_time
+        || now - j.created_at_time >= 23 * 60 * 60 * 1_000_000_000
+        || balance
+            .checked_sub(j.gross_amount_e6)
+            .is_none_or(|v| v < r.config.protected_balance_e6)
+    {
+        return Err(
+            "reserve no-effect retry cannot change its tuple, fee, allocation or protected funds"
+                .into(),
+        );
+    }
+    s.pending_payments
+        .get_mut(&j.vault_id)
+        .expect("validated pending payment")
+        .status = BotPaymentStatus::Prepared;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +360,35 @@ mod tests {
         assert!(s.operator_reserve.is_none());
         assert!(settle_once(&mut s, &j));
         assert_eq!(s.pending_payments[&202].held_surplus_e6, 10_000);
+    }
+
+    #[test]
+    fn no_effect_retry_reuses_original_allocation_tuple_and_rejects_fee_time_or_floor_changes() {
+        let (mut s, j) = payment_fixture();
+        commit_payment(&mut s, j.clone(), 26_716_720, 22_522).unwrap();
+        s.pending_payments.get_mut(&202).unwrap().status = BotPaymentStatus::NoEffect;
+        let retry = s.pending_payments[&202].clone();
+        let original = serde_json::to_vec(&s).unwrap();
+        for (fee, balance, now) in [
+            (10_001, 26_716_720, 124),
+            (10_000, 25_621_238, 124),
+            (10_000, 26_716_720, 23 * 60 * 60 * 1_000_000_000 + 123),
+        ] {
+            assert!(rearm_no_effect(&mut s, &retry, fee, balance, now).is_err());
+            assert_eq!(serde_json::to_vec(&s).unwrap(), original);
+        }
+        rearm_no_effect(&mut s, &retry, 10_000, 26_716_720, 124).unwrap();
+        assert_eq!(
+            s.pending_payments[&202].created_at_time,
+            retry.created_at_time
+        );
+        assert_eq!(s.pending_payments[&202].amount_e6, retry.amount_e6);
+        assert_eq!(s.pending_payments[&202].memo, retry.memo);
+        assert_eq!(s.operator_reserve.as_ref().unwrap().allocated_e6, 15_426);
+        assert!(payment_allocation_matches(&s, &retry));
+        let mut changed = retry.clone();
+        changed.created_at_time += 1;
+        assert!(!payment_allocation_matches(&s, &changed));
     }
 
     #[test]

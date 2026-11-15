@@ -121,7 +121,7 @@ fn journal_matches(j: &state::BotPaymentJournal, config: &BotConfig) -> bool {
         && j.held_surplus_e6 == 0
 }
 
-pub fn protected_claim_output(config: &BotConfig, s: &BotState) -> Result<u64, String> {
+pub fn protected_claim_output(config: &BotConfig, s: &state::BotState) -> Result<u64, String> {
     if s.pending_claims.is_empty() {
         return Ok(0);
     }

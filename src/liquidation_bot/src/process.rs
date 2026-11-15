@@ -2452,8 +2452,12 @@ async fn resume_pending_payment_for_vault(
         return true;
     }
 
+    if !state::read_state(|s| crate::reserve::payment_allocation_matches(s, &journal)) {
+        log!(crate::INFO, "STUCK: payment for vault #{} differs from its immutable reserve allocation", journal.vault_id);
+        return true;
+    }
     if journal.status == state::BotPaymentStatus::NoEffect {
-        log!(crate::INFO, "STUCK: payment for vault #{} has a definitive no-effect response; operator must correct the cause before allocating a new exact tuple", journal.vault_id);
+        log!(crate::INFO, "STUCK: payment for vault #{} has a definitive no-effect response; operator must correct the cause before retrying its saved tuple", journal.vault_id);
         return true;
     }
     if journal.shortfall_receipt_observed {
@@ -2525,6 +2529,11 @@ async fn resume_pending_payment_for_vault(
     };
     match call_bot_confirm_liquidation_with_proof(config, proof).await {
         Ok(()) => {
+            if !state::read_state(|s| pending_payment_matches(s, &journal)
+                && crate::reserve::payment_allocation_matches(s, &journal)) {
+                log!(crate::INFO, "STUCK: confirmed payment state changed before treasury reconstruction for vault #{}", journal.vault_id);
+                return true;
+            }
             journal.status = state::BotPaymentStatus::Confirmed;
             // Legacy payment journals predate the history link. Allocate and
             // persist one before reconstructing any unpaid treasury phase.
@@ -3185,6 +3194,16 @@ pub async fn admin_retry_no_effect_payment(
         || config.ckusdc_ledger != journal.ledger_principal
     {
         return Err("configured backend or ckUSDC ledger differs from the journal".into());
+    }
+    if state::read_state(|s| crate::reserve::has_allocation(s, &journal)) {
+        let fee = swap::fetch_ledger_fee(journal.ledger_principal).await?;
+        let balance = swap::balance_of_self_ckusdc(config).await?;
+        state::mutate_state(|s| crate::reserve::rearm_no_effect(s, &journal, fee, balance, ic_cdk::api::time()))?;
+        state::save_config_to_stable();
+        resume_pending_payment_for_vault(config, Some(vault_id)).await;
+        return if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
+            Err("reserve payment remains held; reconcile its original tuple".into())
+        } else { Ok(()) };
     }
     let fee = config.ckusdc_fee_e6.unwrap_or(10_000);
     if journal.gross_amount_e6 < required_ckusdc_gross(journal.debt_covered_e8s, fee) {
@@ -3980,6 +3999,64 @@ mod tests {
             status: state::BotReturnTransferStatus::Prepared,
         });
         assert!(vault158_identity_matches_for_bot(&config, &returned_claim, &record, bot).is_err());
+    }
+
+    const FEE: u64 = 10_000;
+
+    #[test]
+    fn ordinary_single_swap_fee_is_excluded_from_treasury_residual() {
+        let net = 100_000_000u64;
+        let swap = calculate_swap_amount(net, 50_000_000_000, 1_000_000_000_000);
+        assert!(swap_fits_claim(net, swap, FEE));
+        // Treasury gets only genuine residual; the fee is not drawn from float.
+        assert_eq!(claim_icp_residual_after_swap(net, swap, FEE), net - swap - FEE);
+        // The pre-fix journal value (0) over-allocates by exactly one fee.
+        assert_eq!(
+            claim_icp_residual_after_swap(net, swap, 0) - claim_icp_residual_after_swap(net, swap, FEE),
+            FEE
+        );
+    }
+
+    #[test]
+    fn ordinary_initial_plus_topup_charge_both_fees() {
+        let net = 100_000_000u64;
+        let (initial, topup) = (60_000_000u64, 20_000_000u64);
+        assert!(swap_fits_claim(net, initial, FEE));
+        let remaining = claim_icp_remaining(net, initial, FEE);
+        assert_eq!(remaining, net - initial - FEE);
+        assert!(swap_fits_claim(remaining, topup, FEE));
+        let fees = FEE + FEE;
+        assert_eq!(claim_icp_remaining(net, initial + topup, fees), net - initial - topup - fees);
+        assert_eq!(claim_icp_residual_after_swap(net, initial + topup, fees), 20_000_000 - 2 * FEE);
+        // A top-up bounded by remaining-minus-fee fits exactly and leaves no residual.
+        let max_topup = max_swap_input_for_claim(remaining, FEE);
+        assert!(swap_fits_claim(remaining, max_topup, FEE));
+        assert!(!swap_fits_claim(remaining, max_topup + 1, FEE));
+        assert_eq!(claim_icp_residual_after_swap(net, initial + max_topup, fees), 0);
+    }
+
+    #[test]
+    fn swap_that_cannot_cover_its_fee_from_the_claim_is_refused() {
+        // Full-collateral swap (e.g. zero oracle price) must be shrunk by the fee.
+        let net = 5_000_000u64;
+        assert!(!swap_fits_claim(net, net, FEE));
+        assert!(swap_fits_claim(net, max_swap_input_for_claim(net, FEE), FEE));
+        // Remaining no larger than the fee: nothing can be swapped.
+        assert_eq!(max_swap_input_for_claim(FEE, FEE), 0);
+        assert!(!swap_fits_claim(FEE, 0, FEE));
+        assert!(!swap_fits_claim(FEE - 1, 1, FEE));
+        assert!(!swap_fits_claim(u64::MAX, u64::MAX, FEE), "overflow must not pass");
+        // Fees already charged shrink what the top-up may use, never below zero.
+        assert_eq!(claim_icp_remaining(net, net, FEE), 0);
+    }
+
+    #[test]
+    fn legacy_zero_fee_journal_residual_semantics_are_unchanged() {
+        // Old payment journals decode with swap_input_fee_e8s == 0 and must not
+        // have a fee guessed for them.
+        assert_eq!(claim_icp_residual_after_swap(100, 60, 0), 40);
+        assert_eq!(claim_icp_residual_after_swap(60, 60, 0), 0);
+        assert_eq!(claim_icp_residual_after_swap(50, 60, 0), 0);
     }
 
     #[test]
