@@ -207,6 +207,12 @@ type AmmLiquidityEvent = record {
   timestamp : nat64;
 };
 
+type AmmLiquidityEventWindow = record {
+  oldest_available_id : nat64;
+  next_event_id : nat64;
+  events : vec AmmLiquidityEvent;
+};
+
 // ── Admin Events ──
 
 type AmmAdminAction = variant {
@@ -448,6 +454,7 @@ service : (AmmInitArgs) -> {
   // ── Liquidity Event History ──
   get_amm_liquidity_events : (nat64, nat64) -> (vec AmmLiquidityEvent) query;
   get_amm_liquidity_event_count : () -> (nat64) query;
+  get_amm_liquidity_events_from_id : (nat64, nat64) -> (AmmLiquidityEventWindow) query;
 
   // ── Admin Event History ──
   get_amm_admin_events : (nat64, nat64) -> (vec AmmAdminEvent) query;

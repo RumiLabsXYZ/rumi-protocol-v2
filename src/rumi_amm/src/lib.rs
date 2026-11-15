@@ -2617,6 +2617,44 @@ fn get_amm_liquidity_events(start: u64, length: u64) -> Vec<AmmLiquidityEvent> {
     })
 }
 
+/// Page the retained liquidity event window using monotonic event IDs.
+/// The position-based endpoint above remains available for existing clients.
+#[query]
+fn get_amm_liquidity_events_from_id(start_id: u64, length: u64) -> AmmLiquidityEventWindow {
+    read_state(|s| {
+        liquidity_event_window(
+            &s.liquidity_events,
+            s.next_liquidity_event_id,
+            start_id,
+            length,
+        )
+    })
+}
+
+fn liquidity_event_window(
+    events: &[AmmLiquidityEvent],
+    next_event_id: u64,
+    start_id: u64,
+    length: u64,
+) -> AmmLiquidityEventWindow {
+    let oldest_available_id = events
+        .first()
+        .map(|event| event.id)
+        .unwrap_or(next_event_id);
+    // IDs are assigned once per append and the retained vector is only
+    // front-pruned, so retained event IDs are contiguous and indexable.
+    let start = start_id
+        .saturating_sub(oldest_available_id)
+        .min(events.len() as u64) as usize;
+    let length = length.min(MAX_EVENT_PAGE) as usize;
+    let end = start.saturating_add(length).min(events.len());
+    AmmLiquidityEventWindow {
+        oldest_available_id,
+        next_event_id,
+        events: events[start..end].to_vec(),
+    }
+}
+
 #[query]
 fn get_amm_liquidity_event_count() -> u64 {
     read_state(|s| s.liquidity_events.len() as u64)
@@ -2848,6 +2886,21 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 mod dos_001_tests {
     use super::*;
 
+    fn dummy_liquidity_event(i: u64) -> AmmLiquidityEvent {
+        AmmLiquidityEvent {
+            id: i,
+            caller: Principal::anonymous(),
+            pool_id: "pool".to_string(),
+            action: AmmLiquidityAction::AddLiquidity,
+            token_a: Principal::anonymous(),
+            amount_a: 1,
+            token_b: Principal::anonymous(),
+            amount_b: 1,
+            lp_shares: 1,
+            timestamp: i,
+        }
+    }
+
     fn dummy_swap_event(i: u64, pool: &str, who: Principal) -> AmmSwapEvent {
         AmmSwapEvent {
             id: i,
@@ -2898,6 +2951,32 @@ mod dos_001_tests {
             limit: u64::MAX,
         });
         assert_eq!(by_time.len() as u64, MAX_EVENT_PAGE);
+    }
+
+    #[test]
+    fn monotonic_liquidity_page_covers_retention_gap_and_empty_window() {
+        let retained = vec![
+            dummy_liquidity_event(50_001),
+            dummy_liquidity_event(50_002),
+            dummy_liquidity_event(50_003),
+        ];
+        let page = liquidity_event_window(&retained, 50_004, 50_000, 2);
+        assert_eq!(page.oldest_available_id, 50_001);
+        assert_eq!(page.next_event_id, 50_004);
+        assert_eq!(
+            page.events.iter().map(|event| event.id).collect::<Vec<_>>(),
+            [50_001, 50_002]
+        );
+
+        let page = liquidity_event_window(&retained, 50_004, 50_003, 2);
+        assert_eq!(
+            page.events.iter().map(|event| event.id).collect::<Vec<_>>(),
+            [50_003]
+        );
+
+        let empty = liquidity_event_window(&[], 50_004, 50_000, 2);
+        assert_eq!(empty.oldest_available_id, 50_004);
+        assert!(empty.events.is_empty());
     }
 }
 
