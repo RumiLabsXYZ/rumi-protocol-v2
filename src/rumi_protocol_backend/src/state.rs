@@ -5304,6 +5304,41 @@ impl From<InitArg> for State {
     }
 }
 
+/// Validate the ordering required by partial-liquidation cap math.
+///
+/// The liquidation target must exceed both the liquidation trigger ratio and
+/// the bonus multiplier. Otherwise a partial liquidation is either
+/// nonsensical or its `target - bonus` denominator is non-positive.
+pub fn validate_liquidation_risk_order(
+    liquidation_ratio: Ratio,
+    borrow_threshold_ratio: Ratio,
+    liquidation_bonus: Ratio,
+) -> Result<(), String> {
+    if borrow_threshold_ratio <= liquidation_ratio {
+        return Err(format!(
+            "borrow_threshold_ratio ({}) must be strictly greater than liquidation_ratio ({})",
+            borrow_threshold_ratio.to_f64(),
+            liquidation_ratio.to_f64()
+        ));
+    }
+    if borrow_threshold_ratio <= liquidation_bonus {
+        return Err(format!(
+            "borrow_threshold_ratio ({}) must be strictly greater than liquidation_bonus ({})",
+            borrow_threshold_ratio.to_f64(),
+            liquidation_bonus.to_f64()
+        ));
+    }
+    Ok(())
+}
+
+fn checked_liquidation_denominator(target: Ratio, bonus: Ratio) -> Option<Ratio> {
+    target
+        .0
+        .checked_sub(bonus.0)
+        .filter(|denominator| *denominator > Decimal::ZERO)
+        .map(Ratio::from)
+}
+
 impl State {
     /// Record a failed 3USD refund attempt while retaining the liability row,
     /// including when the automatic retry cap is reached.
@@ -8441,7 +8476,9 @@ impl State {
             return None; // already at or above target
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = recovery_target - liq_bonus;
+        let Some(denominator) = checked_liquidation_denominator(recovery_target, liq_bonus) else {
+            return Some(vault.borrowed_icusd_amount);
+        };
         let repay_amount = deficit / denominator;
         Some(repay_amount.min(vault.borrowed_icusd_amount))
     }
@@ -8479,11 +8516,11 @@ impl State {
             return ICUSD::new(0);
         }
         let deficit = numerator_icusd - collateral_value;
-        let denominator = target_cr - liq_bonus;
-        // If target CR <= bonus (misconfigured or deeply underwater), full liquidation
-        if denominator <= Ratio::from(dec!(0)) {
+        // A persisted or concurrently changed invalid risk tuple must fail
+        // closed to full liquidation rather than panic on Ratio subtraction.
+        let Some(denominator) = checked_liquidation_denominator(target_cr, liq_bonus) else {
             return vault.borrowed_icusd_amount;
-        }
+        };
         let repay_amount = deficit / denominator;
         repay_amount.min(vault.borrowed_icusd_amount)
     }
@@ -8803,7 +8840,10 @@ impl State {
             }
 
             let deficit = numerator_icusd - collateral_value;
-            let denominator = recovery_target - liq_bonus;
+            let Some(denominator) = checked_liquidation_denominator(recovery_target, liq_bonus)
+            else {
+                return Some(vault.borrowed_icusd_amount);
+            };
             Some((deficit / denominator).min(vault.borrowed_icusd_amount))
         } else {
             Some(vault.borrowed_icusd_amount) // full liquidation
@@ -15636,9 +15676,8 @@ mod tests {
         let debt = ICUSD::new(200_000_000); // 2.0 icUSD — above the dust threshold
         let collateral_amount = 100_000_000u64; // deeply underwater
         let liq_ratio = Ratio::from(dec!(1.10));
-        // `Ratio::sub` panics on a negative result, so `target_cr` can only
-        // reach the `denominator <= 0` saturate-to-full-debt branch via
-        // EQUALITY with `bonus` (denominator == 0), not by going below it.
+        // Equality is one invalid-denominator case; the checked helper also
+        // covers target_cr below bonus without panicking.
         let target_cr = Ratio::from(dec!(1.15));
         let bonus = Ratio::from(dec!(1.15)); // target_cr == bonus -> cap saturates to full debt
         liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
@@ -15659,6 +15698,74 @@ mod tests {
         assert_eq!(
             result, debt,
             "a residual inside the dust band must round the amount up to the full debt"
+        );
+    }
+
+    #[test]
+    fn liquidation_risk_order_rejects_non_positive_cap_denominators() {
+        assert!(super::validate_liquidation_risk_order(
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.50)),
+            Ratio::from(dec!(1.15)),
+        )
+        .is_ok());
+        assert!(super::validate_liquidation_risk_order(
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.05)),
+        )
+        .is_err());
+        assert!(super::validate_liquidation_risk_order(
+            Ratio::from(dec!(1.05)),
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.15)),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn partial_liquidation_cap_underflow_fails_closed_to_full_debt() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq-cap-underflow");
+        let debt = ICUSD::new(1_000_000_000);
+        liq0xx_collateral(
+            &mut state,
+            ct,
+            Ratio::from(dec!(1.05)),
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.15)),
+            1.0,
+        );
+        let vault = liq0xx_vault(76, ct, 900_000_000, debt.to_u64());
+        assert_eq!(
+            state.compute_partial_liquidation_cap(&vault, UsdIcp::from(Decimal::ONE)),
+            debt
+        );
+    }
+
+    #[test]
+    fn recovery_and_legacy_caps_underflow_fail_closed_to_full_debt() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"recovery-cap-underflow");
+        let debt = ICUSD::new(1_000_000_000);
+        liq0xx_collateral(
+            &mut state,
+            ct,
+            Ratio::from(dec!(1.10)),
+            Ratio::from(dec!(1.50)),
+            Ratio::from(dec!(1.45)),
+            1.0,
+        );
+        state.mode = Mode::Recovery;
+        state.recovery_mode_threshold = Ratio::from(dec!(1.40));
+        state.recovery_cr_multiplier = Ratio::from(Decimal::ONE);
+
+        let vault = liq0xx_vault(77, ct, 1_350_000_000, debt.to_u64());
+        let price = UsdIcp::from(Decimal::ONE);
+        assert_eq!(state.compute_recovery_repay_cap(&vault, price), Some(debt));
+        assert_eq!(
+            state.legacy_recovery_or_full_repay_amount(&vault, Mode::Recovery, price),
+            Some(debt)
         );
     }
 

@@ -17405,6 +17405,12 @@ async fn register_icrc_collateral_token(
             min_xrc_sources: None,
         }
     });
+    rumi_protocol_backend::state::validate_liquidation_risk_order(
+        risk_parameters.liquidation_ratio,
+        risk_parameters.borrow_threshold_ratio,
+        risk_parameters.liquidation_bonus,
+    )
+    .map_err(ProtocolError::GenericError)?;
 
     let config = CollateralConfig {
         ledger_canister_id: arg.ledger_canister_id,
@@ -18089,29 +18095,22 @@ async fn set_collateral_liquidation_ratio(
             liquidation_ratio
         )));
     }
-    let borrow_threshold = read_state(|s| {
+    let (borrow_threshold, liquidation_bonus) = read_state(|s| {
         s.collateral_configs
             .get(&collateral_type)
-            .map(|c| c.borrow_threshold_ratio.to_f64())
-    });
-    let borrow_threshold = match borrow_threshold {
-        Some(bt) => bt,
-        None => {
-            return Err(ProtocolError::GenericError(
-                "Unknown collateral type".to_string(),
-            ))
-        }
-    };
-    if liquidation_ratio >= borrow_threshold {
-        return Err(ProtocolError::GenericError(format!(
-            "liquidation_ratio ({}) must be strictly less than borrow_threshold_ratio ({})",
-            liquidation_ratio, borrow_threshold
-        )));
-    }
+            .map(|c| (c.borrow_threshold_ratio, c.liquidation_bonus))
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Unknown collateral type".to_string()))?;
     let ratio =
         Ratio::from(Decimal::try_from(liquidation_ratio).map_err(|_| {
             ProtocolError::GenericError("Invalid liquidation_ratio value".to_string())
         })?);
+    rumi_protocol_backend::state::validate_liquidation_risk_order(
+        ratio,
+        borrow_threshold,
+        liquidation_bonus,
+    )
+    .map_err(ProtocolError::GenericError)?;
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_collateral_liquidation_ratio(
             s,
@@ -18153,16 +18152,17 @@ async fn set_collateral_borrow_threshold(
             borrow_threshold_ratio
         )));
     }
-    let (liq_ratio, healthy_cr) = read_state(|s| {
+    let (liq_ratio, healthy_cr, liquidation_bonus) = read_state(|s| {
         s.collateral_configs
             .get(&collateral_type)
             .map(|c| {
                 (
-                    c.liquidation_ratio.to_f64(),
+                    c.liquidation_ratio,
                     c.healthy_cr.map(|r| r.to_f64()),
+                    c.liquidation_bonus,
                 )
             })
-            .unwrap_or((0.0, None))
+            .unwrap_or((Ratio::default(), None, Ratio::default()))
     });
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
@@ -18170,12 +18170,15 @@ async fn set_collateral_borrow_threshold(
             "Unknown collateral type".to_string(),
         ));
     }
-    if borrow_threshold_ratio <= liq_ratio {
-        return Err(ProtocolError::GenericError(format!(
-            "borrow_threshold_ratio ({}) must be strictly greater than liquidation_ratio ({})",
-            borrow_threshold_ratio, liq_ratio
-        )));
-    }
+    let ratio = Ratio::from(Decimal::try_from(borrow_threshold_ratio).map_err(|_| {
+        ProtocolError::GenericError("Invalid borrow_threshold_ratio value".to_string())
+    })?);
+    rumi_protocol_backend::state::validate_liquidation_risk_order(
+        liq_ratio,
+        ratio,
+        liquidation_bonus,
+    )
+    .map_err(ProtocolError::GenericError)?;
     if let Some(hcr) = healthy_cr {
         if borrow_threshold_ratio >= hcr {
             return Err(ProtocolError::GenericError(format!(
@@ -18184,9 +18187,6 @@ async fn set_collateral_borrow_threshold(
             )));
         }
     }
-    let ratio = Ratio::from(Decimal::try_from(borrow_threshold_ratio).map_err(|_| {
-        ProtocolError::GenericError("Invalid borrow_threshold_ratio value".to_string())
-    })?);
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_collateral_borrow_threshold(
             s,
@@ -18220,16 +18220,22 @@ async fn set_collateral_liquidation_bonus(
     }
     rumi_protocol_backend::validate_f64_inclusive("liquidation_bonus", liquidation_bonus, 1.0, 1.5)
         .map_err(ProtocolError::GenericError)?;
-    let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
-    if !exists {
-        return Err(ProtocolError::GenericError(
-            "Unknown collateral type".to_string(),
-        ));
-    }
     let ratio =
         Ratio::from(Decimal::try_from(liquidation_bonus).map_err(|_| {
             ProtocolError::GenericError("Invalid liquidation_bonus value".to_string())
         })?);
+    let risk_pair = read_state(|s| {
+        s.collateral_configs
+            .get(&collateral_type)
+            .map(|config| (config.liquidation_ratio, config.borrow_threshold_ratio))
+    })
+    .ok_or_else(|| ProtocolError::GenericError("Unknown collateral type".to_string()))?;
+    rumi_protocol_backend::state::validate_liquidation_risk_order(
+        risk_pair.0,
+        risk_pair.1,
+        ratio,
+    )
+    .map_err(ProtocolError::GenericError)?;
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_collateral_liquidation_bonus(
             s,
