@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-06",
-      "state": "Review",
+      "state": "Done",
       "owner": "Bram",
-      "scope": "Prepare vault 158 liquidation recovery without executing it",
-      "evidenceText": "The exact candidate pinned by merged PR #618 is installed: module SHA-256 db8931273a83bb3dfbd8c516b85808b24ad5bd9daed0df9f7265b440658fe098. Readback confirmed the bot is running but processing remains paused, its recovery configuration is readable, vault 158 is still a generation-1 PaymentShortfall claim, and no recovery, payment journal, or treasury intent was created. The upgrade-only step is complete. Recovery preparation, execution, reconciliation, unpause, and funds remain held for separate authority.",
+      "scope": "Verify vault 158 liquidation recovery settlement",
+      "evidenceText": "The upgraded bot reports vault 158 recovery as TreasurySettled with durable swap, payment, and Treasury receipts. Its backend, Treasury, ICP-ledger, and ckUSDC-ledger configuration was read back; claim and payment journals and backend active claims are empty. Normal processing resumed only after those checks.",
       "evidenceLinks": [
         {
           "title": "Vault 158 recovery PR",
@@ -19,10 +19,10 @@
     },
     {
       "id": "SEC-01",
-      "state": "Review",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Verify Stability Pool recovery and current rails",
-      "evidenceText": "The pool is open and internally consistent, with all 237 staged interest packets credited and no public pending refund, unallocated-interest, chain-absorb, or active 3USD-conversion queue. A November 15 management readback reports the pool running on preceding module SHA-256 ff4988d75e7e97c24130691187ec49ca0304c54505d65cab98c46bb72024f47f; the reviewed remediation candidate is SHA-256 32cf7dac324e97d8a6d6ddef93902c89dee2bec93c5b51521cf10e260ba83cce. Preserve the credited recovery invariant during the pending upgrade and repeat the bounded readbacks afterward.",
+      "evidenceText": "The reviewed candidate SHA-256 32cf7dac324e97d8a6d6ddef93902c89dee2bec93c5b51521cf10e260ba83cce is installed and running. The pool is open and internally consistent, all 237 staged interest packets remain credited, and the queried pending refund, unallocated-interest, chain-absorb, and active 3USD-conversion inventories are empty.",
       "evidenceLinks": [
         {
           "title": "Stability Pool rails PR",
@@ -36,10 +36,10 @@
     },
     {
       "id": "SEC-02",
-      "state": "In progress",
+      "state": "Review",
       "owner": "Bram",
       "scope": "Reconcile accepted security findings",
-      "evidenceText": "A private row-level matrix now covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 are merged, their six production candidates are hash-pinned, and the AMM candidate is installed. Analytics, Stability Pool, Treasury, backend, and bot still require coordinated installation and readback; several older September rows still need exact canonical-source mapping rather than an inferred closure claim.",
+      "evidenceText": "A private row-level matrix covers CL-01 through CL-17 and all 25 September IDs. PRs #652 through #662 are merged and all six exact reviewed candidates are installed and running. Remaining evidence work is bounded to exact Points and Cycle Sentinel source-byte provenance, exact mapping for several older September rows, the held archive-proof case, and preservation of 60 Treasury legacy tombstones.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
@@ -73,7 +73,7 @@
       "state": "Done",
       "owner": "Bram",
       "scope": "Refresh release and public security status",
-      "evidenceText": "PR #663 merged at 9da6444e. An assets-only sync published the dated closure status page, and live browser verification shows the report and updated security index served from rumiprotocol.com. The homepage asset-canister Wasm and five-controller set were preserved. The page accurately says the protocol rollout remains partial.",
+      "evidenceText": "PR #663 merged at 9da6444e and an assets-only sync published the dated closure page. A follow-up correction records the completed six-canister rollout, exact installed hashes, bounded recovery evidence, 60 fail-closed Treasury tombstones, and the remaining historical proof limits.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",

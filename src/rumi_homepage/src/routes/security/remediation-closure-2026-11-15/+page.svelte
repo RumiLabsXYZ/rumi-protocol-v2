@@ -2,17 +2,17 @@
   const stages = [
     { label: 'Source', value: 'Merged', detail: 'PRs #652–#662 are in canonical main.', tone: 'done' },
     { label: 'Artifacts', value: 'Verified', detail: 'Six production candidates are hash-pinned.', tone: 'done' },
-    { label: 'Installed', value: 'Partial', detail: 'AMM is installed; five tranche upgrades remain.', tone: 'partial' },
+    { label: 'Installed', value: 'Complete', detail: 'All six reviewed candidates are installed and hash-matched.', tone: 'done' },
     { label: 'Recovery', value: 'Bounded', detail: 'Named durable inventories were queried and reconciled.', tone: 'partial' }
   ];
 
   const releaseRows = [
     { component: 'AMM', state: 'Installed', tone: 'installed', hash: '66aa67b3…d9085', detail: 'Exact candidate hash observed; state baseline matched.' },
-    { component: 'Analytics', state: 'Held', tone: 'held', hash: 'cbb3654e…234db', detail: 'Healthy on the preceding module after an interrupted install command.' },
-    { component: 'Stability Pool', state: 'Pending', tone: 'held', hash: 'ff4988d7…f47f', detail: 'Running and unpaused; remediation candidate not installed.' },
-    { component: 'Treasury', state: 'Pending', tone: 'held', hash: '0d7a7cf1…d840', detail: 'Backfill complete; new reporter interface not installed.' },
-    { component: 'Protocol backend', state: 'Pending', tone: 'held', hash: '75d2cdc4…4d29', detail: 'General Availability; remediation candidate not installed.' },
-    { component: 'Liquidation bot', state: 'Pending', tone: 'held', hash: 'f27db027…9669', detail: 'Processing on the preceding module; journals queried empty.' }
+    { component: 'Analytics', state: 'Installed', tone: 'installed', hash: 'd6c59e87…f398', detail: 'Exact candidate installed; collector state and cursors preserved.' },
+    { component: 'Stability Pool', state: 'Installed', tone: 'installed', hash: '32cf7dac…cce', detail: 'Exact candidate installed; state invariant and all 237 recovery credits preserved.' },
+    { component: 'Treasury', state: 'Installed', tone: 'installed', hash: '785adb02…c3832', detail: 'Exact candidate installed; balances preserved, backfill complete, and reporter set bound.' },
+    { component: 'Protocol backend', state: 'Installed', tone: 'installed', hash: 'caaf7398…3bd1', detail: 'Exact candidate installed; General Availability mode and empty recovery queues preserved.' },
+    { component: 'Liquidation bot', state: 'Installed', tone: 'installed', hash: 'dadce6c5…bb2', detail: 'Exact candidate installed; journals empty, recovery configuration verified, and processing resumed.' }
   ];
 
   const widerRows = [
@@ -36,11 +36,10 @@
   ];
 
   const followThrough = [
-    'Install and read back the analytics candidate through a tracked executor that returns a definitive result.',
-    'Upgrade Stability Pool while preserving its 237 credited recovery packets and current invariant.',
-    'Coordinate Treasury, backend, and bot installation, reporter configuration, and journal readback.',
+    'Keep the legacy Stability Pool burn case held until exact authenticated archive proof exists.',
+    'Preserve the 60 fail-closed Treasury tombstones for legacy rows that lack exact ledger provenance.',
     'Bind the current Points and Cycle Sentinel module hashes to exact reviewed source.',
-    'Repeat the bounded production queries and publish a final finding-by-finding verdict.'
+    'Continue periodic bounded inventory checks; an empty current queue is not proof that no unknown historical obligation exists.'
   ];
 </script>
 
@@ -56,18 +55,18 @@
       <div class="hero-grid">
         <div>
           <p class="date-line">Evidence snapshot · <time datetime="2026-11-15">November 15, 2026</time></p>
-          <h1 id="report-title">Remediation merged.<br /><em>Rollout still partial.</em></h1>
+          <h1 id="report-title">Remediation merged.<br /><em>Rollout verified.</em></h1>
           <p class="lede">
-            Eleven accepted active-path remediations are merged and six production candidates are
-            identified. One candidate is installed. This report shows source, artifact,
+            Eleven accepted active-path remediations are merged and all six production candidates
+            are installed with exact module-hash readback. This report shows source, artifact,
             installation, and bounded recovery evidence while keeping activation and historical
             settlement as separate questions.
           </p>
         </div>
         <aside class="verdict">
           <span>Executive verdict</span>
-          <strong>The program is materially safer, but not yet closed.</strong>
-          <p>Five tranche upgrades and their post-install readbacks remain. Current empty inventories are bounded evidence, not proof that unknown obligations never existed.</p>
+          <strong>The active-path remediation rollout is complete.</strong>
+          <p>Historical proof gaps remain held or fail-closed. Current empty inventories are bounded evidence, not proof that unknown obligations never existed.</p>
           <a href="/security">Security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
@@ -96,7 +95,7 @@
     <div class="page-width section">
       <header class="section-heading wide">
         <p class="section-label">Production snapshot</p>
-        <h2 id="release-title">The merged tranche is only partly installed</h2>
+        <h2 id="release-title">The merged tranche is installed and read back</h2>
         <p>Module hashes were read through the management interface. Candidate hashes remain build evidence until the same bytes are observed in production.</p>
       </header>
       <ul class="release-table" aria-label="Production module status">
@@ -150,7 +149,7 @@
       </div>
       <div class="recovery-copy">
         <p>All 237 staged Stability Pool interest packets are credited, and the pool reports a consistent state with no pending chain absorbs or unallocated interest forwards.</p>
-        <p>Treasury’s external-token backfill is complete. The queried backend recovery pages, bot claim and payment journals, and AMM unresolved payout inventory are empty.</p>
+        <p>Treasury’s external-token backfill is complete with 60 fail-closed tombstones for legacy rows lacking exact ledger provenance. The queried backend recovery pages, bot claim and payment journals, and AMM unresolved payout inventory are empty.</p>
         <p class="limit">These are endpoint-limited observations at one time. They do not prove that no unindexed historical obligation exists.</p>
       </div>
     </div>
@@ -160,7 +159,7 @@
     <div class="page-width section follow-grid">
       <header>
         <p class="section-label">Remaining follow-through</p>
-        <h2 id="follow-title">What still has to happen</h2>
+        <h2 id="follow-title">Residual evidence and recovery holds</h2>
       </header>
       <ol>
         {#each followThrough as item, index}

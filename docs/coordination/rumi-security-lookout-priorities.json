@@ -2,26 +2,26 @@
   "items": [
     {
       "id": "audit-closure",
-      "title": "Complete the security remediation rollout",
+      "title": "Close the remaining security evidence gaps",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Install and read back the five remaining reviewed candidates in their coordinated order. Preserve the Stability Pool recovery invariant and keep older findings without exact source mapping explicitly unresolved.",
+      "nextAction": "Bind the current Points and Cycle Sentinel bytes to reviewed source, map the remaining older September rows exactly, and preserve the archive-proof hold and Treasury tombstones.",
       "cardIds": ["SEC-02", "SEC-04"]
     },
     {
       "id": "sp-live-recovery",
       "title": "Stability Pool live recovery",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Upgrade from the observed preceding module to the reviewed candidate while preserving all 237 credited packets, then repeat the bounded recovery and invariant readbacks.",
+      "nextAction": "The reviewed candidate is installed and all 237 credited packets and bounded recovery inventories were preserved. Continue ordinary monitoring.",
       "cardIds": ["SEC-01"]
     },
     {
       "id": "vault158-recovery",
       "title": "Vault 158 liquidation recovery",
-      "status": "blocked",
-      "blockedReason": "The exact recovery-capable bot is installed and its configuration was read back, but financial recovery remains outside the completed upgrade-only authority.",
-      "nextAction": "Review the immutable upgrade readback and draft the smallest readable recovery-authorization artifact. Do not unpause, transfer funds, or call recovery preparation, execution, or reconciliation without separate authority.",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "Recovery is TreasurySettled with durable receipts; bot configuration and empty claim/payment inventories were read back before processing resumed.",
       "cardIds": ["SEC-06"]
     },
     {
@@ -45,7 +45,7 @@
       "title": "Release and public status",
       "status": "done",
       "blockedReason": "",
-      "nextAction": "The dated report is published. Refresh it after the remaining canister installations and readbacks.",
+      "nextAction": "Publish and verify the completed-rollout correction, then refresh only when material evidence changes.",
       "cardIds": ["SEC-05"]
     },
     {
