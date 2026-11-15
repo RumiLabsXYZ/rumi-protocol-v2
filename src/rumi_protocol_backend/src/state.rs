@@ -1838,10 +1838,9 @@ pub enum CustodyKind {
 }
 
 /// P3: a native-XRP vault awaiting its on-chain deposit. Created by
-/// `open_xrp_vault` (no collateral credited, no icUSD minted) and removed by
-/// `confirm_xrp_deposit` once the deposit to `custody_address` is verified and a
-/// real `Vault` is created. `derivation_nonce` (= the reserved vault_id) plus the
-/// owner pin the threshold-Ed25519 custody path, so the address is reproducible.
+/// `open_xrp_vault` (no collateral credited, no icUSD minted); confirmation
+/// converts it to a real `Vault`. Cancellation only marks a durable tombstone:
+/// `derivation_nonce` (= vault_id) plus owner keep late deposits recoverable.
 fn default_xrp_pending_reserve_base_drops() -> u64 {
     0
 }
@@ -1857,6 +1856,11 @@ pub struct XrpPendingDeposit {
     /// was not recorded before this field existed.
     #[serde(default = "default_xrp_pending_reserve_base_drops")]
     pub reserve_base_drops: u64,
+    /// A cancelled open remains as a recoverable tombstone. The address stays
+    /// bound to this owner and derivation nonce because XRPL deposits can arrive
+    /// after an unfunded account observation.
+    #[serde(default)]
+    pub cancelled_at_ns: Option<u64>,
 }
 
 /// Temporary admission reservation made before open_xrp_vault awaits threshold
@@ -1865,6 +1869,8 @@ pub struct XrpPendingDeposit {
 pub struct XrpPendingOpenReservation {
     pub owner: Principal,
     pub reserved_at_ns: u64,
+    #[serde(default)]
+    pub permit_consumed: bool,
 }
 
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
@@ -4694,6 +4700,11 @@ pub struct State {
     /// reservation is safe to release because no address has been returned.
     #[serde(default)]
     pub xrp_pending_open_reservations: BTreeMap<u64, XrpPendingOpenReservation>,
+    /// Developer-issued one-time permits. Empty after install and on upgrades
+    /// from snapshots that predate this gate, so public permissionless opens stay
+    /// disabled unless an operator explicitly admits a principal.
+    #[serde(default)]
+    pub xrp_open_permits: BTreeSet<Principal>,
 
     /// SEC-11 immutable original custody binding and opening ledger cutoff.
     #[serde(default)]
@@ -5081,6 +5092,7 @@ impl Default for State {
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
             xrp_pending_open_reservations: BTreeMap::new(),
+            xrp_open_permits: BTreeSet::new(),
             xrp_vault_origins: BTreeMap::new(),
             xrp_topup_receipts: BTreeMap::new(),
             xrp_topup_receipt_counts: BTreeMap::new(),
@@ -5419,6 +5431,7 @@ impl From<InitArg> for State {
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
             xrp_pending_open_reservations: BTreeMap::new(),
+            xrp_open_permits: BTreeSet::new(),
             xrp_vault_origins: BTreeMap::new(),
             xrp_topup_receipts: BTreeMap::new(),
             xrp_topup_receipt_counts: BTreeMap::new(),
@@ -14169,9 +14182,9 @@ mod tests {
         let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
         let entries = match value {
             ciborium::Value::Map(mut e) => {
-                e.retain(
-                    |(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "xrp_pending_deposits"),
-                );
+                e.retain(|(k, _)| {
+                    !matches!(k, ciborium::Value::Text(s) if s == "xrp_pending_deposits" || s == "xrp_pending_open_reservations" || s == "xrp_open_permits")
+                });
                 e
             }
             other => panic!("expected a CBOR map, got {other:?}"),
@@ -14182,6 +14195,7 @@ mod tests {
             ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
         assert!(restored.xrp_pending_deposits.is_empty());
         assert!(restored.xrp_pending_open_reservations.is_empty());
+        assert!(restored.xrp_open_permits.is_empty());
     }
 
     #[test]
@@ -15605,6 +15619,7 @@ mod tests {
             derivation_nonce: 7,
             opened_at_ns: 123,
             reserve_base_drops: 1_000_000,
+            cancelled_at_ns: Some(456),
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&dep, &mut buf).unwrap();
@@ -15632,6 +15647,7 @@ mod tests {
         ciborium::ser::into_writer(&legacy, &mut buf).unwrap();
         let back: XrpPendingDeposit = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert_eq!(back.reserve_base_drops, 0);
+        assert_eq!(back.cancelled_at_ns, None);
     }
 
     #[test]

@@ -3547,27 +3547,49 @@ fn reserve_xrp_open_slot(
     caller: Principal,
     now_ns: u64,
 ) -> Result<u64, ProtocolError> {
-    s.xrp_pending_open_reservations.retain(|_, reservation| {
-        now_ns.saturating_sub(reservation.reserved_at_ns) <= XRP_OPEN_RESERVATION_TTL_NS
-    });
+    let expired: Vec<u64> = s
+        .xrp_pending_open_reservations
+        .iter()
+        .filter_map(|(id, reservation)| {
+            (now_ns.saturating_sub(reservation.reserved_at_ns) > XRP_OPEN_RESERVATION_TTL_NS)
+                .then_some(*id)
+        })
+        .collect();
+    for id in expired {
+        if let Some(reservation) = s.xrp_pending_open_reservations.remove(&id) {
+            if reservation.permit_consumed {
+                s.xrp_open_permits.insert(reservation.owner);
+            }
+        }
+    }
     let caller_has_open = s
         .xrp_pending_deposits
         .values()
-        .any(|pending| pending.owner == caller)
+        .any(|pending| pending.owner == caller && pending.cancelled_at_ns.is_none())
         || s.xrp_pending_open_reservations
             .values()
             .any(|reservation| reservation.owner == caller);
     if caller_has_open {
         return Err(ProtocolError::GenericError(
-            "An XRP deposit is already pending; confirm or cancel it before opening another."
+            "An XRP deposit is already pending; confirm or recover that address before opening another."
                 .to_string(),
         ));
     }
-    if s.xrp_pending_deposits.len() + s.xrp_pending_open_reservations.len()
-        >= MAX_XRP_PENDING_GLOBAL
+    let active_pending = s
+        .xrp_pending_deposits
+        .values()
+        .filter(|pending| pending.cancelled_at_ns.is_none())
+        .count();
+    if active_pending + s.xrp_pending_open_reservations.len() >= MAX_XRP_PENDING_GLOBAL
     {
         return Err(ProtocolError::GenericError(
             "XRP deposit staging is full; please retry after pending deposits clear.".to_string(),
+        ));
+    }
+    if !s.xrp_open_permits.remove(&caller) {
+        return Err(ProtocolError::GenericError(
+            "Native-XRP opens are operator-admitted only; request a one-time permit."
+                .to_string(),
         ));
     }
     let vault_id = s.increment_vault_id();
@@ -3576,19 +3598,119 @@ fn reserve_xrp_open_slot(
         crate::state::XrpPendingOpenReservation {
             owner: caller,
             reserved_at_ns: now_ns,
+            permit_consumed: true,
         },
     );
     Ok(vault_id)
 }
 
-fn release_xrp_open_slot(s: &mut crate::state::State, vault_id: u64, owner: Principal) -> bool {
+fn release_xrp_open_slot(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    owner: Principal,
+    restore_permit: bool,
+) -> bool {
     match s.xrp_pending_open_reservations.get(&vault_id) {
         Some(reservation) if reservation.owner == owner => {
+            let permit_consumed = reservation.permit_consumed;
             s.xrp_pending_open_reservations.remove(&vault_id);
+            if restore_permit && permit_consumed {
+                s.xrp_open_permits.insert(owner);
+            }
             true
         }
         _ => false,
     }
+}
+
+fn reopen_xrp_pending_open(
+    s: &mut crate::state::State,
+    caller: Principal,
+) -> Option<XrpVaultOpenInfo> {
+    let existing_id = s
+        .xrp_pending_deposits
+        .iter()
+        .find_map(|(id, pending)| (pending.owner == caller).then_some(*id));
+    existing_id.and_then(|id| {
+        let pending = s.xrp_pending_deposits.get_mut(&id)?;
+        pending.cancelled_at_ns = None;
+        Some(XrpVaultOpenInfo {
+            vault_id: id,
+            custody_address: pending.custody_address.clone(),
+            reserve_base_drops: pending.reserve_base_drops,
+        })
+    })
+}
+
+fn xrp_open_permit_authorized(s: &crate::state::State, caller: Principal) -> bool {
+    s.developer_principal == caller && caller != Principal::anonymous()
+}
+
+pub fn grant_xrp_open_permit(principal: Principal) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    mutate_state(|s| {
+        if !xrp_open_permit_authorized(s, caller) {
+            return Err(ProtocolError::GenericError(
+                "Only the developer can grant XRP open permits.".to_string(),
+            ));
+        }
+        grant_xrp_open_permit_in_state(s, principal)
+    })
+}
+
+fn grant_xrp_open_permit_in_state(
+    s: &mut crate::state::State,
+    principal: Principal,
+) -> Result<bool, ProtocolError> {
+    if principal == Principal::anonymous() {
+        return Err(ProtocolError::GenericError(
+            "Anonymous principals cannot receive XRP open permits.".to_string(),
+        ));
+    }
+    Ok(s.xrp_open_permits.insert(principal))
+}
+
+pub fn revoke_xrp_open_permit(principal: Principal) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    mutate_state(|s| {
+        if !xrp_open_permit_authorized(s, caller) {
+            return Err(ProtocolError::GenericError(
+                "Only the developer can revoke XRP open permits.".to_string(),
+            ));
+        }
+        Ok(revoke_xrp_open_permit_in_state(s, principal))
+    })
+}
+
+fn revoke_xrp_open_permit_in_state(s: &mut crate::state::State, principal: Principal) -> bool {
+    let mut changed = s.xrp_open_permits.remove(&principal);
+    let reservations: Vec<u64> = s
+        .xrp_pending_open_reservations
+        .iter()
+        .filter_map(|(id, reservation)| (reservation.owner == principal).then_some(*id))
+        .collect();
+    for id in reservations {
+        s.xrp_pending_open_reservations.remove(&id);
+        changed = true;
+    }
+    changed
+}
+
+pub fn get_xrp_open_permits() -> Result<Vec<Principal>, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    read_state(|s| {
+        if !xrp_open_permit_authorized(s, caller) {
+            return Err(ProtocolError::GenericError(
+                "Only the developer can read XRP open permits.".to_string(),
+            ));
+        }
+        Ok(s.xrp_open_permits.iter().copied().collect())
+    })
+}
+
+pub fn get_my_xrp_open_permit() -> bool {
+    let caller = ic_cdk::api::caller();
+    read_state(|s| s.xrp_open_permits.contains(&caller))
 }
 
 fn require_xrp_production_key() -> Result<(), ProtocolError> {
@@ -3616,14 +3738,24 @@ fn require_xrp_production_key() -> Result<(), ProtocolError> {
 /// Derives the per-vault XRPL custody address (threshold Ed25519), records an
 /// `XrpPendingDeposit` under a freshly reserved vault_id, and returns the address
 /// for the user to fund. NO collateral is credited and NO icUSD is minted until
-/// `confirm_xrp_deposit` verifies the deposit. Errors if native-XRP collateral is
-/// not registered (P5) or is not accepting new vaults.
+/// `confirm_xrp_deposit` verifies the deposit. Fresh addresses require a
+/// developer-issued one-time permit; permissionless public opens are disabled.
+/// Existing pending addresses are returned idempotently for recovery.
 pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, "open_xrp_vault")?;
     if let Err(e) = require_xrp_production_key() {
         guard_principal.fail();
         return Err(e);
+    }
+
+    // Repeated opens, including recovery after cancellation, return the original
+    // owner/address/derivation binding without consuming a new permit or deriving
+    // a second custody address.
+    let existing = mutate_state(|s| reopen_xrp_pending_open(s, caller));
+    if let Some(info) = existing {
+        guard_principal.complete();
+        return Ok(info);
     }
 
     let xrp_ct = crate::state::xrp_collateral_principal();
@@ -3671,7 +3803,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
         Ok(r) => match u64::try_from(r) {
             Ok(drops) => drops,
             Err(_) => {
-                mutate_state(|s| release_xrp_open_slot(s, vault_id, caller));
+                mutate_state(|s| release_xrp_open_slot(s, vault_id, caller, true));
                 guard_principal.fail();
                 return Err(ProtocolError::GenericError(
                     "xrp reserve base exceeds u64 drops".to_string(),
@@ -3679,7 +3811,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
             }
         },
         Err(e) => {
-            mutate_state(|s| release_xrp_open_slot(s, vault_id, caller));
+            mutate_state(|s| release_xrp_open_slot(s, vault_id, caller, true));
             guard_principal.fail();
             return Err(ProtocolError::GenericError(format!(
                 "xrp server_state failed: {e}"
@@ -3695,7 +3827,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     let custody_address = match crate::chains::xrp::ted25519::derive_xrp_address(path).await {
         Ok((_pubkey, addr)) => addr,
         Err(e) => {
-            mutate_state(|s| release_xrp_open_slot(s, vault_id, caller));
+            mutate_state(|s| release_xrp_open_slot(s, vault_id, caller, true));
             guard_principal.fail();
             return Err(ProtocolError::GenericError(format!(
                 "xrp custody derive failed: {e}"
@@ -3705,7 +3837,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
 
     let opened_at_ns = ic_cdk::api::time();
     let reservation_consumed = mutate_state(|s| {
-        if !release_xrp_open_slot(s, vault_id, caller) {
+        if !release_xrp_open_slot(s, vault_id, caller, false) {
             return false;
         }
         s.xrp_pending_deposits.insert(
@@ -3716,6 +3848,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
                 derivation_nonce: vault_id,
                 opened_at_ns,
                 reserve_base_drops,
+                cancelled_at_ns: None,
             },
         );
         true
@@ -5435,20 +5568,21 @@ pub(crate) fn xrp_sibling_reconcile_decision(
     }
 }
 
-pub(crate) fn remove_xrp_pending_deposit_if_unfunded_snapshot(
+pub(crate) fn tombstone_xrp_pending_deposit_if_unfunded_snapshot(
     s: &mut crate::state::State,
     vault_id: u64,
     expected: &crate::state::XrpPendingDeposit,
     acct: &crate::chains::xrp::xrp_rpc::XrpAccountInfo,
+    now_ns: u64,
 ) -> Result<bool, ProtocolError> {
     if acct.exists {
         return Err(ProtocolError::GenericError(
             "XRP custody account is funded; confirm the deposit instead of cancelling.".to_string(),
         ));
     }
-    match s.xrp_pending_deposits.get(&vault_id) {
+    match s.xrp_pending_deposits.get_mut(&vault_id) {
         Some(current) if current == expected => {
-            s.xrp_pending_deposits.remove(&vault_id);
+            current.cancelled_at_ns = Some(now_ns);
             Ok(true)
         }
         Some(_) | None => Ok(false),
@@ -5471,8 +5605,8 @@ pub(crate) fn ensure_xrp_pending_cleanup_age(
     Ok(())
 }
 
-/// XRP-006: owner cleanup for an unfunded native-XRP open. This never removes a
-/// funded custody account; users must confirm funded deposits into real vaults.
+/// XRP-006: owner cancellation tombstones an unfunded open. The stable custody
+/// binding remains so a late XRPL payment can still be confirmed or reopened.
 pub async fn cancel_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal =
@@ -5507,11 +5641,17 @@ pub async fn cancel_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError>
         }
     };
 
-    let removed = mutate_state(|s| {
+    let tombstoned = mutate_state(|s| {
         ensure_xrp_pending_cleanup_age(&pending, ic_cdk::api::time())?;
-        remove_xrp_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, &acct)
+        tombstone_xrp_pending_deposit_if_unfunded_snapshot(
+            s,
+            vault_id,
+            &pending,
+            &acct,
+            ic_cdk::api::time(),
+        )
     })?;
-    if !removed {
+    if !tombstoned {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
             "XRP pending deposit changed concurrently; refresh and retry.".to_string(),
@@ -5522,9 +5662,8 @@ pub async fn cancel_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError>
     Ok(())
 }
 
-/// XRP-006: developer cleanup for abandoned unfunded native-XRP opens. This is
-/// deliberately unfunded-only; if XRP has reached the custody address the entry
-/// must remain confirmable by its owner.
+/// XRP-006: developer cleanup tombstones abandoned opens. The custody binding is
+/// retained so a late or previously unseen deposit remains recoverable.
 pub async fn sweep_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::api::caller();
     if !read_state(|s| s.developer_principal == caller) {
@@ -5560,11 +5699,17 @@ pub async fn sweep_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> 
         }
     };
 
-    let removed = mutate_state(|s| {
+    let tombstoned = mutate_state(|s| {
         ensure_xrp_pending_cleanup_age(&pending, ic_cdk::api::time())?;
-        remove_xrp_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, &acct)
+        tombstone_xrp_pending_deposit_if_unfunded_snapshot(
+            s,
+            vault_id,
+            &pending,
+            &acct,
+            ic_cdk::api::time(),
+        )
     })?;
-    if !removed {
+    if !tombstoned {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
             "XRP pending deposit changed concurrently; refresh and retry.".to_string(),
@@ -6434,6 +6579,7 @@ mod xrp_p3_tests {
             derivation_nonce: 7,
             opened_at_ns: 123,
             reserve_base_drops: 1_000_000,
+            cancelled_at_ns: None,
         }
     }
 
@@ -6464,6 +6610,8 @@ mod xrp_p3_tests {
         let second = Principal::from_slice(&[0x42; 16]);
         let mut s = crate::state::State::default();
 
+        assert!(reserve_xrp_open_slot(&mut s, first, 100).is_err());
+        s.xrp_open_permits.insert(first);
         let id = reserve_xrp_open_slot(&mut s, first, 100).unwrap();
         assert!(s.xrp_pending_open_reservations.contains_key(&id));
         assert!(reserve_xrp_open_slot(&mut s, first, 101).is_err());
@@ -6472,6 +6620,7 @@ mod xrp_p3_tests {
         // unfunded pending deposits, even before threshold derivation returns.
         for i in 0..(MAX_XRP_PENDING_GLOBAL - 1) {
             let owner = Principal::from_slice(&(i as u32).to_be_bytes());
+            s.xrp_open_permits.insert(owner);
             reserve_xrp_open_slot(&mut s, owner, 100).expect("available global slot");
         }
         assert_eq!(
@@ -6485,6 +6634,7 @@ mod xrp_p3_tests {
     fn pending_open_admission_expires_only_unpublished_reservations() {
         let owner = Principal::from_slice(&[0x43; 16]);
         let mut s = crate::state::State::default();
+        s.xrp_open_permits.insert(owner);
         let id = reserve_xrp_open_slot(&mut s, owner, 10).unwrap();
         let next = reserve_xrp_open_slot(&mut s, owner, 10 + XRP_OPEN_RESERVATION_TTL_NS + 1)
             .expect("stale unpublished slot can be released");
@@ -6493,7 +6643,80 @@ mod xrp_p3_tests {
     }
 
     #[test]
-    fn pending_cleanup_removes_only_when_live_account_is_unfunded() {
+    fn failed_pre_address_open_restores_its_one_time_permit() {
+        let owner = Principal::from_slice(&[0x45; 16]);
+        let mut s = crate::state::State::default();
+        s.xrp_open_permits.insert(owner);
+        let id = reserve_xrp_open_slot(&mut s, owner, 10).unwrap();
+        assert!(!s.xrp_open_permits.contains(&owner));
+        assert!(release_xrp_open_slot(&mut s, id, owner, true));
+        assert!(s.xrp_open_permits.contains(&owner));
+        assert!(s.xrp_pending_open_reservations.is_empty());
+    }
+
+    #[test]
+    fn only_configured_non_anonymous_developer_can_manage_open_permits() {
+        let developer = Principal::from_slice(&[0x4a; 16]);
+        let other = Principal::from_slice(&[0x4b; 16]);
+        let mut s = crate::state::State::default();
+        s.developer_principal = developer;
+        assert!(xrp_open_permit_authorized(&s, developer));
+        assert!(!xrp_open_permit_authorized(&s, other));
+        assert!(!xrp_open_permit_authorized(&s, Principal::anonymous()));
+    }
+
+    #[test]
+    fn permit_grant_is_idempotent_and_rejects_anonymous_principal() {
+        let principal = Principal::from_slice(&[0x4c; 16]);
+        let mut s = crate::state::State::default();
+        assert!(grant_xrp_open_permit_in_state(&mut s, principal).unwrap());
+        assert!(!grant_xrp_open_permit_in_state(&mut s, principal).unwrap());
+        assert!(matches!(
+            grant_xrp_open_permit_in_state(&mut s, Principal::anonymous()),
+            Err(ProtocolError::GenericError(_))
+        ));
+        assert!(s.xrp_open_permits.contains(&principal));
+    }
+
+    #[test]
+    fn successful_open_consumes_its_one_time_permit() {
+        let owner = Principal::from_slice(&[0x46; 16]);
+        let mut s = crate::state::State::default();
+        s.xrp_open_permits.insert(owner);
+        let id = reserve_xrp_open_slot(&mut s, owner, 10).unwrap();
+        assert!(release_xrp_open_slot(&mut s, id, owner, false));
+        assert!(!s.xrp_open_permits.contains(&owner));
+    }
+
+    #[test]
+    fn revoked_permit_cancels_reservation_without_restoring_admission() {
+        let owner = Principal::from_slice(&[0x47; 16]);
+        let mut s = crate::state::State::default();
+        s.xrp_open_permits.insert(owner);
+        let id = reserve_xrp_open_slot(&mut s, owner, 10).unwrap();
+        assert!(s.xrp_pending_open_reservations.contains_key(&id));
+        assert!(revoke_xrp_open_permit_in_state(&mut s, owner));
+        assert!(!s.xrp_pending_open_reservations.contains_key(&id));
+        assert!(s.xrp_open_permits.is_empty());
+        assert!(reserve_xrp_open_slot(&mut s, owner, 11).is_err());
+    }
+
+    #[test]
+    fn tombstones_do_not_consume_active_open_capacity() {
+        let caller = Principal::from_slice(&[0x48; 16]);
+        let mut s = crate::state::State::default();
+        for i in 0..MAX_XRP_PENDING_GLOBAL {
+            let owner = Principal::from_slice(&(i as u32).to_be_bytes());
+            let mut dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
+            dep.cancelled_at_ns = Some(123);
+            s.xrp_pending_deposits.insert(i as u64, dep);
+        }
+        s.xrp_open_permits.insert(caller);
+        assert!(reserve_xrp_open_slot(&mut s, caller, 200).is_ok());
+    }
+
+    #[test]
+    fn pending_cancel_tombstones_unfunded_address_for_late_recovery() {
         let owner = Principal::from_slice(&[0x44; 16]);
         let dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
         let mut s = crate::state::State::default();
@@ -6506,10 +6729,73 @@ mod xrp_p3_tests {
         };
 
         assert_eq!(
-            remove_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct).unwrap(),
+            tombstone_xrp_pending_deposit_if_unfunded_snapshot(
+                &mut s,
+                7,
+                &dep,
+                &acct,
+                456,
+            )
+            .unwrap(),
             true
         );
-        assert!(!s.xrp_pending_deposits.contains_key(&7));
+        let tombstone = s.xrp_pending_deposits.get(&7).unwrap();
+        assert_eq!(tombstone.owner, owner);
+        assert_eq!(tombstone.custody_address, dep.custody_address);
+        assert_eq!(tombstone.derivation_nonce, dep.derivation_nonce);
+        assert_eq!(tombstone.cancelled_at_ns, Some(456));
+
+        // A deposit arriving after the cancellation snapshot remains attached to
+        // the same custody record and can be confirmed by the unchanged path.
+        let late_funded = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 1,
+            balance_drops: 5_000_000,
+            ledger_index: 9_000_001,
+        };
+        assert!(late_funded.exists);
+        let reopened = reopen_xrp_pending_open(&mut s, owner).unwrap();
+        assert_eq!(reopened.vault_id, 7);
+        assert_eq!(reopened.custody_address, dep.custody_address);
+        assert_eq!(s.xrp_pending_deposits.get(&7).unwrap().cancelled_at_ns, None);
+    }
+
+    #[test]
+    fn developer_sweep_tombstone_retains_address_after_late_funding() {
+        let owner = Principal::from_slice(&[0x49; 16]);
+        let dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
+        let mut s = crate::state::State::default();
+        s.xrp_pending_deposits.insert(9, dep.clone());
+        let unfunded_snapshot = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: false,
+            sequence: 0,
+            balance_drops: 0,
+            ledger_index: 9_000_000,
+        };
+
+        assert!(tombstone_xrp_pending_deposit_if_unfunded_snapshot(
+            &mut s,
+            9,
+            &dep,
+            &unfunded_snapshot,
+            789,
+        )
+        .unwrap());
+        let late_funding = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 1,
+            balance_drops: 5_000_000,
+            ledger_index: 9_000_001,
+        };
+        assert!(late_funding.exists);
+        let retained = s.xrp_pending_deposits.get(&9).unwrap();
+        assert_eq!(retained.owner, owner);
+        assert_eq!(retained.custody_address, dep.custody_address);
+        assert_eq!(retained.derivation_nonce, dep.derivation_nonce);
+        assert_eq!(
+            xrp_credit_amount(late_funding.balance_drops, 1_000_000, 0).unwrap(),
+            4_000_000
+        );
     }
 
     #[test]
@@ -6526,7 +6812,7 @@ mod xrp_p3_tests {
         };
 
         assert!(matches!(
-            remove_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct),
+            tombstone_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct, 456),
             Err(ProtocolError::GenericError(_))
         ));
         assert!(s.xrp_pending_deposits.contains_key(&7));
@@ -6547,7 +6833,7 @@ mod xrp_p3_tests {
         };
 
         assert_eq!(
-            remove_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct).unwrap(),
+            tombstone_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct, 456).unwrap(),
             false
         );
         assert!(s.xrp_pending_deposits.contains_key(&7));
