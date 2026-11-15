@@ -1,0 +1,7 @@
+{
+  "testedSource": "9a9106ad361a665c06bcb40c2c6f8687dc6968b6",
+  "testsPassed": 77,
+  "testsFailed": 0,
+  "canonicalGeneratedFromRust": true,
+  "sourceReview": "7ef1e694; only later Rust change is explicit closure Result type"
+}

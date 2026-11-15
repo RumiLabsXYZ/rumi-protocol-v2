@@ -1,0 +1,304 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-vault202-recovery-20261114/src/xrc_demo/xrc_mock/Cargo.toml
+workspace: /private/tmp/rumi-vault202-recovery-20261114/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-vault202-recovery-20261114/src/monad_rpc_mock/Cargo.toml
+workspace: /private/tmp/rumi-vault202-recovery-20261114/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /private/tmp/rumi-vault202-recovery-20261114/src/sol_rpc_mock/Cargo.toml
+workspace: /private/tmp/rumi-vault202-recovery-20261114/Cargo.toml
+warning: unused import: `FromPrimitive`
+  --> src/rumi_protocol_backend/src/sp_liquidation.rs:14:29
+   |
+14 | use rust_decimal::prelude::{FromPrimitive, ToPrimitive as DecimalToPrimitive};
+   |                             ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `rust_decimal::prelude::FromPrimitive`
+    --> src/rumi_protocol_backend/src/management.rs:1721:9
+     |
+1721 |     use rust_decimal::prelude::FromPrimitive;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> src/rumi_protocol_backend/src/vault.rs:7140:5
+     |
+7140 |     mut journal: crate::state::BorrowMintJournal,
+     |     ----^^^^^^^
+     |     |
+     |     help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `rust_decimal::prelude::ToPrimitive`
+  --> src/rumi_protocol_backend/src/event.rs:11:5
+   |
+11 | use rust_decimal::prelude::ToPrimitive;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ToPrimitive`
+  --> src/rumi_protocol_backend/src/sp_liquidation.rs:14:44
+   |
+14 | use rust_decimal::prelude::{FromPrimitive, ToPrimitive as DecimalToPrimitive};
+   |                                            ^^^^^^^^^^^
+
+warning: unused variable: `outcome`
+    --> src/rumi_protocol_backend/src/vault.rs:2924:23
+     |
+2924 |             let (fee, outcome, net, symbol, decimals) = match mutation_result {
+     |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_outcome`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `journal`
+    --> src/rumi_protocol_backend/src/vault.rs:3365:52
+     |
+3365 |     if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+     |                                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_journal`
+
+warning: unused variable: `journal`
+    --> src/rumi_protocol_backend/src/vault.rs:6652:52
+     |
+6652 |     if let Some(journal) = active.as_ref().filter(|journal| resuming) {
+     |                                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_journal`
+
+warning: function `redemption_transfer_meets_minimum` is never used
+    --> src/rumi_protocol_backend/src/lib.rs:1504:4
+     |
+1504 | fn redemption_transfer_meets_minimum(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `status_requires_recovery` is never used
+   --> src/rumi_protocol_backend/src/cksol.rs:144:4
+    |
+144 | fn status_requires_recovery(status: &CkSolRelayStatus) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `status_is_unknown` is never used
+   --> src/rumi_protocol_backend/src/cksol.rs:155:4
+    |
+155 | fn status_is_unknown(status: &DepositSolStatus) -> bool {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `retain_unknown` is never used
+   --> src/rumi_protocol_backend/src/cksol.rs:213:4
+    |
+213 | fn retain_unknown(owner: Principal, started_at_ns: u64) {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `reserve_attempt` is never used
+   --> src/rumi_protocol_backend/src/cksol.rs:225:4
+    |
+225 | fn reserve_attempt(
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `try_decode_u64_opt_principal` is never used
+   --> src/rumi_protocol_backend/src/icrc21.rs:300:4
+    |
+300 | fn try_decode_u64_opt_principal(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `try_decode_u64_u64_opt_principal` is never used
+   --> src/rumi_protocol_backend/src/icrc21.rs:320:4
+    |
+320 | fn try_decode_u64_u64_opt_principal(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> src/rumi_protocol_backend/src/sp_liquidation.rs:119:9
+    |
+118 | pub(crate) struct SpLiquidationApplied {
+    |                   -------------------- fields in this struct
+119 |     pub debt_e8s: u64,
+    |         ^^^^^^^^
+120 |     pub interest_share_e8s: u64,
+121 |     pub collateral_gross_raw: u64,
+    |         ^^^^^^^^^^^^^^^^^^^^
+122 |     pub collateral_net_raw: u64,
+    |         ^^^^^^^^^^^^^^^^^^
+123 |     pub protocol_cut_raw: u64,
+    |         ^^^^^^^^^^^^^^^^
+124 |     pub payout: Option<(u128, Principal, u64, u64, u64, u128)>,
+125 |     pub xrp_claim_id: Option<u64>,
+    |         ^^^^^^^^^^^^
+126 |     pub drained: bool,
+    |         ^^^^^^^
+127 |     pub payment_block_index: u64,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: function `commit_lst_wrapped_price` is never used
+   --> src/rumi_protocol_backend/src/management.rs:122:4
+    |
+122 | fn commit_lst_wrapped_price(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transfer_deposit_after_bounds` is never used
+    --> src/rumi_protocol_backend/src/management.rs:3766:10
+     |
+3766 | async fn transfer_deposit_after_bounds<F, Fut>(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_LST_EXTERNAL_CALLS_PER_REFRESH` is never used
+  --> src/rumi_protocol_backend/src/vault.rs:41:7
+   |
+41 | const MAX_LST_EXTERNAL_CALLS_PER_REFRESH: usize = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS` is never used
+  --> src/rumi_protocol_backend/src/vault.rs:42:7
+   |
+42 | const MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS: usize = MAX_REDEMPTION_PRICE_CANDIDATES + 1; // one off-set ICP source dependency
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REDEMPTION_OFFER_EXTERNAL_CALLS` is never used
+  --> src/rumi_protocol_backend/src/vault.rs:52:7
+   |
+52 | const MAX_REDEMPTION_OFFER_EXTERNAL_CALLS: usize = (MAX_REDEMPTION_OFFER_REFRESH_PASSES
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_legacy_reserve_spillover_asset` is never used
+   --> src/rumi_protocol_backend/src/vault.rs:394:4
+    |
+394 | fn validate_legacy_reserve_spillover_asset(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `legacy_reserve_spillover_run` is never used
+   --> src/rumi_protocol_backend/src/vault.rs:408:4
+    |
+408 | fn legacy_reserve_spillover_run(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `current_legacy_reserve_run_for_snapshot` is never used
+   --> src/rumi_protocol_backend/src/vault.rs:424:4
+    |
+424 | fn current_legacy_reserve_run_for_snapshot(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `current_fresh_legacy_reserve_run_for_snapshot` is never used
+   --> src/rumi_protocol_backend/src/vault.rs:433:4
+    |
+433 | fn current_fresh_legacy_reserve_run_for_snapshot(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reserve_spillover_snapshot_mismatch_refund` is never used
+   --> src/rumi_protocol_backend/src/vault.rs:493:4
+    |
+493 | fn reserve_spillover_snapshot_mismatch_refund(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reserve_post_settlement_raw_refund` is never used
+   --> src/rumi_protocol_backend/src/vault.rs:503:4
+    |
+503 | fn reserve_post_settlement_raw_refund(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `max_effective_icusd_for_u64_payout` is never used
+    --> src/rumi_protocol_backend/src/vault.rs:1557:4
+     |
+1557 | fn max_effective_icusd_for_u64_payout(price_usd: Decimal, decimals: u8) -> u64 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `drive_pending_borrow_fee_mint_with` is never used
+    --> src/rumi_protocol_backend/src/vault.rs:7191:10
+     |
+7191 | async fn drive_pending_borrow_fee_mint_with<F, Fut, N, NFut>(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `rumi_protocol_backend` (lib) generated 29 warnings (run `cargo fix --lib -p rumi_protocol_backend` to apply 6 suggestions)
+   Compiling liquidation_bot v0.1.0 (/private/tmp/rumi-vault202-recovery-20261114/src/liquidation_bot)
+warning: function `load_from_stable_memory` is never used
+   --> src/liquidation_bot/src/state.rs:557:8
+    |
+557 | pub fn load_from_stable_memory() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `liquidation_bot` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.97s
+     Running unittests src/lib.rs (/private/tmp/rumi-cksol-icp-target/debug/deps/liquidation_bot-4c97e5c21734cf95)
+
+running 77 tests
+test admin_retry_tests::admin_test_swap_is_blocked_by_any_pending_recovery_journal ... ok
+test admin_retry_tests::config_change_is_blocked_by_pending_treasury_obligation ... ok
+test admin_retry_tests::missing_journal_also_fails_closed ... ok
+test admin_retry_tests::short_payment_claim_cannot_fall_through_to_legacy_confirmation ... ok
+test admin_retry_tests::vault158_keeps_processing_paused_until_treasury_settlement ... ok
+test generate_bot_candid_from_rust ... ok
+test native_icp_blocks::tests::archived_vault158_native_receipt_fixture_matches_exact_transferfrom_block ... ok
+test native_icp_blocks::tests::supplied_wrong_block_index_is_rejected ... ok
+test native_icp_blocks::tests::vault158_native_swap_input_requires_exact_sender_amount_fee_memo_and_timestamp ... ok
+test process::recovery202::tests::real_202_identity_rejects_changed_claim_generation_amount_and_destination ... ok
+test process::recovery202::tests::real_output_receipt_requires_exact_fee_amount_sender_recipient_and_memo ... ok
+test process::tests::a_short_durable_receipt_is_held_below_the_claim_net_minimum ... ok
+test process::tests::ambiguous_or_legacy_return_attempts_cannot_be_fee_refreshed ... ok
+test process::tests::captured_vault158_ckusdc_output_block_requires_exact_pool_receipt_and_fee ... ok
+test process::tests::claim_retry_final_failure_gives_up ... ok
+test process::tests::claim_retry_first_failure_schedules_retry ... ok
+test process::tests::claim_retry_handles_counter_overflow_safely ... ok
+test process::tests::claim_retry_penultimate_failure_still_retries ... ok
+test process::tests::confirmed_vault158_tombstone_survives_journal_consumption_and_replay ... ok
+test process::tests::cumulative_shortfall_confirmation_applies_totals_and_removes_journal_once ... ok
+test process::tests::expired_ambiguous_treasury_intent_accepts_exact_verified_candidate_once ... ok
+test process::tests::false_original_payment_proof_never_invokes_residual_transfer ... ok
+test process::tests::favorable_swap_overage_is_held_and_not_reused_by_next_claim ... ok
+test process::tests::held_return_does_not_starve_a_later_resumable_claim ... ok
+test process::tests::held_treasury_attempt_does_not_starve_later_bot_work ... ok
+test process::tests::legacy_zero_fee_journal_residual_semantics_are_unchanged ... ok
+test process::tests::live_shaped_vault158_claim_and_history_229_are_accepted_exactly ... ok
+test process::tests::net_claim_and_return_fee_float_are_checked_fail_closed ... ok
+test process::tests::old_backend_result_decodes_with_missing_net_fields_as_held ... ok
+test process::tests::ordinary_initial_plus_topup_charge_both_fees ... ok
+test process::tests::ordinary_single_swap_fee_is_excluded_from_treasury_residual ... ok
+test process::tests::post_swap_balance_read_failure_cannot_create_phase_three_reservation ... ok
+test process::tests::pre_swap_balance_failure_arms_only_current_unstarted_claim_for_return ... ok
+test process::tests::reconciled_residual_block_uses_exact_persisted_tuple_and_preserves_original ... ok
+test process::tests::reservation_clean_router_matches_delta ... ok
+test process::tests::reservation_overdelivery_does_not_spend_surplus ... ok
+test process::tests::reservation_partial_underdelivery_uses_delta ... ok
+test process::tests::reservation_pool_underdelivers_uses_delta ... ok
+test process::tests::return_error_takes_priority_over_cancel_error ... ok
+test process::tests::short_payment_gross_threshold_covers_rounding_and_fee ... ok
+test process::tests::swap_failure_clean_cleanup_records_swap_failed ... ok
+test process::tests::swap_failure_with_failed_return_records_transfer_failed_and_logs_stuck ... ok
+test process::tests::swap_failure_with_stuck_cancel_records_confirm_failed_and_logs_stuck ... ok
+test process::tests::swap_that_cannot_cover_its_fee_from_the_claim_is_refused ... ok
+test process::tests::treasury_candidate_with_wrong_tuple_metadata_leaves_pending_intent_unchanged ... ok
+test process::tests::treasury_paid_totals_require_matching_receipt_and_apply_once_per_generation ... ok
+test process::tests::typed_first_dispatch_bad_fee_refreshes_are_lossless_unique_and_bounded ... ok
+test process::tests::vault158_evidence_is_exact_generation_and_receipts_are_single_use ... ok
+test process::tests::vault158_execution_promotes_only_the_exact_claim_once ... ok
+test reserve::tests::allocation_is_atomic_and_replay_or_changed_tuple_cannot_spend_again ... ok
+test reserve::tests::exact_202_shortfall_fits_funded_budget_but_default_has_no_authority ... ok
+test reserve::tests::fee_budget_cannot_spend_protected_claim_funds_or_exceed_caps ... ok
+test reserve::tests::legacy_state_has_no_reserve_and_new_budget_survives_serialization ... ok
+test reserve::tests::no_effect_retry_reuses_original_allocation_tuple_and_rejects_fee_time_or_floor_changes ... ok
+test reserve::tests::ordinary_claim_without_shortfall_needs_no_reserve_and_keeps_own_proceeds ... ok
+test reserve::tests::small_vault_is_not_claimed_without_fee_coverage_or_after_budget_exhaustion ... ok
+test state::tests::durable_payment_tuple_survives_state_snapshot_roundtrip ... ok
+test state::tests::legacy_pre_icpswap_state_deserializes ... ok
+test state::tests::recovery_config_view_is_none_when_unconfigured ... ok
+test state::tests::recovery_config_view_reports_configured_values_verbatim ... ok
+test state::tests::treasury_intent_round_trips_in_stable_state ... ok
+test state::tests::upg_001_corrupt_length_traps_instead_of_wiping ... ok
+test state::tests::upg_001_decode_failure_traps_instead_of_wiping ... ok
+test state::tests::upg_001_legacy_save_fence_blocks_raw_write_when_layout_exists ... ok
+test state::tests::upg_001_memory_manager_magic_matches_crate ... ok
+test state::tests::upg_001_no_data_defaults_with_migration_flag_set ... ok
+test state::tests::upg_001_pre_upgrade_never_takes_legacy_path_once_layout_exists ... ok
+test state::tests::upg_001_valid_snapshot_roundtrips ... ok
+test state::tests::upgrade_pause_handles_legacy_snapshot_without_pause_field ... ok
+test state::tests::upgrade_pause_overrides_previously_persisted_false ... ok
+test swap::return_transfer_tests::commit_then_call_reject_is_ambiguous_and_never_unwinds_claim ... ok
+test swap::return_transfer_tests::deposit_application_err_is_ambiguous_and_never_unwinds_claim ... ok
+test swap::return_transfer_tests::icp_treasury_tuple_uses_claim_bound_dedup_identity_and_exact_fee ... ok
+test swap::return_transfer_tests::native_icp_default_account_identifier_matches_canonical_vector ... ok
+test swap::return_transfer_tests::native_icp_transfer_block_matches_exact_persisted_tuple ... ok
+test swap::return_transfer_tests::pre_deposit_errors_are_definitive_and_may_use_gross_return_path ... ok
+test swap::return_transfer_tests::return_transfer_fee_keeps_new_and_legacy_wire_identities_distinct ... ok
+
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+

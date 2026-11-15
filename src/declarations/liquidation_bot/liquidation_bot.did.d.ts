@@ -199,12 +199,38 @@ export type LiquidationStatus = { 'ClaimFailed' : null } |
   { 'AdminResolved' : null } |
   { 'TransferFailed' : null } |
   { 'Completed' : null };
+export interface OperatorReserve {
+  'enabled' : boolean,
+  'allocated_e6' : bigint,
+  'allocations' : Array<[bigint, ReserveAllocation]>,
+  'config' : OperatorReserveConfig,
+  'settled_e6' : bigint,
+}
+export interface OperatorReserveConfig {
+  'per_claim_cap_e6' : bigint,
+  'protected_balance_e6' : bigint,
+  'budget_e6' : bigint,
+}
+export interface ReserveAllocation {
+  'payment_memo' : Uint8Array | number[],
+  'backend_principal' : Principal,
+  'settled' : boolean,
+  'payment_amount_e6' : bigint,
+  'claim_generation' : bigint,
+  'vault_id' : bigint,
+  'payment_fee_e6' : bigint,
+  'ledger_principal' : Principal,
+  'amount_e6' : bigint,
+  'payment_created_at_time' : bigint,
+}
+export type Result = { 'Ok' : null } |
+  { 'Err' : string };
+export type Result_1 = { 'Ok' : SwapResult } |
+  { 'Err' : string };
 export interface SwapResult {
   'ckusdc_received_e6' : bigint,
   'effective_price_e8s' : bigint,
 }
-export type TestSwapResult = { 'Ok' : SwapResult } |
-  { 'Err' : string };
 export interface TransferReceipt {
   'block_index' : bigint,
   'created_at_time' : bigint,
@@ -242,46 +268,27 @@ export type Vault158RecoveryStatus = { 'PaymentConfirmed' : null } |
   { 'EvidencePrepared' : null };
 export interface _SERVICE {
   'admin_approve_pool' : ActorMethod<[], undefined>,
-  'admin_authorize_shortfall_topup' : ActorMethod<
-    [bigint, bigint],
-    { 'Ok' : null } |
-      { 'Err' : string }
+  'admin_authorize_shortfall_topup' : ActorMethod<[bigint, bigint], Result>,
+  'admin_configure_operator_reserve' : ActorMethod<
+    [OperatorReserveConfig],
+    Result
   >,
-  'admin_execute_vault158_recovery' : ActorMethod<
-    [],
-    { 'Ok' : null } |
-      { 'Err' : string }
-  >,
-  'admin_prepare_vault158_recovery' : ActorMethod<
-    [],
-    { 'Ok' : null } |
-      { 'Err' : string }
-  >,
-  'admin_reconcile_payment_block' : ActorMethod<
-    [bigint, bigint],
-    { 'Ok' : null } |
-      { 'Err' : string }
-  >,
-  'admin_reconcile_return_block' : ActorMethod<
-    [bigint, bigint],
-    { 'Ok' : null } |
-      { 'Err' : string }
-  >,
+  'admin_execute_vault158_recovery' : ActorMethod<[], Result>,
+  'admin_execute_vault202_recovery' : ActorMethod<[], Result>,
+  'admin_prepare_vault158_recovery' : ActorMethod<[], Result>,
+  'admin_reconcile_payment_block' : ActorMethod<[bigint, bigint], Result>,
+  'admin_reconcile_return_block' : ActorMethod<[bigint, bigint], Result>,
   'admin_reconcile_shortfall_topup_block' : ActorMethod<
     [bigint, bigint],
-    { 'Ok' : null } |
-      { 'Err' : string }
+    Result
   >,
-  'admin_reconcile_treasury_block' : ActorMethod<
-    [bigint, bigint],
-    { 'Ok' : null } |
-      { 'Err' : string }
-  >,
+  'admin_reconcile_treasury_block' : ActorMethod<[bigint, bigint], Result>,
   'admin_refresh_fees' : ActorMethod<[], [bigint, bigint]>,
   'admin_resolve_pool_ordering' : ActorMethod<[], undefined>,
   'admin_retry_stuck_claim' : ActorMethod<[bigint], undefined>,
+  'admin_set_operator_reserve_enabled' : ActorMethod<[boolean], Result>,
   'admin_sweep_ckusdc' : ActorMethod<[Principal, [] | [bigint]], undefined>,
-  'admin_test_swap' : ActorMethod<[bigint], TestSwapResult>,
+  'admin_test_swap' : ActorMethod<[bigint], Result_1>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'get_admin_event_count' : ActorMethod<[], bigint>,
@@ -297,6 +304,7 @@ export interface _SERVICE {
     [bigint, bigint],
     Array<LiquidationRecordVersioned>
   >,
+  'get_operator_reserve' : ActorMethod<[], [] | [OperatorReserve]>,
   'get_pending_claim_journals' : ActorMethod<[], Array<BotClaimJournal>>,
   'get_pending_payment_journals' : ActorMethod<[], Array<BotPaymentJournal>>,
   'get_pending_treasury_intent' : ActorMethod<
@@ -312,11 +320,7 @@ export interface _SERVICE {
     undefined
   >,
   'set_config' : ActorMethod<[BotConfig], undefined>,
-  'set_processing_paused' : ActorMethod<
-    [boolean],
-    { 'Ok' : null } |
-      { 'Err' : string }
-  >,
+  'set_processing_paused' : ActorMethod<[boolean], Result>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];
