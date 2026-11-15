@@ -9,6 +9,7 @@ mod icpswap;
 mod memory;
 mod native_icp_blocks;
 mod process;
+mod reserve;
 mod state;
 mod swap;
 
@@ -161,7 +162,9 @@ fn inspect_message() {
         | "set_processing_paused" | "admin_reconcile_payment_block" | "admin_reconcile_return_block"
         | "admin_authorize_shortfall_topup" | "admin_reconcile_shortfall_topup_block"
         | "admin_refresh_fees" | "admin_test_swap" | "admin_reconcile_treasury_block"
-        | "admin_prepare_vault158_recovery" | "admin_execute_vault158_recovery" => {
+        | "admin_prepare_vault158_recovery" | "admin_execute_vault158_recovery"
+        | "admin_configure_operator_reserve" | "admin_set_operator_reserve_enabled"
+        | "admin_execute_vault202_recovery" => {
             if ic_cdk::api::caller() != Principal::anonymous() {
                 ic_cdk::api::call::accept_message();
             }
@@ -379,6 +382,57 @@ fn get_liquidation_events(offset: u64, limit: u64) -> Vec<history::LiquidationRe
 }
 
 // ---- Admin endpoints ----
+
+#[query]
+fn get_operator_reserve() -> Option<reserve::OperatorReserve> {
+    state::read_state(|s| s.operator_reserve.clone())
+}
+
+/// Establish one bounded operator allocation. This is an explicit financial
+/// policy decision, never an automatic migration or a reset of spent budget.
+#[update]
+async fn admin_configure_operator_reserve(args: reserve::OperatorReserveConfig) -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire().map_err(str::to_string)?;
+    if !state::read_state(|s| s.processing_paused && s.operator_reserve.is_none()
+        && s.pending_payments.is_empty() && s.pending_treasury.is_empty()
+        && s.pending_claims.keys().all(|id| *id == 202)) {
+        return Err("pause processing; existing reserve or unrelated recovery prevents configuration".into());
+    }
+    let config = state::read_state(|s| s.config.clone()).ok_or("Config not set")?;
+    let balance = swap::balance_of_self_ckusdc(&config).await?;
+    // Existing claim202's verified output is not part of the operator budget.
+    let protected_claim = state::read_state(|s| process::protected_claim_output(&config, s))?;
+    let reserve = reserve::OperatorReserve::new(args, balance.checked_sub(protected_claim)
+        .ok_or("pending claim funds are unavailable")?)?;
+    state::mutate_state(|s| { s.operator_reserve = Some(reserve); });
+    state::save_config_to_stable();
+    Ok(())
+}
+
+#[update]
+fn admin_set_operator_reserve_enabled(enabled: bool) -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire().map_err(str::to_string)?;
+    state::mutate_state(|s| {
+        if !s.processing_paused { return Err("pause processing before changing reserve admission".into()); }
+        let r = s.operator_reserve.as_mut().ok_or("reserve is not configured")?;
+        r.enabled = enabled;
+        Ok(())
+    })?;
+    state::save_config_to_stable();
+    Ok(())
+}
+
+/// Continue only the receipt-pinned202/generation3 payment and its treasury
+/// residual. The existing worker stays paused; unknown outcomes remain held.
+#[update]
+async fn admin_execute_vault202_recovery() -> Result<(), String> {
+    require_admin();
+    let _guard = ProcessingGuard::acquire().map_err(str::to_string)?;
+    let config = state::read_state(|s| s.config.clone()).ok_or("Config not set")?;
+    process::admin_execute_vault202_recovery(&config).await
+}
 
 /// Verify and durably retain vault 158's already-observed swap receipts. This
 /// performs read-only ledger calls and does not authorize a payment.
@@ -796,4 +850,17 @@ async fn admin_reconcile_return_block(vault_id: u64, block_index: u64) -> Result
     let config = state::read_state(|s| s.config.clone())
         .ok_or_else(|| "Config not set".to_string())?;
     process::admin_reconcile_return_block(&config, vault_id, block_index).await
+}
+
+#[cfg(test)]
+candid::export_service!();
+
+#[test]
+fn generate_bot_candid_from_rust() {
+    if std::env::var("RUMI_REGEN_BOT_DID").as_deref() == Ok("1") {
+        std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/liquidation_bot.did"), __export_service()).unwrap();
+    } else {
+        assert_eq!(__export_service().trim(), include_str!("../liquidation_bot.did").trim(),
+            "regenerate canonical bot Candid with RUMI_REGEN_BOT_DID=1");
+    }
 }

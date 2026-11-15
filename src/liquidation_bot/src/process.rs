@@ -1,3 +1,7 @@
+mod recovery202;
+pub use recovery202::{admin_execute_vault202_recovery, protected_claim_output};
+#[cfg(test)]
+pub(crate) use recovery202::fixture202;
 use candid::{CandidType, Deserialize};
 use ic_canister_log::log;
 
@@ -1086,6 +1090,8 @@ fn apply_confirmed_payment_totals_once(
         return false;
     }
 
+    if !crate::reserve::settle_once(bot_state, journal) { return false; }
+
     bot_state.stats.total_debt_covered_e8s = bot_state
         .stats
         .total_debt_covered_e8s
@@ -1808,7 +1814,11 @@ pub async fn process_pending() {
     }
     let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(10_000);
     let required_gross = required_ckusdc_gross(debt_covered, ckusdc_fee);
-    if reservation.to_transfer_e6 < required_gross {
+    let can_use_reserve_without_second_swap = state::read_state(|s| crate::reserve::can_cover(s,
+        required_gross.saturating_sub(reservation.to_transfer_e6),
+        bal_before_swap.saturating_add(reservation.recorded_received_e6), required_gross,
+        crate::reserve::economic_subsidy_cap(debt_covered, ckusdc_fee, config.max_slippage_bps)));
+    if reservation.to_transfer_e6 < required_gross && !can_use_reserve_without_second_swap {
         let shortfall = required_gross - reservation.to_transfer_e6;
         let remaining_icp = claim_icp_remaining(collateral_received_amount, swap_amount, swap_input_fees_e8s);
         let max_topup_icp = max_swap_input_for_claim(remaining_icp, swap::swap_input_fee_e8s(&config));
@@ -1900,7 +1910,21 @@ pub async fn process_pending() {
     let payment_allocation = allocate_claim_payment(&reservation, required_gross);
     let ckusdc_received = reservation.recorded_received_e6;
     let min_ckusdc_net = required_gross.saturating_sub(ckusdc_fee);
-    if reservation.to_transfer_e6 < required_gross {
+    let reserve_deficit = required_gross.saturating_sub(reservation.to_transfer_e6);
+    // A reserve is explicit authority, separate from measured claim proceeds.
+    // Fee/balance read failure keeps the claim held; no aggregate-wallet fallback.
+    let reserve_balance = if reserve_deficit > 0 {
+        match (swap::fetch_ledger_fee(config.ckusdc_ledger).await,
+               swap::balance_of_self_ckusdc(&config).await) {
+            (Ok(fee), Ok(balance)) if fee == ckusdc_fee => Some(balance),
+            _ => None,
+        }
+    } else { Some(0) };
+    let economic_cap = crate::reserve::economic_subsidy_cap(debt_covered, ckusdc_fee, config.max_slippage_bps);
+    let reserve_available = reserve_balance.is_some_and(|balance| state::read_state(|s| {
+        crate::reserve::can_cover(s, reserve_deficit, balance, required_gross, economic_cap)
+    }));
+    if reserve_deficit > 0 && !reserve_available {
         // Never transfer a short amount: that would credit the backend without
         // authorizing the debt write-down. The active claim and both asset
         // balances are left for explicit recovery instead.
@@ -1932,8 +1956,8 @@ pub async fn process_pending() {
         swap_input_fee_e8s: swap_input_fees_e8s,
         ckusdc_received_e6: ckusdc_received,
         held_surplus_e6: payment_allocation.held_surplus_e6,
-        gross_amount_e6: payment_allocation.gross_to_transfer_e6,
-        amount_e6: payment_allocation.gross_to_transfer_e6.saturating_sub(ckusdc_fee),
+        gross_amount_e6: required_gross,
+        amount_e6: min_ckusdc_net,
         fee_e6: ckusdc_fee,
         created_at_time,
         memo: payment_memo.clone(),
@@ -1942,10 +1966,14 @@ pub async fn process_pending() {
         shortfall_receipt_observed: false,
         shortfall_topup: None,
     };
-    state::mutate_state(|s| {
-        s.pending_claims.remove(&vault.vault_id);
-        s.pending_payments.insert(vault.vault_id, payment_journal.clone());
-    });
+    if let Err(error) = state::mutate_state(|s| {
+        crate::reserve::commit_payment(s, payment_journal.clone(), reserve_balance.unwrap_or(0), economic_cap)
+    }) {
+        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount,
+            debt_covered, swap_amount, ckusdc_received, collateral_price, effective_price,
+            slippage_bps, &format!("payment allocation refused before dispatch: {error}"));
+        return;
+    }
     state::save_config_to_stable();
 
     let transfer_result = swap::transfer_ckusdc_to_backend(
