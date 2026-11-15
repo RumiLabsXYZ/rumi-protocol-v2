@@ -63,7 +63,7 @@
       </span>
       <span class="sb-cta">See how →</span>
     {:else if phase === 'ended'}
-      <span class="sb-msg">Season 1 has ended — allocations are being finalized</span>
+      <span class="sb-msg">Season 1 has ended — view recorded Season 1 points and history</span>
       <span class="sb-cta">View →</span>
     {:else if phase === 'live' && $seasonStore.status && !$seasonStore.status.driver_enabled}
       <span class="sb-msg">Points processing is paused. Existing earned points are preserved.</span>
@@ -108,7 +108,7 @@
   }
   .sb-icon { display: inline-flex; color: #34d399; flex-shrink: 0; }
   .sb-tag { color: #6ee7b7; font-weight: 700; letter-spacing: 0.01em; flex-shrink: 0; }
-  .sb-sep { color: var(--rumi-text-muted); flex-shrink: 0; }
+  .sb-sep { color: var(--rumi-text-secondary); flex-shrink: 0; }
   .sb-msg {
     color: var(--rumi-text-secondary);
     flex: 1;

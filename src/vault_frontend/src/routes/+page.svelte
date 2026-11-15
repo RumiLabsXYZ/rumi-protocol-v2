@@ -24,8 +24,8 @@
   import { isVaultPullRecoveryError, requestSavedVaultReview } from '$lib/services/protocol/vaultPullRecoveryNavigation';
   import type { CollateralInfo } from '$lib/services/types';
 
-  let collateralAmount = 1;
-  let icusdAmount = 5;
+  let collateralAmount = 0;
+  let icusdAmount = 0;
   let errorMessage = '';
   let recoveryOwner = '';
   let successMessage = '';
@@ -116,7 +116,20 @@
     ? ((creditedCollateralAmount * collateralPrice) / icusdAmount) * 100 : creditedCollateralAmount > 0 ? Infinity : 0;
   $: formattedCollateralRatio = calculatedCollateralRatio === Infinity
     ? '∞' : calculatedCollateralRatio > 1000000 ? '>1,000,000' : formatNumber(calculatedCollateralRatio);
-  $: isValidCollateralRatio = calculatedCollateralRatio >= selectedMinCR * 100;
+  $: isValidCollateralRatio = Number.isFinite(projectedMintCr) && projectedMintCr >= selectedMinCR;
+  // The same explanation gates the button and the handler; an empty or invalid
+  // preview must never open a wallet flow. Existing service guards still apply.
+  $: hasBorrowQuote = Number.isFinite(collateralAmount) && collateralAmount > 0
+    && Number.isFinite(icusdAmount) && icusdAmount > 0
+    && Number.isFinite(collateralPrice) && collateralPrice > 0 && !!selectedCollateralInfo;
+  $: borrowInputMessage = (() => {
+    if (!Number.isFinite(collateralAmount) || collateralAmount <= 0) return 'Enter a collateral amount to get started.';
+    if (isNativeXrpSelected && creditedCollateralAmount <= 0) return `Enter more than ${xrpReserveEstimate} XRP to cover the XRPL account reserve.`;
+    if (!Number.isFinite(icusdAmount) || icusdAmount <= 0) return 'Enter the amount of icUSD you want to borrow.';
+    if (!hasBorrowQuote) return 'Waiting for collateral price and parameters. Please try again when they load.';
+    if (!isValidCollateralRatio) return `Add collateral or borrow less. This ${selectedSymbol} vault needs at least ${(selectedMinCR * 100).toFixed(0)}% collateralization to open.`;
+    return '';
+  })();
   // CR color: 3 states for text + marker
   $: crColorClass = calculatedCollateralRatio < selectedMinCR * 100 ? 'danger'
     : calculatedCollateralRatio < selectedMinCR * 1.234 * 100 ? 'caution' : 'safe';
@@ -238,7 +251,7 @@
   async function createVault() {
     if (xrpBorrowFlowActive) return;
     if (!$isConnected) { errorMessage = 'Please connect your wallet first'; return; }
-    if (collateralAmount <= 0) { errorMessage = 'Please enter a valid collateral amount'; return; }
+    if (borrowInputMessage) { errorMessage = borrowInputMessage; return; }
     // Native XRP: the reserve comes OUT of the sent amount, so anything at or
     // below the reserve credits zero collateral and the backend rejects it.
     if (isNativeXrpSelected && creditedCollateralAmount <= 0) {
@@ -272,7 +285,7 @@
           ? `Submitted: created ${vaultLabel} and borrowed ${icusdAmount} icUSD. (Wallet glitch ignored — confirmed on-chain.)`
           : `Successfully created ${vaultLabel} and borrowed ${icusdAmount} icUSD!`;
         if ($principal) await appDataStore.refreshAll($principal);
-        collateralAmount = 1; icusdAmount = 5;
+        collateralAmount = 0; icusdAmount = 0;
       } else { errorMessage = result.error || 'Failed to create vault'; }
     } catch (error) {
       console.error('Error creating vault:', error);
@@ -288,8 +301,8 @@
       : `Successfully created ${vaultLabel} and borrowed ${intent?.icusdAmount ?? icusdAmount} icUSD!`;
     xrpBorrowIntent = null;
     if ($principal) await appDataStore.refreshAll($principal);
-    collateralAmount = 1;
-    icusdAmount = 5;
+    collateralAmount = 0;
+    icusdAmount = 0;
   }
 </script>
 
@@ -321,7 +334,7 @@
               </div>
               <div class="input-wrap">
                 <input id="collateral-amount" type="number" bind:value={collateralAmount} min="0" step="0.01"
-                  class="icp-input form-input" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
+                  class="icp-input form-input" aria-describedby="borrow-input-help" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
                 <button class="token-selector"
                   disabled={xrpBorrowFlowActive}
                   on:click|stopPropagation={() => { showCollateralDropdown = !showCollateralDropdown; }}>
@@ -351,7 +364,7 @@
               <label for="icusd-amount" class="form-label">icUSD to Borrow</label>
               <div class="input-wrap">
                 <input id="icusd-amount" type="number" bind:value={icusdAmount} min="0" step="0.01"
-                  class="icp-input form-input form-input-with-max" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
+                  class="icp-input form-input form-input-with-max" aria-describedby="borrow-input-help" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
                 <div class="input-suffix-group">
                   {#if maxBorrow > 0}
                     <button class="max-btn" on:click={setMaxBorrow}>Max</button>
@@ -359,17 +372,18 @@
                   <span class="input-suffix-text">icUSD</span>
                 </div>
               </div>
-              {#if icusdAmount > 0}
-                <div class="fee-row"><span>Fee ({(effectiveMintFeeRate * 100).toFixed(2)}%)</span><span>{formatStableTx(calculatedBorrowFee)} icUSD</span></div>
+              {#if hasBorrowQuote}
+                <div class="fee-row"><span>One-time borrowing fee ({(effectiveMintFeeRate * 100).toFixed(2)}%)</span><span>{formatStableTx(calculatedBorrowFee)} icUSD</span></div>
                 <div class="fee-row"><span>You receive</span><span>{formatStableTx(calculatedIcusdAmount)} icUSD</span></div>
                 {#if rateCurve}
-                  <div class="fee-row"><span>Interest Rate</span><span>{(projectedMintRate * 100).toFixed(2)}% APR</span></div>
+                  <div class="fee-row"><span>Estimated interest APR</span><span>{(projectedMintRate * 100).toFixed(2)}%</span></div>
                 {/if}
+                <p class="form-hint">This quote includes current adjustments to the base rates. Interest can change over time.</p>
               {/if}
             </div>
 
             <!-- CR gauge + liquidation price -->
-            {#if collateralAmount > 0 && icusdAmount > 0}
+            {#if hasBorrowQuote}
               <div class="gauge-section">
                 <div class="gauge-header">
                   <span>Collateral Ratio</span>
@@ -387,9 +401,11 @@
                     style="left:{gaugePosition}%; background:{borrowGaugeColor}; box-shadow: 0 0 4px {borrowGaugeColor}80"></div>
                 </div>
                 <div class="gauge-labels">
-                  <span class="gauge-label-abs" style="left:{liqZone}%">liq</span>
+                  <span class="gauge-label-abs" style="left:{liqZone}%" title={`Liquidation threshold: ${(selectedLiqCR * 100).toFixed(0)}%`}>liq</span>
                   <span class="gauge-label-abs" style="right:0">300%+</span>
                 </div>
+
+                <p class="form-hint">Minimum to open: {(selectedMinCR * 100).toFixed(0)}% · Liquidation threshold: {(selectedLiqCR * 100).toFixed(0)}%</p>
 
                 <!-- Liquidation price -->
                 {#if liquidationPrice > 0}
@@ -405,6 +421,8 @@
                 {/if}
               </div>
             {/if}
+
+            <p id="borrow-input-help" class="form-hint" class:input-warning={hasBorrowQuote && !isValidCollateralRatio} aria-live="polite">{borrowInputMessage}</p>
 
             {#if errorMessage}
               <div class="msg-error" role="alert">
@@ -427,7 +445,7 @@
             <button
               class="btn-primary cta-button"
               on:click={createVault}
-              disabled={actionInProgress || xrpBorrowFlowActive || !$isConnected}
+              disabled={actionInProgress || xrpBorrowFlowActive || !$isConnected || !!borrowInputMessage}
             >
               {#if !$isConnected}Connect Wallet to Continue
               {:else if actionInProgress}Creating Vault…
@@ -447,6 +465,7 @@
 </div>
 
 <style>
+  .form-hint.input-warning { color: var(--rumi-danger); }
   .saved-request-link { margin-top: .5rem; padding: .6rem .8rem; border: 1px solid currentColor; border-radius: .5rem; color: inherit; background: transparent; cursor: pointer; }
 
   .page-container { max-width: 820px; margin: 0 auto; }
@@ -474,22 +493,22 @@
   .input-wrap { position: relative; }
   .form-input { width: 100%; padding-right: 5.5rem; }
   .form-input-with-max { padding-right: 7rem; }
-  .form-hint { font-size: 0.75rem; color: var(--rumi-text-muted); margin-top: 0.125rem; }
-  .fee-row { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--rumi-text-muted); }
+  .form-hint { font-size: 0.75rem; color: var(--rumi-text-secondary); margin-top: 0.125rem; }
+  .fee-row { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--rumi-text-secondary); }
 
   /* Input suffix group (Max + token label) */
   .input-suffix-group {
     position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%);
     display: flex; align-items: center; gap: 0.375rem;
   }
-  .input-suffix-text { font-size: 0.8125rem; color: var(--rumi-text-muted); }
+  .input-suffix-text { font-size: 0.8125rem; color: var(--rumi-text-secondary); }
   .max-btn {
-    font-size: 0.6875rem; font-weight: 600; color: var(--rumi-text-muted);
+    font-size: 0.6875rem; font-weight: 600; color: var(--rumi-text-secondary);
     background: var(--rumi-bg-surface2); border: 1px solid var(--rumi-border);
     border-radius: 0.25rem; padding: 0.125rem 0.375rem; cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
   }
-  .max-btn:hover { color: var(--rumi-text-primary); border-color: var(--rumi-text-muted); }
+  .max-btn:hover { color: var(--rumi-text-primary); border-color: var(--rumi-text-secondary); }
 
   /* Token selector (collateral dropdown) */
   .token-selector {
@@ -553,7 +572,7 @@
   }
   .gauge-labels {
     position: relative; height: 0.875rem;
-    font-size: 0.6875rem; color: var(--rumi-text-muted); margin-top: 0.25rem;
+    font-size: 0.6875rem; color: var(--rumi-text-secondary); margin-top: 0.25rem;
   }
   .gauge-label-abs { position: absolute; transform: translateX(-50%); }
   .gauge-label-abs:last-child { transform: none; }
@@ -583,7 +602,7 @@
   /* Airdrop points hint above the CTA */
   .points-hint {
     display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
-    font-size: 0.75rem; color: var(--rumi-text-muted);
+    font-size: 0.75rem; color: var(--rumi-text-secondary);
   }
 
   /* Dev gate */

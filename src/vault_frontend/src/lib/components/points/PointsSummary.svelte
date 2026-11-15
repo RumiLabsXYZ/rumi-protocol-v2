@@ -2,7 +2,7 @@
   /**
    * PointsSummary — the enrolled wallet's dashboard:
    *   tiles (points + rank) →
-   *   Earning now (live positions, engine-mirrored) →
+   *   Season 1 position status (live positions while scoring is open) →
    *   How you've earned (per-source ledger history) →
    *   Recent epochs (per-epoch timeline) →
    *   enrollment line.
@@ -39,8 +39,7 @@
   // `$state` rune isn't shadowed by a binding named `state`.
   let { state: pState, rank, detail, status, config, onRetry }: Props = $props();
 
-  // After season end the engine credits nothing, ever — the live panel must
-  // say so instead of claiming positions are still earning.
+  // This phase describes the season represented by these records, not other seasons.
   const seasonEnded = $derived(
     seasonState(status, config, BigInt(Date.now()) * 1_000_000n) === 'ended',
   );
@@ -116,10 +115,10 @@
     </div>
   </div>
 
-  <!-- ── Earning now ─────────────────────────────────────────────────── -->
+  <!-- ── Season 1 positions ─────────────────────────────────────────── -->
   <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
     <div class="flex items-baseline justify-between gap-3 mb-3">
-      <p class="text-sm font-medium text-gray-200">Earning now</p>
+      <p class="text-sm font-medium text-gray-200">{seasonEnded ? 'Season 1 positions' : 'Earning now'}</p>
       {#if !seasonEnded && live && live.rows.length > 0}
         <p class="text-xs text-gray-500">up to ≈{pts(live.weeklyEstimateUsdDays)} pts/week</p>
       {/if}
@@ -127,8 +126,7 @@
 
     {#if seasonEnded}
       <p class="text-sm text-gray-400">
-        Season 1 has ended — positions no longer accrue points. Your earned total above is final;
-        allocation and claiming details will be announced.
+        Season 1 has ended. Your recorded Season 1 points and earning history are shown here.
       </p>
     {:else if detail.loading}
       <p class="text-sm text-gray-400">Checking your current positions…</p>
@@ -198,7 +196,7 @@
                 {:else if s.meta.multiplier === null}
                   <span class="text-[10px] uppercase tracking-wider text-amber-300/90 border border-amber-300/30 rounded-full px-1.5 py-px whitespace-nowrap">rate unavailable</span>
                 {:else}
-                  <MultiplierBadge multiplier={s.meta.multiplier} />
+                  <MultiplierBadge multiplier={s.meta.multiplier} historical />
                 {/if}
               </span>
               <span class="text-sm text-gray-100 tabular-nums whitespace-nowrap">{formatPoints(s.points)}</span>
@@ -216,7 +214,11 @@
                   stopped after epoch {s.lastEpoch}{#if epochRangeByIndex(detail.epochs, s.lastEpoch)}&nbsp;({epochRangeByIndex(detail.epochs, s.lastEpoch)}){/if}
                 </span>
               {:else}
-                <span class="text-emerald-400/80">active</span>
+                {#if seasonEnded}
+                  <span class="text-gray-400/80">Recorded through epoch {s.lastEpoch}</span>
+                {:else}
+                  <span class="text-emerald-400/80">active</span>
+                {/if}
               {/if}
             </div>
           </li>

@@ -117,8 +117,8 @@
       <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
     </div>
   {:else if points.length === 0}
-    <div class="flex items-center justify-center text-gray-500 text-sm" style="height: {HEIGHT}px">
-      No data available
+    <div class="flex items-center justify-center text-sm" style="height: {HEIGHT}px; color: var(--rumi-text-secondary)">
+      {data.length === 0 ? 'No historical data available' : 'No history available for this range'}
     </div>
   {:else}
     <svg viewBox="0 0 {WIDTH} {HEIGHT}" class="w-full" preserveAspectRatio="xMidYMid meet">

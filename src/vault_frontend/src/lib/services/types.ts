@@ -1,4 +1,5 @@
 import type { Principal } from '@dfinity/principal';
+import type { NicpRedemptionClaim } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 
 const E8S = 100_000_000;
 
@@ -106,6 +107,7 @@ export interface VaultDTO {
  * Matches the regenerated Candid declarations.
  */
 export interface CandidVault {
+  nicp_redemption_claim?: [] | [NicpRedemptionClaim];
   vault_id: number;
   owner: string;
   borrowed_icusd_amount: number;

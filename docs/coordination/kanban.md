@@ -368,3 +368,18 @@ User authorizes protocol-controlled nICP redemption, retained debt, a public tra
 | V51-02 | Source verified | claim_accounting_review | Integrate claim accounting and spending exclusions | fixed ICP valuation, retained nICP terms, repayment-only, 33 frontend regressions; current deployed sunset/3USD fixes preserved |
 | V51-03 | Software published | root | Transparency notice and release evidence | exact backend/asset readbacks verified; claim=null, vault51 still1500 nICP; financial initiation remains manual user action; PR612 |
 | V51-04 | Passed | claim_custody_review | Independent custody review | exact dispatch, unknown outcomes, settlement attribution, no extra mint; final scoped compatibility/replay review passed |
+
+
+## CLARITY-20261115 — focused preview, no deployment
+
+Owner: Cassian. Rob authorized implementation preserving branding/layout and requires preview before live deployment. Base: verified SEC21 `e7b736c9`; branch `codex/rumi-clarity-preview`. Sonnet availability returned read-only tools, so narrow workers use GPT-6 Luna; Cassian integrates. No pricing, accounting, signing, eligibility, backend or release changes.
+
+| Card | State | Owner | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- |
+| CLARITY-01 | In progress | Cassian | Borrow validation/copy, readable text, claim presentation | Invalid borrow cannot start; fees and thresholds explained; existing brand/layout/transactions preserved. |
+| CLARITY-02 | In progress | Luna loading worker | ProtocolStats, ManualLiquidations loading-only, TvlChart | Initial loading/error is not rendered as final zero/partial totals; no arithmetic or action changes. |
+| CLARITY-03 | Review | Luna Points worker | Points labels/copy only | Historical and current-season language follows existing observable state; no unsupported Season 2/backfill claims. |
+
+Review evidence: pending targeted checks and actual local screenshots. Frontend build slot requested through Merritt. Merge/deployment held for Rob's review.
+
+CLARITY-04: Luna preview fixture worker, In progress; owns only temporary visual harness, real components + synthetic data and blocked financial methods. Same Sonnet read-only fallback. Cassian owns visual review.

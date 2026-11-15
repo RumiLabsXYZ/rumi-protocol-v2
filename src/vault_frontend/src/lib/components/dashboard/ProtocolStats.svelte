@@ -32,6 +32,11 @@
   let selfFetchedBorrowFee = 0;
   let ckusdtReserve = 0;
   let ckusdcReserve = 0;
+  let statusReadError = false;
+  let collateralTotalsState: 'loading' | 'refreshing' | 'ready' | 'unavailable' = 'loading';
+  let hasLoadedCollateralTotals = false;
+  let reservesState: 'loading' | 'refreshing' | 'ready' | 'unavailable' = 'loading';
+  let hasLoadedReserves = false;
   let refreshInterval: ReturnType<typeof setInterval>;
 
   // RMR and redemption fee
@@ -49,6 +54,7 @@
   const protocolPrincipal = Principal.fromText(CANISTER_IDS.PROTOCOL);
 
   async function fetchStatus() {
+    void fetchCkStableReserves();
     try {
       const [s, bFee, rFloor, rCeiling, rFloorCr, rCeilingCr, rFee] = await Promise.all([
         protocolService.getProtocolStatus(),
@@ -79,16 +85,19 @@
         reserveRedemptionsEnabled: Boolean(s.reserveRedemptionsEnabled),
         reserveRedemptionFee: Number(s.reserveRedemptionFee || 0),
       };
+      statusReadError = false;
       // Also fetch per-collateral config for ICP-specific values
-      await collateralStore.fetchSupportedCollateral();
+      await collateralStore.fetchSupportedCollateral().catch(() => {});
       // Compute per-collateral totals from all vaults
-      fetchCollateralTotals();
-      // Fetch ckStable reserves held by the protocol canister
-      fetchCkStableReserves();
-    } catch (e) { console.error('ProtocolStats fetch error:', e); }
+      void fetchCollateralTotals();
+    } catch (e) {
+      if (!selfFetchedStatus) statusReadError = true;
+      console.error('ProtocolStats fetch error:', e);
+    }
   }
 
   async function fetchCkStableReserves() {
+    reservesState = hasLoadedReserves ? 'refreshing' : 'loading';
     try {
       const [usdt, usdc] = await Promise.all([
         TokenService.getTokenBalance(CANISTER_IDS.CKUSDT_LEDGER, protocolPrincipal),
@@ -96,13 +105,19 @@
       ]);
       ckusdtReserve = Number(usdt) / 1e6; // ckUSDT = 6 decimals
       ckusdcReserve = Number(usdc) / 1e6; // ckUSDC = 6 decimals
-    } catch (e) { console.error('ckStable reserve fetch error:', e); }
+      hasLoadedReserves = true;
+      reservesState = 'ready';
+    } catch (e) {
+      reservesState = 'unavailable';
+      console.error('ckStable reserve fetch error:', e);
+    }
   }
 
   async function fetchCollateralTotals() {
+    collateralTotalsState = hasLoadedCollateralTotals ? 'refreshing' : 'loading';
     try {
       const totals = await publicActor.get_collateral_totals() as any[];
-      try { redemptionClaim = decodeNicpClaim(await publicActor.get_nicp_redemption_claim()); } catch { /* Older backend has no claim query. */ }
+      redemptionClaim = decodeNicpClaim(await publicActor.get_nicp_redemption_claim());
       const collaterals = get(collateralStore).collaterals;
       claimHaircut = collaterals.find(c => c.principal === 'buwm7-7yaaa-aaaar-qagva-cai')?.lstHaircut;
       collateralTotals = totals
@@ -126,7 +141,13 @@
           const bo = bi === -1 ? COLLATERAL_DISPLAY_ORDER.length : bi;
           return ao !== bo ? ao - bo : a.symbol.localeCompare(b.symbol);
         });
-    } catch (e) { console.error('CollateralTotals fetch error:', e); }
+      hasLoadedCollateralTotals = true;
+      collateralTotalsState = 'ready';
+    } catch (e) {
+      redemptionClaim = undefined;
+      collateralTotalsState = 'unavailable';
+      console.error('CollateralTotals fetch error:', e);
+    }
   }
 
   onMount(() => {
@@ -152,14 +173,19 @@
     ? collateralTotals.reduce((sum, ct) => sum + ct.amount * ct.price, 0)
     : (status?.totalIcpMargin || 0) * icpPrice)
     + (redemptionClaim ? nicpClaimValueUsd(redemptionClaim, icpPrice, claimHaircut) : 0);
+  $: collateralValueDisplay = collateralTotalsState === 'ready' || collateralTotalsState === 'refreshing'
+    ? `$${formatNumber(collateralValueUsd)}${collateralTotalsState === 'refreshing' ? ' · Updating…' : ''}`
+    : collateralTotalsState === 'unavailable' ? 'Unavailable' : '…';
   $: collateralPercent = (status?.totalIcusdBorrowed || 0) > 0
     ? (status?.totalCollateralRatio || 0) * 100
     : (status?.totalIcpMargin || 0) > 0 ? Infinity : 0;
-  $: formattedCR = collateralPercent === Infinity
-    ? '∞' : collateralPercent > 1000000 ? '>1M' : formatNumber(collateralPercent);
+  $: formattedCR = !status
+    ? statusReadError ? 'Unavailable' : '…'
+    : collateralPercent === Infinity
+      ? '∞' : collateralPercent > 1000000 ? '>1M' : formatNumber(collateralPercent);
   $: modeLabel = (() => {
     const m = status?.mode;
-    if (!m) return 'Unknown';
+    if (!m) return status ? 'Unknown' : statusReadError ? 'Unavailable' : '…';
     if (typeof m === 'string') return m === 'GeneralAvailability' ? 'Normal' : m;
     if (m.GeneralAvailability !== undefined) return 'Normal';
     if (m.Recovery !== undefined) return 'Recovery';
@@ -209,44 +235,63 @@
   <div class="stats-stack">
     <div class="stat-row">
       <span class="stat-label">Protocol CR</span>
-      <span class="stat-value">{formattedCR}%</span>
+      <span class="stat-value">{status ? `${formattedCR}%` : formattedCR}</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Collateral Value</span>
-      <span class="stat-value">${formatNumber(collateralValueUsd)}</span>
+      <span class="stat-value">{collateralValueDisplay}</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Total Borrowed</span>
-      <span class="stat-value">{formatStableDisplay(status?.totalIcusdBorrowed || 0)} icUSD</span>
+      <span class="stat-value">{status ? `${formatStableDisplay(status.totalIcusdBorrowed || 0)} icUSD` : statusReadError ? 'Unavailable' : '…'}</span>
     </div>
     <div class="stat-row">
       <span class="stat-label" title="Sunset collateral is excluded from this breakdown but remains included in system value and collateral ratio">Collateral (excl. sunset)</span>
       <span class="stat-value-stack">
-        {#if redemptionClaim && redemptionClaim.stage !== 'Adopted' && !redemptionClaim.releaseBlock && !redemptionClaim.releasePending}<span>{formatTokenBalance(redemptionClaim.icpAmount)} ICP redemption claim (reserved)</span>{/if}
-        {#if collateralTotals.length > 0}
+        {#if collateralTotalsState === 'loading'}
+          <span>Loading…</span>
+        {:else if collateralTotalsState === 'refreshing'}
+          <span>Updating…</span>
+        {:else if collateralTotalsState === 'unavailable'}
+          <span>Unavailable</span>
+        {:else}
+          {#if redemptionClaim && redemptionClaim.stage !== 'Adopted' && !redemptionClaim.releaseBlock && !redemptionClaim.releasePending}<span>{formatTokenBalance(redemptionClaim.icpAmount)} ICP redemption claim (reserved)</span>{/if}
+          {#if collateralTotals.length > 0}
           {#each visibleCollateralTotals as ct}
             <span><span class="collateral-dot" style="background:{ct.color}"></span> {formatTokenBalance(ct.amount)} {ct.symbol}</span>
           {:else}
             <span>—</span>
           {/each}
-        {:else}
-          <span>—</span>
+          {:else}
+            <span>—</span>
+          {/if}
         {/if}
       </span>
     </div>
-    {#if ckusdtReserve > 0 || ckusdcReserve > 0}
-      <div class="stat-row">
-        <span class="stat-label">Reserves</span>
-        <span class="stat-value-stack">
+    <div class="stat-row">
+      <span class="stat-label">Reserves</span>
+      <span class="stat-value-stack">
+        {#if reservesState === 'loading'}
+          <span>Loading…</span>
+        {:else if reservesState === 'refreshing'}
+          {#if ckusdtReserve > 0}<span>{formatStableDisplay(ckusdtReserve)} ckUSDT</span>{/if}
+          {#if ckusdcReserve > 0}<span>{formatStableDisplay(ckusdcReserve)} ckUSDC</span>{/if}
+          {#if ckusdtReserve === 0 && ckusdcReserve === 0}<span>—</span>{/if}
+          <span>Updating…</span>
+        {:else if reservesState === 'unavailable'}
+          <span>Unavailable</span>
+        {:else if ckusdtReserve > 0 || ckusdcReserve > 0}
           {#if ckusdtReserve > 0}
             <span>{formatStableDisplay(ckusdtReserve)} ckUSDT</span>
           {/if}
           {#if ckusdcReserve > 0}
             <span>{formatStableDisplay(ckusdcReserve)} ckUSDC</span>
           {/if}
-        </span>
-      </div>
-    {/if}
+        {:else}
+          <span>—</span>
+        {/if}
+      </span>
+    </div>
     <div class="stat-row">
       <span class="stat-label">RMR</span>
       <span class="stat-value">{(currentRmr * 100).toFixed(0)}%</span>
@@ -271,7 +316,7 @@
   <h4 class="group-heading">Parameters <span class="param-symbol">({paramLabel})</span></h4>
   <div class="stats-stack">
     <div class="stat-row">
-      <span class="stat-label">Min CR</span>
+      <span class="stat-label">Minimum opening CR</span>
       <span class="stat-value">{(minCR * 100).toFixed(0)}%</span>
     </div>
     <div class="stat-row">
@@ -287,11 +332,11 @@
       <span class="stat-value">{liqPenalty > 0 ? `${formatNumber(liqPenalty)}%` : '—'}</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Borrowing Fee</span>
+      <span class="stat-label">Base borrowing fee</span>
       <span class="stat-value">{formatNumber(paramBorrowFee)}%</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Base Interest</span>
+      <span class="stat-label">Base interest APR</span>
       <span class="stat-value">{interestApr > 0 ? `${formatNumber(interestApr * 100)}%` : '0%'}</span>
     </div>
   </div>
@@ -310,7 +355,7 @@
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--rumi-text-muted);
+    color: var(--rumi-text-secondary);
     margin-bottom: 0.625rem;
   }
   .param-symbol {
