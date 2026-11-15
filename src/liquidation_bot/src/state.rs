@@ -443,6 +443,9 @@ pub enum BotAdminAction {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct BotState {
+    /// Explicitly funded operator reserve. Absent legacy snapshots are inert.
+    #[serde(default)]
+    pub operator_reserve: Option<crate::reserve::OperatorReserve>,
     pub config: Option<BotConfig>,
     pub stats: BotStats,
     pub liquidation_events: Vec<BotLiquidationEvent>,

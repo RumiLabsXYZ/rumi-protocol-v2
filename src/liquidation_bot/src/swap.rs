@@ -454,6 +454,14 @@ pub async fn verify_vault158_swap_input_receipt(
     memo: &[u8],
     created_at_time: u64,
 ) -> Result<(), String> {
+    let block = fetch_native_block(ledger, block_index).await?;
+    native_icp_blocks::verify_swap_input_transfer(
+        &block, sender, pool, amount_e8s, fee_e8s, memo, created_at_time,
+    )
+}
+
+/// Fetch one exact native ledger block, following only its advertised archive.
+pub(crate) async fn fetch_native_block(ledger: Principal, block_index: u64) -> Result<native_icp_blocks::Block, String> {
     let request = native_icp_blocks::GetBlocksArgs { start: block_index, length: 1 };
     let request_bytes = candid::Encode!(&request)
         .map_err(|error| format!("could not encode ICP query_blocks request: {error}"))?;
@@ -478,9 +486,7 @@ pub async fn verify_vault158_swap_input_receipt(
             blocks.remove(0)
         }
     };
-    native_icp_blocks::verify_swap_input_transfer(
-        &block, sender, pool, amount_e8s, fee_e8s, memo, created_at_time,
-    )
+    Ok(block)
 }
 
 /// Prepare and persist this exact ICRC tuple before dispatch. `gross` includes
