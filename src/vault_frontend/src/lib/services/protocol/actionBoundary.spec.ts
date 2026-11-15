@@ -92,8 +92,9 @@ import {
   parseIcusdAmountToE8s,
 } from './apiClient';
 import type { AcceptedRedemptionOffer } from '$lib/utils/redemptionPreview';
-import { walletOperations, StaleActionSessionError, type ActionBoundContext } from './walletOperations';
+import { captureActionBoundContext, walletOperations, StaleActionSessionError, type ActionBoundContext } from './walletOperations';
 import { clearRawSnapshots } from './rawSnapshotCache';
+import { parseExactTokenAmount } from '../stabilityPoolConversion';
 
 const CKDOGE_LEDGER_ID = CANISTER_IDS.CKDOGE_LEDGER;
 const BACKEND_ID = CONFIG.currentCanisterId;
@@ -152,6 +153,8 @@ let backendActor: {
   ack_vault_operation: ReturnType<typeof vi.fn>;
   cancel_vault_operation: ReturnType<typeof vi.fn>;
   borrow_from_vault: ReturnType<typeof vi.fn>;
+  withdraw_partial_collateral: ReturnType<typeof vi.fn>;
+  withdraw_and_close_vault: ReturnType<typeof vi.fn>;
   redeem_quoted: ReturnType<typeof vi.fn>;
   get_my_liquidity_withdrawal_status: ReturnType<typeof vi.fn>;
   withdraw_liquidity_with_id: ReturnType<typeof vi.fn>;
@@ -216,6 +219,8 @@ beforeEach(() => {
       return { Ok: operation_id };
     }),
     borrow_from_vault: vi.fn().mockResolvedValue({ Ok: { block_index: 55n, fee_amount_paid: 1_000n } }),
+    withdraw_partial_collateral: vi.fn().mockResolvedValue({ Ok: 56n }),
+    withdraw_and_close_vault: vi.fn().mockResolvedValue({ Ok: [57n] }),
     redeem_quoted: vi.fn().mockResolvedValue({ Ok: {
       icusd_block_index: 88n,
       fee_paid_e8s: 1_000n,
@@ -946,6 +951,43 @@ describe('ApiClient.openVaultAndBorrowBound — Oisy ICRC-112 batched path', () 
 });
 
 describe('ApiClient.addMarginToVault V2 collateral verification', () => {
+  it('dispatches 0.29 from 8-decimal input as exactly 29,000,000 raw units', async () => {
+    const ledgerId = CANISTER_IDS.CKDOGE_LEDGER;
+    vi.spyOn(ApiClient, 'getVaultById').mockResolvedValue({ vaultId: 5, collateralType: ledgerId } as any);
+    vi.mocked(collateralStore.getCollateralInfo).mockReturnValue({
+      ledgerCanisterId: ledgerId, symbol: 'ckDOGE', decimals: 8, ledgerFee: 10_000, minCollateralDeposit: 0,
+    } as any);
+    backendActor.add_margin_to_vault_v2.mockImplementation(async args => {
+      vaultStatusOverride = { Ok: { acknowledged_through: 0n, active: [{
+        operation_id: args.operation_id,
+        request: { AddMargin: { vault_id: args.vault_id, amount_e8s: args.amount } },
+        vault_id: 5n,
+        phase: { Completed: { result: { AddMargin: { vault_id: 5n, block_index: 42n } } } },
+      }] } };
+      return { Ok: 42n };
+    });
+
+    const raw = parseExactTokenAmount('0.29', 8);
+    const result = await ApiClient.addMarginToVaultBound(makeCtx(PRINCIPAL_A), 5, raw, ledgerId);
+
+    expect(result.success).toBe(true);
+    expect(backendActor.add_margin_to_vault_v2).toHaveBeenCalledWith({
+      operation_id: 1n, vault_id: 5n, amount: 29_000_000n,
+    });
+    expect(ledgerActor.icrc2_approve).toHaveBeenCalledWith(expect.objectContaining({ amount: 29_020_000n }));
+  });
+
+  it('rejects excess raw-input precision before approval or backend dispatch', async () => {
+    const ledgerId = CANISTER_IDS.CKDOGE_LEDGER;
+    const dispatchInput = async (input: string) => ApiClient.addMarginToVaultBound(
+      makeCtx(PRINCIPAL_A), 5, parseExactTokenAmount(input, 8), ledgerId,
+    );
+
+    await expect(dispatchInput('0.290000001')).rejects.toThrow('at most 8 decimal places');
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+  });
+
   it('reports a confirmed recovery liability without claiming collateral was added or repeating payment', async () => {
     const request = { AddMargin: { vault_id: 5n, amount_e8s: 123_456_789n } };
     vaultStatusOverride = { Ok: { acknowledged_through: 0n, active: [{
@@ -1357,5 +1399,41 @@ describe('saved request recovery adapter', () => {
     await expect(ApiClient.getVaultPullRecovery()).rejects.toThrow();
     expect(backendActor.cancel_vault_operation).not.toHaveBeenCalled();
     expect(localStorage.getItem(key)).toBe(original);
+  });
+});
+
+describe('legacy vault action session boundary', () => {
+  it.each([
+    ['partial withdrawal', 'principal'] as const,
+    ['withdraw and close', 'principal'] as const,
+    ['partial withdrawal', 'same-principal reconnect'] as const,
+    ['withdraw and close', 'provider switch'] as const,
+  ])('does not dispatch %s when %s changes during actor creation', async (action, transition) => {
+    const ctx = captureActionBoundContext(PRINCIPAL_A);
+    mocks.getActor.mockImplementationOnce(async () => {
+      if (transition === 'principal') setLivePrincipal(PRINCIPAL_B);
+      if (transition === 'same-principal reconnect') walletSessionGeneration.update((value) => value + 1);
+      if (transition === 'provider switch') currentWalletType.set(WALLET_TYPES.OISY);
+      return backendActor;
+    });
+
+    const result = action === 'partial withdrawal'
+      ? await ApiClient.withdrawPartialCollateralBound(ctx, 7, 123_456n)
+      : await ApiClient.withdrawCollateralAndCloseVaultBound(ctx, 7);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Wallet session changed');
+    expect(backendActor.withdraw_partial_collateral).not.toHaveBeenCalled();
+    expect(backendActor.withdraw_and_close_vault).not.toHaveBeenCalled();
+  });
+
+  it('captureActionBoundContext invalidates on same-principal reconnect and provider round-trip', () => {
+    const ctx = captureActionBoundContext(PRINCIPAL_A);
+    expect(ctx.assertCurrent()).toBe(true);
+    walletSessionGeneration.update((value) => value + 1);
+    expect(ctx.assertCurrent()).toBe(false);
+    walletSessionGeneration.set(0);
+    currentWalletType.set(WALLET_TYPES.OISY);
+    expect(ctx.assertCurrent()).toBe(false);
   });
 });

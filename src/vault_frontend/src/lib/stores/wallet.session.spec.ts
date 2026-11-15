@@ -12,6 +12,17 @@ import { Principal } from '@dfinity/principal';
 // Deterministic non-anonymous synthetic principal (the anonymous principal
 // would let auth-not-actually-invoked bugs pass these assertions silently).
 const TEST_PRINCIPAL = Principal.fromUint8Array(new Uint8Array([1, 2, 3, 4, 5]));
+const OTHER_PRINCIPAL = Principal.fromUint8Array(new Uint8Array([6, 7, 8, 9, 10]));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 // vi.mock factories are hoisted above all top-level imports, so the fake
 // `auth` store must be built from primitives inside vi.hoisted rather than
@@ -207,7 +218,7 @@ describe('walletStore.connect() — fresh login visible connection state (wallet
     expect(state.principal?.toString()).toBe(TEST_PRINCIPAL.toString());
     expect(state.icon).toBe('/wallets/01InfinityMarkHEX.svg');
 
-    expect(mocks.setWalletState).toHaveBeenCalledWith(true, expect.anything());
+    expect(mocks.setWalletState).toHaveBeenCalledWith(true, expect.anything(), expect.any(Number));
     expect(mocks.setWalletState).not.toHaveBeenCalledWith(false, null);
 
     // Background refresh must actually have been kicked off (proving the
@@ -234,8 +245,47 @@ describe('walletStore.connect() — fresh login visible connection state (wallet
     expect(state.loading).toBe(false);
     expect(state.principal?.toString()).toBe(TEST_PRINCIPAL.toString());
 
-    expect(mocks.setWalletState).toHaveBeenCalledWith(true, expect.anything());
+    expect(mocks.setWalletState).toHaveBeenCalledWith(true, expect.anything(), expect.any(Number));
     expect(mocks.setWalletState).not.toHaveBeenCalledWith(false, null);
+  });
+
+  it('does not let an old wallet refresh error overwrite a newer session balance state', async () => {
+    const oldFetch = deferred<{ icpBalance: bigint; icusdBalance: bigint }>();
+    const newFetch = deferred<{ icpBalance: bigint; icusdBalance: bigint }>();
+    mocks.authConnect
+      .mockResolvedValueOnce({ owner: TEST_PRINCIPAL, balance: 0n })
+      .mockResolvedValueOnce({ owner: OTHER_PRINCIPAL, balance: 0n });
+    mocks.fetchBalances.mockImplementation((principal: Principal) =>
+      principal.toText() === TEST_PRINCIPAL.toText() ? oldFetch.promise : newFetch.promise,
+    );
+    mocks.fetchProtocolStatus.mockResolvedValue({ lastIcpRate: 1 });
+
+    await walletStore.connect('internet-identity');
+    expect(mocks.fetchBalances).toHaveBeenCalledWith(TEST_PRINCIPAL, true, undefined, expect.any(Function), undefined);
+
+    await walletStore.connect('internet-identity');
+    const session = get(walletSessionGeneration);
+    const currentContext = {
+      expectedPrincipalText: OTHER_PRINCIPAL.toText(),
+      assertCurrent: () => get(walletStore).principal?.toText() === OTHER_PRINCIPAL.toText()
+        && get(walletSessionGeneration) === session,
+    };
+    const newRefresh = walletStore.refreshBalance({ skipCache: true }, currentContext);
+
+    // The late failure is an ordinary endpoint error, but belongs to the old
+    // account/session and must neither publish an error nor affect the new one.
+    oldFetch.reject(new Error('old account network failure'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(get(walletStore).principal?.toText()).toBe(OTHER_PRINCIPAL.toText());
+    expect(get(walletStore).error).toBeNull();
+
+    newFetch.resolve({ icpBalance: 22n, icusdBalance: 33n });
+    await newRefresh;
+    expect(get(walletStore).principal?.toText()).toBe(OTHER_PRINCIPAL.toText());
+    expect(get(walletStore).balance).toBe(22n);
+    expect(get(walletStore).tokenBalances.ICUSD.raw).toBe(33n);
+    expect(get(walletStore).error).toBeNull();
   });
 });
 
@@ -276,7 +326,7 @@ describe('walletStore.refreshWallet() — session identity transition', () => {
       .toBeLessThan(mocks.pnpDisconnect.mock.invocationCallOrder[0]);
     expect(get(walletStore).isConnected).toBe(true);
     expect(get(walletStore).principal?.toText()).toBe(ownerB.toText());
-    expect(mocks.setWalletState).toHaveBeenLastCalledWith(true, ownerB);
+    expect(mocks.setWalletState).toHaveBeenLastCalledWith(true, ownerB, expect.any(Number));
   });
 
   it('fails closed and clears the published identity if reconnect fails', async () => {
@@ -289,7 +339,7 @@ describe('walletStore.refreshWallet() — session identity transition', () => {
 
     expect(mocks.beginWalletSessionTransition).toHaveBeenCalledOnce();
     expect(get(walletStore)).toMatchObject({ isConnected: false, principal: null, loading: false });
-    expect(mocks.setWalletState).toHaveBeenLastCalledWith(false, null);
+    expect(mocks.setWalletState).toHaveBeenLastCalledWith(false, null, expect.any(Number));
   });
 });
 

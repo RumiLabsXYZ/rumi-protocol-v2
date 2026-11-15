@@ -1,6 +1,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Principal } from '@dfinity/principal';
 import type { ProtocolStatusDTO, VaultDTO } from '../services/types';
+import { registerWalletSessionTransitionListener } from '../services/walletSessionTransitions';
 
 /**
  * CENTRALIZED DATA STORE
@@ -76,6 +77,23 @@ const CACHE_DURATION = 5000; // 5 seconds
 
 function createAppDataStore() {
   const { subscribe, set, update } = writable<AppDataState>(INITIAL_STATE);
+  let walletSessionScope = 'session:initial';
+  let walletSessionEpoch = 0;
+  let walletSessionTransitioning = false;
+  const activeBalancePromises = new Map<string, Promise<{ icpBalance: bigint; icusdBalance: bigint }>>();
+  const activeUserVaultPromises = new Map<string, Promise<VaultDTO[]>>();
+
+  function isCurrentUserRequest(
+    principal: Principal,
+    scope: string,
+    epoch: number,
+    context?: { assertCurrent: () => boolean },
+  ): boolean {
+    const state = get(appDataStore);
+    return !walletSessionTransitioning && walletSessionScope === scope && walletSessionEpoch === epoch &&
+      state.walletConnected && state.walletPrincipal?.toText() === principal.toText() &&
+      (!context || context.assertCurrent());
+  }
 
   return {
     subscribe,
@@ -216,77 +234,69 @@ function createAppDataStore() {
     /**
      * USER VAULTS - Single source of truth
      */
-    async fetchUserVaults(principal: Principal, forceRefresh = false): Promise<VaultDTO[]> {
-      return new Promise((resolve, reject) => {
-        const requestKey = `user_vaults_${principal.toString()}`; // Move requestKey outside
-        
-        update(state => {
-          const now = Date.now();
-          
-          // If request already active, wait for it
-          if (state.activeRequests.has(requestKey)) {
-            console.log('🔄 User vaults request already in progress...');
-            const checkCompletion = () => {
-              const currentState = get(appDataStore);
-              if (!currentState.activeRequests.has(requestKey)) {
-                resolve(currentState.userVaults);
-              } else {
-                setTimeout(checkCompletion, 100);
-              }
+    async fetchUserVaults(
+      principal: Principal,
+      forceRefresh = false,
+      context?: { assertCurrent: () => boolean },
+    ): Promise<VaultDTO[]> {
+      const requestScope = walletSessionScope;
+      const requestEpoch = walletSessionEpoch;
+      const requestKey = `user_vaults_${principal.toString()}_${requestScope}_${requestEpoch}`;
+      const isCurrent = () => isCurrentUserRequest(principal, requestScope, requestEpoch, context);
+      if (!isCurrent()) throw new Error('Wallet session changed before user vaults could be refreshed.');
+
+      const inFlight = activeUserVaultPromises.get(requestKey);
+      if (inFlight) return inFlight;
+
+      const state = get(appDataStore);
+      const now = Date.now();
+      if (!forceRefresh && state.walletPrincipal?.toText() === principal.toText() &&
+          now - state.userVaultsLastFetch < CACHE_DURATION) {
+        return state.userVaults;
+      }
+
+      update(current => ({
+        ...current,
+        activeRequests: new Set([...current.activeRequests, requestKey]),
+        userVaultsLoading: true,
+        userVaultsError: null,
+      }));
+
+      let trackedRequest!: Promise<VaultDTO[]>;
+      trackedRequest = this._fetchUserVaultsFromAPI(principal)
+        .then(userVaults => {
+          update(current => {
+            const activeRequests = new Set(current.activeRequests);
+            activeRequests.delete(requestKey);
+            if (!isCurrent()) return { ...current, activeRequests };
+            return {
+              ...current,
+              activeRequests,
+              userVaults,
+              userVaultsLoading: false,
+              userVaultsError: null,
+              userVaultsLastFetch: Date.now(),
             };
-            checkCompletion();
-            return state;
-          }
-
-          // Use cache if valid and not forcing refresh
-          if (!forceRefresh && 
-              state.userVaults.length >= 0 && // Allow empty arrays to be cached
-              state.walletPrincipal?.toString() === principal.toString() &&
-              (now - state.userVaultsLastFetch) < CACHE_DURATION) {
-            console.log('📦 Using cached user vaults');
-            resolve(state.userVaults);
-            return state;
-          }
-
-          // Start new request
-          console.log('🆕 Fetching fresh user vaults...');
-          state.activeRequests.add(requestKey);
-          
-          return {
-            ...state,
-            userVaultsLoading: true,
-            userVaultsError: null,
-          };
-        });
-
-        // Make the actual API call
-        this._fetchUserVaultsFromAPI(principal)
-          .then(userVaults => {
-            update(state => {
-              state.activeRequests.delete(requestKey);
-              resolve(userVaults);
-              return {
-                ...state,
-                userVaults,
-                userVaultsLoading: false,
-                userVaultsError: null,
-                userVaultsLastFetch: Date.now(),
-              };
-            });
-          })
-          .catch(error => {
-            update(state => {
-              state.activeRequests.delete(requestKey); // Now requestKey is accessible
-              const errorMsg = error.message || 'Failed to fetch user vaults';
-              reject(new Error(errorMsg));
-              return {
-                ...state,
-                userVaultsLoading: false,
-                userVaultsError: errorMsg,
-              };
-            });
           });
-      });
+          return userVaults;
+        })
+        .catch(error => {
+          update(current => {
+            const activeRequests = new Set(current.activeRequests);
+            activeRequests.delete(requestKey);
+            if (!isCurrent()) return { ...current, activeRequests };
+            const errorMsg = error instanceof Error ? error.message : 'Failed to fetch user vaults';
+            return { ...current, activeRequests, userVaultsLoading: false, userVaultsError: errorMsg };
+          });
+          throw error;
+        })
+        .finally(() => {
+          if (activeUserVaultPromises.get(requestKey) === trackedRequest) {
+            activeUserVaultPromises.delete(requestKey);
+          }
+        });
+      activeUserVaultPromises.set(requestKey, trackedRequest);
+      return trackedRequest;
     },
 
     /**
@@ -301,107 +311,156 @@ function createAppDataStore() {
       principal: Principal,
       forceRefresh = false,
       opts?: { skipCache?: boolean },
+      isRequestCurrent: () => boolean = () => true,
+      requestScope?: string,
     ): Promise<{ icpBalance: bigint; icusdBalance: bigint }> {
-      return new Promise((resolve, reject) => {
-        const requestKey = `balances_${principal.toString()}`; // Move requestKey outside
-        
-        update(state => {
-          const now = Date.now();
-          
-          // If request already active, wait for it
-          if (state.activeRequests.has(requestKey)) {
-            console.log('🔄 Balance request already in progress...');
-            const checkCompletion = () => {
-              const currentState = get(appDataStore);
-              if (!currentState.activeRequests.has(requestKey)) {
-                resolve({ 
-                  icpBalance: currentState.icpBalance || 0n, 
-                  icusdBalance: currentState.icusdBalance || 0n 
-                });
-              } else {
-                setTimeout(checkCompletion, 100);
-              }
+      // Bound refreshes pass a unique request identity; unbound callers share
+      // within the current wallet session so useful same-session dedupe stays.
+      const requestKey = `balances_${principal.toString()}_${requestScope ?? walletSessionScope}`;
+      const inFlight = activeBalancePromises.get(requestKey);
+      if (inFlight) return inFlight;
+
+      const state = get(appDataStore);
+      if (walletSessionTransitioning || !state.walletConnected ||
+          state.walletPrincipal?.toText() !== principal.toText() || !isRequestCurrent()) {
+        throw new Error('Wallet session changed before balances could be refreshed.');
+      }
+      const requestSessionScope = walletSessionScope;
+      const requestSessionEpoch = walletSessionEpoch;
+      const isStillCurrent = () => !walletSessionTransitioning &&
+        walletSessionScope === requestSessionScope && walletSessionEpoch === requestSessionEpoch &&
+        get(appDataStore).walletConnected &&
+        get(appDataStore).walletPrincipal?.toText() === principal.toText() && isRequestCurrent();
+      const now = Date.now();
+      if (!forceRefresh && state.icpBalance !== null && state.icusdBalance !== null &&
+          state.walletPrincipal?.toString() === principal.toString() &&
+          now - state.balancesLastFetch < CACHE_DURATION) {
+        return { icpBalance: state.icpBalance, icusdBalance: state.icusdBalance };
+      }
+
+      update(current => ({
+        ...current,
+        activeRequests: new Set([...current.activeRequests, requestKey]),
+        balancesLoading: true,
+        balancesError: null,
+      }));
+
+      let trackedRequest!: Promise<{ icpBalance: bigint; icusdBalance: bigint }>;
+      trackedRequest = this._fetchBalancesFromAPI(principal, opts)
+        .then(result => {
+          update(current => {
+            const activeRequests = new Set(current.activeRequests);
+            activeRequests.delete(requestKey);
+            // A response from an old owner/session retires only its own marker;
+            // it cannot write cache data or clear the newer request's loading bit.
+            if (!isStillCurrent()) return { ...current, activeRequests };
+            return {
+              ...current,
+              activeRequests,
+              icpBalance: result.icpBalance,
+              icusdBalance: result.icusdBalance,
+              balancesLoading: false,
+              balancesError: null,
+              balancesLastFetch: Date.now(),
             };
-            checkCompletion();
-            return state;
-          }
-
-          // Use cache if valid and not forcing refresh
-          if (!forceRefresh && 
-              state.icpBalance !== null && 
-              state.icusdBalance !== null &&
-              state.walletPrincipal?.toString() === principal.toString() &&
-              (now - state.balancesLastFetch) < CACHE_DURATION) {
-            console.log('📦 Using cached balances');
-            resolve({ icpBalance: state.icpBalance, icusdBalance: state.icusdBalance });
-            return state;
-          }
-
-          // Start new request
-          console.log('🆕 Fetching fresh balances...');
-          state.activeRequests.add(requestKey);
-          
-          return {
-            ...state,
-            balancesLoading: true,
-            balancesError: null,
-          };
-        });
-
-        // Make the actual API call
-        this._fetchBalancesFromAPI(principal, opts)
-          .then(({ icpBalance, icusdBalance }) => {
-            update(state => {
-              state.activeRequests.delete(requestKey);
-              resolve({ icpBalance, icusdBalance });
-              return {
-                ...state,
-                icpBalance,
-                icusdBalance,
-                balancesLoading: false,
-                balancesError: null,
-                balancesLastFetch: Date.now(),
-              };
-            });
-          })
-          .catch(error => {
-            update(state => {
-              state.activeRequests.delete(requestKey); // Now requestKey is accessible
-              const errorMsg = error.message || 'Failed to fetch balances';
-              reject(new Error(errorMsg));
-              return {
-                ...state,
-                balancesLoading: false,
-                balancesError: errorMsg,
-              };
-            });
           });
-      });
+          return result;
+        })
+        .catch(error => {
+          update(current => {
+            const activeRequests = new Set(current.activeRequests);
+            activeRequests.delete(requestKey);
+            if (!isStillCurrent()) return { ...current, activeRequests };
+            const errorMsg = error instanceof Error ? error.message : 'Failed to fetch balances';
+            return { ...current, activeRequests, balancesLoading: false, balancesError: errorMsg };
+          });
+          throw error;
+        })
+        .finally(() => {
+          if (activeBalancePromises.get(requestKey) === trackedRequest) activeBalancePromises.delete(requestKey);
+        });
+      activeBalancePromises.set(requestKey, trackedRequest);
+      return trackedRequest;
     },
 
     /**
      * WALLET CONNECTION STATE
      */
-    setWalletState(connected: boolean, principal: Principal | null) {
-      update(state => ({
-        ...state,
-        walletConnected: connected,
-        walletPrincipal: principal,
-        // Clear user-specific data when wallet disconnects
-        ...(!connected && {
+    setWalletState(connected: boolean, principal: Principal | null, sessionScope?: string | number) {
+      walletSessionTransitioning = false;
+      update(state => {
+        const principalChanged = state.walletPrincipal?.toText() !== principal?.toText();
+        const nextSessionScope = sessionScope === undefined
+          ? `owner:${principal?.toText() ?? 'disconnected'}`
+          : `session:${String(sessionScope)}`;
+        const sessionChanged = principalChanged || nextSessionScope !== walletSessionScope || state.walletConnected !== connected;
+        if (sessionChanged) {
+          walletSessionScope = nextSessionScope;
+          walletSessionEpoch += 1;
+        }
+        const activeRequests = sessionChanged
+          ? new Set([...state.activeRequests].filter(key => !key.startsWith('balances_') && !key.startsWith('user_vaults_')))
+          : state.activeRequests;
+        return {
+          ...state,
+          activeRequests,
+          walletConnected: connected,
+          walletPrincipal: principal,
+          // Never show one owner's balances after another owner connects.
+          // Reset the aggregate loading bit on owner changes; only the current
+          // owner's guarded request may set it again.
+          ...(sessionChanged && {
+            icpBalance: null,
+            icusdBalance: null,
+            balancesError: null,
+            balancesLoading: false,
+            balancesLastFetch: 0,
+          }),
+          // User vaults belong to a wallet session, even when reconnecting the same principal.
+          ...(sessionChanged && {
           userVaults: [],
+          userVaultsLoading: false,
+          userVaultsError: null,
           userVaultsLastFetch: 0,
+          }),
+          // Clear wallet data when disconnected.
+          ...(!connected && {
           icpBalance: null,
           icusdBalance: null,
+          balancesError: null,
+          balancesLoading: false,
           balancesLastFetch: 0,
-        })
+          })
+        };
+      });
+    },
+
+    /** Invalidate user-specific in-flight requests while preserving published wallet connection state. */
+    invalidateWalletSessionTransition(generation: number): void {
+      walletSessionTransitioning = true;
+      walletSessionScope = `transition:${generation}`;
+      walletSessionEpoch += 1;
+      update(state => ({
+        ...state,
+        activeRequests: new Set([...state.activeRequests].filter(
+          key => !key.startsWith('balances_') && !key.startsWith('user_vaults_'),
+        )),
+        userVaults: [],
+        userVaultsLoading: false,
+        userVaultsError: null,
+        userVaultsLastFetch: 0,
+        icpBalance: null,
+        icusdBalance: null,
+        balancesLoading: false,
+        balancesError: null,
+        balancesLastFetch: 0,
       }));
     },
 
     /**
      * FORCE REFRESH ALL DATA
      */
-    async refreshAll(principal?: Principal): Promise<void> {
+    async refreshAll(principal?: Principal, context?: { assertCurrent: () => boolean }): Promise<void> {
       const currentState = get(appDataStore);
       const targetPrincipal = principal || currentState.walletPrincipal;
       
@@ -413,11 +472,14 @@ function createAppDataStore() {
       console.log('🔄 Force refreshing all data...');
       
       try {
+        const requestScope = walletSessionScope;
+        const requestEpoch = walletSessionEpoch;
+        const isCurrent = () => isCurrentUserRequest(targetPrincipal, requestScope, requestEpoch, context);
         await Promise.all([
           this.fetchProtocolStatus(true),
           this.fetchCollateralTotals(true),
-          this.fetchUserVaults(targetPrincipal, true),
-          this.fetchBalances(targetPrincipal, true),
+          this.fetchUserVaults(targetPrincipal, true, context),
+          this.fetchBalances(targetPrincipal, true, undefined, isCurrent, `${requestScope}:${requestEpoch}`),
         ]);
         console.log('✅ All data refreshed successfully');
       } catch (error) {
@@ -429,6 +491,8 @@ function createAppDataStore() {
      * CLEAR ALL DATA
      */
     clearAll(): void {
+      walletSessionScope = `session:cleared:${++walletSessionEpoch}`;
+      walletSessionTransitioning = false;
       set(INITIAL_STATE);
     },
 
@@ -491,6 +555,7 @@ function createAppDataStore() {
 }
 
 export const appDataStore = createAppDataStore();
+registerWalletSessionTransitionListener((generation) => appDataStore.invalidateWalletSessionTransition(generation));
 
 // DERIVED STORES - These are reactive and update automatically
 export const protocolStatus = derived(appDataStore, $store => $store.protocolStatus);

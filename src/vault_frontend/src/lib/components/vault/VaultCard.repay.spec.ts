@@ -10,10 +10,11 @@ describe('VaultCard repayment input contract', () => {
 
     // icUSD uses e8s raw units, so a value such as 1.995 must be valid in the
     // browser input and must remain the same value selected by Max.
-    expect(source).toContain('repayAmount = floorTo(maxRepayable, 8)');
-    expect(source).toContain('$: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, 8) : undefined;');
+    expect(source).toContain("$: repayInputDecimals = isCkStableRepay ? 6 : 8;");
+    expect(source).toContain('repayAmount = floorTo(maxRepayable, repayInputDecimals)');
+    expect(source).toContain('$: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, repayInputDecimals) : undefined;');
     expect(source).toContain('Max: {repayInputMax}');
-    expect(source).toContain('min="0" max={repayInputMax} step="0.00000001"');
+    expect(source).toContain('min="0" max={repayInputMax} step={repayInputStep}');
   });
 
   it('keeps a wallet-limited icUSD max on the ordinary repay path', () => {

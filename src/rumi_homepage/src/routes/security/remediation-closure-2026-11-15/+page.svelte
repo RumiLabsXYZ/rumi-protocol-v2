@@ -17,8 +17,8 @@
 
   const widerRows = [
     { component: '3pool', hash: 'c17b4e71…6117615', detail: 'Source-bound October 23 release. Current pool totals are readable, with zero pending claims and 561 retained donation receipts.' },
-    { component: 'Points', hash: '352e269e…0aacf9', detail: 'Epoch 18 is closed through delayed legacy-B recovery. No epoch is open and the driver is disabled; current source-byte provenance remains to be reconstructed.' },
-    { component: 'Cycle Sentinel', hash: 'a863dacb…0afad8', detail: 'No active public self-recovery delivery risk. Canonical source contains the unresolved write-off safeguard; current source-byte provenance remains to be reconstructed.' }
+    { component: 'Points', hash: '352e269e…0aacf9', detail: 'Epoch 18 is closed through delayed legacy-B recovery. The installed artifact is an exact hash match and PR #608 is the strongest source candidate; the source-to-build chain remains partial.' },
+    { component: 'Cycle Sentinel', hash: 'a863dacb…0afad8', detail: 'No active public self-recovery delivery risk. The installed hash exactly matches the preserved production artifact built from PR #662 head 5f5ff064.' }
   ];
 
   const fixes = [
@@ -38,7 +38,9 @@
   const followThrough = [
     'Keep the legacy Stability Pool burn case held until exact authenticated archive proof exists.',
     'Preserve the 60 fail-closed Treasury tombstones for legacy rows that lack exact ledger provenance.',
-    'Bind the current Points and Cycle Sentinel module hashes to exact reviewed source.',
+    'Complete the remaining Points source-to-build provenance record.',
+    'Install and read back production candidates built from the remediated Rust lockfile; current installed hashes predate the dependency updates.',
+    'Merge and publish the wallet-session and exact-amount frontend fixes, then verify the served assets with real wallet session changes.',
     'Continue periodic bounded inventory checks; an empty current queue is not proof that no unknown historical obligation exists.'
   ];
 </script>

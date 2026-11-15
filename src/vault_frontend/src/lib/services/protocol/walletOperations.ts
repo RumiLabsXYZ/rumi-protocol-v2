@@ -2,6 +2,7 @@ import { Principal } from '@dfinity/principal';
 import { Actor, HttpAgent, AnonymousIdentity } from "@dfinity/agent";
 import { get } from 'svelte/store';
 import { walletStore } from '../../stores/wallet';
+import { currentWalletType, walletSessionGeneration } from '../auth';
 import { CONFIG } from '../../config';
 import { permissionManager } from '../PermissionManager';
 import type { UserBalances } from '../types';
@@ -128,6 +129,26 @@ export interface ActionBoundContext {
    * after every internal await a bound action performs.
    */
   assertCurrent: () => boolean;
+}
+
+/** Capture the current owner, wallet provider, and session generation for one UI action. */
+export function captureActionBoundContext(expectedPrincipalText?: string): ActionBoundContext {
+  const wallet = get(walletStore);
+  const walletType = get(currentWalletType);
+  const generation = get(walletSessionGeneration);
+  const owner = wallet.principal?.toText();
+  if (!wallet.isConnected || wallet.loading || !walletType || !owner ||
+      (expectedPrincipalText !== undefined && owner !== expectedPrincipalText)) {
+    throw new StaleActionSessionError('Connect the vault owner wallet before submitting this action.');
+  }
+  return {
+    expectedPrincipalText: owner,
+    assertCurrent: () => {
+      const live = get(walletStore);
+      return live.isConnected && !live.loading && live.principal?.toText() === owner &&
+        get(currentWalletType) === walletType && get(walletSessionGeneration) === generation;
+    },
+  };
 }
 
 /**
@@ -643,7 +664,7 @@ export class walletOperations {
       const approvalResult = await icpActor.icrc2_approve({
         amount,
         spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-        expires_at: [],
+        expires_at: largeApprovalExpiry(),
         expected_allowance: [],
         memo: [],
         fee: [],
@@ -666,7 +687,7 @@ export class walletOperations {
     const approvalResult = await ledgerActor.icrc2_approve({
       amount,
       spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-      expires_at: [],
+      expires_at: largeApprovalExpiry(),
       expected_allowance: [],
       memo: [],
       fee: [],

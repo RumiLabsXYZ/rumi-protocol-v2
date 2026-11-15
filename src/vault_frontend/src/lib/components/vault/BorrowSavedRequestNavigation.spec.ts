@@ -13,13 +13,19 @@ vi.mock('$lib/stores/collateralStore',()=>({collateralStore:{subscribe:fx.collat
 vi.mock('$lib/stores/appDataStore',()=>({appDataStore:{subscribe:fx.app.subscribe, fetchProtocolStatus:fx.fetch, refreshAll:fx.refresh},protocolStatus:fx.derived(fx.app,v=>v.protocolStatus),isLoadingProtocol:fx.store(false)}));
 vi.mock('$lib/stores/developer',()=>({developerAccess:fx.store(true)}));
 vi.mock('$lib/stores/seasonStore',()=>({seasonStore:{ensureLoaded:vi.fn()},earningActive:fx.store(false)}));
-vi.mock('$lib/services/protocol',()=>({protocolService:{openVaultAndBorrow:fx.open}}));
-vi.mock('$lib/services/protocol/apiClient',()=>({ApiClient:{getVaultPullRecovery:fx.inspect,resumeSavedVaultCollateralPull:fx.resume,cancelSavedVaultCollateralPull:fx.cancel}}));
+vi.mock('$lib/services/protocol',()=>({protocolService:{openVaultAndBorrowBound:fx.open}}));
+vi.mock('$lib/services/protocol/apiClient',()=>({
+ ApiClient:{getVaultPullRecovery:fx.inspect,resumeSavedVaultCollateralPull:fx.resume,cancelSavedVaultCollateralPull:fx.cancel},
+ parseIcusdAmountToE8s:(amount:string)=>{const [whole='0',fraction='']=amount.split('.');return BigInt(whole)*100_000_000n+BigInt((fraction+'00000000').slice(0,8));},
+}));
 vi.mock('$lib/services/auth',()=>({currentWalletType:fx.store('internet-identity'),walletSessionGeneration:fx.store(0),WALLET_TYPES:{OISY:'oisy'}}));
 vi.mock('$lib/services/oisySigner',()=>({openOisySignerChannel:vi.fn()}));
 vi.mock('$lib/stores/vaultStore',()=>({vaultStore:Object.assign(fx.store({vaults:[]}),{refreshVaults:fx.refresh})}));
 vi.mock('$lib/stores/toast',()=>({toastStore:{success:vi.fn(),error:vi.fn()}}));
-vi.mock('$lib/config',()=>({CANISTER_IDS:{ICP_LEDGER:'ryjl3-tyaaa-aaaaa-aaaba-cai'}}));
+vi.mock('$lib/config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('$lib/config')>();
+  return { ...actual, CANISTER_IDS: { ...actual.CANISTER_IDS, ICP_LEDGER: 'ryjl3-tyaaa-aaaaa-aaaba-cai' } };
+});
 vi.mock('$lib/protocol',()=>({MINIMUM_CR:1.5,LIQUIDATION_CR:1.33}));
 vi.mock('$lib/utils/nativeXrpBorrowFlow',()=>({isNativeXrpCollateral:()=>false,xrpCreditedCollateral:()=>0,XRPL_BASE_RESERVE_XRP:1}));
 vi.mock('$lib/components/dashboard/ProtocolStats.svelte',async()=>({default:(await import('../../../tests/vault-recovery-fixtures/Quiet.svelte')).default}));
@@ -37,7 +43,7 @@ beforeEach(()=>{
  fx.wallet.set({isConnected:true,loading:false,principal:owner,tokenBalances:{ICP:{raw:1_000_000_000n,formatted:'10'}}});
  fx.collateral.set({collaterals:[{principal:'ryjl3-tyaaa-aaaaa-aaaba-cai',symbol:'ICP',decimals:8,price:10,minimumCr:1.5,liquidationCr:1.33,ledgerFee:10_000,status:'Active',color:'#0ff',interestRateApr:0.05}]});
  fx.app.set({protocolStatus:{lastIcpRate:10,borrowingFeeCurveResolved:[]}});
- fx.open.mockResolvedValue({success:false,error}); fx.inspect.mockResolvedValue({intent,status:{active:[],acknowledged_through:2n}});
+ fx.open.mockResolvedValue({kind:'dispatched_err',vaultId:null,blockIndex:null,partialZeroDebtVaultId:null,errorMessage:error}); fx.inspect.mockResolvedValue({intent,status:{active:[],acknowledged_through:2n}});
  target=document.createElement('div'); document.body.append(target);
 });
 afterEach(async()=>{for(const instance of instances) await unmount(instance);instances=[];target.remove();});
@@ -55,13 +61,13 @@ it('gives the actual ICP form error a direct read-only route to the exact saved 
  expect(fx.open).toHaveBeenCalledOnce(); expect(fx.resume).not.toHaveBeenCalled(); expect(fx.cancel).not.toHaveBeenCalled();
 });
 it('keeps healthy successful borrowing free of extra recovery controls',async()=>{
- fx.open.mockResolvedValue({success:true,vaultId:215}); instances.push(mount(Page,{target})); flushSync();
+ fx.open.mockResolvedValue({kind:'dispatched_ok',vaultId:215,blockIndex:1n,partialZeroDebtVaultId:null,errorMessage:null}); instances.push(mount(Page,{target})); flushSync();
  button('Create Vault & Borrow icUSD')!.click();
  await vi.waitFor(()=>expect(target.textContent).toContain('Successfully created vault #215'));
  expect(button('Review saved request')).toBeUndefined(); expect(fx.inspect).not.toHaveBeenCalled();
 });
 it('does not offer saved-request navigation for an unrelated validation error',async()=>{
- fx.open.mockResolvedValue({success:false,error:'Service temporarily unavailable'}); instances.push(mount(Page,{target})); flushSync();
+ fx.open.mockResolvedValue({kind:'dispatched_err',vaultId:null,blockIndex:null,partialZeroDebtVaultId:null,errorMessage:'Service temporarily unavailable'}); instances.push(mount(Page,{target})); flushSync();
  button('Create Vault & Borrow icUSD')!.click();
  await vi.waitFor(()=>expect(target.textContent).toContain('Service temporarily unavailable'));
  expect(button('Review saved request')).toBeUndefined();

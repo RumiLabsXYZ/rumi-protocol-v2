@@ -2,6 +2,8 @@ import type { Writable } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
 import { Principal } from '@dfinity/principal';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const mocks = vi.hoisted(() => ({ getSubmitted: vi.fn(), openChannel: vi.fn(), acknowledge: vi.fn(), recover: vi.fn() }));
 vi.mock('$lib/services/protocol/apiClient', () => ({ ApiClient: {
@@ -29,6 +31,11 @@ import { VAULT_PULL_STATUS_EVENT } from '$lib/services/protocol/vaultOperationJo
 let component: ReturnType<typeof mount>;
 let target: HTMLElement;
 const owner = Principal.selfAuthenticating(new Uint8Array([1, 2, 3]));
+
+it('binds both post-recovery vault-list refreshes to the captured action session', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/lib/components/vault/VaultPullRecoveryBanner.svelte'), 'utf8');
+  expect(source.match(/await vaultStore\.refreshVaults\(balanceContext\);/g)).toHaveLength(2);
+});
 
 beforeEach(() => {
   mocks.getSubmitted.mockReset().mockResolvedValue(null);

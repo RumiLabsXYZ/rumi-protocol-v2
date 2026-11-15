@@ -10,6 +10,7 @@
   import { savedVaultRequestActions, savedVaultRequestSummary } from '$lib/services/protocol/vaultPullRecoveryDetails';
   import { toastStore } from '$lib/stores/toast';
   import { isCurrentVaultPullStatusRead } from '$lib/services/protocol/vaultPullRecoveryViewState';
+  import { runConfirmedActionRefresh } from '$lib/services/protocol/postActionRefresh';
 
   import { VAULT_PULL_REVIEW_EVENT } from '$lib/services/protocol/vaultPullRecoveryNavigation';
 
@@ -208,6 +209,7 @@
     const sessionAtClick = $walletSessionGeneration;
     const current = () => action === actionEpoch && ownerAtClick === owner
       && walletTypeAtClick === $currentWalletType && sessionAtClick === $walletSessionGeneration;
+    const balanceContext = { expectedPrincipalText: ownerAtClick, assertCurrent: current };
     busy = true;
     actionNotice = '';
     try {
@@ -223,10 +225,12 @@
         if (!current()) return;
         actionNotice = 'The request is retired. It may have been resolved elsewhere; refresh your vaults and balance. This does not reverse an approval or transfer.';
       }
-      await refresh();
-      if (!current()) return;
-      await vaultStore.refreshVaults();
-      if (current()) walletStore.refreshBalance({ skipCache: true });
+      await runConfirmedActionRefresh('Saved vault recovery action', balanceContext, async () => {
+        await refresh();
+        if (!current()) return;
+        await vaultStore.refreshVaults(balanceContext);
+        if (current()) await walletStore.refreshBalance({ skipCache: true }, balanceContext);
+      }, (message) => { if (current()) actionNotice = message; });
     } catch (error) {
       if (current()) statusReadError = error instanceof Error ? error.message : 'The saved request remains held. Refresh status before another action.';
     } finally {
@@ -298,6 +302,7 @@
     const principalAtClick = $walletStore.principal;
     const current = () => action === actionEpoch && ownerAtClick === owner
       && walletTypeAtClick === $currentWalletType && sessionAtClick === $walletSessionGeneration;
+    const balanceContext = { expectedPrincipalText: ownerAtClick, assertCurrent: current };
     busy = true;
     try {
       // Open from the click stack before the first await. Oisy requires its
@@ -312,8 +317,10 @@
       }
       toastStore.success(`Recovered vault operation ${submitted?.operationId.toString() ?? ''}.`, 8000);
       blockIndex = '';
-      await vaultStore.refreshVaults();
-      if (current()) walletStore.refreshBalance({ skipCache: true });
+      await runConfirmedActionRefresh('Vault operation recovery', balanceContext, async () => {
+        await vaultStore.refreshVaults(balanceContext);
+        if (current()) await walletStore.refreshBalance({ skipCache: true }, balanceContext);
+      }, (message) => { if (current()) actionNotice = message; });
     } catch (error) {
       if (current()) toastStore.error(error instanceof Error ? error.message : 'Vault operation remains held.', 8000);
     } finally {

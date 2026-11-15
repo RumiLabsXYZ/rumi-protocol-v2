@@ -105,11 +105,13 @@ const fx = vi.hoisted(() => {
     icon: '',
     tokenBalances: {} as Record<string, { raw: bigint; formatted: string; usdValue: number | null }>,
   });
+  const walletGeneration = makeStore(1);
   const collateralState = makeStore({ collaterals: [] as unknown[], loading: false });
   const appDataState = makeStore({ protocolStatus: null as unknown, userVaults: [] as unknown[] });
 
   return {
     walletState,
+    walletGeneration,
     collateralState,
     appDataState,
     makeDerived,
@@ -202,7 +204,7 @@ vi.mock('$lib/services/protocol/apiClient', () => ({
 vi.mock('$lib/services/auth', () => ({
   WALLET_TYPES: { PLUG: 'plug', INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' },
   currentWalletType: { subscribe: (run: (value: string) => void) => { run('plug'); return () => {}; } },
-  walletSessionGeneration: { subscribe: (run: (value: number) => void) => { run(1); return () => {}; } },
+  walletSessionGeneration: fx.walletGeneration,
 }));
 
 vi.mock('$lib/services/ckdogeMinterActors', () => ({
@@ -315,6 +317,7 @@ beforeEach(() => {
   localStorage.clear();
   installFakeLocksManager();
   resetWalletState();
+  fx.walletGeneration.set(1);
   fx.collateralState.set({ collaterals: [fakeCollateralInfo()], loading: false });
   fx.appDataState.set({
     protocolStatus: {
@@ -594,6 +597,23 @@ describe('/doge/borrow — account switching mid-flight', () => {
     await settle();
     expect((q('.dbw-qr') as HTMLImageElement)?.src).toContain('fresh-b');
   });
+
+  it('ignores an in-flight address read after auth refresh changes generation but keeps the same principal', async () => {
+    const address = deferred<string>();
+    fx.getPublicMinterActor.mockResolvedValue({
+      get_doge_address: vi.fn(() => address.promise),
+      get_minter_info: vi.fn(async () => fakeMinterInfo()),
+    });
+    connectAs(PRINCIPAL_A);
+    renderPage(); await settle();
+    findButtonByText('Continue with this loan')!.click(); await settle();
+    expect(host.textContent).toContain('Send DOGE to your address');
+
+    fx.walletGeneration.set(2);
+    address.resolve('STALE_DOGE_ADDRESS_AFTER_REFRESH');
+    await settle();
+    expect(host.textContent).not.toContain('STALE_DOGE_ADDRESS_AFTER_REFRESH');
+  });
 });
 
 describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
@@ -681,6 +701,36 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     const remainingToastIds = readToasts().map((toast) => toast.id);
     expect(remainingToastIds).toContain(unrelatedError);
     expect(remainingToastIds).not.toContain(staleError);
+  });
+
+  it('does not refresh user data when global wallet session changes during a confirmed borrow', async () => {
+    fx.collateralState.set({ collaterals: [fakeCollateralInfo({ ledgerFee: 0 })], loading: false });
+    connectAs(PRINCIPAL_A);
+    fx.getPublicMinterActor.mockResolvedValue({
+      get_doge_address: vi.fn(async () => 'DsessionBoundaryAddress000000001'),
+      get_minter_info: vi.fn(async () => fakeMinterInfo()),
+    });
+    fx.updateDogeBalanceForOwner.mockResolvedValue(fakeMintedUtxoResult(17n, 100_000_000_000n));
+    renderPage(); await settle();
+    findButtonByText('Continue with this loan')!.click(); await settle();
+    findButtonByText('I sent the DOGE')!.click(); await settle();
+    findButtonByText('Continue to confirm borrow')!.click(); await settle();
+
+    const pendingOpen = deferred<any>();
+    fx.openVaultAndBorrowBound.mockReturnValueOnce(pendingOpen.promise);
+    findButtonByText('Confirm and borrow')!.click();
+    await settle();
+    expect(fx.openVaultAndBorrowBound).toHaveBeenCalledOnce();
+
+    // The principal text is unchanged, but auth has ended this wallet session.
+    fx.walletGeneration.set(2);
+    pendingOpen.resolve({
+      kind: 'dispatched_ok', vaultId: 71, blockIndex: 12, partialZeroDebtVaultId: null,
+      errorMessage: null, approvalMayHaveMutated: true,
+      submittedCollateralRaw: 100_000_000_000n, submittedIcusdRaw: 5_000_000_000n,
+    });
+    await settle();
+    expect(fx.refreshAll).not.toHaveBeenCalled();
   });
 
   it('reproduces the reported bug: a wallet holding exactly 52 ckDOGE submits the fee-adjusted amount instead of erroring InsufficientFunds', async () => {

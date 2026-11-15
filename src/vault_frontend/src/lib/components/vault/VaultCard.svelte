@@ -4,7 +4,6 @@
   import type { Vault } from '../../services/types';
   import { protocolService } from '../../services/protocol';
   import { vaultStore } from '../../stores/vaultStore';
-  import { protocolManager } from '../../services/ProtocolManager';
   import { CANISTER_IDS } from '../../config';
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { interpolateMultiplier, computeProjectedRate } from '../../utils/interpolate';
@@ -15,7 +14,11 @@
   import { collateralStore } from '../../stores/collateralStore';
   import { TokenService } from '../../services/tokenService';
   import { toastStore } from '../../stores/toast';
-  import { ApiClient } from '../../services/protocol/apiClient';
+  import { captureActionBoundContext } from '../../services/protocol/walletOperations';
+  import type { ActionBoundContext } from '../../services/protocol/walletOperations';
+  import { parseExactTokenAmount } from '../../services/stabilityPoolConversion';
+  import { ApiClient, parseIcusdAmountToE8s } from '../../services/protocol/apiClient';
+  import { runConfirmedActionRefresh } from '../../services/protocol/postActionRefresh';
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
   import XrpExistingDeposit from './XrpExistingDeposit.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
@@ -623,16 +626,18 @@
   function setMaxRepay() {
     if (isProcessing) return;
     if (maxRepayable > 0) {
-      repayAmount = floorTo(maxRepayable, 8);
+      repayAmount = floorTo(maxRepayable, repayInputDecimals);
       repayMaxSelected = true;
       repayMaxAdjusted = false;
     }
   }
 
-  // icUSD is an 8-decimal token. Keep the native number input's constraint at
-  // token precision so a Max value such as 1.995 remains a valid entry, while
-  // the max attribute reflects the same floored amount passed to the API.
-  $: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, 8) : undefined;
+  // icUSD debt uses e8s, while ckUSDC/ckUSDT wallets use six-decimal ledger
+  // units. Keep Max and the native input constraint on the selected token's
+  // exact precision so the UI never generates an amount the bound path rejects.
+  $: repayInputDecimals = isCkStableRepay ? 6 : 8;
+  $: repayInputStep = isCkStableRepay ? '0.000001' : '0.00000001';
+  $: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, repayInputDecimals) : undefined;
 
   // A backend refresh can lower the interpolated debt and its partial-repay cap.
   // Only lower an untouched Max selection; never rewrite typed amounts, raise
@@ -684,8 +689,15 @@
       toastStore.error('Adding collateral is temporarily paused while safe recovery for an in-flight vault pull is finalized. No approval or transfer was started.', 8000);
       return;
     }
-    const amount = parseFloat(addCollateralAmount);
-    if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
+    const amountText = addCollateralAmount.trim();
+    let amountRaw: bigint;
+    try {
+      amountRaw = parseExactTokenAmount(addCollateralAmount, collateralDecimals);
+    } catch {
+      toastStore.error(`Enter a valid ${collateralSymbol} amount with at most ${collateralDecimals} decimal places`, 8000);
+      return;
+    }
+    if (amountRaw <= 0n) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
     if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     const principalAtClick = $walletStore.principal;
@@ -695,19 +707,25 @@
       && $walletStore.principal?.toText() === ownerAtClick
       && $currentWalletType === walletAtClick && $walletSessionGeneration === sessionAtClick;
     try {
+      const actionContext = captureActionBoundContext(ownerAtClick);
       // Open the existing signer channel in the click before any query/queue wait.
       if (walletAtClick === WALLET_TYPES.OISY && principalAtClick) await openOisySignerChannel(principalAtClick);
       if (!current()) throw new Error('Wallet session changed. No new top-up was submitted.');
-      const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
-      if (!current()) return;
+      const result = await protocolService.addMarginToVaultBound(actionContext, vault.vaultId, amountRaw, vaultCollateralType);
       if (result.success) {
         const msg = result.oisyResilient
-          ? `Added ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
-          : `Added ${amount} ${collateralSymbol}`;
+          ? `Added ${amountText} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
+          : `Added ${amountText} ${collateralSymbol}`;
         toastStore.success(msg, 8000); addCollateralAmount = '';
-        await vaultStore.refreshVault(vault.vaultId);
-        walletStore.refreshBalance({ skipCache: true });
+        await runConfirmedActionRefresh('Collateral deposit', actionContext,
+          async () => {
+            await vaultStore.refreshVault(vault.vaultId, actionContext);
+            if (actionContext.assertCurrent()) await walletStore.refreshBalance({ skipCache: true }, actionContext);
+          },
+          (message) => toastStore.info(message, 12000));
         dispatch('updated');
+      } else if (!current()) {
+        toastStore.info('The top-up did not report success and the wallet session changed. Reconnect the submitting wallet and check vault status before considering another submission.', 12000);
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
@@ -728,7 +746,10 @@
     if (withdrawOverMax) { toastStore.error(`Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ${collateralSymbol}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount, collateralDecimals);
+      const ctx = captureActionBoundContext(vault.owner);
+      const result = await protocolService.withdrawPartialCollateralBound(
+        ctx, vault.vaultId, parseExactTokenAmount(withdrawAmount, collateralDecimals)
+      );
       if (result.success) {
         // Native-XRP withdraw creates a settle-able XrpClaim (the XRP does NOT land in
         // an IC wallet) — say so and don't refresh an IC-side balance that won't change.
@@ -738,9 +759,15 @@
             ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
             : `Withdrew ${amount} ${collateralSymbol}`;
         toastStore.success(msg, 8000); withdrawAmount = '';
-        await vaultStore.refreshVault(vault.vaultId);
-        if (!isNativeXrp) walletStore.refreshBalance({ skipCache: true });
+        await runConfirmedActionRefresh('Withdrawal', ctx,
+          async () => {
+            await vaultStore.refreshVault(vault.vaultId, ctx);
+            if (!isNativeXrp && ctx.assertCurrent()) await walletStore.refreshBalance({ skipCache: true }, ctx);
+          },
+          (message) => toastStore.info(message, 12000));
         dispatch('updated');
+      } else if (!ctx.assertCurrent()) {
+        toastStore.info(`The withdrawal did not report success and the wallet session changed. Reconnect the submitting wallet and check vault status before considering another submission. ${result.error || ''}`, 12000);
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
@@ -755,19 +782,24 @@
     if (borrowOverMax || borrowCrInvalid) { toastStore.error(`Max: ${formatStableDisplay(maxBorrowable)} icUSD`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
-      const result = await protocolService.borrowFromVault(vault.vaultId, amount);
-      if (result.success) {
-        const msg = result.oisyResilient
-          ? `Borrowed ${amount} icUSD (wallet glitch ignored — operation confirmed on-chain).`
-          : `Borrowed ${amount} icUSD`;
+      const ctx = captureActionBoundContext(vault.owner);
+      const result = await protocolService.borrowFromVaultBound(ctx, vault.vaultId, parseIcusdAmountToE8s(borrowAmount));
+      if (result.kind === 'dispatched_ok') {
+        const msg = `Borrowed ${amount} icUSD`;
         toastStore.success(msg, 8000); borrowAmount = '';
-        await vaultStore.refreshVault(vault.vaultId);
+        await runConfirmedActionRefresh('Borrow', ctx,
+          async () => {
+            await vaultStore.refreshVault(vault.vaultId, ctx);
+            if (ctx.assertCurrent()) await walletStore.refreshBalance({ skipCache: true }, ctx);
+          },
+          (message) => toastStore.info(message, 12000));
         // This vault's borrow changed the collateral's aggregate debt: refresh the
         // ceiling headroom so the Max reflects the new protocol-wide total.
         appDataStore.fetchCollateralTotals(true).catch(() => {});
-        walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
-      } else { toastStore.error(result.error || 'Failed', 8000); }
+      } else if (result.kind === 'ambiguous_transport' || !ctx.assertCurrent()) {
+        toastStore.info(`The borrow outcome needs a status check before another submission. Reconnect the submitting wallet and refresh its vault.${result.errorMessage ? ` ${result.errorMessage}` : ''}`, 12000);
+      } else { toastStore.error(result.errorMessage || 'Borrow did not complete.', 10000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isProcessing = false; }
   }
@@ -775,38 +807,64 @@
   let claimPayoutBlock = '';
   async function handleClaimAction(action: 'refresh' | 'withdraw' | 'reconcile') {
     clearMessages(); isProcessing = true;
+    let ctx: ActionBoundContext | null = null;
     try {
+      const actionContext = captureActionBoundContext(vault.owner);
+      ctx = actionContext;
       if (action === 'reconcile' && !/^[0-9]+$/.test(claimPayoutBlock)) throw new Error('Enter a valid ICP ledger block number.');
       await ApiClient.vault51ClaimAction(action, vault.owner, action === 'reconcile' ? BigInt(claimPayoutBlock) : undefined);
-      await vaultStore.refreshVaults();
-      await walletStore.refreshBalance({ skipCache: true });
+      await runConfirmedActionRefresh('Claim action', actionContext, async () => {
+        await vaultStore.refreshVaults(actionContext);
+        if (actionContext.assertCurrent()) await walletStore.refreshBalance({ skipCache: true }, actionContext);
+      },
+        (message) => toastStore.info(message, 12000));
       dispatch('updated');
       toastStore.success(action === 'refresh' ? 'Redemption status refreshed.' : 'ICP withdrawal recorded.', 8000);
     } catch (err) {
-      toastStore.error(`Action not confirmed: ${err instanceof Error ? err.message : 'Unknown error'}. Refresh claim status before retrying.`, 12000);
-      await vaultStore.refreshVaults().catch(() => {});
+      toastStore.error(`Claim action was not confirmed: ${err instanceof Error ? err.message : 'Unknown error'}. Check claim status before submitting it again.`, 12000);
+      if (ctx?.assertCurrent()) await vaultStore.refreshVaults(ctx).catch(() => {});
     } finally { isProcessing = false; }
   }
 
   async function handleRepay() {
-    const amount = parseFloat(repayAmount);
-    if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
+    let amountRaw: bigint;
+    try {
+      amountRaw = repayTokenType === 'icUSD'
+        ? parseIcusdAmountToE8s(repayAmount)
+        : parseExactTokenAmount(repayAmount, 6) * 100n;
+    } catch (error) {
+      toastStore.error(error instanceof Error ? error.message : 'Enter a valid amount', 8000);
+      return;
+    }
+    if (amountRaw <= 0n) { toastStore.error('Enter a valid amount', 8000); return; }
+    const amount = Number(amountRaw) / E8S;
     // The fixed 0.1 icUSD floor still applies to partial repays (anti-spam guarantee on
     // the backend). The compound `repay_and_close_vault` path bypasses it so
     // stuck-zone vaults can be cleared — match that here.
-    if (!isRepayAndClose && !claimFullRepaySelected && amount < MIN_REPAY) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
+    if (!isRepayAndClose && !claimFullRepaySelected && amountRaw < MIN_REPAY_E8S) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
     if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
+    const principalAtClick = $walletStore.principal;
+    const ownerAtClick = principalAtClick?.toText();
+    const walletAtClick = $currentWalletType, sessionAtClick = $walletSessionGeneration;
+    const current = () => $walletStore.isConnected && !$walletStore.loading
+      && $walletStore.principal?.toText() === ownerAtClick
+      && $currentWalletType === walletAtClick && $walletSessionGeneration === sessionAtClick;
     try {
+      const ctx = captureActionBoundContext(ownerAtClick);
+      // Preserve Oisy's click-bound signer channel before any internal actor or
+      // allowance work, then fail closed if that session changed while opening.
+      if (walletAtClick === WALLET_TYPES.OISY && principalAtClick) await openOisySignerChannel(principalAtClick);
+      if (!current()) throw new Error('Wallet session changed. No new repayment was submitted.');
       let result;
       if (isRepayAndClose) {
         // Compound: repay full debt + withdraw all collateral + close vault in
         // one backend call (one Oisy consent screen instead of three).
-        result = await protocolManager.repayAndCloseVault(vault.vaultId, amount);
+        result = await protocolService.repayAndCloseVaultBound(ctx, vault.vaultId, amountRaw);
       } else if (repayTokenType === 'icUSD') {
-        result = await protocolManager.repayToVault(vault.vaultId, amount);
+        result = await protocolService.repayToVaultBound(ctx, vault.vaultId, amountRaw);
       } else {
-        result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
+        result = await protocolService.repayToVaultWithStableBound(ctx, vault.vaultId, amountRaw, repayTokenType);
       }
       if (result.success) {
         const actionLabel = isRepayAndClose
@@ -822,15 +880,40 @@
         await new Promise(r => setTimeout(r, 1000));
         // For non-XRP repay-and-close, refresh the full vault list because the
         // vault is gone. Native-XRP vaults remain open.
-        if (isRepayAndClose && !isNativeXrp) {
-          await vaultStore.refreshVaults();
-        } else {
-          await vaultStore.refreshVault(vault.vaultId);
-        }
+        await runConfirmedActionRefresh(isRepayAndClose ? 'Repay and close' : 'Repayment', ctx,
+          async () => {
+            await (isRepayAndClose && !isNativeXrp
+              ? vaultStore.refreshVaults(ctx)
+              : vaultStore.refreshVault(vault.vaultId, ctx));
+            if (ctx.assertCurrent()) await walletStore.refreshBalance({ skipCache: true }, ctx);
+          },
+          (message) => toastStore.info(message, 12000));
         // Repaying lowers this collateral's aggregate debt: refresh ceiling headroom.
         appDataStore.fetchCollateralTotals(true).catch(() => {});
-        walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
+      } else if (result.ambiguous) {
+        toastStore.info(result.error || 'The repayment outcome is unknown. Check the vault and ledger before retrying.', 12000);
+      } else if (isRepayAndClose && ctx.assertCurrent()) {
+        // The compound backend commits repayment before returning collateral.
+        // A typed close error can therefore leave a debt-free, still-open
+        // vault. Refresh before guiding the user so a retry cannot be based on
+        // the stale pre-repayment card.
+        try {
+          await vaultStore.refreshVaults(ctx);
+          await walletStore.refreshBalance({ skipCache: true }, ctx);
+          appDataStore.fetchCollateralTotals(true).catch(() => {});
+          dispatch('updated');
+        } catch {
+          // Keep the recovery guidance visible even if the best-effort refresh
+          // itself fails; reconnecting and refreshing remains safe.
+        }
+        if (!ctx.assertCurrent()) {
+          toastStore.info('Wallet session changed while checking the repay-and-close result. Reconnect the submitting wallet and refresh its vault before retrying.', 12000);
+          return;
+        }
+        toastStore.info(`${result.error || 'Repay and close did not complete.'} Refresh the vault. If its debt is now zero, use Withdraw & Close to recover the collateral.`, 12000);
+      } else if (result.approvalMayHaveMutated && !ctx.assertCurrent()) {
+        toastStore.info(`${result.error || 'The repayment was not confirmed.'} The allowance may have changed; reconnect the submitting wallet and check status before retrying.`, 12000);
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -847,7 +930,8 @@
     if (!canWithdraw) { toastStore.error('Repay all debt first', 8000); return; }
     clearMessages(); isWithdrawingAndClosing = true;
     try {
-      const result = await protocolService.withdrawCollateralAndCloseVault(vault.vaultId);
+      const ctx = captureActionBoundContext(vault.owner);
+      const result = await protocolService.withdrawCollateralAndCloseVaultBound(ctx, vault.vaultId);
       if (result.success) {
         const msg = isNativeXrp
           ? `Withdrawable XRP queued for settlement. ${nativeXrpKeepOpenCloseCopy()}`
@@ -855,13 +939,15 @@
             ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
             : 'Vault closed. Collateral returned.';
         toastStore.success(msg, 8000);
-        if (isNativeXrp) {
-          await vaultStore.refreshVault(vault.vaultId);
-        } else {
-          await vaultStore.refreshVaults();
-        }
-        if (!isNativeXrp) walletStore.refreshBalance({ skipCache: true });
+        await runConfirmedActionRefresh('Vault close', ctx,
+          async () => {
+            await (isNativeXrp ? vaultStore.refreshVault(vault.vaultId, ctx) : vaultStore.refreshVaults(ctx));
+            if (!isNativeXrp && ctx.assertCurrent()) await walletStore.refreshBalance({ skipCache: true }, ctx);
+          },
+          (message) => toastStore.info(message, 12000));
         dispatch('updated');
+      } else if (!ctx.assertCurrent()) {
+        toastStore.info(`The close did not report success and the wallet session changed. Reconnect the submitting wallet and check vault status before considering another submission. ${result.error || ''}`, 12000);
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
     } finally { isWithdrawingAndClosing = false; }
@@ -1063,7 +1149,8 @@
             {#if activeAction === 'add'}
               {#if isNativeXrp}
                 <XrpExistingDeposit vaultId={vault.vaultId} on:credited={() => {
-                  vaultStore.refreshVault(vault.vaultId).catch(() => {
+                  const ctx = captureActionBoundContext(vault.owner);
+                  vaultStore.refreshVault(vault.vaultId, ctx).catch(() => {
                     toastStore.info('Deposit verified. Refresh your vault to see its latest collateral.');
                   });
                   dispatch('updated');
@@ -1076,9 +1163,9 @@
                 {/if}
               </div>
               <div class="action-input-row">
-                <input type="number" class="action-input" bind:value={addCollateralAmount}
+                <input type="text" inputmode="decimal" class="action-input" bind:value={addCollateralAmount}
                   on:blur={() => clampInput('add')}
-                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing || !ADD_MARGIN_V2_ENABLED} />
+                  placeholder="0.00" disabled={isProcessing || !ADD_MARGIN_V2_ENABLED} />
                 <span class="input-suffix">{collateralSymbol}</span>
               </div>
               {#if !ADD_MARGIN_V2_ENABLED}
@@ -1172,10 +1259,13 @@
                 {/if}
               </div>
               <div class="action-input-row">
-                <input type="number" class="action-input action-input-repay" bind:value={repayAmount}
-                  on:input={() => { repayMaxSelected = false; repayMaxAdjusted = false; }}
+                <input type="number" class="action-input action-input-repay" value={repayAmount}
+                  on:input={(event) => {
+                    repayAmount = event.currentTarget.value;
+                    repayMaxSelected = false; repayMaxAdjusted = false;
+                  }}
                   on:blur={() => clampInput('repay')}
-                  placeholder="0.00" min="0" max={repayInputMax} step="0.00000001" inputmode="decimal" disabled={isProcessing} />
+                  placeholder="0.00" min="0" max={repayInputMax} step={repayInputStep} inputmode="decimal" disabled={isProcessing} />
                 {#if bitcoinOnly}
                   <span class="token-selector" aria-label="Repayment token: icUSD">
                     <span class="token-dot token-dot-icusd"></span> icUSD

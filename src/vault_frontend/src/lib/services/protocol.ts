@@ -58,12 +58,18 @@ export class ProtocolService {
   static getVaultById = ApiClient.getVaultById;
   static borrowFromVault = ApiClient.borrowFromVault;
   static borrowFromVaultBound = ApiClient.borrowFromVaultBound;
+  static withdrawPartialCollateralBound = ApiClient.withdrawPartialCollateralBound;
+  static withdrawCollateralAndCloseVaultBound = ApiClient.withdrawCollateralAndCloseVaultBound;
   static retryPendingBorrowMintBound = ApiClient.retryPendingBorrowMintBound;
   static reconcilePendingBorrowMintFromBlockBound = ApiClient.reconcilePendingBorrowMintFromBlockBound;
   static addMarginToVault = ApiClient.addMarginToVault;
+  static addMarginToVaultBound = ApiClient.addMarginToVaultBound;
   static repayToVault = ApiClient.repayToVault;
+  static repayToVaultBound = ApiClient.repayToVaultBound;
   static partialRepayToVault = ApiClient.repayToVault;
   static repayAndCloseVault = ApiClient.repayAndCloseVault;
+  static repayAndCloseVaultBound = ApiClient.repayAndCloseVaultBound;
+  static repayToVaultWithStableBound = ApiClient.repayToVaultWithStableBound;
   static closeVault = ApiClient.closeVault;
   static getVaultHistory = ApiClient.getVaultHistory;
   static getVaultInterestRate = ApiClient.getVaultInterestRate;
@@ -131,10 +137,14 @@ export const protocolService = {
   getMyPendingBorrowMintsBound: ProtocolService.getMyPendingBorrowMintsBound,
   borrowFromVault: ProtocolService.borrowFromVault,
   borrowFromVaultBound: ProtocolService.borrowFromVaultBound,
+  withdrawPartialCollateralBound: ProtocolService.withdrawPartialCollateralBound,
+  withdrawCollateralAndCloseVaultBound: ProtocolService.withdrawCollateralAndCloseVaultBound,
   retryPendingBorrowMintBound: ProtocolService.retryPendingBorrowMintBound,
   reconcilePendingBorrowMintFromBlockBound: ProtocolService.reconcilePendingBorrowMintFromBlockBound,
   addMarginToVault: ProtocolService.addMarginToVault,
+  addMarginToVaultBound: ProtocolService.addMarginToVaultBound,
   repayToVault: ProtocolService.repayToVault,
+  repayToVaultBound: ProtocolService.repayToVaultBound,
   closeVault: ProtocolService.closeVault,
   getVaultHistory: ProtocolService.getVaultHistory,
   redeemIcp: ProtocolService.redeemIcp,
@@ -163,6 +173,8 @@ export const protocolService = {
   // Add the new combined operation to the public API
   withdrawCollateralAndCloseVault: ProtocolService.withdrawCollateralAndCloseVault,
   repayAndCloseVault: ProtocolService.repayAndCloseVault,
+  repayAndCloseVaultBound: ProtocolService.repayAndCloseVaultBound,
+  repayToVaultWithStableBound: ProtocolService.repayToVaultWithStableBound,
 
   // Wallet operations
   approveIcpTransfer: ProtocolService.approveIcpTransfer,
