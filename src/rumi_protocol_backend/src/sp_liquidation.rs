@@ -1337,7 +1337,6 @@ async fn settle_post_accounting(
             };
             Ok(Some((treasury, fee, op_nonce)))
         })?;
-        let dispatched_now = tuple.is_some();
         if let Some((treasury, fee, op_nonce)) = tuple {
             let protocol_fee_net_raw = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
             match crate::management::transfer_collateral_with_nonce_and_fee_status(
@@ -1394,50 +1393,23 @@ async fn settle_post_accounting(
                 )
             })?;
             let amount = exact_payout_net(journal.quote_protocol_cut_raw, fee)?;
-            match asset_type {
-                asset_type @ (crate::treasury::AssetType::CKUSDT
-                | crate::treasury::AssetType::CKUSDC) => {
-                    crate::treasury::notify_external_collateral_deposit_once(
-                        treasury,
-                        journal.collateral_ledger,
-                        asset_type,
-                        amount,
-                        block_index,
-                        Some(format!("sp-liquidation-v1:{}", journal.vault_id)),
-                    )
-                    .await
-                    .map_err(|error| {
-                        ProtocolError::TemporarilyUnavailable(format!(
-                            "SP Treasury receipt remains held: {error}"
-                        ))
-                    })?;
-                }
-                crate::treasury::AssetType::ICP if dispatched_now => {
-                    crate::treasury::notify_treasury_deposit(
-                        treasury,
-                        crate::treasury::DepositType::LiquidationFee,
-                        crate::treasury::AssetType::ICP,
-                        amount,
-                        block_index,
-                    )
-                    .await
-                    .map_err(|error| {
-                        ProtocolError::TemporarilyUnavailable(format!(
-                            "SP Treasury ICP notification outcome is unresolved: {error}"
-                        ))
-                    })?;
-                }
-                crate::treasury::AssetType::ICP => {
-                    return Err(ProtocolError::TemporarilyUnavailable(
-                        "SP Treasury ICP transfer is proven, but its legacy notification outcome requires operator reconciliation".into(),
-                    ));
-                }
-                _ => {
-                    return Err(ProtocolError::TemporarilyUnavailable(
-                        "SP Treasury fee asset is not supported by an idempotent receipt path".into(),
-                    ));
-                }
-            }
+            // Use the same exact receiver-side receipt journal for ICP and CK
+            // collateral. A lost Treasury reply can then replay this exact
+            // ledger/block/memo identity without resending the transfer.
+            crate::treasury::notify_external_collateral_deposit_once(
+                treasury,
+                journal.collateral_ledger,
+                asset_type,
+                amount,
+                block_index,
+                Some(format!("sp-liquidation-v1:{}", journal.vault_id)),
+            )
+            .await
+            .map_err(|error| {
+                ProtocolError::TemporarilyUnavailable(format!(
+                    "SP Treasury receipt remains held: {error}"
+                ))
+            })?;
         }
     }
     mutate_state(|state| {

@@ -11686,7 +11686,7 @@ pub async fn liquidate_vault_partial(
     };
 
     // Step 3: Update protocol state (partial liquidation)
-    let (interest_share, xrp_claim_id) = mutate_state(|s| {
+    let (interest_share, xrp_claim_id, applied_protocol_cut, liquidation_operation_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -11729,7 +11729,9 @@ pub async fn liquidate_vault_partial(
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
-        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(protocol_cut));
+        let (payout_to_liquidator, applied_protocol_cut) =
+            liquidation_collateral_split(protocol_cut, collateral_applied);
+        let payout_to_liquidator = ICP::from(payout_to_liquidator);
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log. Records all liquidations (healthy and underwater) so
@@ -11772,7 +11774,7 @@ pub async fn liquidate_vault_partial(
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
             protocol_fee_collateral: if protocol_cut > 0 {
-                Some(protocol_cut.min(collateral_applied))
+                Some(applied_protocol_cut)
             } else {
                 None
             },
@@ -11811,17 +11813,22 @@ pub async fn liquidate_vault_partial(
             "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created",
             1
         );
-        (interest_share, xrp_claim_id)
+        (interest_share, xrp_claim_id, applied_protocol_cut, nonce)
     });
 
     // Journal unsupported collateral synchronously before any post-commit
     // await so the protocol fee obligation cannot disappear on interruption.
-    let unsupported_treasury_fee_held = protocol_cut > 0
+    let unsupported_treasury_fee_held = applied_protocol_cut > 0
         && vault.collateral_type != crate::state::xrp_collateral_principal()
         && crate::treasury::hold_unsupported_liquidation_fee_if_needed(
-            protocol_cut,
+            applied_protocol_cut,
             vault.collateral_type,
         );
+    let treasury_fee_source = if applied_protocol_cut > 0 && !unsupported_treasury_fee_held {
+        crate::treasury::admit_liquidation_fee_to_treasury(
+            applied_protocol_cut, vault.collateral_type, liquidation_operation_id,
+        )
+    } else { None };
 
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
@@ -11835,7 +11842,7 @@ pub async fn liquidate_vault_partial(
     }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
+    if applied_protocol_cut > 0 {
         if vault.collateral_type == crate::state::xrp_collateral_principal() {
             // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
             // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
@@ -11849,16 +11856,12 @@ pub async fn liquidate_vault_partial(
                     dev,
                     vault.owner,
                     vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
+                    applied_protocol_cut,
                     now_ns,
                 );
             });
-        } else if !unsupported_treasury_fee_held {
-            crate::treasury::route_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-            )
-            .await;
+        } else if let Some(source) = treasury_fee_source {
+            crate::treasury::process_treasury_stable_transfer(source).await;
         }
     }
 
@@ -12130,7 +12133,7 @@ pub async fn liquidate_vault_partial_with_stable(
         };
 
     // Step 3: Update protocol state (partial liquidation)
-    let (interest_share, xrp_claim_id, applied_stable_protocol_cut) = mutate_state(|s| {
+    let (interest_share, xrp_claim_id, applied_stable_protocol_cut, liquidation_operation_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -12167,8 +12170,9 @@ pub async fn liquidate_vault_partial_with_stable(
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
-        let applied_protocol_cut = protocol_cut.min(collateral_applied);
-        let payout_to_liquidator = ICP::from(collateral_applied.saturating_sub(applied_protocol_cut));
+        let (payout_to_liquidator, applied_protocol_cut) =
+            liquidation_collateral_split(protocol_cut, collateral_applied);
+        let payout_to_liquidator = ICP::from(payout_to_liquidator);
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
@@ -12263,7 +12267,7 @@ pub async fn liquidate_vault_partial_with_stable(
             INFO,
             "[liquidate_vault_stable] Partial liquidation completed, pending transfer created"
         );
-        (interest_share, xrp_claim_id, applied_protocol_cut)
+        (interest_share, xrp_claim_id, applied_protocol_cut, nonce)
     });
 
     // Journal unsupported collateral synchronously before any post-commit
@@ -12274,6 +12278,11 @@ pub async fn liquidate_vault_partial_with_stable(
             applied_stable_protocol_cut,
             vault.collateral_type,
         );
+    let treasury_fee_source = if applied_stable_protocol_cut > 0 && !unsupported_treasury_fee_held {
+        crate::treasury::admit_liquidation_fee_to_treasury(
+            applied_stable_protocol_cut, vault.collateral_type, liquidation_operation_id,
+        )
+    } else { None };
 
     // Route interest via N-way split (stablecoin-denominated)
     if interest_share.to_u64() > 0 {
@@ -12307,12 +12316,8 @@ pub async fn liquidate_vault_partial_with_stable(
                     now_ns,
                 );
             });
-        } else if !unsupported_treasury_fee_held {
-            crate::treasury::route_liquidation_fee_to_treasury(
-                applied_stable_protocol_cut,
-                vault.collateral_type,
-            )
-            .await;
+        } else if let Some(source) = treasury_fee_source {
+            crate::treasury::process_treasury_stable_transfer(source).await;
         }
     }
 
@@ -12522,8 +12527,9 @@ pub async fn liquidate_vault_debt_already_burned_v2(
 /// Clamp a quoted protocol cut to collateral actually committed by the
 /// liquidation state transition. Every Treasury/XRP fee side effect must use
 /// this applied amount rather than the pre-await quote.
-fn applied_liquidation_protocol_cut(requested: u64, collateral_applied: u64) -> u64 {
-    requested.min(collateral_applied)
+fn liquidation_collateral_split(requested_cut: u64, collateral_applied: u64) -> (u64, u64) {
+    let cut = requested_cut.min(collateral_applied);
+    (collateral_applied - cut, cut)
 }
 
 /// An owner excess payout is valid only when the state transition actually
@@ -13034,9 +13040,9 @@ async fn liquidate_vault_debt_already_burned_inner(
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
-        let applied_protocol_cut =
-            applied_liquidation_protocol_cut(protocol_cut, collateral_applied);
-        let payout_to_liquidator = ICP::from(collateral_applied - applied_protocol_cut);
+        let (payout_to_liquidator, applied_protocol_cut) =
+            liquidation_collateral_split(protocol_cut, collateral_applied);
+        let payout_to_liquidator = ICP::from(payout_to_liquidator);
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log. SP writedowns count toward the breaker — a flood of
@@ -13164,10 +13170,10 @@ async fn liquidate_vault_debt_already_burned_inner(
             );
         }
 
-        (interest_share, applied_protocol_cut)
+        (interest_share, applied_protocol_cut, nonce)
     });
 
-    let (interest_share, applied_protocol_cut) = interest_share;
+    let (interest_share, applied_protocol_cut, liquidation_operation_id) = interest_share;
 
     // Journal unsupported collateral synchronously before any post-commit
     // await so the protocol fee obligation cannot disappear on interruption.
@@ -13177,6 +13183,11 @@ async fn liquidate_vault_debt_already_burned_inner(
             applied_protocol_cut,
             vault.collateral_type,
         );
+    let treasury_fee_source = if applied_protocol_cut > 0 && !unsupported_treasury_fee_held {
+        crate::treasury::admit_liquidation_fee_to_treasury(
+            applied_protocol_cut.to_u64().unwrap_or(0), vault.collateral_type, liquidation_operation_id,
+        )
+    } else { None };
 
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
@@ -13208,12 +13219,8 @@ async fn liquidate_vault_debt_already_burned_inner(
                     now_ns,
                 );
             });
-        } else if !unsupported_treasury_fee_held {
-            crate::treasury::route_liquidation_fee_to_treasury(
-                applied_protocol_cut,
-                vault.collateral_type,
-            )
-            .await;
+        } else if let Some(source) = treasury_fee_source {
+            crate::treasury::process_treasury_stable_transfer(source).await;
         }
     }
 
@@ -13435,7 +13442,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // our pre-await read and the icUSD pull above. Detect it BEFORE any
     // irreversible state work and refund the liquidator (None branch below)
     // instead of trapping inside s.liquidate_vault()'s vault lookup.
-    let (interest_share, xrp_claim_id, applied_protocol_cut) = match mutate_state(|s| {
+    let (interest_share, xrp_claim_id, applied_protocol_cut, liquidation_operation_id) = match mutate_state(|s| {
         if !s.vault_id_to_vaults.contains_key(&vault_id) {
             return None;
         }
@@ -13450,11 +13457,12 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             .get(&vault_id)
             .map(|v| v.collateral_amount)
             .unwrap_or(0);
-        let cut_applied = applied_liquidation_protocol_cut(protocol_cut, live_collateral);
+        let (liquidator_budget, cut_applied) =
+            liquidation_collateral_split(protocol_cut, live_collateral);
         let liquidator_pay = ICP::from(
             collateral_to_liquidator
                 .to_u64()
-                .min(live_collateral.saturating_sub(cut_applied)),
+                .min(liquidator_budget),
         );
         // Execute the liquidation in state first (this must happen).
         // LIQ-0XX (review finding 1): pass the PINNED `debt_amount` decided
@@ -13613,7 +13621,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 1
             }
         );
-        Some((interest_share, xrp_claim_id, cut_applied))
+        Some((interest_share, xrp_claim_id, cut_applied, liquidator_nonce))
     }) {
         Some(result) => result,
         None => {
@@ -13672,6 +13680,11 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             applied_protocol_cut,
             vault.collateral_type,
         );
+    let treasury_fee_source = if applied_protocol_cut > 0 && !unsupported_treasury_fee_held {
+        crate::treasury::admit_liquidation_fee_to_treasury(
+            applied_protocol_cut.to_u64().unwrap_or(0), vault.collateral_type, liquidation_operation_id,
+        )
+    } else { None };
 
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
@@ -13703,12 +13716,8 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                     now_ns,
                 );
             });
-        } else if !unsupported_treasury_fee_held {
-            crate::treasury::route_liquidation_fee_to_treasury(
-                applied_protocol_cut,
-                vault.collateral_type,
-            )
-            .await;
+        } else if let Some(source) = treasury_fee_source {
+            crate::treasury::process_treasury_stable_transfer(source).await;
         }
     }
 
@@ -14100,7 +14109,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     };
 
     // Step 5: Update protocol state ATOMICALLY
-    let (interest_share, xrp_claim_id, applied_protocol_cut) = mutate_state(|s| {
+    let (interest_share, xrp_claim_id, applied_protocol_cut, liquidation_operation_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&arg.vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -14135,9 +14144,9 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
             vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_applied);
         }
-        let applied_protocol_cut =
-            applied_liquidation_protocol_cut(protocol_cut, collateral_applied);
-        let payout_to_liquidator = ICP::from(collateral_applied - applied_protocol_cut);
+        let (payout_to_liquidator, applied_protocol_cut) =
+            liquidation_collateral_split(protocol_cut, collateral_applied);
+        let payout_to_liquidator = ICP::from(payout_to_liquidator);
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
@@ -14216,7 +14225,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             INFO,
             "[partial_liquidate_vault] Protocol state updated, pending transfer created"
         );
-        (interest_share, xrp_claim_id, applied_protocol_cut)
+        (interest_share, xrp_claim_id, applied_protocol_cut, nonce)
     });
 
     // Journal unsupported collateral synchronously before any post-commit
@@ -14227,6 +14236,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             applied_protocol_cut,
             vault.collateral_type,
         );
+    let treasury_fee_source = if applied_protocol_cut > 0 && !unsupported_treasury_fee_held {
+        crate::treasury::admit_liquidation_fee_to_treasury(
+            applied_protocol_cut.to_u64().unwrap_or(0), vault.collateral_type, liquidation_operation_id,
+        )
+    } else { None };
 
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
@@ -14258,12 +14272,8 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
                     now_ns,
                 );
             });
-        } else if !unsupported_treasury_fee_held {
-            crate::treasury::route_liquidation_fee_to_treasury(
-                applied_protocol_cut,
-                vault.collateral_type,
-            )
-            .await;
+        } else if let Some(source) = treasury_fee_source {
+            crate::treasury::process_treasury_stable_transfer(source).await;
         }
     }
 
@@ -14329,7 +14339,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
 #[cfg(test)]
 mod sp_writedown_native_xrp_guard_tests {
-    use super::{applied_liquidation_protocol_cut, *};
+    use super::*;
     use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
     use crate::state::{replace_state, xrp_collateral_principal, CustodyKind, State};
 
@@ -14444,20 +14454,20 @@ mod sp_writedown_native_xrp_guard_tests {
     fn sp_writedown_treasury_cut_is_capped_to_committed_collateral() {
         let applied_collateral = 10;
         let quoted_cut = 15;
-        let applied_cut = applied_liquidation_protocol_cut(quoted_cut, applied_collateral);
+        let (_, applied_cut) = liquidation_collateral_split(quoted_cut, applied_collateral);
         let liquidator_payout = applied_collateral - applied_cut;
         assert_eq!(applied_cut, 10);
         assert_eq!(liquidator_payout, 0);
         assert_eq!(applied_cut + liquidator_payout, applied_collateral);
-        assert_eq!(applied_liquidation_protocol_cut(4, 10), 4);
-        assert_eq!(applied_liquidation_protocol_cut(4, 0), 0);
+        assert_eq!(liquidation_collateral_split(4, 10).1, 4);
+        assert_eq!(liquidation_collateral_split(4, 0).1, 0);
     }
 
     #[test]
     fn full_liquidation_treasury_cut_is_capped_to_live_collateral() {
         let live_collateral = 10;
         let quoted_cut = 15;
-        let sent_fee = applied_liquidation_protocol_cut(quoted_cut, live_collateral);
+        let sent_fee = liquidation_collateral_split(quoted_cut, live_collateral).1;
         assert_eq!(sent_fee, 10);
         assert!(sent_fee <= live_collateral);
     }
@@ -14466,11 +14476,33 @@ mod sp_writedown_native_xrp_guard_tests {
     fn partial_liquidation_event_payout_and_fee_share_applied_collateral() {
         let applied_collateral = 10;
         let quoted_cut = 15;
-        let applied_cut = applied_liquidation_protocol_cut(quoted_cut, applied_collateral);
+        let applied_cut = liquidation_collateral_split(quoted_cut, applied_collateral).1;
         let liquidator_payout = applied_collateral - applied_cut;
         assert_eq!(applied_cut, 10);
         assert_eq!(liquidator_payout, 0);
         assert_eq!(liquidator_payout + applied_cut, applied_collateral);
+    }
+
+    #[test]
+    fn all_five_liquidation_fee_admission_routes_conserve_the_applied_gross_cut() {
+        // These five route shapes use `liquidation_collateral_split` at their
+        // commit boundary before calling the shared Treasury outbox admission:
+        // partial, stablecoin partial, SP writedown, full, and explicit partial.
+        for (route, seized, requested_cut) in [
+            ("partial", 1_000, 31),
+            ("stable partial", 750, 24),
+            ("SP writedown", 500, 17),
+            ("full", 2_000, 62),
+            ("explicit partial", 350, 9),
+        ] {
+            let (liquidator_payout, gross_treasury_cut) =
+                liquidation_collateral_split(requested_cut, seized);
+            assert_eq!(liquidator_payout + gross_treasury_cut, seized, "{route}");
+            assert_eq!(gross_treasury_cut, requested_cut, "{route}");
+        }
+        let (payout, cut) = liquidation_collateral_split(15, 10);
+        assert_eq!((payout, cut), (0, 10), "cut is capped to applied collateral");
+        assert_eq!(payout + cut, 10);
     }
 }
 

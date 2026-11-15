@@ -979,6 +979,9 @@ mod tests {
         assert!(service.contains("deposit_borrowing_fee_once"));
         assert!(service.contains("deposit_interest_revenue_once"));
         assert!(service.contains("record_external_token_deposit_once"));
+        assert!(service.contains("record_reported_transfer_once"));
+        assert!(service.contains("set_transfer_reporter"));
+        assert!(service.contains("get_transfer_reporters"));
         assert!(service.contains("continue_external_token_deposit_backfill"));
         assert!(service.contains("get_external_token_deposit_backfill_status"));
         assert!(service.contains("get_withdrawal_intent_status"));
@@ -992,6 +995,15 @@ mod tests {
     #[test]
     fn candid_interface_matches_committed_did() {
         let generated = crate::__export_service();
+        if std::env::var("RUMI_REGEN_DID").is_ok() {
+            let manifest_dir =
+                std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+            let did_path = std::env::var_os("RUMI_REGEN_DID_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| manifest_dir.join("rumi_treasury.did"));
+            std::fs::write(&did_path, &generated).expect("failed to regenerate Treasury DID");
+            return;
+        }
         service_equal(
             CandidSource::Text(&generated),
             CandidSource::File(Path::new("rumi_treasury.did")),
@@ -1111,13 +1123,105 @@ mod tests {
                 2,
             )
         });
-        assert!(retry.is_err(), "legacy block tombstone must fail closed");
+        assert_eq!(
+            retry.unwrap(),
+            (legacy_id, false),
+            "an exact controller retry must return the original receipt"
+        );
         crate::state::with_state(|s| {
             assert_eq!(s.get_deposits_count(), 1);
             assert_eq!(s.balances[&AssetType::CKUSDT].total, 123);
             assert_eq!(s.get_events_count(), 1);
             assert_eq!(legacy_id, 1);
         });
+    }
+
+    #[test]
+    fn reported_transfer_retry_is_exact_idempotent_and_authorized() {
+        init_test_treasury();
+        let reporter = Principal::from_slice(&[77]);
+        let unauthorized = Principal::from_slice(&[78]);
+        let ledger = crate::state::with_state(|s| s.get_config().icp_ledger);
+        let args = crate::types::ReportedTransferDepositArgs {
+            operation_id: [0x42; 32],
+            ledger,
+            deposit_type: DepositType::LiquidationFee,
+            asset_type: AssetType::ICP,
+            amount: 77,
+            block_index: 9001,
+            memo: Some("receipt-1".into()),
+        };
+        assert!(
+            crate::state::with_state_mut(|s| s.record_reported_transfer_once(
+                unauthorized,
+                args.clone(),
+                1
+            ))
+            .is_err()
+        );
+        crate::state::with_state_mut(|s| s.set_transfer_reporter(reporter, true)).unwrap();
+        let first = crate::state::with_state_mut(|s| {
+            s.record_reported_transfer_once(reporter, args.clone(), 2)
+        })
+        .unwrap();
+        let retry = crate::state::with_state_mut(|s| {
+            s.record_reported_transfer_once(reporter, args.clone(), 3)
+        })
+        .unwrap();
+        assert_eq!(first, (1, true));
+        assert_eq!(retry, (1, false));
+        let mut conflict = args.clone();
+        conflict.amount += 1;
+        assert!(crate::state::with_state_mut(
+            |s| s.record_reported_transfer_once(reporter, conflict, 4)
+        )
+        .is_err());
+        let mut alternate_operation = args;
+        alternate_operation.operation_id = [0x43; 32];
+        assert_eq!(
+            crate::state::with_state_mut(|s| s.record_reported_transfer_once(
+                reporter,
+                alternate_operation,
+                5
+            ))
+            .unwrap(),
+            (1, false),
+            "same physical transfer cannot be booked twice under another operation ID"
+        );
+        crate::state::with_state(|s| {
+            assert_eq!(s.get_deposits_count(), 1);
+            assert_eq!(s.get_events_count(), 0); // state helper is below the API's event wrapper
+            assert_eq!(s.balances[&AssetType::ICP].total, 77);
+        });
+    }
+
+    #[test]
+    fn old_treasury_config_decodes_with_reporters_disabled_by_default() {
+        #[derive(candid::CandidType)]
+        struct PriorConfig {
+            icusd_ledger: Principal,
+            icp_ledger: Principal,
+            ckbtc_ledger: Option<Principal>,
+            ckusdt_ledger: Option<Principal>,
+            ckusdc_ledger: Option<Principal>,
+            is_paused: bool,
+            stability_pool_reporter: Option<Principal>,
+        }
+        let old = PriorConfig {
+            icusd_ledger: mock_principal(),
+            icp_ledger: mock_principal(),
+            ckbtc_ledger: None,
+            ckusdt_ledger: None,
+            ckusdc_ledger: None,
+            is_paused: true,
+            stability_pool_reporter: None,
+        };
+        let bytes = candid::encode_one(old).unwrap();
+        let decoded = <crate::state::TreasuryConfig as ic_stable_structures::Storable>::from_bytes(
+            std::borrow::Cow::Owned(bytes),
+        );
+        assert!(decoded.is_paused);
+        assert!(decoded.transfer_reporters.unwrap_or_default().is_empty());
     }
 
     #[test]

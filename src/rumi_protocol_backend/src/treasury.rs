@@ -6,10 +6,11 @@
 //! All treasury operations are **non-critical**: failures are logged but
 //! never block user-facing operations (borrow, repay, liquidation).
 
-use candid::{CandidType, Deserialize, Nat, Principal};
+use candid::{CandidType, Deserialize, Encode, Nat, Principal};
 use ic_canister_log::log;
 use num_traits::ToPrimitive;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -233,6 +234,7 @@ pub struct DepositArgs {
 /// from legacy `deposit`, whose block handling is not exact-replay safe.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ExternalTokenDepositArgs {
+    pub operation_id: [u8; 32],
     pub ledger: Principal,
     pub deposit_type: DepositType,
     pub asset_type: AssetType,
@@ -255,6 +257,7 @@ mod external_token_treasury_candid_compatibility_tests {
     enum ReceiverAssetType { ICUSD, ICP, CKBTC, CKUSDT, CKUSDC }
     #[derive(CandidType)]
     struct ReceiverExternalTokenDepositArgs {
+        operation_id: [u8; 32],
         ledger: Principal,
         deposit_type: ReceiverDepositType,
         asset_type: ReceiverAssetType,
@@ -275,8 +278,11 @@ mod external_token_treasury_candid_compatibility_tests {
                 AssetType::CKUSDT, ReceiverAssetType::CKUSDT),
             (DepositType::LiquidationFee, ReceiverDepositType::LiquidationFee,
                 AssetType::CKUSDC, ReceiverAssetType::CKUSDC),
+            (DepositType::LiquidationFee, ReceiverDepositType::LiquidationFee,
+                AssetType::ICP, ReceiverAssetType::ICP),
         ] {
             let backend = ExternalTokenDepositArgs {
+                operation_id: [9; 32],
                 ledger,
                 deposit_type: backend_deposit,
                 asset_type: backend_asset,
@@ -285,6 +291,7 @@ mod external_token_treasury_candid_compatibility_tests {
                 memo: Some("rumi-stable-v1:source".into()),
             };
             let receiver = ReceiverExternalTokenDepositArgs {
+                operation_id: [9; 32],
                 ledger,
                 deposit_type: receiver_deposit,
                 asset_type: receiver_asset,
@@ -337,6 +344,7 @@ pub fn resolve_pending_treasury_stable_transfer(op_nonce: u128, caller: Principa
             .find(|(_, row)| row.op_nonce == op_nonce).map(|(source, row)| (source.clone(), row.clone()))
         else { return Err("no pending Treasury stable transfer exists".into()); };
         let configured_ledger = match &expected.asset_type {
+            AssetType::ICP => Some(s.icp_ledger_principal),
             AssetType::CKUSDT => s.ckusdt_ledger_principal,
             AssetType::CKUSDC => s.ckusdc_ledger_principal,
             _ => None,
@@ -357,6 +365,18 @@ pub fn resolve_pending_treasury_stable_transfer(op_nonce: u128, caller: Principa
                         return Err("configured Treasury differs from the frozen destination".into());
                     }
                     updated.treasury = Some(configured_treasury);
+                    updated.phase = crate::state::TreasuryStableTransferPhase::AwaitingPreflight;
+                }
+            crate::state::TreasuryStableTransferPhase::ConfigurationHold
+                if expected.gross_amount_e6s.is_some()
+                    && expected.fee_e6s.is_some_and(|fee| fee >= expected.gross_amount_e6s.unwrap_or_default())
+                    && expected.history_floor.is_none() => {
+                    // The existing phase keeps persisted rows readable by the
+                    // prior backend on rollback. The gross/fee tuple identifies
+                    // this pre-dispatch hold and permits only explicit re-preflight.
+                    updated.amount_e6s = expected.gross_amount_e6s.expect("guarded above");
+                    updated.fee_e6s = None;
+                    updated.history_floor = None;
                     updated.phase = crate::state::TreasuryStableTransferPhase::AwaitingPreflight;
                 }
             crate::state::TreasuryStableTransferPhase::ConfigurationReviewRequired { block_index } => {
@@ -607,9 +627,8 @@ pub async fn notify_treasury_deposit(
     }
 }
 
-/// Record a configured ckUSDT/ckUSDC collateral receipt exactly once in
-/// Treasury. The receiver binds idempotency to `(ledger, block_index)` and
-/// rejects conflicting tuples.
+/// Record an exact external collateral receipt in Treasury. The receiver
+/// binds idempotency to the immutable operation ID and `(ledger, block_index)`.
 pub async fn notify_external_collateral_deposit_once(
     treasury: Principal,
     ledger: Principal,
@@ -618,10 +637,13 @@ pub async fn notify_external_collateral_deposit_once(
     block_index: u64,
     memo: Option<String>,
 ) -> Result<u64, String> {
-    if !matches!(asset_type, AssetType::CKUSDT | AssetType::CKUSDC) {
-        return Err("exact external collateral receipts support only ckUSDT/ckUSDC".into());
-    }
+    let canonical = candid::Encode!(&ledger, &block_index, &amount, &asset_type, &memo)
+        .expect("Candid encoding of the fixed external receipt tuple cannot fail");
+    let mut identity = Sha256::new();
+    identity.update(b"rumi-external-collateral-receipt-v1");
+    identity.update(canonical);
     let args = ExternalTokenDepositArgs {
+        operation_id: identity.finalize().into(),
         ledger,
         deposit_type: DepositType::LiquidationFee,
         asset_type,
@@ -631,7 +653,7 @@ pub async fn notify_external_collateral_deposit_once(
     };
     let result: Result<(Result<u64, String>,), _> = ic_cdk::call(
         treasury,
-        "record_external_token_deposit_once",
+        "record_reported_transfer_once",
         (args,),
     )
     .await;
@@ -672,7 +694,7 @@ pub fn admit_treasury_stable_transfer_in_state(
 ) -> Option<u128> {
     admit_treasury_stable_transfer_in_state_at(
         s, source, transfer_ledger, frozen_treasury, amount_e6s, asset_type,
-        deposit_type, ic_cdk::api::time(),
+        deposit_type, None, ic_cdk::api::time(),
     )
 }
 
@@ -684,12 +706,17 @@ fn admit_treasury_stable_transfer_in_state_at(
     amount_e6s: u64,
     asset_type: AssetType,
     deposit_type: DepositType,
+    gross_budget_e6s: Option<u64>,
     now: u64,
 ) -> Option<u128> {
     if amount_e6s == 0 { return None; }
     if s.completed_treasury_stable_transfer_sources.contains_key(&source) { return None; }
     if let Some(existing) = s.pending_treasury_stable_transfers.get(&source) {
-        if existing.amount_e6s == amount_e6s && existing.asset_type == asset_type
+        let same_amount = match gross_budget_e6s {
+            Some(gross) => existing.gross_amount_e6s == Some(gross),
+            None => existing.gross_amount_e6s.is_none() && existing.amount_e6s == amount_e6s,
+        };
+        if same_amount && existing.asset_type == asset_type
             && existing.deposit_type == deposit_type && existing.ledger == transfer_ledger
             && existing.treasury == frozen_treasury {
             return Some(existing.op_nonce);
@@ -705,6 +732,7 @@ fn admit_treasury_stable_transfer_in_state_at(
     }
     let treasury = frozen_treasury;
     let configured_ledger = match &asset_type {
+            AssetType::ICP => Some(s.icp_ledger_principal),
             AssetType::CKUSDT => s.ckusdt_ledger_principal,
             AssetType::CKUSDC => s.ckusdc_ledger_principal,
             _ => None,
@@ -715,6 +743,7 @@ fn admit_treasury_stable_transfer_in_state_at(
     let nonce = s.next_op_nonce_at(now);
     let operation = crate::state::TreasuryStableTransferJournal {
         source: source.clone(), ledger, treasury, asset_type, deposit_type, amount_e6s,
+        gross_amount_e6s: gross_budget_e6s,
         fee_e6s: None, history_floor: None, recovery_scan: None, expiry_proven: false,
         memo: management::nonce_to_memo(nonce).0.as_slice().try_into().expect("nonce memo is 16 bytes"),
         created_at_time_ns: management::nonce_to_created_at_time(nonce), op_nonce: nonce,
@@ -726,6 +755,13 @@ fn admit_treasury_stable_transfer_in_state_at(
     );
     s.pending_treasury_stable_transfers.insert(source, operation);
     Some(nonce)
+}
+
+/// Convert a liquidation fee's gross collateral budget into the exact token
+/// amount delivered to Treasury. The ledger debits `net + fee`; a zero net
+/// transfer has no useful receipt and must remain held.
+fn liquidation_fee_net_amount(gross_e6s: u64, fee_e6s: u64) -> Option<u64> {
+    gross_e6s.checked_sub(fee_e6s).filter(|net| *net > 0)
 }
 
 fn persist_stable_transfer(
@@ -789,6 +825,7 @@ async fn notify_external_stable_transfer(
 ) -> Result<(), String> {
     let configured = crate::state::read_state(|s| {
         let ledger = match operation.asset_type {
+            AssetType::ICP => Some(s.icp_ledger_principal),
             AssetType::CKUSDT => s.ckusdt_ledger_principal,
             AssetType::CKUSDC => s.ckusdc_ledger_principal,
             _ => None,
@@ -802,16 +839,9 @@ async fn notify_external_stable_transfer(
         persist_stable_transfer(operation, &held);
         return Err("Treasury or stablecoin ledger configuration differs from the frozen transfer".into());
     }
-    let args = ExternalTokenDepositArgs {
-        ledger: operation.ledger,
-        deposit_type: operation.deposit_type.clone(),
-        asset_type: operation.asset_type.clone(),
-        amount: operation.amount_e6s,
-        block_index,
-        memo: Some(treasury_external_memo(&operation.source)),
-    };
+    let args = external_transfer_deposit_args(operation, block_index);
     let result: Result<(Result<u64, String>,), _> =
-        ic_cdk::call(operation.treasury.expect("configuration checked"), "record_external_token_deposit_once", (args,)).await;
+        ic_cdk::call(operation.treasury.expect("configuration checked"), "record_reported_transfer_once", (args,)).await;
     match result {
         Ok((Ok(_),)) => {
             complete_stable_transfer(operation, block_index);
@@ -819,6 +849,29 @@ async fn notify_external_stable_transfer(
         }
         Ok((Err(error),)) => Err(error),
         Err((_, error)) => Err(error),
+    }
+}
+
+fn external_transfer_deposit_args(
+    operation: &crate::state::TreasuryStableTransferJournal,
+    block_index: u64,
+) -> ExternalTokenDepositArgs {
+    let memo = Some(treasury_external_memo(&operation.source));
+    let canonical = candid::Encode!(
+        &operation.source, &operation.op_nonce, &operation.ledger,
+        &operation.amount_e6s, &block_index, &memo
+    ).expect("Candid encoding of the persisted Treasury transfer tuple cannot fail");
+    let mut identity = Sha256::new();
+    identity.update(b"rumi-stable-transfer-receipt-v1");
+    identity.update(canonical);
+    ExternalTokenDepositArgs {
+        operation_id: identity.finalize().into(),
+        ledger: operation.ledger,
+        deposit_type: operation.deposit_type.clone(),
+        asset_type: operation.asset_type.clone(),
+        amount: operation.amount_e6s,
+        block_index,
+        memo,
     }
 }
 
@@ -1080,6 +1133,7 @@ pub async fn process_treasury_stable_transfer(source: crate::state::TreasuryStab
     if operation.treasury.is_none() { return; }
     let config_matches = crate::state::read_state(|s| {
         let configured_ledger = match &operation.asset_type {
+            AssetType::ICP => Some(s.icp_ledger_principal),
             AssetType::CKUSDT => s.ckusdt_ledger_principal,
             AssetType::CKUSDC => s.ckusdc_ledger_principal,
             _ => None,
@@ -1099,6 +1153,17 @@ pub async fn process_treasury_stable_transfer(source: crate::state::TreasuryStab
         let result: Result<(Nat,), _> = ic_cdk::call(operation.ledger, "icrc1_fee", ()).await;
         let Ok((fee_nat,)) = result else { return; };
         let Some(fee) = fee_nat.0.to_u64() else { return; };
+        if let Some(gross) = operation.gross_amount_e6s {
+            let Some(net) = liquidation_fee_net_amount(gross, fee) else {
+                let previous = operation.clone();
+                operation.fee_e6s = Some(fee);
+                operation.history_floor = None;
+                operation.phase = crate::state::TreasuryStableTransferPhase::ConfigurationHold;
+                persist_stable_transfer(&previous, &operation);
+                return;
+            };
+            operation.amount_e6s = net;
+        }
         let Ok(history_floor) = crate::icrc3_proof::icrc3_history_floor(operation.ledger).await else { return; };
         let previous = operation.clone();
         operation.fee_e6s = Some(fee);
@@ -1257,7 +1322,9 @@ mod borrowing_fee_endpoint_tests {
 #[cfg(test)]
 mod treasury_stable_transfer_admission_tests {
     use super::{
-        admit_treasury_stable_transfer_in_state_at, persist_stable_transfer,
+        admit_treasury_stable_transfer_in_state_at, external_transfer_deposit_args,
+        liquidation_fee_net_amount, liquidation_fee_transfer_source,
+        persist_stable_transfer,
         rearm_stable_transfer_after_proven_absence, stable_interest_share_e6s,
         stable_transfer_with_initial_scan,
         AssetType, DepositType,
@@ -1285,21 +1352,62 @@ mod treasury_stable_transfer_admission_tests {
     }
 
     #[test]
+    fn liquidation_fee_sources_use_committed_unique_nonce_not_vault_identity() {
+        let ledger = Principal::from_slice(&[3]);
+        let first = liquidation_fee_transfer_source(ledger, 101);
+        let retry = liquidation_fee_transfer_source(ledger, 101);
+        let partial_repeat = liquidation_fee_transfer_source(ledger, 102);
+        assert_eq!(first, retry, "a retry reuses its committed payout nonce");
+        assert_ne!(first, partial_repeat, "repeated liquidations of one vault get distinct source keys");
+        assert!(first.lane.starts_with("protocol_liquidation_fee_v1:"));
+    }
+
+    #[test]
+    fn liquidation_fee_budget_sends_and_books_only_the_net_amount() {
+        let (treasury, ledger) = configured();
+        let source = liquidation_fee_transfer_source(ledger, 505);
+        let nonce = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
+            s, source.clone(), ledger, Some(treasury), 100, AssetType::CKUSDT,
+            DepositType::LiquidationFee, Some(100), 99,
+        )).unwrap();
+        let mut row = state::read_state(|s| s.pending_treasury_stable_transfers[&source].clone());
+        assert_eq!(row.gross_amount_e6s, Some(100));
+        let net = liquidation_fee_net_amount(100, 10).unwrap();
+        assert_eq!(net, 90);
+        assert_eq!(net.checked_add(10), Some(100));
+        row.amount_e6s = net;
+        row.fee_e6s = Some(10);
+        row.phase = TreasuryStableTransferPhase::TransferPending;
+        let args = external_transfer_deposit_args(&row, 1234);
+        assert_eq!(args.amount, net, "Treasury receipt amount must equal ledger recipient amount");
+        assert_eq!(row.gross_amount_e6s, Some(100), "retries retain the original gross budget");
+        assert_eq!(row.op_nonce, nonce, "fee conversion must not replace operation identity");
+        assert!(matches!(args.deposit_type, DepositType::LiquidationFee));
+    }
+
+    #[test]
+    fn liquidation_fee_is_held_when_fee_consumes_or_exceeds_gross_budget() {
+        assert_eq!(liquidation_fee_net_amount(100, 100), None);
+        assert_eq!(liquidation_fee_net_amount(100, 101), None);
+        assert_eq!(liquidation_fee_net_amount(100, 99), Some(1));
+    }
+
+    #[test]
     fn exact_source_retry_returns_same_nonce_and_payload_conflict_holds() {
         let (treasury, ledger) = configured();
         let key = source();
         let nonce = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
             s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
-            DepositType::InterestRevenue, 99,
+            DepositType::InterestRevenue, None, 99,
         )).unwrap();
         let same = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
             s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
-            DepositType::InterestRevenue, 100,
+            DepositType::InterestRevenue, None, 100,
         ));
         assert_eq!(same, Some(nonce));
         let conflict = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
             s, key.clone(), ledger, Some(treasury), 124, AssetType::CKUSDT,
-            DepositType::InterestRevenue, 101,
+            DepositType::InterestRevenue, None, 101,
         ));
         assert_eq!(conflict, None);
         assert_eq!(state::read_state(|s| s.pending_treasury_stable_transfers[&key].phase.clone()),
@@ -1320,7 +1428,7 @@ mod treasury_stable_transfer_admission_tests {
         let key = source();
         let nonce = state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
             s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
-            DepositType::InterestRevenue, 99,
+            DepositType::InterestRevenue, None, 99,
         )).unwrap();
         let awaiting = state::read_state(|s| s.pending_treasury_stable_transfers[&key].clone());
         assert_eq!(awaiting.op_nonce, nonce);
@@ -1351,7 +1459,7 @@ mod treasury_stable_transfer_admission_tests {
         let key = source();
         state::mutate_state(|s| admit_treasury_stable_transfer_in_state_at(
             s, key.clone(), ledger, Some(treasury), 123, AssetType::CKUSDT,
-            DepositType::InterestRevenue, 99,
+            DepositType::InterestRevenue, None, 99,
         ));
         let mut held = state::read_state(|s| s.pending_treasury_stable_transfers[&key].clone());
         held.phase = TreasuryStableTransferPhase::ReceiptRecoveryRequired;
@@ -3183,43 +3291,6 @@ pub async fn mint_borrowing_fee_to_treasury(fee: ICUSD) {
     }
 }
 
-/// Transfer collateral (liquidation fee) to treasury and record the deposit.
-pub async fn send_liquidation_fee_to_treasury(
-    amount: u64,
-    collateral_ledger: Principal,
-    asset_type: AssetType,
-) {
-    if amount == 0 {
-        return;
-    }
-    let treasury = read_state(|s| s.treasury_principal);
-    if let Some(tp) = treasury {
-        match management::transfer_collateral(amount, tp, collateral_ledger).await {
-            Ok(block_index) => {
-                log!(
-                    INFO,
-                    "[treasury] Sent {} collateral liquidation fee (block {})",
-                    amount,
-                    block_index
-                );
-                let _ = notify_treasury_deposit(
-                    tp,
-                    DepositType::LiquidationFee,
-                    asset_type,
-                    amount,
-                    block_index,
-                )
-                .await;
-            }
-            Err(e) => log!(
-                INFO,
-                "[treasury] WARNING: liquidation fee transfer failed: {:?}",
-                e
-            ),
-        }
-    }
-}
-
 /// Synchronously journal an unsupported collateral fee before a liquidation
 /// path reaches its first post-commit await. Returning `true` tells the caller
 /// that no transfer may be attempted for this fee.
@@ -3258,16 +3329,37 @@ pub fn hold_unsupported_liquidation_fee_if_needed(
     true
 }
 
-/// Route a liquidation fee only when the collateral ledger has an explicit
-/// Treasury bookkeeping classification. Unsupported collateral stays in the
-/// backend rather than being transferred and falsely recorded as ICP.
-pub async fn route_liquidation_fee_to_treasury(amount: u64, collateral_ledger: Principal) {
-    if hold_unsupported_liquidation_fee_if_needed(amount, collateral_ledger) {
-        return;
+/// Synchronously create/retrieve the durable Treasury fee obligation from the
+/// payout nonce allocated in the same liquidation state transition. No await
+/// occurs before this admission boundary.
+pub fn admit_liquidation_fee_to_treasury(
+    amount: u64,
+    collateral_ledger: Principal,
+    liquidation_operation_id: u128,
+) -> Option<crate::state::TreasuryStableTransferSource> {
+    let asset_type = collateral_to_asset_type(&collateral_ledger)?;
+    let source = liquidation_fee_transfer_source(collateral_ledger, liquidation_operation_id);
+    if amount == 0 { return None; }
+    crate::state::mutate_state(|s| {
+        let treasury = s.treasury_principal;
+        admit_treasury_stable_transfer_in_state_at(
+            s, source.clone(), collateral_ledger, treasury, amount, asset_type,
+            DepositType::LiquidationFee, Some(amount), ic_cdk::api::time(),
+        )
+    })?;
+    Some(source)
+}
+
+fn liquidation_fee_transfer_source(
+    ledger: Principal,
+    liquidation_operation_id: u128,
+) -> crate::state::TreasuryStableTransferSource {
+    crate::state::TreasuryStableTransferSource {
+        ledger,
+        block_index: 0,
+        lane: format!("protocol_liquidation_fee_v1:{liquidation_operation_id}"),
+        slot: 0,
     }
-    let asset_type = collateral_to_asset_type(&collateral_ledger)
-        .expect("supported collateral classification disappeared without an await");
-    send_liquidation_fee_to_treasury(amount, collateral_ledger, asset_type).await;
 }
 
 /// Flush accumulated interest from periodic harvesting to pools/treasury.

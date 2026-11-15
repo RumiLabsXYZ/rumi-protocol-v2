@@ -1,162 +1,165 @@
-type AssetType = variant {
-  ICUSD;
-  ICP;
-  CKBTC;
-  CKUSDT;
-  CKUSDC;
-};
-
-type DepositType = variant {
-  BorrowingFee;
-  RedemptionFee;
-  LiquidationFee;
-  InterestRevenue;
-};
-
 type AssetBalance = record {
-  total: nat64;
-  reserved: nat64;
-  available: nat64;
+  total : nat64;
+  "reserved" : nat64;
+  available : nat64;
 };
-
-type DepositRecord = record {
-  id: nat64;
-  deposit_type: DepositType;
-  asset_type: AssetType;
-  amount: nat64;
-  block_index: nat64;
-  timestamp: nat64;
-  memo: opt text;
-};
-
-type TreasuryStatus = record {
-  total_deposits: nat64;
-  balances: vec record { AssetType; AssetBalance };
-  controller: principal;
-  is_paused: bool;
-};
-
+type AssetType = variant { ICP; CKUSDC; CKUSDT; ICUSD; CKBTC };
 type CycleManagerCyclesStatus = record {
-  balance : nat;
+  idle_burn_cycles_per_day : opt nat;
+  stable_memory_bytes : opt nat64;
   low_watermark : nat;
+  balance : nat;
+  heap_memory_bytes : opt nat64;
   healthy : bool;
   freeze_threshold_secs : nat64;
-  stable_memory_bytes : opt nat64;
-  heap_memory_bytes : opt nat64;
-  idle_burn_cycles_per_day : opt nat;
 };
 type CycleManagerMetric = record {
   key : text;
-  count : nat64;
   value : nat;
+  count : nat64;
   label : opt text;
 };
-
-type TreasuryInitArgs = record {
-  controller: principal;
-  icusd_ledger: principal;
-  icp_ledger: principal;
-  ckbtc_ledger: opt principal;
-  ckusdt_ledger: opt principal;
-  ckusdc_ledger: opt principal;
-};
-
 type DepositArgs = record {
-  deposit_type: DepositType;
-  asset_type: AssetType;
-  amount: nat64;
-  block_index: nat64;
-  memo: opt text;
-};
-
-type ExternalTokenDepositArgs = record {
-  ledger: principal;
-  deposit_type: DepositType;
-  asset_type: AssetType;
-  amount: nat64;
-  block_index: nat64;
-  memo: opt text;
-};
-
-type ExternalTokenDepositBackfill = variant {
-  Uninitialized;
-  InProgress: record { next_deposit_id: nat64; snapshot_max_id: nat64 };
-  Complete;
-};
-
-type ExternalTokenDepositBackfillStatus = record {
-  state: ExternalTokenDepositBackfill;
-  indexed_through_deposit_id: nat64;
-  ambiguous_legacy_blocks: nat64;
-};
-
-type WithdrawArgs = record {
-  asset_type: AssetType;
-  amount: nat64;
-  to: principal;
-  memo: opt text;
-  request_id: opt nat64;
-};
-
-type WithdrawResult = record {
-  block_index: nat64;
-  amount_transferred: nat64;
-  fee: nat64;
-};
-
-type WithdrawalIntentStatus = variant {
-  InFlight;
-  TransportAmbiguous;
-  ConfirmedUnrepresentable : record { block_index : text };
-  Held : record { reason : text };
-  Rejected : record { error : text };
-  Completed : WithdrawResult;
-};
-
-type WithdrawalIntentStatusView = record {
-  request_id : nat64;
   asset_type : AssetType;
+  block_index : nat64;
+  deposit_type : DepositType;
+  memo : opt text;
   amount : nat64;
-  to : principal;
-  ledger : principal;
-  created_at_time : nat64;
-  may_have_committed : bool;
-  status : WithdrawalIntentStatus;
 };
-
+type DepositRecord = record {
+  id : nat64;
+  asset_type : AssetType;
+  block_index : nat64;
+  deposit_type : DepositType;
+  memo : opt text;
+  timestamp : nat64;
+  amount : nat64;
+};
+type DepositType = variant {
+  BorrowingFee;
+  LiquidationFee;
+  RedemptionFee;
+  InterestRevenue;
+};
+type ExternalTokenDepositArgs = record {
+  asset_type : AssetType;
+  block_index : nat64;
+  deposit_type : DepositType;
+  memo : opt text;
+  ledger : principal;
+  amount : nat64;
+};
+type ExternalTokenDepositBackfill = variant {
+  Complete;
+  Uninitialized;
+  InProgress : record { next_deposit_id : nat64; snapshot_max_id : nat64 };
+};
+type ExternalTokenDepositBackfillStatus = record {
+  state : ExternalTokenDepositBackfill;
+  indexed_through_deposit_id : nat64;
+  ambiguous_legacy_blocks : nat64;
+};
+type ReportedTransferDepositArgs = record {
+  asset_type : AssetType;
+  block_index : nat64;
+  deposit_type : DepositType;
+  memo : opt text;
+  operation_id : blob;
+  ledger : principal;
+  amount : nat64;
+};
+type Result = variant { Ok; Err : text };
+type Result_1 = variant { Ok : text; Err : text };
+type Result_2 = variant { Ok : nat64; Err : text };
+type Result_3 = variant { Ok : opt WithdrawalIntentStatusView; Err : text };
+type Result_4 = variant { Ok : vec principal; Err : text };
+type Result_5 = variant { Ok : WithdrawResult; Err : text };
 type TreasuryAction = variant {
-  Deposit : record { deposit_type : DepositType; asset_type : AssetType; amount : nat64 };
-  Withdraw : record { asset_type : AssetType; amount : nat64; to : principal };
+  Withdraw : record { to : principal; asset_type : AssetType; amount : nat64 };
+  Deposit : record {
+    asset_type : AssetType;
+    deposit_type : DepositType;
+    amount : nat64;
+  };
   SetPaused : record { paused : bool };
 };
-
 type TreasuryEvent = record {
   id : nat64;
+  action : TreasuryAction;
   timestamp : nat64;
   caller : principal;
-  action : TreasuryAction;
 };
-
+type TreasuryInitArgs = record {
+  controller : principal;
+  ckusdt_ledger : opt principal;
+  ckusdc_ledger : opt principal;
+  icp_ledger : principal;
+  ckbtc_ledger : opt principal;
+  icusd_ledger : principal;
+};
+type TreasuryStatus = record {
+  controller : principal;
+  total_deposits : nat64;
+  is_paused : bool;
+  balances : vec record { AssetType; AssetBalance };
+};
+type WithdrawArgs = record {
+  to : principal;
+  request_id : opt nat64;
+  asset_type : AssetType;
+  memo : opt text;
+  amount : nat64;
+};
+type WithdrawResult = record {
+  fee : nat64;
+  block_index : nat64;
+  amount_transferred : nat64;
+};
+type WithdrawalIntentStatus = variant {
+  Held : record { reason : text };
+  TransportAmbiguous;
+  Rejected : record { error : text };
+  InFlight;
+  ConfirmedUnrepresentable : record { block_index : text };
+  Completed : WithdrawResult;
+};
+type WithdrawalIntentStatusView = record {
+  to : principal;
+  request_id : nat64;
+  status : WithdrawalIntentStatus;
+  asset_type : AssetType;
+  may_have_committed : bool;
+  ledger : principal;
+  created_at_time : nat64;
+  amount : nat64;
+};
 service : (TreasuryInitArgs) -> {
-  deposit: (DepositArgs) -> (variant { Ok : nat64; Err : text });
-  deposit_borrowing_fee_once: (DepositArgs) -> (variant { Ok : nat64; Err : text });
-  continue_icusd_deposit_block_backfill: () -> (variant { Ok : text; Err : text });
-  record_stability_pool_unallocated_interest: (nat64, nat64, vec nat64) -> (variant { Ok : nat64; Err : text });
-  set_stability_pool_reporter: (opt principal) -> (variant { Ok; Err : text });
-  bind_external_token_ledger_once: (AssetType, principal) -> (variant { Ok; Err : text });
-  withdraw: (WithdrawArgs) -> (variant { Ok : WithdrawResult; Err : text });
-  cycles_status: () -> (CycleManagerCyclesStatus) query;
-  cycle_manager_metrics: () -> (vec CycleManagerMetric) query;
-  get_status: () -> (TreasuryStatus) query;
-  get_withdrawal_intent_status: (nat64) -> (variant { Ok : opt WithdrawalIntentStatusView; Err : text }) query;
-  get_active_withdrawal_intent_status: () -> (variant { Ok : opt WithdrawalIntentStatusView; Err : text }) query;
-  is_caller_controller: () -> (bool) query;
-  get_deposits: (opt nat64, opt nat64) -> (vec DepositRecord) query;
-  get_events: (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
-  get_event_count: () -> (nat64) query;
-  set_paused: (bool) -> (variant { Ok; Err : text });
-  deposit_interest_revenue_once: (DepositArgs) -> (variant { Ok : nat64; Err : text });
-  record_external_token_deposit_once: (ExternalTokenDepositArgs) -> (variant { Ok : nat64; Err : text });
-  continue_external_token_deposit_backfill: () -> (variant { Ok : text; Err : text });
-  get_external_token_deposit_backfill_status: () -> (ExternalTokenDepositBackfillStatus) query;
+  bind_external_token_ledger_once : (AssetType, principal) -> (Result);
+  continue_external_token_deposit_backfill : () -> (Result_1);
+  continue_icusd_deposit_block_backfill : () -> (Result_1);
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  deposit : (DepositArgs) -> (Result_2);
+  deposit_borrowing_fee_once : (DepositArgs) -> (Result_2);
+  deposit_interest_revenue_once : (DepositArgs) -> (Result_2);
+  get_active_withdrawal_intent_status : () -> (Result_3) query;
+  get_deposits : (opt nat64, opt nat64) -> (vec DepositRecord) query;
+  get_event_count : () -> (nat64) query;
+  get_events : (opt nat64, opt nat64) -> (vec TreasuryEvent) query;
+  get_external_token_deposit_backfill_status : () -> (
+      ExternalTokenDepositBackfillStatus,
+    ) query;
+  get_status : () -> (TreasuryStatus) query;
+  get_transfer_reporters : () -> (Result_4) query;
+  get_withdrawal_intent_status : (nat64) -> (Result_3) query;
+  is_caller_controller : () -> (bool) query;
+  record_external_token_deposit_once : (ExternalTokenDepositArgs) -> (Result_2);
+  record_reported_transfer_once : (ReportedTransferDepositArgs) -> (Result_2);
+  record_stability_pool_unallocated_interest : (nat64, nat64, vec nat64) -> (
+      Result_2,
+    );
+  set_paused : (bool) -> (Result);
+  set_stability_pool_reporter : (opt principal) -> (Result);
+  set_transfer_reporter : (principal, bool) -> (Result);
+  withdraw : (WithdrawArgs) -> (Result_5);
 }

@@ -2,12 +2,13 @@ mod recovery202;
 pub use recovery202::{admin_execute_vault202_recovery, protected_claim_output};
 #[cfg(test)]
 pub(crate) use recovery202::fixture202;
-use candid::{CandidType, Deserialize};
+use candid::{CandidType, Deserialize, Encode};
 use ic_canister_log::log;
 
 use crate::history::{self, LiquidationRecordV1, LiquidationRecordVersioned, LiquidationStatus};
 use crate::state::{self, BotConfig};
 use crate::swap;
+use sha2::{Digest, Sha256};
 
 const CONFIRM_ATTEMPTS: u8 = 5;
 const CANCEL_ATTEMPTS: u8 = 3;
@@ -2264,6 +2265,81 @@ fn apply_verified_treasury_receipt_once(
     true
 }
 
+fn retain_verified_treasury_receipt_for_booking_retry(
+    bot_state: &mut state::BotState,
+    journal: &state::BotTreasuryJournal,
+    error: &str,
+) -> bool {
+    let Some(current) = bot_state.pending_treasury.get_mut(&journal.record_id) else { return false };
+    if !treasury_intent_matches(current, journal)
+        || current.status != state::BotTreasuryStatus::ReceiptObserved
+        || current.receipt != journal.receipt
+        || journal.receipt.is_none()
+    { return false; }
+    current.record.status = LiquidationStatus::TransferFailed;
+    current.record.icp_to_treasury_e8s = 0;
+    current.record.error_message = Some(format!("Verified ICP transfer is awaiting Treasury booking; exact receipt retained: {error}"));
+    true
+}
+
+fn bot_treasury_report_operation_id(
+    journal: &state::BotTreasuryJournal,
+    receipt: &crate::swap::TransferReceipt,
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"rumi-bot-treasury-bonus-v1");
+    let canonical = candid::Encode!(
+        &journal.record_id, &journal.vault_id, &journal.claim_generation,
+        &journal.attempt_generation, &journal.ledger_principal,
+        &journal.sender_principal, &journal.treasury_principal,
+        &journal.gross_amount_e8s, &journal.amount_e8s, &journal.fee_e8s,
+        &journal.created_at_time, &journal.memo, &receipt.block_index,
+        &receipt.amount, &receipt.created_at_time
+    ).expect("Candid encoding of the immutable Treasury receipt tuple cannot fail");
+    hash.update(canonical);
+    hash.finalize().into()
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum TreasuryReportedDepositType { BorrowingFee, RedemptionFee, LiquidationFee, InterestRevenue }
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum TreasuryReportedAssetType { ICUSD, ICP, CKBTC, CKUSDT, CKUSDC }
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct TreasuryReportedTransferArgs {
+    operation_id: [u8; 32],
+    ledger: candid::Principal,
+    deposit_type: TreasuryReportedDepositType,
+    asset_type: TreasuryReportedAssetType,
+    amount: u64,
+    block_index: u64,
+    memo: Option<String>,
+}
+
+async fn book_verified_treasury_receipt(
+    journal: &state::BotTreasuryJournal,
+    receipt: &crate::swap::TransferReceipt,
+) -> Result<u64, String> {
+    let args = TreasuryReportedTransferArgs {
+        operation_id: bot_treasury_report_operation_id(journal, receipt),
+        ledger: journal.ledger_principal,
+        deposit_type: TreasuryReportedDepositType::LiquidationFee,
+        asset_type: TreasuryReportedAssetType::ICP,
+        amount: receipt.amount,
+        block_index: receipt.block_index,
+        memo: Some(format!("rumi-bot-bonus-v1:{}:{}", journal.claim_generation, receipt.block_index)),
+    };
+    let result: Result<(Result<u64, String>,), _> = ic_cdk::call(
+        journal.treasury_principal,
+        "record_reported_transfer_once",
+        (args,),
+    ).await;
+    match result {
+        Ok((Ok(deposit_id),)) => Ok(deposit_id),
+        Ok((Err(error),)) => Err(error),
+        Err((code, message)) => Err(format!("Treasury booking call failed: {code:?} {message}")),
+    }
+}
+
 fn treasury_intent_matches(
     current: &state::BotTreasuryJournal,
     candidate: &state::BotTreasuryJournal,
@@ -2613,6 +2689,22 @@ async fn resume_pending_treasury_for_record(
         state::save_config_to_stable();
         write_record(journal.record.clone());
         log!(crate::INFO, "STUCK: ICP treasury receipt block {} could not be verified for claim {}: {}", receipt.block_index, journal.claim_generation, error);
+        return true;
+    }
+    if let Err(error) = book_verified_treasury_receipt(&journal, receipt).await {
+        // The ledger debit is proven, but the accounting canister has not
+        // positively acknowledged its immutable receipt. Keep the exact receipt
+        // and retry the same operation ID; never send the ICP transfer again.
+        state::mutate_state(|s| {
+            retain_verified_treasury_receipt_for_booking_retry(s, &journal, &error)
+        });
+        state::save_config_to_stable();
+        let mut record = journal.record.clone();
+        record.status = LiquidationStatus::TransferFailed;
+        record.icp_to_treasury_e8s = 0;
+        record.error_message = Some(format!("Verified ICP transfer is awaiting Treasury booking; exact receipt retained: {error}"));
+        write_record(record);
+        log!(crate::INFO, "STUCK: verified ICP treasury receipt block {} is awaiting idempotent Treasury booking for claim {}: {}", receipt.block_index, journal.claim_generation, error);
         return true;
     }
     let paid_now = state::mutate_state(|s| apply_verified_treasury_receipt_once(s, &journal));
@@ -4563,6 +4655,29 @@ mod tests {
         wrong_receipt.receipt.as_mut().unwrap().amount += 1;
         assert!(!apply_verified_treasury_receipt_once(&mut bot_state, &wrong_receipt));
         assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 25_000);
+    }
+
+    #[test]
+    fn treasury_booking_reply_loss_retains_receipt_and_operation_identity() {
+        let journal = treasury_test_journal();
+        let receipt = journal.receipt.as_ref().unwrap();
+        let operation_id = bot_treasury_report_operation_id(&journal, receipt);
+        assert_eq!(operation_id, bot_treasury_report_operation_id(&journal, receipt));
+        let mut changed_receipt = receipt.clone();
+        changed_receipt.block_index += 1;
+        assert_ne!(operation_id, bot_treasury_report_operation_id(&journal, &changed_receipt));
+
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_treasury.insert(journal.record_id, journal.clone());
+        assert!(retain_verified_treasury_receipt_for_booking_retry(
+            &mut bot_state, &journal, "reply lost after Treasury persisted the deposit",
+        ));
+        let retained = &bot_state.pending_treasury[&journal.record_id];
+        assert_eq!(retained.status, state::BotTreasuryStatus::ReceiptObserved);
+        assert_eq!(retained.receipt, journal.receipt);
+        assert_eq!(retained.record.status, LiquidationStatus::TransferFailed);
+        assert_eq!(retained.paid_total_applied, false);
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 0);
     }
 
     #[test]

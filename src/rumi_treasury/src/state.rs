@@ -1,7 +1,7 @@
 use crate::types::{
     AssetBalance, AssetType, BalancesSnapshot, DepositRecord, ExternalTokenDepositArgs,
-    ExternalTokenDepositBackfill, TreasuryAction, TreasuryEvent, TreasuryInitArgs,
-    WithdrawalIntent,
+    ExternalTokenDepositBackfill, ReportedTransferDepositArgs, TreasuryAction, TreasuryEvent,
+    TreasuryInitArgs, WithdrawalIntent,
 };
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
@@ -38,6 +38,8 @@ const MEM_EXTERNAL_TOKEN_BACKFILL: u8 = 12; // StableCell<ExternalTokenDepositBa
 const MEM_EXTERNAL_TOKEN_INDEXED_THROUGH: u8 = 13; // StableCell<u64>
 const MEM_EXTERNAL_TOKEN_RECEIPTS_BY_ID: u8 = 14; // StableBTreeMap<deposit ID, receipt>
 const MEM_WITHDRAWAL_INTENTS: u8 = 15; // StableBTreeMap<request ID, durable withdrawal intent>
+const MEM_REPORTED_TRANSFER_OPS: u8 = 16; // StableBTreeMap<(reporter, operation ID), deposit ID>
+const MEM_TRANSFER_RECEIPT_INDEX_VERSION: u8 = 17; // StableCell<u8> (non-ICUSD block index schema)
 
 const PRINCIPAL_KEY_MAX_BYTES: usize = 29;
 const EXTERNAL_RECEIPT_KEY_BYTES: usize = 1 + PRINCIPAL_KEY_MAX_BYTES + 8;
@@ -90,6 +92,11 @@ const MEMORY_LAYOUT: &[(u8, &str)] = &[
         "external_token_receipts_by_id",
     ),
     (MEM_WITHDRAWAL_INTENTS, "withdrawal_intents"),
+    (MEM_REPORTED_TRANSFER_OPS, "reported_transfer_operations"),
+    (
+        MEM_TRANSFER_RECEIPT_INDEX_VERSION,
+        "transfer_receipt_index_version",
+    ),
 ];
 
 /// A block is marked ambiguous when more than one historic ICUSD deposit used
@@ -117,6 +124,51 @@ pub enum IcusdDepositBlockBackfill {
 pub struct ExternalTokenReceiptKey {
     pub ledger: Principal,
     pub block_index: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportedTransferOperationKey {
+    pub reporter: Principal,
+    pub operation_id: [u8; 32],
+}
+impl Ord for ReportedTransferOperationKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.reporter
+            .cmp(&other.reporter)
+            .then_with(|| self.operation_id.cmp(&other.operation_id))
+    }
+}
+impl PartialOrd for ReportedTransferOperationKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl ic_stable_structures::Storable for ReportedTransferOperationKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let principal = self.reporter.as_slice();
+        assert!(principal.len() <= PRINCIPAL_KEY_MAX_BYTES);
+        let mut bytes = vec![0; 1 + PRINCIPAL_KEY_MAX_BYTES + 32];
+        bytes[0] = principal.len() as u8;
+        bytes[1..1 + principal.len()].copy_from_slice(principal);
+        bytes[1 + PRINCIPAL_KEY_MAX_BYTES..].copy_from_slice(&self.operation_id);
+        Cow::Owned(bytes)
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        assert_eq!(bytes.len(), 1 + PRINCIPAL_KEY_MAX_BYTES + 32);
+        let len = bytes[0] as usize;
+        assert!(len <= PRINCIPAL_KEY_MAX_BYTES);
+        let mut operation_id = [0; 32];
+        operation_id.copy_from_slice(&bytes[1 + PRINCIPAL_KEY_MAX_BYTES..]);
+        Self {
+            reporter: Principal::from_slice(&bytes[1..1 + len]),
+            operation_id,
+        }
+    }
+    const BOUND: ic_stable_structures::storable::Bound =
+        ic_stable_structures::storable::Bound::Bounded {
+            max_size: (1 + PRINCIPAL_KEY_MAX_BYTES + 32) as u32,
+            is_fixed_size: true,
+        };
 }
 
 impl Ord for ExternalTokenReceiptKey {
@@ -313,6 +365,7 @@ pub struct TreasuryState {
         StableBTreeMap<ExternalTokenLegacyBlockKey, UnitValue, Memory>,
     pub external_token_backfill: StableCell<ExternalTokenDepositBackfill, Memory>,
     pub external_token_indexed_through: StableCell<u64, Memory>,
+    pub reported_transfer_operations: StableBTreeMap<ReportedTransferOperationKey, u64, Memory>,
 }
 
 /// Treasury configuration stored in stable memory
@@ -334,6 +387,9 @@ pub struct TreasuryConfig {
     /// receives no controller or withdrawal authority.
     #[serde(default)]
     pub stability_pool_reporter: Option<Principal>,
+    /// Canisters authorized to report positively verified transfer receipts.
+    #[serde(default)]
+    pub transfer_reporters: Option<Vec<Principal>>,
 }
 
 // Storable implementation for TreasuryConfig
@@ -423,10 +479,6 @@ fn empty_balances() -> HashMap<AssetType, AssetBalance> {
     m
 }
 
-fn is_external_token_asset(asset_type: &AssetType) -> bool {
-    matches!(asset_type, AssetType::CKUSDT | AssetType::CKUSDC)
-}
-
 impl TreasuryState {
     /// Initialize treasury state with given arguments (first install only).
     pub fn init(args: TreasuryInitArgs) -> Self {
@@ -441,7 +493,14 @@ impl TreasuryState {
                 ckusdc_ledger: args.ckusdc_ledger,
                 is_paused: false,
                 stability_pool_reporter: None,
+                transfer_reporters: Some(vec![args.controller]),
             };
+
+            StableCell::init(
+                memory_manager.get(MemoryId::new(MEM_TRANSFER_RECEIPT_INDEX_VERSION)),
+                1u8,
+            )
+            .unwrap();
 
             let balances = empty_balances();
 
@@ -502,6 +561,9 @@ impl TreasuryState {
                     0,
                 )
                 .unwrap(),
+                reported_transfer_operations: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_REPORTED_TRANSFER_OPS)),
+                ),
             }
         })
     }
@@ -641,7 +703,7 @@ impl TreasuryState {
         }
 
         record.id = deposit_id;
-        let external_asset = is_external_token_asset(&record.asset_type);
+        let external_asset = record.asset_type != AssetType::ICUSD;
         let asset_type = record.asset_type.clone();
         let block_index = record.block_index;
 
@@ -667,17 +729,8 @@ impl TreasuryState {
         args: ExternalTokenDepositArgs,
         timestamp: u64,
     ) -> Result<(u64, bool), String> {
-        match &args.asset_type {
-            AssetType::CKUSDT | AssetType::CKUSDC => {}
-            _ => return Err("external receipt accepts only CKUSDT or CKUSDC".to_string()),
-        }
-        if !matches!(
-            &args.deposit_type,
-            crate::types::DepositType::InterestRevenue
-                | crate::types::DepositType::LiquidationFee
-                | crate::types::DepositType::RedemptionFee
-        ) {
-            return Err("CKUSDT/CKUSDC receipts accept only InterestRevenue, LiquidationFee, or RedemptionFee".to_string());
+        if args.asset_type == AssetType::ICUSD {
+            return Err("transfer receipt endpoint does not accept ICUSD".to_string());
         }
         if args.amount == 0 {
             return Err("deposit amount must be greater than zero".to_string());
@@ -740,9 +793,11 @@ impl TreasuryState {
         }
 
         let configured_ledger = match &args.asset_type {
+            AssetType::ICP => Some(self.get_config().icp_ledger),
+            AssetType::CKBTC => self.get_config().ckbtc_ledger,
             AssetType::CKUSDT => self.get_config().ckusdt_ledger,
             AssetType::CKUSDC => self.get_config().ckusdc_ledger,
-            _ => unreachable!("external asset was validated above"),
+            AssetType::ICUSD => unreachable!("ICUSD receipt was rejected above"),
         }
         .ok_or_else(|| format!("configured ledger missing for {:?}", args.asset_type))?;
         if args.ledger != configured_ledger {
@@ -802,7 +857,7 @@ impl TreasuryState {
         let processed = rows.len() as u64;
         let last_id = rows.last().map(|(id, _)| *id);
         for (deposit_id, record) in &rows {
-            if is_external_token_asset(&record.asset_type) {
+            if record.asset_type != AssetType::ICUSD {
                 let receipt_matches = self
                     .external_token_receipts_by_id
                     .get(deposit_id)
@@ -1360,6 +1415,89 @@ impl TreasuryState {
         Ok(())
     }
 
+    pub fn set_transfer_reporter(
+        &mut self,
+        reporter: Principal,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if reporter == Principal::anonymous() {
+            return Err("transfer reporter cannot be anonymous".into());
+        }
+        let mut config = self.config.get().clone();
+        let reporters = config.transfer_reporters.get_or_insert_with(Vec::new);
+        if enabled {
+            if !reporters.contains(&reporter) {
+                reporters.push(reporter);
+            }
+        } else {
+            reporters.retain(|candidate| *candidate != reporter);
+        }
+        reporters.sort();
+        self.config
+            .set(config)
+            .map_err(|e| format!("Failed to update transfer reporters: {e:?}"))?;
+        Ok(())
+    }
+
+    pub fn record_reported_transfer_once(
+        &mut self,
+        reporter: Principal,
+        args: ReportedTransferDepositArgs,
+        timestamp: u64,
+    ) -> Result<(u64, bool), String> {
+        if !self
+            .get_config()
+            .transfer_reporters
+            .unwrap_or_default()
+            .contains(&reporter)
+        {
+            return Err("caller is not an authorized transfer reporter".into());
+        }
+        if args.operation_id.iter().all(|byte| *byte == 0) {
+            return Err("operation ID cannot be zero".into());
+        }
+        if !matches!(
+            &args.deposit_type,
+            crate::types::DepositType::InterestRevenue
+                | crate::types::DepositType::LiquidationFee
+                | crate::types::DepositType::RedemptionFee
+        ) {
+            return Err("authorized transfer reporters cannot report this deposit type".into());
+        }
+        let key = ReportedTransferOperationKey {
+            reporter,
+            operation_id: args.operation_id,
+        };
+        if let Some(deposit_id) = self.reported_transfer_operations.get(&key) {
+            let receipt = self
+                .external_token_receipts_by_id
+                .get(&deposit_id)
+                .ok_or_else(|| "operation points to missing transfer receipt".to_string())?;
+            if receipt.ledger != args.ledger
+                || receipt.deposit_type != args.deposit_type
+                || receipt.asset_type != args.asset_type
+                || receipt.amount != args.amount
+                || receipt.block_index != args.block_index
+                || receipt.memo != args.memo
+            {
+                return Err("operation ID conflicts with its original transfer tuple".into());
+            }
+            return Ok((deposit_id, false));
+        }
+        let ext = ExternalTokenDepositArgs {
+            ledger: args.ledger,
+            deposit_type: args.deposit_type,
+            asset_type: args.asset_type,
+            amount: args.amount,
+            block_index: args.block_index,
+            memo: args.memo,
+        };
+        let (deposit_id, newly_recorded) =
+            self.record_external_token_deposit_once(ext, timestamp)?;
+        self.reported_transfer_operations.insert(key, deposit_id);
+        Ok((deposit_id, newly_recorded))
+    }
+
     /// Bind a previously-unconfigured external stablecoin ledger exactly once.
     ///
     /// This deliberately cannot clear or replace a ledger. Allowing an exact
@@ -1455,6 +1593,7 @@ pub fn restore_state() {
                 ckusdc_ledger: None,
                 is_paused: true,
                 stability_pool_reporter: None,
+                transfer_reporters: None,
             };
             let config =
                 StableCell::init(memory_manager.get(MemoryId::new(MEM_CONFIG)), dummy_config)
@@ -1554,6 +1693,16 @@ pub fn restore_state() {
                 0,
             )
             .unwrap();
+            let reported_transfer_operations: StableBTreeMap<
+                ReportedTransferOperationKey,
+                u64,
+                Memory,
+            > = StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_REPORTED_TRANSFER_OPS)));
+            let mut transfer_receipt_index_version: StableCell<u8, Memory> = StableCell::init(
+                memory_manager.get(MemoryId::new(MEM_TRANSFER_RECEIPT_INDEX_VERSION)),
+                0,
+            )
+            .unwrap();
             if matches!(
                 icusd_deposit_block_backfill.get(),
                 IcusdDepositBlockBackfill::Uninitialized
@@ -1649,6 +1798,25 @@ pub fn restore_state() {
                 }
             }
 
+            // The older migration indexed only CK stable-token deposits. A
+            // separate version fence forces one bounded pass over every
+            // historical non-ICUSD asset before ICP/CKBTC receipts are admitted.
+            if *transfer_receipt_index_version.get() == 0 {
+                external_token_backfill
+                    .set(if max_id == 0 {
+                        ExternalTokenDepositBackfill::Complete
+                    } else {
+                        ExternalTokenDepositBackfill::InProgress {
+                            next_deposit_id: 1,
+                            snapshot_max_id: max_id,
+                        }
+                    })
+                    .expect("persist generalized transfer-receipt backfill state");
+                transfer_receipt_index_version
+                    .set(1)
+                    .expect("persist transfer-receipt index version");
+            }
+
             *s.borrow_mut() = Some(TreasuryState {
                 deposits,
                 balances,
@@ -1669,6 +1837,7 @@ pub fn restore_state() {
                 external_token_legacy_blocks,
                 external_token_backfill,
                 external_token_indexed_through,
+                reported_transfer_operations,
             });
         });
     });

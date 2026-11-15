@@ -118,11 +118,24 @@ pub struct DepositArgs {
     pub memo: Option<String>,
 }
 
-/// A controller-reported ckUSDT/ckUSDC ledger receipt. `ledger` must equal
-/// the configured ledger for `asset_type`; the block index is only an
-/// idempotency key and is not independently verified as a ledger payment.
+/// A controller-reported non-ICUSD ledger receipt. `ledger` must equal the
+/// configured ledger for `asset_type`; the block index is an idempotency key.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct ExternalTokenDepositArgs {
+    pub ledger: Principal,
+    pub deposit_type: DepositType,
+    pub asset_type: AssetType,
+    pub amount: u64,
+    pub block_index: u64,
+    pub memo: Option<String>,
+}
+
+/// An authorized canister's receipt report for an exact token transfer. The
+/// reporter must positively verify the ledger block before calling this
+/// endpoint. The operation ID binds reply-loss retries to the same obligation.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ReportedTransferDepositArgs {
+    pub operation_id: [u8; 32],
     pub ledger: Principal,
     pub deposit_type: DepositType,
     pub asset_type: AssetType,

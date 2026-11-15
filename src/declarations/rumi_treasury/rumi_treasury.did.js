@@ -14,6 +14,8 @@ export const idlFactory = ({ IDL }) => {
     'ICUSD' : IDL.Null,
     'CKBTC' : IDL.Null,
   });
+  const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const Result_1 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -42,6 +44,7 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Opt(IDL.Text),
     'amount' : IDL.Nat64,
   });
+  const Result_2 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
   const WithdrawResult = IDL.Record({
     'fee' : IDL.Nat64,
     'block_index' : IDL.Nat64,
@@ -64,6 +67,10 @@ export const idlFactory = ({ IDL }) => {
     'ledger' : IDL.Principal,
     'created_at_time' : IDL.Nat64,
     'amount' : IDL.Nat64,
+  });
+  const Result_3 = IDL.Variant({
+    'Ok' : IDL.Opt(WithdrawalIntentStatusView),
+    'Err' : IDL.Text,
   });
   const DepositRecord = IDL.Record({
     'id' : IDL.Nat64,
@@ -117,11 +124,24 @@ export const idlFactory = ({ IDL }) => {
     'is_paused' : IDL.Bool,
     'balances' : IDL.Vec(IDL.Tuple(AssetType, AssetBalance)),
   });
+  const Result_4 = IDL.Variant({
+    'Ok' : IDL.Vec(IDL.Principal),
+    'Err' : IDL.Text,
+  });
   const ExternalTokenDepositArgs = IDL.Record({
     'asset_type' : AssetType,
     'block_index' : IDL.Nat64,
     'deposit_type' : DepositType,
     'memo' : IDL.Opt(IDL.Text),
+    'ledger' : IDL.Principal,
+    'amount' : IDL.Nat64,
+  });
+  const ReportedTransferDepositArgs = IDL.Record({
+    'asset_type' : AssetType,
+    'block_index' : IDL.Nat64,
+    'deposit_type' : DepositType,
+    'memo' : IDL.Opt(IDL.Text),
+    'operation_id' : IDL.Vec(IDL.Nat8),
     'ledger' : IDL.Principal,
     'amount' : IDL.Nat64,
   });
@@ -132,53 +152,25 @@ export const idlFactory = ({ IDL }) => {
     'memo' : IDL.Opt(IDL.Text),
     'amount' : IDL.Nat64,
   });
+  const Result_5 = IDL.Variant({ 'Ok' : WithdrawResult, 'Err' : IDL.Text });
   return IDL.Service({
     'bind_external_token_ledger_once' : IDL.Func(
         [AssetType, IDL.Principal],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [Result],
         [],
       ),
-    'continue_external_token_deposit_backfill' : IDL.Func(
-        [],
-        [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text })],
-        [],
-      ),
-    'continue_icusd_deposit_block_backfill' : IDL.Func(
-        [],
-        [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text })],
-        [],
-      ),
+    'continue_external_token_deposit_backfill' : IDL.Func([], [Result_1], []),
+    'continue_icusd_deposit_block_backfill' : IDL.Func([], [Result_1], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
-    'deposit' : IDL.Func(
-        [DepositArgs],
-        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
-        [],
-      ),
-    'deposit_borrowing_fee_once' : IDL.Func(
-        [DepositArgs],
-        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
-        [],
-      ),
-    'deposit_interest_revenue_once' : IDL.Func(
-        [DepositArgs],
-        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
-        [],
-      ),
-    'get_active_withdrawal_intent_status' : IDL.Func(
-        [],
-        [
-          IDL.Variant({
-            'Ok' : IDL.Opt(WithdrawalIntentStatusView),
-            'Err' : IDL.Text,
-          }),
-        ],
-        ['query'],
-      ),
+    'deposit' : IDL.Func([DepositArgs], [Result_2], []),
+    'deposit_borrowing_fee_once' : IDL.Func([DepositArgs], [Result_2], []),
+    'deposit_interest_revenue_once' : IDL.Func([DepositArgs], [Result_2], []),
+    'get_active_withdrawal_intent_status' : IDL.Func([], [Result_3], ['query']),
     'get_deposits' : IDL.Func(
         [IDL.Opt(IDL.Nat64), IDL.Opt(IDL.Nat64)],
         [IDL.Vec(DepositRecord)],
@@ -196,42 +188,36 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_status' : IDL.Func([], [TreasuryStatus], ['query']),
+    'get_transfer_reporters' : IDL.Func([], [Result_4], ['query']),
     'get_withdrawal_intent_status' : IDL.Func(
         [IDL.Nat64],
-        [
-          IDL.Variant({
-            'Ok' : IDL.Opt(WithdrawalIntentStatusView),
-            'Err' : IDL.Text,
-          }),
-        ],
+        [Result_3],
         ['query'],
       ),
     'is_caller_controller' : IDL.Func([], [IDL.Bool], ['query']),
     'record_external_token_deposit_once' : IDL.Func(
         [ExternalTokenDepositArgs],
-        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [Result_2],
+        [],
+      ),
+    'record_reported_transfer_once' : IDL.Func(
+        [ReportedTransferDepositArgs],
+        [Result_2],
         [],
       ),
     'record_stability_pool_unallocated_interest' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Vec(IDL.Nat64)],
-        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [Result_2],
         [],
       ),
-    'set_paused' : IDL.Func(
-        [IDL.Bool],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
-        [],
-      ),
+    'set_paused' : IDL.Func([IDL.Bool], [Result], []),
     'set_stability_pool_reporter' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [Result],
         [],
       ),
-    'withdraw' : IDL.Func(
-        [WithdrawArgs],
-        [IDL.Variant({ 'Ok' : WithdrawResult, 'Err' : IDL.Text })],
-        [],
-      ),
+    'set_transfer_reporter' : IDL.Func([IDL.Principal, IDL.Bool], [Result], []),
+    'withdraw' : IDL.Func([WithdrawArgs], [Result_5], []),
   });
 };
 export const init = ({ IDL }) => {
