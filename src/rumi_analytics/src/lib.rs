@@ -667,6 +667,7 @@ async fn admin_backfill_add_margin_events(
     let admin = state::read_state(|s| s.admin);
     let caller = ic_cdk::caller();
     require_admin(caller, admin)?;
+    advance_add_margin_dedupe_index()?;
     let backend = state::read_state(|s| s.sources.backend);
     let cursor = state::read_state(|s| s.add_margin_backfill_cursor.unwrap_or(0));
     let count = sources::backend::get_event_count(backend).await?;
@@ -682,9 +683,36 @@ async fn admin_backfill_add_margin_events(
     }
     let want = batch_size.clamp(1, 5_000).min(count - cursor);
     let events = sources::backend::get_events(backend, cursor, want).await?;
+    state::mutate_state(|s| {
+        commit_add_margin_backfill_batch(s, cursor, &events, count, |row| {
+            storage::events::push_add_margin_if_new(row)
+        })
+    })
+}
+
+fn commit_add_margin_backfill_batch<F>(
+    state: &mut SlimState,
+    expected_cursor: u64,
+    events: &[sources::backend::BackendEvent],
+    total_events: u64,
+    mut emit: F,
+) -> Result<types::BackfillProgress, String>
+where
+    F: FnMut(storage::events::AnalyticsVaultEvent) -> bool,
+{
+    let current_cursor = state.add_margin_backfill_cursor.unwrap_or(0);
+    if current_cursor != expected_cursor {
+        return Err(format!(
+            "AddMargin backfill cursor advanced concurrently from {} to {}; retry",
+            expected_cursor, current_cursor
+        ));
+    }
+
+    let cursor_after = expected_cursor
+        .checked_add(events.len() as u64)
+        .ok_or_else(|| "AddMargin backfill cursor overflow".to_string())?;
     let mut emitted = 0u64;
-    for (i, event) in events.iter().enumerate() {
-        let event_id = cursor + i as u64;
+    for (offset, event) in events.iter().enumerate() {
         if let sources::backend::BackendEvent::AddMarginToVault {
             vault_id,
             margin_added,
@@ -693,31 +721,67 @@ async fn admin_backfill_add_margin_events(
             ..
         } = event
         {
-            storage::events::evt_vaults::push(storage::events::AnalyticsVaultEvent {
+            if emit(storage::events::AnalyticsVaultEvent {
                 timestamp_ns: timestamp.unwrap_or(0),
-                source_event_id: event_id,
+                source_event_id: expected_cursor + offset as u64,
                 vault_id: *vault_id,
                 owner: actor.unwrap_or(candid::Principal::anonymous()),
                 event_kind: storage::events::VaultEventKind::CollateralDeposited,
                 collateral_type: candid::Principal::anonymous(),
                 amount: *margin_added,
                 fee_amount: None,
-            });
-            emitted += 1;
+            }) {
+                emitted += 1;
+            }
         }
     }
-    let cursor_after = cursor + events.len() as u64;
-    state::mutate_state(|s| {
-        s.add_margin_backfill_cursor = Some(cursor_after);
-    });
+
+    state.add_margin_backfill_cursor = Some(cursor_after);
     Ok(types::BackfillProgress {
-        from: cursor,
+        from: expected_cursor,
         scanned: events.len() as u64,
         emitted,
         cursor_after,
-        total_events: count,
-        complete: cursor_after >= count,
+        total_events,
+        complete: cursor_after >= total_events,
     })
+}
+
+const ADD_MARGIN_BACKFILL_BATCH_MAX: u64 = 5_000;
+
+/// Rebuild the sparse dedupe index incrementally after upgrading old analytics
+/// state. Tailer and backfill pause until the existing vault log is indexed.
+pub(crate) fn advance_add_margin_dedupe_index() -> Result<(), String> {
+    let (ready, cursor) = state::read_state(|s| {
+        (
+            s.add_margin_dedupe_index_ready.unwrap_or(false),
+            s.add_margin_dedupe_index_cursor.unwrap_or(0),
+        )
+    });
+    if ready {
+        return Ok(());
+    }
+
+    let log_len = storage::events::evt_vaults::len();
+    let end = cursor
+        .saturating_add(ADD_MARGIN_BACKFILL_BATCH_MAX)
+        .min(log_len);
+    let next = storage::events::index_existing_add_margin_rows(cursor, end - cursor);
+    let caught_up = next >= storage::events::evt_vaults::len();
+    state::mutate_state(|s| {
+        if s.add_margin_dedupe_index_cursor.unwrap_or(0) == cursor {
+            s.add_margin_dedupe_index_cursor = Some(next);
+            s.add_margin_dedupe_index_ready = Some(caught_up);
+        }
+    });
+    if caught_up {
+        Ok(())
+    } else {
+        Err(format!(
+            "AddMargin dedupe index warming: scanned vault-event rows {}..{}; retry",
+            cursor, next
+        ))
+    }
 }
 
 #[ic_cdk_macros::update]
@@ -884,6 +948,104 @@ mod cycle_manager_tests {
             require_admin(Principal::anonymous(), Principal::anonymous()).is_err(),
             "an unconfigured anonymous admin must not authorize anonymous ingress"
         );
+    }
+
+    #[test]
+    fn stale_overlapping_add_margin_batch_is_rejected_without_emitting() {
+        let actor = principal(7);
+        let events = [sources::backend::BackendEvent::AddMarginToVault {
+            vault_id: 42,
+            margin_added: 500,
+            block_index: 0,
+            caller: Some(actor),
+            timestamp: Some(99),
+        }];
+        let mut slim = SlimState {
+            add_margin_backfill_cursor: Some(10),
+            ..SlimState::default()
+        };
+        let mut emitted = Vec::new();
+
+        let winner = commit_add_margin_backfill_batch(&mut slim, 10, &events, 11, |row| {
+            emitted.push(row);
+            true
+        })
+        .expect("first batch should commit");
+        let stale = commit_add_margin_backfill_batch(&mut slim, 10, &events, 11, |row| {
+            emitted.push(row);
+            true
+        });
+
+        assert_eq!(winner.scanned, 1);
+        assert_eq!(winner.emitted, 1);
+        assert_eq!(winner.cursor_after, 11);
+        assert!(stale.unwrap_err().contains("advanced concurrently"));
+        assert_eq!(slim.add_margin_backfill_cursor, Some(11));
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].source_event_id, 10);
+    }
+
+    #[test]
+    fn add_margin_dedupe_index_warms_across_bounded_batches() {
+        let log_start = storage::events::evt_vaults::len();
+        let row_count = ADD_MARGIN_BACKFILL_BATCH_MAX as usize + 1;
+        let source_start = u64::MAX - 20_000;
+        for offset in 0..row_count {
+            storage::events::evt_vaults::push(storage::events::AnalyticsVaultEvent {
+                timestamp_ns: offset as u64,
+                source_event_id: source_start + offset as u64,
+                vault_id: offset as u64,
+                owner: principal(7),
+                event_kind: storage::events::VaultEventKind::CollateralDeposited,
+                collateral_type: Principal::anonymous(),
+                amount: 500,
+                fee_amount: None,
+            });
+        }
+
+        let prior_state = state::read_state(|s| s.clone());
+        state::replace_state(SlimState {
+            add_margin_dedupe_index_cursor: Some(log_start),
+            ..SlimState::default()
+        });
+
+        let first = advance_add_margin_dedupe_index();
+        assert!(first.unwrap_err().contains("index warming"));
+        assert_eq!(
+            state::read_state(|s| s.add_margin_dedupe_index_cursor),
+            Some(log_start + ADD_MARGIN_BACKFILL_BATCH_MAX)
+        );
+        assert_eq!(
+            state::read_state(|s| s.add_margin_dedupe_index_ready),
+            Some(false)
+        );
+
+        let second = advance_add_margin_dedupe_index();
+        assert!(second.is_ok());
+        assert_eq!(
+            state::read_state(|s| s.add_margin_dedupe_index_cursor),
+            Some(log_start + row_count as u64)
+        );
+        assert_eq!(
+            state::read_state(|s| s.add_margin_dedupe_index_ready),
+            Some(true)
+        );
+
+        let duplicate = storage::events::AnalyticsVaultEvent {
+            timestamp_ns: (row_count - 1) as u64,
+            source_event_id: source_start + (row_count - 1) as u64,
+            vault_id: (row_count - 1) as u64,
+            owner: principal(7),
+            event_kind: storage::events::VaultEventKind::CollateralDeposited,
+            collateral_type: Principal::anonymous(),
+            amount: 500,
+            fee_amount: None,
+        };
+        let before_duplicate = storage::events::evt_vaults::len();
+        assert!(!storage::events::push_add_margin_if_new(duplicate));
+        assert_eq!(storage::events::evt_vaults::len(), before_duplicate);
+
+        state::replace_state(prior_state);
     }
 
     #[test]
