@@ -1,36 +1,36 @@
 {
   "items": [
     {
-      "id": "vault158-recovery",
-      "title": "Joint top: vault 158 liquidation recovery",
-      "status": "blocked",
-      "blockedReason": "The exact recovery-capable bot is installed and its configuration was read back, but financial recovery remains outside the completed upgrade-only authority.",
-      "nextAction": "Review the immutable upgrade readback and draft the smallest readable recovery-authorization artifact. Do not unpause, transfer funds, or call recovery preparation, execution, or reconciliation without separate authority.",
-      "cardIds": [
-        "SEC-06"
-      ]
-    },
-    {
-      "id": "cksol-icp-processing",
-      "title": "Joint top: ckSOL processing paid in ICP",
-      "status": "blocked",
-      "blockedReason": "Focused source composition checks pass; production artifact still excludes the recovery composition. No production build slot or deployment/financial authority is active.",
-      "nextAction": "Complete standing green source merge, then coordinate one source-matched artifact build and refresh the upgrade packet. Preserve accepted stop/drain and exact archived-slot replacement policy; reserve stays off.",
-      "cardIds": [
-        "CKICP-01",
-        "CKICP-02",
-        "CKICP-03"
-      ]
+      "id": "audit-closure",
+      "title": "Complete the security remediation rollout",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Install and read back the five remaining reviewed candidates in their coordinated order. Preserve the Stability Pool recovery invariant and keep older findings without exact source mapping explicitly unresolved.",
+      "cardIds": ["SEC-02", "SEC-04"]
     },
     {
       "id": "sp-live-recovery",
       "title": "Stability Pool live recovery",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Preserve the authenticated recovery and management readback. Bind the current module hash only if an existing release receipt or retained artifact proves it; otherwise keep the source provenance limitation explicit. Do not allocate a build or install solely for attribution.",
-      "cardIds": [
-        "SEC-01"
-      ]
+      "nextAction": "Upgrade from the observed preceding module to the reviewed candidate while preserving all 237 credited packets, then repeat the bounded recovery and invariant readbacks.",
+      "cardIds": ["SEC-01"]
+    },
+    {
+      "id": "vault158-recovery",
+      "title": "Vault 158 liquidation recovery",
+      "status": "blocked",
+      "blockedReason": "The exact recovery-capable bot is installed and its configuration was read back, but financial recovery remains outside the completed upgrade-only authority.",
+      "nextAction": "Review the immutable upgrade readback and draft the smallest readable recovery-authorization artifact. Do not unpause, transfer funds, or call recovery preparation, execution, or reconciliation without separate authority.",
+      "cardIds": ["SEC-06"]
+    },
+    {
+      "id": "cksol-icp-processing",
+      "title": "ckSOL processing paid in ICP",
+      "status": "blocked",
+      "blockedReason": "Focused source composition checks pass; the production artifact still excludes the recovery composition. No production build slot or deployment or financial authority is active.",
+      "nextAction": "Complete standing green source merge, then coordinate one source-matched artifact build and refresh the upgrade packet. Preserve accepted stop and drain and exact archived-slot replacement policy; reserve stays off.",
+      "cardIds": ["CKICP-01", "CKICP-02", "CKICP-03"]
     },
     {
       "id": "vault51-nicp-recovery",
@@ -38,20 +38,15 @@
       "status": "in_progress",
       "blockedReason": "",
       "nextAction": "Review green PR #613 and preserve the separate authorization boundary for owner repayment, nICP settlement, and ICP withdrawal.",
-      "cardIds": [
-        "SEC-08"
-      ]
+      "cardIds": ["SEC-08"]
     },
     {
-      "id": "audit-closure",
-      "title": "Remaining security findings",
-      "status": "in_progress",
+      "id": "release-report",
+      "title": "Release and public status",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Update the finding matrix against current source and live evidence, preserving unresolved liabilities.",
-      "cardIds": [
-        "SEC-02",
-        "SEC-04"
-      ]
+      "nextAction": "The dated report is published. Refresh it after the remaining canister installations and readbacks.",
+      "cardIds": ["SEC-05"]
     },
     {
       "id": "points-recovery",
@@ -59,19 +54,7 @@
       "status": "done",
       "blockedReason": "",
       "nextAction": "Season 1 scoring is finalized and verified. Token claims and Season 2 remain separate work.",
-      "cardIds": [
-        "SEC-03"
-      ]
-    },
-    {
-      "id": "release-report",
-      "title": "Release and public status",
-      "status": "blocked",
-      "blockedReason": "Current live readback and accepted-finding closure evidence are not yet recorded in this board.",
-      "nextAction": "Once verified, update the release record and public page with the observed state.",
-      "cardIds": [
-        "SEC-05"
-      ]
+      "cardIds": ["SEC-03"]
     },
     {
       "id": "xrp-deposit-tag-guidance",
@@ -79,10 +62,7 @@
       "status": "done",
       "blockedReason": "",
       "nextAction": "Deployed and verified. Customer-specific exchange behavior and any existing funds require separate identifiers.",
-      "cardIds": [
-        "XRPTAG-01",
-        "XRPTAG-02"
-      ]
+      "cardIds": ["XRPTAG-01", "XRPTAG-02"]
     }
   ]
 }
