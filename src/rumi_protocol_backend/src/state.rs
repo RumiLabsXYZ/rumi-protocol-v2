@@ -8197,17 +8197,37 @@ impl State {
         }
     }
 
-    pub fn borrow_from_vault(&mut self, vault_id: u64, borrowed_amount: ICUSD) {
+    pub fn borrow_from_vault_at(
+        &mut self,
+        vault_id: u64,
+        borrowed_amount: ICUSD,
+        timestamp_ns: Option<u64>,
+    ) {
         match self.vault_id_to_vaults.get_mut(&vault_id) {
             Some(vault) => {
+                let debt_was_zero = vault.borrowed_icusd_amount == ICUSD::new(0);
                 vault.borrowed_icusd_amount =
                     crate::numeric::checked_icusd_add(vault.borrowed_icusd_amount, borrowed_amount)
                         .unwrap_or_else(|| ic_cdk::trap("vault debt exceeds the u64 icUSD range"));
+                // A debt-free vault's accrual clock describes no principal. When
+                // debt first becomes positive, start its clock at the committed
+                // borrow timestamp so the new principal cannot inherit idle time.
+                // Positive-debt callers accrue before this transition and retain
+                // that already-advanced clock.
+                if debt_was_zero {
+                    if let Some(timestamp_ns) = timestamp_ns {
+                        vault.last_accrual_time = timestamp_ns;
+                    }
+                }
             }
             None => ic_cdk::trap("borrowing from unknown vault"),
         }
         // Wave-8b LIQ-002: re-key after debt change.
         self.reindex_vault_cr(vault_id);
+    }
+
+    pub fn borrow_from_vault(&mut self, vault_id: u64, borrowed_amount: ICUSD) {
+        self.borrow_from_vault_at(vault_id, borrowed_amount, None);
     }
 
     /// Validate the representable collateral total without changing state.
@@ -10933,6 +10953,66 @@ mod tests {
             state.vault_id_to_vaults[&vault_id].borrowed_icusd_amount,
             ICUSD::new(u64::MAX),
             "the failed addition must leave vault debt unchanged"
+        );
+    }
+
+    #[test]
+    fn first_borrow_after_debt_free_idle_starts_accrual_at_borrow_time() {
+        let mut state = test_state();
+        let vault_id = 74;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            crate::vault::Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: state.icp_ledger_principal,
+                last_accrual_time: 10,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        state.borrow_from_vault_at(vault_id, ICUSD::new(100), Some(1_000));
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100));
+        assert_eq!(vault.last_accrual_time, 1_000);
+
+        state.borrow_from_vault_at(vault_id, ICUSD::new(50), Some(2_000));
+        assert_eq!(
+            state.vault_id_to_vaults[&vault_id].last_accrual_time,
+            1_000,
+            "positive-debt callers retain the clock advanced by their pre-borrow accrual"
+        );
+    }
+
+    #[test]
+    fn legacy_borrow_without_timestamp_preserves_existing_accrual_clock() {
+        let mut state = test_state();
+        let vault_id = 75;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            crate::vault::Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: state.icp_ledger_principal,
+                last_accrual_time: 10,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        state.borrow_from_vault(vault_id, ICUSD::new(100));
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100));
+        assert_eq!(
+            vault.last_accrual_time, 10,
+            "legacy events without a timestamp retain their historical replay semantics"
         );
     }
 

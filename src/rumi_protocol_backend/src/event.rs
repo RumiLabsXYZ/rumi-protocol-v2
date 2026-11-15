@@ -2656,10 +2656,11 @@ fn replay_with_nonce_time_and_payout_events(
             Event::BorrowFromVault {
                 vault_id,
                 borrowed_amount,
+                timestamp,
                 ..
             } => {
                 // Fee was phantom (never minted) in old events; now routed to treasury in async caller.
-                state.borrow_from_vault(vault_id, borrowed_amount)
+                state.borrow_from_vault_at(vault_id, borrowed_amount, timestamp)
             }
             Event::RedemptionOnVaults {
                 owner,
@@ -4008,7 +4009,7 @@ pub fn record_borrow_from_vault_at(
         },
         timestamp_ns,
     );
-    state.borrow_from_vault(vault_id, borrowed_amount);
+    state.borrow_from_vault_at(vault_id, borrowed_amount, Some(timestamp_ns));
     // Fee is now minted to treasury in the async caller — no longer credited to liquidity pool.
 }
 
@@ -6689,6 +6690,101 @@ mod three_usd_reserve_payout_replay_tests {
         assert_eq!(payout.rearmed_attempts.len(), 1);
         assert_eq!(payout.rearmed_attempts[0].op_nonce, new_nonce);
         assert_eq!(payout.rearmed_attempts[0].fee_arg_e8s, Some(10));
+    }
+}
+
+#[cfg(test)]
+mod borrow_replay_tests {
+    use super::*;
+    use crate::vault::Vault;
+
+    fn principal(seed: u8) -> Principal {
+        Principal::self_authenticating([seed; 32])
+    }
+
+    fn init_args(icp: Principal) -> InitArg {
+        InitArg {
+            xrc_principal: principal(20),
+            icusd_ledger_principal: principal(21),
+            icp_ledger_principal: icp,
+            fee_e8s: 0,
+            developer_principal: principal(22),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        }
+    }
+
+    fn open_zero_debt_vault(vault_id: u64, owner: Principal, collateral: Principal) -> Event {
+        Event::OpenVault {
+            vault: Vault {
+                owner,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_amount: 1_000_000_000,
+                vault_id,
+                collateral_type: collateral,
+                last_accrual_time: 7,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+            block_index: vault_id,
+            timestamp: Some(7),
+        }
+    }
+
+    #[test]
+    fn replayed_first_borrow_starts_accrual_at_recorded_borrow_time() {
+        let icp = principal(1);
+        let owner = principal(2);
+        let vault_id = 1;
+        let state = replay(
+            vec![
+                Event::Init(init_args(icp)),
+                open_zero_debt_vault(vault_id, owner, icp),
+                Event::BorrowFromVault {
+                    vault_id,
+                    block_index: 9,
+                    fee_amount: ICUSD::new(0),
+                    borrowed_amount: ICUSD::new(100_000_000),
+                    caller: Some(owner),
+                    timestamp: Some(1_000),
+                },
+            ]
+            .into_iter(),
+        )
+        .expect("borrow replay should remain consistent");
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100_000_000));
+        assert_eq!(vault.last_accrual_time, 1_000);
+    }
+
+    #[test]
+    fn replayed_legacy_borrow_without_timestamp_preserves_existing_clock() {
+        let icp = principal(3);
+        let owner = principal(4);
+        let vault_id = 2;
+        let state = replay(
+            vec![
+                Event::Init(init_args(icp)),
+                open_zero_debt_vault(vault_id, owner, icp),
+                Event::BorrowFromVault {
+                    vault_id,
+                    block_index: 10,
+                    fee_amount: ICUSD::new(0),
+                    borrowed_amount: ICUSD::new(100_000_000),
+                    caller: Some(owner),
+                    timestamp: None,
+                },
+            ]
+            .into_iter(),
+        )
+        .expect("legacy borrow replay should remain compatible");
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100_000_000));
+        assert_eq!(vault.last_accrual_time, 7);
     }
 }
 
