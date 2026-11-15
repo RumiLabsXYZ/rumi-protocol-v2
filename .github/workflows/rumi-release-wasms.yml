@@ -1,0 +1,86 @@
+name: Build Rumi release Wasms
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/rumi-release-wasms.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install pinned Rust toolchain and Wasm target
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup +1.92.0 target add wasm32-unknown-unknown
+
+      - name: Build release Wasms
+        run: |
+          cargo +1.92.0 build --release --target wasm32-unknown-unknown --locked --jobs 1 \
+            -p stability_pool \
+            -p rumi_amm \
+            -p rumi_analytics \
+            -p liquidation_bot \
+            -p rumi_protocol_backend \
+            -p rumi_points
+
+      - name: Stage Wasms and provenance
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for name in \
+            stability_pool \
+            rumi_amm \
+            rumi_analytics \
+            liquidation_bot \
+            rumi_protocol_backend \
+            rumi_points
+          do
+            wasm="target/wasm32-unknown-unknown/release/$name.wasm"
+            test -s "$wasm"
+            cp "$wasm" dist/
+          done
+
+          {
+            printf 'checked_out_sha=%s\n' "$(git rev-parse HEAD)"
+            printf 'pr_head_sha=%s\n' "$PR_HEAD_SHA"
+            printf 'pr_base_sha=%s\n' "$PR_BASE_SHA"
+            printf 'rustc=%s\n' "$(rustc +1.92.0 --version)"
+            printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | cut -d ' ' -f 1)"
+            printf '%s\n' 'target=wasm32-unknown-unknown' 'profile=release'
+            printf '%s\n' 'cargo build --release --target wasm32-unknown-unknown --locked --jobs 1 -p stability_pool -p rumi_amm -p rumi_analytics -p liquidation_bot -p rumi_protocol_backend -p rumi_points'
+          } > dist/PROVENANCE.txt
+
+          (
+            cd dist
+            sha256sum \
+              stability_pool.wasm \
+              rumi_amm.wasm \
+              rumi_analytics.wasm \
+              liquidation_bot.wasm \
+              rumi_protocol_backend.wasm \
+              rumi_points.wasm \
+              > SHA256SUMS
+          )
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rumi-release-wasms-${{ github.event.pull_request.head.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
