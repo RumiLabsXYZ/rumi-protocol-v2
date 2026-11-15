@@ -89,15 +89,14 @@
           <div class="status-card-top">
             <span class="status-dot" aria-hidden="true"></span>
             <span>Release status</span>
-            <span class="status-label">In progress</span>
+            <span class="status-label">One hold</span>
           </div>
-          <h2 id="release-status-title">Remediation merged; rollout partial</h2>
+          <h2 id="release-status-title">Core remediation live; one refresh held</h2>
           <p>
-            PRs #652–#662 are merged and six production candidates are identified. The AMM
-            candidate is installed and matched its state baseline. Analytics, Stability Pool,
-            Treasury, backend, and liquidation bot still run preceding modules for this tranche.
-            Fresh readbacks also cover 3pool, Points, and Cycle Sentinel without treating a live
-            hash as source provenance where that binding is not established.
+            PRs #652–#662 and #666 are merged. The backend, liquidation bot, AMM, and Analytics
+            now run the PR #666 dependency-refresh candidates, and the wallet-session frontend is
+            published. The Stability Pool remains on its prior remediated module after two
+            interrupted refresh requests; its current state is healthy and no retry is being made.
           </p>
           <div class="status-divider"></div>
           <p class="status-footnote">
@@ -115,12 +114,12 @@
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step working">
           <span class="step-icon" aria-hidden="true">02</span>
-          <div><strong>Security remediations</strong><span>PRs #652–#662 merged</span></div>
+          <div><strong>Security remediations</strong><span>PRs #652–#662 and #666 merged</span></div>
         </div>
         <span class="rail-line" aria-hidden="true"></span>
         <div class="evidence-step live">
           <span class="step-icon" aria-hidden="true">03</span>
-          <div><strong>Installed code</strong><span>AMM complete; five tranche upgrades pending</span></div>
+          <div><strong>Installed code</strong><span>Four dependency refreshes live; one held</span></div>
         </div>
       </div>
     </div>
@@ -147,23 +146,22 @@
       <article class="state-card state-source">
         <span class="state-icon" aria-hidden="true">◷</span>
         <p class="state-label">Source work</p>
-        <h3>A newer review is still being closed out</h3>
+        <h3>The latest remediation source is merged</h3>
         <p>
-          The later review produced a merged remediation tranche and a complete private
-          finding matrix. The public closure report keeps source, artifact, installation,
-          activation, and recovery claims separate.
+          The later review produced a merged remediation tranche, PR #666 wallet-session and
+          dependency fixes, and a private finding matrix. The public closure report keeps source,
+          artifact, installation, activation, and recovery claims separate.
         </p>
       </article>
 
       <article class="state-card state-live">
         <span class="state-icon" aria-hidden="true">⌁</span>
         <p class="state-label">Mainnet</p>
-        <h3>Source changes do not update canisters</h3>
+        <h3>Four refreshed canisters are hash-matched</h3>
         <p>
-          The November 15 readback confirms the tranche AMM candidate is installed. Analytics,
-          Stability Pool, Treasury, backend, and bot still run earlier modules relative to their
-          new candidates. A source merge does not prove installation, feature activation,
-          migration, or successful live operation.
+          Backend, bot, AMM, and Analytics match their verified PR #666 upload hashes. Treasury
+          remains on its installed remediation build, while Stability Pool remains on its prior
+          healthy remediated build pending disposition of interrupted refresh requests.
         </p>
       </article>
     </div>
@@ -177,9 +175,9 @@
       </div>
       <h2 id="closure-report-title">Security remediation closure status</h2>
       <p class="report-description">
-        Review the merged remediation tranche, exact production module evidence, bounded
-        recovery inventories, wider 3pool/Points/Sentinel readbacks, and the remaining coordinated
-        upgrades.
+        Review the merged remediation tranche and PR #666, exact production module evidence,
+        bounded recovery inventories, wider 3pool/Points/Sentinel readbacks, and the single held
+        dependency refresh.
       </p>
       <div class="report-links">
         <a href="/security/remediation-closure-2026-11-15">Read the closure status report <span aria-hidden="true">↗</span></a>

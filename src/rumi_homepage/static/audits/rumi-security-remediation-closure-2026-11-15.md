@@ -1,13 +1,13 @@
 # Rumi Protocol security remediation status
 
 - **Report date:** November 15, 2026
-- **Canonical source:** `dbcc69bcda00c34721f3b3ffb809d887ff93e175`
-- **Release input tree:** `baba52eb113ed5c53f9a74cb99204fc3a111f29d`
-- **Status:** remediation source merged; six-canister production rollout installed and verified
+- **Canonical source:** `f72ede8195b23299c297fb24f37ac76d7d957269`
+- **Release input tree:** `18b286ab639f714cb10bbf37cdae0f795d1cad06`
+- **Status:** active-path remediation and PR #666 merged; four of five dependency-refresh canisters installed; frontend published; Stability Pool refresh held
 
 ## Executive verdict
 
-The accepted active-path remediations listed in the PR #652–#662 tranche below are merged into the canonical repository. All six reviewed production candidates are now installed and their exact module hashes have been read back. The active-path release is complete; historical proof gaps remain held or fail-closed rather than being treated as settled without evidence.
+The accepted active-path remediations listed in the PR #652–#662 tranche and the PR #666 wallet-session/dependency closure are merged into the canonical repository. The PR #666 backend, liquidation-bot, AMM, and Analytics candidates are installed and their exact module hashes have been read back. The wallet-session frontend is published. The Stability Pool dependency-refresh candidate remains held after two interrupted install requests; the prior remediated module remains running and healthy.
 
 The AMM, Analytics, Stability Pool, Treasury, protocol backend, and liquidation bot upgrades are installed. State baselines, operating modes, recovery queues, reporter authorization, and pause/resume state were checked before and after the coordinated rollout.
 
@@ -33,12 +33,12 @@ The following hashes were read through the authenticated management interface du
 
 | Component | Installed module SHA-256 | Current result |
 | --- | --- | --- |
-| AMM | `66aa67b3be40f27c4471bfbbf99d8bd8c3cd8f189669a89943c7a3ae934d9085` | Remediation installed; pre/post pool values, flags, event counts, pending claims, and unresolved payouts matched. |
-| Analytics | `d6c59e870590964c4be3c950e460d1fee83abf610d12f6b79f627847a499f398` | Exact candidate installed; collector state and retained-event cursors preserved. |
-| Stability Pool | `32cf7dac324e97d8a6d6ddef93902c89dee2bec93c5b51521cf10e260ba83cce` | Exact candidate installed; state invariant, all 237 credited recovery packets, and empty pending recovery queues preserved. |
+| AMM | `3a59c167c0df19fadf1ecfd9d01d334fc380fbfc43830fb79e0618adca7185e6` | PR #666 dependency-refresh candidate installed; pool reserves, LP supply, flags, and empty unresolved-payout inventory preserved. |
+| Analytics | `704f654800cd43cd5fd0b690776e7cac1a882b39ec2b1d76760ed6833c51f290` | PR #666 dependency-refresh candidate installed; collector state, cursors, and pull schedule preserved. |
+| Stability Pool | `32cf7dac324e97d8a6d6ddef93902c89dee2bec93c5b51521cf10e260ba83cce` | Prior remediated build remains installed and healthy; all 237 credited recovery packets and empty pending recovery queues were read back. PR #666 candidate `d8385398…329e9` is not installed after two interrupted requests. |
 | Treasury | `785adb02c314d49244a1f2db5f1923ec9a24440dbe5a7698525b0dce1a0c3832` | Exact candidate installed; deposit count and balances preserved, backfill complete, exact backend and bot reporter set installed, and ingress resumed. |
-| Protocol backend | `caaf7398c04d2f71a75115f4199fa5e429c30a6c8563c874e25d884b28703bd1` | Exact candidate installed; General Availability mode preserved and payout, Treasury-interest, and Treasury-stable recovery pages queried empty. |
-| Liquidation bot | `dadce6c52a79d815a46fbaf2f1c954495d07edf5f8a4f2ef7662cac20bd6cbb2` | Exact candidate installed; processing held during verification, journals empty, Vault 158 recovery settled, configuration read back, and processing resumed. |
+| Protocol backend | `59a64f78e0e652d0e48413aba587d3f826c1dc25258f56ab09575c59de444111` | PR #666 dependency-refresh candidate installed; General Availability mode, zero protocol deficit, and untripped liquidation breaker preserved. |
+| Liquidation bot | `941cd13a3d4024349844d888a8aa1452483aa5dc49cc5599605c7a2fccbab17a` | PR #666 dependency-refresh candidate installed; processing paused automatically, claim/payment journals and backend claim inventory were empty, and processing was explicitly resumed. |
 
 The AMM's pre-upgrade snapshot and fuller baseline showed the same pool values later observed after installation. Its pool values, operational flags, event counts, pending claims, and unresolved payouts matched across the accepted upgrade.
 
@@ -68,9 +68,10 @@ The canonical source includes the following independently merged work:
 - PR #659: commit-time liquidation excess gate;
 - PR #660: Treasury transfer-receipt accounting journal;
 - PR #661: native-XRP admission, capacity reservation, and late-funding tombstones; and
-- PR #662: held protocol-payout recovery with post-await authorization and state revalidation.
+- PR #662: held protocol-payout recovery with post-await authorization and state revalidation; and
+- PR #666: wallet-session binding, exact raw repayment amounts, partial repay-and-close recovery, and patched Rust dependency resolution.
 
-The final merged commit is `dbcc69bcda00c34721f3b3ffb809d887ff93e175`. The final reviewed PR head and the merge commit share Git tree `baba52eb113ed5c53f9a74cb99204fc3a111f29d`.
+The current merged commit is `f72ede8195b23299c297fb24f37ac76d7d957269`. PR #666 head `a059d40ba1e6fe9bec0488102a197eafbf271e34` and the merge commit share Git tree `18b286ab639f714cb10bbf37cdae0f795d1cad06`.
 
 ## Release artifact evidence
 
@@ -89,6 +90,8 @@ Those CI outputs are raw Cargo Wasms, not direct production uploads. The release
 
 The backend candidate passed the mainnet XRPL-environment marker check. A candidate hash is build evidence only until the same hash is observed as installed.
 
+PR #666 exact-head GitHub Actions run `43763172823` built the eight raw Rust canister Wasms from `a059d40ba1e6fe9bec0488102a197eafbf271e34`; its published `SHA256SUMS` verified locally. The deployment-format artifacts were rebuilt from the identical merged tree and produced backend `59a64f78…44111`, bot `941cd13a…ab17a`, Stability Pool `d8385398…329e9`, AMM `3a59c167…185e6`, and Analytics `704f6548…1f290`. Four of those five hashes are installed. The Stability Pool hash remains `32cf7dac…83cce`, so no dependency-refresh installation is claimed for that canister.
+
 ## Current recovery evidence
 
 The November 15 production queries established the following bounded facts:
@@ -105,22 +108,23 @@ These results do not prove that no unknown or unindexed historical obligation ex
 
 ## Residual evidence and recovery holds
 
-The coordinated six-canister release work is complete. The following items remain as explicit evidence limitations or recovery holds, not as hidden claims of settlement and not as blanket gates for unrelated protocol work.
+The original six-canister remediation release is complete. The later PR #666 dependency refresh is installed on four of five affected canisters, with the Stability Pool refresh held. The following items remain explicit evidence limitations or recovery holds, not hidden claims of settlement and not blanket gates for unrelated protocol work.
 
 1. keep the legacy ambiguous Stability Pool burn case held until exact authenticated archive proof exists;
 2. preserve the 60 Treasury tombstones so legacy blocks without exact ledger provenance cannot later be accepted as fresh receipts;
 3. complete the remaining Points source-to-build provenance record; and
-4. repeat bounded durable-inventory queries periodically, because an empty queue at one observation time cannot prove that no unknown historical obligation exists.
+4. obtain an authoritative disposition for the interrupted Stability Pool refresh before any retry, then install and read back exact candidate `d8385398…329e9`; and
+5. repeat bounded durable-inventory queries periodically, because an empty queue at one observation time cannot prove that no unknown historical obligation exists.
 
 ### Dependency follow-up
 
 A fresh production-scope npm advisory query completed on November 15 with zero high or critical findings, nine moderate findings and six low findings. The reported chains are concentrated in the frontend build/static-site toolchain; this is not a claim that they are reachable in deployed static assets, and it is not a clean-audit claim.
 
-The same review found that the Rust production graph had regressed to `bytes` 1.9.0, within the affected range for RUSTSEC-2026-0007. The follow-up source updates `bytes` to 1.11.1, removes two unused state-machine dependencies, and applies compatible patched releases across the lockfile. A fresh RustSec inventory fell from 60 vulnerability matches and 35 warnings to three reviewed non-applicable matches and nine exact maintenance or yanked-package notices. The remaining matches are an inactive optional `rkyv` feature and `crypto-bigint` operations that Rumi does not use with local secrets; both are recorded as exact, expiring policy tuples. Locked Wasm-target checks pass for all nine production canisters. The installed hashes recorded above predate these dependency updates. Exact rebuilt artifacts, state-preserving upgrades and live hash readbacks remain required before the production dependency rollout is closed.
+The same review found that the Rust production graph had regressed to `bytes` 1.9.0, within the affected range for RUSTSEC-2026-0007. PR #666 updates `bytes` to 1.11.1, removes two unused state-machine dependencies, and applies compatible patched releases across the lockfile. A fresh RustSec inventory fell from 60 vulnerability matches and 35 warnings to three reviewed non-applicable matches and nine exact maintenance or yanked-package notices. The remaining matches are an inactive optional `rkyv` feature and `crypto-bigint` operations that Rumi does not use with local secrets; both are recorded as exact, expiring policy tuples. Locked Wasm-target checks pass for all nine production canisters. Backend, liquidation bot, AMM, and Analytics now run those dependency updates. Stability Pool remains on its prior remediated module; its refreshed candidate is built and hash-pinned but not installed.
 
 ### Frontend wallet-session follow-up
 
-The closure branch also updates the enabled create-vault, borrow, collateral-add, partial-withdrawal, close, repayment, and recovery follow-up paths. Mutations, vault refreshes, balance refreshes, shared stores, and local caches remain bound to the submitting wallet owner, provider, and session generation across asynchronous boundaries. Decimal input is converted directly to exact raw integer units rather than through floating-point truncation, and a confirmed financial action is not reclassified as failed merely because a later display refresh fails. The full frontend unit suite passes 1,728 tests, and the production build plus authentication-asset verifier pass. These are source and build results only; the frontend changes remain unmerged and unpublished at this report revision, and real extension account-switch and multi-tab behavior still requires served-asset validation.
+PR #666 updates the enabled create-vault, borrow, collateral-add, partial-withdrawal, close, repayment, and recovery follow-up paths. Mutations, vault refreshes, balance refreshes, shared stores, and local caches remain bound to the submitting wallet owner, provider, and session generation across asynchronous boundaries. Decimal input is converted directly to exact raw integer units rather than through floating-point truncation, and a confirmed financial action is not reclassified as failed merely because a later display refresh fails. The final full frontend unit suite passes 1,740 tests, including 34 focused repayment tests, and the production build plus authentication-asset verifier pass. PR #666 is merged and the asset-only publication synced 759 vault assets while preserving the asset-canister Wasm and controllers. Real extension account-switch and multi-tab behavior still requires served-wallet validation; publication alone is not that proof.
 
 The broader ICRC-3 archive helper accepts only a bounded callback selected by a configured ledger; reviewed public paths do not let an unprivileged caller choose that ledger or archive. Under the [ICP execution model](https://docs.internetcomputer.org/references/ic-interface-spec/), replicated inter-canister execution prevents a single boundary node from forging the reply, but the design still trusts the configured ledger's selected archive rather than independently applying the [ICRC-3 certified-chain procedure](https://github.com/dfinity/ICRC-1/blob/main/standards/ICRC-3/README.md). Rumi therefore keeps sensitive direct-only recovery paths fail-closed. Certified hash-chain verification remains defense-in-depth if independently controlled archives are moved outside that trusted boundary; it is not presented as an active unauthenticated exploit.
 
