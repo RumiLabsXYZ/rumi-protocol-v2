@@ -982,6 +982,25 @@ fn pre_upgrade() {
     log!(INFO, "[pre_upgrade]: state serialized to stable memory");
 }
 
+/// Apply the safe default only when no developer configuration has been
+/// recorded. An empty set with the marker set is an intentional disable.
+fn default_bot_allowlist_if_unconfigured(state: &mut State) -> bool {
+    if state.bot_allowed_collateral_types_configured {
+        return false;
+    }
+    state.bot_allowed_collateral_types.clear();
+    state
+        .bot_allowed_collateral_types
+        .insert(state.icp_ledger_principal);
+    state.bot_allowed_collateral_types_configured = true;
+    true
+}
+
+/// Apply the safe default to a legacy snapshot only when a bot is configured.
+fn migrate_legacy_bot_allowlist(state: &mut State) -> bool {
+    state.liquidation_bot_principal.is_some() && default_bot_allowlist_if_unconfigured(state)
+}
+
 #[post_upgrade]
 fn post_upgrade(arg: ProtocolArg) {
     use rumi_protocol_backend::event::replay_with_pending_payout_events;
@@ -1123,14 +1142,14 @@ fn post_upgrade(arg: ProtocolArg) {
         );
     });
 
-    // Safety net: if bot is configured but allowlist is empty, default to ICP
+    // Legacy snapshots have no marker recording whether the developer ever
+    // configured the bot allowlist. Default those snapshots to ICP once, while
+    // preserving an explicitly configured empty set (bot disabled).
     mutate_state(|s| {
-        if s.liquidation_bot_principal.is_some() && s.bot_allowed_collateral_types.is_empty() {
-            s.bot_allowed_collateral_types
-                .insert(s.icp_ledger_principal);
+        if migrate_legacy_bot_allowlist(s) {
             log!(
                 INFO,
-                "[upgrade]: bot_allowed_collateral_types was empty, defaulted to ICP"
+                "[upgrade]: legacy bot allowlist defaulted to configured ICP ledger"
             );
         }
     });
@@ -8711,6 +8730,86 @@ fn get_stability_pool_liquidate_with_reserves_v2_payout_candidate(
     ))
 }
 
+/// Payout-owner-only lookup for the immutable operation behind a held reserve
+/// payout. The persisted reserve key keeps the historical owner able to invoke
+/// the existing owner-authorized recovery endpoint after SP registration rotates.
+#[query]
+#[candid_method(query)]
+fn get_stability_pool_liquidate_with_reserves_v2_payout_operation_id(
+    vault_id: u64,
+    absorb_id: u64,
+) -> Option<u128> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    read_state(|state| three_usd_reserve_payout_operation_id_for_caller(
+        state, caller, ic_cdk::api::id(), vault_id, absorb_id,
+    ))
+}
+
+fn three_usd_reserve_payout_operation_id_for_caller(
+    state: &rumi_protocol_backend::state::State,
+    caller: Principal,
+    backend: Principal,
+    vault_id: u64,
+    absorb_id: u64,
+) -> Option<u128> {
+    use rumi_protocol_backend::state::{PendingPayoutKind, ThreeUsdReserveIngressKey};
+
+    if caller == Principal::anonymous() { return None; }
+    let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
+    let payout = state.three_usd_reserve_collateral_payouts.get(&key)?;
+    let operation_id = payout.operation_id;
+    if operation_id == 0
+        || payout.op_nonce != operation_id
+        || state.three_usd_reserve_payout_operation_keys.get(&operation_id) != Some(&key)
+        || payout.collateral_type == Principal::anonymous()
+        || payout.ledger == Principal::anonymous()
+        || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
+        || payout.fee_arg_e8s != Some(payout.expected_fee_e8s)
+        || payout.memo.as_slice()
+            != rumi_protocol_backend::management::nonce_to_memo(payout.op_nonce).0.as_slice()
+        || payout.created_at_time_ns
+            != rumi_protocol_backend::management::nonce_to_created_at_time(payout.op_nonce)
+        || payout.rearmed_attempts.len()
+            > rumi_protocol_backend::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+        || payout.source.owner != backend
+        || payout.source.subaccount.is_some()
+        || payout.destination.owner != caller
+        || payout.destination.subaccount.is_some()
+    {
+        return None;
+    }
+    if payout.rearmed_attempts.iter().any(|attempt| {
+        attempt.op_nonce == 0
+            || attempt.op_nonce == payout.op_nonce
+            || attempt.fee_arg_e8s != Some(payout.expected_fee_e8s)
+            || attempt.memo.as_slice()
+                != rumi_protocol_backend::management::nonce_to_memo(attempt.op_nonce).0.as_slice()
+            || attempt.created_at_time_ns
+                != rumi_protocol_backend::management::nonce_to_created_at_time(attempt.op_nonce)
+    }) {
+        return None;
+    }
+    let (_, transfer) = state.get_pending_payout(operation_id)?;
+    let current_attempt_is_linked = transfer.op_nonce == payout.op_nonce
+        || payout.rearmed_attempts.iter().any(|attempt| attempt.op_nonce == transfer.op_nonce);
+    (transfer.operation_id == operation_id
+        && transfer.owner == caller
+        && transfer.vault_id == vault_id
+        && transfer.payout_kind == PendingPayoutKind::Margin
+        && transfer.held_for_manual_retry
+        && transfer.reconciliation_required
+        && !transfer.in_flight
+        && current_attempt_is_linked
+        && transfer.ledger == Some(payout.ledger)
+        && transfer.collateral_type == payout.collateral_type
+        && transfer.margin.to_u64() == payout.gross_e8s
+        && transfer.transfer_amount_raw == Some(payout.net_e8s))
+        .then_some(operation_id)
+}
+
 fn three_usd_reserve_payout_candidate_for_caller(
     state: &rumi_protocol_backend::state::State,
     caller: Principal,
@@ -8805,6 +8904,66 @@ mod three_usd_reserve_payout_candidate_tests {
             observed_fee_e8s: Some(10),
             rearmed_attempts: Vec::new(),
         }
+    }
+
+    fn held_transfer(pool: Principal) -> rumi_protocol_backend::state::PendingMarginTransfer {
+        use rumi_protocol_backend::state::{PendingMarginTransfer, PendingPayoutKind};
+        PendingMarginTransfer {
+            vault_id: 5,
+            operation_id: 9,
+            payout_kind: PendingPayoutKind::Margin,
+            owner: pool,
+            margin: rumi_protocol_backend::numeric::ICP::new(110),
+            collateral_type: p(3),
+            retry_count: 0,
+            op_nonce: 9,
+            ledger: Some(p(3)),
+            transfer_amount_raw: Some(100),
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 1,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        }
+    }
+
+    #[test]
+    fn payout_operation_lookup_follows_persisted_owner_after_registration_rotation() {
+        let backend = p(1);
+        let pool = p(2);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 5, absorb_id: 6 };
+        let mut state = State::default();
+        state.stability_pool_canister = Some(pool);
+        let mut held = payout(backend, pool);
+        held.candidate_block_index = None;
+        state.three_usd_reserve_collateral_payouts.insert(key.clone(), held);
+        state.three_usd_reserve_payout_operation_keys.insert(9, key.clone());
+        state.insert_pending_payout(held_transfer(pool));
+
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), Some(9));
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, p(4), backend, 5, 6), None);
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 7), None);
+
+        let new_pool = p(4);
+        state.stability_pool_canister = Some(new_pool);
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), Some(9));
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, new_pool, backend, 5, 6), None);
+
+        state.three_usd_reserve_payout_operation_keys.insert(9, ThreeUsdReserveIngressKey {
+            stability_pool: pool, vault_id: 5, absorb_id: 7,
+        });
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), None);
+        state.three_usd_reserve_payout_operation_keys.insert(9, key);
+
+        state.mutate_pending_payout(9, |transfer| transfer.owner = p(4));
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), None);
     }
 
     #[test]
@@ -12064,10 +12223,15 @@ async fn set_liquidation_bot_config(
             monthly_budget_e8s,
             ic_cdk::api::time(),
         );
-        // Default: allow ICP if the allowlist is empty (first-time setup)
-        if s.bot_allowed_collateral_types.is_empty() {
-            s.bot_allowed_collateral_types
-                .insert(s.icp_ledger_principal);
+        // Default to ICP only before the developer has explicitly configured
+        // the allowlist. Record the default so replay preserves an explicit
+        // empty allowlist set before bot setup.
+        if default_bot_allowlist_if_unconfigured(s) {
+            let icp_ledger = s.icp_ledger_principal;
+            rumi_protocol_backend::event::record_set_bot_allowed_collateral_types(
+                s,
+                vec![icp_ledger],
+            );
         }
     });
     log!(
@@ -12121,6 +12285,19 @@ async fn reset_bot_budget(new_budget_e8s: u64) -> Result<(), ProtocolError> {
 
 /// Set which collateral types the bot is allowed to liquidate (developer only).
 /// Pass an empty vec to disable bot liquidations entirely.
+/// The current bot rail only handles native ICP collateral, so the setter must
+/// not admit another ledger even when that ledger is registered in the backend.
+fn validate_bot_allowed_collateral_types(
+    collateral_types: &[Principal],
+    icp_ledger: Principal,
+) -> Result<(), Principal> {
+    collateral_types
+        .iter()
+        .copied()
+        .find(|collateral| *collateral != icp_ledger)
+        .map_or(Ok(()), Err)
+}
+
 #[candid_method(update)]
 #[update]
 async fn set_bot_allowed_collateral_types(
@@ -12132,6 +12309,13 @@ async fn set_bot_allowed_collateral_types(
         return Err(ProtocolError::GenericError(
             "Only developer can set bot allowed collateral types".to_string(),
         ));
+    }
+    let icp_ledger = read_state(|s| s.icp_ledger_principal);
+    if let Err(collateral) = validate_bot_allowed_collateral_types(&collateral_types, icp_ledger) {
+        return Err(ProtocolError::GenericError(format!(
+            "Bot liquidation currently supports only the configured ICP ledger {}; rejected {}",
+            icp_ledger, collateral
+        )));
     }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_bot_allowed_collateral_types(
@@ -12146,6 +12330,63 @@ async fn set_bot_allowed_collateral_types(
         collateral_types
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod bot_allowed_collateral_types_config_tests {
+    use super::{
+        default_bot_allowlist_if_unconfigured, migrate_legacy_bot_allowlist,
+        validate_bot_allowed_collateral_types,
+    };
+    use candid::Principal;
+    use rumi_protocol_backend::state::State;
+
+    #[test]
+    fn allowlist_accepts_only_configured_icp_ledger_before_update() {
+        let icp = Principal::from_slice(&[1]);
+        let other = Principal::from_slice(&[2]);
+
+        assert_eq!(validate_bot_allowed_collateral_types(&[], icp), Ok(()));
+        assert_eq!(validate_bot_allowed_collateral_types(&[icp], icp), Ok(()));
+        assert_eq!(
+            validate_bot_allowed_collateral_types(&[icp, other], icp),
+            Err(other),
+            "a mixed ICP and non-ICP allowlist must be rejected as a whole"
+        );
+        assert_eq!(validate_bot_allowed_collateral_types(&[other], icp), Err(other));
+    }
+
+    #[test]
+    fn upgrade_defaults_legacy_allowlist_but_preserves_explicit_empty_disable() {
+        let icp = Principal::from_slice(&[1]);
+        let bot = Principal::from_slice(&[3]);
+
+        let mut legacy = State::default();
+        legacy.liquidation_bot_principal = Some(bot);
+        legacy.icp_ledger_principal = icp;
+        let mut legacy_snapshot = serde_json::to_value(&legacy).expect("serialize state");
+        legacy_snapshot
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("bot_allowed_collateral_types_configured");
+        let mut restored_legacy: State =
+            serde_json::from_value(legacy_snapshot).expect("legacy snapshot decodes");
+        assert!(!restored_legacy.bot_allowed_collateral_types_configured);
+        assert!(migrate_legacy_bot_allowlist(&mut restored_legacy));
+        assert_eq!(
+            restored_legacy.bot_allowed_collateral_types,
+            [icp].into_iter().collect()
+        );
+        assert!(restored_legacy.bot_allowed_collateral_types_configured);
+
+        let mut explicitly_disabled = State::default();
+        explicitly_disabled.liquidation_bot_principal = Some(bot);
+        explicitly_disabled.icp_ledger_principal = icp;
+        explicitly_disabled.bot_allowed_collateral_types_configured = true;
+        assert!(!default_bot_allowlist_if_unconfigured(&mut explicitly_disabled));
+        assert!(!migrate_legacy_bot_allowlist(&mut explicitly_disabled));
+        assert!(explicitly_disabled.bot_allowed_collateral_types.is_empty());
+    }
 }
 
 #[candid_method(query)]

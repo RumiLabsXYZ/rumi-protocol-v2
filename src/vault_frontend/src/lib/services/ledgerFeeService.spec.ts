@@ -18,10 +18,10 @@ vi.mock('@dfinity/agent', async () => {
       ...actual.Actor,
       createActor: vi.fn(() => ({ icrc1_fee: mocks.icrc1Fee })),
     },
-    HttpAgent: vi.fn(() => ({
-      fetchRootKey: mocks.fetchRootKey,
-    })),
-    AnonymousIdentity: vi.fn(() => ({})),
+    HttpAgent: vi.fn(function HttpAgentMock() {
+      return { fetchRootKey: mocks.fetchRootKey };
+    }),
+    AnonymousIdentity: vi.fn(function AnonymousIdentityMock() {}),
   };
 });
 

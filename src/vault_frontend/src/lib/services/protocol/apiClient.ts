@@ -3866,11 +3866,19 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
   private static clearAllStaleOperations() {
     const now = Date.now();
     let clearedCount = 0;
-      // Clear operation flags on page load to avoid stuck operations between sessions
-      ApiClient.operationInProgress = false;
-      ApiClient.operationTimestamps.clear();
-       console.log(`Cleared ${clearedCount} stale vault operations`);
+    for (const [operationId, startedAt] of ApiClient.operationTimestamps) {
+      if (now - startedAt > ApiClient.STALE_OPERATION_TIMEOUT) {
+        ApiClient.operationTimestamps.delete(operationId);
+        clearedCount++;
+      }
     }
+    // The active-operation lock is released only by executeSequentialOperation's
+    // finally block. A periodic timeout must never admit a second mutation while
+    // the first operation is still unresolved.
+    if (clearedCount > 0) {
+      console.log(`Cleared ${clearedCount} stale vault operation timestamps`);
+    }
+  }
   
 
 

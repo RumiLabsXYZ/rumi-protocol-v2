@@ -2700,6 +2700,10 @@ service : (ProtocolArg) -> {
       nat64,
       nat64,
     ) -> (opt ThreeUsdReserveCollateralPayout) query;
+  get_stability_pool_liquidate_with_reserves_v2_payout_operation_id : (
+      nat64,
+      nat64,
+    ) -> (opt nat) query;
   get_stability_pool_liquidate_with_reserves_v2_status : (nat64, nat64) -> (
       ThreeUsdReserveIngressV2StatusView,
     ) query;

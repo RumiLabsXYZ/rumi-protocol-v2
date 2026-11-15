@@ -110,6 +110,11 @@ export interface AmmLiquidityEvent {
   'caller' : Principal,
   'pool_id' : string,
 }
+export interface AmmLiquidityEventWindow {
+  'next_event_id' : bigint,
+  'events' : Array<AmmLiquidityEvent>,
+  'oldest_available_id' : bigint,
+}
 export interface AmmPoolStats {
   'volume_b_e8s' : bigint,
   'fees_a_e8s' : bigint,
@@ -380,6 +385,10 @@ export interface _SERVICE {
   'get_amm_liquidity_events_by_principal' : ActorMethod<
     [AmmEventsByPrincipalQuery],
     Array<AmmLiquidityEvent>
+  >,
+  'get_amm_liquidity_events_from_id' : ActorMethod<
+    [bigint, bigint],
+    AmmLiquidityEventWindow
   >,
   'get_amm_pool_stats' : ActorMethod<[AmmStatsQuery], AmmPoolStats>,
   'get_amm_reward_series' : ActorMethod<

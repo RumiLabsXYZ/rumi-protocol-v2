@@ -2432,6 +2432,10 @@ pub struct SpLiquidationJournal {
     pub protocol_fee_attempted: bool,
     #[serde(default)]
     pub protocol_fee_block_index: Option<u64>,
+    /// Exact hold record created for this request's unsupported protocol cut.
+    /// Older journals had no request-bound hold identity.
+    #[serde(default)]
+    pub unsupported_protocol_fee_hold_id: Option<u128>,
     #[serde(default)]
     pub interest_dispatch_started: bool,
     #[serde(default)]
@@ -2900,6 +2904,9 @@ pub struct HeldUnsupportedTreasuryCollateral {
     pub amount_raw: u64,
     pub ledger: Principal,
     pub created_at_ns: u64,
+    /// SP request that owns this hold, when it came from the durable SP rail.
+    #[serde(default)]
+    pub source_sp_liquidation_request_id: Option<[u8; 32]>,
 }
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -4289,6 +4296,11 @@ pub struct State {
     /// Vaults with collateral not in this set are rejected by bot_liquidate,
     /// leaving the stability pool to handle them.
     pub bot_allowed_collateral_types: BTreeSet<Principal>,
+    /// Distinguishes an intentionally empty bot allowlist from a legacy
+    /// snapshot that predates configuration tracking and needs the safe ICP
+    /// default applied during upgrade.
+    #[serde(default)]
+    pub bot_allowed_collateral_types_configured: bool,
     /// Tracks vault_id → timestamp (nanos) when notified to bot.
     /// Used by check_vaults() to implement priority cascade:
     /// bot gets one cycle, then stability pool takes over.
@@ -4948,6 +4960,7 @@ impl Default for State {
             bot_total_debt_covered_e8s: 0,
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
+            bot_allowed_collateral_types_configured: false,
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
@@ -5283,6 +5296,7 @@ impl From<InitArg> for State {
             bot_total_debt_covered_e8s: 0,
             bot_total_icusd_deposited_e8s: 0,
             bot_allowed_collateral_types: BTreeSet::new(),
+            bot_allowed_collateral_types_configured: false,
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
@@ -14949,6 +14963,7 @@ mod tests {
             protocol_fee_ledger_fee_raw: Some(10),
             protocol_fee_attempted: true,
             protocol_fee_block_index: Some(43),
+            unsupported_protocol_fee_hold_id: None,
             interest_dispatch_started: true,
             post_accounting_done: false,
             applied_interest_share_e8s: Some(10),
@@ -15000,6 +15015,29 @@ mod tests {
             restored.sp_liquidation_journals[&[56; 32]].phase,
             SpLiquidationPhase::PayoutSubmitted
         );
+    }
+
+    #[test]
+    fn legacy_sp_journal_defaults_unsupported_fee_hold_id_to_none() {
+        let journal = pending_sp_journal_test_row(
+            [57; 32],
+            SpLiquidationPhase::DebtCommitted,
+        );
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&journal, &mut bytes).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut map = match value {
+            ciborium::value::Value::Map(map) => map,
+            _ => panic!("SP journal must serialize as a map"),
+        };
+        map.retain(|(key, _)| {
+            !matches!(key, ciborium::value::Value::Text(name) if name == "unsupported_protocol_fee_hold_id")
+        });
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::value::Value::Map(map), &mut legacy_bytes).unwrap();
+        let restored: SpLiquidationJournal =
+            ciborium::de::from_reader(legacy_bytes.as_slice()).unwrap();
+        assert_eq!(restored.unsupported_protocol_fee_hold_id, None);
     }
 
     #[test]

@@ -167,6 +167,17 @@ pub struct AmmLiquidityEvent {
     pub timestamp: u64,
 }
 
+/// Bounded monotonic-ID page over the retained liquidity-event window.
+/// `oldest_available_id` is the lowest event ID still retained, or
+/// `next_event_id` when the log is empty. `next_event_id` is the source's
+/// monotonic high-water mark.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+pub struct AmmLiquidityEventWindow {
+    pub oldest_available_id: u64,
+    pub next_event_id: u64,
+    pub events: Vec<AmmLiquidityEvent>,
+}
+
 // ─── Admin Events ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]

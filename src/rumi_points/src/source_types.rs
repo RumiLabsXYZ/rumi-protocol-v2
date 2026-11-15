@@ -185,13 +185,15 @@ pub mod backend {
             BackendEvent::RepayToVault { vault_id, caller, repayed_amount, timestamp } => (
                 caller,
                 timestamp,
-                // `repayment_asset` is gated: the upstream backend `RepayToVault`
-                // event does not carry it yet, so it stays `None` and the 5x
-                // ck-stable window is skipped until the field ships.
+                // The backend `repayed_amount` is the ICUSD-denominated debt
+                // reduction (8 decimals), even when a ck-stable funded it. The
+                // upstream event still lacks `repayment_asset`, so legacy events
+                // remain fail-closed until that asset metadata is available.
                 IngestKind::VaultRepay {
                     vault_id,
                     amount_e8s: repayed_amount,
                     repayment_asset: None,
+                    amount_unit: Some(crate::valuation::RepaymentAmountUnit::IcusdE8),
                 },
             ),
             BackendEvent::CloseVault { vault_id, timestamp } => {
@@ -656,6 +658,29 @@ mod normalize_tests {
         let out = backend::normalize(1, roundtrip(&ev));
         assert_eq!(out.caller, Some(p(2)));
         assert_eq!(out.kind, IngestKind::VaultOpen { vault_id: 9, borrowed_e8s: 1000 });
+    }
+
+    #[test]
+    fn legacy_backend_repay_wire_keeps_known_unit_and_unknown_asset_closed() {
+        // Existing backend wire events have no repayment_asset field. Preserve
+        // decode compatibility and record the amount's proven unit, while keeping
+        // the repayment award gated until the source can identify the asset.
+        let ev = backend::BackendEvent::RepayToVault {
+            vault_id: 12,
+            caller: Some(p(6)),
+            repayed_amount: 100_000_000,
+            timestamp: Some(123),
+        };
+        let out = backend::normalize(8, roundtrip(&ev));
+        assert_eq!(
+            out.kind,
+            IngestKind::VaultRepay {
+                vault_id: 12,
+                amount_e8s: 100_000_000,
+                repayment_asset: None,
+                amount_unit: Some(crate::valuation::RepaymentAmountUnit::IcusdE8),
+            }
+        );
     }
 
     #[test]

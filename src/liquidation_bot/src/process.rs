@@ -243,10 +243,13 @@ async fn choose_bounded_topup_amount(
 }
 
 fn write_short_payment_recovery(
+    config: &BotConfig,
     id: u64,
     vault_id: u64,
+    claim_generation: Option<u64>,
     timestamp: u64,
     collateral_amount: u64,
+    collateral_received_amount: Option<u64>,
     debt_covered: u64,
     swap_amount: u64,
     ckusdc_received: u64,
@@ -255,12 +258,8 @@ fn write_short_payment_recovery(
     slippage_bps: i32,
     reason: &str,
 ) {
-    state::mutate_state(|s| {
-        if let Some(journal) = s.pending_claims.get_mut(&vault_id) {
-            journal.status = state::BotClaimJournalStatus::PaymentShortfall;
-        }
-    });
-    state::save_config_to_stable();
+    // First persist the immutable history row. The identity below may only
+    // reference a row which records that no ckUSDC amount was transferred.
     write_record(LiquidationRecordV1 {
         id, vault_id, timestamp,
         status: LiquidationStatus::TransferFailed,
@@ -276,6 +275,39 @@ fn write_short_payment_recovery(
         error_message: Some(reason.to_string()),
         confirm_retry_count: 0,
     });
+    state::mutate_state(|s| {
+        if let Some(journal) = s.pending_claims.get_mut(&vault_id) {
+            journal.status = state::BotClaimJournalStatus::PaymentShortfall;
+            if let (Some(generation), Some(collateral_received)) =
+                (claim_generation, collateral_received_amount)
+            {
+                if journal.claim_generation == generation
+                    && journal.debt_covered_e8s == debt_covered
+                    && journal.collateral_amount_e8s == collateral_amount
+                    && journal.collateral_received_amount_e8s == Some(collateral_received)
+                    && journal.payment_memo == payment_memo(vault_id, generation)
+                    && !s.pending_payments.contains_key(&vault_id)
+                    && !s.no_dispatch_payment_recoveries.contains_key(&vault_id)
+                {
+                    s.no_dispatch_payment_recoveries.insert(vault_id, state::BotNoDispatchPaymentRecovery {
+                        record_id: id,
+                        vault_id,
+                        claim_generation: generation,
+                        backend_principal: config.backend_principal,
+                        ledger_principal: config.ckusdc_ledger,
+                        debt_covered_e8s: debt_covered,
+                        collateral_amount_e8s: collateral_amount,
+                        collateral_received_amount_e8s: collateral_received,
+                        collateral_price_e8s: collateral_price,
+                        icp_swapped_e8s: swap_amount,
+                        ckusdc_received_e6: ckusdc_received,
+                        memo: journal.payment_memo.clone(),
+                    });
+                }
+            }
+        }
+    });
+    state::save_config_to_stable();
 }
 
 const VAULT158_ID: u64 = 158;
@@ -1379,8 +1411,8 @@ pub async fn process_pending() {
             state::save_config_to_stable();
             let Some(payment_ledger) = r.payment_ledger_principal else {
                 write_short_payment_recovery(
-                    record_id, r.vault_id, timestamp,
-                    r.collateral_amount, r.debt_covered, 0, 0,
+                    &config, record_id, r.vault_id, None, timestamp,
+                    r.collateral_amount, None, r.debt_covered, 0, 0,
                     r.collateral_price_e8s, 0, 0,
                     "claim has no pinned ckUSDC ledger; operator reconciliation required",
                 );
@@ -1787,7 +1819,7 @@ pub async fn process_pending() {
                     Ok(balance) => balance,
                     Err(error) => {
                         log!(crate::INFO, "STUCK: pre-top-up ckUSDC balance unavailable for vault #{}: {}", vault.vault_id, error);
-                        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, "pre-top-up balance unavailable");
+                        write_short_payment_recovery(&config, record_id, vault.vault_id, Some(claim_generation), timestamp, collateral_amount, Some(collateral_received_amount), debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, "pre-top-up balance unavailable");
                         return;
                     }
                 };
@@ -1819,7 +1851,7 @@ pub async fn process_pending() {
                             Ok(balance) => balance,
                             Err(error) => {
                                 log!(crate::INFO, "STUCK: post-top-up ckUSDC balance unavailable for vault #{}: {}", vault.vault_id, error);
-                                write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount.saturating_add(topup_icp), reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, "post-top-up balance unavailable");
+                                write_short_payment_recovery(&config, record_id, vault.vault_id, Some(claim_generation), timestamp, collateral_amount, Some(collateral_received_amount), debt_covered, swap_amount.saturating_add(topup_icp), reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, "post-top-up balance unavailable");
                                 return;
                             }
                         };
@@ -1852,7 +1884,7 @@ pub async fn process_pending() {
                     }
                     Err(swap::SwapAttemptError::NoEffect(error)) => {
                         log!(crate::INFO, "STUCK: bounded short-payment top-up failed before deposit dispatch for vault #{}: {}", vault.vault_id, error);
-                        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("bounded top-up failed before deposit dispatch: {error}"));
+                        write_short_payment_recovery(&config, record_id, vault.vault_id, Some(claim_generation), timestamp, collateral_amount, Some(collateral_received_amount), debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("bounded top-up failed before deposit dispatch: {error}"));
                         return;
                     }
                 }
@@ -1860,7 +1892,7 @@ pub async fn process_pending() {
             Ok(None) => {}
             Err(error) => {
                 log!(crate::INFO, "STUCK: cannot quote bounded short-payment top-up for vault #{}: {}", vault.vault_id, error);
-                write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("top-up quote unavailable: {error}"));
+                write_short_payment_recovery(&config, record_id, vault.vault_id, Some(claim_generation), timestamp, collateral_amount, Some(collateral_received_amount), debt_covered, swap_amount, reservation.recorded_received_e6, collateral_price, effective_price, slippage_bps, &format!("top-up quote unavailable: {error}"));
                 return;
             }
         }
@@ -1877,7 +1909,7 @@ pub async fn process_pending() {
             payment_allocation.gross_to_transfer_e6, required_gross, min_ckusdc_net
         );
         log!(crate::INFO, "STUCK: {} for vault #{}; claim remains active for recovery", message, vault.vault_id);
-        write_short_payment_recovery(record_id, vault.vault_id, timestamp, collateral_amount, debt_covered, swap_amount, ckusdc_received, collateral_price, effective_price, slippage_bps, &message);
+        write_short_payment_recovery(&config, record_id, vault.vault_id, Some(claim_generation), timestamp, collateral_amount, Some(collateral_received_amount), debt_covered, swap_amount, ckusdc_received, collateral_price, effective_price, slippage_bps, &message);
         return;
     }
 
@@ -3160,6 +3192,9 @@ pub async fn admin_authorize_shortfall_topup(
     vault_id: u64,
     funding_allocation_e6: u64,
 ) -> Result<(), String> {
+    if !state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
+        return admin_authorize_no_dispatch_payment(config, vault_id, funding_allocation_e6).await;
+    }
     let mut journal = state::read_state(|s| s.pending_payments.get(&vault_id).cloned())
         .ok_or_else(|| "no pending payment journal for this vault".to_string())?;
     if config.backend_principal != journal.backend_principal
@@ -3217,6 +3252,262 @@ pub async fn admin_authorize_shortfall_topup(
     resume_shortfall_payment(config, journal).await;
     if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
         Err("shortfall top-up or cumulative backend proof remains pending; inspect the durable payment journal".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn claim_swap_principals_match(claim: &state::BotClaimJournal, config: &BotConfig) -> bool {
+    !claim.swap_intents.is_empty() && claim.swap_intents.iter().all(|intent| {
+        if intent.pool_principal != config.icpswap_pool
+            || intent.input_ledger_principal != config.icp_ledger
+            || intent.output_ledger_principal != config.ckusdc_ledger
+        {
+            return false;
+        }
+        true
+    })
+}
+
+fn no_dispatch_identity_matches(
+    identity: &state::BotNoDispatchPaymentRecovery,
+    claim: &state::BotClaimJournal,
+    config: &BotConfig,
+    record: &LiquidationRecordV1,
+) -> bool {
+    let saved_swap_input = claim.swap_intents.iter().try_fold(0u64, |sum, intent| {
+        sum.checked_add(intent.amount_in_e8s)
+    });
+    identity.vault_id == claim.vault_id
+        && claim.status == state::BotClaimJournalStatus::PaymentShortfall
+        && claim.collateral_return.is_none()
+        && claim_swap_principals_match(claim, config)
+        && saved_swap_input == Some(identity.icp_swapped_e8s)
+        && identity.claim_generation == claim.claim_generation
+        && identity.backend_principal == config.backend_principal
+        && identity.ledger_principal == config.ckusdc_ledger
+        && identity.debt_covered_e8s == claim.debt_covered_e8s
+        && identity.collateral_amount_e8s == claim.collateral_amount_e8s
+        && identity.collateral_received_amount_e8s == claim.collateral_received_amount_e8s.unwrap_or(0)
+        && identity.collateral_price_e8s == claim.collateral_price_e8s
+        && identity.memo == claim.payment_memo
+        && identity.record_id == record.id
+        && record.vault_id == identity.vault_id
+        && record.status == LiquidationStatus::TransferFailed
+        && record.collateral_claimed_e8s == identity.collateral_amount_e8s
+        && record.debt_to_cover_e8s == identity.debt_covered_e8s
+        && record.oracle_price_e8s == identity.collateral_price_e8s
+        && record.icp_swapped_e8s == identity.icp_swapped_e8s
+        && record.ckusdc_received_e6 == identity.ckusdc_received_e6
+        && record.ckusdc_transferred_e6 == 0
+        && identity.memo == payment_memo(identity.vault_id, identity.claim_generation)
+}
+
+fn exact_no_dispatch_payment_amounts(
+    debt_covered_e8s: u64,
+    fee_e6: u64,
+    funding_allocation_e6: u64,
+) -> Result<(u64, u64), String> {
+    let amount_e6 = required_ckusdc_net(debt_covered_e8s);
+    let allocation_e6 = amount_e6.checked_add(fee_e6)
+        .ok_or_else(|| "exact debt payment plus ledger fee overflowed".to_string())?;
+    if funding_allocation_e6 != allocation_e6 {
+        return Err(format!("administrator allocation must equal the exact debt-covering ckUSDC amount plus fee: {} e6", allocation_e6));
+    }
+    Ok((amount_e6, allocation_e6))
+}
+
+const LEGACY_RECOVERY_HISTORY_PAGE_SIZE: u64 = 1_000;
+const LEGACY_RECOVERY_HISTORY_SCAN_LIMIT: u64 = 10_000;
+
+fn unique_legacy_history_match(
+    history_count: u64,
+    mut read_page: impl FnMut(u64, u64) -> Vec<LiquidationRecordV1>,
+    mut matches_claim: impl FnMut(&LiquidationRecordV1) -> bool,
+) -> Result<LiquidationRecordV1, String> {
+    if history_count > LEGACY_RECOVERY_HISTORY_SCAN_LIMIT {
+        return Err(format!(
+            "legacy history has {} rows, above the bounded uniqueness scan limit {}; no recovery identity was created",
+            history_count, LEGACY_RECOVERY_HISTORY_SCAN_LIMIT
+        ));
+    }
+    let mut offset = 0;
+    let mut candidate = None;
+    while offset < history_count {
+        for record in read_page(offset, LEGACY_RECOVERY_HISTORY_PAGE_SIZE) {
+            if matches_claim(&record) {
+                if candidate.is_some() {
+                    return Err("legacy no-dispatch recovery history is ambiguous; no identity was created".into());
+                }
+                candidate = Some(record);
+            }
+        }
+        offset = offset.saturating_add(LEGACY_RECOVERY_HISTORY_PAGE_SIZE);
+    }
+    candidate.ok_or_else(|| "legacy no-dispatch recovery has no matching zero-transfer history row".into())
+}
+
+/// Backward-compatible recovery for short claims written before the durable
+/// no-dispatch identity was added. History has no generation field, so only a
+/// single row that exactly matches the still-active claim and saved swaps is
+/// eligible to be promoted. Ambiguous legacy histories stay held.
+fn recover_legacy_no_dispatch_identity(
+    claim: &state::BotClaimJournal,
+    config: &BotConfig,
+) -> Result<state::BotNoDispatchPaymentRecovery, String> {
+    if claim.status != state::BotClaimJournalStatus::PaymentShortfall
+        || claim.collateral_return.is_some()
+        || claim.collateral_received_amount_e8s.is_none()
+        || claim.swap_intents.is_empty()
+    {
+        return Err("active claim is not a fully bound PaymentShortfall with saved swap evidence".into());
+    }
+    if claim.payment_memo != payment_memo(claim.vault_id, claim.claim_generation)
+        || !claim_swap_principals_match(claim, config)
+    {
+        return Err("saved claim memo or swap principals differ from current configuration".into());
+    }
+    let total_swap_input = claim.swap_intents.iter().try_fold(0u64, |sum, intent| {
+        sum.checked_add(intent.amount_in_e8s)
+    }).ok_or_else(|| "saved swap input total overflowed".to_string())?;
+    let record = unique_legacy_history_match(
+        history::record_count(),
+        |offset, limit| history::get_records(offset, limit).into_iter()
+            .filter_map(|record| match record { LiquidationRecordVersioned::V1(record) => Some(record) })
+            .collect(),
+        |record| {
+            record.vault_id == claim.vault_id
+                && record.status == LiquidationStatus::TransferFailed
+                && record.collateral_claimed_e8s == claim.collateral_amount_e8s
+                && record.debt_to_cover_e8s == claim.debt_covered_e8s
+                && record.oracle_price_e8s == claim.collateral_price_e8s
+                && record.icp_swapped_e8s == total_swap_input
+                && record.ckusdc_transferred_e6 == 0
+        },
+    )?;
+    Ok(state::BotNoDispatchPaymentRecovery {
+        record_id: record.id,
+        vault_id: claim.vault_id,
+        claim_generation: claim.claim_generation,
+        backend_principal: config.backend_principal,
+        ledger_principal: config.ckusdc_ledger,
+        debt_covered_e8s: claim.debt_covered_e8s,
+        collateral_amount_e8s: claim.collateral_amount_e8s,
+        collateral_received_amount_e8s: claim.collateral_received_amount_e8s.unwrap(),
+        collateral_price_e8s: claim.collateral_price_e8s,
+        icp_swapped_e8s: record.icp_swapped_e8s,
+        ckusdc_received_e6: record.ckusdc_received_e6,
+        memo: claim.payment_memo.clone(),
+    })
+}
+
+async fn admin_authorize_no_dispatch_payment(
+    config: &BotConfig,
+    vault_id: u64,
+    funding_allocation_e6: u64,
+) -> Result<(), String> {
+    let (claim, existing_identity, any_payment_exists) = state::read_state(|s| (
+        s.pending_claims.get(&vault_id).cloned(),
+        s.no_dispatch_payment_recoveries.get(&vault_id).cloned(),
+        !s.pending_payments.is_empty(),
+    ));
+    if any_payment_exists {
+        return Err("a payment journal is already pending; no-dispatch recovery cannot allocate against mixed obligations".into());
+    }
+    let claim = claim.ok_or_else(|| "no pending claim journal for this vault".to_string())?;
+    let identity = match existing_identity {
+        Some(identity) => identity,
+        None => {
+            let identity = recover_legacy_no_dispatch_identity(&claim, config)?;
+            state::mutate_state(|s| {
+                if s.pending_payments.contains_key(&vault_id)
+                    || s.no_dispatch_payment_recoveries.contains_key(&vault_id)
+                    || s.pending_claims.get(&vault_id).is_none_or(|current| current.claim_generation != claim.claim_generation)
+                {
+                    return;
+                }
+                s.no_dispatch_payment_recoveries.insert(vault_id, identity.clone());
+            });
+            state::save_config_to_stable();
+            state::read_state(|s| s.no_dispatch_payment_recoveries.get(&vault_id).cloned())
+                .ok_or_else(|| "claim changed while recording the no-dispatch recovery identity".to_string())?
+        }
+    };
+    let record = match history::get_record(identity.record_id) {
+        Some(LiquidationRecordVersioned::V1(record)) => record,
+        None => return Err("no-dispatch recovery history row is unavailable".into()),
+    };
+    if claim.status != state::BotClaimJournalStatus::PaymentShortfall
+        || !no_dispatch_identity_matches(&identity, &claim, config, &record)
+        || claim.collateral_return.is_some()
+        || !state::read_state(|s| !s.pending_payments.contains_key(&vault_id))
+    {
+        return Err("claim, configuration, zero-transfer history, or no-dispatch identity changed".into());
+    }
+    if state::read_state(|s| s.pending_treasury.values().any(|j| j.vault_id == vault_id)) {
+        return Err("a treasury journal exists for this claim; no-dispatch payment recovery is closed".into());
+    }
+    let fee = swap::fetch_ledger_fee(identity.ledger_principal).await?;
+    let (amount_e6, exact_allocation) = exact_no_dispatch_payment_amounts(
+        identity.debt_covered_e8s, fee, funding_allocation_e6,
+    )?;
+    let balance = swap::balance_of_self_ckusdc(config).await?;
+    if balance < exact_allocation {
+        return Err(format!("bot ckUSDC balance {} is below the explicitly allocated exact debt payment plus fee {}", balance, exact_allocation));
+    }
+    let created_at_time = ic_cdk::api::time();
+    if created_at_time == 0 {
+        return Err("clock returned zero; payment tuple was not created".into());
+    }
+    let swap_input_fee_e8s = claim.swap_intents.iter().try_fold(0u64, |sum, intent| {
+        sum.checked_add(intent.input_fee_e8s)
+    }).ok_or_else(|| "saved swap input fee total overflowed".to_string())?;
+    let journal = state::BotPaymentJournal {
+        record_id: Some(identity.record_id),
+        vault_id,
+        backend_principal: identity.backend_principal,
+        ledger_principal: identity.ledger_principal,
+        claim_generation: identity.claim_generation,
+        debt_covered_e8s: identity.debt_covered_e8s,
+        collateral_amount_e8s: identity.collateral_amount_e8s,
+        collateral_received_amount_e8s: Some(identity.collateral_received_amount_e8s),
+        collateral_price_e8s: identity.collateral_price_e8s,
+        icp_swapped_e8s: identity.icp_swapped_e8s,
+        swap_input_fee_e8s,
+        ckusdc_received_e6: identity.ckusdc_received_e6,
+        held_surplus_e6: 0,
+        gross_amount_e6: exact_allocation,
+        amount_e6,
+        fee_e6: fee,
+        created_at_time,
+        memo: identity.memo.clone(),
+        status: state::BotPaymentStatus::Prepared,
+        receipt: None,
+        shortfall_receipt_observed: false,
+        shortfall_topup: None,
+    };
+    let committed = state::mutate_state(|s| {
+        if !s.pending_payments.is_empty()
+            || s.no_dispatch_payment_recoveries.get(&vault_id) != Some(&identity)
+            || s.pending_claims.get(&vault_id).is_none_or(|current| {
+                current.claim_generation != claim.claim_generation
+                    || current.status != state::BotClaimJournalStatus::PaymentShortfall
+            })
+        {
+            return false;
+        }
+        s.pending_claims.remove(&vault_id);
+        s.no_dispatch_payment_recoveries.remove(&vault_id);
+        s.pending_payments.insert(vault_id, journal.clone());
+        true
+    });
+    if !committed {
+        return Err("claim recovery identity changed before payment intent was committed".into());
+    }
+    state::save_config_to_stable();
+    resume_pending_payment(config).await;
+    if state::read_state(|s| s.pending_payments.contains_key(&vault_id)) {
+        Err("full debt payment remains pending or ambiguous; inspect the durable payment journal".into())
     } else {
         Ok(())
     }
@@ -3661,6 +3952,81 @@ mod tests {
             status: state::BotReturnTransferStatus::Prepared,
         });
         assert!(vault158_identity_matches_for_bot(&config, &returned_claim, &record, bot).is_err());
+    }
+
+    #[test]
+    fn no_dispatch_recovery_requires_generation_config_and_zero_transfer_history() {
+        let (config, claim, record, _) = vault158_claim_history_fixture();
+        let identity = state::BotNoDispatchPaymentRecovery {
+            record_id: record.id,
+            vault_id: claim.vault_id,
+            claim_generation: claim.claim_generation,
+            backend_principal: config.backend_principal,
+            ledger_principal: config.ckusdc_ledger,
+            debt_covered_e8s: claim.debt_covered_e8s,
+            collateral_amount_e8s: claim.collateral_amount_e8s,
+            collateral_received_amount_e8s: claim.collateral_received_amount_e8s.unwrap(),
+            collateral_price_e8s: claim.collateral_price_e8s,
+            icp_swapped_e8s: record.icp_swapped_e8s,
+            ckusdc_received_e6: record.ckusdc_received_e6,
+            memo: claim.payment_memo.clone(),
+        };
+        assert!(no_dispatch_identity_matches(&identity, &claim, &config, &record));
+
+        let mut changed_generation = identity.clone();
+        changed_generation.claim_generation += 1;
+        assert!(!no_dispatch_identity_matches(&changed_generation, &claim, &config, &record));
+        let mut changed_config = config.clone();
+        changed_config.backend_principal = candid::Principal::anonymous();
+        assert!(!no_dispatch_identity_matches(&identity, &claim, &changed_config, &record));
+        changed_config = config.clone();
+        changed_config.icpswap_pool = candid::Principal::anonymous();
+        assert!(!claim_swap_principals_match(&claim, &changed_config));
+        let mut paid_record = record.clone();
+        paid_record.ckusdc_transferred_e6 = 1;
+        assert!(!no_dispatch_identity_matches(&identity, &claim, &config, &paid_record));
+        let mut wrong_record = record.clone();
+        wrong_record.id += 1;
+        assert!(!no_dispatch_identity_matches(&identity, &claim, &config, &wrong_record));
+    }
+
+    #[test]
+    fn no_dispatch_allocation_is_exact_debt_cover_plus_live_fee() {
+        let required_net = required_ckusdc_net(VAULT158_DEBT_E8S);
+        assert_eq!(required_net, 5_138_419);
+        assert_eq!(
+            exact_no_dispatch_payment_amounts(VAULT158_DEBT_E8S, 10_000, 5_148_419).unwrap(),
+            (5_138_419, 5_148_419),
+        );
+        assert!(exact_no_dispatch_payment_amounts(VAULT158_DEBT_E8S, 10_000, 5_148_418).is_err());
+        assert!(exact_no_dispatch_payment_amounts(VAULT158_DEBT_E8S, 10_000, 5_148_420).is_err());
+        assert!(exact_no_dispatch_payment_amounts(u64::MAX, u64::MAX, 0).is_err());
+    }
+
+    #[test]
+    fn legacy_no_dispatch_uniqueness_scan_finds_ambiguity_beyond_first_page() {
+        let (_, _, record, _) = vault158_claim_history_fixture();
+        let second = LiquidationRecordV1 { id: record.id + 1, ..record.clone() };
+        let result = unique_legacy_history_match(
+            1_001,
+            |offset, _limit| {
+                if offset == 0 { vec![record.clone()] } else { vec![second.clone()] }
+            },
+            |candidate| candidate.vault_id == record.vault_id,
+        );
+        assert!(result.unwrap_err().contains("ambiguous"));
+
+        let mut read_page_called = false;
+        let oversized = unique_legacy_history_match(
+            LEGACY_RECOVERY_HISTORY_SCAN_LIMIT + 1,
+            |_offset, _limit| {
+                read_page_called = true;
+                vec![record.clone()]
+            },
+            |_| true,
+        );
+        assert!(oversized.unwrap_err().contains("bounded uniqueness scan limit"));
+        assert!(!read_page_called, "oversized histories must fail before partial scanning");
     }
 
     const FEE: u64 = 10_000;
