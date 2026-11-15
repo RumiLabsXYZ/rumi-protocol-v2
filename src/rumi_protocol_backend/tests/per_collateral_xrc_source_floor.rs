@@ -56,6 +56,7 @@ fn mock_cfg(min_xrc_sources: Option<u32>) -> CollateralConfig {
         redemption_tier: 1,
         min_xrc_sources,
         custody_kind: None,
+        symbol: None,
     }
 }
 

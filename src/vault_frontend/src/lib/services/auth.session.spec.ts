@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import { Principal } from '@dfinity/principal';
+import { createPNP, BaseSignerAdapter, PNP } from '@windoge98/plug-n-play';
 
 // ──────────────────────────────────────────────────────────────
 // Regression coverage for Internet Identity session persistence
@@ -16,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   logout: vi.fn().mockResolvedValue(undefined),
   getTokenBalance: vi.fn(),
   fetchRootKey: vi.fn().mockResolvedValue(undefined),
+  pnpConnect: vi.fn(),
+  pnpInstance: vi.fn(),
 }));
 
 vi.mock('@dfinity/auth-client', () => ({
@@ -49,8 +52,8 @@ vi.mock('./tokenService', () => ({
 vi.mock('./pnp', () => ({
   pnp: {},
   canisterIDLs: {},
-  connectWithComprehensivePermissions: vi.fn(),
-  getPnpInstance: vi.fn(),
+  connectWithComprehensivePermissions: mocks.pnpConnect,
+  getPnpInstance: mocks.pnpInstance,
   silentPlugReconnect: vi.fn(),
 }));
 
@@ -66,7 +69,13 @@ vi.mock('./oisySigner', () => ({
   clearOisySigner: vi.fn(),
 }));
 
+vi.mock('../stores/appDataStore', () => ({ appDataStore: { setWalletState: vi.fn(), fetchBalances: vi.fn().mockResolvedValue({ icpBalance: 0n, icusdBalance: 0n }), fetchProtocolStatus: vi.fn().mockResolvedValue({ lastIcpRate: 1 }) } }));
+vi.mock('../stores/collateralStore', () => ({ collateralStore: { fetchSupportedCollateral: vi.fn().mockResolvedValue([]) } }));
+vi.mock('./threeUsdPrice', () => ({ getThreeUsdPrice: vi.fn().mockResolvedValue(1) }));
+vi.mock('./protocol/apiClient', () => ({ ApiClient: { clearVaultCache: vi.fn() } }));
+
 import { auth, WALLET_TYPES } from './auth';
+import { walletStore } from '../stores/wallet';
 
 // Deterministic, distinct, non-anonymous principals. The anonymous principal
 // (2vxsx-fae) must never stand in for an authenticated identity in these
@@ -202,5 +211,145 @@ describe('II session persistence (auth.ts)', () => {
     const finalState = get(auth);
     expect(finalState.account?.owner.toString()).toBe(OTHER_PRINCIPAL.toString());
     expect(finalState.account?.balance).toBe(99n);
+  });
+});
+
+// Use the installed OISY adapter class, including its real connect/cache/disconnect.
+// Only the popup transport/account reply is synthetic; no live wallet is contacted.
+const InstalledOisyAdapter = createPNP().config.adapters.oisy.adapter as typeof BaseSignerAdapter;
+class OisyLifecycleFixture extends InstalledOisyAdapter {
+  readonly accountsRpc = vi.fn();
+  constructor(readonly liveOwner: Principal) {
+    super({ adapter: { id: 'oisy', walletName: 'Oisy', enabled: true, chain: 'ICP', config: { fetchRootKey: false } },
+      config: { hostUrl: 'https://icp-api.io', disableAccountSelection: true } } as any);
+    this.accountsRpc.mockResolvedValue([{ owner: liveOwner }]);
+  }
+  protected async ensureTransportInitialized() {
+    this.signer = { closeChannel: vi.fn() } as any;
+    this.signerAgent = { signer: { accounts: this.accountsRpc }, replaceAccount: vi.fn() } as any;
+  }
+}
+
+describe('OISY disconnect and installed PNP principal cache', () => {
+  beforeEach(() => {
+    localStorage.clear(); sessionStorage.clear(); vi.clearAllMocks();
+    mocks.getTokenBalance.mockResolvedValue(0n);
+  });
+  it('retires the actual PNP cache so disconnect plus page reload cannot revive another signer owner', async () => {
+    let provider = new OisyLifecycleFixture(TEST_PRINCIPAL);
+    const disconnect = vi.fn(() => provider.disconnect());
+    mocks.pnpInstance.mockReturnValue({ disconnect });
+    mocks.pnpConnect.mockImplementation(async () => {
+      const result = await provider.connect();
+      return { ...result, owner: Principal.fromText(String(result.owner)) };
+    });
+    await auth.connect(WALLET_TYPES.OISY);
+    expect(provider.accountsRpc).toHaveBeenCalledOnce();
+    expect(localStorage.getItem('oisy_principal')).toBe(TEST_PRINCIPAL.toText());
+    await auth.disconnect();
+    const cacheAfterDisconnect = localStorage.getItem('oisy_principal');
+    // A new provider simulates reload; the next explicit connection must read accounts.
+    provider = new OisyLifecycleFixture(OTHER_PRINCIPAL);
+    const next = await auth.connect(WALLET_TYPES.OISY);
+    console.log('Installed OISY reconnect observation', { cachedPrincipalSurvived: cacheAfterDisconnect !== null, accountsRpcCount: provider.accountsRpc.mock.calls.length, returnedLiveOwner: next?.owner.toText() === OTHER_PRINCIPAL.toText() });
+    expect(next?.owner.toText()).toBe(OTHER_PRINCIPAL.toText());
+    expect(disconnect).toHaveBeenCalledOnce();
+    expect(cacheAfterDisconnect).toBeNull();
+    expect(provider.accountsRpc).toHaveBeenCalledOnce();
+    expect(get(auth).account?.owner.toText()).toBe(OTHER_PRINCIPAL.toText());
+    await auth.disconnect();
+  });
+  it('does not clear a replacement wallet session while OISY disconnect is pending', async () => {
+    let owner = TEST_PRINCIPAL;
+    mocks.pnpConnect.mockImplementation(async () => ({ owner }));
+    let finish!: () => void;
+    mocks.pnpInstance.mockReturnValue({ disconnect: vi.fn(() => new Promise<void>(r => { finish = r; })) });
+    await auth.connect(WALLET_TYPES.OISY);
+    const pending = auth.disconnect();
+    owner = OTHER_PRINCIPAL;
+    await auth.connect(WALLET_TYPES.OISY);
+    finish(); await pending;
+    expect(get(auth).isConnected).toBe(true);
+    expect(get(auth).account?.owner.toText()).toBe(OTHER_PRINCIPAL.toText());
+    expect(localStorage.getItem('rumi_last_wallet')).toBe(WALLET_TYPES.OISY);
+  });
+  it('keeps a cancelled fresh account request disconnected rather than reviving its retired cache', async () => {
+    let provider = new OisyLifecycleFixture(TEST_PRINCIPAL);
+    mocks.pnpInstance.mockImplementation(() => ({ disconnect: () => provider.disconnect() }));
+    mocks.pnpConnect.mockImplementation(async () => { const r=await provider.connect(); return {...r,owner:Principal.fromText(String(r.owner))}; });
+    await auth.connect(WALLET_TYPES.OISY); await auth.disconnect();
+    provider = new OisyLifecycleFixture(OTHER_PRINCIPAL);
+    provider.accountsRpc.mockRejectedValueOnce(new Error('Account permission cancelled'));
+    await expect(auth.connect(WALLET_TYPES.OISY)).rejects.toThrow('Account permission cancelled');
+    expect(provider.accountsRpc).toHaveBeenCalledOnce();
+    expect(get(auth).isConnected).toBe(false);
+    expect(localStorage.getItem('oisy_principal')).toBeNull();
+  });
+  it('refuses a false-clean disconnect when the real installed adapter silently retains its principal', async () => {
+    const provider = new OisyLifecycleFixture(TEST_PRINCIPAL);
+    mocks.pnpConnect.mockImplementation(async () => { const r=await provider.connect(); return {...r,owner:Principal.fromText(String(r.owner))}; });
+    mocks.pnpInstance.mockReturnValue({ disconnect: () => provider.disconnect() });
+    await auth.connect(WALLET_TYPES.OISY);
+    const remove = Storage.prototype.removeItem;
+    const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function(this:Storage,key:string) { if(key==='oisy_principal')throw Error('storage removal denied'); return remove.call(this,key); });
+    try {
+      await expect(auth.disconnect()).rejects.toThrow('OISY principal cache retirement could not be confirmed');
+      expect(get(auth).isConnected).toBe(true);
+      expect(localStorage.getItem('oisy_principal')).toBe(TEST_PRINCIPAL.toText());
+    } finally { spy.mockRestore(); }
+  });
+  it('retires and reconnects through the real wallet UI store, auth and installed PNP manager after reload', async () => {
+    let liveOwner = TEST_PRINCIPAL;
+    const accounts = vi.fn(async () => [{ owner: liveOwner }]);
+    class TransportOnlyOisyAdapter extends InstalledOisyAdapter {
+      protected async ensureTransportInitialized() {
+        let account = Principal.anonymous();
+        this.agent = {} as any;
+        this.signer = { closeChannel: vi.fn() } as any;
+        this.signerAgent = { signer: { accounts }, replaceAccount: (next: Principal) => { account = next; }, getPrincipal: async () => account } as any;
+      }
+    }
+    const definition = createPNP().config.adapters.oisy;
+    const freshManager = () => new PNP({ ...createPNP().config, adapters: { oisy: { ...definition, adapter: TransportOnlyOisyAdapter } } });
+    let manager = freshManager();
+    expect(manager.config.adapters.oisy.adapter).toBe(TransportOnlyOisyAdapter);
+    mocks.pnpInstance.mockImplementation(() => manager);
+    mocks.pnpConnect.mockImplementation(async () => { const r=await manager.connect('oisy'); return {...r,owner:Principal.fromText(String(r.owner))}; });
+    try {
+      await walletStore.connect('oisy');
+      expect(get(walletStore).principal?.toText()).toBe(TEST_PRINCIPAL.toText());
+      expect(localStorage.getItem('oisy_principal')).toBe(TEST_PRINCIPAL.toText());
+      const recoveryJournalKey = `rumi:vault-pull-operation:v1:${TEST_PRINCIPAL.toText()}`;
+      localStorage.setItem(recoveryJournalKey, 'opaque protected request evidence');
+      await walletStore.disconnect();
+      expect(localStorage.getItem(recoveryJournalKey)).toBe('opaque protected request evidence');
+      expect(manager.account).toBeNull();
+      expect(manager.provider).toBeNull();
+      expect((manager as any).actorManager.provider).toBeNull();
+      expect(await manager.isAuthenticated()).toBe(false);
+      expect(localStorage.getItem('oisy_principal')).toBeNull();
+      expect(get(auth).isConnected).toBe(false);
+      expect(get(walletStore).isConnected).toBe(false);
+      // New PNP manager/provider = new page, retaining the real persisted storage.
+      liveOwner = OTHER_PRINCIPAL; manager = freshManager(); accounts.mockClear();
+      await walletStore.connect('oisy');
+      expect(accounts).toHaveBeenCalledOnce();
+      expect(get(auth).account?.owner.toText()).toBe(OTHER_PRINCIPAL.toText());
+      expect(get(walletStore).principal?.toText()).toBe(OTHER_PRINCIPAL.toText());
+      expect(manager.account?.owner?.toString()).toBe(OTHER_PRINCIPAL.toText());
+      expect(await manager.isAuthenticated()).toBe(true);
+    } finally { await walletStore.disconnect(); }
+  });
+  it('does not report a clean disconnect if the PNP retirement fails', async () => {
+    const provider = new OisyLifecycleFixture(TEST_PRINCIPAL);
+    mocks.pnpConnect.mockImplementation(async () => {
+      const result = await provider.connect();
+      return { ...result, owner: Principal.fromText(String(result.owner)) };
+    });
+    mocks.pnpInstance.mockReturnValue({ disconnect: vi.fn().mockRejectedValue(new Error('PNP retirement failed')) });
+    await auth.connect(WALLET_TYPES.OISY);
+    await expect(auth.disconnect()).rejects.toThrow('PNP retirement failed');
+    expect(get(auth).isConnected).toBe(true);
+    expect(localStorage.getItem('oisy_principal')).toBe(TEST_PRINCIPAL.toText());
   });
 });

@@ -83,6 +83,7 @@ vi.mock('../pnp', () => ({
 vi.mock('../PermissionManager', () => ({ permissionManager: {} }));
 
 import { CONFIG, CANISTER_IDS } from '../../config';
+import { collateralStore } from '$lib/stores/collateralStore';
 import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '../auth';
 import {
   ApiClient,
@@ -149,6 +150,7 @@ let backendActor: {
   add_margin_to_vault_v2: ReturnType<typeof vi.fn>;
   get_vault_operation_status: ReturnType<typeof vi.fn>;
   ack_vault_operation: ReturnType<typeof vi.fn>;
+  cancel_vault_operation: ReturnType<typeof vi.fn>;
   borrow_from_vault: ReturnType<typeof vi.fn>;
   redeem_quoted: ReturnType<typeof vi.fn>;
   get_my_liquidity_withdrawal_status: ReturnType<typeof vi.fn>;
@@ -209,6 +211,10 @@ beforeEach(() => {
       vaultStatusOverride = { Ok: { acknowledged_through: operation_id, active: [] } };
       return { Ok: null };
     }),
+    cancel_vault_operation: vi.fn().mockImplementation(async ({ operation_id }: { operation_id: bigint }) => {
+      vaultStatusOverride = { Ok: { acknowledged_through: operation_id, active: [] } };
+      return { Ok: operation_id };
+    }),
     borrow_from_vault: vi.fn().mockResolvedValue({ Ok: { block_index: 55n, fee_amount_paid: 1_000n } }),
     redeem_quoted: vi.fn().mockResolvedValue({ Ok: {
       icusd_block_index: 88n,
@@ -240,6 +246,7 @@ beforeEach(() => {
 
   setLivePrincipal(PRINCIPAL_A);
   mocks.walletState.loading = false;
+  vi.mocked(collateralStore.getCollateralInfo).mockImplementation(() => ({ledgerCanisterId:CKDOGE_LEDGER_ID,symbol:'ckDOGE',decimals:8,ledgerFee:10000,minCollateralDeposit:0}) as any);
 });
 
 describe('ApiClient.withdrawLiquidity — journal identity and session boundary', () => {
@@ -939,16 +946,98 @@ describe('ApiClient.openVaultAndBorrowBound — Oisy ICRC-112 batched path', () 
 });
 
 describe('ApiClient.addMarginToVault V2 collateral verification', () => {
-  it('fails closed before actor acquisition, status, approval, or transfer while AddMargin V2 is disabled', async () => {
-    const result = await ApiClient.addMarginToVault(5, 1, CKDOGE_LEDGER_ID);
-
+  it('reports a confirmed recovery liability without claiming collateral was added or repeating payment', async () => {
+    const request = { AddMargin: { vault_id: 5n, amount_e8s: 123_456_789n } };
+    vaultStatusOverride = { Ok: { acknowledged_through: 0n, active: [{
+      operation_id: 1n, request, vault_id: 5n,
+      phase: { PullConfirmed: { block_index: 9_007_199_254_740_993n } }, recovery: [{
+        vault_id: 5n, block_index: 9_007_199_254_740_993n, amount: 123_456_789n,
+        ledger: Principal.fromText(CKDOGE_LEDGER_ID), payout_operation_id: 99_999_999_999_999_999_999n,
+      }],
+    }] } };
+    const result = await (ApiClient as any).runVaultCollateralPull(request);
     expect(result.success).toBe(false);
-    expect(result.error).toContain('temporarily paused');
-    expect(mocks.getActor).not.toHaveBeenCalled();
+    expect(result.error).toContain('it was not added to the vault');
+    expect(result.error).toContain('Do not send again');
+    expect(result.collateralRecovery).toEqual({
+      vaultId: '5', blockIndex: '9007199254740993', amountRaw: '123456789',
+      ledger: CKDOGE_LEDGER_ID, payoutOperationId: '99999999999999999999',
+    });
+    expect(backendActor.ack_vault_operation).not.toHaveBeenCalled();
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
     expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
-    expect(backendActor.get_vault_operation_status).not.toHaveBeenCalled();
   });
+
+  it('uses the verified nine-decimal ledger and dispatches the exact top-up once', async () => {
+    const ledgerId = CANISTER_IDS.CKSOL_LEDGER;
+    vi.spyOn(ApiClient,'getVaultById').mockResolvedValue({vaultId:5,collateralType:ledgerId} as any);
+    vi.spyOn(ApiClient as any,'refreshVaultData').mockResolvedValue(undefined);
+    vi.mocked(collateralStore.getCollateralInfo).mockReturnValue({ledgerCanisterId:ledgerId,symbol:'ckSOL',decimals:9,ledgerFee:10000,minCollateralDeposit:0} as any);
+    mocks.getActor.mockImplementation(async id=>id===BACKEND_ID?backendActor:ledgerActor);
+    backendActor.add_margin_to_vault_v2.mockImplementation(async args=>{
+      vaultStatusOverride={Ok:{acknowledged_through:0n,active:[{
+        operation_id:args.operation_id,request:{AddMargin:{vault_id:args.vault_id,amount_e8s:args.amount}},vault_id:5n,
+        phase:{Completed:{result:{AddMargin:{vault_id:5n,block_index:42n}}}},
+      }]}};
+      return {Ok:42n};
+    });
+    const result=await ApiClient.addMarginToVault(5,13.01909,ledgerId);
+    expect(result.success).toBe(true);
+    expect(backendActor.add_margin_to_vault_v2).toHaveBeenCalledOnce();
+    expect(backendActor.add_margin_to_vault_v2).toHaveBeenCalledWith({operation_id:1n,vault_id:5n,amount:13_019_090_000n});
+    expect(ledgerActor.icrc2_approve).toHaveBeenCalledWith(expect.objectContaining({amount:13_019_110_000n}));
+  });
+
+  it('rejects unavailable ckSOL metadata before approval even when nine-decimal metadata arrives later', async () => {
+    const ledgerId = CANISTER_IDS.CKSOL_LEDGER;
+    vi.spyOn(ApiClient, 'getVaultById').mockResolvedValue({ vaultId: 5, collateralType: ledgerId } as any);
+    vi.spyOn(ApiClient as any, 'refreshVaultData').mockResolvedValue(undefined);
+    vi.mocked(collateralStore.getCollateralInfo)
+      .mockReturnValue({ ledgerCanisterId: ledgerId, symbol: 'ckSOL', decimals: 9, ledgerFee: 10000, minCollateralDeposit: 0 } as any)
+      .mockReturnValueOnce(undefined);
+    mocks.getActor.mockImplementation(async id => id === BACKEND_ID ? backendActor : ledgerActor);
+    backendActor.add_margin_to_vault_v2.mockImplementation(async args => {
+      vaultStatusOverride = { Ok: { acknowledged_through: 0n, active: [{
+        operation_id: args.operation_id, request: { AddMargin: { vault_id: args.vault_id, amount_e8s: args.amount } }, vault_id: 5n,
+        phase: { Completed: { result: { AddMargin: { vault_id: 5n, block_index: 42n } } } },
+      }] } };
+      return { Ok: 42n };
+    });
+    const result = await ApiClient.addMarginToVault(5, 1, ledgerId);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Collateral details could not be verified');
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+  });
+
+  it.each([-1, 9.5, 256, NaN])('rejects invalid collateral decimals %s before approval', async decimals => {
+    vi.spyOn(ApiClient as any, 'refreshVaultData').mockResolvedValue(undefined);
+    vi.mocked(collateralStore.getCollateralInfo).mockReturnValue({
+      ledgerCanisterId: CANISTER_IDS.CKSOL_LEDGER, symbol: 'ckSOL', decimals, ledgerFee: 10000, minCollateralDeposit: 0,
+    } as any);
+    const result = await ApiClient.addMarginToVault(5, 1, CANISTER_IDS.CKSOL_LEDGER);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Collateral details could not be verified');
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+  });
+
+  it('stops before approval if the target ledger cannot be verified',async()=>{
+    vi.spyOn(ApiClient,'getVaultById').mockResolvedValue(undefined as any);
+    vi.spyOn(ApiClient as any,'refreshVaultData').mockResolvedValue(undefined);
+    const result=await ApiClient.addMarginToVault(5,1,CKDOGE_LEDGER_ID);
+    expect(result.success).toBe(false);expect(result.error).toContain('Could not verify');
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+  });
+
+  it('stops before approval after a same-owner session change during target verification',async()=>{
+    vi.spyOn(ApiClient,'getVaultById').mockImplementation(async()=>{walletSessionGeneration.set(1);return {vaultId:5,collateralType:CKDOGE_LEDGER_ID} as any;});
+    vi.spyOn(ApiClient as any,'refreshVaultData').mockResolvedValue(undefined);
+    const result=await ApiClient.addMarginToVault(5,1,CKDOGE_LEDGER_ID);
+    expect(result.success).toBe(false);expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.add_margin_to_vault_v2).not.toHaveBeenCalled();
+  });
+
 });
 
 describe('ApiClient.borrowFromVaultBound — finish-borrow leg', () => {
@@ -1176,5 +1265,97 @@ describe('Oisy vault-close cache admission', () => {
       error: 'Vault state is unavailable. Refresh vault data and try again.',
     });
     expect(mocks.getActor).not.toHaveBeenCalled();
+  });
+});
+
+describe('saved request recovery adapter', () => {
+  const key = `rumi:vault-pull-operation:v1:${PRINCIPAL_A}`;
+  function seed() {
+    const intent = { version: 1, owner: PRINCIPAL_A, operationId: '1', savedAt: 10,
+      request: { OpenVaultAndBorrow: { amount_e8s: 30_571_620n, borrow_amount_e8s: 192_000_001n, collateral_type: CANISTER_IDS.CKSOL_LEDGER } } };
+    localStorage.setItem(key, JSON.stringify(intent, (_k, v) => typeof v === 'bigint' ? `${v}n` : v));
+    return localStorage.getItem(key);
+  }
+  it('uses the actual caller status with no owner argument and retires the exact request without approval or dispatch', async () => {
+    seed();
+    const snapshot = await ApiClient.getVaultPullRecovery();
+    expect(snapshot?.intent).toBeTruthy();
+    expect(backendActor.get_vault_operation_status).toHaveBeenCalledWith();
+    await expect(ApiClient.cancelSavedVaultCollateralPull(snapshot!.intent!)).resolves.toBe(1n);
+    const sent = backendActor.cancel_vault_operation.mock.calls[0][0];
+    expect(sent.operation_id).toBe(1n);
+    expect(sent.request.OpenVaultAndBorrow.collateral_type.toText()).toBe(CANISTER_IDS.CKSOL_LEDGER);
+    expect(sent.request.OpenVaultAndBorrow.amount_e8s).toBe(30_571_620n);
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
+    expect(localStorage.getItem(key)).toBeNull();
+  });
+  it('resumes the reviewed raw nine-decimal ckSOL request through the existing V2 adapter without rounding', async () => {
+    seed();
+    const info = collateralStore.getCollateralInfo(CANISTER_IDS.CKSOL_LEDGER)!;
+    vi.spyOn(collateralStore, 'getCollateralInfo').mockReturnValue({ ...info, ledgerCanisterId: CANISTER_IDS.CKSOL_LEDGER, symbol: 'ckSOL', decimals: 9 });
+    mocks.getActor.mockImplementation(async (id: string) => id === BACKEND_ID ? backendActor : ledgerActor);
+    const snapshot = await ApiClient.getVaultPullRecovery();
+    const result = await ApiClient.resumeSavedVaultCollateralPull(snapshot!.intent!);
+    expect(result.success).toBe(true);
+    const sent = backendActor.open_vault_and_borrow_v2.mock.calls[0][0];
+    expect(sent.collateral_amount).toBe(30_571_620n);
+    expect(sent.borrow_amount).toBe(192_000_001n);
+    expect(sent.operation_id).toBe(1n);
+    expect(sent.collateral_type[0].toText()).toBe(CANISTER_IDS.CKSOL_LEDGER);
+  });
+  it.each(['same-owner reconnect', 'provider round-trip'])('rejects an old Continue click after queued %s', async (transition) => {
+    const original = seed();
+    const snapshot = await ApiClient.getVaultPullRecovery();
+    vi.useFakeTimers();
+    try {
+      let release!: () => void;
+      const blocking = ApiClient.executeSequentialOperation(() => new Promise<void>(resolve => {
+        release = resolve;
+      }), undefined, { refreshBefore: false, refreshAfter: false });
+      mocks.getActor.mockClear();
+      const pending = ApiClient.resumeSavedVaultCollateralPull(snapshot!.intent!);
+      // Attach immediately so a rejected queued action is never unhandled.
+      const outcome = pending.then(value => value, error => error);
+      expect(mocks.getActor).not.toHaveBeenCalled();
+      if (transition === 'same-owner reconnect') {
+        setLivePrincipal(null);
+        setLivePrincipal(PRINCIPAL_A);
+      } else {
+        currentWalletType.set(WALLET_TYPES.OISY);
+        currentWalletType.set(WALLET_TYPES.PLUG);
+      }
+      walletSessionGeneration.update(value => value + 1);
+      release();
+      await blocking;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await outcome).toBeInstanceOf(StaleActionSessionError);
+      expect(mocks.getActor).not.toHaveBeenCalled();
+      expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+      expect(backendActor.open_vault_and_borrow_v2).not.toHaveBeenCalled();
+      expect(backendActor.ack_vault_operation).not.toHaveBeenCalled();
+      expect(localStorage.getItem(key)).toBe(original);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('holds the original browser record when the authenticated status is unavailable', async () => {
+    const original = seed();
+    const snapshot = await ApiClient.getVaultPullRecovery();
+    backendActor.get_vault_operation_status.mockRejectedValueOnce(new Error('Status unavailable'));
+    await expect(ApiClient.cancelSavedVaultCollateralPull(snapshot!.intent!)).rejects.toThrow('Status unavailable');
+    expect(backendActor.cancel_vault_operation).not.toHaveBeenCalled();
+    expect(localStorage.getItem(key)).toBe(original);
+  });
+  it('discards a status reply after a caller switch instead of treating operator emptiness as customer proof', async () => {
+    const original = seed();
+    backendActor.get_vault_operation_status.mockImplementationOnce(async () => {
+      setLivePrincipal(PRINCIPAL_B);
+      return { Ok: { active: [], acknowledged_through: 0n } };
+    });
+    await expect(ApiClient.getVaultPullRecovery()).rejects.toThrow();
+    expect(backendActor.cancel_vault_operation).not.toHaveBeenCalled();
+    expect(localStorage.getItem(key)).toBe(original);
   });
 });

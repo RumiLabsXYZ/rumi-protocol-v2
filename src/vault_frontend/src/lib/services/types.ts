@@ -25,6 +25,11 @@ export interface VaultOperationResult {
   feePaid?: number;
   xrpClaimId?: string;
   message?: string;
+  /** Confirmed top-up retained as a recovery liability; never a credited deposit or refund delivery. */
+  collateralRecovery?: {
+    vaultId: string; blockIndex: string; amountRaw: string;
+    ledger: string; payoutOperationId: string;
+  };
   /**
    * The icUSD debt the backend actually cleared (human icUSD), when the
    * backend populates `debt_liquidated_e8s` on this result. Authoritative —

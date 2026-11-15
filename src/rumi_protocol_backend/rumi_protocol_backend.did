@@ -15,6 +15,13 @@ type AddCollateralArg = record {
   interest_rate_apr : float64;
   liquidation_ratio : float64;
 };
+type AddMarginRecovery = record {
+  payout_operation_id : nat;
+  block_index : nat64;
+  vault_id : nat64;
+  ledger : principal;
+  amount : nat64;
+};
 type AddMarginV2Args = record {
   operation_id : nat64;
   vault_id : nat64;
@@ -434,6 +441,13 @@ type ClaimStage = variant {
   FundingSubmitted;
   Settled;
 };
+type CollateralAdoption = record {
+  completed : bool;
+  fee_e8s : nat64;
+  amount_e8s : nat64;
+  nonce : nat;
+  block : opt nat64;
+};
 type CollateralConfig = record {
   last_redemption_time : nat64;
   status : CollateralStatus;
@@ -607,6 +621,7 @@ type Event = variant {
     repayed_amount : nat64;
     timestamp : opt nat64;
     caller : opt principal;
+    settlement : opt RepaymentSettlement;
   };
   withdrawal_signed : record {
     op_id : nat64;
@@ -769,7 +784,6 @@ type Event = variant {
     reason : text;
   };
   set_rmr_floor_cr : record { value : text };
-  xrpl_icusd : XrplIcusdEvent;
   chain_pending_burn_settled : record {
     amount_e8s : nat;
     chain_id : nat32;
@@ -1235,6 +1249,7 @@ type NextAction = variant {
 type NicpRedemptionClaim = record {
   last_error : opt text;
   burn_block : opt nat64;
+  adoption : opt CollateralAdoption;
   icp_due_e8s : nat64;
   owner : principal;
   withdrawal_id : opt nat64;
@@ -1641,7 +1656,6 @@ type RegisterChainArg = record {
   chain_id : nat32;
   min_quorum_providers : opt nat32;
 };
-type ReleaseReason = variant { MintFailed; DebtCommitted };
 type RepayAndCloseSuccess = record {
   collateral_return_block_index : opt nat64;
   repay_block_index : nat64;
@@ -1656,6 +1670,12 @@ type RepaymentIntentView = record {
   currency : text;
   payer : text;
   max_e8s : nat64;
+};
+type RepaymentSettlement = record {
+  interest_before : nat64;
+  last_accrual_time : nat64;
+  debt_before : nat64;
+  forgiven : nat64;
 };
 type ReserveBalance = record {
   balance : nat64;
@@ -2323,6 +2343,10 @@ type VaultIntent = record {
   deadline_secs : nat64;
   debt_e8s : nat;
 };
+type VaultOperationCancelArg = record {
+  request : VaultCollateralPullRequest;
+  operation_id : nat64;
+};
 type VaultOperationIdArg = record { operation_id : nat64 };
 type VaultOperationResult = variant {
   AddMargin : record { block_index : nat64; vault_id : nat64 };
@@ -2342,6 +2366,7 @@ type VaultOperationView = record {
   request : VaultCollateralPullRequest;
   operation_id : nat64;
   vault_id : nat64;
+  recovery : opt AddMarginRecovery;
   phase : VaultCollateralPullPhase;
   confirmed_wide_block_index : opt nat;
 };
@@ -2452,55 +2477,6 @@ type XrplIcusdError = variant {
   WrongNetwork : text;
   AnonymousCaller;
 };
-type XrplIcusdEvent = variant {
-  RepayCancelled : record { at : nat64; op_id : nat64; vault_id : nat64 };
-  ReservationBegun : record {
-    request_nonce : blob;
-    op_id : nat64;
-    owner : principal;
-    net_e8s : nat64;
-    recipient : text;
-    network : XrplNetwork;
-    fee_e8s : nat64;
-    vault_id : nat64;
-    timestamp : nat64;
-    collateral_type : principal;
-    policy_version : nat64;
-    gross_e8s : nat64;
-  };
-  ReservationReleased : record {
-    op_id : nat64;
-    vault_id : nat64;
-    timestamp : nat64;
-    reason : ReleaseReason;
-  };
-  RepayCutoffBegun : record {
-    interest_share_e8s : nat64;
-    request_nonce : blob;
-    op_id : nat64;
-    owner : principal;
-    snapshot_accrued_e8s : nat64;
-    snapshot_debt_e8s : nat64;
-    network : XrplNetwork;
-    vault_id : nat64;
-    repay_e8s : nat64;
-    destination_tag : nat32;
-    payer : text;
-    max_e8s : nat64;
-    last_accrual_time : nat64;
-    cutoff_ns : nat64;
-    full_close : bool;
-  };
-  RepaySettled : record {
-    burn_block : nat64;
-    interest_share_e8s : nat64;
-    op_id : nat64;
-    owner : principal;
-    vault_id : nat64;
-    applied_e8s : nat64;
-    settled_at : nat64;
-  };
-};
 type XrplNetwork = variant { Mainnet; Testnet };
 service : (ProtocolArg) -> {
   ack_vault_operation : (VaultOperationIdArg) -> (Result);
@@ -2536,6 +2512,7 @@ service : (ProtocolArg) -> {
       Result_1,
     );
   bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result_1);
+  cancel_vault_operation : (VaultOperationCancelArg) -> (Result);
   cancel_xrp_pending_open : (nat64) -> (Result_1);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result);
@@ -2802,6 +2779,7 @@ service : (ProtocolArg) -> {
       nat,
       nat64,
     ) -> (Result_1);
+  reconcile_vault51_collateral_adoption : (nat64) -> (Result_4);
   reconcile_vault51_icp_payout : (nat64) -> (Result_4);
   reconcile_vault_collateral_pull_from_block : (VaultOperationIdArg, nat64) -> (
       Result_1,

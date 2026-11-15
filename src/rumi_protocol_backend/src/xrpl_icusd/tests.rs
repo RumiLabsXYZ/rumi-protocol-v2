@@ -300,37 +300,50 @@ fn lane_state_survives_a_cbor_roundtrip() {
     assert_eq!(s, back);
 }
 
+fn lane_entry(
+    after_event_count: u64,
+    event: XrplIcusdEvent,
+) -> crate::storage::PendingPayoutJournalEntry {
+    crate::storage::PendingPayoutJournalEntry {
+        after_event_count,
+        event: crate::event::PendingPayoutEvent::XrplIcusd { event },
+    }
+}
+
 #[test]
 fn event_replay_preserves_operation_owner_and_proofs() {
     let vault = 42u64;
-    let events = vec![
-        crate::event::Event::Init(crate::InitArg {
-            xrc_principal: Principal::anonymous(),
-            icusd_ledger_principal: Principal::anonymous(),
-            icp_ledger_principal: Principal::anonymous(),
-            fee_e8s: 0,
-            developer_principal: Principal::anonymous(),
-            treasury_principal: None,
-            stability_pool_principal: None,
-            ckusdt_ledger_principal: None,
-            ckusdc_ledger_principal: None,
-        }),
-        crate::event::Event::XrplIcusd(XrplIcusdEvent::ReservationBegun {
-            op_id: 3,
-            owner: owner(5),
-            request_nonce: vec![0x33; 32],
-            network: TESTNET,
-            vault_id: vault,
-            collateral_type: Principal::from_slice(&[0xAA]),
-            gross_e8s: 1_000,
-            fee_e8s: 10,
-            net_e8s: 990,
-            recipient: holder_addr(9),
-            policy_version: 4,
-            timestamp: 111,
-        }),
-    ];
-    let mid = crate::event::replay_with_nonce_time(events.clone().into_iter(), || 7).unwrap();
+    let events = vec![crate::event::Event::Init(crate::InitArg {
+        xrc_principal: Principal::anonymous(),
+        icusd_ledger_principal: Principal::anonymous(),
+        icp_ledger_principal: Principal::anonymous(),
+        fee_e8s: 0,
+        developer_principal: Principal::anonymous(),
+        treasury_principal: None,
+        stability_pool_principal: None,
+        ckusdt_ledger_principal: None,
+        ckusdc_ledger_principal: None,
+    })];
+    let begun = XrplIcusdEvent::ReservationBegun {
+        op_id: 3,
+        owner: owner(5),
+        request_nonce: vec![0x33; 32],
+        network: TESTNET,
+        vault_id: vault,
+        collateral_type: Principal::from_slice(&[0xAA]),
+        gross_e8s: 1_000,
+        fee_e8s: 10,
+        net_e8s: 990,
+        recipient: holder_addr(9),
+        policy_version: 4,
+        timestamp: 111,
+    };
+    let mid = crate::event::replay_with_nonce_time_and_payout_events(
+        events.clone().into_iter(),
+        vec![lane_entry(1, begun.clone())].into_iter(),
+        || 7,
+    )
+    .unwrap();
     let lane = &mid.xrpl_icusd;
     let op = lane.op(3).expect("reservation rebuilt from the log");
     assert_eq!(op.owner, owner(5), "owner preserved");
@@ -342,27 +355,41 @@ fn event_replay_preserves_operation_owner_and_proofs() {
     assert!(lane.next_operation_id >= 4);
 
     // Released with the debt committed: exclusion gone, operation handed to delivery.
-    let mut with_release = events.clone();
-    with_release.push(crate::event::Event::XrplIcusd(XrplIcusdEvent::ReservationReleased {
-        op_id: 3,
-        vault_id: vault,
-        reason: ReleaseReason::DebtCommitted,
-        timestamp: 112,
-    }));
-    let s2 = crate::event::replay_with_nonce_time(with_release.into_iter(), || 7).unwrap();
+    let with_release = vec![
+        lane_entry(1, begun.clone()),
+        lane_entry(1, XrplIcusdEvent::ReservationReleased {
+            op_id: 3,
+            vault_id: vault,
+            reason: ReleaseReason::DebtCommitted,
+            timestamp: 112,
+        }),
+    ];
+    let s2 = crate::event::replay_with_nonce_time_and_payout_events(
+        events.clone().into_iter(),
+        with_release.into_iter(),
+        || 7,
+    )
+    .unwrap();
     assert_eq!(s2.xrpl_icusd.op(3).unwrap().phase, Phase::DebtCommitted);
     assert!(!xrpl_vault_excluded(&s2, vault));
     assert_eq!(s2.xrpl_icusd.durable_reserved_total(), 0);
 
     // A definite mint failure cancels with no debt.
-    let mut with_fail = events;
-    with_fail.push(crate::event::Event::XrplIcusd(XrplIcusdEvent::ReservationReleased {
-        op_id: 3,
-        vault_id: vault,
-        reason: ReleaseReason::MintFailed,
-        timestamp: 112,
-    }));
-    let s3 = crate::event::replay_with_nonce_time(with_fail.into_iter(), || 7).unwrap();
+    let with_fail = vec![
+        lane_entry(1, begun),
+        lane_entry(1, XrplIcusdEvent::ReservationReleased {
+            op_id: 3,
+            vault_id: vault,
+            reason: ReleaseReason::MintFailed,
+            timestamp: 112,
+        }),
+    ];
+    let s3 = crate::event::replay_with_nonce_time_and_payout_events(
+        events.into_iter(),
+        with_fail.into_iter(),
+        || 7,
+    )
+    .unwrap();
     assert_eq!(s3.xrpl_icusd.op(3).unwrap().phase, Phase::Cancelled);
     assert!(!xrpl_vault_excluded(&s3, vault));
 }
@@ -381,7 +408,21 @@ fn replay_rebuilds_freeze_before_accrual_event() {
         ckusdt_ledger_principal: None,
         ckusdc_ledger_principal: None,
     });
-    let cutoff = crate::event::Event::XrplIcusd(XrplIcusdEvent::RepayCutoffBegun {
+    let open = crate::event::Event::OpenVault {
+        vault: crate::vault::Vault {
+            owner: owner(2),
+            vault_id: vault,
+            borrowed_icusd_amount: crate::numeric::ICUSD::new(900),
+            collateral_amount: 1_000_000_000,
+            collateral_type: Principal::anonymous(),
+            last_accrual_time: 900,
+            accrued_interest: crate::numeric::ICUSD::new(40),
+            bot_processing: false,
+        },
+        block_index: 0,
+        timestamp: Some(900),
+    };
+    let cutoff = XrplIcusdEvent::RepayCutoffBegun {
         op_id: 1,
         owner: owner(2),
         request_nonce: vec![1; 32],
@@ -397,18 +438,20 @@ fn replay_rebuilds_freeze_before_accrual_event() {
         repay_e8s: 500,
         interest_share_e8s: 20,
         last_accrual_time: 900,
-    });
+    };
     let accrue = crate::event::Event::AccrueInterest { timestamp: 2_000 };
     // Unresolved burn: the freeze/exclusion are in place when AccrueInterest replays.
-    let s = crate::event::replay_with_nonce_time(
-        vec![init.clone(), cutoff.clone(), accrue.clone()].into_iter(),
+    let s = crate::event::replay_with_nonce_time_and_payout_events(
+        vec![init.clone(), open.clone(), accrue.clone()].into_iter(),
+        vec![lane_entry(2, cutoff.clone())].into_iter(),
         || 7,
-    )
-    .unwrap();
+    ).unwrap();
     assert!(xrpl_accrual_frozen(&s, vault));
     assert!(xrpl_vault_excluded(&s, vault));
     let op = s.xrpl_icusd.op(1).unwrap();
     assert_eq!(op.owner, owner(2));
+    assert_eq!(s.vault_id_to_vaults[&vault].last_accrual_time, 900, "anchored cutoff freezes the later accrual");
+    assert_eq!(s.vault_id_to_vaults[&vault].borrowed_icusd_amount.to_u64(), 900);
     match &op.kind {
         OperationKind::Repayment { cutoff, .. } => {
             let c = cutoff.as_ref().unwrap();
@@ -417,7 +460,7 @@ fn replay_rebuilds_freeze_before_accrual_event() {
         k => panic!("{k:?}"),
     }
     // Settled: both lifted, proof (burn block) recorded in the event itself.
-    let settled = crate::event::Event::XrplIcusd(XrplIcusdEvent::RepaySettled {
+    let settled = XrplIcusdEvent::RepaySettled {
         op_id: 1,
         vault_id: vault,
         burn_block: 4_321,
@@ -425,29 +468,33 @@ fn replay_rebuilds_freeze_before_accrual_event() {
         owner: owner(2),
         applied_e8s: 500,
         interest_share_e8s: 20,
-    });
-    let s2 = crate::event::replay_with_nonce_time(
-        vec![init.clone(), cutoff.clone(), accrue.clone(), settled].into_iter(),
+    };
+    let s2 = crate::event::replay_with_nonce_time_and_payout_events(
+        vec![init.clone(), open.clone(), accrue.clone()].into_iter(),
+        vec![lane_entry(2, cutoff.clone()), lane_entry(3, settled)].into_iter(),
         || 7,
-    )
-    .unwrap();
+    ).unwrap();
     assert!(!xrpl_accrual_frozen(&s2, vault) && !xrpl_vault_excluded(&s2, vault));
     // Task 5: a settled repayment with nothing left over is Complete.
     assert_eq!(s2.xrpl_icusd.op(1).unwrap().phase, Phase::Complete);
     // Cancelled burn: lifted and held.
-    let cancelled = crate::event::Event::XrplIcusd(XrplIcusdEvent::RepayCancelled {
+    let cancelled = XrplIcusdEvent::RepayCancelled {
         op_id: 1,
         vault_id: vault,
         at: 3_000,
-    });
-    let s3 = crate::event::replay_with_nonce_time(vec![init, cutoff, accrue, cancelled].into_iter(), || 7).unwrap();
+    };
+    let s3 = crate::event::replay_with_nonce_time_and_payout_events(
+        vec![init, open, accrue].into_iter(),
+        vec![lane_entry(2, cutoff), lane_entry(3, cancelled)].into_iter(),
+        || 7,
+    ).unwrap();
     assert!(!xrpl_accrual_frozen(&s3, vault) && !xrpl_vault_excluded(&s3, vault));
     assert_eq!(s3.xrpl_icusd.op(1).unwrap().phase, Phase::Held);
 }
 
 #[test]
-fn lane_events_roundtrip_through_cbor_and_candid() {
-    let ev = crate::event::Event::XrplIcusd(XrplIcusdEvent::ReservationBegun {
+fn lane_events_roundtrip_in_private_journal_and_public_contract_omits_them() {
+    let ev = XrplIcusdEvent::ReservationBegun {
         op_id: 1,
         owner: owner(1),
         request_nonce: vec![5; 32],
@@ -460,18 +507,14 @@ fn lane_events_roundtrip_through_cbor_and_candid() {
         recipient: holder_addr(9),
         policy_version: 1,
         timestamp: 9,
-    });
+    };
+    let private_event = crate::event::PendingPayoutEvent::XrplIcusd { event: ev };
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&ev, &mut bytes).unwrap();
-    let back: crate::event::Event = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-    assert_eq!(ev, back);
-    let enc = candid::encode_one(&ev).unwrap();
-    let dec: crate::event::Event = candid::decode_one(&enc).unwrap();
-    assert_eq!(ev, dec);
-    assert!(ev.is_vault_related(&2) && !ev.is_vault_related(&3));
-    assert_eq!(ev.timestamp_ns(), Some(9));
-    assert!(ev.involves_principal(&owner(1)));
-    assert!(!ev.is_accrue_interest());
+    ciborium::ser::into_writer(&private_event, &mut bytes).unwrap();
+    let back: crate::event::PendingPayoutEvent = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+    assert_eq!(private_event, back);
+    let public_event_type = format!("{:?}", <crate::event::Event as candid::CandidType>::_ty());
+    assert!(!public_event_type.contains("XrplIcusd"));
 }
 
 // ---- escrow identity ----------------------------------------------------------------------

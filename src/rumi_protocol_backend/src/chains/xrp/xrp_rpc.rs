@@ -1123,7 +1123,10 @@ mod tests {
     #[test]
     fn rpc_url_selects_network_by_key() {
         assert_eq!(rpc_url("key_1"), "https://xrplcluster.com/");
-        assert_eq!(rpc_url("test_key_1"), "https://s.altnet.rippletest.net:51234/");
+        assert_eq!(
+            rpc_url("test_key_1"),
+            "https://s.altnet.rippletest.net:51234/"
+        );
     }
 
     #[cfg(not(feature = "xrpl-testnet-fixture"))]

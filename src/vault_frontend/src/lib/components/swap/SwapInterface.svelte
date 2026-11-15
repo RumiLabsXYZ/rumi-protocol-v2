@@ -18,6 +18,7 @@
   import { TokenService } from '../../services/tokenService';
   import { routeVenueLabel } from './routePresentation';
   import { get } from 'svelte/store';
+  import OisyAccountCheck from './OisyAccountCheck.svelte';
 
   // The 3USD/ICP market is temporarily paused. Keep 3USD in AMM_TOKENS for
   // balances and liquidity-position handling, but do not offer it in swaps.
@@ -661,6 +662,8 @@
         {error}
       </div>
     {/if}
+    <!-- Optional collapsed wallet help; account inspection still requires its own click. -->
+    <OisyAccountCheck />
     {#if notice}
       <div class="notice-bar">{notice}</div>
     {/if}

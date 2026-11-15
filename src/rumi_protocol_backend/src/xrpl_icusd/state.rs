@@ -1320,9 +1320,10 @@ pub fn owner_page(
 // Event application (live + replay share this)
 // ----------------------------------------------------------------------------------
 
-/// Apply one lane event to the full state. Replay calls this for every
-/// `Event::XrplIcusd` in log order, interleaved with `Event::AccrueInterest`, so the
-/// accrual freeze and the exclusions are in place BEFORE later accrual events run.
+/// Apply one lane event to the full state. Replay calls this for every anchored
+/// private journal entry in log order, interleaved with public
+/// `Event::AccrueInterest` records, so the accrual freeze and exclusions are in
+/// place BEFORE later accrual events run.
 pub fn apply_xrpl_icusd_event(state: &mut crate::state::State, ev: &XrplIcusdEvent) {
     match ev {
         XrplIcusdEvent::ReservationBegun {

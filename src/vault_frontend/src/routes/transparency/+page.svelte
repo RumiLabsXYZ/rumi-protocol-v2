@@ -22,7 +22,7 @@
       const result = await publicActor.get_nicp_redemption_claim();
       redemptionClaim = result[0] ?? null;
       claimStatus = redemptionClaim
-        ? (claimStages[Object.keys(redemptionClaim.stage)[0]] ?? 'Unknown migration status')
+        ? (redemptionClaim.adoption?.[0]?.completed ? 'ICP adopted as ordinary collateral in vault 51' : claimStages[Object.keys(redemptionClaim.stage)[0]] ?? 'Unknown migration status')
         : 'Planned — no migration recorded';
     } catch {
       claimStatus = 'Live migration status unavailable';
@@ -108,9 +108,9 @@
     {#if claimReadError}<p>{claimReadError}</p>{/if}
     <p>Rumi's founder has authorized migration of vault #51 from nICP collateral to a WaterNeuron redemption claim controlled by the protocol, followed by ICP held in the same dedicated protocol account when redemption settles. The verified status above distinguishes preparation, a submitted request, a confirmed claim, and receipt of ICP.</p>
     <p>The connected vault view on November 1 showed <strong>1,500 nICP</strong> and approximately <strong>2,871.08 icUSD of debt</strong>. Debt changes with repayments and interest. WaterNeuron's observed exchange rate implies approximately <strong>1,942.86 ICP</strong> before applicable deductions; the actual claim amount must come from the confirmed withdrawal.</p>
-    <p>The migration preserves the vault's outstanding debt and accrued interest, with <strong>the existing nICP collateral parameters and dynamic interest-rate rules retained</strong>, including after ICP arrives. The fixed ICP amount is valued at the ICP price with the nICP haircut; it does not accrue further nICP staking rewards. This migration does not mint icUSD or forgive debt. Once the ICP has arrived and the debt is fully repaid, the vault owner can withdraw the settled ICP to the owner account.</p>
+    <p>The migration preserves vault 51, its owner, full outstanding debt, accrued interest and history. The existing nICP parameters apply while the claim is pending. After verifying WaterNeuron’s payout, Rumi automatically moves the net received ICP into ordinary custody and makes it normal ICP collateral in the same vault. Normal ICP interest and liquidation rules apply from that cutover. No repayment or wallet withdrawal is required, and this transition neither mints icUSD nor forgives debt. The custody transfer fee is deducted from the received ICP.</p>
     <p><strong>Timing and risk:</strong> WaterNeuron's interface advertises a two-week delayed withdrawal with a transition warning. The short-term backing neuron queried on November 1 reported approximately <strong>151 days of dissolve delay</strong>. Two-week settlement is not confirmed. During a pending redemption, the claim would not be immediately available for ordinary liquidation or redemption by icUSD holders. ICP price declines, continuing interest, or a delayed or failed payout could create a shortfall. Protocol custody alone does not eliminate that risk.</p>
-    <p><strong>Exception for vault #51:</strong> ordinary borrowing, collateral withdrawal, liquidation, and icUSD redemption against this vault are suspended while the claim or received ICP remains in dedicated custody. Repayment remains available and interest continues. The founder has personally committed to covering any shortfall and keeping the protocol whole. That commitment is not additional on-chain collateral or an independently funded guarantee.</p>
+    <p><strong>Exception for vault #51:</strong> ordinary borrowing, collateral withdrawal, liquidation, and icUSD redemption against this vault are suspended until the verified custody transition to ordinary ICP collateral completes. Repayment remains available and interest continues. The founder has personally committed to covering any shortfall and keeping the protocol whole. That commitment is not additional on-chain collateral or an independently funded guarantee.</p>
     {#if redemptionClaim}
       <p>Original collateral: <strong>{fmtIcusd(Number(redemptionClaim.original_nicp_e8s))} nICP</strong>. Recorded ICP amount: <strong>{fmtIcusd(Number(redemptionClaim.received_icp_e8s[0] ?? redemptionClaim.icp_due_e8s))} ICP</strong>{#if !('ClaimConfirmed' in redemptionClaim.stage) && !('Settled' in redemptionClaim.stage)} (provisional until the withdrawal is verified){/if}.</p>
       <p class="meta-text">Custodian: <code>{CANISTER_IDS.PROTOCOL}</code> · Dedicated subaccount: <code>{Array.from(redemptionClaim.escrow_subaccount).map(b => b.toString(16).padStart(2, '0')).join('')}</code></p>
@@ -119,6 +119,10 @@
       {#if redemptionClaim.settlement_block.length}<p>ICP settlement block <a href={`https://dashboard.internetcomputer.org/transaction/${redemptionClaim.settlement_block[0]}`} target="_blank" rel="noopener noreferrer">#{redemptionClaim.settlement_block[0]?.toString()}</a>.</p>{/if}
       {#if redemptionClaim.release?.[0]}
         {#if redemptionClaim.release[0].block.length}<p>Owner withdrawal confirmed in ICP ledger block #{redemptionClaim.release[0].block[0]?.toString()}.</p>{:else}<p>Owner withdrawal initiated; its outcome is unconfirmed. The claim is no longer counted as collateral.</p>{/if}
+      {/if}
+      {#if redemptionClaim.adoption?.[0]}
+        <p>{redemptionClaim.adoption[0].completed ? 'Ordinary ICP collateral adoption completed' : 'Custody transition pending; claim remains protected'}. Net collateral: {fmtIcusd(Number(redemptionClaim.adoption[0].amount_e8s))} ICP.</p>
+        {#if redemptionClaim.adoption[0].block.length}<p>ICP custody sweep block #{redemptionClaim.adoption[0].block[0]?.toString()}.</p>{/if}
       {/if}
       {#if redemptionClaim.last_error.length}<p>Operator reconciliation required: {redemptionClaim.last_error[0]}</p>{/if}
     {/if}

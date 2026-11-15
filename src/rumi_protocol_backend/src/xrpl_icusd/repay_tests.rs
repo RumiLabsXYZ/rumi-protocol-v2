@@ -253,8 +253,12 @@ fn upgrade_roundtrip() {
 }
 
 fn count_events(f: impl Fn(&XrplIcusdEvent) -> bool) -> usize {
-    crate::storage::events()
-        .filter(|e| matches!(e, crate::event::Event::XrplIcusd(x) if f(x)))
+    crate::storage::pending_payout_events()
+        .filter_map(|entry| match entry.event {
+            crate::event::PendingPayoutEvent::XrplIcusd { event } => Some(event),
+            _ => None,
+        })
+        .filter(|event| f(event))
         .count()
 }
 
@@ -1725,7 +1729,12 @@ fn cutoff_without_settle_replays_frozen_and_settles_to_the_live_debt() {
         let v = read_state(|s| s.vault_id_to_vaults[&2].clone());
         (v.borrowed_icusd_amount.to_u64(), v.accrued_interest.to_u64(), v.last_accrual_time)
     };
-    let lane_events: Vec<Event> = crate::storage::events().collect();
+    let lane_events: Vec<XrplIcusdEvent> = crate::storage::pending_payout_events()
+        .filter_map(|entry| match entry.event {
+            crate::event::PendingPayoutEvent::XrplIcusd { event } => Some(event),
+            _ => None,
+        })
+        .collect();
     assert_eq!(lane_events.len(), 2, "Begun then Settled");
     let begun = lane_events[0].clone();
     let settled = lane_events[1].clone();
@@ -1754,8 +1763,14 @@ fn cutoff_without_settle_replays_frozen_and_settles_to_the_live_debt() {
             },
         ]
     };
-    let debt_of_replay = |events: Vec<Event>| -> (u64, u64, u64, bool) {
-        let st = crate::event::replay_with_nonce_time(events.into_iter(), || 7).unwrap();
+    let debt_of_replay = |events: Vec<Event>,
+                          private_events: Vec<crate::storage::PendingPayoutJournalEntry>| {
+        let st = crate::event::replay_with_nonce_time_and_payout_events(
+            events.into_iter(),
+            private_events.into_iter(),
+            || 7,
+        )
+        .unwrap();
         let v = &st.vault_id_to_vaults[&2];
         (
             v.borrowed_icusd_amount.to_u64(),
@@ -1767,21 +1782,38 @@ fn cutoff_without_settle_replays_frozen_and_settles_to_the_live_debt() {
     // Control: WITHOUT the cutoff event, the timer accrual moves the vault.
     let mut control = base();
     control.push(Event::AccrueInterest { timestamp: mid });
-    let (control_debt, ..) = debt_of_replay(control);
+    let (control_debt, ..) = debt_of_replay(control, Vec::new());
     assert!(control_debt > 100 * E8, "the control vault accrues: {control_debt}");
     // Cutoff recorded, burn unresolved, then a timer AccrueInterest: frozen.
     let mut unresolved = base();
-    unresolved.push(begun.clone());
     unresolved.push(Event::AccrueInterest { timestamp: mid });
-    let (d, a, t, frozen) = debt_of_replay(unresolved);
+    let (d, a, t, frozen) = debt_of_replay(
+        unresolved,
+        vec![crate::storage::PendingPayoutJournalEntry {
+            after_event_count: 3,
+            event: crate::event::PendingPayoutEvent::XrplIcusd {
+                event: begun.clone(),
+            },
+        }],
+    );
     assert!(frozen, "the freeze is rebuilt from the event");
     assert_eq!((d, a, t), (100 * E8, 10 * E8, NOW), "the frozen vault did not accrue in replay");
     // Then the settlement: the same final debt as the live path.
     let mut full = base();
-    full.push(begun);
     full.push(Event::AccrueInterest { timestamp: mid });
-    full.push(settled);
-    let (d, a, t, frozen) = debt_of_replay(full);
+    let (d, a, t, frozen) = debt_of_replay(
+        full,
+        vec![
+            crate::storage::PendingPayoutJournalEntry {
+                after_event_count: 3,
+                event: crate::event::PendingPayoutEvent::XrplIcusd { event: begun },
+            },
+            crate::storage::PendingPayoutJournalEntry {
+                after_event_count: 4,
+                event: crate::event::PendingPayoutEvent::XrplIcusd { event: settled },
+            },
+        ],
+    );
     assert!(!frozen);
     assert_eq!((d, a, t), live_final, "replay settles to exactly the live debt");
 }
@@ -2409,9 +2441,9 @@ fn repay_settled_event_carries_what_consumers_need() {
     assert!(matches!(settle(id), SettleOutcome::BurnAdmitted { .. }));
     prove_burn(id, 321);
     advance_at(id, NOW + 100);
-    let settled: Vec<XrplIcusdEvent> = crate::storage::events()
-        .filter_map(|e| match e {
-            crate::event::Event::XrplIcusd(x @ XrplIcusdEvent::RepaySettled { .. }) => Some(x),
+    let settled: Vec<XrplIcusdEvent> = crate::storage::pending_payout_events()
+        .filter_map(|entry| match entry.event {
+            crate::event::PendingPayoutEvent::XrplIcusd { event: x @ XrplIcusdEvent::RepaySettled { .. } } => Some(x),
             _ => None,
         })
         .collect();

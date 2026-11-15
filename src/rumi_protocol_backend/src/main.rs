@@ -798,6 +798,7 @@ fn register_conflux_hot_wallet_refresh_timer() {
 }
 
 fn setup_timers() {
+    rumi_protocol_backend::nicp_redemption::adoption::register_timer();
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
     // the collateral configs have stale or missing prices.  An immediate
@@ -6895,10 +6896,36 @@ fn ack_vault_operation(arg: rumi_protocol_backend::vault::VaultOperationIdArg) -
     if caller == Principal::anonymous() {
         return Err(ProtocolError::GenericError("anonymous caller cannot ACK a vault operation".into()));
     }
-    mutate_state(|s| s.acknowledge_vault_operation(caller, arg.operation_id))
-        .map_err(ProtocolError::GenericError)
+    mutate_state(|s| {
+        let add_margin = s.vault_collateral_pull_journals.get(&caller).is_some_and(|j|
+            j.operation_id == arg.operation_id && matches!(j.request,
+                rumi_protocol_backend::state::VaultCollateralPullRequest::AddMargin { .. }));
+        if add_margin {
+            rumi_protocol_backend::event::record_vault_add_margin_acknowledged(s, caller, arg.operation_id)
+        } else { s.acknowledge_vault_operation(caller, arg.operation_id) }
+    }).map_err(ProtocolError::GenericError)
 }
 
+/// Cancellation is a synchronous caller-owned sequence fence. Do not acquire
+/// GuardPrincipal: the delayed original request can hold it during preflight.
+#[candid_method(update)]
+#[update]
+fn cancel_vault_operation(
+    arg: rumi_protocol_backend::vault::VaultOperationCancelArg,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    check_postcondition(mutate_state(|state| {
+        rumi_protocol_backend::event::record_vault_operation_cancelled(
+            state,
+            caller,
+            arg.operation_id,
+            arg.request,
+        )
+    }))
+}
 /// Positive-only recovery for an ambiguous collateral transfer_from. The
 /// ledger-global block index is a candidate; the backend fetches and checks
 /// the direct block against the authenticated caller's pinned journal.
@@ -6966,24 +6993,13 @@ async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 #[candid_method(update)]
 #[update]
 async fn add_margin_to_vault_v2(args: rumi_protocol_backend::vault::AddMarginV2Args) -> Result<u64, ProtocolError> {
-    let _ = args;
-    Err(ProtocolError::TemporarilyUnavailable(
-        "operation-ID add-margin is held pending a safe recovery path; no collateral was pulled".into(),
-    ))
-}
-
-#[cfg(test)]
-#[test]
-fn add_margin_v2_wrapper_fails_before_canister_validation() {
-    let result = futures::executor::block_on(add_margin_to_vault_v2(
-        rumi_protocol_backend::vault::AddMarginV2Args {
-            operation_id: 1,
-            vault_id: 99,
-            amount: 100,
-        },
-    ));
-    assert!(matches!(result, Err(ProtocolError::TemporarilyUnavailable(message))
-        if message.contains("no collateral was pulled")));
+    let caller = ic_cdk::api::caller();
+    if has_recoverable_vault_operation(caller, args.operation_id) {
+        validate_authenticated_not_frozen()?;
+    } else {
+        validate_call().await?;
+    }
+    check_postcondition(rumi_protocol_backend::vault::add_margin_to_vault_v2(args).await)
 }
 
 // ─── Push-deposit endpoints (Oisy wallet integration) ───
@@ -10950,7 +10966,7 @@ fn get_pending_payouts(cursor: Option<u128>, limit: Option<u16>) -> PendingPayou
                             "Attempt exceeded the ledger replay window; complete ledger-history proof is required before any rearm".to_string()
                         })
                     } else if transfer.reconciliation_required {
-                        Some("Legacy or upgrade-interrupted receipt lacks a safe automatic reconciliation proof".to_string())
+                        Some("Payout is held for manual reconciliation and will not be sent automatically".to_string())
                     } else if transfer.ledger.is_none() || transfer.transfer_amount_raw.is_none() {
                         Some("Exact ledger or net amount is not pinned; payout remains held".to_string())
                     } else if transfer.retry_count >= rumi_protocol_backend::MAX_PENDING_RETRIES {
@@ -20933,6 +20949,12 @@ fn get_unsupported_icrc_receipts(
             .cloned()
             .collect()
     }))
+}
+
+#[candid_method(update)]
+#[update]
+async fn reconcile_vault51_collateral_adoption(block_index: u64) -> Result<rumi_protocol_backend::nicp_redemption::NicpRedemptionClaim, String> {
+    rumi_protocol_backend::nicp_redemption::adoption::reconcile(block_index).await
 }
 
 // Keep last: export_service! only collects #[candid_method]s declared above it.
