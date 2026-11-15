@@ -19,6 +19,13 @@ thread_local! {
 /// Number of fee-refresh tuples permitted after the original first dispatch.
 /// Every typed first-dispatch BadFee is retained before a refresh.
 const MAX_AUTO_RETURN_FEE_REFRESHES: usize = 3;
+const SAFE_TREASURY_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
+// Native ICP ledger transactions remain admissible for 24 hours plus the
+// permitted one-minute clock drift. A replacement tuple is never prepared
+// until the original is outside that full window.
+const TREASURY_REISSUE_MIN_AGE_NS: u64 =
+    24 * 60 * 60 * 1_000_000_000 + 60 * 1_000_000_000 + 1;
+const MAX_TREASURY_REISSUES: u32 = 8;
 
 fn persist_swap_intent(
     vault_id: u64,
@@ -2245,6 +2252,124 @@ fn treasury_intent_matches(
         && current.fee_e8s == candidate.fee_e8s
         && current.memo == candidate.memo
         && current.created_at_time == candidate.created_at_time
+        && current.attempt_generation == candidate.attempt_generation
+}
+
+fn treasury_reissue_request_matches(
+    journal: &state::BotTreasuryJournal,
+    request: &state::BotTreasuryReissueRequest,
+) -> bool {
+    journal.record_id == request.record_id
+        && journal.vault_id == request.vault_id
+        && journal.claim_generation == request.claim_generation
+        && journal.attempt_generation == request.expected_attempt_generation
+        && journal.ledger_principal == request.ledger_principal
+        && journal.sender_principal == request.sender_principal
+        && journal.treasury_principal == request.treasury_principal
+        && journal.gross_amount_e8s == request.gross_amount_e8s
+        && journal.amount_e8s == request.amount_e8s
+        && journal.fee_e8s == request.fee_e8s
+        && journal.memo == request.memo
+        && journal.created_at_time == request.created_at_time
+}
+
+fn apply_operator_attested_treasury_reissue_once(
+    bot_state: &mut state::BotState,
+    request: &state::BotTreasuryReissueRequest,
+    operator: candid::Principal,
+    now: u64,
+) -> Result<state::BotTreasuryIntentView, String> {
+    if request.absence_evidence_digest.len() != 32
+        || request.absence_evidence_digest.iter().all(|byte| *byte == 0)
+    {
+        return Err("absence evidence digest must be exactly 32 non-zero bytes".into());
+    }
+    let journal = bot_state.pending_treasury.get_mut(&request.record_id)
+        .ok_or_else(|| "no pending treasury intent for this record ID".to_string())?;
+    if !treasury_reissue_request_matches(journal, request) {
+        return Err("treasury reissue acknowledgement does not match the current exact tuple".into());
+    }
+    if journal.receipt.is_some()
+        || journal.paid_total_applied
+        || matches!(journal.status, state::BotTreasuryStatus::ReceiptObserved | state::BotTreasuryStatus::Paid)
+    {
+        return Err("original treasury transfer has a receipt or is already settled".into());
+    }
+    if !matches!(journal.status,
+        state::BotTreasuryStatus::Prepared
+            | state::BotTreasuryStatus::Ambiguous
+            | state::BotTreasuryStatus::NoEffect)
+    {
+        return Err("treasury intent is not an unresolved dispatched tuple".into());
+    }
+    if now.saturating_sub(journal.created_at_time) < TREASURY_REISSUE_MIN_AGE_NS {
+        return Err("original treasury tuple is still inside the ledger transaction window".into());
+    }
+    if journal.amount_e8s == 0
+        || journal.amount_e8s.checked_add(journal.fee_e8s) != Some(journal.gross_amount_e8s)
+    {
+        return Err("treasury obligation amount is invalid".into());
+    }
+    if journal.attempt_generation >= MAX_TREASURY_REISSUES {
+        return Err("treasury reissue limit reached; obligation remains held".into());
+    }
+    if usize::try_from(journal.attempt_generation).ok() != Some(journal.prior_attempts.len()) {
+        return Err("treasury attempt history is inconsistent; obligation remains held".into());
+    }
+
+    let next_generation = journal.attempt_generation.checked_add(1)
+        .ok_or_else(|| "treasury attempt generation exhausted".to_string())?;
+    let next_created_at_time = now.max(journal.created_at_time.checked_add(1)
+        .ok_or_else(|| "treasury created-at time exhausted".to_string())?);
+    let archived = state::BotTreasuryAttemptArchive {
+        attempt_generation: journal.attempt_generation,
+        ledger_principal: journal.ledger_principal,
+        sender_principal: journal.sender_principal,
+        treasury_principal: journal.treasury_principal,
+        gross_amount_e8s: journal.gross_amount_e8s,
+        amount_e8s: journal.amount_e8s,
+        fee_e8s: journal.fee_e8s,
+        memo: journal.memo.clone(),
+        created_at_time: journal.created_at_time,
+        status: journal.status.clone(),
+        receipt: journal.receipt.clone(),
+        checked_through_block: request.checked_through_block,
+        absence_evidence_digest: request.absence_evidence_digest.clone(),
+        authorized_by: operator,
+        authorized_at_time: now,
+    };
+    journal.prior_attempts.push(archived);
+    journal.attempt_generation = next_generation;
+    journal.memo = swap::icp_treasury_reissue_memo(
+        journal.record_id,
+        journal.claim_generation,
+        next_generation,
+    );
+    journal.created_at_time = next_created_at_time;
+    journal.status = state::BotTreasuryStatus::Prepared;
+    journal.receipt = None;
+    journal.record.status = LiquidationStatus::TransferFailed;
+    journal.record.error_message = Some(format!(
+        "treasury obligation reissued as attempt generation {next_generation}; dispatch pending"
+    ));
+    Ok(state::BotTreasuryIntentView::from(&*journal))
+}
+
+/// Prepare a fresh tuple only after an authorized operator has acknowledged,
+/// against the complete original tuple, that its ledger inspection found no
+/// exact transfer. This endpoint does not dispatch. The acknowledgement is a
+/// trust-bearing administrative act, not inferred non-inclusion evidence.
+pub fn admin_reissue_expired_treasury_intent(
+    request: state::BotTreasuryReissueRequest,
+    operator: candid::Principal,
+) -> Result<state::BotTreasuryIntentView, String> {
+    let view = state::mutate_state(|s| {
+        apply_operator_attested_treasury_reissue_once(s, &request, operator, ic_cdk::api::time())
+    })?;
+    // Persist the replacement tuple and archived original before the normal
+    // worker is allowed to dispatch it.
+    state::save_config_to_stable();
+    Ok(view)
 }
 
 /// Commit a candidate that was already verified against the saved tuple by the
@@ -2338,7 +2463,6 @@ async fn resume_pending_treasury_for_record(
     config: &BotConfig,
     only_record_id: Option<u64>,
 ) -> bool {
-    const SAFE_RETRY_WINDOW_NS: u64 = 23 * 60 * 60 * 1_000_000_000;
     let now = ic_cdk::api::time();
     let selected = state::read_state(|s| {
         let eligible = |j: &state::BotTreasuryJournal| {
@@ -2351,7 +2475,7 @@ async fn resume_pending_treasury_for_record(
                     j.gross_amount_e8s, config.icp_fee_e8s.unwrap_or(10_000),
                 ).is_ok(),
                 state::BotTreasuryStatus::Prepared | state::BotTreasuryStatus::Ambiguous | state::BotTreasuryStatus::NoEffect =>
-                    now.saturating_sub(j.created_at_time) < SAFE_RETRY_WINDOW_NS,
+                    now.saturating_sub(j.created_at_time) < SAFE_TREASURY_RETRY_WINDOW_NS,
                 state::BotTreasuryStatus::Paid => false,
             }
         };
@@ -2395,6 +2519,18 @@ async fn resume_pending_treasury_for_record(
             journal.gross_amount_e8s, journal.created_at_time,
         ).expect("treasury obligation construction is infallible");
         refreshed.record = journal.record.clone();
+        // Fee refresh is a typed no-effect transition, not a new obligation.
+        // Preserve every prior reissue authorization and the active generation
+        // instead of silently falling back to the legacy TB1 identity.
+        refreshed.attempt_generation = journal.attempt_generation;
+        refreshed.prior_attempts = journal.prior_attempts.clone();
+        if refreshed.attempt_generation > 0 {
+            refreshed.memo = swap::icp_treasury_reissue_memo(
+                refreshed.record_id,
+                refreshed.claim_generation,
+                refreshed.attempt_generation,
+            );
+        }
         journal = refreshed;
         state::mutate_state(|s| { s.pending_treasury.insert(journal.record_id, journal.clone()); });
         state::save_config_to_stable();
@@ -2403,7 +2539,7 @@ async fn resume_pending_treasury_for_record(
         }
     }
     if journal.status != state::BotTreasuryStatus::ReceiptObserved {
-        if ic_cdk::api::time().saturating_sub(journal.created_at_time) >= SAFE_RETRY_WINDOW_NS {
+        if ic_cdk::api::time().saturating_sub(journal.created_at_time) >= SAFE_TREASURY_RETRY_WINDOW_NS {
             log!(crate::INFO, "STUCK: ICP treasury intent for claim generation {} exceeded safe dedup window; no new tuple was created", journal.claim_generation);
             return true;
         }
@@ -4367,6 +4503,8 @@ mod tests {
             memo: b"RUMI:TB1:77:12".to_vec(), created_at_time: 100,
             status: state::BotTreasuryStatus::ReceiptObserved,
             receipt: Some(swap::TransferReceipt { block_index: 4, amount: 15_000, created_at_time: 100 }),
+            attempt_generation: 0,
+            prior_attempts: Vec::new(),
             paid_total_applied: false,
             record: LiquidationRecordV1 {
                 id: 77, vault_id: 8, timestamp: 90,
@@ -4438,6 +4576,126 @@ mod tests {
         assert!(!apply_verified_treasury_candidate_once(&mut bot_state, &journal, &wrong_receipt, journal.sender_principal));
         assert_eq!(bot_state.pending_treasury[&journal.record_id].status, state::BotTreasuryStatus::Ambiguous);
         assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 0);
+    }
+
+    fn treasury_reissue_request(
+        journal: &state::BotTreasuryJournal,
+    ) -> state::BotTreasuryReissueRequest {
+        state::BotTreasuryReissueRequest {
+            record_id: journal.record_id,
+            vault_id: journal.vault_id,
+            claim_generation: journal.claim_generation,
+            expected_attempt_generation: journal.attempt_generation,
+            ledger_principal: journal.ledger_principal,
+            sender_principal: journal.sender_principal,
+            treasury_principal: journal.treasury_principal,
+            gross_amount_e8s: journal.gross_amount_e8s,
+            amount_e8s: journal.amount_e8s,
+            fee_e8s: journal.fee_e8s,
+            memo: journal.memo.clone(),
+            created_at_time: journal.created_at_time,
+            checked_through_block: 44_000_000,
+            absence_evidence_digest: vec![0x5a; 32],
+        }
+    }
+
+    #[test]
+    fn expired_ambiguous_treasury_intent_reissues_only_after_exact_operator_attestation() {
+        let mut journal = treasury_test_journal();
+        journal.status = state::BotTreasuryStatus::Ambiguous;
+        journal.receipt = None;
+        journal.memo = swap::icp_treasury_memo(journal.record_id, journal.claim_generation);
+        let original = journal.clone();
+        let request = treasury_reissue_request(&journal);
+        let operator = candid::Principal::from_slice(&[9]);
+        let now = journal.created_at_time + TREASURY_REISSUE_MIN_AGE_NS;
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_treasury.insert(journal.record_id, journal);
+
+        let view = apply_operator_attested_treasury_reissue_once(
+            &mut bot_state, &request, operator, now,
+        ).expect("exact expired tuple may be renewed after operator acknowledgement");
+        assert_eq!(view.attempt_generation, 1);
+        assert_eq!(view.status, state::BotTreasuryStatus::Prepared);
+        assert_eq!(view.created_at_time, now);
+        assert_eq!(view.memo, swap::icp_treasury_reissue_memo(77, 12, 1));
+
+        let renewed = &bot_state.pending_treasury[&77];
+        assert_eq!(renewed.prior_attempts.len(), 1);
+        let archived = &renewed.prior_attempts[0];
+        assert_eq!(archived.attempt_generation, 0);
+        assert_eq!(archived.memo, original.memo);
+        assert_eq!(archived.created_at_time, original.created_at_time);
+        assert_eq!(archived.status, state::BotTreasuryStatus::Ambiguous);
+        assert_eq!(archived.checked_through_block, 44_000_000);
+        assert_eq!(archived.absence_evidence_digest, vec![0x5a; 32]);
+        assert_eq!(archived.authorized_by, operator);
+
+        let stale_original_receipt = swap::TransferReceipt {
+            block_index: 9003,
+            amount: original.amount_e8s,
+            created_at_time: original.created_at_time,
+        };
+        assert!(!apply_verified_treasury_candidate_once(
+            &mut bot_state,
+            &original,
+            &stale_original_receipt,
+            original.sender_principal,
+        ));
+        assert_eq!(bot_state.stats.total_collateral_to_treasury_e8s, 0);
+
+        // Replaying the exact old authorization cannot create generation two.
+        assert!(apply_operator_attested_treasury_reissue_once(
+            &mut bot_state, &request, operator, now + 1,
+        ).is_err());
+        assert_eq!(bot_state.pending_treasury[&77].attempt_generation, 1);
+        assert_eq!(bot_state.pending_treasury[&77].prior_attempts.len(), 1);
+    }
+
+    #[test]
+    fn treasury_reissue_holds_ambiguous_tuple_inside_full_ledger_window() {
+        let mut journal = treasury_test_journal();
+        journal.status = state::BotTreasuryStatus::Ambiguous;
+        journal.receipt = None;
+        let request = treasury_reissue_request(&journal);
+        let created_at_time = journal.created_at_time;
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_treasury.insert(journal.record_id, journal);
+
+        let error = apply_operator_attested_treasury_reissue_once(
+            &mut bot_state,
+            &request,
+            candid::Principal::from_slice(&[9]),
+            created_at_time + TREASURY_REISSUE_MIN_AGE_NS - 1,
+        ).unwrap_err();
+        assert!(error.contains("still inside"));
+        assert_eq!(bot_state.pending_treasury[&77].attempt_generation, 0);
+        assert!(bot_state.pending_treasury[&77].prior_attempts.is_empty());
+    }
+
+    #[test]
+    fn treasury_reissue_rejects_landed_original_and_wrong_exact_tuple() {
+        let journal = treasury_test_journal();
+        let mut request = treasury_reissue_request(&journal);
+        let now = journal.created_at_time + TREASURY_REISSUE_MIN_AGE_NS;
+        let mut bot_state = state::BotState::default();
+        bot_state.pending_treasury.insert(journal.record_id, journal.clone());
+
+        let landed_error = apply_operator_attested_treasury_reissue_once(
+            &mut bot_state, &request, candid::Principal::from_slice(&[9]), now,
+        ).unwrap_err();
+        assert!(landed_error.contains("receipt or is already settled"));
+
+        let mut unresolved = journal;
+        unresolved.status = state::BotTreasuryStatus::Ambiguous;
+        unresolved.receipt = None;
+        bot_state.pending_treasury.insert(unresolved.record_id, unresolved);
+        request.amount_e8s += 1;
+        let mismatch_error = apply_operator_attested_treasury_reissue_once(
+            &mut bot_state, &request, candid::Principal::from_slice(&[9]), now,
+        ).unwrap_err();
+        assert!(mismatch_error.contains("does not match"));
+        assert_eq!(bot_state.pending_treasury[&77].attempt_generation, 0);
     }
     const RETURN_ERR: &str = "Transfer error: BadFee";
     const CANCEL_ERR: &str = "GenericError(\"Cannot cancel claim for vault #7: protocol collateral balance 0 < required 99990000\")";

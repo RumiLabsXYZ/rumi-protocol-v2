@@ -144,9 +144,27 @@ type BotTreasuryIntentView = record {
   claim_generation : nat64;
   vault_id : nat64;
   amount_e8s : nat64;
+  prior_attempt_count : nat32;
   treasury_principal : principal;
+  attempt_generation : nat32;
   ledger_principal : principal;
   created_at_time : nat64;
+  record_id : nat64;
+  sender_principal : principal;
+};
+type BotTreasuryReissueRequest = record {
+  gross_amount_e8s : nat64;
+  expected_attempt_generation : nat32;
+  memo : blob;
+  fee_e8s : nat64;
+  claim_generation : nat64;
+  vault_id : nat64;
+  amount_e8s : nat64;
+  treasury_principal : principal;
+  ledger_principal : principal;
+  checked_through_block : nat64;
+  created_at_time : nat64;
+  absence_evidence_digest : blob;
   record_id : nat64;
   sender_principal : principal;
 };
@@ -232,7 +250,8 @@ type ReserveAllocation = record {
   payment_created_at_time : nat64;
 };
 type Result = variant { Ok; Err : text };
-type Result_1 = variant { Ok : SwapResult; Err : text };
+type Result_1 = variant { Ok : BotTreasuryIntentView; Err : text };
+type Result_2 = variant { Ok : SwapResult; Err : text };
 type SwapResult = record {
   ckusdc_received_e6 : nat64;
   effective_price_e8s : nat64;
@@ -286,11 +305,14 @@ service : (BotInitArgs) -> {
   admin_reconcile_shortfall_topup_block : (nat64, nat64) -> (Result);
   admin_reconcile_treasury_block : (nat64, nat64) -> (Result);
   admin_refresh_fees : () -> (nat64, nat64);
+  admin_reissue_expired_treasury_intent : (BotTreasuryReissueRequest) -> (
+      Result_1,
+    );
   admin_resolve_pool_ordering : () -> ();
   admin_retry_stuck_claim : (nat64) -> ();
   admin_set_operator_reserve_enabled : (bool) -> (Result);
   admin_sweep_ckusdc : (principal, opt nat64) -> ();
-  admin_test_swap : (nat64) -> (Result_1);
+  admin_test_swap : (nat64) -> (Result_2);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   get_admin_event_count : () -> (nat64) query;

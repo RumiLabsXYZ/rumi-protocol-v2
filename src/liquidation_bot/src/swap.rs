@@ -510,6 +510,8 @@ pub fn prepare_icp_treasury_transfer(
         gross_amount_e8s, amount_e8s, fee_e8s, memo, created_at_time,
         status: if amount_e8s == 0 { crate::state::BotTreasuryStatus::NeedsPreparation } else { crate::state::BotTreasuryStatus::Prepared },
         receipt: None,
+        attempt_generation: 0,
+        prior_attempts: Vec::new(),
         paid_total_applied: false,
         record: crate::history::LiquidationRecordV1 {
             id: record_id, vault_id, timestamp: created_at_time,
@@ -532,6 +534,18 @@ pub(crate) fn icp_treasury_memo(record_id: u64, claim_generation: u64) -> Vec<u8
     let mut memo = b"RUMI:TB1:".to_vec();
     memo.extend_from_slice(&record_id.to_be_bytes());
     memo.extend_from_slice(&claim_generation.to_be_bytes());
+    memo
+}
+
+pub(crate) fn icp_treasury_reissue_memo(
+    record_id: u64,
+    claim_generation: u64,
+    attempt_generation: u32,
+) -> Vec<u8> {
+    let mut memo = b"RUMI:TB2:".to_vec();
+    memo.extend_from_slice(&record_id.to_be_bytes());
+    memo.extend_from_slice(&claim_generation.to_be_bytes());
+    memo.extend_from_slice(&attempt_generation.to_be_bytes());
     memo
 }
 
@@ -661,6 +675,8 @@ mod return_transfer_tests {
             memo: Vec::new(), created_at_time: 100,
             status: crate::state::BotTreasuryStatus::ReceiptObserved,
             receipt: Some(TransferReceipt { block_index: 4, amount: 15_000, created_at_time: 100 }),
+            attempt_generation: 0,
+            prior_attempts: Vec::new(),
             paid_total_applied: false,
             record: crate::history::LiquidationRecordV1 {
                 id: 7, vault_id: 8, timestamp: 90,

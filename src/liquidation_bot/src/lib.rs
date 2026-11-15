@@ -162,6 +162,7 @@ fn inspect_message() {
         | "set_processing_paused" | "admin_reconcile_payment_block" | "admin_reconcile_return_block"
         | "admin_authorize_shortfall_topup" | "admin_reconcile_shortfall_topup_block"
         | "admin_refresh_fees" | "admin_test_swap" | "admin_reconcile_treasury_block"
+        | "admin_reissue_expired_treasury_intent"
         | "admin_prepare_vault158_recovery" | "admin_execute_vault158_recovery"
         | "admin_configure_operator_reserve" | "admin_set_operator_reserve_enabled"
         | "admin_execute_vault202_recovery" => {
@@ -824,6 +825,22 @@ async fn admin_reconcile_treasury_block(record_id: u64, block_index: u64) -> Res
     let _guard = ProcessingGuard::acquire()
         .map_err(|_| "Another operation is in progress".to_string())?;
     process::admin_reconcile_treasury_block(record_id, block_index).await
+}
+
+/// Authorize a new identity for one expired unresolved treasury obligation.
+/// The operator acknowledgement is exact-tuple bound and is durably archived;
+/// dispatch remains the responsibility of the normal paused-aware worker.
+#[update]
+fn admin_reissue_expired_treasury_intent(
+    request: state::BotTreasuryReissueRequest,
+) -> Result<state::BotTreasuryIntentView, String> {
+    require_admin();
+    if !state::read_state(|s| s.processing_paused) {
+        return Err("pause processing before authorizing a treasury reissue".into());
+    }
+    let _guard = ProcessingGuard::acquire()
+        .map_err(|_| "Another operation is in progress".to_string())?;
+    process::admin_reissue_expired_treasury_intent(request, ic_cdk::api::caller())
 }
 
 /// Authorize one exact residual payment after allocating residual plus fee.

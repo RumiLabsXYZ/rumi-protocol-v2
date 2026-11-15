@@ -22,11 +22,61 @@ export const idlFactory = ({ IDL }) => {
     'protected_balance_e6' : IDL.Nat64,
     'budget_e6' : IDL.Nat64,
   });
+  const BotTreasuryReissueRequest = IDL.Record({
+    'gross_amount_e8s' : IDL.Nat64,
+    'expected_attempt_generation' : IDL.Nat32,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_e8s' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'treasury_principal' : IDL.Principal,
+    'ledger_principal' : IDL.Principal,
+    'checked_through_block' : IDL.Nat64,
+    'created_at_time' : IDL.Nat64,
+    'absence_evidence_digest' : IDL.Vec(IDL.Nat8),
+    'record_id' : IDL.Nat64,
+    'sender_principal' : IDL.Principal,
+  });
+  const BotTreasuryStatus = IDL.Variant({
+    'ReceiptObserved' : IDL.Null,
+    'NoEffect' : IDL.Null,
+    'Paid' : IDL.Null,
+    'Ambiguous' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'NeedsPreparation' : IDL.Null,
+  });
+  const TransferReceipt = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat64,
+  });
+  const BotTreasuryIntentView = IDL.Record({
+    'status' : BotTreasuryStatus,
+    'gross_amount_e8s' : IDL.Nat64,
+    'receipt' : IDL.Opt(TransferReceipt),
+    'memo' : IDL.Vec(IDL.Nat8),
+    'fee_e8s' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'prior_attempt_count' : IDL.Nat32,
+    'treasury_principal' : IDL.Principal,
+    'attempt_generation' : IDL.Nat32,
+    'ledger_principal' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'record_id' : IDL.Nat64,
+    'sender_principal' : IDL.Principal,
+  });
+  const Result_1 = IDL.Variant({
+    'Ok' : BotTreasuryIntentView,
+    'Err' : IDL.Text,
+  });
   const SwapResult = IDL.Record({
     'ckusdc_received_e6' : IDL.Nat64,
     'effective_price_e8s' : IDL.Nat64,
   });
-  const Result_1 = IDL.Variant({ 'Ok' : SwapResult, 'Err' : IDL.Text });
+  const Result_2 = IDL.Variant({ 'Ok' : SwapResult, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -120,11 +170,6 @@ export const idlFactory = ({ IDL }) => {
     'Prepared' : IDL.Null,
     'FeeMismatchAmbiguous' : IDL.Null,
   });
-  const TransferReceipt = IDL.Record({
-    'block_index' : IDL.Nat64,
-    'created_at_time' : IDL.Nat64,
-    'amount' : IDL.Nat64,
-  });
   const BotReturnTransferJournal = IDL.Record({
     'status' : BotReturnTransferStatus,
     'backend_principal' : IDL.Principal,
@@ -205,29 +250,6 @@ export const idlFactory = ({ IDL }) => {
     'debt_covered_e8s' : IDL.Nat64,
     'record_id' : IDL.Opt(IDL.Nat64),
     'icp_swapped_e8s' : IDL.Nat64,
-  });
-  const BotTreasuryStatus = IDL.Variant({
-    'ReceiptObserved' : IDL.Null,
-    'NoEffect' : IDL.Null,
-    'Paid' : IDL.Null,
-    'Ambiguous' : IDL.Null,
-    'Prepared' : IDL.Null,
-    'NeedsPreparation' : IDL.Null,
-  });
-  const BotTreasuryIntentView = IDL.Record({
-    'status' : BotTreasuryStatus,
-    'gross_amount_e8s' : IDL.Nat64,
-    'receipt' : IDL.Opt(TransferReceipt),
-    'memo' : IDL.Vec(IDL.Nat8),
-    'fee_e8s' : IDL.Nat64,
-    'claim_generation' : IDL.Nat64,
-    'vault_id' : IDL.Nat64,
-    'amount_e8s' : IDL.Nat64,
-    'treasury_principal' : IDL.Principal,
-    'ledger_principal' : IDL.Principal,
-    'created_at_time' : IDL.Nat64,
-    'record_id' : IDL.Nat64,
-    'sender_principal' : IDL.Principal,
   });
   const BotRecoveryConfigView = IDL.Record({
     'icp_fee_e8s' : IDL.Opt(IDL.Nat64),
@@ -313,6 +335,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_refresh_fees' : IDL.Func([], [IDL.Nat64, IDL.Nat64], []),
+    'admin_reissue_expired_treasury_intent' : IDL.Func(
+        [BotTreasuryReissueRequest],
+        [Result_1],
+        [],
+      ),
     'admin_resolve_pool_ordering' : IDL.Func([], [], []),
     'admin_retry_stuck_claim' : IDL.Func([IDL.Nat64], [], []),
     'admin_set_operator_reserve_enabled' : IDL.Func([IDL.Bool], [Result], []),
@@ -321,7 +348,7 @@ export const idlFactory = ({ IDL }) => {
         [],
         [],
       ),
-    'admin_test_swap' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'admin_test_swap' : IDL.Func([IDL.Nat64], [Result_2], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
