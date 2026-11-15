@@ -10504,16 +10504,48 @@ async fn stability_pool_settle_xrp_claim(
     )
 }
 
-/// XRP-006: owner cleanup for an abandoned native-XRP open. The vault layer
-/// verifies live XRPL state and removes the pending entry only if it is unfunded.
+/// XRP-006: owner cancellation verifies live XRPL state and marks the open as a
+/// recoverable tombstone; the original owner/address binding is never deleted.
 #[update]
 async fn cancel_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::cancel_xrp_pending_open(vault_id).await)
 }
 
-/// XRP-006: developer cleanup for abandoned native-XRP opens. This is also
-/// unfunded-only; funded custody addresses remain confirmable by their owners.
+/// Grant a one-time permit for a principal to open one new native-XRP vault.
+/// Public permissionless XRP opens remain disabled until a scarce-cost admission
+/// design exists.
+#[candid_method(update)]
+#[update]
+async fn grant_xrp_open_permit(principal: Principal) -> Result<bool, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::grant_xrp_open_permit(principal))
+}
+
+/// Revoke a principal's unused XRP open permit and any in-flight reservation.
+#[candid_method(update)]
+#[update]
+async fn revoke_xrp_open_permit(principal: Principal) -> Result<bool, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::revoke_xrp_open_permit(principal))
+}
+
+/// Developer readback for the current XRP open permit allowlist.
+#[candid_method(query)]
+#[query]
+fn get_xrp_open_permits() -> Result<Vec<Principal>, ProtocolError> {
+    rumi_protocol_backend::vault::get_xrp_open_permits()
+}
+
+/// Caller readback for their own one-time XRP open permit.
+#[candid_method(query)]
+#[query]
+fn get_my_xrp_open_permit() -> bool {
+    rumi_protocol_backend::vault::get_my_xrp_open_permit()
+}
+
+/// XRP-006: developer cleanup marks an abandoned native-XRP open as a durable
+/// tombstone. The original custody binding remains confirmable by its owner.
 #[update]
 async fn sweep_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
     validate_call().await?;
