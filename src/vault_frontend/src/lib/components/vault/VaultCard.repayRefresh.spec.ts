@@ -104,6 +104,16 @@ it('refreshes and gives recovery guidance when repay succeeds but compound close
  expect(fx.toastInfo).toHaveBeenCalledWith(expect.stringContaining('If its debt is now zero, use Withdraw & Close'),12000);
  expect(fx.toastError).not.toHaveBeenCalled();
 });
+it('does not show the previous account recovery hint after the wallet session changes during refresh',async()=>{
+ let release!:()=>void;
+ fx.close.mockResolvedValue({success:false,error:'Collateral transfer failed'});
+ fx.refreshVaults.mockImplementation(()=>new Promise<void>(resolve=>{release=resolve;}));
+ await show(30393940000n);max().click();await tick();submit().click();
+ await vi.waitFor(()=>expect(fx.refreshVaults).toHaveBeenCalledOnce());
+ walletSessionGeneration.set(1);release();
+ await vi.waitFor(()=>expect(fx.toastInfo).toHaveBeenCalledWith(expect.stringContaining('Reconnect the submitting wallet'),12000));
+ expect(fx.toastInfo).not.toHaveBeenCalledWith(expect.stringContaining('If its debt is now zero'),12000);
+});
 
 it('keeps manual repayment disabled when the safe maximum falls to zero',async()=>{
  await show();input().value='1';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();

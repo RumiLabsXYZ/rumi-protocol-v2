@@ -907,6 +907,10 @@
           // Keep the recovery guidance visible even if the best-effort refresh
           // itself fails; reconnecting and refreshing remains safe.
         }
+        if (!ctx.assertCurrent()) {
+          toastStore.info('Wallet session changed while checking the repay-and-close result. Reconnect the submitting wallet and refresh its vault before retrying.', 12000);
+          return;
+        }
         toastStore.info(`${result.error || 'Repay and close did not complete.'} Refresh the vault. If its debt is now zero, use Withdraw & Close to recover the collateral.`, 12000);
       } else if (result.approvalMayHaveMutated && !ctx.assertCurrent()) {
         toastStore.info(`${result.error || 'The repayment was not confirmed.'} The allowance may have changed; reconnect the submitting wallet and check status before retrying.`, 12000);
