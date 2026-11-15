@@ -8711,6 +8711,86 @@ fn get_stability_pool_liquidate_with_reserves_v2_payout_candidate(
     ))
 }
 
+/// Payout-owner-only lookup for the immutable operation behind a held reserve
+/// payout. The persisted reserve key keeps the historical owner able to invoke
+/// the existing owner-authorized recovery endpoint after SP registration rotates.
+#[query]
+#[candid_method(query)]
+fn get_stability_pool_liquidate_with_reserves_v2_payout_operation_id(
+    vault_id: u64,
+    absorb_id: u64,
+) -> Option<u128> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    read_state(|state| three_usd_reserve_payout_operation_id_for_caller(
+        state, caller, ic_cdk::api::id(), vault_id, absorb_id,
+    ))
+}
+
+fn three_usd_reserve_payout_operation_id_for_caller(
+    state: &rumi_protocol_backend::state::State,
+    caller: Principal,
+    backend: Principal,
+    vault_id: u64,
+    absorb_id: u64,
+) -> Option<u128> {
+    use rumi_protocol_backend::state::{PendingPayoutKind, ThreeUsdReserveIngressKey};
+
+    if caller == Principal::anonymous() { return None; }
+    let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
+    let payout = state.three_usd_reserve_collateral_payouts.get(&key)?;
+    let operation_id = payout.operation_id;
+    if operation_id == 0
+        || payout.op_nonce != operation_id
+        || state.three_usd_reserve_payout_operation_keys.get(&operation_id) != Some(&key)
+        || payout.collateral_type == Principal::anonymous()
+        || payout.ledger == Principal::anonymous()
+        || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
+        || payout.fee_arg_e8s != Some(payout.expected_fee_e8s)
+        || payout.memo.as_slice()
+            != rumi_protocol_backend::management::nonce_to_memo(payout.op_nonce).0.as_slice()
+        || payout.created_at_time_ns
+            != rumi_protocol_backend::management::nonce_to_created_at_time(payout.op_nonce)
+        || payout.rearmed_attempts.len()
+            > rumi_protocol_backend::state::MAX_THREE_USD_RESERVE_PAYOUT_ATTEMPTS
+        || payout.source.owner != backend
+        || payout.source.subaccount.is_some()
+        || payout.destination.owner != caller
+        || payout.destination.subaccount.is_some()
+    {
+        return None;
+    }
+    if payout.rearmed_attempts.iter().any(|attempt| {
+        attempt.op_nonce == 0
+            || attempt.op_nonce == payout.op_nonce
+            || attempt.fee_arg_e8s != Some(payout.expected_fee_e8s)
+            || attempt.memo.as_slice()
+                != rumi_protocol_backend::management::nonce_to_memo(attempt.op_nonce).0.as_slice()
+            || attempt.created_at_time_ns
+                != rumi_protocol_backend::management::nonce_to_created_at_time(attempt.op_nonce)
+    }) {
+        return None;
+    }
+    let (_, transfer) = state.get_pending_payout(operation_id)?;
+    let current_attempt_is_linked = transfer.op_nonce == payout.op_nonce
+        || payout.rearmed_attempts.iter().any(|attempt| attempt.op_nonce == transfer.op_nonce);
+    (transfer.operation_id == operation_id
+        && transfer.owner == caller
+        && transfer.vault_id == vault_id
+        && transfer.payout_kind == PendingPayoutKind::Margin
+        && transfer.held_for_manual_retry
+        && transfer.reconciliation_required
+        && !transfer.in_flight
+        && current_attempt_is_linked
+        && transfer.ledger == Some(payout.ledger)
+        && transfer.collateral_type == payout.collateral_type
+        && transfer.margin.to_u64() == payout.gross_e8s
+        && transfer.transfer_amount_raw == Some(payout.net_e8s))
+        .then_some(operation_id)
+}
+
 fn three_usd_reserve_payout_candidate_for_caller(
     state: &rumi_protocol_backend::state::State,
     caller: Principal,
@@ -8805,6 +8885,66 @@ mod three_usd_reserve_payout_candidate_tests {
             observed_fee_e8s: Some(10),
             rearmed_attempts: Vec::new(),
         }
+    }
+
+    fn held_transfer(pool: Principal) -> rumi_protocol_backend::state::PendingMarginTransfer {
+        use rumi_protocol_backend::state::{PendingMarginTransfer, PendingPayoutKind};
+        PendingMarginTransfer {
+            vault_id: 5,
+            operation_id: 9,
+            payout_kind: PendingPayoutKind::Margin,
+            owner: pool,
+            margin: rumi_protocol_backend::numeric::ICP::new(110),
+            collateral_type: p(3),
+            retry_count: 0,
+            op_nonce: 9,
+            ledger: Some(p(3)),
+            transfer_amount_raw: Some(100),
+            held_for_manual_retry: true,
+            reconciliation_required: true,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: None,
+            rearm_schema_version: 1,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        }
+    }
+
+    #[test]
+    fn payout_operation_lookup_follows_persisted_owner_after_registration_rotation() {
+        let backend = p(1);
+        let pool = p(2);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 5, absorb_id: 6 };
+        let mut state = State::default();
+        state.stability_pool_canister = Some(pool);
+        let mut held = payout(backend, pool);
+        held.candidate_block_index = None;
+        state.three_usd_reserve_collateral_payouts.insert(key.clone(), held);
+        state.three_usd_reserve_payout_operation_keys.insert(9, key.clone());
+        state.insert_pending_payout(held_transfer(pool));
+
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), Some(9));
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, p(4), backend, 5, 6), None);
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 7), None);
+
+        let new_pool = p(4);
+        state.stability_pool_canister = Some(new_pool);
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), Some(9));
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, new_pool, backend, 5, 6), None);
+
+        state.three_usd_reserve_payout_operation_keys.insert(9, ThreeUsdReserveIngressKey {
+            stability_pool: pool, vault_id: 5, absorb_id: 7,
+        });
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), None);
+        state.three_usd_reserve_payout_operation_keys.insert(9, key);
+
+        state.mutate_pending_payout(9, |transfer| transfer.owner = p(4));
+        assert_eq!(three_usd_reserve_payout_operation_id_for_caller(&state, pool, backend, 5, 6), None);
     }
 
     #[test]

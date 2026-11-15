@@ -4000,6 +4000,44 @@ async fn prepare_new_three_usd_absorb_with_io(
     })
 }
 
+async fn recover_held_three_usd_reserve_payout(
+    protocol_id: Principal,
+    intent: &ThreeUsdReserveAbsorbIntent,
+) -> Result<bool, String> {
+    let (operation_id,): (Option<u128>,) = call(
+        protocol_id,
+        "get_stability_pool_liquidate_with_reserves_v2_payout_operation_id",
+        (intent.vault_id, intent.absorb_id),
+    )
+    .await
+    .map_err(|error| format!("backend payout operation lookup failed: {error:?}"))?;
+    let operation_id = operation_id
+        .ok_or_else(|| "backend has no linked held payout operation".to_string())?;
+    let (recovery,): (Result<bool, rumi_protocol_backend::ProtocolError>,) = call(
+        protocol_id,
+        "recover_pending_payout",
+        (operation_id,),
+    )
+    .await
+    .map_err(|error| format!("owner-bound payout recovery call failed: {error:?}"))?;
+    recovery.map_err(|error| format!("owner-bound payout recovery remains held: {error:?}"))
+}
+
+fn reserve_payout_recovery_is_terminal(
+    recovery_completed: bool,
+    status_rechecked_same_absorb: bool,
+    candidate_verified: bool,
+) -> bool {
+    recovery_completed && status_rechecked_same_absorb && candidate_verified
+}
+
+fn reserve_absorb_status_rechecked_same_request(
+    before: &rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView,
+    after: &rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView,
+) -> bool {
+    before == after
+}
+
 async fn resolve_three_usd_absorb_status(
     protocol_id: Principal,
     intent: &ThreeUsdReserveAbsorbIntent,
@@ -4029,6 +4067,7 @@ async fn resolve_three_usd_absorb_status(
             "backend status identity did not match the persisted request".into(),
         );
     }
+    let status_snapshot = view.clone();
 
     match view.status {
         Status::Unseen => ThreeUsdReserveAbsorbStatusResolution::Unseen,
@@ -4066,6 +4105,42 @@ async fn resolve_three_usd_absorb_status(
             {
                 let verified_payout = match verify_three_usd_collateral_payout(protocol_id, intent, &result).await {
                     Ok(receipt) => receipt,
+                    Err(reason) if reason == "backend has no unique payout candidate" => {
+                        let recovery = recover_held_three_usd_reserve_payout(protocol_id, intent).await;
+                        // Recovery can advance only a bounded ledger-history page. Always
+                        // re-read the saga status and require it to remain the exact same
+                        // absorbed request before accepting a newly discovered candidate.
+                        let refreshed: Result<(rumi_protocol_backend::ThreeUsdReserveIngressV2StatusView,), _> = call(
+                            protocol_id,
+                            "get_stability_pool_liquidate_with_reserves_v2_status",
+                            (intent.vault_id, intent.absorb_id),
+                        )
+                        .await;
+                        let same_status = refreshed.is_ok_and(|(fresh,)| {
+                            reserve_absorb_status_rechecked_same_request(&status_snapshot, &fresh)
+                        });
+                        let candidate = if same_status {
+                            verify_three_usd_collateral_payout(protocol_id, intent, &result).await
+                        } else {
+                            Err("backend status changed or could not be re-read after payout recovery".into())
+                        };
+                        match (recovery, candidate) {
+                            (Ok(recovered), Ok(receipt))
+                                if reserve_payout_recovery_is_terminal(recovered, same_status, true) => receipt,
+                            (recovery, candidate) => {
+                                let progress = match &recovery {
+                                    Ok(true) => "recovery completed",
+                                    Ok(false) => "recovery is scanning or remains held",
+                                    Err(_) => "recovery remains ambiguous",
+                                };
+                                let detail = candidate.err().or_else(|| recovery.err())
+                                    .unwrap_or_else(|| "no independently verified payout candidate".into());
+                                return ThreeUsdReserveAbsorbStatusResolution::Pending(
+                                    format!("collateral payout remains held ({progress}): {detail}"),
+                                );
+                            }
+                        }
+                    }
                     Err(reason) => return ThreeUsdReserveAbsorbStatusResolution::Pending(
                         format!("collateral payout remains held: {reason}"),
                     ),
@@ -7064,6 +7139,34 @@ mod tests {
     use icrc_ledger_types::icrc1::transfer::Memo;
     use serde_bytes::ByteBuf;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn held_payout_scan_progress_and_changed_status_keep_absorb_ambiguous() {
+        use rumi_protocol_backend::{
+            ThreeUsdReserveIngressV2Status,
+            ThreeUsdReserveIngressV2StatusView,
+        };
+
+        let pool = Principal::self_authenticating([1; 32]);
+        let before = ThreeUsdReserveIngressV2StatusView {
+            stability_pool: pool,
+            vault_id: 7,
+            absorb_id: 8,
+            status: ThreeUsdReserveIngressV2Status::Unseen,
+        };
+        let same = before.clone();
+        assert!(reserve_absorb_status_rechecked_same_request(&before, &same));
+        assert!(!reserve_payout_recovery_is_terminal(false, true, false));
+        assert!(!reserve_payout_recovery_is_terminal(true, false, true));
+        assert!(!reserve_payout_recovery_is_terminal(true, true, false));
+        assert!(reserve_payout_recovery_is_terminal(true, true, true));
+
+        let changed = ThreeUsdReserveIngressV2StatusView {
+            absorb_id: 9,
+            ..before.clone()
+        };
+        assert!(!reserve_absorb_status_rechecked_same_request(&before, &changed));
+    }
 
     #[test]
     fn notification_holds_pool_for_legacy_ambiguous_liquidation() {

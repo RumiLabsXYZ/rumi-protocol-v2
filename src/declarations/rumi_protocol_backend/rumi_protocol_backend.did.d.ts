@@ -3042,6 +3042,10 @@ export interface _SERVICE {
     [bigint, bigint],
     [] | [ThreeUsdReserveCollateralPayout]
   >,
+  'get_stability_pool_liquidate_with_reserves_v2_payout_operation_id' : ActorMethod<
+    [bigint, bigint],
+    [] | [bigint]
+  >,
   'get_stability_pool_liquidate_with_reserves_v2_status' : ActorMethod<
     [bigint, bigint],
     ThreeUsdReserveIngressV2StatusView

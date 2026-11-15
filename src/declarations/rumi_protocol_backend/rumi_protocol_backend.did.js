@@ -3244,6 +3244,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(ThreeUsdReserveCollateralPayout)],
         ['query'],
       ),
+    'get_stability_pool_liquidate_with_reserves_v2_payout_operation_id' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Opt(IDL.Nat)],
+        ['query'],
+      ),
     'get_stability_pool_liquidate_with_reserves_v2_status' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [ThreeUsdReserveIngressV2StatusView],
