@@ -27,6 +27,8 @@ pub struct ReserveAllocation {
     pub payment_memo: Vec<u8>,
     pub payment_amount_e6: u64,
     pub payment_fee_e6: u64,
+    pub backend_principal: candid::Principal,
+    pub ledger_principal: candid::Principal,
     pub settled: bool,
 }
 
@@ -72,6 +74,36 @@ pub fn economic_subsidy_cap(debt_e8s: u64, ledger_fee_e6: u64, slippage_bps: u16
     ledger_fee_e6.saturating_mul(2).saturating_add(slippage)
 }
 
+/// Conservative pre-claim admission: pool slippage, pool withdrawal fee and
+/// the separate backend payment fee all fit owned proceeds + authorized reserve.
+pub fn can_admit_quote(
+    s: &BotState,
+    debt_e8s: u64,
+    fee: u64,
+    quote: u64,
+    slippage_bps: u16,
+    balance: u64,
+) -> bool {
+    if quote == 0 || slippage_bps > 10_000 {
+        return false;
+    }
+    let minimum_gross =
+        (u128::from(quote) * u128::from(10_000u16.saturating_sub(slippage_bps)) / 10_000) as u64;
+    let minimum_net = minimum_gross.saturating_sub(fee);
+    let net_debt = debt_e8s / 100 + u64::from(debt_e8s % 100 != 0);
+    let Some(payment_gross) = net_debt.checked_add(fee) else {
+        return false;
+    };
+    let deficit = payment_gross.saturating_sub(minimum_net);
+    can_cover(
+        s,
+        deficit,
+        balance.saturating_add(minimum_net),
+        payment_gross,
+        economic_subsidy_cap(debt_e8s, fee, slippage_bps),
+    )
+}
+
 fn allocation_matches(a: &ReserveAllocation, j: &BotPaymentJournal) -> bool {
     a.vault_id == j.vault_id
         && a.claim_generation == j.claim_generation
@@ -79,6 +111,9 @@ fn allocation_matches(a: &ReserveAllocation, j: &BotPaymentJournal) -> bool {
         && a.payment_memo == j.memo
         && a.payment_amount_e6 == j.amount_e6
         && a.payment_fee_e6 == j.fee_e6
+        && a.backend_principal == j.backend_principal
+        && a.ledger_principal == j.ledger_principal
+        && j.amount_e6.checked_add(j.fee_e6) == Some(j.gross_amount_e6)
         && a.amount_e6 == j.gross_amount_e6.saturating_sub(j.ckusdc_received_e6)
 }
 
@@ -172,6 +207,8 @@ pub fn commit_payment(
                 payment_memo: journal.memo.clone(),
                 payment_amount_e6: journal.amount_e6,
                 payment_fee_e6: journal.fee_e6,
+                backend_principal: journal.backend_principal,
+                ledger_principal: journal.ledger_principal,
                 settled: false,
             },
         );
@@ -424,6 +461,35 @@ mod tests {
         assert!(!can_cover(&s, 15_426, 26_716_720, 110_908, 22_522));
         s.operator_reserve.as_mut().unwrap().enabled = false;
         assert!(!can_cover(&s, 1, 26_716_720, 110_908, 22_522));
+    }
+
+    #[test]
+    fn small_vault_is_not_claimed_without_fee_coverage_or_after_budget_exhaustion() {
+        let mut s = configured();
+        assert!(can_admit_quote(
+            &s, 10_090_702, 10_000, 106_023, 250, 26_621_238
+        ));
+        assert!(!can_admit_quote(
+            &BotState::default(),
+            10_090_702,
+            10_000,
+            106_023,
+            250,
+            26_621_238
+        ));
+        s.operator_reserve.as_mut().unwrap().allocated_e6 = 1_000_000;
+        assert!(!can_admit_quote(
+            &s, 10_090_702, 10_000, 106_023, 250, 26_621_238
+        ));
+        // A larger economically covered claim needs no reserve authority.
+        assert!(can_admit_quote(
+            &BotState::default(),
+            100_000_000,
+            10_000,
+            1_060_000,
+            250,
+            0
+        ));
     }
 
     #[test]
