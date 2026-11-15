@@ -1,18 +1,18 @@
 <script>
   const stages = [
-    { label: 'Source', value: 'Merged', detail: 'PRs #652–#662 are in canonical main.', tone: 'done' },
-    { label: 'Artifacts', value: 'Verified', detail: 'Six production candidates are hash-pinned.', tone: 'done' },
-    { label: 'Installed', value: 'Complete', detail: 'All six reviewed candidates are installed and hash-matched.', tone: 'done' },
+    { label: 'Source', value: 'Merged', detail: 'PRs #652–#662 and #666 are in canonical main.', tone: 'done' },
+    { label: 'Artifacts', value: 'Verified', detail: 'The five dependency-refresh candidates are hash-pinned.', tone: 'done' },
+    { label: 'Installed', value: '4 of 5 refreshed', detail: 'Backend, bot, AMM, and Analytics match; Stability Pool remains held.', tone: 'partial' },
     { label: 'Recovery', value: 'Bounded', detail: 'Named durable inventories were queried and reconciled.', tone: 'partial' }
   ];
 
   const releaseRows = [
-    { component: 'AMM', state: 'Installed', tone: 'installed', hash: '66aa67b3…d9085', detail: 'Exact candidate hash observed; state baseline matched.' },
-    { component: 'Analytics', state: 'Installed', tone: 'installed', hash: 'd6c59e87…f398', detail: 'Exact candidate installed; collector state and cursors preserved.' },
-    { component: 'Stability Pool', state: 'Installed', tone: 'installed', hash: '32cf7dac…cce', detail: 'Exact candidate installed; state invariant and all 237 recovery credits preserved.' },
+    { component: 'AMM', state: 'Refreshed', tone: 'installed', hash: '3a59c167…185e6', detail: 'PR #666 candidate installed; pool values and empty payout inventory preserved.' },
+    { component: 'Analytics', state: 'Refreshed', tone: 'installed', hash: '704f6548…1f290', detail: 'PR #666 candidate installed; collector cursors and schedule preserved.' },
+    { component: 'Stability Pool', state: 'Held', tone: 'held', hash: '32cf7dac…cce', detail: 'The prior remediated build remains installed and healthy. Candidate d8385398…329e9 was not installed after two interrupted requests.' },
     { component: 'Treasury', state: 'Installed', tone: 'installed', hash: '785adb02…c3832', detail: 'Exact candidate installed; balances preserved, backfill complete, and reporter set bound.' },
-    { component: 'Protocol backend', state: 'Installed', tone: 'installed', hash: 'caaf7398…3bd1', detail: 'Exact candidate installed; General Availability mode and empty recovery queues preserved.' },
-    { component: 'Liquidation bot', state: 'Installed', tone: 'installed', hash: 'dadce6c5…bb2', detail: 'Exact candidate installed; journals empty, recovery configuration verified, and processing resumed.' }
+    { component: 'Protocol backend', state: 'Refreshed', tone: 'installed', hash: '59a64f78…44111', detail: 'PR #666 candidate installed; General Availability mode and zero protocol deficit preserved.' },
+    { component: 'Liquidation bot', state: 'Refreshed', tone: 'installed', hash: '941cd13a…ab17a', detail: 'PR #666 candidate installed; journals and backend claim inventory were empty before processing resumed.' }
   ];
 
   const widerRows = [
@@ -32,15 +32,17 @@
     'Commit-time liquidation excess gate',
     'Treasury transfer-receipt accounting journal',
     'Native-XRP admission and late-funding tombstones',
-    'Held protocol-payout recovery with post-await revalidation'
+    'Held protocol-payout recovery with post-await revalidation',
+    'Wallet-session binding, exact repayment amounts, and partial-close recovery',
+    'Patched Rust dependency graph and exact-head RustSec gate'
   ];
 
   const followThrough = [
     'Keep the legacy Stability Pool burn case held until exact authenticated archive proof exists.',
     'Preserve the 60 fail-closed Treasury tombstones for legacy rows that lack exact ledger provenance.',
     'Complete the remaining Points source-to-build provenance record.',
-    'Install and read back production candidates built from the remediated Rust lockfile; current installed hashes predate the dependency updates.',
-    'Merge and publish the wallet-session and exact-amount frontend fixes, then verify the served assets with real wallet session changes.',
+    'Install and read back the held Stability Pool dependency-refresh candidate only after the interrupted install path has an authoritative disposition.',
+    'Exercise the published wallet-session protections with real extension account changes and multi-tab behavior.',
     'Continue periodic bounded inventory checks; an empty current queue is not proof that no unknown historical obligation exists.'
   ];
 </script>
@@ -59,20 +61,20 @@
           <p class="date-line">Evidence snapshot · <time datetime="2026-11-15">November 15, 2026</time></p>
           <h1 id="report-title">Remediation merged.<br /><em>Rollout verified.</em></h1>
           <p class="lede">
-            Eleven accepted active-path remediations are merged and all six production candidates
-            are installed with exact module-hash readback. This report shows source, artifact,
-            installation, and bounded recovery evidence while keeping activation and historical
-            settlement as separate questions.
+            The accepted active-path remediation tranche and PR #666 are merged. The latest
+            dependency refresh is installed on the backend, bot, AMM, and Analytics, and the
+            wallet-session frontend is published. The Stability Pool refresh remains explicitly
+            held after interrupted install requests.
           </p>
         </div>
         <aside class="verdict">
           <span>Executive verdict</span>
-          <strong>The active-path remediation rollout is complete.</strong>
-          <p>Historical proof gaps remain held or fail-closed. Current empty inventories are bounded evidence, not proof that unknown obligations never existed.</p>
+          <strong>Core remediation is live; one dependency refresh remains held.</strong>
+          <p>The prior remediated Stability Pool build remains healthy. Historical proof gaps remain held or fail-closed, and empty inventories are bounded evidence rather than proof that unknown obligations never existed.</p>
           <a href="/security">Security archive <span aria-hidden="true">→</span></a>
         </aside>
       </div>
-      <div class="hero-rule"><span>Canonical source dbcc69bc</span><span>Release tree baba52eb</span></div>
+      <div class="hero-rule"><span>Canonical source f72ede81</span><span>Release tree 18b286ab</span></div>
     </div>
   </section>
 
@@ -97,7 +99,7 @@
     <div class="page-width section">
       <header class="section-heading wide">
         <p class="section-label">Production snapshot</p>
-        <h2 id="release-title">The merged tranche is installed and read back</h2>
+        <h2 id="release-title">The merged tranche is live; PR #666 is four-fifths installed</h2>
         <p>Module hashes were read through the management interface. Candidate hashes remain build evidence until the same bytes are observed in production.</p>
       </header>
       <ul class="release-table" aria-label="Production module status">
@@ -132,7 +134,7 @@
     <div class="page-width section fixes-grid">
       <header>
         <p class="section-label">Merged source</p>
-        <h2 id="fixes-title">PRs #652–#662</h2>
+        <h2 id="fixes-title">PRs #652–#662 and #666</h2>
         <p>Concise remediation areas are listed here without exploit instructions.</p>
       </header>
       <ol class="fix-list">
