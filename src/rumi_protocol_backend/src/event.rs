@@ -1236,11 +1236,23 @@ pub enum BorrowInterestCheckpointKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingPayoutEvent {
-    /// A per-vault interest accrual performed during borrow admission or
-    /// immediately before a proven mint is committed. Either boundary can
-    /// exist without a subsequent Borrow event, so it is journaled separately
-    /// for exact fallback replay.
+    /// Legacy timestamp-only accrual emitted by an unshipped remediation
+    /// predecessor. Keep this variant decodeable so staging or recovery state
+    /// created by that build cannot trap while scanning the private journal.
+    /// New code must emit `BorrowInterestApplied`, whose exact result does not
+    /// depend on reconstructing historical price/TCR context.
     BorrowInterestAccrued { vault_id: u64, timestamp_ns: u64 },
+    /// Exact result of a per-vault accrual performed during borrow admission
+    /// or immediately before a proven mint is committed. Persist the applied
+    /// debt, interest, and clock rather than recomputing from a timestamp:
+    /// fallback replay intentionally lacks historical price/TCR context, while
+    /// the runtime dynamic rate may depend on that context.
+    BorrowInterestApplied {
+        vault_id: u64,
+        borrowed_amount: ICUSD,
+        accrued_interest: ICUSD,
+        last_accrual_time_ns: u64,
+    },
     /// Exact pre-commit vault debt checkpoint. This bridges a pending mint
     /// admitted by a predecessor Wasm whose admission accrual changed stable
     /// state before private accrual journaling existed.
@@ -1974,7 +1986,23 @@ fn apply_bot_proof_audit_event(state: &mut State, event: BotProofAuditEvent) {
 fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
     match event {
         PendingPayoutEvent::BorrowInterestAccrued { vault_id, timestamp_ns } => {
+            // Compatibility-only replay for private rows created by the
+            // predecessor remediation build. Production never ran that build;
+            // retaining the decoder avoids turning any staging/recovery row
+            // into an iterator trap. Exact new rows use the arm below.
             state.accrue_single_vault(vault_id, timestamp_ns);
+        }
+        PendingPayoutEvent::BorrowInterestApplied {
+            vault_id,
+            borrowed_amount,
+            accrued_interest,
+            last_accrual_time_ns,
+        } => {
+            if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                vault.borrowed_icusd_amount = borrowed_amount;
+                vault.accrued_interest = accrued_interest;
+                vault.last_accrual_time = last_accrual_time_ns;
+            }
         }
         PendingPayoutEvent::BorrowInterestCheckpoint {
             key,
@@ -4080,25 +4108,28 @@ pub fn record_borrow_interest_accrual(
     vault_id: u64,
     timestamp_ns: u64,
 ) -> bool {
-    let Some(vault) = state.vault_id_to_vaults.get(&vault_id) else {
+    let update = match state.plan_single_vault_accrual(vault_id, timestamp_ns) {
+        Ok(update) => update,
+        Err(()) => return false,
+    };
+    let Some((borrowed_amount, accrued_interest)) = update else {
+        return true;
+    };
+    crate::storage::record_pending_payout_event(
+        &PendingPayoutEvent::BorrowInterestApplied {
+            vault_id,
+            borrowed_amount,
+            accrued_interest,
+            last_accrual_time_ns: timestamp_ns,
+        },
+    );
+    let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) else {
         return false;
     };
-    if vault.borrowed_icusd_amount.0 == 0 || vault.last_accrual_time >= timestamp_ns {
-        return true;
-    }
-    if state.xrpl_icusd.accrual_frozen_vaults.contains(&vault_id) {
-        return false;
-    }
-    // Do not append a transition that the current state cannot apply. A
-    // permanently overflowing proven mint is retried by the XRPL worker; an
-    // append-before-check order would grow the private log on every pass.
-    if !state.can_accrue_single_vault(vault_id, timestamp_ns) {
-        return false;
-    }
-    crate::storage::record_pending_payout_event(
-        &PendingPayoutEvent::BorrowInterestAccrued { vault_id, timestamp_ns },
-    );
-    state.try_accrue_single_vault(vault_id, timestamp_ns)
+    vault.borrowed_icusd_amount = borrowed_amount;
+    vault.accrued_interest = accrued_interest;
+    vault.last_accrual_time = timestamp_ns;
+    true
 }
 
 /// Persist the exact debt/accrual state immediately before a proven mint is
@@ -7001,27 +7032,31 @@ mod borrow_replay_tests {
             caller: Some(owner),
             timestamp: Some(commit_time),
         };
-        let private = [admission_time, commit_time].into_iter().map(|timestamp_ns| {
-            crate::storage::PendingPayoutJournalEntry {
+        let mut accrued = replay(vec![init.clone(), rate.clone(), open.clone()].into_iter()).unwrap();
+        let mut private = Vec::new();
+        for timestamp_ns in [admission_time, commit_time] {
+            assert!(accrued.try_accrue_single_vault(vault_id, timestamp_ns));
+            let vault = accrued.vault_id_to_vaults[&vault_id].clone();
+            private.push(crate::storage::PendingPayoutJournalEntry {
                 after_event_count: 3,
-                event: PendingPayoutEvent::BorrowInterestAccrued {
+                event: PendingPayoutEvent::BorrowInterestApplied {
                     vault_id,
-                    timestamp_ns,
+                    borrowed_amount: vault.borrowed_icusd_amount,
+                    accrued_interest: vault.accrued_interest,
+                    last_accrual_time_ns: timestamp_ns,
                 },
-            }
-        });
+            });
+        }
 
         let replayed = replay_with_pending_payout_events(
             vec![init.clone(), rate.clone(), open.clone(), borrow].into_iter(),
-            private,
+            private.into_iter(),
         )
         .expect("private borrow accruals should replay in order");
 
-        let mut expected = replay(vec![init.clone(), rate.clone(), open.clone()].into_iter()).unwrap();
-        assert!(expected.try_accrue_single_vault(vault_id, admission_time));
-        assert!(expected.try_accrue_single_vault(vault_id, commit_time));
-        let debt_before_new_principal = expected.vault_id_to_vaults[&vault_id]
+        let debt_before_new_principal = accrued.vault_id_to_vaults[&vault_id]
             .borrowed_icusd_amount;
+        let mut expected = accrued;
         expected.borrow_from_vault_at(
             vault_id,
             ICUSD::new(100_000_000),
@@ -7084,21 +7119,24 @@ mod borrow_replay_tests {
         let owner = principal(10);
         let vault_id = 5;
         let admission_time = crate::numeric::NANOS_PER_YEAR / 2;
+        let init = Event::Init(init_args(icp));
+        let rate = Event::SetInterestRate {
+            collateral_type: icp,
+            interest_rate_apr: "0.05".into(),
+        };
+        let open = open_positive_debt_vault(vault_id, owner, icp);
+        let mut planned = replay(vec![init.clone(), rate.clone(), open.clone()].into_iter()).unwrap();
+        assert!(planned.try_accrue_single_vault(vault_id, admission_time));
+        let applied = planned.vault_id_to_vaults[&vault_id].clone();
         let state = replay_with_pending_payout_events(
-            vec![
-                Event::Init(init_args(icp)),
-                Event::SetInterestRate {
-                    collateral_type: icp,
-                    interest_rate_apr: "0.05".into(),
-                },
-                open_positive_debt_vault(vault_id, owner, icp),
-            ]
-            .into_iter(),
+            vec![init, rate, open].into_iter(),
             std::iter::once(crate::storage::PendingPayoutJournalEntry {
                 after_event_count: 3,
-                event: PendingPayoutEvent::BorrowInterestAccrued {
+                event: PendingPayoutEvent::BorrowInterestApplied {
                     vault_id,
-                    timestamp_ns: admission_time,
+                    borrowed_amount: applied.borrowed_icusd_amount,
+                    accrued_interest: applied.accrued_interest,
+                    last_accrual_time_ns: admission_time,
                 },
             }),
         )
@@ -7107,6 +7145,35 @@ mod borrow_replay_tests {
         let vault = &state.vault_id_to_vaults[&vault_id];
         assert_eq!(vault.last_accrual_time, admission_time);
         assert!(vault.borrowed_icusd_amount > ICUSD::new(500_000_000));
+    }
+
+    #[test]
+    fn exact_borrow_accrual_replay_does_not_require_price_or_rate_context() {
+        let icp = principal(23);
+        let owner = principal(24);
+        let vault_id = 8;
+        let state = replay_with_pending_payout_events(
+            vec![
+                Event::Init(init_args(icp)),
+                open_positive_debt_vault(vault_id, owner, icp),
+            ]
+            .into_iter(),
+            std::iter::once(crate::storage::PendingPayoutJournalEntry {
+                after_event_count: 2,
+                event: PendingPayoutEvent::BorrowInterestApplied {
+                    vault_id,
+                    borrowed_amount: ICUSD::new(555_000_123),
+                    accrued_interest: ICUSD::new(55_000_123),
+                    last_accrual_time_ns: 9_876_543,
+                },
+            }),
+        )
+        .unwrap();
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(555_000_123));
+        assert_eq!(vault.accrued_interest, ICUSD::new(55_000_123));
+        assert_eq!(vault.last_accrual_time, 9_876_543);
     }
 
     #[test]
@@ -7129,6 +7196,7 @@ mod borrow_replay_tests {
         assert!(live.try_accrue_single_vault(vault_id, admission_time));
         let admitted = live.vault_id_to_vaults[&vault_id].clone();
         assert!(live.try_accrue_single_vault(vault_id, commit_time));
+        let committed_accrual = live.vault_id_to_vaults[&vault_id].clone();
         live.borrow_from_vault_at(vault_id, ICUSD::new(100_000_000), Some(commit_time));
 
         let private = vec![
@@ -7147,9 +7215,11 @@ mod borrow_replay_tests {
             },
             crate::storage::PendingPayoutJournalEntry {
                 after_event_count: 3,
-                event: PendingPayoutEvent::BorrowInterestAccrued {
+                event: PendingPayoutEvent::BorrowInterestApplied {
                     vault_id,
-                    timestamp_ns: commit_time,
+                    borrowed_amount: committed_accrual.borrowed_icusd_amount,
+                    accrued_interest: committed_accrual.accrued_interest,
+                    last_accrual_time_ns: commit_time,
                 },
             },
         ];

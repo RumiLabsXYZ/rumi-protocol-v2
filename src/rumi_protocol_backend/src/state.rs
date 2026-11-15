@@ -7226,7 +7226,7 @@ impl State {
         let _ = self.try_accrue_single_vault(vault_id, now_nanos);
     }
 
-    fn preview_single_vault_accrual(
+    pub(crate) fn plan_single_vault_accrual(
         &self,
         vault_id: u64,
         now_nanos: u64,
@@ -7260,18 +7260,13 @@ impl State {
         Ok(Some((ICUSD::from(new_debt), new_accrued_interest)))
     }
 
-    pub fn can_accrue_single_vault(&self, vault_id: u64, now_nanos: u64) -> bool {
-        self.preview_single_vault_accrual(vault_id, now_nanos)
-            .is_ok()
-    }
-
     /// The checked form used at a proven external-mint commit. Returns true
     /// when the vault is already current/has no debt or the clock advanced;
     /// false when the vault is missing, frozen, or arithmetic prevented the
     /// required accrual. Callers must hold rather than add new principal on
     /// false.
     pub fn try_accrue_single_vault(&mut self, vault_id: u64, now_nanos: u64) -> bool {
-        let update = match self.preview_single_vault_accrual(vault_id, now_nanos) {
+        let update = match self.plan_single_vault_accrual(vault_id, now_nanos) {
             Ok(update) => update,
             Err(()) => {
                 log!(
