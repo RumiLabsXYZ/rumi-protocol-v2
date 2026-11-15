@@ -1,0 +1,62 @@
+{
+  "description": "SYNTHETIC FIXTURE, not live data. The rejected D/X overlap: the XRPL network xrpl-mainnet is listed as a D destination AND as the XRPL lane, both bound to one synthetic escrow (bytes spell synthetic-escrow-xrpl). Counting both would report escrow_locked 200 for a single 100 escrow, so the collector must refuse it before reading anything. A run of this file prints source: fixture and exits non-zero. It also carries a synthetic instance id and audit reply for the xrpl-mainnet D entry, to show that a complete-looking shape is still refused: the boundary runs before any read, including the audit.",
+  "config": {
+    "destinations": [
+      {
+        "network_id": "xrpl-mainnet",
+        "in_d": true,
+        "escrow": {
+          "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm",
+          "subaccount": null
+        },
+        "instance": "3i3ju-idtpf-xhi2d-foruw-glljn-zzxiy-lomns-s26ds-obwa"
+      }
+    ],
+    "xrpl": {
+      "network_id": "xrpl-mainnet",
+      "escrow": {
+        "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm",
+        "subaccount": null
+      }
+    }
+  },
+  "readings": {
+    "icp_ledger_total_supply": "100000000000",
+    "debt_backed_chain_supplies": "0",
+    "icrc1_balances": [
+      {
+        "escrow": {
+          "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm",
+          "subaccount": null
+        },
+        "balance": "10000000000"
+      }
+    ],
+    "instance_audits": [
+      {
+        "instance": "3i3ju-idtpf-xhi2d-foruw-glljn-zzxiy-lomns-s26ds-obwa",
+        "audit": {
+          "escrow_account": {
+            "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm",
+            "subaccount": null
+          },
+          "escrow_balance_e8s": "10000000000",
+          "outstanding_e8s": "10000000000",
+          "pending_mint_e8s": "0",
+          "inflight_mint_e8s": "0",
+          "pending_release_e8s": "0",
+          "pending_refund_e8s": "0",
+          "held_e8s": "0",
+          "fees_e8s": "0",
+          "reserved_pulls_e8s": "0",
+          "unknown_outflow_e8s": "0",
+          "liabilities_e8s": "10000000000",
+          "required_escrow_e8s": "10000000000",
+          "coverage_ok": true,
+          "reported_supply_e8s": "10000000000",
+          "reported_supply_block": 1000
+        }
+      }
+    ]
+  }
+}

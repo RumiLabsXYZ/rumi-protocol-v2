@@ -1,0 +1,86 @@
+{
+  "description": "SYNTHETIC FIXTURE, not live data. Base plus the XRPL lane. Every number is invented and the principals are synthetic test principals (their bytes spell synthetic-escrow-base, synthetic-instance-base and synthetic-escrow-xrpl), not real accounts; the ledger hash is invented. The XRPL lane (X) has its own escrow and an issued outstanding read at a validated ledger; the collector counts each escrow once in escrow_locked and prints source: fixture.",
+  "config": {
+    "destinations": [
+      {
+        "network_id": "base-mainnet",
+        "in_d": true,
+        "escrow": {
+          "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+          "subaccount": null
+        },
+        "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq"
+      }
+    ],
+    "xrpl": {
+      "network_id": "xrpl-mainnet",
+      "escrow": {
+        "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm",
+        "subaccount": null
+      }
+    }
+  },
+  "readings": {
+    "icp_ledger_total_supply": "100000000000",
+    "debt_backed_chain_supplies": "0",
+    "icrc1_balances": [
+      {
+        "escrow": {
+          "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+          "subaccount": null
+        },
+        "balance": "20012345678"
+      },
+      {
+        "escrow": {
+          "owner": "ejjav-qltpf-xhi2d-foruw-gllfo-nrxe3-3xfv4-he4dm",
+          "subaccount": null
+        },
+        "balance": "5000000001"
+      }
+    ],
+    "evm_supplies": [
+      {
+        "network_id": "base-mainnet",
+        "supply": "20012345678",
+        "finality": "evm_tag",
+        "block": 1000
+      }
+    ],
+    "xrpl_issued": [
+      {
+        "network_id": "xrpl-mainnet",
+        "issued_outstanding": "5000000001",
+        "finality": "xrpl_validated",
+        "ledger_index": 91000000,
+        "ledger_hash": "00000000000000000000000000000000000000000000000000000000FEEDF00D"
+      }
+    ],
+    "instance_audits": [
+      {
+        "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq",
+        "audit": {
+          "escrow_account": {
+            "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+            "subaccount": null
+          },
+          "escrow_balance_e8s": "20012345678",
+          "outstanding_e8s": "20000000000",
+          "pending_mint_e8s": "12345678",
+          "inflight_mint_e8s": "12345678",
+          "pending_release_e8s": "0",
+          "pending_refund_e8s": "0",
+          "held_e8s": "0",
+          "fees_e8s": "0",
+          "reserved_pulls_e8s": "0",
+          "unknown_outflow_e8s": "0",
+          "liabilities_e8s": "20012345678",
+          "required_escrow_e8s": "20012345678",
+          "coverage_ok": true,
+          "reported_supply_e8s": "20012345678",
+          "reported_supply_block": 1000
+        }
+      }
+    ]
+  }
+}

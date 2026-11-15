@@ -1,0 +1,35 @@
+[package]
+name = "rumi_icusd_sui_bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Escrow-backed ICP icUSD <-> Sui icUSD bridge canister instance (BB-52 foundation: ids, role paths, BCS TransactionData builder with both digests, wire signatures, Gate decoders, GraphQL mirror)"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candid = "0.10.6"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0"
+serde_bytes = "0.11"
+ic-cdk = "0.12.0"
+ic-cdk-timers = "0.10.0"
+ic-stable-structures = "0.6.5"
+ciborium = "0.2.1"
+# The same pinned ICRC types the Base and Solana instances use (git dependency already in Cargo.lock).
+icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
+num-traits = "0.2"
+# Already in Cargo.lock (used by the other bridge crates and the backend); no new crate.
+sha2 = "0.10.2"
+# The one new lock entry (BB-52): RustCrypto BLAKE2 on the digest 0.10 already in the lock.
+blake2 = "=0.10.6"
+hex = "0.4"
+bs58 = "0.5"
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# 53b: verifies each threshold signature against the role key before it is stored or broadcast
+# (BB-52 used it in tests only). Already in Cargo.lock; default features off.
+ed25519-dalek = { version = "2.1.1", default-features = false }
+
+[dev-dependencies]
+candid_parser = "0.1"

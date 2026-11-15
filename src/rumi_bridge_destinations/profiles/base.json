@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "id": "base",
+  "display_name": "Base",
+  "family": "evm",
+  "topology": {
+    "kind": {
+      "value": "bridge_instance",
+      "rationale": "The existing reviewed Base bridge is a single-destination canister; one instance per destination network (design section 1.2). Base keeps its Candid and state unchanged.",
+      "status": "recommendation"
+    },
+    "wasm_family": "evm",
+    "existing_work": {
+      "value": "rumi_icusd_bridge",
+      "source_url": "src/rumi_icusd_bridge/Cargo.toml",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    }
+  },
+  "representation": {
+    "standard": {
+      "value": "erc20",
+      "rationale": "foundry/src/BridgedIcUSD.sol is the reference escrow-backed ERC-20 (8 decimals) of the existing reviewed Base bridge. This record describes it as the reference only.",
+      "status": "recommendation"
+    },
+    "backing": "escrow_locked_icusd",
+    "debt_creating": false,
+    "decimals": 8,
+    "amount_bounds": {
+      "value": {
+        "min_e8s": "1",
+        "max_e8s": "18446744073709551615",
+        "max_outstanding_e8s": null,
+        "encoding": "u64",
+        "basis": null
+      },
+      "source_url": "foundry/src/BridgedIcUSD.sol",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    }
+  },
+  "signing": {
+    "scheme": "ecdsa_secp256k1",
+    "key_name": {
+      "value": {
+        "mainnet": "key_1",
+        "testnet": "test_key_1"
+      },
+      "source_url": "https://docs.internetcomputer.org/references/cycle-costs/",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    "derivation_domain": [
+      "rumi-icusd-base-bridge",
+      "v1",
+      "{lane}",
+      "{network_identity}"
+    ],
+    "roles": [
+      "minter",
+      "admin"
+    ],
+    "domains": {
+      "mint_id": "rumi.icusd.base.mint.v1",
+      "remint_id": "rumi.icusd.base.remint.v1",
+      "return_id": "rumi.icusd.base.bridge-out.v1",
+      "burn_id": null,
+      "escrow_label": "rumi-icusd-base-bridge:escrow:v1"
+    },
+    "signed_payload": {
+      "value": "EIP-1559 (type 2) transaction signing hash with EIP-155 chain-id rules (v = {0,1} + CHAIN_ID*2 + 35 for legacy envelopes); the threshold secp256k1 output is directly usable.",
+      "source_url": "https://eips.ethereum.org/EIPS/eip-155",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "wallet": {
+    "standard": "eip1193_eip6963",
+    "named": {
+      "value": [
+        "MetaMask"
+      ],
+      "source_url": "https://docs.metamask.io/agent-wallet/reference/supported-chains/",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "prerequisites": [
+    {
+      "value": {
+        "id": "gas-funding",
+        "text": "ETH on Base for the minter and admin gas addresses and the deployer; the contract must be deployed; no deployment allowlist was found.",
+        "unavoidable": true
+      },
+      "source_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  ],
+  "open_decisions": [
+    {
+      "id": "D9",
+      "topic": "Testnet escrow: real icUSD ledger or a test ledger",
+      "choice": {
+        "value": "synthetic_test_ledgers",
+        "rationale": "Design section 12 (settled for planning): synthetic test ledgers for future testnet demos; no real canonical icUSD is locked for a new testnet rollout under this groundwork.",
+        "status": "planning_decision"
+      }
+    }
+  ],
+  "networks": [
+    {
+      "network_id": "base-mainnet",
+      "role": "mainnet",
+      "identity": {
+        "value": {
+          "kind": "evm_chain_id",
+          "value": "8453"
+        },
+        "source_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "base-live-status-not-established",
+          "text": "This groundwork data does not establish the live status of any Base install. The record stays disabled until a separate activation step with its own evidence.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 7; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "evm_tag",
+        "parameters": {
+          "value": {
+            "tag": "finalized",
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": null,
+            "typical_wait": "about 20 minutes (L1 batch finality)"
+          },
+          "source_url": "https://docs.base.org/base-chain/network-information/transaction-finality",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "evm_rpc_canister",
+        "native_variant": {
+          "value": "BaseMainnet",
+          "source_url": "https://raw.githubusercontent.com/dfinity/evm-rpc-canister/main/candid/evm_rpc.did",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Baseline from the Base bridge design (section 7.7): identical results from 2 of 3 independent providers. The EVM RPC canister skill recommends Threshold with total 3 and min 2.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "mainnet.base.org"
+          ],
+          "source_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Native BaseMainnet provider variant. Base also publishes separate sequencer hosts that are for sending transactions only.",
+          "source_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "base-sepolia",
+      "role": "testnet",
+      "identity": {
+        "value": {
+          "kind": "evm_chain_id",
+          "value": "84532"
+        },
+        "source_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "base-live-status-not-established",
+          "text": "This groundwork data does not establish the live status of any Base install. The record stays disabled until a separate activation step with its own evidence.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/reuse-inventory.md section 7; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 10"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "single-keyless-endpoint",
+          "text": "Only one keyless public read endpoint is listed for Base Sepolia. A quorum of 2 independent providers needs more providers, and keyed provider URLs conflict with the no-secrets-in-state rule.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/sources-evm.md section 2 row 1"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "evm_tag",
+        "parameters": {
+          "value": {
+            "tag": "finalized",
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": null,
+            "typical_wait": "about 20 minutes (L1 batch finality)"
+          },
+          "source_url": "https://docs.base.org/base-chain/network-information/transaction-finality",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "evm_rpc_canister",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Same baseline as mainnet (2 identical results). Testnet networks do not weaken it; a provider shortage is recorded as a blocker instead.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "sepolia.base.org"
+          ],
+          "source_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Base Sepolia is not a native EVM RPC canister variant, so it uses the Custom variant, which carries a chain id and provider URLs.",
+          "source_url": "https://raw.githubusercontent.com/dfinity/evm-rpc-canister/main/candid/evm_rpc.did",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    }
+  ]
+}

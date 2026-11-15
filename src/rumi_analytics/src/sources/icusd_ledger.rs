@@ -1,6 +1,7 @@
 //! Typed wrapper around icusd_ledger ICRC-1 queries.
 
 use candid::{CandidType, Nat, Principal};
+use icrc_ledger_types::icrc1::account::Account;
 use serde::Deserialize;
 
 pub async fn icrc1_total_supply(ledger: Principal) -> Result<u128, String> {
@@ -11,6 +12,19 @@ pub async fn icrc1_total_supply(ledger: Principal) -> Result<u128, String> {
             .try_into()
             .map_err(|e| format!("icrc1_total_supply nat -> u128: {}", e)),
         Err((code, msg)) => Err(format!("icrc1_total_supply: {:?} {}", code, msg)),
+    }
+}
+
+/// `icrc1_balance_of` for one account. Used to read bridge escrow balances.
+pub async fn icrc1_balance_of(ledger: Principal, account: &Account) -> Result<u128, String> {
+    let res: Result<(Nat,), _> =
+        ic_cdk::api::call::call(ledger, "icrc1_balance_of", (*account,)).await;
+    match res {
+        Ok((nat,)) => nat
+            .0
+            .try_into()
+            .map_err(|e| format!("icrc1_balance_of nat -> u128: {}", e)),
+        Err((code, msg)) => Err(format!("icrc1_balance_of: {:?} {}", code, msg)),
     }
 }
 

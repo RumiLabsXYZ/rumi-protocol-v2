@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "id": "xrpl",
+  "display_name": "XRP Ledger",
+  "family": "xrpl",
+  "topology": {
+    "kind": {
+      "value": "backend_module",
+      "rationale": "PR #586 already is a backend module with one XRPL icUSD lane; no XRPL bridge instance and no second XRPL token (design section 1.4).",
+      "status": "recommendation"
+    },
+    "wasm_family": null,
+    "existing_work": {
+      "value": "pr586",
+      "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    }
+  },
+  "representation": {
+    "standard": {
+      "value": "xrpl_iou",
+      "rationale": "PR #586 implements an escrow-backed trust-line issued currency with exact decimal parsing and caps. D2 (settled for planning) keeps that lane; Multi-Purpose Token is deferred, not a replacement gate.",
+      "status": "planning_decision"
+    },
+    "backing": "escrow_locked_icusd",
+    "debt_creating": false,
+    "decimals": 8,
+    "amount_bounds": {
+      "value": {
+        "min_e8s": "1",
+        "max_e8s": "999999999999999",
+        "max_outstanding_e8s": "999999999999999",
+        "encoding": "xrpl_decimal_15",
+        "basis": "15 significant digits (D7 planning decision): both each operation and total outstanding stay at or below 999999999999999 e8s, and inexact amounts are rejected or held exactly, never rounded."
+      },
+      "source_url": "https://xrpl.org/docs/references/protocol/data-types/currency-formats",
+      "verified": "2026-10-30",
+      "source_kind": "derived"
+    }
+  },
+  "signing": {
+    "scheme": "schnorr_ed25519",
+    "key_name": {
+      "value": {
+        "mainnet": "key_1",
+        "testnet": "test_key_1"
+      },
+      "source_url": "https://docs.internetcomputer.org/concepts/chain-key-cryptography.md",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    "derivation_domain": [
+      "rumi",
+      "xrpl-icusd",
+      "v1",
+      "{network_name}"
+    ],
+    "roles": [],
+    "domains": {
+      "mint_id": null,
+      "remint_id": null,
+      "return_id": null,
+      "burn_id": null,
+      "escrow_label": "rumi:xrpl-icusd:escrow:v1"
+    },
+    "signed_payload": {
+      "value": "Ed25519 over the 0x53545800 prefix followed by the canonical serialization without TxnSignature; no pre-hash.",
+      "source_url": "https://xrpl.org/docs/references/protocol/binary-format",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "wallet": {
+    "standard": "vendor_specific",
+    "named": {
+      "value": [
+        "Xaman"
+      ],
+      "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    }
+  },
+  "prerequisites": [
+    {
+      "value": {
+        "id": "issuer-funding",
+        "text": "The issuer account must be funded from outside: 1 XRP base reserve plus 0.2 XRP per owned object.",
+        "unavoidable": true
+      },
+      "source_url": "https://xrpl.org/docs/concepts/accounts/reserves",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    {
+      "value": {
+        "id": "holder-trust-line",
+        "text": "Holders must create a trust line to the issuer before they can receive icUSD.",
+        "unavoidable": true
+      },
+      "source_url": "https://xrpl.org/docs/concepts/tokens/fungible-tokens/trust-line-tokens",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  ],
+  "open_decisions": [
+    {
+      "id": "D2",
+      "topic": "XRPL trust-line token (PR #586) or Multi-Purpose Token",
+      "choice": {
+        "value": "issued_currency_lane_mpt_deferred",
+        "rationale": "Design section 12 (settled for planning): XRPL uses PR #586's issued-currency escrow and import seam; MPT is deferred, not a replacement gate; the no-vault canonical return stays a named missing implementation.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D7",
+      "topic": "XRPL precision caps: 15 versus 16 digits",
+      "choice": {
+        "value": "15_digit_caps_per_operation_and_total_outstanding",
+        "rationale": "Design section 12 (settled for planning): conservative 15-significant-digit caps (999999999999999 e8s) on each operation AND on total outstanding, with exact rejection or holding of inexact amounts.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D9",
+      "topic": "Testnet escrow: real icUSD ledger or a test ledger",
+      "choice": {
+        "value": "synthetic_test_ledgers",
+        "rationale": "Design section 12 (settled for planning): synthetic test ledgers for future testnet demos; no real canonical icUSD is locked for a new testnet rollout under this groundwork.",
+        "status": "planning_decision"
+      }
+    }
+  ],
+  "networks": [
+    {
+      "network_id": "xrpl-mainnet",
+      "role": "mainnet",
+      "identity": {
+        "value": {
+          "kind": "xrpl_network_id",
+          "value": "0"
+        },
+        "source_url": "https://xrpl.org/docs/references/protocol/transactions/common-fields",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "xrpl-pr586-unmerged",
+          "text": "PR #586 is open and unmerged and its issuance lane is disabled by default. Nothing here claims deployment.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q8"
+        },
+        {
+          "id": "xrpl-return-intent-missing",
+          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586. The return source (BB-56, with the BB-57 cases) is accepted at source and focused-test level on a separate local branch that was not pushed (local commits up to 46cf6b34). It is not in PR #586, not on this branch and not in PR #591. Still held: publication of that branch (the exact push was denied and is not retried here), the PR #586 merge, deployment, and live or public-chain evidence.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4; BB-56 e48dc18d and BB-57 46cf6b34 (unpublished local branch, not pushed)"
+        },
+        {
+          "id": "xrpl-wallet-xaman-only",
+          "text": "The PR #586 frontend supports Xaman only (manual address or QR fallback). No other XRPL wallet connector was found.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q6"
+        },
+        {
+          "id": "xrpl-15-digit-validator-not-wired",
+          "text": "Missing on PR #586 and on this branch. A local follow-up accepted at source and focused-test level (BB-55, f887fab5 with 868ebca8) wires the validator on a separate local branch that was not pushed; it is not in PR #586, this branch or PR #591. On the PR #586 baseline (before that follow-up), the 15-digit request validator (validate_normal_request and parse_normal_request) has no caller outside tests, and the frontend parser accepts up to u64. On that baseline, the 15-digit bound holds only if a controller sets both caps at or below 999999999999999 e8s.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 3; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 3"
+        },
+        {
+          "id": "xrpl-caps-not-hard-bounded",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5 with 868ebca8), on a separate local branch that was not pushed, clamps the caps and checks the ceiling before any new attempt; it is not in PR #586, this branch or PR #591. On the PR #586 baseline (before that follow-up), config accepts any u64 for both caps, and the requirement was to clamp both to 999999999999999 e8s when applying config and again inside the per-operation check and the return-intent creation, add the issuer snapshot ceiling as a coverage condition, and clamp in the frontend parser before an amount is shown. The holder trust-line limit defaults to the outstanding cap, so an unclamped cap writes a limit longer than 15 digits.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 3 (items 1, 3, 4 and 5)"
+        },
+        {
+          "id": "xrpl-pending-import-cap-race",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5), on a separate local branch that was not pushed, counts pending imports; it is not in PR #586, this branch or PR #591. On the PR #586 baseline (before that follow-up), an import still in its ledger-pull phase is neither in the delivery bucket nor a reservation, so concurrent imports can each pass the cap check and together exceed the total cap (from reading the source, not tested). The requirement was to count pending-pull amounts and re-check when the import advances.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 3 (item 2)"
+        },
+        {
+          "id": "xrpl-no-origin-split",
+          "text": "Implementation missing. The outstanding counter has no origin split between imported and debt-originated units after delivery. Report cumulative delivered by kind and never claim a per-token origin or a debt-free outstanding; only the import flow carries no new debt.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 1 (buckets, refinement c); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 2.2"
+        },
+        {
+          "id": "xrpl-issuer-policy-undecided",
+          "text": "The issuer policy (allow clawback, no freeze) has no default and cannot change once setup starts. Both options are irreversible, so choosing one is a decision before setup, and the page must disclose the choice. Local fixtures use false and false, which is not a production decision.",
+          "kind": "decision",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 6"
+        },
+        {
+          "id": "xrpl-backend-wasm-headroom",
+          "text": "The backend code section was 9,648,104 bytes (77% of the 12 MiB limit) after merging main, and PocketIC 7 caps the code section at 10 MiB, leaving about 837,656 bytes for the follow-up. Budget the follow-up against the smaller figure.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 7"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "xrpl-outcall-port-unknown",
+          "text": "One of the three mainnet read hosts uses port 51234, and support for non-443 ports in HTTPS outcalls is not established. PR #586 treats that host as possibly unreachable and requires a spare 443 provider, so quorum 2 stays reachable on the other two.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 5; docs/coordination/multichain/sources-native.md open question 3"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "xrpl_validated",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": "validated",
+            "required_result": "tesSUCCESS",
+            "execution_delay_blocks": null,
+            "typical_wait": "validated ledger with tesSUCCESS; wait time not stated in the facts files"
+          },
+          "source_url": "https://xrpl.org/docs/concepts/transactions/finality-of-results/look-up-transaction-results",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "https_outcall_jsonrpc",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "PR #586 reads need READ_QUORUM = 2 identical reduced responses.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "xrplcluster.com",
+            "xrpl.link",
+            "s1.ripple.com"
+          ],
+          "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+          "verified": "2026-10-30",
+          "source_kind": "repo"
+        },
+        "outcall_notes": {
+          "value": "Reads and submits go through HTTPS outcalls to rippled JSON-RPC with a read quorum of 2 identical reduced responses. No official ICP canister exists for XRPL, and non-443 port support is not established.",
+          "source_url": "https://skills.internetcomputer.org/.well-known/skills/https-outcalls/SKILL.md",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "xrpl-testnet",
+      "role": "testnet",
+      "identity": {
+        "value": {
+          "kind": "xrpl_network_id",
+          "value": "1"
+        },
+        "source_url": "https://xrpl.org/docs/references/protocol/transactions/common-fields",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "xrpl-pr586-unmerged",
+          "text": "PR #586 is open and unmerged and its issuance lane is disabled by default. Nothing here claims deployment.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q8"
+        },
+        {
+          "id": "xrpl-return-intent-missing",
+          "text": "No dedicated no-vault operation returns XRPL icUSD to an ICP account in the PR #586 endpoint list. It is specified as a follow-up (BB-37), not an edit to #586. The return source (BB-56, with the BB-57 cases) is accepted at source and focused-test level on a separate local branch that was not pushed (local commits up to 46cf6b34). It is not in PR #586, not on this branch and not in PR #591. Still held: publication of that branch (the exact push was denied and is not retried here), the PR #586 merge, deployment, and live or public-chain evidence.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 1.4; BB-56 e48dc18d and BB-57 46cf6b34 (unpublished local branch, not pushed)"
+        },
+        {
+          "id": "xrpl-wallet-xaman-only",
+          "text": "The PR #586 frontend supports Xaman only (manual address or QR fallback). No other XRPL wallet connector was found.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/xrpl-pr586-inventory.md Q6"
+        },
+        {
+          "id": "xrpl-15-digit-validator-not-wired",
+          "text": "Missing on PR #586 and on this branch. A local follow-up accepted at source and focused-test level (BB-55, f887fab5 with 868ebca8) wires the validator on a separate local branch that was not pushed; it is not in PR #586, this branch or PR #591. On the PR #586 baseline (before that follow-up), the 15-digit request validator (validate_normal_request and parse_normal_request) has no caller outside tests, and the frontend parser accepts up to u64. On that baseline, the 15-digit bound holds only if a controller sets both caps at or below 999999999999999 e8s.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 3; docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 3"
+        },
+        {
+          "id": "xrpl-caps-not-hard-bounded",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5 with 868ebca8), on a separate local branch that was not pushed, clamps the caps and checks the ceiling before any new attempt; it is not in PR #586, this branch or PR #591. On the PR #586 baseline (before that follow-up), config accepts any u64 for both caps, and the requirement was to clamp both to 999999999999999 e8s when applying config and again inside the per-operation check and the return-intent creation, add the issuer snapshot ceiling as a coverage condition, and clamp in the frontend parser before an amount is shown. The holder trust-line limit defaults to the outstanding cap, so an unclamped cap writes a limit longer than 15 digits.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 3 (items 1, 3, 4 and 5)"
+        },
+        {
+          "id": "xrpl-pending-import-cap-race",
+          "text": "Missing on PR #586 and on this branch. The BB-55 follow-up (f887fab5), on a separate local branch that was not pushed, counts pending imports; it is not in PR #586, this branch or PR #591. On the PR #586 baseline (before that follow-up), an import still in its ledger-pull phase is neither in the delivery bucket nor a reservation, so concurrent imports can each pass the cap check and together exceed the total cap (from reading the source, not tested). The requirement was to count pending-pull amounts and re-check when the import advances.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 3 (item 2)"
+        },
+        {
+          "id": "xrpl-no-origin-split",
+          "text": "Implementation missing. The outstanding counter has no origin split between imported and debt-originated units after delivery. Report cumulative delivered by kind and never claim a per-token origin or a debt-free outstanding; only the import flow carries no new debt.",
+          "kind": "code",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 1 (buckets, refinement c); docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 2.2"
+        },
+        {
+          "id": "xrpl-issuer-policy-undecided",
+          "text": "The issuer policy (allow clawback, no freeze) has no default and cannot change once setup starts. Both options are irreversible, so choosing one is a decision before setup, and the page must disclose the choice. Local fixtures use false and false, which is not a production decision.",
+          "kind": "decision",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 6"
+        },
+        {
+          "id": "xrpl-backend-wasm-headroom",
+          "text": "The backend code section was 9,648,104 bytes (77% of the 12 MiB limit) after merging main, and PocketIC 7 caps the code section at 10 MiB, leaving about 837,656 bytes for the follow-up. Budget the follow-up against the smaller figure.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 7"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "xrpl-outcall-port-unknown",
+          "text": "Testnet has exactly 2 read hosts at quorum 2 and one of them uses port 51234. If HTTPS outcalls to that port fail, the testnet lane cannot read at all. Support for non-443 ports is not established; probe it in a separate approved step.",
+          "kind": "external",
+          "source": "docs/coordination/multichain/chain-xrpl.md section 5; docs/coordination/multichain/sources-native.md open question 3"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "xrpl_validated",
+        "parameters": {
+          "value": {
+            "tag": null,
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": "validated",
+            "required_result": "tesSUCCESS",
+            "execution_delay_blocks": null,
+            "typical_wait": "validated ledger with tesSUCCESS; wait time not stated in the facts files"
+          },
+          "source_url": "https://xrpl.org/docs/concepts/transactions/finality-of-results/look-up-transaction-results",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "https_outcall_jsonrpc",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "PR #586 reads need READ_QUORUM = 2 identical reduced responses.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "s.altnet.rippletest.net",
+            "testnet.xrpl-labs.com"
+          ],
+          "source_url": "docs/coordination/multichain/xrpl-pr586-inventory.md",
+          "verified": "2026-10-30",
+          "source_kind": "repo"
+        },
+        "outcall_notes": {
+          "value": "Reads and submits go through HTTPS outcalls to rippled JSON-RPC with a read quorum of 2 identical reduced responses. No official ICP canister exists for XRPL, and non-443 port support is not established.",
+          "source_url": "https://skills.internetcomputer.org/.well-known/skills/https-outcalls/SKILL.md",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    }
+  ]
+}

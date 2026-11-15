@@ -1,0 +1,112 @@
+{
+ "description": "SYNTHETIC FIXTURE, not live data. Base plus one Solana destination with custody. Every number is invented and the principals are synthetic test principals (their bytes spell synthetic-escrow-base, synthetic-instance-base and synthetic-instance-solana), not real accounts. The Solana mint supply and the return-account balance are one recorded pair at a finalized slot; the instance's self-reported buckets (return_custodied, burn_unknown, stray) explain the custody and are compared with it, never used as a read. The collector prints source: fixture.",
+ "config": {
+  "destinations": [
+   {
+    "network_id": "base-mainnet",
+    "in_d": true,
+    "escrow": {
+     "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+     "subaccount": null
+    },
+    "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq"
+   },
+   {
+    "network_id": "solana-mainnet",
+    "in_d": true,
+    "escrow": {
+     "owner": "4xwfs-uttpf-xhi2d-foruw-glljn-zzxiy-lomns-s243p-nrqw4-yi",
+     "subaccount": "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4"
+    },
+    "instance": "4xwfs-uttpf-xhi2d-foruw-glljn-zzxiy-lomns-s243p-nrqw4-yi"
+   }
+  ],
+  "xrpl": null
+ },
+ "readings": {
+  "icp_ledger_total_supply": "100000000000",
+  "debt_backed_chain_supplies": "0",
+  "icrc1_balances": [
+   {
+    "escrow": {
+     "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+     "subaccount": null
+    },
+    "balance": "20012345678"
+   },
+   {
+    "escrow": {
+     "owner": "4xwfs-uttpf-xhi2d-foruw-glljn-zzxiy-lomns-s243p-nrqw4-yi",
+     "subaccount": "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4"
+    },
+    "balance": "10200000000"
+   }
+  ],
+  "evm_supplies": [
+   {
+    "network_id": "base-mainnet",
+    "supply": "20012345678",
+    "finality": "evm_tag",
+    "block": 1000
+   }
+  ],
+  "solana_supplies": [
+   {
+    "network_id": "solana-mainnet",
+    "supply": "10200000000",
+    "custody": "1250000000",
+    "finality": "solana_commitment",
+    "slot": 280000000
+   }
+  ],
+  "instance_audits": [
+   {
+    "instance": "veb5x-fltpf-xhi2d-foruw-glljn-zzxiy-lomns-s2ytb-onsq",
+    "audit": {
+     "escrow_account": {
+      "owner": "kftuw-5dtpf-xhi2d-foruw-gllfo-nrxe3-3xfvr-gc43f",
+      "subaccount": null
+     },
+     "escrow_balance_e8s": "20012345678",
+     "outstanding_e8s": "20000000000",
+     "pending_mint_e8s": "12345678",
+     "inflight_mint_e8s": "12345678",
+     "pending_release_e8s": "0",
+     "pending_refund_e8s": "0",
+     "held_e8s": "0",
+     "fees_e8s": "0",
+     "reserved_pulls_e8s": "0",
+     "unknown_outflow_e8s": "0",
+     "liabilities_e8s": "20012345678",
+     "required_escrow_e8s": "20012345678",
+     "coverage_ok": true,
+     "reported_supply_e8s": "20012345678",
+     "reported_supply_block": 1000
+    }
+   },
+   {
+    "instance": "4xwfs-uttpf-xhi2d-foruw-glljn-zzxiy-lomns-s243p-nrqw4-yi",
+    "audit": {
+     "escrow_account": {
+      "owner": "4xwfs-uttpf-xhi2d-foruw-glljn-zzxiy-lomns-s243p-nrqw4-yi",
+      "subaccount": "12f37a581370e84a29695a45f63396cd0b13e8a51179e770e0a2ae7d02b720a4"
+     },
+     "outstanding_e8s": "9000000000",
+     "pending_mint_e8s": "0",
+     "inflight_mint_e8s": "0",
+     "pending_release_e8s": "0",
+     "pending_refund_e8s": "0",
+     "held_e8s": "0",
+     "fees_e8s": "0",
+     "reserved_pulls_e8s": "0",
+     "unknown_outflow_e8s": "0",
+     "liabilities_e8s": "10200000000",
+     "required_escrow_e8s": "10200000000",
+     "return_custodied_e8s": "1000000000",
+     "burn_unknown_e8s": "200000000",
+     "stray_e8s": "50000000"
+    }
+   }
+  ]
+ }
+}

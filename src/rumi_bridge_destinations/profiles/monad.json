@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "id": "monad",
+  "display_name": "Monad",
+  "family": "evm",
+  "topology": {
+    "kind": {
+      "value": "bridge_instance",
+      "rationale": "One bridge instance per destination network (design section 1.2); the frontend selects the actor (section 1.5).",
+      "status": "recommendation"
+    },
+    "wasm_family": "evm",
+    "existing_work": null
+  },
+  "representation": {
+    "standard": {
+      "value": "erc20",
+      "rationale": "foundry/src/BridgedIcUSD.sol (escrow-backed ERC-20, 8 decimals) deploys unchanged on this chain per the EVM facts file; D5 (settled for planning) reuses identical bytecode.",
+      "status": "planning_decision"
+    },
+    "backing": "escrow_locked_icusd",
+    "debt_creating": false,
+    "decimals": 8,
+    "amount_bounds": {
+      "value": {
+        "min_e8s": "1",
+        "max_e8s": "18446744073709551615",
+        "max_outstanding_e8s": null,
+        "encoding": "u64",
+        "basis": null
+      },
+      "source_url": "foundry/src/BridgedIcUSD.sol",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    }
+  },
+  "signing": {
+    "scheme": "ecdsa_secp256k1",
+    "key_name": {
+      "value": {
+        "mainnet": "key_1",
+        "testnet": "test_key_1"
+      },
+      "source_url": "https://docs.internetcomputer.org/references/cycle-costs/",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    "derivation_domain": [
+      "rumi-icusd-monad-bridge",
+      "v1",
+      "{lane}",
+      "{network_identity}"
+    ],
+    "roles": [
+      "minter",
+      "admin"
+    ],
+    "domains": {
+      "mint_id": "rumi.icusd.monad.mint.v1",
+      "remint_id": "rumi.icusd.monad.remint.v1",
+      "return_id": null,
+      "burn_id": null,
+      "escrow_label": "rumi-icusd-monad-bridge:escrow:v1"
+    },
+    "signed_payload": {
+      "value": "EIP-1559 (type 2) transaction signing hash with EIP-155 chain-id rules (v = {0,1} + CHAIN_ID*2 + 35 for legacy envelopes); the threshold secp256k1 output is directly usable.",
+      "source_url": "https://eips.ethereum.org/EIPS/eip-155",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "wallet": {
+    "standard": "eip1193_eip6963",
+    "named": {
+      "value": [
+        "MetaMask",
+        "Rabby"
+      ],
+      "source_url": "https://docs.monad.xyz/tooling-and-infra/wallets/software-wallets",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  },
+  "prerequisites": [
+    {
+      "value": {
+        "id": "gas-funding",
+        "text": "MON for the minter and admin gas addresses and the deployer; the contract must be deployed; no deployment allowlist was found.",
+        "unavoidable": true
+      },
+      "source_url": "https://docs.monad.xyz/developer-essentials/gas-pricing",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    },
+    {
+      "value": {
+        "id": "monad-explicit-labels",
+        "text": "The app shows explicit chain and escrow-backed labels for this token and binds the exact contract; it never binds or accepts the debt-backed IcUSD token as the bridge token, nor the reverse (D8).",
+        "unavoidable": true
+      },
+      "source_url": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md",
+      "verified": "2026-10-30",
+      "source_kind": "repo"
+    },
+    {
+      "value": {
+        "id": "monad-reserve-balance",
+        "text": "Keep every gas address well above the 10 MON reserve balance so back-to-back transactions do not revert.",
+        "unavoidable": true
+      },
+      "source_url": "https://docs.monad.xyz/developer-essentials/reserve-balance",
+      "verified": "2026-10-30",
+      "source_kind": "primary"
+    }
+  ],
+  "open_decisions": [
+    {
+      "id": "D1",
+      "topic": "Generalize the Base Wasm in place or build a separate EVM artifact",
+      "choice": {
+        "value": "in_place_generalization_on_working_branch",
+        "rationale": "Design section 12 (settled for planning): in-place source generalization on a working branch, Base behavior and stable state preserved; no deployed Base canister is upgraded; the EVM stack is not copied into a second artifact.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D1a",
+      "topic": "Candid method names when the EVM Wasm is generalized in place",
+      "choice": {
+        "value": "keep_legacy_base_method_names",
+        "rationale": "Design section 12 (settled for planning): new EVM instances keep the legacy Base-named Candid methods and fields at first, documented, routed by the per-network actor; generic aliases are optional later.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D1b",
+      "topic": "RPC service variants for new EVM networks",
+      "choice": {
+        "value": "additive_native_variants_where_useful",
+        "rationale": "Design section 12 (settled for planning): additive native RPC-service variants where useful. The absence of a published endpoint list does not prove Custom impossible or force this API change; the provider and finality requirements still apply.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D5",
+      "topic": "Non-Base EVM contracts: identical bytecode or a relabeled, newly reviewed contract",
+      "choice": {
+        "value": "identical_bytecode_keep_contract_version",
+        "rationale": "Design section 12 (settled for planning): reuse identical BridgedIcUSD bytecode, keeping CONTRACT_VERSION and its Base-labelled bridge-out domain; chain id and contract stay in the id preimages; only new off-chain instance domains are chain-qualified, and Base reproduces its strings exactly.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D8",
+      "topic": "Naming of escrow-backed and debt-backed icUSD on one chain",
+      "choice": {
+        "value": "explicit_labels_and_exact_contract_binding",
+        "rationale": "Design section 12 (settled for planning): Monad uses explicit chain and escrow-backed labels plus exact contract binding; a new on-chain symbol is optional later; the debt token is never bound as a bridge token, nor the reverse.",
+        "status": "planning_decision"
+      }
+    },
+    {
+      "id": "D5xD8",
+      "topic": "Identical bytecode versus a distinct token name on a chain with a debt-backed IcUSD",
+      "choice": {
+        "value": "decide_d5_and_d8_together",
+        "rationale": "Design section 12 (D5 x D8, raised by BB-34, still a recommendation): identical bytecode hard-codes the ERC-20 name and symbol (foundry/src/BridgedIcUSD.sol:157). D5 and D8 are settled for planning as identical bytecode plus explicit labels and exact contract binding; a new on-chain symbol is optional later.",
+        "status": "recommendation"
+      }
+    },
+    {
+      "id": "D9",
+      "topic": "Testnet escrow: real icUSD ledger or a test ledger",
+      "choice": {
+        "value": "synthetic_test_ledgers",
+        "rationale": "Design section 12 (settled for planning): synthetic test ledgers for future testnet demos; no real canonical icUSD is locked for a new testnet rollout under this groundwork.",
+        "status": "planning_decision"
+      }
+    }
+  ],
+  "networks": [
+    {
+      "network_id": "monad-mainnet",
+      "role": "mainnet",
+      "identity": {
+        "value": {
+          "kind": "evm_chain_id",
+          "value": "143"
+        },
+        "source_url": "https://docs.monad.xyz/developer-essentials/network-information",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "evm-instance-not-activated",
+          "text": "Source support is not activation. The Wasm can now install this network (chain table row, slug-based identifiers, the Verified head rule of finalized minus 3 blocks, per-chain defaults and a sibling deploy script), but this record names no instance (instance_ref is null, deployment is none). The token contract is not deployed, the minter and admin gas addresses are unfunded, and mint gas and fee caps are unmeasured on this network (the chain table's defaults are starting points, not findings). A testnet round trip and an approved launch come first, and the record stays disabled until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 6 row 7"
+        },
+        {
+          "id": "monad-verified-head",
+          "text": "Receipts, logs and the supply audit depend on execution outputs, so the bridge reads from a Verified block (head = finalized minus 3 blocks, per the Monad developer summary); reading at the finalized head is ordering-level evidence only. The chain table now implements this head rule. What is not established is whether independent providers agree on the fast-moving finalized tag often enough for a 2 of 3 quorum through the EVM RPC canister (Monad finalizes in about 600 ms). That consensus evidence needs an authorized read-only probe, and the head rule stays unproven on the live network until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad head rule); docs/coordination/multichain/sources-evm.md coordinator addendum and reconciliation (Monad); docs/coordination/multichain/chain-evm.md section 0 item 6"
+        },
+        {
+          "id": "monad-explicit-gas-limits",
+          "text": "The sender pays gas_limit times price, not gas used, so the lane uses explicit limits. The chain table now starts Monad instances with explicit mint and admin gas limits, but they are unmeasured on Monad (Monad reprices some opcodes, so the Base measurement does not transfer). Mint gas must be measured on Monad testnet before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
+        },
+        {
+          "id": "monad-reserve-aware-funding",
+          "text": "Each EOA keeps a 10 MON reserve; a transaction that dips below it can revert while still paying gas. The chain table now starts Monad instances with a gas reserve above that floor, and the lane requires it on top of gas_limit times max fee. The gas addresses must still be funded well above the reserve before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
+        },
+        {
+          "id": "monad-log-range-chunking",
+          "text": "eth_getLogs block-range limits are provider-specific (100 to 1,000 blocks). The chain table now starts Monad instances with 100-block log ranges, the low end of the provider caps. That value must still be confirmed against the providers actually used before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 4"
+        },
+        {
+          "id": "monad-token-naming-d8",
+          "text": "A debt-backed IcUSD may exist on Monad. The app and observer need explicit chain and escrow-backed labels and an exact contract binding; the debt token is never bound as a bridge token, nor the reverse (D8 planning decision). A new on-chain symbol is optional later.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D8); docs/coordination/multichain/sources-evm.md section 6 row 7"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "monad_verified",
+        "parameters": {
+          "value": {
+            "tag": "finalized",
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": 3,
+            "typical_wait": "Finalized in about 600 ms; Verified (state root) comes 3 blocks after Finalized"
+          },
+          "source_url": "https://docs.monad.xyz/developer-essentials/summary",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "evm_rpc_canister",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Baseline from the Base bridge design (section 7.7): identical results from 2 of 3 independent providers. The EVM RPC canister skill recommends Threshold with total 3 and min 2.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "rpc.monad.xyz",
+            "rpc1.monad.xyz",
+            "rpc2.monad.xyz",
+            "rpc3.monad.xyz",
+            "rpc-mainnet.monadinfra.com"
+          ],
+          "source_url": "https://docs.monad.xyz/developer-essentials/network-information",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Not a native variant (Custom with the chain id). Public endpoints come from different operators and are rate-limited, described as enough for basic usage.",
+          "source_url": "https://docs.monad.xyz/developer-essentials/network-information",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    },
+    {
+      "network_id": "monad-testnet",
+      "role": "testnet",
+      "identity": {
+        "value": {
+          "kind": "evm_chain_id",
+          "value": "10143"
+        },
+        "source_url": "https://docs.monad.xyz/developer-essentials/network-information",
+        "verified": "2026-10-30",
+        "source_kind": "primary"
+      },
+      "status": "disabled",
+      "instance_ref": null,
+      "activation_blockers": [
+        {
+          "id": "evm-instance-not-activated",
+          "text": "Source support is not activation. The Wasm can now install this network (chain table row, slug-based identifiers, the Verified head rule of finalized minus 3 blocks, per-chain defaults and a sibling deploy script), but this record names no instance (instance_ref is null, deployment is none). The token contract is not deployed, the minter and admin gas addresses are unfunded, and mint gas and fee caps are unmeasured on this network (the chain table's defaults are starting points, not findings). A testnet round trip and an approved launch come first, and the record stays disabled until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (chain table, install gate and per-chain defaults); docs/coordination/multichain/sources-evm.md section 6 row 7"
+        },
+        {
+          "id": "monad-verified-head",
+          "text": "Receipts, logs and the supply audit depend on execution outputs, so the bridge reads from a Verified block (head = finalized minus 3 blocks, per the Monad developer summary); reading at the finalized head is ordering-level evidence only. The chain table now implements this head rule. What is not established is whether independent providers agree on the fast-moving finalized tag often enough for a 2 of 3 quorum through the EVM RPC canister (Monad finalizes in about 600 ms). That consensus evidence needs an authorized read-only probe, and the head rule stays unproven on the live network until then.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad head rule); docs/coordination/multichain/sources-evm.md coordinator addendum and reconciliation (Monad); docs/coordination/multichain/chain-evm.md section 0 item 6"
+        },
+        {
+          "id": "monad-explicit-gas-limits",
+          "text": "The sender pays gas_limit times price, not gas used, so the lane uses explicit limits. The chain table now starts Monad instances with explicit mint and admin gas limits, but they are unmeasured on Monad (Monad reprices some opcodes, so the Base measurement does not transfer). Mint gas must be measured on Monad testnet before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
+        },
+        {
+          "id": "monad-reserve-aware-funding",
+          "text": "Each EOA keeps a 10 MON reserve; a transaction that dips below it can revert while still paying gas. The chain table now starts Monad instances with a gas reserve above that floor, and the lane requires it on top of gas_limit times max fee. The gas addresses must still be funded well above the reserve before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 5"
+        },
+        {
+          "id": "monad-log-range-chunking",
+          "text": "eth_getLogs block-range limits are provider-specific (100 to 1,000 blocks). The chain table now starts Monad instances with 100-block log ranges, the low end of the provider caps. That value must still be confirmed against the providers actually used before real use.",
+          "kind": "external",
+          "source": "src/rumi_icusd_bridge/src/chains.rs (Monad defaults); docs/coordination/multichain/sources-evm.md section 6 row 4"
+        },
+        {
+          "id": "monad-token-naming-d8",
+          "text": "A debt-backed IcUSD may exist on Monad. The app and observer need explicit chain and escrow-backed labels and an exact contract binding; the debt token is never bound as a bridge token, nor the reverse (D8 planning decision). A new on-chain symbol is optional later.",
+          "kind": "code",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D8); docs/coordination/multichain/sources-evm.md section 6 row 7"
+        },
+        {
+          "id": "controller-model-undecided",
+          "text": "The controller and upgrade-authority model for this instance and its chain-side authorities is not decided (D6). The controller set is the root of trust for escrow and every signature.",
+          "kind": "decision",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D6); docs/coordination/multichain/sources-native.md open question 10"
+        },
+        {
+          "id": "testnet-synthetic-ledger-only",
+          "text": "Future testnet demos use a synthetic test ledger. No real canonical icUSD is locked for a new testnet rollout under this groundwork (D9 planning decision).",
+          "kind": "config",
+          "source": "docs/superpowers/specs/2026-10-30-multichain-icusd-groundwork-design.md section 12 (D9)"
+        }
+      ],
+      "claims": {
+        "designed": true,
+        "deployment": "none",
+        "mint_authority": "none",
+        "mint_enabled": false,
+        "finality_checked": false,
+        "settlement_proven": false
+      },
+      "finality": {
+        "rule": "monad_verified",
+        "parameters": {
+          "value": {
+            "tag": "finalized",
+            "commitment": null,
+            "checkpoint": null,
+            "ledger_index": null,
+            "required_result": null,
+            "execution_delay_blocks": 3,
+            "typical_wait": "Finalized in about 600 ms; Verified (state root) comes 3 blocks after Finalized"
+          },
+          "source_url": "https://docs.monad.xyz/developer-essentials/summary",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      },
+      "rpc": {
+        "path": "evm_rpc_canister",
+        "native_variant": null,
+        "min_quorum": {
+          "value": 2,
+          "rationale": "Same baseline as mainnet (2 identical results). Testnet networks do not weaken it; a provider shortage is recorded as a blocker instead.",
+          "status": "recommendation"
+        },
+        "min_independent_providers": 2,
+        "historical_state_required": true,
+        "endpoints": {
+          "value": [
+            "testnet-rpc.monad.xyz",
+            "rpc.ankr.com",
+            "rpc-testnet.monadinfra.com"
+          ],
+          "source_url": "https://docs.monad.xyz/developer-essentials/testnets",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        },
+        "outcall_notes": {
+          "value": "Not a native variant (Custom with the chain id). Public endpoints come from different operators and are rate-limited, described as enough for basic usage.",
+          "source_url": "https://docs.monad.xyz/developer-essentials/testnets",
+          "verified": "2026-10-30",
+          "source_kind": "primary"
+        }
+      }
+    }
+  ]
+}

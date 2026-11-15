@@ -1,3 +1,4 @@
+type Account = record { owner : principal; subaccount : opt blob };
 type AddressValuePoint = record {
   ts_ns : nat64;
   breakdown : vec AddressValueSourceBreakdown;
@@ -483,6 +484,7 @@ type VolatilityResponse = record {
 };
 service : (InitArgs) -> {
   admin_backfill_add_margin_events : (nat64) -> (Result);
+  admin_set_bridge_escrow_accounts : (vec Account) -> (Result_1);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycle_manager_targets : () -> (vec CycleManagerTarget) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
