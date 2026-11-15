@@ -1,3 +1,4 @@
+import { MIN_REPAY_E8S } from '../../utils/repayLimits';
 import { decodeNicpClaim } from '../../utils/nicpClaim';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
@@ -73,6 +74,13 @@ import {
   recoverSubmittedVaultPullFromBlock,
   hasCompatibleVaultPullIntent,
   normalizeVaultPullStatus,
+  heldVaultPullRecovery,
+  acknowledgeHeldVaultPullRecovery,
+  inspectVaultPullRecovery,
+  cancelSavedVaultPullOperation,
+  resumeSavedVaultPullOperation,
+  type VaultPullRecoverySnapshot,
+  type VaultPullIntent,
   type VaultPullRequest,
   type VaultPullView,
   type VaultPullAdapter,
@@ -82,9 +90,8 @@ import {
 
 // Constants from backend
 export const E8S = 100_000_000;
-// Backend retains the V2 endpoint but rejects AddMargin until its in-flight
-// collateral recovery path can safely handle concurrent vault liquidation.
-const isVaultAddMarginV2Enabled = (): boolean => false;
+// Paired with backend exact-receipt credit or held collateral recovery.
+const isVaultAddMarginV2Enabled = (): boolean => true;
 const NAT64_MAX = 18_446_744_073_709_551_615n;
 
 /** Parse an icUSD decimal string into exact e8s without passing through Number. */
@@ -376,6 +383,7 @@ private static async refreshVaultData(): Promise<void> {
       ctx?: ActionBoundContext,
       lifecycle?: { onApprovalMayHaveMutated?: () => void; onDispatch?: () => void },
       recoveryBlockIndex?: bigint,
+      reviewedIntent?: VaultPullIntent,
     ): Promise<VaultOperationResult> {
       const owner = ApiClient.currentPrincipalText();
       if (!owner || !get(walletStore).isConnected) {
@@ -423,6 +431,16 @@ private static async refreshVaultData(): Promise<void> {
       };
 
       const completed = (view: VaultPullView): VaultOperationResult => {
+        const held = heldVaultPullRecovery(view);
+        if (held) return {
+          success: false,
+          error: `Your collateral transfer was confirmed at ledger block ${held.block_index}, but it was not added to the vault. ${held.amount} base units on ledger ${held.ledger} are recorded for recovery under reference ${held.payout_operation_id}. Do not send again. Review the collateral recovery notice or contact Rumi support with this reference.`,
+          collateralRecovery: {
+            vaultId: held.vault_id.toString(), blockIndex: held.block_index.toString(),
+            amountRaw: held.amount.toString(), ledger: held.ledger,
+            payoutOperationId: held.payout_operation_id.toString(),
+          },
+        };
         const result = ('Completed' in view.phase ? view.phase.Completed.result : {}) as any;
         if (result.OpenVault) {
           return {
@@ -545,12 +563,115 @@ private static async refreshVaultData(): Promise<void> {
             if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
           },
         };
+      if (reviewedIntent) {
+        return resumeSavedVaultPullOperation({ owner, intent: reviewedIntent, adapter });
+      }
       if (recoveryBlockIndex !== undefined) {
         return recoverSubmittedVaultPullFromBlock<VaultOperationResult>({
           owner, blockIndex: recoveryBlockIndex, adapter,
         });
       }
       return runVaultPullOperation<VaultOperationResult>({ owner, request, adapter });
+    }
+
+    /** Pin recovery to the actual caller, wallet transport and signer session. */
+    private static vaultPullRecoveryContext(expectedOwner?: string): { owner: string; ctx: ActionBoundContext } {
+      const wallet = get(walletStore);
+      const owner = wallet.principal?.toText();
+      const walletType = get(currentWalletType);
+      const generation = get(walletSessionGeneration);
+      if (!wallet.isConnected || wallet.loading || !owner || !walletType || (expectedOwner && owner !== expectedOwner)) {
+        throw new Error('Connect the wallet that owns the saved request.');
+      }
+      const ctx: ActionBoundContext = {
+        expectedPrincipalText: owner,
+        assertCurrent: () => get(walletStore).isConnected && !get(walletStore).loading
+          && get(currentWalletType) === walletType && get(walletSessionGeneration) === generation,
+      };
+      assertActionBoundContextCurrent(ctx);
+      return { owner, ctx };
+    }
+
+    /** Caller-scoped backend status plus this wallet's exact browser intent. */
+    static async getVaultPullRecovery(): Promise<VaultPullRecoverySnapshot | null> {
+      if (USE_MOCK_DATA || !get(walletStore).isConnected || get(walletStore).loading) return null;
+      const { owner, ctx } = ApiClient.vaultPullRecoveryContext();
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      return inspectVaultPullRecovery({ owner, adapter: {
+        currentOwner: () => ApiClient.currentPrincipalText(),
+        assertCurrent: () => assertActionBoundContextCurrent(ctx),
+        getStatus: async () => {
+          assertActionBoundContextCurrent(ctx);
+          const response = await actor.get_vault_operation_status();
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return normalizeVaultPullStatus(response.Ok as any);
+        },
+      } });
+    }
+
+    /** Explicit continuation of reviewed raw values; never reconstruct a new loan from rounded UI numbers. */
+    static async resumeSavedVaultCollateralPull(intent: VaultPullIntent): Promise<VaultOperationResult> {
+      // Bind the click before the queue can yield, including same-owner reconnects.
+      const { ctx } = ApiClient.vaultPullRecoveryContext(intent.owner);
+      return ApiClient.executeSequentialOperation(async () => {
+        assertActionBoundContextCurrent(ctx);
+        return ApiClient.runVaultCollateralPull(intent.request, ctx, undefined, undefined, intent);
+      }, undefined, { refreshBefore: false, refreshAfter: false });
+    }
+
+    /** Receipt ACK only; the separate held collateral liability remains recorded. */
+    static async acknowledgeCollateralRecovery(view: VaultPullView): Promise<bigint> {
+      const { owner, ctx } = ApiClient.vaultPullRecoveryContext();
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      return acknowledgeHeldVaultPullRecovery({ owner, view, adapter: {
+        currentOwner: () => ApiClient.currentPrincipalText(),
+        assertCurrent: () => assertActionBoundContextCurrent(ctx),
+        getStatus: async () => {
+          const response = await actor.get_vault_operation_status();
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return normalizeVaultPullStatus(response.Ok as any);
+        },
+        acknowledge: async (operation_id) => {
+          const response = await actor.ack_vault_operation({ operation_id });
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return response.Ok;
+        },
+      } });
+    }
+
+    /** Retire only an authoritative no-dispatch/no-effect operation; never an approval or transfer. */
+    static async cancelSavedVaultCollateralPull(intent: VaultPullIntent): Promise<bigint> {
+      const { owner, ctx } = ApiClient.vaultPullRecoveryContext(intent.owner);
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      return cancelSavedVaultPullOperation({ owner, intent, adapter: {
+        currentOwner: () => ApiClient.currentPrincipalText(),
+        assertCurrent: () => assertActionBoundContextCurrent(ctx),
+        getStatus: async () => {
+          assertActionBoundContextCurrent(ctx);
+          const response = await actor.get_vault_operation_status();
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return normalizeVaultPullStatus(response.Ok as any);
+        },
+        cancel: async (operationId, exact) => {
+          assertActionBoundContextCurrent(ctx);
+          const request = 'OpenVault' in exact
+            ? { OpenVault: { ...exact.OpenVault, collateral_type: Principal.fromText(exact.OpenVault.collateral_type) } }
+            : 'OpenVaultAndBorrow' in exact
+              ? { OpenVaultAndBorrow: { ...exact.OpenVaultAndBorrow, collateral_type: Principal.fromText(exact.OpenVaultAndBorrow.collateral_type) } }
+              : { AddMargin: exact.AddMargin };
+          const response = await actor.cancel_vault_operation({ operation_id: operationId, request });
+          assertActionBoundContextCurrent(ctx);
+          if ('Err' in response) throw new Error(ApiClient.formatProtocolError(response.Err));
+          return response.Ok;
+        },
+      } });
     }
 
     /** Return the authenticated active Submitted operation for the active wallet. */
@@ -1236,8 +1357,12 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
     };
   }
 
+  let ctx: ActionBoundContext;
+  try { ctx = ApiClient.vaultPullRecoveryContext().ctx; }
+  catch (error) { return { success: false, error: error instanceof Error ? error.message : 'Connect the vault owner wallet.' }; }
   return ApiClient.executeSequentialOperation(async () => {
     try {
+      assertActionBoundContextCurrent(ctx);
       if (!Number.isSafeInteger(vaultId) || vaultId < 0 ||
           !Number.isFinite(collateralAmount) || collateralAmount <= 0) {
         return { success: false, error: 'Vault ID and collateral amount must be valid positive values.' };
@@ -1248,10 +1373,14 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         ctPrincipal = vault?.collateralType || CANISTER_IDS.ICP_LEDGER;
       }
       const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
-      const factor = Math.pow(10, collateralInfo?.decimals ?? 8);
-      const symbol = collateralInfo?.symbol ?? 'ICP';
+      if (!collateralInfo || !Number.isInteger(collateralInfo.decimals)
+          || collateralInfo.decimals < 0 || collateralInfo.decimals > 255) {
+        return { success: false, error: 'Collateral details could not be verified. Refresh and try again. No approval or transfer was started.' };
+      }
+      const factor = Math.pow(10, collateralInfo.decimals);
+      const symbol = collateralInfo.symbol;
       const amountRaw = BigInt(Math.floor(collateralAmount * factor));
-      const minimum = BigInt(collateralInfo?.minCollateralDeposit ?? 0);
+      const minimum = BigInt(collateralInfo.minCollateralDeposit ?? 0);
       if (minimum > 0n && amountRaw < minimum) {
         return { success: false, error: 'Amount too low. Minimum required: ' + Number(minimum) / factor + ' ' + symbol };
       }
@@ -1262,7 +1391,8 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       const request: VaultPullRequest = {
         AddMargin: { vault_id: BigInt(vaultId), amount_e8s: amountRaw },
       };
-      return await ApiClient.runVaultCollateralPull(request);
+      assertActionBoundContextCurrent(ctx);
+      return await ApiClient.runVaultCollateralPull(request, ctx);
     } catch (error) {
       console.error('Error adding margin to vault:', error);
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error adding margin' };
@@ -1290,10 +1420,10 @@ static async repayToVault(vaultId: number, icusdAmount: number): Promise<VaultOp
         };
       }
 
-      if (vaultId !== 51 && icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
+      if (vaultId !== 51 && Math.floor(icusdAmount * E8S) < Number(MIN_REPAY_E8S)) {
         return {
           success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
+          error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S} icUSD`
         };
       }
 
@@ -1425,11 +1555,9 @@ static async repayAndCloseVault(vaultId: number, icusdAmount: number): Promise<V
         };
       }
 
-      if (icusdAmount * E8S < MIN_ICUSD_AMOUNT) {
-        return {
-          success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`
-        };
+      // Explicit close retains the backend's subminimum-debt recovery path.
+      if (Math.floor(icusdAmount * E8S) < 1) {
+        return { success: false, error: 'Repayment must be at least one icUSD e8.' };
       }
 
       const amountE8s = BigInt(Math.floor(icusdAmount * E8S));
@@ -1555,10 +1683,10 @@ static async repayToVaultWithStable(
         };
       }
 
-      if (vaultId !== 51 && amount * E8S < MIN_ICUSD_AMOUNT) {
+      if (vaultId !== 51 && Math.floor(amount * E8S) < Number(MIN_REPAY_E8S)) {
         return {
           success: false,
-          error: `Amount too low. Minimum repayment amount: ${MIN_ICUSD_AMOUNT / E8S}`
+          error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S}`
         };
       }
 

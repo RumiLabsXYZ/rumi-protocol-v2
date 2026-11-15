@@ -1242,7 +1242,7 @@ pub struct ObserverState {
 }
 
 // ----------------------------------------------------------------------------------
-// Events (wrapped in `Event::XrplIcusd`)
+// Lane events (stored in the anchored private journal)
 // ----------------------------------------------------------------------------------
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

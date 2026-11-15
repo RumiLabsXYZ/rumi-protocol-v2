@@ -22,6 +22,13 @@ export interface AddCollateralArg {
   'interest_rate_apr' : number,
   'liquidation_ratio' : number,
 }
+export interface AddMarginRecovery {
+  'payout_operation_id' : bigint,
+  'block_index' : bigint,
+  'vault_id' : bigint,
+  'ledger' : Principal,
+  'amount' : bigint,
+}
 export interface AddMarginV2Args {
   'operation_id' : bigint,
   'vault_id' : bigint,
@@ -430,6 +437,13 @@ export type ClaimStage = { 'WithdrawalSubmitted' : null } |
   { 'Funded' : null } |
   { 'FundingSubmitted' : null } |
   { 'Settled' : null };
+export interface CollateralAdoption {
+  'completed' : boolean,
+  'fee_e8s' : bigint,
+  'amount_e8s' : bigint,
+  'nonce' : bigint,
+  'block' : [] | [bigint],
+}
 export interface CollateralConfig {
   'last_redemption_time' : bigint,
   'status' : CollateralStatus,
@@ -613,6 +627,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'repayed_amount' : bigint,
       'timestamp' : [] | [bigint],
       'caller' : [] | [Principal],
+      'settlement' : [] | [RepaymentSettlement],
     }
   } |
   {
@@ -826,7 +841,6 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   { 'set_rmr_floor_cr' : { 'value' : string } } |
-  { 'xrpl_icusd' : XrplIcusdEvent } |
   {
     'chain_pending_burn_settled' : {
       'amount_e8s' : bigint,
@@ -1398,6 +1412,7 @@ export type NextAction = { 'ContactOperator' : null } |
 export interface NicpRedemptionClaim {
   'last_error' : [] | [string],
   'burn_block' : [] | [bigint],
+  'adoption' : [] | [CollateralAdoption],
   'icp_due_e8s' : bigint,
   'owner' : Principal,
   'withdrawal_id' : [] | [bigint],
@@ -1821,8 +1836,6 @@ export interface RegisterChainArg {
   'chain_id' : number,
   'min_quorum_providers' : [] | [number],
 }
-export type ReleaseReason = { 'MintFailed' : null } |
-  { 'DebtCommitted' : null };
 export interface RepayAndCloseSuccess {
   'collateral_return_block_index' : [] | [bigint],
   'repay_block_index' : bigint,
@@ -1837,6 +1850,12 @@ export interface RepaymentIntentView {
   'currency' : string,
   'payer' : string,
   'max_e8s' : bigint,
+}
+export interface RepaymentSettlement {
+  'interest_before' : bigint,
+  'last_accrual_time' : bigint,
+  'debt_before' : bigint,
+  'forgiven' : bigint,
 }
 export interface ReserveBalance {
   'balance' : bigint,
@@ -2551,6 +2570,10 @@ export interface VaultIntent {
   'deadline_secs' : bigint,
   'debt_e8s' : bigint,
 }
+export interface VaultOperationCancelArg {
+  'request' : VaultCollateralPullRequest,
+  'operation_id' : bigint,
+}
 export interface VaultOperationIdArg { 'operation_id' : bigint }
 export type VaultOperationResult = {
     'AddMargin' : { 'block_index' : bigint, 'vault_id' : bigint }
@@ -2572,6 +2595,7 @@ export interface VaultOperationView {
   'request' : VaultCollateralPullRequest,
   'operation_id' : bigint,
   'vault_id' : bigint,
+  'recovery' : [] | [AddMarginRecovery],
   'phase' : VaultCollateralPullPhase,
   'confirmed_wide_block_index' : [] | [bigint],
 }
@@ -2680,63 +2704,6 @@ export type XrplIcusdError = { 'Internal' : string } |
   { 'LimitExceeded' : string } |
   { 'WrongNetwork' : string } |
   { 'AnonymousCaller' : null };
-export type XrplIcusdEvent = {
-    'RepayCancelled' : { 'at' : bigint, 'op_id' : bigint, 'vault_id' : bigint }
-  } |
-  {
-    'ReservationBegun' : {
-      'request_nonce' : Uint8Array | number[],
-      'op_id' : bigint,
-      'owner' : Principal,
-      'net_e8s' : bigint,
-      'recipient' : string,
-      'network' : XrplNetwork,
-      'fee_e8s' : bigint,
-      'vault_id' : bigint,
-      'timestamp' : bigint,
-      'collateral_type' : Principal,
-      'policy_version' : bigint,
-      'gross_e8s' : bigint,
-    }
-  } |
-  {
-    'ReservationReleased' : {
-      'op_id' : bigint,
-      'vault_id' : bigint,
-      'timestamp' : bigint,
-      'reason' : ReleaseReason,
-    }
-  } |
-  {
-    'RepayCutoffBegun' : {
-      'interest_share_e8s' : bigint,
-      'request_nonce' : Uint8Array | number[],
-      'op_id' : bigint,
-      'owner' : Principal,
-      'snapshot_accrued_e8s' : bigint,
-      'snapshot_debt_e8s' : bigint,
-      'network' : XrplNetwork,
-      'vault_id' : bigint,
-      'repay_e8s' : bigint,
-      'destination_tag' : number,
-      'payer' : string,
-      'max_e8s' : bigint,
-      'last_accrual_time' : bigint,
-      'cutoff_ns' : bigint,
-      'full_close' : boolean,
-    }
-  } |
-  {
-    'RepaySettled' : {
-      'burn_block' : bigint,
-      'interest_share_e8s' : bigint,
-      'op_id' : bigint,
-      'owner' : Principal,
-      'vault_id' : bigint,
-      'applied_e8s' : bigint,
-      'settled_at' : bigint,
-    }
-  };
 export type XrplNetwork = { 'Mainnet' : null } |
   { 'Testnet' : null };
 export interface _SERVICE {
@@ -2807,6 +2774,7 @@ export interface _SERVICE {
     [BotPaymentProof],
     Result_1
   >,
+  'cancel_vault_operation' : ActorMethod<[VaultOperationCancelArg], Result>,
   'cancel_xrp_pending_open' : ActorMethod<[bigint], Result_1>,
   'chain_has_active_settlement_op' : ActorMethod<[number], boolean>,
   'claim_chain_collateral' : ActorMethod<
@@ -3195,6 +3163,7 @@ export interface _SERVICE {
     [bigint, bigint],
     Result_1
   >,
+  'reconcile_vault51_collateral_adoption' : ActorMethod<[bigint], Result_4>,
   'reconcile_vault51_icp_payout' : ActorMethod<[bigint], Result_4>,
   'reconcile_vault_collateral_pull_from_block' : ActorMethod<
     [VaultOperationIdArg, bigint],

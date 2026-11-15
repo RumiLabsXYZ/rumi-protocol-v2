@@ -1084,7 +1084,15 @@ fn borrow_events_replay_the_same_debt_and_release() {
         .chain(std::iter::once(vault_open))
         .chain(lane_and_debt)
         .collect();
-    let replayed = crate::event::replay_with_nonce_time(events.into_iter(), || 7).unwrap();
+    let mut private_events: Vec<_> = crate::storage::pending_payout_events().collect();
+    // The fixture prepends Init and OpenVault to the captured public log, so
+    // shift private anchors by those two synthetic records before replay.
+    for entry in &mut private_events {
+        entry.after_event_count = entry.after_event_count.saturating_add(2);
+    }
+    let replayed = crate::event::replay_with_nonce_time_and_payout_events(
+        events.into_iter(), private_events.into_iter(), || 7,
+    ).unwrap();
     assert_eq!(replayed.vault_id_to_vaults[&1].borrowed_icusd_amount.to_u64(), live_debt);
     assert!(live_repaid.to_u64() > 0);
     assert_eq!(replayed.total_deficit_repaid_icusd, live_repaid, "the deficit allocation replays once");
@@ -1092,6 +1100,33 @@ fn borrow_events_replay_the_same_debt_and_release() {
     assert_eq!(replayed.xrpl_icusd.durable_reserved_total(), 0);
     assert_eq!(replayed.xrpl_icusd.op(id).unwrap().phase, Phase::DebtCommitted);
     assert_eq!(replayed.xrpl_icusd.op(id).unwrap().owner, owner(1));
+}
+
+#[test]
+fn live_lane_record_journals_then_applies_once() {
+    let mut state = world();
+    let owner_p = owner(1);
+    let event = XrplIcusdEvent::ReservationBegun {
+        op_id: 700,
+        owner: owner_p,
+        request_nonce: vec![0x77; 32],
+        network: TESTNET,
+        vault_id: 1,
+        collateral_type: xrp(),
+        gross_e8s: 1_000,
+        fee_e8s: 10,
+        net_e8s: 990,
+        recipient: holder_addr(9),
+        policy_version: 1,
+        timestamp: NOW,
+    };
+    let journal_index = crate::storage::private_journal_entry_count();
+    borrow::record_lane_event(&mut state, event.clone());
+
+    let recorded = crate::storage::private_journal_entry_at(journal_index).unwrap();
+    assert_eq!(recorded.event, crate::event::PendingPayoutEvent::XrplIcusd { event });
+    assert_eq!(state.xrpl_icusd.durable_reserved_total(), 1_000);
+    assert_eq!(state.xrpl_icusd.op(700).unwrap().phase, Phase::Prepared);
 }
 
 // ---- review hardening: fee-remainder retry, accrual before commit, replay mint ------------

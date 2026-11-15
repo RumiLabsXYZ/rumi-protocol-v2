@@ -132,6 +132,8 @@ vi.mock('./protocol/walletOperations', () => ({
 // Keep oisySigner and pnp importable without side effects. The Oisy ICPswap
 // direct dispatch test below overrides these with concrete fakes via
 // vi.mocked(...).mockResolvedValueOnce(...).
+vi.mock('./auth', () => ({ currentWalletType: { subscribe(fn: any) { fn('oisy'); return () => {}; } }, walletSessionGeneration: { subscribe(fn: any) { fn(0); return () => {}; } } }));
+
 vi.mock('./oisySigner', () => ({
   getOisySignerAgent: vi.fn(),
   createOisyActor: vi.fn(),

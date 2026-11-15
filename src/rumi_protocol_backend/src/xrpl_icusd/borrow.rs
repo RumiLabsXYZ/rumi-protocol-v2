@@ -74,8 +74,8 @@ pub fn check_borrow_gates(state: &State) -> Result<(), XrplIcusdError> {
 /// Record a lane event in the log and apply it through the SAME pure function the
 /// replay path uses.
 pub fn record_lane_event(state: &mut State, ev: XrplIcusdEvent) {
-    let ts = ev.timestamp();
-    crate::storage::record_event_at(&crate::event::Event::XrplIcusd(ev.clone()), ts);
+    let journal_event = crate::event::PendingPayoutEvent::XrplIcusd { event: ev.clone() };
+    crate::storage::record_pending_payout_event(&journal_event);
     super::state::apply_xrpl_icusd_event(state, &ev);
 }
 
