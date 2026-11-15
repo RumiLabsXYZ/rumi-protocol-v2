@@ -137,6 +137,7 @@
 
   <SeasonBanner {status} {config} />
 
+  {#if !seasonEnded}
   <div class="rounded-lg border border-gray-700/40 bg-gray-900/20 px-3 py-2 text-xs text-gray-400">
     {fiatStablePolicyStatus(fiatPolicy)}
     {#if status && !status.driver_enabled}
@@ -147,6 +148,7 @@
     {/if}
     {#if migrationNotice}{migrationNotice}{/if}
   </div>
+  {/if}
 
   {#if $myPointsStore.loading}
     <div class="flex justify-center py-12">
