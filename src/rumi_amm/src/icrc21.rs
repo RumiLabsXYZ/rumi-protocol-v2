@@ -368,7 +368,7 @@ mod tests {
             &"icUSD_ICP".to_string(),
             &5_000u128,
             &490_000u128,
-            &1_490_000u128,
+            &1_490_000u128
         ).unwrap();
         let message = generate_remove_liquidity_consent(&arg).unwrap();
         assert!(message.contains("5000 LP shares"));
