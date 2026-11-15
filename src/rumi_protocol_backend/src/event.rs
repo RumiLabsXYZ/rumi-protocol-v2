@@ -7444,6 +7444,40 @@ mod borrow_replay_tests {
     }
 
     #[test]
+    fn p02_f03_replayed_first_borrow_resets_future_zero_debt_clock() {
+        let icp = principal(6);
+        let owner = principal(7);
+        let vault_id = 3;
+        let borrow_time = crate::numeric::NANOS_PER_YEAR;
+        let future_zero_debt_clock = 2 * crate::numeric::NANOS_PER_YEAR;
+        let mut open = open_zero_debt_vault(vault_id, owner, icp);
+        if let Event::OpenVault { vault, .. } = &mut open {
+            vault.last_accrual_time = future_zero_debt_clock;
+        }
+
+        let state = replay(
+            vec![
+                Event::Init(init_args(icp)),
+                open,
+                Event::BorrowFromVault {
+                    vault_id,
+                    block_index: 11,
+                    fee_amount: ICUSD::new(0),
+                    borrowed_amount: ICUSD::new(100_000_000),
+                    caller: Some(owner),
+                    timestamp: Some(borrow_time),
+                },
+            ]
+            .into_iter(),
+        )
+        .expect("borrow replay should reset the empty vault clock");
+
+        let vault = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100_000_000));
+        assert_eq!(vault.last_accrual_time, borrow_time);
+    }
+
+    #[test]
     fn replayed_legacy_borrow_without_timestamp_preserves_existing_clock() {
         let icp = principal(3);
         let owner = principal(4);
