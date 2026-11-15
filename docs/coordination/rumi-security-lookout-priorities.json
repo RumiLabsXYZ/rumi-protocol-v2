@@ -43,9 +43,9 @@
     {
       "id": "release-report",
       "title": "Release and public status",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Publish the final all-five-installed status update and verify exact served bundle readback; refresh again only when material evidence changes.",
+      "nextAction": "The final all-five-installed status is published with exact served-byte readback. Refresh again only when material evidence changes.",
       "cardIds": ["SEC-05"]
     },
     {

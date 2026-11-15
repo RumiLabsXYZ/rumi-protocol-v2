@@ -70,10 +70,10 @@
     },
     {
       "id": "SEC-05",
-      "state": "Review",
+      "state": "Done",
       "owner": "Bram",
       "scope": "Refresh release and public security status",
-      "evidenceText": "The final November 15 closure update records all five installed PR #666 dependency refreshes, the published wallet-session frontend, bounded recovery evidence, 60 fail-closed Treasury tombstones, and remaining historical proof limits. Its homepage asset publication and exact served-bundle readback are still pending.",
+      "evidenceText": "PR #669 merged and the asset-only homepage sync published the final all-five-installed closure update. The served version token and the security index, closure page, and static report hashes exactly match the reviewed build. The asset-canister Wasm and controllers were preserved.",
       "evidenceLinks": [
         {
           "title": "Public security closure status",
@@ -86,6 +86,10 @@
         {
           "title": "Current rollout status PR #667",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/667"
+        },
+        {
+          "title": "Final closure status PR #669",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/669"
         }
       ]
     },
