@@ -3547,6 +3547,7 @@ fn claim_three_usd_reserve_candidate_recovery(
     state: &mut crate::state::State,
     owner: Principal,
     requester: Principal,
+    operator_request: bool,
     backend: Principal,
     operation_id: u128,
 ) -> Option<ThreeUsdReserveCandidateRecoveryClaim> {
@@ -3561,7 +3562,7 @@ fn claim_three_usd_reserve_candidate_recovery(
         attempt.candidate_block_index.map(|block_index| (attempt.op_nonce, block_index))
     }));
     if !crate::payout_history::reserve_candidate_recovery_authorized(
-        state, &key, operation_id, requester,
+        state, &key, operation_id, requester, operator_request,
     )
         || candidates.len() != 1 || candidates[0].0 != transfer.op_nonce
         || transfer.operation_id != operation_id
@@ -3614,6 +3615,7 @@ fn finish_three_usd_reserve_candidate_recovery(
     state: &mut crate::state::State,
     claim: &ThreeUsdReserveCandidateRecoveryClaim,
     requester: Principal,
+    operator_request: bool,
     observed_fee_e8s: Option<u64>,
     completed_at_ns: u64,
 ) -> bool {
@@ -3652,6 +3654,7 @@ fn finish_three_usd_reserve_candidate_recovery(
         &claim.key,
         claim.operation_id,
         requester,
+        operator_request,
     ) {
         // Authorization may be revoked while the ledger fee query is in
         // flight. Release only this exact transient claim; keep the payout and
@@ -3701,6 +3704,7 @@ fn finish_three_usd_reserve_candidate_recovery(
 pub async fn recover_three_usd_reserve_payout_candidate(
     operation_id: u128,
     requester: Principal,
+    operator_request: bool,
 ) -> Option<bool> {
     let (owner, reserve_linked) = crate::state::read_state(|state| {
         let owner = state.get_pending_payout(operation_id)?.1.owner;
@@ -3718,7 +3722,7 @@ pub async fn recover_three_usd_reserve_payout_candidate(
                 .get(&operation_id)
                 .is_some_and(|key| {
                     crate::payout_history::reserve_candidate_recovery_authorized(
-                        state, key, operation_id, requester,
+                        state, key, operation_id, requester, operator_request,
                     )
                 })
         })
@@ -3726,7 +3730,11 @@ pub async fn recover_three_usd_reserve_payout_candidate(
         return Some(false);
     }
     if reserve_linked && !crate::state::read_state(|state| has_three_usd_reserve_candidate(state, operation_id)) {
-        match crate::payout_history::advance_owner_reserve_candidate_discovery(operation_id, requester)
+        match crate::payout_history::advance_owner_reserve_candidate_discovery(
+            operation_id,
+            requester,
+            operator_request,
+        )
             .await
         {
             Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::CandidateRecorded) => {}
@@ -3743,6 +3751,7 @@ pub async fn recover_three_usd_reserve_payout_candidate(
             state,
             owner,
             requester,
+            operator_request,
             ic_cdk::id(),
             operation_id,
         ))
@@ -3758,7 +3767,12 @@ pub async fn recover_three_usd_reserve_payout_candidate(
     let completed_at_ns = ic_cdk::api::time();
     Some(crate::state::mutate_state(|state| {
         finish_three_usd_reserve_candidate_recovery(
-            state, &claim, requester, observed_fee_e8s, completed_at_ns,
+            state,
+            &claim,
+            requester,
+            operator_request,
+            observed_fee_e8s,
+            completed_at_ns,
         )
     }))
 }
@@ -3838,10 +3852,10 @@ mod three_usd_reserve_candidate_recovery_tests {
     #[test]
     fn exact_pinned_fee_completes_only_the_persisted_candidate() {
         let (mut state, backend, pool, developer, key, operation_id) = fixture();
-        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, backend, operation_id)
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, true, backend, operation_id)
             .expect("held single candidate should be claimable");
         assert_eq!(claim.block_index, 12);
-        assert!(finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, Some(10), 100));
+        assert!(finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, true, Some(10), 100));
         assert!(state.get_pending_payout(operation_id).is_none());
         assert_eq!(
             state.three_usd_reserve_collateral_payouts.get(&key).unwrap().observed_fee_e8s,
@@ -3852,9 +3866,9 @@ mod three_usd_reserve_candidate_recovery_tests {
     #[test]
     fn fee_mismatch_is_journaled_and_stays_held() {
         let (mut state, backend, pool, developer, key, operation_id) = fixture();
-        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, backend, operation_id)
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, true, backend, operation_id)
             .expect("held single candidate should be claimable");
-        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, Some(12), 100));
+        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, true, Some(12), 100));
         let (_, transfer) = state.get_pending_payout(operation_id).unwrap();
         assert!(transfer.held_for_manual_retry);
         assert!(transfer.reconciliation_required);
@@ -3868,20 +3882,20 @@ mod three_usd_reserve_candidate_recovery_tests {
     #[test]
     fn stale_proof_callback_cannot_complete_a_changed_pending_tuple() {
         let (mut state, backend, pool, developer, _, operation_id) = fixture();
-        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, backend, operation_id)
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, true, backend, operation_id)
             .expect("held single candidate should be claimable");
         state.mutate_pending_payout(operation_id, |row| row.transfer_amount_raw = Some(99));
         let before = state.get_pending_payout(operation_id).unwrap();
-        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, Some(10), 100));
+        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, true, Some(10), 100));
         assert_eq!(state.get_pending_payout(operation_id), Some(before));
     }
 
     #[test]
     fn failed_block_read_releases_only_the_in_memory_claim_and_keeps_payout_held() {
         let (mut state, backend, pool, developer, _, operation_id) = fixture();
-        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, backend, operation_id)
+        let claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, true, backend, operation_id)
             .expect("held single candidate should be claimable");
-        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, None, 100));
+        assert!(!finish_three_usd_reserve_candidate_recovery(&mut state, &claim, developer, true, None, 100));
         let (_, transfer) = state.get_pending_payout(operation_id).unwrap();
         assert!(transfer.held_for_manual_retry);
         assert!(transfer.reconciliation_required);
@@ -3895,6 +3909,7 @@ mod three_usd_reserve_candidate_recovery_tests {
             &mut state,
             pool,
             developer,
+            true,
             backend,
             operation_id,
         )
@@ -3905,6 +3920,7 @@ mod three_usd_reserve_candidate_recovery_tests {
             &mut state,
             &claim,
             developer,
+            true,
             Some(10),
             100,
         ));
@@ -3924,6 +3940,7 @@ mod three_usd_reserve_candidate_recovery_tests {
             &mut state,
             pool,
             developer,
+            true,
             backend,
             operation_id,
         )
@@ -3934,6 +3951,7 @@ mod three_usd_reserve_candidate_recovery_tests {
             &mut state,
             &claim,
             developer,
+            true,
             Some(10),
             100,
         ));
@@ -3947,9 +3965,40 @@ mod three_usd_reserve_candidate_recovery_tests {
     }
 
     #[test]
+    fn operator_candidate_callback_does_not_fall_back_to_owner_identity_after_rotation() {
+        let (mut state, backend, pool, developer, key, operation_id) = fixture();
+        state.developer_principal = pool;
+        let claim = claim_three_usd_reserve_candidate_recovery(
+            &mut state,
+            pool,
+            pool,
+            true,
+            backend,
+            operation_id,
+        )
+        .expect("registered developer-owned pool is initially authorized");
+        state.developer_principal = developer;
+
+        assert!(!finish_three_usd_reserve_candidate_recovery(
+            &mut state,
+            &claim,
+            pool,
+            true,
+            Some(10),
+            100,
+        ));
+        let (_, transfer) = state.get_pending_payout(operation_id).unwrap();
+        assert!(transfer.held_for_manual_retry);
+        assert!(transfer.reconciliation_required);
+        assert!(!transfer.in_flight);
+        let payout = state.three_usd_reserve_collateral_payouts.get(&key).unwrap();
+        assert_eq!(payout.observed_fee_e8s, None);
+    }
+
+    #[test]
     fn generic_timer_does_not_clear_an_owner_proof_claim_as_journal_mismatch() {
         let (mut state, backend, pool, developer, _, operation_id) = fixture();
-        let _claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, backend, operation_id)
+        let _claim = claim_three_usd_reserve_candidate_recovery(&mut state, pool, developer, true, backend, operation_id)
             .expect("held single candidate should be claimable");
         let (_, transfer) = state.get_pending_payout(operation_id).unwrap();
         assert!(!reserve_payout_journal_mismatch_requires_hold(&transfer, false));

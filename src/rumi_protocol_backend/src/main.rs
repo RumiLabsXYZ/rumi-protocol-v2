@@ -11043,6 +11043,18 @@ mod operator_payout_recovery_status_tests {
         assert!(!is_configured_payout_recovery_operator(
             developer, user, developer, Some(pool), Some(bot),
         ));
+        assert!(
+            rumi_protocol_backend::payout_history::recovery_actor_authorized(
+                user, user, developer, Some(pool), Some(bot),
+            ),
+            "ordinary owner self-recovery remains available through the owner path"
+        );
+        assert!(!is_configured_payout_recovery_operator(
+            pool, pool, developer, Some(pool), Some(bot),
+        ), "the operator endpoint never inherits owner-self authorization");
+        assert!(!is_configured_payout_recovery_operator(
+            developer, developer, developer, Some(pool), Some(bot),
+        ), "developer identity is insufficient when it is not a registered payout owner");
         assert!(!is_configured_payout_recovery_operator(
             Principal::from_slice(&[10]),
             pool,
@@ -11121,9 +11133,13 @@ fn is_configured_payout_recovery_operator(
     stability_pool: Option<Principal>,
     liquidation_bot: Option<Principal>,
 ) -> bool {
-    rumi_protocol_backend::payout_history::recovery_actor_authorized(
-        owner, caller, developer, stability_pool, liquidation_bot,
-    ) && caller == developer
+    rumi_protocol_backend::payout_history::recovery_operator_authorized(
+        owner,
+        caller,
+        developer,
+        stability_pool,
+        liquidation_bot,
+    )
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -11222,6 +11238,7 @@ async fn recover_pending_payout(operation_id: u128) -> Result<bool, ProtocolErro
     if let Some(recovered) = rumi_protocol_backend::recover_three_usd_reserve_payout_candidate(
         operation_id,
         caller,
+        false,
     )
     .await
     {
@@ -11233,7 +11250,11 @@ async fn recover_pending_payout(operation_id: u128) -> Result<bool, ProtocolErro
                 "Payout is held for manual reconciliation; it was not resent".to_string(),
             ));
         }
-        match rumi_protocol_backend::payout_history::advance_owner_rearm(operation_id, caller)
+        match rumi_protocol_backend::payout_history::advance_owner_rearm(
+            operation_id,
+            caller,
+            false,
+        )
             .await
             .map_err(ProtocolError::GenericError)?
         {
@@ -11293,6 +11314,7 @@ async fn operator_recover_pending_payout(
     if let Some(recovered) = rumi_protocol_backend::recover_three_usd_reserve_payout_candidate(
         operation_id,
         caller,
+        true,
     )
     .await
     {
@@ -11306,7 +11328,11 @@ async fn operator_recover_pending_payout(
     if !transfer.too_old_confirmed {
         return Ok(operator_payout_recovery_status(&transfer));
     }
-    match rumi_protocol_backend::payout_history::advance_owner_rearm(operation_id, caller)
+    match rumi_protocol_backend::payout_history::advance_owner_rearm(
+        operation_id,
+        caller,
+        true,
+    )
         .await
         .map_err(ProtocolError::GenericError)?
     {
