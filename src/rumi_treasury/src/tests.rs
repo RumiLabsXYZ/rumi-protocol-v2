@@ -2,6 +2,8 @@
 mod tests {
     use crate::types::*;
     use candid::Principal;
+    use candid_parser::utils::{service_equal, CandidSource};
+    use std::path::Path;
 
     fn mock_principal() -> Principal {
         Principal::anonymous()
@@ -982,8 +984,102 @@ mod tests {
         assert!(service.contains("get_withdrawal_intent_status"));
         assert!(service.contains("get_active_withdrawal_intent_status"));
         assert!(service.contains("is_caller_controller"));
+        assert!(service.contains("bind_external_token_ledger_once"));
         assert!(service.contains("DepositArgs"));
         assert!(service.contains("ExternalTokenDepositArgs"));
+    }
+
+    #[test]
+    fn candid_interface_matches_committed_did() {
+        let generated = crate::__export_service();
+        service_equal(
+            CandidSource::Text(&generated),
+            CandidSource::File(Path::new("rumi_treasury.did")),
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "rumi_treasury.did is out of sync with the canister interface:\n{err}\n\n{generated}"
+            )
+        });
+    }
+
+    #[test]
+    fn external_token_ledgers_bind_once_while_paused_and_survive_restore() {
+        let ckusdt = Principal::from_slice(&[1, 2, 3]);
+        let ckusdc = Principal::from_slice(&[4, 5, 6]);
+        crate::state::init_state(TreasuryInitArgs {
+            controller: mock_principal(),
+            icusd_ledger: mock_principal(),
+            icp_ledger: mock_principal(),
+            ckbtc_ledger: None,
+            ckusdt_ledger: None,
+            ckusdc_ledger: None,
+        });
+
+        assert!(crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::CKUSDT, ckusdt)
+        })
+        .is_err());
+        crate::state::with_state_mut(|s| s.set_paused(true)).unwrap();
+
+        crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::CKUSDT, ckusdt)
+        })
+        .unwrap();
+        crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::CKUSDC, ckusdc)
+        })
+        .unwrap();
+        crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::CKUSDT, ckusdt)
+        })
+        .unwrap();
+
+        crate::state::restore_state();
+        crate::state::with_state(|s| {
+            let config = s.get_config();
+            assert_eq!(config.ckusdt_ledger, Some(ckusdt));
+            assert_eq!(config.ckusdc_ledger, Some(ckusdc));
+            assert!(config.is_paused);
+        });
+    }
+
+    #[test]
+    fn external_token_ledger_binding_rejects_replacement_anonymous_and_other_assets() {
+        let configured = Principal::from_slice(&[1, 2, 3]);
+        let replacement = Principal::from_slice(&[4, 5, 6]);
+        crate::state::init_state(TreasuryInitArgs {
+            controller: mock_principal(),
+            icusd_ledger: mock_principal(),
+            icp_ledger: mock_principal(),
+            ckbtc_ledger: None,
+            ckusdt_ledger: None,
+            ckusdc_ledger: None,
+        });
+        crate::state::with_state_mut(|s| s.set_paused(true)).unwrap();
+
+        crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::CKUSDT, configured)
+        })
+        .unwrap();
+        assert!(crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::CKUSDT, replacement)
+        })
+        .is_err());
+        assert!(crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::CKUSDC, Principal::anonymous())
+        })
+        .is_err());
+        assert!(crate::state::with_state_mut(|s| {
+            s.bind_external_token_ledger_once(AssetType::ICUSD, replacement)
+        })
+        .is_err());
+
+        crate::state::with_state(|s| {
+            let config = s.get_config();
+            assert_eq!(config.ckusdt_ledger, Some(configured));
+            assert_eq!(config.ckusdc_ledger, None);
+        });
     }
 
     #[test]

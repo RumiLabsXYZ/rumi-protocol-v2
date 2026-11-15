@@ -7,6 +7,13 @@ export const idlFactory = ({ IDL }) => {
     'ckbtc_ledger' : IDL.Opt(IDL.Principal),
     'icusd_ledger' : IDL.Principal,
   });
+  const AssetType = IDL.Variant({
+    'ICP' : IDL.Null,
+    'CKUSDC' : IDL.Null,
+    'CKUSDT' : IDL.Null,
+    'ICUSD' : IDL.Null,
+    'CKBTC' : IDL.Null,
+  });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -21,13 +28,6 @@ export const idlFactory = ({ IDL }) => {
     'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
     'healthy' : IDL.Bool,
     'freeze_threshold_secs' : IDL.Nat64,
-  });
-  const AssetType = IDL.Variant({
-    'ICP' : IDL.Null,
-    'CKUSDC' : IDL.Null,
-    'CKUSDT' : IDL.Null,
-    'ICUSD' : IDL.Null,
-    'CKBTC' : IDL.Null,
   });
   const DepositType = IDL.Variant({
     'BorrowingFee' : IDL.Null,
@@ -133,6 +133,11 @@ export const idlFactory = ({ IDL }) => {
     'amount' : IDL.Nat64,
   });
   return IDL.Service({
+    'bind_external_token_ledger_once' : IDL.Func(
+        [AssetType, IDL.Principal],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
     'continue_external_token_deposit_backfill' : IDL.Func(
         [],
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text })],
