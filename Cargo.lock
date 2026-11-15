@@ -7390,6 +7390,7 @@ name = "rumi_treasury"
 version = "0.1.0"
 dependencies = [
  "candid",
+ "candid_parser",
  "ic-canister-log 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ic-cdk 0.12.2",
  "ic-stable-structures",

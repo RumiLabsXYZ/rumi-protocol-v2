@@ -433,6 +433,16 @@ fn set_stability_pool_reporter(reporter: Option<Principal>) -> Result<(), String
     with_state_mut(|s| s.set_stability_pool_reporter(reporter))
 }
 
+/// Bind a missing ckUSDT or ckUSDC ledger exactly once. The Treasury must be
+/// paused so no receipt can race the configuration change. Existing bindings
+/// cannot be cleared or replaced; retrying the same binding is idempotent.
+#[update]
+#[candid_method(update)]
+fn bind_external_token_ledger_once(asset_type: AssetType, ledger: Principal) -> Result<(), String> {
+    ensure_controller()?;
+    with_state_mut(|s| s.bind_external_token_ledger_once(asset_type, ledger))
+}
+
 /// Record an icUSD transfer already made by the configured Stability Pool when
 /// no opted-in icUSD depositor existed. The backend mint receipts make the
 /// record exactly-once across SP retries and lost callback responses.

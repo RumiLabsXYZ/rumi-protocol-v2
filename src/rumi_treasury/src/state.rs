@@ -1360,6 +1360,47 @@ impl TreasuryState {
         Ok(())
     }
 
+    /// Bind a previously-unconfigured external stablecoin ledger exactly once.
+    ///
+    /// This deliberately cannot clear or replace a ledger. Allowing an exact
+    /// same-value retry makes the operation safe when the caller loses the
+    /// response after the stable write committed.
+    pub fn bind_external_token_ledger_once(
+        &mut self,
+        asset_type: AssetType,
+        ledger: Principal,
+    ) -> Result<(), String> {
+        if !self.get_config().is_paused {
+            return Err("Treasury must be paused before binding an external token ledger".into());
+        }
+        if ledger == Principal::anonymous() {
+            return Err("external token ledger cannot be anonymous".into());
+        }
+
+        let mut config = self.config.get().clone();
+        let configured = match &asset_type {
+            AssetType::CKUSDT => &mut config.ckusdt_ledger,
+            AssetType::CKUSDC => &mut config.ckusdc_ledger,
+            _ => return Err("only CKUSDT or CKUSDC ledgers can be bound".into()),
+        };
+
+        match configured {
+            Some(existing) if *existing == ledger => return Ok(()),
+            Some(_) => {
+                return Err(format!(
+                    "configured {:?} ledger cannot be replaced",
+                    asset_type
+                ))
+            }
+            None => *configured = Some(ledger),
+        }
+
+        self.config
+            .set(config)
+            .map_err(|e| format!("Failed to bind external token ledger: {:?}", e))?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Queries
     // ------------------------------------------------------------------
