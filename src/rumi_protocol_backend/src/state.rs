@@ -6635,11 +6635,22 @@ impl State {
         }
     }
 
-    pub fn total_borrowed_icusd_amount(&self) -> ICUSD {
+    /// Exact aggregate debt, or `None` if the persisted vault set cannot be
+    /// represented by the protocol's u64 icUSD accounting type.
+    ///
+    /// Borrow admission uses this checked form so an impossible aggregate
+    /// fails closed before any ledger mint. Read-only callers use the
+    /// saturating wrapper below rather than observing a wrapped low balance.
+    pub fn checked_total_borrowed_icusd_amount(&self) -> Option<ICUSD> {
         self.vault_id_to_vaults
             .values()
             .map(|vault| vault.borrowed_icusd_amount)
-            .sum()
+            .try_fold(ICUSD::new(0), crate::numeric::checked_icusd_add)
+    }
+
+    pub fn total_borrowed_icusd_amount(&self) -> ICUSD {
+        self.checked_total_borrowed_icusd_amount()
+            .unwrap_or(ICUSD::new(u64::MAX))
     }
 
     /// A claim remains fenced after settlement while its ICP is held in the
@@ -7745,16 +7756,25 @@ impl State {
         }
     }
 
-    /// Total borrowed icUSD for a specific collateral type
-    pub fn total_debt_for_collateral(&self, ct: &CollateralType) -> ICUSD {
+    /// Exact borrowed icUSD for a specific collateral type, or `None` if the
+    /// indexed vault debts cannot be represented without overflow.
+    pub fn checked_total_debt_for_collateral(&self, ct: &CollateralType) -> Option<ICUSD> {
         match self.collateral_to_vault_ids.get(ct) {
             Some(vault_ids) => vault_ids
                 .iter()
                 .filter_map(|id| self.vault_id_to_vaults.get(id))
                 .map(|v| v.borrowed_icusd_amount)
-                .sum(),
-            None => ICUSD::new(0),
+                .try_fold(ICUSD::new(0), crate::numeric::checked_icusd_add),
+            None => Some(ICUSD::new(0)),
         }
+    }
+
+    /// Total borrowed icUSD for a specific collateral type. An invalid
+    /// over-wide persisted aggregate is represented as maximum debt so
+    /// read-only risk calculations fail closed instead of wrapping low.
+    pub fn total_debt_for_collateral(&self, ct: &CollateralType) -> ICUSD {
+        self.checked_total_debt_for_collateral(ct)
+            .unwrap_or(ICUSD::new(u64::MAX))
     }
 
     /// Total raw collateral amount for a specific collateral type
@@ -11388,6 +11408,43 @@ mod tests {
             state.vault_id_to_vaults[&vault_id].borrowed_icusd_amount,
             ICUSD::new(u64::MAX),
             "the failed addition must leave vault debt unchanged"
+        );
+    }
+
+    #[test]
+    fn debt_aggregates_never_wrap_and_checked_views_expose_overflow() {
+        let mut state = test_state();
+        let collateral = state.icp_ledger_principal;
+        for (vault_id, debt) in [(81, u64::MAX), (82, 1)] {
+            state.vault_id_to_vaults.insert(
+                vault_id,
+                crate::vault::Vault {
+                    owner: Principal::anonymous(),
+                    vault_id,
+                    collateral_amount: 1,
+                    borrowed_icusd_amount: ICUSD::new(debt),
+                    collateral_type: collateral,
+                    last_accrual_time: 0,
+                    accrued_interest: ICUSD::new(0),
+                    bot_processing: false,
+                },
+            );
+        }
+        state
+            .collateral_to_vault_ids
+            .insert(collateral, [81, 82].into_iter().collect());
+
+        assert_eq!(state.checked_total_borrowed_icusd_amount(), None);
+        assert_eq!(state.checked_total_debt_for_collateral(&collateral), None);
+        assert_eq!(
+            state.total_borrowed_icusd_amount(),
+            ICUSD::new(u64::MAX),
+            "read-only global aggregation must saturate high rather than wrap low"
+        );
+        assert_eq!(
+            state.total_debt_for_collateral(&collateral),
+            ICUSD::new(u64::MAX),
+            "read-only collateral aggregation must saturate high rather than wrap low"
         );
     }
 

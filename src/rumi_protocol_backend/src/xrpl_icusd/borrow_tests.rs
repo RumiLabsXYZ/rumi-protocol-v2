@@ -695,6 +695,35 @@ fn mixed_collateral_global_cap_and_upgrade() {
     drop(icp_borrow(50 * E8).unwrap());
 }
 
+#[test]
+fn legacy_admission_rejects_overwide_committed_debt_before_reserving() {
+    let mut w = world();
+    w.vault_id_to_vaults
+        .get_mut(&1)
+        .expect("vault 1")
+        .borrowed_icusd_amount = ICUSD::new(u64::MAX);
+    w.vault_id_to_vaults
+        .get_mut(&3)
+        .expect("vault 3")
+        .borrowed_icusd_amount = ICUSD::new(1);
+    replace_state(w);
+
+    let result = legacy(owner(4), 4, E8);
+    assert!(
+        matches!(
+            result,
+            Err(ProtocolError::GenericError(message))
+                if message.contains("debt aggregate exceeds the representable")
+        ),
+        "an impossible committed aggregate must fail before taking headroom"
+    );
+    assert_eq!(
+        crate::guard::heap_borrow_reserved(xrp()).unwrap(),
+        (0, 0),
+        "failed admission must not leave a heap reservation"
+    );
+}
+
 // ---- exclusion hooks -------------------------------------------------------------------
 
 fn underwater_xrp_price() {
