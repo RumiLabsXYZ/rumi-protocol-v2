@@ -43,12 +43,94 @@ pub enum ReserveCandidateDiscoveryProgress {
     Held,
 }
 
+/// The payout owner may recover their own row. The configured developer may
+/// drive the same proof-only recovery only for rows owned by a currently
+/// registered protocol canister that has no recovery call into this backend.
+/// Keep ordinary user-owned rows owner-only even when the caller is developer.
+pub fn recovery_actor_authorized(
+    owner: Principal,
+    caller: Principal,
+    developer: Principal,
+    stability_pool: Option<Principal>,
+    liquidation_bot: Option<Principal>,
+) -> bool {
+    caller != Principal::anonymous()
+        && (caller == owner
+            || (caller == developer
+                && [stability_pool, liquidation_bot]
+                    .into_iter()
+                    .flatten()
+                    .any(|registered_owner| registered_owner == owner)))
+}
+
+/// Operator recovery is narrower than owner recovery: the caller must be the
+/// current developer and the row owner must be a currently registered protocol
+/// canister. Use this at every callback boundary for operator-originated work.
+pub fn recovery_operator_authorized(
+    owner: Principal,
+    caller: Principal,
+    developer: Principal,
+    stability_pool: Option<Principal>,
+    liquidation_bot: Option<Principal>,
+) -> bool {
+    caller != Principal::anonymous()
+        && caller == developer
+        && [stability_pool, liquidation_bot]
+            .into_iter()
+            .flatten()
+            .any(|registered_owner| registered_owner == owner)
+}
+
+/// Recheck authorization and the exact reserve-payout ownership binding at a
+/// mutation boundary. Reserve candidate recovery is only for the currently
+/// registered Stability Pool; this prevents stale developer/canister
+/// configuration captured before an inter-canister await from committing a
+/// candidate or settlement afterward.
+pub(crate) fn reserve_candidate_recovery_authorized(
+    state: &crate::state::State,
+    key: &crate::state::ThreeUsdReserveIngressKey,
+    operation_id: u128,
+    caller: Principal,
+    operator_request: bool,
+) -> bool {
+    let Some((_, row)) = state.get_pending_payout(operation_id) else {
+        return false;
+    };
+    let Some(payout) = state.three_usd_reserve_collateral_payouts.get(key) else {
+        return false;
+    };
+    state.three_usd_reserve_payout_operation_keys.get(&operation_id) == Some(key)
+        && row.operation_id == operation_id
+        && row.owner == key.stability_pool
+        && state.stability_pool_canister == Some(row.owner)
+        && payout.operation_id == operation_id
+        && payout.destination.owner == row.owner
+        && (if operator_request {
+            recovery_operator_authorized(
+                row.owner,
+                caller,
+                state.developer_principal,
+                state.stability_pool_canister,
+                state.liquidation_bot_principal,
+            )
+        } else {
+            recovery_actor_authorized(
+                row.owner,
+                caller,
+                state.developer_principal,
+                state.stability_pool_canister,
+                state.liquidation_bot_principal,
+            )
+        })
+}
+
 /// Discover a lost-reply 3USD reserve payout candidate from the exact
 /// pre-dispatch history boundary. This never proves absence and never rearms:
 /// only a unique exact tuple in a complete direct-ledger prefix is recorded.
 pub async fn advance_owner_reserve_candidate_discovery(
     operation_id: u128,
     caller: Principal,
+    operator_request: bool,
 ) -> Result<ReserveCandidateDiscoveryProgress, String> {
     let Some((key, payout, row, saved_scan)) = crate::state::read_state(|state| {
         let key = state.three_usd_reserve_payout_operation_keys.get(&operation_id)?.clone();
@@ -59,8 +141,10 @@ pub async fn advance_owner_reserve_candidate_discovery(
     }) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
     };
-    if row.owner != caller {
-        return Err("only the payout owner can request candidate discovery".into());
+    if !crate::state::read_state(|state| {
+        reserve_candidate_recovery_authorized(state, &key, operation_id, caller, operator_request)
+    }) {
+        return Err("caller is neither the payout owner nor an authorized canister-recovery operator".into());
     }
     let Some(attempt) = reserve_attempt(&payout, row.op_nonce) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
@@ -78,7 +162,7 @@ pub async fn advance_owner_reserve_candidate_discovery(
         || payout.operation_id != operation_id
         || payout.ledger == Principal::anonymous()
         || payout.source.owner != ic_cdk::id()
-        || payout.destination.owner != caller
+        || payout.destination.owner != row.owner
         || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
         || attempt.fee_arg_e8s != Some(payout.expected_fee_e8s)
         || attempt.candidate_block_index.is_some()
@@ -157,7 +241,11 @@ pub async fn advance_owner_reserve_candidate_discovery(
                     .is_some_and(|(_, current)| current == row);
                 let same_payout = state.three_usd_reserve_collateral_payouts.get(&key)
                     .is_some_and(|current| current == &payout);
-                same_row && same_payout && crate::event::record_three_usd_reserve_payout_candidate_scan(
+                same_row && same_payout
+                    && reserve_candidate_recovery_authorized(
+                        state, &key, operation_id, caller, operator_request,
+                    )
+                    && crate::event::record_three_usd_reserve_payout_candidate_scan(
                     state, key.clone(), operation_id, row.op_nonce, scan.clone(),
                 )
             });
@@ -169,7 +257,7 @@ pub async fn advance_owner_reserve_candidate_discovery(
     };
 
     if scan.next_index == scan.snapshot_log_length {
-        return finish_reserve_candidate_scan(&key, &payout, &row, scan);
+        return finish_reserve_candidate_scan(&key, &payout, &row, scan, caller, operator_request);
     }
     let Some(end) = next_page_end(scan.next_index, scan.snapshot_log_length) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
@@ -207,7 +295,13 @@ pub async fn advance_owner_reserve_candidate_discovery(
     let stored = crate::state::mutate_state(|state| {
         let same_row = state.get_pending_payout(operation_id)
             .is_some_and(|(_, current)| current == row);
-        same_row && crate::event::record_three_usd_reserve_payout_candidate_scan(
+        same_row
+            && state.three_usd_reserve_collateral_payouts.get(&key)
+                .is_some_and(|current| current == &payout)
+            && reserve_candidate_recovery_authorized(
+                state, &key, operation_id, caller, operator_request,
+            )
+            && crate::event::record_three_usd_reserve_payout_candidate_scan(
             state, key.clone(), operation_id, row.op_nonce, advanced.clone(),
         )
     });
@@ -215,7 +309,7 @@ pub async fn advance_owner_reserve_candidate_discovery(
         return Ok(ReserveCandidateDiscoveryProgress::Held);
     }
     if end == scan.snapshot_log_length {
-        finish_reserve_candidate_scan(&key, &payout, &row, advanced)
+        finish_reserve_candidate_scan(&key, &payout, &row, advanced, caller, operator_request)
     } else {
         Ok(ReserveCandidateDiscoveryProgress::Scanning)
     }
@@ -244,6 +338,8 @@ fn finish_reserve_candidate_scan(
     payout: &crate::state::ThreeUsdReserveCollateralPayout,
     row: &crate::state::PendingMarginTransfer,
     scan: crate::state::ThreeUsdReservePayoutCandidateScan,
+    caller: Principal,
+    operator_request: bool,
 ) -> Result<ReserveCandidateDiscoveryProgress, String> {
     if scan.next_index != scan.snapshot_log_length || scan.multiple_candidates {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
@@ -254,10 +350,12 @@ fn finish_reserve_candidate_scan(
     let stored = crate::state::mutate_state(|state| {
         if !state.get_pending_payout(scan.operation_id).is_some_and(|(_, current)| current == *row)
             || !state.three_usd_reserve_collateral_payouts.get(key).is_some_and(|current| {
-                current.operation_id == payout.operation_id
-                    && current.ledger == payout.ledger
+                current == payout
             })
             || state.three_usd_reserve_payout_candidate_scans.get(key) != Some(&scan)
+            || !reserve_candidate_recovery_authorized(
+                state, key, scan.operation_id, caller, operator_request,
+            )
         {
             return false;
         }
@@ -545,14 +643,29 @@ pub fn scan_page(
 pub async fn advance_owner_rearm(
     operation_id: u128,
     caller: Principal,
+    operator_request: bool,
 ) -> Result<PayoutRearmProgress, String> {
     let now = ic_cdk::api::time();
     let initial = crate::state::read_state(|state| state.get_pending_payout(operation_id));
-    let Some((_, row)) = initial else {
+    let Some((_, mut row)) = initial else {
         return Err("pending payout no longer exists".into());
     };
-    if row.owner != caller {
-        return Err("only the payout owner can request history reconciliation".into());
+    let (developer, stability_pool, liquidation_bot) = crate::state::read_state(|state| {
+        (
+            state.developer_principal,
+            state.stability_pool_canister,
+            state.liquidation_bot_principal,
+        )
+    });
+    if !rearm_actor_authorized(
+        row.owner,
+        caller,
+        developer,
+        stability_pool,
+        liquidation_bot,
+        operator_request,
+    ) {
+        return Err("caller is neither the payout owner nor an authorized canister-recovery operator".into());
     }
     if row.history_candidate_seen {
         return Ok(PayoutRearmProgress::CandidateHeld);
@@ -601,28 +714,27 @@ pub async fn advance_owner_rearm(
                 next_index: start_index,
             };
             let stored = crate::state::mutate_state(|state| {
-                let valid = state
-                    .get_pending_payout(operation_id)
-                    .is_some_and(|(_, current)| eligible(&current) && current == row);
-                if !valid {
-                    return false;
-                }
-                state.mutate_pending_payout(operation_id, |current| {
-                    current.history_log_length = Some(snapshot_log_length);
-                    current.history_cursor = start_index;
-                    current.history_scan = Some(scan.clone());
-                });
-                true
+                store_initial_history_scan_in_state(
+                    state,
+                    operation_id,
+                    &row,
+                    &scan,
+                    caller,
+                    operator_request,
+                )
             });
             if !stored {
                 return Ok(PayoutRearmProgress::UnsupportedHeld);
             }
+            row.history_log_length = Some(snapshot_log_length);
+            row.history_cursor = start_index;
+            row.history_scan = Some(scan.clone());
             scan
         }
     };
 
     if scan.next_index == scan.snapshot_log_length {
-        return commit_rearm(operation_id, caller, scan, now);
+        return commit_rearm(operation_id, caller, row, scan, now, operator_request);
     }
     let Some(end) = next_page_end(scan.next_index, scan.snapshot_log_length) else {
         return Ok(PayoutRearmProgress::UnsupportedHeld);
@@ -634,7 +746,7 @@ pub async fn advance_owner_rearm(
     let response: Result<(GetBlocksResult,), _> =
         ic_cdk::call(ledger, "icrc3_get_blocks", (request,)).await;
     let Ok((history,)) = response else {
-        discard_incomplete_scan(operation_id, &scan);
+        discard_incomplete_scan(operation_id, &row, &scan, caller, operator_request);
         return Ok(PayoutRearmProgress::UnsupportedHeld);
     };
     let source = ic_cdk::id();
@@ -649,43 +761,26 @@ pub async fn advance_owner_rearm(
     );
     match page_result {
         PayoutPageResult::Candidate => {
-            crate::state::mutate_state(|state| {
-                if state
-                    .get_pending_payout(operation_id)
-                    .is_some_and(|(_, current)| scan_matches_row(&scan, operation_id, &current))
-                {
-                    state.mutate_pending_payout(operation_id, |current| {
-                        if current.history_scan.as_ref() == Some(&scan) {
-                            current.history_candidate_seen = true;
-                        }
-                    });
-                }
+            let marked = crate::state::mutate_state(|state| {
+                mark_history_candidate_seen_in_state(
+                    state, operation_id, &row, &scan, caller, operator_request,
+                )
             });
-            Ok(PayoutRearmProgress::CandidateHeld)
+            Ok(if marked {
+                PayoutRearmProgress::CandidateHeld
+            } else {
+                PayoutRearmProgress::UnsupportedHeld
+            })
         }
         PayoutPageResult::Incomplete => {
-            discard_incomplete_scan(operation_id, &scan);
+            discard_incomplete_scan(operation_id, &row, &scan, caller, operator_request);
             Ok(PayoutRearmProgress::UnsupportedHeld)
         }
         PayoutPageResult::CoveredAbsent => {
             let advanced = crate::state::mutate_state(|state| {
-                let valid = state
-                    .get_pending_payout(operation_id)
-                    .is_some_and(|(_, current)| {
-                        eligible(&current)
-                            && scan_matches_row(&scan, operation_id, &current)
-                            && current.history_scan.as_ref() == Some(&scan)
-                    });
-                if !valid {
-                    return false;
-                }
-                state.mutate_pending_payout(operation_id, |current| {
-                    if let Some(stored) = current.history_scan.as_mut() {
-                        stored.next_index = end;
-                    }
-                    current.history_cursor = end;
-                });
-                true
+                advance_history_scan_in_state(
+                    state, operation_id, &row, &scan, end, caller, operator_request,
+                )
             });
             if !advanced {
                 return Ok(PayoutRearmProgress::UnsupportedHeld);
@@ -693,7 +788,11 @@ pub async fn advance_owner_rearm(
             if end == scan.snapshot_log_length {
                 let mut complete = scan;
                 complete.next_index = end;
-                commit_rearm(operation_id, caller, complete, now)
+                row.history_cursor = end;
+                if let Some(stored) = row.history_scan.as_mut() {
+                    stored.next_index = end;
+                }
+                commit_rearm(operation_id, caller, row, complete, now, operator_request)
             } else {
                 Ok(PayoutRearmProgress::Scanning)
             }
@@ -701,19 +800,197 @@ pub async fn advance_owner_rearm(
     }
 }
 
-fn discard_incomplete_scan(operation_id: u128, scan: &crate::state::PendingPayoutHistoryScan) {
-    crate::state::mutate_state(|state| {
-        if state
-            .get_pending_payout(operation_id)
-            .is_some_and(|(_, current)| current.history_scan.as_ref() == Some(scan))
-        {
-            state.mutate_pending_payout(operation_id, |current| {
-                current.history_scan = None;
-                current.history_log_length = None;
-                current.history_cursor = 0;
-            });
-        }
+fn rearm_callback_authorized(
+    state: &crate::state::State,
+    operation_id: u128,
+    expected_row: &crate::state::PendingMarginTransfer,
+    caller: Principal,
+    operator_request: bool,
+) -> bool {
+    state
+        .get_pending_payout(operation_id)
+        .is_some_and(|(_, current)| {
+            current == *expected_row
+                && current.operation_id == operation_id
+                && eligible(&current)
+                && rearm_actor_authorized(
+                    current.owner,
+                    caller,
+                    state.developer_principal,
+                    state.stability_pool_canister,
+                    state.liquidation_bot_principal,
+                    operator_request,
+                )
+        })
+}
+
+fn rearm_actor_authorized(
+    owner: Principal,
+    caller: Principal,
+    developer: Principal,
+    stability_pool: Option<Principal>,
+    liquidation_bot: Option<Principal>,
+    operator_request: bool,
+) -> bool {
+    if operator_request {
+        recovery_operator_authorized(
+            owner, caller, developer, stability_pool, liquidation_bot,
+        )
+    } else {
+        recovery_actor_authorized(owner, caller, developer, stability_pool, liquidation_bot)
+    }
+}
+
+fn initial_scan_matches_row(
+    scan: &crate::state::PendingPayoutHistoryScan,
+    operation_id: u128,
+    row: &crate::state::PendingMarginTransfer,
+) -> bool {
+    let Some(start_index) = row.history_start_index else {
+        return false;
+    };
+    scan.operation_id == operation_id
+        && row.operation_id == operation_id
+        && scan.payout_kind == row.payout_kind
+        && row.ledger == Some(scan.ledger)
+        && scan.owner == row.owner
+        && row.transfer_amount_raw == Some(scan.amount_raw)
+        && scan.attempt_nonce == row.op_nonce
+        && scan.start_index == start_index
+        && scan.next_index == start_index
+        && history_span_within_budget(scan.start_index, scan.snapshot_log_length)
+}
+
+fn store_initial_history_scan_in_state(
+    state: &mut crate::state::State,
+    operation_id: u128,
+    expected_row: &crate::state::PendingMarginTransfer,
+    scan: &crate::state::PendingPayoutHistoryScan,
+    caller: Principal,
+    operator_request: bool,
+) -> bool {
+    if !rearm_callback_authorized(
+        state, operation_id, expected_row, caller, operator_request,
+    )
+        || expected_row.history_scan.is_some()
+        || !initial_scan_matches_row(scan, operation_id, expected_row)
+    {
+        return false;
+    }
+    state.mutate_pending_payout(operation_id, |current| {
+        current.history_log_length = Some(scan.snapshot_log_length);
+        current.history_cursor = scan.start_index;
+        current.history_scan = Some(scan.clone());
     });
+    true
+}
+
+fn mark_history_candidate_seen_in_state(
+    state: &mut crate::state::State,
+    operation_id: u128,
+    expected_row: &crate::state::PendingMarginTransfer,
+    scan: &crate::state::PendingPayoutHistoryScan,
+    caller: Principal,
+    operator_request: bool,
+) -> bool {
+    let authorized = state
+        .get_pending_payout(operation_id)
+        .is_some_and(|(_, row)| {
+            row == *expected_row
+                && row.operation_id == operation_id
+                && eligible(&row)
+                && rearm_actor_authorized(
+                    row.owner,
+                    caller,
+                    state.developer_principal,
+                    state.stability_pool_canister,
+                    state.liquidation_bot_principal,
+                    operator_request,
+                )
+                && scan_matches_row(scan, operation_id, &row)
+                && row.history_scan.as_ref() == Some(scan)
+        });
+    if !authorized {
+        return false;
+    }
+    state.mutate_pending_payout(operation_id, |row| row.history_candidate_seen = true);
+    true
+}
+
+fn advance_history_scan_in_state(
+    state: &mut crate::state::State,
+    operation_id: u128,
+    expected_row: &crate::state::PendingMarginTransfer,
+    scan: &crate::state::PendingPayoutHistoryScan,
+    end: u64,
+    caller: Principal,
+    operator_request: bool,
+) -> bool {
+    let authorized = state
+        .get_pending_payout(operation_id)
+        .is_some_and(|(_, row)| {
+            row == *expected_row
+                && row.operation_id == operation_id
+                && eligible(&row)
+                && rearm_actor_authorized(
+                    row.owner,
+                    caller,
+                    state.developer_principal,
+                    state.stability_pool_canister,
+                    state.liquidation_bot_principal,
+                    operator_request,
+                )
+                && scan_matches_row(scan, operation_id, &row)
+                && row.history_scan.as_ref() == Some(scan)
+                && end == next_page_end(scan.next_index, scan.snapshot_log_length).unwrap_or(0)
+        });
+    if !authorized {
+        return false;
+    }
+    state.mutate_pending_payout(operation_id, |current| {
+        if let Some(stored) = current.history_scan.as_mut() {
+            stored.next_index = end;
+        }
+        current.history_cursor = end;
+    });
+    true
+}
+
+fn discard_incomplete_scan(
+    operation_id: u128,
+    expected_row: &crate::state::PendingMarginTransfer,
+    scan: &crate::state::PendingPayoutHistoryScan,
+    caller: Principal,
+    operator_request: bool,
+) {
+    crate::state::mutate_state(|state| {
+        discard_incomplete_scan_in_state(
+            state, operation_id, expected_row, scan, caller, operator_request,
+        )
+    });
+}
+
+fn discard_incomplete_scan_in_state(
+    state: &mut crate::state::State,
+    operation_id: u128,
+    expected_row: &crate::state::PendingMarginTransfer,
+    scan: &crate::state::PendingPayoutHistoryScan,
+    caller: Principal,
+    operator_request: bool,
+) -> bool {
+    if rearm_callback_authorized(state, operation_id, expected_row, caller, operator_request)
+        && expected_row.history_scan.as_ref() == Some(scan)
+        && scan_matches_row(scan, operation_id, expected_row)
+    {
+        state.mutate_pending_payout(operation_id, |current| {
+            current.history_scan = None;
+            current.history_log_length = None;
+            current.history_cursor = 0;
+        });
+        true
+    } else {
+        false
+    }
 }
 
 fn eligible(row: &crate::state::PendingMarginTransfer) -> bool {
@@ -726,7 +1003,6 @@ fn eligible(row: &crate::state::PendingMarginTransfer) -> bool {
         && row.history_start_index.is_some()
         && row.ledger.is_some()
         && row.transfer_amount_raw.is_some_and(|amount| amount > 0)
-        && row.retry_count < crate::MAX_PENDING_RETRIES
         && row.no_effect_proof.is_none()
         && !row.history_candidate_seen
 }
@@ -758,40 +1034,20 @@ fn history_span_within_budget(start_index: u64, snapshot_log_length: u64) -> boo
 fn commit_rearm(
     operation_id: u128,
     caller: Principal,
+    expected_row: crate::state::PendingMarginTransfer,
     scan: crate::state::PendingPayoutHistoryScan,
     now: u64,
+    operator_request: bool,
 ) -> Result<PayoutRearmProgress, String> {
     let committed = crate::state::mutate_state(|state| {
-        let Some((_, row)) = state.get_pending_payout(operation_id) else {
-            return false;
-        };
-        if !eligible(&row)
-            || row.owner != caller
-            || !scan_matches_row(&scan, operation_id, &row)
-            || scan.next_index != scan.snapshot_log_length
-            || row.history_scan.as_ref() != Some(&scan)
-        {
-            return false;
-        }
-        let mut new_nonce = state.next_op_nonce_at(now);
-        while new_nonce == 0 || new_nonce == row.op_nonce {
-            new_nonce = state.next_op_nonce_at(now);
-        }
-        crate::event::record_pending_payout_rearmed(
+        commit_rearm_in_state(
             state,
-            crate::state::PendingPayoutNoEffectProof {
-                operation_id,
-                payout_kind: row.payout_kind,
-                ledger: scan.ledger,
-                owner: row.owner,
-                amount_raw: scan.amount_raw,
-                old_attempt_nonce: scan.attempt_nonce,
-                new_attempt_nonce: new_nonce,
-                start_index: scan.start_index,
-                snapshot_log_length: scan.snapshot_log_length,
-                complete_prefix: true,
-                verified_at_ns: now,
-            },
+            operation_id,
+            caller,
+            expected_row,
+            scan,
+            now,
+            operator_request,
         )
     });
     Ok(if committed {
@@ -799,6 +1055,54 @@ fn commit_rearm(
     } else {
         PayoutRearmProgress::UnsupportedHeld
     })
+}
+
+fn commit_rearm_in_state(
+    state: &mut crate::state::State,
+    operation_id: u128,
+    caller: Principal,
+    expected_row: crate::state::PendingMarginTransfer,
+    scan: crate::state::PendingPayoutHistoryScan,
+    now: u64,
+    operator_request: bool,
+) -> bool {
+    let Some((_, row)) = state.get_pending_payout(operation_id) else {
+        return false;
+    };
+    if row != expected_row
+        || !rearm_callback_authorized(
+            state,
+            operation_id,
+            &expected_row,
+            caller,
+            operator_request,
+        )
+        || !scan_matches_row(&scan, operation_id, &row)
+        || scan.next_index != scan.snapshot_log_length
+        || row.history_scan.as_ref() != Some(&scan)
+    {
+        return false;
+    }
+    let mut new_nonce = state.next_op_nonce_at(now);
+    while new_nonce == 0 || new_nonce == row.op_nonce {
+        new_nonce = state.next_op_nonce_at(now);
+    }
+    crate::event::record_pending_payout_rearmed(
+        state,
+        crate::state::PendingPayoutNoEffectProof {
+            operation_id,
+            payout_kind: row.payout_kind,
+            ledger: scan.ledger,
+            owner: row.owner,
+            amount_raw: scan.amount_raw,
+            old_attempt_nonce: scan.attempt_nonce,
+            new_attempt_nonce: new_nonce,
+            start_index: scan.start_index,
+            snapshot_log_length: scan.snapshot_log_length,
+            complete_prefix: true,
+            verified_at_ns: now,
+        },
+    )
 }
 
 fn inspect_blocks(
@@ -942,6 +1246,54 @@ mod tests {
             history_cursor: 0,
             min_net_collateral_raw: None,
         }
+    }
+
+    fn held_rearm_row() -> crate::state::PendingMarginTransfer {
+        let mut row = pending_row();
+        row.held_for_manual_retry = true;
+        row.reconciliation_required = true;
+        row.too_old_confirmed = true;
+        row.history_start_index = Some(10);
+        row
+    }
+
+    fn rearm_scan(
+        row: &crate::state::PendingMarginTransfer,
+        snapshot_log_length: u64,
+        next_index: u64,
+    ) -> crate::state::PendingPayoutHistoryScan {
+        crate::state::PendingPayoutHistoryScan {
+            operation_id: row.operation_id,
+            payout_kind: row.payout_kind,
+            ledger: row.ledger.unwrap(),
+            owner: row.owner,
+            amount_raw: row.transfer_amount_raw.unwrap(),
+            attempt_nonce: row.op_nonce,
+            start_index: row.history_start_index.unwrap(),
+            snapshot_log_length,
+            next_index,
+        }
+    }
+
+    fn operator_rearm_state(
+        mut row: crate::state::PendingMarginTransfer,
+        scan: Option<crate::state::PendingPayoutHistoryScan>,
+    ) -> (
+        crate::state::State,
+        crate::state::PendingMarginTransfer,
+        Principal,
+    ) {
+        let developer = Principal::from_slice(&[9]);
+        if let Some(scan) = scan {
+            row.history_log_length = Some(scan.snapshot_log_length);
+            row.history_cursor = scan.next_index;
+            row.history_scan = Some(scan);
+        }
+        let mut state = crate::state::State::default();
+        state.developer_principal = developer;
+        state.stability_pool_canister = Some(row.owner);
+        state.insert_pending_payout(row.clone());
+        (state, row, developer)
     }
 
     fn block(index: u64, value: ICRC3Value) -> BlockWithId {
@@ -1242,6 +1594,156 @@ mod tests {
             !eligible(&row),
             "legacy row cannot be opted in by migration"
         );
+    }
+
+    #[test]
+    fn developer_may_recover_canister_owned_payout_rows_only() {
+        let developer = Principal::from_slice(&[9]);
+        let unrelated = Principal::from_slice(&[10]);
+        let stability_pool = Principal::from_slice(&[2]);
+        let liquidation_bot = Principal::from_slice(&[3]);
+        let ordinary_user = Principal::from_slice(&[5]);
+        assert!(recovery_actor_authorized(
+            stability_pool, developer, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
+        assert!(recovery_actor_authorized(
+            liquidation_bot, developer, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
+        assert!(recovery_actor_authorized(
+            ordinary_user, ordinary_user, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
+        assert!(!recovery_actor_authorized(
+            ordinary_user, developer, developer, Some(stability_pool), Some(liquidation_bot),
+        ), "developer cannot recover an ordinary user's payout");
+        assert!(!recovery_actor_authorized(
+            stability_pool, unrelated, developer, Some(stability_pool), Some(liquidation_bot),
+        ));
+        assert!(!recovery_actor_authorized(
+            stability_pool,
+            Principal::anonymous(),
+            developer,
+            Some(stability_pool),
+            Some(liquidation_bot),
+        ));
+        assert!(!recovery_actor_authorized(
+            ordinary_user, developer, developer, None, None,
+        ), "unconfigured canister owners do not receive operator recovery");
+    }
+
+    #[test]
+    fn retry_cap_does_not_block_too_old_history_proof_but_does_not_create_proof() {
+        let mut row = pending_row();
+        row.held_for_manual_retry = true;
+        row.reconciliation_required = true;
+        row.retry_count = crate::MAX_PENDING_RETRIES;
+        row.too_old_confirmed = false;
+        row.history_start_index = Some(10);
+        assert!(!eligible(&row), "retry-cap disposition alone is not no-effect proof");
+        row.too_old_confirmed = true;
+        assert!(eligible(&row), "typed TooOld may enter bounded history proof even at cap");
+    }
+
+    #[test]
+    fn snapshot_callback_does_not_persist_after_operator_revocation() {
+        let row = held_rearm_row();
+        let scan = rearm_scan(&row, 12, 10);
+        let (mut state, row, _) = operator_rearm_state(row, None);
+        state.developer_principal = row.owner;
+        let developer = row.owner;
+        let before = state.get_pending_payout(row.operation_id);
+        state.developer_principal = Principal::from_slice(&[8]);
+
+        assert!(!store_initial_history_scan_in_state(
+            &mut state,
+            row.operation_id,
+            &row,
+            &scan,
+            developer,
+            true,
+        ));
+        assert_eq!(state.get_pending_payout(row.operation_id), before);
+    }
+
+    #[test]
+    fn candidate_callback_does_not_poison_row_after_owner_registration_changes() {
+        let row = held_rearm_row();
+        let scan = rearm_scan(&row, 12, 10);
+        let (mut state, row, developer) = operator_rearm_state(row, Some(scan.clone()));
+        let before = state.get_pending_payout(row.operation_id);
+        state.stability_pool_canister = Some(Principal::from_slice(&[8]));
+
+        assert!(!mark_history_candidate_seen_in_state(
+            &mut state,
+            row.operation_id,
+            &row,
+            &scan,
+            developer,
+            true,
+        ));
+        assert_eq!(state.get_pending_payout(row.operation_id), before);
+        assert!(!state.get_pending_payout(row.operation_id).unwrap().1.in_flight);
+    }
+
+    #[test]
+    fn absent_page_callback_does_not_advance_after_exact_row_changes() {
+        let row = held_rearm_row();
+        let scan = rearm_scan(&row, 12, 10);
+        let (mut state, row, developer) = operator_rearm_state(row, Some(scan.clone()));
+        state.mutate_pending_payout(row.operation_id, |current| {
+            current.collateral_type = Principal::from_slice(&[7]);
+        });
+        let before = state.get_pending_payout(row.operation_id);
+
+        assert!(!advance_history_scan_in_state(
+            &mut state,
+            row.operation_id,
+            &row,
+            &scan,
+            12,
+            developer,
+            true,
+        ));
+        assert_eq!(state.get_pending_payout(row.operation_id), before);
+    }
+
+    #[test]
+    fn incomplete_callback_preserves_resumable_scan_after_operator_revocation() {
+        let row = held_rearm_row();
+        let scan = rearm_scan(&row, 12, 10);
+        let (mut state, row, developer) = operator_rearm_state(row, Some(scan.clone()));
+        let before = state.get_pending_payout(row.operation_id);
+        state.developer_principal = Principal::from_slice(&[8]);
+
+        assert!(!discard_incomplete_scan_in_state(
+            &mut state,
+            row.operation_id,
+            &row,
+            &scan,
+            developer,
+            true,
+        ));
+        assert_eq!(state.get_pending_payout(row.operation_id), before);
+    }
+
+    #[test]
+    fn final_rearm_callback_does_not_commit_after_operator_revocation() {
+        let row = held_rearm_row();
+        let scan = rearm_scan(&row, 12, 12);
+        let (mut state, mut row, developer) = operator_rearm_state(row, Some(scan.clone()));
+        row.history_cursor = 12;
+        let before = state.get_pending_payout(row.operation_id);
+        state.developer_principal = Principal::from_slice(&[8]);
+
+        assert!(!commit_rearm_in_state(
+            &mut state,
+            row.operation_id,
+            developer,
+            row,
+            scan,
+            100,
+            true,
+        ));
+        assert_eq!(state.get_pending_payout(row.operation_id), before);
     }
 
     #[test]
