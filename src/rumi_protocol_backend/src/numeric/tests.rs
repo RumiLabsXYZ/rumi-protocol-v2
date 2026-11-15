@@ -89,8 +89,17 @@ fn collateral_conversion_checks_u64_boundary() {
         None,
         "the first amount above u64::MAX must be reported as unrepresentable"
     );
-    let trapped = std::panic::catch_unwind(|| icusd_to_collateral_amount(exceeds, dec!(1), 18));
-    assert!(trapped.is_err(), "normal conversion must fail closed");
+    assert_eq!(
+        icusd_to_collateral_amount(exceeds, dec!(1), 18),
+        u64::MAX,
+        "ordinary conversion must saturate so liquidation can cap to actual collateral"
+    );
+    let available_collateral = 10_000;
+    assert_eq!(
+        icusd_to_collateral_amount(exceeds, dec!(1), 18).min(available_collateral),
+        available_collateral,
+        "a liquidator can seize at most the raw collateral the vault contains"
+    );
 }
 
 #[test]
