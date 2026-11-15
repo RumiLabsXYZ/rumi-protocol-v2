@@ -82,7 +82,11 @@
       <p class="eyebrow"><span class="status-mark" aria-hidden="true"></span> Rumi Protocol / Security notes</p>
       <div class="hero-grid">
         <div class="hero-copy">
-          <p class="issue-line">Status report <span aria-hidden="true">—</span> <time datetime="2026-11-14">November 14, 2026</time></p>
+          <p class="issue-line">
+            Status report <span aria-hidden="true">—</span>
+            <time datetime="2026-11-14">November 14, 2026</time> · revised
+            <time datetime="2026-11-15">November 15, 2026</time>
+          </p>
           <h1 id="report-title">Security progress,<br /><span>with each step clear.</span></h1>
           <p class="lede">
             PR #641 is merged, and its merged tree matched the reviewed head. The hosted
@@ -107,7 +111,7 @@
 
       <div class="rule-caption" aria-label="Evidence summary">
         <span>PR #641 · merged commit e723c94b</span>
-        <span>Snapshot date: November 14, 2026</span>
+        <span>Snapshot date: November 14 · revised November 15, 2026</span>
       </div>
     </div>
   </section>
@@ -245,7 +249,7 @@
   </section>
 
   <footer class="page-width page-foot">
-    <span>Security status snapshot dated November 14, 2026.</span>
+    <span>Security status snapshot dated November 14; revised November 15, 2026.</span>
     <a href="/security/october-2026">Read the October status snapshot <span aria-hidden="true">→</span></a>
   </footer>
 </main>
