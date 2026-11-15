@@ -355,7 +355,7 @@
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--rumi-text-muted);
+    color: var(--rumi-text-secondary);
     margin-bottom: 0.625rem;
   }
   .param-symbol {

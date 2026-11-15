@@ -925,7 +925,7 @@
             <span class="ov-cell ov-cell-ratio">
               {#if claim}
                 <span class="ov-label">Status</span>
-                <span class="ov-sub">{claim.stage}</span>
+                <span class="ov-sub">{claim.stage.replace(/([a-z])([A-Z])/g, '$1 $2')}</span>
               {:else}
               <span class="ov-label">CR</span>
               <span class="ov-value ov-ratio" style="color:{g.crColor}">
