@@ -49,6 +49,12 @@ export interface VaultOperationResult {
   redemption?: QueuedRedemptionReceipt;
   /** The signer returned no result even though the icUSD debit was observed. */
   ambiguous?: boolean;
+  /**
+   * A bound repayment reached the ledger approval dispatch before failing or
+   * noticing a stale wallet session. The allowance may have changed even when
+   * the backend repayment itself was never dispatched.
+   */
+  approvalMayHaveMutated?: boolean;
 }
 
 export interface QueuedRedemptionReceipt {

@@ -1516,6 +1516,207 @@ static async addMarginToVaultBound(
   }, vaultId, { refreshBefore: false, refreshAfter: false });
 }
 
+private static async executeBoundRepayment(
+  vaultId: number,
+  operation: () => Promise<VaultOperationResult>,
+): Promise<VaultOperationResult> {
+  // Bound financial actions fail closed instead of waiting through another
+  // mutation. Waiting here can consume Oisy's transient user activation and
+  // can also outlive the wallet session captured by the click handler.
+  if (ApiClient.operationInProgress) {
+    return { success: false, error: 'Another transaction is still processing. Wait for it to finish, then refresh before trying again.' };
+  }
+  ApiClient.operationInProgress = true;
+  ApiClient.operationTimestamps.set(vaultId, Date.now());
+  try {
+    return await operation();
+  } finally {
+    ApiClient.operationInProgress = false;
+    ApiClient.operationTimestamps.delete(vaultId);
+  }
+}
+
+private static async ensureBoundRepaymentAllowance(
+  ctx: ActionBoundContext,
+  ledgerId: string,
+  approvalAmount: bigint,
+  onApprovalDispatch: () => void,
+): Promise<void> {
+  assertActionBoundContextCurrent(ctx);
+  // Oisy must reach its signer without an intervening allowance query. Other
+  // wallets can avoid a redundant approval when the exact large allowance is
+  // already present. Both paths keep that allowance time-bounded.
+  if (!isOisyWallet()) {
+    const current = await walletOperations.checkCollateralAllowanceBound(
+      ctx, CONFIG.currentCanisterId, ledgerId,
+    );
+    assertActionBoundContextCurrent(ctx);
+    if (current >= approvalAmount) return;
+  }
+
+  onApprovalDispatch();
+  const approval = await walletOperations.approveCollateralTransferBound(
+    ctx, approvalAmount, CONFIG.currentCanisterId, ledgerId,
+  );
+  assertActionBoundContextCurrent(ctx);
+  if (!approval.success) throw new Error(approval.error || 'Repayment approval failed');
+}
+
+/** Exact, wallet-session-bound icUSD repayment. */
+static async repayToVaultBound(
+  ctx: ActionBoundContext,
+  vaultId: number,
+  amountE8s: bigint,
+): Promise<VaultOperationResult> {
+  return ApiClient.executeBoundRepayment(vaultId, async () => {
+    let approvalMayHaveMutated = false;
+    let repaymentDispatched = false;
+    try {
+      assertActionBoundContextCurrent(ctx);
+      if (!Number.isSafeInteger(vaultId) || vaultId < 0 || amountE8s <= 0n || amountE8s > NAT64_MAX) {
+        return { success: false, error: 'Vault ID and repayment amount must be valid positive values.' };
+      }
+      if (vaultId !== 51 && amountE8s < MIN_REPAY_E8S) {
+        return { success: false, error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S} icUSD` };
+      }
+
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      await ApiClient.ensureBoundRepaymentAllowance(
+        ctx,
+        CONFIG.currentIcusdLedgerId,
+        100_000_000_000_000_000n,
+        () => { approvalMayHaveMutated = true; },
+      );
+      assertActionBoundContextCurrent(ctx);
+      repaymentDispatched = true;
+      const result = await actor.repay_to_vault({ vault_id: BigInt(vaultId), amount: amountE8s });
+      // A decoded Candid result proves the transport outcome is no longer
+      // ambiguous. Keep later local formatting failures out of the
+      // "submitted but unknown" recovery path.
+      repaymentDispatched = false;
+      if ('Ok' in result) return { success: true, vaultId, blockIndex: Number(result.Ok) };
+      return { success: false, error: ApiClient.formatProtocolError(result.Err), approvalMayHaveMutated };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Unknown repayment error';
+      if (repaymentDispatched) {
+        return {
+          success: false,
+          ambiguous: true,
+          approvalMayHaveMutated,
+          error: `The repayment was submitted but no typed result was received. Check the vault and ledger before retrying. ${detail}`,
+        };
+      }
+      return { success: false, approvalMayHaveMutated, error: detail };
+    }
+  });
+}
+
+/** Exact, wallet-session-bound compound repayment and close. */
+static async repayAndCloseVaultBound(
+  ctx: ActionBoundContext,
+  vaultId: number,
+  amountE8s: bigint,
+): Promise<VaultOperationResult> {
+  return ApiClient.executeBoundRepayment(vaultId, async () => {
+    let approvalMayHaveMutated = false;
+    let repaymentDispatched = false;
+    try {
+      assertActionBoundContextCurrent(ctx);
+      if (!Number.isSafeInteger(vaultId) || vaultId < 0 || amountE8s <= 0n || amountE8s > NAT64_MAX) {
+        return { success: false, error: 'Vault ID and repayment amount must be valid positive values.' };
+      }
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      await ApiClient.ensureBoundRepaymentAllowance(
+        ctx,
+        CONFIG.currentIcusdLedgerId,
+        100_000_000_000_000_000n,
+        () => { approvalMayHaveMutated = true; },
+      );
+      assertActionBoundContextCurrent(ctx);
+      repaymentDispatched = true;
+      const result = await actor.repay_and_close_vault({ vault_id: BigInt(vaultId), amount: amountE8s });
+      repaymentDispatched = false;
+      if ('Ok' in result) {
+        return {
+          success: true,
+          vaultId,
+          blockIndex: Number(result.Ok.repay_block_index),
+          message: `Vault #${vaultId} closed.`,
+        };
+      }
+      return { success: false, error: ApiClient.formatProtocolError(result.Err), approvalMayHaveMutated };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Unknown repay-and-close error';
+      if (repaymentDispatched) {
+        return {
+          success: false,
+          ambiguous: true,
+          approvalMayHaveMutated,
+          error: `The repay-and-close call was submitted but no typed result was received. Check the vault and ledger before retrying. ${detail}`,
+        };
+      }
+      return { success: false, approvalMayHaveMutated, error: detail };
+    }
+  });
+}
+
+/** Exact, wallet-session-bound ckUSDC/ckUSDT repayment. */
+static async repayToVaultWithStableBound(
+  ctx: ActionBoundContext,
+  vaultId: number,
+  amountE8s: bigint,
+  tokenType: 'CKUSDT' | 'CKUSDC',
+): Promise<VaultOperationResult> {
+  return ApiClient.executeBoundRepayment(vaultId, async () => {
+    let approvalMayHaveMutated = false;
+    let repaymentDispatched = false;
+    try {
+      assertActionBoundContextCurrent(ctx);
+      if (!Number.isSafeInteger(vaultId) || vaultId < 0 || amountE8s <= 0n || amountE8s > NAT64_MAX) {
+        return { success: false, error: 'Vault ID and repayment amount must be valid positive values.' };
+      }
+      if (amountE8s % 100n !== 0n) {
+        return { success: false, error: 'Stablecoin repayment supports at most 6 decimal places.' };
+      }
+      if (vaultId !== 51 && amountE8s < MIN_REPAY_E8S) {
+        return { success: false, error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S}` };
+      }
+
+      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+      const ledgerId = CONFIG.getStableLedgerId(tokenType);
+      await ApiClient.ensureBoundRepaymentAllowance(
+        ctx,
+        ledgerId,
+        1_000_000_000_000_000n,
+        () => { approvalMayHaveMutated = true; },
+      );
+      assertActionBoundContextCurrent(ctx);
+      repaymentDispatched = true;
+      const token_type = tokenType === 'CKUSDT' ? { CKUSDT: null } as const : { CKUSDC: null } as const;
+      const result = await actor.repay_to_vault_with_stable({
+        vault_id: BigInt(vaultId), amount: amountE8s, token_type,
+      });
+      repaymentDispatched = false;
+      if ('Ok' in result) return { success: true, vaultId, blockIndex: Number(result.Ok) };
+      return { success: false, error: ApiClient.formatProtocolError(result.Err), approvalMayHaveMutated };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Unknown stablecoin repayment error';
+      if (repaymentDispatched) {
+        return {
+          success: false,
+          ambiguous: true,
+          approvalMayHaveMutated,
+          error: `The stablecoin repayment was submitted but no typed result was received. Check the vault and ledger before retrying. ${detail}`,
+        };
+      }
+      return { success: false, approvalMayHaveMutated, error: detail };
+    }
+  });
+}
+
 
 /**
  * Repay icUSD to a vault.

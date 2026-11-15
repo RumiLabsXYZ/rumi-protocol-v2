@@ -664,7 +664,7 @@ export class walletOperations {
       const approvalResult = await icpActor.icrc2_approve({
         amount,
         spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-        expires_at: [],
+        expires_at: largeApprovalExpiry(),
         expected_allowance: [],
         memo: [],
         fee: [],
@@ -687,7 +687,7 @@ export class walletOperations {
     const approvalResult = await ledgerActor.icrc2_approve({
       amount,
       spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
-      expires_at: [],
+      expires_at: largeApprovalExpiry(),
       expected_allowance: [],
       memo: [],
       fee: [],

@@ -22,6 +22,15 @@ describe('legacy vault UI session-bound action wiring', () => {
     expect(vaultCard).toContain('protocolService.withdrawCollateralAndCloseVaultBound(');
   });
 
+  it('routes repayment through exact raw units and the pinned wallet context', () => {
+    expect(vaultCard).toContain("parseIcusdAmountToE8s(repayAmount)");
+    expect(vaultCard).toContain("parseExactTokenAmount(repayAmount, 6) * 100n");
+    expect(vaultCard).toContain('protocolService.repayToVaultBound(ctx, vault.vaultId, amountRaw)');
+    expect(vaultCard).toContain('protocolService.repayAndCloseVaultBound(ctx, vault.vaultId, amountRaw)');
+    expect(vaultCard).toContain('protocolService.repayToVaultWithStableBound(ctx, vault.vaultId, amountRaw, repayTokenType)');
+    expect(vaultCard).not.toContain('protocolManager.repayToVault(');
+  });
+
   it('keeps add-margin on the enabled exact-receipt recovery path', () => {
     expect(vaultCard).toContain('const ADD_MARGIN_V2_ENABLED: boolean = true');
     expect(vaultCard).toContain('parseExactTokenAmount(addCollateralAmount, collateralDecimals)');

@@ -4,7 +4,6 @@
   import type { Vault } from '../../services/types';
   import { protocolService } from '../../services/protocol';
   import { vaultStore } from '../../stores/vaultStore';
-  import { protocolManager } from '../../services/ProtocolManager';
   import { CANISTER_IDS } from '../../config';
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { interpolateMultiplier, computeProjectedRate } from '../../utils/interpolate';
@@ -627,16 +626,18 @@
   function setMaxRepay() {
     if (isProcessing) return;
     if (maxRepayable > 0) {
-      repayAmount = floorTo(maxRepayable, 8);
+      repayAmount = floorTo(maxRepayable, repayInputDecimals);
       repayMaxSelected = true;
       repayMaxAdjusted = false;
     }
   }
 
-  // icUSD is an 8-decimal token. Keep the native number input's constraint at
-  // token precision so a Max value such as 1.995 remains a valid entry, while
-  // the max attribute reflects the same floored amount passed to the API.
-  $: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, 8) : undefined;
+  // icUSD debt uses e8s, while ckUSDC/ckUSDT wallets use six-decimal ledger
+  // units. Keep Max and the native input constraint on the selected token's
+  // exact precision so the UI never generates an amount the bound path rejects.
+  $: repayInputDecimals = isCkStableRepay ? 6 : 8;
+  $: repayInputStep = isCkStableRepay ? '0.000001' : '0.00000001';
+  $: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, repayInputDecimals) : undefined;
 
   // A backend refresh can lower the interpolated debt and its partial-repay cap.
   // Only lower an untouched Max selection; never rewrite typed amounts, raise
@@ -826,25 +827,44 @@
   }
 
   async function handleRepay() {
-    const amount = parseFloat(repayAmount);
-    if (!amount || amount <= 0) { toastStore.error('Enter a valid amount', 8000); return; }
+    let amountRaw: bigint;
+    try {
+      amountRaw = repayTokenType === 'icUSD'
+        ? parseIcusdAmountToE8s(repayAmount)
+        : parseExactTokenAmount(repayAmount, 6) * 100n;
+    } catch (error) {
+      toastStore.error(error instanceof Error ? error.message : 'Enter a valid amount', 8000);
+      return;
+    }
+    if (amountRaw <= 0n) { toastStore.error('Enter a valid amount', 8000); return; }
+    const amount = Number(amountRaw) / E8S;
     // The fixed 0.1 icUSD floor still applies to partial repays (anti-spam guarantee on
     // the backend). The compound `repay_and_close_vault` path bypasses it so
     // stuck-zone vaults can be cleared — match that here.
-    if (!isRepayAndClose && !claimFullRepaySelected && amount < MIN_REPAY) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
+    if (!isRepayAndClose && !claimFullRepaySelected && amountRaw < MIN_REPAY_E8S) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
     if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
     clearMessages(); isProcessing = true;
+    const principalAtClick = $walletStore.principal;
+    const ownerAtClick = principalAtClick?.toText();
+    const walletAtClick = $currentWalletType, sessionAtClick = $walletSessionGeneration;
+    const current = () => $walletStore.isConnected && !$walletStore.loading
+      && $walletStore.principal?.toText() === ownerAtClick
+      && $currentWalletType === walletAtClick && $walletSessionGeneration === sessionAtClick;
     try {
-      const ctx = captureActionBoundContext(vault.owner);
+      const ctx = captureActionBoundContext(ownerAtClick);
+      // Preserve Oisy's click-bound signer channel before any internal actor or
+      // allowance work, then fail closed if that session changed while opening.
+      if (walletAtClick === WALLET_TYPES.OISY && principalAtClick) await openOisySignerChannel(principalAtClick);
+      if (!current()) throw new Error('Wallet session changed. No new repayment was submitted.');
       let result;
       if (isRepayAndClose) {
         // Compound: repay full debt + withdraw all collateral + close vault in
         // one backend call (one Oisy consent screen instead of three).
-        result = await protocolManager.repayAndCloseVault(vault.vaultId, amount);
+        result = await protocolService.repayAndCloseVaultBound(ctx, vault.vaultId, amountRaw);
       } else if (repayTokenType === 'icUSD') {
-        result = await protocolManager.repayToVault(vault.vaultId, amount);
+        result = await protocolService.repayToVaultBound(ctx, vault.vaultId, amountRaw);
       } else {
-        result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
+        result = await protocolService.repayToVaultWithStableBound(ctx, vault.vaultId, amountRaw, repayTokenType);
       }
       if (result.success) {
         const actionLabel = isRepayAndClose
@@ -871,6 +891,10 @@
         // Repaying lowers this collateral's aggregate debt: refresh ceiling headroom.
         appDataStore.fetchCollateralTotals(true).catch(() => {});
         dispatch('updated');
+      } else if (result.ambiguous) {
+        toastStore.info(result.error || 'The repayment outcome is unknown. Check the vault and ledger before retrying.', 12000);
+      } else if (result.approvalMayHaveMutated && !ctx.assertCurrent()) {
+        toastStore.info(`${result.error || 'The repayment was not confirmed.'} The allowance may have changed; reconnect the submitting wallet and check status before retrying.`, 12000);
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -1216,10 +1240,13 @@
                 {/if}
               </div>
               <div class="action-input-row">
-                <input type="number" class="action-input action-input-repay" bind:value={repayAmount}
-                  on:input={() => { repayMaxSelected = false; repayMaxAdjusted = false; }}
+                <input type="number" class="action-input action-input-repay" value={repayAmount}
+                  on:input={(event) => {
+                    repayAmount = event.currentTarget.value;
+                    repayMaxSelected = false; repayMaxAdjusted = false;
+                  }}
                   on:blur={() => clampInput('repay')}
-                  placeholder="0.00" min="0" max={repayInputMax} step="0.00000001" inputmode="decimal" disabled={isProcessing} />
+                  placeholder="0.00" min="0" max={repayInputMax} step={repayInputStep} inputmode="decimal" disabled={isProcessing} />
                 {#if bitcoinOnly}
                   <span class="token-selector" aria-label="Repayment token: icUSD">
                     <span class="token-dot token-dot-icusd"></span> icUSD

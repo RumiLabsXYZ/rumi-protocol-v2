@@ -4,14 +4,14 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Principal } from '@dfinity/principal';
 vi.mock('$lib/services/auth',async()=>{const {writable}=await import('svelte/store');return {currentWalletType:writable('plug'),walletSessionGeneration:writable(0),WALLET_TYPES:{OISY:'oisy'}};});
 vi.mock('$lib/services/oisySigner',()=>({openOisySignerChannel:fx.openChannel}));
-const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), add: vi.fn(), openChannel: vi.fn() }));
+const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), toastError:vi.fn() }));
 vi.mock('../../stores/wallet', async () => {
   const { writable } = await import('svelte/store');
   return { walletStore: Object.assign(writable({principal:null,tokenBalances:{}}), {refreshBalance:vi.fn()}) };
 });
 vi.mock('../../stores/collateralStore', () => ({ collateralStore: {getCollateralInfo:()=>({symbol:'ICP',decimals:8,price:10,minVaultDebt:10000000,interestRateApr:0,ledgerFee:10000})} }));
 vi.mock('../../stores/vaultStore', () => ({vaultStore:{refreshVault:vi.fn(),refreshVaults:vi.fn()}}));
-vi.mock('../../stores/toast', () => ({toastStore:{success:vi.fn(),error:vi.fn()}}));
+vi.mock('../../stores/toast', () => ({toastStore:{success:vi.fn(),error:fx.toastError,info:vi.fn()}}));
 vi.mock('../../stores/appDataStore', async () => {
   const {writable}=await import('svelte/store');
   return {appDataStore:{fetchProtocolStatus:async()=>{},fetchCollateralTotals:async()=>{}},protocolStatus:writable({}),collateralTotals:writable({})};
@@ -20,9 +20,16 @@ vi.mock('../../stores/seasonStore', async () => {
   const {writable}=await import('svelte/store');
   return {seasonStore:{ensureLoaded:()=>{}},earningActive:writable(false)};
 });
-vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:500000000}),addMarginToVaultBound:fx.add}}));
+vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:500000000,ckstableRepayFee:0.01}),addMarginToVaultBound:fx.add,repayToVaultBound:fx.repay,repayAndCloseVaultBound:fx.close,repayToVaultWithStableBound:fx.stable}}));
 vi.mock('../../services/ProtocolManager', () => ({protocolManager:{repayToVault:fx.repay,repayAndCloseVault:fx.close}}));
-vi.mock('../../services/protocol/apiClient', () => ({ApiClient:{getVaultInterestRate:async()=>0}}));
+vi.mock('../../services/protocol/apiClient', () => ({
+  ApiClient:{getVaultInterestRate:async()=>0},
+  parseIcusdAmountToE8s:(value:string)=>{
+    if(!/^(?:\d+(?:\.\d{0,8})?|\.\d{1,8})$/.test(value))throw new Error('Enter an icUSD amount with up to 8 decimal places');
+    const [whole='0',fraction='']=value.split('.');
+    return BigInt(whole||'0')*100_000_000n+BigInt((fraction+'00000000').slice(0,8));
+  }
+}));
 vi.mock('../../services/tokenService', () => ({TokenService:{getTokenBalance:async()=>0n}}));
 vi.mock('../../config', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../config')>();
@@ -35,17 +42,17 @@ import Harness from '../../../tests/vault-recovery-fixtures/RepayCard.svelte';
 import {walletStore} from '../../stores/wallet';
 import {currentWalletType,walletSessionGeneration} from '$lib/services/auth';
 let component:ReturnType<typeof mount>|null=null,target:HTMLDivElement;
-const base={vaultId:33,borrowedIcusd:303.9384,icpMargin:200,collateralAmount:200,collateralType:'ryjl3-tyaaa-aaaaa-aaaba-cai'};
+const base={vaultId:33,owner:'rrkah-fqaaa-aaaaa-aaaaq-cai',borrowedIcusd:303.9384,icpMargin:200,collateralAmount:200,collateralType:'ryjl3-tyaaa-aaaaa-aaaba-cai'};
 let vaultInput=writable({...base});
 const input=()=>target.querySelector<HTMLInputElement>('.action-input-repay')!;
 const max=()=>[...target.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.trim().startsWith('Max:'))!;
 const submit=()=>target.querySelector<HTMLButtonElement>('.btn-submit-debt')!;
 async function show(balance=30393000000n){
-  (walletStore as any).set({isConnected:true,loading:false,principal:Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai'),tokenBalances:{ICUSD:{raw:balance,formatted:String(Number(balance)/1e8)}}});
+  (walletStore as any).set({isConnected:true,loading:false,principal:Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai'),tokenBalances:{ICUSD:{raw:balance,formatted:String(Number(balance)/1e8)},CKUSDC:{raw:2000000n,formatted:'2.0'}}});
   component=mount(Harness,{target,props:{vaultInput}});await tick();await tick();
   [...target.querySelectorAll<HTMLButtonElement>('.pill-debt')].find(b=>b.textContent?.trim()==='Repay')!.click();await tick();
 }
-beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
+beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.toastError.mockReset();currentWalletType.set('plug');walletSessionGeneration.set(0);});
 afterEach(async()=>{if(component)await unmount(component);component=null;target.remove();});
 it('keeps an untouched Max selection valid when refreshed debt lowers the cap',async()=>{
  await show();max().click();await tick();const previous=input().valueAsNumber;
@@ -105,7 +112,7 @@ it('uses a wallet-limited near-full payment without closing and previews forgive
  expect(target.textContent).toContain('Estimated debt after payment: 0');
  expect(target.textContent).toContain('Estimated forgiveness: 0.005');
  submit().click();await tick();
- expect(fx.repay).toHaveBeenCalledWith(33,1.995);
+ expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({expectedPrincipalText:expect.any(String),assertCurrent:expect.any(Function)}),33,199_500_000n);
  expect(fx.close).not.toHaveBeenCalled();
 });
 it('shows exactly 0.1 as remaining debt rather than forgiven',async()=>{
@@ -115,6 +122,29 @@ it('shows exactly 0.1 as remaining debt rather than forgiven',async()=>{
  expect(target.textContent).toContain('Estimated debt after payment: 0.1');
  expect(target.textContent).not.toContain('Estimated forgiveness:');
  expect(submit().textContent?.trim()).toBe('Repay');
+});
+it('floors a ckUSDC Max to six decimals and dispatches the exact debt e8s',async()=>{
+ await show();
+ target.querySelector<HTMLButtonElement>('.token-selector')!.click();await tick();
+ [...target.querySelectorAll<HTMLButtonElement>('.token-option')].find(b=>b.textContent?.includes('ckUSDC'))!.click();await tick();
+ max().click();await tick();
+ expect(input().value).toMatch(/^\d+\.\d{1,6}$/);
+ expect(input().step).toBe('0.000001');
+ const [whole,fraction='']=input().value.split('.');
+ const raw=(BigInt(whole)*1_000_000n+BigInt((fraction+'000000').slice(0,6)))*100n;
+ submit().click();await tick();
+ expect(fx.stable).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),33,raw,'CKUSDC');
+});
+it('opens the Oisy signer channel before starting a bound repayment',async()=>{
+ currentWalletType.set('oisy');fx.repay.mockResolvedValue({success:true});
+ await show();input().value='0.12500002';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();
+ expect(submit().disabled).toBe(false);
+ submit().click();
+ await tick();
+ expect(fx.toastError).not.toHaveBeenCalled();
+ await vi.waitFor(()=>expect(fx.openChannel).toHaveBeenCalledOnce());
+ expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),33,12_500_002n);
+ expect(fx.openChannel.mock.invocationCallOrder[0]).toBeLessThan(fx.repay.mock.invocationCallOrder[0]);
 });
 
 async function deposit(){
