@@ -15,7 +15,7 @@
     {
       label: 'Built',
       title: 'Selected artifacts prepared',
-      detail: 'Backend and Points raw artifacts were built; the backend canonical candidate was verified.',
+      detail: 'Backend and Points raw artifacts were built. No production backend candidate was accepted from this tranche.',
       tone: 'built'
     },
     {
@@ -96,8 +96,9 @@
           <span class="stamp-label">Current status</span>
           <strong>Merged and CI-verified; production follow-through remains open</strong>
           <p>
-            Backend and Points raw artifacts were built, and the backend canonical candidate
-            was verified. This snapshot does not include production-installation or
+            Backend and Points raw artifacts were built. A later live-interface check identified
+            backend source-lineage reconciliation as required before accepting a production
+            backend candidate. This snapshot does not include production-installation or
             operation-specific recovery evidence for PR #641.
           </p>
           <a href="/security">View security archive <span aria-hidden="true">→</span></a>
@@ -188,8 +189,9 @@
       <div class="hold-copy">
         <p>
           The closure tranche still requires remaining production artifacts, exact installation
-          readbacks, and operation-specific Vault-202 recovery evidence. This snapshot includes no
-          activation evidence for EVM/public-open or native-XRP fanout.
+          readbacks, backend source-lineage reconciliation, and operation-specific Vault-202
+          recovery evidence. This snapshot includes no activation evidence for EVM/public-open or
+          native-XRP fanout.
           Those route-specific evidence gaps are not blockers for unrelated flows.
         </p>
         <p>
@@ -211,7 +213,8 @@
         <p>
           The merge statement is based on PR #641 and the matching reviewed and merged trees.
           CI statements refer only to the named hosted jobs. Build and candidate-verification
-          statements describe artifact preparation; they are not installation evidence.
+          statements describe artifact preparation; no backend production candidate is accepted
+          by this snapshot, and artifact preparation is not installation evidence.
         </p>
         <p>
           Installation requires a production readback tied to the exact artifact. Activation
