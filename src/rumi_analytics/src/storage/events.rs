@@ -49,7 +49,7 @@ pub enum SwapSource {
     Amm,
 }
 
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum LiquidityAction {
     Add,
     Remove,
@@ -144,7 +144,7 @@ pub struct AnalyticsAdminEvent {
 
 /// AMM Add/RemoveLiquidity event mirror, used to reconstruct per-(principal,
 /// pool_id) LP-share timelines for portfolio valuation.
-#[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct AnalyticsAmmLiquidityEvent {
     pub timestamp_ns: u64,
     pub source_event_id: u64,
@@ -298,6 +298,31 @@ evt_accessors!(evt_stability, EVT_STABILITY_LOG, AnalyticsStabilityEvent);
 evt_accessors!(evt_admin, EVT_ADMIN_LOG, AnalyticsAdminEvent);
 evt_accessors!(evt_amm_liquidity, EVT_AMM_LIQUIDITY_LOG, AnalyticsAmmLiquidityEvent);
 
+/// Snapshot a bounded number of normalized AMM-liquidity fingerprints for the
+/// one-time generation cutover. Reading the stable log once keeps the callback
+/// cost O(existing rows + source page), rather than scanning stable memory once
+/// per source event.
+fn validate_amm_liquidity_cutover_scan_bound(len: u64, max_rows: u64) -> Result<(), String> {
+    if len > max_rows {
+        return Err(format!(
+            "AMM liquidity generation cutover fingerprint scan would exceed bound: {} rows > {}",
+            len, max_rows
+        ));
+    }
+    Ok(())
+}
+
+pub fn bounded_amm_liquidity_events(
+    max_rows: u64,
+) -> Result<Vec<AnalyticsAmmLiquidityEvent>, String> {
+    EVT_AMM_LIQUIDITY_LOG.with(|log| {
+        let log = log.borrow();
+        let len = log.len();
+        validate_amm_liquidity_cutover_scan_bound(len, max_rows)?;
+        Ok((0..len).filter_map(|index| log.get(index)).collect())
+    })
+}
+
 /// Append an AddMargin row only when its backend source event has not already
 /// been represented. The index claim and log append are synchronous, so no
 /// canister message can interleave between them.
@@ -342,6 +367,14 @@ pub fn index_existing_add_margin_rows(from: u64, limit: u64) -> u64 {
 mod tests {
     use super::*;
     use candid::Principal;
+
+    #[test]
+    fn amm_liquidity_cutover_fingerprint_scan_is_explicitly_bounded() {
+        assert!(validate_amm_liquidity_cutover_scan_bound(10_000, 10_000).is_ok());
+        let error = validate_amm_liquidity_cutover_scan_bound(10_001, 10_000)
+            .expect_err("a mature mirror above the reviewed bound must hold fail-closed");
+        assert!(error.contains("10001 rows > 10000"));
+    }
 
     #[test]
     fn liquidation_event_roundtrip() {

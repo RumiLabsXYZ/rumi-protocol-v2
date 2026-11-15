@@ -94,6 +94,9 @@ cursor_accessors!(icusd_blocks, CURSOR_ICUSD_BLOCKS);
 pub mod amm_liquidity_legacy {
     use super::*;
 
+    /// For forensic compatibility only. New-generation tailing must never use
+    /// this pre-reset positional cursor for admission or progress.
+    #[allow(dead_code)]
     pub fn get() -> u64 {
         CURSOR_AMM_LIQUIDITY.with(|cursor| *cursor.borrow().get())
     }
