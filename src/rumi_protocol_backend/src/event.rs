@@ -2641,7 +2641,6 @@ fn apply_pending_payout_event(state: &mut State, event: PendingPayoutEvent) {
                 || !transfer.too_old_confirmed
                 || transfer.in_flight
                 || transfer.no_effect_proof.is_some()
-                || transfer.retry_count >= crate::MAX_PENDING_RETRIES
                 || proof.operation_id != operation_id
                 || proof.new_attempt_nonce != attempt_nonce
                 || proof.new_attempt_nonce == proof.old_attempt_nonce
@@ -4082,7 +4081,6 @@ pub fn record_pending_payout_rearmed(
                 || scan.snapshot_log_length != proof.snapshot_log_length
                 || scan.next_index != proof.snapshot_log_length
         })
-        || transfer.retry_count >= crate::MAX_PENDING_RETRIES
         || proof.new_attempt_nonce == 0
         || proof.new_attempt_nonce == proof.old_attempt_nonce
         || proof.operation_id != transfer.operation_id
@@ -6208,7 +6206,7 @@ mod filter_tests {
             owner,
             margin: ICP::new(100),
             collateral_type: ledger,
-            retry_count: 9,
+            retry_count: crate::MAX_PENDING_RETRIES,
             op_nonce: old_nonce,
             ledger: Some(ledger),
             transfer_amount_raw: Some(90),
@@ -6274,7 +6272,7 @@ mod filter_tests {
         let (_, recovered) = state.get_pending_payout(operation_id).unwrap();
         assert_eq!(recovered.operation_id, operation_id);
         assert_eq!(recovered.op_nonce, new_nonce);
-        assert_eq!(recovered.retry_count, 9);
+        assert_eq!(recovered.retry_count, crate::MAX_PENDING_RETRIES);
         assert!(!recovered.held_for_manual_retry);
         assert!(recovered.no_effect_proof.is_some());
         assert_eq!(recovered.history_start_index, None);
@@ -7408,7 +7406,11 @@ mod three_usd_reserve_payout_replay_tests {
             complete_prefix: true,
             verified_at_ns: 99,
         };
-        assert!(record_pending_payout_rearmed(&mut state, proof));
+        assert!(record_pending_payout_rearmed(&mut state, proof.clone()));
+        assert!(
+            !record_pending_payout_rearmed(&mut state, proof),
+            "replaying an already committed proof must not rearm or append a second attempt"
+        );
         apply_pending_payout_event(&mut replayed, PendingPayoutEvent::Rearmed {
             operation_id,
             attempt_nonce: new_nonce,

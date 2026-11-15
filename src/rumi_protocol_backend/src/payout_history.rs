@@ -43,6 +43,13 @@ pub enum ReserveCandidateDiscoveryProgress {
     Held,
 }
 
+/// The payout owner may recover their own row. The configured developer may
+/// drive the same proof-only recovery for canister-owned rows whose registered
+/// canister does not expose a recovery call into this backend.
+pub fn recovery_actor_authorized(owner: Principal, caller: Principal, developer: Principal) -> bool {
+    caller != Principal::anonymous() && (caller == owner || caller == developer)
+}
+
 /// Discover a lost-reply 3USD reserve payout candidate from the exact
 /// pre-dispatch history boundary. This never proves absence and never rearms:
 /// only a unique exact tuple in a complete direct-ledger prefix is recorded.
@@ -59,8 +66,9 @@ pub async fn advance_owner_reserve_candidate_discovery(
     }) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
     };
-    if row.owner != caller {
-        return Err("only the payout owner can request candidate discovery".into());
+    let developer = crate::state::read_state(|state| state.developer_principal);
+    if !recovery_actor_authorized(row.owner, caller, developer) {
+        return Err("caller is neither the payout owner nor configured developer".into());
     }
     let Some(attempt) = reserve_attempt(&payout, row.op_nonce) else {
         return Ok(ReserveCandidateDiscoveryProgress::Held);
@@ -78,7 +86,7 @@ pub async fn advance_owner_reserve_candidate_discovery(
         || payout.operation_id != operation_id
         || payout.ledger == Principal::anonymous()
         || payout.source.owner != ic_cdk::id()
-        || payout.destination.owner != caller
+        || payout.destination.owner != row.owner
         || payout.gross_e8s.checked_sub(payout.net_e8s) != Some(payout.expected_fee_e8s)
         || attempt.fee_arg_e8s != Some(payout.expected_fee_e8s)
         || attempt.candidate_block_index.is_some()
@@ -551,8 +559,9 @@ pub async fn advance_owner_rearm(
     let Some((_, row)) = initial else {
         return Err("pending payout no longer exists".into());
     };
-    if row.owner != caller {
-        return Err("only the payout owner can request history reconciliation".into());
+    let developer = crate::state::read_state(|state| state.developer_principal);
+    if !recovery_actor_authorized(row.owner, caller, developer) {
+        return Err("caller is neither the payout owner nor configured developer".into());
     }
     if row.history_candidate_seen {
         return Ok(PayoutRearmProgress::CandidateHeld);
@@ -726,7 +735,6 @@ fn eligible(row: &crate::state::PendingMarginTransfer) -> bool {
         && row.history_start_index.is_some()
         && row.ledger.is_some()
         && row.transfer_amount_raw.is_some_and(|amount| amount > 0)
-        && row.retry_count < crate::MAX_PENDING_RETRIES
         && row.no_effect_proof.is_none()
         && !row.history_candidate_seen
 }
@@ -766,7 +774,7 @@ fn commit_rearm(
             return false;
         };
         if !eligible(&row)
-            || row.owner != caller
+            || !recovery_actor_authorized(row.owner, caller, state.developer_principal)
             || !scan_matches_row(&scan, operation_id, &row)
             || scan.next_index != scan.snapshot_log_length
             || row.history_scan.as_ref() != Some(&scan)
@@ -1242,6 +1250,35 @@ mod tests {
             !eligible(&row),
             "legacy row cannot be opted in by migration"
         );
+    }
+
+    #[test]
+    fn developer_may_recover_canister_owned_payout_rows_only() {
+        let developer = Principal::from_slice(&[9]);
+        let unrelated = Principal::from_slice(&[10]);
+        let stability_pool = Principal::from_slice(&[2]);
+        let liquidation_bot = Principal::from_slice(&[3]);
+        assert!(recovery_actor_authorized(stability_pool, developer, developer));
+        assert!(recovery_actor_authorized(liquidation_bot, developer, developer));
+        assert!(!recovery_actor_authorized(stability_pool, unrelated, developer));
+        assert!(!recovery_actor_authorized(
+            stability_pool,
+            Principal::anonymous(),
+            developer,
+        ));
+    }
+
+    #[test]
+    fn retry_cap_does_not_block_too_old_history_proof_but_does_not_create_proof() {
+        let mut row = pending_row();
+        row.held_for_manual_retry = true;
+        row.reconciliation_required = true;
+        row.retry_count = crate::MAX_PENDING_RETRIES;
+        row.too_old_confirmed = false;
+        row.history_start_index = Some(10);
+        assert!(!eligible(&row), "retry-cap disposition alone is not no-effect proof");
+        row.too_old_confirmed = true;
+        assert!(eligible(&row), "typed TooOld may enter bounded history proof even at cap");
     }
 
     #[test]

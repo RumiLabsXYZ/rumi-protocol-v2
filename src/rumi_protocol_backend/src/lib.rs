@@ -3293,7 +3293,7 @@ pub async fn process_one_pending_payout(operation_id: u128) {
                 return None;
             }
         }
-        if transfer.retry_count >= MAX_PENDING_RETRIES {
+        if transfer.retry_count >= MAX_PENDING_RETRIES && transfer.no_effect_proof.is_none() {
             s.mutate_pending_payout(operation_id, |row| row.held_for_manual_retry = true);
             return None;
         }
@@ -3683,13 +3683,18 @@ fn finish_three_usd_reserve_candidate_recovery(
 /// through the generic recovery flow. `Some(false)` is held without resend.
 pub async fn recover_three_usd_reserve_payout_candidate(
     operation_id: u128,
-    owner: Principal,
+    requester: Principal,
 ) -> Option<bool> {
-    let reserve_linked = crate::state::read_state(|state| {
-        state.three_usd_reserve_payout_operation_keys.contains_key(&operation_id)
-    });
+    let (owner, developer, reserve_linked) = crate::state::read_state(|state| {
+        let owner = state.get_pending_payout(operation_id)?.1.owner;
+        Some((owner, state.developer_principal,
+            state.three_usd_reserve_payout_operation_keys.contains_key(&operation_id)))
+    })?;
+    if !crate::payout_history::recovery_actor_authorized(owner, requester, developer) {
+        return Some(false);
+    }
     if reserve_linked && !crate::state::read_state(|state| has_three_usd_reserve_candidate(state, operation_id)) {
-        match crate::payout_history::advance_owner_reserve_candidate_discovery(operation_id, owner)
+        match crate::payout_history::advance_owner_reserve_candidate_discovery(operation_id, requester)
             .await
         {
             Ok(crate::payout_history::ReserveCandidateDiscoveryProgress::CandidateRecorded) => {}

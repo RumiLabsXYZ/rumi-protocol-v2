@@ -10961,6 +10961,112 @@ struct PendingPayoutPage {
     next_cursor: Option<u128>,
 }
 
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+enum OperatorPayoutRecoveryStatus {
+    HistoryScanInProgress,
+    RearmedAndAttempted,
+    Settled,
+    HeldAmbiguous,
+    HeldForManualReview,
+    HeldWithoutAbsenceProof,
+    HeldUnsupportedOrLegacy,
+    NotHeld,
+}
+
+#[cfg(test)]
+mod operator_payout_recovery_status_tests {
+    use super::{
+        is_configured_payout_recovery_operator, operator_payout_recovery_status,
+        OperatorPayoutRecoveryStatus,
+    };
+    use candid::Principal;
+    use rumi_protocol_backend::numeric::ICP;
+    use rumi_protocol_backend::state::{PendingMarginTransfer, PendingPayoutKind};
+
+    fn row() -> PendingMarginTransfer {
+        PendingMarginTransfer {
+            vault_id: 1,
+            operation_id: 2,
+            payout_kind: PendingPayoutKind::Margin,
+            owner: Principal::from_slice(&[3]),
+            margin: ICP::new(100),
+            collateral_type: Principal::from_slice(&[4]),
+            retry_count: rumi_protocol_backend::MAX_PENDING_RETRIES,
+            op_nonce: 5,
+            ledger: Some(Principal::from_slice(&[4])),
+            transfer_amount_raw: Some(90),
+            held_for_manual_retry: true,
+            reconciliation_required: false,
+            in_flight: false,
+            too_old_confirmed: false,
+            history_start_index: Some(10),
+            rearm_schema_version: 1,
+            history_scan: None,
+            history_candidate_seen: false,
+            no_effect_proof: None,
+            history_log_length: None,
+            history_cursor: 0,
+            min_net_collateral_raw: None,
+        }
+    }
+
+    #[test]
+    fn capped_typed_no_effect_is_explicitly_held_without_resend_or_payment_claim() {
+        assert_eq!(
+            operator_payout_recovery_status(&row()),
+            OperatorPayoutRecoveryStatus::HeldWithoutAbsenceProof,
+        );
+    }
+
+    #[test]
+    fn ambiguous_outcome_stays_held_and_is_not_misreported_as_no_effect() {
+        let mut row = row();
+        row.reconciliation_required = true;
+        assert_eq!(
+            operator_payout_recovery_status(&row),
+            OperatorPayoutRecoveryStatus::HeldAmbiguous,
+        );
+    }
+
+    #[test]
+    fn operator_endpoint_rejects_non_developer_and_anonymous_callers() {
+        let developer = Principal::from_slice(&[9]);
+        assert!(is_configured_payout_recovery_operator(developer, developer));
+        assert!(!is_configured_payout_recovery_operator(
+            Principal::from_slice(&[10]),
+            developer,
+        ));
+        assert!(!is_configured_payout_recovery_operator(
+            Principal::anonymous(),
+            developer,
+        ));
+    }
+}
+
+fn operator_payout_recovery_status(
+    transfer: &rumi_protocol_backend::state::PendingMarginTransfer,
+) -> OperatorPayoutRecoveryStatus {
+    if transfer.too_old_confirmed {
+        OperatorPayoutRecoveryStatus::HistoryScanInProgress
+    } else if transfer.reconciliation_required {
+        OperatorPayoutRecoveryStatus::HeldAmbiguous
+    } else if transfer.held_for_manual_retry
+        && transfer.retry_count >= rumi_protocol_backend::MAX_PENDING_RETRIES
+    {
+        // A retry cap is not proof the ledger did nothing. Keep this liability
+        // held and do not assign a new nonce or dispatch another transfer.
+        OperatorPayoutRecoveryStatus::HeldWithoutAbsenceProof
+    } else if transfer.held_for_manual_retry {
+        OperatorPayoutRecoveryStatus::HeldUnsupportedOrLegacy
+    } else {
+        OperatorPayoutRecoveryStatus::NotHeld
+    }
+}
+
+fn is_configured_payout_recovery_operator(caller: Principal, developer: Principal) -> bool {
+    caller != Principal::anonymous() && caller == developer
+}
+
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 struct PendingPayoutView {
     operation_id: u128,
@@ -11085,6 +11191,77 @@ async fn recover_pending_payout(operation_id: u128) -> Result<bool, ProtocolErro
     }
     rumi_protocol_backend::process_one_pending_payout(operation_id).await;
     Ok(read_state(|s| s.get_pending_payout(operation_id).is_none()))
+}
+
+/// Developer-operated recovery for held payouts whose owner is a canister
+/// (such as the Stability Pool) and therefore cannot call the owner endpoint.
+/// This does not waive evidence requirements: only a typed TooOld can enter
+/// the exact ICRC-3 no-effect scan/rearm flow. Other held rows return an
+/// explicit disposition and remain untouched.
+#[candid_method(update)]
+#[update]
+async fn operator_recover_pending_payout(
+    operation_id: u128,
+) -> Result<OperatorPayoutRecoveryStatus, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !is_configured_payout_recovery_operator(
+        caller,
+        read_state(|state| state.developer_principal),
+    ) {
+        return Err(ProtocolError::GenericError(
+            "Only the configured developer can operate held payout recovery".into(),
+        ));
+    }
+    let transfer = read_state(|state| {
+        state
+            .get_pending_payout(operation_id)
+            .map(|(_, transfer)| transfer)
+    })
+    .ok_or_else(|| {
+        ProtocolError::GenericError("No pending payout with this operation ID".into())
+    })?;
+    if !transfer.held_for_manual_retry && !transfer.reconciliation_required {
+        return Ok(OperatorPayoutRecoveryStatus::NotHeld);
+    }
+
+    if let Some(recovered) = rumi_protocol_backend::recover_three_usd_reserve_payout_candidate(
+        operation_id,
+        caller,
+    )
+    .await
+    {
+        return Ok(if recovered {
+            OperatorPayoutRecoveryStatus::Settled
+        } else {
+            OperatorPayoutRecoveryStatus::HeldForManualReview
+        });
+    }
+
+    if !transfer.too_old_confirmed {
+        return Ok(operator_payout_recovery_status(&transfer));
+    }
+    match rumi_protocol_backend::payout_history::advance_owner_rearm(operation_id, caller)
+        .await
+        .map_err(ProtocolError::GenericError)?
+    {
+        rumi_protocol_backend::payout_history::PayoutRearmProgress::Rearmed => {
+            rumi_protocol_backend::process_one_pending_payout(operation_id).await;
+            Ok(if read_state(|state| state.get_pending_payout(operation_id).is_none()) {
+                OperatorPayoutRecoveryStatus::Settled
+            } else {
+                OperatorPayoutRecoveryStatus::RearmedAndAttempted
+            })
+        }
+        rumi_protocol_backend::payout_history::PayoutRearmProgress::Scanning => {
+            Ok(OperatorPayoutRecoveryStatus::HistoryScanInProgress)
+        }
+        rumi_protocol_backend::payout_history::PayoutRearmProgress::CandidateHeld => {
+            Ok(OperatorPayoutRecoveryStatus::HeldAmbiguous)
+        }
+        rumi_protocol_backend::payout_history::PayoutRearmProgress::UnsupportedHeld => {
+            Ok(OperatorPayoutRecoveryStatus::HeldUnsupportedOrLegacy)
+        }
+    }
 }
 
 #[candid_method(update)]
