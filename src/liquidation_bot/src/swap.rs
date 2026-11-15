@@ -171,6 +171,31 @@ pub async fn prepare_icp_for_ckusdc(
     config: &BotConfig,
     icp_amount_e8s: u64,
 ) -> Result<PreparedSwap, SwapAttemptError> {
+    prepare_icp_for_ckusdc_with_oracle_floor(config, icp_amount_e8s, None).await
+}
+
+/// Prepare a liquidation-claim swap using the oracle price pinned by the
+/// backend when it admitted this exact claim. The quote still limits normal
+/// execution slippage, while the oracle floor prevents a low manipulated quote
+/// from lowering the minimum accepted output.
+pub async fn prepare_claim_icp_for_ckusdc(
+    config: &BotConfig,
+    icp_amount_e8s: u64,
+    claim_collateral_price_e8s: u64,
+) -> Result<PreparedSwap, SwapAttemptError> {
+    prepare_icp_for_ckusdc_with_oracle_floor(
+        config,
+        icp_amount_e8s,
+        Some(claim_collateral_price_e8s),
+    )
+    .await
+}
+
+async fn prepare_icp_for_ckusdc_with_oracle_floor(
+    config: &BotConfig,
+    icp_amount_e8s: u64,
+    claim_collateral_price_e8s: Option<u64>,
+) -> Result<PreparedSwap, SwapAttemptError> {
     require_icpswap_pool_set(config).map_err(SwapAttemptError::NoEffect)?;
     let zero_for_one = config
         .icpswap_zero_for_one
@@ -190,7 +215,42 @@ pub async fn prepare_icp_for_ckusdc(
         ));
     }
 
-    let min_output = apply_slippage(quoted_output, config.max_slippage_bps);
+    if config.max_slippage_bps > 10_000 {
+        return Err(SwapAttemptError::NoEffect(
+            "configured slippage exceeds 10000 bps".to_string(),
+        ));
+    }
+
+    let icp_fee = swap_input_fee_e8s(config);
+    let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(FALLBACK_LEDGER_FEE);
+    let quote_minimum = apply_slippage(quoted_output, config.max_slippage_bps);
+    let min_output = if let Some(price_e8s) = claim_collateral_price_e8s {
+        let oracle_minimum = oracle_bound_minimum_output_e6(
+            icp_amount_e8s,
+            price_e8s,
+            icp_fee,
+            ckusdc_fee,
+            config.max_slippage_bps,
+        )
+        .ok_or_else(|| {
+            SwapAttemptError::NoEffect(
+                "claim oracle output floor is zero, invalid, or overflowed".to_string(),
+            )
+        })?;
+        claim_minimum_output_e6(
+            quoted_output,
+            oracle_minimum,
+            config.max_slippage_bps,
+        )
+        .ok_or_else(|| {
+            SwapAttemptError::NoEffect(format!(
+                "ICPSwap quote {} ckUSDC e6 is below claim oracle floor {} e6",
+                quoted_output, oracle_minimum
+            ))
+        })?
+    } else {
+        quote_minimum
+    };
 
     log!(
         crate::INFO,
@@ -200,9 +260,6 @@ pub async fn prepare_icp_for_ckusdc(
         min_output
     );
 
-    let icp_fee = swap_input_fee_e8s(config);
-    let ckusdc_fee = config.ckusdc_fee_e6.unwrap_or(FALLBACK_LEDGER_FEE);
-
     Ok(PreparedSwap {
         amount_in_e8s: icp_amount_e8s,
         amount_out_minimum_e6: min_output,
@@ -210,6 +267,136 @@ pub async fn prepare_icp_for_ckusdc(
         input_fee_e8s: icp_fee,
         output_fee_e6: ckusdc_fee,
     })
+}
+
+/// Oracle-bound minimum gross pool output for a liquidation swap.
+///
+/// ICP price is the fresh price pinned in the backend claim. ckUSDC is valued
+/// at its $1 peg because this flow has no independent ckUSDC oracle; the
+/// configured max slippage is the aggregate discount budget for pool fees,
+/// price impact, execution movement, and tolerated peg deviation. The ICP
+/// input fee is valued at the same pinned price. The result is the required
+/// net ckUSDC amount plus the exact ckUSDC output ledger fee, because ICPSwap
+/// enforces `amountOutMinimum` against gross pool output.
+pub(crate) fn oracle_bound_minimum_output_e6(
+    amount_in_e8s: u64,
+    collateral_price_e8s: u64,
+    input_fee_e8s: u64,
+    output_fee_e6: u64,
+    allowed_discount_bps: u16,
+) -> Option<u64> {
+    const CKUSDC_E6_PER_USD_E8: u128 = 10_000_000_000;
+    const BPS_DENOMINATOR: u128 = 10_000;
+
+    if amount_in_e8s == 0 || collateral_price_e8s == 0 || allowed_discount_bps > 10_000 {
+        return None;
+    }
+    let total_input = amount_in_e8s.checked_add(input_fee_e8s)?;
+    let discounted_numerator = u128::from(total_input)
+        .checked_mul(u128::from(collateral_price_e8s))?
+        .checked_mul(BPS_DENOMINATOR - u128::from(allowed_discount_bps))?;
+    let denominator = CKUSDC_E6_PER_USD_E8.checked_mul(BPS_DENOMINATOR)?;
+    // Round the required net amount up, then add the transfer fee to form the
+    // gross pool-output minimum enforced by ICPSwap.
+    let net_minimum = discounted_numerator
+        .checked_add(denominator.checked_sub(1)?)?
+        .checked_div(denominator)?;
+    let gross_minimum = net_minimum.checked_add(u128::from(output_fee_e6))?;
+    let gross_minimum = u64::try_from(gross_minimum).ok()?;
+    (gross_minimum > output_fee_e6).then_some(gross_minimum)
+}
+
+pub(crate) fn claim_minimum_output_e6(
+    quoted_output_e6: u64,
+    oracle_minimum_e6: u64,
+    allowed_discount_bps: u16,
+) -> Option<u64> {
+    if quoted_output_e6 == 0
+        || quoted_output_e6 < oracle_minimum_e6
+        || allowed_discount_bps > 10_000
+    {
+        return None;
+    }
+    let quote_minimum = apply_slippage(quoted_output_e6, allowed_discount_bps);
+    Some(quote_minimum.max(oracle_minimum_e6))
+}
+
+#[cfg(test)]
+mod oracle_floor_tests {
+    use super::*;
+
+    #[test]
+    fn claim_floor_rejects_manipulated_low_quote() {
+        let floor = oracle_bound_minimum_output_e6(
+            100_000_000,
+            100_000_000,
+            10_000,
+            10_000,
+            100,
+        )
+        .unwrap();
+        assert_eq!(floor, 1_000_099);
+        assert_eq!(claim_minimum_output_e6(900_000, floor, 100), None);
+    }
+
+    #[test]
+    fn claim_floor_rounds_up_and_charges_each_ledger_fee() {
+        // A fractional base-unit valuation rounds up; ICP input fee is valued
+        // at the pinned oracle price and ckUSDC's exact output fee is added
+        // back to the net target for ICPSwap's gross-output check.
+        assert_eq!(
+            oracle_bound_minimum_output_e6(1, 1, 0, 0, 0),
+            Some(1)
+        );
+        assert_eq!(
+            oracle_bound_minimum_output_e6(
+                100_000_000,
+                100_000_000,
+                10_000,
+                10_000,
+                100,
+            ),
+            Some(1_000_099)
+        );
+        assert_eq!(1_000_099 - 10_000, 990_099);
+    }
+
+    #[test]
+    fn peg_assumption_is_one_usd_with_only_configured_discount_budget() {
+        // At the documented $1 ckUSDC reference, a 2% depeg plus the output
+        // fee exceeds a 1% aggregate discount budget and is refused. The
+        // $1,000,000 gross target preserves $990,000 net after the fee.
+        let floor = oracle_bound_minimum_output_e6(
+            100_000_000,
+            100_000_000,
+            0,
+            10_000,
+            100,
+        )
+        .unwrap();
+        assert_eq!(floor, 1_000_000);
+        assert_eq!(floor - 10_000, 990_000);
+        assert_eq!(claim_minimum_output_e6(990_000, floor, 100), None);
+    }
+
+    #[test]
+    fn healthy_quote_keeps_the_existing_quote_slippage_bound() {
+        let floor = oracle_bound_minimum_output_e6(
+            100_000_000,
+            100_000_000,
+            10_000,
+            10_000,
+            100,
+        )
+        .unwrap();
+        // Quote is 0.5% above the $1 gross reference. The oracle floor is
+        // stricter than the original one-percent quote-slippage minimum.
+        assert_eq!(
+            claim_minimum_output_e6(1_005_000, floor, 100),
+            Some(1_000_099)
+        );
+        assert_eq!(1_000_099 - 10_000, 990_099);
+    }
 }
 
 /// Dispatch one already prepared call. Any returned error is ambiguous because

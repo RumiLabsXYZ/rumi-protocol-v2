@@ -219,14 +219,23 @@ async fn choose_bounded_topup_amount(
     config: &BotConfig,
     remaining_icp: u64,
     shortfall_e6: u64,
+    collateral_price_e8s: u64,
 ) -> Result<Option<u64>, String> {
     if remaining_icp == 0 || shortfall_e6 == 0 {
         return Ok(None);
     }
-    let conservative_output = |quoted: u64| {
-        (quoted as u128)
-            .saturating_mul(10_000u128.saturating_sub(config.max_slippage_bps as u128))
-            .checked_div(10_000)
+    let conservative_output = |quoted: u64, input: u64| {
+        let oracle_floor = crate::swap::oracle_bound_minimum_output_e6(
+            input,
+            collateral_price_e8s,
+            crate::swap::swap_input_fee_e8s(config),
+            config.ckusdc_fee_e6.unwrap_or(10_000),
+            config.max_slippage_bps,
+        );
+        oracle_floor
+            .and_then(|floor| {
+                crate::swap::claim_minimum_output_e6(quoted, floor, config.max_slippage_bps)
+            })
             .unwrap_or(0)
     };
     let mut low = 1u64;
@@ -239,14 +248,14 @@ async fn choose_bounded_topup_amount(
         }
         let mid = low + (high - low) / 2;
         let quoted = swap::quote_icp_for_ckusdc(config, mid).await?;
-        if conservative_output(quoted) >= u128::from(shortfall_e6) {
+        if conservative_output(quoted, mid) >= shortfall_e6 {
             high = mid;
         } else {
             low = mid.saturating_add(1);
         }
     }
     let quoted = swap::quote_icp_for_ckusdc(config, low).await?;
-    if conservative_output(quoted) >= u128::from(shortfall_e6) {
+    if conservative_output(quoted, low) >= shortfall_e6 {
         Ok(Some(low))
     } else {
         Ok(None)
@@ -1624,7 +1633,13 @@ pub async fn process_pending() {
         }
     };
 
-    let swap_result = match swap::prepare_icp_for_ckusdc(&config, swap_amount).await {
+    let swap_result = match swap::prepare_claim_icp_for_ckusdc(
+        &config,
+        swap_amount,
+        collateral_price,
+    )
+    .await
+    {
         Err(error) => Err(error),
         Ok(prepared) if !swap_fits_claim(collateral_received_amount, prepared.amount_in_e8s, prepared.input_fee_e8s) => {
             Err(swap::SwapAttemptError::NoEffect(format!(
@@ -1855,7 +1870,7 @@ pub async fn process_pending() {
         let remaining_icp = claim_icp_remaining(collateral_received_amount, swap_amount, swap_input_fees_e8s);
         let max_topup_icp = max_swap_input_for_claim(remaining_icp, swap::swap_input_fee_e8s(&config));
         let mut topup_fee_e8s = 0u64;
-        match choose_bounded_topup_amount(&config, max_topup_icp, shortfall).await {
+        match choose_bounded_topup_amount(&config, max_topup_icp, shortfall, collateral_price).await {
             Ok(Some(topup_icp)) => {
                 let before = match swap::balance_of_self_ckusdc(&config).await {
                     Ok(balance) => balance,
@@ -1865,7 +1880,13 @@ pub async fn process_pending() {
                         return;
                     }
                 };
-                let topup_result = match swap::prepare_icp_for_ckusdc(&config, topup_icp).await {
+                let topup_result = match swap::prepare_claim_icp_for_ckusdc(
+                    &config,
+                    topup_icp,
+                    collateral_price,
+                )
+                .await
+                {
                     Err(error) => Err(error),
                     Ok(prepared) if !swap_fits_claim(remaining_icp, prepared.amount_in_e8s, prepared.input_fee_e8s) => {
                         Err(swap::SwapAttemptError::NoEffect(format!(
