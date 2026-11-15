@@ -1859,6 +1859,14 @@ pub struct XrpPendingDeposit {
     pub reserve_base_drops: u64,
 }
 
+/// Temporary admission reservation made before open_xrp_vault awaits threshold
+/// address derivation. No custody address has been returned while this exists.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XrpPendingOpenReservation {
+    pub owner: Principal,
+    pub reserved_at_ns: u64,
+}
+
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
 /// no IC ledger, so this reserved principal is only an opaque key (15 bytes — not a
 /// valid 10-byte canister id, so it cannot collide with a real canister). The XRP
@@ -4682,6 +4690,10 @@ pub struct State {
     /// `#[serde(default)]` (State is ciborium/serde-encoded — storage.rs).
     #[serde(default)]
     pub xrp_pending_deposits: BTreeMap<u64, XrpPendingDeposit>,
+    /// Bounded, short-lived slots for concurrent native-XRP opens. A stale
+    /// reservation is safe to release because no address has been returned.
+    #[serde(default)]
+    pub xrp_pending_open_reservations: BTreeMap<u64, XrpPendingOpenReservation>,
 
     /// SEC-11 immutable original custody binding and opening ledger cutoff.
     #[serde(default)]
@@ -5068,6 +5080,7 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_pending_open_reservations: BTreeMap::new(),
             xrp_vault_origins: BTreeMap::new(),
             xrp_topup_receipts: BTreeMap::new(),
             xrp_topup_receipt_counts: BTreeMap::new(),
@@ -5405,6 +5418,7 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_pending_open_reservations: BTreeMap::new(),
             xrp_vault_origins: BTreeMap::new(),
             xrp_topup_receipts: BTreeMap::new(),
             xrp_topup_receipt_counts: BTreeMap::new(),
@@ -14167,6 +14181,7 @@ mod tests {
         let restored: State =
             ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
         assert!(restored.xrp_pending_deposits.is_empty());
+        assert!(restored.xrp_pending_open_reservations.is_empty());
     }
 
     #[test]

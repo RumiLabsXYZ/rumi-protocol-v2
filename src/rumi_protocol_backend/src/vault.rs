@@ -3539,6 +3539,58 @@ pub struct XrpVaultOpenInfo {
     pub reserve_base_drops: u64,
 }
 
+const MAX_XRP_PENDING_GLOBAL: usize = 256;
+const XRP_OPEN_RESERVATION_TTL_NS: u64 = 5 * 60 * 1_000_000_000;
+
+fn reserve_xrp_open_slot(
+    s: &mut crate::state::State,
+    caller: Principal,
+    now_ns: u64,
+) -> Result<u64, ProtocolError> {
+    s.xrp_pending_open_reservations.retain(|_, reservation| {
+        now_ns.saturating_sub(reservation.reserved_at_ns) <= XRP_OPEN_RESERVATION_TTL_NS
+    });
+    let caller_has_open = s
+        .xrp_pending_deposits
+        .values()
+        .any(|pending| pending.owner == caller)
+        || s.xrp_pending_open_reservations
+            .values()
+            .any(|reservation| reservation.owner == caller);
+    if caller_has_open {
+        return Err(ProtocolError::GenericError(
+            "An XRP deposit is already pending; confirm or cancel it before opening another."
+                .to_string(),
+        ));
+    }
+    if s.xrp_pending_deposits.len() + s.xrp_pending_open_reservations.len()
+        >= MAX_XRP_PENDING_GLOBAL
+    {
+        return Err(ProtocolError::GenericError(
+            "XRP deposit staging is full; please retry after pending deposits clear.".to_string(),
+        ));
+    }
+    let vault_id = s.increment_vault_id();
+    s.xrp_pending_open_reservations.insert(
+        vault_id,
+        crate::state::XrpPendingOpenReservation {
+            owner: caller,
+            reserved_at_ns: now_ns,
+        },
+    );
+    Ok(vault_id)
+}
+
+fn release_xrp_open_slot(s: &mut crate::state::State, vault_id: u64, owner: Principal) -> bool {
+    match s.xrp_pending_open_reservations.get(&vault_id) {
+        Some(reservation) if reservation.owner == owner => {
+            s.xrp_pending_open_reservations.remove(&vault_id);
+            true
+        }
+        _ => false,
+    }
+}
+
 fn require_xrp_production_key() -> Result<(), ProtocolError> {
     let configured_key = crate::chains::xrp::config::xrp_schnorr_key_name();
     // Fixture-only branch: the default-off `xrpl-testnet-fixture` artifact accepts
@@ -3602,40 +3654,24 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
         }
     }
 
-    // Hardening (P3/P4 review): bound per-caller pending deposits so a caller can't
-    // spam unfunded opens (each would consume a vault_id + a threshold derivation +
-    // a persisted state entry).
-    const MAX_XRP_PENDING_PER_CALLER: usize = 10;
-    // Global cap bounds total persisted pending-deposit state (and the O(N) per-caller
-    // scan below) across all callers — safe (refuses NEW opens when full; never
-    // orphans an existing entry, unlike a TTL prune of a maybe-funded deposit).
-    const MAX_XRP_PENDING_GLOBAL: usize = 10_000;
-    let (global_pending, caller_pending) = read_state(|s| {
-        (
-            s.xrp_pending_deposits.len(),
-            s.xrp_pending_deposits
-                .values()
-                .filter(|d| d.owner == caller)
-                .count(),
-        )
-    });
-    if global_pending >= MAX_XRP_PENDING_GLOBAL {
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError(
-            "XRP deposit staging is full; please retry after pending deposits clear.".to_string(),
-        ));
-    }
-    if caller_pending >= MAX_XRP_PENDING_PER_CALLER {
-        guard_principal.fail();
-        return Err(ProtocolError::GenericError(
-            "Too many open XRP deposits; confirm or settle existing ones first.".to_string(),
-        ));
-    }
+    // Reserve capacity atomically before the first await. The global cap and
+    // one-open-per-owner rule apply to both durable deposits and in-flight opens,
+    // so concurrent Sybil callers cannot race past the state bound.
+    let vault_id = match mutate_state(|s| reserve_xrp_open_slot(s, caller, ic_cdk::api::time())) {
+        Ok(id) => id,
+        Err(error) => {
+            guard_principal.fail();
+            return Err(error);
+        }
+    };
 
-    let reserve_base_drops = match crate::chains::xrp::xrp_rpc::fetch_reserve_base().await {
+    // This quorum-validated cache only informs the open UI. Confirmation reads
+    // the current reserve again before crediting, so cache staleness cannot overcredit.
+    let reserve_base_drops = match crate::chains::xrp::xrp_rpc::fetch_reserve_base_cached().await {
         Ok(r) => match u64::try_from(r) {
             Ok(drops) => drops,
             Err(_) => {
+                mutate_state(|s| release_xrp_open_slot(s, vault_id, caller));
                 guard_principal.fail();
                 return Err(ProtocolError::GenericError(
                     "xrp reserve base exceeds u64 drops".to_string(),
@@ -3643,16 +3679,13 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
             }
         },
         Err(e) => {
+            mutate_state(|s| release_xrp_open_slot(s, vault_id, caller));
             guard_principal.fail();
             return Err(ProtocolError::GenericError(format!(
                 "xrp server_state failed: {e}"
             )));
         }
     };
-
-    // Reserve a vault_id (also the threshold-derivation nonce). A derive failure
-    // below just leaves a gap in the id sequence, which is harmless.
-    let vault_id = mutate_state(|s| s.increment_vault_id());
 
     let path = crate::chains::xrp::ted25519::custody_derivation_path(
         crate::chains::xrp::XRP_CHAIN_ID,
@@ -3662,6 +3695,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     let custody_address = match crate::chains::xrp::ted25519::derive_xrp_address(path).await {
         Ok((_pubkey, addr)) => addr,
         Err(e) => {
+            mutate_state(|s| release_xrp_open_slot(s, vault_id, caller));
             guard_principal.fail();
             return Err(ProtocolError::GenericError(format!(
                 "xrp custody derive failed: {e}"
@@ -3670,7 +3704,10 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     };
 
     let opened_at_ns = ic_cdk::api::time();
-    mutate_state(|s| {
+    let reservation_consumed = mutate_state(|s| {
+        if !release_xrp_open_slot(s, vault_id, caller) {
+            return false;
+        }
         s.xrp_pending_deposits.insert(
             vault_id,
             crate::state::XrpPendingDeposit {
@@ -3681,7 +3718,14 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
                 reserve_base_drops,
             },
         );
+        true
     });
+    if !reservation_consumed {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "XRP open admission reservation expired; retry the open.".to_string(),
+        ));
+    }
 
     guard_principal.complete();
     Ok(XrpVaultOpenInfo {
@@ -3765,23 +3809,18 @@ pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
             "XRP custody account is unfunded; deposit not yet received.".to_string(),
         ));
     }
-    let reserve = if pending.reserve_base_drops > 0 {
-        u128::from(pending.reserve_base_drops)
-    } else {
-        match crate::chains::xrp::xrp_rpc::fetch_reserve_base().await {
-            Ok(r) => r,
-            Err(e) => {
-                guard_principal.fail();
-                return Err(ProtocolError::GenericError(format!(
-                    "xrp server_state failed: {e}"
-                )));
-            }
+    let reserve = match crate::chains::xrp::xrp_rpc::fetch_reserve_base().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xrp server_state failed: {e}"
+            )));
         }
     };
 
-    // Credit balance net of the reserve quoted when the deposit address was
-    // prepared. Legacy pending deposits did not store it, so they fall back to a
-    // live reserve read above.
+    // Always net against the live quorum-validated reserve. The value stored at
+    // open is informational only and may be stale by the time funds arrive.
     let credited = match xrp_credit_amount(acct.balance_drops, reserve, min_deposit) {
         Ok(c) => c,
         Err(e) => {
@@ -6417,6 +6456,40 @@ mod xrp_p3_tests {
             xrp_credit_amount(1_000_000, 1_000_000, 0),
             Err(ProtocolError::AmountTooLow { .. })
         ));
+    }
+
+    #[test]
+    fn pending_open_admission_reserves_global_capacity_before_await() {
+        let first = Principal::from_slice(&[0x41; 16]);
+        let second = Principal::from_slice(&[0x42; 16]);
+        let mut s = crate::state::State::default();
+
+        let id = reserve_xrp_open_slot(&mut s, first, 100).unwrap();
+        assert!(s.xrp_pending_open_reservations.contains_key(&id));
+        assert!(reserve_xrp_open_slot(&mut s, first, 101).is_err());
+
+        // Reservations count against the same bounded capacity as funded and
+        // unfunded pending deposits, even before threshold derivation returns.
+        for i in 0..(MAX_XRP_PENDING_GLOBAL - 1) {
+            let owner = Principal::from_slice(&(i as u32).to_be_bytes());
+            reserve_xrp_open_slot(&mut s, owner, 100).expect("available global slot");
+        }
+        assert_eq!(
+            s.xrp_pending_open_reservations.len(),
+            MAX_XRP_PENDING_GLOBAL
+        );
+        assert!(reserve_xrp_open_slot(&mut s, second, 100).is_err());
+    }
+
+    #[test]
+    fn pending_open_admission_expires_only_unpublished_reservations() {
+        let owner = Principal::from_slice(&[0x43; 16]);
+        let mut s = crate::state::State::default();
+        let id = reserve_xrp_open_slot(&mut s, owner, 10).unwrap();
+        let next = reserve_xrp_open_slot(&mut s, owner, 10 + XRP_OPEN_RESERVATION_TTL_NS + 1)
+            .expect("stale unpublished slot can be released");
+        assert!(!s.xrp_pending_open_reservations.contains_key(&id));
+        assert!(s.xrp_pending_open_reservations.contains_key(&next));
     }
 
     #[test]

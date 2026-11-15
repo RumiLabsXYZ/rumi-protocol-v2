@@ -35,6 +35,7 @@ use ic_cdk::api::management_canister::http_request::{
     TransformContext,
 };
 use serde_json::{json, Value};
+use std::cell::RefCell;
 
 use super::config::xrp_schnorr_key_name;
 use super::network::{collateral_network_for_key, provider_urls_unchecked};
@@ -44,6 +45,19 @@ pub const MAX_TX_BYTES: u64 = 65_536;
 pub const MAX_SUBMIT_BYTES: u64 = 8_192;
 pub const READ_CYCLES: u128 = 2_000_000_000;
 pub const SUBMIT_CYCLES: u128 = 4_000_000_000;
+const RESERVE_BASE_CACHE_TTL_NS: u64 = 60 * 1_000_000_000;
+
+thread_local! {
+    /// Quorum-validated network reserve used only to prepare the open response.
+    /// Confirmation always reads the live reserve before crediting collateral.
+    static RESERVE_BASE_CACHE: RefCell<Option<(u128, u64)>> = const { RefCell::new(None) };
+}
+
+fn cached_reserve_base(cache: Option<(u128, u64)>, now_ns: u64) -> Option<u128> {
+    cache.and_then(|(drops, validated_at)| {
+        (now_ns.saturating_sub(validated_at) <= RESERVE_BASE_CACHE_TTL_NS).then_some(drops)
+    })
+}
 
 /// How many times a consensus-relative READ is re-issued on the transient
 /// consensus-miss class before giving up. Reads are idempotent, so retrying is
@@ -693,6 +707,21 @@ pub async fn fetch_reserve_base() -> Result<u128, String> {
     .await
 }
 
+/// Return a recently quorum-validated reserve for open preparation, refreshing
+/// at most once per minute. It is advisory: confirm_xrp_deposit must use a live
+/// value before crediting any XRP.
+pub async fn fetch_reserve_base_cached() -> Result<u128, String> {
+    let now_ns = ic_cdk::api::time();
+    if let Some(cached) = RESERVE_BASE_CACHE
+        .with(|cache| cached_reserve_base(*cache.borrow(), now_ns))
+    {
+        return Ok(cached);
+    }
+    let reserve = fetch_reserve_base().await?;
+    RESERVE_BASE_CACHE.with(|cache| *cache.borrow_mut() = Some((reserve, now_ns)));
+    Ok(reserve)
+}
+
 /// Submit a hex-encoded signed tx blob; returns the rippled-reported hash on a
 /// `tes*`/`ter*` engine result (the caller should prefer the LOCALLY computed
 /// hash from `sign::tx_hash`).
@@ -745,6 +774,23 @@ mod tests {
     fn parse_reserve_base_reads_drops() {
         let body = br#"{"reserve_base":1000000,"error":null}"#;
         assert_eq!(parse_reserve_base(body).unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn reserve_cache_is_validated_only_for_one_minute() {
+        assert_eq!(
+            cached_reserve_base(Some((1_000_000, 10)), 10 + RESERVE_BASE_CACHE_TTL_NS),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            cached_reserve_base(Some((1_000_000, 10)), 11 + RESERVE_BASE_CACHE_TTL_NS),
+            None
+        );
+        assert_eq!(
+            cached_reserve_base(Some((1_000_000, 20)), 19),
+            Some(1_000_000)
+        );
+        assert_eq!(cached_reserve_base(None, 20), None);
     }
 
     #[test]
