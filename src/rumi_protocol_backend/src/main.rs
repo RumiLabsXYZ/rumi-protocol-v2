@@ -13174,6 +13174,16 @@ async fn bot_confirm_liquidation_with_proof(
         else {
             return Err("Claim debt changed during payment proof verification".to_string());
         };
+        let interest_reduction_e8s =
+            rumi_protocol_backend::vault::interest_share_for_debt_reduction(
+                claim.debt_amount,
+                vault.borrowed_icusd_amount.to_u64(),
+                vault.accrued_interest.to_u64(),
+            );
+        let new_accrued_interest_e8s = vault
+            .accrued_interest
+            .to_u64()
+            .saturating_sub(interest_reduction_e8s);
         let Some(new_collateral) = vault.collateral_amount.checked_sub(claim.collateral_amount)
         else {
             return Err("Claim collateral changed during payment proof verification".to_string());
@@ -13187,6 +13197,7 @@ async fn bot_confirm_liquidation_with_proof(
         );
         let vault = s.vault_id_to_vaults.get_mut(&proof.vault_id).unwrap();
         vault.borrowed_icusd_amount = ICUSD::new(new_debt_e8s);
+        vault.accrued_interest = ICUSD::new(new_accrued_interest_e8s);
         vault.collateral_amount = new_collateral;
         vault.bot_processing = false;
         let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
@@ -13356,6 +13367,16 @@ async fn bot_confirm_liquidation_with_proofs(
         else {
             return Err("Claim debt changed during payment proof verification".into());
         };
+        let interest_reduction_e8s =
+            rumi_protocol_backend::vault::interest_share_for_debt_reduction(
+                claim.debt_amount,
+                vault.borrowed_icusd_amount.to_u64(),
+                vault.accrued_interest.to_u64(),
+            );
+        let new_accrued_interest_e8s = vault
+            .accrued_interest
+            .to_u64()
+            .saturating_sub(interest_reduction_e8s);
         let Some(new_collateral) = vault.collateral_amount.checked_sub(claim.collateral_amount)
         else {
             return Err("Claim collateral changed during payment proof verification".into());
@@ -13371,6 +13392,7 @@ async fn bot_confirm_liquidation_with_proofs(
         }
         let vault = s.vault_id_to_vaults.get_mut(&first.vault_id).unwrap();
         vault.borrowed_icusd_amount = ICUSD::new(new_debt_e8s);
+        vault.accrued_interest = ICUSD::new(new_accrued_interest_e8s);
         vault.collateral_amount = new_collateral;
         vault.bot_processing = false;
         let event = rumi_protocol_backend::event::Event::PartialLiquidateVault {
