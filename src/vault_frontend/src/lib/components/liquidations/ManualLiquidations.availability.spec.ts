@@ -86,7 +86,7 @@ it('shows a redemption claim as suspended rather than zero nICP and a liquidatio
  component=mount(Page,{target});
  await vi.waitFor(()=>expect(target.querySelector('.ov-card')?.textContent).toContain('ICP redemption claim'));
  const card=target.querySelector('.ov-card')!;
- expect(card.textContent).toContain('1,900 ICP');
+ expect(card.textContent).toContain('1900 ICP');
  expect(card.textContent).toContain('Liquidation suspended');
  expect(card.querySelector('.ov-gauge-track')).toBeNull();
  expect(card.textContent).not.toContain('0.0%');
