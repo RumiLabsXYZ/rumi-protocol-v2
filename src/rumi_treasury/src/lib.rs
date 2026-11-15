@@ -14,9 +14,9 @@ use state::{init_state, restore_state, with_state, with_state_mut};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use types::{
-    AssetType, DepositArgs, DepositRecord, DepositType, ExternalTokenDepositArgs, TreasuryAction,
-    TreasuryEvent, TreasuryInitArgs, TreasuryStatus, WithdrawArgs, WithdrawResult,
-    WithdrawalIntent, WithdrawalIntentStatus,
+    AssetType, DepositArgs, DepositRecord, DepositType, ExternalTokenDepositArgs,
+    ReportedTransferDepositArgs, TreasuryAction, TreasuryEvent, TreasuryInitArgs, TreasuryStatus,
+    WithdrawArgs, WithdrawResult, WithdrawalIntent, WithdrawalIntentStatus,
 };
 
 // Declare log buffer for debugging
@@ -190,12 +190,23 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
     Ok(deposit_id)
 }
 
-fn validate_legacy_deposit_asset(_asset_type: &AssetType) -> Result<(), String> {
-    // TODO(external-token-receipts): remove CKUSDT/CKUSDC support here after
-    // every backend collateral/fee caller has migrated to the durable outbox
-    // and `record_external_token_deposit_once`; until then rejecting this
-    // route can strand already-transferred fees whose notifier uses `deposit`.
-    Ok(())
+fn validate_legacy_deposit_asset(asset_type: &AssetType) -> Result<(), String> {
+    if *asset_type == AssetType::ICUSD {
+        return Ok(());
+    }
+    let config = with_state(|s| s.get_config());
+    let ledger = match asset_type {
+        AssetType::ICP => Some(config.icp_ledger),
+        AssetType::CKBTC => config.ckbtc_ledger,
+        AssetType::CKUSDT => config.ckusdt_ledger,
+        AssetType::CKUSDC => config.ckusdc_ledger,
+        AssetType::ICUSD => unreachable!(),
+    };
+    if ledger.is_some() {
+        Ok(())
+    } else {
+        Err(format!("configured ledger missing for {asset_type:?}"))
+    }
 }
 
 /// Record a BorrowingFee/ICUSD transfer with receiver-side idempotency. This
@@ -254,6 +265,55 @@ fn record_external_token_deposit_once(args: ExternalTokenDepositArgs) -> Result<
     let deposit_caller = caller();
     let timestamp = ic_cdk::api::time();
     record_external_token_deposit_with_event(args, deposit_caller, timestamp)
+}
+
+/// Record a positively verified transfer reported by a configured backend or
+/// liquidation bot. This endpoint grants bookkeeping only; it cannot move funds.
+#[update]
+#[candid_method(update)]
+fn record_reported_transfer_once(args: ReportedTransferDepositArgs) -> Result<u64, String> {
+    if with_state(|s| s.get_config().is_paused) {
+        return Err("Treasury is paused and not accepting deposits".into());
+    }
+    let reporter = caller();
+    let now = ic_cdk::api::time();
+    let (id, newly_recorded) =
+        with_state_mut(|s| s.record_reported_transfer_once(reporter, args, now))?;
+    if newly_recorded {
+        let record = with_state(|s| {
+            s.deposits
+                .get(&id)
+                .ok_or_else(|| format!("deposit {id} missing"))
+        })?;
+        with_state_mut(|s| {
+            s.push_event_at(
+                reporter,
+                TreasuryAction::Deposit {
+                    deposit_type: record.deposit_type,
+                    asset_type: record.asset_type,
+                    amount: record.amount,
+                },
+                now,
+            )
+        });
+    }
+    Ok(id)
+}
+
+#[update]
+#[candid_method(update)]
+fn set_transfer_reporter(reporter: Principal, enabled: bool) -> Result<(), String> {
+    ensure_controller()?;
+    with_state_mut(|s| s.set_transfer_reporter(reporter, enabled))
+}
+
+#[query]
+#[candid_method(query)]
+fn get_transfer_reporters() -> Result<Vec<Principal>, String> {
+    ensure_controller()?;
+    Ok(with_state(|s| {
+        s.get_config().transfer_reporters.unwrap_or_default()
+    }))
 }
 
 /// Continue the bounded migration of historical CKUSDT/CKUSDC block indexes.
@@ -382,7 +442,27 @@ fn record_deposit_with_event(
         if asset_type == AssetType::ICUSD {
             s.record_icusd_deposit_once(record)
         } else {
-            Ok((s.try_add_deposit(record, true)?, true))
+            let config = s.get_config();
+            let ledger = match asset_type {
+                AssetType::ICP => Some(config.icp_ledger),
+                AssetType::CKBTC => config.ckbtc_ledger,
+                AssetType::CKUSDT => config.ckusdt_ledger,
+                AssetType::CKUSDC => config.ckusdc_ledger,
+                AssetType::ICUSD => unreachable!(),
+            }
+            .ok_or_else(|| format!("configured ledger missing for {asset_type:?}"))?;
+            let (id, newly) = s.record_external_token_deposit_once(
+                ExternalTokenDepositArgs {
+                    ledger,
+                    deposit_type: deposit_type.clone(),
+                    asset_type: asset_type.clone(),
+                    amount,
+                    block_index: record.block_index,
+                    memo: record.memo.clone(),
+                },
+                timestamp,
+            )?;
+            Ok((id, newly))
         }
     })?;
 

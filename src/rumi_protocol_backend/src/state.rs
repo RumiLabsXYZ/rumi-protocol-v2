@@ -2894,9 +2894,10 @@ pub enum TreasuryInterestMintPhase {
     AwaitingHistoryFloor,
 }
 
-/// Source identity for a Treasury-directed CK stablecoin transfer. The key is
-/// derived from the inbound ledger and block plus the accounting lane/index;
-/// completed rows remain as tombstones so replayed source events cannot queue
+/// Source identity for a Treasury-directed collateral transfer. Ledger receipts
+/// use their source ledger/block; protocol liquidation fees use a committed
+/// liquidation nonce encoded in `lane` before the outgoing transfer begins.
+/// Completed rows remain as tombstones so replayed source events cannot queue
 /// the same transfer twice.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, Serialize)]
 pub struct TreasuryStableTransferSource {
@@ -2914,6 +2915,12 @@ pub struct TreasuryStableTransferJournal {
     pub asset_type: crate::treasury::AssetType,
     pub deposit_type: crate::treasury::DepositType,
     pub amount_e6s: u64,
+    /// Original gross collateral budget for liquidation-fee transfers. `amount_e6s`
+    /// is reduced to the exact recipient amount after fee preflight. `None`
+    /// identifies legacy/non-liquidation journal rows whose amount semantics
+    /// must remain unchanged across upgrades.
+    #[serde(default)]
+    pub gross_amount_e6s: Option<u64>,
     pub fee_e6s: Option<u64>,
     #[serde(default)]
     pub history_floor: Option<u64>,

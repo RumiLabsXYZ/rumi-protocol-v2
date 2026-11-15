@@ -182,7 +182,7 @@ mod treasury_stable_transfer_event_tests {
             },
             ledger: Principal::from_slice(&[3]), treasury: Some(Principal::from_slice(&[2])),
             asset_type: AssetType::CKUSDT, deposit_type: DepositType::InterestRevenue,
-            amount_e6s: 900, fee_e6s: Some(10), history_floor: Some(100),
+            amount_e6s: 900, gross_amount_e6s: None, fee_e6s: Some(10), history_floor: Some(100),
             recovery_scan: None, expiry_proven: false, memo: [4; 16],
             created_at_time_ns: 1_000, op_nonce: 5,
             phase: TreasuryStableTransferPhase::TransferPending,
@@ -234,6 +234,76 @@ mod treasury_stable_transfer_event_tests {
         let next = state.next_op_nonce_at(1_000);
         assert_ne!(next, reissued_nonce);
         assert_eq!(next, ((1_000u128) << 64) | 7);
+    }
+
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    enum PreviousTransferPhase {
+        AwaitingPreflight,
+        TransferPending,
+        NotifyPending { block_index: u64 },
+        ConfigurationHold,
+        ReceiptRecoveryRequired,
+        ConfigurationReviewRequired { block_index: u64 },
+    }
+
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    struct PreviousTransferJournal {
+        source: TreasuryStableTransferSource,
+        ledger: Principal,
+        treasury: Option<Principal>,
+        asset_type: AssetType,
+        deposit_type: DepositType,
+        amount_e6s: u64,
+        fee_e6s: Option<u64>,
+        history_floor: Option<u64>,
+        recovery_scan: Option<crate::state::BorrowMintAbsenceScan>,
+        expiry_proven: bool,
+        memo: [u8; 16],
+        created_at_time_ns: u64,
+        op_nonce: u128,
+        phase: PreviousTransferPhase,
+    }
+
+    #[test]
+    fn fee_budget_hold_decodes_with_previous_backend_schema_for_rollback() {
+        let mut row = operation();
+        row.amount_e6s = 100;
+        row.gross_amount_e6s = Some(100);
+        row.fee_e6s = Some(100);
+        row.history_floor = None;
+        row.phase = TreasuryStableTransferPhase::ConfigurationHold;
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&row, &mut bytes).expect("encode current fee-budget hold");
+        let previous: PreviousTransferJournal = ciborium::de::from_reader(bytes.as_slice())
+            .expect("previous backend must decode the persisted phase and ignore additive field");
+        assert_eq!(previous.amount_e6s, 100);
+        assert_eq!(previous.fee_e6s, Some(100));
+        assert!(matches!(previous.phase, PreviousTransferPhase::ConfigurationHold));
+        let _ = (previous.source, previous.ledger, previous.treasury, previous.asset_type,
+            previous.deposit_type, previous.history_floor, previous.recovery_scan,
+            previous.expiry_proven, previous.memo, previous.created_at_time_ns, previous.op_nonce);
+    }
+
+    #[test]
+    fn legacy_transfer_journal_without_gross_budget_decodes_unchanged() {
+        let row = operation();
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&row, &mut bytes).expect("encode journal fixture");
+        let mut value: ciborium::value::Value =
+            ciborium::de::from_reader(bytes.as_slice()).expect("decode journal fixture");
+        let fields = match &mut value {
+            ciborium::value::Value::Map(fields) => fields,
+            other => panic!("journal must encode as a map, got {other:?}"),
+        };
+        fields.retain(|(key, _)| !matches!(key, ciborium::value::Value::Text(name) if name == "gross_amount_e6s"));
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut legacy_bytes).expect("encode legacy journal fixture");
+        let decoded: TreasuryStableTransferJournal = ciborium::de::from_reader(legacy_bytes.as_slice())
+            .expect("legacy journal without gross budget must decode");
+        assert_eq!(decoded.gross_amount_e6s, None);
+        assert_eq!(decoded.amount_e6s, row.amount_e6s);
     }
 }
 
