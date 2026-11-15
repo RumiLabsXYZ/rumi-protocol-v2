@@ -3,9 +3,9 @@
     {
       "id": "audit-closure",
       "title": "Close the remaining security evidence gaps",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Resolve the interrupted Stability Pool refresh through its original approval path before any retry. Then finish the Points source-to-build chain and older-finding evidence reconciliation while preserving the archive-proof hold and Treasury tombstones.",
+      "nextAction": "Accepted active-path findings and all five dependency refreshes are closed. Preserve the archive-proof hold, Treasury tombstones, and partial Points provenance classification; refresh evidence only when stronger historical proof appears.",
       "cardIds": ["SEC-02", "SEC-04"]
     },
     {
@@ -43,9 +43,9 @@
     {
       "id": "release-report",
       "title": "Release and public status",
-      "status": "done",
+      "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "PR #667 is merged and the current rollout report is live with exact bundle readback. Refresh only when material evidence changes.",
+      "nextAction": "Publish the final all-five-installed status update and verify exact served bundle readback; refresh again only when material evidence changes.",
       "cardIds": ["SEC-05"]
     },
     {
