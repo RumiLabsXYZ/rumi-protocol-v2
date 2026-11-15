@@ -1116,6 +1116,36 @@ describe('ApiClient sequential mutation admission', () => {
       refreshAfter: false,
     })).resolves.toBe('second');
   });
+
+  it('keeps the active mutation locked when periodic cleanup runs after 120 seconds', async () => {
+    vi.useFakeTimers();
+    (ApiClient as any).operationInProgress = false;
+    (ApiClient as any).startCleanupInterval();
+    let releaseFirst!: () => void;
+    const firstOperation = vi.fn(() => new Promise<void>((resolve) => { releaseFirst = resolve; }));
+    const secondOperation = vi.fn().mockResolvedValue('second');
+
+    const first = ApiClient.executeSequentialOperation(firstOperation, undefined, {
+      refreshBefore: false,
+      refreshAfter: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstOperation).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    const second = ApiClient.executeSequentialOperation(secondOperation, undefined, {
+      refreshBefore: false,
+      refreshAfter: false,
+    });
+    const rejected = expect(second).rejects.toThrow('Another transaction is still processing');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+    expect(secondOperation).not.toHaveBeenCalled();
+
+    releaseFirst();
+    await first;
+    (ApiClient as any).stopCleanupInterval();
+  });
 });
 
 describe('Oisy vault-close cache admission', () => {
