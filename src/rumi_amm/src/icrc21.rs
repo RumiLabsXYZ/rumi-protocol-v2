@@ -113,6 +113,14 @@ fn generate_consent_message(method: &str) -> String {
             *No additional fee applies.*"
             .to_string(),
 
+        "claim_rewards" => "## Claim AMM Rewards\n\n\
+            You are claiming accrued rewards from a Rumi AMM pool.\n\n\
+            This will:\n\
+            - Deduct the icUSD ledger fee from your settled pool rewards\n\
+            - Transfer the net icUSD amount to your wallet\n\n\
+            *The exact amount is determined when the pool settles your rewards.*"
+            .to_string(),
+
         // Query methods
         "health"
         | "get_pool"
@@ -257,4 +265,25 @@ pub fn icrc10_supported_standards() -> Vec<StandardRecord> {
             url: "https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-28/ICRC-28.md".to_string(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_consent_message;
+
+    #[test]
+    fn claim_rewards_has_method_specific_money_movement_consent() {
+        let message = generate_consent_message("claim_rewards");
+        assert!(message.contains("Claim AMM Rewards"));
+        assert!(message.contains("Deduct the icUSD ledger fee"));
+        assert!(message.contains("Transfer the net icUSD amount"));
+        assert!(!message.contains("Rumi AMM Action"));
+    }
+
+    #[test]
+    fn unknown_method_keeps_generic_fallback() {
+        let message = generate_consent_message("future_method");
+        assert!(message.contains("Rumi AMM Action"));
+        assert!(message.contains("future_method"));
+    }
 }
