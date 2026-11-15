@@ -16,11 +16,17 @@ export const idlFactory = ({ IDL }) => {
     'three_pool_principal' : IDL.Opt(IDL.Principal),
   });
   const BotInitArgs = IDL.Record({ 'config' : BotConfig });
+  const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const OperatorReserveConfig = IDL.Record({
+    'per_claim_cap_e6' : IDL.Nat64,
+    'protected_balance_e6' : IDL.Nat64,
+    'budget_e6' : IDL.Nat64,
+  });
   const SwapResult = IDL.Record({
     'ckusdc_received_e6' : IDL.Nat64,
     'effective_price_e8s' : IDL.Nat64,
   });
-  const TestSwapResult = IDL.Variant({ 'Ok' : SwapResult, 'Err' : IDL.Text });
+  const Result_1 = IDL.Variant({ 'Ok' : SwapResult, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -80,6 +86,25 @@ export const idlFactory = ({ IDL }) => {
   });
   const LiquidationRecordVersioned = IDL.Variant({
     'V1' : LiquidationRecordV1,
+  });
+  const ReserveAllocation = IDL.Record({
+    'payment_memo' : IDL.Vec(IDL.Nat8),
+    'backend_principal' : IDL.Principal,
+    'settled' : IDL.Bool,
+    'payment_amount_e6' : IDL.Nat64,
+    'claim_generation' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'payment_fee_e6' : IDL.Nat64,
+    'ledger_principal' : IDL.Principal,
+    'amount_e6' : IDL.Nat64,
+    'payment_created_at_time' : IDL.Nat64,
+  });
+  const OperatorReserve = IDL.Record({
+    'enabled' : IDL.Bool,
+    'allocated_e6' : IDL.Nat64,
+    'allocations' : IDL.Vec(IDL.Tuple(IDL.Nat64, ReserveAllocation)),
+    'config' : OperatorReserveConfig,
+    'settled_e6' : IDL.Nat64,
   });
   const BotClaimJournalStatus = IDL.Variant({
     'ReturnPending' : IDL.Null,
@@ -256,48 +281,47 @@ export const idlFactory = ({ IDL }) => {
     'admin_approve_pool' : IDL.Func([], [], []),
     'admin_authorize_shortfall_topup' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [Result],
         [],
       ),
-    'admin_execute_vault158_recovery' : IDL.Func(
-        [],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
-        [],
-      ),
-    'admin_prepare_vault158_recovery' : IDL.Func(
-        [],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+    'admin_configure_operator_reserve' : IDL.Func(
+        [OperatorReserveConfig],
+        [Result],
         [],
       ),
+    'admin_execute_vault158_recovery' : IDL.Func([], [Result], []),
+    'admin_execute_vault202_recovery' : IDL.Func([], [Result], []),
+    'admin_prepare_vault158_recovery' : IDL.Func([], [Result], []),
     'admin_reconcile_payment_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [Result],
         [],
       ),
     'admin_reconcile_return_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [Result],
         [],
       ),
     'admin_reconcile_shortfall_topup_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [Result],
         [],
       ),
     'admin_reconcile_treasury_block' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [Result],
         [],
       ),
     'admin_refresh_fees' : IDL.Func([], [IDL.Nat64, IDL.Nat64], []),
     'admin_resolve_pool_ordering' : IDL.Func([], [], []),
     'admin_retry_stuck_claim' : IDL.Func([IDL.Nat64], [], []),
+    'admin_set_operator_reserve_enabled' : IDL.Func([IDL.Bool], [Result], []),
     'admin_sweep_ckusdc' : IDL.Func(
         [IDL.Principal, IDL.Opt(IDL.Nat64)],
         [],
         [],
       ),
-    'admin_test_swap' : IDL.Func([IDL.Nat64], [TestSwapResult], []),
+    'admin_test_swap' : IDL.Func([IDL.Nat64], [Result_1], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -325,6 +349,11 @@ export const idlFactory = ({ IDL }) => {
     'get_liquidations' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Vec(LiquidationRecordVersioned)],
+        ['query'],
+      ),
+    'get_operator_reserve' : IDL.Func(
+        [],
+        [IDL.Opt(OperatorReserve)],
         ['query'],
       ),
     'get_pending_claim_journals' : IDL.Func(
@@ -364,11 +393,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'set_config' : IDL.Func([BotConfig], [], []),
-    'set_processing_paused' : IDL.Func(
-        [IDL.Bool],
-        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
-        [],
-      ),
+    'set_processing_paused' : IDL.Func([IDL.Bool], [Result], []),
   });
 };
 export const init = ({ IDL }) => {
