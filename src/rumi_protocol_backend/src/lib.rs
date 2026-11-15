@@ -2719,7 +2719,20 @@ pub fn record_per_collateral_redemption_fee(
 ) {
     if let Some(config) = state.collateral_configs.get_mut(collateral_type) {
         config.current_base_rate = base_fee;
-        config.last_redemption_time = now_ns;
+        // Fee decay is quantized in whole hours by `compute_redemption_fee`.
+        // Keep the clock anchored until at least one decay period has elapsed;
+        // otherwise successful redemptions more often than hourly reset the
+        // timestamp before the next fee quote can observe any decay. Advance by
+        // whole periods (rather than setting it to `now_ns`) to preserve the
+        // partial-hour remainder across redemptions.
+        const DECAY_INTERVAL_NS: u64 = 60 * 60 * 1_000_000_000;
+        let elapsed_ns = now_ns.saturating_sub(config.last_redemption_time);
+        let elapsed_periods = elapsed_ns / DECAY_INTERVAL_NS;
+        if elapsed_periods > 0 {
+            config.last_redemption_time = config
+                .last_redemption_time
+                .saturating_add(elapsed_periods.saturating_mul(DECAY_INTERVAL_NS));
+        }
     }
 }
 
