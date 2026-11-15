@@ -2597,6 +2597,38 @@ fn get_amm_swap_events(start: u64, length: u64) -> Vec<AmmSwapEvent> {
     })
 }
 
+/// Page retained swap history by monotonic event ID. The legacy positional
+/// endpoint remains available for existing clients.
+#[query]
+fn get_amm_swap_events_from_id(start_id: u64, length: u64) -> AmmSwapEventWindow {
+    read_state(|s| {
+        swap_event_window(&s.swap_events, s.next_swap_event_id, start_id, length)
+    })
+}
+
+fn swap_event_window(
+    events: &[AmmSwapEvent],
+    next_event_id: u64,
+    start_id: u64,
+    length: u64,
+) -> AmmSwapEventWindow {
+    let oldest_available_id = events
+        .first()
+        .map(|event| event.id)
+        .unwrap_or(next_event_id);
+    // Swap IDs are monotonic and the retained vector is only front-pruned.
+    let start = start_id
+        .saturating_sub(oldest_available_id)
+        .min(events.len() as u64) as usize;
+    let length = length.min(MAX_EVENT_PAGE) as usize;
+    let end = start.saturating_add(length).min(events.len());
+    AmmSwapEventWindow {
+        oldest_available_id,
+        next_event_id,
+        events: events[start..end].to_vec(),
+    }
+}
+
 #[query]
 fn get_amm_swap_event_count() -> u64 {
     read_state(|s| s.swap_events.len() as u64)
@@ -2976,6 +3008,28 @@ mod dos_001_tests {
 
         let empty = liquidity_event_window(&[], 50_004, 50_000, 2);
         assert_eq!(empty.oldest_available_id, 50_004);
+        assert!(empty.events.is_empty());
+    }
+
+    #[test]
+    fn monotonic_swap_page_covers_retention_gap_and_empty_window() {
+        let retained: Vec<_> = (50_001..=50_004)
+            .map(|id| dummy_swap_event(id, "pool", Principal::anonymous()))
+            .collect();
+
+        let page = swap_event_window(&retained, 50_005, 50_003, 2);
+        assert_eq!(page.oldest_available_id, 50_001);
+        assert_eq!(page.next_event_id, 50_005);
+        assert_eq!(page.events.iter().map(|event| event.id).collect::<Vec<_>>(), [50_003, 50_004]);
+
+        // A consumer behind the retained prefix starts at the oldest event;
+        // the explicit bounds let it report the lost prefix.
+        let gap_page = swap_event_window(&retained, 50_005, 40_000, 2);
+        assert_eq!(gap_page.events.iter().map(|event| event.id).collect::<Vec<_>>(), [50_001, 50_002]);
+
+        let empty = swap_event_window(&[], 50_005, 50_004, 2);
+        assert_eq!(empty.oldest_available_id, 50_005);
+        assert_eq!(empty.next_event_id, 50_005);
         assert!(empty.events.is_empty());
     }
 }

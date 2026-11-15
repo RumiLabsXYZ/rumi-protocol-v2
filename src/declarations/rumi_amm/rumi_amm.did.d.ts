@@ -149,6 +149,11 @@ export interface AmmSwapEvent {
   'token_out' : Principal,
   'pool_id' : string,
 }
+export interface AmmSwapEventWindow {
+  'next_event_id' : bigint,
+  'events' : Array<AmmSwapEvent>,
+  'oldest_available_id' : bigint,
+}
 export interface AmmTopLpsQuery { 'pool' : string, 'limit' : number }
 export interface AmmTopSwappersQuery {
   'pool' : string,
@@ -404,6 +409,10 @@ export interface _SERVICE {
   'get_amm_swap_events_by_time_range' : ActorMethod<
     [AmmEventsByTimeRangeQuery],
     Array<AmmSwapEvent>
+  >,
+  'get_amm_swap_events_from_id' : ActorMethod<
+    [bigint, bigint],
+    AmmSwapEventWindow
   >,
   'get_amm_top_lps' : ActorMethod<
     [AmmTopLpsQuery],

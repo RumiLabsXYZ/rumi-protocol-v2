@@ -183,6 +183,11 @@ export const idlFactory = ({ IDL }) => {
     'limit' : IDL.Nat64,
     'end_ns' : IDL.Nat64,
   });
+  const AmmSwapEventWindow = IDL.Record({
+    'next_event_id' : IDL.Nat64,
+    'events' : IDL.Vec(AmmSwapEvent),
+    'oldest_available_id' : IDL.Nat64,
+  });
   const AmmTopLpsQuery = IDL.Record({ 'pool' : IDL.Text, 'limit' : IDL.Nat32 });
   const AmmTopSwappersQuery = IDL.Record({
     'pool' : IDL.Text,
@@ -451,6 +456,11 @@ export const idlFactory = ({ IDL }) => {
     'get_amm_swap_events_by_time_range' : IDL.Func(
         [AmmEventsByTimeRangeQuery],
         [IDL.Vec(AmmSwapEvent)],
+        ['query'],
+      ),
+    'get_amm_swap_events_from_id' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [AmmSwapEventWindow],
         ['query'],
       ),
     'get_amm_top_lps' : IDL.Func(
