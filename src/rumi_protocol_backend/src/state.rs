@@ -8504,6 +8504,9 @@ impl State {
                 // that already-advanced clock.
                 if debt_was_zero {
                     if let Some(timestamp_ns) = timestamp_ns {
+                        // A zero-debt clock describes no principal and may be
+                        // stale or ahead of the committed borrow timestamp.
+                        // Reset it exactly, or new debt could under-accrue.
                         vault.last_accrual_time = timestamp_ns;
                     }
                 }
@@ -12418,6 +12421,140 @@ mod tests {
             config.interest_rate_apr = Ratio::from_f64(0.05);
         }
         state
+    }
+
+    #[test]
+    fn p02_f03_full_repay_idle_first_borrow_only_accrues_after_new_principal() {
+        let mut state = accrual_test_state();
+        let collateral = state.icp_ledger_principal;
+        let vault_id = 1;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 150_000_000,
+                borrowed_icusd_amount: ICUSD::new(500_000_000),
+                collateral_type: collateral,
+                last_accrual_time: 100,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        let (_, principal_paid) = state.repay_to_vault(vault_id, ICUSD::new(500_000_000));
+        assert_eq!(principal_paid, ICUSD::new(500_000_000));
+        assert_eq!(state.vault_id_to_vaults[&vault_id].borrowed_icusd_amount, ICUSD::new(0));
+
+        // A timer can visit the empty vault after years of idleness. It must
+        // remain debt-free and the next committed borrow starts a fresh clock.
+        let idle_end = 10 * crate::numeric::NANOS_PER_YEAR;
+        state.accrue_single_vault(vault_id, idle_end);
+        assert_eq!(state.vault_id_to_vaults[&vault_id].borrowed_icusd_amount, ICUSD::new(0));
+        state.borrow_from_vault_at(vault_id, ICUSD::new(500_000_000), Some(idle_end));
+        let after_borrow = &state.vault_id_to_vaults[&vault_id];
+        assert_eq!(after_borrow.borrowed_icusd_amount, ICUSD::new(500_000_000));
+        assert_eq!(after_borrow.accrued_interest, ICUSD::new(0));
+        assert_eq!(after_borrow.last_accrual_time, idle_end);
+
+        state.accrue_single_vault(vault_id, idle_end + crate::numeric::NANOS_PER_YEAR);
+        let after_year = &state.vault_id_to_vaults[&vault_id];
+        assert!((525_000_000..=525_000_001).contains(&after_year.borrowed_icusd_amount.0));
+        assert!((25_000_000..=25_000_001).contains(&after_year.accrued_interest.0));
+        assert_eq!(after_year.last_accrual_time, idle_end + crate::numeric::NANOS_PER_YEAR);
+    }
+
+    #[test]
+    fn p02_f03_redemption_to_zero_debt_reborrow_starts_fresh_clock() {
+        let mut state = accrual_test_state();
+        let collateral = state.icp_ledger_principal;
+        let vault_id = 2;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 300_000_000,
+                borrowed_icusd_amount: ICUSD::new(500_000_000),
+                collateral_type: collateral,
+                last_accrual_time: 100,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        state.apply_vault_redemptions(&[crate::event::VaultRedemption {
+            vault_id,
+            icusd_redeemed_e8s: 500_000_000,
+            collateral_seized: 100_000_000,
+        }]);
+        assert_eq!(state.vault_id_to_vaults[&vault_id].borrowed_icusd_amount, ICUSD::new(0));
+        assert_eq!(state.vault_id_to_vaults[&vault_id].collateral_amount, 200_000_000);
+
+        let new_borrow_time = 5 * crate::numeric::NANOS_PER_YEAR;
+        state.accrue_single_vault(vault_id, new_borrow_time);
+        state.borrow_from_vault_at(vault_id, ICUSD::new(500_000_000), Some(new_borrow_time));
+        assert_eq!(state.vault_id_to_vaults[&vault_id].accrued_interest, ICUSD::new(0));
+        assert_eq!(state.vault_id_to_vaults[&vault_id].last_accrual_time, new_borrow_time);
+    }
+
+    #[test]
+    fn p02_f03_full_liquidation_closure_removes_the_stale_clock_vault() {
+        let mut state = accrual_test_state();
+        let collateral = state.icp_ledger_principal;
+        let vault_id = 3;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 1,
+                borrowed_icusd_amount: ICUSD::new(500_000_000),
+                collateral_type: collateral,
+                last_accrual_time: 100,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        state.liquidate_vault(
+            vault_id,
+            Mode::GeneralAvailability,
+            UsdIcp::from(dec!(1.0)),
+            Some(ICUSD::new(500_000_000)),
+        );
+        assert!(!state.vault_id_to_vaults.contains_key(&vault_id));
+    }
+
+    #[test]
+    fn p02_f03_first_borrow_resets_future_zero_debt_clock_and_accrues_from_commit() {
+        let mut state = accrual_test_state();
+        let vault_id = 4;
+        let collateral = state.icp_ledger_principal;
+        let borrow_time = crate::numeric::NANOS_PER_YEAR;
+        let old_zero_debt_clock = 2 * crate::numeric::NANOS_PER_YEAR;
+        state.vault_id_to_vaults.insert(
+            vault_id,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id,
+                collateral_amount: 150_000_000,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: collateral,
+                // Simulate a stale/future zero-debt clock in restored state.
+                last_accrual_time: old_zero_debt_clock,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
+
+        state.borrow_from_vault_at(vault_id, ICUSD::new(500_000_000), Some(borrow_time));
+
+        assert_eq!(state.vault_id_to_vaults[&vault_id].last_accrual_time, borrow_time);
+        state.accrue_single_vault(vault_id, old_zero_debt_clock);
+        let after_year = &state.vault_id_to_vaults[&vault_id];
+        assert!((525_000_000..=525_000_001).contains(&after_year.borrowed_icusd_amount.0));
+        assert_eq!(after_year.last_accrual_time, old_zero_debt_clock);
     }
 
     #[test]
