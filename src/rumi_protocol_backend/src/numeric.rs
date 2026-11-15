@@ -520,10 +520,15 @@ pub fn collateral_to_whole_tokens(amount: u64, decimals: u8) -> Decimal {
 /// Given a USD value (as ICUSD e8s), a price per whole token, and decimals,
 /// returns the raw token amount in native precision.
 /// Example: 10 icUSD at $5/token with 8 decimals = 2 * 10^8 = 200_000_000 raw units.
+///
+/// If the mathematically required amount cannot fit in `u64`, return `u64::MAX`
+/// so callers can cap the requirement to the vault's actual collateral. This
+/// avoids trapping on valid high-decimal collateral (for example, ckETH) when
+/// an otherwise liquidatable debt requires more raw units than the storage
+/// type can represent. Callers must cap the result against available collateral
+/// before transferring or recording a seizure.
 pub fn icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> u64 {
-    try_icusd_to_collateral_amount(icusd_value, price_usd, decimals).unwrap_or_else(|| {
-        ic_cdk::trap("ICUSD collateral conversion exceeds the u64 collateral range")
-    })
+    try_icusd_to_collateral_amount(icusd_value, price_usd, decimals).unwrap_or(u64::MAX)
 }
 
 /// Checked form of [`icusd_to_collateral_amount`]. Returns `None` when the
