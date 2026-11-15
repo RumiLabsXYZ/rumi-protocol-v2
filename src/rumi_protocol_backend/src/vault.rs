@@ -11421,8 +11421,14 @@ pub async fn liquidate_vault_partial(
     icusd_amount: u64,
 ) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal =
-        GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
+    let operation_name = format!("liquidate_vault_partial_{}", vault_id);
+    let is_configured_stability_pool =
+        read_state(|state| state.stability_pool_canister == Some(caller));
+    let guard_principal = if is_configured_stability_pool {
+        GuardPrincipal::new_system(caller, &operation_name)?
+    } else {
+        GuardPrincipal::new(caller, &operation_name)?
+    };
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
                                          // BK-001/002: per-vault lock so two different callers can't race this vault
                                          // and both be paid the full pre-state collateral from the shared pool.
@@ -12498,8 +12504,14 @@ async fn liquidate_vault_debt_already_burned_inner(
         ));
     }
 
-    let guard_principal =
-        GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
+    let operation_name = format!("liquidate_vault_debt_burned_{}", vault_id);
+    let is_configured_stability_pool =
+        read_state(|state| state.stability_pool_canister == Some(caller));
+    let guard_principal = if is_configured_stability_pool {
+        GuardPrincipal::new_system(caller, &operation_name)?
+    } else {
+        GuardPrincipal::new(caller, &operation_name)?
+    };
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault (SP path)
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
 

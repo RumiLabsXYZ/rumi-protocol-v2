@@ -1395,7 +1395,7 @@ async fn settle_post_accounting(
             match asset_type {
                 asset_type @ (crate::treasury::AssetType::CKUSDT
                 | crate::treasury::AssetType::CKUSDC) => {
-                    crate::treasury::notify_treasury_external_collateral_deposit_once(
+                    crate::treasury::notify_external_collateral_deposit_once(
                         treasury,
                         journal.collateral_ledger,
                         asset_type,
