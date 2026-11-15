@@ -111,6 +111,9 @@ pub const MEM_FIRSTSEEN_3USD: MemoryId = MemoryId::new(59);
 // AMM liquidity event mirror + cursor (added 2026-04-30 with vault_equity work).
 pub const MEM_EVT_AMM_LIQUIDITY_IDX: MemoryId = MemoryId::new(60);
 pub const MEM_EVT_AMM_LIQUIDITY_DATA: MemoryId = MemoryId::new(61);
+/// Retired positional cursor. Its stable-memory slot must remain reserved so
+/// existing canisters keep the original memory layout.
+#[allow(dead_code)]
 pub const MEM_CURSOR_AMM_LIQUIDITY: MemoryId = MemoryId::new(62);
 pub const MEM_ADD_MARGIN_EVENT_IDS: MemoryId = MemoryId::new(63);
 pub const MEM_CURSOR_AMM_LIQUIDITY_ID: MemoryId = MemoryId::new(64);
@@ -202,6 +205,20 @@ pub struct SlimState {
     /// firing in a single post-upgrade burst) and bumps it.
     #[serde(default)]
     pub schedule_layout_version: Option<u32>,
+    /// One-time cutover from the pre-recovery AMM liquidity event namespace
+    /// to the current monotonic event-ID namespace.  The AMM's historical
+    /// recovery reset event IDs to zero, so neither the legacy positional
+    /// cursor nor the last mirrored source ID can seed the new generation.
+    ///
+    /// `cursor` and `target` make the cutover resumable in bounded pages.
+    /// `complete` permanently prevents legacy cursor values from being
+    /// consulted again after the current generation has been enumerated.
+    #[serde(default)]
+    pub amm_liquidity_generation_cutover_cursor: Option<u64>,
+    #[serde(default)]
+    pub amm_liquidity_generation_cutover_target: Option<u64>,
+    #[serde(default)]
+    pub amm_liquidity_generation_cutover_complete: Option<bool>,
 }
 
 /// Snapshot of one AMM pool's composition for portfolio LP valuation.
@@ -263,6 +280,9 @@ impl Default for SlimState {
             pull_period_secs_override: None,
             pull_tick_secs_override: None,
             schedule_layout_version: None,
+            amm_liquidity_generation_cutover_cursor: None,
+            amm_liquidity_generation_cutover_target: None,
+            amm_liquidity_generation_cutover_complete: None,
         }
     }
 }
@@ -649,6 +669,9 @@ mod slim_state_upgrade_tests {
         assert_eq!(decoded.schedule_layout_version, None);
         assert_eq!(decoded.add_margin_dedupe_index_cursor, None);
         assert_eq!(decoded.add_margin_dedupe_index_ready, None);
+        assert_eq!(decoded.amm_liquidity_generation_cutover_cursor, None);
+        assert_eq!(decoded.amm_liquidity_generation_cutover_target, None);
+        assert_eq!(decoded.amm_liquidity_generation_cutover_complete, None);
     }
 
     #[test]
@@ -659,6 +682,9 @@ mod slim_state_upgrade_tests {
         s.schedule_layout_version = Some(2);
         s.add_margin_dedupe_index_cursor = Some(123);
         s.add_margin_dedupe_index_ready = Some(true);
+        s.amm_liquidity_generation_cutover_cursor = Some(5);
+        s.amm_liquidity_generation_cutover_target = Some(5);
+        s.amm_liquidity_generation_cutover_complete = Some(true);
 
         let bytes = <SlimState as Storable>::to_bytes(&s);
         let decoded = <SlimState as Storable>::from_bytes(bytes);
@@ -668,5 +694,11 @@ mod slim_state_upgrade_tests {
         assert_eq!(decoded.schedule_layout_version, Some(2));
         assert_eq!(decoded.add_margin_dedupe_index_cursor, Some(123));
         assert_eq!(decoded.add_margin_dedupe_index_ready, Some(true));
+        assert_eq!(decoded.amm_liquidity_generation_cutover_cursor, Some(5));
+        assert_eq!(decoded.amm_liquidity_generation_cutover_target, Some(5));
+        assert_eq!(
+            decoded.amm_liquidity_generation_cutover_complete,
+            Some(true)
+        );
     }
 }
