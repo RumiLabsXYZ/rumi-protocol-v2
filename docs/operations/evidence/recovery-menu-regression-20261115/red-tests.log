@@ -1,0 +1,124 @@
+
+> vault_frontend@0.0.0 test:unit
+> vitest --run src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts --maxWorkers=1
+
+
+ RUN  v4.1.12 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+ ❯ src/lib/components/vault/VaultPullRecoveryBanner.spec.ts (7 tests | 1 failed) 137ms
+     × does not ask the signer on mount or background notifications; an explicit click performs the read 7ms
+7:00:37 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:497:8 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+7:00:37 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:497:8 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+7:00:37 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:728:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+7:00:37 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:739:18 A form label must be associated with a control
+https://svelte.dev/e/a11y_label_has_associated_control
+7:00:37 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:841:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+stdout | src/lib/components/wallet/WalletRecoveryNavigation.spec.ts > keeps unchecked recovery in the wallet menu and reads only on its explicit action
+[3USD] LP balance for 5pljz-srzc6-vkvjq-5qhpl-spxry-j7mmr-7re35-zgkeu-w7fkt-xzimg-jqe : 0
+
+stdout | src/lib/components/wallet/WalletRecoveryNavigation.spec.ts > discovers a submitted action from another browser without allowing a replacement or cancellation
+[3USD] LP balance for 5pljz-srzc6-vkvjq-5qhpl-spxry-j7mmr-7re35-zgkeu-w7fkt-xzimg-jqe : 0
+
+ ❯ src/lib/components/wallet/WalletRecoveryNavigation.spec.ts (2 tests | 2 failed) 38ms
+   × keeps unchecked recovery in the wallet menu and reads only on its explicit action 27ms
+   × discovers a submitted action from another browser without allowing a replacement or cancellation 10ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/components/wallet/WalletRecoveryNavigation.spec.ts > keeps unchecked recovery in the wallet menu and reads only on its explicit action
+AssertionError: expected <section …(2)>…(2)</section> to be null
+
+- Expected:
+null
+
++ Received:
+<section
+  aria-label="Check pending vault action"
+  class="recovery svelte-7f0gcp"
+>
+  <p
+    class="svelte-7f0gcp"
+  >
+    Need to resume a vault action? Checking its status will ask for confirmation in Oisy.
+  </p>
+   
+  <button
+    class="svelte-7f0gcp"
+  >
+    Check pending vault action
+  </button>
+</section>
+
+ ❯ src/lib/components/wallet/WalletRecoveryNavigation.spec.ts:53:64
+     51| it('keeps unchecked recovery in the wallet menu and reads only on its …
+     52|   instances.push(mount(Connector, { target }), mount(Banner, { target …
+     53|   expect(target.querySelector('#vault-pull-recovery section')).toBeNul…
+       |                                                                ^
+     54|   expect(button('Recover a vault action')).toBeUndefined();
+     55|   expect(fx.channel).not.toHaveBeenCalled(); expect(fx.inspect).not.to…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/lib/components/wallet/WalletRecoveryNavigation.spec.ts > discovers a submitted action from another browser without allowing a replacement or cancellation
+TypeError: Cannot read properties of undefined (reading 'click')
+ ❯ src/lib/components/wallet/WalletRecoveryNavigation.spec.ts:72:34
+     70|   instances.push(mount(Connector, { target }), mount(Banner, { target …
+     71|   (target.querySelector('#wallet-button') as HTMLButtonElement).click(…
+     72|   button('Recover a vault action').click();
+       |                                  ^
+     73|   await vi.waitFor(() => expect(target.textContent).toContain('unknown…
+     74|   expect(button('Verify block and resume')).toBeTruthy();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/lib/components/vault/VaultPullRecoveryBanner.spec.ts > Oisy vault recovery status consent > does not ask the signer on mount or background notifications; an explicit click performs the read
+AssertionError: expected <section …(2)>…(2)</section> to be null
+
+- Expected:
+null
+
++ Received:
+<section
+  aria-label="Check pending vault action"
+  class="recovery svelte-7f0gcp"
+>
+  <p
+    class="svelte-7f0gcp"
+  >
+    Need to resume a vault action? Checking its status will ask for confirmation in Oisy.
+  </p>
+   
+  <button
+    class="svelte-7f0gcp"
+  >
+    Check pending vault action
+  </button>
+</section>
+
+ ❯ src/lib/components/vault/VaultPullRecoveryBanner.spec.ts:77:45
+     75|     window.dispatchEvent(new CustomEvent(VAULT_PULL_STATUS_EVENT, { de…
+     76|     await tick(); expect(mocks.getSubmitted).not.toHaveBeenCalled();
+     77|     expect(target.querySelector('section')).toBeNull();
+       |                                             ^
+     78|     requestSavedVaultReview(owner.toText()); await vi.waitFor(() => ex…
+     79|     expect(mocks.openChannel).toHaveBeenCalledWith(owner);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  2 failed (2)
+      Tests  3 failed | 6 passed (9)
+   Start at  19:00:34
+   Duration  2.96s (transform 972ms, setup 19ms, import 1.47s, tests 175ms, environment 1.09s)
+
+npm error Lifecycle script `test:unit` failed with error:
+npm error code 1
+npm error path /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+npm error workspace vault_frontend@0.0.0
+npm error location /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+npm error command failed
+npm error command sh -c vitest --run src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts --maxWorkers=1

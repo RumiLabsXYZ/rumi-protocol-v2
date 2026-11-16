@@ -1,0 +1,8 @@
+import fs from 'node:fs';import crypto from 'node:crypto';
+const out=new URL('./',import.meta.url),base='https://app.rumiprotocol.com';const hash=b=>crypto.createHash('sha256').update(b).digest('hex');const evidence=[];
+async function read(path,name){const r=await fetch(base+path,{headers:{'Accept-Encoding':'identity','Cache-Control':'no-cache'}});const b=Buffer.from(await r.arrayBuffer());if(!r.ok)throw Error(path+':'+r.status);fs.writeFileSync(new URL(name,out),b);evidence.push({path,status:r.status,bytes:b.length,sha256:hash(b),headers:Object.fromEntries(r.headers)});return b.toString()}
+const [html,version]=await Promise.all([read('/vaults','index.html'),read('/_app/version.json','version.json')]);
+const entries=[...new Set([...html.matchAll(/(_app\/immutable\/entry\/(?:start|app)\.[a-zA-Z0-9_-]+\.js)/g)].map(x=>'/'+x[1]))];
+if(!entries.length)throw Error('entry parse missing');
+for(const entry of entries){const name=entry.split('/').at(-1);const js=await read(entry,name);if(name.startsWith('app.')){const nodes=[...js.matchAll(/\.\.\/nodes\/0\.[a-zA-Z0-9_-]+\.js/g)].map(x=>x[0]);if(!nodes.length)throw Error('root parse missing');for(const n of new Set(nodes)){const path='/_app/immutable/'+n.replace('../','');const root=await read(path,'root.js');evidence.push({rootMarkers:{genericPrompt:root.includes('Need to resume a vault action?'),oldButton:root.includes('Check pending vault action'),menuLabel:root.includes('Recover a vault action')}})}}}
+const result={checkedUtc:new Date().toISOString(),version:JSON.parse(version),evidence};fs.writeFileSync(new URL('served-proof.json',out),JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({checkedUtc:result.checkedUtc,version:result.version,evidence:evidence.map(({headers,...r})=>r)}));

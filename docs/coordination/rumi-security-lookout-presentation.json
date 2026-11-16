@@ -1,6 +1,6 @@
 {
-  "summary": "The finding matrix covers CL-01 through CL-17 and all 25 September IDs. PR #666 is merged; backend, bot, Stability Pool, AMM, and Analytics run its reviewed builds, and the wallet-session frontend is published. Partial Points provenance, one legacy archive-proof case, and 60 Treasury tombstones remain bounded historical limitations rather than active-path blockers.",
-  "plainSummary": "The accepted active-path security fixes are merged and installed, including all five dependency updates and the wallet frontend. Historical cases without exact proof remain safely held, and the public report keeps those limits visible. Rob does not need to act right now.",
+  "summary": "Accepted security-remediation closure remains intact. A later main-based frontend release omitted prior SEC20/21 UI corrections; current1794779370215 served root confirms generic recovery-card regression. Ellis restores both on canonical9b with39tests/twofinalreviews/mocklayoutPASS; currentPR666sessionguards retained. CanonicalCI/merge and coordinatedasset-onlypublication next; no backend/funds.",
+  "plainSummary": "The security program remains closed, but a later frontend release brought back the generic recovery card and dropped the manual-queue guard. Both corrections are prepared on canonical source and pass focused checks. The next step is verified publication; no wallet action or additional approval is needed.",
   "glossary": [
     {
       "term": "Stability Pool",

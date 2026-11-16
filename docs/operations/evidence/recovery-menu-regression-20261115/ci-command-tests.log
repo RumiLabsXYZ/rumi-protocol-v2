@@ -1,0 +1,27 @@
+
+> vault_frontend@0.0.0 test
+> npm run test:unit -- --run src/lib/components/vault/XrpDepositTagNotice.spec.ts src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts
+
+
+> vault_frontend@0.0.0 test:unit
+> vitest --run src/lib/components/vault/XrpDepositTagNotice.spec.ts src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts
+
+
+ RUN  v4.1.12 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+7:09:17 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:503:8 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+7:09:17 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:503:8 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+7:09:17 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:746:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+7:09:17 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:757:18 A form label must be associated with a control
+https://svelte.dev/e/a11y_label_has_associated_control
+7:09:17 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:859:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+
+ Test Files  3 passed (3)
+      Tests  11 passed (11)
+   Start at  19:09:15
+   Duration  2.31s (transform 2.21s, setup 53ms, import 3.44s, tests 357ms, environment 2.13s)
+

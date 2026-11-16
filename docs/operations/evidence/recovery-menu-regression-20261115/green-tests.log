@@ -1,0 +1,29 @@
+
+> vault_frontend@0.0.0 test:unit
+> vitest --run src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/vault/VaultPullSavedRequest.spec.ts src/lib/components/vault/BorrowSavedRequestNavigation.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts src/lib/services/protocol/postActionRefresh.spec.ts --maxWorkers=1
+
+
+ RUN  v4.1.12 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+7:01:30 PM [vite-plugin-svelte] src/routes/+page.svelte:378:18 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+7:01:30 PM [vite-plugin-svelte] src/routes/+page.svelte:378:18 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+7:01:30 PM [vite-plugin-svelte] src/routes/+page.svelte:643:2 Unused CSS selector "input[type=number]"
+https://svelte.dev/e/css_unused_selector
+7:01:31 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:503:8 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+7:01:31 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:503:8 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+7:01:31 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:746:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+7:01:31 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:757:18 A form label must be associated with a control
+https://svelte.dev/e/a11y_label_has_associated_control
+7:01:31 PM [vite-plugin-svelte] src/lib/components/wallet/WalletConnector.svelte:859:16 Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute
+https://svelte.dev/e/a11y_consider_explicit_label
+
+ Test Files  5 passed (5)
+      Tests  28 passed (28)
+   Start at  19:01:25
+   Duration  6.38s (transform 1.25s, setup 25ms, import 2.22s, tests 1.74s, environment 1.90s)
+

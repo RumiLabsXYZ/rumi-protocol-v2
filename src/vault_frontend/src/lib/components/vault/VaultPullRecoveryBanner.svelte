@@ -412,11 +412,6 @@
   </section>
 {:else if owner && actionNotice}
   <section class="recovery" role="status"><p>{actionNotice}</p><button on:click={requestRefresh} disabled={busy}>Refresh status</button></section>
-{:else if owner && manualCheckPending && !statusReadError}
-  <section class="recovery" aria-label="Check pending vault action">
-    <p>Need to resume a vault action? Checking its status will ask for confirmation in Oisy.</p>
-    <button on:click={requestRefresh} disabled={busy}>Check pending vault action</button>
-  </section>
 {:else if owner && statusReadError}
   <section class="recovery recovery-error" role="status">
     <p>Could not check for a submitted vault collateral pull: {statusReadError}</p>

@@ -1,12 +1,25 @@
 {
   "items": [
     {
+      "id": "recovery-menu-release-regression",
+      "title": "Restore the approved recovery menu and queue guard in canonical releases",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Exact canonical PR/CI/merge; Dorian coordinates one frontend/auth build and asset-only publication, Ellis verifies served root/menu/queue bundles and layouts. Keep current PR666 protections and all closed security findings/financial holds. No backend or financial action.",
+      "cardIds": [
+        "SEC-20"
+      ]
+    },
+    {
       "id": "audit-closure",
       "title": "Close the remaining security evidence gaps",
       "status": "done",
       "blockedReason": "",
       "nextAction": "Accepted active-path findings and all five dependency refreshes are closed. Preserve the archive-proof hold, Treasury tombstones, and partial Points provenance classification; refresh evidence only when stronger historical proof appears.",
-      "cardIds": ["SEC-02", "SEC-04"]
+      "cardIds": [
+        "SEC-02",
+        "SEC-04"
+      ]
     },
     {
       "id": "sp-live-recovery",
@@ -14,7 +27,9 @@
       "status": "done",
       "blockedReason": "",
       "nextAction": "The reviewed candidate is installed and all 237 credited packets and bounded recovery inventories were preserved. Continue ordinary monitoring.",
-      "cardIds": ["SEC-01"]
+      "cardIds": [
+        "SEC-01"
+      ]
     },
     {
       "id": "vault158-recovery",
@@ -22,7 +37,9 @@
       "status": "done",
       "blockedReason": "",
       "nextAction": "Recovery is TreasurySettled with durable receipts; bot configuration and empty claim/payment inventories were read back before processing resumed.",
-      "cardIds": ["SEC-06"]
+      "cardIds": [
+        "SEC-06"
+      ]
     },
     {
       "id": "cksol-icp-processing",
@@ -30,7 +47,11 @@
       "status": "blocked",
       "blockedReason": "Focused source composition checks pass; the production artifact still excludes the recovery composition. No production build slot or deployment or financial authority is active.",
       "nextAction": "Complete standing green source merge, then coordinate one source-matched artifact build and refresh the upgrade packet. Preserve accepted stop and drain and exact archived-slot replacement policy; reserve stays off.",
-      "cardIds": ["CKICP-01", "CKICP-02", "CKICP-03"]
+      "cardIds": [
+        "CKICP-01",
+        "CKICP-02",
+        "CKICP-03"
+      ]
     },
     {
       "id": "vault51-nicp-recovery",
@@ -38,7 +59,9 @@
       "status": "in_progress",
       "blockedReason": "",
       "nextAction": "Review green PR #613 and preserve the separate authorization boundary for owner repayment, nICP settlement, and ICP withdrawal.",
-      "cardIds": ["SEC-08"]
+      "cardIds": [
+        "SEC-08"
+      ]
     },
     {
       "id": "release-report",
@@ -46,7 +69,9 @@
       "status": "done",
       "blockedReason": "",
       "nextAction": "The final all-five-installed status is published with exact served-byte readback. Refresh again only when material evidence changes.",
-      "cardIds": ["SEC-05"]
+      "cardIds": [
+        "SEC-05"
+      ]
     },
     {
       "id": "points-recovery",
@@ -54,7 +79,9 @@
       "status": "done",
       "blockedReason": "",
       "nextAction": "Season 1 scoring is finalized and verified. Token claims and Season 2 remain separate work.",
-      "cardIds": ["SEC-03"]
+      "cardIds": [
+        "SEC-03"
+      ]
     },
     {
       "id": "xrp-deposit-tag-guidance",
@@ -62,7 +89,10 @@
       "status": "done",
       "blockedReason": "",
       "nextAction": "Deployed and verified. Customer-specific exchange behavior and any existing funds require separate identifiers.",
-      "cardIds": ["XRPTAG-01", "XRPTAG-02"]
+      "cardIds": [
+        "XRPTAG-01",
+        "XRPTAG-02"
+      ]
     }
   ]
 }

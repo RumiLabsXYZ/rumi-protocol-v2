@@ -1,6 +1,19 @@
 {
   "cards": [
     {
+      "id": "SEC-20",
+      "state": "In progress",
+      "owner": "Ellis source/integration/independent verification; Dorian coordinated publisher",
+      "scope": "Restore recovery menu and manual-queue availability after canonical frontend regression",
+      "evidenceText": "Currentpublic1794779370215 root0.CKx57ZA5.js hash99bf0829 contains old genericOISYcard/button and no menu label; canonicalPR666f72/main9b omitted priorSEC20/21 lineage. Restoring3frontendcomponents/currentcanonicalbase, retaining entirePR666 Banner script and all session-bound refreshguards. Wallet andmanualqueuecomponents matchpreviouslyapprovede7; publicclaimquery only, no backend/funds. Redreproduction;39tests/7suites, twofinalcombinedreviews, connectedmockdesktop/mobilePASS. ExistingfrontendCI now includesrecovery/queue regressions. CanonicalPR/CI/merge then one coordinatedasset-onlypublication and independentservedreadback next. Broadersecurityclosure/holds remainclosed/preserved.",
+      "evidenceLinks": [
+        {
+          "title": "Source diagnosis, restoration and publication boundary",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-menu-regression-20261115/docs/operations/recovery-menu-regression-20261115.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-06",
       "state": "Done",
       "owner": "Bram",
