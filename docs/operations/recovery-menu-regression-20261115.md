@@ -18,6 +18,10 @@ Prior SEC20 code `8a64f8188422d1e7692fca67531782fb2f04d241` was published and re
 
 Bram and Merritt confirmed that the previously approved SEC21 manual-queue availability correction must also be carried into canonical source. ManualLiquidations.svelte and its five mounted regressions are restored byte-for-byte from deployed e7b736c9: existing public bot-claim IDs, reserved/loading/unavailable execution guards, rejection-versus-stale-read fencing, independent XRP settlement and accurate status wording. The canonical component had no newer PR666 logic in those differences. CI includes those suites too. No backend, canister API, dependency, financial, unrelated UI redesign or old-source rollback is included.
 
+## Discovery publication preservation
+
+Dorian is separately publishing only the two approved discovery assets. To preserve them in the next full frontend release, source commit `1b42e9048077dbf0b34505cf4a12e0f97a2311e1` carries exactly three runtime paths from his pushed `7ca180793fa58beecba22ea98f4bc46507754854`: `scripts/generate-frontend-discovery.mjs`, the frontend package postbuild chain and `.ic-assets.json` content-type rules. Both generated mainnet files match his frozen assets byte-for-byte; the local-network run removes them, and the unchanged auth verifier remains first in postbuild. No dependency change or production build was required for these checks. His publication receipt and a fresh live asset inventory must precede our later asset publication; preserve both keys and their properties. This does not change the three UI components or their completed test/review evidence.
+
 ## Verification completed
 
 - On canonical base, the restored expectations reproduced three failures across nine mounted tests: the unwanted global card and missing menu control.
