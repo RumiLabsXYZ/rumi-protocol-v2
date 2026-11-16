@@ -1,0 +1,32 @@
+{
+  "authorityThread": "01a1a48c-240e-77f0-8205-91e3120e76c0",
+  "authorityUserMessage": "01a1e262-209f-7e62-ba26-6b3ea42cff83",
+  "startedUtc": "2026-11-16T03:25:20.364155+00:00",
+  "resumptionRequiresNewRobApproval": true,
+  "steps": [
+    {
+      "name": "pre-flag",
+      "exit": 0,
+      "utc": "2026-11-16T03:25:21.600565+00:00"
+    },
+    {
+      "name": "set-hold-ONCE",
+      "exit": 0,
+      "utc": "2026-11-16T03:25:23.313627+00:00"
+    },
+    {
+      "name": "independent-post-flag",
+      "exit": 0,
+      "utc": "2026-11-16T03:25:23.954997+00:00"
+    },
+    {
+      "name": "pool-status-after",
+      "exit": 0,
+      "utc": "2026-11-16T03:25:24.687202+00:00"
+    }
+  ],
+  "verifiedHeld": true,
+  "poolEmergencyPauseUnchangedFalse": true,
+  "finishedUtc": "2026-11-16T03:25:24.687409+00:00",
+  "productionWrites": 1
+}

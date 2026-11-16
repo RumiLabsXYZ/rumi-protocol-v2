@@ -1,0 +1,33 @@
+{
+  "assembledUtc": "2026-11-16T03:24:43.136881+00:00",
+  "readFiles": [
+    {
+      "name": "sp-writedown-disabled.txt",
+      "sha256": "b98ee57d9f05f9318b90414b8b0d2a8c53be3834622eee81eab2e9828a0e504c"
+    },
+    {
+      "name": "liquidation-frozen.txt",
+      "sha256": "b98ee57d9f05f9318b90414b8b0d2a8c53be3834622eee81eab2e9828a0e504c"
+    },
+    {
+      "name": "backend-status.txt",
+      "sha256": "fbc52844f8c04f0ec6a0763caf74da7ed4ccb2dabbd1df9914277a8a8250b726"
+    },
+    {
+      "name": "pool-status.txt",
+      "sha256": "9b5fb5e56920534911ec73029432abc739e6f685ff79e2c4cc3be9cabf577beb"
+    },
+    {
+      "name": "pool-get_pool_status.txt",
+      "sha256": "d31e3722cd4c4e5a17838c1d0af3af9d65a5738cb2a67371d1fe7a37c389e95d"
+    },
+    {
+      "name": "pool-get_liquidation_history.txt",
+      "sha256": "9e6fa6134518992e9a04323dcd4b548458d34369e43c0848e26f1dc5a11cd562"
+    },
+    {
+      "name": "vault208.txt",
+      "sha256": "783e35874a041c93e547a5ad1cab04b29ef0ccd84bc1e02fd174bd926defba61"
+    }
+  ]
+}
