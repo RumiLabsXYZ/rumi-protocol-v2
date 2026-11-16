@@ -1,0 +1,11 @@
+{
+  "base": "9b7669e7",
+  "deployedSecuritySource": "f72ede8195b23299c297fb24f37ac76d7d957269",
+  "oldServedVersion": "1794779370215",
+  "bannerEntireScriptUnchanged": true,
+  "bannerScriptSha256": "5385bd2e4b9bf048d584dac34f1ff3af4afc55abf94ed39ce6aed37cc4b624fb",
+  "walletComponentEqualsPriorDeployedSec20": true,
+  "walletSha256": "9e60cf472f7c2ef80c06c1382f9c85cdd57750992bd58c0b68eba1481dc640df",
+  "earlierSec20AncestorOfCanonicalBase": false,
+  "financialAction": false
+}

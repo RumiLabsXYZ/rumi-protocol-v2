@@ -1,0 +1,9 @@
+{
+  "text": "No saved request is pending in this wallet. Refresh your vaults and balance before creating another request.\n\nRefresh status",
+  "qa": {
+    "reads": 1,
+    "channels": 1,
+    "financial": 0
+  },
+  "menuClosed": true
+}
