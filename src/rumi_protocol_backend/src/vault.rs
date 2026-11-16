@@ -4755,14 +4755,20 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
             )));
         }
     }
-    if existing.is_none() && state.vault_id_to_vaults.get(&vault_id)
+    if state
+        .vault_id_to_vaults
+        .get(&vault_id)
         .and_then(|vault| state.get_collateral_config(&vault.collateral_type))
         .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset) {
-        return Err(ProtocolError::GenericError("Sunset collateral requires manual liquidation".into()));
+        return Err(ProtocolError::GenericError(
+            "Sunset collateral requires manual liquidation".into(),
+        ));
     }
-    // A pre-upgrade reservation is the exact quote already admitted to the
-    // SP. Preserve its immutable tuple, including legacy full-debt quotes that
-    // exceed the new recovery cap. Fresh reservations always pass the cap.
+    // Any preflight call is a new admission/readmission decision, even when a
+    // matching row already exists. Revalidate the current cap and liquidation
+    // guards before returning the old immutable tuple; proof-backed settlement
+    // of an already-burned legacy reservation bypasses this function.
+    let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
     if let Some(row) = existing.as_ref() {
         if row.caller == caller && row.icusd_burn_e8s == expected_icusd_burn_e8s {
             return Ok(crate::XrpSpAbsorbPreflight {
@@ -4774,7 +4780,6 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
             });
         }
     }
-    let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
     let mut preflight = sizing.preflight;
     preflight.expires_at_ns = now_ns.saturating_add(XRP_SP_ABSORB_PREFLIGHT_TTL_NS);
     state.sp_xrp_absorb_preflights.insert(
@@ -15370,8 +15375,10 @@ mod xrp_sp_absorb_contract_tests {
         assert_eq!(preflight.icusd_burn_e8s, recovery_cap.to_u64());
         assert!(preflight.icusd_burn_e8s < vault.borrowed_icusd_amount.to_u64());
 
-        // A matching legacy full-debt reservation stays byte-for-byte pinned,
-        // even though the new fresh-request policy would reject its amount.
+        // A matching legacy full-debt reservation is not a new-admission
+        // bypass. Reject the over-cap preflight retry without mutating its
+        // immutable tuple; a proof-backed submit still settles that exact old
+        // tuple through the separate commit path.
         let mut legacy = test_state_with_xrp_vault();
         legacy.collateral_configs.get_mut(&xrp).unwrap().last_price = Some(1.30);
         let old = crate::state::StoredXrpSpAbsorbPreflight {
@@ -15384,22 +15391,48 @@ mod xrp_sp_absorb_contract_tests {
             expires_at_ns: 9,
         };
         legacy.sp_xrp_absorb_preflights.insert(VAULT_ID, old.clone());
-        let replay = stability_pool_preflight_xrp_absorb_in_state(
+        let err = stability_pool_preflight_xrp_absorb_in_state(
             &mut legacy,
             sp(),
             VAULT_ID,
             100 * E8,
             20,
         )
-        .expect("existing exact legacy reservation remains admitted");
-        assert_eq!(replay.icusd_burn_e8s, old.icusd_burn_e8s);
-        assert_eq!(replay.collateral_received_drops, old.collateral_received_drops);
-        assert_eq!(replay.collateral_price_e8s, old.collateral_price_e8s);
-        assert_eq!(replay.expires_at_ns, old.expires_at_ns);
+        .expect_err("over-cap legacy tuple cannot be newly admitted");
+        assert!(format!("{err:?}").contains("exceeds native-XRP recovery cap"));
+        assert_eq!(legacy.sp_xrp_absorb_preflights.get(&VAULT_ID), Some(&old));
+
+        let mut already_burned_request = valid_request(44);
+        already_burned_request.allocations[0].drops = 57_000_000;
+        already_burned_request.allocations[1].drops = 40_000_000;
+        let settled = stability_pool_liquidate_xrp_vault_in_state(
+            &mut legacy,
+            sp(),
+            already_burned_request,
+            30,
+        )
+        .expect("proof-backed legacy burn settles from its exact reserved tuple");
+        assert_eq!(settled.liquidated_debt_e8s, old.icusd_burn_e8s);
+        assert_eq!(settled.collateral_received_drops, old.collateral_received_drops);
+        assert_eq!(
+            settled
+                .payout_claims
+                .iter()
+                .map(|claim| claim.drops)
+                .sum::<u64>(),
+            97_000_000
+        );
+        assert_eq!(
+            legacy.xrp_claims.len(),
+            3,
+            "two payouts plus the legacy protocol cut"
+        );
+        assert!(legacy.vault_id_to_vaults.get(&VAULT_ID).is_none());
+        assert!(legacy.sp_xrp_absorb_preflights.get(&VAULT_ID).is_none());
     }
 
     #[test]
-    fn sunset_xrp_rejects_fresh_preflight_but_preserves_existing_reservation() {
+    fn sunset_xrp_rejects_preflight_retry_and_preserves_existing_row() {
         let mut fresh = test_state_with_xrp_vault();
         fresh.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
         let err = stability_pool_preflight_xrp_absorb_in_state(&mut fresh, sp(), VAULT_ID, 100 * E8, 10).unwrap_err();
@@ -15409,7 +15442,18 @@ mod xrp_sp_absorb_contract_tests {
         let mut reserved = test_state_with_xrp_vault();
         stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 10).unwrap();
         reserved.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
-        assert!(stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 11).is_ok());
+        let old = reserved.sp_xrp_absorb_preflights.get(&VAULT_ID).unwrap().clone();
+        assert!(
+            stability_pool_preflight_xrp_absorb_in_state(
+                &mut reserved,
+                sp(),
+                VAULT_ID,
+                100 * E8,
+                11
+            )
+            .is_err()
+        );
+        assert_eq!(reserved.sp_xrp_absorb_preflights.get(&VAULT_ID), Some(&old));
     }
 
     #[test]
