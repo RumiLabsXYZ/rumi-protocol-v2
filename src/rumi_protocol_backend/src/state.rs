@@ -6698,6 +6698,9 @@ impl State {
         if let Some(mode) = args.mode {
             self.mode = mode;
         }
+        if args.preserve_sp_writedown_hold == Some(true) {
+            self.sp_writedown_disabled = true;
+        }
     }
 
     /// Exact aggregate debt, or `None` if the persisted vault set cannot be

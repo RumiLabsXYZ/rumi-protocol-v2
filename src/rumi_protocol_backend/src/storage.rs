@@ -1,6 +1,7 @@
 use crate::event::Event;
 use crate::event::{BotProofAuditEvent, PendingPayoutEvent};
 use ic_stable_structures::{
+    cell::Cell as StableCell,
     log::{Log as StableLog, NoSuchEntry},
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     DefaultMemoryImpl, Memory,
@@ -29,12 +30,17 @@ const EVENT_TS_DATA_MEMORY_ID: MemoryId = MemoryId::new(6);
 // variant set returned by long-lived public event APIs.
 const PAYOUT_EVENT_INDEX_MEMORY_ID: MemoryId = MemoryId::new(7);
 const PAYOUT_EVENT_DATA_MEMORY_ID: MemoryId = MemoryId::new(8);
+// IDs 9 and 10 belonged to historical storage partitions and must not be
+// reused. This private cell is an admission control latch, outside public
+// Event so its addition does not widen the Candid event variant set.
+const SP_WRITEDOWN_HOLD_MEMORY_ID: MemoryId = MemoryId::new(11);
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
 type EventLog = StableLog<Vec<u8>, VMem, VMem>;
 type SnapshotLog = StableLog<Vec<u8>, VMem, VMem>;
 type TimestampLog = StableLog<u64, VMem, VMem>;
 type PayoutEventLog = StableLog<Vec<u8>, VMem, VMem>;
+type SpWritedownHoldCell = StableCell<u8, VMem>;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -86,6 +92,80 @@ thread_local! {
                   ).expect("failed to initialize private payout event log")
               )
         );
+
+    /// 0 = not yet migrated, 1 = explicit false, 2 = explicit true.
+    /// Any other value is corruption and is treated as a trap by the accessor.
+    static SP_WRITEDOWN_HOLD: RefCell<SpWritedownHoldCell> = MEMORY_MANAGER
+        .with(|m| RefCell::new(StableCell::init(
+            m.borrow().get(SP_WRITEDOWN_HOLD_MEMORY_ID),
+            0,
+        ).expect("failed to initialize SP write-down hold cell")));
+}
+
+fn resolve_sp_writedown_hold(
+    state_value: bool,
+    stored_value: u8,
+    current_upgrade_override: Option<bool>,
+) -> Result<(bool, u8), u8> {
+    // A current, explicit Some(true) is the only upgrade-argument action that
+    // may write this latch. Some(false) is deliberately not an authorization.
+    if current_upgrade_override == Some(true) {
+        return Ok((true, 2));
+    }
+
+    match stored_value {
+        1 => Ok((false, 1)),
+        2 => Ok((true, 2)),
+        0 => Ok((state_value, if state_value { 2 } else { 1 })),
+        invalid => Err(invalid),
+    }
+}
+
+/// Read the persisted SP write-down hold. `None` means the new cell has not
+/// yet been initialized from the restored state.
+pub fn sp_writedown_hold() -> Option<bool> {
+    SP_WRITEDOWN_HOLD.with(|cell| match *cell.borrow().get() {
+        0 => None,
+        1 => Some(false),
+        2 => Some(true),
+        invalid => ic_cdk::trap(&format!("invalid SP write-down hold cell value {invalid}")),
+    })
+}
+
+/// Persist an explicit admin-set hold state. Callers must perform the existing
+/// controller authorization before invoking this function.
+pub fn set_sp_writedown_hold(disabled: bool) {
+    let encoded = if disabled { 2 } else { 1 };
+    SP_WRITEDOWN_HOLD.with(|cell| {
+        cell.borrow_mut()
+            .set(encoded)
+            .expect("failed to persist SP write-down hold")
+    });
+}
+
+/// Apply the private hold cell to a restored or replay-rebuilt state before
+/// timers/admission start. Only the current upgrade's `Some(true)` can force
+/// the hold; historical Upgrade events cannot overwrite an explicit clear.
+pub fn apply_sp_writedown_hold_overlay(
+    state: &mut crate::state::State,
+    current_upgrade_override: Option<bool>,
+) {
+    SP_WRITEDOWN_HOLD.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let (disabled, encoded) = resolve_sp_writedown_hold(
+            state.sp_writedown_disabled,
+            *cell.get(),
+            current_upgrade_override,
+        )
+        .unwrap_or_else(|invalid| {
+            ic_cdk::trap(&format!("invalid SP write-down hold cell value {invalid}"))
+        });
+        if *cell.get() != encoded {
+            cell.set(encoded)
+                .expect("failed to initialize SP write-down hold");
+        }
+        state.sp_writedown_disabled = disabled;
+    });
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -671,5 +751,115 @@ mod state_snapshot_tests {
             decode_state_body(truncated).is_err(),
             "a truncated snapshot must fail to decode (not silently wipe)"
         );
+    }
+}
+
+#[cfg(test)]
+mod sp_writedown_hold_tests {
+    use super::{
+        decode_state_body, resolve_sp_writedown_hold, set_sp_writedown_hold,
+        sp_writedown_hold, StableCell, MEMORY_MANAGER, SP_WRITEDOWN_HOLD_MEMORY_ID,
+    };
+
+    #[test]
+    fn stable_hold_overlay_handles_fallback_snapshot_and_authorized_clear() {
+        // An old event replay can rebuild a default false heap state, but an
+        // already persisted true latch is authoritative before admission.
+        assert_eq!(resolve_sp_writedown_hold(false, 2, None), Ok((true, 2)));
+
+        // A later historical Upgrade(true) in fallback replay cannot undo an
+        // explicit admin clear stored by the setter.
+        assert_eq!(resolve_sp_writedown_hold(true, 1, None), Ok((false, 1)));
+
+        // First install migrates a true state snapshot into the new cell.
+        assert_eq!(resolve_sp_writedown_hold(true, 0, None), Ok((true, 2)));
+
+        // The exact current install argument may force/persist true even if an
+        // older explicit false cell exists. Some(false) is never authorization.
+        assert_eq!(resolve_sp_writedown_hold(false, 1, Some(true)), Ok((true, 2)));
+        assert_eq!(resolve_sp_writedown_hold(false, 2, Some(false)), Ok((true, 2)));
+        assert_eq!(resolve_sp_writedown_hold(false, 2, None), Ok((true, 2)));
+        assert_eq!(resolve_sp_writedown_hold(true, 0, Some(false)), Ok((true, 2)));
+    }
+
+    #[test]
+    fn snapshot_hold_round_trip_and_explicit_false_persist() {
+        let mut state = crate::state::State::default();
+        state.sp_writedown_disabled = true;
+        let mut snapshot = Vec::new();
+        ciborium::ser::into_writer(&state, &mut snapshot).expect("hold snapshot encodes");
+        let restored = decode_state_body(&snapshot).expect("hold snapshot decodes");
+        let (disabled, cell) = resolve_sp_writedown_hold(
+            restored.sp_writedown_disabled,
+            0,
+            None,
+        )
+        .expect("initialize hold cell from snapshot");
+        assert!(disabled);
+        assert_eq!(cell, 2);
+
+        // This is the state after the existing controller setter writes its
+        // explicit false value. On restart, it must override an old replayed
+        // true value and remain clear.
+        let (disabled, cell) = resolve_sp_writedown_hold(true, 1, None)
+            .expect("explicit false remains authoritative");
+        assert!(!disabled);
+        assert_eq!(cell, 1);
+    }
+
+    #[test]
+    fn invalid_hold_cell_encoding_fails_closed() {
+        assert_eq!(resolve_sp_writedown_hold(false, 3, None), Err(3));
+    }
+
+    #[test]
+    fn stable_cell_write_reopen_and_upgrade_overlay_use_persisted_hold() {
+        assert_eq!(sp_writedown_hold(), None, "fresh cell begins unset");
+
+        // The install override writes through the real global cell.
+        let mut default_state = crate::state::State::default();
+        super::apply_sp_writedown_hold_overlay(&mut default_state, Some(true));
+        assert!(default_state.sp_writedown_disabled);
+        assert_eq!(sp_writedown_hold(), Some(true));
+
+        // Fallback replay may rebuild a default false heap, but the cell is
+        // applied before admission and remains authoritative.
+        let mut fallback_state = crate::state::State::default();
+        super::apply_sp_writedown_hold_overlay(&mut fallback_state, None);
+        assert!(fallback_state.sp_writedown_disabled);
+
+        // The authorized setter persists false; a historical Upgrade(true)
+        // heap value cannot overwrite that explicit clear during replay.
+        set_sp_writedown_hold(false);
+        let mut replayed_legacy_hold = crate::state::State::default();
+        replayed_legacy_hold.sp_writedown_disabled = true;
+        super::apply_sp_writedown_hold_overlay(&mut replayed_legacy_hold, None);
+        assert!(!replayed_legacy_hold.sp_writedown_disabled);
+        assert_eq!(sp_writedown_hold(), Some(false));
+
+        // An upgrade argument with Some(false) cannot clear a persisted true.
+        set_sp_writedown_hold(true);
+        let mut held_state = crate::state::State::default();
+        super::apply_sp_writedown_hold_overlay(&mut held_state, Some(false));
+        assert!(held_state.sp_writedown_disabled);
+
+        // Reinitialize a second StableCell handle over the same manager memory,
+        // as a restart would, and verify its explicit value was not reset.
+        let reopened_value = MEMORY_MANAGER.with(|manager| {
+            let memory = manager.borrow().get(SP_WRITEDOWN_HOLD_MEMORY_ID);
+            let reopened = StableCell::init(memory, 0u8)
+                .expect("reopen existing SP write-down hold cell");
+            *reopened.get()
+        });
+        assert_eq!(reopened_value, 2);
+
+        set_sp_writedown_hold(false);
+        let reopened_value = MEMORY_MANAGER.with(|manager| {
+            let memory = manager.borrow().get(SP_WRITEDOWN_HOLD_MEMORY_ID);
+            let reopened = StableCell::init(memory, 0u8)
+                .expect("reopen explicitly cleared SP write-down hold cell");
+            *reopened.get()
+        });
+        assert_eq!(reopened_value, 1);
     }
 }
