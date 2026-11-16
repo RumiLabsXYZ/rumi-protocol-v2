@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { walletStore as wallet } from "$lib/stores/wallet";
   import { protocolService } from '$lib/services/protocol';
+  import { ApiClient } from '$lib/services/protocol/apiClient';
   import { formatNumber, formatStableDisplay, formatStableTx, formatTokenBalance } from '$lib/utils/format';
   import { tweened } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
@@ -123,6 +124,29 @@
   let isRecoveryMode = false;
   let isLoading = true;
   let isPriceLoading = true;
+  let availabilityReadError = '';
+  let botClaimedVaultIds = new Set<string>();
+  let lockRejectedVaultIds = new Set<string>();
+  let queueReadGeneration = 0;
+
+  function manualAvailability(vaultId: number): string {
+    if (isLoading) return 'Checking liquidation availability. Please wait.';
+    if (availabilityReadError) return availabilityReadError;
+    if (botClaimedVaultIds.has(String(vaultId)) || lockRejectedVaultIds.has(String(vaultId))) {
+      return 'Reserved for bot liquidation. Manual liquidation is unavailable; refresh to check again.';
+    }
+    return '';
+  }
+
+  function rememberBotLock(vaultId: number, message: string) {
+    if (!message.includes(`Vault #${vaultId} is locked — bot liquidation in progress`)) return;
+    // A newer rejection outranks a status read already in flight. Only a new
+    // successful availability read may make this row actionable again.
+    queueReadGeneration++;
+    isLoading = false;
+    lockRejectedVaultIds = new Set([...lockRejectedVaultIds, String(vaultId)]);
+  }
+
   let liquidationError = "";
   let liquidationSuccess = "";
   let processingVaultId: number | null = null;
@@ -414,14 +438,24 @@
   }
 
   async function loadLiquidatableVaults() {
-    isLoading = true; liquidationError = "";
+    const generation = ++queueReadGeneration;
+    isLoading = true; liquidationError = ""; availabilityReadError = '';
     try {
-      const vaults = await protocolService.getLiquidatableVaults();
-      liquidatableVaults = vaults.map(normalizeVault);
+      const [vaults, claims] = await Promise.allSettled([
+        protocolService.getLiquidatableVaults(),
+        ApiClient.getPublicData<bigint[] | BigUint64Array>('get_bot_claim_vault_ids'),
+      ]);
+      if (generation !== queueReadGeneration) return;
+      if (vaults.status === 'rejected') throw vaults.reason;
+      liquidatableVaults = vaults.value.map(normalizeVault);
+      if (claims.status === 'rejected') throw claims.reason;
+      botClaimedVaultIds = new Set(Array.from(claims.value, id => id.toString()));
+      lockRejectedVaultIds = new Set();
     } catch (error) {
-      console.error("Error loading liquidatable vaults:", error);
-      liquidationError = "Failed to load liquidatable vaults.";
-    } finally { isLoading = false; }
+      if (generation !== queueReadGeneration) return;
+      console.error("Error loading liquidation availability:", error);
+      availabilityReadError = 'Could not verify liquidation availability. Refresh before attempting a liquidation.';
+    } finally { if (generation === queueReadGeneration) isLoading = false; }
   }
 
   async function loadAllVaults() {
@@ -461,6 +495,8 @@
   async function handleLiquidate(vault: CandidVault) {
     if (!isConnected) { liquidationError = "Please connect your wallet"; return; }
     if (processingVaultId !== null) return;
+    const unavailable = manualAvailability(vault.vault_id);
+    if (unavailable) { liquidationError = unavailable; return; }
     const inputAmount = getInputVal(vault);
     if (inputAmount <= 0) { liquidationError = "Enter an amount"; return; }
     if (isOverMax(vault)) { liquidationError = "Amount exceeds maximum"; return; }
@@ -502,6 +538,8 @@
       if (!isOisyWallet()) {
         await loadLiquidatableVaults();
       }
+      const unavailableNow = manualAvailability(vault.vault_id);
+      if (unavailableNow) { liquidationError = unavailableNow; return; }
       if (!liquidatableVaults.find(v => v.vault_id === vault.vault_id)) {
         liquidationError = "Vault no longer available"; processingVaultId = null; return;
       }
@@ -561,6 +599,7 @@
         }
       } else {
         const msg = result.error || "Liquidation failed";
+        rememberBotLock(vault.vault_id, msg);
         if (msg.includes('Click Liquidate again')) {
           liquidationSuccess = 'Approved! Click Liquidate again to complete.';
         } else if (isXrp && isAmbiguousLiquidationError(msg)) {
@@ -577,6 +616,7 @@
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
+      rememberBotLock(vault.vault_id, msg);
       if (isXrp && isAmbiguousLiquidationError(msg)) {
         const recovered = await recoverXrpClaimsForVault(vault);
         if (recovered.length > 0) {
@@ -629,7 +669,7 @@
 
 <div class="liq-page">
   <div class="liq-summary">
-    <span class="summary-stat">{sortedVaults.length} liquidatable vault{sortedVaults.length !== 1 ? 's' : ''} · {allVaults.length} total</span>
+    <span class="summary-stat">{sortedVaults.length} at-risk vault{sortedVaults.length !== 1 ? 's' : ''} · {allVaults.length} total</span>
     <span class="summary-sep">·</span>
     <span class="price-pill">
       ICP
@@ -652,6 +692,7 @@
   {/if}
   {#if liquidationError}<div class="msg msg-error">{liquidationError}</div>{/if}
   {#if liquidationSuccess}<div class="msg msg-success">{liquidationSuccess}</div>{/if}
+  {#if availabilityReadError}<div class="msg msg-warn" role="status">{availabilityReadError}</div>{/if}
 
   {#if orphanedPendingManualXrpClaims.length > 0}
     <div class="xrp-orphaned-pending">
@@ -679,11 +720,13 @@
     <div class="loading-state"><div class="spinner"></div></div>
   {:else if sortedVaults.length === 0}
     <div class="empty-state">
-      <p class="empty-text">No liquidatable vaults. All positions are healthy.</p>
+      <p class="empty-text">No vaults in the liquidation queue.</p>
     </div>
   {:else}
     <div class="liq-list">
       {#each sortedVaults as vault (vault.vault_id)}
+        {@const reserved = botClaimedVaultIds.has(String(vault.vault_id)) || lockRejectedVaultIds.has(String(vault.vault_id))}
+        {@const manualUnavailable = isLoading || !!availabilityReadError || reserved}
         {@const cr = calculateCollateralRatio(vault)}
         {@const debt = getVaultDebt(vault)}
         {@const capParams = getLiquidationCapParams(vault)}
@@ -720,7 +763,7 @@
             </div>
 
             <div class="card-center">
-              {#if s}
+              {#if s && !manualUnavailable}
                 <span class="outcome-label">{isXrp ? 'XRP claim' : 'You receive'}</span>
                 <span class="outcome-line">
                   {formatNumber(s.collateralSeized, 4)} {s.symbol}
@@ -733,6 +776,8 @@
             </div>
 
             <div class="card-right">
+              {#if reserved}<p class="availability-note" role="status">Reserved for bot liquidation. Refresh to check manual availability.</p>
+              {:else if isLoading}<p class="availability-note" role="status">Checking liquidation availability…</p>{/if}
               {#if isXrp}
                 <div class="xrp-payout-fields">
                   <label class="xrp-field-label" for={`xrp-address-${vault.vault_id}`}>XRP payout address</label>
@@ -742,7 +787,7 @@
                     type="text"
                     placeholder="XRPL address"
                     bind:value={xrpPayoutAddresses[vault.vault_id]}
-                    disabled={isProcessingThis}
+                    disabled={isProcessingThis || manualUnavailable}
                   />
                   <input
                     class="xrp-tag-input"
@@ -750,7 +795,7 @@
                     inputmode="numeric"
                     placeholder="Destination tag (optional)"
                     bind:value={xrpDestinationTags[vault.vault_id]}
-                    disabled={isProcessingThis}
+                    disabled={isProcessingThis || manualUnavailable}
                   />
                 </div>
                 {#each vaultPendingXrpClaims as pendingXrpClaim (pendingXrpClaim.claimId)}
@@ -772,7 +817,7 @@
               <div class="input-label-row">
                 <span class="input-label">Amount to liquidate</span>
                 {#if maxLiq > 0}
-                  <button class="max-text" on:click={() => setMax(vault)}>Max: {formatNumber(maxLiq, 4)}</button>
+                  <button class="max-text" disabled={manualUnavailable} on:click={() => setMax(vault)}>Max: {formatNumber(maxLiq, 4)}</button>
                 {:else if isConnected}
                   <span class="max-loading">Max: ····</span>
                 {/if}
@@ -787,21 +832,24 @@
                     on:input={() => { liquidationAmounts = liquidationAmounts; }}
                     min="0" step="0.01"
                     placeholder="0.00"
-                    disabled={isProcessingThis} />
+                    disabled={isProcessingThis || manualUnavailable} />
                   <select class="token-select"
                     bind:value={liquidationTokens[vault.vault_id]}
                     on:change={() => { liquidationAmounts[vault.vault_id] = ''; liquidationTokens = liquidationTokens; }}
-                    disabled={isProcessingThis}>
+                    disabled={isProcessingThis || manualUnavailable}>
                     <option value="icUSD">icUSD</option>
                     <option value="CKUSDT">ckUSDT</option>
                     <option value="CKUSDC">ckUSDC</option>
                   </select>
                 </div>
-                <button class="btn-primary btn-sm btn-liquidate"
+                <button class="btn-primary btn-sm btn-liquidate" class:manual-unavailable={manualUnavailable}
                   on:click={() => handleLiquidate(vault)}
-                  disabled={!isConnected || processingVaultId !== null || inputVal <= 0 || (isXrp && !(xrpPayoutAddresses[vault.vault_id] ?? '').trim())}>
+                  disabled={manualUnavailable || !isConnected || processingVaultId !== null || inputVal <= 0 || (isXrp && !(xrpPayoutAddresses[vault.vault_id] ?? '').trim())}>
                   {#if isProcessingThis}
                     {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
+                  {:else if reserved}Reserved
+                  {:else if availabilityReadError}Unavailable
+                  {:else if isLoading}Checking…
                   {:else}
                     Liquidate
                   {/if}
@@ -891,6 +939,8 @@
 </div>
 
 <style>
+  .btn-liquidate.manual-unavailable { background: var(--rumi-bg-surface2); color: var(--rumi-text-muted); cursor: not-allowed; }
+  .availability-note { max-width: 22rem; margin: 0 0 .5rem; color: var(--rumi-text-muted); font-size: .8rem; }
   .liq-page { max-width: 800px; margin: 0 auto; }
 
   .price-pill {

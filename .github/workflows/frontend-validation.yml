@@ -24,7 +24,7 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Generate SvelteKit configuration
         run: npm run prebuild --workspace=src/vault_frontend
-      - name: Verify XRP guidance and wallet recovery entry
-        run: npm test --workspace=src/vault_frontend -- src/lib/components/vault/XrpDepositTagNotice.spec.ts src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts
+      - name: Verify XRP guidance and recovery regressions
+        run: npm test --workspace=src/vault_frontend -- src/lib/components/vault/XrpDepositTagNotice.spec.ts src/lib/components/vault/VaultPullRecoveryBanner.spec.ts src/lib/components/wallet/WalletRecoveryNavigation.spec.ts src/lib/components/liquidations/ManualLiquidations.availability.spec.ts src/lib/components/liquidations/ManualLiquidations.xrp.spec.ts
       - name: Build frontend and verify auth assets
         run: npm run build --workspace=src/vault_frontend

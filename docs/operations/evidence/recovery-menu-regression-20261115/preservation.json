@@ -7,5 +7,9 @@
   "walletComponentEqualsPriorDeployedSec20": true,
   "walletSha256": "9e60cf472f7c2ef80c06c1382f9c85cdd57750992bd58c0b68eba1481dc640df",
   "earlierSec20AncestorOfCanonicalBase": false,
-  "financialAction": false
+  "financialAction": false,
+  "earlierSec20Commit": "8a64f8188422d1e7692fca67531782fb2f04d241",
+  "ancestorCommandExit": 1,
+  "manualQueueComponentEqualsPriorDeployedSec21": true,
+  "manualQueueSha256": "ec1ad46d8e0ae5270db1b2cea8673621debc385b470c8c4882d8cf1514851915"
 }
