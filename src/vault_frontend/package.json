@@ -6,7 +6,7 @@
 	"scripts": {
 		"prebuild": "npx @sveltejs/kit sync",
 		"build": "vite build",
-		"postbuild": "node ../../scripts/verify-frontend-auth-assets.mjs",
+		"postbuild": "node ../../scripts/verify-frontend-auth-assets.mjs && node ../../scripts/generate-frontend-discovery.mjs",
 		"dev": "vite dev",
 		"preview": "vite preview",
 		"package": "svelte-kit sync && svelte-package && publint",
