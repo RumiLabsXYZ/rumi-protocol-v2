@@ -1,0 +1,16 @@
+{
+  "observedUtc": "2026-11-16T23:57:05.335508+00:00",
+  "base": "9b7669e799d4e6e6cc6d52174c06e87e3569994c",
+  "fullVault208Source": "c2cbffc872b514034035b8c71d54474eca95c142",
+  "scope": "HOLD ONLY; no XRP sizing or settlement behavior",
+  "patchSha256": "1b4f191d48733088d89711bda6a1bd62c97c47fbd0939ab78717a607177dc1c5",
+  "dorianDraftBase": "f0df15285cc4b51e83045ab6b0469a1bab4a44c6",
+  "dorianDraftDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "applyCheckExit": 0,
+  "dorianWorktreeUnchanged": true,
+  "runtimeTestsRun": false,
+  "buildRun": false,
+  "deploymentAuthorized": false,
+  "testOnlyCorrection": "Explicit0u8 in two reopen tests",
+  "holdOnlySourceCommit": "68946c3419055960f5a7ae8d6910adad3b3ae2e7"
+}

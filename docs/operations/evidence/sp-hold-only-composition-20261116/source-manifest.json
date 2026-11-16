@@ -1,0 +1,39 @@
+{
+  "sourceFiles": [
+    {
+      "path": "src/rumi_protocol_backend/src/lib.rs",
+      "sha256": "a5002be9dc37524b0d912cdbb46ac93a977b95f9cfbf7694252c57cea5d8b8d0"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/main.rs",
+      "sha256": "dc6659474d070a83029a2d9bec405534b17327ec4574629a535d4378c4a62219"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/state.rs",
+      "sha256": "fc43d52011b045cd37023c44ed7940cd20bd8dcd3d9a3dd30bce1288199afdb4"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/storage.rs",
+      "sha256": "bdce5d7513ce79bddafffaa3266b85de76f96f4b6e0db6341b6a9a5acc7bc75a"
+    },
+    {
+      "path": "src/rumi_protocol_backend/tests/cksol_icp_lifecycle_pic.rs",
+      "sha256": "379206720a0f4cde5e06f3109093df312b962cece8fb19c07ca7adfaca4387d6"
+    },
+    {
+      "path": "src/rumi_protocol_backend/tests/xrpl_icusd_testnet_rehearsal.rs",
+      "sha256": "0b14490610e638867e2cf22532eeb98374cfbba47a36dd0c3479148785ad6f45"
+    }
+  ],
+  "unchangedVaultSourceSha256": "76b54bf0c8cef3a2863ca483acee14565292fee81a129c611e630636535546a9",
+  "proof": "vault.rs byte-identical to9b7669e7; state.rs exactly3addedholdlines; otherpaths matchc2cbffc8 except two test-only StableCell default literals typed0u8",
+  "runtimeValidation": "UNRUN",
+  "generatedCandid": "not regenerated; must be generated from final composed Rust under authorized validation",
+  "testNames": [
+    "storage::sp_writedown_hold_tests::stable_hold_overlay_handles_fallback_snapshot_and_authorized_clear",
+    "storage::sp_writedown_hold_tests::snapshot_hold_round_trip_and_explicit_false_persist",
+    "storage::sp_writedown_hold_tests::invalid_hold_cell_encoding_fails_closed",
+    "storage::sp_writedown_hold_tests::stable_cell_write_reopen_and_upgrade_overlay_use_persisted_hold"
+  ],
+  "testOnlyCorrection": "Two reopened StableCell handles use explicit0u8 defaults, avoiding i32 literal inference against the persisted u8 cell; runtime hold code unchanged."
+}
