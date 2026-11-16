@@ -1,0 +1,21 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "(true)"
+    }
+  ],
+  "structuredContent": {
+    "canister_id": "tfesu-vyaaa-aaaap-qrd7a-cai",
+    "columns": [],
+    "declared_at": "/.well-known/ic-architecture",
+    "declared_by": "https://app.rumiprotocol.com",
+    "has_more": false,
+    "is_anonymous": true,
+    "method": "get_sp_writedown_disabled",
+    "mode": "candid",
+    "reply": "(true)",
+    "rows": []
+  },
+  "isError": false
+}

@@ -1,0 +1,211 @@
+{
+  "batch_id": "704",
+  "operations": [
+    {
+      "CreateAsset": {
+        "key": "/.well-known/ic-architecture",
+        "content_type": "application/json",
+        "max_age": [],
+        "headers": [
+          [
+            [
+              "Access-Control-Allow-Origin",
+              "*"
+            ],
+            [
+              "Cache-Control",
+              "no-cache, no-store, must-revalidate"
+            ],
+            [
+              "Content-Security-Policy",
+              "default-src 'self';script-src 'self' 'unsafe-inline' https://static.onramper.com/web-sdk https://oisy.com https://beta.oisy.com https://static.onramper.com/web-sdk/v1/onramper-web-sdk.min.js;worker-src 'self' blob:;connect-src 'self' blob: https://icp0.io https://*.icp0.io https://icp-api.io https://ic0.app https://*.ic0.app https://rumiprotocol.io https://oisy.com https://beta.oisy.com https://api.rumiprotocol.io https://solana-rpc.publicnode.com https://xumm.app https://*.xumm.app wss://xumm.app wss://*.xumm.app https://xaman.app https://*.xaman.app https://s.altnet.rippletest.net:51234 https://s.devnet.rippletest.net:51234 https://xrplcluster.com https://s1.ripple.com:51234;frame-src 'self' blob: https://*.tradingview.com https://*.onramper.com https://buy.onramper.com;img-src 'self' blob: data: https://xumm.app https://*.xumm.app;style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;style-src-elem 'self' https://fonts.googleapis.com;style-src-attr 'unsafe-inline';font-src 'self' data: https://fonts.gstatic.com;object-src 'none';base-uri 'self';frame-ancestors 'self' https://rumiprotocol.io https://app.rumiprotocol.com https://app.rumiprotocol.xyz https://*.tradingview.com https://*.onramper.com https://buy.onramper.com;form-action 'self';upgrade-insecure-requests;"
+            ],
+            [
+              "Permissions-Policy",
+              "clipboard-read=(self), clipboard-write=(self)"
+            ],
+            [
+              "Referrer-Policy",
+              "same-origin"
+            ],
+            [
+              "Strict-Transport-Security",
+              "max-age=31536000; includeSubDomains"
+            ],
+            [
+              "X-Content-Type-Options",
+              "nosniff"
+            ],
+            [
+              "X-Frame-Options",
+              "DENY"
+            ],
+            [
+              "X-XSS-Protection",
+              "1; mode=block"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ]
+        ],
+        "enable_aliasing": [
+          false
+        ],
+        "allow_raw_access": [
+          false
+        ]
+      }
+    },
+    {
+      "SetAssetContent": {
+        "key": "/.well-known/ic-architecture",
+        "content_encoding": "identity",
+        "chunk_ids": [
+          "14308"
+        ],
+        "last_chunk": [],
+        "sha256": [
+          {
+            "0": 34,
+            "1": 188,
+            "2": 223,
+            "3": 106,
+            "4": 95,
+            "5": 26,
+            "6": 216,
+            "7": 228,
+            "8": 193,
+            "9": 178,
+            "10": 65,
+            "11": 164,
+            "12": 110,
+            "13": 58,
+            "14": 127,
+            "15": 26,
+            "16": 229,
+            "17": 190,
+            "18": 192,
+            "19": 171,
+            "20": 22,
+            "21": 167,
+            "22": 158,
+            "23": 98,
+            "24": 206,
+            "25": 33,
+            "26": 82,
+            "27": 136,
+            "28": 232,
+            "29": 98,
+            "30": 247,
+            "31": 2
+          }
+        ]
+      }
+    },
+    {
+      "CreateAsset": {
+        "key": "/.well-known/ii-derivation-origin",
+        "content_type": "text/plain; charset=utf-8",
+        "max_age": [],
+        "headers": [
+          [
+            [
+              "Access-Control-Allow-Origin",
+              "*"
+            ],
+            [
+              "Cache-Control",
+              "no-cache, no-store, must-revalidate"
+            ],
+            [
+              "Content-Security-Policy",
+              "default-src 'self';script-src 'self' 'unsafe-inline' https://static.onramper.com/web-sdk https://oisy.com https://beta.oisy.com https://static.onramper.com/web-sdk/v1/onramper-web-sdk.min.js;worker-src 'self' blob:;connect-src 'self' blob: https://icp0.io https://*.icp0.io https://icp-api.io https://ic0.app https://*.ic0.app https://rumiprotocol.io https://oisy.com https://beta.oisy.com https://api.rumiprotocol.io https://solana-rpc.publicnode.com https://xumm.app https://*.xumm.app wss://xumm.app wss://*.xumm.app https://xaman.app https://*.xaman.app https://s.altnet.rippletest.net:51234 https://s.devnet.rippletest.net:51234 https://xrplcluster.com https://s1.ripple.com:51234;frame-src 'self' blob: https://*.tradingview.com https://*.onramper.com https://buy.onramper.com;img-src 'self' blob: data: https://xumm.app https://*.xumm.app;style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;style-src-elem 'self' https://fonts.googleapis.com;style-src-attr 'unsafe-inline';font-src 'self' data: https://fonts.gstatic.com;object-src 'none';base-uri 'self';frame-ancestors 'self' https://rumiprotocol.io https://app.rumiprotocol.com https://app.rumiprotocol.xyz https://*.tradingview.com https://*.onramper.com https://buy.onramper.com;form-action 'self';upgrade-insecure-requests;"
+            ],
+            [
+              "Permissions-Policy",
+              "clipboard-read=(self), clipboard-write=(self)"
+            ],
+            [
+              "Referrer-Policy",
+              "same-origin"
+            ],
+            [
+              "Strict-Transport-Security",
+              "max-age=31536000; includeSubDomains"
+            ],
+            [
+              "X-Content-Type-Options",
+              "nosniff"
+            ],
+            [
+              "X-Frame-Options",
+              "DENY"
+            ],
+            [
+              "X-XSS-Protection",
+              "1; mode=block"
+            ],
+            [
+              "Content-Type",
+              "text/plain; charset=utf-8"
+            ]
+          ]
+        ],
+        "enable_aliasing": [
+          false
+        ],
+        "allow_raw_access": [
+          false
+        ]
+      }
+    },
+    {
+      "SetAssetContent": {
+        "key": "/.well-known/ii-derivation-origin",
+        "content_encoding": "identity",
+        "chunk_ids": [
+          "14309"
+        ],
+        "last_chunk": [],
+        "sha256": [
+          {
+            "0": 22,
+            "1": 207,
+            "2": 107,
+            "3": 90,
+            "4": 142,
+            "5": 183,
+            "6": 135,
+            "7": 179,
+            "8": 34,
+            "9": 43,
+            "10": 165,
+            "11": 131,
+            "12": 8,
+            "13": 205,
+            "14": 98,
+            "15": 52,
+            "16": 117,
+            "17": 91,
+            "18": 32,
+            "19": 190,
+            "20": 134,
+            "21": 147,
+            "22": 55,
+            "23": 225,
+            "24": 225,
+            "25": 30,
+            "26": 66,
+            "27": 181,
+            "28": 30,
+            "29": 238,
+            "30": 83,
+            "31": 160
+          }
+        ]
+      }
+    }
+  ]
+}

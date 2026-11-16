@@ -1,0 +1,321 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "app_url: https://app.rumiprotocol.com (as_provided)\nderivation_origin: https://tcfua-yaaaa-aaaap-qrd7q-cai.ic0.app (declared)\nalternative_origins: https://app.rumiprotocol.com, https://app.rumiprotocol.xyz, https://rumiprotocol.io, https://tcfua-yaaaa-aaaap-qrd7q-cai.icp0.io, https://tcfua-yaaaa-aaaap-qrd7q-cai.raw.icp0.io\n\nCanisters:\n- 6niqu-siaaa-aaaap-qrjeq-cai  — Rumi icUSD transaction index [ic-architecture, bundle] [declared]\n- dtlu2-uqaaa-aaaap-qugcq-cai  — Protocol analytics and historical metrics [ic-architecture, bundle] [declared]\n- fohh4-yyaaa-aaaap-qtkpa-cai  — StableSwap pool and internal 3USD LP token ledger [ic-architecture, bundle] [declared]\n- t6bor-paaaa-aaaap-qrd5q-cai  — Rumi icUSD token ledger [ic-architecture, bundle] [declared]\n- tcfua-yaaaa-aaaap-qrd7q-cai  — Rumi application frontend [ic-architecture, header, bundle] [declared]\n- tfesu-vyaaa-aaaap-qrd7a-cai  — Collateral vaults and protocol accounting [ic-architecture, bundle] [declared]\n- tmhzi-dqaaa-aaaap-qrd6q-cai  — Stability Pool deposits, gains and liquidation accounting [ic-architecture, bundle] [declared]\n- bfnu3-6aaaa-aaaab-qhanq-cai [bundle]\n- cngnf-vqaaa-aaaar-qag4q-cai  «ckUSDT Ledger» (ledger) [bundle]\n- eb25l-dyaaa-aaaar-qb4lq-cai [bundle]\n- efmc5-wyaaa-aaaar-qb3wa-cai  «ckDOGE Ledger» (ledger) [bundle]\n- eqltq-xqaaa-aaaar-qb3vq-cai  «ckDOGE Minter» (minter) [bundle]\n- heq6n-fyaaa-aaaag-qkcpq-cai [bundle]\n- ijlzs-2yaaa-aaaap-quaaq-cai [bundle]\n- jogrm-gqaaa-aaaar-qcg2a-cai [bundle]\n- joh3a-5aaaa-aaaap-quy6a-cai [bundle]\n- lh22c-kyaaa-aaaar-qb5nq-cai [bundle]\n- ls5lp-lqaaa-aaaar-qb5oa-cai [bundle]\n- mqygn-kiaaa-aaaar-qaadq-cai  «ckBTC Minter» (minter) [bundle]\n- mu2zw-6iaaa-aaaar-qb56q-cai [bundle]\n- mxzaz-hqaaa-aaaar-qaada-cai  «ckBTC Ledger» (ledger) [bundle]\n- nqxwe-hiaaa-aaaar-qb5yq-cai [bundle]\n- nygob-3qaaa-aaaap-qttcq-cai [bundle]\n- qhbym-qaaaa-aaaaa-aaafq-cai  «ICP Index» (index) [bundle]\n- rdmx6-jaaaa-aaaaa-aaadq-cai  «NNS Internet Identity» [bundle]\n- ryjl3-tyaaa-aaaaa-aaaba-cai  «ICP Ledger» (ledger) [bundle]\n- ss2fx-dyaaa-aaaar-qacoq-cai  «ckETH Ledger» (ledger) [bundle]\n(+5 more findings dropped by the output cap; the list is authority-ordered, so the least authoritative entries were cut first)\n\n\nNext: inspect a canister with get_canister_candid — its oql / api_doc_available flags say whether to read via OQL and whether a canister declares a doc for get_canister_api_doc to read (api_doc_available=false means no compatible method was detected — usually there is none, though an unparsable interface reads the same way). Every one of those tools takes the app_url above, whose /.well-known/ic-architecture manifest is what authorizes reaching a canister at all: the [declared] canisters listed above are the ones within reach, and a candidate found only in the app's env.json or bundle is not (which is also why its capability flags are blank). To act as the user, pass the derivation_origin above to canister_query (read) and canister_update_call (write); for an OQL canister, call get_canister_oql_schema for the entity/field names, then canister_query with the `oql` argument — plus an optional account from list_app_accounts. A \"my/our…\" question is an AUTHENTICATED read: pass the origin."
+    }
+  ],
+  "structuredContent": {
+    "alternative_origins": [
+      "https://app.rumiprotocol.com",
+      "https://app.rumiprotocol.xyz",
+      "https://rumiprotocol.io",
+      "https://tcfua-yaaaa-aaaap-qrd7q-cai.icp0.io",
+      "https://tcfua-yaaaa-aaaap-qrd7q-cai.raw.icp0.io"
+    ],
+    "app_url": "https://app.rumiprotocol.com",
+    "app_url_source": "as_provided",
+    "application_is_ic": null,
+    "application_origin": "https://app.rumiprotocol.com",
+    "canisters": [
+      {
+        "api_doc_available": false,
+        "canister_id": "6niqu-siaaa-aaaap-qrjeq-cai",
+        "declared": true,
+        "kind": null,
+        "label": "Rumi icUSD transaction index",
+        "name": null,
+        "oql": false,
+        "sources": [
+          "ic-architecture",
+          "bundle"
+        ]
+      },
+      {
+        "api_doc_available": false,
+        "canister_id": "dtlu2-uqaaa-aaaap-qugcq-cai",
+        "declared": true,
+        "kind": null,
+        "label": "Protocol analytics and historical metrics",
+        "name": null,
+        "oql": false,
+        "sources": [
+          "ic-architecture",
+          "bundle"
+        ]
+      },
+      {
+        "api_doc_available": false,
+        "canister_id": "fohh4-yyaaa-aaaap-qtkpa-cai",
+        "declared": true,
+        "kind": null,
+        "label": "StableSwap pool and internal 3USD LP token ledger",
+        "name": null,
+        "oql": false,
+        "sources": [
+          "ic-architecture",
+          "bundle"
+        ]
+      },
+      {
+        "api_doc_available": false,
+        "canister_id": "t6bor-paaaa-aaaap-qrd5q-cai",
+        "declared": true,
+        "kind": null,
+        "label": "Rumi icUSD token ledger",
+        "name": null,
+        "oql": false,
+        "sources": [
+          "ic-architecture",
+          "bundle"
+        ]
+      },
+      {
+        "api_doc_available": false,
+        "canister_id": "tcfua-yaaaa-aaaap-qrd7q-cai",
+        "declared": true,
+        "kind": null,
+        "label": "Rumi application frontend",
+        "name": null,
+        "oql": false,
+        "sources": [
+          "ic-architecture",
+          "header",
+          "bundle"
+        ]
+      },
+      {
+        "api_doc_available": false,
+        "canister_id": "tfesu-vyaaa-aaaap-qrd7a-cai",
+        "declared": true,
+        "kind": null,
+        "label": "Collateral vaults and protocol accounting",
+        "name": null,
+        "oql": false,
+        "sources": [
+          "ic-architecture",
+          "bundle"
+        ]
+      },
+      {
+        "api_doc_available": false,
+        "canister_id": "tmhzi-dqaaa-aaaap-qrd6q-cai",
+        "declared": true,
+        "kind": null,
+        "label": "Stability Pool deposits, gains and liquidation accounting",
+        "name": null,
+        "oql": false,
+        "sources": [
+          "ic-architecture",
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "bfnu3-6aaaa-aaaab-qhanq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "cngnf-vqaaa-aaaar-qag4q-cai",
+        "declared": false,
+        "kind": "ledger",
+        "label": null,
+        "name": "ckUSDT Ledger",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "eb25l-dyaaa-aaaar-qb4lq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "efmc5-wyaaa-aaaar-qb3wa-cai",
+        "declared": false,
+        "kind": "ledger",
+        "label": null,
+        "name": "ckDOGE Ledger",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "eqltq-xqaaa-aaaar-qb3vq-cai",
+        "declared": false,
+        "kind": "minter",
+        "label": null,
+        "name": "ckDOGE Minter",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "heq6n-fyaaa-aaaag-qkcpq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "ijlzs-2yaaa-aaaap-quaaq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "jogrm-gqaaa-aaaar-qcg2a-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "joh3a-5aaaa-aaaap-quy6a-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "lh22c-kyaaa-aaaar-qb5nq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "ls5lp-lqaaa-aaaar-qb5oa-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "mqygn-kiaaa-aaaar-qaadq-cai",
+        "declared": false,
+        "kind": "minter",
+        "label": null,
+        "name": "ckBTC Minter",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "mu2zw-6iaaa-aaaar-qb56q-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "mxzaz-hqaaa-aaaar-qaada-cai",
+        "declared": false,
+        "kind": "ledger",
+        "label": null,
+        "name": "ckBTC Ledger",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "nqxwe-hiaaa-aaaar-qb5yq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "nygob-3qaaa-aaaap-qttcq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": null,
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "qhbym-qaaaa-aaaaa-aaafq-cai",
+        "declared": false,
+        "kind": "index",
+        "label": null,
+        "name": "ICP Index",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "rdmx6-jaaaa-aaaaa-aaadq-cai",
+        "declared": false,
+        "kind": null,
+        "label": null,
+        "name": "NNS Internet Identity",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "ryjl3-tyaaa-aaaaa-aaaba-cai",
+        "declared": false,
+        "kind": "ledger",
+        "label": null,
+        "name": "ICP Ledger",
+        "sources": [
+          "bundle"
+        ]
+      },
+      {
+        "canister_id": "ss2fx-dyaaa-aaaar-qacoq-cai",
+        "declared": false,
+        "kind": "ledger",
+        "label": null,
+        "name": "ckETH Ledger",
+        "sources": [
+          "bundle"
+        ]
+      }
+    ],
+    "derivation_origin": "https://tcfua-yaaaa-aaaap-qrd7q-cai.ic0.app",
+    "derivation_origin_source": "declared",
+    "discovery_error": null,
+    "note": null,
+    "omitted": 5
+  },
+  "isError": false
+}

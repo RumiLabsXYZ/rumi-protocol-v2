@@ -1,0 +1,30 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "service : {\n  get_pool_event_count : () -> (nat64) query;\n}"
+    },
+    {
+      "type": "text",
+      "text": "This interface is restricted to 1 of the 96 methods the canister declares, with the type definitions they use and the interface's own comments on them (and the service's init arguments omitted): a valid Candid interface for calling them. The complete interface is 35312 bytes."
+    },
+    {
+      "type": "text",
+      "text": "No API-doc method was detected on this canister (api_doc_available=false) — usually there is none, and the Candid types above are the interface; an interface this parser cannot read looks the same."
+    }
+  ],
+  "structuredContent": {
+    "api_doc_available": false,
+    "best_effort": false,
+    "bytes": 59,
+    "candid": "service : {\n  get_pool_event_count : () -> (nat64) query;\n}",
+    "canister_id": "tmhzi-dqaaa-aaaap-qrd6q-cai",
+    "declared_at": "/.well-known/ic-architecture",
+    "declared_by": "https://app.rumiprotocol.com",
+    "methods": [
+      "get_pool_event_count"
+    ],
+    "oql": false
+  },
+  "isError": false
+}

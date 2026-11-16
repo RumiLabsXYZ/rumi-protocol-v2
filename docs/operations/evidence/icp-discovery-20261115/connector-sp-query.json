@@ -1,0 +1,21 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "(2_684 : nat64)"
+    }
+  ],
+  "structuredContent": {
+    "canister_id": "tmhzi-dqaaa-aaaap-qrd6q-cai",
+    "columns": [],
+    "declared_at": "/.well-known/ic-architecture",
+    "declared_by": "https://app.rumiprotocol.com",
+    "has_more": false,
+    "is_anonymous": true,
+    "method": "get_pool_event_count",
+    "mode": "candid",
+    "reply": "(2_684 : nat64)",
+    "rows": []
+  },
+  "isError": false
+}

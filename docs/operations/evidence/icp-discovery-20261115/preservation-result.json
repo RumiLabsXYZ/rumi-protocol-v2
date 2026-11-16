@@ -1,0 +1,12 @@
+{
+  "oldAssets": 759,
+  "newAssets": 761,
+  "oldAssetsBytePropertiesEncodingMetadataUnchanged": true,
+  "added": [
+    "/.well-known/ic-architecture",
+    "/.well-known/ii-derivation-origin"
+  ],
+  "modulesSettingsPermissionsUnchanged": true,
+  "spWritedownDisabled": true,
+  "batch": "704"
+}

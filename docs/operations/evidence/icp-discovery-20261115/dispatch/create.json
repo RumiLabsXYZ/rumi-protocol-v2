@@ -1,0 +1,11 @@
+{
+  "method": "create_batch",
+  "argsSha256": "8a0498d93b8d76da62759d63ce3c0bda2e82cde93f08230e7d1b835b583b6f52",
+  "dispatchedUtc": "2026-11-16T03:46:19.443Z",
+  "state": "cli-success-readback-pending",
+  "exit": 0,
+  "finishedUtc": "2026-11-16T03:46:21.443Z",
+  "result": {
+    "batch_id": "704"
+  }
+}

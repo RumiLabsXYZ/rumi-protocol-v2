@@ -1,0 +1,50 @@
+{
+  "published": true,
+  "batchId": "704",
+  "observedUtc": "2026-11-16T03:49:39.302739+00:00",
+  "source": "7ca180793fa58beecba22ea98f4bc46507754854",
+  "canonicalRestorationSource": "1b42e9048077dbf0b34505cf4a12e0f97a2311e1",
+  "canonicalMainMergePending": true,
+  "operatorTermsVersion": "1.1",
+  "operatorAcceptedDirectly": true,
+  "preservation": {
+    "oldAssets": 759,
+    "newAssets": 761,
+    "oldAssetsBytePropertiesEncodingMetadataUnchanged": true,
+    "added": [
+      "/.well-known/ic-architecture",
+      "/.well-known/ii-derivation-origin"
+    ],
+    "modulesSettingsPermissionsUnchanged": true,
+    "spWritedownDisabled": true,
+    "batch": "704"
+  },
+  "connector": {
+    "openAppDeclaredServices": 7,
+    "backendCandid": "PASS narrowed get_sp_writedown_disabled",
+    "stabilityPoolCandid": "PASS narrowed get_pool_event_count",
+    "anonymousBackendHoldQuery": "(true)",
+    "anonymousSpEventCount": "(2_684 : nat64)",
+    "signedQueriesOrActionsExecuted": false,
+    "publishedDerivationOrigin": "https://tcfua-yaaaa-aaaap-qrd7q-cai.icp0.io",
+    "connectorNormalizedDerivationOrigin": "https://tcfua-yaaaa-aaaap-qrd7q-cai.ic0.app",
+    "authenticatedPrincipalEquivalenceTested": false
+  },
+  "preservedHolds": [
+    "Stability Pool writedown_disabled=true; resume requires explicit later Rob decision",
+    "Vault2027d0d9b69 production/reserve/recovery/workerresume approval pending",
+    "All unrelated signing/financial/governance/controller/installation holds unchanged"
+  ],
+  "verificationLimitations": [
+    "No independent cryptographic HTTP certificate validation; HTTPS gateway header/exact bytes checked",
+    "No signed identity or financial canary",
+    "Full Candid fetch exceeded connector5120B replycap; narrowed method retrieval passed",
+    "No full frontend rebuild/paidCI by this lane; generatorfunctionalchecks passed; futurecanonicalintegration owned by Ellis"
+  ],
+  "worktreeCleanup": {
+    "registered": 78,
+    "eligible": 0,
+    "removed": 0,
+    "blocked": 77
+  }
+}
