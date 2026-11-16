@@ -1,0 +1,44 @@
+{
+  "valuationBasis": "protocol $1/icUSD accounting; incident XRP oracle, excluding delivery fees/market changes",
+  "oraclePriceUsdPerXrp": "0.937824869",
+  "targetRecoveryCR": "1.32266666666666666624",
+  "liquidationBonusMultiplier": "1.075",
+  "protocolShareOfBonus": "0.03",
+  "reconstructedBefore": {
+    "collateralDrops": 3499000010,
+    "debtE8s": 281245001091,
+    "CR": "1.166758240423799991813664985799895110996869042658237033"
+  },
+  "continuousDebtRetirementIcusd": "1770.462941134769755943817699445094599741704785046730939",
+  "rounding": "ceil closed-form repayment to icUSD e8s; existing floor collateral conversion, bonus and protocol split; conservative minimal up to native-unit quantization, not a global search",
+  "intended": {
+    "debtRetiredE8s": 177046294114,
+    "baseXrpDrops": 1887839616,
+    "grossXrpSeizedDrops": 2029427587,
+    "poolGainDrops": 2025179948,
+    "protocolClaimDrops": 4247639,
+    "remainingDebtE8s": 104198706977,
+    "remainingXrpDrops": 1469572423,
+    "postCR": "1.322666667437822352738694867998601767332562395890852418"
+  },
+  "actual": {
+    "debtRetiredE8s": 281245001091,
+    "baseXrpDrops": 2998907476,
+    "grossXrpSeizedDrops": 3223825536,
+    "poolGainDrops": 3217077995,
+    "protocolClaimDrops": 6747541,
+    "remainingDebtE8s": 0,
+    "remainingXrpDrops": 275174474,
+    "postCR": null
+  },
+  "extraXrpSeized": "1194.397949",
+  "extraDebtRetiredIcusd": "1041.98706977",
+  "netExcessPenaltyUsd": "78.149030284793681",
+  "cashCompensationCeilE6": 78149031,
+  "xrpEquivalentCompensationCeilDrops": 83330090,
+  "borrowerEffectiveIcusdPerGrossXrp": "0.8723952271932124803418642565153997216802243234045776849",
+  "normalMode117PercentTriggerPrice": "0.9404305525465545797469146048959285370222105258010559423",
+  "actualXrpSeizedPercent": "92.13562522967812166425229590096514460998815487285465884",
+  "intendedXrpSeizedPercent": "58.00021666761870057839754050186470276689138963449159864",
+  "executionAuthorized": false
+}

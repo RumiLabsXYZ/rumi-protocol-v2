@@ -1,0 +1,99 @@
+(
+  record {
+    next_start = 568_370 : nat64;
+    reached_end = false;
+    events = vec {
+      record {
+        566_446 : nat64;
+        variant {
+          partial_liquidate_vault = record {
+            protocol_fee_collateral = opt (9_332_559 : nat64);
+            icp_rate = opt blob "\00\00\06\00\84\de\00\00\00\00\00\00\00\00\00\00";
+            liquidator_payment = 118_137_765 : nat64;
+            vault_id = 66 : nat64;
+            ledger_fee_collateral = null;
+            timestamp = opt (1_794_691_698_141_527_257 : nat64);
+            three_usd_reserves_e8s = null;
+            liquidator = opt principal "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae";
+            icp_to_liquidator = 2_375_654_972 : nat64;
+          }
+        };
+      };
+      record {
+        566_447 : nat64;
+        variant {
+          margin_transfer = record {
+            payout_kind = opt variant { Margin };
+            block_index = 260_654 : nat64;
+            operation_id = opt (
+              33_106_218_446_827_949_437_870_802_622_912_420_648 : nat
+            );
+            vault_id = 66 : nat64;
+            timestamp = opt (1_794_691_705_795_514_806 : nat64);
+          }
+        };
+      };
+      record {
+        567_406 : nat64;
+        variant {
+          upgrade = record {
+            mode = null;
+            description = opt "PR #644/#645 security reconciliation and recovery hardening";
+          }
+        };
+      };
+      record {
+        567_420 : nat64;
+        variant {
+          partial_liquidate_vault = record {
+            protocol_fee_collateral = null;
+            icp_rate = opt blob "\00\00\08\00\e8\e4\d6\0c\00\00\00\00\00\00\00\00";
+            liquidator_payment = 10_090_702 : nat64;
+            vault_id = 202 : nat64;
+            ledger_fee_collateral = opt (10_000 : nat64);
+            timestamp = opt (1_794_738_355_224_931_322 : nat64);
+            three_usd_reserves_e8s = null;
+            liquidator = opt principal "nygob-3qaaa-aaaap-qttcq-cai";
+            icp_to_liquidator = 5_142_859 : nat64;
+          }
+        };
+      };
+      record {
+        567_531 : nat64;
+        variant {
+          upgrade = record {
+            mode = null;
+            description = opt "CL-16 checked debt aggregate admission";
+          }
+        };
+      };
+      record {
+        567_536 : nat64;
+        variant {
+          upgrade = record {
+            mode = null;
+            description = opt "CL-16 checked debt aggregate admission";
+          }
+        };
+      };
+      record {
+        567_928 : nat64;
+        variant {
+          upgrade = record {
+            mode = null;
+            description = opt "PR #653-#662: security remediation tranche";
+          }
+        };
+      };
+      record {
+        568_219 : nat64;
+        variant {
+          upgrade = record {
+            mode = null;
+            description = opt "PR #666: wallet-session and dependency security closure";
+          }
+        };
+      };
+    };
+  },
+)

@@ -1,0 +1,14 @@
+Extract from rumi_identity developer-authorized get_xrp_claims(); full raw capture SHA256 c93f1af99ff8c13ce88fa7d5dea205e5158446b40797144ee0f9b0a874604ff9
+      19 : nat64;
+      record {
+        custody_nonce = 208 : nat64;
+        claimant = principal "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae";
+        created_at_ns = 1_794_689_067_323_215_836 : nat64;
+        quarantine_reason = null;
+        custody_owner = principal "tjsut-lqpan-5xkiw-dq3j4-xpp53-uhhy2-dyam5-vtrcx-aadcg-bvxsx-6ae";
+        drops = 6_747_541 : nat64;
+        settlement = null;
+      };
+    };
+  },
+)

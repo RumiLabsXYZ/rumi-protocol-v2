@@ -1,0 +1,48 @@
+(
+  record {
+    log_length = 46_304 : nat;
+    blocks = vec {
+      record {
+        id = 46_098 : nat;
+        block = variant {
+          Map = vec {
+            record { "fee_col_block"; variant { Nat = 0 : nat } };
+            record {
+              "phash";
+              variant {
+                Blob = blob "\db\7d\8a\cd\b1\76\3d\76\cc\b5\e5\bc\2e\96\8d\a7\be\f3\58\71\78\f5\be\5b\b5\51\f8\4e\e7\6f\24\39"
+              };
+            };
+            record { "ts"; variant { Nat = 1_794_689_066_923_748_086 : nat } };
+            record {
+              "tx";
+              variant {
+                Map = vec {
+                  record { "amt"; variant { Nat = 281_245_001_091 : nat } };
+                  record {
+                    "from";
+                    variant {
+                      Array = vec { variant { Blob = blob "\00\00\00\00\01\f0\88\fd\01\01" };}
+                    };
+                  };
+                  record {
+                    "memo";
+                    variant {
+                      Blob = blob "\52\55\4d\49\2d\4c\49\51\2d\30\30\34\3a\00\00\00\00\00\00\00\d0"
+                    };
+                  };
+                  record { "op"; variant { Text = "burn" } };
+                  record {
+                    "ts";
+                    variant { Nat = 1_794_689_066_923_748_086 : nat };
+                  };
+                }
+              };
+            };
+          }
+        };
+      };
+    };
+    archived_blocks = vec {};
+  },
+)

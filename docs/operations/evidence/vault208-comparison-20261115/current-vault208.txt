@@ -1,0 +1,17 @@
+(
+  record {
+    vaults = vec {
+      record {
+        collateral_amount = 275_174_474 : nat64;
+        owner = principal "tjsut-lqpan-5xkiw-dq3j4-xpp53-uhhy2-dyam5-vtrcx-aadcg-bvxsx-6ae";
+        vault_id = 208 : nat64;
+        collateral_type = principal "5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i";
+        accrued_interest = 0 : nat64;
+        icp_margin_amount = 275_174_474 : nat64;
+        nicp_redemption_claim = null;
+        borrowed_icusd_amount = 0 : nat64;
+      };
+    };
+    next_start_id = opt (209 : nat64);
+  },
+)

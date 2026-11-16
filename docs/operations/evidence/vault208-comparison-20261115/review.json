@@ -1,0 +1,12 @@
+{
+  "arithmeticReview": "independent native reserve/accounting reviewer PASS; exact rational inputs/rounding/net compensation verified",
+  "provenancePolicyReview": "Bram PASS after corrected-policy benchmark + unknown incident-mode wording; no further review campaign",
+  "scope": "analysis/proposal only; no payment/debt change/resumption authorization",
+  "knownLimits": [
+    "per-XRP target is proposed corrected-policy benchmark, not old executed helper",
+    "mode at incident unknown",
+    "price reconstructed, retained price receipt null",
+    "XRPL depositor payout finality not independently traced",
+    "funding/recipient/preferred asset/prior compensation unverified"
+  ]
+}

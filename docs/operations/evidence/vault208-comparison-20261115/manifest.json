@@ -1,0 +1,15 @@
+{
+  "docs/operations/vault208-comparison-remedy-20261115.md": "54958381ea57455004311c5ceb3afcbc0a9365fb5964036c1b4905e417b54013",
+  "docs/operations/evidence/vault208-comparison-20261115/calculation.json": "fcddf4f4d4dcdc7b2399998be624822e36d7673463d5a8029a87848e8ee6cc00",
+  "docs/operations/evidence/vault208-comparison-20261115/calculate-comparison.py": "15ee68e13097231c482d06892145d863ef7a512d2c4f0a846d95bc7b250bba4d",
+  "docs/operations/evidence/vault208-comparison-20261115/review.json": "e66f2c1440c1b750af34fc0b536fc75f0712db85a6fde24735477cdac91cdcd7",
+  "docs/operations/evidence/vault208-comparison-20261115/incident-price-events.json": "8a174de329d400207c68ed7b16c21f1e555ca721d1e303de314c1ad7b95b5f8d",
+  "docs/operations/evidence/vault208-comparison-20261115/price-window.txt": "b232246504bf486965c0138c9eed2e9939efe8614dcd4341b514a773a022beb4",
+  "docs/operations/evidence/vault208-comparison-20261115/post-incident-events566370.txt": "31d313de500cc9c927c50fbb250e681b3aa78e8479cabb03f700c11d69bb8497",
+  "docs/operations/evidence/vault208-comparison-20261115/post-incident-events568370.txt": "10526e3989b76ac3009b4361b2a6379e8801664f0065688e5c0ae7e9b943df19",
+  "docs/operations/evidence/vault208-comparison-20261115/icusd-ledger-burn46098.txt": "b75aa4841893e1b94a3bca840acd03194a222b843a6cef375010cfbb5458f1f9",
+  "docs/operations/evidence/vault208-comparison-20261115/developer-claim19-extract.txt": "49cfdb120c5a2d80545781ccec215d9e692428643b43b0b66986086229d0449f",
+  "docs/operations/evidence/vault208-comparison-20261115/pool-liquidation-history.txt": "9e6fa6134518992e9a04323dcd4b548458d34369e43c0848e26f1dc5a11cd562",
+  "docs/operations/evidence/vault208-comparison-20261115/current-vault208.txt": "783e35874a041c93e547a5ad1cab04b29ef0ccd84bc1e02fd174bd926defba61",
+  "docs/operations/evidence/vault208-comparison-20261115/current-protocol-config.txt": "4c8d8144a6f2008a72ac961d0a98e9b05dbd62ffaf784079d634fb6ceaa92798"
+}
