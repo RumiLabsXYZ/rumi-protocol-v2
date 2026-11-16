@@ -22,6 +22,10 @@ Bram and Merritt confirmed that the previously approved SEC21 manual-queue avail
 
 Dorian is separately publishing only the two approved discovery assets. To preserve them in the next full frontend release, source commit `1b42e9048077dbf0b34505cf4a12e0f97a2311e1` carries exactly three runtime paths from his pushed `7ca180793fa58beecba22ea98f4bc46507754854`: `scripts/generate-frontend-discovery.mjs`, the frontend package postbuild chain and `.ic-assets.json` content-type rules. Both generated mainnet files match his frozen assets byte-for-byte; the local-network run removes them, and the unchanged auth verifier remains first in postbuild. No dependency change or production build was required for these checks. His publication receipt and a fresh live asset inventory must precede our later asset publication; preserve both keys and their properties. This does not change the three UI components or their completed test/review evidence.
 
+## Discovery live-result preservation
+
+Dorian's [immutable publication receipt](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8a5886b59bac5e5a40b04a2939a4de4bd485c149/docs/operations/icp-discovery-live-result-20261115.md), SHA256 `6de58d96eb82747f0769d6f9c324adaf7cf6aa67c5f25fd781020ee1e7492683`, records batch 704 and the inventory increase from 759 to 761 assets with all prior assets unchanged. The next publication must preserve `/.well-known/ic-architecture` identity bytes (1048 bytes, SHA256 `22bcdf6a5f1ad8e4c1b241a46e3a7f1ae5bec0ab16a79e62ce215288e862f702`) and `/.well-known/ii-derivation-origin` identity bytes (44 bytes, SHA256 `16cf6b5a8eb787b3222ba58308cd6234755b20be869337e1e11e42b51eee53a0`), with their recorded properties. This receipt was read and its document hash independently matched; its live inventory claims remain Dorian's publication evidence until our fresh pre-publication baseline is captured. It does not establish UI deployment, authenticated identity equivalence or financial execution.
+
 ## Verification completed
 
 - On canonical base, the restored expectations reproduced three failures across nine mounted tests: the unwanted global card and missing menu control.
