@@ -5,11 +5,19 @@
       "state": "In progress",
       "owner": "Ellis source/integration/independent verification; Dorian coordinated publisher",
       "scope": "Restore recovery menu and manual-queue availability after canonical frontend regression",
-      "evidenceText": "Currentpublic1794779370215 root0.CKx57ZA5.js hash99bf0829 contains old genericOISYcard/button and no menu label; canonicalPR666f72/main9b omitted priorSEC20/21 lineage. Restoring3frontendcomponents/currentcanonicalbase, retaining entirePR666 Banner script and all session-bound refreshguards. Wallet andmanualqueuecomponents matchpreviouslyapprovede7; publicclaimquery only, no backend/funds. Redreproduction;39tests/7suites, twofinalcombinedreviews, connectedmockdesktop/mobilePASS. ExistingfrontendCI now includesrecovery/queue regressions. CanonicalPR/CI/merge then one coordinatedasset-onlypublication and independentservedreadback next. Broadersecurityclosure/holds remainclosed/preserved.",
+      "evidenceText": "PR #671 merged into canonical main at 0edaf018 after exact-head Frontend validation run 43982949272 and its only job completed successfully. The merged tree exactly matches tested f1233707. Both recovery-menu and manual-queue fixes retain PR #666 session protections; discovery generation and both published keys are preserved. Existing 39 local tests, two focused reviews and mocked desktop/mobile checks pass. A November 16 independent stable double-read confirms 761 assets and both discovery hashes; certified frontend/backend modules and controllers match the baseline. The live root still has the old UI. Next: separately scheduled production frontend build, coordinated asset-only publication and independent served/UI checks. No financial action.",
       "evidenceLinks": [
         {
-          "title": "Source diagnosis, restoration and publication boundary",
-          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-menu-regression-20261115/docs/operations/recovery-menu-regression-20261115.md"
+          "title": "Canonical restoration PR #671",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/671"
+        },
+        {
+          "title": "Exact-head frontend CI passed",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/43982949272"
+        },
+        {
+          "title": "Source diagnosis and publication boundary",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0edaf018bbc2b9c5ab648c9244001437e3af5ea4/docs/operations/recovery-menu-regression-20261115.md"
         }
       ]
     },

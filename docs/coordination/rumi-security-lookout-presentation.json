@@ -1,6 +1,6 @@
 {
-  "summary": "Accepted security-remediation closure remains intact. A later main-based frontend release omitted prior SEC20/21 UI corrections; current1794779370215 served root confirms generic recovery-card regression. Ellis restores both on canonical9b with39tests/twofinalreviews/mocklayoutPASS; currentPR666sessionguards retained. CanonicalCI/merge and coordinatedasset-onlypublication next; no backend/funds.",
-  "plainSummary": "The security program remains closed, but a later frontend release brought back the generic recovery card and dropped the manual-queue guard. Both corrections are prepared on canonical source and pass focused checks. The next step is verified publication; no wallet action or additional approval is needed.",
+  "summary": "The recovery-menu and manual-queue restoration is merged through PR #671 at 0edaf018 with exact-head frontend CI successful. Approved discovery runtime files and live keys are included. Production frontend build, coordinated asset publication and independent verification remain next. Existing security closure and financial holds remain unchanged.",
+  "plainSummary": "The recovery-menu and manual-queue fixes are merged into main after CI passed. The discovery files are preserved in the same source. A fresh production build and publication are next; the live interface still shows the old behavior. No customer wallet action is needed.",
   "glossary": [
     {
       "term": "Stability Pool",

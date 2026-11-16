@@ -5,7 +5,7 @@
       "title": "Restore the approved recovery menu and queue guard in canonical releases",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Exact canonical PR/CI/merge; Dorian coordinates one frontend/auth build and asset-only publication, Ellis verifies served root/menu/queue bundles and layouts. Keep current PR666 protections and all closed security findings/financial holds. No backend or financial action.",
+      "nextAction": "Canonical merge and CI are complete. Dorian coordinates a separately admitted production frontend/auth build and asset-only publication; Ellis verifies preservation of all current assets, both discovery files, served menu/queue bundles and layouts. Keep financial holds and PR #666 protections.",
       "cardIds": [
         "SEC-20"
       ]

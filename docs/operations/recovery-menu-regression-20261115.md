@@ -37,6 +37,12 @@ Dorian's [immutable publication receipt](https://github.com/RumiLabsXYZ/rumi-pro
 
 [Evidence](evidence/recovery-menu-regression-20261115) retains served identity, source preservation, red/green/CI-command logs and connected screenshots/DOM measurements.
 
+## Canonical CI and merge completed
+
+[PR #671](https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/671) merged on November 16 at `0edaf018bbc2b9c5ab648c9244001437e3af5ea4`. Its tree `c6e49ea9ef799757ec7d519edf21a5b494c8c781` exactly equals the tested head `f12337079e7b0ee420920e9210fa97599a65cff8`. The single [Frontend validation run](https://github.com/RumiLabsXYZ/rumi-protocol-v2/actions/runs/43982949272), attempt 1, and its only job `133703764015` completed successfully, including scoped regressions, production build and auth verification. The complete owned-run census was terminal; Cody released allocation `73acd474-7ef9-4e5a-8bf9-793333a3241b`. [Terminal CI receipt](evidence/recovery-menu-regression-20261115/hosted-run-terminal.json) records actual steps and timestamps. No rerun, manual dispatch, extra workflow or local production build occurred.
+
+A fresh independent production baseline on November 16 confirms 761 stable assets (761 identity and 207 gzip encodings), with both discovery identity hashes matching Dorian's pinned publication. Certified frontend module `04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62`, backend module `59a64f78e0e652d0e48413aba587d3f826c1dc25258f56ab09575c59de444111`, controllers and backend Candid `74cd6c8f7a8b0667bf10f2cd50b1a3c81e55ff863b0cb9520fb8eca1795e03fb` are unchanged. Primary-domain served version/root remain the old regressed bytes. Source merge and hosted build do not establish production publication. Dorian's separately admitted fresh production artifact and the served/layout readbacks remain outstanding.
+
 ## Publication boundary
 
 Rob's explicit publish-after-verification instruction for this exact recovery UX is recorded in Merritt human message `01a1db85-3658-7c01-8637-73e787fa6eb4`. The current recurrence report is human message `01a1e247-080b-7240-8a3f-3e71b41f46e7`. Existing scope authorizes the verified recovery restoration and Rob's prior explicit SEC21 queue-publication instruction (Merritt human message01a1dd32-aece-7ee0-b545-2ddbc605e891) covers that already-deployed guard. Bram's current publication coordination confirms carrying both corrections forward. No duplicate unchanged-scope approval is requested.
