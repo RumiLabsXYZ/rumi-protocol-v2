@@ -1,0 +1,40 @@
+{
+  "version": "1.0.0",
+  "canisters": [
+    {
+      "id": "tcfua-yaaaa-aaaap-qrd7q-cai",
+      "name": "vault_frontend",
+      "role": "Rumi application frontend"
+    },
+    {
+      "id": "tfesu-vyaaa-aaaap-qrd7a-cai",
+      "name": "rumi_protocol_backend",
+      "role": "Collateral vaults and protocol accounting"
+    },
+    {
+      "id": "tmhzi-dqaaa-aaaap-qrd6q-cai",
+      "name": "rumi_stability_pool",
+      "role": "Stability Pool deposits, gains and liquidation accounting"
+    },
+    {
+      "id": "dtlu2-uqaaa-aaaap-qugcq-cai",
+      "name": "rumi_analytics",
+      "role": "Protocol analytics and historical metrics"
+    },
+    {
+      "id": "fohh4-yyaaa-aaaap-qtkpa-cai",
+      "name": "rumi_3pool",
+      "role": "StableSwap pool and internal 3USD LP token ledger"
+    },
+    {
+      "id": "t6bor-paaaa-aaaap-qrd5q-cai",
+      "name": "icusd_ledger",
+      "role": "Rumi icUSD token ledger"
+    },
+    {
+      "id": "6niqu-siaaa-aaaap-qrjeq-cai",
+      "name": "icusd_index",
+      "role": "Rumi icUSD transaction index"
+    }
+  ]
+}

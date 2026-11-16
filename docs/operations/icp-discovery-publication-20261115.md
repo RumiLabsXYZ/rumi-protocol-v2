@@ -1,6 +1,6 @@
 # Rumi ICP connector discovery publication decision
 
-Status: prepared scope; no discovery manifest created/generated/published, no live write.
+Status: operator accepted Terms v1.1 and authorized publication directly on November 15, 2026. Source and two generated assets prepared; publication readback pending.
 Canonical base: 9b7669e799d4e6e6cc6d52174c06e87e3569994c.
 
 ## Operator decision required
@@ -8,7 +8,7 @@ Canonical base: 9b7669e799d4e6e6cc6d52174c06e87e3569994c.
 The current authoritative ICP MCP App Operator Terms are version 1.1, effective September 2, 2026:
 https://internetcomputer.org/icp-mcp/app-operator-terms/
 Publishing /.well-known/ic-architecture constitutes acceptance for Rumi's operator.
-The operator must confirm authority to bind Rumi and acceptance before manifest creation or publication.
+Rob confirmed: "I’m authorized to bind Rumi and accept the ICP MCP App Operator Terms v1.1. Go ahead with the discovery manifest, coordinate with Merritt and Ellis, and verify the connector works. Preserve all existing holds."
 Participation permits public metadata retrieval, indexing/caching/listing, queries and user-authorized
 state-changing calls signed with those users' application-specific Internet Identity identities.
 The manifest is a canister declaration, not a method allowlist or read-only restriction.
@@ -73,9 +73,8 @@ rejected before contacting Stability Pool because the architecture endpoint retu
 Canonical source confirms the effective pinned II origin above.
 
 The official service-discoverability guidance requires operator acceptance before creating,
-generating or publishing the architecture manifest. Until that decision, no discovery asset is created.
-A coordination message was separately rejected by automatic approval review for unrecognized
-destination authorization. It remains unsent; do not reroute it through another chat.
+generating or publishing the architecture manifest. That decision has now been granted directly; generated files are frozen in the publication evidence.
+Earlier coordination was rejected for unrecognized destination authorization; Rob subsequently explicitly authorized Merritt and Ellis, and both were successfully notified.
 
 No optional audit, OQL implementation, API-doc backend method, full UI rebuild, financial canary
 or repeat build/test campaign is required for this bounded static discovery change.

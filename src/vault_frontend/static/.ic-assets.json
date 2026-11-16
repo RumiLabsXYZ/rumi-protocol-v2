@@ -20,5 +20,21 @@
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*"
         }
+    },
+    {
+        "match": ".well-known/ic-architecture",
+        "ignore": false,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+        }
+    },
+    {
+        "match": ".well-known/ii-derivation-origin",
+        "ignore": false,
+        "headers": {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Access-Control-Allow-Origin": "*"
+        }
     }
 ]
