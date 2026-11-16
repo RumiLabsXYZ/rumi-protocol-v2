@@ -1020,6 +1020,9 @@ fn post_upgrade(arg: ProtocolArg) {
             args
         }
     };
+    // Keep the current install argument distinct from an Upgrade event replay:
+    // only this current explicit true may force the private admission latch.
+    let current_sp_hold_override = upgrade_args.preserve_sp_writedown_hold;
 
     // Try to restore from stable memory (fast path, no drift)
     let mut state = match rumi_protocol_backend::storage::load_state_from_stable() {
@@ -1053,6 +1056,10 @@ fn post_upgrade(arg: ProtocolArg) {
             )
         }
     };
+    rumi_protocol_backend::storage::apply_sp_writedown_hold_overlay(
+        &mut state,
+        current_sp_hold_override,
+    );
     rumi_protocol_backend::cksol_icp_paid::mark_interrupted_minter_calls(&mut state, ic_cdk::api::time());
     let held_amm1_donations = state.migrate_legacy_amm1_donations();
     if held_amm1_donations > 0 {
@@ -15087,6 +15094,7 @@ fn get_liquidation_frozen() -> bool {
 fn set_sp_writedown_disabled(disabled: bool) -> Result<(), ProtocolError> {
     require_controller()?;
     mutate_state(|s| {
+        rumi_protocol_backend::storage::set_sp_writedown_hold(disabled);
         s.sp_writedown_disabled = disabled;
         log!(INFO, "[admin] sp_writedown_disabled set to {}", disabled);
     });

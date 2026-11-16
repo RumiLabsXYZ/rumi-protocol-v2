@@ -6698,6 +6698,9 @@ impl State {
         if let Some(mode) = args.mode {
             self.mode = mode;
         }
+        if args.preserve_sp_writedown_hold == Some(true) {
+            self.sp_writedown_disabled = true;
+        }
     }
 
     /// Exact aggregate debt, or `None` if the persisted vault set cannot be
@@ -8291,36 +8294,148 @@ impl State {
         base + tolerance
     }
 
-    /// Wave-9c DOS-005: walk `vault_cr_index` and return the unhealthy
-    /// vault list plus instrumentation metadata. The walk is bounded by
-    /// the at-risk threshold when `do_full_sweep == false`, and walks
-    /// the entire index otherwise.
-    ///
-    /// Per-vault classification mirrors the pre-Wave-9c logic in
-    /// `lib.rs::check_vaults`: skip `bot_processing` vaults
-    /// (already claimed) and push the remainder into the `unhealthy`
-    /// vec when `compute_collateral_ratio < min_liquidation_ratio`.
-    /// Healthy vaults inside the band are visited but discarded.
-    ///
-    /// `vaults_visited` increments for every vault entry in iterated
-    /// buckets, including those skipped due to `bot_processing` — that
-    /// read still costs cycles, so the counter reflects actual cost
-    /// paid (useful for production telemetry and the DOS-005 fence).
+    /// Conservatively rounded native-XRP debt burn whose drop-rounded seizure
+    /// restores the residual vault to its configured recovery target. A full
+    /// burn is used for dust debt or when no proper partial burn can restore
+    /// that CR. The calculation uses the same floor conversion and capped
+    /// bonus seizure as the backend's reserved XRP preflight.
+    pub fn native_xrp_recovery_repay_amount(&self, vault: &Vault) -> ICUSD {
+        let debt = vault.borrowed_icusd_amount;
+        let Some(config) = self.get_collateral_config(&vault.collateral_type) else {
+            return ICUSD::new(0);
+        };
+        if !config.is_native_xrp() || debt.0 == 0 {
+            return ICUSD::new(0);
+        }
+        if self.dust_liquidation_threshold.0 > 0 && debt <= self.dust_liquidation_threshold {
+            return debt;
+        }
+        let Some(price) = config.last_price.and_then(Decimal::from_f64) else {
+            return ICUSD::new(0);
+        };
+        if price <= Decimal::ZERO {
+            return ICUSD::new(0);
+        }
+
+        let target = self.get_recovery_cr_for(&vault.collateral_type);
+        if crate::compute_collateral_ratio(vault, UsdIcp::from(price), self) >= target {
+            return ICUSD::new(0);
+        }
+        let bonus = self.get_liquidation_bonus_for(&vault.collateral_type);
+        let Some(denominator) = checked_liquidation_denominator(target, bonus) else {
+            return ICUSD::new(0);
+        };
+        let Some(collateral_scale) = 10u64.checked_pow(config.decimals as u32) else {
+            return ICUSD::new(0);
+        };
+        let Some(collateral_usd) = Decimal::from(vault.collateral_amount)
+            .checked_div(Decimal::from(collateral_scale))
+            .and_then(|whole_tokens| whole_tokens.checked_mul(price))
+        else {
+            return ICUSD::new(0);
+        };
+        let Some(debt_usd) = Decimal::from(debt.to_u64())
+            .checked_div(Decimal::from(100_000_000u64))
+        else {
+            return ICUSD::new(0);
+        };
+        let Some(deficit_usd) = debt_usd
+            .checked_mul(target.0)
+            .and_then(|target_debt| target_debt.checked_sub(collateral_usd))
+        else {
+            return ICUSD::new(0);
+        };
+        if deficit_usd <= Decimal::ZERO {
+            return ICUSD::new(0);
+        }
+        let Some(repay_e8s) = deficit_usd
+            .checked_div(denominator.0)
+            .and_then(|repay_usd| repay_usd.checked_mul(Decimal::from(100_000_000u64)))
+            .and_then(|repay_e8s| repay_e8s.ceil().to_u64())
+        else {
+            return ICUSD::new(0);
+        };
+
+        let seized_for = |repay_e8s: u64| {
+            let raw = crate::numeric::icusd_to_collateral_amount_for_burned_debt(
+                ICUSD::new(repay_e8s),
+                price,
+                config.decimals,
+            );
+            let gross = crate::numeric::collateral_with_bonus_capped(
+                raw,
+                bonus,
+                vault.collateral_amount,
+            );
+            gross
+        };
+        let restores_target = |repay_e8s: u64, gross: u64| {
+            let debt_left = debt.to_u64().saturating_sub(repay_e8s);
+            if debt_left == 0 { return true; }
+            let mut residual = vault.clone();
+            residual.borrowed_icusd_amount = ICUSD::new(debt_left);
+            residual.collateral_amount = vault.collateral_amount.saturating_sub(gross);
+            crate::compute_collateral_ratio(
+                &residual,
+                crate::numeric::UsdIcp::from(price),
+                self,
+            ) >= target
+        };
+
+        if repay_e8s >= debt.to_u64() {
+            return debt;
+        }
+
+        // The continuous formula is rounded up. Correct for native-drop
+        // flooring by recomputing the debt requirement from the exact residual
+        // collateral. At most a few iterations are needed for the drop-level
+        // stair steps; this deliberately avoids searching every icUSD unit.
+        let mut repay_e8s = repay_e8s.max(1);
+        let mut restored = false;
+        for _ in 0..8 {
+            let gross = seized_for(repay_e8s);
+            if restores_target(repay_e8s, gross) {
+                restored = true;
+                break;
+            }
+            let residual_collateral = vault.collateral_amount.saturating_sub(gross);
+            let residual_value = crate::numeric::collateral_usd_value(
+                residual_collateral,
+                price,
+                config.decimals,
+            );
+            let Some(max_debt_left) = Decimal::from(residual_value.to_u64())
+                .checked_div(target.0)
+                .and_then(|value| value.to_u64())
+            else {
+                return ICUSD::new(0);
+            };
+            let required = debt.to_u64().saturating_sub(max_debt_left);
+            repay_e8s = required.max(repay_e8s.saturating_add(1));
+            if repay_e8s >= debt.to_u64() {
+                return debt;
+            }
+        }
+        if !restored {
+            return ICUSD::new(0);
+        }
+
+        let amount = ICUSD::new(repay_e8s);
+        let min_vault_debt = config.min_vault_debt;
+        let dust_floor = self.dust_liquidation_threshold.max(min_vault_debt);
+        crate::vault::round_up_partial_liq_dust(vault, amount, dust_floor)
+    }
+
     /// Amount a liquidation dispatch should ask an absorber to repay.
-    ///
-    /// Native-XRP is full-liquidation-only: `xrp_sp_absorb_sizing` rejects any
-    /// requested burn that isn't exactly the vault's live debt (the seizure and
-    /// the resulting `XrpClaim` are computed against the whole debt). Handing
-    /// the SP the generic partial cap makes every automated absorb fail at
-    /// preflight, so native-XRP dispatches the full debt. All other collateral
-    /// keeps the partial cap, which restores the vault to its borrow threshold.
+    /// Native XRP uses its drop-rounded recovery-target amount; other
+    /// collateral retains the existing partial-cap policy.
     pub fn recommended_liquidation_amount_for(&self, vault: &Vault, price: UsdIcp) -> ICUSD {
         if self
             .get_collateral_config(&vault.collateral_type)
             .map(|c| c.is_native_xrp())
             .unwrap_or(false)
         {
-            return vault.borrowed_icusd_amount;
+            return self.native_xrp_recovery_repay_amount(vault);
         }
         self.effective_liquidation_amount(vault, price, None)
     }
@@ -8340,6 +8455,21 @@ impl State {
             .unwrap_or(false)
     }
 
+    /// Wave-9c DOS-005: walk `vault_cr_index` and return the unhealthy
+    /// vault list plus instrumentation metadata. The walk is bounded by
+    /// the at-risk threshold when `do_full_sweep == false`, and walks
+    /// the entire index otherwise.
+    ///
+    /// Per-vault classification mirrors the pre-Wave-9c logic in
+    /// `lib.rs::check_vaults`: skip `bot_processing` vaults
+    /// (already claimed) and push the remainder into the `unhealthy`
+    /// vec when `compute_collateral_ratio < min_liquidation_ratio`.
+    /// Healthy vaults inside the band are visited but discarded.
+    ///
+    /// `vaults_visited` increments for every vault entry in iterated
+    /// buckets, including those skipped due to `bot_processing` — that
+    /// read still costs cycles, so the counter reflects actual cost
+    /// paid (useful for production telemetry and the DOS-005 fence).
     pub fn scan_unhealthy_vaults(&self, rate: UsdIcp, do_full_sweep: bool) -> UnhealthyVaultScan {
         let threshold_key = self.check_vaults_alert_threshold_key();
         let upper_bound = if do_full_sweep {
@@ -14488,14 +14618,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sizing_requests_full_debt_for_native_xrp() {
-        // The native-XRP SP absorb path is full-liquidation-only: the backend's
-        // `xrp_sp_absorb_sizing` rejects any `expected_icusd_burn_e8s` that is
-        // not exactly equal to the vault's live debt. `check_vaults` must
-        // therefore dispatch the FULL debt for native-XRP, not the generic
-        // partial-liquidation cap (which returns a partial for an ordinary
-        // breach and would make every automated absorb fail at preflight).
-        // Non-XRP collateral keeps the partial cap.
+    fn dispatch_sizing_uses_native_xrp_recovery_target_and_keeps_other_assets() {
         let mut s = test_state();
         let icp = s.icp_ledger_principal;
         let xrp = xrp_collateral_principal();
@@ -14507,17 +14630,17 @@ mod tests {
             Ratio::new(dec!(0.0)),
             Ratio::new(dec!(1.0333)),
         );
-        // $1.30 of XRP against $1.00 of debt => CR 130%, under the 133%
-        // liquidation floor but well above the 112% bonus: the ordinary
-        // breach, where the partial cap is strictly less than full debt.
+        // $130 of XRP against $100 debt: below the liquidation floor, with
+        // enough collateral for a partial burn to restore the recovery CR.
         xrp_cfg.last_price = Some(1.30);
+        xrp_cfg.borrow_threshold_ratio = Ratio::new(dec!(1.28));
         s.collateral_configs.insert(xrp, xrp_cfg);
 
         let xrp_vault = crate::vault::Vault {
             owner: Principal::anonymous(),
             vault_id: 2,
             borrowed_icusd_amount: ICUSD::new(100_000_000),
-            collateral_amount: 1_000_000, // 6 decimals => 1.0 XRP
+            collateral_amount: 100_000_000, // 6 decimals => 100 XRP
             collateral_type: xrp,
             accrued_interest: ICUSD::new(0),
             last_accrual_time: 0,
@@ -14535,23 +14658,116 @@ mod tests {
         };
         let dummy = crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO);
 
-        // Guard the premise: the generic cap really is a partial here, so this
-        // test would be vacuous if it ever stopped being one.
+        // The generic borrow-threshold cap returns zero above 128%; the
+        // configured XRP recovery CR is 128% × 1.0333 and needs a burn.
         assert!(
-            s.compute_partial_liquidation_cap(&xrp_vault, dummy) < xrp_vault.borrowed_icusd_amount,
-            "premise: generic cap must be partial for this XRP vault"
+            s.compute_partial_liquidation_cap(&xrp_vault, dummy) == ICUSD::new(0),
+            "premise: the generic cap must not size this XRP recovery burn"
         );
-
-        assert_eq!(
-            s.recommended_liquidation_amount_for(&xrp_vault, dummy),
-            xrp_vault.borrowed_icusd_amount,
-            "native-XRP dispatch must request the full live debt"
+        let xrp_amount = s.recommended_liquidation_amount_for(&xrp_vault, dummy);
+        assert!(xrp_amount > ICUSD::new(0));
+        assert!(xrp_amount < xrp_vault.borrowed_icusd_amount);
+        let gross = crate::numeric::collateral_with_bonus_capped(
+            crate::numeric::icusd_to_collateral_amount_for_burned_debt(
+                xrp_amount,
+                rust_decimal::Decimal::from_f64(1.30).unwrap(),
+                6,
+            ),
+            s.get_liquidation_bonus_for(&xrp),
+            xrp_vault.collateral_amount,
         );
+        let mut residual = xrp_vault.clone();
+        residual.borrowed_icusd_amount = residual.borrowed_icusd_amount - xrp_amount;
+        residual.collateral_amount -= gross;
+        assert!(crate::compute_collateral_ratio(&residual, dummy, &s) >= s.get_recovery_cr_for(&xrp));
         assert_eq!(
             s.recommended_liquidation_amount_for(&icp_vault, dummy),
             s.compute_partial_liquidation_cap(&icp_vault, dummy),
             "non-XRP collateral must keep the generic partial cap"
         );
+    }
+
+    #[test]
+    fn native_xrp_recovery_cap_matches_vault208_six_decimal_vector() {
+        let mut state = test_state();
+        let xrp = xrp_collateral_principal();
+        let mut config = xrp_collateral_config(
+            Ratio::from(Decimal::ZERO),
+            Ratio::from(Decimal::ZERO),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        config.borrow_threshold_ratio = Ratio::new(dec!(1.28));
+        config.liquidation_ratio = Ratio::new(dec!(1.17));
+        config.liquidation_bonus = Ratio::new(dec!(1.075));
+        config.last_price = Some(0.937824869);
+        state.collateral_configs.insert(xrp, config);
+        state.recovery_cr_multiplier = Ratio::new(dec!(1.033333333333333333));
+        state.liquidation_protocol_share = Ratio::new(dec!(0.03));
+        let vault = crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 208,
+            borrowed_icusd_amount: ICUSD::new(281_245_001_091),
+            collateral_amount: 3_499_000_010,
+            collateral_type: xrp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        };
+
+        let repay = state.native_xrp_recovery_repay_amount(&vault);
+        assert!(repay.to_u64() <= 177_046_294_114);
+        let price = rust_decimal::Decimal::from_f64(0.937824869).unwrap();
+        let gross = crate::numeric::collateral_with_bonus_capped(
+            crate::numeric::icusd_to_collateral_amount_for_burned_debt(repay, price, 6),
+            state.get_liquidation_bonus_for(&xrp),
+            vault.collateral_amount,
+        );
+        let mut residual = vault.clone();
+        residual.borrowed_icusd_amount = residual.borrowed_icusd_amount - repay;
+        residual.collateral_amount -= gross;
+        let target = state.get_recovery_cr_for(&xrp);
+        assert!(crate::compute_collateral_ratio(&residual, crate::numeric::UsdIcp::from(price), &state) >= target);
+        assert_eq!(gross, 2_029_427_587, "six-decimal XRP seizure uses the pinned floor rounding");
+    }
+
+    #[test]
+    fn native_xrp_recovery_cap_uses_full_debt_only_for_dust_or_underwater() {
+        let mut state = test_state();
+        let xrp = xrp_collateral_principal();
+        let mut config = xrp_collateral_config(
+            Ratio::from(Decimal::ZERO),
+            Ratio::from(Decimal::ZERO),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        config.last_price = Some(1.0);
+        state.collateral_configs.insert(xrp, config);
+        let mut vault = crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(50_000_000),
+            collateral_amount: 100_000_000,
+            collateral_type: xrp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        };
+        state.dust_liquidation_threshold = ICUSD::new(100_000_000);
+        assert_eq!(state.native_xrp_recovery_repay_amount(&vault), vault.borrowed_icusd_amount);
+
+        state.dust_liquidation_threshold = ICUSD::new(0);
+        vault.borrowed_icusd_amount = ICUSD::new(100 * 100_000_000);
+        state.collateral_configs.get_mut(&xrp).unwrap().liquidation_bonus =
+            Ratio::new(dec!(2.0));
+        assert_eq!(
+            state.native_xrp_recovery_repay_amount(&vault),
+            ICUSD::new(0),
+            "invalid recovery denominator must fail closed without requesting full debt"
+        );
+
+        state.collateral_configs.get_mut(&xrp).unwrap().liquidation_bonus =
+            Ratio::new(dec!(1.12));
+        vault.collateral_amount = 1;
+        assert_eq!(state.native_xrp_recovery_repay_amount(&vault), vault.borrowed_icusd_amount);
     }
 
     #[test]

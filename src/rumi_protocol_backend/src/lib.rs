@@ -1649,6 +1649,11 @@ pub struct UpgradeArg {
     /// Human-readable description of what changed in this upgrade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Preserve the Stability Pool write-down admission hold during an
+    /// explicitly scoped upgrade. `Some(false)` is ignored so upgrade args
+    /// cannot authorize resuming liquidation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_sp_writedown_hold: Option<bool>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
