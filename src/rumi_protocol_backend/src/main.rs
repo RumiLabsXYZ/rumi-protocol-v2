@@ -10494,7 +10494,7 @@ async fn stability_pool_settle_xrp_claim(
         )
     })?;
     check_postcondition(
-        rumi_protocol_backend::vault::settle_xrp_claim_as(
+        rumi_protocol_backend::vault::settle_xrp_claim_automatically_as(
             claimant,
             claim_id,
             destination,

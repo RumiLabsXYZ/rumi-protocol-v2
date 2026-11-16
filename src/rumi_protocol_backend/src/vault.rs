@@ -5466,6 +5466,7 @@ pub fn resolve_quarantined_xrp_claim_snapshot(
 }
 
 async fn reconcile_xrp_other_inflight_claims(
+    origin: XrpSettlementOrigin,
     current_claim_id: u64,
     custody_owner: Principal,
     custody_nonce: u64,
@@ -5482,7 +5483,7 @@ async fn reconcile_xrp_other_inflight_claims(
                     "xrp tx status for claim #{other_claim_id} failed: {e}"
                 ))
             })?;
-        match xrp_sibling_reconcile_decision(&status, &settlement, acct) {
+        match xrp_sibling_reconcile_decision_for_origin(origin, &status, &settlement, acct) {
             XrpSiblingReconcileDecision::Paid => {
                 mutate_state(|s| {
                     reconcile_xrp_settlement_snapshot(
@@ -5591,6 +5592,43 @@ pub(crate) fn ensure_xrp_replacement_sequence_safe(
     Ok(())
 }
 
+/// Automatic pool ticks may reconcile prior work, but a failed/expired payment
+/// requires a fresh claimant action before another paid signature. Otherwise an
+/// unfunded destination can burn signing cycles every ten minutes indefinitely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XrpSettlementOrigin {
+    Claimant,
+    AutomaticPool,
+}
+
+fn hold_automatic_xrp_replacement(
+    origin: XrpSettlementOrigin,
+    status: &crate::chains::xrp::xrp_rpc::XrpTxStatus,
+) -> bool {
+    origin == XrpSettlementOrigin::AutomaticPool
+        && !matches!(status, crate::chains::xrp::xrp_rpc::XrpTxStatus::Validated { .. })
+}
+
+// Keep the bound at the paid-signature boundary as well as the observation path.
+// The supplied claim is re-read under the custody lock immediately before this
+// call; a retained attempt can never be mistaken for an unsigned first payment.
+async fn dispatch_xrp_claim_signature_with<T, F, Fut>(
+    origin: XrpSettlementOrigin,
+    claim: &crate::state::XrpClaim,
+    sign: F,
+) -> Result<T, ProtocolError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ProtocolError>>,
+{
+    if origin == XrpSettlementOrigin::AutomaticPool && claim.settlement.is_some() {
+        return Err(ProtocolError::GenericError(
+            "Automatic XRP settlement retains a prior attempt; claimant recovery is required before another signature.".to_string(),
+        ));
+    }
+    sign().await
+}
+
 /// How to reconcile an OTHER in-flight sibling settlement (one sharing a custody
 /// address with the claim currently being settled), given the sibling's on-ledger tx
 /// status and the live custody account. Split out of `reconcile_xrp_other_inflight_claims`
@@ -5640,6 +5678,25 @@ pub(crate) fn xrp_sibling_reconcile_decision(
                 XrpSiblingReconcileDecision::QuarantineDiverged
             }
         }
+    }
+}
+
+// A second automatic payout must not clear a failed/expired sibling's tuple:
+// that would make the next tick mistake the sibling for an unsigned first attempt.
+fn xrp_sibling_reconcile_decision_for_origin(
+    origin: XrpSettlementOrigin,
+    status: &crate::chains::xrp::xrp_rpc::XrpTxStatus,
+    settlement: &crate::state::XrpSettlement,
+    acct: &crate::chains::xrp::xrp_rpc::XrpAccountInfo,
+) -> XrpSiblingReconcileDecision {
+    let decision = xrp_sibling_reconcile_decision(status, settlement, acct);
+    if origin == XrpSettlementOrigin::AutomaticPool
+        && matches!(decision, XrpSiblingReconcileDecision::FailedFeeCharged
+            | XrpSiblingReconcileDecision::ExpiredSafeToClear)
+    {
+        XrpSiblingReconcileDecision::StillInFlight
+    } else {
+        decision
     }
 }
 
@@ -5819,13 +5876,37 @@ pub async fn settle_xrp_claim_with_tag(
 }
 
 /// Settlement body with an explicit acting claimant. The claimant entry points
-/// pass `ic_cdk::caller()`; `stability_pool_settle_xrp_claim` passes the
-/// depositor the SP is settling for (after `validate_sp_settle_xrp_claim_in_state`
-/// has established the caller is the registered SP and the claimant matches).
+/// pass `ic_cdk::caller()`. The SP entry point uses the separate automatic
+/// wrapper after validating the registered pool and acting claimant.
 /// The per-claim guard is keyed by the acting claimant either way, so an SP
 /// sweep and the depositor clicking settle serialize on the same custody lock
 /// and the confirm-before-sign idempotency check below.
 pub async fn settle_xrp_claim_as(
+    caller: Principal,
+    claim_id: u64,
+    destination: String,
+    destination_tag: Option<u32>,
+) -> Result<String, ProtocolError> {
+    settle_xrp_claim_with_origin(
+        XrpSettlementOrigin::Claimant, caller, claim_id, destination, destination_tag,
+    ).await
+}
+
+/// Registered-SP-only entry point validates its caller in main.rs, then passes
+/// the acting claimant here. It can send once and confirm; it cannot re-sign.
+pub async fn settle_xrp_claim_automatically_as(
+    caller: Principal,
+    claim_id: u64,
+    destination: String,
+    destination_tag: Option<u32>,
+) -> Result<String, ProtocolError> {
+    settle_xrp_claim_with_origin(
+        XrpSettlementOrigin::AutomaticPool, caller, claim_id, destination, destination_tag,
+    ).await
+}
+
+async fn settle_xrp_claim_with_origin(
+    origin: XrpSettlementOrigin,
     caller: Principal,
     claim_id: u64,
     destination: String,
@@ -5879,6 +5960,14 @@ pub async fn settle_xrp_claim_as(
     // Payment, paying the claimant twice out of the custody address.
     if let Some(prev) = claim.settlement.clone() {
         match crate::chains::xrp::xrp_rpc::fetch_tx_status(&prev.tx_hash).await {
+            Ok(status) if hold_automatic_xrp_replacement(origin, &status) => {
+                // Keep the claim, fee accounting and original hash/sequence intact.
+                // A claimant can explicitly retry through the existing manual route.
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "Automatic XRP settlement for claim #{claim_id} is held after a prior attempt; claimant recovery is required before another signature."
+                )));
+            }
             Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Validated { .. }) => {
                 // Already paid on-chain — finalize by removing the claim.
                 mutate_state(|s| {
@@ -6020,6 +6109,7 @@ pub async fn settle_xrp_claim_as(
         }
     };
     let blocking_other_claim = match reconcile_xrp_other_inflight_claims(
+        origin,
         claim_id,
         claim.custody_owner,
         claim.custody_nonce,
@@ -6061,21 +6151,22 @@ pub async fn settle_xrp_claim_as(
     }
 
     let adapter = crate::chains::xrp::adapter::XrpAdapter::new(crate::chains::xrp::XRP_CHAIN_ID);
-    let payment = match adapter
-        .sign_xrp_payment_from(
+    let live_claim = read_state(|s| s.xrp_claims.get(&claim_id).cloned())
+        .ok_or_else(|| ProtocolError::GenericError("XRP claim disappeared before signing".to_string()))?;
+    let payment = match dispatch_xrp_claim_signature_with(origin, &live_claim, || async {
+        adapter.sign_xrp_payment_from(
             path,
             &replacement_destination,
             send_drops as u128,
             replacement_destination_tag,
         )
         .await
-    {
+        .map_err(|e| ProtocolError::GenericError(format!("xrp claim sign failed: {e:?}")))
+    }).await {
         Ok(v) => v,
         Err(e) => {
             guard_principal.fail();
-            return Err(ProtocolError::GenericError(format!(
-                "xrp claim sign failed: {e:?}"
-            )));
+            return Err(e);
         }
     };
     let signed = payment.signed;
@@ -6140,6 +6231,103 @@ mod xrp_p4_tests {
             destination: Some("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh".to_string()),
             destination_tag: None,
         }
+    }
+
+    #[test]
+    fn automatic_xrp_repeated_failed_or_missing_observations_never_rearm_signing() {
+        use crate::chains::xrp::xrp_rpc::XrpTxStatus;
+        use std::cell::Cell;
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        for status in [XrpTxStatus::Failed, XrpTxStatus::NotFound] {
+            let signatures = Cell::new(0);
+            let mut state = crate::state::State::default();
+            state.xrp_claims.insert(7, claim(claimant, owner, 191, 94_300));
+            // The same production dispatch boundary admits an unsigned first
+            // payment. The result stands in for a paid signer's saved tuple.
+            let signed = futures::executor::block_on(dispatch_xrp_claim_signature_with(
+                XrpSettlementOrigin::AutomaticPool, state.xrp_claims.get(&7).unwrap(), || async {
+                    signatures.set(signatures.get() + 1);
+                    Ok(settlement("FIRST"))
+                },
+            )).unwrap();
+            state.xrp_claims.get_mut(&7).unwrap().settlement = Some(signed);
+            let before = state.xrp_claims.clone();
+
+            // Use the production upgrade codec: an upgrade/restart must not
+            // erase the attempt and purchase a new signature on the next tick.
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+            state = crate::storage::decode_state_body(&bytes).unwrap();
+            for _ in 0..144 { // a full day of ten-minute ticks over one retained attempt
+                assert!(hold_automatic_xrp_replacement(XrpSettlementOrigin::AutomaticPool, &status));
+                // Even an accidental fall-through to the signer is bounded.
+                let result = futures::executor::block_on(dispatch_xrp_claim_signature_with(
+                    XrpSettlementOrigin::AutomaticPool, state.xrp_claims.get(&7).unwrap(), || async {
+                        signatures.set(signatures.get() + 1);
+                        Ok(settlement("UNEXPECTED"))
+                    },
+                ));
+                assert!(result.is_err());
+            }
+            assert_eq!(signatures.get(), 1);
+            assert_eq!(state.xrp_claims, before);
+            assert_eq!(xrp_unresolved_claim_drops_for_custody(&state, owner, 191).unwrap(), 94_300);
+            assert!(!hold_automatic_xrp_replacement(XrpSettlementOrigin::Claimant, &status));
+
+            // Explicit manual recovery keeps existing fee treatment: only a
+            // validated failed payment charges its fee, once for this tuple.
+            if matches!(status, XrpTxStatus::Failed) {
+                assert!(reconcile_xrp_settlement_snapshot(&mut state, 7, "FIRST", XrpSettlementReconciliation::FailedFeeCharged));
+                assert!(!reconcile_xrp_settlement_snapshot(&mut state, 7, "FIRST", XrpSettlementReconciliation::FailedFeeCharged));
+                assert_eq!(state.xrp_claims[&7].drops, 94_280);
+            }
+            futures::executor::block_on(dispatch_xrp_claim_signature_with(
+                XrpSettlementOrigin::Claimant, state.xrp_claims.get(&7).unwrap(), || async {
+                    signatures.set(signatures.get() + 1);
+                    Ok(())
+                },
+            )).unwrap();
+            assert_eq!(signatures.get(), 2);
+        }
+    }
+
+    #[test]
+    fn automatic_xrp_success_still_reconciles_without_replacement_signing() {
+        let status = crate::chains::xrp::xrp_rpc::XrpTxStatus::Validated {
+            ledger_index: 9_000_010, delivered_drops: 999_980,
+        };
+        assert!(!hold_automatic_xrp_replacement(XrpSettlementOrigin::AutomaticPool, &status));
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true, sequence: 42, balance_drops: 10_000_000, ledger_index: 9_000_100,
+        };
+        assert_eq!(xrp_sibling_reconcile_decision_for_origin(
+            XrpSettlementOrigin::AutomaticPool, &status, &settlement("PAID"), &acct,
+        ), XrpSiblingReconcileDecision::Paid);
+    }
+
+    #[test]
+    fn automatic_xrp_sibling_reconciliation_cannot_rearm_a_failed_or_expired_claim() {
+        use crate::chains::xrp::xrp_rpc::XrpTxStatus;
+        let saved = settlement("SIBLING");
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true, sequence: 41, balance_drops: 10_000_000, ledger_index: 9_000_100,
+        };
+        for status in [XrpTxStatus::Failed, XrpTxStatus::NotFound] {
+            assert_eq!(xrp_sibling_reconcile_decision_for_origin(
+                XrpSettlementOrigin::AutomaticPool, &status, &saved, &acct,
+            ), XrpSiblingReconcileDecision::StillInFlight);
+        }
+        assert_eq!(xrp_sibling_reconcile_decision_for_origin(
+            XrpSettlementOrigin::Claimant, &XrpTxStatus::Failed, &saved, &acct,
+        ), XrpSiblingReconcileDecision::FailedFeeCharged);
+        assert_eq!(xrp_sibling_reconcile_decision_for_origin(
+            XrpSettlementOrigin::Claimant, &XrpTxStatus::NotFound, &saved, &acct,
+        ), XrpSiblingReconcileDecision::ExpiredSafeToClear);
+        let advanced = crate::chains::xrp::xrp_rpc::XrpAccountInfo { sequence: 42, ..acct };
+        assert_eq!(xrp_sibling_reconcile_decision_for_origin(
+            XrpSettlementOrigin::AutomaticPool, &XrpTxStatus::NotFound, &saved, &advanced,
+        ), XrpSiblingReconcileDecision::QuarantineDiverged);
     }
 
     #[test]
