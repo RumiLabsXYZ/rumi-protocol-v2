@@ -1,0 +1,10 @@
+{
+  "reviewedCommit": "7567b883307bbefedda23c738985577299aae699",
+  "reviewerA": "FAIL: exact args file lacked fsync before durable dispatch marker",
+  "reviewerB": "FAIL: same independently confirmed argument-file durability gap",
+  "otherBlockingIssues": [],
+  "correction": "Argument file now uses exclusive open/write-all/fsync/close before marker; journal data writes also use write-all before fsync. Pins refreshed. No execution or artifact rebuild.",
+  "correctedPublisherSha256": "8a4085de82f28537bdab93af4ea61749642a0f70a2caf8f5999ddf0e04dbedf1",
+  "correctedExecutionPinsSha256": "75b69c92da01358b75a19a74e9ba0a76d88073033532273d929ea33542c9e50e",
+  "freshFinalReviewPending": true
+}
