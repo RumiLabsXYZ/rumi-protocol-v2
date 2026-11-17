@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "didc",
+    "check",
+    "backend-ce014.did",
+    "backend-59a.did"
+  ],
+  "exitCode": 0,
+  "stdout": "",
+  "stderr": "",
+  "oldCandidSha256": "74cd6c8f7a8b0667bf10f2cd50b1a3c81e55ff863b0cb9520fb8eca1795e03fb",
+  "newCandidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "generatedFilesChanged": false
+}

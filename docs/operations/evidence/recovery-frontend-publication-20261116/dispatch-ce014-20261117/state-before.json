@@ -1,0 +1,17 @@
+{
+  "frontend": {
+    "status": "Running",
+    "moduleHash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+    "settingsSha256": "efba6671f552c15b1e43e49c6af7d56b2898d0b2d2ee2ab695dba886394a7326"
+  },
+  "backend": {
+    "status": "Running",
+    "moduleHash": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+    "settingsSha256": "ce32352f4df9c65d2f6ff5835ff6e71c8c9f38c8d78ffe245518a0596f293f2d"
+  },
+  "permissions": {
+    "Commit": "4449444c016d68010001011dcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402",
+    "Prepare": "4449444c016d68010001011dcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402"
+  },
+  "spHold": "(true)"
+}

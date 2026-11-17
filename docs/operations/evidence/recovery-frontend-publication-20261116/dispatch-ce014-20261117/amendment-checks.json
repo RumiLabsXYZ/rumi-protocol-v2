@@ -1,0 +1,27 @@
+{
+  "oldPinsSha256": "e12c4db48741d377706eccffb53b399e581e3ccbf4b15d59372f09ca1a6f18e7",
+  "newPinsSha256": "475a8b21dd5b20cc37d235d67253b11a3252164a77d7f9a0c3e6f4672284ddd1",
+  "oldDispatchManifestSha256": "b6486dfa559d10fe8d0741fb30ec49d2b3289781759a03a75b763d8ef5e5d86f",
+  "newDispatchManifestSha256": "3ddef12644ea1eb922b4799d6150b30e48e7e56cb66c4e52b9b3e53e295c62ee",
+  "changedPinnedFiles": [
+    "dispatch-manifest.json",
+    "state-before.json",
+    "certified-before.json"
+  ],
+  "publisherCodeUnchanged": true,
+  "verifierCodeUnchanged": true,
+  "allOtherPinnedFilesUnchanged": true,
+  "dispatchPhasesIdentical": true,
+  "inventoryBytesIdentical": true,
+  "freshAssetsEqualOldAssets": true,
+  "frontendSettingsControllersPermissionsAndHoldUnchanged": true,
+  "capturedUtc": "2026-11-17T16:34:10.248Z",
+  "oldPacketUntouched": true,
+  "uiWrites": 0,
+  "backendOrFinancialWrites": 0,
+  "executionHeldWith": "Dorian",
+  "uiDirectApprovalStillRequired": true,
+  "localOnlyInspectExitCode": 0,
+  "localOnlyInspectPublicationPerformed": false,
+  "all764ArtifactFilesRevalidatedByInspect": true
+}

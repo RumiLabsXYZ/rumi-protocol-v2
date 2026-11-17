@@ -1,0 +1,34 @@
+{
+  "schema": "rumi-frontend-dispatch-pins-v1",
+  "executionHeldWith": "Dorian",
+  "preparedOnly": true,
+  "resourceAllocationDoesNotGrantPublication": true,
+  "humanAuthority": [
+    "Merritt user01a1db85-3658-7c01-8637-73e787fa6eb4",
+    "Merritt user01a1dd32-aece-7ee0-b545-2ddbc605e891"
+  ],
+  "filesSha256": {
+    "prepare-dispatch.mjs": "7d65e748c937c71fe01397451f5ed71ebc7e32620407a1a80b0bd87e89478d5a",
+    "publish-frontend.mjs": "ec7198cebc81260224a003eaf413bd7db15ae3a95f3cc73617e9f900def541a4",
+    "read-preflight.mjs": "4c598c435d017613433b1edfe65ed108b9d18f1439d06fc29e1fbd87342a8693",
+    "verify-dispatch.mjs": "d4e30c694f944d6efe46cd3fcd3a3024d8f4d708f2d67500c0f0896fe1960f9c",
+    "decode-saved-reply.mjs": "2073c76a73afe62752d33161cf55b740ca8773454cc87e37c6396cb8c37e7341",
+    "materialize-artifact.py": "3569f2c50dbbe4d76a31e728cc0e7092be2fdeb26181f0b05ab70af041eb6295",
+    "dispatch-manifest.json": "3ddef12644ea1eb922b4799d6150b30e48e7e56cb66c4e52b9b3e53e295c62ee",
+    "artifact-manifest.json": "82768e536040d1a45b77215f3bd48ae1290945e80a44f3d5968735c97a319e82",
+    "inventory-before.json": "efcbb671a923600a669dc92321adcbac0be32e8a43ae0f6cd30c8bd059375a49",
+    "state-before.json": "d961c0b5d6ef9e43972bd3590f998d1c1b930c87251eb816c64a1ad1fa9ccaff",
+    "certified-before.json": "9a24d96fefe6aa57e82bb0c05c97eba3f367588937f7024dd3895f8048a0a9d1",
+    "frontend-live.did": "af4efb9d921acb40734025cedd6a3424c8a925c5bcd5585d711cb2dbf263227b",
+    "frontend-live-idl.mjs": "20f32f0c55067d8f969b83e1f6f8d0fd7f4851298d4d37be0cc15ff75b70eebe",
+    "dispatch-boundary-check.mjs": "1e742541998dd4a2fc4e58e0ac893c6215bdbd01770b67b124e93e51dedf862b"
+  },
+  "baselineAmendment": {
+    "priorUiPacketCommit": "37380ddd3d8585c0b1c85d04127b865bebf2bf79",
+    "priorPinsSha256": "e12c4db48741d377706eccffb53b399e581e3ccbf4b15d59372f09ca1a6f18e7",
+    "separatelyApprovedBackendReceiptCommit": "8a42c5212f7f7a8a688c51e5c4d1b4bf856b17ac",
+    "receiptDocumentSha256": "f8d8c7ed24452b6b6a74e7f5163561ae3ce6ba13234a98d9314aa789749e7ced",
+    "uiExecutionAuthorizationGranted": false,
+    "change": "Exact replacement of expected backend module and certified Candid baseline; all execution code/payloads/guards preserved."
+  }
+}
