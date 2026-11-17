@@ -1,0 +1,60 @@
+(
+  opt record {
+    last_redemption_time = 0 : nat64;
+    status = variant { Active };
+    decimals = 8 : nat8;
+    recovery_interest_rate_apr = null;
+    redemption_fee_ceiling = blob "\00\00\02\00\05\00\00\00\00\00\00\00\00\00\00\00";
+    healthy_cr = opt blob "\00\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00";
+    debt_ceiling = 18_446_744_073_709_551_615 : nat64;
+    min_vault_debt = 10_000_000 : nat64;
+    rate_curve = opt record {
+      method = variant { Linear };
+      markers = vec {
+        record {
+          multiplier = blob "\00\00\00\00\05\00\00\00\00\00\00\00\00\00\00\00";
+          cr_level = blob "\00\00\1c\00\8c\b9\a5\e3\35\aa\ee\b3\8c\80\f9\2a";
+        };
+        record {
+          multiplier = blob "\00\00\01\00\19\00\00\00\00\00\00\00\00\00\00\00";
+          cr_level = blob "\00\00\01\00\0f\00\00\00\00\00\00\00\00\00\00\00";
+        };
+        record {
+          multiplier = blob "\00\00\01\00\0f\00\00\00\00\00\00\00\00\00\00\00";
+          cr_level = blob "\00\00\02\00\af\00\00\00\00\00\00\00\00\00\00\00";
+        };
+        record {
+          multiplier = blob "\00\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00";
+          cr_level = blob "\00\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00";
+        };
+      };
+    };
+    recovery_borrowing_fee = null;
+    min_xrc_sources = null;
+    min_collateral_deposit = 100_000 : nat64;
+    last_price = opt (2.491755746 : float64);
+    last_price_timestamp = opt (1_794_873_480_000_000_000 : nat64);
+    redemption_tier = 1 : nat8;
+    redemption_fee_floor = blob "\00\00\03\00\03\00\00\00\00\00\00\00\00\00\00\00";
+    borrow_threshold_ratio = blob "\00\00\01\00\0f\00\00\00\00\00\00\00\00\00\00\00";
+    custody_kind = null;
+    ledger_fee = 10_000 : nat64;
+    recovery_target_cr = blob "\00\00\13\00\fb\ff\8d\a2\e0\0f\1b\d7\00\00\00\00";
+    current_base_rate = blob "\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00";
+    ledger_canister_id = principal "ryjl3-tyaaa-aaaaa-aaaba-cai";
+    price_source = variant {
+      Xrc = record {
+        quote_asset_class = variant { FiatCurrency };
+        quote_asset = "USD";
+        base_asset_class = variant { Cryptocurrency };
+        base_asset = "ICP";
+      }
+    };
+    liquidation_bonus = blob "\00\00\01\00\0b\00\00\00\00\00\00\00\00\00\00\00";
+    display_color = opt "#2DD4BF";
+    borrowing_fee = blob "\00\00\03\00\03\00\00\00\00\00\00\00\00\00\00\00";
+    interest_rate_apr = blob "\00\00\02\00\02\00\00\00\00\00\00\00\00\00\00\00";
+    symbol = opt "ICP";
+    liquidation_ratio = blob "\00\00\02\00\85\00\00\00\00\00\00\00\00\00\00\00";
+  },
+)

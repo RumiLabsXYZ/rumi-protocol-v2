@@ -1,0 +1,37 @@
+{
+  "observedUtc": "2026-11-16T23:35:10.165Z",
+  "url": "https://xrplcluster.com",
+  "account": "r4DD8ANjzQhJUj7iLfWQFK4pKuLDP3Bnsb",
+  "destination": "rw98ukWsZf7adUaewfpdtNgT2WEsAYtXa",
+  "complete": true,
+  "totalAccountTransactions": 1108,
+  "paymentTransactions": 1100,
+  "counts": {
+    "tecNO_DST_INSUF_XRP": 1099,
+    "tesSUCCESS": 1
+  },
+  "totalFeeDrops": "22000",
+  "first": {
+    "hash": "15CD4BE95D7B95691064EE792C8D143F871F49B9E94D2AA51B86936C1D094889",
+    "result": "tecNO_DST_INSUF_XRP",
+    "date": 847337250,
+    "utc": "2026-11-07T03:27:30.000Z",
+    "feeDrops": "20",
+    "amountDrops": "94280",
+    "sequence": 108107735,
+    "lastLedgerSequence": 108166358,
+    "validated": true
+  },
+  "last": {
+    "hash": "468C3B651C7AEF1D588A000A56AD7C00C15C96C05B61BBB88FEE97C819D704EE",
+    "result": "tesSUCCESS",
+    "date": 848006470,
+    "utc": "2026-11-14T21:21:10.000Z",
+    "feeDrops": "20",
+    "amountDrops": "72300",
+    "sequence": 108108838,
+    "lastLedgerSequence": 108332487,
+    "validated": true
+  },
+  "fullHistorySha256": "961530f117347c085fa97b43f4a42457370001cbc3448b350e20d5ddff0a8ea7"
+}

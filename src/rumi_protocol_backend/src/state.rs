@@ -6695,6 +6695,9 @@ impl State {
     }
 
     pub fn upgrade(&mut self, args: UpgradeArg) {
+        if args.preserve_sp_liquidation_pause == Some(true) {
+            self.sp_writedown_disabled = true;
+        }
         if let Some(mode) = args.mode {
             self.mode = mode;
         }

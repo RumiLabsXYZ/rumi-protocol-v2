@@ -1,0 +1,25 @@
+(
+  opt record {
+    last_error = null;
+    burn_block = opt (3_435_761 : nat64);
+    adoption = null;
+    icp_due_e8s = 194_282_931_553 : nat64;
+    owner = principal "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae";
+    withdrawal_id = opt (1_696 : nat64);
+    redeem_nicp_e8s = 149_998_000_000 : nat64;
+    release = null;
+    fee_e8s = 1_000_000 : nat64;
+    updated_at_ns = 1_794_872_574_307_654_707 : nat64;
+    vault_id = 51 : nat64;
+    escrow_subaccount = blob "\6b\bd\6b\a3\f7\aa\00\a1\2f\21\3c\c9\33\01\39\5c\88\2b\eb\8b\d5\61\5f\31\77\d6\eb\33\36\f1\79\6a";
+    created_at_ns = 1_793_581_188_834_194_406 : nat64;
+    received_icp_e8s = null;
+    stage = variant { ClaimConfirmed };
+    funding_nonce = 33_085_733_165_844_107_869_574_759_434_835_482_656 : nat;
+    funding_block = opt (3_435_759 : nat64);
+    approval_nonce = 33_085_733_165_844_107_869_574_759_434_835_482_657 : nat;
+    settlement_block = null;
+    approval_block = opt (3_435_760 : nat64);
+    original_nicp_e8s = 150_000_000_000 : nat64;
+  },
+)

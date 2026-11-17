@@ -281,6 +281,7 @@ fn real_ledger_settlement_and_upgrade_preserve_receipt() {
         encode_one(ProtocolArg::Upgrade(UpgradeArg {
             mode: None,
             description: None,
+            preserve_sp_liquidation_pause: None,
         }))
         .unwrap(),
         None,
@@ -343,6 +344,7 @@ fn real_ledger_settlement_and_upgrade_preserve_receipt() {
         encode_one(ProtocolArg::Upgrade(UpgradeArg {
             mode: None,
             description: None,
+            preserve_sp_liquidation_pause: None,
         }))
         .unwrap(),
         None,
@@ -421,6 +423,7 @@ fn real_ledger_settlement_and_upgrade_preserve_receipt() {
         encode_one(ProtocolArg::Upgrade(UpgradeArg {
             mode: None,
             description: None,
+            preserve_sp_liquidation_pause: None,
         }))
         .unwrap(),
         None,
@@ -629,6 +632,7 @@ fn refund_reply_lost_on_upgrade_retries_same_ledger_tuple() {
         encode_one(ProtocolArg::Upgrade(UpgradeArg {
             mode: None,
             description: None,
+            preserve_sp_liquidation_pause: None,
         }))
         .unwrap(),
         None,
@@ -773,6 +777,7 @@ fn funding_committed_reply_lost_on_upgrade_is_not_recharged() {
         encode_one(ProtocolArg::Upgrade(UpgradeArg {
             mode: None,
             description: None,
+            preserve_sp_liquidation_pause: None,
         }))
         .unwrap(),
         None,

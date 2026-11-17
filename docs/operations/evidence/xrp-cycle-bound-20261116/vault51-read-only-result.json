@@ -1,0 +1,72 @@
+{
+  "observedUtc": "2026-11-17T00:04:16.826392+00:00",
+  "kind": "read-only reconciliation of already-completed superseded Vault51 correction",
+  "approvedPacket": "097bf775d3181de5936058ef01e21704d8cfc0ab",
+  "oldApprovedGzip": "730f54713dca1938c40b661ef6bd6ddc23555d92ca4c8e1feca282e3a33f8cf9",
+  "installedModule": "0x59a64f78e0e652d0e48413aba587d3f826c1dc25258f56ab09575c59de444111",
+  "oldInstallationReplayed": false,
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "spWritedownDisabled": true,
+  "claim": {
+    "vaultId": 51,
+    "withdrawalId": 1696,
+    "burnBlock": 3435761,
+    "stage": "ClaimConfirmed",
+    "lastError": null,
+    "receivedIcp": null,
+    "settlementBlock": null,
+    "release": null,
+    "adoption": null,
+    "icpDueE8s": 194282931553,
+    "originalNicpE8s": 150000000000,
+    "updatedAtNs": 1794872574307654707,
+    "updatedAtUtc": "2026-11-16T23:42:54.307655+00:00"
+  },
+  "escrowBalanceE8s": 0,
+  "icpCollateralConfig": {
+    "status": "Active",
+    "decimals": 8,
+    "ledger": "ryjl3-tyaaa-aaaaa-aaaba-cai"
+  },
+  "vaultPublicProjection": {
+    "collateralType": "buwm7-7yaaa-aaaar-qagva-cai",
+    "collateralAmount": 0,
+    "borrowedIcusdE8s": 288191644052,
+    "accruedInterestE8s": 0,
+    "zeroCollateralIsPendingClaimProjection": true
+  },
+  "automaticChecks": {
+    "sourceRegistration": "setup_timers -> nicp_redemption::adoption::register_timer; interval3600s plus10s afterregistration",
+    "newTimerFiringObservedDuringThisReadWindow": false,
+    "reconciliationTimestampObservedOnly": true,
+    "historicalFirstAutomaticCheck": "2026-11-11T16:18:15.264700035Z"
+  },
+  "maturityGate": "WaterNeuron payout not received in dedicated escrow; settlement/sweep/adoption unproven and pending",
+  "actions": "public/query reads only; no update, installation, payout, sweep, adoption, reserve/funding/permission/controller change",
+  "files": {
+    "vault51-current-claim.txt": {
+      "sha256": "4e1e2023e012f3d075c11e10a1c03dfa03f59a2956b398a9b0509ead142136d1",
+      "bytes": 1044
+    },
+    "vault51-current-vault51-only.txt": {
+      "sha256": "91df9012ecb10ad53d05091e9de0fd19560b2220de7948663ad3f54e95f0a3e5",
+      "bytes": 1293
+    },
+    "vault51-current-escrow.txt": {
+      "sha256": "110fd129c764944e9e54bc9cd2e6fc16e5b5f8bf312a27614ee6b2f39425b1c1",
+      "bytes": 10
+    },
+    "vault51-current-icp-config.txt": {
+      "sha256": "27dd64d0e58352e1a63860f7e0d09de3fde8d8bbc8fec97d80731a80ed3f93dc",
+      "bytes": 2588
+    },
+    "vault51-current-config.txt": {
+      "sha256": "5679c349814c447ce1cc57f400ef3365ff75b01d25dafebdb993e9b0be40c8c1",
+      "bytes": 30130
+    },
+    "backend-current-public-status.json": {
+      "sha256": "fdb189fb893fcf8712a4a6ca8bff56cfb527885210201d335770637cf30155a9",
+      "bytes": 298
+    }
+  }
+}

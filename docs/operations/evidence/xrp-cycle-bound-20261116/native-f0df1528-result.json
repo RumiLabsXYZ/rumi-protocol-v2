@@ -1,0 +1,123 @@
+{
+  "source": "f0df15285cc4b51e83045ab6b0469a1bab4a44c6",
+  "tree": "6cc7335e8acf7e84dfd9528e345493b74258c0c2",
+  "allocationId": "e51a211e-b1bc-4847-8873-e7050f829aa8",
+  "target": "/Users/robertripley/coding/rumi-protocol-v2/target",
+  "before": {
+    "source": "f0df15285cc4b51e83045ab6b0469a1bab4a44c6",
+    "tree": "6cc7335e8acf7e84dfd9528e345493b74258c0c2",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "startFreeBytes": 75753824256,
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--lib",
+        "xrp_p4_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 33,
+      "startedUtc": "2026-11-16T23:58:16Z",
+      "peakRssBytes": 2873114624,
+      "maximumPhysicalGrowthBytes": 1393491968,
+      "pid": 56125,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [
+        [
+          "33",
+          "0"
+        ]
+      ],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--lib",
+        "storage::state_snapshot_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 6,
+      "startedUtc": "2026-11-17T00:01:50Z",
+      "peakRssBytes": 5013504,
+      "maximumPhysicalGrowthBytes": 1393582080,
+      "pid": 57906,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [
+        [
+          "6",
+          "0"
+        ]
+      ],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--bin",
+        "rumi_protocol_backend",
+        "check_candid_interface_compatibility",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 1,
+      "startedUtc": "2026-11-17T00:01:51Z",
+      "peakRssBytes": 2761736192,
+      "maximumPhysicalGrowthBytes": 1863139328,
+      "pid": 57928,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [
+        [
+          "1",
+          "0"
+        ]
+      ],
+      "countMatched": true
+    }
+  ],
+  "noDeploy": true,
+  "ownedGroupsClosed": true,
+  "result": "PASS",
+  "after": {
+    "source": "f0df15285cc4b51e83045ab6b0469a1bab4a44c6",
+    "tree": "6cc7335e8acf7e84dfd9528e345493b74258c0c2",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "sourceUnchanged": true,
+  "elapsedSeconds": 271.728,
+  "endFreeBytes": 73854398464,
+  "physicalGrowthBytes": 1899425792
+}

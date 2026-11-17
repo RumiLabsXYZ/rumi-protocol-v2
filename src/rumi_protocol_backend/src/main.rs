@@ -1032,6 +1032,7 @@ fn post_upgrade(arg: ProtocolArg) {
             // Apply upgrade args to the restored state (the snapshot was taken
             // before this upgrade event, so we must apply it explicitly)
             let pre_upgrade_ckusdc_ledger = state.ckusdc_ledger_principal;
+            // Hold-only upgrade args apply before state publication or timers.
             state.upgrade(upgrade_args);
             bind_legacy_bot_payment_tombstones(&mut state, pre_upgrade_ckusdc_ledger);
             state

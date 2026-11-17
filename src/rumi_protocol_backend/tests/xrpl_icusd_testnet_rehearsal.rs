@@ -694,6 +694,7 @@ fn upgrade_running_rehearsal_backend() {
     let arg = Encode!(&rumi_protocol_backend::ProtocolArg::Upgrade(rumi_protocol_backend::UpgradeArg {
         mode: None,
         description: Some("rehearsal: XRPL API v2 receipts".into()),
+        preserve_sp_liquidation_pause: None,
     }))
     .unwrap();
     let args = InstallChunkedCodeArgs {

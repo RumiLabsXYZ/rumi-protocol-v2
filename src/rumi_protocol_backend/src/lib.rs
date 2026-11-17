@@ -1649,6 +1649,93 @@ pub struct UpgradeArg {
     /// Human-readable description of what changed in this upgrade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Hold-only override for a release that must retain the liquidation pause
+    /// even when recovering through event replay. Neither false nor omission
+    /// grants permission to resume liquidations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_sp_liquidation_pause: Option<bool>,
+}
+
+#[cfg(test)]
+mod sp_upgrade_hold_tests {
+    use super::*;
+
+    fn args(hold: Option<bool>) -> UpgradeArg {
+        UpgradeArg { mode: None, description: None, preserve_sp_liquidation_pause: hold }
+    }
+
+    #[derive(CandidType, Serialize, Deserialize)]
+    struct LegacyUpgradeArg { mode: Option<Mode>, description: Option<String> }
+
+    #[derive(Serialize)]
+    enum LegacyEvent {
+        #[serde(rename = "upgrade")]
+        Upgrade(LegacyUpgradeArg),
+    }
+
+    #[test]
+    fn sp_upgrade_hold_old_candid_and_event_args_remain_decodable() {
+        let old = LegacyUpgradeArg { mode: None, description: Some("older upgrade".into()) };
+        let wire = candid::encode_one(&old).unwrap();
+        let decoded: UpgradeArg = candid::decode_one(&wire).unwrap();
+        assert_eq!(decoded.preserve_sp_liquidation_pause, None);
+        assert_eq!(decoded.description, old.description);
+        let mut cbor = Vec::new();
+        ciborium::ser::into_writer(&old, &mut cbor).unwrap();
+        let restored: UpgradeArg = ciborium::de::from_reader(cbor.as_slice()).unwrap();
+        assert_eq!(restored.preserve_sp_liquidation_pause, None);
+        cbor.clear();
+        ciborium::ser::into_writer(&LegacyEvent::Upgrade(old), &mut cbor).unwrap();
+        let restored: event::Event = ciborium::de::from_reader(cbor.as_slice()).unwrap();
+        match restored {
+            event::Event::Upgrade(args) => assert_eq!(args.preserve_sp_liquidation_pause, None),
+            _ => panic!("expected historical Upgrade event"),
+        }
+    }
+
+    #[test]
+    fn sp_upgrade_hold_snapshot_path_forces_pause_without_changing_liabilities() {
+        let mut state = state::State::default();
+        state.protocol_deficit_icusd = numeric::ICUSD::new(123);
+        state.sp_writedown_disabled = false;
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let mut restored = storage::decode_state_body(&bytes).unwrap();
+        let previous_mode = restored.mode;
+        restored.upgrade(args(Some(true)));
+        assert!(restored.sp_writedown_disabled);
+        assert_eq!(restored.protocol_deficit_icusd, numeric::ICUSD::new(123));
+        assert_eq!(restored.mode, previous_mode);
+    }
+
+    #[test]
+    fn sp_upgrade_hold_false_and_omission_cannot_resume() {
+        for hold in [None, Some(false)] {
+            for was_paused in [false, true] {
+                let mut state = state::State::default();
+                state.sp_writedown_disabled = was_paused;
+                state.upgrade(args(hold));
+                assert_eq!(state.sp_writedown_disabled, was_paused);
+            }
+        }
+    }
+
+    #[test]
+    fn sp_upgrade_hold_event_replay_retains_pause_across_later_upgrades() {
+        let init = InitArg {
+            xrc_principal: Principal::from_slice(&[1]),
+            icusd_ledger_principal: Principal::from_slice(&[2]),
+            icp_ledger_principal: Principal::from_slice(&[3]),
+            fee_e8s: 10_000,
+            developer_principal: Principal::from_slice(&[4]),
+            treasury_principal: None, stability_pool_principal: None,
+            ckusdt_ledger_principal: None, ckusdc_ledger_principal: None,
+        };
+        let events = [event::Event::Init(init), event::Event::Upgrade(args(Some(true))),
+            event::Event::Upgrade(args(None)), event::Event::Upgrade(args(Some(false)))];
+        let replayed = event::replay_with_nonce_time(events.into_iter(), || 10).unwrap();
+        assert!(replayed.sp_writedown_disabled);
+    }
 }
 
 #[derive(CandidType, Deserialize, Debug)]
