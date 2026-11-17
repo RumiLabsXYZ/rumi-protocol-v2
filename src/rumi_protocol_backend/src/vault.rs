@@ -15755,7 +15755,9 @@ mod xrp_sp_absorb_contract_tests {
         let all_claims = state
             .xrp_claims
             .values()
-            .filter(|claim| claim.vault_id == VAULT_ID)
+            .filter(|claim| {
+                claim.custody_owner == before.owner && claim.custody_nonce == VAULT_ID
+            })
             .map(|claim| claim.drops)
             .sum::<u64>();
         assert_eq!(all_claims, gross_seized);
