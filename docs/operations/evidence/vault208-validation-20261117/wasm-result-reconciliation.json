@@ -1,0 +1,117 @@
+{
+  "kind": "Read-only offline artifact result reconciliation; original stopped receipt unchanged",
+  "observedUtc": "2026-11-17T22:36:23.699921+00:00",
+  "builtSource": "afedab2993e87744a9a4e1a14efa59934815e975",
+  "builtTree": "8755049c0b042fc375ed7275a7a8c996c434e812",
+  "allocationId": "bd2206f4-6b31-4178-9a47-3ec69c43e4ad",
+  "originalReceiptSha256": "70d1f3e276535db0e07e5d385f33503a4f592d7ee6c4d068a4101246debfd3b3",
+  "originalResult": "STOPPED",
+  "originalElapsedSecondsInvalid": -9856044.996,
+  "originalExecutedRunnerSha256": "d68a59988178f2f3c0b1a02bcbd2892dcd9f22135ab7b1a9a3ce3f248a72631a",
+  "producerCommandsAllSevenExitZero": true,
+  "allOwnedProcessGroupsClosed": [
+    67772,
+    68215,
+    68224,
+    68235,
+    68250,
+    68285,
+    68294
+  ],
+  "all134SourcePinsAndReleaseInputsUnchanged": true,
+  "cargoExactBackendSourceDefaultFeaturesSizeProfileAndRawOutputVerified": true,
+  "embeddedCanonicalDidSha256": "92d6e8353fcd61194f0e9034245b44293105d1f8a3978dd7ce3fb854d6681524",
+  "gzipRoundtripAndZeroMtimeVerified": true,
+  "mainnetMarkerGuardExitZero": true,
+  "artifacts": {
+    "backend.raw.wasm": {
+      "bytes": 16448348,
+      "sha256": "d4549d07a3312823fac2ec489a8efe9dcde691321aba61ae833fd9b606e77e14"
+    },
+    "backend.wasm": {
+      "bytes": 11452345,
+      "sha256": "7fc4d5ba5dddc58611b765ee24899e92659496eeea2dba9d5238678409cff193"
+    },
+    "backend.wasm.gz": {
+      "bytes": 2797987,
+      "sha256": "8718b644c1f42da904e1a8d20e9aa7bb584b73253e2a0fddc336d411ead31f37"
+    }
+  },
+  "codeSectionBytes": 10320295,
+  "privateOriginalThreshold": {
+    "bytes": 10223616,
+    "assertionFailed": true,
+    "noCurrentRumiMandatoryGuardSourceFound": true,
+    "origin": "Conservative10MiB-minus256KiB assertion introduced by this private runner from older receipts; not a replica rejection."
+  },
+  "acceptedSizeCriterion": {
+    "networkLimitBytes": 12582912,
+    "retainedReserveBytes": 262144,
+    "maximumCodeBytesWithReserve": 12320768,
+    "headroomAfterReserveBytes": 2000473,
+    "fits": true,
+    "precedentPacketCommit": "2f5b2b62476979e2c4e611a06ba8d478628d3c45",
+    "precedentPath": "docs/operations/xrp-cycle-bound-deployment-20261116.md",
+    "precedentLine": 17,
+    "precedentAcceptedCodeBytes": 10317840,
+    "existingRunnerPath": "/private/tmp/rumi-cycle-burn-20261116/run-release-2ff2723a.py",
+    "existingRunnerLine": 134,
+    "sourceReserve": "Cargo.toml:22-27;icp.yaml:617-618"
+  },
+  "timing": {
+    "cause": "Wasm parser reassigned section payload offset to start after producer commands; precomputed active deadline and resource accounting unaffected. Executed runner/receipt retained unchanged.",
+    "startEpochFromExclusiveConsume": 1794954443.735065,
+    "endEpochFromOriginalReceiptMtime": 1794954664.375289,
+    "elapsedWallSeconds": 220.640224,
+    "wallTimeNotMonotonicMeasurement": true,
+    "maximumAdmittedSecondsIncludingClosure": 1800,
+    "withinAdmittedWindow": true
+  },
+  "resources": {
+    "peakObservedOwnedRssBytes": 2044641280,
+    "maximumObservedPhysicalGrowthBytes": 163217408,
+    "endFreeBytes": 45723877376,
+    "withinAdmittedBounds": true
+  },
+  "rootIndependentProofSha256": "7cf4dbf0b9c3193725ad1630e88006fb55b3be6d4aa86e436965f2c53f374283",
+  "logs": {
+    "command-0.log": {
+      "bytes": 349211,
+      "sha256": "34dae4eb6bd46f8da120ce0ea6de9c72b9eca98573743f828cde978858a2bbc8"
+    },
+    "command-1.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "command-2.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "command-3.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "command-4.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "command-5.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "command-6.log": {
+      "bytes": 166,
+      "sha256": "185c9c312c05e81dcb1a617a9de848db709d2064c7fb1f1d3e4537b85a85ece8"
+    }
+  },
+  "postValidationLiveReads": {
+    "installedModule": "0xce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+    "spWritedownDisabled": true,
+    "anonymousDeclaredApp": "https://app.rumiprotocol.com",
+    "rawStatusSha256": "782786061ade1f3bec5026b5b144fc931da1e5db45d9e36e4b4f03a927c8858c",
+    "pauseQuerySha256": "5327a2426a67caba009c72bf68218adf5a8a9c1868fe1406832ff941051fecf5"
+  },
+  "outcome": "OFFLINE_SOURCE_MATCHED_ARTIFACT_PROOF; original private-threshold stop separately preserved",
+  "noProducerRetryNoGuardSourceChangeNoDeployment": true,
+  "notInstallationReadiness": true
+}
