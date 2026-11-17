@@ -1,6 +1,6 @@
 {
-  "summary": "The recovery-menu and queue restoration is verified through canonical merge, CI, one production artifact and final dispatch review. Automatic approval review rejected the attempted production asset write before process creation, requiring trusted direct approval of the exact packet. Dorian has one approval question pending; no retry or executor change. All frozen artifacts and financial holds remain intact.",
-  "plainSummary": "The fixes are merged, and CI, the production build and final dispatch reviews passed. Publication is blocked by automatic approval review; it rejected the older cross-chat authorization before any asset call started. Rob has one exact approval question pending in Dorian\u2019s release chat. The reviewed files remain unchanged.",
+  "summary": "The canonical recovery-menu and queue restoration passed CI, the production build and final dispatch review. The exact ce014 backend baseline amendment is pushed and independently verified; code, artifact and upload operations are unchanged. Dorian has the self-contained packet for the existing direct approval decision. No UI write occurred; all financial and liquidation holds remain.",
+  "plainSummary": "The fixes are built and verified, and the updated approval packet is ready. It accounts for the new backend without changing the frontend files or upload steps. The old card remains live because publication is still awaiting the exact approval in the release chat. All financial holds remain.",
   "glossary": [
     {
       "term": "Stability Pool",
