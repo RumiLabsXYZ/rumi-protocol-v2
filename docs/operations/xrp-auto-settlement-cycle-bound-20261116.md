@@ -1,6 +1,6 @@
 # XRP automatic settlement cycle-waste correction
 
-Status: focused native validation passed (33 XRP + 6 state-snapshot + 1 normal Candid on f0df1528; 4 hold-only + 1 canonical exporter on 37a1adda). Final normal compatibility and source-matched release artifact pending. Not approved for installation. Stability Pool liquidations must remain paused.
+Status: focused native validation passed (33 XRP + 6 state-snapshot + 1 normal Candid on f0df1528; 4 hold-only + 1 canonical exporter on 37a1adda). Final normal compatibility and canonical source-matched release artifact passed. Exact deployment remains separately held. Not approved for installation. Stability Pool liquidations must remain paused.
 
 ## Confirmed production mechanism
 
@@ -28,7 +28,7 @@ No installation, liquidation resume, claim retry/payment, reserve change, fundin
 
 ## Canonical interface preparation
 
-The Rust exporter output is retained by hash. Deterministic trailing-whitespace normalization removes only whitespace from generated comment lines; `didc check --strict` proves equality with the raw exporter. Existing `scripts/regenerate-declarations.sh rumi_protocol_backend` generated the synchronized DID copies and JS/TS bindings; index files are unchanged. Backward `didc check` against the pre-hold contract passes. The only semantic contract change is the optional hold-only UpgradeArg field; source documentation comments account for the larger DID text diff. Exact typed upgrade arguments are preserved in evidence/xrp-cycle-bound-20261116/upgrade-args.did (mode null; hold opt true), with encoded/decoded forms. Normal final-source Rust compatibility and the final artifact are still pending.
+The Rust exporter output is retained by hash. Deterministic trailing-whitespace normalization removes only whitespace from generated comment lines; `didc check --strict` proves equality with the raw exporter. Existing `scripts/regenerate-declarations.sh rumi_protocol_backend` generated the synchronized DID copies and JS/TS bindings; index files are unchanged. Backward `didc check` against the pre-hold contract passes. The only semantic contract change is the optional hold-only UpgradeArg field; source documentation comments account for the larger DID text diff. Exact typed upgrade arguments are preserved in evidence/xrp-cycle-bound-20261116/upgrade-args.did (mode null; hold opt true), with encoded/decoded forms. Normal final-source Rust compatibility and the canonical artifact now pass; see the exact deployment packet.
 
 Optional broad CI/RPC-harness coverage is recorded as XRP-CYCLE-DEF-01 in the existing deferred ledger. No main merge or CI validation is claimed.
 

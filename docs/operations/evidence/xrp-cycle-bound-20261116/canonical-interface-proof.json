@@ -6,7 +6,7 @@
   "semanticDelta": "Only optional UpgradeArg.preserve_sp_liquidation_pause:opt bool. Canonical exporter adds source documentation comments.",
   "generatedBindings": "scripts/regenerate-declarations.sh rumi_protocol_backend; only canonical .did copies, JS and TS contract changed; index files unchanged",
   "upgradeArgsTypedEncodeDecode": "PASS (ProtocolArg); mode=null and hold=opt true",
-  "normalRustCandidCompatibility": "pending final frozen-source continuation",
+  "normalRustCandidCompatibility": "PASS: exact source2ff2723a,1test, canonical release stage0, no regeneration",
   "files": {
     "src/rumi_protocol_backend/rumi_protocol_backend.did": {
       "sha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",

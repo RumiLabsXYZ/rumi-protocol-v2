@@ -1,0 +1,90 @@
+{
+  "verifiedAt": "2026-11-17T00:49:04.997915+00:00",
+  "allocationId": "5a860e6c-1b4e-43d1-958a-140f57432082",
+  "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+  "tree": "aa457279cfa8e7943635d19be59510cf3b45ae7a",
+  "originalReceiptSha256": "91d9eea593ead03cc3bc884b613f739dd614d2363c12fb821de4b11e257251cc",
+  "originalNegativeElapsedRetainedInvalid": true,
+  "timingCorrectionSha256": "68715141e30f0c0f2d2ba88aeba3053c3803bfe71e8e988ca8ffce262ddbc240",
+  "elapsedWallSecondsFromExclusiveConsumeAndOriginalMtime": 336.3555896282196,
+  "withinAdmitted1800Seconds": true,
+  "allEightNativeExitsZero": true,
+  "finalNormalCandidPassed": 1,
+  "logs": [
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-0.log",
+      "bytes": 11774,
+      "sha256": "58c59be5501d1d606e3ec2225234748549dd5e08e205d2f0a0c7d0d8cbc1f6bb"
+    },
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-1.log",
+      "bytes": 358508,
+      "sha256": "ffde6c982cd38a7d7472681cbc51e0d55acd3c7e4d2638dff5770d6d729a74b5"
+    },
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-2.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-3.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-4.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-5.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-6.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/command-7.log",
+      "bytes": 145,
+      "sha256": "1f25b2f69a5815c493913f4d15c6a226d0b5b07c82e94c621d99ff7201cff5b1"
+    }
+  ],
+  "artifacts": {
+    "backend.raw.wasm": {
+      "bytes": 16444705,
+      "sha256": "3f8dfc9f7d2956e77b423ba88fe2af0e889801ac244dc83a5ab4d1e7ce245346"
+    },
+    "backend.wasm": {
+      "bytes": 11449431,
+      "sha256": "6f87ef8db5db5dec0166f1294ebd3695aba23b3325fc0e95ae8d1b2217bb3efa"
+    },
+    "backend.wasm.gz": {
+      "bytes": 2796198,
+      "sha256": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f"
+    }
+  },
+  "codeSectionBytes": 10317840,
+  "executableReserveBytes": 262144,
+  "embeddedCandidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "gzipRoundtripAndZeroMtimeVerified": true,
+  "actualCargoSourceDefaultFeaturesReleaseProfileRawOutputBindingVerified": true,
+  "beforeAfterSourceInputsEqualAndCurrentClean": true,
+  "peakOwnedRssBytes": 2096087040,
+  "maximumPhysicalDropBytes": 844558336,
+  "minimumFreeBytesDerivedFromRetainedObservations": 72169107456,
+  "ownedGroupsIndependentlyEmpty": [
+    63403,
+    63431,
+    65161,
+    65175,
+    65188,
+    65210,
+    65267,
+    65281
+  ],
+  "processCount": 1388,
+  "candidateOnlyNoCImergeInstallFinancialOrSPResumeClaim": true
+}

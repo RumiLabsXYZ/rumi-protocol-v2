@@ -1,0 +1,47 @@
+{
+  "result": "PASS_LOCAL_VERIFICATION_AFTER_LAYOUT_CORRECTION",
+  "snapshotId": "00000000000000160000000001f088fe0101",
+  "snapshotTimestamp": 1793927851682795038,
+  "serverTotalSizeBytes": 113971296,
+  "payloadBytes": 113971168,
+  "differenceToServerTotalBytes": 128,
+  "archiveDirectoryMode": "0700",
+  "components": {
+    "wasm_module.bin": {
+      "bytes": 2297824,
+      "sha256": "d4d60e5176efd4aba0be1b583a9f6a9acc2e6b77b1d971a37d5cc82c65740c95",
+      "mode": "0600",
+      "readbackAndFsync": true
+    },
+    "wasm_memory.bin": {
+      "bytes": 2555904,
+      "sha256": "a4a2f021e59ca4ec822ba8e842184bc1e498417433b71f96fd29a07e8de265fd",
+      "mode": "0600",
+      "readbackAndFsync": true
+    },
+    "stable_memory.bin": {
+      "bytes": 109117440,
+      "sha256": "5ea9946787f0b0a5bb3feca98eb5375c5d010cc7608e3a99121f7e82c8b92610",
+      "mode": "0600",
+      "readbackAndFsync": true
+    },
+    "metadata.json": {
+      "bytes": 519,
+      "sha256": "5c55b17c60154c0a977e71131aa4963190afe2f51c0c1994f3c0fd185356ac83",
+      "mode": "0600",
+      "readbackAndFsync": true
+    }
+  },
+  "expectedControlEntries": {
+    ".lock": "zero-byte0600; CLI process closed",
+    "wasm_chunk_store": "empty0700; metadata chunkstore[]"
+  },
+  "inventoryBeforeAfterEqual": true,
+  "allTenSnapshotRowsUnchanged": true,
+  "originalReceiptSha256": "999832005983885ffb48420559eb31ef36c7fc41ffedf78ac81bd5823bdaf742",
+  "originalVerifierResult": "STOPPED on overly narrow four-name assertion after all three successful CLI reads",
+  "coverage": "One successful pinned official CLI download into fresh absent output with no resume; exact snapshot timestamp and declared component sizes; no missing component/progress data; full local component SHA readback/fsync; identical before/after remote inventory. Empty CLI control entries retained.",
+  "rawStateDisclosure": "none; raw archive local/private only",
+  "noRepeatDownloadOrSnapshotMutation": true,
+  "localVerificationSeconds": 0.079
+}

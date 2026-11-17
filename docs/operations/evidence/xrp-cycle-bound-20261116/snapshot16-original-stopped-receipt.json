@@ -1,0 +1,104 @@
+{
+  "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+  "tree": "aa457279cfa8e7943635d19be59510cf3b45ae7a",
+  "allocationId": "bbff3e6b-08f5-4ceb-818c-c0d890631f0e",
+  "target": "/Users/robertripley/coding/rumi-protocol-v2/.recovery-artifacts/xrp-cycle-bound-20261116",
+  "before": {
+    "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+    "tree": "aa457279cfa8e7943635d19be59510cf3b45ae7a",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "startFreeBytes": 72216944640,
+  "commands": [
+    {
+      "argv": [
+        "icp",
+        "canister",
+        "snapshot",
+        "list",
+        "tfesu-vyaaa-aaaap-qrd7a-cai",
+        "--network",
+        "ic",
+        "--identity",
+        "rumi_identity",
+        "--json"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T01:03:16Z",
+      "peakRssBytes": 72957952,
+      "maximumPhysicalGrowthBytes": 73728,
+      "pid": 68228,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "icp",
+        "canister",
+        "snapshot",
+        "download",
+        "tfesu-vyaaa-aaaap-qrd7a-cai",
+        "00000000000000160000000001f088fe0101",
+        "--output",
+        "/Users/robertripley/coding/rumi-protocol-v2/.recovery-artifacts/xrp-cycle-bound-20261116/snapshot-00000000000000160000000001f088fe0101",
+        "--network",
+        "ic",
+        "--identity",
+        "rumi_identity"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T01:03:18Z",
+      "peakRssBytes": 117276672,
+      "maximumPhysicalGrowthBytes": 171118592,
+      "pid": 68246,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "icp",
+        "canister",
+        "snapshot",
+        "list",
+        "tfesu-vyaaa-aaaap-qrd7a-cai",
+        "--network",
+        "ic",
+        "--identity",
+        "rumi_identity",
+        "--json"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T01:03:39Z",
+      "peakRssBytes": 73367552,
+      "maximumPhysicalGrowthBytes": 170885120,
+      "pid": 68316,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    }
+  ],
+  "noDeploy": true,
+  "ownedGroupsClosed": true,
+  "result": "STOPPED",
+  "error": "Missing/unexpected/progress file",
+  "after": {
+    "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+    "tree": "aa457279cfa8e7943635d19be59510cf3b45ae7a",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "sourceUnchanged": true,
+  "elapsedSeconds": 26.066,
+  "endFreeBytes": 72104140800,
+  "physicalGrowthBytes": 112803840
+}

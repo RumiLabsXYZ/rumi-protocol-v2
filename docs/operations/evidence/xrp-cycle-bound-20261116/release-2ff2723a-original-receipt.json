@@ -1,0 +1,258 @@
+{
+  "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+  "tree": "aa457279cfa8e7943635d19be59510cf3b45ae7a",
+  "allocationId": "5a860e6c-1b4e-43d1-958a-140f57432082",
+  "target": "/Users/robertripley/coding/rumi-protocol-v2/target",
+  "before": {
+    "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+    "tree": "aa457279cfa8e7943635d19be59510cf3b45ae7a",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "startFreeBytes": 73013665792,
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--bin",
+        "rumi_protocol_backend",
+        "check_candid_interface_compatibility",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 1,
+      "startedUtc": "2026-11-17T00:34:22Z",
+      "peakRssBytes": 132775936,
+      "maximumPhysicalGrowthBytes": 78917632,
+      "pid": 63403,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [
+        [
+          "1",
+          "0"
+        ]
+      ],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--offline",
+        "--locked",
+        "--release",
+        "--target",
+        "wasm32-unknown-unknown",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--message-format=json"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T00:34:24Z",
+      "peakRssBytes": 2096087040,
+      "maximumPhysicalGrowthBytes": 844558336,
+      "pid": 63431,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "cp",
+        "/Users/robertripley/coding/rumi-protocol-v2/target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.raw.wasm"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T00:39:35Z",
+      "peakRssBytes": 2244608,
+      "maximumPhysicalGrowthBytes": 732200960,
+      "pid": 65161,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "ic-wasm",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.raw.wasm",
+        "-o",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.wasm",
+        "metadata",
+        "candid:service",
+        "-f",
+        "/private/tmp/rumi-xrp-cycle-bound-20261116/src/rumi_protocol_backend/rumi_protocol_backend.did",
+        "-v",
+        "public"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T00:39:36Z",
+      "peakRssBytes": 425984,
+      "maximumPhysicalGrowthBytes": 750219264,
+      "pid": 65175,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "ic-wasm",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.wasm",
+        "-o",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.wasm",
+        "shrink",
+        "--keep-name-section"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T00:39:37Z",
+      "peakRssBytes": 507904,
+      "maximumPhysicalGrowthBytes": 761741312,
+      "pid": 65188,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "ic-wasm",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.wasm",
+        "-o",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.wasm",
+        "optimize",
+        "O1",
+        "--keep-name-section"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T00:39:38Z",
+      "peakRssBytes": 982908928,
+      "maximumPhysicalGrowthBytes": 831074304,
+      "pid": 65210,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "gzip",
+        "-9",
+        "-n",
+        "-c",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.wasm"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T00:39:55Z",
+      "peakRssBytes": 1523712,
+      "maximumPhysicalGrowthBytes": 800653312,
+      "pid": 65267,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/verify-xrpl-icusd-artifact.sh",
+        "--require-mainnet",
+        "/private/tmp/rumi-cycle-burn-20261116/release-5a860e6c-1b4e-43d1-958a-140f57432082/backend.wasm.gz"
+      ],
+      "expectedPassed": null,
+      "startedUtc": "2026-11-17T00:39:56Z",
+      "peakRssBytes": 579960832,
+      "maximumPhysicalGrowthBytes": 814997504,
+      "pid": 65281,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [],
+      "countMatched": true
+    }
+  ],
+  "noDeploy": true,
+  "ownedGroupsClosed": true,
+  "cargoBackendArtifact": {
+    "reason": "compiler-artifact",
+    "package_id": "path+file:///private/tmp/rumi-xrp-cycle-bound-20261116/src/rumi_protocol_backend#0.1.0",
+    "manifest_path": "/private/tmp/rumi-xrp-cycle-bound-20261116/src/rumi_protocol_backend/Cargo.toml",
+    "target": {
+      "kind": [
+        "bin"
+      ],
+      "crate_types": [
+        "bin"
+      ],
+      "name": "rumi_protocol_backend",
+      "src_path": "/private/tmp/rumi-xrp-cycle-bound-20261116/src/rumi_protocol_backend/src/main.rs",
+      "edition": "2021",
+      "doc": true,
+      "doctest": false,
+      "test": true
+    },
+    "profile": {
+      "opt_level": "z",
+      "debuginfo": 0,
+      "debug_assertions": false,
+      "overflow_checks": false,
+      "test": false
+    },
+    "features": [],
+    "filenames": [
+      "/Users/robertripley/coding/rumi-protocol-v2/target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm"
+    ],
+    "executable": "/Users/robertripley/coding/rumi-protocol-v2/target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm",
+    "fresh": false
+  },
+  "codeSectionBytes": 10317840,
+  "codeSectionReserveBytes": 262144,
+  "embeddedCandidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "artifacts": {
+    "backend.raw.wasm": {
+      "bytes": 16444705,
+      "sha256": "3f8dfc9f7d2956e77b423ba88fe2af0e889801ac244dc83a5ab4d1e7ce245346"
+    },
+    "backend.wasm": {
+      "bytes": 11449431,
+      "sha256": "6f87ef8db5db5dec0166f1294ebd3695aba23b3325fc0e95ae8d1b2217bb3efa"
+    },
+    "backend.wasm.gz": {
+      "bytes": 2796198,
+      "sha256": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f"
+    }
+  },
+  "result": "PASS",
+  "releaseInputsAfter": {
+    "recipe": "680e46af26eed614075343fc44c35cd621d1034f47dadd2dbc0599448bf1322a",
+    "candid": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+    "mainnetGuard": "f3ad97a7031ecbe0b1eb5aac3152142ae8fdc7c367f41b42cce4a83cec63700e",
+    "upgradeArgumentHelper": "b33206cd3f7177badc4baaeeb8a2404346e1ec1aa0d498b768b2c7f0ebf8ba3e",
+    "icWasm": "b18343bb8726bb739d4c67d59ed426c6f6b3a43dc2bb94837faa3fb7d2068bcd",
+    "gzip": "c78f313867a6978148f989c8e758fb7a9ba7ff324f0b359b2053f5172f970be5"
+  },
+  "after": {
+    "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+    "tree": "aa457279cfa8e7943635d19be59510cf3b45ae7a",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "sourceUnchanged": true,
+  "elapsedSeconds": -9931792.335,
+  "endFreeBytes": 72198651904,
+  "physicalGrowthBytes": 815013888
+}

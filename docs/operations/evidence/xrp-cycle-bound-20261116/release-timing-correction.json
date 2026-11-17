@@ -1,0 +1,26 @@
+{
+  "kind": "correction of receipt bookkeeping only; original receipt and artifact retained unchanged",
+  "originalReceiptSha256": "91d9eea593ead03cc3bc884b613f739dd614d2363c12fb821de4b11e257251cc",
+  "originalElapsedSecondsInvalid": -9931792.335,
+  "cause": "Post-build Wasm section parser assigned section payload offset to start, shadowing initial monotonic start after all monitored subprocess stages had completed. Production deadline enforcement used original monotonic start/deadline throughout every command.",
+  "startEpochFromExclusiveConsumeReceipt": 1794875662.4464982,
+  "endEpochFromOriginalReceiptFilesystemMtime": 1794875998.8020878,
+  "elapsedWallSeconds": 336.35559,
+  "maximumAdmittedSecondsIncludingClosure": 1800,
+  "withinAdmittedWindow": true,
+  "nativeResultsUnchanged": "all8stages exit0; actualnormalCandid1PASS; allownedgroupsclosed; exactsource/inputpins preserved; module/artifact checksPASS",
+  "artifacts": {
+    "backend.raw.wasm": {
+      "bytes": 16444705,
+      "sha256": "3f8dfc9f7d2956e77b423ba88fe2af0e889801ac244dc83a5ab4d1e7ce245346"
+    },
+    "backend.wasm": {
+      "bytes": 11449431,
+      "sha256": "6f87ef8db5db5dec0166f1294ebd3695aba23b3325fc0e95ae8d1b2217bb3efa"
+    },
+    "backend.wasm.gz": {
+      "bytes": 2796198,
+      "sha256": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f"
+    }
+  }
+}

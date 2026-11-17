@@ -1,0 +1,33 @@
+{
+  "verifiedAt": "2026-11-17T01:12:02.399938+00:00",
+  "allocationId": "bbff3e6b-08f5-4ceb-818c-c0d890631f0e",
+  "source": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+  "originalStoppedReceiptSha256": "999832005983885ffb48420559eb31ef36c7fc41ffedf78ac81bd5823bdaf742",
+  "originalStoppedReceiptPreserved": true,
+  "allThreeOfficialCliReadsExitedZero": true,
+  "noRetryResumeRedownloadOrCanisterMutation": true,
+  "falsePositiveResolved": ".lock is zero-byte unlocked directory-structure bookkeeping and empty wasm_chunk_store is created by official CLI; neither is an incomplete transfer marker",
+  "officialSourceUrls": [
+    "https://github.com/dfinity/icp-cli/blob/v1.3.0/crates/icp-cli/src/operations/snapshot_transfer.rs#L64-L103",
+    "https://github.com/dfinity/icp-cli/blob/v1.3.0/crates/icp-cli/src/commands/canister/snapshot/download.rs#L218-L225"
+  ],
+  "allDeclaredComponentsExactLengthsFullReadHashesAndFsyncVerified": true,
+  "allReturnedMetadataRetained": true,
+  "noProgressUploadOrUnexpectedFile": true,
+  "archiveManifest": "/private/tmp/rumi-cycle-burn-20261116/ROOT-SNAPSHOT16-PRIVATE-ARCHIVE-MANIFEST.json",
+  "archiveManifestSha256": "4206765e05f7294b9bff57a3b3335c78d891ff8728fe795c589b334bdc5646d9",
+  "inventoryBeforeAfterAll10EntriesUnchanged": true,
+  "privateFiles0600Directories0700Verified": true,
+  "ownedGroupsIndependentlyEmpty": [
+    68228,
+    68246,
+    68316
+  ],
+  "processCount": 1433,
+  "elapsedSeconds": 26.066,
+  "peakOwnedRssBytes": 117276672,
+  "maximumPhysicalDropBytes": 171118592,
+  "completeOfficialDownloadedArchiveVerifiedNotRestoreTested": true,
+  "noDeletionReplacementRestoreInstallOrSPResumeAuthority": true,
+  "noRetryClaimScope": "No second CLI download/resume invocation or script retry; this does not assert absence of the official CLI internal idempotent HTTP retry mechanism."
+}

@@ -1,0 +1,28 @@
+{
+  "observedUtc": "2026-11-17T01:30:37.230388+00:00",
+  "backendModule": "0x59a64f78e0e652d0e48413aba587d3f826c1dc25258f56ab09575c59de444111",
+  "spWritedownDisabled": true,
+  "settingsSha256": "ce32352f4df9c65d2f6ff5835ff6e71c8c9f38c8d78ffe245518a0596f293f2d",
+  "vault51": {
+    "stage": "ClaimConfirmed",
+    "lastError": null,
+    "withdrawalId": 1696,
+    "burnBlock": 3435761,
+    "receivedIcp": null,
+    "settlementBlock": null,
+    "release": null,
+    "adoption": null,
+    "updatedAtNs": 1794876174252968553,
+    "updatedAtUtc": "2026-11-17T00:42:54.252969+00:00",
+    "timerEvidence": "Reconciliation timestamp advanced between query-only observation windows, consistent with configured hourly timer; no manual refresh invoked by this lane. Historical first automatic check separately verified in Nov11 release. No new exclusive attribution from timestamp alone.",
+    "escrowBalanceE8s": 0,
+    "escrowQuerySha256": "110fd129c764944e9e54bc9cd2e6fc16e5b5f8bf312a27614ee6b2f39425b1c1"
+  },
+  "sourceBaseline": {
+    "installedReceiptSourceTree": "18b286ab639f714cb10bbf37cdae0f795d1cad06",
+    "gitCommitWithExactTree": "f72ede8195b23299c297fb24f37ac76d7d957269",
+    "candidateBase": "9b7669e799d4e6e6cc6d52174c06e87e3569994c",
+    "backendCargoRecipeDeltaBetweenBaselineAndBase": "empty; git diff --exit-code PASS"
+  },
+  "noDeploymentOrFinancialAction": true
+}
