@@ -1,0 +1,12 @@
+{
+  "localMaterializationFiles": 764,
+  "manifestSha256": "82768e536040d1a45b77215f3bd48ae1290945e80a44f3d5968735c97a319e82",
+  "inspectExitCode": 0,
+  "syntaxFiles": 5,
+  "freshReadOnlyStateMatchesFrozenBaseline": true,
+  "freshReadOnlyFinishedUtc": "2026-11-17T00:41:56.707Z",
+  "assetWriteMethodsExecuted": 0,
+  "publisherExecutionHeldWith": "Dorian",
+  "executionPinsSha256": "5e53b2ecd75c6d32209a1266cd781192270755fe82b3c8d5b80cb8637ce0ec40",
+  "dispatchManifestSha256": "b6486dfa559d10fe8d0741fb30ec49d2b3289781759a03a75b763d8ef5e5d86f"
+}
