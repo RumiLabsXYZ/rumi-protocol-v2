@@ -1,0 +1,7 @@
+{
+  "rawLogSha256": "745f11fd8baff3f607a0c4c78a878f9ae881aac7098b3e033a1da4f620076e04",
+  "redactedLogSha256": "ccc002f507f0c78c46393df2cde5b9d5e70ca77775044cb6d6d3bb92bd5ba154",
+  "redaction": "Only the source checkout and warm-dependency absolute paths replaced; raw log retained with allocation evidence.",
+  "archiveSha256": "a765d0410b30fec71f63883635550dcd306cc791a3e8e5348a4cb95c31102780",
+  "archiveBytes": 8197894
+}
