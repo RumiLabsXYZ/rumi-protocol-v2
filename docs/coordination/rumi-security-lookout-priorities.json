@@ -5,7 +5,7 @@
       "title": "Restore the approved recovery menu and queue guard in canonical releases",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "The merged source and production artifact pass CI/build checks. Both artifact reviews pass. Complete the publisher encoding manifest/fresh baseline; Dorian publishes once, Ellis verifies every preserved asset/property, discovery/auth files, new active bundles and desktop/mobile layout. Financial holds remain.",
+      "nextAction": "Source, CI, production artifact and exact dispatch reviews pass. Dorian holds the single release execution checkpoint. On his release, refresh baseline and stage immutable resources; Ellis verifies stage, then Dorian activates entries and Ellis verifies all assets/properties, served bundles and desktop/mobile layout. Financial holds remain.",
       "cardIds": [
         "SEC-20"
       ]

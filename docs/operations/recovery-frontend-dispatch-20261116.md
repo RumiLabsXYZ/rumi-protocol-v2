@@ -72,3 +72,9 @@ A decoded saved reply still requires effect readback. For an uncertain stage or 
 ## Preparation evidence
 
 The full frozen archive materialized locally with all 764 hashes and sizes matching. JavaScript syntax checks and local-only `inspect` encoding passed. No stage/activation command was run, no asset journal was consumed and no live asset was written by preparation. The normal source tests, CI and production build are not repeated. The exact dispatch code and encoding plan receive two focused independent reviews before Dorian's execution checkpoint; all existing financial and permission holds remain unchanged.
+
+## Final independent dispatch review
+
+Two fresh reviewers returned **PASS with no blockers** against `cd87eef1d3cdfcf7eb304274a9fec4fa7869797b`; [round 3 evidence](evidence/recovery-frontend-publication-20261116/dispatch/dispatch-review-round3.json) records the exact hashes and checked invariants. Earlier review findings were corrected before execution: argument-file contents are flushed before the durable marker, and the remaining deadline is rechecked after those flushes immediately before spawning the CLI. Three local boundary cases pass, and complete piped inspection output is verified. Neither review executed a stage, activation, network verification, frontend build/test or financial call.
+
+Dispatch preparation is complete. Execution remains held with Dorian until his explicit phase checkpoint under the existing UI authority. No additional build, source campaign or duplicate user approval is requested; actual stage/final readbacks and desktop/mobile inspection remain after publication.

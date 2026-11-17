@@ -1,6 +1,6 @@
 {
-  "summary": "PR #671 canonical restoration and exact-head CI are complete. The one production frontend/auth/discovery build passed with source/dependency and full-artifact verification. Frozen artifact and additive preservation plan are pushed; both artifact reviews pass; exact encoding dispatch and fresh baseline precede Dorian publication and independent served checks. Existing security closure and financial holds remain unchanged.",
-  "plainSummary": "The recovery-menu and manual-queue fixes are merged, and the production frontend build passed. Both discovery files are preserved, and two independent artifact reviews passed. One coordinated publication and live verification remain; the live interface still shows the old behavior. No customer wallet action is needed.",
+  "summary": "Canonical restoration PR #671, exact-head CI, one production artifact and final bounded dispatch reviews pass. The preserved discovery/auth files and all historical assets are pinned. Two journal/deadline findings were fixed before execution. Dorian retains the single publication checkpoint; stage/final readbacks and live desktop/mobile verification remain. Existing financial holds are unchanged.",
+  "plainSummary": "The recovery-menu and manual-queue fixes are merged, and the production frontend build passed. The exact asset upload plan also passed independent review. Dorian holds execution of the release; publication and live verification are next. No customer wallet action is needed.",
   "glossary": [
     {
       "term": "Stability Pool",

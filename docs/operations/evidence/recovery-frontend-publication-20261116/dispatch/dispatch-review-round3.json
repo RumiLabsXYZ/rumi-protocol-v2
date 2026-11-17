@@ -1,0 +1,28 @@
+{
+  "reviewedCommit": "cd87eef1d3cdfcf7eb304274a9fec4fa7869797b",
+  "reviewedUtc": "2026-11-17T01:08:46Z",
+  "round": 3,
+  "executionPinsSha256": "e12c4db48741d377706eccffb53b399e581e3ccbf4b15d59372f09ca1a6f18e7",
+  "publisherSha256": "ec7198cebc81260224a003eaf413bd7db15ae3a95f3cc73617e9f900def541a4",
+  "dispatchManifestSha256": "b6486dfa559d10fe8d0741fb30ec49d2b3289781759a03a75b763d8ef5e5d86f",
+  "reviewerA": {
+    "verdict": "PASS",
+    "blockingIssues": [],
+    "verified": "Pins, unique sets/group correspondence, scoped asset writes, durable argument/unknown marker ordering, post-flush deadline, replay barrier, stage-proof gate, full read-only verification and accurate scope."
+  },
+  "reviewerB": {
+    "verdict": "PASS",
+    "blockingIssues": [],
+    "verified": "All443 payload mappings and exact groups,327 historical templates, protected keys untouched,761to1088 preservation, typed replies, durable markers, positive remaining deadline and activation binding."
+  },
+  "confirmedIssuesResolved": [
+    "Exact argument file open/write-all/fsync/close before durable dispatch marker",
+    "Positive remaining deadline rechecked after durable marker before CLI spawn; validated timeout without resurrection"
+  ],
+  "deterministicLocalBoundaryCases": 3,
+  "localInspectionOutputComplete": true,
+  "assetWritesByPreparationOrReview": 0,
+  "executionHeldWith": "Dorian",
+  "publicationVerified": false,
+  "customerOutcomeVerified": false
+}
