@@ -1,0 +1,378 @@
+{
+  "verifiedUtc": "2026-11-17T16:30:14.125741+00:00",
+  "approvalMessage": "01a1ea49-7d87-7471-8fb2-a47658ea4bae",
+  "approvedPacket": "2f5b2b62476979e2c4e611a06ba8d478628d3c45",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "network": "ic",
+  "oldModuleHash": "59a64f78e0e652d0e48413aba587d3f826c1dc25258f56ab09575c59de444111",
+  "installedModuleHash": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+  "status": "Running",
+  "spLiquidationPause": true,
+  "settingsAndControllersUnchanged": true,
+  "embeddedCandidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "freshArgsHexSha256": "37d9ae24baad43051f8fd1aaa556d6a3911bcb0693ac7e75f0882a5a306ed935",
+  "backup": {
+    "snapshot": {
+      "snapshot_id": "00000000000000200000000001f088fe0101",
+      "taken_at_timestamp": 1794932756770661692,
+      "total_size_bytes": 114372920
+    },
+    "files": [
+      {
+        "file": "wasm_module.bin",
+        "bytes": 2764984,
+        "sha256": "59a64f78e0e652d0e48413aba587d3f826c1dc25258f56ab09575c59de444111"
+      },
+      {
+        "file": "wasm_memory.bin",
+        "bytes": 2490368,
+        "sha256": "7ee15c04e2b8abc410c6a5157913a5bec09ecea4ae6880284534a8841643ca98"
+      },
+      {
+        "file": "stable_memory.bin",
+        "bytes": 109117440,
+        "sha256": "b7b9768eb609286dd186711d569917e40ea25a462778e1ab6650b4de3314e481"
+      },
+      {
+        "file": "metadata.json",
+        "bytes": 519,
+        "sha256": "a7ce031838c30df240fb0e687379f51ca2d12afeb2ba0e3a30bbb950e211e8f3"
+      }
+    ],
+    "fullCoverage": true,
+    "emptyChunkStore": true,
+    "serverOverheadBytes": 128,
+    "oldModuleMatches": true,
+    "otherNineUnchanged": true,
+    "activeVaultTreeVerified": true,
+    "rawStatePrivate": true
+  },
+  "operations": {
+    "stop": {
+      "startedUtc": "2026-11-17T16:25:40.765923+00:00",
+      "finishedUtc": "2026-11-17T16:25:42.347072+00:00",
+      "exit": 0,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dispatchCount": 1
+    },
+    "fresh-snapshot": {
+      "startedUtc": "2026-11-17T16:25:54.123684+00:00",
+      "finishedUtc": "2026-11-17T16:25:57.553930+00:00",
+      "exit": 0,
+      "stdoutSha256": "498e74839587a6474bf559b0c786b19bf145b2458ffe65742b71e1d6bd8b5a40",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dispatchCount": 1
+    },
+    "install": {
+      "startedUtc": "2026-11-17T16:27:32.761970+00:00",
+      "finishedUtc": "2026-11-17T16:27:54.992208+00:00",
+      "exit": 0,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "8d84fdec035cf95adad6573ad2bbd9b1bc1a2a4239a1eb6615dff120f4363445",
+      "dispatchCount": 1
+    },
+    "start": {
+      "startedUtc": "2026-11-17T16:28:12.190236+00:00",
+      "finishedUtc": "2026-11-17T16:28:13.863743+00:00",
+      "exit": 0,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dispatchCount": 1
+    }
+  },
+  "statePreservation": {
+    "vaultCount": 51,
+    "vaultIdsOwnersCollateralTypesAndCollateralUnchanged": true,
+    "allVaultDebtAndAccruedInterestExactlyMatchActiveStoppedBackup": true,
+    "stoppedAndAfterTotalDebtE8s": "1553032143039",
+    "xrpClaimsExactlyUnchanged": 4,
+    "pendingPayouts": 0,
+    "reserveJournalRows": 0,
+    "exactlyUnchangedQuerySurfaces": [
+      "get_cksol_relay_budget",
+      "get_cksol_payment_quote",
+      "get_pending_payouts",
+      "get_vault_operation_status",
+      "get_cksol_icp_terms",
+      "get_xrp_claims",
+      "get_vault_count",
+      "get_sp_writedown_disabled",
+      "get_bot_allowed_collateral_types",
+      "get_bot_claim_vault_ids",
+      "get_bot_cr_tolerance_bps",
+      "admin_get_reserve_redemption_status"
+    ],
+    "staticProtocolAndCollateralConfigurationUnchanged": true,
+    "modeUnchanged": {
+      "GeneralAvailability": null
+    },
+    "nicpClaimUnchangedExceptUpdatedAt": {
+      "before": "1794930178428016611",
+      "after": "1794932895576165457"
+    },
+    "prestopToStoppedAccrualChanges": [
+      {
+        "vault_id": "40",
+        "beforeDebtE8s": "14520650215",
+        "stoppedAndAfterDebtE8s": "14520653683",
+        "deltaE8s": "3468"
+      },
+      {
+        "vault_id": "41",
+        "beforeDebtE8s": "49689413589",
+        "stoppedAndAfterDebtE8s": "49689423888",
+        "deltaE8s": "10299"
+      },
+      {
+        "vault_id": "49",
+        "beforeDebtE8s": "25276609853",
+        "stoppedAndAfterDebtE8s": "25276617072",
+        "deltaE8s": "7219"
+      },
+      {
+        "vault_id": "50",
+        "beforeDebtE8s": "553775",
+        "stoppedAndAfterDebtE8s": "553777",
+        "deltaE8s": "2"
+      },
+      {
+        "vault_id": "51",
+        "beforeDebtE8s": "288240600733",
+        "stoppedAndAfterDebtE8s": "288241201832",
+        "deltaE8s": "601099"
+      },
+      {
+        "vault_id": "53",
+        "beforeDebtE8s": "2996032538",
+        "stoppedAndAfterDebtE8s": "2996034388",
+        "deltaE8s": "1850"
+      },
+      {
+        "vault_id": "66",
+        "beforeDebtE8s": "153644165",
+        "stoppedAndAfterDebtE8s": "153644415",
+        "deltaE8s": "250"
+      },
+      {
+        "vault_id": "99",
+        "beforeDebtE8s": "13941387",
+        "stoppedAndAfterDebtE8s": "13941399",
+        "deltaE8s": "12"
+      },
+      {
+        "vault_id": "100",
+        "beforeDebtE8s": "13941386",
+        "stoppedAndAfterDebtE8s": "13941398",
+        "deltaE8s": "12"
+      },
+      {
+        "vault_id": "111",
+        "beforeDebtE8s": "13941340",
+        "stoppedAndAfterDebtE8s": "13941352",
+        "deltaE8s": "12"
+      },
+      {
+        "vault_id": "124",
+        "beforeDebtE8s": "8721642",
+        "stoppedAndAfterDebtE8s": "8721650",
+        "deltaE8s": "8"
+      },
+      {
+        "vault_id": "125",
+        "beforeDebtE8s": "8687277",
+        "stoppedAndAfterDebtE8s": "8687285",
+        "deltaE8s": "8"
+      },
+      {
+        "vault_id": "126",
+        "beforeDebtE8s": "8647964",
+        "stoppedAndAfterDebtE8s": "8647970",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "127",
+        "beforeDebtE8s": "8623433",
+        "stoppedAndAfterDebtE8s": "8623439",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "128",
+        "beforeDebtE8s": "8611192",
+        "stoppedAndAfterDebtE8s": "8611198",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "129",
+        "beforeDebtE8s": "8611196",
+        "stoppedAndAfterDebtE8s": "8611202",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "130",
+        "beforeDebtE8s": "8586683",
+        "stoppedAndAfterDebtE8s": "8586689",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "131",
+        "beforeDebtE8s": "8573969",
+        "stoppedAndAfterDebtE8s": "8573975",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "132",
+        "beforeDebtE8s": "8569543",
+        "stoppedAndAfterDebtE8s": "8569549",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "133",
+        "beforeDebtE8s": "8562231",
+        "stoppedAndAfterDebtE8s": "8562237",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "134",
+        "beforeDebtE8s": "8546519",
+        "stoppedAndAfterDebtE8s": "8546525",
+        "deltaE8s": "6"
+      },
+      {
+        "vault_id": "158",
+        "beforeDebtE8s": "421544560",
+        "stoppedAndAfterDebtE8s": "421544876",
+        "deltaE8s": "316"
+      },
+      {
+        "vault_id": "174",
+        "beforeDebtE8s": "8698333",
+        "stoppedAndAfterDebtE8s": "8698341",
+        "deltaE8s": "8"
+      },
+      {
+        "vault_id": "175",
+        "beforeDebtE8s": "129269274",
+        "stoppedAndAfterDebtE8s": "129269368",
+        "deltaE8s": "94"
+      },
+      {
+        "vault_id": "178",
+        "beforeDebtE8s": "4580166018",
+        "stoppedAndAfterDebtE8s": "4580168719",
+        "deltaE8s": "2701"
+      },
+      {
+        "vault_id": "188",
+        "beforeDebtE8s": "505193089",
+        "stoppedAndAfterDebtE8s": "505193283",
+        "deltaE8s": "194"
+      },
+      {
+        "vault_id": "189",
+        "beforeDebtE8s": "709267684",
+        "stoppedAndAfterDebtE8s": "709268090",
+        "deltaE8s": "406"
+      },
+      {
+        "vault_id": "196",
+        "beforeDebtE8s": "146257301",
+        "stoppedAndAfterDebtE8s": "146257423",
+        "deltaE8s": "122"
+      },
+      {
+        "vault_id": "197",
+        "beforeDebtE8s": "110294200608",
+        "stoppedAndAfterDebtE8s": "110294222332",
+        "deltaE8s": "21724"
+      },
+      {
+        "vault_id": "199",
+        "beforeDebtE8s": "183377361443",
+        "stoppedAndAfterDebtE8s": "183377413809",
+        "deltaE8s": "52366"
+      },
+      {
+        "vault_id": "200",
+        "beforeDebtE8s": "97408726928",
+        "stoppedAndAfterDebtE8s": "97408764017",
+        "deltaE8s": "37089"
+      },
+      {
+        "vault_id": "202",
+        "beforeDebtE8s": "2239",
+        "stoppedAndAfterDebtE8s": "2241",
+        "deltaE8s": "2"
+      },
+      {
+        "vault_id": "206",
+        "beforeDebtE8s": "331141350462",
+        "stoppedAndAfterDebtE8s": "331141616452",
+        "deltaE8s": "265990"
+      },
+      {
+        "vault_id": "209",
+        "beforeDebtE8s": "330989668532",
+        "stoppedAndAfterDebtE8s": "330989933952",
+        "deltaE8s": "265420"
+      },
+      {
+        "vault_id": "213",
+        "beforeDebtE8s": "50015039709",
+        "stoppedAndAfterDebtE8s": "50015053992",
+        "deltaE8s": "14283"
+      },
+      {
+        "vault_id": "214",
+        "beforeDebtE8s": "56054280398",
+        "stoppedAndAfterDebtE8s": "56054309181",
+        "deltaE8s": "28783"
+      },
+      {
+        "vault_id": "215",
+        "beforeDebtE8s": "100120135",
+        "stoppedAndAfterDebtE8s": "100120247",
+        "deltaE8s": "112"
+      },
+      {
+        "vault_id": "216",
+        "beforeDebtE8s": "135425209",
+        "stoppedAndAfterDebtE8s": "135425345",
+        "deltaE8s": "136"
+      },
+      {
+        "vault_id": "219",
+        "beforeDebtE8s": "6000183683",
+        "stoppedAndAfterDebtE8s": "6000186448",
+        "deltaE8s": "2765"
+      }
+    ],
+    "dynamicChangesExplainedBy": [
+      "Existing accrue_all_vault_interest before stop; all after debts/accrual match stopped active tree exactly",
+      "Live oracle price updates and existing post_upgrade CoinGecko timestamp invalidation",
+      "Debt/price-dependent recovery threshold, CR, resolved fee curve and weighted interest projections",
+      "Existing Vault51 automatic withdrawal reconciliation updates timestamp only; no settlement or adoption observed"
+    ]
+  },
+  "independentPauseCheck": {
+    "observer": "Merritt",
+    "result": true,
+    "method": "anonymous ICP connector get_sp_writedown_disabled"
+  },
+  "scope": {
+    "paidPayoutOrClaimRetryTest": false,
+    "spResume": false,
+    "botUpgradeOrWorkerResumption": false,
+    "vault202RecoveryOrReserveChange": false,
+    "vault208SizingRelease": false,
+    "frontendPublication": false,
+    "permissionOrControllerChange": false,
+    "rawSnapshotsPublished": false,
+    "automaticRollbackOrRestore": false
+  },
+  "limitations": [
+    "No production payout/signature used as test",
+    "Backup completeness verified, no restore test",
+    "No new build, CI or main-merge claim; reused approved source/artifact review"
+  ]
+}
