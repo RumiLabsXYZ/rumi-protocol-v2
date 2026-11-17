@@ -2323,7 +2323,11 @@ type UpdateChainConfigArg = record {
   display_name : opt text;
   min_quorum_providers : opt opt nat32;
 };
-type UpgradeArg = record { mode : opt Mode; description : opt text };
+type UpgradeArg = record {
+  mode : opt Mode;
+  description : opt text;
+  preserve_sp_liquidation_pause : opt bool;
+};
 type Vault = record {
   collateral_amount : nat64;
   owner : principal;
@@ -2515,89 +2519,313 @@ service : (ProtocolArg) -> {
   add_collateral_token : (AddCollateralArg) -> (Result_1);
   add_margin_to_vault : (VaultArg) -> (Result);
   add_margin_to_vault_v2 : (AddMarginV2Args) -> (Result);
+  // Add margin to a vault using funds already deposited to the caller's deposit account.
+  // Use this instead of add_margin_to_vault when the wallet cannot do ICRC-2 approve.
   add_margin_with_deposit : (nat64) -> (Result);
+  // Admin correction of vault collateral amount (developer only).
+  // Used to fix vault state that was inflated/deflated by bugs.
+  // Records an on-chain event for full auditability.
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result_1);
+  // Admin-only: correct vault debt amounts that were inflated by replay interest drift.
+  // Records an auditable event for each correction.
   admin_correct_vault_debts : (vec VaultDebtCorrection) -> (Result_2);
+  // Controller-only view for release preflight and bounded recovery operations.
   admin_get_reserve_redemption_status : () -> (Result_3) query;
+  // Admin: mint icUSD to a recipient (developer only).
+  // Used for refunding stuck icUSD from failed operations.
+  // Capped at 1,500 icUSD per call with a 72-hour cooldown between mints.
+  // Every use is recorded as an on-chain event with a stated reason.
   admin_mint_icusd : (nat64, principal, text) -> (Result);
+  // F-03 defense-in-depth: manually quarantine a native-XRP claim (e.g. ops suspects a
+  // divergence the automatic Sequence guard has not yet hit). Developer-gated, idempotent.
   admin_quarantine_xrp_claim : (nat64, text) -> (Result_1);
+  // Controller-only recovery for one exact retained operation. The protocol
+  // freeze remains authoritative; ledger destinations and amounts come only
+  // from the persisted journal.
   admin_reconcile_reserve_redemption : (nat, opt nat64) -> (Result_1);
+  // Compatibility endpoint retained for older clients. It cannot resolve a claim
+  // because the legacy boolean does not prove either payment or collateral return.
   admin_resolve_stuck_claim : (nat64, bool) -> (Result_1);
+  // F-03: resolve a quarantined native-XRP claim after off-ledger reconciliation.
+  // Developer-gated. Errors if the claim is absent or not quarantined, so a resolve can
+  // never silently drop a healthy, still-settle-able claim. See `XrpClaimResolution`.
   admin_resolve_xrp_claim : (nat64, XrpClaimResolution) -> (Result_1);
+  // Treasury sweeps are held until shared-account liabilities and ambiguous
+  // outbound sweep transfers have durable accounting and recovery.
   admin_sweep_to_treasury : (text) -> (Result);
+  // Continue a bounded fixed-tip ICRC-3 recovery for one pending borrow mint.
+  // Caller supplies only the vault ID; the persisted journal defines all evidence.
   advance_pending_borrow_mint_recovery : (nat64) -> (Result_1);
+  // Developer-only bounded recovery for a held Treasury-interest mint. Each
+  // call advances at most one direct ICRC-3 page or performs one proof-backed
+  // transition; no recovery call resends the old tuple.
   advance_pending_treasury_interest_mint_recovery : (nat) -> (Result_1);
+  // Developer-authorized config resolution or one bounded exact-receipt scan
+  // step. This never changes or blindly retries a frozen transfer tuple.
   advance_pending_treasury_stable_transfer_recovery : (nat) -> (Result_1);
   advance_vault51_nicp_redemption : () -> (Result_4);
+  // One-time (idempotent) admin backfill of `CollateralConfig.symbol` for
+  // collaterals registered before that field existed. Wallet consent messages
+  // (ICRC-21) name the collateral by this symbol; without it they fall back to a
+  // generic label instead of the correct token name. For each ICRC-custodied
+  // collateral whose symbol is currently `None`, queries `icrc1_symbol` from its
+  // ledger; native-XRP (synthetic ledger key, no real ledger) is set to "XRP"
+  // directly. Records an `UpdateCollateralConfig` event per fill so the change is
+  // replay-safe. Safe to call repeatedly — already-populated symbols are left
+  // untouched, and a ledger that fails to answer is skipped (fill it on a later
+  // call). Returns the (collateral_type, symbol) pairs it populated this call.
   backfill_collateral_symbols : () -> (Result_5);
+  // Bind a formerly missing treasury destination after explicit developer
+  // review, then dispatch the tuple created by this one-time binding.
   bind_and_retry_missing_borrow_fee_treasury : (nat) -> (Result_1);
+  // EVM-signed `Borrow` (synchronous — no `.await`, so the nonce check + op +
+  // nonce bump are atomic in one message; preserves the FLAG-16 sync invariant).
+  // Spend-on-success: a failed op does not burn the nonce.
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
   borrow_from_vault : (VaultArg) -> (Result_6);
+  // Borrow icUSD against the caller's own native-XRP vault and deliver it as XRPL
+  // icUSD to `recipient` (a funded classic account with the exact trust line). Debt
+  // is recorded through the normal borrow event only after the canonical escrow mint
+  // is proven; delivery then follows as a backed, owner-held claim.
   borrow_to_xrpl : (BorrowToXrplArg) -> (Result_7);
+  // Bot calls this when the swap failed and collateral has been returned (cancel phase).
+  // Unlocks the vault, restores budget, and clears the claim.
+  // The bot MUST transfer the collateral back to the backend canister BEFORE calling this.
   bot_cancel_liquidation : (nat64) -> (Result_1);
+  // Bot calls this to CLAIM a vault for liquidation (phase 1 of 2).
+  // Transfers collateral to the bot and locks the vault (`bot_processing = true`).
+  // Vault debt and collateral amounts are NOT modified yet.
+  // Bot must call `bot_confirm_liquidation` after successful swap, or
+  // `bot_cancel_liquidation` if the swap fails (returns collateral).
   bot_claim_liquidation : (nat64) -> (Result_8);
+  // Bot calls this after successfully swapping collateral (phase 2 of 2).
+  // Finalizes the liquidation: reduces vault debt and collateral, records event.
   bot_confirm_liquidation : (nat64) -> (Result_1);
+  // Confirm a bot liquidation against the exact ckUSDC ICRC-3 transfer block.
+  // The claim-specific memo and generation prevent a payment for an older claim
+  // on the same vault from authorizing a later claim.
   bot_confirm_liquidation_with_proof : (BotPaymentProof) -> (Result_1);
+  // Settle one active bot liquidation from 2–8 exact ckUSDC payment blocks.
+  // Every block is verified before any block is tombstoned or vault accounting
+  // changes, and the batch sum must equal the claim's rounded-up debt exactly.
   bot_confirm_liquidation_with_proofs : (vec BotPaymentProof) -> (Result_1);
+  // Persist an exact collateral-return receipt before cancel or timeout cleanup.
+  // In strict mode both the explicit cancel and expiry gate require this record.
   bot_record_collateral_return_proof : (BotCollateralReturnProofArg) -> (
       Result_1,
     );
+  // Verify a claim-bound bot payment receipt without changing claim or vault
+  // state. Short-payment recovery uses this before dispatching any residual
+  // transfer, so an operator-supplied block index cannot authorize funds by
+  // itself.
   bot_verify_liquidation_payment_proof : (BotPaymentProof) -> (Result_1);
+  // Cancellation is a synchronous caller-owned sequence fence. Do not acquire
+  // GuardPrincipal: the delayed original request can hold it during preflight.
   cancel_vault_operation : (VaultOperationCancelArg) -> (Result);
+  // XRP-006: owner cancellation verifies live XRPL state and marks the open as a
+  // recoverable tombstone; the original owner/address binding is never deleted.
   cancel_xrp_pending_open : (nat64) -> (Result_1);
+  // True iff `chain`'s settlement queue holds any NON-terminal op (`Queued` or
+  // `Inflight`), false once the worker has drained it (no op, or only terminal
+  // `Succeeded`/`Failed` ops awaiting prune). Lets a caller observe whether a
+  // chain's settlement worker has finished its outbound work without inspecting
+  // individual ops. Returns false for an unregistered chain (no queue). Public
+  // read-only query; no gate (mirrors `get_chain_vault`).
   chain_has_active_settlement_op : (nat32) -> (bool) query;
+  // Called by the stability pool to enqueue a native CFX payout from a reserved
+  // chain-liquidation claim. The SP owns depositor apportionment; the backend owns
+  // custody, idempotency, and the settlement queue.
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result);
   claim_cksol_cycle_refund : (nat64) -> (Result_9);
   claim_liquidity_returns : () -> (Result);
+  // Developer-gated manual clear for the bad-debt circuit. Cumulative bad-debt
+  // accounting and the configured threshold are preserved.
   clear_chain_bad_debt_circuit : (nat32) -> (Result_1);
   clear_cksol_deposit : () -> (Result_10);
+  // Clear the global supply-invariant halt (set by the Timer-B self-check on
+  // drift). Use only AFTER manually confirming `total_supply_all_chains_e8s`
+  // matches `total_chain_vault_debt_e8s`. Developer-gated.
   clear_invariant_halt : () -> (Result_1);
+  // Wave-10 LIQ-008: clear the breaker latch so `check_vaults` resumes
+  // auto-publishing on the next tick. Admin-only. Emits `BreakerCleared`
+  // with the windowed total at clear time so the audit trail captures
+  // what state the operator was looking at when they decided to resume.
   clear_liquidation_breaker : () -> (Result_1);
+  // Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
+  // `reorg_suspect_streak` debounce counter (Task 11): clearing the halt without
+  // also zeroing the streak would let the very next suspect observer tick push
+  // the streak back over `REORG_CONFIRM_TICKS` and re-halt the chain.
+  // Developer-gated.
   clear_reorg_halt : (nat32) -> (Result_1);
   clear_stuck_operations : (opt principal) -> (Result);
+  // Phase 1b Task 13: close a debt-free foreign-chain EVM (Monad or Conflux) vault.
+  //
+  // Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on the
+  // foreign chain), then withdraws the FULL remaining collateral to `dest_address`
+  // (vault -> `Closing`, then `Closed` on the transfer's confirmation).
+  // Synchronous + developer-gated (mirrors `withdraw_chain_collateral`).
+  // CONCURRENCY INVARIANT (audit FLAG-16): keep synchronous — see
+  // `withdraw_chain_collateral`; adding an `.await` needs a per-vault guard.
   close_chain_vault : (nat64, text) -> (Result_1);
+  // EVM-signed `Close` (synchronous; spend-on-success). Requires `debt_e8s == 0`
+  // (repay first by burning icUSD on-chain); returns all collateral to `owner_evm`.
   close_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
+  // Close a debt-free Solana chain vault (mirrors `close_chain_vault`).
+  //
+  // Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
+  // Solana), then withdraws the FULL remaining collateral to `dest_address`
+  // (vault -> `Closing`, then `Closed` on the transfer's confirmation).
+  // Synchronous + developer-gated. CONCURRENCY INVARIANT (audit FLAG-16): keep
+  // synchronous — see `withdraw_chain_collateral`; an `.await` needs a guard.
   close_solana_vault : (nat64, text) -> (Result_1);
   close_vault : (nat64) -> (Result_11);
+  // Transform function for HTTPS outcalls (CoinGecko price fetches).
+  // Strips response headers so all replicas reach consensus on the same payload.
   coingecko_transform : (TransformArgs) -> (HttpResponse) query;
   configure_xrpl_icusd : (ConfigureXrplIcusdArg) -> (Result_12);
+  // P3 (native-XRP collateral): verify the deposit to a vault's custody address and
+  // credit it as collateral (creating the Vault with zero debt). Owner-only,
+  // idempotent. Borrow icUSD afterwards via the normal `borrow_from_vault`.
   confirm_xrp_deposit : (nat64) -> (Result);
+  // SEC-11: credit exactly one validated direct native Payment, never a balance delta.
   confirm_xrp_vault_topup : (nat64, text, opt nat64) -> (Result);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
+  // Delete a chain entirely. Permitted only when the chain carries ZERO supply
+  // and NO chain_vaults reference it (so deletion cannot orphan debt/collateral);
+  // purges every per-chain map. Developer-gated. This DELETES (not disables) a
+  // chain, so it does not record `Event::ChainDisabled`.
   delete_chain : (nat32) -> (Result_1);
   disable_chain : (nat32) -> (Result_1);
+  // Enable or disable the legacy confirmation fail-closed guard (developer only).
   enable_bot_confirm_proof_requirement : () -> (Result_1);
+  // Reverse `disable_chain`: flip a `Disabled` chain back to `Registered`.
+  //
+  // `disable_chain` is the post-launch emergency stop: it blocks new opens and
+  // borrows, hands the chain's native pair back to manual pricing, AND drops the
+  // chain from the observer/settlement worker fan-outs, so exits enqueued while
+  // it is Disabled are accepted but not broadcast. This is its recovery half,
+  // and it is what makes that stop REVERSIBLE: without it a disabled chain with
+  // any open vault could never be re-enabled (`register_chain` refuses a present
+  // `chain_id`, `delete_chain` refuses a chain with any supply or vault), so a
+  // queued exit would strand permanently. Re-enabling restores the workers and
+  // those queued exits drain.
+  //
+  // Developer-gated, like every other chain-admin mutation. Adds no persisted
+  // field and preserves all per-chain state (see `enable_chain_in_state`).
+  // Records the existing durable `Event::ChainConfigUpdated`, since this IS a chain
+  // config change (the `status` field), and reusing the shipped variant avoids
+  // adding an event shape that every historical log reader would have to learn.
+  // The explicit `Disabled -> Registered` transition is written to the INFO log
+  // so an operator reading the log can tell this apart from an ordinary
+  // `set_chain_config` edit.
+  //
+  // Re-enabling reopens the gate; it does NOT vouch for the chain's price
+  // freshness. An open after enable still has to pass the price
+  // presence/staleness checks, which is why the documented recovery order is
+  // disable, rebaseline the price manually, verify it, and only then enable.
   enable_chain : (nat32) -> (Result_1);
+  // Manually enter Recovery mode. Automatic mode transitions are suppressed
+  // until `exit_recovery_mode` is called.
   enter_recovery_mode : () -> (Result_1);
+  // Make the one exact protocol mint attempt saved by
+  // `prepare_legacy_sp_burn_compensation`. Unresolved outcomes remain held and
+  // are never resent under a new identity.
   execute_legacy_sp_burn_compensation : (nat64) -> (Result);
+  // Exit Recovery mode and re-enable automatic mode transitions based on
+  // collateral ratio.
   exit_recovery_mode : () -> (Result_1);
+  // Emergency kill switch — halts ALL state-changing operations.
+  // Supersedes mode; even Recovery and GeneralAvailability are irrelevant while frozen.
   freeze_protocol : () -> (Result_1);
+  // Legacy bulk vault enumeration. Returns the first
+  // `MAX_VAULTS_LEGACY_PAGE` vaults by ascending `vault_id`. New
+  // callers should use `get_vaults_page` for full enumeration.
+  //
+  // Audit Wave 9a (DOS-004): the unbounded clone+encode path scaled
+  // linearly with `vault_id_to_vaults.len()` — the cap keeps a single
+  // call inside the cycle budget at any TVL.
   get_all_vaults : () -> (vec CandidVault) query;
+  // Get the configured AMM1 canister principal.
   get_amm1_canister : () -> (opt principal) query;
+  // Developer-only paged inspection of exact active AMM1 tuples and held
+  // legacy or aged-unknown obligations. Inspection does not prove ledger
+  // absence or authorize a replacement mint nonce.
   get_amm1_donation_inspection_page : (nat64, opt nat16) -> (Result_13) query;
+  // Read the configured AMM1 pool_id, if any.
   get_amm1_pool_id : () -> (opt text) query;
+  // Get the current borrowing fee rate
   get_borrowing_fee : () -> (float64) query;
   get_bot_allowed_collateral_types : () -> (vec principal) query;
+  // Vault IDs with an open `BotClaim` on the protocol side.
+  //
+  // Used by the explorer to reconcile the liquidation_bot's
+  // `get_stuck_liquidations` (a permanent history log) against the protocol's
+  // live claim set. A record can be `TransferFailed`/`ConfirmFailed` in the
+  // bot's log forever, but if the matching vault is no longer in `bot_claims`
+  // (e.g. resolved by Wave-11 BOT-001 auto-cancel or proof-backed bot confirmation/cancellation),
+  // the explorer should not flag it as awaiting admin action.
   get_bot_claim_vault_ids : () -> (vec nat64) query;
   get_bot_cr_tolerance_bps : () -> (nat64) query;
+  // Scans the ordered private journal for bot proof transitions. `scan_start`
+  // and `scan_end` address journal entries, including payout entries, so callers
+  // must resume at `scan_end` even when a page contains no bot audit records.
   get_bot_proof_audit_events : (nat64, nat64) -> (Result_14) query;
   get_bot_stats : () -> (BotStatsResponse) query;
+  // Public read-only status for the per-chain bad-debt circuit. No secrets.
   get_chain_bad_debt_circuit_status : (nat32) -> (
       ChainBadDebtCircuitStatus,
     ) query;
+  // Return the explicit Tier-B debt override for `chain`, if one has been set.
   get_chain_debt_config : (nat32) -> (opt ChainDebtConfigV1) query;
+  // Task 12: derive the per-chain interest-treasury (revenue) address — the
+  // tECDSA-derived EVM address that receives minted interest, distinct from the
+  // settlement (minter) address. Developer-gated (derivation costs cycles + a
+  // signing-subnet call). Used by ops + tests to learn where revenue accrues.
   get_chain_interest_treasury_address : (nat32) -> (Result_2);
+  // Public read: vaults currently liquidatable on `chain` (CR below the
+  // liquidation threshold, Open, not already marked, no in-flight mint). Capped
+  // for DOS safety. Returns empty if the chain has no collateral config or no
+  // fresh price.
   get_chain_liquidatable_vaults : (nat32) -> (vec ChainLiquidatableVault) query;
+  // Return the per-chain liquidation config, or None if unset. Public read-only
+  // query (mirrors `get_chain_vault`); the config is operator DEX wiring + risk
+  // knobs, no secrets.
   get_chain_liquidation_config : (nat32) -> (
       opt ChainLiquidationConfigV1,
     ) query;
+  // Consolidated, anonymous-safe public launch/readiness status. This is a
+  // synchronous projection over current canister state and performs no outcalls.
   get_chain_public_launch_status : (nat32) -> (ChainPublicLaunchStatus) query;
+  // Increment 3: derive the per-chain liquidation-RESERVE address — the
+  // tECDSA-derived EVM address bot-liquidation swaps settle USDC into (the PSM
+  // sink). Developer-gated. The operator uses this to FIND + FUND the reserve
+  // address and to verify books==custody before bridging (spec §4.8/§5.5).
   get_chain_reserve_address : (nat32) -> (Result_2);
+  // Developer-gated reserve reconciliation view. Uses an update method because
+  // the optional `balanceOf` probe makes an inter-canister EVM RPC call and burns
+  // cycles; no protocol state is mutated.
   get_chain_reserves : (nat32) -> (Result_15);
+  // Developer-gated, side-effect-free replicated update method committing to one
+  // chain's live stored RPC endpoint set and effective quorum. The response
+  // intentionally contains no endpoint URL text: configured URLs may embed
+  // provider credentials. Recovery tooling compares this digest/count/quorum to
+  // an independently sealed local provider set before dispatching any chain-admin
+  // mutation. This is deliberately an update export so the response is produced
+  // by replicated execution rather than an uncertified fast query.
   get_chain_rpc_endpoint_set_digest : (nat32) -> (Result_16);
+  // Derive the per-chain SETTLEMENT (minter) address — the tECDSA-derived EVM
+  // address whose private share the canister controls for that chain. Operators
+  // grant `MINTER_ROLE` on `IcUSD.sol` to this address. Async (the derive hits
+  // the management/signing subnet). Developer-gated: derivation costs cycles and
+  // a signing-subnet call, so it is not exposed to arbitrary callers even though
+  // it is read-only. No state borrow is held across the `.await`.
   get_chain_settlement_address : (nat32) -> (Result_2);
+  // Return a single foreign-chain vault by id (the `custody_address` field is the
+  // user's deposit address). Public read-only query; no gate.
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
+  // The current chains EVM tECDSA key name (`test_key_1` | `key_1`). Public read
+  // (non-sensitive config; the derived addresses are already public).
   get_chains_ecdsa_key_name : () -> (text) query;
   get_cksol_deposit : (principal) -> (opt CkSolRelayAttempt) query;
   get_cksol_icp_payment : (principal) -> (opt CkSolIcpPayment) query;
@@ -2605,111 +2833,297 @@ service : (ProtocolArg) -> {
   get_cksol_payment : (principal) -> (opt CkSolPayment) query;
   get_cksol_payment_quote : () -> (CkSolPaymentQuote) query;
   get_cksol_relay_budget : () -> (nat64) query;
+  // Get the current ckstable repayment fee rate
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
+  // 2026-07-03: observability for the per-collateral price-fetch cadence. Returns
+  // the EFFECTIVE interval (seconds) for every configured collateral — the
+  // per-collateral override where set, else the 300s default. ICP is included for
+  // completeness but its background refresh is actually driven by Timer A
+  // (`xrc_fetch_interval_secs`), not the per-collateral timer.
   get_collateral_price_fetch_intervals : () -> (
       vec record { principal; nat64 },
     ) query;
+  // Returns per-collateral aggregate totals (collateral amount, debt, vault count).
+  // O(collateral_types × vaults_per_type) but computed on-canister — returns a tiny response
+  // instead of transferring all vault data to the caller.
   get_collateral_totals : () -> (vec CollateralTotals) query;
+  // Wave-8d LIQ-004: snapshot of the consumed-writedown-proof set, used by
+  // ops monitoring (cross-check on-chain reserves vs sum of writedowns) and
+  // by the PocketIC fence for the Phase-2 wave. Returned as a Vec rather
+  // than a Set so it round-trips cleanly through Candid.
   get_consumed_writedown_proofs : () -> (
       vec record { LegacySpProofLedger; nat64 },
     ) query;
+  // Get the deposit account for the caller. The user transfers collateral here,
+  // then calls open_vault_with_deposit or add_margin_with_deposit.
   get_deposit_account : (opt principal) -> (Account) query;
+  // Get the current dust-liquidation threshold (in e8s)
   get_dust_liquidation_threshold : () -> (nat64) query;
+  // Return the debt config actually used by EVM open/borrow: explicit override
+  // when present, otherwise the compile-time collateral default.
   get_effective_chain_debt_config : (nat32) -> (opt ChainDebtConfigV1) query;
   get_event_count : () -> (nat64) query;
+  // Recording-time timestamp for `length` consecutive events starting at
+  // `start`. Slots past the end of the side log come back as `0`; the
+  // frontend uses these to fill in a real time on admin/upgrade rows whose
+  // event payloads have no inline `timestamp` field. Pre-existing events
+  // (recorded before this side log shipped) also surface as `0`.
+  //
+  // Cap is high enough (80k) to cover the entire current event log in a
+  // single round-trip — at 8 bytes per nat64 that's a 640 KB response,
+  // well under the 2 MB IC reply limit. Without that headroom the
+  // frontend's mixed-feed admin scope (which spans tens of thousands of
+  // indices) misses every event past the first 2k of the requested range.
   get_event_timestamps : (nat64, nat64) -> (vec nat64) query;
   get_events : (GetEventsArg) -> (vec Event) query;
+  // Legacy entry point for the explorer's per-principal activity feed.
+  // Returns up to `MAX_RESULTS` matches in newest-first order. The
+  // previous implementation materialised every match before slicing;
+  // we now use a bounded ring buffer so memory is O(MAX_RESULTS)
+  // regardless of total log length.
+  //
+  // Audit Wave 9a (DOS-003): bounds response size and intermediate
+  // memory. The full-log scan complexity is unchanged — for callers
+  // that need to walk a very large log without paying that O(N) cost
+  // per call, use `get_events_by_principal_paged` to scan a bounded
+  // window per call.
   get_events_by_principal : (principal) -> (vec record { nat64; Event }) query;
+  // Cursor-paginated principal activity feed. Caller passes
+  // `scan_start` (event-log index to begin scanning at, inclusive) and
+  // `scan_length` (number of log entries to walk in this call, capped
+  // at `MAX_SCAN_LENGTH`). The response reports the matches found in
+  // that window, the `scan_end` index where the next call should
+  // resume, and an `exhausted` flag set true once the scan reaches
+  // the current end of the event log.
+  //
+  // Audit Wave 9a (DOS-003): bounds the per-call scan window so a
+  // caller paging through a very large log can never trigger an
+  // unbounded query — the scan stays under the cycle budget for any
+  // log size. Output is also capped at `MAX_OUTPUT_PER_CALL` matches
+  // to bound the response payload.
   get_events_by_principal_paged : (principal, nat64, nat64) -> (
       EventsByPrincipalPagedResponse,
     ) query;
+  // Server-side filtered event query, paginated newest-first.
+  // `start` is the page number (0-indexed) into the *filtered* result set;
+  // `length` is page size (capped at `MAX_PAGE_SIZE`).
+  //
+  // Filter semantics (all AND-combined):
+  // - `types`: empty/null preserves the legacy behavior of hiding
+  // `AccrueInterest`/`PriceUpdate`. When non-empty, only matching variants
+  // are included (those two are returnable if explicitly requested).
+  // - `principal`: matches via `Event::involves_principal`.
+  // - `collateral_token`: matches via `Event::collateral_token` using a
+  // per-query `vault_id → collateral_type` lookup built from `OpenVault`.
+  // - `time_range`: events with no `timestamp_ns` are excluded.
+  // - `min_size_e8s`: events with no `size_e8s_usd` pass through.
+  //
+  // `total` is the matched count across the entire log (not the scanned slice),
+  // so the frontend can render accurate result counters.
+  //
+  // Results are cached for `FILTERED_EVENTS_TTL_NS` (10s) keyed on the full
+  // filter spec + page, since events append continuously and stale results
+  // would hide just-recorded activity.
   get_events_filtered : (GetEventsArg) -> (GetEventsFilteredResponse) query;
   get_events_forward_filtered : (nat64, nat64, opt vec EventTypeFilter) -> (
       ForwardFilteredEventsResponse,
     ) query;
+  // De-scaffold pass (2026-08-20, additive candid): reports the EVM RPC
+  // canister principal chains calls actually route through right now. Lets an
+  // operator verify, before registering a chain for real (see the go-live
+  // checklist at the top of chains/mod.rs, item 5), that no stale
+  // `set_evm_rpc_principal` override is left pointing production traffic at a
+  // PocketIC/staging mock.
   get_evm_rpc_principal : () -> (EvmRpcPrincipalInfo) query;
+  // Return the exact next EIP-712 typed-intent nonce for `(chain, owner)`.
+  // Read-only and anonymous-safe: the nonce is public replay-protection state,
+  // while malformed addresses and non-EVM chains fail explicitly.
   get_expected_evm_nonce : (nat32, text) -> (Result) query;
   get_fees : (nat64) -> (Fees) query;
   get_fees_for_collateral : (principal, nat64) -> (Fees) query;
+  // Get the current global icUSD mint cap (in e8s). u64::MAX = uncapped.
   get_global_icusd_mint_cap : () -> (nat64) query;
+  // Phase 1a: canonical multi-chain icUSD supply (sum across all chains).
+  // Equals `sum(state.multi_chain.chain_supplies.values())`. Returns 0 when
+  // no chains are registered (the Phase 1a default state).
+  //
+  // Note: this query is read-only and does NOT exercise the invariant
+  // check. Operators investigating drift should call `get_supply_audit`
+  // for the per-chain breakdown.
   get_global_icusd_supply : () -> (nat) query;
+  // Lightweight query exposing the cached XRC ICP/USD price as `u128` in e8s.
+  //
+  // Used by `rumi_amm`'s TVL sampler so it can compute USD-denominated TVL
+  // without re-fetching from XRC. Reads the same `last_icp_rate` field that
+  // `get_protocol_status` exposes (just narrower payload). Returns `0` when
+  // the price has not been cached yet (e.g. before the first XRC tick).
   get_icp_usd_price_e8s : () -> (ProtocolStatusLite) query;
+  // Get whether ICPswap-backed swap routing is enabled.
   get_icpswap_routing_enabled : () -> (bool) query;
+  // Get the current interest pool share (fraction of interest going to stability pool).
   get_interest_pool_share : () -> (float64) query;
+  // Get the current interest split configuration.
   get_interest_split : () -> (vec InterestSplitArg) query;
+  // Read the burn-watch cursor (`last_observed_block`) for a chain. Returns 0 when
+  // unseeded. Ungated query — used by tests and Task-D staging verification to
+  // confirm the cursor advances.
   get_last_observed_block : (nat32) -> (nat64) query;
+  // Legacy entry point used by the layout's at-risk banner and the
+  // liquidator hot path. Returns the first `MAX_LIQUIDATABLE_LEGACY_PAGE`
+  // liquidatable vaults by ascending `vault_id`. New callers should
+  // use `get_liquidatable_vaults_page` for full enumeration.
+  //
+  // Audit Wave 9a (DOS-004): bounds reply size and per-call instructions
+  // when a price drop pushes many vaults underwater simultaneously.
   get_liquidatable_vaults : () -> (vec CandidVault) query;
+  // Paginated enumeration of currently-liquidatable vaults, ordered
+  // ascending by `vault_id` starting at `start_id`. `limit` is capped
+  // at `MAX_VAULTS_PAGE_LIMIT` (the same cap as `get_vaults_page`).
+  // `next_start_id` carries the cursor for the next page, or `None`
+  // once the scan has reached the end of the vault map.
+  //
+  // Audit Wave 9a (DOS-004): pairs with `get_vaults_page` to give the
+  // liquidations UI bounded-cost paging at any TVL.
   get_liquidatable_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
+  // Get the current liquidation bonus multiplier
   get_liquidation_bonus : () -> (float64) query;
+  // Wave-5 LIQ-007: read the liquidation kill switch state.
   get_liquidation_frozen : () -> (bool) query;
+  // Wave-8b LIQ-002: read the current liquidation-ordering tolerance band, in
+  // basis points (e.g., 100 = 1% CR = the default).
   get_liquidation_ordering_tolerance_bps : () -> (nat64) query;
+  // Get the global liquidation protocol share.
   get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
+  // Read the on-chain manual collateral price and its freshness timestamp for
+  // `(chain, symbol)`. Returns `None` if no price is set. This is the read path
+  // the off-chain CFX monitor uses to verify its writes landed and to know how
+  // stale the canister's own manual price is (audit F-01). Read-only query.
   get_manual_collateral_price : (nat32, text) -> (opt ManualPriceInfo) query;
+  // Get the current minimum icUSD amount (in e8s)
   get_min_icusd_amount : () -> (nat64) query;
   get_my_liquidity_withdrawal_status : () -> (
       opt LiquidityWithdrawStatus,
     ) query;
+  // Owner-authenticated view of durable borrowing-fee outbox rows.
   get_my_pending_borrow_fee_mints : (opt nat, nat16) -> (Result_17) query;
+  // Owner-authenticated recovery view for borrow mints whose top-level result
+  // may have been lost. It exposes only vault, gross raw amount, and phase.
   get_my_pending_borrow_mints : () -> (vec BorrowMintStatus) query;
+  // Return the caller's outstanding icUSD refund claims, including claims held
+  // after the bounded automatic retry window. This is visibility only; held
+  // claims require manual recovery and are not guaranteed automatic delivery.
   get_my_pending_icusd_refunds : () -> (vec PendingIcusdRefundView) query;
+  // P5 (frontend): the caller's OWN outstanding native-XRP claims (those the caller
+  // is the `claimant` of — XRP owed to them from a withdraw/close/liquidation). The UI
+  // uses this to list claims the user can `settle_xrp_claim` to an XRPL address.
   get_my_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
+  // Caller readback for their own one-time XRP open permit.
   get_my_xrp_open_permit : () -> (bool) query;
+  // P5 (frontend): the caller's OWN native-XRP pending deposits (those whose vault
+  // the caller opened). Unlike `get_xrp_pending_deposits` (developer-gated, all
+  // users), this is the per-user read the UI uses to show "send XRP to this custody
+  // address" for a deposit it is still waiting on. Returns `(reserved_vault_id, pending)`.
   get_my_xrp_pending_deposits : () -> (
       vec record { nat64; XrpPendingDeposit },
     ) query;
+  // Caller-scoped, paged (at most 50 rows).
   get_my_xrpl_operations : (opt nat64, nat32) -> (OperationPage) query;
   get_nicp_redemption_claim : () -> (opt NicpRedemptionClaim) query;
   get_pending_3usd_refunds : () -> (vec LegacyPendingThreeUsdRefund) query;
+  // Diagnostic: return the count of AMM1 donations pending or held for reconciliation.
   get_pending_amm1_donations_count : () -> (nat64) query;
+  // Developer-only bounded recovery listing for retained fee outbox rows.
   get_pending_borrow_fee_mint_recovery_page : (opt nat, nat16) -> (
       Result_17,
     ) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_pending_payouts : (opt nat, opt nat16) -> (PendingPayoutPage) query;
+  // Number of minted stability-pool interest payments awaiting acknowledgement
+  // from the stability pool. These entries are retried by the periodic treasury
+  // tick and are deliberately exposed so production release checks can verify
+  // that no notification was stranded during a pool upgrade.
   get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
+  // Page durable pool-interest notifications so operators can inspect legacy
+  // rows held across the receipt-protocol upgrade. Rows with no
+  // `receipt_protocol_version` are never auto-delivered.
   get_pending_stability_pool_interest_notifications : (opt nat64, nat64) -> (
       Result_18,
     ) query;
+  // Developer-only paginated view of retained treasury-interest mint rows.
+  // Each item includes the complete pinned ledger tuple and current phase.
   get_pending_treasury_interest_mint_recovery_page : (opt nat, nat16) -> (
       Result_19,
     ) query;
+  // Developer-only paginated view of exact Treasury-directed CK stablecoin
+  // transfer obligations and their current recovery phase.
   get_pending_treasury_stable_transfer_recovery_page : (
       opt TreasuryStableTransferSource,
       nat16,
     ) -> (Result_20) query;
+  // Read the `(chain_id, symbol)` pairs the price-pusher principal is allowed to set.
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
+  // Read the currently-authorized price-pusher principal (`None` if unset).
   get_price_pusher_principal : () -> (opt principal) query;
+  // Net 3USD principal retained in protocol reserves from stability pool liquidations (e8s).
   get_protocol_3usd_reserves : () -> (nat64) query;
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_status : () -> (ProtocolStatus) query;
+  // Get the current recovery CR multiplier
   get_recovery_cr_multiplier : () -> (float64) query;
+  // Get the effective recovery target CR (threshold × multiplier)
   get_recovery_target_cr : () -> (float64) query;
+  // Get the current redemption fee ceiling
   get_redemption_fee_ceiling : () -> (float64) query;
+  // Get the current redemption fee floor
   get_redemption_fee_floor : () -> (float64) query;
+  // Cached-price redemption preview. It is advisory only and can include stale
+  // prices; execution requires `prepare_redemption_offer` followed by the normal
+  // explicitly quoted submit path.
   get_redemption_preview : (nat64) -> (RedemptionPreview) query;
+  // Snapshot the exact consecutive collateral runs the backend would consume,
+  // ordered by the vault CR label's underlying health shade.
   get_redemption_queue : () -> (RedemptionQueue) query;
+  // Quote a single-collateral redemption against the first currently eligible run.
+  // Price age is explicit; submission refreshes and revalidates priority and payout.
   get_redemption_quote : (nat64) -> (Result_21) query;
   get_redemption_rate : () -> (float64) query;
+  // Get the redemption priority tier for a collateral type.
   get_redemption_tier : (principal) -> (Result_22) query;
+  // Query available reserve balances
   get_reserve_balances : () -> (vec ReserveBalance) query;
+  // Get the current reserve redemption fee
   get_reserve_redemption_fee : () -> (float64) query;
+  // Return the caller's retained reserve-redemption settlement status.
+  // Raw ledger tuples and operation nonces remain private to backend state.
   get_reserve_redemption_status : () -> (opt ReserveRedemptionStatus) query;
+  // Get whether reserve redemptions are enabled
   get_reserve_redemptions_enabled : () -> (bool) query;
+  // Get the RMR ceiling (ratio redeemers receive when system is stressed).
   get_rmr_ceiling : () -> (float64) query;
+  // Get the CR below which the RMR ceiling applies.
   get_rmr_ceiling_cr : () -> (float64) query;
+  // Get the RMR floor (ratio redeemers receive when system is healthy).
   get_rmr_floor : () -> (float64) query;
+  // Get the CR above which the RMR floor applies.
   get_rmr_floor_cr : () -> (float64) query;
   get_settlement_proof_ids : (opt nat32) -> (SettlementProofIds) query;
   get_snapshot_count : () -> (nat64) query;
+  // Wave-8c LIQ-004: read the SP-writedown kill switch state.
   get_sp_writedown_disabled : () -> (bool) query;
   get_stability_pool_config : () -> (StabilityPoolConfig) query;
+  // Caller-bound lookup for the one backend payout queued by a V2 reserve
+  // absorb. This returns a ledger candidate, not an authenticated receipt; the
+  // registered Stability Pool must read and verify the exact ledger block.
   get_stability_pool_liquidate_with_reserves_v2_payout_candidate : (
       nat64,
       nat64,
     ) -> (opt ThreeUsdReserveCollateralPayout) query;
+  // Payout-owner-only lookup for the immutable operation behind a held reserve
+  // payout. The persisted reserve key keeps the historical owner able to invoke
+  // the existing owner-authorized recovery endpoint after SP registration rotates.
   get_stability_pool_liquidate_with_reserves_v2_payout_operation_id : (
       nat64,
       nat64,
@@ -2717,137 +3131,418 @@ service : (ProtocolArg) -> {
   get_stability_pool_liquidate_with_reserves_v2_status : (nat64, nat64) -> (
       ThreeUsdReserveIngressV2StatusView,
     ) query;
+  // Current point quote for the SP's public fallback. The receiving SP still
+  // verifies bindings and obtains a durable backend reservation before payment.
   get_stability_pool_liquidation_candidate : (nat64) -> (
       opt LiquidatableVaultInfo,
     ) query;
   get_stability_pool_principal : () -> (opt principal) query;
+  // Check if a stable token type is currently enabled
   get_stable_token_enabled : (StableTokenType) -> (bool) query;
+  // Phase 1a: per-chain breakdown for external auditors. Iterates
+  // `multi_chain.chain_configs` in chain-id order so the response shape is
+  // deterministic.
   get_supply_audit : () -> (SupplyAudit) query;
   get_supported_collateral_types : () -> (
       vec record { principal; CollateralStatus },
     ) query;
+  // Get the configured 3pool canister principal.
   get_three_pool_canister : () -> (opt principal) query;
   get_three_usd_reserve_ingress_enabled : () -> (bool) query;
+  // Developer-only raw inventory of retained 3USD reserve refund, V2 ingress,
+  // proof-result, and payout reconciliation rows. Terminal rows remain visible.
   get_three_usd_reserve_inventory_page : (
       opt ThreeUsdReserveInventoryCursor,
       nat16,
     ) -> (Result_23) query;
   get_treasury_principal : () -> (opt principal) query;
+  // Get treasury-related statistics including accrued interest across all vaults.
+  //
+  // Wave-9b DOS-007: `total_accrued_interest_system` is cached with a
+  // 5-second TTL on the read path (refreshed in the existing 5-minute
+  // XRC tick). Other fields are O(1)/O(small) and read fresh.
   get_treasury_stats : () -> (TreasuryStats) query;
+  // Developer-only visibility into ledger receipts whose block indexes cannot
+  // be represented by Rumi's historical `u64` event schemas. The presence of
+  // any row intentionally holds all generic ICRC dispatches. There is no clear
+  // endpoint: reconciliation requires an operation-specific source upgrade so
+  // a confirmed transfer can never be discarded or retried as if it had no
+  // effect.
   get_unsupported_icrc_receipts : () -> (Result_24) query;
+  // Total vault count (open + closed). Used by the explorer to size
+  // pagination controls without fetching the full vault list. Audit
+  // Wave 9a (DOS-004) companion to `get_vaults_page`.
   get_vault_count : () -> (nat64) query;
+  // Legacy entry point for the explorer's per-vault timeline. Kept for
+  // backwards-compat with cached frontend bundles, but now bounded:
+  // returns at most `MAX_VAULT_HISTORY` matches. When a vault has more
+  // than that many events, the newest matches are returned in chronological
+  // order (the frontend reverses for newest-first display). For full
+  // historical access, use `get_vault_history_paged`.
+  //
+  // Audit Wave 9a (DOS-001): the previous unbounded scan walked every
+  // stable-log entry and decoded each one for `is_vault_related`. The
+  // per-call cost scaled linearly with total event-log size; this cap
+  // bounds the response to the most relevant slice.
   get_vault_history : (nat64) -> (vec record { nat64; Event }) query;
+  // Paginated per-vault timeline. `start` indexes into matches sorted
+  // newest-first; `length` is the page size (capped at
+  // `MAX_VAULT_HISTORY_PAGE`). `total` is the total matched-event count
+  // for this vault so the caller can render accurate page indicators.
+  //
+  // Audit Wave 9a (DOS-001): bounds response size and gives the
+  // explorer paged access to a vault's full history without forcing a
+  // single round-trip.
   get_vault_history_paged : (nat64, nat64, nat64) -> (
       GetEventsFilteredResponse,
     ) query;
+  // Query: get the current dynamic interest rate for a specific vault.
   get_vault_interest_rate : (nat64) -> (Result_25) query;
   get_vault_operation_status : () -> (Result_26) query;
+  // Vault lookup. With `target = Some(principal)` returns every vault
+  // owned by that principal (naturally bounded — typical principals own
+  // 1-2 vaults; the per-principal index walks at most a few entries).
+  // With `target = None` returns the first `MAX_VAULTS_LEGACY_PAGE`
+  // vaults by ascending `vault_id`. For full enumeration use
+  // `get_vaults_page` with cursoring.
+  //
+  // Audit Wave 9a (DOS-004): the previous `target = None` branch cloned
+  // every vault and Candid-encoded the full set — at 10k+ vaults that
+  // pushed reply sizes into the megabyte range. The cap bounds the
+  // legacy reply; new callers paginate.
   get_vaults : (opt principal) -> (vec CandidVault) query;
+  // Paginated vault enumeration. Returns vaults with `vault_id >= start_id`
+  // up to `limit` entries (capped at `MAX_VAULTS_PAGE_LIMIT`), ordered
+  // ascending by `vault_id`. `next_start_id` is `Some(id)` when more
+  // vaults remain past this page, `None` when the end of the map is
+  // reached.
+  //
+  // Audit Wave 9a (DOS-004): replaces unbounded `get_all_vaults` /
+  // `get_vaults(None)` reads with a cursor-based page so single-call
+  // reply size and instructions stay bounded at any TVL.
   get_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
+  // P5 observability: all outstanding native-XRP claims (XRP owed out of a custody
+  // address — created on withdraw/close/liquidation, removed once `settle_xrp_claim`
+  // confirms the Payment validated). Developer-gated read (empty for non-developers).
+  // Ops + the frontend use this to know which claims still need settling.
   get_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
+  // Developer readback for the current XRP open permit allowlist.
   get_xrp_open_permits : () -> (Result_27) query;
+  // P5 observability: all native-XRP vaults still awaiting their on-chain deposit
+  // (created by `open_xrp_vault`, removed by `confirm_xrp_deposit`). Developer-gated
+  // read (returns empty for non-developers) — ops + the e2e harness use it to see
+  // the deposit-staging queue. Returns `(reserved_vault_id, pending)` pairs.
   get_xrp_pending_deposits : () -> (
       vec record { nat64; XrpPendingDeposit },
     ) query;
+  // F-03 observability: native-XRP claims currently quarantined (a settlement divergence
+  // is suspected — resolve via `admin_resolve_xrp_claim`). Developer-gated read.
   get_xrp_quarantined_claims : () -> (vec record { nat64; XrpClaim }) query;
   get_xrp_schnorr_key_name : () -> (text) query;
+  // SEC-11: authenticated existing-owner custody address and bounded origin bootstrap.
   get_xrp_vault_deposit_address : (nat64, opt nat64) -> (Result_28);
+  // Public, key-free configuration of the XRPL icUSD lane.
   get_xrpl_icusd_config : () -> (PublicXrplIcusdConfig) query;
+  // Refreshes and returns the coverage report (escrow balance vs liabilities vs the
+  // fixed-ledger issuer obligation snapshot).
   get_xrpl_icusd_coverage : () -> (Result_29);
+  // Controller-only: per-transaction evidence for value held in an overflow bucket
+  // (contributions at or above the auto-refund threshold; bounded).
   get_xrpl_overflow_evidence : () -> (Result_30) query;
+  // Controller-only: the value-bearing receipts held in quarantine (their value left
+  // `O` and is part of `H`; none is credited as debt repayment).
   get_xrpl_quarantined_receipts : () -> (Result_30) query;
+  // Grant a one-time permit for a principal to open one new native-XRP vault.
+  // Public permissionless XRP opens remain disabled until a scarce-cost admission
+  // design exists.
   grant_xrp_open_permit : (principal) -> (Result_31);
+  // Task 12: manually trigger one interest harvest for `chain` (developer-gated),
+  // for testing/ops independent of the off-by-default timer. Resolves the
+  // interest-treasury address + APR, enqueues an `InterestMint` for every
+  // eligible vault, and returns the number enqueued. The settlement worker then
+  // mints/confirms them on-chain.
   harvest_chain_interest : (nat32) -> (Result);
   http_request : (HttpRequest) -> (HttpResponse_1) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_32);
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  // Move canonical icUSD (explicit ICRC-2 allowance, stable-nonce pull) into escrow and
+  // issue the same amount on the XRPL to `recipient`. Creates NO debt and NO fee.
   issue_xrpl_from_canonical : (IssueFromCanonicalArg) -> (Result_7);
+  // Dev-gated manual/permissionless liquidation trigger (spec §7). Runs the
+  // IDENTICAL gate as the detection tick (so a manual caller can never liquidate a
+  // vault the timer wouldn't). Synchronous: reads price from state, sizes, and
+  // enqueues in one mutate_state. Bot tier only in Increment 2; the enqueued
+  // `LiquidationSwap` op is inert until Increment 3.
   liquidate_chain_vault : (nat64) -> (Result);
   liquidate_vault : (nat64) -> (Result_6);
   liquidate_vault_partial : (VaultArg) -> (Result_6);
+  // Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD)
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_6);
+  // List the foreign-chain vaults whose `collateral_chain == chain`, CLAMPED to
+  // at most 500 entries. The clamp follows the Wave-9a DOS-pagination convention:
+  // an unbounded query over a growing map is a cycle-DoS vector. Compatibility
+  // only: new callers must use `list_chain_vaults_page`. Public query.
   list_chain_vaults : (nat32) -> (vec ChainVaultV1) query;
+  // Bounded global-cursor page over foreign-chain vaults. Each call examines at
+  // most 500 GLOBAL vault-map entries; sparse chains still make monotonic cursor
+  // progress and are never silently truncated at the first 500 global rows.
   list_chain_vaults_page : (nat32, opt nat64, nat16) -> (ChainVaultPage) query;
+  // A wallet-reported transaction hash is a HINT only: the backend re-reads and
+  // verifies the transaction itself (the same private consumer as the issuer-history
+  // scan, so a return found by both applies once). Owner-only and throttled.
   observe_xrpl_repayment : (ObserveRepaymentArg) -> (Result_7);
+  // Phase 1b Task 12: open a foreign-chain EVM (Monad or Conflux) vault, OPEN-THEN-VERIFY.
+  //
+  // Creates the vault in `AwaitingDeposit` with the DECLARED collateral and the
+  // intended mint in `pending_mint_e8s`; enqueues NO mint. The caller then reads
+  // the vault's `custody_address` (Task 14 `get_chain_vault`) and deposits the
+  // native token (MON on Monad, CFX on Conflux) there. deposit-watch verifies the
+  // on-chain balance covers the declared collateral at finality, flips the vault
+  // to `MintPending`, and enqueues the mint. icUSD is only ever minted against a
+  // verified on-chain deposit. The native price symbol and min CR are resolved
+  // per-chain from the compile-time configs (see `evm_vault_params`).
+  //
+  // Developer-gated for Phase 1b (matches the chain-admin endpoints). Async
+  // because deriving the per-user custody address calls tECDSA. Borrow
+  // discipline: no `read_state`/`mutate_state` borrow is held across the
+  // `derive_evm_address(...).await`.
   open_chain_vault : (nat32, nat, nat, text) -> (Result);
+  // EVM-signed `Open` (async — derives the per-vault custody address via tECDSA).
+  //
+  // Saga/TOCTOU: the nonce is consumed + the per-owner cap checked + the vault id
+  // reserved in ONE pre-await `mutate_state` (spend-on-attempt), so a same-nonce
+  // double-submit is rejected before the costly derive and no duplicate vault can
+  // be created. A failed derive leaves the nonce spent — the user re-signs with
+  // `nonce + 1` (a spent counter is harmless; no funds move on this path).
   open_chain_vault_evm : (VaultIntent, blob) -> (Result);
+  // Open a Solana chain vault, OPEN-THEN-VERIFY (mirrors `open_chain_vault`).
+  //
+  // Creates the vault in `AwaitingDeposit` with the DECLARED collateral
+  // (lamports) and the intended mint in `pending_mint_e8s`; enqueues NO mint. The
+  // caller then reads the vault's `custody_address` (`get_chain_vault`) and
+  // deposits SOL there. deposit-watch (Task 9) verifies the on-chain balance
+  // covers the declared collateral at finality, flips the vault to `MintPending`,
+  // and enqueues the mint. icUSD is only ever minted against a verified on-chain
+  // deposit.
+  //
+  // Developer-gated. Async because deriving the per-user custody address calls
+  // threshold Ed25519. Borrow discipline: the `vault_id` is reserved in one
+  // `mutate_state`, the custody derive is `.await`ed with NO state borrow held,
+  // then the vault is opened + cloned out in a second `mutate_state`.
   open_solana_vault : (nat, nat, text) -> (Result_33);
   open_vault : (nat64, opt principal) -> (Result_34);
+  // Compound open vault + borrow in a single canister call.
+  // Allows Oisy / ICRC-112 wallets to batch approve + this call into one popup.
   open_vault_and_borrow : (nat64, nat64, opt principal) -> (Result_34);
   open_vault_and_borrow_v2 : (OpenVaultAndBorrowV2Args) -> (Result_34);
   open_vault_v2 : (OpenVaultV2Args) -> (Result_34);
+  // Open a vault using funds already deposited to the caller's deposit account.
+  // Use this instead of open_vault when the wallet cannot do ICRC-2 approve (e.g., Oisy).
   open_vault_with_deposit : (nat64, opt principal) -> (Result_34);
+  // P3 (native-XRP collateral): open a vault in open-then-verify staging and return
+  // its XRPL custody address to fund. No collateral credited, no icUSD minted.
+  // Errors until native-XRP collateral is registered (P5).
   open_xrp_vault : () -> (Result_35);
+  // Developer-operated recovery for held payouts whose owner is a canister
+  // (such as the Stability Pool) and therefore cannot call the owner endpoint.
+  // This does not waive evidence requirements: only a typed TooOld can enter
+  // the exact ICRC-3 no-effect scan/rearm flow. Other held rows return an
+  // explicit disposition and remain untouched.
   operator_recover_pending_payout : (nat) -> (Result_36);
   partial_liquidate_vault : (VaultArg) -> (Result_6);
   partial_repay_to_vault : (VaultArg) -> (Result);
+  // Persist the exact protocol-funded compensation identity for one eligible
+  // legacy SP intent. The configured pool and its saved intent determine the
+  // ledger, destination, and amount; callers cannot select a funding tuple.
   prepare_legacy_sp_burn_compensation : (nat64) -> (Result_37);
+  // Refresh stale candidate prices and return a current queue/offer without
+  // approving or pulling icUSD. A fresh queue is preserved when the requested
+  // amount itself cannot be quoted.
   prepare_redemption_offer : (nat64) -> (Result_38);
   prepare_vault51_nicp_redemption : (PrepareNicpRedemption) -> (Result_4);
+  // Prepare a repayment of the caller's own XRP-vault debt with XRPL icUSD. Returns the
+  // exact `Payment` (to the issuer, with a unique never-reused destination tag) the
+  // wallet must sign. Nothing is credited until the backend itself verifies the
+  // validated return; `top_up_operation` binds a follow-up payment to a HELD repayment.
   prepare_xrpl_repayment : (PrepareRepaymentArg) -> (Result_39);
   provide_liquidity : (nat64) -> (Result);
+  // Resume a capped legacy 3USD refund only when its saved state proves the
+  // worker never pinned or submitted a transfer tuple. This changes only the
+  // retry counter; old snapshots and ambiguous dispatches require receipt proof.
   rearm_unsent_legacy_three_usd_refund : (nat) -> (Result_1);
+  // Resume a capped V2 refund only when its journal proves that no transfer
+  // remains submitted and no receipt has been recorded. The worker rechecks the
+  // current zero-fee ledger policy and the full liability balance before it
+  // pins a new attempt; a nonzero fee keeps the obligation held.
   rearm_unsent_v2_default_account_refund : (nat) -> (Result_1);
+  // Developer-only recovery using positive exact ICRC-3 mint-block evidence.
+  // This method never treats missing history as proof of non-mint and never
+  // submits a new mint.
   reconcile_amm1_donation_mint_candidate_block : (nat64, nat64) -> (Result_1);
+  // Developer-gated, on-demand supply reconciliation against the chain (audit
+  // FLAG-2). The Timer-B self-check only compares two INTERNAL mirror fields
+  // (`sum(chain_supplies)` vs `total_chain_vault_debt`), which are kept in
+  // lockstep and so cannot reveal canister-vs-chain drift. This reads the real
+  // on-chain `totalSupply()` at the finalized cursor and reports the gap, so an
+  // unbacked mint (on-chain supply ABOVE recorded, with no in-flight mint) is
+  // detectable even when recorded debt is 0 (which the observer's per-tick alarm
+  // skips on its no-debt fast path).
   reconcile_chain_supply : (nat32) -> (Result_40);
   reconcile_cksol_icp_funding_from_block : (nat64, nat64) -> (Result_41);
+  // Reconcile only a held legacy tuple after a positive sealed receiver credit.
   reconcile_held_sp_interest_receipt : (
       PendingStabilityPoolInterestNotification,
       blob,
     ) -> (Result_31);
+  // Reconcile an old or ambiguous V1 reserve refund using a developer-supplied
+  // candidate block. Only a direct response from the row's recorded ledger and
+  // an exact historical transfer tuple can clear the durable liability.
   reconcile_legacy_three_usd_refund_candidate_block : (nat, nat64) -> (
       Result_1,
     );
   reconcile_liquidity_withdrawal_from_block : (nat, nat64) -> (Result);
+  // Reconcile an ambiguous borrowing-fee mint from an exact ICRC-3 block.
   reconcile_pending_borrow_fee_mint_from_block : (nat, nat64) -> (Result_1);
+  // Reconcile an ambiguous borrow only from a positive, exact ICRC-3 mint
+  // receipt. Candidate indexes are untrusted and checked against the journal.
   reconcile_pending_borrow_mint_from_block : (nat64, nat64) -> (Result_6);
+  // Reconcile a held treasury-interest mint only from a positive exact ICRC-3
+  // block. No mint is submitted by this recovery method.
   reconcile_pending_treasury_interest_mint_from_block : (nat, nat64) -> (
       Result_1,
     );
+  // Retry a refund only after a typed no-effect result, or verify a caller-
+  // supplied block against the exact journaled leg and continue the saga.
+  // Recovery uses pinned ledger tuples and does not need a fresh oracle price.
   reconcile_reserve_redemption : (opt nat64) -> (Result_1);
+  // Promote an ingress whose exact ICRC-2 tuple was submitted but whose reply
+  // was lost after the ledger's deduplication window. The developer supplies a
+  // candidate block index; this endpoint verifies the configured 3pool's ICRC-3
+  // receipt against the immutable journal tuple before changing state. Absence
+  // from any bounded scan is never evidence that no transfer occurred.
   reconcile_three_usd_reserve_ingress_candidate_block : (
       nat64,
       nat64,
       nat64,
     ) -> (Result_1);
   reconcile_three_usd_reserve_v1_cutover : (blob) -> (Result_1);
+  // Reconcile a submitted V2 default-account refund child from one direct ICRC-3
+  // candidate block. This endpoint never submits or rearms the transfer.
   reconcile_v2_default_account_three_usd_refund_candidate_block : (
       nat,
       nat64,
     ) -> (Result_1);
   reconcile_vault51_collateral_adoption : (nat64) -> (Result_4);
   reconcile_vault51_icp_payout : (nat64) -> (Result_4);
+  // Positive-only recovery for an ambiguous collateral transfer_from. The
+  // ledger-global block index is a candidate; the backend fetches and checks
+  // the direct block against the authenticated caller's pinned journal.
   reconcile_vault_collateral_pull_from_block : (VaultOperationIdArg, nat64) -> (
       Result_1,
     );
+  // Controller-only: resolve a replay-rebuilt borrow (`NextAction::ReconcileMint`) by
+  // supplying the ledger block of its escrow mint. The block is fetched and verified
+  // against the reservation terms; without a block the borrow stays surfaced.
   reconcile_xrpl_borrow_mint : (nat64, nat64) -> (Result_7);
+  // Controller-only: re-read ONE overflow receipt through the provider quorum and move
+  // exactly its amount from the overflow bucket to the verified sender's attributed
+  // aggregate (refundable at the threshold). Works once per receipt; there is no
+  // assertion-only path.
   reconcile_xrpl_overflow_receipt : (text) -> (Result_42);
+  // Controller-only: re-read a quarantined transaction through the provider quorum and
+  // book its value into the verified sender's refundable aggregate. There is no
+  // assertion-only path: the amount comes from the re-verified receipt and must match
+  // the quarantine record and the receipt's own issuer-line metadata.
   reconcile_xrpl_quarantined_receipt : (text) -> (Result_42);
+  // Bind a deposit id observed by an operator to a retained unknown relay
+  // attempt. This only changes reconciliation state; it never calls the minter
+  // and cannot mint, spend cycles, or choose a different owner/subaccount.
   recover_cksol_deposit_id : (principal, nat64) -> (Result_10);
   recover_pending_payout : (nat) -> (Result_31);
   recover_pending_transfer : (nat64) -> (Result_31);
+  // Developer-gated recovery for a foreign-chain vault wedged in `MintPending`
+  // after its mint permanently reverted (audit FLAG-4). When a mint reverts at
+  // finality the worker clears `pending_mint_e8s` but leaves the vault
+  // `MintPending`; there is no transition out (withdraw/close require `Open`, and
+  // the mint can never re-confirm with `pending == 0`), so the deposited
+  // collateral would be locked forever. This transitions a genuinely-stuck vault
+  // back to `Open` (debt is 0 under Design B — the mint was never confirmed) so
+  // the existing dev-gated `close_chain_vault` / `withdraw_chain_collateral` can
+  // return the collateral. Rejects unless the vault is on `chain`, is
+  // `MintPending`, has `pending_mint_e8s == 0`, and has NO live (Queued/Inflight)
+  // Mint op left.
   recover_stuck_chain_vault : (nat32, nat64) -> (Result_1);
+  // Generic collateral redemption: burn icUSD and receive any collateral type.
+  // `redeem_icp` remains as a convenience wrapper for ICP specifically.
   redeem_collateral : (principal, nat64) -> (Result_6);
   redeem_icp : (nat64) -> (Result_6);
+  // Redeem against one collateral run with an explicit expected token and strict
+  // minimum net payout. The reply says payout is queued, not ledger-delivered.
   redeem_quoted : (RedeemQuotedRequest) -> (Result_43);
+  // Redeem icUSD for ckStable tokens from reserves. Requests requiring vault
+  // spillover are held before the icUSD pull until receipt recovery is supported.
   redeem_reserves : (nat64, opt principal) -> (Result_44);
+  // Refresh the cached settlement hot-wallet balance without requiring an
+  // active settlement op. This is deliberately allowed while a known EVM chain
+  // is Disabled so launch preflight can prove gas solvency before the separately
+  // authorized enable. Only a successful RPC read updates balance+timestamp.
   refresh_chain_hot_wallet_balance : (nat32) -> (Result_45);
   refresh_vault51_redemption_claim : () -> (Result_4);
+  // Retry or reconcile exact compensation for a Stability Pool icUSD burn.
   refund_stability_pool_burn : (nat64, nat64, SpWritedownProof) -> (Result_46);
   register_chain : (RegisterChainArg) -> (Result_1);
+  // Register mainnet ckDOGE as ordinary ICRC collateral with the established XRP
+  // risk envelope. Unlike native XRP, ckDOGE is held entirely on its ICRC ledger,
+  // so the generic registration path queries the ledger's live decimals, fee, and
+  // symbol and uses standard ICRC-2 custody flows.
+  //
+  // This source endpoint does not itself register ckDOGE anywhere until an
+  // authorized developer calls it on an installed canister.
   register_ckdoge_collateral : () -> (Result_1);
+  // Register mainnet ckSOL as ordinary ICRC collateral. Risk terms are copied
+  // from the current live ckETH configuration, while token precision and the
+  // XRC pair are ckSOL-specific. Repeated calls are a no-op once the fixed
+  // ledger principal is present.
   register_cksol_collateral : () -> (Result_1);
+  // P5 (native-XRP collateral): register XRP as a collateral (developer-gated). XRP
+  // has no IC ledger, so decimals (6 / drops) and fee (0) are NOT queried;
+  // custody_kind = NativeXrp routes deposits/payouts through the chains::xrp rail +
+  // the XrpClaim model. Params: 150% borrow / 133% liquidation / 12% penalty / $100
+  // debt ceiling; borrowing-fee + interest inherited from ICP. Calling this is the
+  // deliberate act that ACTIVATES the native-XRP rail — do NOT call on mainnet
+  // before the security audit.
   register_xrp_collateral : () -> (Result_1);
+  // Compound repay + withdraw + close in a single canister call.
+  // Saves one Oisy consent screen for users closing borrowed vaults.
   repay_and_close_vault : (VaultArg) -> (Result_47);
   repay_to_vault : (VaultArg) -> (Result);
+  // Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD)
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result);
   reset_bot_budget : (nat64) -> (Result_1);
   resolve_pending_treasury_stable_transfer : (nat) -> (Result_1);
+  // Developer-gated resolution for a settlement op wedged `Inflight` (audit
+  // FLAG-10). `select_next_op` is strictly one-in-flight per chain, so an op whose
+  // tx never confirms blocks EVERY later op for that chain (the Solana path has no
+  // automatic same-bytes rebroadcast yet). This marks the op `Failed` and applies
+  // the SAME per-kind reversal as the confirm-reverted path (clear a Mint's
+  // `pending_mint_e8s`; restore a NativeWithdrawal's reserved collateral and flip
+  // `Closing -> Open`) so the queue can advance.
+  //
+  // DANGER: the operator MUST first verify on-chain that the op's tx did NOT land.
+  // Marking a Mint `Failed` after its tx actually minted on-chain would leave
+  // icUSD minted with no recorded debt (an unbacked mint). Rejects unless the op
+  // is currently `Inflight`.
   resolve_stuck_settlement_op : (nat32, nat64) -> (Result_1);
+  // Owner-scoped claim resolution: take the canonical backing back, or reissue on the
+  // XRPL. Refused while a signed issuance for the claim is unresolved.
   resolve_xrpl_claim : (ResolveClaimArg) -> (Result_7);
   resume_cksol_icp_payment : (nat64) -> (Result_41);
+  // Owner-scoped: drive one of the caller's operations forward (reconciliation stays
+  // available while issuance or settlement is paused).
   resume_xrpl_operation : (nat64) -> (Result_7);
+  // Request-bound no-dispatch fence. Never replace this with a bare Unseen
+  // query: delayed original calls must find the same durable terminal row.
   retire_stability_pool_liquidate_with_reserves_v2 : (
       nat64,
       nat64,
@@ -2855,135 +3550,503 @@ service : (ProtocolArg) -> {
       nat64,
       principal,
     ) -> (Result_48);
+  // Retry a retained borrowing-fee mint with its original ledger tuple, or
+  // retry its idempotent treasury deposit notification.
   retry_pending_borrow_fee_mint : (nat) -> (Result_1);
+  // Controller-only: retry a HELD borrow fee-remainder mint (no treasury at the debt
+  // commit, or the automatic fresh-nonce budget is exhausted). Refused unless every
+  // earlier fee-mint job is proven unexecuted.
   retry_xrpl_fee_mint : (nat64) -> (Result_7);
+  // Revoke a principal's unused XRP open permit and any in-flight reservation.
   revoke_xrp_open_permit : (principal) -> (Result_31);
   run_xrpl_issuer_setup_step : () -> (Result_49);
+  // Set the AMM1 canister principal for interest donations (developer only).
+  //
+  // `distribute_interest` routes the `Amm1` arm of the N-way interest split to
+  // this principal. Rejects `Principal::anonymous()` defensively so a misformed
+  // admin call cannot leak interest mints to the anonymous principal.
   set_amm1_canister : (principal) -> (Result_1);
+  // Set the canonical AMM1 pool_id used by `donate_icusd_to_amm1`.
+  // Must match the AMM's `make_pool_id(token_a, token_b)` output exactly.
+  // Developer-only.
   set_amm1_pool_id : (text) -> (Result_1);
+  // Set the borrowing fee rate (developer only)
+  // Rate is a decimal: 0.005 = 0.5%, range 0.0–0.10 (10%)
   set_borrowing_fee : (float64) -> (Result_1);
+  // Set the dynamic borrowing fee curve.
+  // Pass None to disable (revert to flat fee).
+  // Accepts a JSON-serialized RateCurveV2.
   set_borrowing_fee_curve : (opt text) -> (Result_1);
   set_bot_allowed_collateral_types : (vec principal) -> (Result_1);
+  // Tolerance (in basis points) added to per-collateral
+  // `min_liquidation_ratio` when the bot calls `bot_claim_liquidation`.
+  // Closes the scan→claim TOCTOU window. See `set_bot_cr_tolerance_bps`.
   set_bot_cr_tolerance_bps : (nat64) -> (Result_1);
+  // Wave-10 LIQ-008: tune the cumulative-debt ceiling for the mass-liquidation
+  // circuit breaker, in icUSD e8s. 0 disables tripping (operator should leave
+  // at 0 for the first 24-48h post-deploy, then set after observing baseline
+  // `windowed_liquidation_total_e8s`). Admin-only.
   set_breaker_window_debt_ceiling_e8s : (nat64) -> (Result_1);
+  // Wave-10 LIQ-008: tune the rolling-window length for the mass-liquidation
+  // circuit breaker, in nanoseconds. 0 disables the breaker entirely (no
+  // recording, no tripping). Admin-only.
   set_breaker_window_ns : (nat64) -> (Result_1);
+  // Phase 1c: developer-gated toggle for the EMERGENCY continuous `eth_getLogs`
+  // burn-watch poll-scan on a chain. Default OFF (notify-then-verify only, via
+  // `submit_burn_proof`). Flip ON only for a targeted catch-up — the scan costs
+  // O(blocks produced), so leave it OFF in steady state. No-op (Ok) if the chain
+  // is not registered. Persisted in `ChainConfigV2.burn_watch_poll_enabled`.
   set_burn_watch_poll_enabled : (nat32, bool) -> (Result_1);
+  // Developer-gated threshold setter. `None` disables the circuit for the chain
+  // and clears any existing latch; `Some(0)` is rejected to avoid ambiguous
+  // always-trip semantics.
   set_chain_bad_debt_circuit_threshold : (nat32, opt nat) -> (Result_1);
   set_chain_config : (nat32, UpdateChainConfigArg) -> (Result_1);
+  // Record the deployed `IcUSD.sol` (or equivalent) contract address for a chain.
+  // Developer-gated.
   set_chain_contract : (nat32, text) -> (Result_1);
+  // Persist Tier-B debt knobs for a chain. Missing config means the compile-time
+  // defaults from `chain_collateral_config` remain authoritative.
   set_chain_debt_config : (nat32, ChainDebtConfigV1) -> (Result_1);
+  // Task 12: tune the interest-realization dust floor (e8s) — accrued interest
+  // below this is not minted (its gas would dwarf the interest). Default 0.01
+  // icUSD. Developer-gated.
   set_chain_interest_min_realize_e8s : (nat) -> (Result_1);
+  // Task 12: tune the foreign-chain interest-harvest interval (seconds). Default
+  // ~1 year (effectively OFF). Re-registers the timer in place. Rejects `secs ==
+  // 0` (the register fn also floors a 0 to the 1-year default). Developer-gated.
   set_chain_interest_tick_interval_secs : (nat64) -> (Result_1);
+  // Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
+  // wiring + risk knobs the bot path will read. Developer-gated. The config is
+  // validated (known EVM chain in Registered or Disabled state, EVM addresses
+  // well-formed, penalty cushion safe) before persisting; enabling also checks
+  // the UniswapV2 factory-derived pair matches the pinned pair. This permits
+  // closed staging without opening a public risk window. A rejected config
+  // mutates nothing.
   set_chain_liquidation_config : (nat32, ChainLiquidationConfigV1) -> (
       Result_1,
     );
+  // Set the production tECDSA key name for the EVM chains rail (developer-gated).
+  // Intended for a FRESH production canister: set `key_1` BEFORE registering any
+  // chain, so all custody/settlement/treasury addresses derive from the
+  // production threshold key. Rejected once any EVM setup or key-bound state
+  // exists, even if a staged chain is still Disabled and has no vaults.
+  // kvg63 staging keeps the default `test_key_1`.
   set_chains_ecdsa_key_name : (text) -> (Result_1);
+  // Wave-9c DOS-005: tune the alert-band width (in bps) used by
+  // `check_vaults` to bound the sorted-troves walk on band-only ticks.
+  // Default 1000 bps (10% headroom above the worst per-collateral
+  // `min_liquidation_ratio`). 0 disables the band (only vaults strictly
+  // below the worst floor are visited). Wider values trade cycle savings
+  // for safety margin against cross-collateral CR-key drift.
   set_check_vaults_alert_band_bps : (nat64) -> (Result_1);
+  // Wave-9c DOS-005: tune the cadence of the safety-belt full sweep that
+  // walks every vault in `vault_cr_index` regardless of CR band.
+  // Default 12 (one full sweep per hour at the 5-minute XRC cadence).
+  // 0 or 1 forces full sweep every tick (revert path that mirrors
+  // pre-Wave-9c behavior).
   set_check_vaults_full_sweep_every_n_ticks : (nat64) -> (Result_1);
   set_cksol_icp_reserve : (nat64) -> (Result_10);
   set_cksol_relay_budget : (nat64) -> (Result_10);
+  // Set the fee rate charged on ckUSDT/ckUSDC repayments (developer only)
+  // Rate is a decimal: 0.0002 = 0.02%, max 0.05 = 5%
   set_ckstable_repay_fee : (float64) -> (Result_1);
+  // Set the borrow threshold ratio for a specific collateral type (developer only).
+  // e.g. 1.55 = 155%. Must be strictly greater than liquidation_ratio
+  // and strictly less than healthy_cr if healthy_cr is set.
   set_collateral_borrow_threshold : (principal, float64) -> (Result_1);
+  // Set the borrowing fee for a specific collateral type (developer only).
+  // e.g. 0.005 = 0.5%, 0.001 = 0.1%. Range 0.0–0.10.
   set_collateral_borrowing_fee : (principal, float64) -> (Result_1);
   set_collateral_debt_ceiling : (principal, nat64) -> (Result_1);
+  // Set the display color (hex) for a collateral type, used by frontend (developer only).
+  // Pass None to clear.
   set_collateral_display_color : (principal, opt text) -> (Result_1);
+  // Set the ledger fee for a specific collateral type (developer only).
+  // `ledger_fee` is in the collateral token's native units.
+  // Note: the backend also auto-syncs this from BadFee errors during transfers.
   set_collateral_ledger_fee : (principal, nat64) -> (Result_1);
+  // Set the liquidation bonus for a specific collateral type (developer only).
+  // e.g. 1.10 = 10% bonus. Range 1.0–1.5.
   set_collateral_liquidation_bonus : (principal, float64) -> (Result_1);
+  // Set the liquidation ratio for a specific collateral type (developer only).
+  // e.g. 1.25 = 125%. Must be strictly less than borrow_threshold_ratio.
   set_collateral_liquidation_ratio : (principal, float64) -> (Result_1);
+  // Set the minimum collateral deposit for a specific collateral type (developer only).
+  // `min_collateral_deposit` is in the collateral token's native units.
   set_collateral_min_deposit : (principal, nat64) -> (Result_1);
+  // Set the minimum vault debt (dust threshold) for a specific collateral type (developer only).
+  // `min_vault_debt` is in icUSD e8s.
   set_collateral_min_vault_debt : (principal, nat64) -> (Result_1);
+  // Wave-14a CDP-14 follow-up: set the per-collateral XRC source-count floor
+  // override. `None` clears the override and the collateral inherits the
+  // global floor (`State.min_xrc_sources_used`, default 3). `Some(0)` is a
+  // per-collateral kill switch (matches the global semantics).
+  //
+  // Use case: collaterals whose underlying asset has genuinely thin CEX
+  // coverage on XRC (e.g. XAUT, listed on only a handful of exchanges)
+  // chronically fall short of the strict floor=3 gate even when XRC is
+  // healthy. Dropping the floor to 2 for those specific assets stops the
+  // rejection-event flood without weakening the gate for the rest.
   set_collateral_min_xrc_sources : (principal, opt nat32) -> (Result_1);
+  // 2026-07-03 cycle-burn optimization: tune the background XRC price-refresh
+  // cadence (seconds) for a SINGLE non-ICP collateral. Default (unset) is 300s.
+  // Re-registers that collateral's price timer in place; no upgrade required.
+  //
+  // Trade-off: this timer is a background refresh feeding query displays and the
+  // liquidation sweep's cached-price read. User mint/withdraw/borrow always force
+  // an on-demand XRC fetch when the cache is older than
+  // `PRICE_FRESHNESS_THRESHOLD_NANOS` (60s), so RAISING this never affects
+  // user-operation pricing. It DOES mean the liquidation sweep for this
+  // collateral may act on a price up to `secs` old, so keep debt-bearing,
+  // volatile collateral tight (300-900s) and only stretch idle / low-debt
+  // collateral. The 10-minute hard oracle-staleness ceiling
+  // (`ensure_fresh_price_for`) still fail-closes user ops regardless.
+  //
+  // ICP is rejected: it is driven by its own Timer A, tuned via
+  // `set_xrc_fetch_interval_secs`, not the per-collateral price timer.
   set_collateral_price_fetch_interval_secs : (principal, nat64) -> (Result_1);
+  // Set the redemption fee ceiling for a specific collateral type (developer only).
+  // e.g. 0.05 = 5%. Must be ≥ redemption_fee_floor. Range 0.0–0.50.
   set_collateral_redemption_fee_ceiling : (principal, float64) -> (Result_1);
+  // Set the redemption fee floor for a specific collateral type (developer only).
+  // e.g. 0.005 = 0.5%. Must be ≤ redemption_fee_ceiling.
   set_collateral_redemption_fee_floor : (principal, float64) -> (Result_1);
   set_collateral_status : (principal, CollateralStatus) -> (Result_1);
+  // Wave-8e LIQ-005: set the deficit-driven ReadOnly auto-latch threshold (e8s).
+  // 0 disables the latch. Operator should leave at 0 for the first 24-48h
+  // post-deploy and set after observing baseline deficit accrual.
   set_deficit_readonly_threshold_e8s : (nat64) -> (Result_1);
+  // Wave-8e LIQ-005: tune the per-fee fraction routed to deficit repayment.
+  // Default 0.5; bounded [0.0, 1.0]. 0.0 disables repayment; 1.0 routes the
+  // entire fee until the deficit is cleared.
   set_deficit_repayment_fraction : (float64) -> (Result_1);
+  // LIQ-0XX: set the global dust-liquidation threshold (developer only).
+  // Amount is in e8s, <= 10_000_000_000 (100 icUSD). A vault whose debt is at
+  // or below this threshold is always liquidated in full (never partially) —
+  // see `State::effective_liquidation_amount`. `0` disables the dust-forces-
+  // full-close rule and the dust-threshold extension to the LIQ-003 residual
+  // round-up; the per-collateral `min_vault_debt` round-up still applies
+  // regardless.
   set_dust_liquidation_threshold : (nat64) -> (Result_1);
+  // Override the EVM RPC canister principal the shared EVM wrapper talks to.
+  // This PocketIC/local-test escape hatch is developer-gated and may select a
+  // non-default principal only while the EVM rail is truly fresh. Once any EVM
+  // setup or trust-bound state exists, only an idempotent same-principal call is
+  // accepted; production chain 1030 separately requires the official default.
   set_evm_rpc_principal : (principal) -> (Result_1);
+  // Set the global cap on total icUSD that can be minted (developer only).
+  // Amount is in e8s. e.g. 3_000_000_000_000 = 30,000 icUSD.
   set_global_icusd_mint_cap : (nat64) -> (Result_1);
+  // Set the healthy CR override for a collateral type.
+  // `healthy_cr`: None = reset to default (1.5x borrow threshold).
   set_healthy_cr : (principal, opt float64) -> (Result_1);
+  // Enable or disable ICPswap-backed swap routing. When disabled, the frontend
+  // skips all ICPswap providers and falls back to Rumi AMM + 3pool only.
   set_icpswap_routing_enabled : (bool) -> (Result_1);
+  // Set the interest flush threshold (developer only).
+  // Interest is accumulated per collateral type and flushed to pools/treasury
+  // when any bucket reaches this threshold. Default is 10_000_000 (0.1 icUSD).
   set_interest_flush_threshold : (nat64) -> (Result_1);
+  // Set the share of interest revenue sent to the stability pool (0.0–1.0).
+  // Remainder goes to protocol treasury. Default: 0.75 (75%).
   set_interest_pool_share : (float64) -> (Result_1);
+  // Set the base interest rate APR for a specific collateral type (developer only).
+  // e.g. 0.02 = 2% APR, 0.005 = 0.5% APR.
   set_interest_rate : (principal, float64) -> (Result_1);
+  // Set the N-way interest revenue split. Each recipient is a (destination, bps) pair.
+  // Destination: "stability_pool", "treasury", or "three_pool".
+  // All bps must sum to exactly 10,000.
   set_interest_split : (vec InterestSplitArg) -> (Result_1);
+  // Wave-14b CDP-12 follow-up: tune the Timer B (interest accrual +
+  // treasury drains) interval in seconds. Default 300. Re-registers in
+  // place.
+  //
+  // Trade-offs: cheap in cycles (pure in-memory work + 3 short ICRC calls).
+  // Lowering tightens interest precision and treasury drain cadence at
+  // negligible cost. Raising makes interest accrual lumpier but doesn't
+  // break anything.
   set_interest_treasury_tick_interval_secs : (nat64) -> (Result_1);
+  // Manual EVM observer cursor writes are disabled. A developer-supplied height
+  // is not proof of contiguous Burn-log coverage or current external finality;
+  // only the observer's completed scan may advance the cursor and proof floor.
+  // Fresh-chain activation remains unavailable until a separately verified
+  // quorum-tip setup path is implemented.
   set_last_observed_block : (nat32, nat64) -> (Result_1);
+  // Set the liquidation bonus multiplier (developer only)
+  // Rate is a decimal: 1.1 = 110% (10% bonus), range 1.0–1.5
   set_liquidation_bonus : (float64) -> (Result_1);
   set_liquidation_bot_config : (principal, nat64) -> (Result_1);
+  // Wave-5 LIQ-007: toggle the liquidation kill switch. When true, all
+  // liquidation endpoints reject with TemporarilyUnavailable. Independent of
+  // `frozen` (which halts everything) and `Mode::ReadOnly` (which auto-latches
+  // on TCR < 100% but lets liquidations through). Use during a confirmed oracle
+  // outage where liquidating against the cached price would be unsafe.
   set_liquidation_frozen : (bool) -> (Result_1);
+  // Wave-8b LIQ-002: tune the liquidation-ordering tolerance band. The band is
+  // expressed in absolute CR units (e.g., 0.01 = 1% CR = 100 bps). Liquidator
+  // endpoints accept a vault only if its CR is within `tolerance` of the
+  // lowest-CR vault. Widening to 1.0 effectively disables the gate (all
+  // indexed vaults are in band); shrinking to 0 forces strict worst-first
+  // ordering. Default is `DEFAULT_LIQUIDATION_ORDERING_TOLERANCE` (1%).
   set_liquidation_ordering_tolerance : (nat64) -> (Result_1);
+  // Set the global liquidation protocol share (fraction of liquidator's bonus profit).
+  // Default: 0.03 (3%). Range: 0.0–1.0.
   set_liquidation_protocol_share : (float64) -> (Result_1);
+  // Set the LST haircut for a collateral type that uses LstWrapped price source.
+  // Haircut is a decimal: 0.07 = 7%, range 0.0–0.50.
   set_lst_haircut : (principal, float64) -> (Result_1);
+  // Set a manual collateral price override for `(chain, symbol)` as a USD e8
+  // value (e.g. $2.00 == 2_0000_0000). Phase 1b uses manual prices for foreign
+  // collateral; a real oracle is a later task. Callable by the developer OR the
+  // narrowly-scoped price-pusher principal (audit F-01) so the always-online CFX
+  // price monitor can refresh without holding the full developer key. Stamps the
+  // write time so `get_manual_collateral_price` can expose freshness.
+  //
+  // Refuses outright, for EVERY caller, while the pair is XRC-managed (see the
+  // one-price-writer gate in the body): manual pricing is available only while
+  // the chain is disabled.
   set_manual_collateral_price : (nat32, text, nat64) -> (Result_1);
+  // Set the minimum icUSD amount for borrow/repay/redemption/liquidation operations (developer only).
+  // Amount is in e8s. Must be > 0 and <= 10_000_000_000 (100 icUSD).
   set_min_icusd_amount : (nat64) -> (Result_1);
+  // Wave-14a CDP-14: tune the XRC source-count floor. Default is 3 (set
+  // via `xrc::MIN_XRC_SOURCES`); 0 disables the gate entirely. Used by ops
+  // to slacken the requirement if XRC's aggregation degrades industry-
+  // wide, or to tighten it when more depth is available.
   set_min_xrc_sources_used : (nat32) -> (Result_1);
+  // Phase 1b Task 15: tune the Monad inbound observer fan-out interval in
+  // seconds. Default 300. Re-registers in place.
+  //
+  // Rejects `secs == 0` (belt-and-suspenders with the hard floor in
+  // `register_observer_timer`). Lowering tightens deposit-detection and
+  // burn-observation latency at the cost of more frequent EVM RPC polling;
+  // raising slows it. Same per-chain re-entrancy-guard skip behavior as the
+  // settlement timer.
   set_observer_tick_interval_secs : (nat64) -> (Result_1);
+  // Grant, rotate, or revoke (`None` principal) the narrowly-scoped price-pusher.
+  // `allowed` is the exact set of `(chain_id, symbol)` pairs the pusher may set —
+  // it may set NOTHING outside this list (and the developer is never constrained
+  // by it). Passing an empty `allowed` with a `Some` principal registers a pusher
+  // that can set nothing (fail-closed) until scope is granted. The pusher may ONLY
+  // call `set_manual_collateral_price`, never any other endpoint. Developer-gated.
   set_price_pusher_principal : (opt principal, vec record { nat32; text }) -> (
       Result_1,
     );
+  // Set rate curve markers for a collateral type or the global default.
+  // `collateral_type`: None = update global default curve; Some(principal) = per-asset curve.
+  // `markers`: Vec of (cr_level, multiplier) pairs, sorted ascending by cr_level.
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (
       Result_1,
     );
+  // Set the recovery CR multiplier (developer only).
+  // recovery_cr = borrow_threshold × multiplier.
+  // Example: multiplier = 1.0333, borrow_threshold = 1.50 → recovery_cr = 1.55.
   set_recovery_cr_multiplier : (float64) -> (Result_1);
+  // Set per-collateral recovery mode overrides for borrowing fee and interest rate (developer only).
+  // Pass None to clear an override (reverts to normal value during Recovery).
   set_recovery_parameters : (principal, opt float64, opt float64) -> (Result_1);
+  // Set the recovery rate curve (Layer 2 system-wide multipliers).
+  // `markers`: Vec of (SystemThreshold variant name, multiplier) pairs.
   set_recovery_rate_curve : (vec record { text; float64 }) -> (Result_1);
+  // Legacy: set the recovery target CR as an absolute value.
+  // Kept for Candid backwards compat. Internally converts to multiplier.
   set_recovery_target_cr : (float64) -> (Result_1);
+  // Set the redemption fee ceiling (developer only)
+  // Rate is a decimal: 0.05 = 5%, range 0.0–0.50
   set_redemption_fee_ceiling : (float64) -> (Result_1);
+  // Set the redemption fee floor (developer only)
+  // Rate is a decimal: 0.005 = 0.5%, range 0.0–0.10
   set_redemption_fee_floor : (float64) -> (Result_1);
+  // Set the redemption priority tier for a collateral type (developer only).
+  // Tier 1 = redeemed first, tier 3 = redeemed last.
   set_redemption_tier : (principal, nat8) -> (Result_1);
+  // Set the flat fee for reserve redemptions (developer only)
+  // Rate is a decimal: 0.003 = 0.3%, range 0.0–0.10
   set_reserve_redemption_fee : (float64) -> (Result_1);
+  // Enable or disable reserve redemptions (developer only)
   set_reserve_redemptions_enabled : (bool) -> (Result_1);
+  // Set the RMR ceiling (0.0–1.0). Must be ≥ current rmr_floor.
   set_rmr_ceiling : (float64) -> (Result_1);
+  // Set the CR below which the RMR ceiling applies (≥ 1.0). Must be ≤ current rmr_floor_cr.
   set_rmr_ceiling_cr : (float64) -> (Result_1);
+  // Set the RMR floor (0.0–1.0). Must be ≤ current rmr_ceiling.
   set_rmr_floor : (float64) -> (Result_1);
+  // Set the CR above which the RMR floor applies (≥ 1.0). Must be ≥ current rmr_ceiling_cr.
   set_rmr_floor_cr : (float64) -> (Result_1);
+  // Phase 1b Task 15: tune the Timer D (Monad outbound settlement fan-out)
+  // interval in seconds. Default 300. Re-registers in place.
+  //
+  // Rejects `secs == 0` (belt-and-suspenders with the hard floor in
+  // `register_settlement_timer`, which would coerce a 0 to 30 anyway). Lowering
+  // makes mint/withdrawal settlement land faster (one op per chain per tick) at
+  // the cost of more frequent EVM RPC polling; raising slows settlement
+  // throughput. The per-chain re-entrancy guard means a tick that out-runs the
+  // interval is simply skipped, so a low interval never stacks concurrent runs.
   set_settlement_tick_interval_secs : (nat64) -> (Result_1);
+  // Developer-gated: set the SOL RPC canister principal override (mock/staging).
   set_sol_rpc_principal : (principal) -> (Result_1);
+  // Developer-gated (M2 Task 8): enable or disable the Solana observer +
+  // settlement workers. While `false` (the default on every existing snapshot),
+  // the chain-kind timer dispatch SKIPS the Solana `run_observer` /
+  // `run_settlement` even when a Solana chain is registered, so Solana burns no
+  // signing-subnet / SOL-RPC cycles until the operator flips this on. Monad chains
+  // are unaffected (they always run). Takes effect on the NEXT timer tick (the
+  // dispatcher reads the flag each tick); no upgrade or timer re-registration
+  // needed.
   set_solana_workers_enabled : (bool) -> (Result_1);
+  // Wave-8c LIQ-004: toggle the SP-writedown kill switch. When true, both
+  // `stability_pool_liquidate_debt_burned` and
+  // `stability_pool_liquidate_with_reserves` reject with
+  // TemporarilyUnavailable. Independent of `frozen` (global emergency stop)
+  // and `liquidation_frozen` (Wave-5 blanket liquidation halt). Use during a
+  // confirmed SP compromise or drift event so user-initiated liquidations
+  // stay open.
   set_sp_writedown_disabled : (bool) -> (Result_1);
   set_stability_pool_principal : (principal) -> (Result_1);
+  // Set the ckUSDT or ckUSDC ledger principal (developer only)
   set_stable_ledger_principal : (StableTokenType, principal) -> (Result_1);
+  // Enable or disable a specific stable token for repayments/liquidations (developer only)
   set_stable_token_enabled : (StableTokenType, bool) -> (Result_1);
+  // Set the 3pool canister principal for interest donations (developer only).
   set_three_pool_canister : (principal) -> (Result_1);
   set_three_usd_reserve_ingress_enabled : (bool) -> (Result_1);
   set_treasury_principal : (principal) -> (Result_1);
+  // Wave-14b CDP-12 follow-up: tune the Timer C (vault health sweep +
+  // aggregate snapshot refresh) interval in seconds. Default 600.
+  // Re-registers in place.
+  //
+  // Trade-offs: this is the liquidation-latency knob. Lowering means
+  // liquidations dispatch faster (bot/SP get notified within seconds of
+  // a vault becoming unhealthy) at the cost of running the Wave-9c
+  // sharded `check_vaults` walk more often. Raising slows liquidation
+  // response but is still bounded by the 10-minute oracle staleness gate.
   set_vault_check_tick_interval_secs : (nat64) -> (Result_1);
+  // Wave-14b CDP-12 follow-up: tune the Timer A (XRC fetch) interval in
+  // seconds. Default 300. Re-registers the timer in place; no upgrade
+  // required for the change to take effect.
+  //
+  // Trade-offs: lowering this means more XRC calls per minute (~1B cycles
+  // each for the ICP/USD pair). Most callers hit the cached price via the
+  // PRICE_FRESHNESS_THRESHOLD_NANOS gate anyway, so the timer is mainly a
+  // defense-in-depth refresh; 60s would 5x XRC cycle cost. Raising means
+  // staler cached prices, which the staleness gate (10 min hard) and the
+  // CDP-01 consecutive-failure breaker still bound.
   set_xrc_fetch_interval_secs : (nat64) -> (Result_1);
   set_xrp_schnorr_key_name : (text) -> (Result_1);
   set_xrpl_icusd_pauses : (SetPausesArg) -> (Result_12);
+  // DISABLED (2026-08-20, de-scaffold pass). This was the unverified, freeform-
+  // proof-string reconciliation path for the SP pending-burn accounting: any
+  // caller passing the developer gate could book an arbitrary `amount_e8s` with
+  // nothing but a human-typed `proof` string, no receipt verification at all.
+  // The receipt-verified replacement, `settle_pending_chain_burn_with_proof`,
+  // actually fetches and validates the on-chain burn receipt before settling.
+  // The candid signature is kept EXACTLY as-is (a breaking removal would ripple
+  // into any live caller still pointed at the old method); the body now just
+  // refuses, unconditionally, before touching state or the caller's identity.
   settle_pending_chain_burn : (nat32, nat, text) -> (Result_1);
+  // Developer-gated proof-backed reconciliation for the SP pending-burn path.
   settle_pending_chain_burn_with_proof : (nat32, BurnSettlementProofArg) -> (
       Result_1,
     );
+  // DISABLED (2026-08-20, de-scaffold pass). Same rationale as
+  // `settle_pending_chain_burn` above, for Tier-1 reserve retirement: the
+  // receipt-verified replacement is `settle_reserve_burn_with_proof`.
   settle_reserve_burn : (nat32, nat, text) -> (Result_1);
+  // Developer-gated proof-backed reconciliation for Tier-1 reserve retirement.
   settle_reserve_burn_with_proof : (nat32, ReserveSettlementProofArg) -> (
       Result_1,
     );
+  // P4 (native-XRP collateral): settle an XRP collateral claim by signing +
+  // submitting a Payment from the source vault's custody address to `destination`
+  // (claimant bears the fee). Claimant-only. Returns the local tx hash.
   settle_xrp_claim : (nat64, text) -> (Result_2);
+  // XRP-007: settle an XRP collateral claim to a destination that requires an XRPL
+  // destination tag. The legacy untagged endpoint remains available for ordinary
+  // self-custody addresses.
   settle_xrp_claim_with_tag : (nat64, text, nat32) -> (Result_2);
+  // M2 durable-nonce bootstrap: idempotently create + initialize the settlement
+  // key's durable nonce account on Solana devnet. Developer-gated; the operator
+  // runs this once per settlement key. If the nonce account already holds an
+  // Initialized durable nonce, this is a no-op (returns Ok). Otherwise it obtains a
+  // real recent blockhash, builds the 2-instruction create+initialize transaction,
+  // multi-signs it (fee payer + new nonce account, both threshold-Ed25519), and
+  // broadcasts it. Subsequent settlement transactions reference the durable nonce
+  // so build->sign(slow)->broadcast stays valid across async gaps.
+  //
+  // `blockhash` (playbook #4): `getLatestBlockhash` changes every slot, so the
+  // DFINITY sol-rpc canister's multi-provider consensus almost never agrees on it
+  // and chronically returns `#Inconsistent` - which the canister-side auto-fetch
+  // rejects. So on real devnet/mainnet the operator obtains a fresh finalized
+  // blockhash out-of-band (e.g. `solana blockhash`, or a single-provider
+  // `getLatestBlockhash`) and passes it here as a 32-byte base58 string; it is fed
+  // straight into the create-nonce tx, bypassing the broken consensus fetch. Pass it
+  // promptly: blockhashes expire (~60s). The no-arg/`None` path auto-fetches and
+  // only works where multi-provider consensus on `getLatestBlockhash` is possible
+  // (the PocketIC mock / a consensus-capable environment).
   solana_bootstrap_nonce : (opt text) -> (Result_1);
+  // M1 read-seam probe: read a SOL balance (lamports) via the SOL RPC canister.
   solana_get_balance : (text) -> (Result);
+  // M1 read-seam probe: read the registered icUSD SPL mint's on-chain supply.
   solana_get_mint_supply : () -> (Result);
+  // M1 read-seam probe: derive and return the Solana settlement (mint-authority)
+  // address. Developer-gated. Exercises threshold Ed25519 on devnet/staging.
   solana_settlement_address : () -> (Result_2);
+  // M2 sign-seam probe: build, threshold-Ed25519 sign, and return the legacy wire
+  // bytes of a System Transfer from the Solana settlement address to `to` for
+  // `lamports`. Developer-gated. Uses a dummy (all-zero) blockhash, so the bytes
+  // are NOT broadcastable (sign-validity is what we prove here); the real broadcast
+  // path fetches a fresh blockhash and calls `sol_rpc::send_transaction`. The
+  // returned bytes are `[compact-u16 sig count][64-byte sig][serialized message]`.
   solana_sign_test_transfer : (text, nat64) -> (Result_50);
   stability_pool_cancel_liquidation : (blob) -> (Result_51);
+  // Bind an absent prepare retirement to every immutable request field and
+  // its frozen payment ledger; no mutable admission gates run during recovery.
   stability_pool_cancel_liquidation_bound : (
       SpLiquidationRequest,
       principal,
     ) -> (Result_51);
   stability_pool_execute_liquidation : (blob) -> (Result_51);
   stability_pool_liquidate : (nat64, nat64) -> (Result_52);
+  // Called by the stability pool after it has burned IC-native icUSD to absorb a
+  // bot-failed foreign-chain vault. This does NOT burn the eSpace icUSD
+  // representation; it writes debt -> pending_chain_burn and reserves seized CFX
+  // in a `ChainLiqClaimV1` for later SP depositor claims.
   stability_pool_liquidate_chain_vault : (nat64, nat64, SpWritedownProof) -> (
       Result_53,
     );
+  // Called by the stability pool after it has already burned icUSD (via 3pool atomic burn).
+  // Writes down the vault's debt and releases proportional collateral to the caller.
+  // Only callable by the registered stability pool canister.
+  //
+  // Wave-8d LIQ-004 Phase 2: `proof` is required. The SP must pass an
+  // ICRC-3 burn block index pointing at a real burn on the icUSD ledger;
+  // the backend verifies the block matches the expected memo, amount, and
+  // `from` account before accepting the writedown.
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
       Result_52,
     );
+  // Called by the stability pool to liquidate a vault using 3USD reserves.
+  // The SP must have approved this canister to spend `three_usd_amount_e8s` on `three_usd_ledger`.
+  // Validates vault first, then pulls 3USD, then writes down debt and releases collateral.
+  // Only callable by the registered stability pool canister.
+  //
+  // Wave-8d LIQ-004 Phase 2: the backend builds the writedown proof
+  // internally from the block index returned by `transfer_3usd_to_reserves`.
+  // The SP does not pass a proof on this path (the block does not exist
+  // until after the backend's own transfer), so the proof argument has been
+  // retired from the entry point's surface; vault binding is enforced by
+  // `liquidate_vault_debt_already_burned`'s `vault_id_memo == vault_id`
+  // assertion. This legacy reserve path does not bind transaction metadata;
+  // the default-account P08 V2 path verifies the exact ICRC-2 memo/CAT tuple.
+  // Replay defense via
+  // `consumed_writedown_proofs` and on-chain account/amount validation
+  // remain in force.
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
       Result_52,
     );
+  // V2 reserve ingress: the absorb identity and full ICRC-2 tuple are journaled
+  // before dispatch. Repeating the same ID resumes that exact operation.
   stability_pool_liquidate_with_reserves_v2 : (
       nat64,
       nat64,
@@ -2993,41 +4056,139 @@ service : (ProtocolArg) -> {
     ) -> (Result_52);
   stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_54);
   stability_pool_liquidation_status : (blob) -> (Result_51) query;
+  // Called by the stability pool immediately before a fresh IC-native icUSD burn.
+  // This lets the backend kill switch and live-debt check reject before the SP
+  // spends funds. It is intentionally non-mutating; the post-burn endpoint still
+  // performs the same checks before consuming the proof.
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result_1);
   stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_55);
+  // Durable ordinary Stability Pool liquidation rail. The four wrappers are
+  // intentionally isolated from the compatibility endpoints above so existing
+  // clients keep their current Candid surface while the SP migrates to the
+  // request-ID protocol.
   stability_pool_prepare_liquidation : (SpLiquidationRequest) -> (Result_51);
+  // Recovery-only wrapper: it deliberately skips the normal mode/oracle gate
+  // because a positive proof for an already-dispatched immutable tuple must
+  // remain usable after a freeze, price change, upgrade, or archive transition.
   stability_pool_reconcile_liquidation_payment : (blob, nat64) -> (Result_51);
+  // Recovery-only wrapper for the exact SP collateral payout. This can reattach
+  // a generic worker's settled operation when its pending row has already been
+  // removed, but only after the full frozen payout tuple proves the block.
   stability_pool_reconcile_liquidation_payout : (blob, nat64) -> (Result_51);
+  // Recovery-only wrapper for the exact protocol-fee collateral transfer.
   stability_pool_reconcile_liquidation_protocol_fee : (blob, nat64) -> (
       Result_51,
     );
   stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_31);
+  // SP auto-settlement sweep: settle a depositor's XRP payout claim to the
+  // XRPL address they registered when opting into XRP absorption. Caller must
+  // be the registered stability pool; the claim must belong to `claimant`;
+  // quarantined claims are refused. Delegates to the same settlement machinery
+  // as the claimant-facing endpoints (per-custody sequence lock +
+  // confirm-before-sign idempotency), so an SP sweep racing a manual settle
+  // click cannot double-pay.
   stability_pool_settle_xrp_claim : (nat64, principal, text, opt nat32) -> (
       Result_2,
     );
+  // Read the exact persisted result for a native-XRP absorb recovery attempt.
   stability_pool_xrp_absorb_status : (XrpSpAbsorbRequest) -> (Result_56);
+  // Called by the Stability Pool before it clears a native-XRP payout reminder.
+  // Returns true only while the backend still has an outstanding claim for that
+  // exact depositor; false means the claim is absent and the SP reminder may be
+  // removed.
   stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_31);
   start_cksol_deposit : () -> (Result_57);
   start_cksol_deposit_paid : (nat64, nat64) -> (Result_9);
   start_cksol_deposit_with_icp : (nat64, nat64, nat64, nat64, nat64) -> (
       Result_41,
     );
+  // Phase 1c notify-then-verify: submit a burn transaction hash for verification.
+  //
+  // OPERATOR-ONLY: only the configured non-anonymous developer may submit a tx
+  // hash. The verify path (`verify_and_apply_burn_proof`) fetches the receipt via ONE
+  // `eth_getTransactionReceipt`, rejects forgeries (only Burn logs emitted by the
+  // configured icUSD contract count, and the amount/vault come FROM the log, never
+  // from the caller), requires finality, and dedups by chain-qualified replay IDs
+  // until the observer advances a monotonic finalized-coverage floor. Covered
+  // historical replays are rejected, so pruning observer cache entries cannot
+  // make an old burn eligible again. Returns newly applied burns. This replaces
+  // the continuous `eth_getLogs` burn-scan as
+  // the PRIMARY burn-observation path (one outcall per actual burn instead of
+  // O(blocks produced)).
+  //
+  // Finality lag is surfaced as `TemporarilyUnavailable` so the caller (the
+  // frontend, per plan Task 7) can poll-and-retry until the receipt is final.
+  //
+  // This closes the global admission-budget starvation path: a per-caller limit
+  // cannot prevent attackers rotating principals, while any rejected caller is
+  // stopped before the receipt and finality RPCs. A future permissionless lane
+  // requires a global anti-Sybil admission design.
   submit_burn_proof : (nat32, text) -> (Result_58);
+  // XRP-006: developer cleanup marks an abandoned native-XRP open as a durable
+  // tombstone. The original custody binding remains confirmable by its owner.
   sweep_xrp_pending_open : (nat64) -> (Result_1);
+  // Lift the freeze. Operations resume under whatever mode is currently active.
   unfreeze_protocol : () -> (Result_1);
+  // Update any per-collateral parameter (developer only).
+  // Replaces the entire CollateralConfig for the given collateral type.
+  // Use `get_collateral_config` to fetch the current config, modify fields, then pass back.
   update_collateral_config : (principal, CollateralConfig) -> (Result_1);
   verify_xrpl_icusd_minting_account : () -> (Result_59);
   withdraw_and_close_vault : (nat64) -> (Result_11);
+  // Phase 1b Task 13: withdraw foreign-chain EVM (Monad or Conflux) collateral.
+  //
+  // Resolves the vault's chain from state, then CR-checks the REMAINING
+  // collateral against that chain's `min_cr_e4` (debt-free vaults skip the
+  // check), RESERVES the withdrawn amount (decrements `collateral_amount_native`
+  // at enqueue), and enqueues a `NativeWithdrawal` op that Timer D signs and
+  // broadcasts. A vault that becomes empty AND debt-free flips to `Closing` here
+  // and `Closed` once the transfer confirms.
+  //
+  // There is NO repay endpoint: the user burns icUSD on-chain and the burn-watch
+  // observer decrements `debt_e8s` + chain supply. This path moves only
+  // collateral. Synchronous — `dest_address` is supplied by the caller, so no
+  // tECDSA derive is needed; signing happens later in Timer D. Developer-gated.
+  //
+  // CONCURRENCY INVARIANT (audit FLAG-16): this MUST stay synchronous. Its
+  // safety against double-withdraw rests on the reserve-at-enqueue happening
+  // atomically within this single message (no `GuardPrincipal` is taken, unlike
+  // the ICP-native vault ops). Adding ANY `.await` here re-opens a read->await->
+  // write race; if you must, acquire a per-vault `GuardPrincipal` first.
   withdraw_chain_collateral : (nat64, nat, text) -> (Result_1);
+  // EVM-signed `WithdrawCollateral` (synchronous; spend-on-success). The released
+  // collateral goes to `owner_evm` (recipient forced == owner).
   withdraw_chain_collateral_evm : (VaultIntent, blob) -> (Result_1);
   withdraw_collateral : (nat64) -> (Result);
   withdraw_liquidity : (nat64) -> (Result);
   withdraw_liquidity_with_id : (nat, nat64) -> (Result);
   withdraw_partial_collateral : (VaultArg) -> (Result);
+  // Withdraw Solana collateral (mirrors `withdraw_chain_collateral`).
+  //
+  // CONCURRENCY INVARIANT (audit FLAG-16): keep synchronous — see
+  // `withdraw_chain_collateral`; adding an `.await` needs a per-vault guard.
+  //
+  // CR-checks the REMAINING collateral against `SOLANA_MIN_CR_E4` (debt-free
+  // vaults skip the check), RESERVES the withdrawn lamports, and enqueues a
+  // `NativeWithdrawal` op for the Task-8 settlement worker to sign + broadcast. A
+  // vault that becomes empty AND debt-free flips to `Closing` here. There is NO
+  // repay endpoint: the user burns icUSD on Solana and burn-watch decrements
+  // `debt_e8s` + chain supply. Synchronous (the `dest_address` is supplied by the
+  // caller; signing happens later in the settlement worker). Developer-gated.
   withdraw_solana_collateral : (nat64, nat, text) -> (Result_1);
   withdraw_vault51_settled_icp : () -> (Result_4);
+  // P1 observability (developer-gated): read an XRP account's balance in drops from
+  // a public rippled node via the rail's consensus-retry-wrapped outcall. Confirms
+  // the transform shims above resolve and the outcall path works end to end on
+  // testnet. Returns 0 for an unfunded account.
   xrp_balance : (text) -> (Result);
+  // P1 observability (developer-gated): derive the per-vault XRP custody address for
+  // `(user, nonce)` via threshold Ed25519 — the address a future XRP vault would
+  // publish for deposits. No state is written (derivation is idempotent).
   xrp_custody_address : (principal, nat64) -> (Result_2);
+  // P1 observability (developer-gated, no funds touched): derive the protocol's XRP
+  // settlement (custody) classic address via threshold Ed25519 and return it, so an
+  // operator can see it on XRPL testnet. The chains::xrp module is dormant; this
+  // only derives a public address (derivation is free and idempotent).
   xrp_settlement_address : () -> (Result_2);
   xrp_transform_account : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_account_tx : (TransformArgs) -> (HttpResponse) query;

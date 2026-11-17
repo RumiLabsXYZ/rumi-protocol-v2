@@ -7,6 +7,7 @@ export const idlFactory = ({ IDL }) => {
   const UpgradeArg = IDL.Record({
     'mode' : IDL.Opt(Mode),
     'description' : IDL.Opt(IDL.Text),
+    'preserve_sp_liquidation_pause' : IDL.Opt(IDL.Bool),
   });
   const InitArg = IDL.Record({
     'ckusdc_ledger_principal' : IDL.Opt(IDL.Principal),
@@ -4095,6 +4096,7 @@ export const init = ({ IDL }) => {
   const UpgradeArg = IDL.Record({
     'mode' : IDL.Opt(Mode),
     'description' : IDL.Opt(IDL.Text),
+    'preserve_sp_liquidation_pause' : IDL.Opt(IDL.Bool),
   });
   const InitArg = IDL.Record({
     'ckusdc_ledger_principal' : IDL.Opt(IDL.Principal),

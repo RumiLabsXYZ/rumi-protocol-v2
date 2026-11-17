@@ -1,0 +1,32 @@
+{
+  "rawRustExporterSha256": "5294a3721ea1b1df23ee2dd319e1f1cecc83d16507c6133d28fb1f7fbdf8a593",
+  "normalization": "Trailing whitespace only; no type edits or manual merge. Existing backend generator run afterward.",
+  "strictRawNormalizedEquality": "didc check --strict canonical raw-export:PASS",
+  "backwardServiceCompatibility": "didc check canonical before-hold-interface.did:PASS",
+  "semanticDelta": "Only optional UpgradeArg.preserve_sp_liquidation_pause:opt bool. Canonical exporter adds source documentation comments.",
+  "generatedBindings": "scripts/regenerate-declarations.sh rumi_protocol_backend; only canonical .did copies, JS and TS contract changed; index files unchanged",
+  "upgradeArgsTypedEncodeDecode": "PASS (ProtocolArg); mode=null and hold=opt true",
+  "normalRustCandidCompatibility": "pending final frozen-source continuation",
+  "files": {
+    "src/rumi_protocol_backend/rumi_protocol_backend.did": {
+      "sha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+      "bytes": 177354
+    },
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.js": {
+      "sha256": "03dc4d2fe8f155c2dcdf749d1b262099936dc3b9ad116640178317050047b690",
+      "bytes": 137866
+    },
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.d.ts": {
+      "sha256": "acff622a5243a83bc926448401fd53cc2a018e496d372f3a12ea55f8055400a6",
+      "bytes": 114948
+    },
+    "docs/operations/evidence/xrp-cycle-bound-20261116/upgrade-args.did": {
+      "sha256": "60668207d96958a1ccedb424adea0a8f296ecbd1891ce71a41364ca0f569c373",
+      "bytes": 190
+    },
+    "docs/operations/evidence/xrp-cycle-bound-20261116/upgrade-args.hex": {
+      "sha256": "37d9ae24baad43051f8fd1aaa556d6a3911bcb0693ac7e75f0882a5a306ed935",
+      "bytes": 421
+    }
+  }
+}

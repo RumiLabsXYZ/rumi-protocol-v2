@@ -1,0 +1,94 @@
+{
+  "source": "37a1adda2f3e851d7122c1ac6a0dfcc27c4364a6",
+  "tree": "7ab2376761781bb6a5dede1187002b45a199abdb",
+  "allocationId": "a79f9188-6ca0-4db0-b947-d587629bd5d4",
+  "target": "/Users/robertripley/coding/rumi-protocol-v2/target",
+  "before": {
+    "source": "37a1adda2f3e851d7122c1ac6a0dfcc27c4364a6",
+    "tree": "7ab2376761781bb6a5dede1187002b45a199abdb",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "startFreeBytes": 73784467456,
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--lib",
+        "sp_upgrade_hold_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 4,
+      "startedUtc": "2026-11-17T00:14:18Z",
+      "peakRssBytes": 2893561856,
+      "maximumPhysicalGrowthBytes": 81694720,
+      "pid": 59803,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [
+        [
+          "4",
+          "0"
+        ]
+      ],
+      "countMatched": true
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--bin",
+        "rumi_protocol_backend",
+        "check_candid_interface_compatibility",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 1,
+      "startedUtc": "2026-11-17T00:15:26Z",
+      "peakRssBytes": 2471133184,
+      "maximumPhysicalGrowthBytes": 146546688,
+      "pid": 60046,
+      "groupClosed": true,
+      "exitCode": 0,
+      "summaries": [
+        [
+          "1",
+          "0"
+        ]
+      ],
+      "countMatched": true
+    }
+  ],
+  "noDeploy": true,
+  "ownedGroupsClosed": true,
+  "generatedCandidSha256": "5294a3721ea1b1df23ee2dd319e1f1cecc83d16507c6133d28fb1f7fbdf8a593",
+  "result": "PASS",
+  "after": {
+    "source": "37a1adda2f3e851d7122c1ac6a0dfcc27c4364a6",
+    "tree": "7ab2376761781bb6a5dede1187002b45a199abdb",
+    "clean": true,
+    "lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+  },
+  "sourceUnchanged": true,
+  "elapsedSeconds": 125.788,
+  "endFreeBytes": 73636765696,
+  "physicalGrowthBytes": 147701760
+}
