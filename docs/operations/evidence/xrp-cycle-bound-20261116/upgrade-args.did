@@ -1,1 +1,7 @@
-(variant { Upgrade = record { mode = null; description = opt "Bound automatic XRP claim signatures; preserve Stability Pool liquidation pause"; preserve_sp_liquidation_pause = opt true } })
+(variant {
+  Upgrade = record {
+    mode = null;
+    description = opt "Bound automatic XRP claim signatures; preserve Stability Pool liquidation pause";
+    preserve_sp_liquidation_pause = opt true
+  }
+})

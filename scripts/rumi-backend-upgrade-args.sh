@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE' >&2
 Usage:
-  scripts/rumi-backend-upgrade-args.sh --description "PR #123: concise upgrade reason" [--protocol-mode MODE]
+  scripts/rumi-backend-upgrade-args.sh --description "PR #123: concise upgrade reason" [--protocol-mode MODE] [--preserve-sp-liquidation-pause]
 
 MODE:
   none | null | preserve          -> mode = null (default)
@@ -15,11 +15,15 @@ MODE:
 
 The output is Candid suitable for:
   icp canister install rumi_protocol_backend --mode upgrade --args "$UPGRADE_ARGS"
+
+--preserve-sp-liquidation-pause emits the true-only hold override. Omission
+preserves the previous argument shape; this helper has no resume override.
 USAGE
 }
 
 description=""
 mode="none"
+preserve_sp_liquidation_pause="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       fi
       mode="$2"
       shift 2
+      ;;
+    --preserve-sp-liquidation-pause)
+      preserve_sp_liquidation_pause="1"
+      shift
       ;;
     -h|--help)
       usage
@@ -99,11 +107,16 @@ esac
 escaped_description="${description//\\/\\\\}"
 escaped_description="${escaped_description//\"/\\\"}"
 
+extra_upgrade_field=""
+if [[ "$preserve_sp_liquidation_pause" == "1" ]]; then
+  extra_upgrade_field=$';\n    preserve_sp_liquidation_pause = opt true'
+fi
+
 cat <<ARGS
 (variant {
   Upgrade = record {
     mode = ${mode_candid};
-    description = opt "${escaped_description}"
+    description = opt "${escaped_description}"${extra_upgrade_field}
   }
 })
 ARGS

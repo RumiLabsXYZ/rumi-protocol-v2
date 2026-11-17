@@ -21,12 +21,29 @@
       "bytes": 114948
     },
     "docs/operations/evidence/xrp-cycle-bound-20261116/upgrade-args.did": {
-      "sha256": "60668207d96958a1ccedb424adea0a8f296ecbd1891ce71a41364ca0f569c373",
-      "bytes": 190
+      "sha256": "e9ae1229a9dea3d455c88bb7692b994850d2fe74a06e39e6c72ac72a3a203cf8",
+      "bytes": 206
     },
     "docs/operations/evidence/xrp-cycle-bound-20261116/upgrade-args.hex": {
       "sha256": "37d9ae24baad43051f8fd1aaa556d6a3911bcb0693ac7e75f0882a5a306ed935",
       "bytes": 421
     }
+  },
+  "upgradeArgumentHelper": {
+    "path": "scripts/rumi-backend-upgrade-args.sh",
+    "sha256": "b33206cd3f7177badc4baaeeb8a2404346e1ec1aa0d498b768b2c7f0ebf8ba3e",
+    "command": [
+      "bash",
+      "scripts/rumi-backend-upgrade-args.sh",
+      "--description",
+      "Bound automatic XRP claim signatures; preserve Stability Pool liquidation pause",
+      "--preserve-sp-liquidation-pause"
+    ],
+    "checks": [
+      "bash -n PASS",
+      "four existing modes produce byte-identical default output",
+      "description/mode/unknown false-option rejection retained",
+      "hold-only emitted; didc typed encoding equals previous exact value; mode preserved"
+    ]
   }
 }
