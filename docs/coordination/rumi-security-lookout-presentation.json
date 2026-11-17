@@ -1,6 +1,6 @@
 {
-  "summary": "The recovery-menu and manual-queue restoration is merged through PR #671 at 0edaf018 with exact-head frontend CI successful. Approved discovery runtime files and live keys are included. Production frontend build, coordinated asset publication and independent verification remain next. Existing security closure and financial holds remain unchanged.",
-  "plainSummary": "The recovery-menu and manual-queue fixes are merged into main after CI passed. The discovery files are preserved in the same source. A fresh production build and publication are next; the live interface still shows the old behavior. No customer wallet action is needed.",
+  "summary": "PR #671 canonical restoration and exact-head CI are complete. The one production frontend/auth/discovery build passed with source/dependency and full-artifact verification. Frozen artifact and additive preservation plan are pushed; focused artifact review, exact encoding dispatch and fresh baseline precede Dorian publication and independent served checks. Existing security closure and financial holds remain unchanged.",
+  "plainSummary": "The recovery-menu and manual-queue fixes are merged, and the production frontend build passed. Both discovery files are preserved. The frozen artifact is undergoing final preservation review before one coordinated publication; the live interface still shows the old behavior. No customer wallet action is needed.",
   "glossary": [
     {
       "term": "Stability Pool",

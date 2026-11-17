@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis source/integration/independent verification; Dorian coordinated publisher",
       "scope": "Restore recovery menu and manual-queue availability after canonical frontend regression",
-      "evidenceText": "PR #671 merged into canonical main at 0edaf018 after exact-head Frontend validation run 43982949272 and its only job completed successfully. The merged tree exactly matches tested f1233707. Both recovery-menu and manual-queue fixes retain PR #666 session protections; discovery generation and both published keys are preserved. Existing 39 local tests, two focused reviews and mocked desktop/mobile checks pass. A November 16 independent stable double-read confirms 761 assets and both discovery hashes; certified frontend/backend modules and controllers match the baseline. The live root still has the old UI. Next: separately scheduled production frontend build, coordinated asset-only publication and independent served/UI checks. No financial action.",
+      "evidenceText": "PR #671 is merged into canonical main at 0edaf018 with exact-head CI successful and closed. One production frontend/auth/discovery build passed in 19.377 seconds; source/dependency pins and process closure were verified independently, including all 764 artifact files. Frozen artifact and corrected additive plan are pushed at cfe7d35b: preserve every old asset/property/untouched encoding and both discovery/auth files; add 327 immutable keys and atomically replace six entry assets, final 1088 keys. Focused artifact reviews and publisher encoding manifest/fresh baseline precede one coordinated asset-only publication. Live UI still serves the older release. No backend, permissions or financial action.",
       "evidenceLinks": [
         {
           "title": "Canonical restoration PR #671",
@@ -18,6 +18,10 @@
         {
           "title": "Source diagnosis and publication boundary",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/0edaf018bbc2b9c5ab648c9244001437e3af5ea4/docs/operations/recovery-menu-regression-20261115.md"
+        },
+        {
+          "title": "Frozen production artifact and preservation handoff",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/cfe7d35b6170719e2df92c6f093f86f3a8fdb226/docs/operations/recovery-frontend-publication-20261116.md"
         }
       ]
     },
