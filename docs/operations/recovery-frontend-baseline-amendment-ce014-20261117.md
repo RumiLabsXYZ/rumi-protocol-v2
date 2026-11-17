@@ -39,3 +39,31 @@ export PUBLISH_PINS_SHA256=475a8b21dd5b20cc37d235d67253b11a3252164a77d7f9a0c3e6f
 ```
 
 Reuse the existing verified artifact; do not rebuild or rematerialize it unnecessarily. Runtime readers still require exact current modules/settings/controllers/API/permissions/hold and full asset rows before upload and commit. All deadline, durable-argument, one-use journal, unknown-outcome and independent stage-proof gates are unchanged. Stage proof must bind to the amended dispatch-manifest hash above; old-plan proofs are not accepted. Final served bytes, preservation and desktop/mobile checks remain after actual publication. No UI publication or customer outcome is claimed by this amendment.
+
+## Exact approval requested
+
+This is the exact amended packet for Rob's decision. Approve Dorian to publish
+only the existing, verified frontend artifact to frontend
+`tcfua-yaaaa-aaaap-qrd7q-cai`, following the unchanged
+[original dispatch procedure](https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/37380ddd3d8585c0b1c85d04127b865bebf2bf79/docs/operations/recovery-frontend-dispatch-20261116.md)
+with the amended path and pins above:
+
+1. Stage **327 new immutable asset keys and 436 content sets**.
+2. Independently verify the complete staged state before activation.
+3. Activate **seven content sets across six existing entry keys**, reaching
+   **1,088 total keys**, then independently verify served bytes, preserved assets
+   and the desktop/mobile recovery-menu and queue behavior.
+
+Retain all **761 historical keys** and every property and untouched encoding;
+only the seven explicitly pinned entry encodings change during activation.
+Preserve discovery and Internet Identity/domain files, both canister modules,
+settings, controllers, permissions and the Stability Pool pause. No asset deletion,
+backend installation, fund movement, reserve activation, Vault 202 recovery,
+Vault 208 sizing release, bot/worker action or liquidation resumption is included.
+All financial and liquidation holds remain intact.
+
+Automatic approval review rejected the previous staging write before process
+creation because it did not accept the older cross-chat references as trusted
+exact production authorization. No publisher process, journal or asset call
+started. This amended readable packet is for the existing release-chat approval
+decision; preparation does not authorize execution or bypass that rejection.
