@@ -1,6 +1,6 @@
 {
-  "summary": "Canonical restoration PR #671, exact-head CI, one production artifact and final bounded dispatch reviews pass. The preserved discovery/auth files and all historical assets are pinned. Two journal/deadline findings were fixed before execution. Dorian retains the single publication checkpoint; stage/final readbacks and live desktop/mobile verification remain. Existing financial holds are unchanged.",
-  "plainSummary": "The recovery-menu and manual-queue fixes are merged, and the production frontend build passed. The exact asset upload plan also passed independent review. Dorian holds execution of the release; publication and live verification are next. No customer wallet action is needed.",
+  "summary": "The recovery-menu and queue restoration is verified through canonical merge, CI, one production artifact and final dispatch review. Automatic approval review rejected the attempted production asset write before process creation, requiring trusted direct approval of the exact packet. Dorian has one approval question pending; no retry or executor change. All frozen artifacts and financial holds remain intact.",
+  "plainSummary": "The fixes are merged, and CI, the production build and final dispatch reviews passed. Publication is blocked by automatic approval review; it rejected the older cross-chat authorization before any asset call started. Rob has one exact approval question pending in Dorian\u2019s release chat. The reviewed files remain unchanged.",
   "glossary": [
     {
       "term": "Stability Pool",

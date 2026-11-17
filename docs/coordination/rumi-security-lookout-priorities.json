@@ -3,9 +3,9 @@
     {
       "id": "recovery-menu-release-regression",
       "title": "Restore the approved recovery menu and queue guard in canonical releases",
-      "status": "in_progress",
-      "blockedReason": "",
-      "nextAction": "Source, CI, production artifact and exact dispatch reviews pass. Dorian holds the single release execution checkpoint. On his release, refresh baseline and stage immutable resources; Ellis verifies stage, then Dorian activates entries and Ellis verifies all assets/properties, served bundles and desktop/mobile layout. Financial holds remain.",
+      "status": "blocked",
+      "blockedReason": "Automatic approval review rejected the asset write before process creation because earlier cross-chat authorization was not accepted as trusted approval for this exact scope. One direct approval question is pending in Dorian\u2019s release chat.",
+      "nextAction": "Keep the exact packet and execution held. Rob can answer Dorian\u2019s existing approval question for packet 37380ddd; do not duplicate it or retry through another executor. After actual approval, Dorian remains sole publisher and Ellis performs independent stage/final verification. No further build or source campaign is needed.",
       "cardIds": [
         "SEC-20"
       ]
