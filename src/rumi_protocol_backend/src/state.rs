@@ -14639,7 +14639,7 @@ mod tests {
         let xrp_vault = crate::vault::Vault {
             owner: Principal::anonymous(),
             vault_id: 2,
-            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            borrowed_icusd_amount: ICUSD::new(100 * 100_000_000),
             collateral_amount: 100_000_000, // 6 decimals => 100 XRP
             collateral_type: xrp,
             accrued_interest: ICUSD::new(0),
@@ -14657,6 +14657,13 @@ mod tests {
             bot_processing: false,
         };
         let dummy = crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO);
+
+        assert!(xrp_vault.borrowed_icusd_amount > s.dust_liquidation_threshold);
+        assert_eq!(
+            crate::compute_collateral_ratio(&xrp_vault, dummy, &s),
+            Ratio::new(dec!(1.30)),
+            "fixture must represent $130 of XRP against $100 of debt"
+        );
 
         // The generic borrow-threshold cap returns zero above 128%; the
         // configured XRP recovery CR is 128% × 1.0333 and needs a burn.
