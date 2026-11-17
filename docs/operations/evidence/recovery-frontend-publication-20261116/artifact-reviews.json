@@ -1,0 +1,32 @@
+{
+  "reviewedUtc": "2026-11-17T00:17:15Z",
+  "reviewedPacketCommit": "cfe7d35b6170719e2df92c6f093f86f3a8fdb226",
+  "scope": "Frozen artifact and corrected additive preservation handoff only; source review/test evidence reused. No build, publication or financial call by reviewers.",
+  "reviewA": {
+    "verdict": "PASS",
+    "blockingIssues": [],
+    "verified": [
+      "archive/manifest and all764files/11318429bytes",
+      "frontend/scripts tree equality",
+      "327 new immutable/6 changed/428 unchanged/327 retained =1088final",
+      "three configuration files excluded",
+      "discovery/auth bytes, root/menu and queue markers",
+      "receipt/closure/evidence hashes"
+    ],
+    "remainingPublisherWork": "Freeze exact dispatch/encoding manifest and fresh pre-write baseline; include changed encodings with six explicit entry keys."
+  },
+  "reviewB": {
+    "verdict": "PASS",
+    "blockingIssues": [],
+    "verified": [
+      "archive/manifest and all764files/11318429bytes",
+      "source-tree equality and receipt/index hashes",
+      "complete corrected classification and excluded configuration sidecars",
+      "discovery/auth bytes match baseline",
+      "no publication/customer outcome overclaim"
+    ],
+    "remainingPublisherWork": "Freeze exact dispatch/encoding manifest and fresh baseline, including index.html gzip with explicit entry assets."
+  },
+  "artifactReady": true,
+  "publicationPerformed": false
+}

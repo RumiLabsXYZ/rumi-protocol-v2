@@ -16,6 +16,10 @@ Auth/domain verification passed. Both discovery identity files exactly match liv
 
 The built root `/_app/immutable/nodes/0.DDqiCHqT.js`, SHA256 `21f0fe594231aeb9dc538d70b563aca9c02223c235420e815caf0e85e9afcfcb`, omits the generic recovery prompt/button and contains Wallet → Recover a vault action. Queue bundle `/_app/immutable/nodes/49.DoMq6N1O.js`, SHA256 `9a27bd0441a01ef18fe3a472f68b3ccc27a2968c396c160026810e96c160f872`, includes the reserved-row message and existing public claim query. The PR #666 recovery script and session protections remain unchanged.
 
+## Focused artifact reviews
+
+Both independent artifact/preservation reviewers returned **PASS with no blockers** against corrected packet commit `cfe7d35b6170719e2df92c6f093f86f3a8fdb226`. They independently checked the complete archive/manifest, all 764 files and byte counts, source-tree equality, corrected 327/6/428/327 classification, excluded configuration sidecars, discovery/auth bytes, root/menu/queue markers and evidence hashes. [Review results](evidence/recovery-frontend-publication-20261116/artifact-reviews.json) retain the scope and remaining publisher work. This passes artifact readiness; the exact dispatch/encoding manifest and fresh baseline remain required before writing. In particular, include changed `/index.html` gzip content in the atomic activation, alongside the six explicit entry assets. No further build or source-test campaign is requested.
+
 ## Existing authority and exact publication scope
 
 Merritt's original human messages `01a1db85-3658-7c01-8637-73e787fa6eb4` and `01a1dd32-aece-7ee0-b545-2ddbc605e891` authorize the already approved recovery-menu and queue restoration after verification. Cody independently read those original user instructions. No duplicate unchanged-scope approval is requested. Resource allocations only admitted validation/build and did not grant publication or financial authority.
