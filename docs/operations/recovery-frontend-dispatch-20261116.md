@@ -4,7 +4,7 @@ Ellis prepared this bounded dispatch for Dorian, the sole execution owner. **No 
 
 ## Frozen inputs and actual scope
 
-[Execution pins](evidence/recovery-frontend-publication-20261116/dispatch/execution-pins.json), SHA256 `75b69c92da01358b75a19a74e9ba0a76d88073033532273d929ea33542c9e50e`, hash the exact publisher, read-only preflight/verifier, decoder, materializer, typed asset Candid, full artifact manifest and fresh baseline. [Dispatch manifest](evidence/recovery-frontend-publication-20261116/dispatch/dispatch-manifest.json), SHA256 `b6486dfa559d10fe8d0741fb30ec49d2b3289781759a03a75b763d8ef5e5d86f`, freezes every new asset property and every payload key, encoding, source file, size and SHA256. The archive remains SHA256 `a765d0410b30fec71f63883635550dcd306cc791a3e8e5348a4cb95c31102780`; the complete 764-file manifest remains `82768e536040d1a45b77215f3bd48ae1290945e80a44f3d5968735c97a319e82`. No rebuild is needed.
+[Execution pins](evidence/recovery-frontend-publication-20261116/dispatch/execution-pins.json), SHA256 `f034fac9a618167da227efa2363387fd831eccd8a69a24a6157216448ab6dcd6`, hash the exact publisher, read-only preflight/verifier, decoder, materializer, typed asset Candid, full artifact manifest and fresh baseline. [Dispatch manifest](evidence/recovery-frontend-publication-20261116/dispatch/dispatch-manifest.json), SHA256 `b6486dfa559d10fe8d0741fb30ec49d2b3289781759a03a75b763d8ef5e5d86f`, freezes every new asset property and every payload key, encoding, source file, size and SHA256. The archive remains SHA256 `a765d0410b30fec71f63883635550dcd306cc791a3e8e5348a4cb95c31102780`; the complete 764-file manifest remains `82768e536040d1a45b77215f3bd48ae1290945e80a44f3d5968735c97a319e82`. No rebuild is needed.
 
 Target only existing asset canister `tcfua-yaaaa-aaaap-qrd7q-cai`, network `ic`, project environment `mainnet-live`, existing identity `rumi_identity`, pinned public principal `fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae`. Use a checkout with the frozen dispatch files and existing project environment mappings. The CLI signs ordinary asset ingress with the existing identity; no customer wallet signing, backend/bot state-changing call, permission/settings/module change, financial transaction or Stability Pool resumption is included.
 
@@ -28,12 +28,12 @@ DISPATCH=docs/operations/evidence/recovery-frontend-publication-20261116/dispatc
 EVIDENCE=docs/operations/evidence/recovery-frontend-publication-20261116
 ARTIFACT_DIR=/private/tmp/rumi-recovery-dispatch-20261116/operator-artifact
 JOURNAL_DIR=/private/tmp/rumi-recovery-dispatch-20261116/operator-journal
-export PUBLISH_PINS_SHA256=75b69c92da01358b75a19a74e9ba0a76d88073033532273d929ea33542c9e50e
+export PUBLISH_PINS_SHA256=f034fac9a618167da227efa2363387fd831eccd8a69a24a6157216448ab6dcd6
 python3 "$DISPATCH/materialize-artifact.py" "$EVIDENCE/frontend-artifact.tar.gz" "$EVIDENCE/artifact-manifest.json" "$ARTIFACT_DIR"
 node "$DISPATCH/publish-frontend.mjs" inspect "$ARTIFACT_DIR"
 ```
 
-**Dorian must explicitly release stage execution before running this command.** The release variable is an intent guard; it does not confer new authority or alter canister permissions. The script is one-use per phase and journals before dispatch. Each phase is bounded by a deadline (15 minutes stage, 10 minutes activation), each mutation call by 180 seconds or the remaining deadline, and every ingress argument by 1.8 MB. An expired deadline prevents another mutation. Read-only captures may finish after a deadline; they never authorize a later write.
+**Dorian must explicitly release stage execution before running this command.** The release variable is an intent guard; it does not confer new authority or alter canister permissions. The script is one-use per phase and journals before dispatch. Each phase is bounded by a deadline (15 minutes stage, 10 minutes activation), each mutation call by 180 seconds or the remaining deadline, and every ingress argument by 1.8 MB. A final positive-remaining-time check after durable journal writes prevents launching another CLI mutation when the deadline has expired at that check. Read-only captures may finish after a deadline; they never authorize a later write.
 
 ```sh
 PUBLISH_EXECUTION_RELEASE=DORIAN_STAGE node "$DISPATCH/publish-frontend.mjs" stage "$ARTIFACT_DIR" "$JOURNAL_DIR"
