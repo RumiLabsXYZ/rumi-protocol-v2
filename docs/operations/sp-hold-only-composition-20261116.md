@@ -56,7 +56,7 @@ Dorian's draft advanced to committed `f0df15285cc4b51e83045ab6b0469a1bab4a44c6`
 during preparation. The isolated patch applies cleanly to that exact commit.
 `git apply --check` was read-only; its worktree/index/diff remained unchanged.
 See [composition receipt](evidence/sp-hold-only-composition-20261116/composition.json)
-and [exact six-file patch](evidence/sp-hold-only-composition-20261116/hold-only.patch).
+and [exact six-file patch (gzip)](evidence/sp-hold-only-composition-20261116/hold-only.patch.gz).
 The actual shared source path is `main.rs`, in different hunks: the hold adds
 post-upgrade/setter handling while Dorian changes the automatic-settlement call.
 This check is not permission to edit Dorian's worktree and must be repeated if
