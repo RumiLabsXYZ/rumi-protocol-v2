@@ -847,7 +847,7 @@ mod sp_writedown_hold_tests {
         // as a restart would, and verify its explicit value was not reset.
         let reopened_value = MEMORY_MANAGER.with(|manager| {
             let memory = manager.borrow().get(SP_WRITEDOWN_HOLD_MEMORY_ID);
-            let reopened = StableCell::init(memory, 0)
+            let reopened = StableCell::init(memory, 0u8)
                 .expect("reopen existing SP write-down hold cell");
             *reopened.get()
         });
@@ -856,7 +856,7 @@ mod sp_writedown_hold_tests {
         set_sp_writedown_hold(false);
         let reopened_value = MEMORY_MANAGER.with(|manager| {
             let memory = manager.borrow().get(SP_WRITEDOWN_HOLD_MEMORY_ID);
-            let reopened = StableCell::init(memory, 0)
+            let reopened = StableCell::init(memory, 0u8)
                 .expect("reopen explicitly cleared SP write-down hold cell");
             *reopened.get()
         });
