@@ -7,8 +7,10 @@
   "freshReadOnlyFinishedUtc": "2026-11-17T00:41:56.707Z",
   "assetWriteMethodsExecuted": 0,
   "publisherExecutionHeldWith": "Dorian",
-  "executionPinsSha256": "75b69c92da01358b75a19a74e9ba0a76d88073033532273d929ea33542c9e50e",
+  "executionPinsSha256": "e12c4db48741d377706eccffb53b399e581e3ccbf4b15d59372f09ca1a6f18e7",
   "dispatchManifestSha256": "b6486dfa559d10fe8d0741fb30ec49d2b3289781759a03a75b763d8ef5e5d86f",
   "argumentFileFsyncBeforeMarkerAndDispatch": true,
-  "journalUsesWriteAllBeforeFsync": true
+  "journalUsesWriteAllBeforeFsync": true,
+  "postFsyncDeadlineBoundaryCasesPassed": 3,
+  "pipedInspectOutputIsCompleteJson": true
 }

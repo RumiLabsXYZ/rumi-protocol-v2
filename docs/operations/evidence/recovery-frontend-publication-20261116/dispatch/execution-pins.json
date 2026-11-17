@@ -9,7 +9,7 @@
   ],
   "filesSha256": {
     "prepare-dispatch.mjs": "7d65e748c937c71fe01397451f5ed71ebc7e32620407a1a80b0bd87e89478d5a",
-    "publish-frontend.mjs": "4176bb9865c53c0008725b48ec4a05f89e3c9f3dc3412f834c73cb0e4b16ccb3",
+    "publish-frontend.mjs": "ec7198cebc81260224a003eaf413bd7db15ae3a95f3cc73617e9f900def541a4",
     "read-preflight.mjs": "4c598c435d017613433b1edfe65ed108b9d18f1439d06fc29e1fbd87342a8693",
     "verify-dispatch.mjs": "d4e30c694f944d6efe46cd3fcd3a3024d8f4d708f2d67500c0f0896fe1960f9c",
     "decode-saved-reply.mjs": "2073c76a73afe62752d33161cf55b740ca8773454cc87e37c6396cb8c37e7341",

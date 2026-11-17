@@ -13,7 +13,7 @@ function bounded(method,args){const bytes=Buffer.from(IDL.encode(types.get(metho
 if(phase==='inspect'){
  const result={publicationPerformed:false,planSha256:pins.filesSha256['dispatch-manifest.json'],phases:{}};
  for(const name of['stage','activate']){const p=plan.phases[name],ids=new Map(p.sets.map((s,i)=>[s.key+'|'+s.encoding,BigInt(i+1)])),ops=operations(name,ids);result.phases[name]={creates:p.creates.length,sets:p.sets.length,operations:ops.length,commitBytesAtDummyBatch0:bounded('commit_batch',[{batch_id:0n,operations:ops}]).length,chunkCalls:p.chunkGroups.length,chunkBytesAtBatch0:p.chunkGroups.map(g=>bounded('create_chunks',[{batch_id:0n,content:g.sets.map(s=>fs.readFileSync(path.join(artifact,s.sourcePath)))}]).length)}}
- console.log(JSON.stringify(result,null,2));process.exit(0)
+ await new Promise((resolve,reject)=>process.stdout.write(JSON.stringify(result,null,2)+'\n',error=>error?reject(error):resolve()));process.exit(0)
 }
 assert.equal(process.env.PUBLISH_EXECUTION_RELEASE,'DORIAN_'+phase.toUpperCase(),'Execution is held with Dorian; preparation must use inspect');assert.ok(journal,'Pass private journal directory');
 const deadline=Date.now()+(phase==='stage'?900000:600000);let stageProof=null;

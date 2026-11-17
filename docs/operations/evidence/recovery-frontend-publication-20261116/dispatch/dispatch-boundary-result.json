@@ -1,0 +1,8 @@
+{
+  "result": "PASS",
+  "cases": 3,
+  "expiredAfterFlushStartsNoCli": true,
+  "expiredAtEntryStartsNoCli": true,
+  "argumentFsyncPrecedesMarkerAndFakeSpawn": true,
+  "realSubprocessesOrCanisterCalls": 0
+}
