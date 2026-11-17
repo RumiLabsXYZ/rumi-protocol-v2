@@ -2543,6 +2543,7 @@ export interface UpdateChainConfigArg {
 export interface UpgradeArg {
   'mode' : [] | [Mode],
   'description' : [] | [string],
+  'preserve_sp_writedown_hold' : [] | [boolean],
 }
 export interface Vault {
   'collateral_amount' : bigint,

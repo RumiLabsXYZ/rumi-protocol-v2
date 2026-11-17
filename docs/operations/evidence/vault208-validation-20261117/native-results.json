@@ -1,0 +1,239 @@
+{
+  "allocationId": "dd4d36e9-ae3a-4c43-91ce-02c4e9623f1b",
+  "source": "9b4772322af3a5cb5cb544cb98a518e4ff1eecd0",
+  "runnerSha256": "5593aa255a12a456f2e6b5cea7f6c2ded5715d82e53251dc3cae80ab3caa6d88",
+  "packetSha256": "64b5c7dfded47d53c1e0c4281c6b539616317e8ba3b8a2b4706e54b4a523cb72",
+  "target": "/private/tmp/vault208-native-cache-20261117/target",
+  "ownerChat": "01a19eae-ce1d-7961-923d-a5031a9fb417",
+  "startedUtc": "2026-11-17T22:12:35.429056+00:00",
+  "baselineFreeBytes": 47474020352,
+  "peakOwnedRssBytes": 2534326272,
+  "minimumFreeBytes": 45975556096,
+  "maxFsDropBytes": 1498464256,
+  "steps": [
+    {
+      "name": "xrp-lib",
+      "command": [
+        "/Users/robertripley/.cargo/bin/cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "rumi_protocol_backend",
+        "--lib",
+        "xrp_",
+        "--",
+        "--test-threads=1"
+      ],
+      "startedUtc": "2026-11-17T22:12:35.429387+00:00",
+      "ownedPgid": 66218,
+      "ownedPids": [
+        66218,
+        66223,
+        66301,
+        66305,
+        66308
+      ],
+      "exit": 0,
+      "resourceStop": null,
+      "ownedGroupClosed": true,
+      "remainingOwnedPids": [],
+      "finishedUtc": "2026-11-17T22:13:00.140527+00:00",
+      "testResults": [
+        [
+          "145",
+          "0"
+        ]
+      ]
+    },
+    {
+      "name": "hold-lib",
+      "command": [
+        "/Users/robertripley/.cargo/bin/cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "rumi_protocol_backend",
+        "--lib",
+        "sp_writedown_hold",
+        "--",
+        "--test-threads=1"
+      ],
+      "startedUtc": "2026-11-17T22:13:00.142413+00:00",
+      "ownedPgid": 66318,
+      "ownedPids": [
+        66318
+      ],
+      "exit": 0,
+      "resourceStop": null,
+      "ownedGroupClosed": true,
+      "remainingOwnedPids": [],
+      "finishedUtc": "2026-11-17T22:13:02.216490+00:00",
+      "testResults": [
+        [
+          "4",
+          "0"
+        ]
+      ]
+    },
+    {
+      "name": "canonical-candid",
+      "command": [
+        "/Users/robertripley/.cargo/bin/cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "rumi_protocol_backend",
+        "--bin",
+        "rumi_protocol_backend",
+        "check_candid_interface_compatibility",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "startedUtc": "2026-11-17T22:13:02.217602+00:00",
+      "ownedPgid": 66330,
+      "ownedPids": [
+        66330,
+        66332,
+        66529,
+        66582,
+        66583,
+        66585
+      ],
+      "exit": 0,
+      "resourceStop": null,
+      "ownedGroupClosed": true,
+      "remainingOwnedPids": [],
+      "finishedUtc": "2026-11-17T22:14:40.830437+00:00",
+      "testResults": [
+        [
+          "1",
+          "0"
+        ]
+      ]
+    },
+    {
+      "name": "didc-backward",
+      "command": [
+        "/Users/robertripley/.cargo/bin/didc",
+        "check",
+        "src/rumi_protocol_backend/rumi_protocol_backend.did",
+        "/private/tmp/vault208-validation-20261115/before.did"
+      ],
+      "startedUtc": "2026-11-17T22:14:40.831247+00:00",
+      "ownedPgid": 66588,
+      "ownedPids": [
+        66588
+      ],
+      "exit": 0,
+      "resourceStop": null,
+      "ownedGroupClosed": true,
+      "remainingOwnedPids": [],
+      "finishedUtc": "2026-11-17T22:14:41.500520+00:00"
+    },
+    {
+      "name": "regenerate-declarations",
+      "command": [
+        "bash",
+        "scripts/regenerate-declarations.sh",
+        "rumi_protocol_backend"
+      ],
+      "startedUtc": "2026-11-17T22:14:41.501091+00:00",
+      "ownedPgid": 66591,
+      "ownedPids": [
+        66591,
+        66593
+      ],
+      "exit": 0,
+      "resourceStop": null,
+      "ownedGroupClosed": true,
+      "remainingOwnedPids": [],
+      "finishedUtc": "2026-11-17T22:14:42.124437+00:00"
+    },
+    {
+      "name": "declarations-equal",
+      "command": [
+        "/Users/robertripley/.cargo/bin/didc",
+        "check",
+        "-s",
+        "src/rumi_protocol_backend/rumi_protocol_backend.did",
+        "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did"
+      ],
+      "startedUtc": "2026-11-17T22:14:42.124949+00:00",
+      "ownedPgid": 66616,
+      "ownedPids": [
+        66616
+      ],
+      "exit": 0,
+      "resourceStop": null,
+      "ownedGroupClosed": true,
+      "remainingOwnedPids": [],
+      "finishedUtc": "2026-11-17T22:14:42.765445+00:00"
+    },
+    {
+      "name": "diff-check",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "startedUtc": "2026-11-17T22:14:42.765952+00:00",
+      "ownedPgid": 66619,
+      "ownedPids": [
+        66619
+      ],
+      "exit": 2,
+      "resourceStop": null,
+      "ownedGroupClosed": true,
+      "remainingOwnedPids": [],
+      "finishedUtc": "2026-11-17T22:14:43.396326+00:00"
+    }
+  ],
+  "outcome": "failed-or-stopped",
+  "allOwnedGroupsClosed": true,
+  "sourcePinsSha256": "8f8255f8cea75bbc72201b6b6dbaa340cbbfdfaba2b5c00ca5fb9de3ddfceed9",
+  "generatedSourceChanges": null,
+  "exception": "AssertionError('stage failed/stopped/unclosed')",
+  "finishedUtc": "2026-11-17T22:14:43.397318+00:00",
+  "elapsedSeconds": 127.96725216601044,
+  "logs": {
+    "canonical-candid.log": "a05edbb77212d53a90a35f8c19b05b1b639d21d594dbf7690b6af93fc6842daf",
+    "declarations-equal.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "didc-backward.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "diff-check.log": "886ba68edad2313c0cbe40b92715c3ca73de0589d3382ac3f6985f11fa7f57f5",
+    "hold-lib.log": "b9ed2cf72f54706644d19371cadbbb3f1be7aba46b5dfe7084b97f128a110e82",
+    "regenerate-declarations.log": "96bba8692c8283c2927c8f4da7ed74e172bb6f379050ff46ce82b1dd8921e698",
+    "xrp-lib.log": "706f04c66cdc2b2ec9c1165ae90d4db72d05206c1b0cca00d27fd1124ae17cde"
+  },
+  "originalReceiptSha256": "7e33cdd3f06723cfe1e425f42e30dcfe1a65de065f770b5f787877eaa70136a7",
+  "postRunMechanicalResolution": {
+    "generatedOnlyWhitespaceNormalized": true,
+    "rawOutputRetainedPrivately": true,
+    "strictNormalizedRawEquality": true,
+    "backwardCompatibility": true,
+    "canonicalDeclarationEquality": true,
+    "gitDiffCheck": true,
+    "testsRerun": false,
+    "noRustChangesAfterPassingTests": true
+  },
+  "normalization": {
+    "transformation": "remove only trailing space/tab/CR on generated lines; noAPIhandmerge",
+    "files": [
+      {
+        "path": "src/rumi_protocol_backend/rumi_protocol_backend.did",
+        "rawSha256": "3db64771e8781f753c1b2f82f8d51f5d3cd741264966b72fcdcdebf61032ded8",
+        "normalizedSha256": "92d6e8353fcd61194f0e9034245b44293105d1f8a3978dd7ce3fb854d6681524",
+        "changedLines": 50
+      },
+      {
+        "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did",
+        "rawSha256": "3db64771e8781f753c1b2f82f8d51f5d3cd741264966b72fcdcdebf61032ded8",
+        "normalizedSha256": "92d6e8353fcd61194f0e9034245b44293105d1f8a3978dd7ce3fb854d6681524",
+        "changedLines": 50
+      }
+    ]
+  }
+}
