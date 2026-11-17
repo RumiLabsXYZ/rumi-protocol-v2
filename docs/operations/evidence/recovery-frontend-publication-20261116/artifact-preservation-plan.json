@@ -3,11 +3,9 @@
   "buildSource": "434d51fa39a4467138fc14e2991979eb26b7300c",
   "artifactManifestSha256": "82768e536040d1a45b77215f3bd48ae1290945e80a44f3d5968735c97a319e82",
   "artifactFiles": 764,
-  "publicBuildKeys": 763,
+  "publicBuildKeys": 761,
   "baselineAssets": 761,
   "newKeys": [
-    "/.ic-assets.json.br",
-    "/.ic-assets.json.gz",
     "/_app/immutable/assets/0.BF_Ez-wH.css",
     "/_app/immutable/assets/0.BF_Ez-wH.css.br",
     "/_app/immutable/assets/0.BF_Ez-wH.css.gz",
@@ -1137,5 +1135,10 @@
     "/index.html.br",
     "/index.html.gz"
   ],
-  "expectedAdditiveFinalAssetCount": 1090
+  "expectedAdditiveFinalAssetCount": 1088,
+  "ignoredUploadConfigurationFiles": [
+    "/.ic-assets.json",
+    "/.ic-assets.json.br",
+    "/.ic-assets.json.gz"
+  ]
 }
