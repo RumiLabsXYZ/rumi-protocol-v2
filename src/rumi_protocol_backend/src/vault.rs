@@ -4639,11 +4639,12 @@ fn xrp_sp_absorb_sizing(
             "Liquidation is not allowed for this collateral type.".to_string(),
         ));
     }
-    if vault.borrowed_icusd_amount.to_u64() != expected_icusd_burn_e8s {
+    let recovery_cap = state.native_xrp_recovery_repay_amount(vault);
+    if expected_icusd_burn_e8s > recovery_cap.to_u64() {
         return Err(ProtocolError::GenericError(format!(
-            "XRP SP absorb burn {} does not match live debt {} for vault {}",
+            "XRP SP absorb burn {} exceeds native-XRP recovery cap {} for vault {}",
             expected_icusd_burn_e8s,
-            vault.borrowed_icusd_amount.to_u64(),
+            recovery_cap.to_u64(),
             vault_id
         )));
     }
@@ -4746,16 +4747,39 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
         )));
     }
 
-    let prior = state.sp_xrp_absorb_preflights.get(&vault_id).is_some_and(|row| {
-        row.caller == caller && row.icusd_burn_e8s == expected_icusd_burn_e8s
-            && row.expires_at_ns > now_ns
-    });
-    if !prior && state.vault_id_to_vaults.get(&vault_id)
+    let existing = state.sp_xrp_absorb_preflights.get(&vault_id).cloned();
+    if let Some(row) = existing.as_ref() {
+        if row.caller != caller || row.icusd_burn_e8s != expected_icusd_burn_e8s {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} already has a different native-XRP absorb reservation"
+            )));
+        }
+    }
+    if state
+        .vault_id_to_vaults
+        .get(&vault_id)
         .and_then(|vault| state.get_collateral_config(&vault.collateral_type))
         .is_some_and(|config| config.status == crate::state::CollateralStatus::Sunset) {
-        return Err(ProtocolError::GenericError("Sunset collateral requires manual liquidation".into()));
+        return Err(ProtocolError::GenericError(
+            "Sunset collateral requires manual liquidation".into(),
+        ));
     }
+    // Any preflight call is a new admission/readmission decision, even when a
+    // matching row already exists. Revalidate the current cap and liquidation
+    // guards before returning the old immutable tuple; proof-backed settlement
+    // of an already-burned legacy reservation bypasses this function.
     let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
+    if let Some(row) = existing.as_ref() {
+        if row.caller == caller && row.icusd_burn_e8s == expected_icusd_burn_e8s {
+            return Ok(crate::XrpSpAbsorbPreflight {
+                vault_id,
+                icusd_burn_e8s: row.icusd_burn_e8s,
+                collateral_received_drops: row.collateral_received_drops,
+                collateral_price_e8s: row.collateral_price_e8s,
+                expires_at_ns: row.expires_at_ns,
+            });
+        }
+    }
     let mut preflight = sizing.preflight;
     preflight.expires_at_ns = now_ns.saturating_add(XRP_SP_ABSORB_PREFLIGHT_TTL_NS);
     state.sp_xrp_absorb_preflights.insert(
@@ -15485,14 +15509,11 @@ mod xrp_sp_absorb_contract_tests {
         // End-to-end pin across the two halves of automated XRP absorption:
         // the amount `check_vaults` puts in `recommended_liquidation_amount`
         // must be an amount `stability_pool_preflight_xrp_absorb_in_state`
-        // actually accepts. Regression for the sizing mismatch where the
-        // dispatch sent the generic partial cap while the absorb path requires
-        // the full live debt, so every automated absorb failed at preflight.
+        // accepts. A fresh over-cap full-debt quote is rejected; the native
+        // recovery-target amount is admitted.
         //
         // The vault is at an ORDINARY breach (CR 130%: under the 133%
-        // liquidation floor, above the 112% bonus). The deep-breach fixture
-        // used elsewhere hides this bug, because the partial cap saturates to
-        // the full debt once a vault is far enough underwater.
+        // liquidation floor and has enough collateral for a partial recovery.
         let mut state = test_state_with_xrp_vault();
         let xrp = xrp_collateral_principal();
         if let Some(cfg) = state.collateral_configs.get_mut(&xrp) {
@@ -15505,22 +15526,24 @@ mod xrp_sp_absorb_contract_tests {
             .clone();
         let dummy = UsdIcp::from(Decimal::ZERO);
 
-        // The generic cap is a strict partial here — the pre-fix dispatch value.
+        // Generic borrow-threshold sizing is smaller than the XRP recovery CR.
         let generic_cap = state.compute_partial_liquidation_cap(&vault, dummy);
         assert!(
-            generic_cap < vault.borrowed_icusd_amount,
-            "premise: ordinary breach must yield a partial cap, got {generic_cap:?}"
+            generic_cap > ICUSD::new(0) && generic_cap < vault.borrowed_icusd_amount,
+            "premise: ordinary breach must yield a partial generic cap, got {generic_cap:?}"
         );
+        let recovery_cap = state.recommended_liquidation_amount_for(&vault, dummy);
+        assert!(recovery_cap > generic_cap && recovery_cap < vault.borrowed_icusd_amount);
         let err = stability_pool_preflight_xrp_absorb_in_state(
             &mut state,
             sp(),
             VAULT_ID,
-            generic_cap.to_u64(),
+            vault.borrowed_icusd_amount.to_u64(),
             10,
         )
-        .expect_err("partial burn must be rejected by the full-debt-only absorb path");
+        .expect_err("fresh full-debt burn above the recovery cap must be rejected");
         assert!(
-            format!("{err:?}").contains("does not match live debt"),
+            format!("{err:?}").contains("exceeds native-XRP recovery cap"),
             "unexpected error: {err:?}"
         );
         assert!(
@@ -15528,24 +15551,76 @@ mod xrp_sp_absorb_contract_tests {
             "a rejected preflight must not leave a reservation behind"
         );
 
-        // What the dispatch actually sends now is accepted.
-        let dispatched = state.recommended_liquidation_amount_for(&vault, dummy);
+        // What the dispatch sends is accepted and pinned unchanged.
         let preflight = stability_pool_preflight_xrp_absorb_in_state(
             &mut state,
             sp(),
             VAULT_ID,
-            dispatched.to_u64(),
+            recovery_cap.to_u64(),
             20,
         )
         .expect("automated dispatch amount must be accepted by the preflight");
+        assert_eq!(preflight.icusd_burn_e8s, recovery_cap.to_u64());
+        assert!(preflight.icusd_burn_e8s < vault.borrowed_icusd_amount.to_u64());
+
+        // A matching legacy full-debt reservation is not a new-admission
+        // bypass. Reject the over-cap preflight retry without mutating its
+        // immutable tuple; a proof-backed submit still settles that exact old
+        // tuple through the separate commit path.
+        let mut legacy = test_state_with_xrp_vault();
+        legacy.collateral_configs.get_mut(&xrp).unwrap().last_price = Some(1.30);
+        let old = crate::state::StoredXrpSpAbsorbPreflight {
+            caller: sp(),
+            vault_id: VAULT_ID,
+            icusd_burn_e8s: 100 * E8,
+            total_to_seize_drops: 100_000_000,
+            collateral_received_drops: 97_000_000,
+            collateral_price_e8s: 50_000_000,
+            expires_at_ns: 9,
+        };
+        legacy.sp_xrp_absorb_preflights.insert(VAULT_ID, old.clone());
+        let err = stability_pool_preflight_xrp_absorb_in_state(
+            &mut legacy,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+            20,
+        )
+        .expect_err("over-cap legacy tuple cannot be newly admitted");
+        assert!(format!("{err:?}").contains("exceeds native-XRP recovery cap"));
+        assert_eq!(legacy.sp_xrp_absorb_preflights.get(&VAULT_ID), Some(&old));
+
+        let mut already_burned_request = valid_request(44);
+        already_burned_request.allocations[0].drops = 57_000_000;
+        already_burned_request.allocations[1].drops = 40_000_000;
+        let settled = stability_pool_liquidate_xrp_vault_in_state(
+            &mut legacy,
+            sp(),
+            already_burned_request,
+            30,
+        )
+        .expect("proof-backed legacy burn settles from its exact reserved tuple");
+        assert_eq!(settled.liquidated_debt_e8s, old.icusd_burn_e8s);
+        assert_eq!(settled.collateral_received_drops, old.collateral_received_drops);
         assert_eq!(
-            preflight.icusd_burn_e8s,
-            vault.borrowed_icusd_amount.to_u64()
+            settled
+                .payout_claims
+                .iter()
+                .map(|claim| claim.drops)
+                .sum::<u64>(),
+            97_000_000
         );
+        assert_eq!(
+            legacy.xrp_claims.len(),
+            3,
+            "two payouts plus the legacy protocol cut"
+        );
+        assert!(legacy.vault_id_to_vaults.get(&VAULT_ID).is_none());
+        assert!(legacy.sp_xrp_absorb_preflights.get(&VAULT_ID).is_none());
     }
 
     #[test]
-    fn sunset_xrp_rejects_fresh_preflight_but_preserves_existing_reservation() {
+    fn sunset_xrp_rejects_preflight_retry_and_preserves_existing_row() {
         let mut fresh = test_state_with_xrp_vault();
         fresh.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
         let err = stability_pool_preflight_xrp_absorb_in_state(&mut fresh, sp(), VAULT_ID, 100 * E8, 10).unwrap_err();
@@ -15555,7 +15630,18 @@ mod xrp_sp_absorb_contract_tests {
         let mut reserved = test_state_with_xrp_vault();
         stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 10).unwrap();
         reserved.collateral_configs.get_mut(&xrp_collateral_principal()).unwrap().status = CollateralStatus::Sunset;
-        assert!(stability_pool_preflight_xrp_absorb_in_state(&mut reserved, sp(), VAULT_ID, 100 * E8, 11).is_ok());
+        let old = reserved.sp_xrp_absorb_preflights.get(&VAULT_ID).unwrap().clone();
+        assert!(
+            stability_pool_preflight_xrp_absorb_in_state(
+                &mut reserved,
+                sp(),
+                VAULT_ID,
+                100 * E8,
+                11
+            )
+            .is_err()
+        );
+        assert_eq!(reserved.sp_xrp_absorb_preflights.get(&VAULT_ID), Some(&old));
     }
 
     #[test]
@@ -15803,6 +15889,69 @@ mod xrp_sp_absorb_contract_tests {
         assert_eq!(vault.collateral_amount, 20_000_000);
         assert_eq!(state.xrp_claims.get(&0).unwrap().drops, 48_000_000);
         assert_eq!(state.xrp_claims.get(&1).unwrap().drops, 32_000_000);
+    }
+
+    #[test]
+    fn xrp_sp_partial_absorb_conserves_gross_claims_and_residual_recovery_cr() {
+        let mut state = test_state_with_xrp_vault();
+        let xrp = xrp_collateral_principal();
+        state.collateral_configs.get_mut(&xrp).unwrap().last_price = Some(1.30);
+        state.liquidation_protocol_share = Ratio::new(dec!(0.03));
+        state
+            .vault_id_to_vaults
+            .get_mut(&VAULT_ID)
+            .unwrap()
+            .accrued_interest = ICUSD::new(10 * E8);
+        let before = state.vault_id_to_vaults[&VAULT_ID].clone();
+        let repay = state.native_xrp_recovery_repay_amount(&before);
+        assert!(repay > ICUSD::new(0) && repay < before.borrowed_icusd_amount);
+        let quote = stability_pool_preflight_xrp_absorb_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            repay.to_u64(),
+            10,
+        )
+        .expect("partial recovery quote is admitted");
+        let depositor_drops = quote.collateral_received_drops;
+        let gross_seized = state.sp_xrp_absorb_preflights[&VAULT_ID].total_to_seize_drops;
+        let mut request = valid_request(45);
+        request.icusd_burned_e8s = repay.to_u64();
+        request.allocations = vec![XrpSpPayoutAllocation {
+            claimant: depositor_a(),
+            payout_address: "rA".into(),
+            destination_tag: Some(7),
+            drops: depositor_drops,
+        }];
+
+        let result = stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), request, 20)
+            .expect("partial burn settles against the pinned quote");
+        let after = &state.vault_id_to_vaults[&VAULT_ID];
+        assert_eq!(after.borrowed_icusd_amount, before.borrowed_icusd_amount - repay);
+        assert!(after.borrowed_icusd_amount > ICUSD::new(0));
+        let interest_applied = crate::numeric::checked_proportional_amount(
+            repay.to_u64(),
+            before.borrowed_icusd_amount.to_u64(),
+            before.accrued_interest.to_u64(),
+        )
+        .expect("proportional interest is representable");
+        assert_eq!(
+            after.accrued_interest,
+            ICUSD::new(before.accrued_interest.to_u64() - interest_applied)
+        );
+        assert_eq!(after.collateral_amount + gross_seized, before.collateral_amount);
+        let all_claims = state
+            .xrp_claims
+            .values()
+            .filter(|claim| {
+                claim.custody_owner == before.owner && claim.custody_nonce == VAULT_ID
+            })
+            .map(|claim| claim.drops)
+            .sum::<u64>();
+        assert_eq!(all_claims, gross_seized);
+        assert_eq!(result.collateral_received_drops, quote.collateral_received_drops);
+        assert!(compute_collateral_ratio(after, UsdIcp::from(Decimal::from_f64(1.30).unwrap()), &state)
+            >= state.get_recovery_cr_for(&xrp));
     }
 
     #[test]
