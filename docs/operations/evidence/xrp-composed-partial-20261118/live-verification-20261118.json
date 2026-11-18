@@ -1,0 +1,678 @@
+{
+  "verifiedUtc": "2026-11-18T20:17:51.974538+00:00",
+  "humanApproval": "01a1f040-0d30-7150-acc8-0b87ca78ec7b",
+  "approvedPacket": "39d7baef2d3bf049fafd2ec9659578ed15555c48",
+  "approvedDocumentSha256": "4b63e741e15a778e50f60132ab7a3264ab5c50dfbab759e13b2c8fb95533213c",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "network": "ic",
+  "operator": "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+  "buildSource": "67a5be7a650ad21ef9f013307d7aa0e897508724",
+  "runtimeSource": "1165a8973cb2040c732753a8bf24e7825ff639c7",
+  "oldModuleHash": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+  "installedModuleHash": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+  "status": "Running",
+  "spLiquidationPause": true,
+  "settingsAndControllersUnchanged": true,
+  "embeddedCandidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "freshArgsHexSha256": "26cbae560b9d7020ff305b4775f0429b5164fb490a11e7aee711ba246a406cb3",
+  "backup": {
+    "oldest17Archive": {
+      "snapshot": {
+        "snapshot_id": "00000000000000170000000001f088fe0101",
+        "taken_at_timestamp": 1794099176324026000,
+        "total_size_bytes": 113996773
+      },
+      "files": [
+        {
+          "file": "wasm_module.bin",
+          "bytes": 2323301,
+          "sha256": "d38887253da67b405f5baf9cb3a53b377a39f7f1a227aced422f97565bceaa10"
+        },
+        {
+          "file": "wasm_memory.bin",
+          "bytes": 2555904,
+          "sha256": "fa89dc3ee3569f26c13a8a35b6f320a1a5792964cf080bf8c6e0249e800655cc"
+        },
+        {
+          "file": "stable_memory.bin",
+          "bytes": 109117440,
+          "sha256": "b2857ba41f7d77840433140314fb614eef7174eafdf99a52200fbfefe39cc3b4"
+        },
+        {
+          "file": "metadata.json",
+          "bytes": 519,
+          "sha256": "26c2d72b90462ae52f0777c98730cc0a2073a33940a1425045e50d8b6b5f800c"
+        },
+        {
+          "file": ".lock",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "fullDeclaredComponentCoverage": true,
+      "metadataGlobalsTimerAndControlsRetained": true,
+      "emptyChunkStore": true,
+      "serverAccountingOverheadBytes": 128,
+      "expectedModuleMatch": null,
+      "privateStateOnly": true,
+      "noRestoreTest": true
+    },
+    "freshStopped": {
+      "snapshot": {
+        "snapshot_id": "00000000000000210000000001f088fe0101",
+        "taken_at_timestamp": 1795032554211333099,
+        "total_size_bytes": 114207526
+      },
+      "files": [
+        {
+          "file": "wasm_module.bin",
+          "bytes": 2796198,
+          "sha256": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f"
+        },
+        {
+          "file": "wasm_memory.bin",
+          "bytes": 2293760,
+          "sha256": "f02b37c1a0061c158f33bb580486765a5d52dd65834950254fa4cc415d925026"
+        },
+        {
+          "file": "stable_memory.bin",
+          "bytes": 109117440,
+          "sha256": "07facc5ab2df0bd89c34b477dfb24a13e5e9693e75c0268828106e4d64905fd7"
+        },
+        {
+          "file": "metadata.json",
+          "bytes": 519,
+          "sha256": "25dc30bb0f794abeebc6290fad465d3da42d4d8caa3190cdf17a9aed8b6a7197"
+        },
+        {
+          "file": ".lock",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "fullDeclaredComponentCoverage": true,
+      "metadataGlobalsTimerAndControlsRetained": true,
+      "emptyChunkStore": true,
+      "serverAccountingOverheadBytes": 128,
+      "expectedModuleMatch": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+      "privateStateOnly": true,
+      "noRestoreTest": true
+    },
+    "otherNineUnchanged": true,
+    "freshSnapshotId": "00000000000000210000000001f088fe0101",
+    "rawSnapshotsRemainPrivate": true
+  },
+  "operations": {
+    "stop": {
+      "startedUtc": "2026-11-18T20:08:42.900619+00:00",
+      "finishedUtc": "2026-11-18T20:08:46.780489+00:00",
+      "exit": 0,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dispatchCount": 1
+    },
+    "fresh-snapshot": {
+      "startedUtc": "2026-11-18T20:09:12.363351+00:00",
+      "finishedUtc": "2026-11-18T20:09:15.017744+00:00",
+      "exit": 0,
+      "stdoutSha256": "320874eb84a33e494cc6d6e796cb8f597c81fc5ee70827099a15db87fa871012",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dispatchCount": 1
+    },
+    "install": {
+      "startedUtc": "2026-11-18T20:11:43.640923+00:00",
+      "finishedUtc": "2026-11-18T20:12:06.764562+00:00",
+      "exit": 0,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "8d84fdec035cf95adad6573ad2bbd9b1bc1a2a4239a1eb6615dff120f4363445",
+      "dispatchCount": 1
+    },
+    "start": {
+      "startedUtc": "2026-11-18T20:13:31.192802+00:00",
+      "finishedUtc": "2026-11-18T20:13:32.724331+00:00",
+      "exit": 0,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dispatchCount": 1
+    }
+  },
+  "statePreservation": {
+    "vaultCount": 51,
+    "vaultIdsOwnersCollateralTypesAndCollateralUnchanged": true,
+    "allVaultDebtAndAccruedInterestExactlyMatchActiveStoppedBackup": true,
+    "refreshedPrestopVaultDebtSumExactlyMatchesStoppedAndAfter": true,
+    "stoppedAndAfterTotalDebtE8s": "1553251078443",
+    "earlyCachedStatusDebtE8s": "1553250376787",
+    "perCollateralDebtTotalsMatchStoppedVaults": true,
+    "xrpClaimsExactlyUnchanged": 4,
+    "pendingPayouts": 0,
+    "reserveJournalRows": 0,
+    "exactlyUnchangedQuerySurfaces": [
+      "get_cksol_relay_budget",
+      "get_cksol_payment_quote",
+      "get_pending_payouts",
+      "get_vault_operation_status",
+      "get_cksol_icp_terms",
+      "get_xrp_claims",
+      "get_vault_count",
+      "get_sp_writedown_disabled",
+      "get_bot_allowed_collateral_types",
+      "get_bot_claim_vault_ids",
+      "get_bot_cr_tolerance_bps",
+      "admin_get_reserve_redemption_status"
+    ],
+    "staticProtocolCollateralRiskAndBotConfigurationUnchanged": true,
+    "modeUnchanged": {
+      "GeneralAvailability": null
+    },
+    "nicpClaimUnchangedExceptUpdatedAt": {
+      "before": "1795030076554826363",
+      "after": "1795032814405821875",
+      "stage": {
+        "ClaimConfirmed": null
+      },
+      "lastError": []
+    },
+    "prestopToStoppedDebtChanges": [],
+    "observedDynamicDeltas": [
+      {
+        "path": "get_protocol_config.borrowing_fee_curve[0][0]",
+        "before": 1.3980665815606619,
+        "after": 1.3980666494825085
+      },
+      {
+        "path": "get_protocol_config.borrowing_fee_curve[1][0]",
+        "before": 1.5078317349922736,
+        "after": 1.506079362251169
+      },
+      {
+        "path": "get_protocol_config.borrowing_fee_curve[2][0]",
+        "before": 1.6675968884238852,
+        "after": 1.6640920750198296
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[0][1].last_price[0]",
+        "before": 2.195584855,
+        "after": 2.191869803
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[0][1].last_price_timestamp[0]",
+        "before": "1795031760000000000",
+        "after": "1795032240000000000"
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[1][1].last_price[0]",
+        "before": 0.062515,
+        "after": 0.062452
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[1][1].last_price_timestamp[0]",
+        "before": "1795031276000000000",
+        "after": "1795032802000000000"
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[2][1].last_price[0]",
+        "before": 62663.278095436,
+        "after": 62709.680865013
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[2][1].last_price_timestamp[0]",
+        "before": "1795031820000000000",
+        "after": "1795032720000000000"
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[3][1].last_price[0]",
+        "before": 1754.665802058,
+        "after": 1754.388328865
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[3][1].last_price_timestamp[0]",
+        "before": "1795031820000000000",
+        "after": "1795032720000000000"
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[4][1].last_price[0]",
+        "before": 2.8263490158329216,
+        "after": 2.821566675701518
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[4][1].last_price_timestamp[0]",
+        "before": "1795031760000000000",
+        "after": "1795032240000000000"
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[7][1].last_price[0]",
+        "before": 73.173363254,
+        "after": 73.091908324
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[7][1].last_price_timestamp[0]",
+        "before": "1795031880000000000",
+        "after": "1795032720000000000"
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[8][1].last_price[0]",
+        "before": 0.0462984,
+        "after": 0.04411
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[8][1].last_price_timestamp[0]",
+        "before": "1795031276000000000",
+        "after": "1795032802000000000"
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[9][1].last_price[0]",
+        "before": 0.968217265,
+        "after": 0.965924416
+      },
+      {
+        "path": "get_protocol_config.collateral_configs[9][1].last_price_timestamp[0]",
+        "before": "1795031880000000000",
+        "after": "1795032180000000000"
+      },
+      {
+        "path": "get_protocol_config.recovery_mode_threshold",
+        "before": 1.3480665815606618,
+        "after": 1.3480666494825084
+      },
+      {
+        "path": "get_protocol_status.borrowing_fee_curve_resolved[0][0]",
+        "before": 1.3980665815606619,
+        "after": 1.3980666494825085
+      },
+      {
+        "path": "get_protocol_status.borrowing_fee_curve_resolved[1][0]",
+        "before": 1.5078317349922736,
+        "after": 1.506079362251169
+      },
+      {
+        "path": "get_protocol_status.borrowing_fee_curve_resolved[2][0]",
+        "before": 1.6675968884238852,
+        "after": 1.6640920750198296
+      },
+      {
+        "path": "get_protocol_status.last_icp_rate",
+        "before": 2.195584855,
+        "after": 2.191869803
+      },
+      {
+        "path": "get_protocol_status.last_icp_timestamp",
+        "before": "1795031760000000000",
+        "after": "1795032240000000000"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[0].total_debt_e8s",
+        "before": "168535386161",
+        "after": "168535425146"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[0].weighted_interest_rate",
+        "before": 0.02430246008915972,
+        "after": 0.024358761416239365
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[1].total_debt_e8s",
+        "before": "153685756",
+        "after": "153685886"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[1].weighted_interest_rate",
+        "before": 0.08843250013128777,
+        "after": 0.08856519950891338
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[2].total_debt_e8s",
+        "before": "49691138591",
+        "after": "49691144175"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[2].weighted_interest_rate",
+        "before": 0.011811071996452299,
+        "after": 0.011782797016541478
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[3].total_debt_e8s",
+        "before": "25277810712",
+        "after": "25277814320"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[4].total_debt_e8s",
+        "before": "289053272629",
+        "after": "289053616098"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[4].weighted_interest_rate",
+        "before": 0.12489391083085631,
+        "after": 0.1256214945773721
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[5].total_debt_e8s",
+        "before": "124819304899",
+        "after": "124819318636"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[5].weighted_interest_rate",
+        "before": 0.011566889228231465,
+        "after": 0.011566893457990517
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[7].total_debt_e8s",
+        "before": "50117553043",
+        "after": "50117560236"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[7].weighted_interest_rate",
+        "before": 0.015082475344778312,
+        "after": 0.015082962092602957
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[9].total_debt_e8s",
+        "before": "845602224996",
+        "after": "845602513946"
+      },
+      {
+        "path": "get_protocol_status.per_collateral_interest[9].weighted_interest_rate",
+        "before": 0.035915927819714914,
+        "after": 0.036116794197607736
+      },
+      {
+        "path": "get_protocol_status.recovery_mode_threshold",
+        "before": 1.3480665815606618,
+        "after": 1.3480666494825084
+      },
+      {
+        "path": "get_protocol_status.recovery_target_cr",
+        "before": 1.3930021342793506,
+        "after": 1.3930022044652588
+      },
+      {
+        "path": "get_protocol_status.snapshot_ts_ns",
+        "before": "1795032242719327351",
+        "after": "1795032815675582453"
+      },
+      {
+        "path": "get_protocol_status.total_collateral_ratio",
+        "before": 1.6675968884238852,
+        "after": 1.6640920750198296
+      },
+      {
+        "path": "get_protocol_status.total_icusd_borrowed",
+        "before": "1553250376787",
+        "after": "1553251078443"
+      },
+      {
+        "path": "get_protocol_status.weighted_average_interest_rate",
+        "before": 0.04747897644538407,
+        "after": 0.04772897736835049
+      },
+      {
+        "path": "get_nicp_redemption_claim[0].updated_at_ns",
+        "before": "1795030076554826363",
+        "after": "1795032814405821875"
+      }
+    ],
+    "dynamicDeltaExplanation": [
+      "Oracle prices/timestamps and derived CR/rate/fee-threshold projections use existing unchanged timer/cache paths",
+      "Earlier cached status predates refreshed prestop vault query; all refreshed prestop, stopped and poststart debts/accrual agree",
+      "Existing authorized Vault51 automatic withdrawal reconciliation updates timestamp only; no settlement/adoption observed"
+    ]
+  },
+  "independentReadback": {
+    "observedUtc": "2026-11-18T20:15:34.985229+00:00",
+    "reviewer": "Adrian; bounded independent postdeployment readback",
+    "approvalPacket": "39d7baef2d3bf049fafd2ec9659578ed15555c48",
+    "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+    "publicModuleSha256": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+    "moduleMatchesApprovedFrozenUpload": true,
+    "publicControllerArrayMatchesApprovedBaseline": true,
+    "anonymousPauseQuery": true,
+    "getSpWritedownDisabled": true,
+    "appManifestDeclaredBy": "https://app.rumiprotocol.com",
+    "executorRunningMilestoneReported": true,
+    "runningStatusProvenance": "Dorian management Running/postcheck milestone; this reviewer independently queried public module/controllers and anonymous pause only.",
+    "publicModuleReceiptSha256": "cd5eceb5b15fa441d3e65498bf878d3f35da63a2ff3a73a476e0045dc3a6e686",
+    "anonymousPauseReceiptSha256": "5327a2426a67caba009c72bf68218adf5a8a9c1868fe1406832ff941051fecf5",
+    "result": "PASS_INDEPENDENT_MODULE_AND_PAUSE_READBACK",
+    "productionWritesByIndependentReviewer": 0,
+    "noSourceChangesExportsTestsOrFinancialActionByReviewer": true,
+    "scopeLimit": "Global retained-state and backup preservation reconciliation remains with sole executor Dorian; no claim of a live liquidation or payout test."
+  },
+  "independentReadbackSha256": "049f3b4152e366349ed22b116a72b76fc01e5a96eaec0d614b4771c0a8b12f61",
+  "merrittIndependentPauseQuery": true,
+  "scope": {
+    "financialPayoutOrClaimRetryTest": false,
+    "spResume": false,
+    "compensation": false,
+    "botUpgradeOrWorkerResumption": false,
+    "vault202RecoveryOrReserveChange": false,
+    "frontendPublication": false,
+    "permissionOrControllerChange": false,
+    "rawSnapshotsPublished": false,
+    "automaticRollbackOrRestore": false
+  },
+  "limitations": [
+    "Code/module/state/hold verification, not a funded partial-liquidation or XRP payout outcome",
+    "Backup completeness verified; no restore test",
+    "No new build, CI or main merge performed during deployment"
+  ],
+  "privateSnapshotExports": {
+    "oldest17": {
+      "intentRecordedBeforeCLI": true,
+      "cliInvocations": 1,
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:05:53.586893+00:00",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "3bafe9942e688550217705b59f671fa31fad8181aa95df8c6ee6803226d857ca",
+      "rawStatePrivate": true
+    },
+    "freshStopped": {
+      "intentRecordedBeforeCLI": true,
+      "cliInvocations": 1,
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:09:41.423916+00:00",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "53abecbcb54d9ac760ff9d5e213b0b16dd6055b22b4f8636e9e8c0add3183724",
+      "rawStatePrivate": true
+    }
+  },
+  "queryEvidence": {
+    "prestop": [
+      {
+        "method": "get_protocol_config",
+        "responseSha256": "949db7e9ebf30679586f72583f108ba25acdfe5c248fc2278631d3c3bd0f81f3",
+        "finishedUtc": "2026-11-18T20:04:03.370338+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_protocol_status",
+        "responseSha256": "f4dc587c50e3438dd9abefc28f9b6fcc3412a7354b6325f7c8adfbe5c7ea066e",
+        "finishedUtc": "2026-11-18T20:04:04.418383+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_cksol_relay_budget",
+        "responseSha256": "50f9008536dbfe9c08b9c0c44ceef6de847c2757613a4e862309b4410c32ecef",
+        "finishedUtc": "2026-11-18T20:04:05.078174+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_cksol_payment_quote",
+        "responseSha256": "e0a8b4a498fd2e28c8e93d56b7c9ae2072608c01202d9e60e4b2f5b956b753e3",
+        "finishedUtc": "2026-11-18T20:04:05.818368+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_pending_payouts",
+        "responseSha256": "edc10955b4b9bd9c02a213e2c34aadeada04dda8c124fde2381bb4ce266c20fd",
+        "finishedUtc": "2026-11-18T20:04:06.344441+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_vault_operation_status",
+        "responseSha256": "d0946baa2a02ec197c16dcf42e0cfa3f9d2d3750890cb792ca3d392c790a4def",
+        "finishedUtc": "2026-11-18T20:04:07.091733+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_cksol_icp_terms",
+        "responseSha256": "5bf84cf89a2ad240ccbc5f9da451be4647623b28ec37bbe2c9d3d6105a2262b3",
+        "finishedUtc": "2026-11-18T20:04:07.836918+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_nicp_redemption_claim",
+        "responseSha256": "2783ad3703872e02c71360e358d5d895d0a6928352a9cb8198552dcffba2428d",
+        "finishedUtc": "2026-11-18T20:07:39.725900+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_xrp_claims",
+        "responseSha256": "c3db9810625bc8a11d315642baa99f52a3a2d3ae1bb49ab4982d1edd5f0dd45c",
+        "finishedUtc": "2026-11-18T20:07:40.390168+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_vaults",
+        "responseSha256": "f8a90a6133ca52de8b33aa0f0612b74be1cf7a1bb2c536a7ed775dde692c46d6",
+        "finishedUtc": "2026-11-18T20:07:39.103748+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_vault_count",
+        "responseSha256": "ecb5eae6a989acbfa6b25e910780d4e76b839ec52002837135f3a669aae8460b",
+        "finishedUtc": "2026-11-18T20:04:11.402882+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_sp_writedown_disabled",
+        "responseSha256": "d7cea58bf5e4e10e7f919f418e2aea0282818592897a31a01afb3bf2d6c39147",
+        "finishedUtc": "2026-11-18T20:07:41.003588+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_bot_allowed_collateral_types",
+        "responseSha256": "bc1744e392607ff94f5268168ce5e6abb6f233e70f9e169cee0086dd91f25bb7",
+        "finishedUtc": "2026-11-18T20:04:13.096675+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_bot_claim_vault_ids",
+        "responseSha256": "944ba85db1ec8221b4fc57fc17d123eaf3b75fea51baa6e0ab2e7a319fe34adb",
+        "finishedUtc": "2026-11-18T20:04:13.851078+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_bot_cr_tolerance_bps",
+        "responseSha256": "c660f8c7e92686572518df67c4766cca412a8deacc76ed2fe0d729fd7772a874",
+        "finishedUtc": "2026-11-18T20:04:14.517825+00:00",
+        "exit": 0
+      },
+      {
+        "method": "admin_get_reserve_redemption_status",
+        "responseSha256": "8715a9b908c44267feb5c3b854ed296c25bba74816c0d7bac801ab56a4dd80fd",
+        "finishedUtc": "2026-11-18T20:04:15.492992+00:00",
+        "exit": 0
+      }
+    ],
+    "after": [
+      {
+        "method": "get_protocol_config",
+        "responseSha256": "baf35480e64cdb7d15ab8abedc5f43afbb237f7a9b257fd9ffea4942f032108d",
+        "finishedUtc": "2026-11-18T20:13:36.299119+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_protocol_status",
+        "responseSha256": "67460f15f31d1789c95722763a6b40b01e991722f165f16d8164e3fe1f4f6191",
+        "finishedUtc": "2026-11-18T20:13:36.833818+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_cksol_relay_budget",
+        "responseSha256": "50f9008536dbfe9c08b9c0c44ceef6de847c2757613a4e862309b4410c32ecef",
+        "finishedUtc": "2026-11-18T20:13:37.509038+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_cksol_payment_quote",
+        "responseSha256": "e0a8b4a498fd2e28c8e93d56b7c9ae2072608c01202d9e60e4b2f5b956b753e3",
+        "finishedUtc": "2026-11-18T20:13:38.233712+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_pending_payouts",
+        "responseSha256": "edc10955b4b9bd9c02a213e2c34aadeada04dda8c124fde2381bb4ce266c20fd",
+        "finishedUtc": "2026-11-18T20:13:38.988790+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_vault_operation_status",
+        "responseSha256": "d0946baa2a02ec197c16dcf42e0cfa3f9d2d3750890cb792ca3d392c790a4def",
+        "finishedUtc": "2026-11-18T20:13:39.770876+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_cksol_icp_terms",
+        "responseSha256": "5bf84cf89a2ad240ccbc5f9da451be4647623b28ec37bbe2c9d3d6105a2262b3",
+        "finishedUtc": "2026-11-18T20:13:40.361102+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_nicp_redemption_claim",
+        "responseSha256": "bd9862a210d05405b4f128a9b04e75657ef2df65250edeb56db7bff7b788b622",
+        "finishedUtc": "2026-11-18T20:13:41.112613+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_xrp_claims",
+        "responseSha256": "c3db9810625bc8a11d315642baa99f52a3a2d3ae1bb49ab4982d1edd5f0dd45c",
+        "finishedUtc": "2026-11-18T20:13:41.685685+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_vaults",
+        "responseSha256": "da67ef726d3f6fd9de65d77fe68090feb5bac16000bd0fe36414bb7c4e2918cc",
+        "finishedUtc": "2026-11-18T20:13:42.301126+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_vault_count",
+        "responseSha256": "ecb5eae6a989acbfa6b25e910780d4e76b839ec52002837135f3a669aae8460b",
+        "finishedUtc": "2026-11-18T20:13:43.176477+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_sp_writedown_disabled",
+        "responseSha256": "d7cea58bf5e4e10e7f919f418e2aea0282818592897a31a01afb3bf2d6c39147",
+        "finishedUtc": "2026-11-18T20:13:43.805546+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_bot_allowed_collateral_types",
+        "responseSha256": "bc1744e392607ff94f5268168ce5e6abb6f233e70f9e169cee0086dd91f25bb7",
+        "finishedUtc": "2026-11-18T20:13:44.573913+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_bot_claim_vault_ids",
+        "responseSha256": "944ba85db1ec8221b4fc57fc17d123eaf3b75fea51baa6e0ab2e7a319fe34adb",
+        "finishedUtc": "2026-11-18T20:13:45.244153+00:00",
+        "exit": 0
+      },
+      {
+        "method": "get_bot_cr_tolerance_bps",
+        "responseSha256": "c660f8c7e92686572518df67c4766cca412a8deacc76ed2fe0d729fd7772a874",
+        "finishedUtc": "2026-11-18T20:13:46.118482+00:00",
+        "exit": 0
+      },
+      {
+        "method": "admin_get_reserve_redemption_status",
+        "responseSha256": "8715a9b908c44267feb5c3b854ed296c25bba74816c0d7bac801ab56a4dd80fd",
+        "finishedUtc": "2026-11-18T20:13:46.839562+00:00",
+        "exit": 0
+      }
+    ]
+  },
+  "onlyFourApprovedMutationDispatches": true,
+  "unknownOutcomeReplay": false
+}

@@ -1,0 +1,20 @@
+{
+  "observedUtc": "2026-11-18T20:15:34.985229+00:00",
+  "reviewer": "Adrian; bounded independent postdeployment readback",
+  "approvalPacket": "39d7baef2d3bf049fafd2ec9659578ed15555c48",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "publicModuleSha256": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+  "moduleMatchesApprovedFrozenUpload": true,
+  "publicControllerArrayMatchesApprovedBaseline": true,
+  "anonymousPauseQuery": true,
+  "getSpWritedownDisabled": true,
+  "appManifestDeclaredBy": "https://app.rumiprotocol.com",
+  "executorRunningMilestoneReported": true,
+  "runningStatusProvenance": "Dorian management Running/postcheck milestone; this reviewer independently queried public module/controllers and anonymous pause only.",
+  "publicModuleReceiptSha256": "cd5eceb5b15fa441d3e65498bf878d3f35da63a2ff3a73a476e0045dc3a6e686",
+  "anonymousPauseReceiptSha256": "5327a2426a67caba009c72bf68218adf5a8a9c1868fe1406832ff941051fecf5",
+  "result": "PASS_INDEPENDENT_MODULE_AND_PAUSE_READBACK",
+  "productionWritesByIndependentReviewer": 0,
+  "noSourceChangesExportsTestsOrFinancialActionByReviewer": true,
+  "scopeLimit": "Global retained-state and backup preservation reconciliation remains with sole executor Dorian; no claim of a live liquidation or payout test."
+}
