@@ -1,0 +1,400 @@
+{
+  "scope": "Read-only readiness; not execution or resumption authority",
+  "humanRequest": "01a1f064-a38f-7380-8c44-6de4a8abcd26",
+  "backendModule": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+  "spModule": "d8385398e5b92ca26b029b6b76ab78d634f40ced65d1f0af5b991591332329e9",
+  "spCandidSha256": "46b90cfbd25c3c1760dc1cd1e2d39a272ef9af587a1f3fae9092741eddb9b3d7",
+  "backendHold": true,
+  "spEmergencyPaused": false,
+  "ledgerVaultCount": 51,
+  "ledgerCandidates": [],
+  "chain1030": {
+    "rows": 2,
+    "open": 1,
+    "closed": 1,
+    "openDebtE8s": "12700000",
+    "openCollateralWei": "4000000000000000000",
+    "launch": "Disabled",
+    "candidates": [],
+    "priceAndHotWalletStale": true
+  },
+  "stableBalances": [
+    {
+      "symbol": "icUSD",
+      "ledger": "t6bor-paaaa-aaaap-qrd5q-cai",
+      "decimals": 8,
+      "label": "ledger-icUSD-balance",
+      "liveRaw": "235843144455",
+      "recordedRaw": "235817479777",
+      "excessRaw": "25664678",
+      "coversRecorded": true
+    },
+    {
+      "symbol": "3USD",
+      "ledger": "fohh4-yyaaa-aaaap-qtkpa-cai",
+      "decimals": 8,
+      "label": "ledger-3USD-balance",
+      "liveRaw": "1463767655559",
+      "recordedRaw": "1463765019296",
+      "excessRaw": "2636263",
+      "coversRecorded": true
+    },
+    {
+      "symbol": "ckUSDC",
+      "ledger": "xevnm-gaaaa-aaaar-qafnq-cai",
+      "decimals": 6,
+      "label": "ledger-ckUSDC-balance",
+      "liveRaw": "0",
+      "recordedRaw": "0",
+      "excessRaw": "0",
+      "coversRecorded": true
+    },
+    {
+      "symbol": "ckUSDT",
+      "ledger": "cngnf-vqaaa-aaaar-qag4q-cai",
+      "decimals": 6,
+      "label": "ledger-ckUSDT-balance",
+      "liveRaw": "1870284",
+      "recordedRaw": "1860294",
+      "excessRaw": "9990",
+      "coversRecorded": true
+    }
+  ],
+  "nativeXrpEligibleIcusdE8s": "125258237011",
+  "mixedPoolUsdE8s": "1891201996750",
+  "pendingChainAbsorbs": [],
+  "threeUsdInventory": {
+    "Ok": {
+      "completed_id_count": "0",
+      "completed_id_retention_limit": "10000",
+      "completed_rows_retain_ids_only": true,
+      "entries": [],
+      "next_cursor": [],
+      "pending_count": "0"
+    }
+  },
+  "chainAuto": {
+    "config": {
+      "enabled": false,
+      "interval_seconds": "300",
+      "max_scan_per_chain": "1"
+    },
+    "last_tick": [],
+    "tick_in_flight": false
+  },
+  "stateValidation": {
+    "Ok": "Pool state is consistent"
+  },
+  "adminProof": {
+    "method": "admin_get_three_usd_absorb_inventory_page",
+    "args": "(null, 100 : nat16)",
+    "identity": "rumi_identity",
+    "principal": "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+    "result": "Ok; same authorized_admins membership required by emergency_pause",
+    "capture": "sp-admin_get_three_usd_absorb_inventory_page"
+  },
+  "visibilityLimit": "No global native-XRP or ordinary reservation enumerator; caller-scoped views do not establish empty work",
+  "captures": [
+    {
+      "capture": "backend-admin_get_reserve_redemption_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:32.520824+00:00",
+      "stdoutSha256": "8715a9b908c44267feb5c3b854ed296c25bba74816c0d7bac801ab56a4dd80fd",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_bot_allowed_collateral_types",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:30.213869+00:00",
+      "stdoutSha256": "bc1744e392607ff94f5268168ce5e6abb6f233e70f9e169cee0086dd91f25bb7",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_bot_claim_vault_ids",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:31.028774+00:00",
+      "stdoutSha256": "944ba85db1ec8221b4fc57fc17d123eaf3b75fea51baa6e0ab2e7a319fe34adb",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_bot_cr_tolerance_bps",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:31.718653+00:00",
+      "stdoutSha256": "c660f8c7e92686572518df67c4766cca412a8deacc76ed2fe0d729fd7772a874",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_cksol_icp_terms",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:25.782456+00:00",
+      "stdoutSha256": "5bf84cf89a2ad240ccbc5f9da451be4647623b28ec37bbe2c9d3d6105a2262b3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_cksol_payment_quote",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:23.457419+00:00",
+      "stdoutSha256": "e0a8b4a498fd2e28c8e93d56b7c9ae2072608c01202d9e60e4b2f5b956b753e3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_cksol_relay_budget",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:22.659459+00:00",
+      "stdoutSha256": "50f9008536dbfe9c08b9c0c44ceef6de847c2757613a4e862309b4410c32ecef",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_liquidatable_vaults",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:33.157148+00:00",
+      "stdoutSha256": "9d8b36098988ea6eae805ef3bebea2744d410ca3204211ae0d765f29135fcc72",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_liquidation_frozen",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:33.776221+00:00",
+      "stdoutSha256": "02f3b058587746998a2a38168ed0fd74711ee65d3f9911dc3cf9251a87cca6e9",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_nicp_redemption_claim",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:26.395671+00:00",
+      "stdoutSha256": "bd9862a210d05405b4f128a9b04e75657ef2df65250edeb56db7bff7b788b622",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_pending_chain_burn_aging",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:49:57.628287+00:00",
+      "stdoutSha256": "7d3bc2986e1a9a8dd23b30610dc467b63f7955923120ec20d188ebaa87c747f8",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_pending_payouts",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:24.335743+00:00",
+      "stdoutSha256": "edc10955b4b9bd9c02a213e2c34aadeada04dda8c124fde2381bb4ce266c20fd",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_protocol_config",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:20.555898+00:00",
+      "stdoutSha256": "28e0b7511cb7e04869bfc122a7a4ba72bd89b232360b2b30b43478c4c236c894",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_protocol_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:21.700931+00:00",
+      "stdoutSha256": "8440af6d505e4324ae9462743943146e7101a3c6e6e180a97a4e7147b16de58b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_sp_writedown_disabled",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:29.450624+00:00",
+      "stdoutSha256": "d7cea58bf5e4e10e7f919f418e2aea0282818592897a31a01afb3bf2d6c39147",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_supply_audit",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:49:56.817335+00:00",
+      "stdoutSha256": "379fd54213522c9e368f2f85575fd16b7cc8ced54958106126cc80a3b2ea746c",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_vault_count",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:28.634428+00:00",
+      "stdoutSha256": "ecb5eae6a989acbfa6b25e910780d4e76b839ec52002837135f3a669aae8460b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_vault_operation_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:25.079081+00:00",
+      "stdoutSha256": "d0946baa2a02ec197c16dcf42e0cfa3f9d2d3750890cb792ca3d392c790a4def",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_vaults",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:27.910170+00:00",
+      "stdoutSha256": "aa3fcd4bf22a62a4d927fec7f02b77adb54972a296fa93ce458e2cda5498577e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-get_xrp_claims",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:27.278041+00:00",
+      "stdoutSha256": "c3db9810625bc8a11d315642baa99f52a3a2d3ae1bb49ab4982d1edd5f0dd45c",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "backend-status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:19.844189+00:00",
+      "stdoutSha256": "8a4eab20b1b8b2685ece400afd0a6563fdb48343e64fea7de9159fc9645c4848",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "chain1030-get_chain_liquidatable_vaults",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:49:58.100076+00:00",
+      "stdoutSha256": "920e9b61d3377db3eb1db0a93eb4ab56a34a775ebec7a664ed2ce3ccc5d28f95",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "chain1030-get_chain_liquidation_config",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:49:59.298519+00:00",
+      "stdoutSha256": "0a057036b0b5de1cf4466bcefdcad863c886586f86ef82ac5639acd3ff18aebf",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "chain1030-get_chain_public_launch_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:50:00.855077+00:00",
+      "stdoutSha256": "8867f2f707beb165d8a3c40130302ae09e932bcb5d6a33e0b06e91f287eb63e8",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "chain1030-list_chain_vaults_page",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:49:58.671077+00:00",
+      "stdoutSha256": "e4bf5c359e37b2446a777ac303c9083a422617c2649a4aba8a48bbee7eef6d63",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "ledger-3USD-balance",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:48:21.217411+00:00",
+      "stdoutSha256": "36a676558a72000c893da5c4df3650ce0f7c9db027e3ba2fd2565e3a6d419159",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "ledger-ckUSDC-balance",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:48:22.321848+00:00",
+      "stdoutSha256": "71fd1c8ec6e351ac298a2f0cdc9869ba8b9fcf1bfeb0d26f8a7e140d6b8989e2",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "ledger-ckUSDT-balance",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:48:23.262917+00:00",
+      "stdoutSha256": "fb7dde03c00a8973ba613e4e0d895d2ae7329f1db5a04aafce492bb300a99664",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "ledger-icUSD-balance",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:48:20.587263+00:00",
+      "stdoutSha256": "d12bd2620c2d9429554cc045280abd41ba597271eedc4e639724f6efc7274ec5",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-admin_get_three_usd_absorb_inventory_page",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:34.036766+00:00",
+      "stdoutSha256": "9c5a4342e61fd3889b329ba7bc852c074d9273e935417d2a1c215889c152538d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-candid",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:36.288291+00:00",
+      "stdoutSha256": "9aacd48504809d6bef7fb0f934ebe39db4a98bc5737dd029fcb4a1e93599b501",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-cycles_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:30.291818+00:00",
+      "stdoutSha256": "1169b212563730721bdcec8256c0114cd38a64b05f9b486b1ed40161a81b956a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_active_3usd_conversion_v1",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:32.810912+00:00",
+      "stdoutSha256": "792db098685318fc46ce08175642ae08a96e8b29297732c167d078088342185a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_chain_absorb_auto_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:28.831496+00:00",
+      "stdoutSha256": "429f02bfd567c8cb7049000452c6e7ad17f3a2ee1e4236bdb3f57124a52b3597",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_interest_recovery_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:29.543010+00:00",
+      "stdoutSha256": "359c0b8a6d42da0329fb238f706a3d826a9029fb674fe7e1efaaa0d9d701d711",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_legacy_ambiguous_liquidation_vaults",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:28.172067+00:00",
+      "stdoutSha256": "aa38c5943bb610996c6b106914ec624766d995c623bcf151b7dbd22e6823dc7a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_liquidation_history",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:34.774583+00:00",
+      "stdoutSha256": "d670808d42a0ecd1b553a38d9398d5cbdc947706d119a070ce87d37aee23417a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_pending_chain_absorbs",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:27.373113+00:00",
+      "stdoutSha256": "6b35951acad114cbec45902d8406e5d89e3957128917f52867924cf0360ecaa9",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_pool_event_count",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:32.079415+00:00",
+      "stdoutSha256": "218fcf7081d610bdb8e92b4dc2fe3b83b09fd764ab2b97db1db3c508fe09d4e6",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_pool_events",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:50:01.813495+00:00",
+      "stdoutSha256": "fbd4ab4c4f6f01e3d9bc9af2d00230ae7b7fddfe88a029ddaa5fb71d4e46841b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-get_pool_status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:26.839964+00:00",
+      "stdoutSha256": "756b05376fc42362af51ad67b4d80eac8be53b4b87e7773f9f079ba609b769de",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-status",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:44:35.511001+00:00",
+      "stdoutSha256": "4c56ece92c2fb6a3e6e2fd0a0f2732ba07bce4902658a17a7a1024ad28c5ba72",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "capture": "sp-validate_pool_state",
+      "exit": 0,
+      "finishedUtc": "2026-11-18T20:45:33.414357+00:00",
+      "stdoutSha256": "19cc0417ca20eee8463a818aefa80920a9a3c29175c45c29f0a580557fbaabc0",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}
