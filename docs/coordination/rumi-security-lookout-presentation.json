@@ -1,6 +1,6 @@
 {
-  "summary": "The canonical recovery-menu and queue restoration passed CI, the production build and final dispatch review. The exact ce014 backend baseline amendment is pushed and independently verified; code, artifact and upload operations are unchanged. Dorian has the self-contained packet for the existing direct approval decision. No UI write occurred; all financial and liquidation holds remain.",
-  "plainSummary": "The fixes are built and verified, and the updated approval packet is ready. It accounts for the new backend without changing the frontend files or upload steps. The old card remains live because publication is still awaiting the exact approval in the release chat. All financial holds remain.",
+  "summary": "The tested recovery-menu and queue artifact is preserved. The exact 4409 backend baseline amendment is pushed and remotely verified; only three baseline data files change, with code/artifact/phases unchanged. Dorian has the packet for the existing exact approval decision. No UI write occurred; financial and liquidation holds remain.",
+  "plainSummary": "The updated approval packet is ready and verified against the newly deployed backend. The tested frontend files and upload steps are unchanged. The old card remains live while the exact publication decision waits in the release chat. All financial and liquidation holds remain.",
   "glossary": [
     {
       "term": "Stability Pool",
