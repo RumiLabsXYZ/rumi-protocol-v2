@@ -1,0 +1,77 @@
+{
+  "source": "67a5be7a650ad21ef9f013307d7aa0e897508724",
+  "tree": "89a5f60f196a2f6a78d5c5e575560c9513c7214e",
+  "runtimeSource": "1165a8973cb2040c732753a8bf24e7825ff639c7",
+  "oldModuleHash": "ce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+  "candidateModuleHash": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+  "phase": "OFFLINE_TESTED_BUILT_DEPLOYMENT_APPROVAL_REQUIRED",
+  "productionWrites": 0,
+  "snapshotExportDeferred": true,
+  "SPpause": true,
+  "files": {
+    "adrian-artifact-readback.json": {
+      "bytes": 2456,
+      "sha256": "bb46c0b4971c225ff8497399b6f4813087186a8f62521c528d36ce9220ee3147"
+    },
+    "adrian-draft-scope-review.json": {
+      "bytes": 2462,
+      "sha256": "898a7ef5c04ba3c8bbbe9d8a1b720dbcc1c4a4972a126454dcdf406cbb758bef"
+    },
+    "adrian-focused-source-review.json": {
+      "bytes": 8555,
+      "sha256": "a5ed5a5e793652311cadaed383c40a7761f76c357d3cf3f8538030661b176f9f"
+    },
+    "adrian-native-readback.json": {
+      "bytes": 1480,
+      "sha256": "6325f1ee380e02f19c08448b15c3114e5cb291be90a9f9626d4396f234f9966c"
+    },
+    "backend.wasm.gz": {
+      "bytes": 2796643,
+      "sha256": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde"
+    },
+    "cody-artifact-resource-verification.json": {
+      "bytes": 1479,
+      "sha256": "f45fabf450201c4b8caf9b7e99eabfe943e03089f37fd17c955e6dbf8e85d025"
+    },
+    "composition-source-checks.json": {
+      "bytes": 2253,
+      "sha256": "c58bdb90a8458910d874c6c7c93bc209cc2cc18cf8e29eb17d27d8805c3681e8"
+    },
+    "enforced-branch-checks.json": {
+      "bytes": 339,
+      "sha256": "8667167e539159906faaa99ea84143024a604da4c033e6b6e29de574e261c739"
+    },
+    "independent-live-baseline.json": {
+      "bytes": 499,
+      "sha256": "95ff21ac64812253abea8863e0212300ae4b64f63fd41381ae0f38901aff9878"
+    },
+    "native-results.json": {
+      "bytes": 2549,
+      "sha256": "f2b62321ed9f5321e7f8c8f6505b4c7c434729963cb706272704d2a62d1bfdc8"
+    },
+    "preapproval-baseline.json": {
+      "bytes": 1038,
+      "sha256": "ca46f444c0224cdaf611bbf4ef03c60e383f7fc44b5138538822958b290b35dd"
+    },
+    "release-results.json": {
+      "bytes": 5262,
+      "sha256": "1dd10369206f385cb484ffa0ee869ab693fde2818f5f006129485fe21f3f9811"
+    },
+    "snapshot-inventory.json": {
+      "bytes": 1614,
+      "sha256": "a6e71fd7724309905788d64b52305c27cecd0955f6d7cfbd0c9091e3cb127ab3"
+    },
+    "upgrade-args.decoded.did": {
+      "bytes": 241,
+      "sha256": "3cbf38644f3a8f0a66045d540096ea30aba7625fee0cdae38c39b0523e6fa133"
+    },
+    "upgrade-args.did": {
+      "bytes": 223,
+      "sha256": "db62906e67cd4adc8a62051a3281ca1057886fbb0ff68b88fa71a16901e68b36"
+    },
+    "upgrade-args.hex": {
+      "bytes": 455,
+      "sha256": "26cbae560b9d7020ff305b4775f0429b5164fb490a11e7aee711ba246a406cb3"
+    }
+  }
+}

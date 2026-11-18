@@ -1,0 +1,11 @@
+{
+  "observedUtc": "2026-11-18T19:18:33.550641+00:00",
+  "canister": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "module": "0xce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+  "spWritedownDisabled": true,
+  "anonymousQuery": true,
+  "declaredBy": "https://app.rumiprotocol.com",
+  "statusFileSha256": "782786061ade1f3bec5026b5b144fc931da1e5db45d9e36e4b4f03a927c8858c",
+  "pauseFileSha256": "5327a2426a67caba009c72bf68218adf5a8a9c1868fe1406832ff941051fecf5",
+  "noProductionMutation": true
+}

@@ -1,0 +1,34 @@
+{
+  "source": "1165a8973cb2040c732753a8bf24e7825ff639c7",
+  "tree": "7e82248d0fa69bf9fa18077262c1b78eff5e2fe2",
+  "liveSource": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+  "changedPaths": [
+    "src/rumi_protocol_backend/src/state.rs",
+    "src/rumi_protocol_backend/src/vault.rs"
+  ],
+  "unchangedLiveReleaseInputs": {
+    "src/rumi_protocol_backend/src/main.rs": "b6d8471e5cba1b41571f8b4f6cc21b42399f3e72c0433cde59407e862ee78101",
+    "src/rumi_protocol_backend/src/lib.rs": "da65248b47532b6255c84a195c16fd08e24ab8fed71f2a9f631bb041684d7fe3",
+    "src/rumi_protocol_backend/src/storage.rs": "b29c715fce1ed5dd5f2d1fb0ace06ac6b6f9edf93bfdc51f1261e2e25f95f06b",
+    "scripts/rumi-backend-upgrade-args.sh": "b33206cd3f7177badc4baaeeb8a2404346e1ec1aa0d498b768b2c7f0ebf8ba3e",
+    "src/rumi_protocol_backend/rumi_protocol_backend.did": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.js": "03dc4d2fe8f155c2dcdf749d1b262099936dc3b9ad116640178317050047b690",
+    "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.d.ts": "acff622a5243a83bc926448401fd53cc2a018e496d372f3a12ea55f8055400a6",
+    "Cargo.toml": "b25c765164b7414004df6f45f21d6f6d3540aa0f0dae3ecdd81c04e5ad438d47",
+    "Cargo.lock": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573",
+    "icp.yaml": "680e46af26eed614075343fc44c35cd621d1034f47dadd2dbc0599448bf1322a"
+  },
+  "stateUpgradePauseImplementationByteIdentical": true,
+  "entireLiveVaultRetryPatchStillReverseApplies": true,
+  "partialPatchSha256": "0ef67e7b30a7fc363a0594b4a281206bf07275fb55d55aa69300f48b4894ef47",
+  "noPrivateMemoryId11HoldOrNewAPI": true,
+  "productionWrites": 0,
+  "reviewCorrection": {
+    "finding": "Expired retained quote could readmit new burn at old price",
+    "fixCommit": "cad2523f634b2f036b3c7d7c5d17b9944fc6b92e",
+    "commentCommit": "1165a8973cb2040c732753a8bf24e7825ff639c7",
+    "postBurnMatcherAndSettlementRuntimeUnchanged": true,
+    "newRegression": "xrp_expired_preflight_cannot_admit_new_burn_but_retains_post_burn_settlement"
+  }
+}

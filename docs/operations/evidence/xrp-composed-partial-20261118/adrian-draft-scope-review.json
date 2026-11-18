@@ -1,0 +1,33 @@
+{
+  "observedUtc": "2026-11-18T05:06:09.711665+00:00",
+  "reviewer": "Adrian; single read-only scope/accounting/typed-args check",
+  "draftCommit": "67a5be7a650ad21ef9f013307d7aa0e897508724",
+  "draftPath": "docs/operations/xrp-composed-partial-scope-draft-20261117.md",
+  "draftSha256": "76c9e7ae01ce0f290aba5d61e526ac56fe914f526b2cec0bf3167735091f8d41",
+  "runtimeSource": "1165a8973cb2040c732753a8bf24e7825ff639c7",
+  "verdict": "PASS_DRAFT_SCOPE_ONLY; not deployment approval readiness",
+  "runtimeBuildInputsUnchangedFromFocusedReview": true,
+  "typedArgsReencodedExact": true,
+  "upgradeArgsHexSha256": "26cbae560b9d7020ff305b4775f0429b5164fb490a11e7aee711ba246a406cb3",
+  "modeNullPauseOptTrue": true,
+  "checks": [
+    "Explicitly excludes deployment approval before actual149+4+1 and one source-matched artifact with actual hashes.",
+    "Single existing backend target/network/operator/ce014 baseline with drift stop; no UI/SP/bot/controller or fund scope.",
+    "Oldest17-only archival/replacement with exact snapshot metadata, full fresh stopped backup, other nine preserved.",
+    "Private exports held for real authority; archive verification precedes replacement, not source/build preparation.",
+    "State preservation compares actual active stopped image rather than stale serialized stableState, with observed accrual/price/timer reconciliation.",
+    "Exact typed helper args, stopped module/Candid/settings checks, Running and pause readbacks, unknown-outcome reconciliation, no old-writer restore.",
+    "No SP resume, compensation, retroactive Vault208 remedy or financial canary; separate automatic Vault51 scope unchanged."
+  ],
+  "blockingSourceOrScopeIssues": [],
+  "finalPacketWordingNotes": [
+    "Use full debt only for existing dust handling (including residual debt floor) or when no proper partial burn restores target, rather than the potentially ambiguous word underwater.",
+    "Enumerate the nine retained hexadecimal snapshot suffixes18,19,1a,1b,1c,1d,1e,1f,20 in the final packet to avoid reading18..20 as decimal."
+  ],
+  "remainingActualPrerequisites": [
+    "Cody-to-Dorian scheduling exchange permission question is pending; no alternate relay.",
+    "149XRP+4pause+1normalCandid composed results and one source-matched artifact not yet run.",
+    "Final pushed exact deployment packet must contain actual artifact hashes and fresh source/baseline/preservation proofs."
+  ],
+  "compilerOrSnapshotExportRunHere": false
+}

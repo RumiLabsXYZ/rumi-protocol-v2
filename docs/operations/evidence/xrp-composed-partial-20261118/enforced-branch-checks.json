@@ -1,0 +1,12 @@
+{
+  "observedUtc": "2026-11-18T19:09:42.754333+00:00",
+  "repository": "RumiLabsXYZ/rumi-protocol-v2",
+  "rulesets": [],
+  "rulesetsReadExit": 0,
+  "mainProtectionHTTP": 404,
+  "mainProtectionMessage": "Branch not protected",
+  "mainProtectionCommandExit": 1,
+  "noPRCreated": true,
+  "noHostedCITriggered": true,
+  "noMergeClaim": true
+}

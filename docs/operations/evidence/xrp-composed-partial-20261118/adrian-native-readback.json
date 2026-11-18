@@ -1,0 +1,30 @@
+{
+  "observedUtc": "2026-11-18T19:11:43.174454+00:00",
+  "reviewer": "Adrian; actual composed test log readback",
+  "source": "67a5be7a650ad21ef9f013307d7aa0e897508724",
+  "tree": "89a5f60f196a2f6a78d5c5e575560c9513c7214e",
+  "receiptSha256": "0922e692e05d0f447959217aa4906c4d28d3e6a13e6dbdac845191924a3d0036",
+  "actualPassedCounts": [
+    149,
+    4,
+    1
+  ],
+  "actualFailedCount": 0,
+  "criticalTestsActuallyObservedOk": [
+    "native_xrp_recovery_cap_matches_vault208_six_decimal_vector",
+    "automatic_xrp_repeated_failed_or_missing_observations_never_rearm_signing",
+    "automatic_xrp_sibling_reconciliation_cannot_rearm_a_failed_or_expired_claim",
+    "automatic_xrp_success_still_reconciles_without_replacement_signing",
+    "xrp_expired_preflight_cannot_admit_new_burn_but_retains_post_burn_settlement",
+    "xrp_sp_partial_absorb_conserves_gross_claims_and_residual_recovery_cr"
+  ],
+  "allThreeCommandsExitZeroAndReportedClosed": true,
+  "sourceLockToolchainBeforeAfterEqual": true,
+  "logs": {
+    "command-2.log": "0e9901f994d49ea7a876119e7ebfe366878f2c1c6d6d280d96d2c8efbe5cf782",
+    "command-0.log": "897b8f0e7d538533fe773d1802aaf49600cd29cd3c3c89f1a56ea3870722ccde",
+    "command-1.log": "9d5434c9c67f7400f3f497af56e9500680e56265e50c078f7203e9177fd109e3"
+  },
+  "proofLimit": "Independent scheduler owns process-census closure; this readback verifies actual receipt and test logs. Artifact/deployment scope pending.",
+  "noProducerStartedByReviewer": true
+}

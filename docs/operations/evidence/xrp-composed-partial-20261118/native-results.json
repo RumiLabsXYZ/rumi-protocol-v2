@@ -1,0 +1,106 @@
+{
+  "source": "67a5be7a650ad21ef9f013307d7aa0e897508724",
+  "tree": "89a5f60f196a2f6a78d5c5e575560c9513c7214e",
+  "runtimeSource": "1165a8973cb2040c732753a8bf24e7825ff639c7",
+  "allocationId": "260d4b24-78d5-4b76-9c6f-62904d5b62c1",
+  "result": "PASS",
+  "elapsedSeconds": 138.328,
+  "sourceUnchanged": true,
+  "ownedGroupsClosed": true,
+  "startFreeBytes": 58183667712,
+  "endFreeBytes": 57320488960,
+  "physicalGrowthBytes": 863178752,
+  "originalReceiptSha256": "0922e692e05d0f447959217aa4906c4d28d3e6a13e6dbdac845191924a3d0036",
+  "commands": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--lib",
+        "xrp_",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 149,
+      "summaries": [
+        [
+          "149",
+          "0"
+        ]
+      ],
+      "exitCode": 0,
+      "countMatched": true,
+      "groupClosed": true,
+      "peakRssBytes": 2841804800,
+      "maximumPhysicalGrowthBytes": 365498368,
+      "logSha256": "897b8f0e7d538533fe773d1802aaf49600cd29cd3c3c89f1a56ea3870722ccde"
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--lib",
+        "sp_upgrade_hold_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 4,
+      "summaries": [
+        [
+          "4",
+          "0"
+        ]
+      ],
+      "exitCode": 0,
+      "countMatched": true,
+      "groupClosed": true,
+      "peakRssBytes": 5980160,
+      "maximumPhysicalGrowthBytes": 366759936,
+      "logSha256": "9d5434c9c67f7400f3f497af56e9500680e56265e50c078f7203e9177fd109e3"
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--jobs",
+        "1",
+        "-p",
+        "rumi_protocol_backend",
+        "--bin",
+        "rumi_protocol_backend",
+        "check_candid_interface_compatibility",
+        "--",
+        "--test-threads=1"
+      ],
+      "expectedPassed": 1,
+      "summaries": [
+        [
+          "1",
+          "0"
+        ]
+      ],
+      "exitCode": 0,
+      "countMatched": true,
+      "groupClosed": true,
+      "peakRssBytes": 2520530944,
+      "maximumPhysicalGrowthBytes": 850771968,
+      "logSha256": "0e9901f994d49ea7a876119e7ebfe366878f2c1c6d6d280d96d2c8efbe5cf782"
+    }
+  ],
+  "noProductionAction": true,
+  "snapshotExportDeferred": true
+}

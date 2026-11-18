@@ -1,0 +1,38 @@
+{
+  "at": "2026-11-18T19:17:06.503901+00:00",
+  "source": "67a5be7a650ad21ef9f013307d7aa0e897508724",
+  "tree": "89a5f60f196a2f6a78d5c5e575560c9513c7214e",
+  "status": "CONSUMED_PASS_RELEASED",
+  "receiptSha256": "256404d7525e91251ccb8a962ed9db815976dc2869662177153cdf5ccdd1abd8",
+  "artifacts": {
+    "backend.raw.wasm": {
+      "bytes": 16447032,
+      "sha256": "ed5966b2b7db28cc4f705d0c5f290b3870af1c9a52cd0f6ce753fba4bb822ad1"
+    },
+    "backend.wasm": {
+      "bytes": 11451910,
+      "sha256": "92271136ea6cd08907c70e024a6825b5116aee5076ade01bc188e31213b29c38"
+    },
+    "backend.wasm.gz": {
+      "bytes": 2796643,
+      "sha256": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde"
+    }
+  },
+  "codeSectionBytes": 10320074,
+  "retainedReserveBytes": 262144,
+  "headroomAfterReserveBytes": 2000694,
+  "embeddedCandidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "allFourComposedMarkersVerified": true,
+  "gzipRoundtripZeroMtime": true,
+  "cargoExactSourceOutputDefaultFeaturesProfileZ": true,
+  "rawMatchesActualCargoOutput": true,
+  "all14InputsUnchanged": true,
+  "allSevenNativeExitsZero": true,
+  "elapsedSeconds": 157.958,
+  "peakRssBytes": 2076901376,
+  "maxPhysicalGrowthBytes": 95518720,
+  "endFreeBytes": 57246281728,
+  "noSnapshotExportInstallFinancialAction": true,
+  "allSevenOwnedGroupsIndependentlyEmpty": true,
+  "originalProofSha256": "30a3bfd7bea05767515a3128413d0972de5995a97657c262aa55df4099d12ca2"
+}

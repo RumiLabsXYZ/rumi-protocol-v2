@@ -1,0 +1,9 @@
+(
+  variant {
+    Upgrade = record {
+      mode = null;
+      description = opt "Cap native XRP liquidation at recovery CR; retain automatic retry bound and Stability Pool pause";
+      preserve_sp_liquidation_pause = opt true;
+    }
+  },
+)

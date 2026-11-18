@@ -1,0 +1,26 @@
+{
+  "capturedUtc": "2026-11-18T19:16:50.463880+00:00",
+  "target": "tfesu-vyaaa-aaaap-qrd7a-cai",
+  "status": "Running",
+  "moduleHash": "0xce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+  "operator": "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+  "settingsControllersUnchangedSinceLiveReceipt8a42c521": true,
+  "settingsSha256": "ce32352f4df9c65d2f6ff5835ff6e71c8c9f38c8d78ffe245518a0596f293f2d",
+  "controllers": [
+    "cpbhu-5iaaa-aaaad-aalta-cai",
+    "mi66c-zqlu4-4kxd6-2gtp7-szg5v-6a62a-geoty-fahu5-4trje-xyfby-wqe",
+    "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae"
+  ],
+  "spPause": true,
+  "nov18QueryCounts": {
+    "vaults": 51,
+    "xrpClaims": 4,
+    "pendingPayouts": 0,
+    "reserveJournals": 0
+  },
+  "completeSnapshotInventoryUnchanged": true,
+  "candidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "snapshotExport": "DEFERRED_TO_DEPLOYMENT_APPROVAL",
+  "snapshotExportPerformed": false,
+  "productionWritesPerformed": false
+}
