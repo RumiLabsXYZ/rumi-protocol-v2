@@ -1,0 +1,76 @@
+{
+  "moduleHash": "0xce014cc2fdccdb59f8545ed4fc6af40a0ee484f290c0cdf6857f1c38bcb3ca5f",
+  "status": "Running",
+  "spPause": true,
+  "vaultCount": 51,
+  "xrpClaims": 4,
+  "pendingPayouts": 0,
+  "reserveJournal": {
+    "Ok": {
+      "journal_count": "0",
+      "operation_id": [],
+      "phase": [],
+      "unresolved_leg": []
+    }
+  },
+  "mode": {
+    "GeneralAvailability": null
+  },
+  "snapshots": {
+    "snapshots": [
+      {
+        "snapshot_id": "00000000000000170000000001f088fe0101",
+        "taken_at_timestamp": 1794099176324026000,
+        "total_size_bytes": 113996773
+      },
+      {
+        "snapshot_id": "00000000000000180000000001f088fe0101",
+        "taken_at_timestamp": 1794100984221282184,
+        "total_size_bytes": 113340776
+      },
+      {
+        "snapshot_id": "00000000000000190000000001f088fe0101",
+        "taken_at_timestamp": 1794196328118193407,
+        "total_size_bytes": 113842743
+      },
+      {
+        "snapshot_id": "000000000000001a0000000001f088fe0101",
+        "taken_at_timestamp": 1794350317923677820,
+        "total_size_bytes": 113983269
+      },
+      {
+        "snapshot_id": "000000000000001b0000000001f088fe0101",
+        "taken_at_timestamp": 1794413633852772336,
+        "total_size_bytes": 113724200
+      },
+      {
+        "snapshot_id": "000000000000001c0000000001f088fe0101",
+        "taken_at_timestamp": 1794556775269151924,
+        "total_size_bytes": 113986471
+      },
+      {
+        "snapshot_id": "000000000000001d0000000001f088fe0101",
+        "taken_at_timestamp": 1794675523069840035,
+        "total_size_bytes": 113988485
+      },
+      {
+        "snapshot_id": "000000000000001e0000000001f088fe0101",
+        "taken_at_timestamp": 1794737761961278615,
+        "total_size_bytes": 114013028
+      },
+      {
+        "snapshot_id": "000000000000001f0000000001f088fe0101",
+        "taken_at_timestamp": 1794743938946735005,
+        "total_size_bytes": 113902781
+      },
+      {
+        "snapshot_id": "00000000000000200000000001f088fe0101",
+        "taken_at_timestamp": 1794932756770661692,
+        "total_size_bytes": 114372920
+      }
+    ]
+  },
+  "settingsSha256": "ce32352f4df9c65d2f6ff5835ff6e71c8c9f38c8d78ffe245518a0596f293f2d",
+  "candidSha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6",
+  "noProductionWrite": true
+}

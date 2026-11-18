@@ -1,0 +1,164 @@
+{
+  "observedUtc": "2026-11-18T05:00:19.540630+00:00",
+  "reviewer": "Adrian; sizing/claim accounting source owner",
+  "source": "1165a8973cb2040c732753a8bf24e7825ff639c7",
+  "tree": "7e82248d0fa69bf9fa18077262c1b78eff5e2fe2",
+  "verdict": "PASS_FOCUSED_SOURCE_REVIEW; native/build verification pending",
+  "acceptedFinding": {
+    "id": "V208-COMPOSE-EXPIRY-1",
+    "initialSource": "dd45f158d8c68f8ff931dd9179410cdb92ce784e",
+    "evidence": "Expired matching reservation was returned for NEW burn while deployed SP caller does not inspect expiry.100XRP/$100debt,old1.20/new1.30,burn10 belowcurrentcap can return717949extra grossdrops comparedwithfreshsizing.",
+    "resolution": "cad2523f refuses expired readmission after current cap validation;1165a897 corrects matcher comment only, preserving exact tuple for already-burned proof-bound settlement.",
+    "regression": "xrp_expired_preflight_cannot_admit_new_burn_but_retains_post_burn_settlement",
+    "regressionSha256": "8a5adfbf1ec16a129590ef5574cf843c34946a3e440fcd9d4a769fccc37528d6",
+    "runtimeTestRunHere": false
+  },
+  "checks": [
+    "Native recovery target is configured per-asset, with drop-floor rounding and invalid math failing closed.",
+    "Fresh/repeated preflight burn cannot exceed current cap; expired existing row cannot newly admit a burn.",
+    "Post-burn matcher/commit/receipt protection remains byte-identical, preserving exact immutable reservation and proof replay fences.",
+    "Partial settlement conserves gross depositor+developer claims and residual debt/collateral with proportional accrued interest.",
+    "Non-XRP sizing is byte-identical.",
+    "Live automatic replacement/signer/sibling guards, pause upgrade/API/helper and state/storage shapes are retained byte-identically."
+  ],
+  "functionChecks": [
+    {
+      "path": "src/rumi_protocol_backend/src/state.rs",
+      "function": "native_xrp_recovery_repay_amount",
+      "identicalTo": "afedab2993e87744a9a4e1a14efa59934815e975",
+      "sha256": "b9fa1d788b4f4df0c155204296ea66d7856dc795ee0a66ebd3575ec299b52d0f",
+      "composedFunctionSha256": "b9fa1d788b4f4df0c155204296ea66d7856dc795ee0a66ebd3575ec299b52d0f"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/state.rs",
+      "function": "recommended_liquidation_amount_for",
+      "identicalTo": "afedab2993e87744a9a4e1a14efa59934815e975",
+      "sha256": "a9f34bd3f282427d55eb972456c7aa9259e8722dc254af83dc4d67a6168ffcf8",
+      "composedFunctionSha256": "a9f34bd3f282427d55eb972456c7aa9259e8722dc254af83dc4d67a6168ffcf8"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "xrp_sp_absorb_sizing",
+      "identicalTo": "afedab2993e87744a9a4e1a14efa59934815e975",
+      "sha256": "5d3ccb888291da04fe1a5198939c6e634148e0cc6240c54b3b135b8397f2ea94",
+      "composedFunctionSha256": "5d3ccb888291da04fe1a5198939c6e634148e0cc6240c54b3b135b8397f2ea94"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "stability_pool_preflight_xrp_absorb_in_state",
+      "identicalTo": "afedab2993e87744a9a4e1a14efa59934815e975",
+      "sha256": "6045cd2c7c3c413735dcdaf4fee0edfdf221ae171a590d4a397dff54229eea42",
+      "change": "Only accepted expired-row refusal after sizing; no tuple mutation.",
+      "composedFunctionSha256": "355d893e23cc885292517dad0aaa6b56af119e1d5fe4a658ee8bb2708aa99eb6"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/state.rs",
+      "function": "upgrade",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "90c2cfeea02728778fc1c307df2e70590d4317ee6a80582c9863e20b99246bca",
+      "composedFunctionSha256": "90c2cfeea02728778fc1c307df2e70590d4317ee6a80582c9863e20b99246bca"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/state.rs",
+      "function": "effective_liquidation_amount",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "a284f6788181bafa1e297e560391b55bb2ccd9aca30190c55ef3e80345a08ddc",
+      "composedFunctionSha256": "a284f6788181bafa1e297e560391b55bb2ccd9aca30190c55ef3e80345a08ddc"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "matching_xrp_absorb_preflight",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "91c1c7791bb6b9cdba4186f1398682e30a1797cd3dec966fab72a0791cf42c58",
+      "composedFunctionSha256": "91c1c7791bb6b9cdba4186f1398682e30a1797cd3dec966fab72a0791cf42c58"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "stability_pool_liquidate_xrp_vault_in_state",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "6f92944c570b5880d9622c8b0db732a8cc18eda910a6a44de08874c7ee450a9a",
+      "composedFunctionSha256": "6f92944c570b5880d9622c8b0db732a8cc18eda910a6a44de08874c7ee450a9a"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "hold_automatic_xrp_replacement",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "489ee68e421961e7caf4f9f03811afc7156b1d704b7f4eeddef48549f945d9d8",
+      "composedFunctionSha256": "489ee68e421961e7caf4f9f03811afc7156b1d704b7f4eeddef48549f945d9d8"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "dispatch_xrp_claim_signature_with",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "e4c5bd6e52689168e2597a61b1c7c4f97be75252d8d872caf7137d04b874c5b2",
+      "composedFunctionSha256": "e4c5bd6e52689168e2597a61b1c7c4f97be75252d8d872caf7137d04b874c5b2"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "xrp_sibling_reconcile_decision_for_origin",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "58d7f2a014c1a9aaf42b78020d79ed48a2fe6850a87bdf7c8139ff06a5ad3262",
+      "composedFunctionSha256": "58d7f2a014c1a9aaf42b78020d79ed48a2fe6850a87bdf7c8139ff06a5ad3262"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/vault.rs",
+      "function": "settle_xrp_claim_with_origin",
+      "identicalTo": "2ff2723a8f85e960eff2e32b141926334cc5b4b5",
+      "sha256": "8ac8ddcf833a4c67408be4dcb29edd393dfc06951d57d60041021f85b8b9f195",
+      "composedFunctionSha256": "8ac8ddcf833a4c67408be4dcb29edd393dfc06951d57d60041021f85b8b9f195"
+    }
+  ],
+  "unchangedLiveFiles": [
+    {
+      "path": "src/rumi_protocol_backend/src/main.rs",
+      "sha256": "b6d8471e5cba1b41571f8b4f6cc21b42399f3e72c0433cde59407e862ee78101"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/lib.rs",
+      "sha256": "da65248b47532b6255c84a195c16fd08e24ab8fed71f2a9f631bb041684d7fe3"
+    },
+    {
+      "path": "src/rumi_protocol_backend/src/storage.rs",
+      "sha256": "b29c715fce1ed5dd5f2d1fb0ace06ac6b6f9edf93bfdc51f1261e2e25f95f06b"
+    },
+    {
+      "path": "src/rumi_protocol_backend/rumi_protocol_backend.did",
+      "sha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did",
+      "sha256": "0279b1f5395cf323e479ba18d842419232b371e8850eb246429fad4e8792ebb6"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.js",
+      "sha256": "03dc4d2fe8f155c2dcdf749d1b262099936dc3b9ad116640178317050047b690"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.d.ts",
+      "sha256": "acff622a5243a83bc926448401fd53cc2a018e496d372f3a12ea55f8055400a6"
+    },
+    {
+      "path": "scripts/rumi-backend-upgrade-args.sh",
+      "sha256": "b33206cd3f7177badc4baaeeb8a2404346e1ec1aa0d498b768b2c7f0ebf8ba3e"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "b25c765164b7414004df6f45f21d6f6d3540aa0f0dae3ecdd81c04e5ad438d47"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "bcf7bbee5b27261b2879f60d72507fefd718bc30b51f8eb3fce4622ff1f5c573"
+    }
+  ],
+  "blockingIssues": [],
+  "nonBlockingNotes": [
+    "An inherited sizing comment still says full-debt; actual guarded behavior and tests permit partial burns. No extra gate imposed."
+  ],
+  "proofLimits": [
+    "No compiler/test/live burn/signature/deployment performed by reviewer.",
+    "Pure-state post-burn regression does not simulate a real ledger burn; outer ledger/auth proof code is unchanged.",
+    "Composed source still requires scheduled149XRP+4existingpause+1normalinterface checks and one exact source-matched backend build."
+  ],
+  "noSourceWritesOrCompilersHere": true,
+  "StabilityPoolLiquidationsRemainPaused": true
+}
