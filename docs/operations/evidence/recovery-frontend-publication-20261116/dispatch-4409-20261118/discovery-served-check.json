@@ -1,0 +1,18 @@
+{
+  "checks": [
+    {
+      "key": "/.well-known/ic-architecture",
+      "bytes": 1048,
+      "sha256": "22bcdf6a5f1ad8e4c1b241a46e3a7f1ae5bec0ab16a79e62ce215288e862f702",
+      "curlExitCode": 0
+    },
+    {
+      "key": "/.well-known/ii-derivation-origin",
+      "bytes": 44,
+      "sha256": "16cf6b5a8eb787b3222ba58308cd6234755b20be869337e1e11e42b51eee53a0",
+      "curlExitCode": 0
+    }
+  ],
+  "tool": "system curl with default TLS verification",
+  "priorPythonAttempt": "local Python CA store lacked issuer; no verification bypass used"
+}

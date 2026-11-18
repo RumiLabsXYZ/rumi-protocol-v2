@@ -1,0 +1,36 @@
+{
+  "schema": "rumi-frontend-dispatch-pins-v1",
+  "executionHeldWith": "Dorian",
+  "preparedOnly": true,
+  "resourceAllocationDoesNotGrantPublication": true,
+  "humanAuthority": [
+    "Merritt user01a1db85-3658-7c01-8637-73e787fa6eb4",
+    "Merritt user01a1dd32-aece-7ee0-b545-2ddbc605e891"
+  ],
+  "filesSha256": {
+    "prepare-dispatch.mjs": "7d65e748c937c71fe01397451f5ed71ebc7e32620407a1a80b0bd87e89478d5a",
+    "publish-frontend.mjs": "ec7198cebc81260224a003eaf413bd7db15ae3a95f3cc73617e9f900def541a4",
+    "read-preflight.mjs": "4c598c435d017613433b1edfe65ed108b9d18f1439d06fc29e1fbd87342a8693",
+    "verify-dispatch.mjs": "d4e30c694f944d6efe46cd3fcd3a3024d8f4d708f2d67500c0f0896fe1960f9c",
+    "decode-saved-reply.mjs": "2073c76a73afe62752d33161cf55b740ca8773454cc87e37c6396cb8c37e7341",
+    "materialize-artifact.py": "3569f2c50dbbe4d76a31e728cc0e7092be2fdeb26181f0b05ab70af041eb6295",
+    "dispatch-manifest.json": "f29280e6137ab3e24ccdae690d7ec2c873ef7dbac1201b4fe6253f98dfc30272",
+    "artifact-manifest.json": "82768e536040d1a45b77215f3bd48ae1290945e80a44f3d5968735c97a319e82",
+    "inventory-before.json": "efcbb671a923600a669dc92321adcbac0be32e8a43ae0f6cd30c8bd059375a49",
+    "state-before.json": "2f56821c3e67552504c2decfaa71f90ed35d08fc562dda874434dcb493c36499",
+    "certified-before.json": "eb7064b09a01fc81c9cb16e40a194e2078d31c4d071146f79eb29809b65e25a3",
+    "frontend-live.did": "af4efb9d921acb40734025cedd6a3424c8a925c5bcd5585d711cb2dbf263227b",
+    "frontend-live-idl.mjs": "20f32f0c55067d8f969b83e1f6f8d0fd7f4851298d4d37be0cc15ff75b70eebe",
+    "dispatch-boundary-check.mjs": "1e742541998dd4a2fc4e58e0ac893c6215bdbd01770b67b124e93e51dedf862b"
+  },
+  "baselineAmendment": {
+    "priorUiPacketCommit": "64bacefaf14c91aef2fdea84c753d0a18bd587e9",
+    "priorPinsSha256": "475a8b21dd5b20cc37d235d67253b11a3252164a77d7f9a0c3e6f4672284ddd1",
+    "originalUiPacketCommit": "37380ddd3d8585c0b1c85d04127b865bebf2bf79",
+    "originalPinsSha256": "e12c4db48741d377706eccffb53b399e581e3ccbf4b15d59372f09ca1a6f18e7",
+    "separatelyApprovedBackendReceiptCommit": "b667e53a17a965865214784fead4396e97b2e3d7",
+    "receiptDocumentSha256": "ce364709e88f9690ea0fb2a36bdd3bb5984c5665b37f7aecf73b75be055d7cab",
+    "uiExecutionAuthorizationGranted": false,
+    "change": "Exact backend module baseline replacement and capture time; certified Candid unchanged. Code, artifact, phases and guards unchanged."
+  }
+}
