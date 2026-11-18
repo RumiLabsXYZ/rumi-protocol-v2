@@ -4859,9 +4859,10 @@ pub fn stability_pool_release_xrp_absorb_preflight_in_state(
 /// the submit consumes it, the burn proof is independently verified and single-use
 /// (`consumed_writedown_proofs`), the caller must be the registered SP, and the
 /// submit guards that the vault still holds at least the reserved gross seizure
-/// before minting any claim. Expiry still blocks NEW vault mutations via
-/// `ensure_no_active_xrp_sp_absorb_preflight`, and a fresh preflight overwrites a
-/// stale one for the same vault.
+/// before minting any claim. Unexpired reservations block new vault mutations
+/// via `ensure_no_active_xrp_sp_absorb_preflight`. A new preflight never
+/// overwrites a retained tuple, and expired rows cannot admit another burn;
+/// the registered SP can release a reservation known to be unburned.
 fn matching_xrp_absorb_preflight(
     state: &crate::state::State,
     vault_id: u64,
