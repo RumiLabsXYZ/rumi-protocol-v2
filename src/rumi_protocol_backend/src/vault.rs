@@ -4770,6 +4770,14 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
     // of an already-burned legacy reservation bypasses this function.
     let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
     if let Some(row) = existing.as_ref() {
+        // An expired quote cannot authorize a new burn at its old price. Keep
+        // its exact tuple for proof-backed settlement of an already-burned
+        // amount; only the registered SP may release an unburned reservation.
+        if row.expires_at_ns <= now_ns {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has an expired native-XRP absorb reservation; reconcile or release it before new admission"
+            )));
+        }
         if row.caller == caller && row.icusd_burn_e8s == expected_icusd_burn_e8s {
             return Ok(crate::XrpSpAbsorbPreflight {
                 vault_id,
@@ -15617,6 +15625,47 @@ mod xrp_sp_absorb_contract_tests {
         );
         assert!(legacy.vault_id_to_vaults.get(&VAULT_ID).is_none());
         assert!(legacy.sp_xrp_absorb_preflights.get(&VAULT_ID).is_none());
+    }
+
+    #[test]
+    fn xrp_expired_preflight_cannot_admit_new_burn_but_retains_post_burn_settlement() {
+        let mut state = test_state_with_xrp_vault();
+        let xrp = xrp_collateral_principal();
+        state.collateral_configs.get_mut(&xrp).unwrap().last_price = Some(1.20);
+        let burn = 10 * E8;
+        let quote = stability_pool_preflight_xrp_absorb_in_state(
+            &mut state, sp(), VAULT_ID, burn, 10,
+        ).expect("initial unexpired quote is admitted");
+        let old = state.sp_xrp_absorb_preflights[&VAULT_ID].clone();
+        state.collateral_configs.get_mut(&xrp).unwrap().last_price = Some(1.30);
+        let current = xrp_sp_absorb_sizing(&state, VAULT_ID, burn)
+            .expect("same burn remains below the current recovery cap");
+        assert!(old.total_to_seize_drops > current.total_to_seize_drops);
+        let after_expiry = quote.expires_at_ns + 1;
+        let error = stability_pool_preflight_xrp_absorb_in_state(
+            &mut state, sp(), VAULT_ID, burn, after_expiry,
+        ).expect_err("expired tuple cannot admit a new burn at its old price");
+        assert!(format!("{error:?}").contains("expired native-XRP absorb reservation"));
+        assert_eq!(state.sp_xrp_absorb_preflights.get(&VAULT_ID), Some(&old));
+        assert_no_xrp_absorb_mutation(&state);
+
+        // A burn already committed against the old tuple remains recoverable.
+        let mut request = valid_request(46);
+        request.icusd_burned_e8s = burn;
+        request.allocations = vec![XrpSpPayoutAllocation {
+            claimant: depositor_a(),
+            payout_address: "rA".into(),
+            destination_tag: Some(7),
+            drops: old.collateral_received_drops,
+        }];
+        let result = stability_pool_liquidate_xrp_vault_in_state(
+            &mut state, sp(), request, after_expiry,
+        ).expect("proof-backed expired tuple still settles exactly");
+        assert_eq!(result.liquidated_debt_e8s, burn);
+        assert_eq!(result.collateral_received_drops, old.collateral_received_drops);
+        assert_eq!(state.vault_id_to_vaults[&VAULT_ID].borrowed_icusd_amount, ICUSD::new(90 * E8));
+        assert_eq!(state.vault_id_to_vaults[&VAULT_ID].collateral_amount, 100_000_000 - old.total_to_seize_drops);
+        assert!(state.sp_xrp_absorb_preflights.get(&VAULT_ID).is_none());
     }
 
     #[test]
