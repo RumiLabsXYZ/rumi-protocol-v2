@@ -1,0 +1,224 @@
+{
+  "releasePacketCommit": "482a61e5631e6b16218bc2c636714528c3f0f3c0",
+  "packetSha256": "d1145e7580b699f02f1df5bffa9ea427ae1f21ba0f91a57cc468908e342d1361",
+  "humanAuthority": "01a1f1d9-32c2-7643-8268-0c27219cc489",
+  "target": "tcfua-yaaaa-aaaap-qrd7q-cai",
+  "network": "ic",
+  "operator": "rumi_identity",
+  "sourceCommit": "8e6f6f01671e615feb577d19400b22c41937a936",
+  "artifactArchiveSha256": "790306bbd2016646614f8c086004a6014c73bf9cd4e686836aaecc591ad72a37",
+  "planSha256": "6f0d7f9bf28a32e6a6447092634fb550ad61fb222146374897ca5983c7e7de68",
+  "proofs": [
+    {
+      "file": "verified-stage.json.gz",
+      "uncompressedSha256": "c389f914a91f2e35e50ed714bd1134432e2b680a46ab815b900e56ed3274e1fd",
+      "compressedSha256": "2841d0c3b1ec9adca6f5cb16bb944ea843042c265deb97c1e5aafc4f772106e8",
+      "phase": "stage",
+      "verifiedUtc": "2026-11-19T03:43:42.273Z",
+      "assetRows": 1088,
+      "storedEncodings": 436,
+      "httpKeys": 331
+    },
+    {
+      "file": "verified-final.json.gz",
+      "uncompressedSha256": "eb2849adef4117fbb557b2ade60e9e57b1e03ebfd340df309a750bcbcd0bcea2",
+      "compressedSha256": "93013084fcc4680c597d75b8b9a14fc9fe6bc781db87f1225d637e53327b4e58",
+      "phase": "activate",
+      "verifiedUtc": "2026-11-19T03:47:45.469Z",
+      "assetRows": 1088,
+      "storedEncodings": 443,
+      "httpKeys": 333
+    }
+  ],
+  "operatorCalls": [
+    {
+      "phase": "stage",
+      "method": "create_batch",
+      "argsSha256": "8a0498d93b8d76da62759d63ce3c0bda2e82cde93f08230e7d1b835b583b6f52",
+      "encodedBytes": 9,
+      "dispatchedUtc": "2026-11-19T03:36:52.735Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:36:54.329Z",
+      "label": "stage-create",
+      "batchId": "705"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "17c641174a8eab8b245862d81d5400c0f9ed0d254243dde7909e06e5f682d7e4",
+      "encodedBytes": 1400229,
+      "dispatchedUtc": "2026-11-19T03:36:54.367Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:36:59.296Z",
+      "label": "stage-chunks-0"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "e139e418b87491b572ffa9c77a5dc6d72287b9c7773b11c533a8deb9cd019a83",
+      "encodedBytes": 1400119,
+      "dispatchedUtc": "2026-11-19T03:36:59.332Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:37:02.636Z",
+      "label": "stage-chunks-1"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "26464f825f47d71c97fd1bcf50f69dca8b6d0dadc70da2476bac841686f6f120",
+      "encodedBytes": 1399979,
+      "dispatchedUtc": "2026-11-19T03:37:02.670Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:37:11.796Z",
+      "label": "stage-chunks-2"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "9eaf0a83bccb3a6d5b1e1d55ed7c37e15ca9d999551ba54cb030cc4f29bcac70",
+      "encodedBytes": 1400194,
+      "dispatchedUtc": "2026-11-19T03:37:11.857Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:37:16.162Z",
+      "label": "stage-chunks-3"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "c9dc6e8f61189216942f45bf012f7c9330b561b2334dc8e12c16575a0fe5366c",
+      "encodedBytes": 776166,
+      "dispatchedUtc": "2026-11-19T03:37:16.201Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:37:21.311Z",
+      "label": "stage-chunks-4"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "c38982da89b163030f7ec5d25db3079e21420faa16d39ec52567c3643d5dad59",
+      "encodedBytes": 99159,
+      "dispatchedUtc": "2026-11-19T03:37:21.330Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:37:23.443Z",
+      "label": "stage-chunks-5"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "db7635b4bafc495127db3366667f8e1938b6f5beecddbd99202f2631f18a5781",
+      "encodedBytes": 481,
+      "dispatchedUtc": "2026-11-19T03:37:23.460Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:37:25.074Z",
+      "label": "stage-chunks-6"
+    },
+    {
+      "phase": "stage",
+      "method": "commit_batch",
+      "argsSha256": "25397520409e8d0ddc057aab96c9ba7ca8a60d9fb9b87ab73c1dfc04dac89aae",
+      "encodedBytes": 584715,
+      "dispatchedUtc": "2026-11-19T03:37:45.239Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:37:50.678Z",
+      "label": "stage-commit"
+    },
+    {
+      "phase": "activate",
+      "method": "create_batch",
+      "argsSha256": "8a0498d93b8d76da62759d63ce3c0bda2e82cde93f08230e7d1b835b583b6f52",
+      "encodedBytes": 9,
+      "dispatchedUtc": "2026-11-19T03:45:28.254Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:45:29.953Z",
+      "label": "activate-create",
+      "batchId": "706"
+    },
+    {
+      "phase": "activate",
+      "method": "create_chunks",
+      "argsSha256": "46d3d9b9be2377ce10569d035da3fcfd90ff4f3d226603f6311b9c9eee36ab3b",
+      "encodedBytes": 6438,
+      "dispatchedUtc": "2026-11-19T03:45:29.973Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:45:31.843Z",
+      "label": "activate-chunks-0"
+    },
+    {
+      "phase": "activate",
+      "method": "create_chunks",
+      "argsSha256": "ab4606802a3684fcabd365fe36ef0af56c329e3e132aac5cd53c8f6d705c78d3",
+      "encodedBytes": 1041,
+      "dispatchedUtc": "2026-11-19T03:45:31.863Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:45:33.372Z",
+      "label": "activate-chunks-1"
+    },
+    {
+      "phase": "activate",
+      "method": "commit_batch",
+      "argsSha256": "5329f6c211b15c9b525453e6499c97ea8d1caf220912f9ca37fe52595ff13ccb",
+      "encodedBytes": 660,
+      "dispatchedUtc": "2026-11-19T03:45:53.761Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T03:45:55.269Z",
+      "label": "activate-commit"
+    }
+  ],
+  "finalState": {
+    "frontend": {
+      "status": "Running",
+      "moduleHash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+      "settingsSha256": "efba6671f552c15b1e43e49c6af7d56b2898d0b2d2ee2ab695dba886394a7326"
+    },
+    "backend": {
+      "status": "Running",
+      "moduleHash": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+      "settingsSha256": "ce32352f4df9c65d2f6ff5835ff6e71c8c9f38c8d78ffe245518a0596f293f2d"
+    },
+    "permissions": {
+      "Commit": "4449444c016d68010001011dcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402",
+      "Prepare": "4449444c016d68010001011dcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402"
+    },
+    "spHold": "(true)"
+  },
+  "rootServedChecks": [
+    {
+      "key": "/index.html",
+      "bytes": 4468,
+      "sha256": "4dc3b76aa0e9727f15d85f3f896e76831707bfa179ad1d9be56c6654426743fd",
+      "expectedMatch": true
+    },
+    {
+      "key": "/_app/immutable/chunks/IKGYMvoi.js",
+      "bytes": 44315,
+      "sha256": "719b9ce0310a60290421cbb0625c3f094bdee8c35a5c23b1a8fe6bfc46399772",
+      "expectedMatch": true
+    }
+  ],
+  "customerWalletOrFinancialAction": false,
+  "clientDepositOutcome": "Not tested or verified",
+  "independentCryptographicHttpCertificateValidation": false,
+  "uiVerification": {
+    "evidenceFile": "ellis-ui-checks.json",
+    "sha256": "b50fa159a504f49c5c60f7782cb9372f785bf912004f6db1e17b9a9b8dce6353",
+    "publicSpDesktopAndMobile": "Rendered without horizontal overflow",
+    "authenticatedMenuAndReservedRows": "Not live-exercised; earlier source/mock coverage only",
+    "manualMobileOverflowObserved": true,
+    "nativeXrpAliasBackground400sObserved": true,
+    "walletConnected": false,
+    "financialButtonClicked": false
+  }
+}

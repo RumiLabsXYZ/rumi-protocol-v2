@@ -1,0 +1,74 @@
+{
+  "observedUtc": "2026-11-19T03:49:59.517174+00:00",
+  "primaryDomain": "https://app.rumiprotocol.com",
+  "isolatedBrowserContext": "ellis-release-verification-20261118",
+  "walletConnected": false,
+  "liveVersion": "1795059056753",
+  "loadedApp": "/_app/immutable/entry/app.Cb_IRo8s.js",
+  "loadedRoot": "/_app/immutable/nodes/0.DkbNAT_q.js",
+  "servedRootSha256": "36c010f03032da31f6f9c6b7eac4d2a7e0ac403906407d1d76596e219fbfb573",
+  "servedDepositHandler": "/_app/immutable/chunks/IKGYMvoi.js",
+  "servedHandlerSha256": "719b9ce0310a60290421cbb0625c3f094bdee8c35a5c23b1a8fe6bfc46399772",
+  "handlerCallsWithImmediateChannelEntry": 2,
+  "genericGlobalCardAbsentFromServedRootAndRenderedPublicPages": true,
+  "recoveryMenuLabelPresentInServedRoot": true,
+  "spDesktop": {
+    "viewportWidth": 1440,
+    "documentWidth": 1425,
+    "publicRendered": true
+  },
+  "spMobile": {
+    "viewportWidth": 390,
+    "documentWidth": 375,
+    "publicRendered": true
+  },
+  "manualDesktop": {
+    "viewportWidth": 1440,
+    "documentWidth": 1425,
+    "publicRendered": true,
+    "publicVaultCount": 51,
+    "eligibleQueueCount": 0
+  },
+  "manualMobile": {
+    "viewportWidth": 390,
+    "documentWidth": 452,
+    "publicRendered": true,
+    "horizontalOverflowObserved": true
+  },
+  "authenticatedRecoveryMenuAndReservedQueueCases": "Not exercised in live isolated browser; source/earlier mocked coverage retained. No eligible reserved row observed.",
+  "consoleObservations": [
+    "Eight HTTP400 responses across navigation for native XRP collateral alias5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i/query and/read_state; outside changed deposit branches. No clean-console claim."
+  ],
+  "scopeDeferrals": [
+    "Mobile manual-page horizontal overflow and native XRP alias background requests recorded separately; no scope expansion or release gate inferred."
+  ],
+  "financialButtonsClicked": false,
+  "clientSigningOrDepositOrRetry": false,
+  "liveCustomerDepositCompletion": "UNVERIFIED",
+  "screenshots": [
+    {
+      "path": "ellis-sp-desktop-live-20261118.png",
+      "bytes": 646459,
+      "sha256": "41ff6fbce21475f339f0561fb0174efd3ea012983c992e10df0e7a0e7f591e58"
+    },
+    {
+      "path": "ellis-sp-mobile-live-20261118.png",
+      "bytes": 344007,
+      "sha256": "49033c57f04c71259d3943235cda90979134df2f8910afdfe1f62273ea2f9c42"
+    },
+    {
+      "path": "ellis-manual-mobile-live-20261118.png",
+      "bytes": 315081,
+      "sha256": "be1c1bd79caad712d15ac023f857d479f8df6e5e40e6751903cf94969326568c"
+    },
+    {
+      "path": "ellis-manual-desktop-live-20261118.png",
+      "bytes": 683091,
+      "sha256": "d409a8ebe25a53959b9d4138d82ed57f89e8cbadbb9f146ad70b975a50335075"
+    }
+  ],
+  "stageProofSha256": "c389f914a91f2e35e50ed714bd1134432e2b680a46ab815b900e56ed3274e1fd",
+  "finalProofSha256": "eb2849adef4117fbb557b2ade60e9e57b1e03ebfd340df309a750bcbcd0bcea2",
+  "originalCaptureSha256": "bd2097ae1607937563171952464bd5e8e29444dad6e8142d20683da0403dc355",
+  "publishedPathNormalization": "Screenshot paths changed to sibling evidence filenames; bytes and hashes unchanged."
+}
