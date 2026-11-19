@@ -1,6 +1,23 @@
 {
   "cards": [
     {
+      "id": "SEC-23",
+      "state": "In progress",
+      "owner": "Ellis repayment fix and verification; Dorian release owner; Merritt customer-case coordinator",
+      "scope": "Fix OISY repayment popup closing before approval and backend repayment",
+      "evidenceText": "Exact source 3294c956 gives repayment one unique click-owned signer shared by ledger approval and backend repayment. Final 44 focused tests pass, including deployed deposit regression and a real-SDK delayed-handshake cancellation test. Two initial independent reviews found the late-handshake cleanup race; the correction closes the owned window immediately and cleans up late channels. Source preserves caller/session/view, token, amount, allowance expiry and unknown-outcome guards. Two fresh final independent source reviews pass. One source-pinned bounded build is prepared but has not started; release preparation follows its actual result. No deployment or customer repayment claimed; all financial and liquidation action boundaries preserved.",
+      "evidenceLinks": [
+        {
+          "title": "Exact repayment source and regression tests",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/commit/3294c9561664d2ec48070ac0bab50862913f22dc"
+        },
+        {
+          "title": "Source/test/review evidence and build boundary",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-release-evidence-20261116/docs/operations/vault197-oisy-repayment-20261118.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-22",
       "state": "Done",
       "owner": "Ellis fix/build/preparation; Dorian proposed publisher",

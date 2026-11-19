@@ -1,6 +1,6 @@
 {
-  "summary": "The combined OISY deposit click fix and recovery-menu/queue restoration are live. Source tests, one exact build, all artifact files, staged/final stored and served bytes passed verification. Public desktop/mobile SP pages load the new handler; authenticated actions and real customer deposit remain unverified. All financial and liquidation holds remain.",
-  "plainSummary": "The wallet popup fix and recovery-menu cleanup are live and verified. The client can refresh the app to load the update. We have not performed or confirmed their deposit. All financial and liquidation holds remain; unrelated mobile queue layout and background lookup errors are deferred.",
+  "summary": "Deposit and recovery-menu fixes are live. A separate OISY repayment correction shares one action-owned signer across approval and repayment; 44 focused checks pass, including delayed-handshake cleanup. Final source verification and one exact build precede release preparation. Customer repayment and all financial actions remain unverified.",
+  "plainSummary": "The deposit and recovery-menu fixes are live. A separate repayment popup bug has a tested correction; independent review found and resolved a cancellation race, and the final build and publication remain ahead. No customer transaction has been attempted, and financial recovery and reserve decisions remain separate.",
   "glossary": [
     {
       "term": "Stability Pool",

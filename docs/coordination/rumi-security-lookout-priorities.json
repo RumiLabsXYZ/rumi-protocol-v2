@@ -1,6 +1,16 @@
 {
   "items": [
     {
+      "id": "oisy-repayment-owned-channel",
+      "title": "Fix urgent OISY repayment popup blocker",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Finish exact pushed evidence and fresh independent verification, then allocate one source-matched frontend build preserving the deployed deposit and recovery fixes. Dorian coordinates release scope. Merritt remains the single customer coordinator; no client retry, financial recovery or reserve activation.",
+      "cardIds": [
+        "SEC-23"
+      ]
+    },
+    {
       "id": "earn-sp-oisy-click",
       "title": "Fix urgent OISY deposit blocker on Earn",
       "status": "done",
