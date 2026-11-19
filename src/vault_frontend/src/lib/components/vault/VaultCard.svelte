@@ -10,6 +10,7 @@
   import { walletStore } from '../../stores/wallet';
   import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '$lib/services/auth';
   import { openOisySignerChannel } from '$lib/services/oisySigner';
+  import { beginRepaymentOisyAction, type RepaymentOisyAction } from '$lib/services/repaymentOisySigner';
   import { MINIMUM_CR, LIQUIDATION_CR, E8S, getMinimumCR, getLiquidationCR } from '$lib/protocol';
   import { collateralStore } from '../../stores/collateralStore';
   import { TokenService } from '../../services/tokenService';
@@ -278,7 +279,13 @@
       tickingDebt = vault.borrowedIcusd * (1 + vaultInterestRate * elapsed / SECONDS_PER_YEAR);
     }
   }, 1000);
-  onDestroy(() => clearInterval(tickInterval));
+  let repaymentViewActive = true;
+  let activeRepaymentAction: RepaymentOisyAction | null = null;
+  onDestroy(() => {
+    clearInterval(tickInterval);
+    repaymentViewActive = false;
+    void activeRepaymentAction?.close().catch(() => {});
+  });
 
   // ── Borrowing fee curve for dynamic multiplier ──
   let borrowingFeeCurve: [number, number][] = [];
@@ -850,12 +857,23 @@
     const current = () => $walletStore.isConnected && !$walletStore.loading
       && $walletStore.principal?.toText() === ownerAtClick
       && $currentWalletType === walletAtClick && $walletSessionGeneration === sessionAtClick;
+    let oisyAction: RepaymentOisyAction | null = null;
     try {
-      const ctx = captureActionBoundContext(ownerAtClick);
+      const capturedContext = captureActionBoundContext(ownerAtClick);
+      const ctx = {
+        ...capturedContext,
+        assertCurrent: () => repaymentViewActive && capturedContext.assertCurrent(),
+      };
       // Preserve Oisy's click-bound signer channel before any internal actor or
       // allowance work, then fail closed if that session changed while opening.
-      if (walletAtClick === WALLET_TYPES.OISY && principalAtClick) await openOisySignerChannel(principalAtClick);
-      if (!current()) throw new Error('Wallet session changed. No new repayment was submitted.');
+      if (walletAtClick === WALLET_TYPES.OISY && principalAtClick) {
+        oisyAction = beginRepaymentOisyAction(principalAtClick, () => {
+          if (!repaymentViewActive || !current()) throw new Error('Wallet session changed or vault view closed. No further repayment step was submitted.');
+        });
+        activeRepaymentAction = oisyAction;
+        await oisyAction.ready;
+      }
+      if (!repaymentViewActive || !current()) throw new Error('Wallet session changed. No new repayment was submitted.');
       let result;
       if (isRepayAndClose) {
         // Compound: repay full debt + withdraw all collateral + close vault in
@@ -923,7 +941,11 @@
       } else {
         toastStore.error(msg, 8000);
       }
-    } finally { isProcessing = false; }
+    } finally {
+      await oisyAction?.close().catch(() => {});
+      if (activeRepaymentAction === oisyAction) activeRepaymentAction = null;
+      isProcessing = false;
+    }
   }
 
   async function handleWithdrawAndClose() {
