@@ -1,0 +1,64 @@
+{
+  "approvedPacket": "8151703f257c1336dddb3ac9aca2cc0c496ef1e4",
+  "source": "3294c9561664d2ec48070ac0bab50862913f22dc",
+  "operator": "Dorian",
+  "independentVerifier": "Ellis",
+  "stageBatch": 707,
+  "activationBatch": 708,
+  "stageCommittedUtc": "2026-11-19T07:05:23.757Z",
+  "activationCommittedUtc": "2026-11-19T07:10:15.275Z",
+  "stageProof": {
+    "sha256": "4dc58f3df525c98f413553be8f72da35506097514d81894525dcb0efa27e7369",
+    "verifiedUtc": "2026-11-19T07:08:21.052Z",
+    "assetKeys": 1355,
+    "storedEncodings": 356,
+    "httpKeys": 271
+  },
+  "finalProof": {
+    "sha256": "c81c089be6c52ca0199bdb7f1f683ec481dd1080a465edd76b8ef5255c242da7",
+    "verifiedUtc": "2026-11-19T07:12:02.603Z",
+    "assetKeys": 1355,
+    "storedEncodings": 363,
+    "httpKeys": 273
+  },
+  "servedVersion": "1795064489138",
+  "servedRepaymentFiles": [
+    {
+      "path": "/_app/immutable/chunks/Bv_H2GCB.js",
+      "status": 200,
+      "bytes": 111211,
+      "sha256": "26fddf5c54e2107835e27f0a4bbeea8e6fb36208fa195576f50b74ce352f254b",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/_app/immutable/chunks/CFyzoWdq.js",
+      "status": 200,
+      "bytes": 56389,
+      "sha256": "b7be781b580f385c738f1e538e5550e8938e85111045a7895f0a93d3a7b84973",
+      "contentType": "text/javascript"
+    }
+  ],
+  "ui": {
+    "desktopWidth": 1440,
+    "mobileWidth": 390,
+    "noHorizontalOverflowObserved": true,
+    "publicDisconnectedUiOnly": true,
+    "screenshots": {
+      "vaults-desktop.png": "2e873e1652684252fb2921aec9c9d22450c44eff8806878966da3281ad201d0f",
+      "vaults-mobile.png": "e6ae35c5ae0c60c425a97adea140c437e95c8b87b91693206faa77a2fee09c00"
+    },
+    "knownDeferredConsoleObservation": "Native-XRP synthetic alias lookup HTTP400s remain; no new fatal render error observed."
+  },
+  "preservation": {
+    "frontendModule": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+    "backendModule": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+    "moduleSettingsControllersPermissionsAndUntouchedAssets": "PASS",
+    "spHold": "(true)",
+    "deployedDepositAndRecoveryComposed": true
+  },
+  "retryReady": true,
+  "customerInstruction": "Refresh app.rumiprotocol.com, use the same wallet and open Vault197 before retrying the intended repayment.",
+  "actualCustomerConsentOrRepayment": "UNVERIFIED",
+  "agentWalletConnectionSigningOrRepayment": false,
+  "independentVerifierPerformedPublication": false
+}

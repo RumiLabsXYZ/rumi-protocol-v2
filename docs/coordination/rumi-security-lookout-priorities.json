@@ -3,9 +3,9 @@
     {
       "id": "oisy-repayment-owned-channel",
       "title": "Fix urgent OISY repayment popup blocker",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Dorian verifies exact publication authority and live baseline against the pushed artifact/payload packet, then performs only authorized staged asset publication and independent stored/served readbacks. Source44tests, dual final reviews and one exact build are complete. Merritt remains the single customer coordinator; no financial retry or reserve action.",
+      "nextAction": "Live handler and independent stored/served/desktop/mobile checks pass. Customer can refresh and retry Vault197; Merritt observes actual consent/payment separately. Preserve exact operator/verifier proof and compose3294c956 in future frontend builds through the normal canonical lane; no new gate on this live release.",
       "cardIds": [
         "SEC-23"
       ]

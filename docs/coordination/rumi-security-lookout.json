@@ -2,10 +2,10 @@
   "cards": [
     {
       "id": "SEC-23",
-      "state": "In progress",
-      "owner": "Ellis repayment fix and verification; Dorian release owner; Merritt customer-case coordinator",
+      "state": "Done",
+      "owner": "Ellis independent verification; Dorian publisher; Merritt customer-case coordinator",
       "scope": "Fix OISY repayment popup closing before approval and backend repayment",
-      "evidenceText": "Source 3294c956 fixes OISY repayment with one owned signer for approval and backend call, including pending-handshake cleanup. All44 focused tests and two fresh final independent reviews pass. One source-matched build passed exit0/54.580s; Cody independently verified all764 artifact files,646 source files, dependencies/resources and process closure. Exact additive packet stages267 immutable keys and activates six entry keys;1355 finalkeys, no deletion/property/backend/financial change. Dorian must resolve publication authority/current baseline; no asset mutation or customer repayment claimed. Release preparation caught stale extraction hash literals before any live write; only those two pins and dependent envelopes were corrected. Committed extractor verified all764 files and inspector passed against the extracted copy; artifact/plan unchanged.",
+      "evidenceText": "LIVE November18 under approved8151703f: stage707 and activation708 independently verified. Final1355 asset keys,363 stored encodings and273 HTTP keys match; old keys/properties/settings/controllers/permissions/backend4409/Candid/SP hold preserved. Primary-domain version1795064489138 loads exact owned-signer/API and repayment-card module hashes; public desktop1440/mobile390 render without overflow. Customer may refresh and retry Vault197. Actual OISY consent and customer repayment remain unverified; no agent wallet/signing/financial action. Deployed deposit/recovery fixes preserved.",
       "evidenceLinks": [
         {
           "title": "Exact repayment source and regression tests",
@@ -18,6 +18,10 @@
         {
           "title": "Exact built artifact and additive publication scope",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-release-evidence-20261116/docs/operations/vault197-oisy-repayment-publication-20261118.md"
+        },
+        {
+          "title": "Independent live stored/served/UI verification and retry-ready boundary",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-release-evidence-20261116/docs/operations/vault197-oisy-repayment-independent-live-result-20261118.md"
         }
       ]
     },

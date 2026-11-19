@@ -1,6 +1,6 @@
 {
-  "summary": "Deposit and recovery-menu fixes are live. The separate OISY repayment correction passed44 focused tests, two fresh independent reviews and one exact build; all764 artifact files were independently verified. The additive publication packet is prepared for Dorian to resolve authority and live baseline. No repayment or financial action is claimed.",
-  "plainSummary": "The deposit and recovery-menu fixes are live. The repayment popup correction passed its tests, independent reviews and production build; its exact release package is ready for the release owner to verify publication authority. It has not been published or tested with a customer transaction, and financial recovery decisions remain separate.",
+  "summary": "Repayment, deposit and recovery-menu fixes are live. Independent repayment stage/final proofs pass:1355 asset keys,363 stored encodings and273 HTTP keys; exact handler modules and desktop/mobile public UI verified. Customer can refresh/retry Vault197. Actual wallet consent/payment remains unverified; unrelated financial holds are preserved.",
+  "plainSummary": "The repayment popup fix is live, alongside the deposit and recovery-menu fixes. Independent stored-byte, served-byte and desktop/mobile checks passed, and the client can refresh and retry repaying vault 197. We have not signed or confirmed their repayment; financial recovery and reserve decisions remain separate.",
   "glossary": [
     {
       "term": "Stability Pool",
