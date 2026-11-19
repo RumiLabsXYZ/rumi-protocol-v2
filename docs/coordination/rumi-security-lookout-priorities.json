@@ -5,7 +5,7 @@
       "title": "Fix urgent OISY repayment popup blocker",
       "status": "in_progress",
       "blockedReason": "",
-      "nextAction": "Finish exact pushed evidence and fresh independent verification, then allocate one source-matched frontend build preserving the deployed deposit and recovery fixes. Dorian coordinates release scope. Merritt remains the single customer coordinator; no client retry, financial recovery or reserve activation.",
+      "nextAction": "Dorian verifies exact publication authority and live baseline against the pushed artifact/payload packet, then performs only authorized staged asset publication and independent stored/served readbacks. Source44tests, dual final reviews and one exact build are complete. Merritt remains the single customer coordinator; no financial retry or reserve action.",
       "cardIds": [
         "SEC-23"
       ]

@@ -5,7 +5,7 @@
       "state": "In progress",
       "owner": "Ellis repayment fix and verification; Dorian release owner; Merritt customer-case coordinator",
       "scope": "Fix OISY repayment popup closing before approval and backend repayment",
-      "evidenceText": "Exact source 3294c956 gives repayment one unique click-owned signer shared by ledger approval and backend repayment. Final 44 focused tests pass, including deployed deposit regression and a real-SDK delayed-handshake cancellation test. Two initial independent reviews found the late-handshake cleanup race; the correction closes the owned window immediately and cleans up late channels. Source preserves caller/session/view, token, amount, allowance expiry and unknown-outcome guards. Two fresh final independent source reviews pass. One source-pinned bounded build is prepared but has not started; release preparation follows its actual result. No deployment or customer repayment claimed; all financial and liquidation action boundaries preserved.",
+      "evidenceText": "Source 3294c956 fixes OISY repayment with one owned signer for approval and backend call, including pending-handshake cleanup. All44 focused tests and two fresh final independent reviews pass. One source-matched build passed exit0/54.580s; Cody independently verified all764 artifact files,646 source files, dependencies/resources and process closure. Exact additive packet stages267 immutable keys and activates six entry keys;1355 finalkeys, no deletion/property/backend/financial change. Dorian must resolve publication authority/current baseline; no asset mutation or customer repayment claimed.",
       "evidenceLinks": [
         {
           "title": "Exact repayment source and regression tests",
@@ -14,6 +14,10 @@
         {
           "title": "Source/test/review evidence and build boundary",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-release-evidence-20261116/docs/operations/vault197-oisy-repayment-20261118.md"
+        },
+        {
+          "title": "Exact built artifact and additive publication scope",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-release-evidence-20261116/docs/operations/vault197-oisy-repayment-publication-20261118.md"
         }
       ]
     },

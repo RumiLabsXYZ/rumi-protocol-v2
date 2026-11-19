@@ -1,5 +1,7 @@
 # Vault 197 OISY repayment popup repair
 
+This source/test checkpoint is followed by the [actual built artifact and publication packet](vault197-oisy-repayment-publication-20261118.md); its build-not-started statements below describe the earlier checkpoint.
+
 The repayment click opened the direct SDK signer, but its bound allowance and backend actor paths used a separate legacy PNP signer sharing the default popup name. The existing legacy idle closer can close or replace that window before consent. This is a supported source/served-route diagnosis, not a claim that the customer's funds moved or that their exact browser transport error was captured.
 
 The exact observed case is Vault 197 / 149.99 icUSD. Its debt snapshot made this an ordinary partial repayment. The repair preserves the requested amount, caller/session checks, token routing, approval amounts and expiry, backend methods and unknown-outcome handling.

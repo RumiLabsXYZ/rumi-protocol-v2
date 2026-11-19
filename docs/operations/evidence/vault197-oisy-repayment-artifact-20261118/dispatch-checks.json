@@ -1,0 +1,21 @@
+{
+  "publicationPerformed": false,
+  "inspector": "PASS",
+  "boundaryCases": 3,
+  "exactPublisherDelta": "Four exact count literals relative to ec7198ce; all mutation/identity/journal/deadline/flush/hold guards retained.",
+  "correctedVerifierDelta": "Only two final asset count literals changed; effective Content-Type behavior retained.",
+  "privateRootVerificationSha256": "df507bb30870a6c8a2bd83cd968bce9c60a742f77e5a0aea0bf344622e2f1c3c",
+  "independentRootVerificationRedactedSha256": "d86136d85938e0467ba3982c2155b81adee9bb0bffdfcb62186a4c5f4126cea2",
+  "inventoryCaptureFinished": "2026-11-19T05:00:11.810Z",
+  "inventoryReadWasStableDoubleRead": true,
+  "artifactSource": "3294c9561664d2ec48070ac0bab50862913f22dc",
+  "stageAssets": 267,
+  "stageSets": 356,
+  "activationAssets": 6,
+  "activationSets": 7,
+  "expectedFinalAssets": 1355,
+  "deletes": 0,
+  "propertyChanges": 0,
+  "permissionsChanges": 0,
+  "backendChanges": 0
+}

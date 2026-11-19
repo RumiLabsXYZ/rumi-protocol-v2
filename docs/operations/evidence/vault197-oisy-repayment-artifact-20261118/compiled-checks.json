@@ -1,0 +1,19 @@
+{
+  "source": "3294c9561664d2ec48070ac0bab50862913f22dc",
+  "checks": {
+    "repaymentOwnedPopup": [
+      "_app/immutable/chunks/Bv_H2GCB.js"
+    ],
+    "approvalFailure": [
+      "_app/immutable/chunks/Bv_H2GCB.js"
+    ],
+    "cancelledReadiness": [
+      "_app/immutable/chunks/Bv_H2GCB.js"
+    ],
+    "unknownRepayment": [
+      "_app/immutable/chunks/CFyzoWdq.js",
+      "_app/immutable/chunks/Bv_H2GCB.js"
+    ]
+  },
+  "proofLimit": "Built bytes contain the verified source behavior; no browser signing or transaction was performed."
+}

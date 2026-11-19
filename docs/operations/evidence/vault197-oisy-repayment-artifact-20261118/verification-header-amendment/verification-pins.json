@@ -1,0 +1,12 @@
+{
+  "schema": "rumi-effective-http-mime-verification-amendment-v1",
+  "priorCorrection": "f1aa846bff171e0cd7968cd7af8026f6a6045e73",
+  "executionPinsSha256": "0bb50083ef81a3bd209aae0a7ca7753f489facb87797cb52a7f8193bc0a2f7b5",
+  "dispatchManifestSha256": "36cc96e745d8710b6ccf586c17a806139bb59157bbfc10c3b2b3374a7c8ee123",
+  "readOnly": true,
+  "filesSha256": {
+    "effectiveContentType.mjs": "9909a54e0af3dc1d92e042ff9995933f71e747b3fa9b6a4aab9b3e2cdaf40fb9",
+    "verify-dispatch.mjs": "97dc8911fc0ae5b55f70485ba4230bf5ce71ff98fa42a17bd2741866ba9f5b99",
+    "run-verification.mjs": "52eb11fb0e96b36f34e345f828ea95deeb057278d41a5bd501d2231b3e4ae73a"
+  }
+}

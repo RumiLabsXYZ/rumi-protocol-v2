@@ -1,0 +1,33 @@
+{
+  "schema": "rumi-frontend-dispatch-pins-v1",
+  "executionHeldWith": "Dorian",
+  "preparedOnly": true,
+  "resourceAllocationDoesNotGrantPublication": true,
+  "humanAuthority": [
+    "Current customer repayment repair preparation; Dorian must resolve exact publication authority separately before any write."
+  ],
+  "filesSha256": {
+    "prepare-dispatch.mjs": "c926aca302122ecbfd061c918cede2cc8dd8409a00f4d81e7ed30823fe53a9c8",
+    "publish-frontend.mjs": "31fa425ebc05376fb432c8857952a07881df2c740100a1e0b02580ee8302cc9b",
+    "read-preflight.mjs": "4c598c435d017613433b1edfe65ed108b9d18f1439d06fc29e1fbd87342a8693",
+    "decode-saved-reply.mjs": "2073c76a73afe62752d33161cf55b740ca8773454cc87e37c6396cb8c37e7341",
+    "materialize-artifact.py": "803ec856bf3a5ba23f3eea717d513f7b56c2a78a788b70d443f17c22ec9e8a34",
+    "dispatch-manifest.json": "36cc96e745d8710b6ccf586c17a806139bb59157bbfc10c3b2b3374a7c8ee123",
+    "artifact-manifest.json": "c0e20f5654625c32ca442e1be7dc49119d5cf9de0622be85740440e0a0bae6ae",
+    "inventory-before.json": "7c5d60c018c729e97debd9943db57f5c5d59b17d8b1a47a3f3810023cb0041f2",
+    "state-before.json": "2f56821c3e67552504c2decfaa71f90ed35d08fc562dda874434dcb493c36499",
+    "certified-before.json": "0529df4345e08dc0b90c6dfbda44878d16c83ea0d2f33cd02139205c4f9c9852",
+    "frontend-live.did": "af4efb9d921acb40734025cedd6a3424c8a925c5bcd5585d711cb2dbf263227b",
+    "frontend-live-idl.mjs": "20f32f0c55067d8f969b83e1f6f8d0fd7f4851298d4d37be0cc15ff75b70eebe",
+    "dispatch-boundary-check.mjs": "1e742541998dd4a2fc4e58e0ac893c6215bdbd01770b67b124e93e51dedf862b"
+  },
+  "combinedRelease": {
+    "source": "3294c9561664d2ec48070ac0bab50862913f22dc",
+    "frontendTree": "e25d2ef75c505890ae6828b32fae86d235c55dcf",
+    "preservedDeployedFrontendSource": "8e6f6f01671e615feb577d19400b22c41937a936",
+    "scope": "Narrow OISY repayment channel correction preserving deployed deposit/recovery UI",
+    "artifactArchiveSha256": "3915e35932d1b47df5a8a8345c61c1416fc4a26fec4ea3642a8a54913a4ac82e",
+    "executionOwner": "Dorian",
+    "publicationPerformed": false
+  }
+}

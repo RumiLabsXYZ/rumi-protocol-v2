@@ -1,0 +1,32 @@
+{
+  "utc": "2026-11-19T05:03:17.207870+00:00",
+  "allocationId": "aa43e929-9bff-42a3-974f-ffd475479d66",
+  "result": "PASS_SOURCE_BUILD_ALL_ARTIFACTS_RESOURCE_AND_OWNED_CLOSURE",
+  "source": "3294c9561664d2ec48070ac0bab50862913f22dc",
+  "tree": "4d04bbcaafc1a13ac5f3fe4931ee9913acfe45f0",
+  "frontendTree": "e25d2ef75c505890ae6828b32fae86d235c55dcf",
+  "sourceExportFilesVerified": 646,
+  "artifactFilesVerified": 764,
+  "artifactBytes": 11322356,
+  "artifactManifestSha256": "c0e20f5654625c32ca442e1be7dc49119d5cf9de0622be85740440e0a0bae6ae",
+  "receiptSha256": "31a0edf453adcec73d7cae4b4a8ec1740ac65ca2011306683c34fdad60b6e042",
+  "logSha256": "32feaec977d5aaef4825c67aebb2fc9329662a8b77c9f53b6c6f8cc698c584ce",
+  "runnerSha256": "f1b01040d9cbba121e2f1a92c8049b5e1c01564a71ad7a3b7f23b92aecf8f330",
+  "requestSha256": "74859407733cfab5a353074661f8de8ba99700dc94feb278fcc573ef5c325401",
+  "ownedGroup": 8437,
+  "actualRootPsRows": [],
+  "elapsedSeconds": 54.58,
+  "peakRssBytes": 2157445120,
+  "maximumPhysicalGrowthBytes": 28565504,
+  "minimumFreeBytesLowerBound": 50675732480,
+  "endFreeBytes": 50717294592,
+  "sourceAndDependencyPinsUnchanged": true,
+  "explicitLaunchPath": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+  "pythonLaunch": [
+    "/usr/bin/python3",
+    "-I"
+  ],
+  "publication": false,
+  "financialAction": false,
+  "separateCodyDorianStatusMessageRejectionPreserved": "[BUILD_EVIDENCE]/NEW-CODY-DORIAN-BUILD-STATUS-MESSAGE-REJECTION.json"
+}
