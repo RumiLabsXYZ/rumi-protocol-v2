@@ -1,0 +1,18 @@
+{
+  "source": "8e6f6f01671e615feb577d19400b22c41937a936",
+  "frontendTree": "763da242b7e26d1e96236fa7f7737f50d8d1ca64",
+  "scriptsTree": "5f5bd567dedc872a0ee32a514c74805813b0ced1",
+  "archiveSha256": "790306bbd2016646614f8c086004a6014c73bf9cd4e686836aaecc591ad72a37",
+  "archiveBytes": 8190950,
+  "artifactManifestSha256": "925290813075ca2149d41a963237643c3b6e5897068d6027ca5591f66866af75",
+  "artifactFiles": 764,
+  "artifactBytes": 11318677,
+  "sourceExportSha256": "654a61b5ece181090c8ee7a23ac16571b5fa3d654715542fafe61a11165d7256",
+  "requestSha256": "0ce51f895c7e0f71b0366bc8a48e47a01ad905d30fe8096f80f7cd9a7d43f8bb",
+  "runnerSha256": "f1b01040d9cbba121e2f1a92c8049b5e1c01564a71ad7a3b7f23b92aecf8f330",
+  "rawBuildLogSha256": "915170e3c8a4f5a4c2586a3b8ec65d99f2f6df60903b8b0e47228636353a142c",
+  "redactedBuildLogSha256": "ebb199d047a81e3b903c9e753b33f9cb2fbf6fbf38cf71c8a900fce9ba58a826",
+  "archiveVerified": true,
+  "productionMutation": false,
+  "redaction": "Private absolute source/dependency/evidence paths replaced and terminal trailing whitespace normalized; actual raw evidence retained locally."
+}

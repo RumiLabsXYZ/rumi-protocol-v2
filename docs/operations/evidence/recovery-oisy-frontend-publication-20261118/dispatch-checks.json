@@ -1,0 +1,15 @@
+{
+  "publisherVerifierReaderAndBoundaryCodeByteIdentical": true,
+  "materializerOnlyArchiveAndManifestPinsUpdated": true,
+  "prepareEncoderOnlyBackendDescriptionUpdatedTo4409": true,
+  "sourceAndArtifactsIndependentlyVerifiedByCody": true,
+  "dataOnlyPayloadChangesFromNewArtifact": true,
+  "newCountsEqualPriorCounts": true,
+  "sourceTests": 27,
+  "earlierFrozenPacketInputsUnchanged": true,
+  "publicationPerformed": false,
+  "executionPinsSha256": "2c8841cb670453414f5f9601d11445104fa2e364321be45c60ee19e6036824ce",
+  "dispatchManifestSha256": "6f0d7f9bf28a32e6a6447092634fb550ad61fb222146374897ca5983c7e7de68",
+  "artifactManifestSha256": "925290813075ca2149d41a963237643c3b6e5897068d6027ca5591f66866af75",
+  "archiveSha256": "790306bbd2016646614f8c086004a6014c73bf9cd4e686836aaecc591ad72a37"
+}

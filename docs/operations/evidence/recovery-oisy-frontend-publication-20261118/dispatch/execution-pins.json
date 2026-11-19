@@ -1,0 +1,35 @@
+{
+  "schema": "rumi-frontend-dispatch-pins-v1",
+  "executionHeldWith": "Dorian",
+  "preparedOnly": true,
+  "resourceAllocationDoesNotGrantPublication": true,
+  "humanAuthority": [
+    "Merritt actual Rob message01a1f1c6-482f-7f02-841c-0397217662a7: urgent OISY fix",
+    "Merritt actual Rob message01a1f1d9-32c2-7643-8268-0c27219cc489: get it fixed now; combined UI publication scope independently verified by Dorian"
+  ],
+  "filesSha256": {
+    "prepare-dispatch.mjs": "1d4580432b246c891e4ff5c3fecebc0fd468db01c05daca52fd924cf4cacf20b",
+    "publish-frontend.mjs": "ec7198cebc81260224a003eaf413bd7db15ae3a95f3cc73617e9f900def541a4",
+    "read-preflight.mjs": "4c598c435d017613433b1edfe65ed108b9d18f1439d06fc29e1fbd87342a8693",
+    "verify-dispatch.mjs": "d4e30c694f944d6efe46cd3fcd3a3024d8f4d708f2d67500c0f0896fe1960f9c",
+    "decode-saved-reply.mjs": "2073c76a73afe62752d33161cf55b740ca8773454cc87e37c6396cb8c37e7341",
+    "materialize-artifact.py": "803ec856bf3a5ba23f3eea717d513f7b56c2a78a788b70d443f17c22ec9e8a34",
+    "dispatch-manifest.json": "6f0d7f9bf28a32e6a6447092634fb550ad61fb222146374897ca5983c7e7de68",
+    "artifact-manifest.json": "925290813075ca2149d41a963237643c3b6e5897068d6027ca5591f66866af75",
+    "inventory-before.json": "f095188e637211aa995ad55af1ed33e26ad8c19a1fea626b68523448163a3bc5",
+    "state-before.json": "2f56821c3e67552504c2decfaa71f90ed35d08fc562dda874434dcb493c36499",
+    "certified-before.json": "4ded45bd16051b9def3dbf54738542ae9b4f9e9096af9af41e42dd36f6927187",
+    "frontend-live.did": "af4efb9d921acb40734025cedd6a3424c8a925c5bcd5585d711cb2dbf263227b",
+    "frontend-live-idl.mjs": "20f32f0c55067d8f969b83e1f6f8d0fd7f4851298d4d37be0cc15ff75b70eebe",
+    "dispatch-boundary-check.mjs": "1e742541998dd4a2fc4e58e0ac893c6215bdbd01770b67b124e93e51dedf862b"
+  },
+  "combinedRelease": {
+    "source": "8e6f6f01671e615feb577d19400b22c41937a936",
+    "frontendTree": "763da242b7e26d1e96236fa7f7737f50d8d1ca64",
+    "priorFrozenPacket": "b278d7da3235bb79d7b5eb2cc73b3d357e714390",
+    "scope": "Recovery menu/manual queue plus narrow OISY deposit/resume click fix",
+    "artifactArchiveSha256": "790306bbd2016646614f8c086004a6014c73bf9cd4e686836aaecc591ad72a37",
+    "executionOwner": "Dorian",
+    "publicationPerformed": false
+  }
+}

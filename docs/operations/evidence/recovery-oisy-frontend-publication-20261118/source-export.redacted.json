@@ -1,0 +1,3247 @@
+{
+  "sourceCommit": "8e6f6f01671e615feb577d19400b22c41937a936",
+  "fullSourceTree": "a5d9b3d87ac55ce979d1912b8703af3e3130ca4f",
+  "frontendTree": "763da242b7e26d1e96236fa7f7737f50d8d1ca64",
+  "scriptsTree": "5f5bd567dedc872a0ee32a514c74805813b0ced1",
+  "exportPaths": [
+    "package.json",
+    "package-lock.json",
+    "canister_ids.json",
+    "declarations",
+    "src/declarations",
+    "src/vault_frontend",
+    "src/rumi_homepage/package.json",
+    "scripts",
+    "icp.yaml"
+  ],
+  "exportedFiles": [
+    {
+      "path": "canister_ids.json",
+      "bytes": 1076,
+      "sha256": "17196050f5f1377997a369aac3d201979bf0caeff71fce267c0b839071d2217c"
+    },
+    {
+      "path": "package-lock.json",
+      "bytes": 259353,
+      "sha256": "b7d03faca7b1a77344930ad428862f4fdc77976f446143337b862969d39c7ef2"
+    },
+    {
+      "path": "package.json",
+      "bytes": 1468,
+      "sha256": "0efcf76d46a1534265392cb47d8e9cf275388dba04439e71e9cb1e08d9593b88"
+    },
+    {
+      "path": "scripts/airdrop-report.py",
+      "bytes": 28981,
+      "sha256": "dc5904e28262fcb92791269c84c597aecaab28ff31ba7ae75aeedbdb07f385ba"
+    },
+    {
+      "path": "scripts/calculate_season1_final.py",
+      "bytes": 4358,
+      "sha256": "d6bbce17bfa1ad7a7b7597d6dfe0b703193d8a74dfcb050576c553ca3e541ce4"
+    },
+    {
+      "path": "scripts/check-conflux-public-launch.sh",
+      "bytes": 31414,
+      "sha256": "a6e5cc948a4987388422a0b0a4b061040ac3d0382a15fb326452bfa3473630d0"
+    },
+    {
+      "path": "scripts/check_rustsec_policy.py",
+      "bytes": 4428,
+      "sha256": "bf783d80a05f12d89acde79b88c6dc31997a5b3e3bd1cc02aed0213133d75238"
+    },
+    {
+      "path": "scripts/cleanup_worktrees.sh",
+      "bytes": 4685,
+      "sha256": "caec1db5724b67d45846e93ac3f65c9eb5d4312c2f47b84271475d391ec36167"
+    },
+    {
+      "path": "scripts/conflux-disabled-recovery-continuation.py",
+      "bytes": 28509,
+      "sha256": "86fa1c0d40a4d492c7026749b9414bf1baed91bdc0383af735c5818591106112"
+    },
+    {
+      "path": "scripts/conflux-disabled-recovery.py",
+      "bytes": 69541,
+      "sha256": "df60b0f10867f1a20ff9fdd7b48910138dafd81cd7ff41ec394afb798df69926"
+    },
+    {
+      "path": "scripts/fiat-stable-topup-report.py",
+      "bytes": 25612,
+      "sha256": "3adb3d6fa521444c10dc8315474df05e65dd961b0755f0a0989b4049a1821a09"
+    },
+    {
+      "path": "scripts/generate-frontend-discovery.mjs",
+      "bytes": 2631,
+      "sha256": "830091d1cec2202faa6208e9338d137d34eb928e45aa74732471a7fb9d4242b6"
+    },
+    {
+      "path": "scripts/icp-mappings-bootstrap.sh",
+      "bytes": 1652,
+      "sha256": "5a0245217b6da18717217da7175af21aa0495f80eeba1355df2ecc07cb7b9577"
+    },
+    {
+      "path": "scripts/regenerate-cksol-bindings.sh",
+      "bytes": 620,
+      "sha256": "fe05adf1a3f000badd61e3a1247bec407f535ae1f0b93a0eb3caa8ccbf17313f"
+    },
+    {
+      "path": "scripts/regenerate-declarations.sh",
+      "bytes": 8094,
+      "sha256": "ba2db5b7e556c148674c0ed3440a38b28fd8cf14ad8f0d84bd20f5899c898ac8"
+    },
+    {
+      "path": "scripts/rumi-backend-upgrade-args.sh",
+      "bytes": 2410,
+      "sha256": "16c44bb597a23f79ea5ec5052dd240932b7e50e1d0ac83941b2029963fe441fc"
+    },
+    {
+      "path": "scripts/rumi_drained_upgrade.py",
+      "bytes": 8114,
+      "sha256": "aa418bd8a0220c5b0456832dc9681e9f52abdc74a80738abe67eee0c4dfb0bbf"
+    },
+    {
+      "path": "scripts/run-xrpl-icusd-testnet.sh",
+      "bytes": 5512,
+      "sha256": "030850c243cfaebd520783fd971909df6112fa07372b66c69d54572b8bd22271"
+    },
+    {
+      "path": "scripts/season1_final_calculation.py",
+      "bytes": 1275,
+      "sha256": "daeb3b71626daf71ebb76ef3fd2f40a930e574d45d33f7071ebc29c3ea908ffb"
+    },
+    {
+      "path": "scripts/sp_rails_aged_backend_fixture.py",
+      "bytes": 22389,
+      "sha256": "4fad8f0c3ebe16a7fce4e49833525041423052398b4f1c10a6cbaffc693d9642"
+    },
+    {
+      "path": "scripts/sp_rails_aged_pool_fixture.py",
+      "bytes": 22534,
+      "sha256": "1046139c98ff5db408edf61caf466294081a4ce11529a2585cd41222f1054ec9"
+    },
+    {
+      "path": "scripts/sp_rails_interfaces.py",
+      "bytes": 44663,
+      "sha256": "e8bd149bad67b6814dd6c75c951ac5588bea29fa11b426c44c440643597fa13a"
+    },
+    {
+      "path": "scripts/sp_rails_lp_fixture.py",
+      "bytes": 14961,
+      "sha256": "775bc66339b961207d1f008d662f33d8dcf290c8433b67790f8f65da7e942fd9"
+    },
+    {
+      "path": "scripts/sp_rails_no_admission_fixture.py",
+      "bytes": 26035,
+      "sha256": "768c7560f6c092d553474631ea438eb4a92ac0e987ddcd91e1681ede0dd6954f"
+    },
+    {
+      "path": "scripts/sp_rails_runtime.py",
+      "bytes": 85517,
+      "sha256": "a93cf2d19cf81679d076443d2b1756edf9e478eb4bf0d915bb2f3f4f91616e3c"
+    },
+    {
+      "path": "scripts/sp_reopening_interfaces.py",
+      "bytes": 4256,
+      "sha256": "9b0575be66e6e69f3cd9139878c375fa0be4b2398afe8595a46e1d69c973d5ea"
+    },
+    {
+      "path": "scripts/sp_reopening_runtime.py",
+      "bytes": 27390,
+      "sha256": "ca7376d083d822a55f4c0e88063b009abfce5d9320d3d8acb1347b2fb4c0bacd"
+    },
+    {
+      "path": "scripts/test-sentinel-native-icp-archive-pic.sh",
+      "bytes": 2574,
+      "sha256": "8b790bcb0b352cba76d7b5cadf0cd2e954e283d301347fdee895135ea993d2ea"
+    },
+    {
+      "path": "scripts/test_rumi_drained_upgrade.py",
+      "bytes": 5392,
+      "sha256": "21cf226f7348c2b31ebd4d48e1b6965e596ef0bbece4bf72d7f4ca86801d8123"
+    },
+    {
+      "path": "scripts/tests/test_fiat_stable_topup_report.py",
+      "bytes": 10549,
+      "sha256": "6a146e2dcc0e68302f959c9475fb9c28058c5eceac500366a9601107a474a531"
+    },
+    {
+      "path": "scripts/verify-frontend-auth-assets.mjs",
+      "bytes": 1795,
+      "sha256": "f70e9a4ddba9184960c01cdf27afdcb07ba4870789f7fca3c161adc5adf2e8ee"
+    },
+    {
+      "path": "scripts/verify-rumi-backend-upgrade-artifact.sh",
+      "bytes": 4313,
+      "sha256": "804a7d37d9a3d0afd14d18990c1fd8af4ffac0036a77a82eab3d81909ec4ad60"
+    },
+    {
+      "path": "scripts/verify-xrpl-icusd-artifact.sh",
+      "bytes": 5662,
+      "sha256": "f3ad97a7031ecbe0b1eb5aac3152142ae8fdc7c367f41b42cce4a83cec63700e"
+    },
+    {
+      "path": "scripts/xrpl-rehearsal-up.sh",
+      "bytes": 3983,
+      "sha256": "6a3631b45fdebca237a7f3dd04e00130d020efe7208c9fdfef6f80476fd97db4"
+    },
+    {
+      "path": "src/declarations/icp_ledger/icp_ledger.did.d.ts",
+      "bytes": 11803,
+      "sha256": "f961363b1ee31360d36b84212a726198c6a92fa0cf9d52a23f8609f2ca38a906"
+    },
+    {
+      "path": "src/declarations/icp_ledger/icp_ledger.did.js",
+      "bytes": 16253,
+      "sha256": "a57f1afd6768182c26e24594770f29bfa660de2b65c87e7bd25f9b37fcbd4ea1"
+    },
+    {
+      "path": "src/declarations/icp_ledger/index.d.ts",
+      "bytes": 1619,
+      "sha256": "9b70c4f2ad3b40b5ff107eac00302578ce10652b3cbecaff9cc7e3b31c886425"
+    },
+    {
+      "path": "src/declarations/icp_ledger/index.js",
+      "bytes": 1418,
+      "sha256": "23f916774b8dabbe2315d03b6c252cb58f12a0f08f60c1214c4341ccca0f6dd6"
+    },
+    {
+      "path": "src/declarations/icp_ledger_canister/icp_ledger_canister.did",
+      "bytes": 15269,
+      "sha256": "74e77a895747a327150196929b05063c60d02b60fb726ce551d586ab717d1048"
+    },
+    {
+      "path": "src/declarations/icp_ledger_canister/icp_ledger_canister.did.d.ts",
+      "bytes": 11803,
+      "sha256": "f961363b1ee31360d36b84212a726198c6a92fa0cf9d52a23f8609f2ca38a906"
+    },
+    {
+      "path": "src/declarations/icp_ledger_canister/icp_ledger_canister.did.js",
+      "bytes": 16253,
+      "sha256": "a57f1afd6768182c26e24594770f29bfa660de2b65c87e7bd25f9b37fcbd4ea1"
+    },
+    {
+      "path": "src/declarations/icp_ledger_canister/index.d.ts",
+      "bytes": 1637,
+      "sha256": "71505783745ac380c513f0ac35a895ad01ba1e36d0548a98da0d9f3c3c759ca2"
+    },
+    {
+      "path": "src/declarations/icp_ledger_canister/index.js",
+      "bytes": 1412,
+      "sha256": "e8f4e7fc10119924a58380edea913f3509e0a4094643fa74a79b1639ca51e5b1"
+    },
+    {
+      "path": "src/declarations/icpswap_pool/icpswap_pool.did",
+      "bytes": 19538,
+      "sha256": "7c0c91915478833aac2067bd64d1ce817b91c330aa6c90882559e2f867555767"
+    },
+    {
+      "path": "src/declarations/icpswap_pool/icpswap_pool.did.d.ts",
+      "bytes": 21791,
+      "sha256": "3634b0319cfd3448f7a7f1849b09abcef2926130cac97c8ebfe08c4cbd8e6812"
+    },
+    {
+      "path": "src/declarations/icpswap_pool/icpswap_pool.did.js",
+      "bytes": 25190,
+      "sha256": "5fcb4287619ee710588231013ebe34bf27c5d4c4daf7cea4de2357f1bd819981"
+    },
+    {
+      "path": "src/declarations/icpswap_pool/index.d.ts",
+      "bytes": 59,
+      "sha256": "4380516a1b1940bf68bb883173ec9addb69d9b125f4eee6db9230d396386ab0c"
+    },
+    {
+      "path": "src/declarations/icpswap_pool/index.js",
+      "bytes": 52,
+      "sha256": "319d3b1dc3aeb78860ae2fe6c2e97f5fb0ccc1dc8553a17dbbbafbb9c3c99692"
+    },
+    {
+      "path": "src/declarations/icusd_index/icusd_index.did",
+      "bytes": 5498,
+      "sha256": "701a43426ae7ba89cb3f348b9925f946e710fb4b2d3c338a2413c18d7112d95d"
+    },
+    {
+      "path": "src/declarations/icusd_index/icusd_index.did.d.ts",
+      "bytes": 4027,
+      "sha256": "87ecbe3e1e6c8315c3bfd16881cab43403c26dcae469572f2a17f42241be12f6"
+    },
+    {
+      "path": "src/declarations/icusd_index/icusd_index.did.js",
+      "bytes": 5186,
+      "sha256": "e9013f15285a8a3bc672daefba319bd66815daa11d5a7974d0e20007c8d1c648"
+    },
+    {
+      "path": "src/declarations/icusd_index/index.d.ts",
+      "bytes": 1621,
+      "sha256": "89a9f3779a8d11781b830513c02eb9ecc69510e3882a48b5b99a66c326e6e5f8"
+    },
+    {
+      "path": "src/declarations/icusd_index/index.js",
+      "bytes": 1380,
+      "sha256": "08b8c91dcc94920f5f0aeca959270d67f29b37f344c49d87af0f0049c12ade7c"
+    },
+    {
+      "path": "src/declarations/icusd_ledger/icusd_ledger.did",
+      "bytes": 15269,
+      "sha256": "74e77a895747a327150196929b05063c60d02b60fb726ce551d586ab717d1048"
+    },
+    {
+      "path": "src/declarations/icusd_ledger/icusd_ledger.did.d.ts",
+      "bytes": 11803,
+      "sha256": "f961363b1ee31360d36b84212a726198c6a92fa0cf9d52a23f8609f2ca38a906"
+    },
+    {
+      "path": "src/declarations/icusd_ledger/icusd_ledger.did.js",
+      "bytes": 16253,
+      "sha256": "a57f1afd6768182c26e24594770f29bfa660de2b65c87e7bd25f9b37fcbd4ea1"
+    },
+    {
+      "path": "src/declarations/icusd_ledger/index.d.ts",
+      "bytes": 1623,
+      "sha256": "b2abd7186e50871dcc12b5405b2a041789155fe0f05e4f0b403b38313c342821"
+    },
+    {
+      "path": "src/declarations/icusd_ledger/index.js",
+      "bytes": 1384,
+      "sha256": "9f1a94ddcd02d4f2eb6dcce88d1703c57f234fec16812ce4344ad88fffff828e"
+    },
+    {
+      "path": "src/declarations/liquidation_bot/index.d.ts",
+      "bytes": 1629,
+      "sha256": "357e53bffdb3b5eaf2b7a4cf3d79e3597a513839b0598620b4b22069677170f1"
+    },
+    {
+      "path": "src/declarations/liquidation_bot/index.js",
+      "bytes": 1396,
+      "sha256": "87c5cfe3f1317652acf6912d03de6904b03b15b4baedcd6f961ad56c1cfcee17"
+    },
+    {
+      "path": "src/declarations/liquidation_bot/liquidation_bot.did",
+      "bytes": 10040,
+      "sha256": "8949a30fa93b8ddac8bdc772083b3801fc88dfb66180ce313382632765d6b0ac"
+    },
+    {
+      "path": "src/declarations/liquidation_bot/liquidation_bot.did.d.ts",
+      "bytes": 12100,
+      "sha256": "6a4ca9a41d5128b796fec870fcfd17b938cba0c5f602aa41c4565d14ea876182"
+    },
+    {
+      "path": "src/declarations/liquidation_bot/liquidation_bot.did.js",
+      "bytes": 14927,
+      "sha256": "9180c9234b3c0e6e3ffe6541f9820df86e4496daeadbeafb0721ec3b99110a8b"
+    },
+    {
+      "path": "src/declarations/rumi_3pool/index.d.ts",
+      "bytes": 1619,
+      "sha256": "c7b17bd73f2ec358ea780b6e77bcd9faa87adf7b55482bd357e224c2dcd7f8e0"
+    },
+    {
+      "path": "src/declarations/rumi_3pool/index.js",
+      "bytes": 1376,
+      "sha256": "a360b9d3d9af493ac87a619b4aded7a27bcbd6049ef347aa0128abfd7f72e158"
+    },
+    {
+      "path": "src/declarations/rumi_3pool/rumi_3pool.did",
+      "bytes": 30559,
+      "sha256": "5011f95c76284f816cc471e061b720b7e67fd1ff00f913420dbfe32f82ad8a7c"
+    },
+    {
+      "path": "src/declarations/rumi_3pool/rumi_3pool.did.d.ts",
+      "bytes": 37704,
+      "sha256": "1ac694f0038d8377ec11974fb13c3ab7681a4fd859285f0c67dce1885f0fe8ad"
+    },
+    {
+      "path": "src/declarations/rumi_3pool/rumi_3pool.did.js",
+      "bytes": 45819,
+      "sha256": "f1ef1c737be577ce6aaf63b9bf185b7dbb6ef77d359a31179488ef4fe99f4f3f"
+    },
+    {
+      "path": "src/declarations/rumi_amm/index.d.ts",
+      "bytes": 1615,
+      "sha256": "4ea05fd7fc00e9f9e0e001b9fd34479dcb6aaa9de3936640f5bb724a007fb2bc"
+    },
+    {
+      "path": "src/declarations/rumi_amm/index.js",
+      "bytes": 1368,
+      "sha256": "e871704b265e255390b702bfe00ba7c045b04811f7b0a2c60c4e40263b3a6883"
+    },
+    {
+      "path": "src/declarations/rumi_amm/rumi_amm.did",
+      "bytes": 13543,
+      "sha256": "8f9852a086bbcef07a8b5aa719cb1c285a96838b20e49f0d874e5d0e991bc63b"
+    },
+    {
+      "path": "src/declarations/rumi_amm/rumi_amm.did.d.ts",
+      "bytes": 16234,
+      "sha256": "f4b3a43731e9be552ad1e9f6ff5b116ae14caeb839ecf32c89a7be06fe5c0423"
+    },
+    {
+      "path": "src/declarations/rumi_amm/rumi_amm.did.js",
+      "bytes": 19904,
+      "sha256": "797870d27944ace6c877847d454db3d843817aaf6d78d7a1fac0601af4894177"
+    },
+    {
+      "path": "src/declarations/rumi_analytics/index.d.ts",
+      "bytes": 1627,
+      "sha256": "07d847bce6d2b67947a1ceed7b1cbfe19e10ca934acabaac41283ef920f89d29"
+    },
+    {
+      "path": "src/declarations/rumi_analytics/index.js",
+      "bytes": 1392,
+      "sha256": "8d01cd617a5c0b97c8cd38461b6addd1998e16fe99a1647aaf21391837db6379"
+    },
+    {
+      "path": "src/declarations/rumi_analytics/rumi_analytics.did",
+      "bytes": 13383,
+      "sha256": "54a8655892922484c87007aee4dff1646b71b9e5c4dc8f9dfb5cfe068868653c"
+    },
+    {
+      "path": "src/declarations/rumi_analytics/rumi_analytics.did.d.ts",
+      "bytes": 17489,
+      "sha256": "03f9dc51c537e9f4747160c59c9020629b2fd3e454798d00c07fc30ef2ca3015"
+    },
+    {
+      "path": "src/declarations/rumi_analytics/rumi_analytics.did.js",
+      "bytes": 21399,
+      "sha256": "d67eead2a9b42721a4f2a32685b729b66eea5515fa0a660c7423d477a5709e49"
+    },
+    {
+      "path": "src/declarations/rumi_cycle_sentinel/index.d.ts",
+      "bytes": 1637,
+      "sha256": "a3bf1032ef33a6ad04b933071f54dbc7573b793a888a96369c9ede57618aa422"
+    },
+    {
+      "path": "src/declarations/rumi_cycle_sentinel/index.js",
+      "bytes": 1412,
+      "sha256": "f2cb57670d1e83a9aa5a0746026f02f37c88876a4b8d1d9ec39cf719cd4e7beb"
+    },
+    {
+      "path": "src/declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did",
+      "bytes": 16944,
+      "sha256": "7c2386f284b038d586c78fff52b57b2bc3be0a2c37018ffe6cce92a282d7ef5c"
+    },
+    {
+      "path": "src/declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did.d.ts",
+      "bytes": 20791,
+      "sha256": "3888f402dca23a04ca9feff22741bdd568cf5a86aa3e29866832c5460822c7c1"
+    },
+    {
+      "path": "src/declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did.js",
+      "bytes": 24667,
+      "sha256": "2e6997ac66c58d14dee7caeada709d10b622d7047834fcc68558e0626bd116f2"
+    },
+    {
+      "path": "src/declarations/rumi_points/index.d.ts",
+      "bytes": 1621,
+      "sha256": "f691cfa1d2306fe58aa7aaf9c76555a614c1e48853942477392e11f60daeec0d"
+    },
+    {
+      "path": "src/declarations/rumi_points/index.js",
+      "bytes": 1380,
+      "sha256": "80df28643b80ba82f9b38fac258584e88054f7315cb996688daae6a213c4dcdd"
+    },
+    {
+      "path": "src/declarations/rumi_points/rumi_points.did",
+      "bytes": 10325,
+      "sha256": "ef8d93189bdea6a5f089addf8e1dae1f397f631ab37df69b5ddeb7d3661a470c"
+    },
+    {
+      "path": "src/declarations/rumi_points/rumi_points.did.d.ts",
+      "bytes": 12619,
+      "sha256": "969dec3a6cc4ad9291409977ed6c3973912cb0678e0154f8e5a2c3e759d5f3ff"
+    },
+    {
+      "path": "src/declarations/rumi_points/rumi_points.did.js",
+      "bytes": 15136,
+      "sha256": "65671c4f1434ee723a06b157d4aaffb017bfede46ba41a95b17dcb6700259c6f"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/index.d.ts",
+      "bytes": 1641,
+      "sha256": "ec48c73e3e8358cea2f9c43b769655b1cb305cd6f2ce5c03a76690ffecf27013"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/index.js",
+      "bytes": 1420,
+      "sha256": "c457772af9593a9b15d0090833340609acbf745fc983db37ce505fea6618ec1d"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did",
+      "bytes": 97134,
+      "sha256": "74cd6c8f7a8b0667bf10f2cd50b1a3c81e55ff863b0cb9520fb8eca1795e03fb"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.d.ts",
+      "bytes": 114896,
+      "sha256": "7565624216d51efca73a1f2a04d20517fb637c5b786359a1e7ab416d82b9c744"
+    },
+    {
+      "path": "src/declarations/rumi_protocol_backend/rumi_protocol_backend.did.js",
+      "bytes": 137752,
+      "sha256": "bef5838c0164ec40bddfecca6656e4cd4eb63c908cf9df756b02d9afd4cc2e11"
+    },
+    {
+      "path": "src/declarations/rumi_stability_pool/index.d.ts",
+      "bytes": 1637,
+      "sha256": "a94e06775a5f3a7ec169b49770ffea940f1c4493f0939b18fe3001a84e4fd40d"
+    },
+    {
+      "path": "src/declarations/rumi_stability_pool/index.js",
+      "bytes": 1412,
+      "sha256": "39e061ebb546b65c0c8dd6b761590a6cadeca2c4792fc90d1a2f4cabda99f9e9"
+    },
+    {
+      "path": "src/declarations/rumi_stability_pool/rumi_stability_pool.did",
+      "bytes": 35312,
+      "sha256": "20b76f1fc466edca699400803c566d910b78889dbb48ef2f4677e08401ad1b43"
+    },
+    {
+      "path": "src/declarations/rumi_stability_pool/rumi_stability_pool.did.d.ts",
+      "bytes": 40602,
+      "sha256": "788e1741126beb6a358a7ab68b4410767378e60f306ccd912a09e4b8746642c4"
+    },
+    {
+      "path": "src/declarations/rumi_stability_pool/rumi_stability_pool.did.js",
+      "bytes": 48575,
+      "sha256": "444dc6ea1a8e2c8b136e13bb8e73068d19b164e63b261c26dc4d71117ec9e970"
+    },
+    {
+      "path": "src/declarations/rumi_treasury/index.d.ts",
+      "bytes": 1625,
+      "sha256": "f6e8038827ecb2946886199ab7931e9f973d3e827a508ad4fc54fdea1913c212"
+    },
+    {
+      "path": "src/declarations/rumi_treasury/index.js",
+      "bytes": 1388,
+      "sha256": "3884378fba8d08d70d7c93aa97c30e3b6b0622918e16b1949016bb0302e85655"
+    },
+    {
+      "path": "src/declarations/rumi_treasury/rumi_treasury.did",
+      "bytes": 4992,
+      "sha256": "e9f09ec2dc65bf875a5999b115eda16db4406c643fa17b7de2adea13fc1db5bd"
+    },
+    {
+      "path": "src/declarations/rumi_treasury/rumi_treasury.did.d.ts",
+      "bytes": 6182,
+      "sha256": "027c5a49c3dcffc67a1754f7c03212fbb4553e99d6b59c96c994beb35dfbb5f1"
+    },
+    {
+      "path": "src/declarations/rumi_treasury/rumi_treasury.did.js",
+      "bytes": 7507,
+      "sha256": "4d6f8cedd48ff96d0f0127110607cd37c4bc92bb698534ea3fbd7805f679ebff"
+    },
+    {
+      "path": "src/declarations/vault_frontend/index.d.ts",
+      "bytes": 1627,
+      "sha256": "9a1a18ed8c360c79f62a00ec8eefb71603e03ae70f214ae61168d400125f2f40"
+    },
+    {
+      "path": "src/declarations/vault_frontend/index.js",
+      "bytes": 1392,
+      "sha256": "d1048051cd25ee80f24de2f3f0f373d0abad779b05fac966619ab0d56a9a9e7d"
+    },
+    {
+      "path": "src/declarations/vault_frontend/vault_frontend.did",
+      "bytes": 7260,
+      "sha256": "413aca1ecc48ab5c23c93a436c441edb425632b66a6205bf5e51bf5bfc2e4e24"
+    },
+    {
+      "path": "src/declarations/vault_frontend/vault_frontend.did.d.ts",
+      "bytes": 7853,
+      "sha256": "1b722d386f99acc52db6d1d16a7fa3904d11159f4e3149e5433c83b858dae46e"
+    },
+    {
+      "path": "src/declarations/vault_frontend/vault_frontend.did.js",
+      "bytes": 9727,
+      "sha256": "f78850e6950b103f0d09c646062c1d94880966369d1fb85d96501f84032c214b"
+    },
+    {
+      "path": "src/rumi_homepage/package.json",
+      "bytes": 1506,
+      "sha256": "2bf5394c86f68ee1ebeba5c0b1baa78051eec6eb7ed24d15102681e933797af2"
+    },
+    {
+      "path": "src/vault_frontend/.gitignore",
+      "bytes": 216,
+      "sha256": "9cf8cbd66d8e68268908b2812e43ac5342663c72aeedc23b34728b56ecf38c47"
+    },
+    {
+      "path": "src/vault_frontend/.prettierignore",
+      "bytes": 62,
+      "sha256": "53b371672d1620f38383706df127e44ad89a9791abeaedbeacb578d678ac24f6"
+    },
+    {
+      "path": "src/vault_frontend/.prettierrc",
+      "bytes": 256,
+      "sha256": "a9e65aec6e93dae1aca12a5fad9aaa5a26a27611ae3154d105d26d936b3bbba9"
+    },
+    {
+      "path": "src/vault_frontend/README.md",
+      "bytes": 1584,
+      "sha256": "24de53d26407e6fc5d3653fe84058fb8c23eca3c816bca3977c85d33016cb52f"
+    },
+    {
+      "path": "src/vault_frontend/assets/.ic-assets.json5",
+      "bytes": 60,
+      "sha256": "1e244007463340432421ea0ba1370d3a9fdcb0ca8e5c734726861b9b2cedfa02"
+    },
+    {
+      "path": "src/vault_frontend/assets/favicon.ico",
+      "bytes": 15406,
+      "sha256": "4e8d31b50ffb59695389d94e393d299c5693405a12f6ccd08c31bcf9b58db2d4"
+    },
+    {
+      "path": "src/vault_frontend/eslint.config.js",
+      "bytes": 765,
+      "sha256": "92262c1665ae9ce9415a0edb3060e97de3a8248effc8e990134a1fdb4fce57a4"
+    },
+    {
+      "path": "src/vault_frontend/index.html",
+      "bytes": 359,
+      "sha256": "0a02cd520a4e06d92c428581175f1b9cc960a3da1439bdcbd7f60a64cc65d428"
+    },
+    {
+      "path": "src/vault_frontend/package-lock.json",
+      "bytes": 182393,
+      "sha256": "ab1449a2629815b3232ea56ced0993636a299cf3af7156f16721517f354855ee"
+    },
+    {
+      "path": "src/vault_frontend/package.json",
+      "bytes": 2264,
+      "sha256": "56870919b1ad8ca19b1eaa02c9464632f90ce9f21810fbb8eef922a694654304"
+    },
+    {
+      "path": "src/vault_frontend/postcss.config.cjs",
+      "bytes": 82,
+      "sha256": "c9cf0854c2eb6db754107c2fc9ebfccf6a9e5b3821d9e75ce8104535819653dc"
+    },
+    {
+      "path": "src/vault_frontend/postcss.config.js",
+      "bytes": 108,
+      "sha256": "ddfacb4543e3f4486e3d01f86da86b11218929ec0167a76f07f4adc38bad32c0"
+    },
+    {
+      "path": "src/vault_frontend/public/favicon.ico",
+      "bytes": 65,
+      "sha256": "c73f7e83b697b7a515357883c5cf2764df9c694e636919b1aeea0fdecb5b10aa"
+    },
+    {
+      "path": "src/vault_frontend/src/app.css",
+      "bytes": 12193,
+      "sha256": "9b547058c2a01b63f0d0e2a7b62e459a1755ba7aec2286f7abaa5536f20acd4a"
+    },
+    {
+      "path": "src/vault_frontend/src/app.d.ts",
+      "bytes": 1097,
+      "sha256": "a40e989bb4e23cb51a6804640b4ca17d0463a3b0d91ac6ae4dbbb05f11f1b1dd"
+    },
+    {
+      "path": "src/vault_frontend/src/app.html",
+      "bytes": 569,
+      "sha256": "e08da16d2f75069351e3de16cd6834c85be160273297f2204d38688353ac29ae"
+    },
+    {
+      "path": "src/vault_frontend/src/demo.spec.ts",
+      "bytes": 148,
+      "sha256": "bf5a33a2cb7ff3c2795430a3cc8b5b0ffc04deb203e94405ab5a7db16310669b"
+    },
+    {
+      "path": "src/vault_frontend/src/global.d.ts",
+      "bytes": 620,
+      "sha256": "0a59fca1754ba187899f578a7a837fce94fcb442fd793b1b6b96d7208f13aa98"
+    },
+    {
+      "path": "src/vault_frontend/src/index.scss",
+      "bytes": 498,
+      "sha256": "83dac61aa1cb0e865737a24081752ab68ba2342afe9234dcccf8c6d773a3e80a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/borrow/XrpBorrowModal.spec.ts",
+      "bytes": 27643,
+      "sha256": "6f58aadce88d51e7e0ed5f702a4133285a58683f629ec1bd1d910f9369035b3b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/borrow/XrpBorrowModal.svelte",
+      "bytes": 24935,
+      "sha256": "70128aaffcb3bfcb681f79d59c4a11d59f78ea3e32bc4bc997aab9d7bd46449d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/borrow/xrpDepositFlow.ts",
+      "bytes": 25650,
+      "sha256": "0124a425598d4cfaa708982dc9275371cec6951ff5dbbc42cfd055474f45bdca"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/common/CkErc20TokenSelect.svelte",
+      "bytes": 8282,
+      "sha256": "87c9af0b703662d61cab64d835130bf6f1137197aee927da302949434970253d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/common/LoadingSpinner.svelte",
+      "bytes": 839,
+      "sha256": "8bd6d09c35815dcbc54908cc7b7bba5dae1642c1091e3046038b33da3b6ab51b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/common/Toast.svelte",
+      "bytes": 2295,
+      "sha256": "1605c6f885d897deb08364b5da56c3059e9586356eb363ba692dd9b7ea2d92bc"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/common/ToastContainer.svelte",
+      "bytes": 692,
+      "sha256": "6c6437164cee48327f62215aa81373033e1157566b680c079dd24af7fa945913"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/dashboard/ProtocolStats.svelte",
+      "bytes": 15313,
+      "sha256": "950de0da2f93ca3378ab86bc8c4ec3b30d25e4862a2f29f5cdaf2f314b632403"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/debug/PriceDebug.svelte",
+      "bytes": 1991,
+      "sha256": "f4ea29d263df4cd8d82d27c289fb11d20898741420893a2fcc40802713c66bf8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/debug/WalletDebug.svelte",
+      "bytes": 5893,
+      "sha256": "2059f45d74242d083673c0a286398066de31f3b1679c6d4e9e171dba0151bd83"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/ActiveFilterChips.svelte",
+      "bytes": 6218,
+      "sha256": "1e742eb57f368859470d2af6631c3e33a27d352473b04213f8dccf5f72512d86"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/ActivityFeed.svelte",
+      "bytes": 2021,
+      "sha256": "6a8f5237161b918df15aa59d23ce00542dafd68b5d55b0f23136e23d6d92dc5d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/AdminBreakdownCard.svelte",
+      "bytes": 4542,
+      "sha256": "182f2479a8848ca2dbe832a0febb3e7023307a3f25ef24084b3d724bc773321f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/AmountDisplay.svelte",
+      "bytes": 1167,
+      "sha256": "6eb70a9983f16234cc744adbe3df1205c73121e33e0db7a1ff6dc35841e4c655"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/CanisterInventoryCard.svelte",
+      "bytes": 3080,
+      "sha256": "ab2433b6aa82259678e02ee076a61f82f04e590e08397d9fa9ea08b9bf5be71f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/CeilingBar.svelte",
+      "bytes": 1209,
+      "sha256": "cb3f6c94083209c100a8590e2e9c20cb5727df9ced9a726aec011b6a44c21222"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/CollateralBreakdownTable.svelte",
+      "bytes": 5989,
+      "sha256": "c59d212ba4abab6daadc9e24ee4e2e1858fd10b9ceb12027ed71568d614e2a55"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/CollateralTable.svelte",
+      "bytes": 4273,
+      "sha256": "aa8acd40bbd69a5300083b07904f54ee6c6aa00c587a48150fc7f73bb1102435"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/CopyButton.svelte",
+      "bytes": 1453,
+      "sha256": "edc04be7151983d7b1b9362b2bb672b5bacea966a1f42053813d335a90f00d71"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/DashboardCard.svelte",
+      "bytes": 840,
+      "sha256": "666e54dc099bb37f385c817c4dc4fbf8de5dec9cac5558ebb5a8119f9cbd00e9"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/DataTable.svelte",
+      "bytes": 3612,
+      "sha256": "52354f33f4fb5987ebc1b382c7982b4b6a0639c5afc6ab86521168c1e592d40b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/EmptyState.svelte",
+      "bytes": 1632,
+      "sha256": "3884cf417e09e811340b6f95c408e25c8becd0c3935770b4852e0481ac317bd0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/EntityLink.svelte",
+      "bytes": 3111,
+      "sha256": "b53ad1a2c458c6b587ae647715d1f39d7cc01e88ce77cba60e75eeddc036c3f9"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/ErrorState.svelte",
+      "bytes": 2330,
+      "sha256": "dd547c3ee569c469a31eb87ff5e15fd341f1389d22a29dccbff7825f9be430d2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/EventRow.svelte",
+      "bytes": 4119,
+      "sha256": "9c0bf42199bebdae24f3d346e6568f5d4c538929fe9b57c4b3525381ca36bfe8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/FacetBar.svelte",
+      "bytes": 14425,
+      "sha256": "cc251e6d645ac6d18d8c1bfe8e1a5f9d29730078e7010f5b3927ffdccace301d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/FacetChip.svelte",
+      "bytes": 2090,
+      "sha256": "7505f00a18b1aa7cce569f6a2a90c7ed4f468840260da196213b35c69de8cedc"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/LensActivityPanel.svelte",
+      "bytes": 15939,
+      "sha256": "9d12c262d2685305f826e31ab7ae38fd9c478fde6e72803e0be61cff798141ac"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/LensHealthStrip.svelte",
+      "bytes": 1945,
+      "sha256": "4fb3033ce5e6bf546784c1e3f606936d890f1e0c746f457a3336813a505614db"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/LensTabs.svelte",
+      "bytes": 2093,
+      "sha256": "618fd013670b2fa614c4778bbd333d211d0eb729bb124f972a45d22705a6d064"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/LiquidationRiskTable.svelte",
+      "bytes": 3882,
+      "sha256": "12f01b0c626730eb7b5aabb3608f1a34ac6d144995fb5d7afbb008bf43563685"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/LiquidationsOverviewCard.svelte",
+      "bytes": 3186,
+      "sha256": "72f7e0bab68a7820df69318afc9e7e015626381fe4308900e9ff6c04958bae20"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/MiniAreaChart.svelte",
+      "bytes": 8420,
+      "sha256": "2a893177394624011570f4c254b77b6f75fb3e21e78fc2a6098168aaf382555d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/MixedEventRow.svelte",
+      "bytes": 5573,
+      "sha256": "d6b4a9b0176131a5f94077c82578642ee4cfbfa44d43c650bd9c1ac81c1513a0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/MixedEventsTable.svelte",
+      "bytes": 2405,
+      "sha256": "826a1147ba13df64d6b8f5f53295da6066287f85459f838f879754e8cd0b13a6"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/ModePill.svelte",
+      "bytes": 982,
+      "sha256": "10affafcad99c9dec03866417728c8a30cfa1876913d4051b8bddd08b65d62a4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/OhlcChart.svelte",
+      "bytes": 3489,
+      "sha256": "62094a83b17bb5fa08aa4e0ce59d9f68428b003308e8cb743b9c3829bf3945fa"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/Pagination.svelte",
+      "bytes": 2010,
+      "sha256": "b44ee6da33615a10c7dd4ec3d3f5618466a1d2fa0457132918ded413537201e0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/PoolBalanceBar.svelte",
+      "bytes": 1300,
+      "sha256": "08e17b040acba6697f317ec2e5de8bc3c2d5124c889021bc0b2bf6253df19bc6"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/PortfolioValueChart.svelte",
+      "bytes": 25035,
+      "sha256": "35cf61945a95936de9d126bc8e1ffb2808637dfa4f505a00525c9e3312016c4b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/PriceLineChart.svelte",
+      "bytes": 3223,
+      "sha256": "d71de54a66e3b823e34017970cdbae15fa8d18b84cfde20c445d9bf740c9e974"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/ProtocolReservesCard.svelte",
+      "bytes": 2314,
+      "sha256": "a57eabf0d6febd56a889ac2a760a29f9f2754cdfe47337f2b0826717cbf9fadb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/RevenueBreakdown.svelte",
+      "bytes": 2992,
+      "sha256": "4beca1f719309086488398f2636793b9d105f0acc44fa2d4901ff3978c70c4de"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/SavedViewsStrip.svelte",
+      "bytes": 3089,
+      "sha256": "1ed540358d27eb629fa99fd01d41b7aa67132f6fdb165c30c37f347629351458"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/SearchBar.svelte",
+      "bytes": 1161,
+      "sha256": "8213a51fb003a8ece27a94507ac8cd8c2ac444fcb266d426e67bb185791dcdb2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/SpCoverageCard.spec.ts",
+      "bytes": 741,
+      "sha256": "40430ef0231878ef0046d902e24f3fee8fce4e9adfd9d3d84b2c81e8d942bd9c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/SpCoverageCard.svelte",
+      "bytes": 3031,
+      "sha256": "88f7310cf61a4a0b63480007df6d4179d99b67def0cbaabaa5fd267b2c5bc45f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/SpCurrentDepositorsCard.svelte",
+      "bytes": 3507,
+      "sha256": "7d64fc78fb0f2245020d949067e761a5b91021af73f63fd280081b913c6009d2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/StatCard.svelte",
+      "bytes": 1208,
+      "sha256": "d42632f3a97ea25c3b762c1a155fb424e57c315950408f8e122fbe6d96d0adca"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/StatusBadge.svelte",
+      "bytes": 946,
+      "sha256": "1cb4a895278708f125ce7c494e04ec2deab2994555ac85166942e20baf34e0de"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/TimeAgo.svelte",
+      "bytes": 487,
+      "sha256": "e18dd4fd8c5a657e2e61cba847af7ae16c9c57deec78df384f291a4329f3344c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/TokenBadge.svelte",
+      "bytes": 1482,
+      "sha256": "fffb80bd92f7a790fd8568a567c8c2ac81c89d51871182b626f3e653a1faa599"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/TokenFlowBars.svelte",
+      "bytes": 3718,
+      "sha256": "96fcc2111c75e430716daf50fdb830e0615fa65a75fab3607cf175c8017c72bc"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/TreasuryHoldingsCard.svelte",
+      "bytes": 2328,
+      "sha256": "6e7fd50df61c8ccea7654729aa0bf11cede5626369185b0d38b9cab6c71f7c6b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/TvlChart.svelte",
+      "bytes": 6778,
+      "sha256": "e29ab8df07e10030ca3abdd946fe289e27dac2230e9efea0423ece4b54f5af24"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/VaultHealthBar.svelte",
+      "bytes": 1679,
+      "sha256": "fb5b114689add827c46a4abd69d6c41b0ddcae82806147ee1992b5de1fa1c5c7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/VaultSummaryCard.svelte",
+      "bytes": 2432,
+      "sha256": "9b475b974174fc08573ca0d5c9d54d821805ee9a7e827630991789fc0aaf3520"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/VolatilityGauge.svelte",
+      "bytes": 1404,
+      "sha256": "d873e9274cf9e968d638e3af3ad43f9dd0bdbd9ffe5d050d60617415a3194748"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/collateralQueryState.spec.ts",
+      "bytes": 1936,
+      "sha256": "3455032193ae5dbe6b6c7b28e352a32cea0f3b9dd6500b503e65da852693ef43"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/collateralQueryState.ts",
+      "bytes": 706,
+      "sha256": "06671bc3e801c2bf60ee74a78445ebf6291a4b0aea4dc6501c3823c29a99a32a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/entity/CRDial.svelte",
+      "bytes": 3815,
+      "sha256": "0683d6b53ed141bed22f33efad738408850cbf135f11bbd834830dbb4906e662"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/entity/EntityShell.svelte",
+      "bytes": 2824,
+      "sha256": "722f7944920c05fb641bc3decddf1bc5d56c5da43441b6edc6ae57ceaed21bcc"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/entity/VaultCRChart.svelte",
+      "bytes": 5123,
+      "sha256": "6fbeab4696082c2ee73c51c9d76eee8b6c657e05b08a016b9944899c5e95e5ff"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/AdminLens.svelte",
+      "bytes": 8911,
+      "sha256": "d92ca6e00571a3f5b08c6601b4e31475a850cf25a7c29e1b958ce9e91ea4b89a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/CollateralLens.spec.ts",
+      "bytes": 1641,
+      "sha256": "8665d8d0daba12b433cde16be4b8bcc97387780373f7de48371b428cafdb32aa"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/CollateralLens.svelte",
+      "bytes": 14992,
+      "sha256": "d4ccb94abf975d9dc83cd8fe4fdf848a730b9ce22b4da112e0cddc5bcd497781"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/DexsLens.svelte",
+      "bytes": 14531,
+      "sha256": "c0616bc58180f53bba1a79a5cb353fd07f944d88c0c17bb480979d479a0fc8f4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/LiquidationsLens.svelte",
+      "bytes": 6681,
+      "sha256": "ad6f3a3f367ca5ead209ed27ec986da8efe5364d19a3460e053b5c8d3291afe1"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/OverviewLens.svelte",
+      "bytes": 14069,
+      "sha256": "ae45abcbdcbef0f75ae445d824abb18005574dc3213921796d24bc96cc661060"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/RedemptionsLens.svelte",
+      "bytes": 15714,
+      "sha256": "79e3a07e4ef9d4c9c4ae9e9732ea7d9d0bb2cbbce125c892a2011f5c1d0064b5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/RevenueLens.spec.ts",
+      "bytes": 5502,
+      "sha256": "a5cc052466cf7fd45b8b89a85a3ad986c1b535168dff0c8676498c32c0ada4e6"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/RevenueLens.svelte",
+      "bytes": 10907,
+      "sha256": "9ada28bae238b7aeb5833c6711d8a5f9dedbf2cdd4b246ed2f20bf240e20bd25"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/StabilityPoolLens.svelte",
+      "bytes": 8963,
+      "sha256": "15d008d9f21d2c6f5720407543974e03a998c808874449607378a4797fec34bd"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/explorer/lenses/lensTypes.ts",
+      "bytes": 144,
+      "sha256": "3373c34af3ec10a4f61bccacbeee588fd6a5c84239e947a9646c6f6454f46b9c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/layout/EarnSubNav.spec.ts",
+      "bytes": 4994,
+      "sha256": "cfd5533b7a79c3c6a23ea40b84e2b3e4aefaa41924e1ebd0b6aa7da064f64ed6"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/layout/EarnSubNav.svelte",
+      "bytes": 5042,
+      "sha256": "34fc156ce202398ef46a647abc60bfb9b669a011ea8d2a583efdaf6610ff1281"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/layout/PositionStrip.svelte",
+      "bytes": 12256,
+      "sha256": "f346444ef472fbce64b63a985255914cb93ad9c5ce5248f59e0374e7c0139bdd"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/layout/positionSummary.spec.ts",
+      "bytes": 13582,
+      "sha256": "b745f9ca1dc0fc5b9f4ff666b6c46a082b6cd500b1bb90aa15f73fb5f96bef2c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/layout/positionSummary.ts",
+      "bytes": 6541,
+      "sha256": "225a095620da5c0d2df1a49addc3ed793e0e772b8ffa920379453a73051f43ce"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/liquidations/BotLiquidationsTable.svelte",
+      "bytes": 15225,
+      "sha256": "dd06da74d4c30a44cffb3d4c2684d7f98283d71e93318b8d66c87e5e4e496741"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/liquidations/LiquidationBotTab.svelte",
+      "bytes": 6475,
+      "sha256": "bab50644bb46990d61378031ffd0fb5047ea8c1e3882d42263504f665498402f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.availability.spec.ts",
+      "bytes": 6121,
+      "sha256": "8ccf1eb3f9e31357336e03670ef9b0781fce57d84f08b5c76dc1d42bfe361a27"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.svelte",
+      "bytes": 58934,
+      "sha256": "ec1ad46d8e0ae5270db1b2cea8673621debc385b470c8c4882d8cf1514851915"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.xrp.spec.ts",
+      "bytes": 3298,
+      "sha256": "17914902321b27570e639643f3a6d29283d5ff0195856ce1bc1902553cce5763"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/liquidations/StabilityPoolTab.svelte",
+      "bytes": 10480,
+      "sha256": "4460a64f75920697a15c3cdcce567b68c2f67ecbdeddf865cdf692ad7efc17e5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/minters/CksolIcpPaymentPanel.spec.ts",
+      "bytes": 13692,
+      "sha256": "0b4e73052e2958be938a80078e5dad7ffdc1cd028facd8e008468fcea8b81686"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/minters/CksolIcpPaymentPanel.svelte",
+      "bytes": 17815,
+      "sha256": "6485ea98a41ef6a8bea1123bc3bc085e3a0b46f121f618ddd0ab610921f52acb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/points/EarnCta.svelte",
+      "bytes": 3307,
+      "sha256": "47ccf90e53d113a10306bfa030d4d96e2f9c8f306b95deb4d5f5161b2996c281"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/points/MultiplierBadge.svelte",
+      "bytes": 1486,
+      "sha256": "ff47b199d59ab491dbc266f65d20a85317ae82b0b3e6cd9d3ba05f35bd4d366e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/points/PointsCallout.svelte",
+      "bytes": 1148,
+      "sha256": "a3067a8b9b6bb8dbe16f4169fc0bf3d53811506692b1daa709dc98e27ac56b15"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/points/PointsSummary.svelte",
+      "bytes": 14581,
+      "sha256": "1033f98ac44f4ef9a9e9f711869de76084444a2a7a6f23a48031d63fc521c6ed"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/points/SeasonBanner.svelte",
+      "bytes": 1802,
+      "sha256": "063838f969f1aa9280af68e9bd08c1b4d92e41cbb40fc9d8bb5670b55aff62a4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/points/SeasonBar.svelte",
+      "bytes": 5110,
+      "sha256": "4821824c4af7b06cd8ed57367e6c78a9752e25f5449e3109a7ad88e2735b1ffe"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/DepositInterface.oisy.spec.ts",
+      "bytes": 7106,
+      "sha256": "dccd38cdae30585527068346299510c941b887cccbb7421e650f489b84b7c7c3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/DepositInterface.svelte",
+      "bytes": 37354,
+      "sha256": "7198d7f87e07f3f823157bd69a3bad5c7682b883f3438e17af259175612dae15"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/EarnInfoCard.svelte",
+      "bytes": 20406,
+      "sha256": "1bee61e97458fd1cf352759857c8b309024087f600c56c04f15dc669d2d04551"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/EarnInfoCard.xrp.spec.ts",
+      "bytes": 2649,
+      "sha256": "9eec7843b5174800ad7caeaca81eab680c948b838280e7a887a2d18bf6706e38"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/LiquidationHistoryCard.svelte",
+      "bytes": 6898,
+      "sha256": "b4f928a56c4ed55bcc79742573b08a94fc159bf614e370f9313180e0b54bc8d9"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/XrpPayoutRouting.spec.ts",
+      "bytes": 2421,
+      "sha256": "5dbae2a14bb7f1df1344cfa5c1df759b16f327ce862fd78c6b72d0a4c7564928"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/XrpPayoutRouting.svelte",
+      "bytes": 11619,
+      "sha256": "62b33fe5979801873885e44b1e77e9326b52f41c8d211735fe1ca8fcafb4c637"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/stability-pool/sunsetCollateralPolicy.ts",
+      "bytes": 1528,
+      "sha256": "896d21c2236af72f0278d526057a822bd53c292fb44a7a4277aa88693d8480b8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/AmmLiquidityPanel.svelte",
+      "bytes": 30383,
+      "sha256": "5432fb459bfe4c2d6cda8f09cc1402512cca89b72d15bc7eff99ca5619b3fc02"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/LiquidityInterface.depositPolicy.spec.ts",
+      "bytes": 11436,
+      "sha256": "01f38ce220579cd11f4927b9495f365b9cb411721ff93494dc3e3f2356216cc7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/LiquidityInterface.svelte",
+      "bytes": 43355,
+      "sha256": "c43073715d570b6e54ed0fe178cc1a1a44ad96bf43fc632575ef1b9b72cc03ff"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/OisyAccountCheck.spec.ts",
+      "bytes": 4802,
+      "sha256": "16d905a953277cc1b355a4c4aa6f9f2005d9b34c9996c3e2ce20dae5d1b999fe"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/OisyAccountCheck.svelte",
+      "bytes": 3831,
+      "sha256": "42fbb63aac1ed8b0a3bad2f03dae67da390826ae227e90146664c8099d6bb329"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/PoolInfoCard.svelte",
+      "bytes": 6572,
+      "sha256": "44b8a412ae73cfe7c10105b730ac9997930f0e5b837e5de4eeacf7e7d57de94f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/PoolListView.svelte",
+      "bytes": 12512,
+      "sha256": "f500934fbbbb3eb4ceccae6a348d3fee660cd045fb8e420ef4263e5341f5d600"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/SwapInterface.accountCheck.spec.ts",
+      "bytes": 3863,
+      "sha256": "8357efd6fd229a337f5717087dc1622edb922d6e7dceba6d642c014b1817a901"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/SwapInterface.svelte",
+      "bytes": 40340,
+      "sha256": "c686c9d41eff2ca33c361adbe471d2eb97fb507664e4505400628b34c73045e0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/SwapLiquidityToggle.svelte",
+      "bytes": 1381,
+      "sha256": "36ba345da88f20771ece3cb33071b46d7ecee98d31f69c18a0aa3ba41cb3f975"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/routePresentation.spec.ts",
+      "bytes": 3121,
+      "sha256": "b6959814d20bd71c9e2daa6b010e79af88feb9d3b933eccff35ba3ec83af9047"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/swap/routePresentation.ts",
+      "bytes": 1331,
+      "sha256": "73ac5167468ff0d0eb5cf69f46122f5d2626e7be56d72d4ccd96984d1b257913"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/BorrowSavedRequestNavigation.spec.ts",
+      "bytes": 7218,
+      "sha256": "49cfcd507e309b289d859440dc48164a46dd312611f094394801bad99ef3a477"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/PendingBorrowMintRecovery.spec.ts",
+      "bytes": 5103,
+      "sha256": "5c00131de99caaf85de2b6917f8a1be1300827f80e60331a03dafc6a95beee58"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/PendingBorrowMintRecovery.svelte",
+      "bytes": 9164,
+      "sha256": "fdc8ef32fb20f9bd6313c189a038a7310eb26adfd9b9d83e5abe85cfe3f9f454"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultCard.repay.spec.ts",
+      "bytes": 1303,
+      "sha256": "b89dfa8496019e8de690740252f3765183460e7857ccb4c2ea729ec74e0abe82"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultCard.repayRefresh.spec.ts",
+      "bytes": 13238,
+      "sha256": "310e659ed84557e4b6886b0434551452f5e6a55c9174982d7569ed6c3e038a17"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultCard.svelte",
+      "bytes": 103440,
+      "sha256": "83d44001f2d37394599ad3e5690b612289510472e84f181652ef1bd35f6ca569"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.spec.ts",
+      "bytes": 7472,
+      "sha256": "fc9479db0b39e08e6010b710af00e8355fcd4095c20b7c16f765f27411e966de"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultPullRecoveryBanner.svelte",
+      "bytes": 24654,
+      "sha256": "59dce32f64d3c036509c325b29043853f30aa1d2f6fdc5e68cf5be449f9e551a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/VaultPullSavedRequest.spec.ts",
+      "bytes": 13129,
+      "sha256": "de60cec959089ef8a2b9f8e3820ebfe2e8bba13a519e33eaf1122a8ec1a968fd"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrpDepositTagNotice.spec.ts",
+      "bytes": 2164,
+      "sha256": "f559c1614f2b296675e1d7706899f7a593ea18cbd9fb7e7c29332e2b902e1c65"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrpDepositTagNotice.svelte",
+      "bytes": 800,
+      "sha256": "d3558c74ba4db0d8751884c964ce06056a44aa34974878b01f18e3644a5a80d5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrpExistingDeposit.svelte",
+      "bytes": 7240,
+      "sha256": "7b2680bb73d490e2f4fbef8346c6f7d303fc760d7179a3d2168916ad36bff9f6"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrpPendingDepositBanner.spec.ts",
+      "bytes": 1112,
+      "sha256": "671889a56b04856606d05f6a41e968559988b664dc78fcece40ea060b4713f0b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrpPendingDepositBanner.svelte",
+      "bytes": 7875,
+      "sha256": "9584bb83681b29c1e5a47f834edce71890dfa7a2efe1e7ccd05653e093307b4b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrpVaultPanel.svelte",
+      "bytes": 17525,
+      "sha256": "1814688ab996cc5bd877f298ef2236c20542a6bce7e926902ca62b2f61073c42"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrplIcusdPanel.component.spec.ts",
+      "bytes": 15433,
+      "sha256": "f8db71913ddacd580090d184205c6defb1b87e0d834588418e3a73408ecfbb6e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/XrplIcusdPanel.svelte",
+      "bytes": 28019,
+      "sha256": "fe4607edfb8744d71cfd43688714623f24c561c523fbdcf3230ced33dd3e3f5a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/xrplIcusdPanelController.spec.ts",
+      "bytes": 41695,
+      "sha256": "8dbd41f53e768cc70ab0eb365e40c6f0d6071e1becc7fd7cad927352823e5dde"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/vault/xrplIcusdPanelController.ts",
+      "bytes": 40978,
+      "sha256": "1b67ebfcf6ee4e0842f641afe4425fc776932f88bfd98ccab063743df465934a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/wallet/WalletConnector.svelte",
+      "bytes": 50630,
+      "sha256": "9e60cf472f7c2ef80c06c1382f9c85cdd57750992bd58c0b68eba1481dc640df"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/wallet/WalletRecoveryNavigation.spec.ts",
+      "bytes": 5347,
+      "sha256": "4f6ebf4373e74b18c4bbf2908e8d636776607137abe4c8b62ec82322f13d5b2b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/components/wallet/XrplWalletConnect.svelte",
+      "bytes": 3038,
+      "sha256": "7e7a61198af12ee0d13912fb3138cd05835f2615d1051e4f6874c9a4222999e3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/config.ts",
+      "bytes": 9180,
+      "sha256": "68e9d99c4c7463ca42f2f64e2a9a7655b36d2b219f1f8dc9c0d61ceb49b7c5e1"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/idls/ckbtc_minter.idl.js",
+      "bytes": 3874,
+      "sha256": "7b1c3930b54e347e10a06d8f437be07a050933db908b96256b7181dca200e78c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/idls/ckdoge_minter.idl.js",
+      "bytes": 4595,
+      "sha256": "ef798296d9828bb86a58d783a4b5762e1c4f68028178b1d567d919c3ec56dca3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/idls/ckerc20_minter.idl.js",
+      "bytes": 6175,
+      "sha256": "f4f7a15f69a82a60102310719ed4d0fae653a696d8dea0f500de9658396eb3c9"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/idls/cksol_minter.did",
+      "bytes": 21327,
+      "sha256": "41e5473e0901fa286443a513c663d3ed7b6efe00da7ac3e44f5c2ee2573843e2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/idls/cksol_minter.idl.d.ts",
+      "bytes": 6986,
+      "sha256": "93bca2b9769deee3f88d686d6018e558aaaaa028ef98f179da3557d8928b932c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/idls/cksol_minter.idl.js",
+      "bytes": 8876,
+      "sha256": "aec92727923d0fe5ed5ce546897fb95275065e59126ffb1eb6ad32e3e19aa1f8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/idls/ledger.idl.js",
+      "bytes": 4502,
+      "sha256": "08f815eefcb729defd85e3ff6ede64ef8ab82fee314a090c990486476737afab"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/localNetwork.spec.ts",
+      "bytes": 1534,
+      "sha256": "fede4b79a6a5789688238a2fbf672c2d70e2b71e8d8fa133ae6f0339ca7e564e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/localNetwork.ts",
+      "bytes": 2574,
+      "sha256": "31c421c49a27fe87bdebb13b744427d04590251d929903d360d1a09ad0349285"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/protocol.ts",
+      "bytes": 3597,
+      "sha256": "405b23f9f730a7c4eaee4c1396b623dff8dcde9d909f1b121c6c88ff907d8f3d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/PermissionManager.ts",
+      "bytes": 8783,
+      "sha256": "e639bbb4813dad4268bca6fc47320c196d88f4b53fa06e480e18b70d2a573012"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ProtocolManager.ts",
+      "bytes": 33442,
+      "sha256": "a7d3b733999604e2218dfc1aae6df9d8ccf41c0eeb3ef13b2e3690d6e0af8aed"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/RequestDeduplicator.ts",
+      "bytes": 1104,
+      "sha256": "29983de0d8d5939be25be5ea13d61f437772bfb52e1e8484e7de35ade32e1be4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/StreamlinedPermissions.ts",
+      "bytes": 1701,
+      "sha256": "0ae4083f37502d747829efa942da3e6cf220ae5d25d3e7eacc118b2563bfe8af"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/TransferReceiptManager.ts",
+      "bytes": 10301,
+      "sha256": "c698a766746c6061b7420c195588c882450ca9c239a2c5aaf7552dc2d0898487"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/amm1ApyService.ts",
+      "bytes": 19272,
+      "sha256": "3eb98bd8c434716e7e23bb44490df6b1edfbd16271b6a5db65dc70aeb0f142e8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ammOperationStore.spec.ts",
+      "bytes": 9442,
+      "sha256": "c6348c421fe01a78db4c5621d26b745b6bdd9731f751c41503ee16dd64fbe54f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ammOperationStore.ts",
+      "bytes": 9620,
+      "sha256": "e1c3d12dbd34b40d28b7b79ed36f5eced62f4803b32790a93f82770f458bf99b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ammService.ts",
+      "bytes": 30051,
+      "sha256": "736b62b2cbaa80b2cfc3c664eaf72c43231fc7de99c8937749a6c10e53706e04"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/auth.session.spec.ts",
+      "bytes": 17385,
+      "sha256": "e82ebb469f20be23980a2779d549294f23a3a50431935602f2341335bbf84f79"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/auth.ts",
+      "bytes": 22722,
+      "sha256": "7287fe399465a87df7cd06c893b83cb55502d6fb95391cbac5a5649f87f66e99"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/backendDebug.ts",
+      "bytes": 8582,
+      "sha256": "d847a18d394996aac6d155941b0ebf54b54cd5f55563dea5902a3263e5a039c8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ckbtcMinterActors.spec.ts",
+      "bytes": 9035,
+      "sha256": "21d8067f6779d023f73d57212ffad4abb298aaecf613de1f10957298a0cac6fe"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ckbtcMinterActors.ts",
+      "bytes": 6995,
+      "sha256": "02f8a3c3f619f8073f8e504c314cf97f2c941703a23255ee8533306d273093cd"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ckdogeMinterActors.spec.ts",
+      "bytes": 20823,
+      "sha256": "984da336a9fcc5080fc1577ca917776de39e8cfa3e1a7827fac70c756d5ea01d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ckdogeMinterActors.ts",
+      "bytes": 11629,
+      "sha256": "015dbf25c84a73115f77b828d0a5a86715fc7d86f7324127f174f45cb3f56a86"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ckerc20Minter.spec.ts",
+      "bytes": 6163,
+      "sha256": "dd671515907d714e647876faa997c35ce0ba1e90e5c851fc87f7053b7bd7c639"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ckerc20Minter.ts",
+      "bytes": 14870,
+      "sha256": "b1b0ec11b1f2b7976ddef7bda9c0243100d8f63bd0159bbbd86fb8810d543d91"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolDepositBalance.spec.ts",
+      "bytes": 1311,
+      "sha256": "0788f63f3a2f87333fd28dc5b74378e0bf914ad2a03b51d203318c33450467ca"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolDepositBalance.ts",
+      "bytes": 1030,
+      "sha256": "d688f891fa53ca681b0ac48895413faf381e8cc99322d3884a925c7cc0680f3d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolIcpPayment.spec.ts",
+      "bytes": 14973,
+      "sha256": "ea1221590441318872820dc8d577bed5322f830444014ec8916ac355b741a70a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolIcpPayment.ts",
+      "bytes": 18447,
+      "sha256": "08c2c325f5c9ef93989ed30cd2baf8c2783b89a72bfa96de83294a8d41545128"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolMinter.spec.ts",
+      "bytes": 10847,
+      "sha256": "21923254d04f5457224df18c43e35c367c6859c562e8953e73e89c73a083a5ec"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolMinter.ts",
+      "bytes": 11763,
+      "sha256": "ea2f864c4fbdb5bb5e9a8c7cf3df2a4628f6e67b879565af127255fb6bb402f0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolOisySigner.spec.ts",
+      "bytes": 4609,
+      "sha256": "919fe31c587fed0cc05af99a88a8be2cf4a708a6031090681709fd306987b440"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolOisySigner.ts",
+      "bytes": 343,
+      "sha256": "7c1c345e59b8f7b3d64698670a9e60ffa6726fc188881855433650e474af9c46"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolPayment.spec.ts",
+      "bytes": 22485,
+      "sha256": "383a38cc0549ea7115790ad743104d292253dde0a1c296e184b247e9a10cfe35"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolPayment.ts",
+      "bytes": 25652,
+      "sha256": "c4a7b6074e21292d9e95f9504fbbbcaf83d88b45dbd455c59ca1bf7d3ae93c6a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cksolPaymentJournal.ts",
+      "bytes": 2519,
+      "sha256": "d07520b8e1a35adb8bc0b1976f6f2882bdac10f46d93b257a6bbc1aa201f2292"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelAccess.ts",
+      "bytes": 703,
+      "sha256": "8ec1a3f87de9e6e859bb35ecfcb9254da01eb177e5334f509676a4191f2fba52"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelFunding.spec.ts",
+      "bytes": 4860,
+      "sha256": "d4107868b3b0e4729a8422d58c050512ab947bd5d4d6f16695e67ed9293d1390"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelFunding.ts",
+      "bytes": 5499,
+      "sha256": "da46571c56ba3a78d4f446e679691be39398c1475ccbdc273fb2754d363bbd1e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelService.spec.ts",
+      "bytes": 6858,
+      "sha256": "5f7e8736b7528fd1877a42a540c19c40577476a231c9936b2dcaf474eb49d912"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelService.ts",
+      "bytes": 15988,
+      "sha256": "251d22c633dd66f8fdd41bd70471535f7b5638bbed19e5c24b685e7a10b5affb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelTelemetry.spec.ts",
+      "bytes": 1035,
+      "sha256": "bdf8256cba0bc4d77c40691a11fb4cf9e6886ecfd957b1d8b15729cd7d72bdc2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelTelemetry.ts",
+      "bytes": 736,
+      "sha256": "78936c3ad6bc283e69d7f45465db84b9cf9df00079f1255768d641df1ec78d4b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/cycleSentinelWallet.spec.ts",
+      "bytes": 2146,
+      "sha256": "e460c071ce8b2f3f4fd1b292240fbfd78e99a1e21ca42abc18eabd20b0d231ef"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/db.ts",
+      "bytes": 1411,
+      "sha256": "ccdf74fe8d4eb3a18e3935f848b5485650428085184fc63755e59720a7e689bc"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/depositPolicy.spec.ts",
+      "bytes": 3395,
+      "sha256": "f57d7b42511a6c6b171da2c6ede6f94ecf3e0dc9146c19ce34a403c8b2d59e30"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/depositPolicy.ts",
+      "bytes": 4999,
+      "sha256": "d931aef098769644c26267943722aca3411ee08d44bc4d63cda8d11e53fbf82c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/earnRates.spec.ts",
+      "bytes": 6824,
+      "sha256": "392dd76653d078094713ff84ea24bb134564785b077baa2c2b275c74719feb54"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/earnRates.ts",
+      "bytes": 5852,
+      "sha256": "d1bc836774adf58c440d91955666eb4deecbc699b1e134e9fd205e9a2a04542a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/analyticsService.feeSeries.spec.ts",
+      "bytes": 1590,
+      "sha256": "6da5c642419a23485a7e5e6c4b6ff02f66d07c1ca645dcd5319a509311226f7d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/analyticsService.ts",
+      "bytes": 24893,
+      "sha256": "c97170b86f5fab6d00004c4617aa2da94e0c008f02433d12df2ee5da72168d53"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/collateralConfigQuery.spec.ts",
+      "bytes": 1766,
+      "sha256": "63b5d3ba23a2a576d2aa3922bb4b0d0dd03d1a06375f3810723157bdb663399a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/collateralConfigQuery.ts",
+      "bytes": 925,
+      "sha256": "c2405897c0a4b5c7936b71702c1fb5405b2347f718db304eaf14e90e31850774"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/explorerDataLayer.ts",
+      "bytes": 3961,
+      "sha256": "51a7ff999367253ba6f0fe516ea4e21cc589e5de49f9cdb1dce549f982fdfa0e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/explorerService.legacy.spec.ts",
+      "bytes": 2308,
+      "sha256": "2a1e05744c35515202186a4a3352dd940f991c03243e383e9cc7315775f3a943"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/explorerService.revenue.spec.ts",
+      "bytes": 3933,
+      "sha256": "4163917d1f580ad985d54fedc9281082385f1ecd9a94b5b68750debcb8b498ec"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/explorerService.ts",
+      "bytes": 83964,
+      "sha256": "ed516ce31070ef4655aab45915c7827608599f85c54699b662f664e0a0459870"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/spDepositorQuery.spec.ts",
+      "bytes": 1941,
+      "sha256": "3c01fab23ad350aeea13cd713f9ead99cc9a080364e77b0cee0b2ea7187259a4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/spDepositorQuery.ts",
+      "bytes": 1171,
+      "sha256": "aed3ea682bcdde9d79c57fb47c56a72477af79eec6c33027f1bb6d0e8c238c8b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/stabilityPoolEventPagination.spec.ts",
+      "bytes": 2033,
+      "sha256": "f43b28ba95dd96da20dc0c44908202ce8ed9b7f29bd1f5d5ce9fe4bd54e7ec42"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/stabilityPoolEventPagination.ts",
+      "bytes": 1265,
+      "sha256": "639e5b00295f54126a30c6aead27b8ddf9ab014af5b1232e96c93be96d02c75e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/vaultPagination.spec.ts",
+      "bytes": 1510,
+      "sha256": "aecdf737545ef9d622a1553de14fa493a7cde7e789d3213b085845eac134b032"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/explorer/vaultPagination.ts",
+      "bytes": 612,
+      "sha256": "fc1132736c7cead0593360f0d2b4c8fbffb3e9347be98850e2ba7fd5f2dd5eb8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/internetIdentity.ts",
+      "bytes": 4843,
+      "sha256": "453faa4ac1ed4a42845b67119805c0a921449ef0e64040439bb0ae381e2ab802"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ledgerFeeService.spec.ts",
+      "bytes": 5587,
+      "sha256": "78f5b723a7642bf1bb06475d6613d938e711cfd03cbdfc10431555199c4b7fc5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/ledgerFeeService.ts",
+      "bytes": 4664,
+      "sha256": "c6c0768b421d3cf24f4337f6a49020dcee8cd44ebd2f88b0312ba0f2ca27115d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/manualXrpLiquidation.spec.ts",
+      "bytes": 8338,
+      "sha256": "0dcf3358a1e8f942eba145a5994a0de987df252fd25b1370e6a9d6df4ca2e583"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/manualXrpLiquidation.ts",
+      "bytes": 6516,
+      "sha256": "8bfcc2820e1b91742b35740c6b1a96b705617b5002e75e779298fa13613b6e6f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/minterOisySigner.ts",
+      "bytes": 2270,
+      "sha256": "8304aa5dd129f9d765193e2500a751711d47ecb368143129bacf7fd9e9611eaf"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/monadBurnService.ts",
+      "bytes": 7869,
+      "sha256": "71560eb27274e23fd81fb95c5560f5a38700581806ac3207e851c50c9cd78a1f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/oisySigner.ts",
+      "bytes": 6132,
+      "sha256": "8b6f4c5c662351b83e452fe08dafccd352ffe21967c7aa017a08d0aaf39c6ca0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/pnp.spec.ts",
+      "bytes": 1826,
+      "sha256": "801c809eef3af18512e1aa8b2381824f250e7c92e21b3a969cca0f760e0d146e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/pnp.ts",
+      "bytes": 15318,
+      "sha256": "d102c66b7b2e06ec0ad223e475e1139eb0b6aa0d097db4071fe5a2837a34453a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/pointsLive.ts",
+      "bytes": 7011,
+      "sha256": "16f8cfb3f19e1410db6a3b899b5e46f982a718db2e342d78447d7f240616b94c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/pointsService.test.ts",
+      "bytes": 1759,
+      "sha256": "b7ed5160ea5e977206d40c14fb36fb450777aac8bb849387641486132e76706c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/pointsService.ts",
+      "bytes": 11049,
+      "sha256": "0620479c560c65deeb1855f42c64d2c6b3021e31d80c6ff2b90b812d926b5c8f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts",
+      "bytes": 66862,
+      "sha256": "bf1c3e330a58270eb5df9912ed319454f0c6d09aff2ac98790429a7c655a1045"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/apiClient.repay.spec.ts",
+      "bytes": 7502,
+      "sha256": "f34155d63457bcee5c967a69fd27738801c81823e02629b087ac86f7f092f27e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/apiClient.ts",
+      "bytes": 192958,
+      "sha256": "2e7dcbeecf97589b645d2e3e48d25d36f1b7076405f19c111753e4571902ea14"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/largeApprovalExpiry.spec.ts",
+      "bytes": 2186,
+      "sha256": "63674fffc323f574beacb4a227f6f8d9c5867d0274715c70695e2431cc443a90"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/legacySessionWiring.spec.ts",
+      "bytes": 4461,
+      "sha256": "06cfa7014966ac5ee2fe35aebbf9ac35f929131960c1b586de59066930e768c0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/oisyResilience.spec.ts",
+      "bytes": 4458,
+      "sha256": "52003054faadd3c92914a9197abecbf0295cc48d855a5f18c1f9a67c2e33d667"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/oisyResilience.ts",
+      "bytes": 5127,
+      "sha256": "1314ac773ba691b4474e4cfa279f6cfc87f8f7cb6852f6bd4b88a7eb13b8e2a0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/postActionRefresh.spec.ts",
+      "bytes": 2162,
+      "sha256": "72e750cede922340365797a72e151f523731e3b6fcb07603059384577d270d5b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/postActionRefresh.ts",
+      "bytes": 902,
+      "sha256": "0d466ce0e77e7f4957648a4d06410b5fa2f8f807d08970ee0594475e13056e8d"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/queryOperations.ts",
+      "bytes": 13758,
+      "sha256": "96b09c3e70e158cef34cc4c6395e5a5b489efabef68f0b71efad5aa31957ab88"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/rawSnapshotCache.spec.ts",
+      "bytes": 3500,
+      "sha256": "f1904d4dcb98177fed0d27d2c2a6f4ab901f1362d85ffdb64f376e03102e90a8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/rawSnapshotCache.ts",
+      "bytes": 2525,
+      "sha256": "0571cf34a4c38033cde437dd362e51e3241c360123a13aec2fd7865d21f9edbe"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/securityConfig.spec.ts",
+      "bytes": 3053,
+      "sha256": "d8875fa109b037f8761645a25793ce6214331c61fe59c0ab608264b0e95409ea"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultMarginRecovery.spec.ts",
+      "bytes": 5363,
+      "sha256": "dec676106d2625c8aef0384ae5931aced2580139631d3c3d256292d1c20fedb5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultOperationJournal.spec.ts",
+      "bytes": 33089,
+      "sha256": "f7ca49b9332975208bffccd7249a9f36a426aa90133a0f997c0d5b527925e1ef"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultOperationJournal.ts",
+      "bytes": 29454,
+      "sha256": "1dff539334aee00476719152ee234e9be22da11ae3fd93cbdb74f4eef5d4168e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultPullRecoveryDetails.ts",
+      "bytes": 3323,
+      "sha256": "5aff417b58db06e76c7a41411d09756c6577d89d3573364a3d8d29760d587c07"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultPullRecoveryNavigation.ts",
+      "bytes": 577,
+      "sha256": "1446637516b2ec6725f11e0b7b3dda1ae6df53a426ccdbb269fc2c4b65e7d64e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultPullRecoveryViewState.spec.ts",
+      "bytes": 589,
+      "sha256": "2c0d70bbb191948f0967fbe0ef6d8ff750e5fd37dda7bb82c4984a4cbfc9441b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/vaultPullRecoveryViewState.ts",
+      "bytes": 345,
+      "sha256": "dd353bafaef62f1ec419eb08736dc2a9dad7abdee9cdbc54328ca67cdc2c2e5f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol/walletOperations.ts",
+      "bytes": 27519,
+      "sha256": "ad0d66b7cd4cee33a6807985a0b5cb412f82dd59173c44d330f2018aec683caf"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/protocol.ts",
+      "bytes": 9522,
+      "sha256": "a679206f374efbfa446c8cc6fd32f4d8e0fb3f70b26041bc787d6eb532a1d60e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/providers/icpswapProvider.spec.ts",
+      "bytes": 10854,
+      "sha256": "d948d9b4c4b8e894af42fe2573de96bf2d73be2d1da347e282291f719807a53a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/providers/icpswapProvider.ts",
+      "bytes": 8909,
+      "sha256": "1fecfda035afe43373de9f8ce9520675bec859733fbac0706d6b9df5152b043f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/providers/providerRegistry.spec.ts",
+      "bytes": 3703,
+      "sha256": "34b4fde373c2f24be31a8ad607cd5e1b44d853c092dcab0a61f1f67b3091fa92"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/providers/providerRegistry.ts",
+      "bytes": 2246,
+      "sha256": "b16d650daa27b7e4a6147a53b682507723b849173f1999a8c053b82a7c3b80bb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/providers/rumiAmmProvider.spec.ts",
+      "bytes": 1915,
+      "sha256": "68ab98f4892166698d58678318686276b0667f3fe77d6b379a009710d57c4876"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/providers/rumiAmmProvider.ts",
+      "bytes": 2559,
+      "sha256": "c032ba3b95cf0069dee76e29b086ed9e1b01e8d80815ae02a241a836e6fcd8a0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/providers/types.ts",
+      "bytes": 1543,
+      "sha256": "935f3ef2fecd6570e9a2e1b2ccce8108a5ab14f2dbf21aae6420bf41f54e04ac"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/redemptionBindings.spec.ts",
+      "bytes": 8601,
+      "sha256": "0fd47a9e101e4833d401005490f2290e796a760fa3d7025f6abafb5f86807160"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPool.ts",
+      "bytes": 7082,
+      "sha256": "11897e47b9e1377ee6487dcd82d0f1a5bd9d0f2c848889d9d5fb3ba98171a484"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolConversion.spec.ts",
+      "bytes": 19287,
+      "sha256": "967ac537245382bec3962075660924acbe9fd94cda8dbbdb78a857638b3dc2c1"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolConversion.ts",
+      "bytes": 26601,
+      "sha256": "94d826f63de87b2b5336cd0a2bf6bdd4151218bc4cb52bf5ba24e3d6165c51a6"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolNativeXrp.spec.ts",
+      "bytes": 2109,
+      "sha256": "deb11a282a6e9f72b885afcdef0091d17afbaab5013b0b493937f5acd610b98c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolNativeXrp.ts",
+      "bytes": 3120,
+      "sha256": "4ac8c669afa99d51cd0706999253d137b8271feff43affd76416c3996b9e35d7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolPositionDecode.spec.ts",
+      "bytes": 3436,
+      "sha256": "c5873ee72bb1cd57370f08c773a3230f46af21f5c8a2d3fe810acf89cb8c5cfb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolService.ts",
+      "bytes": 43660,
+      "sha256": "f3cde6801f7f462a33439c3d14c00efc1ccfc6edb45840d249bc6e7e82b1e5ee"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolService.walletBinding.spec.ts",
+      "bytes": 23249,
+      "sha256": "46eae47b603f5b54ca1a36f59b189f761a84d021de9316176296c22fb4073981"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/stabilityPoolService.xrp.spec.ts",
+      "bytes": 1111,
+      "sha256": "503ea3638242e7b26c7bd3c6fc9b7d10c0291cb4b4b5c35360b936ef9c2b59b3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/swapOisySigner.spec.ts",
+      "bytes": 7888,
+      "sha256": "3e0e6e6b835bebec3f0a34240f8714df2113d289ad0af18fe67e4cf2b9afad9e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/swapOisySigner.ts",
+      "bytes": 3221,
+      "sha256": "8ce6d5251e5b2d557b6c1b8e3a594f8b64929d7ee457d6b71aa8b1d609c29ad7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/swapRouter.spec.ts",
+      "bytes": 43588,
+      "sha256": "3d4f1fdbb1c05579ba662c5ce3e364ee980a776fcad28f740c00125b1fd629b4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/swapRouter.ts",
+      "bytes": 85028,
+      "sha256": "cefc4244c33f0b6e9574584eb430241d8506b21be4485bddb1baef07ee77934b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/threePoolApyService.spec.ts",
+      "bytes": 5324,
+      "sha256": "83291cfa964c4079e2482e3f071fbc98d6ec15844c592c14fa87c81ae1ec1730"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/threePoolApyService.ts",
+      "bytes": 4720,
+      "sha256": "0f72900553d367405a0485971c1d3c3aeddaff0182f5ae8b6b7913085dfc4c9c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/threePoolService.depositPolicy.spec.ts",
+      "bytes": 7450,
+      "sha256": "34906be01dcdfe579eaf68e2f32cafdcbe72e42e6bf6405b8785bb4ef2c0b786"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/threePoolService.swapBinding.spec.ts",
+      "bytes": 9641,
+      "sha256": "fd9bb571bef056801f22a17a5dd0a6f0a6c3d9f8bc5483904ee3f553dea72f60"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/threePoolService.ts",
+      "bytes": 37127,
+      "sha256": "6b8375b2f40ad5df98cd7299607b03be6930d4b052824b86ed221e14765cd179"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/threeUsdPrice.ts",
+      "bytes": 3342,
+      "sha256": "c4a23676ba38dfbe8f46bee583f9ce7ebd1ddf9e780b3b92dcbb287e1628c8b3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/tokenService.ts",
+      "bytes": 15398,
+      "sha256": "2f3988f4da2b13895b4b099f4b1b3e05010d6a4826b5c4b5d7e3022e939ebd1a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/transferService.ts",
+      "bytes": 5784,
+      "sha256": "540418e23d24599aaf61edac3e11a65beb3893fc2e68b080656fe74c15f02f98"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/types.ts",
+      "bytes": 8261,
+      "sha256": "d2c1d84b8c3e1c38a584278b491af400a2db82fe513e61fb92dc10fc40a7447a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/walletSessionTransitions.ts",
+      "bytes": 453,
+      "sha256": "056734b017a9520985cda26d93aede648bb717fa650cbe01263dd484c3e3d4f7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrpExistingDeposit.spec.ts",
+      "bytes": 4189,
+      "sha256": "555d5737de2c5783aec5304e6a80a612f1dea3c0786983c98e522eee262230e7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrpExistingDeposit.ts",
+      "bytes": 3716,
+      "sha256": "fee76f5f9173bbc6ecde168e78ac8cf9348935691364e0ea28552ce6fc791041"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrpPayoutHelpers.collateralGains.spec.ts",
+      "bytes": 1959,
+      "sha256": "577e548a648b98ebb22583cc93ace59d605cc30e79f9568f09bc5c1b4509eaf0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrpPayoutHelpers.spec.ts",
+      "bytes": 5200,
+      "sha256": "f3f58b5b2b74d0caac2539ac9df66321c23cc735283a4f05a10bf4845865070c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrpPayoutHelpers.ts",
+      "bytes": 6874,
+      "sha256": "bf65d9ace18c7056585518b158cf9c1f6514d1733bae5df1ee94ecfcf6df89e8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrpVaultService.spec.ts",
+      "bytes": 4509,
+      "sha256": "a031c27185041bdd64563f7f6a587a2a01f0f2fea1b87715df4528c173198ebf"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrpVaultService.ts",
+      "bytes": 22471,
+      "sha256": "ab61dfb30d21268e9f91e2dc403d8fe8a1c7cb7a2a6174fb8b6fb398fc2bdea9"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrplIcusdService.spec.ts",
+      "bytes": 19697,
+      "sha256": "b40aa5f218ed3e74ba811c70fd5a49df54636e3da8ae6c6e2906516c64214a04"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrplIcusdService.ts",
+      "bytes": 29184,
+      "sha256": "9ccc2c9dc1ae2462ec81ff815ef8b872bff61ed946153a6b05fa1747cecd3bac"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrplWalletService.spec.ts",
+      "bytes": 16879,
+      "sha256": "5195efaba4bfceb469542b802e9ba7c2eea13e84b4943e786faefa97a48381c7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/services/xrplWalletService.ts",
+      "bytes": 17848,
+      "sha256": "8280ae3dfe5cbe8ca3ce43256bb6ab70e19796be7808a3e264e064435df1585b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/appDataStore.ts",
+      "bytes": 21981,
+      "sha256": "e1f9c87ddb013ec859439e826dc7fb7e687285c75f465ed20397a04347bb7ff3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/appDataStore.user-vault-session.spec.ts",
+      "bytes": 7367,
+      "sha256": "5cc4b8973c1d170d9df802d7b51da5de2a00717cfba8989711db146e1be9ece4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/appDataStore.wallet-session.spec.ts",
+      "bytes": 7715,
+      "sha256": "b9dfc1be0b09c6a287cc990ef826515a35882e6e1ad45addd7aa693f737d01e3"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/collateralStore.ts",
+      "bytes": 9174,
+      "sha256": "d9cc8e7b5fecf9a0a1309c3f23bf1e9cffd135f7ce9b8e9a85eba4dd8556adea"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/developer.ts",
+      "bytes": 926,
+      "sha256": "00f4cbb4f3bd601ead47af8e7b77e6c738648d8002eb95329c9ea34230c75af7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/explorerStore.ts",
+      "bytes": 8262,
+      "sha256": "20f4522d545cf18bac049ec793d0c13bf40a9b48b69e9710d514a08990d5c036"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/permissionStore.ts",
+      "bytes": 6708,
+      "sha256": "48ee87d6f3453ef22359fa357844470f47fdeef0576220d5df48ad2d2ed4e716"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/pointsStore.ts",
+      "bytes": 4741,
+      "sha256": "061501946ec0b68af5e9a3efe8b93b930550b1d3c0ea70f2d6ea4d833dc89731"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/processingStore.ts",
+      "bytes": 2854,
+      "sha256": "e6614f2289ec01bbadb1057c09397981a402837416c6512980172f9020f5aca6"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/seasonStore.test.ts",
+      "bytes": 3322,
+      "sha256": "23c7c5e61c97dac58fdbe2b6cb0b98e984589519f1cb5d7f29d38e444a6fb58e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/seasonStore.ts",
+      "bytes": 2781,
+      "sha256": "0b7c6bf8c5aab34fa3d2b041ca7af898fee98ac938c5e41a130ed1ec7d306e52"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/toast.spec.ts",
+      "bytes": 1027,
+      "sha256": "97000697a3abb10528c2713f58c77fbe1e6eadddf9a13d03adfedc2690cb95b8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/toast.ts",
+      "bytes": 1475,
+      "sha256": "288a9c96c463d9faf17aa98498e1d2183905344bf56cb86205d0f95f7095d6c0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/vaultStore.ts",
+      "bytes": 22838,
+      "sha256": "0856b27e5c9bd1eac1242b6a43f2a70bc405235e567fedeae8530574b83f4db4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/vaultStoreSession.spec.ts",
+      "bytes": 4717,
+      "sha256": "a0be021cce6006cd150ced522cda7ee46f42e411059e33fb757d41fd1056b4c9"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/wallet.session.spec.ts",
+      "bytes": 16586,
+      "sha256": "9ff340a8dabc44b6bbfa2bbbcfc02ced0df96ee928ad2c63edb353ec9bf7b050"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/stores/wallet.ts",
+      "bytes": 22608,
+      "sha256": "00f0968e0a65d47201362fd68b47bff80302bcdb8feef373a252bd2b87e62aa5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/types/plug-wallet.d.ts",
+      "bytes": 1466,
+      "sha256": "67c581e2ce152a73dd1e91a51b76ab6ac880608bfca1abd81ab468db728058c7"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/actorUtils.ts",
+      "bytes": 751,
+      "sha256": "9b10ef3f2fbb8e5e2e4a804fc2f156f2d75b4e8e899d031fca808a1c3619fcf0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/ammNaming.ts",
+      "bytes": 2970,
+      "sha256": "25926f1d91da485f7b0886f9963a0268b58a5b8df83c98a07eaf06022bab58e2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/async.ts",
+      "bytes": 1904,
+      "sha256": "8856a6699738225178e6ac6913a8359057766d432546fa7cbc69887d53de11d8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bigint.ts",
+      "bytes": 2518,
+      "sha256": "685768b9436e7a980e2f8d8d4c170bf0b4cff649162d8a5085f88f69bdab082b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bigintUtils.ts",
+      "bytes": 4252,
+      "sha256": "bda8d70bbb8da092709a21965258ca9d920277f92bb3f07c29d8e9a231b2bea5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinBorrowFlow.spec.ts",
+      "bytes": 23681,
+      "sha256": "30f33a566ff785fbe2b5c29e4b0efe0479410836769ee1f73eec2bc57a71cad4"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinBorrowFlow.ts",
+      "bytes": 21585,
+      "sha256": "fa6d31df6a629d3120c425ba32374c0cce1e33c0eff8da588649b5ab6a9c80d2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinBorrowPage.fixture.spec.ts",
+      "bytes": 19024,
+      "sha256": "a72dc144be469137f693d2ffa40fe88cbf69234e5ce7ff448a6f221c347ae0a0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinBorrowWizard.spec.ts",
+      "bytes": 52971,
+      "sha256": "3a38b60f897d61e1b5df04fd09c39fe3ef6632222e98a8b6a0d3978caac125ec"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinBorrowWizard.ts",
+      "bytes": 45914,
+      "sha256": "8ae136e9f922f9abef06b9fb0ebaffae15cb10ee499c47b062c701189f086360"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinMinterFlow.spec.ts",
+      "bytes": 2109,
+      "sha256": "fa0e6477d91c712a200f2f529a3043a13d26f67b698c012766f7c81983eacc58"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinMinterFlow.ts",
+      "bytes": 6652,
+      "sha256": "ade9bc99149d8aa51e16c7e516a2714cc100ef37183a6bd44247069be2fab77e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/bitcoinMinterPage.fixture.spec.ts",
+      "bytes": 24681,
+      "sha256": "9bfc9fb755280d55d79024f3841b743fc0af9118173543dc1eb6574c6bbfc9ef"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/borrowLimits.spec.ts",
+      "bytes": 5210,
+      "sha256": "a9360f9072d34d49434660423a7e4721cc785d08871de54a1c8890e8ad999be2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/borrowLimits.ts",
+      "bytes": 5920,
+      "sha256": "814ddae73334b4caffe7c0444ff4d85586c50c14126c5c7c25d7ef58b710d586"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/ckerc20Logos.ts",
+      "bytes": 612,
+      "sha256": "b1460424861902c39a31d3c20a61e1d34204f73585b1d556317e27af0ee58ad1"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/ckerc20Reconciliation.spec.ts",
+      "bytes": 6466,
+      "sha256": "68e1c20502ad982ea4448e6a2b8c788461654ce5febe2eae931ba3ce57b7396a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/ckerc20Reconciliation.ts",
+      "bytes": 3488,
+      "sha256": "9b63df4cd1cc9f5fd07847f73b92c0f896850c03f90b126b7b129126682ef6e1"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/ckerc20WithdrawalLock.ts",
+      "bytes": 661,
+      "sha256": "3a7b6e80eab007e8473598ca737499493b33f88596e48679f55504d8e557997e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/cksolMinterFlow.spec.ts",
+      "bytes": 1911,
+      "sha256": "2996812b9d57a97778186ba81cd84e76e9b4526eefcb69ecf40f80f92b615612"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/cksolMinterFlow.ts",
+      "bytes": 3625,
+      "sha256": "9aa677cd0ca947e4aa6d64696aa72b7541868018be0b7f635eda0bede5b82c55"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/cksolMinterPage.fixture.spec.ts",
+      "bytes": 53902,
+      "sha256": "3e6fb52741b14693e5d6a8722794d658ee2899ca0cebcec5bd74a8bebed37389"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/cksolReadPolling.spec.ts",
+      "bytes": 3298,
+      "sha256": "044c9c2a30a2447901e77c81917584059c4251ad904af90369cefaf513337728"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/cksolReadPolling.ts",
+      "bytes": 1734,
+      "sha256": "4db7cd9ef37bbae054fe003c9ba51c26ecfcf4024a6e6e02de26838c0d3f56b8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/decimalUtils.ts",
+      "bytes": 1116,
+      "sha256": "33f90ba4413507e9a30325df24faa708003d88259cbfa746ebfbfe26b04a97cc"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/displayEvent.ts",
+      "bytes": 8833,
+      "sha256": "89ee5daad39fe4094bbc4953fefcfb75c688230926f9660e66ea416ca46244bf"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeBorrowFlow.spec.ts",
+      "bytes": 23656,
+      "sha256": "1917ccbac25ccc4442797355332a163b693ca18d8ca31a46c4847b5bbef98a1c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeBorrowFlow.ts",
+      "bytes": 21480,
+      "sha256": "af07b29c0886845bb61abd0f8802c795ab1b9edbc5b7f23dbe3df0e32172162a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeBorrowPage.fixture.spec.ts",
+      "bytes": 50350,
+      "sha256": "cc02f866cc8b48b9a334627ed9f8342a8085e9a4d432526a743367e9cacb375c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeBorrowWizard.spec.ts",
+      "bytes": 52904,
+      "sha256": "d360790d6e61b1ad33b740f9eb6895e7f7b4ed0e758c4ce3baa645b2aefe295b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeBorrowWizard.ts",
+      "bytes": 45697,
+      "sha256": "f98f857ff5293b65c4b26b464486f6b27465d7b630e65303c52deda219a14362"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeMinterPage.fixture.spec.ts",
+      "bytes": 11748,
+      "sha256": "594be08e7e07508cbd17e45e794c3680643f668511a03c0735de8477be915151"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeMinterRecovery.spec.ts",
+      "bytes": 2784,
+      "sha256": "a47fa968b1224588fb1d32fa4763f250120acfd5ac770faef35389074e76f529"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/dogeMinterRecovery.ts",
+      "bytes": 2909,
+      "sha256": "8b2b5a87ce19cb7d55df781ca1b10afa9e4ceac470d1e10ef2ec77d3829c064c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/earnNavigation.ts",
+      "bytes": 583,
+      "sha256": "72618b15af09c5a2db8d49a2e14d5ab050ecf5903fb18acddebed04195306722"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/eventFacets.ts",
+      "bytes": 48416,
+      "sha256": "3baa853ab105b923ef4c75b8c877567415aa59f1a4953c5a7a822a942da1bc92"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/explorerChartHelpers.ts",
+      "bytes": 8154,
+      "sha256": "cdb1a11fd47b618b84b826140ab2e6a86ec6137d4ae01e47fc30b71a55f0f8f8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/explorerFormatters.spec.ts",
+      "bytes": 2282,
+      "sha256": "76e6091e306ed5853c1694671955fe3046d51e2790cc872ea6d6f87a6d1facde"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/explorerFormatters.ts",
+      "bytes": 79145,
+      "sha256": "973f156220e611b7489e8c3f548706bc7fe074119f68b086da5115ffee381e3f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/explorerHelpers.ts",
+      "bytes": 12015,
+      "sha256": "38a0746e8561e86a47f90e225a86e2d49c283c49554607db907fb7b80ab42b37"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/fiatStablePointsPolicy.test.ts",
+      "bytes": 9014,
+      "sha256": "c883cf8ea2b358050ac8a7fbd1d324e54f88f41ddc173aa6828f65025dc11216"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/fiatStablePointsPolicy.ts",
+      "bytes": 8940,
+      "sha256": "161c79eb8650baa55b4f70bb25d43b73553fb4659afe35102a5ed514ada54a5c"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/format.ts",
+      "bytes": 6921,
+      "sha256": "793af0a98d2c055381018600addc99d68c625a72dddd3d07e98d243a06e1bddb"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/interpolate.ts",
+      "bytes": 1335,
+      "sha256": "70b3af619f01916ac4b0cbaec4b14b903236198ce09db07ed583d539880baa5b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/liquidationAmount.spec.ts",
+      "bytes": 7357,
+      "sha256": "adc42fa077cff91317b4eeb87ed684df20aae023a34e0e53f36d7aead067f41f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/liquidationAmount.ts",
+      "bytes": 8643,
+      "sha256": "fc05d4879bb43a91844981dd4ee6fbc370c4b412e4164f6280aa7012c1daf10e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/liveApy.spec.ts",
+      "bytes": 4690,
+      "sha256": "f81197d35658b0a20400273ed0eb196bb9880a3e05239aa2d5c84483c040c57b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/liveApy.ts",
+      "bytes": 6532,
+      "sha256": "d434836b58e0e322b7223fa0fc3d54c1b04657669ee6c3952fb96775008210e5"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/mintCapDisplay.spec.ts",
+      "bytes": 585,
+      "sha256": "0af190336f39e9b949b3f01705f1159feb5dcb1244a0175d40448bc4242002c2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/mintCapDisplay.ts",
+      "bytes": 518,
+      "sha256": "89583465c0bd1402e55c855cd06a229d639f2d85809d5b585aecb35709829392"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/nativeXrpBorrowFlow.test.ts",
+      "bytes": 8045,
+      "sha256": "b96dc6ebbdc42e616f97d87bccfc8d11f1a02befc1fc3787a3865abcb3af730b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/nativeXrpBorrowFlow.ts",
+      "bytes": 11266,
+      "sha256": "3a179283553d44f922d7a3f2062b21664053a49e01fd53d2b86d5db29d7d3b48"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/newVaultCollateralPolicy.spec.ts",
+      "bytes": 828,
+      "sha256": "927e2dc9343733d4099369ab124cc98152f9243531307a267d20c04a94eaceb0"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/newVaultCollateralPolicy.ts",
+      "bytes": 900,
+      "sha256": "2b276318e271da64bdc53d856bb094318d220bd3f5f9dfae15431452b9c155e2"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/nicpClaim.spec.ts",
+      "bytes": 2663,
+      "sha256": "7c05023db0ecdde7ea35f5e3376a80501746601562d949f97b70845a320de58b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/nicpClaim.ts",
+      "bytes": 1200,
+      "sha256": "b207be89b49ff541b52e6cfe62987268176ba0c18043aff801a2bd9c316ed7b1"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/points.test.ts",
+      "bytes": 4714,
+      "sha256": "eb02b02411cb14c2e8bdcff0150a8c3625ce841fd2ae7f1dd66ae5cb42220401"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/points.ts",
+      "bytes": 2901,
+      "sha256": "4edb2fec6d7bd512ab66bf267cd73a9e2b5000f41deb1001c362f86894321880"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/pointsBreakdown.test.ts",
+      "bytes": 11549,
+      "sha256": "24bad4ae0e96c8eff26074012f5883d9523223d0b6149d57d0d9b8bf53d2a980"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/pointsBreakdown.ts",
+      "bytes": 15137,
+      "sha256": "b606d0cb0b51025a9a4ea85db82109a4a730cfb4de4a0c7ee08d5ac8dbb786ad"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/pointsRules.test.ts",
+      "bytes": 3639,
+      "sha256": "06abc67fdb802fa95207223ffd0149e4a891841722ea745e9aa89c8515e3af9a"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/pointsRules.ts",
+      "bytes": 7809,
+      "sha256": "3c4b311cc3a4e72c7fb771e0a43f9e81ceb8b9eb2c85f9e225925bc0d0953fdd"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/principalHelpers.ts",
+      "bytes": 2861,
+      "sha256": "3952f5fa1d6949cf391c2d24f992ed22da00e0c424504d22990fc21a3aa46176"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/redemptionPreview.spec.ts",
+      "bytes": 7848,
+      "sha256": "ab5edfa65668775c0875420d4ab9d30d8a48be98e7d16efd33eb7f709046e74e"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/redemptionPreview.ts",
+      "bytes": 10781,
+      "sha256": "78b07f3e817c4d910b242da213fe8af9bdcc33aa23d9fd093e71435574f0122f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/repayLimits.spec.ts",
+      "bytes": 2515,
+      "sha256": "63259f3a796fc3c957dd9b25dcec9795175939d10733cd3a0bc7f9a7b9ce65c8"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/repayLimits.ts",
+      "bytes": 1723,
+      "sha256": "3e09b5d63b45616a5d124b8e0b592617e25a0e9cef48c5edb5eacee470b7a88b"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/vaultCr.test.ts",
+      "bytes": 2392,
+      "sha256": "d04a9a7d22e9b9f27039785b70ff15756c955a6b93f69a1d20d71198b7070a0f"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/vaultCr.ts",
+      "bytes": 1973,
+      "sha256": "5338d5e04439625238a8d1deea8e844af9029931a527bb896bac3946343b0213"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/vaultHealth.spec.ts",
+      "bytes": 1153,
+      "sha256": "417b5445aa3103effaeeb22c54751e1c850267ad2f9cc546115b35ae4ed39ac1"
+    },
+    {
+      "path": "src/vault_frontend/src/lib/utils/vaultHealth.ts",
+      "bytes": 1549,
+      "sha256": "27b4c91485222c510026bf0631421f1472fdf6cf4ec942f2e010102daf6b1695"
+    },
+    {
+      "path": "src/vault_frontend/src/logo2.svg",
+      "bytes": 15139,
+      "sha256": "037eb7ae523403daa588cf4f47a34c56a3f5de08a5a2dd2364839e45f14f4b8b"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/+layout.svelte",
+      "bytes": 23852,
+      "sha256": "0b97931d21f4d6c6bb4f9f25ae9bb365112f5b10d996a3a49fc7ef6556155c5d"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/+page.svelte",
+      "bytes": 32724,
+      "sha256": "db8a64d6288b76f7a55d90aa4fbcd8caeceeb6266f591037cd29c7ee6a8dba56"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/3usd/+page.svelte",
+      "bytes": 7639,
+      "sha256": "929e22c3af777cc4c993c2ff2308f13b32c9692a7e98508693135613379c0a9a"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/about/+page.svelte",
+      "bytes": 6767,
+      "sha256": "dcea77cb85b6a72d9e3560d285d65ea0c99bc931af41c6dbdd06a7ded7c2b8e5"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/bitcoin/+page.svelte",
+      "bytes": 43713,
+      "sha256": "5f9b75789e79e0c322607d90ea1b57ae74087279f48d6262fa2fd8a96fee83b2"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/bitcoin/borrow/+page.svelte",
+      "bytes": 83515,
+      "sha256": "8996a8abf91972a783e941564d7dbc0611211fc5db56bba70cd32233e2ff9706"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/ckusdc/+page.svelte",
+      "bytes": 83698,
+      "sha256": "6f041395de4a88ab5f93e6afa9a4997b735be2fe3473bf472c67c2d60d11ef0e"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/ckusdc/ckerc20Page.spec.ts",
+      "bytes": 35983,
+      "sha256": "5a2ffa4f871d6ae2dd6d5e9e40380537377b1d3c649b23bf55911a7f75de70c6"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/+layout.svelte",
+      "bytes": 520,
+      "sha256": "4ba8ae56105887b61c4bbd61ad000d98308e941f15e8ef5612609f08934e7cf1"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/+page.svelte",
+      "bytes": 4861,
+      "sha256": "1bf200601c3de8492efef141d1ab38ddc8a7de73efb91597cf6b4ccb749a7136"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/before-you-borrow/+page.svelte",
+      "bytes": 9850,
+      "sha256": "85aa4c3180d319c8022b227032c099b9d1bf162253fe1c96fa153e1c9e57aa3e"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/beta/+page.svelte",
+      "bytes": 3674,
+      "sha256": "f4323bb7b90a62e52d392e7eaa84f7db104ff172047ad5083ffa64ac360e75ee"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/dev-tooling/+page.svelte",
+      "bytes": 30632,
+      "sha256": "97fac5a52352f6881e7acfca2e4ce57a3e361d998d65f075eb7a43a112fdaade"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/liquidation/+page.svelte",
+      "bytes": 14583,
+      "sha256": "37e2edce2beebffa8cba6ffe1656b2e56c950734cb5979596c5845f514680d1e"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/liquidation-bot/+page.svelte",
+      "bytes": 9822,
+      "sha256": "fa6e33d4a258c669f75616dbe94835d77339e62b805eafe9f1b1d6f2a0587f98"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/parameters/+page.svelte",
+      "bytes": 49300,
+      "sha256": "0a9a05ebcbf1f8041e8ba46943ad2cb55efdf6c475cbe96bd11545d378c54ff1"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/points/+page.svelte",
+      "bytes": 9022,
+      "sha256": "ab48ddeadd0c2de966865d8d874515142e333bd23be805496fae344b87770bd9"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/redemptions/+page.svelte",
+      "bytes": 22101,
+      "sha256": "275149fa998d0be51a31586b33b563defaa67bc4ec824f0245dcb9568766da57"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/risks/+page.svelte",
+      "bytes": 11957,
+      "sha256": "236a377daa0fdd5e1b7b9a1c362bbb0c10f0fc99df0c4eae2554e54dd6705b6b"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/stability-pool/+page.svelte",
+      "bytes": 8397,
+      "sha256": "14271ba78324ce87c0350cb1d46753bb55d8aeff5dac780e30aa1f1053b18e4b"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/swap/+page.svelte",
+      "bytes": 5288,
+      "sha256": "e622759d0d9f870b0307547232ee0c75fb6aa72dfb62c46d8aecfe2f7258ea99"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/docs/three-pool/+page.svelte",
+      "bytes": 14086,
+      "sha256": "f8b132ac9978366af22ae15189798b33f7e51a8576ab698b977aca0736c46ad1"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/doge/+page.svelte",
+      "bytes": 56854,
+      "sha256": "98faa77737cedbc1f1f0fd980c166736ae7ec48404af85be4df5a2597eb4b2a2"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/doge/borrow/+page.svelte",
+      "bytes": 81874,
+      "sha256": "7ef93c1948e26a12656621f3ff87b2c5b8422c1c464e6bba1ac0a01d57b3c8cc"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/earn/+page.svelte",
+      "bytes": 2521,
+      "sha256": "ae5322fedb1acba4fefb69ee528ce0a3767a8cab21d411dc679ac3b1ef6deda0"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/earn/directRoutesNoAutoSelect.spec.ts",
+      "bytes": 1525,
+      "sha256": "8297742c994219884f435f9538a991e30260d8b4c8794d3ae1865c217fe31480"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/earn/earn.spec.ts",
+      "bytes": 5846,
+      "sha256": "4a224640e70b76698e0a390cb0417214a8559c031945af9a076e0030d1feb7d2"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/+layout.svelte",
+      "bytes": 7804,
+      "sha256": "5abe1bbdb376c278f575fdcd92af377e28df8d1ceb728f3fce6686f184e351e6"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/+page.svelte",
+      "bytes": 2550,
+      "sha256": "5f890e0d7231cd6ba276ffc82c73a2325c6a920f131575ee41c208cf07c2b895"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/activity/+page.svelte",
+      "bytes": 31366,
+      "sha256": "27529a99eda0f391b39c0b14c7262863d467736c0459c214f53030d0c8a51994"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/address/[principal]/+page.ts",
+      "bytes": 167,
+      "sha256": "0b745b6c5eebb928f2e30c8b23828796075cf24f8b1bffb9a0532cf5dab4efd2"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/canister/[id]/+page.svelte",
+      "bytes": 14805,
+      "sha256": "af85b0dbb491a6833413e357b394a46b0a032e30028526f3575f84746507f123"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/dex/[source]/[id]/+page.ts",
+      "bytes": 179,
+      "sha256": "d2b75422fe07cb9dae86eef11c38b43695d52c0ca3f04a36762f42fa0961fe8f"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/e/address/[principal]/+page.svelte",
+      "bytes": 46471,
+      "sha256": "66497de26064abc8d3b569bc089f8cf3c332a14cc3000c4621b9e62217bc2ae2"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/e/event/[id]/+page.svelte",
+      "bytes": 18190,
+      "sha256": "f7e804658482ab641db9f89091a092dc73fa80050f5a6a5f6a3e35444b36abd8"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/e/pool/[id]/+page.svelte",
+      "bytes": 44226,
+      "sha256": "003f026df2f53126313a194283503e3f39c3944db0b162aa3a4fd3de6ca208ca"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/e/token/[id]/+page.svelte",
+      "bytes": 42042,
+      "sha256": "9893edf2c3eee99fa0ee69b3e7c4078da9398fbf891a9a7d1f5f072f11d0e8c1"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/e/token/[id]/+page.ts",
+      "bytes": 997,
+      "sha256": "b591b7babe3b09d6ac2c9385b63f4799a3d49a5f67b8956a04e7521fd193b81c"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/e/vault/[id]/+page.svelte",
+      "bytes": 28336,
+      "sha256": "2f019e13990b2110ead3e2ce0f1341ae64b2161e6b5431f45868c65cecfb37b0"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/event/[index]/+page.ts",
+      "bytes": 161,
+      "sha256": "8bc12ab499dc319bd091c8040c51258e4d39e7b617ad0eb4fea6b1d9a45c5ee9"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/events/+page.svelte",
+      "bytes": 173,
+      "sha256": "91e3861b4db545d9150fd92bcef4c815b07fa9443d248e505186ad4ca14243e2"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/holders/+page.svelte",
+      "bytes": 318,
+      "sha256": "182a8160c324b826c97da9b0f6dc47022f03b48095bffcb99dbcf1c0f8fd469c"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/liquidations/+page.svelte",
+      "bytes": 337,
+      "sha256": "92d4ca4711c7026e67b4b2b6035ed7bfac7c90848285ba0531966ad8da59d1f5"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/markets/+page.svelte",
+      "bytes": 257,
+      "sha256": "d280a44af8e3692026dd60aca3dc934478b0a2b801f9bdd6de25e8030c15a09b"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/markets/[id]/+page.ts",
+      "bytes": 157,
+      "sha256": "833969b3b4fd20dc63038f986ff06bdaea70828e47da4a69f3354153b72101e7"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/pools/+page.svelte",
+      "bytes": 243,
+      "sha256": "372b7a61e039d4d323c9598c909ffcfa571679c72dfd1dcfc770c97b45822a4a"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/revenue/+page.svelte",
+      "bytes": 251,
+      "sha256": "9b15ce80bc2e89a9d0f5a0e55908e5a11ff9de9114caaa6fdcbb57d96d7f91f9"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/risk/+page.svelte",
+      "bytes": 254,
+      "sha256": "6a812f127f0cb98f9202104bb6503ee7408f1d56b677e95c05a309e808b585e2"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/stats/+page.svelte",
+      "bytes": 237,
+      "sha256": "80972e7977f40a816195ae31a83ffa9107524b00e7332f301839a8eb38137786"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/telemetry/+page.svelte",
+      "bytes": 121877,
+      "sha256": "19082360da2faddc348204f2b5798c902d6bd7056596c5de590574d42eed0b97"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/telemetry/telemetry.contract.spec.ts",
+      "bytes": 18092,
+      "sha256": "97c56d089d170ff147f225fce35f390b95fe1066fa0917e0a69ac60104f9041d"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/telemetry/telemetry.wallet.spec.ts",
+      "bytes": 3807,
+      "sha256": "c3071b572865c2c2df00f0ccf7a80544c06bc5850956ad717bbfd7115a395cb5"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/token/[id]/+page.ts",
+      "bytes": 158,
+      "sha256": "43782e0c56cd41dfa8c4212657d0aacfd7ccf228e35e7a39afa3b8835d6bdf22"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/explorer/vault/[id]/+page.ts",
+      "bytes": 158,
+      "sha256": "31d372fa1fe9a07b105fae979e75c4bc7c5cfef67d2519fe164d7e3101fbbfb8"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/liquidations/+page.svelte",
+      "bytes": 3068,
+      "sha256": "08c5f10d490403b651effc7fbc20daaa9b8cb47f302ec7cf4e2ca1094eef6120"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/liquidity/+page.svelte",
+      "bytes": 14863,
+      "sha256": "dcc352fd1047dc43fde227c87ed40abc635ad9939916205005efc348f60f0b8d"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/points/+page.svelte",
+      "bytes": 7473,
+      "sha256": "a06f679f18ad68b4db04b6cecc15b30563c393352516149612f719653695b41f"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/points/admin/+page.svelte",
+      "bytes": 33671,
+      "sha256": "cc9f064ef23ace37b34d79323f53deffc51b5ba48dd346d23066d0bf5c31e948"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/points/leaderboard/+page.svelte",
+      "bytes": 4928,
+      "sha256": "bedba7309c49ae991d0db7f1a98409e9a1930e4901f83dda69d0e09c6829a753"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/redeem/+page.svelte",
+      "bytes": 55900,
+      "sha256": "ff0c8de898210fbb2292841d6c18955f5cbf4abd09b296faa60bab672cdf6f83"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/redeem/ProtocolStatsStub.svelte",
+      "bytes": 46,
+      "sha256": "5d015cee4a736959688f3668c6fcbc22091b177bb85911adf11c02f1d27e3d51"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/redeem/redeem.spec.ts",
+      "bytes": 19903,
+      "sha256": "0752f93f74ebc933706448a1fcab9757c0dfaf4f6e798a16fbdbb8fbbf79971b"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/solana/+page.svelte",
+      "bytes": 58116,
+      "sha256": "2ac79796a4583eee7a61b9e4d2c082e4e9d0bc8e9c83bb1cc064a201d06c247b"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/stability-pool/+page.svelte",
+      "bytes": 1902,
+      "sha256": "10068dd1f93dc016c9a70e7cc46f1bd2f31143eedd22620d697398436d4344b6"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/swap/+page.svelte",
+      "bytes": 5116,
+      "sha256": "c266bf72f21fa28a269428bec010c04395f2274859b25be31c731dbed90f3d4e"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/telemetry/+page.ts",
+      "bytes": 325,
+      "sha256": "b3c9031312382b9479b677682f869c93b41964d1a380de22a5377ea115f8a964"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/transparency/+page.svelte",
+      "bytes": 15658,
+      "sha256": "7c3b2e8abe14148bfd3cc426838efd9154bbf863c529ce2af524b5220cd8b96b"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/treasury/+page.svelte",
+      "bytes": 25757,
+      "sha256": "63144c6b2342dd876784840239ee3ef34192a9202aa6b148693829b299ee5948"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/vaults/+page.svelte",
+      "bytes": 6925,
+      "sha256": "97afd70c23d35e32b1da465c6d2051ede43aceb5276c2b49b782390d7c2a9642"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/vaults/[id]/+page.svelte",
+      "bytes": 365,
+      "sha256": "959b876851bd8cf712d9b71146381c1adeef096ae52ec37bd02f819d4a5e9788"
+    },
+    {
+      "path": "src/vault_frontend/src/routes/vaults/mock/+page.svelte",
+      "bytes": 2394,
+      "sha256": "8fd37286fe10648cf851a9909b7274cf4b829b9c922efc9d8699868319697886"
+    },
+    {
+      "path": "src/vault_frontend/src/tests/mocks/app-environment.ts",
+      "bytes": 359,
+      "sha256": "fcb0ca9732dc4a46b4e59cd838ca57f5650e19650670f926108800c8e5cf79f9"
+    },
+    {
+      "path": "src/vault_frontend/src/tests/mocks/app-navigation.ts",
+      "bytes": 418,
+      "sha256": "34c89232aa2f82a5116a87fa5a69a653d0e11185e3aa879091c81b8f390d4ebb"
+    },
+    {
+      "path": "src/vault_frontend/src/tests/vault-recovery-fixtures/Quiet.svelte",
+      "bytes": 77,
+      "sha256": "617f1b29af899a783e575b7a4f4fdab133e89f2d3bda8a5de5471bab0a6777be"
+    },
+    {
+      "path": "src/vault_frontend/src/tests/vault-recovery-fixtures/RepayCard.svelte",
+      "bytes": 257,
+      "sha256": "f33c0a6dd5d9a5009c2140c5abb885de9ceed5cd5dab369c6cdc0516206f8c58"
+    },
+    {
+      "path": "src/vault_frontend/src/tests/vitest-setup.ts",
+      "bytes": 46,
+      "sha256": "247c53dd05363ff8ae726051d7de3693ddc094d843f22bf791593a07f5f7f627"
+    },
+    {
+      "path": "src/vault_frontend/src/vite-env.d.ts",
+      "bytes": 38,
+      "sha256": "65996936fbb042915f7b74a200fcdde7e410f32a669b1ab9597cfaa4b0faddb5"
+    },
+    {
+      "path": "src/vault_frontend/static/.ic-assets.json",
+      "bytes": 2360,
+      "sha256": "9574bd7f81c52b76682d6775a25fffc3dc6091f515e81247325279c82e9fcf79"
+    },
+    {
+      "path": "src/vault_frontend/static/.well-known/ic-domains",
+      "bytes": 58,
+      "sha256": "d04261cb158bd5c519857f330ae347351cfbfe0ffbf2a2e1c3a7974065c08cf4"
+    },
+    {
+      "path": "src/vault_frontend/static/.well-known/ii-alternative-origins",
+      "bytes": 242,
+      "sha256": "db093198ac4a3e48f3b01b069843bfbe5bf342b2cd7fc200b56b82ae936e92ff"
+    },
+    {
+      "path": "src/vault_frontend/static/3pool-logo-v4.png",
+      "bytes": 161185,
+      "sha256": "3c17132e3ec881b8f35896575da546c653a0cc2cd88a13e9a234fe18d5ccc056"
+    },
+    {
+      "path": "src/vault_frontend/static/3pool-logo-v4.svg",
+      "bytes": 15952,
+      "sha256": "f80e6d79d5770452388e45b0dcd887c18fb339bcb0abc591d2370793ce68da98"
+    },
+    {
+      "path": "src/vault_frontend/static/3pool-logo-v5.png",
+      "bytes": 151837,
+      "sha256": "7c4af368d1eab9e2bd62ed1edaadc14106d616ace9f0f57750beb0b77460ea25"
+    },
+    {
+      "path": "src/vault_frontend/static/3pool-logo-v5.svg",
+      "bytes": 15952,
+      "sha256": "9d8e1ae01627d24c7d3dfbe4282b2734bb4f3fe28a8c6b25c26585459790cfad"
+    },
+    {
+      "path": "src/vault_frontend/static/3pool-logo-v5b.png",
+      "bytes": 1518514,
+      "sha256": "811dce65dcf86059d6f54f5f8cfd2c6971a17606d2077fa4737328c600e522c8"
+    },
+    {
+      "path": "src/vault_frontend/static/AVAI_Security_Audit_Rumi_Protocol_Professional.pdf",
+      "bytes": 72044,
+      "sha256": "988ea297152579ab1b0f41ebc11b1c46d805543ac9f1c8cbb8e1f5c21750bcbb"
+    },
+    {
+      "path": "src/vault_frontend/static/Rumi-Protocol-Whitepaper.pdf",
+      "bytes": 413985,
+      "sha256": "c056cb198a18fa40c16175eda3489839dab16ea3c5d00a298e56dc971afb40c3"
+    },
+    {
+      "path": "src/vault_frontend/static/bob-logo.png",
+      "bytes": 1276,
+      "sha256": "d0b7b3eb44db1343f6d1908490c3447791613931b9aec5e7f0356bcc049ec941"
+    },
+    {
+      "path": "src/vault_frontend/static/ckBTC_logo.svg",
+      "bytes": 2683,
+      "sha256": "2fd0cbdcfa2949c0d11cf80435831130ac488783b6e5704316a121b55e1d0978"
+    },
+    {
+      "path": "src/vault_frontend/static/ckXAUT_logo.svg",
+      "bytes": 2870,
+      "sha256": "56b58ff293eddcf16380d9ac6923e3b07d30e822d82c7070bf9cb66a1eafda76"
+    },
+    {
+      "path": "src/vault_frontend/static/ckdoge-logo.svg",
+      "bytes": 16326,
+      "sha256": "98ec1f67d3952a1d5bd467b949e8558cc73a00e0cfd86dfcb88f0afcc95feb61"
+    },
+    {
+      "path": "src/vault_frontend/static/cketh-logo.svg",
+      "bytes": 458,
+      "sha256": "32602a552274a7534fdd30c09fa19a9524accd03d4abd25cd6844ad473768720"
+    },
+    {
+      "path": "src/vault_frontend/static/cksol-logo.svg",
+      "bytes": 3606,
+      "sha256": "fa28ddc97e064598f4af73fde0fe40a87dff2d1e3f14599afd699578c6735555"
+    },
+    {
+      "path": "src/vault_frontend/static/email.png",
+      "bytes": 15363,
+      "sha256": "1a60e1fd9e6c5cd080f26ef8e81eb4f6a1a93eb7d058cdeacf71436bb12bdbff"
+    },
+    {
+      "path": "src/vault_frontend/static/exe-logo.svg",
+      "bytes": 283,
+      "sha256": "3df092a726f87001eee65e6520e6c6016f8ae93cf826081d3d75fc4500edc404"
+    },
+    {
+      "path": "src/vault_frontend/static/favicon.png",
+      "bytes": 1571,
+      "sha256": "5146ed79b486cb9e1cdcdd7814cd22ae78e70ceb30fa06b4cd9a16cf121bc9e6"
+    },
+    {
+      "path": "src/vault_frontend/static/fonts/CircularStd-Medium.ttf",
+      "bytes": 86456,
+      "sha256": "a823d805ece856eee4ba276f8246763b310480ddb58dbe5112f044f52af5d900"
+    },
+    {
+      "path": "src/vault_frontend/static/icp-token-dark.svg",
+      "bytes": 2516,
+      "sha256": "5d34918b4e000978317503ecd36a83ede144b51655d16ad74429856d2ce830bb"
+    },
+    {
+      "path": "src/vault_frontend/static/icp_logo.png",
+      "bytes": 3235,
+      "sha256": "49ade45973f61e6a598c514c7f6e41c8f5b37f273a7482a9fa3030c77c455ba7"
+    },
+    {
+      "path": "src/vault_frontend/static/icusd-logo_v3.svg",
+      "bytes": 13394,
+      "sha256": "626573d93ae3e78b00f8131d3f6224d3121d4c102968364542f517346c5a264d"
+    },
+    {
+      "path": "src/vault_frontend/static/icusd-logo_v3b.png",
+      "bytes": 1740313,
+      "sha256": "ed948d3e503047a1aa4bab3ee1b1df22cebe02a25c3790a473c67a24b291fa6f"
+    },
+    {
+      "path": "src/vault_frontend/static/mail-256.png",
+      "bytes": 5070,
+      "sha256": "b30227b1a7543db4691e5a2e20f8ff8ae98c321d0991f38f55b7565b4ff36014"
+    },
+    {
+      "path": "src/vault_frontend/static/main-icp-logo.png",
+      "bytes": 98375,
+      "sha256": "e6583bc632eb233ad949e095ca6cd7d7aeabd236a0e5f7fe11aff6f1fc7f8bc6"
+    },
+    {
+      "path": "src/vault_frontend/static/main-logo-without-BG.png",
+      "bytes": 85781,
+      "sha256": "d67a9c9b6b7a99ba7e9763108171348d526288a65c63c98b7806c95d489f590d"
+    },
+    {
+      "path": "src/vault_frontend/static/message-outline-512.png",
+      "bytes": 9430,
+      "sha256": "0349c63f15df56c53753de70ce8f7b4a622ca7057300f4bb9d3bb3499ae2b30e"
+    },
+    {
+      "path": "src/vault_frontend/static/name-logo.png",
+      "bytes": 34560,
+      "sha256": "3b1008ae52677a7011a792a2d38b66ff1871e90ed3c0018491e3d2cb3f1bb844"
+    },
+    {
+      "path": "src/vault_frontend/static/nicp-logo.png",
+      "bytes": 98056,
+      "sha256": "870948a594440ad80da50ea2b00e328c953c2ef4b9300cba60faa7dbaa092744"
+    },
+    {
+      "path": "src/vault_frontend/static/nicp-logo.svg",
+      "bytes": 284,
+      "sha256": "39d191097459404a84a5c61bf2dd1510c726d9fbb3bf567c4e3a219b60f9acfe"
+    },
+    {
+      "path": "src/vault_frontend/static/protocol-Logo.png",
+      "bytes": 55438,
+      "sha256": "a94179c8a35619326f5dde6a762b9ba137e00059a3a2cab1ed5e7097187ade9d"
+    },
+    {
+      "path": "src/vault_frontend/static/rumi-header-logo.png",
+      "bytes": 148495,
+      "sha256": "448a67da8d338f7804dac7451669cb4f9a740f2a77a5916d4d1fb7e633c0c635"
+    },
+    {
+      "path": "src/vault_frontend/static/rumi-protocol-logo-complete.png",
+      "bytes": 57271,
+      "sha256": "9be239c2f1fe3eb4c52757b3414051061b58ec9a2dadc165ec2338295979311c"
+    },
+    {
+      "path": "src/vault_frontend/static/rumilogo-vector-v2_inset2.png",
+      "bytes": 42816,
+      "sha256": "9e993f7d3840ba044abbcc1364098c807aed7279f4e315a130ad81a67df87010"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckBAT.svg",
+      "bytes": 465,
+      "sha256": "79d122cc1434a3195a79fab3d54bdbb3bb3ba14e0fc43213ece53f4878bd8ca1"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckETH.svg",
+      "bytes": 2047,
+      "sha256": "39d88c9c73534cfe04be18d45dda51c437f8ca74a3fb3a75ed1b06b577fde729"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckEURC.svg",
+      "bytes": 3876,
+      "sha256": "e6dab3e351eb5d60f02e3bf67755a834ed5be14c589f047a8fdcd3037145de03"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckLINK.svg",
+      "bytes": 566,
+      "sha256": "bbc4e9d0cbfa8bc39cc6b816adf9a37fbeef974b8cc9774f672cdf93a43934d9"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckOCT.svg",
+      "bytes": 1713,
+      "sha256": "ddb8df2cea9514966dd8d6a2b34968df6368c73d66d7265ce85f1e73f82502d1"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckPEPE.svg",
+      "bytes": 18232,
+      "sha256": "1a82a46693bf5028c74dee75c611d0cd2cd407116b3af959a2f6e1968d3a9f34"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckSHIB.svg",
+      "bytes": 9353,
+      "sha256": "b2301fdac1e20dd20cc4a97034117112985325baa8c3fcb24e03414f151bad54"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckUNI.svg",
+      "bytes": 4718,
+      "sha256": "5b2c366a1c14fd5dc2d793d42065f3a6d813b15fb6a617fe4bf45cbc7cdee5e9"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckUSDC.svg",
+      "bytes": 3616,
+      "sha256": "2fe772e7b6a44fc2df4a4e9796985f8aee98a3f9b39e2e572fd2e79a4f929fe0"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckUSDT.svg",
+      "bytes": 2377,
+      "sha256": "3051ee94d09482782f846f3977bd94779ae8e0bc8f47a1585dd72b240941c385"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckWBTC.svg",
+      "bytes": 1593,
+      "sha256": "6818c8d0e6c429f0b30710534f8f65a90a1f88eab46499516f817101b78df1c9"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckWSTETH.svg",
+      "bytes": 1422,
+      "sha256": "2aad826fd6768efec57fb79ed6eaa14bc6de60acb382dafb84b0636119501d86"
+    },
+    {
+      "path": "src/vault_frontend/static/tokens/ckerc20/ckXAUT.svg",
+      "bytes": 2870,
+      "sha256": "56b58ff293eddcf16380d9ac6923e3b07d30e822d82c7070bf9cb66a1eafda76"
+    },
+    {
+      "path": "src/vault_frontend/static/twitter-x-256.png",
+      "bytes": 7445,
+      "sha256": "2ff079b54ba9df84f4c0030418837eba9d4574a87f76574524352751a0f9aa69"
+    },
+    {
+      "path": "src/vault_frontend/static/twitterIcon.png",
+      "bytes": 3405,
+      "sha256": "b4f1e214791bd48e05135f01731bd5341c726a9521a079d9f360eb4d79f55af5"
+    },
+    {
+      "path": "src/vault_frontend/static/wallets/01InfinityMarkHEX.svg",
+      "bytes": 1866,
+      "sha256": "b8bfe133d42b6f979d9aca24835ade776b9cdad495fc3e701c9f15b499bd4810"
+    },
+    {
+      "path": "src/vault_frontend/static/wallets/ii-infinity.svg",
+      "bytes": 1462,
+      "sha256": "329b9ff91036ecbcf5f29c4bbe21fa64361482a179f8d7af2a55110e8955fa3a"
+    },
+    {
+      "path": "src/vault_frontend/static/wallets/ii.svg",
+      "bytes": 622,
+      "sha256": "58b68d7a6cc1a4b572f0fc525afc0d2746c17acdd9f2c4b836fea20e7360b62b"
+    },
+    {
+      "path": "src/vault_frontend/static/wallets/nfid.svg",
+      "bytes": 672,
+      "sha256": "9a0bbf89e15d78179bcfc86a352b02cdf142c8b623705eebf77f7728eade5948"
+    },
+    {
+      "path": "src/vault_frontend/static/wallets/oisy.svg",
+      "bytes": 1934,
+      "sha256": "bf1bc03c4e18936263663c5dc98cefd2321715ea5a3e0360b8dca22fae15c2c3"
+    },
+    {
+      "path": "src/vault_frontend/static/wallets/plug.svg",
+      "bytes": 7451,
+      "sha256": "a80399e30d05632a44b8fec78fd6329519ea74346a40bfcaa58db8f27897838b"
+    },
+    {
+      "path": "src/vault_frontend/static/wallets/stoic.svg",
+      "bytes": 555,
+      "sha256": "b642a3d335f02eb4dd8e0ccee18a4b9187eff268f6addd7130ca8d8c8dcb67df"
+    },
+    {
+      "path": "src/vault_frontend/static/windoge98-logo.webp",
+      "bytes": 36404,
+      "sha256": "f6428780543a53d62ccaf64f6a264a8a102f87dff00cddf3b20de41d1f6c4965"
+    },
+    {
+      "path": "src/vault_frontend/svelte.config.js",
+      "bytes": 1327,
+      "sha256": "ac3b77e09ed9c66c6b979d98a13ab42349cf1d05a5ed1fd6e05dc836d11166ff"
+    },
+    {
+      "path": "src/vault_frontend/tailwind.config.js",
+      "bytes": 2035,
+      "sha256": "ca16bcc01c4caeee610e63d1117a91c9c4ba89f8d1a83853ed465b95aa5f3d9a"
+    },
+    {
+      "path": "src/vault_frontend/tests/bitcoin-borrow-fixtures/testData.ts",
+      "bytes": 1822,
+      "sha256": "0290876b70fd46987222e71fec9470b8cb1db058f3c02e2731b6b94bdfbf03f7"
+    },
+    {
+      "path": "src/vault_frontend/tests/bitcoin-minter-fixtures/testData.ts",
+      "bytes": 950,
+      "sha256": "b2d99b9ba0a04fde51ebb94d71a9db43936f0aee988cd4057409b7cdde1371ce"
+    },
+    {
+      "path": "src/vault_frontend/tests/doge-borrow-fixtures/FakeVaultCard.svelte",
+      "bytes": 1452,
+      "sha256": "a3016935d3dd991391dd9ecdaa24ebb87970535badcb13dd7c0a17b2d84a4b79"
+    },
+    {
+      "path": "src/vault_frontend/tests/doge-borrow-fixtures/testData.ts",
+      "bytes": 5973,
+      "sha256": "9d09f7f48ccb64ab7a488df4b4e7420fe28aeaf21bc78d5efb1bcfd2ba07e369"
+    },
+    {
+      "path": "src/vault_frontend/tsconfig.json",
+      "bytes": 774,
+      "sha256": "63281402b8b5140576488425644ada302802eef01c3a3ffe15c2dbcb22decc71"
+    },
+    {
+      "path": "src/vault_frontend/vite.config.js",
+      "bytes": 1032,
+      "sha256": "6a2b18f45ee3c3c259b13a2a794ca8c4210232c79dc6000a4a17c6e8ce9f5a2f"
+    },
+    {
+      "path": "src/vault_frontend/vite.config.ts",
+      "bytes": 1074,
+      "sha256": "01448324e949af018d1594277fd9e927e0106f404ff9cf0531d4a7326e49619e"
+    },
+    {
+      "path": "src/vault_frontend/vitest.config.ts",
+      "bytes": 1617,
+      "sha256": "ba62eafaded3c8b48ba5fe9c7d6d3e5a2de1ead4a4451391306e5132781119b1"
+    },
+    {
+      "path": "src/vault_frontend/vitest.doge-borrow.config.ts",
+      "bytes": 1574,
+      "sha256": "e388942e93b75a9edf4a17826c78b29c6da3669861f931daf60fc9ac7806d317"
+    },
+    {
+      "path": "icp.yaml",
+      "bytes": 55178,
+      "sha256": "680e46af26eed614075343fc44c35cd621d1034f47dadd2dbc0599448bf1322a"
+    }
+  ],
+  "warmDependencies": "[PINNED_WARM_DEPENDENCIES]",
+  "dependencyLockSha256": "b7d03faca7b1a77344930ad428862f4fdc77976f446143337b862969d39c7ef2",
+  "nodeVersion": "v24.13.1",
+  "npmVersion": "11.8.0",
+  "sourceDeltaFrom434": "only DepositInterface.svelte runtime delta plus its regression spec; scripts/declarations/package/lock unchanged",
+  "unrelatedOwnerDeletionsPreserved": true,
+  "networkInstallAllowed": false,
+  "buildStarted": false
+}

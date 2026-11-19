@@ -1,0 +1,14 @@
+{
+  "utc": "2026-11-19T03:30:10.598943+00:00",
+  "allocationId": "f4c8aaa6-b6ac-4eba-91dd-5219b258aca2",
+  "consumed": true,
+  "result": "STOPPED_SANDBOX_PS_EPERM_BEFORE_BUILD_OUTPUT",
+  "receiptSha256": "bf6d9679583723a7d3872e64020222aaa91fda8d945cdd5aa1ee18c84b0f8073",
+  "logBytes": 0,
+  "sourceAndDepsUnchanged": true,
+  "rootOwnedGroup95917Empty": true,
+  "rootCensus": "/private/tmp/rumi-earn-oisy-build-20261118/ROOT-FAILED-ATTEMPT-OWNED-CENSUS.json",
+  "productionMutation": false,
+  "retryUnderOldGrant": false,
+  "correction": "Original Ellis next one-use allocation must invoke unchanged runner using exec_command sandbox_permissions=require_escalated so required ps/resource/closure monitoring is available."
+}

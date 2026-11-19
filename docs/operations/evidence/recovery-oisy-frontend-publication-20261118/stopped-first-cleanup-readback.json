@@ -1,0 +1,9 @@
+{
+  "observedUtc": "2026-11-19T03:29:28.435196+00:00",
+  "ownedPgid": 95917,
+  "members": [],
+  "ownedGroupEmpty": true,
+  "logBytes": 0,
+  "stopReason": "Sandbox denied ps before monitoring; no build output; original STOPPED receipt preserved",
+  "originalReceiptSha256": "bf6d9679583723a7d3872e64020222aaa91fda8d945cdd5aa1ee18c84b0f8073"
+}

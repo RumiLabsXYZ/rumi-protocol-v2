@@ -1,0 +1,36 @@
+{
+  "allocationId": "15171f68-a7b4-4094-882b-694a0e295809",
+  "source": "8e6f6f01671e615feb577d19400b22c41937a936",
+  "tree": "a5d9b3d87ac55ce979d1912b8703af3e3130ca4f",
+  "canonicalMerge": "0edaf018bbc2b9c5ab648c9244001437e3af5ea4",
+  "runnerSha256": "f1b01040d9cbba121e2f1a92c8049b5e1c01564a71ad7a3b7f23b92aecf8f330",
+  "requestSha256": "0ce51f895c7e0f71b0366bc8a48e47a01ad905d30fe8096f80f7cd9a7d43f8bb",
+  "command": [
+    "npm",
+    "run",
+    "build",
+    "--workspace",
+    "vault_frontend"
+  ],
+  "environment": {
+    "DFX_NETWORK": "ic",
+    "NODE_OPTIONS": "--max-old-space-size=4096",
+    "npm_config_offline": "true"
+  },
+  "startedUtc": "2026-11-19T03:30:53Z",
+  "startFreeBytes": 52953313280,
+  "peakRssBytes": 2104180736,
+  "maximumPhysicalGrowthBytes": 1054040064,
+  "ownedGroupsClosed": true,
+  "result": "PASS",
+  "productionMutation": false,
+  "pid": 96437,
+  "exitCode": 0,
+  "artifactFiles": 764,
+  "artifactBytes": 11318677,
+  "manifestSha256": "925290813075ca2149d41a963237643c3b6e5897068d6027ca5591f66866af75",
+  "sourceAndDependenciesUnchanged": true,
+  "elapsedSeconds": 51.379,
+  "endFreeBytes": 51921588224,
+  "physicalGrowthBytes": 1031725056
+}

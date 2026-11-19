@@ -1,0 +1,33 @@
+{
+  "publicationPerformed": false,
+  "planSha256": "6f0d7f9bf28a32e6a6447092634fb550ad61fb222146374897ca5983c7e7de68",
+  "phases": {
+    "stage": {
+      "creates": 327,
+      "sets": 436,
+      "operations": 763,
+      "commitBytesAtDummyBatch0": 584587,
+      "chunkCalls": 7,
+      "chunkBytesAtBatch0": [
+        1400228,
+        1400118,
+        1399978,
+        1400193,
+        776165,
+        99158,
+        480
+      ]
+    },
+    "activate": {
+      "creates": 0,
+      "sets": 7,
+      "operations": 7,
+      "commitBytesAtDummyBatch0": 652,
+      "chunkCalls": 2,
+      "chunkBytesAtBatch0": [
+        6437,
+        1040
+      ]
+    }
+  }
+}
