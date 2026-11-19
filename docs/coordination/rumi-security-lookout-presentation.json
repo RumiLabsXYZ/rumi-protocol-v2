@@ -1,6 +1,6 @@
 {
-  "summary": "Urgent Earn OISY deposit source fix is pushed and27focused tests pass. One source-matched build and exact combined UI release packet are being prepared; no publication or client transaction is claimed. The older baseline-only packet remains frozen. All financial and liquidation holds remain.",
-  "plainSummary": "The client\u2019s deposit is blocked because the app opens the wallet signing channel too late. The narrow fix passes focused tests. Ellis is preparing one matching build and an exact release packet for approval. Nothing is deployed yet, and all financial and liquidation holds remain.",
+  "summary": "The combined OISY deposit click fix and recovery-menu/queue restoration are live. Source tests, one exact build, all artifact files, staged/final stored and served bytes passed verification. Public desktop/mobile SP pages load the new handler; authenticated actions and real customer deposit remain unverified. All financial and liquidation holds remain.",
+  "plainSummary": "The wallet popup fix and recovery-menu cleanup are live and verified. The client can refresh the app to load the update. We have not performed or confirmed their deposit. All financial and liquidation holds remain; unrelated mobile queue layout and background lookup errors are deferred.",
   "glossary": [
     {
       "term": "Stability Pool",

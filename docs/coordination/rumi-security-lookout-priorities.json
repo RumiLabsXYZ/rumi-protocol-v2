@@ -3,9 +3,9 @@
     {
       "id": "earn-sp-oisy-click",
       "title": "Fix urgent OISY deposit blocker on Earn",
-      "status": "in_progress",
+      "status": "done",
       "blockedReason": "",
-      "nextAction": "Complete one source-matched frontend build under fresh resource coordination, preserving the reviewed recovery-menu/queue baseline plus only this narrow deposit fix. Push the exact combined publication packet for separate approval; Dorian remains proposed publisher. No client signing, retries or fund movement.",
+      "nextAction": "Live fix and served-byte verification are complete. Before any future frontend build, integrate or explicitly compose the exact 8e6f6f01 OISY delta through the normal canonical CI lane; an older main-only build omits it. No extra build or gate on the verified current release. Real client deposit remains unverified; preserve financial and SP liquidation holds.",
       "cardIds": [
         "SEC-22"
       ]
@@ -13,9 +13,9 @@
     {
       "id": "recovery-menu-release-regression",
       "title": "Restore the approved recovery menu and queue guard in canonical releases",
-      "status": "blocked",
-      "blockedReason": "Automatic approval review rejected the asset write before process creation because earlier cross-chat authorization was not accepted as trusted approval for this exact scope. One direct approval question is pending in Dorian\u2019s release chat.",
-      "nextAction": "Dorian has the self-contained 4409 replacement packet b278d7da for the existing exact approval decision. Keep both old packets frozen. After actual approval, Dorian remains sole publisher and Ellis verifies stage/final served bytes and desktop/mobile behavior. No rebuild, optional campaign, duplicate question or alternate executor.",
+      "status": "done",
+      "blockedReason": "",
+      "nextAction": "Combined UI is live and independently verified. Preserve exact artifact/operator evidence. Deferred outside-scope observations: mobile manual-page horizontal overflow and background synthetic XRP alias HTTP400s; no new release gate or financial action.",
       "cardIds": [
         "SEC-20"
       ]

@@ -2,23 +2,35 @@
   "cards": [
     {
       "id": "SEC-22",
-      "state": "Review",
+      "state": "Done",
       "owner": "Ellis fix/build/preparation; Dorian proposed publisher",
       "scope": "Urgent Earn Stability Pool OISY deposit popup failure on client screenshare",
-      "evidenceText": "Actual served Stability Pool component omits synchronous OISY channel entry on ordinary and saved-deposit clicks. Narrow source fix8e6f6f01 opens the existing channel before Web Locks/actor/intent awaits, preserving exact context/amount/intent recovery and sequential approvals. Four new regression failures before patch; final27focused tests pass, including actualSDKclickguard with mockedpopup and existing wallet-bound lifecycle tests. Source/doc/test remotely verified. Continuing one source-matched frontend build and exact release preparation; no build or publication yet. Reconnect did not fix the client; no verified workaround or successful deposit claimed. All financial and SPliquidation holds remain.",
+      "evidenceText": "LIVE November 18: exact source 8e6f6f01 and new combined artifact passed 27focused tests, one source-matched build and independent all 764-file verification. Dorian published under current verified human instruction; independent stage/final proof verifies 1088 assets,443 final stored encodings and333 HTTP keys. Browser loads version 1795059056753 and exact fixed handler with click-time channel entry before both fresh/resume deposit calls. Public SP desktop/mobile render without overflow; no agent signing/deposit/retry. Actual client deposit completion remains unverified. All financial/SP liquidation holds preserved. Separate read-only verifier correction honors existing explicit Content-Type override; artifact/publisher/plan unchanged.",
       "evidenceLinks": [
         {
           "title": "Exact diagnosis, source fix and focused proof",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8e6f6f01671e615feb577d19400b22c41937a936/docs/operations/earn-sp-oisy-click-fix-20261118.md"
+        },
+        {
+          "title": "Exact combined source-matched publication packet",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/482a61e5631e6b16218bc2c636714528c3f0f3c0/docs/operations/recovery-oisy-frontend-publication-20261118.md"
+        },
+        {
+          "title": "Narrow read-only effective-header verification amendment",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/f1aa846bff171e0cd7968cd7af8026f6a6045e73/docs/operations/recovery-oisy-verifier-header-amendment-20261118.md"
+        },
+        {
+          "title": "Live result: actual publication, independent proof and UI limitations",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e3e6379a71cddad468b89941581e5d41d6491127/docs/operations/recovery-oisy-frontend-live-result-20261118.md"
         }
       ]
     },
     {
       "id": "SEC-20",
-      "state": "Blocked",
+      "state": "Done",
       "owner": "Ellis source/integration/independent verification; Dorian coordinated publisher",
       "scope": "Restore recovery menu and manual-queue availability after canonical frontend regression",
-      "evidenceText": "PR #671 is merged into canonical main at 0edaf018 with exact-head CI successful and closed. One production frontend/auth/discovery build passed in 19.377 seconds; source/dependency pins and process closure were verified independently, including all 764 artifact files. Frozen artifact and corrected additive plan are pushed at cfe7d35b: preserve every old asset/property/untouched encoding and both discovery/auth files; add 327 immutable keys and atomically replace six entry assets, final 1088 keys. Both focused artifact reviews pass; publisher encoding manifest/fresh baseline precede one coordinated asset-only publication. Live UI still serves the older release. No backend, permissions or financial action. Exact 13-call dispatch preparation and two fresh final code reviews now pass. Durable argument flushing and post-flush deadline guards are corrected; three local boundary cases pass. Dorian retains execution; no asset write occurred. Stage/final full readbacks and desktop/mobile verification remain. Publication attempt was rejected by automatic approval review before process creation: no publisher process, journal or asset call started. The review did not accept older cross-chat references as trusted exact production authorization. Dorian has one direct approval question pending for immutable packet 37380ddd; no retry, relay or executor change. Source, CI, artifact and final dispatch reviews remain passed; the frozen packet and all financial holds are preserved. The separate ce014 baseline-only amendment is pushed at 64bacefa. Independent live readback confirms the approved backend, matching certified Candid and unchanged 761 frontend rows, settings, controllers, permissions and SP pause. All data pins pass; exactly three pinned baseline files change, while executable code, artifact and phase payloads remain identical. The readable amended packet states the exact stage and activation scope for the existing direct release-chat decision; publication remains held. No new build, optional review campaign or asset write. November 18: the separately deployed 4409 backend supersedes ce014. Exact baseline-only replacement packet b278d7da is pushed and remote-read back. Independent capture confirms Running 4409, unchanged certified Candid, all 761 asset rows/settings/controllers/permissions and pause=true; served discovery hashes and compatibility/local artifact inspection pass. Only three pinned baseline data files change; code/artifact/phases and both old packets remain unchanged. Dorian has the self-contained exact approval scope; no publication or financial action. Existing release-chat decision remains pending.",
+      "evidenceText": "PR #671 is merged into canonical main at 0edaf018 with exact-head CI successful and closed. One production frontend/auth/discovery build passed in 19.377 seconds; source/dependency pins and process closure were verified independently, including all 764 artifact files. Frozen artifact and corrected additive plan are pushed at cfe7d35b: preserve every old asset/property/untouched encoding and both discovery/auth files; add 327 immutable keys and atomically replace six entry assets, final 1088 keys. Both focused artifact reviews pass; publisher encoding manifest/fresh baseline precede one coordinated asset-only publication. Live UI still serves the older release. No backend, permissions or financial action. Exact 13-call dispatch preparation and two fresh final code reviews now pass. Durable argument flushing and post-flush deadline guards are corrected; three local boundary cases pass. Dorian retains execution; no asset write occurred. Stage/final full readbacks and desktop/mobile verification remain. Publication attempt was rejected by automatic approval review before process creation: no publisher process, journal or asset call started. The review did not accept older cross-chat references as trusted exact production authorization. Dorian has one direct approval question pending for immutable packet 37380ddd; no retry, relay or executor change. Source, CI, artifact and final dispatch reviews remain passed; the frozen packet and all financial holds are preserved. The separate ce014 baseline-only amendment is pushed at 64bacefa. Independent live readback confirms the approved backend, matching certified Candid and unchanged 761 frontend rows, settings, controllers, permissions and SP pause. All data pins pass; exactly three pinned baseline files change, while executable code, artifact and phase payloads remain identical. The readable amended packet states the exact stage and activation scope for the existing direct release-chat decision; publication remains held. No new build, optional review campaign or asset write. November 18: the separately deployed 4409 backend supersedes ce014. Exact baseline-only replacement packet b278d7da is pushed and remote-read back. Independent capture confirms Running 4409, unchanged certified Candid, all 761 asset rows/settings/controllers/permissions and pause=true; served discovery hashes and compatibility/local artifact inspection pass. Only three pinned baseline data files change; code/artifact/phases and both old packets remain unchanged. Dorian has the self-contained exact approval scope; no publication or financial action. Existing release-chat decision remains pending. November 18 final: combined recovery-menu/queue plus OISY deposit artifact is LIVE under current independently verified human authority. Full final proof passes 1088 rows/443 encodings/333 HTTP keys with historicalkeys/properties/state/SPpause preserved. Servedroot omits genericcard and includes wallet recovery menu label; publicdesktop/mobileSP andmanualroutes reached. Live authenticated menu/reserved-row cases remain earlier source/mockproof; no live eligible row or customer transaction claimed. Oldpackets/artifacts remain untouched. Separate existing mobile manual overflow and native XRP background HTTP400 observations are deferred without a release gate.",
       "evidenceLinks": [
         {
           "title": "Canonical restoration PR #671",
@@ -47,6 +59,10 @@
         {
           "title": "Exact 4409 baseline amendment and approval scope",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/b278d7da3235bb79d7b5eb2cc73b3d357e714390/docs/operations/recovery-frontend-baseline-amendment-4409-20261118.md"
+        },
+        {
+          "title": "Live result: actual publication, independent proof and UI limitations",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/e3e6379a71cddad468b89941581e5d41d6491127/docs/operations/recovery-oisy-frontend-live-result-20261118.md"
         }
       ]
     },
