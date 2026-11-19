@@ -22,5 +22,7 @@
   "rootIndependentVerification": "PASS",
   "publicationPerformed": false,
   "redactedBuildLogNormalization": "Private source/dependency paths replaced and line-end whitespace stripped; actual raw build log retained with its original hash.",
-  "materializerSha256": "109949cf4d37b271ea460e542966b5e39b58a79c357b4f6bffd1ee2e3aba6bb6"
+  "materializerSha256": "109949cf4d37b271ea460e542966b5e39b58a79c357b4f6bffd1ee2e3aba6bb6",
+  "materializerCorrectionProofSha256": "917ed0c123ce7ee17097c86eaaad67965f7b873e5afc37232595e136360570eb",
+  "materializedCopyInspectionSha256": "b2dc0cfcfd57ed9a9b3a35faeaa9f540d0e99204cdd1320150c1da820b1cbde6"
 }

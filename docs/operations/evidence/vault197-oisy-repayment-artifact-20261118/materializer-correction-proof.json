@@ -1,0 +1,29 @@
+{
+  "result": "PASS",
+  "correctedCommittedPacket": "95ee5a741a89a84a945bcb1f7fdb7727e1cf2e71",
+  "previousPacketPreserved": "209c19823a5b7c62cc3476c08e7c6f566939cc53",
+  "exactMaterializerDelta": "Only two archive/manifest SHA256 literals; code path unchanged. Verified by comparing committed old and corrected scripts.",
+  "releaseOwnerInitialFailure": "Prior archive/manifest hashes rejected the new artifact before output creation; no write or phase journal was consumed.",
+  "materializerSha256": "109949cf4d37b271ea460e542966b5e39b58a79c357b4f6bffd1ee2e3aba6bb6",
+  "executionPinsSha256": "a76995fdbf35c441f93f63a25d1eef021787b4b07860b85ba249e7e2ac73a6dc",
+  "verificationPinsSha256": "1605c9471177b2ac76adf34530f584a8210deb5b228e56ea79d5789f5f38b0b1",
+  "archiveSha256": "3915e35932d1b47df5a8a8345c61c1416fc4a26fec4ea3642a8a54913a4ac82e",
+  "artifactManifestSha256": "c0e20f5654625c32ca442e1be7dc49119d5cf9de0622be85740440e0a0bae6ae",
+  "materialization": {
+    "exitCode": 0,
+    "outputCreatedFresh": true,
+    "filesVerified": 764,
+    "message": "All 764 frozen files materialized and verified; no build or live mutation."
+  },
+  "inspectOnMaterializedCopy": {
+    "exitCode": 0,
+    "receiptSha256": "b2dc0cfcfd57ed9a9b3a35faeaa9f540d0e99204cdd1320150c1da820b1cbde6",
+    "planSha256": "36cc96e745d8710b6ccf586c17a806139bb59157bbfc10c3b2b3374a7c8ee123",
+    "stageCommitBytes": 477318,
+    "activationCommitBytes": 652
+  },
+  "allExecutionAndVerificationFilePins": "PASS",
+  "artifactAndPlanUnchanged": true,
+  "rebuildPerformed": false,
+  "publicationOrFinancialMutation": false
+}
