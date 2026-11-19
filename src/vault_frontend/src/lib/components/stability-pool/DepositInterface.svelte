@@ -340,11 +340,13 @@
       error = '';
       if (pendingDeposit) {
         const lockedLedger = Principal.fromText(pendingDeposit.ledger);
-        await stabilityPoolService.deposit(
-          lockedLedger,
-          BigInt(pendingDeposit.amount),
-          captureStabilityPoolActionContext(lockedLedger, 'deposit'),
-        );
+        const lockedAmount = BigInt(pendingDeposit.amount);
+        const context = captureStabilityPoolActionContext(lockedLedger, 'deposit');
+        // Open from this click, before the service enters Web Locks or awaits
+        // intent status. Resume retains the saved ledger, amount and sequence.
+        const channelReady = prepareStabilityPoolOisySignerChannel(Principal.fromText(context.principalText));
+        await channelReady;
+        await stabilityPoolService.deposit(lockedLedger, lockedAmount, context);
         dispatch('success', { action: 'deposit' });
         amount = '';
         return;
@@ -393,6 +395,10 @@
           return;
         }
         const context = captureStabilityPoolActionContext(token.ledger_id, action);
+        // Establish Oisy's channel synchronously in the deposit click. Actor
+        // lookup and the cross-tab lock inside deposit are already too late.
+        const channelReady = prepareStabilityPoolOisySignerChannel(Principal.fromText(context.principalText));
+        await channelReady;
         await stabilityPoolService.deposit(token.ledger_id, rawAmount, context);
         dispatch('success', { action: 'deposit' });
       } else {
