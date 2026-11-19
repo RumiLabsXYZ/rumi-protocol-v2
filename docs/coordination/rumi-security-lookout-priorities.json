@@ -1,6 +1,16 @@
 {
   "items": [
     {
+      "id": "earn-sp-oisy-click",
+      "title": "Fix urgent OISY deposit blocker on Earn",
+      "status": "in_progress",
+      "blockedReason": "",
+      "nextAction": "Complete one source-matched frontend build under fresh resource coordination, preserving the reviewed recovery-menu/queue baseline plus only this narrow deposit fix. Push the exact combined publication packet for separate approval; Dorian remains proposed publisher. No client signing, retries or fund movement.",
+      "cardIds": [
+        "SEC-22"
+      ]
+    },
+    {
       "id": "recovery-menu-release-regression",
       "title": "Restore the approved recovery menu and queue guard in canonical releases",
       "status": "blocked",

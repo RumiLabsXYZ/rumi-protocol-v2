@@ -1,6 +1,19 @@
 {
   "cards": [
     {
+      "id": "SEC-22",
+      "state": "Review",
+      "owner": "Ellis fix/build/preparation; Dorian proposed publisher",
+      "scope": "Urgent Earn Stability Pool OISY deposit popup failure on client screenshare",
+      "evidenceText": "Actual served Stability Pool component omits synchronous OISY channel entry on ordinary and saved-deposit clicks. Narrow source fix8e6f6f01 opens the existing channel before Web Locks/actor/intent awaits, preserving exact context/amount/intent recovery and sequential approvals. Four new regression failures before patch; final27focused tests pass, including actualSDKclickguard with mockedpopup and existing wallet-bound lifecycle tests. Source/doc/test remotely verified. Continuing one source-matched frontend build and exact release preparation; no build or publication yet. Reconnect did not fix the client; no verified workaround or successful deposit claimed. All financial and SPliquidation holds remain.",
+      "evidenceLinks": [
+        {
+          "title": "Exact diagnosis, source fix and focused proof",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/8e6f6f01671e615feb577d19400b22c41937a936/docs/operations/earn-sp-oisy-click-fix-20261118.md"
+        }
+      ]
+    },
+    {
       "id": "SEC-20",
       "state": "Blocked",
       "owner": "Ellis source/integration/independent verification; Dorian coordinated publisher",

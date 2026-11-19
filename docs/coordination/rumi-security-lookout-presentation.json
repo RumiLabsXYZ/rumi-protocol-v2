@@ -1,6 +1,6 @@
 {
-  "summary": "The tested recovery-menu and queue artifact is preserved. The exact 4409 backend baseline amendment is pushed and remotely verified; only three baseline data files change, with code/artifact/phases unchanged. Dorian has the packet for the existing exact approval decision. No UI write occurred; financial and liquidation holds remain.",
-  "plainSummary": "The updated approval packet is ready and verified against the newly deployed backend. The tested frontend files and upload steps are unchanged. The old card remains live while the exact publication decision waits in the release chat. All financial and liquidation holds remain.",
+  "summary": "Urgent Earn OISY deposit source fix is pushed and27focused tests pass. One source-matched build and exact combined UI release packet are being prepared; no publication or client transaction is claimed. The older baseline-only packet remains frozen. All financial and liquidation holds remain.",
+  "plainSummary": "The client\u2019s deposit is blocked because the app opens the wallet signing channel too late. The narrow fix passes focused tests. Ellis is preparing one matching build and an exact release packet for approval. Nothing is deployed yet, and all financial and liquidation holds remain.",
   "glossary": [
     {
       "term": "Stability Pool",
