@@ -14,4 +14,3 @@ https://svelte.dev/e/a11y_no_static_element_interactions
       Tests  44 passed (44)
    Start at  20:52:28
    Duration  6.14s (transform 1.19s, setup 24ms, import 1.77s, tests 2.27s, environment 1.70s)
-
