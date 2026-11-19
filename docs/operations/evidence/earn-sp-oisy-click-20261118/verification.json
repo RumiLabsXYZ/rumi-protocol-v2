@@ -1,0 +1,24 @@
+{
+  "sourceBase": "014904d0bafeaba9628a5eaaa676c7444fac0352",
+  "canonicalMainComponentBlob": "0026071326637be97ca635cfbce3f847b20a90f5",
+  "baseComponentBlob": "0026071326637be97ca635cfbce3f847b20a90f5",
+  "changedSource": {
+    "path": "src/vault_frontend/src/lib/components/stability-pool/DepositInterface.svelte",
+    "sha256": "7198d7f87e07f3f823157bd69a3bad5c7682b883f3438e17af259175612dae15"
+  },
+  "regressionTest": {
+    "path": "src/vault_frontend/src/lib/components/stability-pool/DepositInterface.oisy.spec.ts",
+    "sha256": "dccd38cdae30585527068346299510c941b887cccbb7421e650f489b84b7c7c3"
+  },
+  "validation": {
+    "before": "4failed/1passed with initial5componenttests",
+    "after": "27passed across6component and21wallet-binding tests",
+    "actualSdkClickGuard": "PASS using mocked window.open returning null; no real popup/handshake/signing",
+    "build": "NOT RUN",
+    "publication": "NOT AUTHORIZED OR PERFORMED",
+    "liveClientDeposit": "UNVERIFIED"
+  },
+  "scope": "Only normal deposit and exact saved-deposit click branches; existing signer helper and all service/intent/accounting files unchanged",
+  "frozenUiPacket": "b278d7da3235bb79d7b5eb2cc73b3d357e714390; artifact and inputs unchanged",
+  "holds": "All financial and SP liquidation holds remain"
+}
