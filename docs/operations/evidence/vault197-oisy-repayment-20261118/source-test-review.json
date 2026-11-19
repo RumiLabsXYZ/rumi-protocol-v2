@@ -1,0 +1,78 @@
+{
+  "source": "3294c9561664d2ec48070ac0bab50862913f22dc",
+  "sourceTree": "4d04bbcaafc1a13ac5f3fe4931ee9913acfe45f0",
+  "baselineFrontendSource": "8e6f6f01671e615feb577d19400b22c41937a936",
+  "sourceDelta": [
+    "src/vault_frontend/src/lib/components/vault/VaultCard.repayRefresh.spec.ts",
+    "src/vault_frontend/src/lib/components/vault/VaultCard.svelte",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.repay.spec.ts",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.ts",
+    "src/vault_frontend/src/lib/services/repaymentOisySigner.spec.ts",
+    "src/vault_frontend/src/lib/services/repaymentOisySigner.ts",
+    "src/vault_frontend/src/tests/vault-recovery-fixtures/RepayCard.svelte"
+  ],
+  "focusedTests": {
+    "passed": 44,
+    "failed": 0,
+    "files": 4,
+    "command": [
+      "node",
+      "../../node_modules/vitest/vitest.mjs",
+      "run",
+      "--config",
+      "vitest.config.ts",
+      "src/lib/services/protocol/apiClient.repay.spec.ts",
+      "src/lib/services/repaymentOisySigner.spec.ts",
+      "src/lib/components/vault/VaultCard.repayRefresh.spec.ts",
+      "src/lib/components/stability-pool/DepositInterface.oisy.spec.ts",
+      "--maxWorkers",
+      "1"
+    ],
+    "logSha256": "e07c271fcce11974084db39ac44a4be9918dda58601dfa4171b061acf6f067e3",
+    "actualSignerDelayedHandshakeRedBefore": {
+      "passed": 3,
+      "failed": 1,
+      "logSha256": "16759d047a167d18e863ce61c059fc37383465a0fee48884f82de4ed1fe8ee1d"
+    },
+    "isolatedTrackedExport": true,
+    "warmDependenciesReused": true,
+    "installs": false
+  },
+  "reviews": {
+    "round1": {
+      "reviewerA": "FAIL: close-before-channel-establishment race",
+      "reviewerB": "FAIL: same independently confirmed race"
+    },
+    "correction": "Close captured popup immediately, reject canceled readiness/reopening and close late-established channel after opening settles. Added deferred-transport test using actual SDK Signer.",
+    "round2": {
+      "reviewerA": "PASS, no confirmed blockers",
+      "reviewerB": "PASS, no confirmed blockers"
+    },
+    "runtimeSource": "3294c9561664d2ec48070ac0bab50862913f22dc",
+    "proofLimits": "Read-only source reviews and focused local tests; no real OISY consent, repayment or deployed-byte proof."
+  },
+  "build": {
+    "started": false,
+    "requestSha256": "74859407733cfab5a353074661f8de8ba99700dc94feb278fcc573ef5c325401",
+    "runnerSha256": "f1b01040d9cbba121e2f1a92c8049b5e1c01564a71ad7a3b7f23b92aecf8f330",
+    "exportSha256": "fd83e31408bdce2112b181da2e96774c78a40645e206eb60f16239c929f552a0",
+    "exportedFiles": 646,
+    "bounds": {
+      "executionSeconds": 120,
+      "closureSeconds": 60,
+      "minimumFreeBytes": 21474836480,
+      "physicalGrowthBytes": 2147483648,
+      "ownedRssBytes": 6442450944,
+      "logBytes": 8388608
+    },
+    "priorGrantsConsumed": true,
+    "freshAllocationRequired": true
+  },
+  "preservation": {
+    "deployedDepositAndRecoveryComposed": true,
+    "scriptsAndDeclarationsUnchanged": true,
+    "unrelatedTrackedDeletionsPreserved": 194,
+    "productionMutation": false,
+    "signingOrFinancialActions": false
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "schema": "ellis-single-repayment-frontend-build-v1",
+  "ownerChat": "01a197e0-90a3-7d90-a307-f1f6aeb6d077",
+  "source": "3294c9561664d2ec48070ac0bab50862913f22dc",
+  "tree": "4d04bbcaafc1a13ac5f3fe4931ee9913acfe45f0",
+  "canonicalMerge": "0edaf018bbc2b9c5ab648c9244001437e3af5ea4",
+  "frontendTree": "e25d2ef75c505890ae6828b32fae86d235c55dcf",
+  "scriptsTree": "5f5bd567dedc872a0ee32a514c74805813b0ced1",
+  "sourceFilesSha256": {
+    "package.json": "0efcf76d46a1534265392cb47d8e9cf275388dba04439e71e9cb1e08d9593b88",
+    "package-lock.json": "b7d03faca7b1a77344930ad428862f4fdc77976f446143337b862969d39c7ef2",
+    "src/vault_frontend/package.json": "56870919b1ad8ca19b1eaa02c9464632f90ce9f21810fbb8eef922a694654304",
+    "scripts/verify-frontend-auth-assets.mjs": "f70e9a4ddba9184960c01cdf27afdcb07ba4870789f7fca3c161adc5adf2e8ee",
+    "scripts/generate-frontend-discovery.mjs": "830091d1cec2202faa6208e9338d137d34eb928e45aa74732471a7fb9d4242b6",
+    "icp.yaml": "680e46af26eed614075343fc44c35cd621d1034f47dadd2dbc0599448bf1322a",
+    "canister_ids.json": "17196050f5f1377997a369aac3d201979bf0caeff71fce267c0b839071d2217c",
+    "src/vault_frontend/assets/favicon.ico": "4e8d31b50ffb59695389d94e393d299c5693405a12f6ccd08c31bcf9b58db2d4",
+    "src/vault_frontend/src/lib/components/stability-pool/DepositInterface.svelte": "7198d7f87e07f3f823157bd69a3bad5c7682b883f3438e17af259175612dae15",
+    "src/vault_frontend/src/lib/components/vault/VaultCard.repayRefresh.spec.ts": "186845bb93d05102db6a311b164ae3c20c8ef17bf3a98eb9960e27bc68c2c5c7",
+    "src/vault_frontend/src/lib/components/vault/VaultCard.svelte": "19f6d140304be770026034b325f943232169dca214d8e4a439d6481dd339315f",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.repay.spec.ts": "cd1212c6d92324303472eb5b7496baa51d33ab63029e99a443d6f2da315c0af5",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.ts": "98d69c29229a284afc23f8d229675c4e4a21e494d725fc7261611645716a2726",
+    "src/vault_frontend/src/lib/services/repaymentOisySigner.spec.ts": "d36393b7f949f00e9743a53094231cb3609eb66a6dfdf8a57606de9cf3629d74",
+    "src/vault_frontend/src/lib/services/repaymentOisySigner.ts": "68470adbdab8021285a235af440ef3cf2b4fc3d43208ba06915bbc650a865dcc",
+    "src/vault_frontend/src/tests/vault-recovery-fixtures/RepayCard.svelte": "e3d7b67bcdeb809ce1f549507d9b8206266fae70ebcc305f2b3303ffc9444258"
+  },
+  "warmHiddenLockSha256": "ecfec1c114da3c779b03f77ed90094927b85c88327200d7c69faea05e4ce31f5",
+  "packages": {
+    "vite": {
+      "version": "6.4.6",
+      "packageSha256": "23a60ad52695386a9c9a32aac48c6ac5d73fd8c71bb74929619bbc454749ace0"
+    },
+    "vitest": {
+      "version": "4.1.12",
+      "packageSha256": "e5a6d55e103f04929442595df0f641f128b02fd706ff01474c094863b44511d0"
+    },
+    "svelte": {
+      "version": "5.57.3",
+      "packageSha256": "09eb2907115f906fcfbbf270222af7a07cd1f292aedf5ce5ecc8f93125bc6f82"
+    },
+    "@sveltejs/kit": {
+      "version": "2.70.4",
+      "packageSha256": "afd7719bec7b0e47c234c8c6ef1ec512df320d5b71424dd67abdbd86854190d6"
+    },
+    "@sveltejs/vite-plugin-svelte": {
+      "version": "5.1.1",
+      "packageSha256": "c057bedc7adfbb7b49ef128096a1b7e78d35915d559538681257d95b14eaf919"
+    },
+    "@dfinity/principal": {
+      "version": "2.3.0",
+      "packageSha256": "d4ad1c7678528d048b7251de158f2a0d35b7d8e03261ccd9496f47c3217f73b8"
+    }
+  },
+  "node": "v24.13.1",
+  "npm": "11.8.0",
+  "command": [
+    "npm",
+    "run",
+    "build",
+    "--workspace",
+    "vault_frontend"
+  ],
+  "environment": {
+    "DFX_NETWORK": "ic",
+    "NODE_OPTIONS": "--max-old-space-size=4096",
+    "npm_config_offline": "true"
+  },
+  "bounds": {
+    "executionSeconds": 120,
+    "closureSeconds": 60,
+    "minimumFreeBytes": 21474836480,
+    "physicalGrowthBytes": 2147483648,
+    "ownedRssBytes": 6442450944,
+    "logBytes": 8388608
+  },
+  "postprocess": "Only recipe-equivalent favicon copy, auth/discovery byte checks and complete dist file/hash manifest; no installation, repeated tests or publication.",
+  "runnerSha256": "f1b01040d9cbba121e2f1a92c8049b5e1c01564a71ad7a3b7f23b92aecf8f330",
+  "declarationsTree": "e616a2b139e745cf52963df73182217e1ee201a8",
+  "previousBuildSource": "8e6f6f01671e615feb577d19400b22c41937a936",
+  "exportPaths": [
+    "package.json",
+    "package-lock.json",
+    "canister_ids.json",
+    "declarations",
+    "src/declarations",
+    "src/vault_frontend",
+    "src/rumi_homepage/package.json",
+    "scripts",
+    "icp.yaml"
+  ],
+  "sourceExportSha256": "fd83e31408bdce2112b181da2e96774c78a40645e206eb60f16239c929f552a0",
+  "allowedSourceDelta": [
+    "src/vault_frontend/src/lib/components/vault/VaultCard.repayRefresh.spec.ts",
+    "src/vault_frontend/src/lib/components/vault/VaultCard.svelte",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.repay.spec.ts",
+    "src/vault_frontend/src/lib/services/protocol/apiClient.ts",
+    "src/vault_frontend/src/lib/services/repaymentOisySigner.spec.ts",
+    "src/vault_frontend/src/lib/services/repaymentOisySigner.ts",
+    "src/vault_frontend/src/tests/vault-recovery-fixtures/RepayCard.svelte"
+  ],
+  "buildPurpose": "ONE frontend repayment-owned OISY signer artifact preserving deployed SP deposit and recovery UI; preparation only",
+  "privatePathsOmitted": true
+}
