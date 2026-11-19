@@ -11,7 +11,7 @@
     "publish-frontend.mjs": "31fa425ebc05376fb432c8857952a07881df2c740100a1e0b02580ee8302cc9b",
     "read-preflight.mjs": "4c598c435d017613433b1edfe65ed108b9d18f1439d06fc29e1fbd87342a8693",
     "decode-saved-reply.mjs": "2073c76a73afe62752d33161cf55b740ca8773454cc87e37c6396cb8c37e7341",
-    "materialize-artifact.py": "803ec856bf3a5ba23f3eea717d513f7b56c2a78a788b70d443f17c22ec9e8a34",
+    "materialize-artifact.py": "109949cf4d37b271ea460e542966b5e39b58a79c357b4f6bffd1ee2e3aba6bb6",
     "dispatch-manifest.json": "36cc96e745d8710b6ccf586c17a806139bb59157bbfc10c3b2b3374a7c8ee123",
     "artifact-manifest.json": "c0e20f5654625c32ca442e1be7dc49119d5cf9de0622be85740440e0a0bae6ae",
     "inventory-before.json": "7c5d60c018c729e97debd9943db57f5c5d59b17d8b1a47a3f3810023cb0041f2",

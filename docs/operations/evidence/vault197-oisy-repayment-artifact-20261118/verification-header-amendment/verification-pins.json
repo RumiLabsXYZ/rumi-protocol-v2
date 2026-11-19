@@ -1,7 +1,7 @@
 {
   "schema": "rumi-effective-http-mime-verification-amendment-v1",
   "priorCorrection": "f1aa846bff171e0cd7968cd7af8026f6a6045e73",
-  "executionPinsSha256": "0bb50083ef81a3bd209aae0a7ca7753f489facb87797cb52a7f8193bc0a2f7b5",
+  "executionPinsSha256": "a76995fdbf35c441f93f63a25d1eef021787b4b07860b85ba249e7e2ac73a6dc",
   "dispatchManifestSha256": "36cc96e745d8710b6ccf586c17a806139bb59157bbfc10c3b2b3374a7c8ee123",
   "readOnly": true,
   "filesSha256": {

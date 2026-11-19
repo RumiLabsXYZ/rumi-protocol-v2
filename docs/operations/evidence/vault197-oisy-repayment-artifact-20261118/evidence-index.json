@@ -14,12 +14,13 @@
   "redactedBuildLogSha256": "8dff8d522a99357529d3569a76defd8449d2f893b9ec8361d5c96709bb682379",
   "archiveVerified": true,
   "productionMutation": false,
-  "executionPinsSha256": "0bb50083ef81a3bd209aae0a7ca7753f489facb87797cb52a7f8193bc0a2f7b5",
+  "executionPinsSha256": "a76995fdbf35c441f93f63a25d1eef021787b4b07860b85ba249e7e2ac73a6dc",
   "dispatchManifestSha256": "36cc96e745d8710b6ccf586c17a806139bb59157bbfc10c3b2b3374a7c8ee123",
   "publisherSha256": "31fa425ebc05376fb432c8857952a07881df2c740100a1e0b02580ee8302cc9b",
-  "verificationPinsSha256": "c41307c5ba631179e3ad15a3146cfcbb3995e9bcda9ddca9ef7fd9419323c289",
+  "verificationPinsSha256": "1605c9471177b2ac76adf34530f584a8210deb5b228e56ea79d5789f5f38b0b1",
   "correctedVerifierSha256": "97dc8911fc0ae5b55f70485ba4230bf5ce71ff98fa42a17bd2741866ba9f5b99",
   "rootIndependentVerification": "PASS",
   "publicationPerformed": false,
-  "redactedBuildLogNormalization": "Private source/dependency paths replaced and line-end whitespace stripped; actual raw build log retained with its original hash."
+  "redactedBuildLogNormalization": "Private source/dependency paths replaced and line-end whitespace stripped; actual raw build log retained with its original hash.",
+  "materializerSha256": "109949cf4d37b271ea460e542966b5e39b58a79c357b4f6bffd1ee2e3aba6bb6"
 }

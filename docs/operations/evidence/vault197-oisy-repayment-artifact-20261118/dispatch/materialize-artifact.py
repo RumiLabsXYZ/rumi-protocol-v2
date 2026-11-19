@@ -3,8 +3,8 @@
 import argparse,hashlib,json,tarfile,pathlib
 p=argparse.ArgumentParser();p.add_argument('archive');p.add_argument('manifest');p.add_argument('output');a=p.parse_args()
 archive=pathlib.Path(a.archive);manifest=pathlib.Path(a.manifest)
-assert hashlib.sha256(archive.read_bytes()).hexdigest()=='790306bbd2016646614f8c086004a6014c73bf9cd4e686836aaecc591ad72a37'
-assert hashlib.sha256(manifest.read_bytes()).hexdigest()=='925290813075ca2149d41a963237643c3b6e5897068d6027ca5591f66866af75'
+assert hashlib.sha256(archive.read_bytes()).hexdigest()=='3915e35932d1b47df5a8a8345c61c1416fc4a26fec4ea3642a8a54913a4ac82e'
+assert hashlib.sha256(manifest.read_bytes()).hexdigest()=='c0e20f5654625c32ca442e1be7dc49119d5cf9de0622be85740440e0a0bae6ae'
 expected={f['path']:f for f in json.loads(manifest.read_text())['files']};out=pathlib.Path(a.output);out.mkdir(exist_ok=False)
 with tarfile.open(archive,'r:gz') as tar:
     members=tar.getmembers();assert len(members)==len(expected)==764
