@@ -1,0 +1,243 @@
+{
+  "packetCommit": "8151703f257c1336dddb3ac9aca2cc0c496ef1e4",
+  "packetSha256": "f5f071758d3ebb6e31f174cdec84867895bced9af12ea5b26dc34e567651fa18",
+  "humanApproval": "01a1f29d-437c-7803-ae51-99c5c6259320",
+  "target": "tcfua-yaaaa-aaaap-qrd7q-cai",
+  "network": "ic",
+  "operator": "rumi_identity",
+  "sourceCommit": "3294c9561664d2ec48070ac0bab50862913f22dc",
+  "artifactArchiveSha256": "3915e35932d1b47df5a8a8345c61c1416fc4a26fec4ea3642a8a54913a4ac82e",
+  "executionPinsSha256": "a76995fdbf35c441f93f63a25d1eef021787b4b07860b85ba249e7e2ac73a6dc",
+  "planSha256": "36cc96e745d8710b6ccf586c17a806139bb59157bbfc10c3b2b3374a7c8ee123",
+  "proofs": [
+    {
+      "file": "verified-stage.json.gz",
+      "uncompressedSha256": "4dc58f3df525c98f413553be8f72da35506097514d81894525dcb0efa27e7369",
+      "compressedSha256": "51a3cb44d82141a558e25c4c47fd2dbcb7bf5dea33978d29ce83ec1270330346",
+      "phase": "stage",
+      "verifiedUtc": "2026-11-19T07:08:21.052Z",
+      "assetRows": 1355,
+      "storedEncodings": 356,
+      "httpKeys": 271
+    },
+    {
+      "file": "verified-final.json.gz",
+      "uncompressedSha256": "c81c089be6c52ca0199bdb7f1f683ec481dd1080a465edd76b8ef5255c242da7",
+      "compressedSha256": "b3cbc884bfb518d8ceecf0079b2c3f266147162b6a95b6b7ac9889419ee07f10",
+      "phase": "activate",
+      "verifiedUtc": "2026-11-19T07:12:02.603Z",
+      "assetRows": 1355,
+      "storedEncodings": 363,
+      "httpKeys": 273
+    }
+  ],
+  "operatorCalls": [
+    {
+      "phase": "stage",
+      "method": "create_batch",
+      "argsSha256": "8a0498d93b8d76da62759d63ce3c0bda2e82cde93f08230e7d1b835b583b6f52",
+      "encodedBytes": 9,
+      "dispatchedUtc": "2026-11-19T07:04:26.130Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:04:28.335Z",
+      "label": "stage-create",
+      "batchId": "707"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "23a6be9a7ab51e0c66f2773f9a0a6347ac92690969187658c6ed171c0c1581c7",
+      "encodedBytes": 1400138,
+      "dispatchedUtc": "2026-11-19T07:04:28.382Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:04:34.352Z",
+      "label": "stage-chunks-0"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "f19fa49023e9fb1ca7ee28b284936fc491557924d28eaabf7bbc6a3bc776039e",
+      "encodedBytes": 1400132,
+      "dispatchedUtc": "2026-11-19T07:04:34.386Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:04:39.627Z",
+      "label": "stage-chunks-1"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "0ef86570aa52975d75406daba40a7faddca3c146607d3b55f512ecd573879a76",
+      "encodedBytes": 1400082,
+      "dispatchedUtc": "2026-11-19T07:04:39.675Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:04:44.287Z",
+      "label": "stage-chunks-2"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "f06756eb290f48baa149924ed644f94828b14b316b8ec85798a581c82d89bb8d",
+      "encodedBytes": 825531,
+      "dispatchedUtc": "2026-11-19T07:04:44.316Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:04:48.182Z",
+      "label": "stage-chunks-3"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "234f307f9d9155fa77eaff7d2422a73f29b55bd2a43684220fe1cdd26899e25e",
+      "encodedBytes": 81534,
+      "dispatchedUtc": "2026-11-19T07:04:48.203Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:04:50.644Z",
+      "label": "stage-chunks-4"
+    },
+    {
+      "phase": "stage",
+      "method": "create_chunks",
+      "argsSha256": "e783895eb627e4d8e9259a8cc52a1192bb51bb71c65f7d68ac781811d094f2af",
+      "encodedBytes": 474,
+      "dispatchedUtc": "2026-11-19T07:04:50.664Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:04:52.680Z",
+      "label": "stage-chunks-5"
+    },
+    {
+      "phase": "stage",
+      "method": "commit_batch",
+      "argsSha256": "b72adb892702d44dc69005589f6e16a9f2b1506a5cc8b72e06a10ab33355ea03",
+      "encodedBytes": 477446,
+      "dispatchedUtc": "2026-11-19T07:05:17.914Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:05:23.739Z",
+      "label": "stage-commit"
+    },
+    {
+      "phase": "activate",
+      "method": "create_batch",
+      "argsSha256": "8a0498d93b8d76da62759d63ce3c0bda2e82cde93f08230e7d1b835b583b6f52",
+      "encodedBytes": 9,
+      "dispatchedUtc": "2026-11-19T07:09:42.359Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:09:44.082Z",
+      "label": "activate-create",
+      "batchId": "708"
+    },
+    {
+      "phase": "activate",
+      "method": "create_chunks",
+      "argsSha256": "19b74fa87218673191967555c06fca7fc9cc3a067b4bf46bf0afef0636e678bf",
+      "encodedBytes": 6438,
+      "dispatchedUtc": "2026-11-19T07:09:44.100Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:09:45.723Z",
+      "label": "activate-chunks-0"
+    },
+    {
+      "phase": "activate",
+      "method": "create_chunks",
+      "argsSha256": "23dcad1deba9c14fe5dc25638ab44c5c1642e7202d1a81e0a1e62991c446b0fb",
+      "encodedBytes": 1042,
+      "dispatchedUtc": "2026-11-19T07:09:45.739Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:09:47.344Z",
+      "label": "activate-chunks-1"
+    },
+    {
+      "phase": "activate",
+      "method": "commit_batch",
+      "argsSha256": "c61e59006dccb2933ab4561f8e7b9a992f6180b1a4fcef8be7e7447d22f7c79c",
+      "encodedBytes": 660,
+      "dispatchedUtc": "2026-11-19T07:10:13.700Z",
+      "state": "cli-success-authoritative-readback-pending",
+      "exit": 0,
+      "finishedUtc": "2026-11-19T07:10:15.263Z",
+      "label": "activate-commit"
+    }
+  ],
+  "finalState": {
+    "frontend": {
+      "status": "Running",
+      "moduleHash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+      "settingsSha256": "efba6671f552c15b1e43e49c6af7d56b2898d0b2d2ee2ab695dba886394a7326"
+    },
+    "backend": {
+      "status": "Running",
+      "moduleHash": "4409bfb7d3bd04aab2fd48f22a850656a0fefda471f285b616f6562444effdde",
+      "settingsSha256": "ce32352f4df9c65d2f6ff5835ff6e71c8c9f38c8d78ffe245518a0596f293f2d"
+    },
+    "permissions": {
+      "Commit": "4449444c016d68010001011dcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402",
+      "Prepare": "4449444c016d68010001011dcc7286c72720b32eb57c906efec1552955def045b321da65af59db1402"
+    },
+    "spHold": "(true)"
+  },
+  "rootServedChecks": {
+    "observedUtc": "2026-11-19T07:10:55.618058+00:00",
+    "checks": [
+      {
+        "key": "/index.html",
+        "bytes": 4468,
+        "sha256": "86dc697e74e73a07cbf6eab275bdcb5d3051c186d8b4b76bc6f7dc75989dd7f1",
+        "expectedMatch": true
+      },
+      {
+        "key": "/_app/immutable/chunks/Bv_H2GCB.js",
+        "bytes": 111211,
+        "sha256": "26fddf5c54e2107835e27f0a4bbeea8e6fb36208fa195576f50b74ce352f254b",
+        "expectedMatch": true
+      }
+    ]
+  },
+  "customerWalletOrFinancialAction": false,
+  "customerRepaymentOutcome": "Not tested or verified",
+  "independentCryptographicHttpCertificateValidation": false,
+  "uiVerification": {
+    "files": [
+      {
+        "file": "independent-live-receipt.json",
+        "bytes": 2462,
+        "sha256": "b193cb09898690629261f4425eea3d4f01e6e24025b0c2f4a8637b8a22700041"
+      },
+      {
+        "file": "browser-desktop.json",
+        "bytes": 1608,
+        "sha256": "9df4d80059949af201419e078652965bff1ef4d104981064fc5de98009713429"
+      },
+      {
+        "file": "browser-mobile.json",
+        "bytes": 460,
+        "sha256": "c0505bd938813dbf4d6d57a5cba6f5bab2b26d4259241038918663c6c777af34"
+      },
+      {
+        "file": "vaults-desktop.png",
+        "bytes": 485244,
+        "sha256": "2e873e1652684252fb2921aec9c9d22450c44eff8806878966da3281ad201d0f"
+      },
+      {
+        "file": "vaults-mobile.png",
+        "bytes": 281333,
+        "sha256": "e6ae35c5ae0c60c425a97adea140c437e95c8b87b91693206faa77a2fee09c00"
+      }
+    ],
+    "actualPublicDesktopAndMobile": "PASS; disconnected UI only",
+    "walletConnected": false,
+    "financialAction": false,
+    "servedVersion": "1795064489138",
+    "retryReady": true,
+    "customerConsentOrRepayment": "UNVERIFIED",
+    "knownDeferredConsoleObservation": "Native-XRP synthetic alias HTTP400s; no clean-console claim"
+  }
+}

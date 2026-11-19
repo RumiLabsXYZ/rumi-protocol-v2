@@ -1,0 +1,17 @@
+{
+  "url": "https://app.rumiprotocol.com/vaults",
+  "title": "Vaults | Rumi Protocol",
+  "version": {
+    "version": "1795064489138"
+  },
+  "viewport": {
+    "width": 390,
+    "height": 844,
+    "documentWidth": 390
+  },
+  "mainVisible": true,
+  "walletState": "Disconnected; Connect Wallet visible",
+  "walletInteraction": false,
+  "financialAction": false,
+  "source": "Actual isolated Playwright viewport/evaluate/screenshot observation after activation"
+}

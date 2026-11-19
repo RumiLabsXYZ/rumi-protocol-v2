@@ -1,0 +1,40 @@
+{
+  "url": "https://app.rumiprotocol.com/vaults",
+  "title": "Vaults | Rumi Protocol",
+  "version": {
+    "version": "1795064489138"
+  },
+  "viewport": {
+    "width": 1440,
+    "height": 1000,
+    "documentWidth": 1440
+  },
+  "visibleText": "RUMI\nBeta\nBorrow\nEarn\nSwap\nExplorer\n✨ Points\nDocs\nConnect Wallet\nSeason 1\n·\nSeason 1 has ended — allocations are being finalized\nView →\nMy Vaults\n\nConnect your wallet to view your vaults.\n\nUse the wallet button in the top right corner.\n\nRedeem\nckSOL Minter\nckDOGE Minter\nBitcoin Minter\nBorrow with Bitcoin\nckERC20 Minter\nBorrow with DOGE\nLiquidate\nTransparency\nDocs\nContact\nGitHub\nWhitepaper\nSecurity\n© 2026 Rumi Labs LLC",
+  "buttons": [
+    "Connect Wallet"
+  ],
+  "handlerFiles": [
+    {
+      "path": "/_app/immutable/chunks/Bv_H2GCB.js",
+      "status": 200,
+      "bytes": 111211,
+      "sha256": "26fddf5c54e2107835e27f0a4bbeea8e6fb36208fa195576f50b74ce352f254b",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/_app/immutable/chunks/CFyzoWdq.js",
+      "status": 200,
+      "bytes": 56389,
+      "sha256": "b7be781b580f385c738f1e538e5550e8938e85111045a7895f0a93d3a7b84973",
+      "contentType": "text/javascript"
+    }
+  ],
+  "loadedHandlerResources": [
+    "https://app.rumiprotocol.com/_app/immutable/chunks/Bv_H2GCB.js",
+    "https://app.rumiprotocol.com/_app/immutable/chunks/CFyzoWdq.js",
+    "https://app.rumiprotocol.com/_app/immutable/chunks/Bv_H2GCB.js",
+    "https://app.rumiprotocol.com/_app/immutable/chunks/CFyzoWdq.js"
+  ],
+  "walletInteraction": false,
+  "financialAction": false
+}
