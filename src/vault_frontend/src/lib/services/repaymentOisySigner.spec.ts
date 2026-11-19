@@ -1,7 +1,13 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { Principal } from '@dfinity/principal';
 
-const fx = vi.hoisted(() => ({ windows: new Map<string, any>(), inClick: false, failOpen: false }));
+const fx = vi.hoisted(() => ({
+	windows: new Map<string, any>(),
+	inClick: false,
+	failOpen: false,
+	deferOpen: false,
+	finishOpen: null as (() => void) | null
+}));
 vi.mock('@icp-sdk/signer/web', () => ({
 	PostMessageTransport: class {
 		constructor(private options: any) {}
@@ -17,7 +23,7 @@ vi.mock('@icp-sdk/signer/web', () => ({
 				''
 			);
 			const listeners = new Map<string, Set<(event?: any) => void>>();
-			return Promise.resolve({
+			const channel = {
 				get closed() {
 					return popup.closed;
 				},
@@ -38,7 +44,12 @@ vi.mock('@icp-sdk/signer/web', () => ({
 					});
 					return Promise.resolve();
 				}
-			});
+			};
+			return fx.deferOpen
+				? new Promise<typeof channel>((resolve) => {
+						fx.finishOpen = () => resolve(channel);
+					})
+				: Promise.resolve(channel);
 		}
 	}
 }));
@@ -68,6 +79,8 @@ beforeEach(() => {
 	vi.useFakeTimers();
 	fx.windows.clear();
 	fx.failOpen = false;
+	fx.deferOpen = false;
+	fx.finishOpen = null;
 	vi.spyOn(window, 'open').mockImplementation((_url: any, name: any) => {
 		let popup = fx.windows.get(name);
 		if (!popup || popup.closed) {
@@ -150,4 +163,21 @@ describe('repayment OISY action channel', () => {
 			await next.close();
 		}
 	});
+});
+
+it('closes a pending handshake popup immediately and closes the late SDK channel without admitting readiness', async () => {
+	fx.deferOpen = true;
+	const action = click(() => startRepayment(owner));
+	const readyResult = action.ready.catch((error) => error);
+	const closing = action.close();
+	try {
+		expect([...fx.windows.values()].every((p) => p.closed)).toBe(true);
+		expect(() => getRepaymentOisySignerAgent(owner)).toThrow('click');
+	} finally {
+		fx.finishOpen!();
+		await readyResult;
+		await closing;
+	}
+	expect(await readyResult).toBeInstanceOf(Error);
+	expect([...fx.windows.values()].every((p) => p.closed)).toBe(true);
 });

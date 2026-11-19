@@ -21,9 +21,14 @@ export function beginRepaymentOisyAction(
 	// PNP's legacy signer can close its default window independently. Never
 	// share that named window or its idle timer with this financial action.
 	const popupName = `rumi-repayment-${crypto.randomUUID()}`;
+	let canceled = false;
+	let popup: Window | null = null;
 	const actionWindow = {
-		open: (url?: string | URL, _target?: string, features?: string) =>
-			window.open(url, popupName, features),
+		open: (url?: string | URL, _target?: string, features?: string) => {
+			if (canceled) throw new Error('Repayment wallet action was closed.');
+			popup = window.open(url, popupName, features);
+			return popup;
+		},
 		addEventListener: window.addEventListener.bind(window),
 		removeEventListener: window.removeEventListener.bind(window),
 		focus: window.focus.bind(window)
@@ -41,6 +46,7 @@ export function beginRepaymentOisyAction(
 	active = context;
 	// Invoke synchronously from the click, before any actor or preflight await.
 	const ready = signer.openChannel().then(() => {
+		if (canceled) throw new Error('Repayment wallet action was closed.');
 		assertCurrent();
 		context.ready = true;
 	});
@@ -49,8 +55,15 @@ export function beginRepaymentOisyAction(
 		ready,
 		close() {
 			if (!closing) {
+				canceled = true;
+				context.ready = false;
 				if (active === context) active = null;
-				closing = signer.closeChannel();
+				// SDK closeChannel only sees an established channel. Close the
+				// owned window now, then also clean up a late handshake channel.
+				popup?.close();
+				closing = Promise.allSettled([ready, signer.closeChannel()]).then(() =>
+					signer.closeChannel()
+				);
 			}
 			return closing;
 		}
