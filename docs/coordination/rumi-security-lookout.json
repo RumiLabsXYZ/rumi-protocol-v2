@@ -22,6 +22,10 @@
         {
           "title": "Independent live stored/served/UI verification and retry-ready boundary",
           "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/codex/recovery-release-evidence-20261116/docs/operations/vault197-oisy-repayment-independent-live-result-20261118.md"
+        },
+        {
+          "title": "Operator live result: 12 actual asset calls and final independent/UI proofs",
+          "url": "https://github.com/RumiLabsXYZ/rumi-protocol-v2/blob/de583984e2e37aa58bdee9633c3bf36b221d7a6b/docs/operations/vault197-oisy-repayment-live-result-20261118.md"
         }
       ]
     },
