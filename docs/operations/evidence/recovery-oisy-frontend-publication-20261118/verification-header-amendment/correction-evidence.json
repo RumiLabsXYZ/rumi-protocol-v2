@@ -1,0 +1,70 @@
+{
+  "originalFailure": "HTTP MIME assertion expected application/octet-stream, actual application/json; no PASS proof written",
+  "baselineAsset": {
+    "key": "/.well-known/ii-alternative-origins",
+    "content_type": "application/octet-stream",
+    "max_age": null,
+    "headers": [
+      [
+        "Access-Control-Allow-Origin",
+        "*"
+      ],
+      [
+        "Cache-Control",
+        "no-cache, no-store, must-revalidate"
+      ],
+      [
+        "Content-Security-Policy",
+        "default-src 'self';script-src 'self' 'unsafe-inline' https://static.onramper.com/web-sdk https://oisy.com https://beta.oisy.com https://static.onramper.com/web-sdk/v1/onramper-web-sdk.min.js;worker-src 'self' blob:;connect-src 'self' blob: https://icp0.io https://*.icp0.io https://icp-api.io https://ic0.app https://*.ic0.app https://rumiprotocol.io https://oisy.com https://beta.oisy.com https://api.rumiprotocol.io https://solana-rpc.publicnode.com https://xumm.app https://*.xumm.app wss://xumm.app wss://*.xumm.app https://xaman.app https://*.xaman.app https://s.altnet.rippletest.net:51234 https://s.devnet.rippletest.net:51234 https://xrplcluster.com https://s1.ripple.com:51234;frame-src 'self' blob: https://*.tradingview.com https://*.onramper.com https://buy.onramper.com;img-src 'self' blob: data: https://xumm.app https://*.xumm.app;style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;style-src-elem 'self' https://fonts.googleapis.com;style-src-attr 'unsafe-inline';font-src 'self' data: https://fonts.gstatic.com;object-src 'none';base-uri 'self';frame-ancestors 'self' https://rumiprotocol.io https://app.rumiprotocol.com https://app.rumiprotocol.xyz https://*.tradingview.com https://*.onramper.com https://buy.onramper.com;form-action 'self';upgrade-insecure-requests;"
+      ],
+      [
+        "Content-Type",
+        "application/json"
+      ],
+      [
+        "Permissions-Policy",
+        "clipboard-read=(self), clipboard-write=(self)"
+      ],
+      [
+        "Referrer-Policy",
+        "same-origin"
+      ],
+      [
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+      ],
+      [
+        "X-Content-Type-Options",
+        "nosniff"
+      ],
+      [
+        "X-Frame-Options",
+        "DENY"
+      ],
+      [
+        "X-XSS-Protection",
+        "1; mode=block"
+      ]
+    ],
+    "allow_raw_access": true,
+    "is_aliased": null,
+    "encodings": [
+      {
+        "content_encoding": "identity",
+        "length": "242",
+        "modified": "1794779641853425089",
+        "sha256": "db093198ac4a3e48f3b01b069843bfbe5bf342b2cd7fc200b56b82ae936e92ff"
+      }
+    ]
+  },
+  "confirmedByDorianAgainstPreUploadJournal": true,
+  "explanation": "Existing explicit Content-Type header overrides the base asset content_type for HTTP responses",
+  "originalExecutionPinsUnchanged": "2c8841cb670453414f5f9601d11445104fa2e364321be45c60ee19e6036824ce",
+  "originalVerifierUnchanged": "d4e30c694f944d6efe46cd3fcd3a3024d8f4d708f2d67500c0f0896fe1960f9c",
+  "artifactManifestUnchanged": "925290813075ca2149d41a963237643c3b6e5897068d6027ca5591f66866af75",
+  "newVerificationPinsSha256": "557318eafe31f65a28e1b8de87b9c9688ac77386dff3b57d27276e15e42be66e",
+  "allOriginalChecksPreserved": true,
+  "correctionScope": "Effective HTTP MIME expectation plus path relocation and code-hash launcher; byte/property/encoding/module/controller/permission/pause checks unchanged",
+  "pureHeaderCases": "5PASS",
+  "productionMutation": false
+}
