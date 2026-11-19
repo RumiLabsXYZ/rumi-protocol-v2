@@ -4,7 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Principal } from '@dfinity/principal';
 vi.mock('$lib/services/auth',async()=>{const {writable}=await import('svelte/store');return {currentWalletType:writable('plug'),walletSessionGeneration:writable(0),WALLET_TYPES:{OISY:'oisy'}};});
 vi.mock('$lib/services/oisySigner',()=>({openOisySignerChannel:fx.openChannel}));
-const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), toastError:vi.fn(), toastInfo:vi.fn(), refreshVaults:vi.fn() }));
+vi.mock('$lib/services/repaymentOisySigner',()=>({beginRepaymentOisyAction:fx.beginOwned}));
+const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), beginOwned:vi.fn(), closeOwned:vi.fn(), toastError:vi.fn(), toastInfo:vi.fn(), refreshVaults:vi.fn() }));
 vi.mock('../../stores/wallet', async () => {
   const { writable } = await import('svelte/store');
   return { walletStore: Object.assign(writable({principal:null,tokenBalances:{}}), {refreshBalance:vi.fn()}) };
@@ -52,7 +53,7 @@ async function show(balance=30393000000n){
   component=mount(Harness,{target,props:{vaultInput}});await tick();await tick();
   [...target.querySelectorAll<HTMLButtonElement>('.pill-debt')].find(b=>b.textContent?.trim()==='Repay')!.click();await tick();
 }
-beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
+beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.closeOwned.mockReset().mockResolvedValue(undefined);fx.beginOwned.mockReset().mockImplementation((owner:Principal,assertCurrent:()=>void)=>({ready:fx.openChannel(owner).then(assertCurrent),close:fx.closeOwned}));fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
 afterEach(async()=>{if(component)await unmount(component);component=null;target.remove();});
 it('keeps an untouched Max selection valid when refreshed debt lowers the cap',async()=>{
  await show();max().click();await tick();const previous=input().valueAsNumber;
@@ -164,6 +165,7 @@ it('opens the Oisy signer channel before starting a bound repayment',async()=>{
  await vi.waitFor(()=>expect(fx.openChannel).toHaveBeenCalledOnce());
  expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),33,12_500_002n);
  expect(fx.openChannel.mock.invocationCallOrder[0]).toBeLessThan(fx.repay.mock.invocationCallOrder[0]);
+ await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce(),{timeout:2000});
 });
 
 async function deposit(){
@@ -182,4 +184,35 @@ it('does not deposit after the same wallet reconnects while its signer opens',as
  currentWalletType.set('oisy');let release!:()=>void;fx.openChannel.mockImplementation(()=>new Promise<void>(r=>release=r));
  await show();(await deposit()).click();walletSessionGeneration.set(1);await tick();release();await tick();await tick();
  expect(fx.add).not.toHaveBeenCalled();
+});
+
+it('retains the repayment-owned channel while the exact repayment is pending, then closes once',async()=>{
+ currentWalletType.set('oisy');let release!:(result:any)=>void;fx.repay.mockImplementation(()=>new Promise(r=>release=r));
+ vaultInput.set({...base,vaultId:197,borrowedIcusd:1102.99248062});
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ await vi.waitFor(()=>expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),197,14_999_000_000n));
+ expect(fx.closeOwned).not.toHaveBeenCalled();expect(fx.close).not.toHaveBeenCalled();
+ release({success:false,error:'typed refusal'});await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce());
+});
+it('closes its channel without submitting after the same owner reconnects during opening',async()=>{
+ currentWalletType.set('oisy');let release!:()=>void;fx.openChannel.mockImplementation(()=>new Promise<void>(r=>release=r));
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ walletSessionGeneration.set(1);release();await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce());
+ expect(fx.repay).not.toHaveBeenCalled();expect(fx.close).not.toHaveBeenCalled();
+});
+it('closes a failed popup action and shows its error before any repayment call',async()=>{
+ currentWalletType.set('oisy');fx.openChannel.mockRejectedValueOnce(new Error('Channel handshake failed'));
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce());
+ expect(fx.toastError).toHaveBeenCalledWith('Channel handshake failed',8000);expect(fx.repay).not.toHaveBeenCalled();
+});
+
+it('closes the owned popup when its card is destroyed during opening and never submits',async()=>{
+ currentWalletType.set('oisy');let release!:()=>void;
+ fx.openChannel.mockImplementation(()=>new Promise<void>(r=>release=r));
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ await unmount(component!);component=null;
+ expect(fx.closeOwned).toHaveBeenCalledOnce();
+ release();await vi.waitFor(()=>expect(fx.toastError).toHaveBeenCalledWith(expect.stringContaining('vault view closed'),8000));
+ expect(fx.repay).not.toHaveBeenCalled();
 });
