@@ -559,13 +559,9 @@
   $: canWithdraw = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
   $: canClose = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD;
 
-  // Detect if withdraw amount is the full collateral (max)
-  $: isMaxWithdraw = (() => {
-    const amt = parseFloat(withdrawAmount);
-    return amt > 0 && maxWithdrawable > 0 && Math.abs(amt - maxWithdrawable) < 0.0001;
-  })();
-  // When no debt + max withdraw → this becomes a "Withdraw & Close" action
-  $: isWithdrawAndClose = canClose && isMaxWithdraw;
+  // Only the displayed Max can select close. A nearby typed amount is partial.
+  $: withdrawInputMax = maxWithdrawable > 0 ? floorTo(maxWithdrawable, collateralDecimals) : '';
+  $: isWithdrawAndClose = canClose && Number(withdrawInputMax) > 0 && withdrawAmount === withdrawInputMax;
 
   const MIN_REPAY = Number(MIN_REPAY_E8S) / E8S;
   $: repayAuthorizedE8s = normalizedRepaymentE8s(
@@ -622,7 +618,7 @@
     if (maxAddCollateral > 0) addCollateralAmount = floorTo(maxAddCollateral, collateralFloorDigits);
   }
   function setMaxWithdraw() {
-    if (maxWithdrawable > 0) withdrawAmount = floorTo(maxWithdrawable, collateralFloorDigits);
+    if (withdrawInputMax) withdrawAmount = withdrawInputMax;
   }
   function setMaxBorrow() {
     if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 4);
@@ -746,15 +742,20 @@
   }
 
   async function handleWithdrawPartial() {
-    const amount = parseFloat(withdrawAmount);
-    if (!amount || amount <= 0) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
+    let amountRaw: bigint;
+    try {
+      amountRaw = parseExactTokenAmount(withdrawAmount, collateralDecimals);
+    } catch {
+      toastStore.error(`Enter a valid ${collateralSymbol} amount with at most ${collateralDecimals} decimal places`, 8000);
+      return;
+    }
+    if (amountRaw <= 0n) { toastStore.error(`Enter a valid ${collateralSymbol} amount`, 8000); return; }
+    const amount = withdrawAmount.trim();
     if (withdrawOverMax) { toastStore.error(`Max withdrawable: ${formatNumber(maxWithdrawable, 4)} ${collateralSymbol}`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
       const ctx = captureActionBoundContext(vault.owner);
-      const result = await protocolService.withdrawPartialCollateralBound(
-        ctx, vault.vaultId, parseExactTokenAmount(withdrawAmount, collateralDecimals)
-      );
+      const result = await protocolService.withdrawPartialCollateralBound(ctx, vault.vaultId, amountRaw);
       if (result.success) {
         // Native-XRP withdraw creates a settle-able XrpClaim (the XRP does NOT land in
         // an IC wallet) — say so and don't refresh an IC-side balance that won't change.
@@ -1207,14 +1208,14 @@
             {:else if activeAction === 'withdraw'}
               <div class="input-header">
                 <span class="input-label">Withdraw Collateral</span>
-                {#if maxWithdrawable > 0}
-                  <button class="max-text" on:click={setMaxWithdraw}>Max: {floorTo(maxWithdrawable, collateralFloorDigits)}</button>
+                {#if withdrawInputMax}
+                  <button class="max-text" on:click={setMaxWithdraw}>Max: {withdrawInputMax}</button>
                 {/if}
               </div>
               <div class="action-input-row">
-                <input type="number" class="action-input" bind:value={withdrawAmount}
+                <input type="text" inputmode="decimal" class="action-input" bind:value={withdrawAmount}
                   on:blur={() => clampInput('withdraw')}
-                  placeholder="0.00" min="0.001" step="0.01" disabled={isProcessing} />
+                  placeholder="0.00" disabled={isProcessing} />
                 <span class="input-suffix">{collateralSymbol}</span>
               </div>
               <div class="input-submit-row">
@@ -1243,9 +1244,9 @@
                 {/if}
               </div>
               <div class="action-input-row">
-                <input type="number" class="action-input" bind:value={borrowAmount}
+                <input type="text" inputmode="decimal" class="action-input" bind:value={borrowAmount}
                   on:blur={() => clampInput('borrow')}
-                  placeholder="0.00" min="0.1" step="0.1" disabled={isProcessing} />
+                  placeholder="0.00" disabled={isProcessing} />
                 <span class="input-suffix">icUSD</span>
               </div>
               {#if borrowLimitNote}
