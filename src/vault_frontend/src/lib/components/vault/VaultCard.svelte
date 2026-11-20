@@ -171,11 +171,12 @@
   // For ckStables, the backend tacks on a protocol fee (e.g. 1%) on top of the base amount.
   // Divide by (1 + feeRate) so user's wallet can cover base + fee.
   $: isCkStableRepay = repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC';
-  $: maxRepayBase = isCkStableRepay && ckstableRepayFee > 0
+  $: quoteDebtE8s = BigInt(Math.max(0, Math.round(tickingDebt * E8S)));
+  $: maxRepayBase = isCkStableRepay
     ? effectiveRepayBalance / (1 + ckstableRepayFee)
     : Number(computeSafeIcusdRepayMax(
         walletIcusdRaw,
-        BigInt(Math.max(0, Math.ceil(tickingDebt * E8S))),
+        quoteDebtE8s,
         ICUSD_REPAY_APPROVAL_RESERVE_E8S,
       )) / E8S;
   $: claimSpendable = isCkStableRepay
@@ -551,7 +552,7 @@
 
   $: repayOverMax = (() => {
     const v = parseFloat(repayAmount);
-    return v > 0 && (v > Number(repayQuote?.amount ?? 0) || v > claimSpendable
+    return v > 0 && (v > Number(repayInputMax ?? 0) || v > claimSpendable
       || (repayMaxSelected && repayQuote?.fullDebt === true && tickingDebt - v >= MIN_REPAY));
   })();
 
@@ -578,7 +579,7 @@
 
   // Detect if repay amount is the full debt (max). Only icUSD-denominated
   // repays can be merged with close — the compound backend method takes icUSD.
-  $: isMaxRepay = repayMaxSelected && repayQuote?.fullDebt === true
+  $: isMaxRepay = quoteDebtE8s > 0n && repayMaxSelected && repayQuote?.fullDebt === true
     && Number(repayAmount) === Number(repayQuote.amount);
   // A full icUSD repay on a vault that still holds collateral can route through
   // the backend repay_and_close_vault compound method (repay full debt +
@@ -626,29 +627,30 @@
   function setMaxBorrow() {
     if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 4);
   }
-  // Freeze one quote for this panel and token. Round full icUSD debt up to
-  // 0.00001, without ever authorizing more than the spendable balance.
-  $: if (expanded && activeAction === 'repay' && repayQuote === null && maxRepayable > 0) {
-    const debtE8s = BigInt(Math.max(0, Math.ceil(tickingDebt * E8S)));
-    const spendableE8s = walletIcusdRaw > ICUSD_REPAY_APPROVAL_RESERVE_E8S ? walletIcusdRaw - ICUSD_REPAY_APPROVAL_RESERVE_E8S : 0n;
-    const fullDebt = !isRedemptionClaim && repayTokenType === 'icUSD' && spendableE8s >= debtE8s;
-    const quoted = fullDebt
-      ? quoteFullIcusdRepayment(debtE8s, spendableE8s)
-      : null;
-    const amount = quoted === null
-      ? floorTo(maxRepayable, isCkStableRepay ? 6 : 8)
-      : `${quoted / 100_000_000n}.${(quoted % 100_000_000n).toString().padStart(8, '0')}`.replace(/0+$/, '').replace(/\.$/, '');
-    repayQuote = { amount, fullDebt };
+  // Freeze the ordinary icUSD quote. Claim payments and ckStable payments
+  // still use live limits for claim admission and the selected token's fee.
+  $: if (expanded && activeAction === 'repay' && repayQuote === null
+    && !isRedemptionClaim && repayTokenType === 'icUSD' && maxRepayBase > 0) {
+    const spendableE8s = walletIcusdRaw - ICUSD_REPAY_APPROVAL_RESERVE_E8S;
+    const fullDebt = spendableE8s >= quoteDebtE8s;
+    const amountE8s = fullDebt
+      ? quoteFullIcusdRepayment(quoteDebtE8s, spendableE8s)
+      : spendableE8s;
+    const whole = amountE8s / 100_000_000n;
+    const fraction = (amountE8s % 100_000_000n).toString().padStart(8, '0').replace(/0+$/, '');
+    repayQuote = { amount: fraction ? whole + '.' + fraction : whole.toString(), fullDebt };
   }
 
   function setMaxRepay() {
-    if (isProcessing || !repayQuote) return;
-    repayAmount = repayQuote.amount;
+    if (isProcessing || !repayInputMax) return;
+    repayAmount = repayInputMax;
     repayMaxSelected = true;
   }
 
   $: repayInputStep = isCkStableRepay ? '0.000001' : '0.00000001';
-  $: repayInputMax = repayQuote?.amount;
+  $: repayInputMax = quoteDebtE8s > 0n
+    ? repayQuote?.amount ?? (maxRepayable > 0 ? floorTo(maxRepayable, isCkStableRepay ? 6 : 8) : undefined)
+    : undefined;
 
   function clampInput(field: 'add' | 'withdraw' | 'borrow' | 'repay') {
     if (field === 'add') {
@@ -1274,7 +1276,7 @@
               {#if isRedemptionClaim}<span class="repay-close-hint">The entered amount is the maximum payment. Max includes a small buffer for accrued interest, bounded by your available balance. The protocol charges the actual debt, up to that maximum. Keep enough balance and allowance for fees; refresh if the outcome is unclear.</span>{/if}
               <div class="input-header">
                 <span class="input-label">Repay Debt {#if $earningActive}<MultiplierBadge multiplier={5} comingSoon label="5× soon" />{/if}</span>
-                {#if repayQuote}
+                {#if repayInputMax}
                   <button class="max-text" on:click={setMaxRepay} disabled={isProcessing}>Max: {repayInputMax}</button>
                 {/if}
               </div>
@@ -1319,7 +1321,7 @@
                 {/if}
               </div>
               {#if repayOverMax}
-                <p class="repay-close-hint" role="status">Enter a lower amount or reopen Repay for a new quote.</p>
+                <p class="repay-close-hint" role="status">{quoteDebtE8s === 0n ? 'This vault has no debt to repay.' : 'Enter a lower amount or reopen Repay for a new quote.'}</p>
               {/if}
               {#if canKeepVaultOpenOnFullRepay && !isNativeXrp}
                 <div class="repay-close-toggle" role="radiogroup" aria-label="After repaying full debt">

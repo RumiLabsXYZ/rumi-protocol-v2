@@ -97,19 +97,23 @@ it('freezes the entered amount and Max while a repayment request is pending',asy
  expect(input().value).toBe(selected);expect(input().disabled).toBe(true);expect(max().disabled).toBe(true);
  max().click();expect(fx.repay).toHaveBeenCalledOnce();expect(fx.close).not.toHaveBeenCalled();
 });
-it('offers full repay and close with one approval fee and a fee-free burn',async()=>{
- await show(30393940000n);max().click();await tick();
- expect(input().valueAsNumber).toBe(base.borrowedIcusd);
+it('offers full repay and close when the wallet covers the exact debt and approval fee', async () => {
+ vaultInput.set({...base, borrowedIcusd:10.00003});
+ await show(1_000_103_000n);max().click();await tick();
+ expect(input().value).toBe('10.00003');
  expect(submit().textContent?.trim()).toBe('Repay & Close');
 });
 it('refreshes and gives recovery guidance when repay succeeds but compound close returns an error',async()=>{
  fx.close.mockResolvedValue({success:false,error:'Collateral transfer failed'});
+ fx.refreshVaults.mockImplementation(async () => vaultInput.set({...base, borrowedIcusd:0}));
  await show(30393940000n);max().click();await tick();
  expect(submit().textContent?.trim()).toBe('Repay & Close');
  submit().click();
  await vi.waitFor(()=>expect(fx.refreshVaults).toHaveBeenCalledOnce());
  expect(fx.toastInfo).toHaveBeenCalledWith(expect.stringContaining('If its debt is now zero, use Withdraw & Close'),12000);
  expect(fx.toastError).not.toHaveBeenCalled();
+ expect(max()).toBeUndefined();
+ expect(submit().disabled).toBe(true);
 });
 it('does not show the previous account recovery hint after the wallet session changes during refresh',async()=>{
  let release!:()=>void;

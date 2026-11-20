@@ -10,8 +10,8 @@ describe('VaultCard repayment input contract', () => {
 
     // icUSD uses e8s raw units, so a value such as 1.995 must be valid in the
     // browser input and must remain the same value selected by Max.
-    expect(source).toContain('repayAmount = repayQuote.amount');
-    expect(source).toContain('$: repayInputMax = repayQuote?.amount;');
+    expect(source).toContain('repayAmount = repayInputMax');
+    expect(source).toContain('? repayQuote?.amount');
     expect(source).toContain('Max: {repayInputMax}');
     expect(source).toContain('min="0" max={repayInputMax} step={repayInputStep}');
   });
@@ -20,6 +20,6 @@ describe('VaultCard repayment input contract', () => {
     const source = readFileSync(componentPath, 'utf8');
 
     expect(source).toContain('computeSafeIcusdRepayMax');
-    expect(source).toContain("repayTokenType === 'icUSD' && spendableE8s >= debtE8s");
+    expect(source).toContain("spendableE8s >= quoteDebtE8s");
   });
 });
