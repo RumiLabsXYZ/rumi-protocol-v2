@@ -5,7 +5,7 @@ import { Principal } from '@dfinity/principal';
 vi.mock('$lib/services/auth',async()=>{const {writable}=await import('svelte/store');return {currentWalletType:writable('plug'),walletSessionGeneration:writable(0),WALLET_TYPES:{OISY:'oisy'}};});
 vi.mock('$lib/services/oisySigner',()=>({openOisySignerChannel:fx.openChannel}));
 vi.mock('$lib/services/repaymentOisySigner',()=>({beginRepaymentOisyAction:fx.beginOwned}));
-const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), beginOwned:vi.fn(), closeOwned:vi.fn(), toastError:vi.fn(), toastInfo:vi.fn(), refreshVaults:vi.fn() }));
+const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), beginOwned:vi.fn(), closeOwned:vi.fn(), toastError:vi.fn(), toastInfo:vi.fn(), refreshVaults:vi.fn(), withdraw:vi.fn(), withdrawAndClose:vi.fn(), borrow:vi.fn() }));
 vi.mock('../../stores/wallet', async () => {
   const { writable } = await import('svelte/store');
   return { walletStore: Object.assign(writable({principal:null,tokenBalances:{}}), {refreshBalance:vi.fn()}) };
@@ -21,7 +21,7 @@ vi.mock('../../stores/seasonStore', async () => {
   const {writable}=await import('svelte/store');
   return {seasonStore:{ensureLoaded:()=>{}},earningActive:writable(false)};
 });
-vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:500000000,ckstableRepayFee:0.01}),addMarginToVaultBound:fx.add,repayToVaultBound:fx.repay,repayAndCloseVaultBound:fx.close,repayToVaultWithStableBound:fx.stable}}));
+vi.mock('../../services/protocol', () => ({protocolService:{getProtocolStatus:async()=>({minIcusdAmount:500000000,ckstableRepayFee:0.01}),addMarginToVaultBound:fx.add,repayToVaultBound:fx.repay,repayAndCloseVaultBound:fx.close,repayToVaultWithStableBound:fx.stable,withdrawPartialCollateralBound:fx.withdraw,withdrawCollateralAndCloseVaultBound:fx.withdrawAndClose,borrowFromVaultBound:fx.borrow}}));
 vi.mock('../../services/ProtocolManager', () => ({protocolManager:{repayToVault:fx.repay,repayAndCloseVault:fx.close}}));
 vi.mock('../../services/protocol/apiClient', () => ({
   ApiClient:{getVaultInterestRate:async()=>0},
@@ -53,7 +53,7 @@ async function show(balance=30393000000n){
   component=mount(Harness,{target,props:{vaultInput}});await tick();await tick();
   [...target.querySelectorAll<HTMLButtonElement>('.pill-debt')].find(b=>b.textContent?.trim()==='Repay')!.click();await tick();
 }
-beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.closeOwned.mockReset().mockResolvedValue(undefined);fx.beginOwned.mockReset().mockImplementation((owner:Principal,assertCurrent:()=>void)=>({ready:fx.openChannel(owner).then(assertCurrent),close:fx.closeOwned}));fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
+beforeEach(()=>{fx.withdraw.mockReset().mockReturnValue(new Promise(() => {}));fx.withdrawAndClose.mockReset().mockReturnValue(new Promise(() => {}));fx.borrow.mockReset().mockReturnValue(new Promise(() => {}));target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.closeOwned.mockReset().mockResolvedValue(undefined);fx.beginOwned.mockReset().mockImplementation((owner:Principal,assertCurrent:()=>void)=>({ready:fx.openChannel(owner).then(assertCurrent),close:fx.closeOwned}));fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
 afterEach(async()=>{if(component)await unmount(component);component=null;target.remove();});
 it.each(['Withdraw & close', 'Keep vault open'])('keeps %s available after the debt changes', async (choice) => {
  vaultInput.set({...base, borrowedIcusd:60.01298575});
@@ -217,4 +217,62 @@ it('closes the owned popup when its card is destroyed during opening and never s
  expect(fx.closeOwned).toHaveBeenCalledOnce();
  release();await vi.waitFor(()=>expect(fx.toastError).toHaveBeenCalledWith(expect.stringContaining('vault view closed'),8000));
  expect(fx.repay).not.toHaveBeenCalled();
+});
+
+
+async function selectVaultAction(action: string) {
+ const buttons = [...target.querySelectorAll<HTMLButtonElement>('.pill')];
+ buttons.find(button => button.textContent?.trim() === action)!.click();
+ await tick();
+}
+
+function enterVaultAmount(amount: string) {
+ const field = target.querySelector<HTMLInputElement>('.action-input')!;
+ field.value = amount;
+ field.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+it.each(['0.049407', '0.049906', '0.000001'])(
+ 'submits a typed %s ckXAUT withdrawal without closing the vault',
+ async amount => {
+   vaultInput.set({...base, vaultId:40, borrowedIcusd:0, collateralAmount:0.049907,
+     collateralSymbol:'ckXAUT', collateralDecimals:6});
+   await show();
+   await selectVaultAction('Withdraw');
+   enterVaultAmount(amount);
+   await tick();
+   const button = target.querySelector<HTMLButtonElement>('.btn-submit-collateral')!;
+   expect(button.textContent?.trim()).toBe('Withdraw');
+   button.click();
+   await tick();
+   expect(fx.withdraw).toHaveBeenCalledWith(
+     expect.objectContaining({assertCurrent:expect.any(Function)}), 40, BigInt(amount.slice(2)));
+   expect(fx.withdrawAndClose).not.toHaveBeenCalled();
+ }
+);
+
+it('routes the displayed Max to Withdraw & Close when the vault has no debt', async () => {
+ vaultInput.set({...base, vaultId:40, borrowedIcusd:0, collateralAmount:0.049907,
+   collateralSymbol:'ckXAUT', collateralDecimals:6});
+ await show();
+ await selectVaultAction('Withdraw');
+ max().click();
+ await tick();
+ const button = target.querySelector<HTMLButtonElement>('.btn-submit-collateral')!;
+ expect(button.textContent?.trim()).toBe('Withdraw & Close');
+ button.click();
+ await tick();
+ expect(fx.withdrawAndClose).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}), 40);
+ expect(fx.withdraw).not.toHaveBeenCalled();
+});
+
+it('submits a typed borrow amount at exact icUSD precision', async () => {
+ vaultInput.set({...base, borrowedIcusd:0});
+ await show();
+ await selectVaultAction('Borrow');
+ enterVaultAmount('25.12345678');
+ await tick();
+ submit().click();
+ await tick();
+ expect(fx.borrow).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}), 33, 2_512_345_678n);
 });
