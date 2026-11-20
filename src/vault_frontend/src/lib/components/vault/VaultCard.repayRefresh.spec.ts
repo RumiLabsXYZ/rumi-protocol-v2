@@ -55,27 +55,33 @@ async function show(balance=30393000000n){
 }
 beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.closeOwned.mockReset().mockResolvedValue(undefined);fx.beginOwned.mockReset().mockImplementation((owner:Principal,assertCurrent:()=>void)=>({ready:fx.openChannel(owner).then(assertCurrent),close:fx.closeOwned}));fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
 afterEach(async()=>{if(component)await unmount(component);component=null;target.remove();});
-it('keeps an untouched Max selection valid when refreshed debt lowers the cap',async()=>{
- await show();max().click();await tick();const previous=input().valueAsNumber;
- vaultInput.set({...base,borrowedIcusd:300});await tick();
- expect(Number(input().max)).toBeLessThan(previous);
- expect(input().valueAsNumber).toBeLessThanOrEqual(Number(input().max));
- expect(submit().disabled).toBe(false);
- expect(target.textContent).toContain('Max was reduced');
- expect(fx.repay).not.toHaveBeenCalled();expect(fx.close).not.toHaveBeenCalled();
+it.each(['Withdraw & close', 'Keep vault open'])('keeps %s available after the debt changes', async (choice) => {
+ vaultInput.set({...base, borrowedIcusd:60.01298575});
+ const method = choice === 'Withdraw & close' ? fx.close : fx.repay;
+ method.mockReturnValue(new Promise(() => {}));
+ await show();
+ expect(max().textContent?.trim()).toBe('Max: 60.01299');
+ max().click();await tick();
+ const option = () => [...target.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+   .find(button => button.textContent?.trim() === choice)!;
+ option().click();await tick();
+ for (const debt of [60.01298587, 60.01298431, 60.013001]) {
+   vaultInput.set({...base, borrowedIcusd:debt});await tick();
+   expect(option().getAttribute('aria-checked')).toBe('true');
+   expect(input().value).toBe('60.01299');
+   expect(submit().disabled).toBe(false);
+ }
+ submit().click();await tick();
+ expect(method).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),33,6_001_299_000n);
+ expect(choice === 'Withdraw & close' ? fx.repay : fx.close).not.toHaveBeenCalled();
 });
-it('does not rewrite a manually entered amount after a cap decrease',async()=>{
- await show();max().click();await tick();input().value='300.899015';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();
- vaultInput.set({...base,borrowedIcusd:300});await tick();
- expect(input().value).toBe('300.899015');expect(submit().disabled).toBe(true);
- expect(target.textContent).toContain('Choose Max again');
-});
+
 it('keeps partial repayment when the balance cannot cover debt and approval',async()=>{
  await show(30393939999n); // one e8 below debt + approval fee
  max().click();await tick();
  expect(input().valueAsNumber).toBeLessThan(base.borrowedIcusd);
  expect(submit().textContent?.trim()).toBe('Repay');
- expect(target.textContent).toContain('0.001');
+ expect(target.querySelector('[role="radiogroup"]')).toBeNull();
 });
 it('never raises an untouched Max selection when the safe cap grows',async()=>{
  await show();max().click();await tick();const selected=input().value;
@@ -123,25 +129,17 @@ it('keeps manual repayment disabled when the safe maximum falls to zero',async()
  expect(fx.repay).not.toHaveBeenCalled();
 });
 
-it('uses a wallet-limited near-full payment without closing and previews forgiveness',async()=>{
+it('uses a wallet-limited near-full payment without closing or showing dust copy',async()=>{
  vaultInput.set({...base,borrowedIcusd:2});
  fx.repay.mockReturnValue(new Promise(()=>{}));
  await show(199600000n);max().click();await tick();
  expect(input().valueAsNumber).toBe(1.995);
  expect(submit().textContent?.trim()).toBe('Repay');
- expect(target.textContent).toContain('Estimated debt after payment: 0');
- expect(target.textContent).toContain('Estimated forgiveness: 0.005');
+ expect(target.textContent).not.toContain('Estimated forgiveness:');
+ expect(target.textContent).not.toContain('Max reserves');
  submit().click();await tick();
  expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({expectedPrincipalText:expect.any(String),assertCurrent:expect.any(Function)}),33,199_500_000n);
  expect(fx.close).not.toHaveBeenCalled();
-});
-it('shows exactly 0.1 as remaining debt rather than forgiven',async()=>{
- vaultInput.set({...base,borrowedIcusd:2});
- await show(190100000n);max().click();await tick();
- expect(input().valueAsNumber).toBe(1.9);
- expect(target.textContent).toContain('Estimated debt after payment: 0.1');
- expect(target.textContent).not.toContain('Estimated forgiveness:');
- expect(submit().textContent?.trim()).toBe('Repay');
 });
 it('floors a ckUSDC Max to six decimals and dispatches the exact debt e8s',async()=>{
  await show();

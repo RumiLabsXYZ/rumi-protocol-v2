@@ -114,6 +114,7 @@
   <section class="doc-section">
     <h2 class="doc-heading">Closing Your Vault</h2>
     <p>To close a vault, you must first repay all outstanding icUSD debt, then withdraw your collateral. The protocol offers two compound operations: <strong>withdraw-and-close</strong> (withdraws remaining collateral and closes a zero-debt vault in one call) and <strong>repay-and-close</strong> (repays your full debt, withdraws all collateral, and closes the vault in a single call). Dust amounts below 0.0005 icUSD are forgiven automatically on close.</p>
+    <p>After a successful repayment, a remaining debt below 0.1 icUSD is forgiven; a balance of exactly 0.1 icUSD is not. Repaying without closing leaves your collateral in the vault. For icUSD repayments, Max reserves 0.001 icUSD for a possible token approval fee. Repayment itself burns icUSD without a separate transfer fee, and an existing allowance may avoid the approval fee.</p>
   </section>
 
   <section class="doc-section">

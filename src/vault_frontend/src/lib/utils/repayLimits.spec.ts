@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeSafeIcusdRepayMax, repaymentPreview, normalizedRepaymentE8s } from './repayLimits';
+import { computeSafeIcusdRepayMax, quoteFullIcusdRepayment, repaymentPreview, normalizedRepaymentE8s } from './repayLimits';
 
 describe('repayment authorization and settlement estimates', () => {
   it('uses the spendable balance without increasing a near-full payment', () => {
@@ -46,5 +46,13 @@ describe('stable repayment precision', () => {
     expect(repaymentPreview(110_000_000n, normalizedRepaymentE8s(100_000_001n, true)).remainingE8s).toBe(10_000_000n);
     expect(repaymentPreview(110_000_000n, normalizedRepaymentE8s(100_000_001n)).forgivenE8s).toBe(9_999_999n);
     expect(normalizedRepaymentE8s(5_000_001n, true)).toBeLessThan(5_000_001n);
+  });
+});
+
+describe('full repayment quote', () => {
+  it('rounds up to five decimals and never exceeds available funds', () => {
+    expect(quoteFullIcusdRepayment(6_001_298_575n, 7_000_000_000n)).toBe(6_001_299_000n);
+    expect(quoteFullIcusdRepayment(6_001_298_575n, 6_001_298_600n)).toBe(6_001_298_600n);
+    expect(quoteFullIcusdRepayment(6_001_299_000n, 7_000_000_000n)).toBe(6_001_299_000n);
   });
 });

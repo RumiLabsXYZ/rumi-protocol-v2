@@ -25,7 +25,7 @@
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
-  import { computeSafeIcusdRepayMax, claimRepayMaximum, MIN_REPAY_E8S, repaymentPreview, normalizedRepaymentE8s } from '$lib/utils/repayLimits';
+  import { computeSafeIcusdRepayMax, quoteFullIcusdRepayment, claimRepayMaximum, MIN_REPAY_E8S, repaymentPreview, normalizedRepaymentE8s } from '$lib/utils/repayLimits';
   import { getVaultCrTextColor, VAULT_CR_DANGER } from '$lib/utils/vaultHealth';
   import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
@@ -83,7 +83,7 @@
     if (!expanded) {
       activeAction = 'repay';
       addCollateralAmount = ''; borrowAmount = ''; repayAmount = ''; withdrawAmount = '';
-      repayMaxSelected = false; repayMaxAdjusted = false;
+      repayMaxSelected = false; repayQuote = null;
       // Fetch per-vault dynamic interest rate (CR-dependent)
       ApiClient.getVaultInterestRate(vault.vaultId).then(rate => {
         if (rate !== null) dynamicInterestRate = rate;
@@ -422,7 +422,7 @@
   let borrowAmount = '';
   let repayAmount = '';
   let repayMaxSelected = false;
-  let repayMaxAdjusted = false;
+  let repayQuote: { amount: string; fullDebt: boolean } | null = null;
   let isProcessing = false;
   let isWithdrawingAndClosing = false;
   let showTokenDropdown = false;
@@ -437,12 +437,12 @@
     if (activeAction === action) return; // already selected — do nothing
     clearMessages();
     addCollateralAmount = ''; withdrawAmount = ''; borrowAmount = ''; repayAmount = '';
-    repayMaxSelected = false; repayMaxAdjusted = false;
+    repayMaxSelected = false; repayQuote = null;
     closeOnFullRepay = true; // reset full-repay choice to the default (close)
     activeAction = action;
   }
 
-  function onTokenChange() { repayAmount = ''; repayMaxSelected = false; repayMaxAdjusted = false; clearMessages(); }
+  function onTokenChange() { repayAmount = ''; repayMaxSelected = false; repayQuote = null; clearMessages(); }
 
   $: repayTokenLabel = repayTokenType === 'icUSD' ? 'icUSD'
     : repayTokenType === 'CKUSDT' ? 'ckUSDT' : 'ckUSDC';
@@ -458,6 +458,8 @@
   $: if (bitcoinOnly && repayTokenType !== 'icUSD') {
     repayTokenType = 'icUSD';
     repayAmount = '';
+    repayMaxSelected = false;
+    repayQuote = null;
     showTokenDropdown = false;
   }
 
@@ -549,7 +551,8 @@
 
   $: repayOverMax = (() => {
     const v = parseFloat(repayAmount);
-    return v > 0 && v > maxRepayable;
+    return v > 0 && (v > Number(repayQuote?.amount ?? 0) || v > claimSpendable
+      || (repayMaxSelected && repayQuote?.fullDebt === true && tickingDebt - v >= MIN_REPAY));
   })();
 
   $: canWithdraw = !isRedemptionClaim && tickingDebt < DUST_THRESHOLD && vaultCollateralAmount > 0;
@@ -575,19 +578,12 @@
 
   // Detect if repay amount is the full debt (max). Only icUSD-denominated
   // repays can be merged with close — the compound backend method takes icUSD.
-  $: isMaxRepay = (() => {
-    const amt = parseFloat(repayAmount);
-    const selectedMax = amt > 0 && maxRepayable > 0 && Math.abs(amt - maxRepayable) < 0.00000001;
-    // A wallet-limited icUSD max is a safe partial repayment. Only route it
-    // through repay_and_close when the wallet can cover the full live debt.
-    const fullIcusdDebtAffordable = repayTokenType !== 'icUSD' || maxRepayable >= tickingDebt;
-    return selectedMax && fullIcusdDebtAffordable;
-  })();
+  $: isMaxRepay = repayMaxSelected && repayQuote?.fullDebt === true
+    && Number(repayAmount) === Number(repayQuote.amount);
   // A full icUSD repay on a vault that still holds collateral can route through
   // the backend repay_and_close_vault compound method (repay full debt +
   // withdraw all collateral + close, in one call — one Oisy consent screen
-  // instead of three). `isMaxRepay` guarantees `repayAmount == maxRepayable`
-  // (the live debt), so the compound method always receives a full-debt amount.
+  // instead of three). `isMaxRepay` preserves the full-debt choice made from the quoted amount.
   $: fullIcusdRepayWithCollateral =
       !isRedemptionClaim && repayTokenType === 'icUSD'
       && isMaxRepay
@@ -598,7 +594,7 @@
   // when the full debt is at least the minimum. Stuck-zone vaults (debt in the
   // (DUST, 0.1) band) can ONLY clear via repay_and_close, which bypasses
   // the floor — so we don't offer them the choice; they always close.
-  $: canKeepVaultOpenOnFullRepay = fullIcusdRepayWithCollateral && maxRepayable >= MIN_REPAY;
+  $: canKeepVaultOpenOnFullRepay = fullIcusdRepayWithCollateral && Number(repayQuote?.amount ?? 0) >= MIN_REPAY;
   // Native XRP releases withdrawable collateral into a settlement claim, but the
   // vault stays open because the XRPL reserve remains locked at its address.
   // Other collateral can still honor the user's keep-open choice.
@@ -630,29 +626,29 @@
   function setMaxBorrow() {
     if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 4);
   }
+  // Freeze one quote for this panel and token. Round full icUSD debt up to
+  // 0.00001, without ever authorizing more than the spendable balance.
+  $: if (expanded && activeAction === 'repay' && repayQuote === null && maxRepayable > 0) {
+    const debtE8s = BigInt(Math.max(0, Math.ceil(tickingDebt * E8S)));
+    const spendableE8s = walletIcusdRaw > ICUSD_REPAY_APPROVAL_RESERVE_E8S ? walletIcusdRaw - ICUSD_REPAY_APPROVAL_RESERVE_E8S : 0n;
+    const fullDebt = !isRedemptionClaim && repayTokenType === 'icUSD' && spendableE8s >= debtE8s;
+    const quoted = fullDebt
+      ? quoteFullIcusdRepayment(debtE8s, spendableE8s)
+      : null;
+    const amount = quoted === null
+      ? floorTo(maxRepayable, isCkStableRepay ? 6 : 8)
+      : `${quoted / 100_000_000n}.${(quoted % 100_000_000n).toString().padStart(8, '0')}`.replace(/0+$/, '').replace(/\.$/, '');
+    repayQuote = { amount, fullDebt };
+  }
+
   function setMaxRepay() {
-    if (isProcessing) return;
-    if (maxRepayable > 0) {
-      repayAmount = floorTo(maxRepayable, repayInputDecimals);
-      repayMaxSelected = true;
-      repayMaxAdjusted = false;
-    }
+    if (isProcessing || !repayQuote) return;
+    repayAmount = repayQuote.amount;
+    repayMaxSelected = true;
   }
 
-  // icUSD debt uses e8s, while ckUSDC/ckUSDT wallets use six-decimal ledger
-  // units. Keep Max and the native input constraint on the selected token's
-  // exact precision so the UI never generates an amount the bound path rejects.
-  $: repayInputDecimals = isCkStableRepay ? 6 : 8;
   $: repayInputStep = isCkStableRepay ? '0.000001' : '0.00000001';
-  $: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, repayInputDecimals) : undefined;
-
-  // A backend refresh can lower the interpolated debt and its partial-repay cap.
-  // Only lower an untouched Max selection; never rewrite typed amounts, raise
-  // a selected amount, or change the request while a wallet action is pending.
-  $: if (repayMaxSelected && !isProcessing && Number(repayAmount) > Number(repayInputMax ?? 0)) {
-    repayAmount = repayInputMax ?? '';
-    repayMaxAdjusted = true;
-  }
+  $: repayInputMax = repayQuote?.amount;
 
   function clampInput(field: 'add' | 'withdraw' | 'borrow' | 'repay') {
     if (field === 'add') {
@@ -844,12 +840,13 @@
       return;
     }
     if (amountRaw <= 0n) { toastStore.error('Enter a valid amount', 8000); return; }
-    const amount = Number(amountRaw) / E8S;
+    const closeAtClick = isRepayAndClose;
+    const tokenAtClick = repayTokenType;
     // The fixed 0.1 icUSD floor still applies to partial repays (anti-spam guarantee on
     // the backend). The compound `repay_and_close_vault` path bypasses it so
     // stuck-zone vaults can be cleared — match that here.
-    if (!isRepayAndClose && !claimFullRepaySelected && amountRaw < MIN_REPAY_E8S) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
-    if (repayOverMax) { toastStore.error(`Max: ${formatNumber(maxRepayable, 2)} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`, 8000); return; }
+    if (!closeAtClick && !claimFullRepaySelected && amountRaw < MIN_REPAY_E8S) { toastStore.error(`Minimum repay amount is ${MIN_REPAY} icUSD`, 8000); return; }
+    if (repayOverMax) { toastStore.error('Enter a lower amount or reopen Repay for a new quote.', 8000); return; }
     clearMessages(); isProcessing = true;
     const principalAtClick = $walletStore.principal;
     const ownerAtClick = principalAtClick?.toText();
@@ -875,32 +872,32 @@
       }
       if (!repaymentViewActive || !current()) throw new Error('Wallet session changed. No new repayment was submitted.');
       let result;
-      if (isRepayAndClose) {
+      if (closeAtClick) {
         // Compound: repay full debt + withdraw all collateral + close vault in
         // one backend call (one Oisy consent screen instead of three).
         result = await protocolService.repayAndCloseVaultBound(ctx, vault.vaultId, amountRaw);
-      } else if (repayTokenType === 'icUSD') {
+      } else if (tokenAtClick === 'icUSD') {
         result = await protocolService.repayToVaultBound(ctx, vault.vaultId, amountRaw);
       } else {
-        result = await protocolService.repayToVaultWithStableBound(ctx, vault.vaultId, amountRaw, repayTokenType);
+        result = await protocolService.repayToVaultWithStableBound(ctx, vault.vaultId, amountRaw, tokenAtClick);
       }
       if (result.success) {
-        const actionLabel = isRepayAndClose
+        const actionLabel = closeAtClick
           ? (isNativeXrp
               ? `Repaid all debt and queued your withdrawable XRP for settlement. ${nativeXrpKeepOpenCloseCopy()}`
               : 'Repaid and closed vault')
-          : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
+          : 'Repayment confirmed.';
         const msg = result.oisyResilient
           ? `${actionLabel} (wallet glitch ignored — operation confirmed on-chain).`
           : actionLabel;
         toastStore.success(msg, 8000); repayAmount = '';
-        repayMaxSelected = false; repayMaxAdjusted = false;
+        repayMaxSelected = false;
         await new Promise(r => setTimeout(r, 1000));
         // For non-XRP repay-and-close, refresh the full vault list because the
         // vault is gone. Native-XRP vaults remain open.
-        await runConfirmedActionRefresh(isRepayAndClose ? 'Repay and close' : 'Repayment', ctx,
+        await runConfirmedActionRefresh(closeAtClick ? 'Repay and close' : 'Repayment', ctx,
           async () => {
-            await (isRepayAndClose && !isNativeXrp
+            await (closeAtClick && !isNativeXrp
               ? vaultStore.refreshVaults(ctx)
               : vaultStore.refreshVault(vault.vaultId, ctx));
             if (ctx.assertCurrent()) await walletStore.refreshBalance({ skipCache: true }, ctx);
@@ -908,10 +905,11 @@
           (message) => toastStore.info(message, 12000));
         // Repaying lowers this collateral's aggregate debt: refresh ceiling headroom.
         appDataStore.fetchCollateralTotals(true).catch(() => {});
+        repayQuote = null;
         dispatch('updated');
       } else if (result.ambiguous) {
         toastStore.info(result.error || 'The repayment outcome is unknown. Check the vault and ledger before retrying.', 12000);
-      } else if (isRepayAndClose && ctx.assertCurrent()) {
+      } else if (closeAtClick && ctx.assertCurrent()) {
         // The compound backend commits repayment before returning collateral.
         // A typed close error can therefore leave a debt-free, still-open
         // vault. Refresh before guiding the user so a retry cannot be based on
@@ -1276,7 +1274,7 @@
               {#if isRedemptionClaim}<span class="repay-close-hint">The entered amount is the maximum payment. Max includes a small buffer for accrued interest, bounded by your available balance. The protocol charges the actual debt, up to that maximum. Keep enough balance and allowance for fees; refresh if the outcome is unclear.</span>{/if}
               <div class="input-header">
                 <span class="input-label">Repay Debt {#if $earningActive}<MultiplierBadge multiplier={5} comingSoon label="5× soon" />{/if}</span>
-                {#if maxRepayable > 0}
+                {#if repayQuote}
                   <button class="max-text" on:click={setMaxRepay} disabled={isProcessing}>Max: {repayInputMax}</button>
                 {/if}
               </div>
@@ -1284,7 +1282,7 @@
                 <input type="number" class="action-input action-input-repay" value={repayAmount}
                   on:input={(event) => {
                     repayAmount = event.currentTarget.value;
-                    repayMaxSelected = false; repayMaxAdjusted = false;
+                    repayMaxSelected = false;
                   }}
                   on:blur={() => clampInput('repay')}
                   placeholder="0.00" min="0" max={repayInputMax} step={repayInputStep} inputmode="decimal" disabled={isProcessing} />
@@ -1320,21 +1318,8 @@
                   {/if}
                 {/if}
               </div>
-              {#if repayTokenType === 'icUSD'}
-                <p class="repay-close-hint">Max reserves 0.001 icUSD for token approval. Repayment burns icUSD without a separate transfer fee. An existing allowance may avoid the approval fee.</p>
-                {#if !isRedemptionClaim && maxRepayable > 0 && maxRepayable < tickingDebt}
-                  <p class="repay-close-hint">Max uses your available balance after reserving the approval fee. You will not be charged more than the amount you authorize.</p>
-                {/if}
-              {/if}
-              <p class="repay-close-hint">After a successful repayment, remaining debt below 0.1 icUSD is forgiven. Exactly 0.1 icUSD remains payable. Forgiveness alone leaves your collateral deposited.</p>
-              {#if Number(repayAmount) > 0 && repayPreviewEligible}
-                <p class="repay-close-hint">Estimated debt after payment: {formatStableTx(Number(repaySettlementEstimate.remainingE8s) / E8S)} icUSD.{#if repaySettlementEstimate.forgivenE8s > 0n} Estimated forgiveness: {formatStableTx(Number(repaySettlementEstimate.forgivenE8s) / E8S)} icUSD.{/if} Interest accrued before settlement may change this estimate.</p>
-              {/if}
-              {#if repayMaxAdjusted}
-                <p class="repay-close-hint" role="status">Max was reduced to the refreshed safe limit. Review the amount before repaying.</p>
-              {/if}
               {#if repayOverMax}
-                <p class="repay-close-hint" role="status">The safe repayment limit changed. Choose Max again or enter a lower amount.</p>
+                <p class="repay-close-hint" role="status">Enter a lower amount or reopen Repay for a new quote.</p>
               {/if}
               {#if canKeepVaultOpenOnFullRepay && !isNativeXrp}
                 <div class="repay-close-toggle" role="radiogroup" aria-label="After repaying full debt">

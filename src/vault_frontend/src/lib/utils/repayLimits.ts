@@ -34,3 +34,10 @@ export function claimRepayMaximum(debt: number, spendable: number, safePartial: 
   if (spendable < debt) return Math.min(safePartial, spendable);
   return Math.min(spendable, debt + Math.max(0.01, debt * 0.001));
 }
+
+/** Round a full-debt authorization up to 0.00001 icUSD, capped by funds. */
+export function quoteFullIcusdRepayment(debtE8s: bigint, spendableE8s: bigint): bigint {
+  if (debtE8s <= 0n || spendableE8s <= 0n) return 0n;
+  const rounded = ((debtE8s + 999n) / 1000n) * 1000n;
+  return rounded < spendableE8s ? rounded : spendableE8s;
+}
