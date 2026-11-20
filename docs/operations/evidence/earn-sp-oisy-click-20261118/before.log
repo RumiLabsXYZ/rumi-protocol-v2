@@ -1,0 +1,73 @@
+ RUN  v4.1.12 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+7:11:49 PM [vite-plugin-svelte] src/lib/components/stability-pool/DepositInterface.svelte:502:8 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+7:11:49 PM [vite-plugin-svelte] src/lib/components/stability-pool/DepositInterface.svelte:502:8 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+ ❯ src/lib/components/stability-pool/DepositInterface.oisy.spec.ts (5 tests | 4 failed) 139ms
+     × opens from the fresh deposit click before awaiting, then preserves exact amount and context 67ms
+     × opens before resuming and preserves the saved ledger and amount instead of allocating a new request 6ms
+     × does not enter the deposit service if opening the channel fails 7ms
+     × does not start a second action while the channel is opening 4ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/components/stability-pool/DepositInterface.oisy.spec.ts > SP deposit click-time OISY channel > opens from the fresh deposit click before awaiting, then preserves exact amount and context
+AssertionError: expected "vi.fn()" to be called with arguments: [ Principal{ …(2) } ]
+
+Number of calls: 0
+
+ ❯ src/lib/components/stability-pool/DepositInterface.oisy.spec.ts:67:24
+     65|   it('opens from the fresh deposit click before awaiting, then preserv…
+     66|     render(); await enterAmount(); submit().click();
+     67|     expect(fx.channel).toHaveBeenCalledWith(owner); expect(fx.deposit)…
+       |                        ^
+     68|     const context = fx.context.mock.results.at(-1)!.value;
+     69|     open(); await vi.waitFor(() => expect(fx.deposit).toHaveBeenCalled…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  src/lib/components/stability-pool/DepositInterface.oisy.spec.ts > SP deposit click-time OISY channel > opens before resuming and preserves the saved ledger and amount instead of allocating a new request
+AssertionError: expected "vi.fn()" to be called with arguments: [ Principal{ …(2) } ]
+
+Number of calls: 0
+
+ ❯ src/lib/components/stability-pool/DepositInterface.oisy.spec.ts:76:24
+     74|     fx.pending = { owner: owner.toText(), ledger: lockedLedger.toText(…
+     75|     render(); submit().click();
+     76|     expect(fx.channel).toHaveBeenCalledWith(owner); expect(fx.deposit)…
+       |                        ^
+     77|     const context = fx.context.mock.results.at(-1)!.value;
+     78|     open(); await vi.waitFor(() => expect(fx.deposit).toHaveBeenCalled…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  src/lib/components/stability-pool/DepositInterface.oisy.spec.ts > SP deposit click-time OISY channel > does not enter the deposit service if opening the channel fails
+AssertionError: expected "vi.fn()" to be called once, but got 0 times
+ ❯ src/lib/components/stability-pool/DepositInterface.oisy.spec.ts:83:24
+     81|   it('does not enter the deposit service if opening the channel fails'…
+     82|     render(); await enterAmount(); submit().click();
+     83|     expect(fx.channel).toHaveBeenCalledOnce(); reject(new Error('Signe…
+       |                        ^
+     84|     await vi.waitFor(() => expect(host.textContent).toContain('Signer …
+     85|     expect(fx.deposit).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+ FAIL  src/lib/components/stability-pool/DepositInterface.oisy.spec.ts > SP deposit click-time OISY channel > does not start a second action while the channel is opening
+AssertionError: expected "vi.fn()" to be called once, but got 0 times
+ ❯ src/lib/components/stability-pool/DepositInterface.oisy.spec.ts:89:24
+     87|   it('does not start a second action while the channel is opening', as…
+     88|     render(); await enterAmount(); submit().click(); submit().click();
+     89|     expect(fx.channel).toHaveBeenCalledOnce(); open(); await vi.waitFo…
+       |                        ^
+     90|   });
+     91|   it('rejects an invalid balance before opening any channel or startin…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed | 1 passed (5)
+   Start at  19:11:47
+   Duration  1.99s (transform 784ms, setup 22ms, import 887ms, tests 139ms, environment 809ms)

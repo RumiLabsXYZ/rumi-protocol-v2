@@ -31,6 +31,8 @@ import {
   type ActionBoundContext,
 } from './walletOperations';
 import { pnp } from '../pnp';
+import { createOisyActor } from '../oisySigner';
+import { getRepaymentOisySignerAgent } from '../repaymentOisySigner';
 import { get } from 'svelte/store';
 import { QueryOperations } from './queryOperations';
 import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '../auth';
@@ -1536,6 +1538,15 @@ private static async executeBoundRepayment(
   }
 }
 
+/** Route both repayment substeps through the same click-owned Oisy agent. */
+private static async getBoundRepaymentActor(ctx: ActionBoundContext): Promise<_SERVICE> {
+  assertActionBoundContextCurrent(ctx);
+  if (!isOisyWallet()) return ApiClient.getBoundAuthenticatedActor(ctx);
+  const signerAgent = getRepaymentOisySignerAgent(Principal.fromText(ctx.expectedPrincipalText));
+  assertActionBoundContextCurrent(ctx);
+  return createOisyActor(CONFIG.currentCanisterId, rumi_backendIDL, signerAgent) as _SERVICE;
+}
+
 private static async ensureBoundRepaymentAllowance(
   ctx: ActionBoundContext,
   ledgerId: string,
@@ -1543,6 +1554,27 @@ private static async ensureBoundRepaymentAllowance(
   onApprovalDispatch: () => void,
 ): Promise<void> {
   assertActionBoundContextCurrent(ctx);
+  if (isOisyWallet()) {
+    // Reuse the action-owned signer opened by this repayment click. PNP's
+    // independent legacy signer must not replace or close this channel.
+    const signerAgent = getRepaymentOisySignerAgent(Principal.fromText(ctx.expectedPrincipalText));
+    const ledgerActor = createOisyActor(ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+    assertActionBoundContextCurrent(ctx);
+    onApprovalDispatch();
+    const approval = await ledgerActor.icrc2_approve({
+      amount: approvalAmount,
+      spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
+      expires_at: largeApprovalExpiry(), expected_allowance: [], memo: [], fee: [],
+      from_subaccount: [], created_at_time: [],
+    });
+    assertActionBoundContextCurrent(ctx);
+    if (!('Ok' in approval)) {
+      const detail = approval.Err && typeof approval.Err === 'object' ? Object.keys(approval.Err)[0] : String(approval.Err);
+      throw new Error(`Repayment approval failed: ${detail}`);
+    }
+    return;
+  }
+
   // Oisy must reach its signer without an intervening allowance query. Other
   // wallets can avoid a redundant approval when the exact large allowance is
   // already present. Both paths keep that allowance time-bounded.
@@ -1580,7 +1612,7 @@ static async repayToVaultBound(
         return { success: false, error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S} icUSD` };
       }
 
-      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      const actor = await ApiClient.getBoundRepaymentActor(ctx);
       assertActionBoundContextCurrent(ctx);
       await ApiClient.ensureBoundRepaymentAllowance(
         ctx,
@@ -1626,7 +1658,7 @@ static async repayAndCloseVaultBound(
       if (!Number.isSafeInteger(vaultId) || vaultId < 0 || amountE8s <= 0n || amountE8s > NAT64_MAX) {
         return { success: false, error: 'Vault ID and repayment amount must be valid positive values.' };
       }
-      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      const actor = await ApiClient.getBoundRepaymentActor(ctx);
       assertActionBoundContextCurrent(ctx);
       await ApiClient.ensureBoundRepaymentAllowance(
         ctx,
@@ -1684,7 +1716,7 @@ static async repayToVaultWithStableBound(
         return { success: false, error: `Amount too low. Minimum repayment amount: ${Number(MIN_REPAY_E8S) / E8S}` };
       }
 
-      const actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      const actor = await ApiClient.getBoundRepaymentActor(ctx);
       assertActionBoundContextCurrent(ctx);
       const ledgerId = CONFIG.getStableLedgerId(tokenType);
       await ApiClient.ensureBoundRepaymentAllowance(

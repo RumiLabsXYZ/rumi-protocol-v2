@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
-const fx = vi.hoisted(() => ({ repay:vi.fn(), close:vi.fn(), stable:vi.fn(), oisy:false }));
+const fx = vi.hoisted(() => ({ repay:vi.fn(), close:vi.fn(), stable:vi.fn(), oisy:false, directAgent:{}, directActor:vi.fn(), directApprove:vi.fn(), ownedSigner:vi.fn() }));
 vi.mock('@dfinity/agent',()=>({HttpAgent:class {fetchRootKey(){return Promise.resolve();}},Actor:{createActor:()=>({})}}));
-vi.mock('../../config',()=>({CANISTER_IDS:{},LOCAL_CANISTER_IDS:{},CONFIG:{host:'https://icp-api.io',currentCanisterId:'aaaaa-aa',currentIcusdLedgerId:'ryjl3-tyaaa-aaaaa-aaaba-cai',getStableLedgerId:(token:string)=>token==='CKUSDC'?'xevnm-gaaaa-aaaar-qafnq-cai':'cngnf-vqaaa-aaaar-qag4q-cai'}}));
+vi.mock('../../config',()=>({CANISTER_IDS:{},LOCAL_CANISTER_IDS:{},CONFIG:{host:'https://icp-api.io',icusd_ledgerIDL:{},currentCanisterId:'aaaaa-aa',currentIcusdLedgerId:'ryjl3-tyaaa-aaaaa-aaaba-cai',getStableLedgerId:(token:string)=>token==='CKUSDC'?'xevnm-gaaaa-aaaar-qafnq-cai':'cngnf-vqaaa-aaaar-qag4q-cai'}}));
 vi.mock('../../stores/wallet',async()=>{const {writable}=await import('svelte/store');return {walletStore:writable({})};});
 vi.mock('./walletOperations',()=>({walletOperations:{checkCollateralAllowanceBound:vi.fn().mockResolvedValue(1_000_000_000_000_000_000n),approveCollateralTransferBound:vi.fn().mockResolvedValue({success:true})},isOisyWallet:()=>fx.oisy,largeApprovalExpiry:()=>[],assertActionBoundContextCurrent:(ctx:any)=>{if(!ctx.assertCurrent())throw new Error('wallet session changed');},StaleActionSessionError:class extends Error {}}));
 vi.mock('../pnp',()=>({pnp:{}}));
@@ -12,11 +12,16 @@ vi.mock('../../stores/collateralStore',()=>({collateralStore:{}}));
 vi.mock('../tokenService',()=>({TokenService:{}}));
 vi.mock('./vaultOperationJournal',()=>({}));
 vi.mock('./oisyResilience',()=>({callWithOisyFalseNegativeGuard:(fn:()=>unknown)=>fn(),isOisyArrFalseNegative:()=>false,isOisyLandedSentinel:()=>false}));
+vi.mock('../repaymentOisySigner',()=>({getRepaymentOisySignerAgent:fx.ownedSigner}));
+vi.mock('../oisySigner',()=>({createOisyActor:fx.directActor}));
 import { ApiClient, updateMinIcusdAmount } from './apiClient';
 import { walletOperations } from './walletOperations';
 const ctx={expectedPrincipalText:'aaaaa-aa',assertCurrent:()=>true};
 beforeEach(()=>{
  fx.oisy=false;
+ fx.ownedSigner.mockReset().mockReturnValue(fx.directAgent);
+ fx.directApprove.mockReset().mockResolvedValue({Ok:1n});
+ fx.directActor.mockReset().mockImplementation((id:string)=>id==='aaaaa-aa'?{repay_to_vault:fx.repay,repay_and_close_vault:fx.close,repay_to_vault_with_stable:fx.stable}:{icrc2_approve:fx.directApprove});
  vi.spyOn(ApiClient,'executeSequentialOperation').mockImplementation((fn:any)=>fn());
  vi.spyOn(ApiClient as any,'getAuthenticatedActor').mockResolvedValue({repay_to_vault:fx.repay,repay_and_close_vault:fx.close,repay_to_vault_with_stable:fx.stable});
  vi.spyOn(ApiClient as any,'getBoundAuthenticatedActor').mockResolvedValue({repay_to_vault:fx.repay,repay_and_close_vault:fx.close,repay_to_vault_with_stable:fx.stable});
@@ -97,8 +102,60 @@ it('keeps the Oisy click path free of an allowance query before approval and exa
  const result=await ApiClient.repayToVaultBound(ctx,33,12_500_002n);
  expect(result.success).toBe(true);
  expect(walletOperations.checkCollateralAllowanceBound).not.toHaveBeenCalled();
- expect(walletOperations.approveCollateralTransferBound).toHaveBeenCalledWith(
-  ctx,100_000_000_000_000_000n,'aaaaa-aa','ryjl3-tyaaa-aaaaa-aaaba-cai'
- );
+ expect(walletOperations.approveCollateralTransferBound).not.toHaveBeenCalled();
+ expect(fx.directApprove).toHaveBeenCalledWith(expect.objectContaining({amount:100_000_000_000_000_000n,spender:expect.objectContaining({owner:expect.anything()})}));
  expect(fx.repay).toHaveBeenCalledWith({vault_id:33n,amount:12_500_002n});
+});
+
+it('uses one click-owned signer for vault197 approval and149.99icUSD repayment, never the legacy PNP actor',async()=>{
+ fx.oisy=true;
+ vi.mocked((ApiClient as any).getBoundAuthenticatedActor).mockRejectedValue(new Error('legacy PNP actor must not be used'));
+ const result=await ApiClient.repayToVaultBound(ctx,197,14_999_000_000n);
+ expect(result.success).toBe(true);
+ expect((ApiClient as any).getBoundAuthenticatedActor).not.toHaveBeenCalled();
+ expect(walletOperations.approveCollateralTransferBound).not.toHaveBeenCalled();
+ expect(fx.directActor).toHaveBeenCalledWith('aaaaa-aa',expect.anything(),fx.directAgent);
+ expect(fx.directActor).toHaveBeenCalledWith('ryjl3-tyaaa-aaaaa-aaaba-cai',expect.anything(),fx.directAgent);
+ expect(fx.directApprove).toHaveBeenCalledOnce();
+ expect(fx.repay).toHaveBeenCalledWith({vault_id:197n,amount:14_999_000_000n});
+ expect(fx.directApprove.mock.invocationCallOrder[0]).toBeLessThan(fx.repay.mock.invocationCallOrder[0]);
+});
+
+it('uses the same owned signer for explicit close and each six-decimal stable ledger',async()=>{
+ fx.oisy=true;
+ expect((await ApiClient.repayAndCloseVaultBound(ctx,197,14_999_000_000n)).success).toBe(true);
+ expect(fx.close).toHaveBeenCalledWith({vault_id:197n,amount:14_999_000_000n});
+ for(const token of ['CKUSDC','CKUSDT'] as const){
+   expect((await ApiClient.repayToVaultWithStableBound(ctx,197,14_999_000_000n,token)).success).toBe(true);
+   expect(fx.directActor).toHaveBeenCalledWith(token==='CKUSDC'?'xevnm-gaaaa-aaaar-qafnq-cai':'cngnf-vqaaa-aaaar-qag4q-cai',expect.anything(),fx.directAgent);
+   expect(fx.stable).toHaveBeenCalledWith({vault_id:197n,amount:14_999_000_000n,token_type:{[token]:null}});
+ }
+ expect(fx.directApprove).toHaveBeenCalledTimes(3);
+ expect((ApiClient as any).getBoundAuthenticatedActor).not.toHaveBeenCalled();
+});
+it('stops after an OISY approval when the captured wallet or view becomes stale',async()=>{
+ fx.oisy=true;let live=true;let release!:(value:any)=>void;
+ fx.directApprove.mockImplementationOnce(()=>new Promise(r=>release=r));
+ const action=ApiClient.repayToVaultBound({...ctx,assertCurrent:()=>live},197,14_999_000_000n);
+ await vi.waitFor(()=>expect(fx.directApprove).toHaveBeenCalledOnce());live=false;release({Ok:1n});
+ const result=await action;
+ expect(result.success).toBe(false);expect(result.approvalMayHaveMutated).toBe(true);
+ expect(fx.repay).not.toHaveBeenCalled();
+});
+it('does not repay after a typed approval refusal or an unknown approval reply',async()=>{
+ fx.oisy=true;
+ fx.directApprove.mockResolvedValueOnce({Err:{InsufficientFunds:{balance:0n}}});
+ const refused=await ApiClient.repayToVaultBound(ctx,197,14_999_000_000n);
+ expect(refused.success).toBe(false);expect(refused.error).toContain('InsufficientFunds');
+ fx.directApprove.mockRejectedValueOnce(new Error('approval response lost'));
+ const lost=await ApiClient.repayToVaultBound(ctx,197,14_999_000_000n);
+ expect(lost.success).toBe(false);expect(lost.approvalMayHaveMutated).toBe(true);
+ expect(fx.repay).not.toHaveBeenCalled();
+});
+it('retains the unknown-outcome guard after the OISY repayment dispatch',async()=>{
+ fx.oisy=true;fx.repay.mockRejectedValueOnce(new Error('OISY repayment response lost'));
+ const result=await ApiClient.repayToVaultBound(ctx,197,14_999_000_000n);
+ expect(result.ambiguous).toBe(true);expect(result.approvalMayHaveMutated).toBe(true);
+ expect(result.error).toContain('Check the vault and ledger before retrying');
+ expect(fx.repay).toHaveBeenCalledOnce();expect(fx.directApprove).toHaveBeenCalledOnce();
 });

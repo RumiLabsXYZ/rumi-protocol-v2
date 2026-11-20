@@ -3,4 +3,4 @@
   import VaultCard from '../../lib/components/vault/VaultCard.svelte';
   export let vaultInput: Writable<any>;
 </script>
-<VaultCard vault={$vaultInput} icpPrice={10} expandedVaultId={33} />
+<VaultCard vault={$vaultInput} icpPrice={10} expandedVaultId={$vaultInput.vaultId} />

@@ -4,7 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Principal } from '@dfinity/principal';
 vi.mock('$lib/services/auth',async()=>{const {writable}=await import('svelte/store');return {currentWalletType:writable('plug'),walletSessionGeneration:writable(0),WALLET_TYPES:{OISY:'oisy'}};});
 vi.mock('$lib/services/oisySigner',()=>({openOisySignerChannel:fx.openChannel}));
-const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), toastError:vi.fn(), toastInfo:vi.fn(), refreshVaults:vi.fn() }));
+vi.mock('$lib/services/repaymentOisySigner',()=>({beginRepaymentOisyAction:fx.beginOwned}));
+const fx = vi.hoisted(() => ({ repay: vi.fn(), close: vi.fn(), stable: vi.fn(), add: vi.fn(), openChannel: vi.fn(), beginOwned:vi.fn(), closeOwned:vi.fn(), toastError:vi.fn(), toastInfo:vi.fn(), refreshVaults:vi.fn() }));
 vi.mock('../../stores/wallet', async () => {
   const { writable } = await import('svelte/store');
   return { walletStore: Object.assign(writable({principal:null,tokenBalances:{}}), {refreshBalance:vi.fn()}) };
@@ -52,29 +53,35 @@ async function show(balance=30393000000n){
   component=mount(Harness,{target,props:{vaultInput}});await tick();await tick();
   [...target.querySelectorAll<HTMLButtonElement>('.pill-debt')].find(b=>b.textContent?.trim()==='Repay')!.click();await tick();
 }
-beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
+beforeEach(()=>{target=document.createElement('div');document.body.append(target);vaultInput=writable({...base});fx.repay.mockReset();fx.close.mockReset();fx.stable.mockReset().mockResolvedValue({success:true});fx.add.mockReset().mockResolvedValue({success:true});fx.openChannel.mockReset().mockResolvedValue(undefined);fx.closeOwned.mockReset().mockResolvedValue(undefined);fx.beginOwned.mockReset().mockImplementation((owner:Principal,assertCurrent:()=>void)=>({ready:fx.openChannel(owner).then(assertCurrent),close:fx.closeOwned}));fx.toastError.mockReset();fx.toastInfo.mockReset();fx.refreshVaults.mockReset().mockResolvedValue(undefined);currentWalletType.set('plug');walletSessionGeneration.set(0);});
 afterEach(async()=>{if(component)await unmount(component);component=null;target.remove();});
-it('keeps an untouched Max selection valid when refreshed debt lowers the cap',async()=>{
- await show();max().click();await tick();const previous=input().valueAsNumber;
- vaultInput.set({...base,borrowedIcusd:300});await tick();
- expect(Number(input().max)).toBeLessThan(previous);
- expect(input().valueAsNumber).toBeLessThanOrEqual(Number(input().max));
- expect(submit().disabled).toBe(false);
- expect(target.textContent).toContain('Max was reduced');
- expect(fx.repay).not.toHaveBeenCalled();expect(fx.close).not.toHaveBeenCalled();
+it.each(['Withdraw & close', 'Keep vault open'])('keeps %s available after the debt changes', async (choice) => {
+ vaultInput.set({...base, borrowedIcusd:60.01298575});
+ const method = choice === 'Withdraw & close' ? fx.close : fx.repay;
+ method.mockReturnValue(new Promise(() => {}));
+ await show();
+ expect(max().textContent?.trim()).toBe('Max: 60.01299');
+ max().click();await tick();
+ const option = () => [...target.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+   .find(button => button.textContent?.trim() === choice)!;
+ option().click();await tick();
+ for (const debt of [60.01298587, 60.01298431, 60.013001]) {
+   vaultInput.set({...base, borrowedIcusd:debt});await tick();
+   expect(option().getAttribute('aria-checked')).toBe('true');
+   expect(input().value).toBe('60.01299');
+   expect(submit().disabled).toBe(false);
+ }
+ submit().click();await tick();
+ expect(method).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),33,6_001_299_000n);
+ expect(choice === 'Withdraw & close' ? fx.repay : fx.close).not.toHaveBeenCalled();
 });
-it('does not rewrite a manually entered amount after a cap decrease',async()=>{
- await show();max().click();await tick();input().value='300.899015';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();
- vaultInput.set({...base,borrowedIcusd:300});await tick();
- expect(input().value).toBe('300.899015');expect(submit().disabled).toBe(true);
- expect(target.textContent).toContain('Choose Max again');
-});
+
 it('keeps partial repayment when the balance cannot cover debt and approval',async()=>{
  await show(30393939999n); // one e8 below debt + approval fee
  max().click();await tick();
  expect(input().valueAsNumber).toBeLessThan(base.borrowedIcusd);
  expect(submit().textContent?.trim()).toBe('Repay');
- expect(target.textContent).toContain('0.001');
+ expect(target.querySelector('[role="radiogroup"]')).toBeNull();
 });
 it('never raises an untouched Max selection when the safe cap grows',async()=>{
  await show();max().click();await tick();const selected=input().value;
@@ -90,19 +97,23 @@ it('freezes the entered amount and Max while a repayment request is pending',asy
  expect(input().value).toBe(selected);expect(input().disabled).toBe(true);expect(max().disabled).toBe(true);
  max().click();expect(fx.repay).toHaveBeenCalledOnce();expect(fx.close).not.toHaveBeenCalled();
 });
-it('offers full repay and close with one approval fee and a fee-free burn',async()=>{
- await show(30393940000n);max().click();await tick();
- expect(input().valueAsNumber).toBe(base.borrowedIcusd);
+it('offers full repay and close when the wallet covers the exact debt and approval fee', async () => {
+ vaultInput.set({...base, borrowedIcusd:10.00003});
+ await show(1_000_103_000n);max().click();await tick();
+ expect(input().value).toBe('10.00003');
  expect(submit().textContent?.trim()).toBe('Repay & Close');
 });
 it('refreshes and gives recovery guidance when repay succeeds but compound close returns an error',async()=>{
  fx.close.mockResolvedValue({success:false,error:'Collateral transfer failed'});
+ fx.refreshVaults.mockImplementation(async () => vaultInput.set({...base, borrowedIcusd:0}));
  await show(30393940000n);max().click();await tick();
  expect(submit().textContent?.trim()).toBe('Repay & Close');
  submit().click();
  await vi.waitFor(()=>expect(fx.refreshVaults).toHaveBeenCalledOnce());
  expect(fx.toastInfo).toHaveBeenCalledWith(expect.stringContaining('If its debt is now zero, use Withdraw & Close'),12000);
  expect(fx.toastError).not.toHaveBeenCalled();
+ expect(max()).toBeUndefined();
+ expect(submit().disabled).toBe(true);
 });
 it('does not show the previous account recovery hint after the wallet session changes during refresh',async()=>{
  let release!:()=>void;
@@ -122,25 +133,17 @@ it('keeps manual repayment disabled when the safe maximum falls to zero',async()
  expect(fx.repay).not.toHaveBeenCalled();
 });
 
-it('uses a wallet-limited near-full payment without closing and previews forgiveness',async()=>{
+it('uses a wallet-limited near-full payment without closing or showing dust copy',async()=>{
  vaultInput.set({...base,borrowedIcusd:2});
  fx.repay.mockReturnValue(new Promise(()=>{}));
  await show(199600000n);max().click();await tick();
  expect(input().valueAsNumber).toBe(1.995);
  expect(submit().textContent?.trim()).toBe('Repay');
- expect(target.textContent).toContain('Estimated debt after payment: 0');
- expect(target.textContent).toContain('Estimated forgiveness: 0.005');
+ expect(target.textContent).not.toContain('Estimated forgiveness:');
+ expect(target.textContent).not.toContain('Max reserves');
  submit().click();await tick();
  expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({expectedPrincipalText:expect.any(String),assertCurrent:expect.any(Function)}),33,199_500_000n);
  expect(fx.close).not.toHaveBeenCalled();
-});
-it('shows exactly 0.1 as remaining debt rather than forgiven',async()=>{
- vaultInput.set({...base,borrowedIcusd:2});
- await show(190100000n);max().click();await tick();
- expect(input().valueAsNumber).toBe(1.9);
- expect(target.textContent).toContain('Estimated debt after payment: 0.1');
- expect(target.textContent).not.toContain('Estimated forgiveness:');
- expect(submit().textContent?.trim()).toBe('Repay');
 });
 it('floors a ckUSDC Max to six decimals and dispatches the exact debt e8s',async()=>{
  await show();
@@ -164,6 +167,7 @@ it('opens the Oisy signer channel before starting a bound repayment',async()=>{
  await vi.waitFor(()=>expect(fx.openChannel).toHaveBeenCalledOnce());
  expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),33,12_500_002n);
  expect(fx.openChannel.mock.invocationCallOrder[0]).toBeLessThan(fx.repay.mock.invocationCallOrder[0]);
+ await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce(),{timeout:2000});
 });
 
 async function deposit(){
@@ -182,4 +186,35 @@ it('does not deposit after the same wallet reconnects while its signer opens',as
  currentWalletType.set('oisy');let release!:()=>void;fx.openChannel.mockImplementation(()=>new Promise<void>(r=>release=r));
  await show();(await deposit()).click();walletSessionGeneration.set(1);await tick();release();await tick();await tick();
  expect(fx.add).not.toHaveBeenCalled();
+});
+
+it('retains the repayment-owned channel while the exact repayment is pending, then closes once',async()=>{
+ currentWalletType.set('oisy');let release!:(result:any)=>void;fx.repay.mockImplementation(()=>new Promise(r=>release=r));
+ vaultInput.set({...base,vaultId:197,borrowedIcusd:1102.99248062});
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ await vi.waitFor(()=>expect(fx.repay).toHaveBeenCalledWith(expect.objectContaining({assertCurrent:expect.any(Function)}),197,14_999_000_000n));
+ expect(fx.closeOwned).not.toHaveBeenCalled();expect(fx.close).not.toHaveBeenCalled();
+ release({success:false,error:'typed refusal'});await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce());
+});
+it('closes its channel without submitting after the same owner reconnects during opening',async()=>{
+ currentWalletType.set('oisy');let release!:()=>void;fx.openChannel.mockImplementation(()=>new Promise<void>(r=>release=r));
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ walletSessionGeneration.set(1);release();await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce());
+ expect(fx.repay).not.toHaveBeenCalled();expect(fx.close).not.toHaveBeenCalled();
+});
+it('closes a failed popup action and shows its error before any repayment call',async()=>{
+ currentWalletType.set('oisy');fx.openChannel.mockRejectedValueOnce(new Error('Channel handshake failed'));
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ await vi.waitFor(()=>expect(fx.closeOwned).toHaveBeenCalledOnce());
+ expect(fx.toastError).toHaveBeenCalledWith('Channel handshake failed',8000);expect(fx.repay).not.toHaveBeenCalled();
+});
+
+it('closes the owned popup when its card is destroyed during opening and never submits',async()=>{
+ currentWalletType.set('oisy');let release!:()=>void;
+ fx.openChannel.mockImplementation(()=>new Promise<void>(r=>release=r));
+ await show();input().value='149.99';input().dispatchEvent(new Event('input',{bubbles:true}));await tick();submit().click();
+ await unmount(component!);component=null;
+ expect(fx.closeOwned).toHaveBeenCalledOnce();
+ release();await vi.waitFor(()=>expect(fx.toastError).toHaveBeenCalledWith(expect.stringContaining('vault view closed'),8000));
+ expect(fx.repay).not.toHaveBeenCalled();
 });

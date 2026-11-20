@@ -1,0 +1,11 @@
+ RUN  v4.1.12 /private/tmp/rumi-swap-support-cleanup-20261111/src/vault_frontend
+
+7:14:19 PM [vite-plugin-svelte] src/lib/components/stability-pool/DepositInterface.svelte:508:8 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+7:14:19 PM [vite-plugin-svelte] src/lib/components/stability-pool/DepositInterface.svelte:508:8 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+
+ Test Files  2 passed (2)
+      Tests  27 passed (27)
+   Start at  19:14:17
+   Duration  3.29s (transform 839ms, setup 24ms, import 1.13s, tests 727ms, environment 1.19s)
