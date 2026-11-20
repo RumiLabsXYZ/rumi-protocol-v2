@@ -1336,13 +1336,6 @@
                     Keep vault open
                   </button>
                 </div>
-                <span class="repay-close-hint">
-                  {#if closeOnFullRepay}
-                    Repays all debt, returns your {collateralSymbol}, and closes the vault.
-                  {:else}
-                    Repays all debt and leaves the vault open with {collateralSymbol} deposited.
-                  {/if}
-                </span>
               {:else if isNativeXrp && fullIcusdRepayWithCollateral}
                 <span class="repay-close-hint">
                   Repays all debt, queues your withdrawable XRP for settlement, and keeps the vault open because the XRP account reserve remains locked.
