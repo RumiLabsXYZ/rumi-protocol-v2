@@ -18,6 +18,7 @@
   import type { PublicEpochStatus, PointsConfig } from '$declarations/rumi_points/rumi_points.did';
   import type { EarnVenue } from '$lib/utils/pointsRules';
   import SeasonBanner from '$lib/components/points/SeasonBanner.svelte';
+  import CurrentSeasonStatus from '$lib/components/points/CurrentSeasonStatus.svelte';
   import EarnCta from '$lib/components/points/EarnCta.svelte';
   import PointsSummary from '$lib/components/points/PointsSummary.svelte';
 
@@ -135,6 +136,9 @@
     </div>
   {/if}
 
+  <CurrentSeasonStatus />
+  <h2 class="text-lg font-semibold text-gray-200">Season 1 points history</h2>
+  <p class="text-sm text-gray-400">The totals and activity below belong to Season 1. They do not include Season 2 awards.</p>
   <SeasonBanner {status} {config} />
 
   <div class="rounded-lg border border-gray-700/40 bg-gray-900/20 px-3 py-2 text-xs text-gray-400">
