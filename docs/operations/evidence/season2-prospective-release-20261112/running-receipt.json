@@ -1,0 +1,71 @@
+{
+  "stage": "start",
+  "running": true,
+  "canister_id": "2cvsh-3aaaa-aaaaj-qspga-cai",
+  "cutoff_utc": "2026-11-12T23:45:00Z",
+  "epoch_index": "0",
+  "epoch_end_utc": "2026-11-19T23:45:00Z",
+  "poll_enabled": true,
+  "driver_enabled": true,
+  "historical_points": 0,
+  "ordinary_point_ledger_entries": "0",
+  "outage_credit_entries": "0",
+  "registered_count": "15",
+  "source_cursors": [
+    {
+      "tag": 0,
+      "cursor": "562874"
+    },
+    {
+      "tag": 1,
+      "cursor": "110"
+    },
+    {
+      "tag": 2,
+      "cursor": "2596"
+    },
+    {
+      "tag": 3,
+      "cursor": "5"
+    }
+  ],
+  "first_capture_margin_more_than30min": true,
+  "verified_at_utc": "2026-11-12T23:46:57.521Z",
+  "source_debit_cycles": 900100000000,
+  "source_balance_after_creation": 3400550044313,
+  "installed_uploaded_module_hash": "d301b54c5c2db14fa26baff7435f8152bbb8623866d3bf2fd703ae2b2c039d9c",
+  "decompressed_module_sha256": "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603",
+  "bootstrap_manifest_digest": "3ea7394dcc25c73edb17876b2c0b5fcc1fafbe0e19b2e921ece3edd3d2309e41",
+  "bootstrap_cutoff_cursors": [
+    "562874",
+    "110",
+    "2596",
+    "5"
+  ],
+  "bootstrap_imported_rows": 15,
+  "bootstrap_complete": true,
+  "deferred_backfill_started": false,
+  "participant_addressed_operator_queries": false,
+  "independent_anonymous_epoch_and_ingest_readback": true,
+  "season1_epoch": 21,
+  "season1_open_epoch": false,
+  "season1_poll_enabled": false,
+  "season1_driver_enabled": false,
+  "first_capture_observed": false,
+  "weekly_awards_observed": false,
+  "campaign_end_decided": false,
+  "post_start_memory_bytes": 128114372,
+  "post_start_cycles": 388659128995,
+  "post_start_idle_cycles_per_day": 4137071211,
+  "within_256mib_reserve_envelope": true,
+  "independent_readback_at_utc": "2026-11-12T23:48:12.236583+00:00",
+  "first_automatic_poll_observed": true,
+  "first_automatic_poll_readback_utc": "2026-11-12T23:52:41.732803Z",
+  "manual_poll_after_start": false,
+  "automatic_backend_cursor_before": "562874",
+  "automatic_backend_cursor_after": "562885",
+  "fresh_backend_source_tail": "562885",
+  "automatic_backend_cursor_matches_fresh_tail": true,
+  "poll_enabled_after_automatic_tick": true,
+  "driver_enabled_after_automatic_tick": true
+}

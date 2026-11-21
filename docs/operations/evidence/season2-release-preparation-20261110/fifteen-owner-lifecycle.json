@@ -1,0 +1,66 @@
+{
+  "recordedLocal": "2026-11-10T09:27:03.681751-08:00",
+  "test": "season2_import_upgrade_and_first_epoch",
+  "result": "PASS",
+  "participantsReportedByOrin": 15,
+  "fixturePositions": "one mock debt position; fourteen zero positions",
+  "allParticipantsTraverseSnapshotsAndClose": true,
+  "afterEpochStableMemoryBytes": 142671872,
+  "stages": [
+    {
+      "stage": "installed",
+      "managementMemoryBytes": 50830000,
+      "localCycleBalance": 3983382823172
+    },
+    {
+      "stage": "imported",
+      "managementMemoryBytes": 126327472,
+      "localCycleBalance": 3983337744467
+    },
+    {
+      "stage": "upgraded",
+      "managementMemoryBytes": 134716192,
+      "localCycleBalance": 3966696987274
+    },
+    {
+      "stage": "partial_poll",
+      "managementMemoryBytes": 134716192,
+      "localCycleBalance": 3966666341716
+    },
+    {
+      "stage": "epoch_closed",
+      "managementMemoryBytes": 151493408,
+      "localCycleBalance": 3955198301557
+    }
+  ],
+  "stageCycleDeltas": [
+    {
+      "from": "installed",
+      "to": "imported",
+      "localBalanceDecrease": 45078705
+    },
+    {
+      "from": "imported",
+      "to": "upgraded",
+      "localBalanceDecrease": 16640757193
+    },
+    {
+      "from": "upgraded",
+      "to": "partial_poll",
+      "localBalanceDecrease": 30645558
+    },
+    {
+      "from": "partial_poll",
+      "to": "epoch_closed",
+      "localBalanceDecrease": 11468040159
+    }
+  ],
+  "pollCoverage": "backend mock event endpoint only; 3pool, SP and AMM polling endpoints absent",
+  "cycleProof": "PocketIC local deltas include intervening calls and time; not isolated per-transaction costs or deployed prices",
+  "budgetInference": "100B initial operation allowance remains plausible for this minimal case; no sustained real-cohort or complete-poll runway guarantee",
+  "fundingProposalChanged": false,
+  "payerApproved": false,
+  "newTestsBuildsOrWorkersByReleaseOwner": 0,
+  "canisterWritesByReleaseOwner": 0,
+  "testLogSha256": "e5828123736e21fc483618eee0431962bbc47311969daa0bdb661565bd4655bb"
+}

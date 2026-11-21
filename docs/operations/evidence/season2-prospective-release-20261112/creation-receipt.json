@@ -1,0 +1,10 @@
+{
+  "canister_id": "2cvsh-3aaaa-aaaaj-qspga-cai",
+  "source_balance_before": 4300650044313,
+  "source_balance_after": 3400550044313,
+  "source_debit": 900100000000,
+  "created_amount": 900000000000,
+  "creation_charge": 500000000000,
+  "initial_cycles_before_idle_burn": 400000000000,
+  "verified_at_utc": "2026-11-12T22:37:15.481821+00:00"
+}

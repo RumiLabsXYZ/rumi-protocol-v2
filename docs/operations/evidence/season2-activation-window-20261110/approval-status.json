@@ -1,0 +1,17 @@
+{
+  "old_fixed_packet_commit": "28e0637e",
+  "old_fixed_packet_sha256": "d90a3e8e7504d8aee65405f4046b4f96f48f71943c00f887eb0de98e4fa5de44",
+  "old_fixed_request_status": "expired_and_superseded_not_executable",
+  "old_650b_payer_question_status": "closed_funding_received",
+  "funding_received_cycles": 4000000000000,
+  "observed_deploy_balance_cycles": 4300650044313,
+  "proposed_creation_debit_cycles": 900100000000,
+  "creation_executed": false,
+  "install_executed": false,
+  "credits_imported": false,
+  "activation_executed": false,
+  "historical_credit_acceptance": "paused_pending_corrected_reconstruction",
+  "legacy_20_point_proposal": "withdrawn_incorrect_zero_current_premise",
+  "new_estimated_credit_approval_requested": false,
+  "participant_query_denial_preserved": true
+}
