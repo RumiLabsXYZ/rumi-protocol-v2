@@ -1,0 +1,5 @@
+# S2-REPAIR-DEF-001 — sustained resource study and historical provenance
+
+Owner: Orin with the existing release owner. Status: open. The bounded repair uses deployed pricing, live balances, a controlled cycle-admission experiment, upgrade preservation tests and a conservative proposed execution reserve. A sustained full-cohort load study, broad re-audit and another historical replay without new provenance were omitted. They are not gates for containing the known late-capture hazard or correcting the headline.
+
+Containment: no naked top-up of old code; exact guard upgrade only under approval; expired epoch and all awards remain held. Local/browser tests are not deployed proof. The original DEMO-S2-001 reserve limitation now has observed operational impact and this repair corrects its funding assumption; no perpetual resource guarantee is made. Before client-money incentive reliance, measure sustained use and revisit reserve/alert behavior through existing operations. Historical points still require exact evidence and an approved rule, not a near-zero debt residual. Source/release evidence: [repair packet](../../operations/season2-repair-20261121.md).

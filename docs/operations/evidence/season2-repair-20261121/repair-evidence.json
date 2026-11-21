@@ -1,0 +1,84 @@
+{
+  "observed_at_utc": "2026-11-21T17:49:53Z",
+  "network": "ic",
+  "scorer": "2cvsh-3aaaa-aaaaj-qspga-cai",
+  "installed_gzip_sha256": "d301b54c5c2db14fa26baff7435f8152bbb8623866d3bf2fd703ae2b2c039d9c",
+  "installed_module_sha256": "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603",
+  "management_status": "Running",
+  "cycles_balance": 166586509480,
+  "memory_bytes": 138993348,
+  "idle_cycles_per_day": 4415007734,
+  "freezing_threshold_seconds": 2592000,
+  "epoch_index": 0,
+  "epoch_end_utc": "2026-11-19T23:45:00Z",
+  "a_complete": true,
+  "b_complete": false,
+  "held": false,
+  "driver_enabled": true,
+  "poll_enabled": true,
+  "registered_count": 15,
+  "source_cursors": [
+    570731,
+    111,
+    2709,
+    5
+  ],
+  "ordinary_ledger_entries": 0,
+  "historical_backfill_status": null,
+  "retained_logs": {
+    "records": 50,
+    "first_utc": "2026-11-20T09:00:12.694449Z",
+    "last_utc": "2026-11-20T09:00:23.643400Z",
+    "all": "in canister_global_timer: SysTransient: Couldn't send message",
+    "fresh_log_generation_not_claimed": true
+  },
+  "replica": {
+    "subnet": "jtdsg-3h6gi-hs7o5-z2soi-43w3z-soyl3-ajnp3-ekni5-sw553-5kw67-nqe",
+    "nodes": 13,
+    "version": "5215023a9d81f01c661e0d837121c597d2ba5fcd",
+    "proposal": 144913
+  },
+  "funding_proposal": {
+    "payer_owner": "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+    "payer_subaccount": null,
+    "ledger": "um5iw-rqaaa-aaaaq-qaaba-cai",
+    "observed_payer_balance": 3400550044313,
+    "execution_topup": 1000000000000,
+    "fee": 100000000,
+    "total_debit": 1000100000000,
+    "expected_payer_after_debit": 2400450044313,
+    "authorized": false
+  },
+  "source": {
+    "guard": "4f9d9778df054510e319a6212d54978678f56fa3",
+    "guard_base": "4117ba1b",
+    "ui": "20fd5d12287a940960741424cb16e101b078fa7d",
+    "ui_base": "8546e6a530eed99428ce4a4639676b602165bf61"
+  },
+  "artifacts": {
+    "candidate_wasm": {
+      "bytes": 3045708,
+      "sha256": "7e5834f48a286027e3692f2193036f3b0220af01581389af1bbcc8782ed8da31"
+    },
+    "candidate_gzip": {
+      "bytes": 754015,
+      "sha256": "57cdfcf6b4ee55c78e4a4021584f1571a68a45190c54d8e8c978cdb884fa9058"
+    },
+    "ui_assets_count": 764,
+    "ui_assets_manifest_canonical_sha256": "593b5ea81ad09c92b04e39cc681ddb32ea85c724b197bc88381281370bb2d3cb"
+  },
+  "checks": {
+    "epoch_unit_tests": 26,
+    "normal_lifecycle": "passed",
+    "opt_in_exact_module_tests": 2,
+    "ui_tests": 6,
+    "frontend_build": "passed including auth assets and discovery checks",
+    "candid_extraction": "byte-identical to checked-in did",
+    "review": "two independent bounded reviewers; two issues fixed and confirmed PASS",
+    "browser": "built current-main candidate, public S2 query reads; overdue/no-awards headline; separate S1 history; refresh; 390px and1280px no horizontal overflow"
+  },
+  "live_mutations_performed": false,
+  "deployments_performed": false,
+  "historical_points_changed": false,
+  "private_participant_rows_published": false
+}
