@@ -9,7 +9,7 @@ export interface CurrentSeason {
   status: PublicEpochStatus;
   config: PointsConfig;
   ingest: IngestStatus;
-  ledgerEntries: bigint;
+  highestPoints: bigint;
   observedAt: number;
 }
 let actor: _SERVICE | null = null;
@@ -26,9 +26,9 @@ export async function getCurrentSeason(refresh = false): Promise<CurrentSeason> 
   }
   const source = actor;
   pending = Promise.all([
-    source.get_epoch_status(), source.get_points_config(), source.get_ingest_status(), source.get_point_ledger_len(),
-  ]).then(([status, config, ingest, ledgerEntries]) => {
-    cached = { status, config, ingest, ledgerEntries, observedAt: Date.now() };
+    source.get_epoch_status(), source.get_points_config(), source.get_ingest_status(), source.get_leaderboard(0, 1),
+  ]).then(([status, config, ingest, leaders]) => {
+    cached = { status, config, ingest, highestPoints: leaders[0]?.total_points ?? 0n, observedAt: Date.now() };
     return cached;
   });
   try { return await pending; } finally { pending = null; }
