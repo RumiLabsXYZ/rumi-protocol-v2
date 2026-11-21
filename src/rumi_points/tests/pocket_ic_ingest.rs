@@ -1209,3 +1209,99 @@ fn season2_import_upgrade_and_first_epoch() {
     assert_eq!(Decode!(&retry, Result<Season2ImportStatus, String>).unwrap().unwrap(), sealed);
     assert_eq!(total_points(&pic, rp, participant), 700_000_000 + 28);
 }
+
+
+/// Reproduce the actual S2 shape using the exact previously installed module,
+/// then upgrade in place without replacing the missing B with current balances.
+#[test]
+#[ignore = "requires exact retained deployed and canonical candidate Wasm fixtures; see Season 2 repair packet"]
+fn season2_overdue_upgrade_preserves_a_and_holds_rewards() {
+    let old_path = std::env::var("SEASON2_DEPLOYED_WASM").expect("pin the installed S2 Wasm");
+    let old = std::fs::read(old_path).unwrap();
+    assert_eq!(format!("{:x}", Sha256::digest(&old)),
+        "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603");
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let start = 1_794_527_100_000_000_000;
+    set_time_ns(&pic, start);
+    let mock = install_mock(&pic);
+    let rp = install_legacy_points(&pic, &old, start, u64::MAX);
+    set_all_sources(&pic, rp, mock);
+    let participant = Principal::from_slice(&[7; 5]);
+    set_vault_debt(&pic, mock, participant, 100_000_000);
+    let registered = pic.update_call(rp, admin(), "register_test_principal", Encode!(&participant).unwrap()).unwrap();
+    assert!(matches!(registered, WasmResult::Reply(_)));
+    start_season_ok(&pic, rp, SEASON_SEED);
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    let epoch = epoch_status(&pic, rp).open_epoch.unwrap();
+    set_time_ns(&pic, epoch.snapshot_a_ns);
+    force_tick(&pic, rp);
+    let before = epoch_status(&pic, rp).open_epoch.unwrap();
+    assert!(before.a_complete && !before.b_complete);
+    let ledger_before = pic.query_call(rp, admin(), "get_point_ledger_len", Encode!().unwrap()).unwrap();
+    let state_before = pic.query_call(rp, admin(), "get_principal_state", Encode!(&participant).unwrap()).unwrap();
+    let cursors_before = ingest_status_for_test(&pic, rp).sources;
+    set_time_ns(&pic, epoch.epoch_end_ns + 1);
+    let candidate = std::fs::read(std::env::var("SEASON2_CANDIDATE_WASM").expect("pin the release candidate Wasm")).unwrap();
+    pic.upgrade_canister(rp, candidate, Vec::new(), None).unwrap();
+    let held = held_epoch_status(&pic, rp);
+    assert!(held.legacy_transition_held && !held.legacy_reseed_pending);
+    assert_eq!(held.open_epoch, Some(before.clone()));
+    assert_eq!(held.current_epoch_index, 0);
+    assert_eq!(pic.query_call(rp, admin(), "get_principal_state", Encode!(&participant).unwrap()).unwrap(), state_before);
+    force_tick(&pic, rp);
+    pic.update_call(rp, admin(), "trigger_poll", Encode!().unwrap()).unwrap();
+    assert_eq!(epoch_status(&pic, rp).open_epoch, Some(before));
+    assert_eq!(ingest_status_for_test(&pic, rp).sources, cursors_before);
+    assert_eq!(total_points(&pic, rp, participant), 0);
+    let ledger = pic.query_call(rp, admin(), "get_point_ledger_len", Encode!().unwrap()).unwrap();
+    assert_eq!(ledger, ledger_before, "no new point ledger entry");
+}
+
+/// Local-only funding experiment. A running canister can lack the headroom for
+/// timer-nested calls; adding local test cycles changes no source or state policy.
+#[test]
+#[ignore = "requires exact retained deployed Wasm fixture; see Season 2 repair packet"]
+fn season2_low_cycles_timer_recovers_after_local_topup() {
+    let old_path = std::env::var("SEASON2_DEPLOYED_WASM").expect("pin the installed S2 Wasm");
+    let old = std::fs::read(old_path).unwrap();
+    assert_eq!(format!("{:x}", Sha256::digest(&old)),
+        "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603");
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let mock = install_mock(&pic);
+    let rp = pic.create_canister();
+    pic.add_cycles(rp, 400_000_000_000);
+    let init = InitArgs { admin: Some(admin()), excluded_principals: None,
+        season_start_ns: None, season_end_ns: None, snapshot_seed_commit: None };
+    pic.install_canister(rp, old, Encode!(&Some(init)).unwrap(), None);
+    admin_ok(&pic, rp, "set_source_canister", Encode!(&0u8, &mock).unwrap());
+    admin_ok(&pic, rp, "set_poll_interval_secs", Encode!(&60u64).unwrap());
+    admin_ok(&pic, rp, "set_poll_enabled", Encode!(&true).unwrap());
+    // PocketIC 6 has different replica prices from mainnet. Hold the exact
+    // module/timer/source fixed and reserve all but 70B cycles to test admission.
+    let status = pic.canister_status(rp, None).unwrap();
+    let balance: u128 = status.cycles.to_string().replace('_', "").parse().unwrap();
+    let idle: u128 = status.idle_cycles_burned_per_day.to_string().replace('_', "").parse().unwrap();
+    let freeze_secs = ((balance - 70_000_000_000) * 86_400 / idle) as u64;
+    pic.update_canister_settings(rp, None, pocket_ic::management_canister::CanisterSettings {
+        freezing_threshold: Some(freeze_secs.into()), ..Default::default()
+    }).unwrap();
+    println!("LOW_CYCLES_STATUS {:?}", pic.canister_status(rp, None).unwrap());
+    pic.advance_time(Duration::from_secs(70));
+    for _ in 0..20 { pic.tick(); }
+    let logs = pic.fetch_canister_logs(rp, Principal::anonymous()).unwrap();
+    let text = logs.iter().map(|l| String::from_utf8_lossy(&l.content).to_string()).collect::<Vec<_>>().join("\n");
+    println!("LOW_CYCLES_LOGS {text}");
+    assert!(!is_registered(&pic, rp, synthetic_caller()), "low funded timer must fail before registration");
+    assert!(text.contains("Couldn't send message"), "sender-side admission failure should be visible");
+    pic.add_cycles(rp, 1_000_000_000_000);
+    pic.advance_time(Duration::from_secs(70));
+    for _ in 0..20 { pic.tick(); }
+    assert!(is_registered(&pic, rp, synthetic_caller()), "identical timer/source succeeds with headroom");
+}
+
+fn ingest_status_for_test(pic: &pocket_ic::PocketIc, rp: Principal) -> TIngestStatus {
+    match pic.query_call(rp, admin(), "get_ingest_status", Encode!().unwrap()).unwrap() {
+        WasmResult::Reply(bytes) => Decode!(&bytes, TIngestStatus).unwrap(),
+        _ => panic!("ingest status query"),
+    }
+}

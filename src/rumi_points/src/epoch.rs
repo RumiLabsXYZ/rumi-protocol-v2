@@ -86,6 +86,8 @@ pub enum DriverAction {
     Start,
     CaptureA,
     CaptureB,
+    /// Preserve an incomplete epoch whose approved capture window has ended.
+    HoldExpiredCapture,
     Close,
 }
 
@@ -101,7 +103,9 @@ pub fn next_action(
 ) -> DriverAction {
     match open {
         Some(oe) => {
-            if !oe.a_complete {
+            if capture_window_expired(oe, now) {
+                DriverAction::HoldExpiredCapture
+            } else if !oe.a_complete {
                 step_when(now >= oe.snapshot_a_ns, DriverAction::CaptureA)
             } else if !oe.b_complete {
                 step_when(now >= oe.snapshot_b_ns, DriverAction::CaptureB)
@@ -117,6 +121,25 @@ pub fn next_action(
             step_when(start < season_end && now >= start, DriverAction::Start)
         }
     }
+}
+
+fn capture_window_expired(open: &OpenEpoch, now_ns: u64) -> bool {
+    now_ns >= open.epoch_end_ns && (!open.a_complete || !open.b_complete)
+}
+
+/// Reuse the existing durable operator-review fence. Never replace a missed
+/// in-epoch snapshot with current balances or advance its reward ledger.
+fn hold_expired_capture(open: &OpenEpoch, now_ns: u64) -> bool {
+    if !capture_window_expired(open, now_ns) {
+        return false;
+    }
+    state::set_legacy_transition_held(true);
+    state::set_legacy_reseed_pending(false);
+    ic_cdk::println!(
+        "[epoch] epoch {} capture window expired; preserving snapshots and rewards for operator review",
+        open.epoch_index
+    );
+    true
 }
 
 fn step_when(ready: bool, action: DriverAction) -> DriverAction {
@@ -436,6 +459,9 @@ pub fn prepare_legacy_state_after_upgrade(now_ns: u64) {
         return;
     }
     if let Some(open) = state::get_open_epoch() {
+        if hold_expired_capture(&open, now_ns) {
+            return;
+        }
         if legacy_open_epoch_requires_review(
             &open,
             state::current_epoch_entropy(),
@@ -677,6 +703,11 @@ pub async fn run_tick() {
         }
         DriverAction::CaptureA => capture(Snapshot::A).await,
         DriverAction::CaptureB => capture(Snapshot::B).await,
+        DriverAction::HoldExpiredCapture => {
+            if let Some(open) = open {
+                hold_expired_capture(&open, now);
+            }
+        }
         DriverAction::Close => close_current_epoch(now).await,
     }
 }
@@ -688,10 +719,16 @@ async fn capture(which: Snapshot) {
         Some(o) => o,
         None => return,
     };
+    if hold_expired_capture(&open, ic_cdk::api::time()) {
+        return;
+    }
     let ctx = match fetch_context().await {
         Some(c) => c,
         None => return, // a snapshot-wide source was unreachable; retry next tick
     };
+    if hold_expired_capture(&open, ic_cdk::api::time()) {
+        return;
+    }
     let cursor = match which {
         Snapshot::A => open.a_cursor,
         Snapshot::B => open.b_cursor,
@@ -726,6 +763,10 @@ async fn capture(which: Snapshot) {
                 break;
             }
         };
+        if hold_expired_capture(&open, ic_cdk::api::time()) {
+            hit_error = true;
+            break;
+        }
         if !icp_price_is_fresh(ctx.icp_price_timestamp_ns, ic_cdk::api::time()) {
             ic_cdk::println!("[epoch] ICP price aged out during capture; preserving cursor and retrying");
             hit_error = true;
@@ -1368,6 +1409,58 @@ mod tests {
         assert_eq!(next_action(&Some(oe(true, false)), 500, 0, 2_000, 0), DriverAction::CaptureB);
         assert_eq!(next_action(&Some(oe(true, true)), 999, 0, 2_000, 0), DriverAction::Idle);
         assert_eq!(next_action(&Some(oe(true, true)), 1_000, 0, 2_000, 0), DriverAction::Close);
+    }
+
+    #[test]
+    fn expired_capture_is_held_but_completed_snapshots_can_close() {
+        for (a, b) in [(false, false), (true, false), (false, true)] {
+            for now in [1_000, 1_001, u64::MAX] {
+                assert_eq!(next_action(&Some(oe(a, b)), now, 0, u64::MAX, 0),
+                    DriverAction::HoldExpiredCapture);
+            }
+        }
+        assert_eq!(next_action(&Some(oe(true, false)), 999, 0, u64::MAX, 0), DriverAction::CaptureB);
+        assert_eq!(next_action(&Some(oe(true, true)), 1_001, 0, u64::MAX, 0), DriverAction::Close);
+    }
+
+    #[test]
+    fn upgrade_holds_expired_secure_epoch_without_changing_its_evidence() {
+        state::init_state(None, Principal::anonymous());
+        let mut open = oe(true, false);
+        open.a_cursor = Some(pr(201));
+        open.b_cursor = Some(pr(202));
+        state::set_open_epoch(Some(open.clone()));
+        state::with_state_mut(|s| {
+            s.snapshot_seed.secure_seed_chain_v1 = true;
+            s.snapshot_seed.current_seed = Some([17; 32]);
+        });
+        let weights = accrual::SnapshotWeights { icusd_debt: 73, ..Default::default() };
+        state::snapshot_buffer_put(pr(201), weights.clone());
+        let ledger = state::point_ledger_len();
+        let history = state::epoch_count();
+        let seed = state::current_epoch_seed();
+
+        prepare_legacy_state_after_upgrade(open.epoch_end_ns);
+
+        assert!(state::legacy_transition_held());
+        assert!(!state::legacy_reseed_pending());
+        assert_eq!(state::get_open_epoch(), Some(open));
+        assert_eq!(state::snapshot_buffer_get(&pr(201)), Some(weights));
+        assert_eq!(state::current_epoch_seed(), seed);
+        assert_eq!(state::point_ledger_len(), ledger);
+        assert_eq!(state::epoch_count(), history);
+        assert!(state::try_poll_guard().is_none());
+    }
+
+    #[test]
+    fn capture_deadline_check_also_fences_a_response_that_arrives_late() {
+        state::init_state(None, Principal::anonymous());
+        let open = oe(true, false);
+        assert!(!hold_expired_capture(&open, 999));
+        assert!(!state::legacy_transition_held());
+        assert!(hold_expired_capture(&open, 1_000));
+        assert!(state::legacy_transition_held());
+        assert_eq!(next_capture_cursor(1, None, None, true), (None, false));
     }
 
     #[test]
