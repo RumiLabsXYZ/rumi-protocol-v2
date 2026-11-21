@@ -44,8 +44,7 @@ export const CANISTER_IDS = {
   ICPSWAP_CKUSDT_CKUSDC_POOL: "heq6n-fyaaa-aaaag-qkcpq-cai",
   // Rumi Points (airdrop accrual engine). Live on mainnet 2026-06-09; setting
   // this id flips POINTS_ENABLED true so the /points section renders.
-  RUMI_POINTS: "bfnu3-6aaaa-aaaab-qhanq-cai", // Historical Season 1 totals only.
-  RUMI_POINTS_SEASON2: "2cvsh-3aaaa-aaaaj-qspga-cai",
+  RUMI_POINTS: "bfnu3-6aaaa-aaaab-qhanq-cai",
   // Official ckSOL mainnet deployment: dfinity/cksol (9 decimal lamports).
   CKSOL_MINTER: "lh22c-kyaaa-aaaar-qb5nq-cai",
   CKSOL_LEDGER: "ls5lp-lqaaa-aaaar-qb5oa-cai",
