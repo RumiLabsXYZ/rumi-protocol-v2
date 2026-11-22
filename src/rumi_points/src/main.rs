@@ -42,6 +42,22 @@ async fn admin_resume_points_recovery_v2() -> Result<(),String> {
     Ok(())
 }
 
+#[ic_cdk::query]
+fn get_season2_forward_status() -> Option<rumi_points::season2_forward::ForwardStatus> {
+    rumi_points::season2_forward::status()
+}
+#[ic_cdk::update]
+fn admin_prepare_season2_forward(backup_snapshot_id: Vec<u8>) -> Result<rumi_points::season2_forward::ForwardStatus, String> {
+    rumi_points::season2_forward::prepare(ic_cdk::caller(), backup_snapshot_id)
+}
+#[ic_cdk::update]
+async fn admin_activate_season2_forward(archive_digest: Vec<u8>) -> Result<rumi_points::season2_forward::ForwardStatus, String> {
+    let already_active = rumi_points::season2_forward::status().is_some_and(|s| s.active_start_ns.is_some());
+    let result = rumi_points::season2_forward::activate(ic_cdk::caller(), archive_digest).await;
+    if result.is_ok() && !already_active { poll::setup_poll_timer(); epoch::setup_epoch_timer(); }
+    result
+}
+
 // Imported credits are separately receipted, not fabricated snapshot entries.
 #[ic_cdk::query]
 fn get_season2_import_status() -> Option<state::Season2ImportStatus> { state::season2_import_status() }

@@ -75,6 +75,21 @@ export interface FiatStableTopupProgress {
   'complete' : boolean,
   'next_offset' : bigint,
 }
+export interface ForwardStatus {
+  'pending_start_ns' : bigint,
+  'active_start_ns' : [] | [bigint],
+  'archived_participants' : bigint,
+  'active_seed_commit' : [] | [Uint8Array | number[]],
+  'pending_end_ns' : [] | [bigint],
+  'prepared_at_ns' : bigint,
+  'active_end_ns' : [] | [bigint],
+  'archive_digest' : Uint8Array | number[],
+  'archived_snapshot_rows' : bigint,
+  'active_epoch' : [] | [bigint],
+  'backup_snapshot_id' : Uint8Array | number[],
+  'expires_at_ns' : bigint,
+  'archived_epoch' : bigint,
+}
 export interface HeldEpochRecoveryView {
   'closed' : boolean,
   'epoch_index' : bigint,
@@ -260,22 +275,24 @@ export type Result = { 'Ok' : FiatStablePointsPolicy } |
   { 'Err' : string };
 export type Result_1 = { 'Ok' : null } |
   { 'Err' : PointsError };
-export type Result_2 = { 'Ok' : OutageReconciliationStatus } |
-  { 'Err' : string };
-export type Result_3 = { 'Ok' : bigint } |
-  { 'Err' : string };
-export type Result_4 = { 'Ok' : null } |
-  { 'Err' : string };
-export type Result_5 = { 'Ok' : FiatStableTopupProgress } |
-  { 'Err' : string };
-export type Result_6 = { 'Ok' : Status } |
-  { 'Err' : string };
-export type Result_7 = { 'Ok' : Season2ImportStatus } |
-  { 'Err' : string };
-export type Result_8 = { 'Ok' : Uint8Array | number[] } |
-  { 'Err' : string };
-export type Result_9 = { 'Ok' : bigint } |
+export type Result_10 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
+export type Result_2 = { 'Ok' : ForwardStatus } |
+  { 'Err' : string };
+export type Result_3 = { 'Ok' : OutageReconciliationStatus } |
+  { 'Err' : string };
+export type Result_4 = { 'Ok' : bigint } |
+  { 'Err' : string };
+export type Result_5 = { 'Ok' : null } |
+  { 'Err' : string };
+export type Result_6 = { 'Ok' : FiatStableTopupProgress } |
+  { 'Err' : string };
+export type Result_7 = { 'Ok' : Status } |
+  { 'Err' : string };
+export type Result_8 = { 'Ok' : Season2ImportStatus } |
+  { 'Err' : string };
+export type Result_9 = { 'Ok' : Uint8Array | number[] } |
+  { 'Err' : string };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
   'epoch_index' : bigint,
@@ -324,22 +341,30 @@ export type Venue = { 'Amm' : null } |
 export interface _SERVICE {
   'activate_fiat_stable_4x' : ActorMethod<[], Result>,
   'add_excluded_principal' : ActorMethod<[Principal], Result_1>,
-  'admin_continue_outage_reconciliation' : ActorMethod<[], Result_2>,
-  'admin_poll_held_points_backlog' : ActorMethod<[], Result_3>,
-  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_3>,
-  'admin_resume_held_points' : ActorMethod<[], Result_4>,
-  'admin_resume_points_recovery_v2' : ActorMethod<[], Result_4>,
-  'admin_stage_outage_allocation' : ActorMethod<[OutageAllocation], Result_2>,
-  'apply_fiat_stable_topups' : ActorMethod<[number], Result_5>,
-  'apply_season1_final_supplement' : ActorMethod<[], Result_6>,
-  'begin_season2_backfill' : ActorMethod<[number], Result_7>,
-  'begin_season2_import' : ActorMethod<[number], Result_7>,
+  'admin_activate_season2_forward' : ActorMethod<
+    [Uint8Array | number[]],
+    Result_2
+  >,
+  'admin_continue_outage_reconciliation' : ActorMethod<[], Result_3>,
+  'admin_poll_held_points_backlog' : ActorMethod<[], Result_4>,
+  'admin_prepare_season2_forward' : ActorMethod<
+    [Uint8Array | number[]],
+    Result_2
+  >,
+  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_4>,
+  'admin_resume_held_points' : ActorMethod<[], Result_5>,
+  'admin_resume_points_recovery_v2' : ActorMethod<[], Result_5>,
+  'admin_stage_outage_allocation' : ActorMethod<[OutageAllocation], Result_3>,
+  'apply_fiat_stable_topups' : ActorMethod<[number], Result_6>,
+  'apply_season1_final_supplement' : ActorMethod<[], Result_7>,
+  'begin_season2_backfill' : ActorMethod<[number], Result_8>,
+  'begin_season2_import' : ActorMethod<[number], Result_8>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
-  'finish_season2_backfill' : ActorMethod<[Uint8Array | number[]], Result_7>,
+  'finish_season2_backfill' : ActorMethod<[Uint8Array | number[]], Result_8>,
   'finish_season2_import' : ActorMethod<
     [BigUint64Array | bigint[], Uint8Array | number[], number],
-    Result_7
+    Result_8
   >,
   'force_epoch_tick' : ActorMethod<[], Result_1>,
   'get_asset_ledgers' : ActorMethod<[], Array<[number, Principal]>>,
@@ -377,20 +402,21 @@ export interface _SERVICE {
   'get_registration_info' : ActorMethod<[Principal], [] | [RegistrationInfo]>,
   'get_revealed_seed' : ActorMethod<[bigint], [] | [RevealedSeed]>,
   'get_season1_final_supplement' : ActorMethod<[], Status>,
-  'get_season2_backfill_manifest_hash' : ActorMethod<[], Result_8>,
+  'get_season2_backfill_manifest_hash' : ActorMethod<[], Result_9>,
   'get_season2_backfill_status' : ActorMethod<[], [] | [Season2ImportStatus]>,
+  'get_season2_forward_status' : ActorMethod<[], [] | [ForwardStatus]>,
   'get_season2_import_manifest_hash' : ActorMethod<
     [BigUint64Array | bigint[], number],
-    Result_8
+    Result_9
   >,
   'get_season2_import_status' : ActorMethod<[], [] | [Season2ImportStatus]>,
   'import_season2_backfill_batch' : ActorMethod<
     [number, Array<Season2ImportRow>],
-    Result_7
+    Result_8
   >,
   'import_season2_batch' : ActorMethod<
     [number, Array<Season2ImportRow>],
-    Result_7
+    Result_8
   >,
   'is_excluded' : ActorMethod<[Principal], boolean>,
   'is_registered' : ActorMethod<[Principal], boolean>,
@@ -402,10 +428,10 @@ export interface _SERVICE {
   'set_excluded_principals' : ActorMethod<[Array<Principal>], Result_1>,
   'set_poll_enabled' : ActorMethod<[boolean], Result_1>,
   'set_poll_interval_secs' : ActorMethod<[bigint], Result_1>,
-  'set_season_end_ns' : ActorMethod<[bigint], Result_4>,
+  'set_season_end_ns' : ActorMethod<[bigint], Result_5>,
   'set_source_canister' : ActorMethod<[number, Principal], Result_1>,
-  'start_season' : ActorMethod<[Uint8Array | number[]], Result_4>,
-  'trigger_poll' : ActorMethod<[], Result_9>,
+  'start_season' : ActorMethod<[Uint8Array | number[]], Result_5>,
+  'trigger_poll' : ActorMethod<[], Result_10>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

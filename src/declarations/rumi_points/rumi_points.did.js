@@ -25,6 +25,22 @@ export const idlFactory = ({ IDL }) => {
     'Excluded' : IDL.Null,
   });
   const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : PointsError });
+  const ForwardStatus = IDL.Record({
+    'pending_start_ns' : IDL.Nat64,
+    'active_start_ns' : IDL.Opt(IDL.Nat64),
+    'archived_participants' : IDL.Nat64,
+    'active_seed_commit' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'pending_end_ns' : IDL.Opt(IDL.Nat64),
+    'prepared_at_ns' : IDL.Nat64,
+    'active_end_ns' : IDL.Opt(IDL.Nat64),
+    'archive_digest' : IDL.Vec(IDL.Nat8),
+    'archived_snapshot_rows' : IDL.Nat64,
+    'active_epoch' : IDL.Opt(IDL.Nat64),
+    'backup_snapshot_id' : IDL.Vec(IDL.Nat8),
+    'expires_at_ns' : IDL.Nat64,
+    'archived_epoch' : IDL.Nat64,
+  });
+  const Result_2 = IDL.Variant({ 'Ok' : ForwardStatus, 'Err' : IDL.Text });
   const OutageProgressView = IDL.Record({
     'scanned_through' : IDL.Nat64,
     'allocation_digest' : IDL.Vec(IDL.Nat8),
@@ -42,12 +58,12 @@ export const idlFactory = ({ IDL }) => {
     'configured_allocation_digest' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'credit_log_len' : IDL.Nat64,
   });
-  const Result_2 = IDL.Variant({
+  const Result_3 = IDL.Variant({
     'Ok' : OutageReconciliationStatus,
     'Err' : IDL.Text,
   });
-  const Result_3 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
-  const Result_4 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const Result_4 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
+  const Result_5 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   const AllocationRow = IDL.Record({
     'principal' : IDL.Principal,
     'epoch_index' : IDL.Nat64,
@@ -70,7 +86,7 @@ export const idlFactory = ({ IDL }) => {
     'complete' : IDL.Bool,
     'next_offset' : IDL.Nat64,
   });
-  const Result_5 = IDL.Variant({
+  const Result_6 = IDL.Variant({
     'Ok' : FiatStableTopupProgress,
     'Err' : IDL.Text,
   });
@@ -80,7 +96,7 @@ export const idlFactory = ({ IDL }) => {
     'complete' : IDL.Bool,
     'evidence_digest' : IDL.Vec(IDL.Nat8),
   });
-  const Result_6 = IDL.Variant({ 'Ok' : Status, 'Err' : IDL.Text });
+  const Result_7 = IDL.Variant({ 'Ok' : Status, 'Err' : IDL.Text });
   const Season2Receipt = IDL.Record({
     'principal' : IDL.Principal,
     'category_points' : IDL.Vec(IDL.Nat),
@@ -99,7 +115,7 @@ export const idlFactory = ({ IDL }) => {
     'receipts' : IDL.Vec(Season2Receipt),
     'cutoff_ns' : IDL.Nat64,
   });
-  const Result_7 = IDL.Variant({
+  const Result_8 = IDL.Variant({
     'Ok' : Season2ImportStatus,
     'Err' : IDL.Text,
   });
@@ -324,39 +340,49 @@ export const idlFactory = ({ IDL }) => {
     'snapshot_time_a_ns' : IDL.Nat64,
     'snapshot_time_b_ns' : IDL.Nat64,
   });
-  const Result_8 = IDL.Variant({ 'Ok' : IDL.Vec(IDL.Nat8), 'Err' : IDL.Text });
+  const Result_9 = IDL.Variant({ 'Ok' : IDL.Vec(IDL.Nat8), 'Err' : IDL.Text });
   const Season2ImportRow = IDL.Record({
     'principal_state' : PrincipalState,
     'category_points' : IDL.Vec(IDL.Nat),
   });
-  const Result_9 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
+  const Result_10 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
   return IDL.Service({
     'activate_fiat_stable_4x' : IDL.Func([], [Result], []),
     'add_excluded_principal' : IDL.Func([IDL.Principal], [Result_1], []),
-    'admin_continue_outage_reconciliation' : IDL.Func([], [Result_2], []),
-    'admin_poll_held_points_backlog' : IDL.Func([], [Result_3], []),
-    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_3], []),
-    'admin_resume_held_points' : IDL.Func([], [Result_4], []),
-    'admin_resume_points_recovery_v2' : IDL.Func([], [Result_4], []),
-    'admin_stage_outage_allocation' : IDL.Func(
-        [OutageAllocation],
+    'admin_activate_season2_forward' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
         [Result_2],
         [],
       ),
-    'apply_fiat_stable_topups' : IDL.Func([IDL.Nat32], [Result_5], []),
-    'apply_season1_final_supplement' : IDL.Func([], [Result_6], []),
-    'begin_season2_backfill' : IDL.Func([IDL.Nat32], [Result_7], []),
-    'begin_season2_import' : IDL.Func([IDL.Nat32], [Result_7], []),
+    'admin_continue_outage_reconciliation' : IDL.Func([], [Result_3], []),
+    'admin_poll_held_points_backlog' : IDL.Func([], [Result_4], []),
+    'admin_prepare_season2_forward' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [Result_2],
+        [],
+      ),
+    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_4], []),
+    'admin_resume_held_points' : IDL.Func([], [Result_5], []),
+    'admin_resume_points_recovery_v2' : IDL.Func([], [Result_5], []),
+    'admin_stage_outage_allocation' : IDL.Func(
+        [OutageAllocation],
+        [Result_3],
+        [],
+      ),
+    'apply_fiat_stable_topups' : IDL.Func([IDL.Nat32], [Result_6], []),
+    'apply_season1_final_supplement' : IDL.Func([], [Result_7], []),
+    'begin_season2_backfill' : IDL.Func([IDL.Nat32], [Result_8], []),
+    'begin_season2_import' : IDL.Func([IDL.Nat32], [Result_8], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
-    'finish_season2_backfill' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_7], []),
+    'finish_season2_backfill' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_8], []),
     'finish_season2_import' : IDL.Func(
         [IDL.Vec(IDL.Nat64), IDL.Vec(IDL.Nat8), IDL.Nat8],
-        [Result_7],
+        [Result_8],
         [],
       ),
     'force_epoch_tick' : IDL.Func([], [Result_1], []),
@@ -443,15 +469,20 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_season1_final_supplement' : IDL.Func([], [Status], ['query']),
-    'get_season2_backfill_manifest_hash' : IDL.Func([], [Result_8], ['query']),
+    'get_season2_backfill_manifest_hash' : IDL.Func([], [Result_9], ['query']),
     'get_season2_backfill_status' : IDL.Func(
         [],
         [IDL.Opt(Season2ImportStatus)],
         ['query'],
       ),
+    'get_season2_forward_status' : IDL.Func(
+        [],
+        [IDL.Opt(ForwardStatus)],
+        ['query'],
+      ),
     'get_season2_import_manifest_hash' : IDL.Func(
         [IDL.Vec(IDL.Nat64), IDL.Nat8],
-        [Result_8],
+        [Result_9],
         ['query'],
       ),
     'get_season2_import_status' : IDL.Func(
@@ -461,12 +492,12 @@ export const idlFactory = ({ IDL }) => {
       ),
     'import_season2_backfill_batch' : IDL.Func(
         [IDL.Nat32, IDL.Vec(Season2ImportRow)],
-        [Result_7],
+        [Result_8],
         [],
       ),
     'import_season2_batch' : IDL.Func(
         [IDL.Nat32, IDL.Vec(Season2ImportRow)],
-        [Result_7],
+        [Result_8],
         [],
       ),
     'is_excluded' : IDL.Func([IDL.Principal], [IDL.Bool], ['query']),
@@ -483,10 +514,10 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_poll_enabled' : IDL.Func([IDL.Bool], [Result_1], []),
     'set_poll_interval_secs' : IDL.Func([IDL.Nat64], [Result_1], []),
-    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_4], []),
+    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_5], []),
     'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result_1], []),
-    'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_4], []),
-    'trigger_poll' : IDL.Func([], [Result_9], []),
+    'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_5], []),
+    'trigger_poll' : IDL.Func([], [Result_10], []),
   });
 };
 export const init = ({ IDL }) => {

@@ -27,6 +27,7 @@ pub mod poll;
 pub mod snapshot_seed;
 pub mod source_types;
 pub mod state;
+pub mod season2_forward;
 pub mod types;
 pub mod valuation;
 

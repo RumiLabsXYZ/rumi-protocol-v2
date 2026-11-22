@@ -1163,8 +1163,8 @@ fn season2_import_upgrade_and_first_epoch() {
     let retry: Result<Season2ImportStatus, String> = Decode!(&retry, Result<Season2ImportStatus, String>).unwrap();
     assert_eq!(retry.unwrap(), finished);
     footprint(&pic, rp, "upgraded");
-    // The existing mock only implements backend event polling. Other event
-    // endpoints fail, so this is a partial-poll measurement, not a full poll.
+    // The mock supplies one backend event and empty other source logs. This is
+    // a bounded synthetic poll measurement, not sustained full-cohort load.
     let polled = update(&pic, rp, "trigger_poll", Encode!().unwrap());
     let polled: Result<u64, PointsError> = Decode!(&polled, Result<u64, PointsError>).unwrap();
     assert!(polled.is_ok());
@@ -1304,4 +1304,128 @@ fn ingest_status_for_test(pic: &pocket_ic::PocketIc, rp: Principal) -> TIngestSt
         WasmResult::Reply(bytes) => Decode!(&bytes, TIngestStatus).unwrap(),
         _ => panic!("ingest status query"),
     }
+}
+
+/// Actual forward scoring with the original missed epoch retained, not settled.
+/// Opt-in fixtures use the exact deployed module and final release candidate.
+#[test]
+#[ignore = "requires exact deployed and candidate Wasm fixtures; see S2 repair packet"]
+fn season2_forward_archive_and_real_prospective_close() {
+    use rumi_points::{season2_forward::ForwardStatus, state::{Season2ImportRow, Season2ImportStatus}, types::{PrincipalState, QualifyingAction}};
+    fn rpc(pic: &pocket_ic::PocketIc, rp: Principal, caller: Principal, method: &str, args: Vec<u8>) -> Vec<u8> {
+        match pic.update_call(rp, caller, method, args).expect(method) {
+            WasmResult::Reply(b) => b, WasmResult::Reject(m) => panic!("{method}: {m}"),
+        }
+    }
+    fn query(pic: &pocket_ic::PocketIc, rp: Principal, method: &str) -> Vec<u8> {
+        match pic.query_call(rp, admin(), method, Encode!().unwrap()).expect(method) {
+            WasmResult::Reply(b) => b, WasmResult::Reject(m) => panic!("{method}: {m}"),
+        }
+    }
+    let old = std::fs::read(std::env::var("SEASON2_DEPLOYED_WASM").unwrap()).unwrap();
+    assert_eq!(format!("{:x}", Sha256::digest(&old)), "2ffde290fb25fff915dcc2cfd68b97a0d6e9fb5827b180831a0339872642c603");
+    let candidate = std::fs::read(std::env::var("SEASON2_CANDIDATE_WASM").unwrap()).unwrap();
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let start = 1_794_527_100_000_000_000u64;
+    set_time_ns(&pic, start - 60_000_000_000);
+    let mock = install_mock(&pic);
+    let rp = install_legacy_points(&pic, &old, start, u64::MAX);
+    set_all_sources(&pic, rp, mock);
+    let p = Principal::from_slice(&[7; 5]);
+    set_vault_debt(&pic, mock, p, 100_000_000);
+    let begun = rpc(&pic, rp, admin(), "begin_season2_import", Encode!(&1u32).unwrap());
+    assert!(Decode!(&begun, Result<Season2ImportStatus, String>).unwrap().is_ok());
+    set_time_ns(&pic, start);
+    let rows = vec![Season2ImportRow { principal_state: PrincipalState::new(p, start - 1, QualifyingAction::MintIcUsd), category_points: vec![0;7] }];
+    let imported = rpc(&pic, rp, admin(), "import_season2_batch", Encode!(&0u32, &rows).unwrap());
+    assert!(Decode!(&imported, Result<Season2ImportStatus, String>).unwrap().is_ok());
+    let cursors = vec![0u64;4];
+    let hash = match pic.query_call(rp, admin(), "get_season2_import_manifest_hash", Encode!(&cursors, &0u8).unwrap()).unwrap() {
+        WasmResult::Reply(b) => Decode!(&b, Result<Vec<u8>, String>).unwrap().unwrap(), _ => panic!("manifest"),
+    };
+    let done = rpc(&pic, rp, admin(), "finish_season2_import", Encode!(&cursors, &hash, &0u8).unwrap());
+    assert!(Decode!(&done, Result<Season2ImportStatus, String>).unwrap().unwrap().complete);
+    let bootstrap = query(&pic, rp, "get_season2_import_status");
+    start_season_ok(&pic, rp, SEASON_SEED);
+    admin_ok(&pic, rp, "set_epoch_driver_enabled", Encode!(&false).unwrap());
+    let old_epoch = epoch_status(&pic, rp).open_epoch.unwrap();
+    set_time_ns(&pic, old_epoch.snapshot_a_ns); force_tick(&pic, rp);
+    let captured = epoch_status(&pic, rp).open_epoch.unwrap();
+    assert!(captured.a_complete && !captured.b_complete);
+    set_time_ns(&pic, old_epoch.epoch_end_ns + 2 * rumi_points::NANOS_PER_DAY);
+    pic.stop_canister(rp, None).unwrap();
+    let backup = pic.take_canister_snapshot(rp, None, None).expect("stopped pre-upgrade backup");
+    pic.upgrade_canister(rp, candidate.clone(), Vec::new(), None).unwrap();
+    pic.start_canister(rp, None).unwrap();
+    assert!(held_epoch_status(&pic, rp).legacy_transition_held);
+    let denied = rpc(&pic, rp, p, "admin_prepare_season2_forward", Encode!(&backup.id).unwrap());
+    assert!(Decode!(&denied, Result<ForwardStatus,String>).unwrap().is_err());
+    let receipt = rpc(&pic, rp, admin(), "admin_prepare_season2_forward", Encode!(&backup.id).unwrap());
+    let prepared = Decode!(&receipt, Result<ForwardStatus,String>).unwrap().unwrap();
+    assert_eq!(prepared.archived_snapshot_rows, 1);
+    assert_eq!(prepared.archived_participants, 1);
+    assert_eq!(prepared.pending_end_ns, None);
+    assert_eq!(epoch_status(&pic, rp).open_epoch, Some(captured));
+    let wrong = rpc(&pic, rp, admin(), "admin_activate_season2_forward", Encode!(&vec![0u8;32]).unwrap());
+    assert!(Decode!(&wrong, Result<ForwardStatus,String>).unwrap().is_err());
+    assert_eq!(total_points(&pic, rp, p), 0);
+    let denied_activate = rpc(&pic, rp, p, "admin_activate_season2_forward", Encode!(&prepared.archive_digest).unwrap());
+    assert!(Decode!(&denied_activate, Result<ForwardStatus,String>).unwrap().is_err());
+    let backlog = rpc(&pic, rp, admin(), "admin_activate_season2_forward", Encode!(&prepared.archive_digest).unwrap());
+    assert!(Decode!(&backlog, Result<ForwardStatus,String>).unwrap().unwrap_err().contains("backlog"));
+    let caught_up = rpc(&pic,rp,admin(),"admin_poll_held_points_backlog",Encode!().unwrap());
+    assert!(Decode!(&caught_up,Result<u64,String>).unwrap().is_ok());
+    assert_eq!(ingest_status_for_test(&pic,rp).sources[0].cursor,1);
+    let activated = rpc(&pic, rp, admin(), "admin_activate_season2_forward", Encode!(&prepared.archive_digest).unwrap());
+    let active = Decode!(&activated, Result<ForwardStatus,String>).unwrap().unwrap();
+    assert_eq!(active.active_epoch, Some(1));
+    assert_eq!(active.pending_start_ns, start);
+    assert_eq!(active.pending_end_ns, active.active_start_ns);
+    assert_eq!(active.archive_digest, prepared.archive_digest);
+    assert_eq!(active.backup_snapshot_id, backup.id);
+    assert_eq!(active.active_end_ns, Some(start + 2 * rumi_points::epoch::EPOCH_DURATION_NS));
+    assert_eq!(total_points(&pic, rp, p), 0, "activation awards no missed or future points");
+    assert_eq!(Decode!(&query(&pic,rp,"get_point_ledger_len"),u64).unwrap(),0);
+    assert!(!held_epoch_status(&pic, rp).legacy_transition_held);
+    assert!(epoch_status(&pic, rp).driver_enabled);
+    let replay = rpc(&pic,rp,admin(),"admin_activate_season2_forward",Encode!(&active.archive_digest).unwrap());
+    assert_eq!(Decode!(&replay,Result<ForwardStatus,String>).unwrap().unwrap(),active);
+    pic.upgrade_canister(rp,candidate,Vec::new(),None).unwrap();
+    let archived = Decode!(&query(&pic,rp,"get_season2_forward_status"),Option<ForwardStatus>).unwrap().unwrap();
+    assert_eq!(archived,active,"archive digest/integrity and live boundary survive upgrade");
+    let forward = epoch_status(&pic,rp).open_epoch.unwrap();
+    set_time_ns(&pic,forward.snapshot_a_ns);
+    for _ in 0..20 { pic.tick(); }
+    if !epoch_status(&pic,rp).open_epoch.as_ref().unwrap().a_complete {
+        pic.advance_time(Duration::from_secs(300)); for _ in 0..20 { pic.tick(); }
+    }
+    assert!(epoch_status(&pic,rp).open_epoch.unwrap().a_complete);
+    let now = pic.get_time().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64;
+    set_time_ns(&pic,forward.snapshot_b_ns.max(now));
+    for _ in 0..20 { pic.tick(); }
+    if !epoch_status(&pic,rp).open_epoch.as_ref().unwrap().b_complete {
+        pic.advance_time(Duration::from_secs(300)); for _ in 0..20 { pic.tick(); }
+    }
+    assert!(epoch_status(&pic,rp).open_epoch.unwrap().b_complete);
+    set_time_ns(&pic,forward.epoch_end_ns);
+    for _ in 0..30 { pic.tick(); }
+    if epoch_status(&pic,rp).current_epoch_index == 1 {
+        pic.advance_time(Duration::from_secs(300)); for _ in 0..30 { pic.tick(); }
+    }
+    let expected = 100_000_000u128 * (forward.epoch_end_ns-forward.epoch_start_ns) as u128 / rumi_points::NANOS_PER_DAY as u128;
+    let close_state = epoch_status(&pic,rp);
+    println!("FORWARD_TIMER_CLOSE index={} open={:?} points={}",close_state.current_epoch_index,close_state.open_epoch,total_points(&pic,rp,p));
+    assert_eq!(total_points(&pic,rp,p),expected);
+    assert!(expected > 0 && expected < 700_000_000,"only the actual partial window earns");
+    let history = match pic.query_call(rp,admin(),"get_epoch_history",Encode!(&0u32,&10u32).unwrap()).unwrap() {
+        WasmResult::Reply(b) => Decode!(&b,Vec<rumi_points::types::EpochSummary>).unwrap(), _=>panic!("history"),
+    };
+    assert_eq!(history.len(),1); assert_eq!(history[0].epoch_index,1,"no synthetic epoch0 summary");
+    assert_eq!(query(&pic,rp,"get_season2_import_status"),bootstrap);
+    assert_eq!(Decode!(&query(&pic,rp,"get_season2_backfill_status"),Option<Season2ImportStatus>).unwrap(),None);
+    if epoch_status(&pic,rp).open_epoch.is_none() {
+        pic.advance_time(Duration::from_secs(300)); for _ in 0..30 { pic.tick(); }
+    }
+    assert_eq!(epoch_status(&pic,rp).open_epoch.unwrap().epoch_index,2,"ordinary successor opens");
+    assert_eq!(Decode!(&query(&pic,rp,"get_season2_forward_status"),Option<ForwardStatus>).unwrap().unwrap(),active);
 }

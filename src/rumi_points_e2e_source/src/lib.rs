@@ -211,3 +211,24 @@ fn get_pools() -> Vec<PoolInfo> {
 fn get_lp_balance(_pool_id: String, _user: Principal) -> u128 {
     0
 }
+
+// Source-tail queries for the S2 held-backlog/forward-transition E2E.
+#[ic_cdk::query]
+fn get_event_count() -> u64 { 1 }
+#[ic_cdk::query]
+fn get_liquidity_event_count_v2() -> u64 { 0 }
+#[ic_cdk::query]
+fn get_pool_event_count() -> u64 { 0 }
+#[ic_cdk::query]
+fn get_amm_liquidity_event_count() -> u64 { 0 }
+
+#[derive(CandidType)]
+struct EmptyForwardEvents { events: Vec<candid::Empty>, next_start: u64, reached_end: bool }
+#[ic_cdk::query]
+fn get_liquidity_events_v2_forward(start: u64, _limit: u64) -> EmptyForwardEvents {
+    EmptyForwardEvents { events: vec![], next_start: start, reached_end: true }
+}
+#[ic_cdk::query]
+fn get_pool_events(_offset: u64, _limit: u64) -> Vec<candid::Empty> { vec![] }
+#[ic_cdk::query]
+fn get_amm_liquidity_events(_offset: u64, _limit: u64) -> Vec<candid::Empty> { vec![] }

@@ -73,9 +73,18 @@ const AMM_BATCH: u64 = 200;
 
 type CallResult<T> = Result<T, (RejectionCode, String)>;
 
+fn close_has_priority(open: Option<&crate::types::OpenEpoch>, now_ns: u64) -> bool {
+    open.is_some_and(|e| e.a_complete && e.b_complete && now_ns >= e.epoch_end_ns)
+}
+
 /// Poll every configured source once, under the single-poll guard. Returns the
 /// number of events applied across all sources.
 pub async fn poll_all() -> usize {
+    // The driver and poll timers share their cadence. Once A/B are complete,
+    // let the due close acquire PollGuard rather than starving it every tick.
+    if close_has_priority(state::get_open_epoch().as_ref(), ic_cdk::api::time()) {
+        return 0;
+    }
     // RAII guard (AR-S-001): released on every exit path INCLUDING a trap (the
     // dropped future runs destructors), so a panicking poll never wedges polling.
     let _guard = match state::try_poll_guard() {
@@ -688,6 +697,21 @@ mod tests {
     use crate::events::IngestKind;
     use crate::types::InitArgs;
     use candid::Principal;
+
+    #[test]
+    fn complete_due_epoch_yields_poll_priority_to_close() {
+        let mut open = crate::types::OpenEpoch {
+            epoch_index: 1, epoch_start_ns: 0, epoch_end_ns: 1_000,
+            snapshot_a_ns: 100, snapshot_b_ns: 500, a_cursor: None, a_complete: true,
+            b_cursor: None, b_complete: true, close_started: false, close_cursor: None,
+            close_points_accrued: 0, close_active: 0,
+        };
+        assert!(!close_has_priority(Some(&open), 999));
+        assert!(close_has_priority(Some(&open), 1_000));
+        assert!(!close_has_priority(None, 1_000));
+        open.b_complete = false;
+        assert!(!close_has_priority(Some(&open), 1_000));
+    }
 
     fn tp(n: u8) -> Principal {
         Principal::from_slice(&[n, n, n, n, n])

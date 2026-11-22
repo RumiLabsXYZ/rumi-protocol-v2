@@ -934,6 +934,11 @@ pub fn append_point_entry(entry: PointEntry) {
 
 // New region reserved exclusively for the additive outage reconciliation draft.
 // No State, OpenEpoch, or existing StableLog / map encoding changes.
+/// Additive archive for the separately approved S2 forward transition.
+pub(crate) fn season2_forward_memory() -> VMem {
+    MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(23)))
+}
+
 pub(crate) fn late_recovery_memory() -> VMem {
     MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(19)))
 }
